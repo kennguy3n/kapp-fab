@@ -1,6 +1,6 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2025-04-21
+> **Last Updated:** 2026-04-21
 >
 > Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md)
 
@@ -9,7 +9,7 @@
 ## Current Phase
 
 **Phase A — Kapp Kernel**
-**Status:** Not Started
+**Status:** In Progress
 
 ---
 
@@ -31,7 +31,7 @@ Foundation: tenant isolation, KType metadata, KRecord storage, permissions, audi
 
 ### Deliverables
 
-- [ ] Go module skeleton (`services/api`, `services/worker`, `internal/*`)
+- [x] Go module skeleton (`services/api`, `services/worker`, `internal/*`)
 - [ ] PostgreSQL schema for `tenants`, `users`, `user_tenants`, `roles`, `ktypes`, `krecords`, `events`, `audit_log`
 - [ ] Row-level security policies on all tenant-scoped tables
 - [ ] Tenant-range partitioning for `krecords`, `events`, `audit_log`
@@ -50,7 +50,7 @@ Foundation: tenant isolation, KType metadata, KRecord storage, permissions, audi
 - [ ] Storybook setup for UI components
 - [ ] KChat bridge skeleton (card renderer, slash command dispatcher)
 - [ ] OpenAPI spec generator from KType schemas
-- [ ] Local dev compose stack (api, worker, db, object store, event bus)
+- [x] Local dev compose stack (api, worker, db, object store, event bus)
 
 ### Acceptance Criteria
 
