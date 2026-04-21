@@ -1,0 +1,4 @@
+-- Placeholder for Phase A task 2: initial schema.
+-- Will contain CREATE TABLE statements, indexes, RLS policies, and
+-- tenant-range partitioning for tenants, users, user_tenants, roles,
+-- ktypes, krecords, events, and audit_log.
