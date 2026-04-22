@@ -174,9 +174,11 @@ function LearnerProgressDetail({ enrollmentId }: { enrollmentId: string }) {
   const allLessons = courseModules.flatMap(
     (m) => lessonsByModule.get(m.id) ?? [],
   );
-  const completedCount = allLessons.filter(
-    (l) => progressByLesson.get(l.id)?.status === "completed",
-  ).length;
+  const completedCount = allLessons.filter((l) => {
+    const prog = progressByLesson.get(l.id);
+    const progData = (prog?.data as Record<string, unknown> | undefined) ?? {};
+    return progData.status === "completed";
+  }).length;
   const totalCount = allLessons.length;
   const percent =
     totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;

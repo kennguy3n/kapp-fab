@@ -192,21 +192,17 @@ func (t *submitAssignmentTool) Invoke(ctx context.Context, inv Invocation) (*Res
 		}, nil
 	}
 
-	data["status"] = lms.AssignmentStatusSubmitted
-	patchJSON, _ := json.Marshal(map[string]any{"status": lms.AssignmentStatusSubmitted})
-	updated, err := t.executor.records.Update(ctx, record.KRecord{
-		TenantID:  inv.TenantID,
-		ID:        rec.ID,
-		Data:      patchJSON,
-		UpdatedBy: &inv.ActorID,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("lms.submit_assignment: update status: %w", err)
-	}
-
 	if t.executor.workflow == nil {
 		return nil, errors.New("lms.submit_assignment: workflow engine not configured")
 	}
+	// Create the approval first. The record store's Update and the
+	// workflow engine's RequestApproval run in independent tenant-
+	// scoped transactions, so any cross-step failure leaves visible
+	// state. Requesting approval first preserves the invariant that
+	// whenever an assignment is in `status=submitted` there is a
+	// corresponding approval row the reviewer can act on — the
+	// alternative (patch first) can strand the assignment with no
+	// approver if the approval insert fails.
 	approval, err := t.executor.workflow.RequestApproval(
 		ctx, inv.TenantID,
 		lms.KTypeAssignment, rec.ID,
@@ -219,6 +215,17 @@ func (t *submitAssignmentTool) Invoke(ctx context.Context, inv Invocation) (*Res
 	)
 	if err != nil {
 		return nil, fmt.Errorf("lms.submit_assignment: request approval: %w", err)
+	}
+
+	patchJSON, _ := json.Marshal(map[string]any{"status": lms.AssignmentStatusSubmitted})
+	updated, err := t.executor.records.Update(ctx, record.KRecord{
+		TenantID:  inv.TenantID,
+		ID:        rec.ID,
+		Data:      patchJSON,
+		UpdatedBy: &inv.ActorID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lms.submit_assignment: update status (approval %s already requested): %w", approval.ID, err)
 	}
 
 	body, _ := json.Marshal(map[string]any{
