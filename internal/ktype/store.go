@@ -129,9 +129,12 @@ func (r *PGRegistry) invalidate(name string) {
 	if r.cache == nil {
 		return
 	}
-	// Purge the "latest" pointer; specific-version entries are immutable and
-	// safe to keep, but invalidating them is harmless and simpler.
-	r.cache.Delete(cacheKey(name, 0))
+	// Register upserts `(name, version)` so any cached version for this name
+	// may now be stale. The LRU is small and shared across name spaces; a
+	// full purge on a Register call (admin-frequency) is cheaper than
+	// maintaining a secondary name→versions index.
+	_ = name
+	r.cache.Purge()
 }
 
 func cacheKey(name string, version int) string {

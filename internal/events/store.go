@@ -66,12 +66,18 @@ func (p *PGPublisher) DrainBatch(
 		limit = 100
 	}
 
-	// We first discover which tenants have undelivered events. Draining is
-	// then done per-tenant so we can set the RLS tenant GUC correctly.
+	// The `events` table has RLS enabled, so a direct `SELECT DISTINCT
+	// tenant_id` under the application role (`kapp_app`, non-superuser)
+	// evaluates the policy with no tenant GUC set and returns zero rows.
+	// The `tenants` control-plane table is intentionally not RLS-protected,
+	// so we iterate active tenants there and delegate the real drain work
+	// to drainTenant (which establishes the per-tenant GUC). This is O(N)
+	// in the active tenant count; per-tenant partitioning keeps the
+	// subsequent per-tenant query cheap when the partition is empty.
 	rows, err := p.pool.Query(ctx,
-		`SELECT DISTINCT tenant_id FROM events WHERE delivered_at IS NULL LIMIT 256`)
+		`SELECT id FROM tenants WHERE status = 'active'`)
 	if err != nil {
-		return 0, fmt.Errorf("events: discover tenants: %w", err)
+		return 0, fmt.Errorf("events: list active tenants: %w", err)
 	}
 	var tenants []uuid.UUID
 	for rows.Next() {

@@ -160,12 +160,17 @@ func writeRecordError(w http.ResponseWriter, err error) {
 	}
 }
 
-// actorOrDefault returns the user id from context or a zero-uuid sentinel so
-// Phase A handlers work without a real auth layer. A later work unit will
-// install a real auth middleware that sets a real user id on the context.
+// phaseASystemActor is a deterministic non-nil UUID attributed to requests
+// that reach the handler without an authenticated user. The record store
+// rejects `uuid.Nil` as a created_by / updated_by value, so the handlers
+// need a stable sentinel until a real auth middleware lands.
+var phaseASystemActor = uuid.MustParse("00000000-0000-0000-0000-000000000001")
+
+// actorOrDefault returns the user id from context, or phaseASystemActor when
+// the request did not carry a user identity.
 func actorOrDefault(ctx context.Context) uuid.UUID {
 	if id := platform.UserIDFromContext(ctx); id != uuid.Nil {
 		return id
 	}
-	return uuid.UUID{}
+	return phaseASystemActor
 }

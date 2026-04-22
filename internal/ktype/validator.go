@@ -108,7 +108,7 @@ func validateFieldValue(field FieldSpec, value any) error {
 	switch field.Type {
 	case "string", "text":
 		return validateString(field, value)
-	case "number", "integer":
+	case "number", "integer", "float", "decimal":
 		return validateNumber(field, value)
 	case "boolean":
 		if _, ok := value.(bool); !ok {
