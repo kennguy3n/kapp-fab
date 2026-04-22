@@ -11,7 +11,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/kapp-fab/internal/crm"
+	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
+	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
@@ -41,6 +43,8 @@ type CommandDispatcher struct {
 	records   *record.PGStore
 	workflow  *workflow.Engine
 	approvals *workflow.Engine
+	ledger    *ledger.PGStore
+	poster    *ledger.InvoicePoster
 	cards     *CardRenderer
 	formsBase string
 }
@@ -71,11 +75,27 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.createRecord(ctx, req, crm.KTypeTask, data)
 	case "approve":
 		return d.decideApproval(ctx, req)
+	case "invoice":
+		data, err := invoiceFromArgs(req.Args, req.UserID)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/invoice: %v", err)}, nil
+		}
+		return d.createRecord(ctx, req, finance.KTypeARInvoice, data)
+	case "bill":
+		data, err := billFromArgs(req.Args, req.UserID)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/bill: %v", err)}, nil
+		}
+		return d.createRecord(ctx, req, finance.KTypeAPBill, data)
+	case "post-invoice":
+		return d.postInvoice(ctx, req)
+	case "post-bill":
+		return d.postBill(ctx, req)
 	case "form":
 		return d.formLink(req)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /approve, /form, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /invoice, /bill, /post-invoice, /post-bill, /approve, /form, /help",
 		}, nil
 	default:
 		return CommandResponse{
@@ -190,6 +210,58 @@ func (d *CommandDispatcher) decideApproval(ctx context.Context, req CommandReque
 	}, nil
 }
 
+// postInvoice implements `/post-invoice <invoice_id>`. The invoice must
+// already exist as a draft (or pending_approval) finance.ar_invoice
+// KRecord with the account codes populated — the poster will reject
+// otherwise, surfacing the problem in chat rather than silently
+// erroring.
+func (d *CommandDispatcher) postInvoice(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.poster == nil {
+		return CommandResponse{Text: "ledger not configured"}, nil
+	}
+	if req.TenantID == uuid.Nil || req.UserID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id and user_id required"}, nil
+	}
+	if len(req.Args) < 1 {
+		return CommandResponse{Text: "Usage: /post-invoice <invoice_id>"}, nil
+	}
+	invoiceID, err := uuid.Parse(req.Args[0])
+	if err != nil {
+		return CommandResponse{Text: "invalid invoice id"}, nil
+	}
+	entry, err := d.poster.PostSalesInvoice(ctx, req.TenantID, invoiceID, req.UserID)
+	if err != nil {
+		return CommandResponse{Text: fmt.Sprintf("/post-invoice failed: %v", err)}, nil
+	}
+	return CommandResponse{
+		Text: fmt.Sprintf("Posted invoice %s → journal entry %s", invoiceID, entry.ID),
+	}, nil
+}
+
+// postBill mirrors postInvoice for finance.ap_bill.
+func (d *CommandDispatcher) postBill(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.poster == nil {
+		return CommandResponse{Text: "ledger not configured"}, nil
+	}
+	if req.TenantID == uuid.Nil || req.UserID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id and user_id required"}, nil
+	}
+	if len(req.Args) < 1 {
+		return CommandResponse{Text: "Usage: /post-bill <bill_id>"}, nil
+	}
+	billID, err := uuid.Parse(req.Args[0])
+	if err != nil {
+		return CommandResponse{Text: "invalid bill id"}, nil
+	}
+	entry, err := d.poster.PostPurchaseBill(ctx, req.TenantID, billID, req.UserID)
+	if err != nil {
+		return CommandResponse{Text: fmt.Sprintf("/post-bill failed: %v", err)}, nil
+	}
+	return CommandResponse{
+		Text: fmt.Sprintf("Posted bill %s → journal entry %s", billID, entry.ID),
+	}, nil
+}
+
 // formLink returns a deep link the user can share to collect records via
 // the public form KApp.
 func (d *CommandDispatcher) formLink(req CommandRequest) (CommandResponse, error) {
@@ -284,4 +356,69 @@ func taskFromArgs(args []string, requester uuid.UUID) (map[string]any, error) {
 		"status":   "open",
 		"assignee": assignee.String(),
 	}, nil
+}
+
+// invoiceFromArgs expects `<customer_id> <total> [currency] [invoice_number]`.
+// The resulting record is a draft finance.ar_invoice — account codes
+// aren't required until the invoice is posted, so this keeps the
+// quick-create path to two mandatory arguments.
+func invoiceFromArgs(args []string, owner uuid.UUID) (map[string]any, error) {
+	if len(args) < 2 {
+		return nil, errors.New("usage: /invoice <customer_id> <total> [currency] [number]")
+	}
+	customer, err := uuid.Parse(args[0])
+	if err != nil {
+		return nil, fmt.Errorf("invalid customer id: %w", err)
+	}
+	total, err := strconv.ParseFloat(args[1], 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid total: %w", err)
+	}
+	currency := "USD"
+	if len(args) >= 3 && args[2] != "" {
+		currency = strings.ToUpper(args[2])
+	}
+	data := map[string]any{
+		"customer_id": customer.String(),
+		"subtotal":    total,
+		"total":       total,
+		"currency":    currency,
+		"status":      "draft",
+		"owner":       owner.String(),
+	}
+	if len(args) >= 4 && args[3] != "" {
+		data["invoice_number"] = args[3]
+	}
+	return data, nil
+}
+
+// billFromArgs mirrors invoiceFromArgs for finance.ap_bill.
+func billFromArgs(args []string, owner uuid.UUID) (map[string]any, error) {
+	if len(args) < 2 {
+		return nil, errors.New("usage: /bill <supplier_id> <total> [currency] [number]")
+	}
+	supplier, err := uuid.Parse(args[0])
+	if err != nil {
+		return nil, fmt.Errorf("invalid supplier id: %w", err)
+	}
+	total, err := strconv.ParseFloat(args[1], 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid total: %w", err)
+	}
+	currency := "USD"
+	if len(args) >= 3 && args[2] != "" {
+		currency = strings.ToUpper(args[2])
+	}
+	data := map[string]any{
+		"supplier_id": supplier.String(),
+		"subtotal":    total,
+		"total":       total,
+		"currency":    currency,
+		"status":      "draft",
+		"owner":       owner.String(),
+	}
+	if len(args) >= 4 && args[3] != "" {
+		data["bill_number"] = args[3]
+	}
+	return data, nil
 }

@@ -6,6 +6,7 @@ import { TenantListPage } from "./pages/TenantListPage";
 import { FormPage } from "./pages/FormPage";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
 import { AuditLogPage } from "./pages/AuditLogPage";
+import { SubledgerPage } from "./pages/SubledgerPage";
 
 interface NavSection {
   title: string;
@@ -29,6 +30,17 @@ const navSections: NavSection[] = [
     links: [
       { to: "/records/tasks.task", label: "Tasks" },
       { to: "/approvals", label: "Approvals" },
+    ],
+  },
+  {
+    title: "Finance",
+    links: [
+      { to: "/records/finance.account", label: "Chart of Accounts" },
+      { to: "/records/finance.journal_entry", label: "Journal Entries" },
+      { to: "/records/finance.ar_invoice", label: "Sales Invoices" },
+      { to: "/records/finance.ap_bill", label: "Purchase Bills" },
+      { to: "/finance/ar-subledger", label: "AR Subledger" },
+      { to: "/finance/ap-subledger", label: "AP Subledger" },
     ],
   },
   {
@@ -89,6 +101,14 @@ function AppShell() {
           <Route path="/admin/tenants" element={<TenantListPage />} />
           <Route path="/admin/audit" element={<AuditLogPage />} />
           <Route path="/approvals" element={<ApprovalsPage />} />
+          <Route
+            path="/finance/ar-subledger"
+            element={<SubledgerPage variant="ar" />}
+          />
+          <Route
+            path="/finance/ap-subledger"
+            element={<SubledgerPage variant="ap" />}
+          />
           <Route path="/records/:ktype" element={<RecordListPage />} />
           <Route path="/records/:ktype/new" element={<RecordFormPage />} />
           <Route path="/records/:ktype/:id" element={<RecordFormPage />} />

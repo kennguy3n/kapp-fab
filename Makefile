@@ -19,6 +19,7 @@ migrate:
 	psql "$(DB_URL)" -f migrations/000001_initial_schema.sql
 	psql "$(DB_URL)" -f migrations/000002_admin_role.sql
 	psql "$(DB_URL)" -f migrations/000003_forms.sql
+	psql "$(DB_URL)" -f migrations/000004_finance_extensions.sql
 
 run-api: build
 	DB_URL="$(APP_DB_URL)" ADMIN_DB_URL="$(ADMIN_DB_URL)" ./bin/api

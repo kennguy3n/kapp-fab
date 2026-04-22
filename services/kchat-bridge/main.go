@@ -24,6 +24,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
+	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
@@ -56,6 +57,8 @@ func run() error {
 	auditor := audit.NewPGLogger(pool)
 	recordStore := record.NewPGStore(pool, registry, eventPublisher, auditor)
 	workflowEngine := workflow.NewEngine(pool, eventPublisher, auditor)
+	ledgerStore := ledger.NewPGStore(pool, eventPublisher, auditor)
+	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
 	cards := &CardRenderer{registry: registry}
 	composer := &Composer{registry: registry, records: recordStore, cards: cards}
 	// The approvals renderer is what the worker service will call when
@@ -68,6 +71,8 @@ func run() error {
 		records:   recordStore,
 		workflow:  workflowEngine,
 		approvals: workflowEngine,
+		ledger:    ledgerStore,
+		poster:    invoicePoster,
 		cards:     cards,
 		formsBase: os.Getenv("KAPP_FORMS_BASE_URL"),
 	}

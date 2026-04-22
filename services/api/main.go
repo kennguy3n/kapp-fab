@@ -20,8 +20,10 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/agents"
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/forms"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
+	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
@@ -76,11 +78,28 @@ func run() error {
 	rateLimiter := platform.NewRateLimiter(platform.DefaultRateLimitConfig())
 	quotaEnforcer := platform.NewQuotaEnforcer(pool)
 
+	// Phase C finance engine — ledger store + invoice poster share
+	// the same event publisher + audit logger so journal postings,
+	// invoice lifecycle events, and KRecord mutations all emit into
+	// the single outbox + audit tables used by the rest of the kernel.
+	ledgerStore := ledger.NewPGStore(pool, eventPublisher, auditor)
+	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
+
+	// Register the finance KTypes at boot so a fresh deployment has a
+	// working chart-of-accounts / journal-entry / AR / AP schema set
+	// without requiring an out-of-band migration. The registry upserts
+	// on conflict so repeated restarts are a no-op.
+	if err := finance.RegisterKTypes(ctx, ktypeRegistry); err != nil {
+		return err
+	}
+
 	// Agent tool executor — Phase B wires the CRM / tasks / approvals
 	// tools against the same record store and workflow engine the HTTP
 	// surface uses so dry-run and commit mode behave identically.
+	// Phase C extends it with the finance tool suite.
 	executor := agents.NewExecutor(recordStore, workflowEngine, auditor)
 	agents.RegisterCRMTools(executor)
+	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster)
 
 	fh := &formsHandlers{store: formStore, registry: ktypeRegistry}
 	th := &tenantHandlers{svc: tenantSvc}
@@ -90,6 +109,7 @@ func run() error {
 	ah := &agentHandlers{executor: executor}
 	aph := &approvalsHandlers{engine: workflowEngine, store: recordStore}
 	auh := &auditHandlers{pool: pool}
+	finh := &financeHandlers{store: ledgerStore, poster: invoicePoster}
 	oh := &openAPIHandler{registry: ktypeRegistry}
 
 	r := chi.NewRouter()
@@ -183,6 +203,31 @@ func run() error {
 	r.Route("/api/v1/audit", func(r chi.Router) {
 		r.Use(platform.TenantMiddleware(tenantSvc))
 		r.Get("/", auh.list)
+	})
+
+	// Finance surface (Phase C). Chart of accounts, journal entries,
+	// invoice/bill posting, period lockout, and reports. Mutations
+	// need the full tenant + idempotency + rate-limit + quota stack
+	// because a spammed post can't be allowed to starve other tenants
+	// or double-post an invoice under replay.
+	r.Route("/api/v1/finance", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.IdempotencyMiddleware(pool))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Use(platform.QuotaMiddleware(quotaEnforcer))
+		r.Post("/accounts", finh.createAccount)
+		r.Get("/accounts", finh.listAccounts)
+		r.Get("/accounts/{code}", finh.getAccount)
+		r.Post("/journal-entries", finh.postJournalEntry)
+		r.Get("/journal-entries", finh.listJournalEntries)
+		r.Get("/journal-entries/{id}", finh.getJournalEntry)
+		r.Post("/invoices/{id}/post", finh.postInvoice)
+		r.Post("/bills/{id}/post", finh.postBill)
+		r.Post("/periods/lock", finh.lockPeriod)
+		r.Get("/reports/trial-balance", finh.trialBalance)
+		r.Get("/reports/ar-aging", finh.arAging)
+		r.Get("/reports/ap-aging", finh.apAging)
+		r.Get("/reports/income-statement", finh.incomeStatement)
 	})
 
 	// Forms KApp. Creation and tenant-scoped lookups go through the
