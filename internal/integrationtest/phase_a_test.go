@@ -363,40 +363,52 @@ func containsTenant(ts []tenant.Tenant, id uuid.UUID) bool {
 	return false
 }
 
+// eventTypesForTenant reads the events outbox for a tenant. It wraps
+// the read in dbutil.WithTenantTx so RLS is satisfied whether the pool
+// is the kapp_app role (tenant-scoped policy check) or kapp_admin
+// (BYPASSRLS). Without this wrapper the query would return zero rows
+// against the app role — the events RLS policy defaults to deny when
+// app.tenant_id is unset.
 func eventTypesForTenant(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID) ([]string, error) {
-	rows, err := pool.Query(ctx,
-		`SELECT type FROM events WHERE tenant_id = $1 ORDER BY created_at`, tenantID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	var out []string
-	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			return nil, err
+	err := dbutil.WithTenantTx(ctx, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT type FROM events WHERE tenant_id = $1 ORDER BY created_at`, tenantID)
+		if err != nil {
+			return err
 		}
-		out = append(out, s)
-	}
-	return out, rows.Err()
+		defer rows.Close()
+		for rows.Next() {
+			var s string
+			if err := rows.Scan(&s); err != nil {
+				return err
+			}
+			out = append(out, s)
+		}
+		return rows.Err()
+	})
+	return out, err
 }
 
 func auditActionsForTenant(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID) ([]string, error) {
-	rows, err := pool.Query(ctx,
-		`SELECT action FROM audit_log WHERE tenant_id = $1 ORDER BY created_at`, tenantID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	var out []string
-	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			return nil, err
+	err := dbutil.WithTenantTx(ctx, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT action FROM audit_log WHERE tenant_id = $1 ORDER BY created_at`, tenantID)
+		if err != nil {
+			return err
 		}
-		out = append(out, s)
-	}
-	return out, rows.Err()
+		defer rows.Close()
+		for rows.Next() {
+			var s string
+			if err := rows.Scan(&s); err != nil {
+				return err
+			}
+			out = append(out, s)
+		}
+		return rows.Err()
+	})
+	return out, err
 }
 
 func sameSet(a, b []string) bool {

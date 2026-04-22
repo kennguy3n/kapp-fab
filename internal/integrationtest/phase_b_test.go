@@ -12,9 +12,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/kapp-fab/internal/agents"
 	"github.com/kennguy3n/kapp-fab/internal/crm"
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/forms"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/record"
@@ -452,29 +454,28 @@ func TestRLSDealIsolation(t *testing.T) {
 
 // --- helpers ---
 
-func eventCountsForTenant(ctx context.Context, pool pgxLike, tenantID uuid.UUID) (map[string]int, error) {
-	rows, err := pool.Query(ctx,
-		`SELECT type, COUNT(*) FROM events WHERE tenant_id = $1 GROUP BY type`, tenantID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+// eventCountsForTenant reads the events outbox for a tenant. It wraps
+// the read in dbutil.WithTenantTx so the read succeeds against either
+// the kapp_app role (with SET LOCAL app.tenant_id = tenantID) or the
+// kapp_admin BYPASSRLS role.
+func eventCountsForTenant(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID) (map[string]int, error) {
 	counts := map[string]int{}
-	for rows.Next() {
-		var t string
-		var c int
-		if err := rows.Scan(&t, &c); err != nil {
-			return nil, err
+	err := dbutil.WithTenantTx(ctx, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT type, COUNT(*) FROM events WHERE tenant_id = $1 GROUP BY type`, tenantID)
+		if err != nil {
+			return err
 		}
-		counts[t] = c
-	}
-	return counts, rows.Err()
-}
-
-// pgxLike narrows the pool's surface so eventCountsForTenant can take
-// either *pgxpool.Pool or anything else that satisfies Query. It keeps
-// the helper testable without dragging a pool interface into production
-// code.
-type pgxLike interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+		defer rows.Close()
+		for rows.Next() {
+			var t string
+			var c int
+			if err := rows.Scan(&t, &c); err != nil {
+				return err
+			}
+			counts[t] = c
+		}
+		return rows.Err()
+	})
+	return counts, err
 }
