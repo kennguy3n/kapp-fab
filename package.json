@@ -1,0 +1,17 @@
+{
+  "name": "kapp-fab-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/web",
+    "apps/storybook",
+    "packages/ui",
+    "packages/client"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/web",
+    "build": "npm run build --workspaces --if-present",
+    "storybook": "npm run storybook --workspace=apps/storybook",
+    "generate-client": "npm run generate --workspace=packages/client"
+  }
+}

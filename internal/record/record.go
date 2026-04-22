@@ -41,5 +41,5 @@ type Store interface {
 	Get(ctx context.Context, tenantID, id uuid.UUID) (*KRecord, error)
 	List(ctx context.Context, tenantID uuid.UUID, filter ListFilter) ([]KRecord, error)
 	Update(ctx context.Context, r KRecord) (*KRecord, error)
-	Delete(ctx context.Context, tenantID, id uuid.UUID) error
+	Delete(ctx context.Context, tenantID, id, actorID uuid.UUID) error
 }

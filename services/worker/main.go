@@ -1,20 +1,28 @@
 // Command worker is the Kapp async worker process. It drains the event
-// outbox, advances workflow timers, and runs background jobs. Phase A
-// ships a placeholder tick loop; later phases add real job handlers.
+// outbox and publishes messages to NATS. Later phases add workflow timer
+// advancement, retries, and background job handlers.
 package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
+	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 )
 
-const tickInterval = 10 * time.Second
+const (
+	tickInterval = 2 * time.Second
+	drainBatch   = 100
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -37,8 +45,23 @@ func run() error {
 	}
 	defer pool.Close()
 
-	log.Printf("worker: started; tick interval %s", tickInterval)
+	natsURL := cfg.EventBusURL
+	if natsURL == "" {
+		natsURL = nats.DefaultURL
+	}
+	nc, err := nats.Connect(natsURL,
+		nats.Name("kapp-worker"),
+		nats.ReconnectWait(2*time.Second),
+		nats.MaxReconnects(-1),
+	)
+	if err != nil {
+		return fmt.Errorf("connect nats: %w", err)
+	}
+	defer nc.Drain()
 
+	publisher := events.NewPGPublisher(pool)
+
+	log.Printf("worker: started; draining every %s; nats=%s", tickInterval, natsURL)
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 
@@ -48,7 +71,25 @@ func run() error {
 			log.Printf("worker: shutdown signal received")
 			return nil
 		case <-ticker.C:
-			log.Printf("worker tick")
+			if _, err := publisher.DrainBatch(ctx, drainBatch, deliver(nc)); err != nil {
+				log.Printf("worker: drain batch: %v", err)
+			}
 		}
+	}
+}
+
+func deliver(nc *nats.Conn) func(ctx context.Context, batch []events.Event) error {
+	return func(_ context.Context, batch []events.Event) error {
+		for _, e := range batch {
+			subject := fmt.Sprintf("kapp.events.%s", e.Type)
+			payload, err := json.Marshal(e)
+			if err != nil {
+				return fmt.Errorf("marshal event %s: %w", e.ID, err)
+			}
+			if err := nc.Publish(subject, payload); err != nil {
+				return fmt.Errorf("publish %s: %w", subject, err)
+			}
+		}
+		return nc.Flush()
 	}
 }

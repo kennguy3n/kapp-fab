@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // ActorKind identifies the source of an audited action.
@@ -38,5 +39,7 @@ type Entry struct {
 // transaction as the mutation being audited so the entry is durable iff the
 // mutation succeeds.
 type Logger interface {
-	Log(ctx context.Context, entry Entry) error
+	// LogTx appends an audit entry inside the caller's transaction. The
+	// transaction must already have SET LOCAL app.tenant_id configured.
+	LogTx(ctx context.Context, tx pgx.Tx, entry Entry) error
 }
