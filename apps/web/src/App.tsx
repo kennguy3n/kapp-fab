@@ -78,6 +78,8 @@ const navSections: NavSection[] = [
       { to: "/records/lms.module", label: "Modules" },
       { to: "/records/lms.lesson", label: "Lessons" },
       { to: "/records/lms.enrollment", label: "Enrollments" },
+      { to: "/records/lms.quiz", label: "Quizzes" },
+      { to: "/records/lms.assignment", label: "Assignments" },
     ],
   },
   {

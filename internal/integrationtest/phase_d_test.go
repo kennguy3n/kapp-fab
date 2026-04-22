@@ -10,8 +10,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
@@ -265,44 +268,80 @@ func TestPurchaseBillPostsReceiptMove(t *testing.T) {
 	}
 }
 
-// TestStockLevelsMatchMoveSum asserts that the `stock_levels`
-// projection always equals SUM(inventory_moves.qty) regardless of how
-// the moves were composed (adjustment, invoice, bill, transfer).
-func TestStockLevelsMatchMoveSum(t *testing.T) {
+// TestStockLevelsMatchSumOfMoves asserts that every row in
+// `stock_levels` equals SUM(qty) from `inventory_moves` for that
+// (item, warehouse) regardless of how the moves were composed —
+// receipts, deliveries, adjustments, and transfer legs are all
+// represented so the projection is exercised across every
+// MoveSourceKType the store emits.
+func TestStockLevelsMatchSumOfMoves(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
-	tn, _, _, invStore, item, wh := newTenantForInventory(t, h)
+	tn, _, _, invStore, item, whSrc := newTenantForInventory(t, h)
 	actor := uuid.New()
 
-	deltas := []decimal.Decimal{
-		decimal.NewFromInt(100),
-		decimal.NewFromInt(-12),
-		decimal.NewFromInt(3),
-		decimal.NewFromInt(-50),
+	whDst, err := invStore.UpsertWarehouse(ctx, inventory.Warehouse{
+		TenantID: tn.ID, Code: "WH-SECONDARY", Name: "Secondary",
+	})
+	if err != nil {
+		t.Fatalf("seed destination warehouse: %v", err)
 	}
-	want := decimal.Zero
-	for i, d := range deltas {
-		want = want.Add(d)
+
+	moves := []struct {
+		qty         decimal.Decimal
+		sourceKType string
+		warehouseID uuid.UUID
+	}{
+		{decimal.NewFromInt(100), inventory.MoveSourcePurchaseBill, whSrc.ID},
+		{decimal.NewFromInt(-12), inventory.MoveSourceSalesInvoice, whSrc.ID},
+		{decimal.NewFromInt(3), inventory.MoveSourceAdjustment, whSrc.ID},
+		{decimal.NewFromInt(-50), inventory.MoveSourceSalesInvoice, whSrc.ID},
+	}
+	for i, m := range moves {
+		src := uuid.New()
 		if _, err := invStore.RecordMove(ctx, inventory.Move{
-			TenantID: tn.ID, ItemID: item.ID, WarehouseID: wh.ID,
-			Qty: d, UnitCost: decimal.NewFromInt(1),
-			SourceKType: inventory.MoveSourceAdjustment,
-			MovedAt:     time.Now().UTC().Add(time.Duration(i) * time.Second),
-			CreatedBy:   actor,
+			TenantID: tn.ID, ItemID: item.ID, WarehouseID: m.warehouseID,
+			Qty: m.qty, UnitCost: decimal.NewFromInt(1),
+			SourceKType: m.sourceKType, SourceID: &src,
+			MovedAt:   time.Now().UTC().Add(time.Duration(i) * time.Second),
+			CreatedBy: actor,
 		}); err != nil {
 			t.Fatalf("record move %d: %v", i, err)
 		}
+	}
+	if _, err := invStore.RecordTransfer(ctx, inventory.Transfer{
+		TenantID: tn.ID, ItemID: item.ID,
+		FromWarehouse: whSrc.ID, ToWarehouse: whDst.ID,
+		Qty: decimal.NewFromInt(10), UnitCost: decimal.NewFromInt(1),
+		CreatedBy: actor,
+	}); err != nil {
+		t.Fatalf("record transfer: %v", err)
 	}
 
 	levels, err := invStore.ListStockLevels(ctx, tn.ID, &item.ID)
 	if err != nil {
 		t.Fatalf("list stock levels: %v", err)
 	}
-	if len(levels) != 1 {
-		t.Fatalf("stock levels = %d rows; want 1", len(levels))
+	byWH := map[uuid.UUID]decimal.Decimal{}
+	for _, l := range levels {
+		byWH[l.WarehouseID] = l.Qty
 	}
-	if !levels[0].Qty.Equal(want) {
-		t.Fatalf("stock_levels qty = %s; want %s (SUM of moves)", levels[0].Qty, want)
+
+	sums, err := sumMovesByWarehouse(ctx, h.pool, tn.ID, item.ID)
+	if err != nil {
+		t.Fatalf("sum moves: %v", err)
+	}
+	if len(sums) != len(byWH) {
+		t.Fatalf("warehouse count mismatch: levels=%d sums=%d", len(byWH), len(sums))
+	}
+	for wid, want := range sums {
+		got, ok := byWH[wid]
+		if !ok {
+			t.Fatalf("stock_levels missing warehouse %s", wid)
+		}
+		if !got.Equal(want) {
+			t.Fatalf("stock_levels qty for %s = %s; want %s (SUM of moves)", wid, got, want)
+		}
 	}
 }
 
@@ -360,4 +399,34 @@ func TestWarehouseTransfersAreBalanced(t *testing.T) {
 	if got := byWH[whDst.ID]; !got.Equal(decimal.NewFromInt(15)) {
 		t.Fatalf("destination warehouse qty = %s; want 15", got)
 	}
+}
+
+// sumMovesByWarehouse computes SUM(qty) grouped by warehouse_id for an
+// item, reading directly from the inventory_moves table. Used as an
+// independent cross-check against the stock_levels projection.
+func sumMovesByWarehouse(ctx context.Context, pool *pgxpool.Pool, tenantID, itemID uuid.UUID) (map[uuid.UUID]decimal.Decimal, error) {
+	out := map[uuid.UUID]decimal.Decimal{}
+	err := dbutil.WithTenantTx(ctx, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT warehouse_id, SUM(qty)
+			   FROM inventory_moves
+			  WHERE tenant_id = $1 AND item_id = $2
+			  GROUP BY warehouse_id`,
+			tenantID, itemID,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var wid uuid.UUID
+			var sum decimal.Decimal
+			if err := rows.Scan(&wid, &sum); err != nil {
+				return err
+			}
+			out[wid] = sum
+		}
+		return rows.Err()
+	})
+	return out, err
 }

@@ -61,6 +61,15 @@ func run() error {
 	ledgerStore := ledger.NewPGStore(pool, eventPublisher, auditor)
 	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
 	inventoryStore := inventory.NewPGStore(pool, eventPublisher, auditor)
+	// The `/post-invoice` and `/post-bill` KChat commands run the same
+	// InvoicePoster the REST surface uses, so the inventory PosterHook
+	// must be wired here too or a posted sales invoice / purchase bill
+	// driven from chat would skip the goods-delivery / goods-receipt
+	// move. Mirrors services/api/main.go:99-103.
+	inventoryHook := inventory.NewPosterHook(inventoryStore)
+	invoicePoster.
+		WithSalesInvoiceHook(inventoryHook.OnSalesInvoicePosted).
+		WithPurchaseBillHook(inventoryHook.OnPurchaseBillPosted)
 	cards := &CardRenderer{registry: registry}
 	composer := &Composer{registry: registry, records: recordStore, cards: cards}
 	// The approvals renderer is what the worker service will call when
