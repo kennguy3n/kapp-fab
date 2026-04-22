@@ -45,6 +45,26 @@ export interface KRecord {
   updated_at: string;
 }
 
+export interface Tenant {
+  id: string;
+  slug: string;
+  name: string;
+  cell: string;
+  status: "active" | "suspended" | "archived" | "deleting";
+  plan: string;
+  quota: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateTenantInput {
+  slug: string;
+  name: string;
+  cell: string;
+  plan: string;
+  quota?: Record<string, unknown>;
+}
+
 interface ClientConfig {
   baseUrl: string;
   headers: () => Record<string, string>;
@@ -72,6 +92,24 @@ export class ApiClient {
     return (await res.json()) as T;
   }
 
+  // --- Tenant control plane ---------------------------------------------
+  listTenants(): Promise<Tenant[]> {
+    return this.request("/tenants");
+  }
+
+  getTenant(id: string): Promise<Tenant> {
+    return this.request(`/tenants/${encodeURIComponent(id)}`);
+  }
+
+  createTenant(input: CreateTenantInput): Promise<Tenant> {
+    return this.request("/tenants", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  // --- KType registry ----------------------------------------------------
   listKTypes(): Promise<KType[]> {
     return this.request("/ktypes");
   }
@@ -80,6 +118,19 @@ export class ApiClient {
     return this.request(`/ktypes/${encodeURIComponent(name)}`);
   }
 
+  registerKType(kt: {
+    name: string;
+    version: number;
+    schema: KTypeSchema;
+  }): Promise<{ name: string; version: number }> {
+    return this.request("/ktypes", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(kt),
+    });
+  }
+
+  // --- KRecord CRUD ------------------------------------------------------
   listRecords(ktype: string): Promise<KRecord[]> {
     return this.request(`/records/${encodeURIComponent(ktype)}`);
   }
@@ -112,6 +163,16 @@ export class ApiClient {
         method: "PATCH",
         headers: { "Idempotency-Key": crypto.randomUUID() },
         body: JSON.stringify({ data }),
+      }
+    );
+  }
+
+  deleteRecord(ktype: string, id: string): Promise<void> {
+    return this.request(
+      `/records/${encodeURIComponent(ktype)}/${encodeURIComponent(id)}`,
+      {
+        method: "DELETE",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
       }
     );
   }

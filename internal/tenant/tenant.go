@@ -47,7 +47,10 @@ type CreateInput struct {
 type Service interface {
 	Create(ctx context.Context, input CreateInput) (*Tenant, error)
 	Get(ctx context.Context, id uuid.UUID) (*Tenant, error)
+	GetBySlug(ctx context.Context, slug string) (*Tenant, error)
+	List(ctx context.Context) ([]Tenant, error)
 	Suspend(ctx context.Context, id uuid.UUID) error
+	Activate(ctx context.Context, id uuid.UUID) error
 	Archive(ctx context.Context, id uuid.UUID) error
 	Delete(ctx context.Context, id uuid.UUID) error
 }
