@@ -116,11 +116,11 @@ Typed ledgers and the first postings from Kapps.
 
 ### Acceptance Criteria
 
-- [ ] A sales invoice posts a balanced journal entry (covered by `PostSalesInvoice`; integration test pending)
-- [ ] A purchase bill posts a balanced journal entry (covered by `PostPurchaseBill`; integration test pending)
-- [ ] Trial balance sums to zero at all times (covered by `TrialBalance`; integration test pending)
-- [ ] Period lockout rejects edits to closed periods (covered by `IsPeriodLocked`; integration test pending)
-- [ ] Audit log captures every posting with source record (covered by `PostJournalEntry` + `emitSourceEvent`; integration test pending)
+- [x] A sales invoice posts a balanced journal entry (`TestSalesInvoicePostsBalancedJournal` in `internal/integrationtest/phase_c_test.go`)
+- [x] A purchase bill posts a balanced journal entry (`TestPurchaseBillPostsBalancedJournal`)
+- [x] Trial balance sums to zero at all times (`TestTrialBalanceSumsToZero` — asserts residual = 0)
+- [x] Period lockout rejects edits to closed periods (`TestPeriodLockoutRejectsEdits` — `LockPeriod` + retry surfaces `ErrPeriodLocked`)
+- [x] Audit log captures every posting with source record (`TestAuditLogCapturesPostings` — and `TestRLSIsolatesFinanceData` for tenant isolation)
 
 ---
 
