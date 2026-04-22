@@ -57,10 +57,13 @@ func (s *UserStore) CreateUser(ctx context.Context, u User) (*User, error) {
 		u.ID = uuid.New()
 	}
 	var out User
+	// email and display_name are nullable in the schema. Write NULL for
+	// empty strings via nullIfEmpty, then COALESCE the RETURNING clause
+	// back to '' so pgx can scan into a plain string field.
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO users (id, kchat_user_id, email, display_name)
 		 VALUES ($1, $2, $3, $4)
-		 RETURNING id, kchat_user_id, email, display_name`,
+		 RETURNING id, kchat_user_id, COALESCE(email, ''), COALESCE(display_name, '')`,
 		u.ID, u.KChatUserID, nullIfEmpty(u.Email), nullIfEmpty(u.DisplayName),
 	).Scan(&out.ID, &out.KChatUserID, &out.Email, &out.DisplayName)
 	if err != nil {
@@ -82,7 +85,8 @@ func (s *UserStore) CreateUser(ctx context.Context, u User) (*User, error) {
 func (s *UserStore) GetUser(ctx context.Context, id uuid.UUID) (*User, error) {
 	var u User
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, kchat_user_id, email, display_name FROM users WHERE id = $1`, id,
+		`SELECT id, kchat_user_id, COALESCE(email, ''), COALESCE(display_name, '')
+		 FROM users WHERE id = $1`, id,
 	).Scan(&u.ID, &u.KChatUserID, &u.Email, &u.DisplayName)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
