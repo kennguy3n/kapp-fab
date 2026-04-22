@@ -126,12 +126,16 @@ function LineTable({
   );
 }
 
+// defaultRange returns from/to in the viewer's local calendar. Formatting
+// `toISOString()` of a local-constructed Date would shift the day in UTC+
+// zones (e.g. Jan 1 local → Dec 31 UTC), bleeding prior-year entries into
+// the default range.
 function defaultRange(): { defaultFrom: string; defaultTo: string } {
   const now = new Date();
-  const yearStart = new Date(now.getFullYear(), 0, 1);
+  const pad = (n: number) => String(n).padStart(2, "0");
   return {
-    defaultFrom: yearStart.toISOString().slice(0, 10),
-    defaultTo: now.toISOString().slice(0, 10),
+    defaultFrom: `${now.getFullYear()}-01-01`,
+    defaultTo: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
   };
 }
 
