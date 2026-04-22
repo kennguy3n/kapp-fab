@@ -1,6 +1,6 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2026-04-22
+> **Last Updated:** 2026-04-22 (Phase B acceptance complete)
 >
 > Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md)
 
@@ -78,20 +78,20 @@ Chat-native work tracking and revenue pipeline on top of the kernel.
 - [x] Tasks KType: `tasks.task`
 - [x] Approvals engine: configurable chains, KChat approve/reject cards (engine done, KChat cards not done)
 - [x] Forms KApp: anonymous and authenticated capture forms emitting KRecords
-- [~] KChat cards for all CRM + Tasks + Approvals objects (renderer exists in `services/kchat-bridge/cards.go`; now handles both `cards.message` and `cards.summary` schema shapes)
+- [x] KChat cards for all CRM + Tasks + Approvals objects (renderer + `ApprovalCardRenderer` wired in `services/kchat-bridge/main.go`)
 - [x] Slash commands: `/lead`, `/contact`, `/deal`, `/task`, `/approve`, `/form` (implemented in `services/kchat-bridge/commands.go`)
-- [ ] Composer actions: turn message → Task, Deal, Activity (not started)
-- [~] Right-pane detail views for all Phase B KTypes (generic `RightPane` component at `apps/web/src/components/RightPane.tsx`; per-KType tabs not wired)
+- [x] Composer actions: turn message → Task, Deal, Activity (implemented in `services/kchat-bridge/composer.go`)
+- [x] Right-pane detail views for all Phase B KTypes (per-KType Details / Timeline / Related tabs in `apps/web/src/components/RightPane.tsx`)
 - [x] Agent tools: `crm.create_deal`, `approvals.decide` (confirmed in tests)
-- [~] Agent tools: `crm.advance_deal`, `crm.summarize_pipeline`, `tasks.create_task`, `approvals.request` (executor framework in `internal/agents/` with handlers wired via `RegisterCRMTools`; individual tool coverage being hardened)
+- [x] Agent tools: `crm.advance_deal`, `crm.summarize_pipeline`, `tasks.create_task`, `approvals.request` (HTTP endpoint at `POST /api/v1/agents/tools/{name}`; per-tool tests in `internal/integrationtest/phase_b_test.go`)
 
 ### Acceptance Criteria
 
-- [ ] A Deal can be created from a KChat thread and progressed through its workflow
-- [ ] An approval card posts to the right approvers and finalizes on decision
-- [ ] All CRM records appear in the right pane and kanban views
-- [ ] Agent tools execute with dry-run and confirmation where required
-- [ ] Audit log shows the full lifecycle of each record
+- [x] A Deal can be created from a KChat thread and progressed through its workflow (`TestDealLifecycleEndToEnd`)
+- [x] An approval card posts to the right approvers and finalizes on decision (`TestApprovalChainApproveAndReject` + `ApprovalCardRenderer` in kchat-bridge)
+- [x] All CRM records appear in the right pane and kanban views (generic `RightPane` with per-KType tabs + `RecordListPage`)
+- [x] Agent tools execute with dry-run and confirmation where required (`TestAgentToolsDryRunAndCommit`, `TestAdvanceDealTool`, `TestSummarizePipelineTool`, `TestCreateTaskTool`, `TestRequestApprovalTool`)
+- [x] Audit log shows the full lifecycle of each record (`GET /api/v1/audit` endpoint + `AuditLogPage` + `TestDealLifecycleEndToEnd`)
 
 ---
 
@@ -228,7 +228,7 @@ A concrete, end-to-end demonstration that the kernel is real. Before Phase A is 
 
 - [x] Create two tenants `acme` and `globex` via API (TestRLSIsolatesTenants creates two tenants)
 - [x] Register a KType `demo.note` with fields `title`, `body` (TestKTypeRegistry)
-- [ ] Create user `alice` in `acme` and `bob` in `globex` (user creation exists but not in integration test flow)
+- [x] Create user `alice` in `acme` and `bob` in `globex` (TestFirstCodingSlice)
 - [x] Alice creates a note in `acme`; Bob creates a note in `globex` (TestRLSIsolatesTenants)
 - [x] Alice's note list returns only `acme` notes (TestRLSIsolatesTenants)
 - [x] Bob's note list returns only `globex` notes (TestRLSIsolatesTenants)

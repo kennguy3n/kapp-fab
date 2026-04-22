@@ -220,6 +220,91 @@ export class ApiClient {
     );
   }
 
+  /** Fetch the authoritative workflow run for a record. Returns null
+   *  when the record has no run yet so callers can render the "no
+   *  workflow" state without branching on fetch errors.
+   */
+  async getWorkflowRun(ktype: string, recordId: string): Promise<WorkflowRun | null> {
+    try {
+      return await this.request<WorkflowRun>(
+        `/records/${encodeURIComponent(ktype)}/${encodeURIComponent(recordId)}/workflow-run`
+      );
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("404")) {
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  // --- Approvals ---------------------------------------------------------
+
+  listApprovals(): Promise<Approval[]> {
+    return this.request("/approvals");
+  }
+
+  getApproval(id: string): Promise<Approval> {
+    return this.request(`/approvals/${encodeURIComponent(id)}`);
+  }
+
+  requestApproval(input: {
+    record_ktype: string;
+    record_id: string;
+    chain: ApprovalChain;
+  }): Promise<Approval> {
+    return this.request("/approvals", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  decideApproval(id: string, decision: "approve" | "reject"): Promise<Approval> {
+    return this.request(`/approvals/${encodeURIComponent(id)}/decide`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ decision }),
+    });
+  }
+
+  // --- Agent tools -------------------------------------------------------
+
+  listAgentTools(): Promise<{ tools: string[] }> {
+    return this.request("/agents/tools");
+  }
+
+  invokeAgentTool(
+    name: string,
+    invocation: {
+      mode: "dry_run" | "commit";
+      inputs: Record<string, unknown>;
+      confirmed?: boolean;
+    }
+  ): Promise<AgentInvocationResult> {
+    return this.request(`/agents/tools/${encodeURIComponent(name)}`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(invocation),
+    });
+  }
+
+  // --- Audit log ---------------------------------------------------------
+
+  listAuditLog(params?: {
+    target_ktype?: string;
+    target_id?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<AuditEntry[]> {
+    const qs = new URLSearchParams();
+    if (params?.target_ktype) qs.set("target_ktype", params.target_ktype);
+    if (params?.target_id) qs.set("target_id", params.target_id);
+    if (params?.limit !== undefined) qs.set("limit", String(params.limit));
+    if (params?.offset !== undefined) qs.set("offset", String(params.offset));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return this.request(`/audit${suffix}`);
+  }
+
   // --- Forms ------------------------------------------------------------
 
   /** Public (unauthenticated) fetch of a form's schema + config by id. */
@@ -255,6 +340,60 @@ export interface WorkflowRun {
   }>;
   created_at: string;
   updated_at: string;
+}
+
+export interface ApprovalStep {
+  approvers: string[];
+  required_count: number;
+}
+
+export interface ApprovalAction {
+  step_index: number;
+  actor_id: string;
+  decision: "approve" | "reject";
+  timestamp: string;
+}
+
+export interface ApprovalChain {
+  steps: ApprovalStep[];
+  current_step: number;
+  requested_by: string;
+  history: ApprovalAction[];
+}
+
+export interface Approval {
+  id: string;
+  tenant_id: string;
+  record_ktype: string;
+  record_id: string;
+  chain: ApprovalChain;
+  state: "pending" | "approved" | "rejected";
+  created_at: string;
+}
+
+export interface AgentInvocationResult {
+  tool: string;
+  mode: "dry_run" | "commit";
+  result: unknown;
+  audit: {
+    action: string;
+    target_ktype?: string;
+    target_id?: string | null;
+  };
+}
+
+export interface AuditEntry {
+  id: number;
+  tenant_id: string;
+  actor_id?: string | null;
+  actor_kind: "user" | "agent" | "system";
+  action: string;
+  target_ktype?: string;
+  target_id?: string | null;
+  before?: unknown;
+  after?: unknown;
+  context?: unknown;
+  created_at: string;
 }
 
 export interface Form {

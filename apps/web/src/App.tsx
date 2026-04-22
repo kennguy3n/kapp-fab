@@ -5,6 +5,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { TenantListPage } from "./pages/TenantListPage";
 import { FormPage } from "./pages/FormPage";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
+import { AuditLogPage } from "./pages/AuditLogPage";
 
 interface NavSection {
   title: string;
@@ -32,7 +33,10 @@ const navSections: NavSection[] = [
   },
   {
     title: "Admin",
-    links: [{ to: "/admin/tenants", label: "Tenants" }],
+    links: [
+      { to: "/admin/tenants", label: "Tenants" },
+      { to: "/admin/audit", label: "Audit Log" },
+    ],
   },
 ];
 
@@ -83,6 +87,7 @@ function AppShell() {
         <Routes>
           <Route path="/" element={<div>Select a KType from the nav.</div>} />
           <Route path="/admin/tenants" element={<TenantListPage />} />
+          <Route path="/admin/audit" element={<AuditLogPage />} />
           <Route path="/approvals" element={<ApprovalsPage />} />
           <Route path="/records/:ktype" element={<RecordListPage />} />
           <Route path="/records/:ktype/new" element={<RecordFormPage />} />

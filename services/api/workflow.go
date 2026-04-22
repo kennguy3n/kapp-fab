@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
@@ -19,8 +22,9 @@ import (
 // workflow, and (2) translate errors into HTTP status codes the web
 // client expects.
 type workflowHandlers struct {
-	engine *workflow.Engine
-	store  *record.PGStore
+	engine   *workflow.Engine
+	store    *record.PGStore
+	registry *ktype.PGRegistry
 }
 
 type workflowActionResponse struct {
@@ -61,7 +65,7 @@ func (h *workflowHandlers) action(w http.ResponseWriter, r *http.Request) {
 	actor := actorOrDefault(r.Context())
 	run, err := h.engine.GetRunByRecord(r.Context(), t.ID, recordID)
 	if errors.Is(err, workflow.ErrRunNotFound) {
-		workflowName, ok := workflowNameFor(rec)
+		workflowName, ok := h.workflowNameFor(r.Context(), rec)
 		if !ok {
 			http.Error(w, "no workflow attached to ktype", http.StatusBadRequest)
 			return
@@ -91,18 +95,57 @@ func (h *workflowHandlers) action(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, workflowActionResponse{Record: rec, Run: run})
 }
 
+// getRunByRecord handles GET /api/v1/records/{ktype}/{id}/workflow-run.
+// The RightPane hydrates from this endpoint so it can render the
+// authoritative engine state plus the full transition history timeline
+// without inferring state from the record.data payload.
+func (h *workflowHandlers) getRunByRecord(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	recordID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid record id", http.StatusBadRequest)
+		return
+	}
+	run, err := h.engine.GetRunByRecord(r.Context(), t.ID, recordID)
+	if err != nil {
+		writeWorkflowError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
 // workflowNameFor pulls the workflow.name attribute out of a KType
 // schema payload. It peeks at a small subset of the schema JSON because
 // ktype.Schema (the validator-facing struct) does not expose the
-// workflow block. A fuller schema parser lives in ARCHITECTURE but is
+// workflow block; a fuller schema parser lives in ARCHITECTURE but is
 // deferred until Phase C.
-func workflowNameFor(rec *record.KRecord) (string, bool) {
-	_ = rec
-	// Placeholder — callers that need workflow lookups by KType go
-	// through the registry directly. For Phase B, records always call
-	// StartRun with the declarative workflow name encoded in the KType
-	// schema; see RegisterCRMWorkflows / RegisterCRMKTypes.
-	return "", false
+//
+// Returns ("", false) when the record has no registry-backed KType or
+// the KType schema omits a workflow block.
+func (h *workflowHandlers) workflowNameFor(ctx context.Context, rec *record.KRecord) (string, bool) {
+	if h == nil || h.registry == nil || rec == nil || rec.KType == "" {
+		return "", false
+	}
+	kt, err := h.registry.Get(ctx, rec.KType, 0)
+	if err != nil || kt == nil {
+		return "", false
+	}
+	var envelope struct {
+		Workflow struct {
+			Name string `json:"name"`
+		} `json:"workflow"`
+	}
+	if err := json.Unmarshal(kt.Schema, &envelope); err != nil {
+		return "", false
+	}
+	if envelope.Workflow.Name == "" {
+		return "", false
+	}
+	return envelope.Workflow.Name, true
 }
 
 func writeWorkflowError(w http.ResponseWriter, err error) {

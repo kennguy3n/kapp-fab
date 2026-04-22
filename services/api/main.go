@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/kennguy3n/kapp-fab/internal/agents"
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/forms"
@@ -75,11 +76,20 @@ func run() error {
 	rateLimiter := platform.NewRateLimiter(platform.DefaultRateLimitConfig())
 	quotaEnforcer := platform.NewQuotaEnforcer(pool)
 
+	// Agent tool executor — Phase B wires the CRM / tasks / approvals
+	// tools against the same record store and workflow engine the HTTP
+	// surface uses so dry-run and commit mode behave identically.
+	executor := agents.NewExecutor(recordStore, workflowEngine, auditor)
+	agents.RegisterCRMTools(executor)
+
 	fh := &formsHandlers{store: formStore, registry: ktypeRegistry}
 	th := &tenantHandlers{svc: tenantSvc}
 	kh := &ktypeHandlers{registry: ktypeRegistry}
 	rh := &recordHandlers{store: recordStore}
-	wh := &workflowHandlers{engine: workflowEngine, store: recordStore}
+	wh := &workflowHandlers{engine: workflowEngine, store: recordStore, registry: ktypeRegistry}
+	ah := &agentHandlers{executor: executor}
+	aph := &approvalsHandlers{engine: workflowEngine, store: recordStore}
+	auh := &auditHandlers{pool: pool}
 	oh := &openAPIHandler{registry: ktypeRegistry}
 
 	r := chi.NewRouter()
@@ -129,6 +139,50 @@ func run() error {
 		// same tenant + idempotency + rate-limit + quota stack as record
 		// CRUD so a spammed transition can't starve other tenants.
 		r.Post("/{ktype}/{id}/actions/{action}", wh.action)
+		// Workflow-run read endpoint. The list/kanban UI hydrates the
+		// RightPane from this so it can show the authoritative state
+		// the engine holds rather than inferring it from the record
+		// data field (ARCHITECTURE.md §7).
+		r.Get("/{ktype}/{id}/workflow-run", wh.getRunByRecord)
+	})
+
+	// Agent tool invocation surface. ARCHITECTURE.md §10-§11 requires
+	// every mutation to be tenant-scoped and attributable, so mutating
+	// calls run under the same middleware stack as record CRUD. The
+	// read-only list endpoint lives in the same route group for
+	// discoverability even though it does not need idempotency.
+	r.Route("/api/v1/agents", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.IdempotencyMiddleware(pool))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Use(platform.QuotaMiddleware(quotaEnforcer))
+		r.Get("/tools", ah.list)
+		r.Post("/tools/{name}", ah.invoke)
+	})
+
+	// Approvals surface. GET endpoints are safe to replay under
+	// IdempotencyMiddleware (the middleware short-circuits non-mutating
+	// methods) and the mutations (POST /, POST /{id}/decide) need the
+	// same tenant + idempotency + rate-limit + quota stack as record
+	// CRUD so a spammed approve / reject can't starve other tenants.
+	r.Route("/api/v1/approvals", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.IdempotencyMiddleware(pool))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Use(platform.QuotaMiddleware(quotaEnforcer))
+		r.Get("/", aph.list)
+		r.Post("/", aph.create)
+		r.Get("/{id}", aph.get)
+		r.Post("/{id}/decide", aph.decide)
+	})
+
+	// Audit log read surface. Queries the audit_log table under tenant
+	// context via dbutil.WithTenantTx so RLS is enforced. Admin-only in
+	// production; auth enforcement lands with the broader auth layer
+	// in Phase C.
+	r.Route("/api/v1/audit", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Get("/", auh.list)
 	})
 
 	// Forms KApp. Creation and tenant-scoped lookups go through the
