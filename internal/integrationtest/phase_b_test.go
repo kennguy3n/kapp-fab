@@ -820,9 +820,14 @@ func TestDealLifecycleEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("audit: %v", err)
 	}
+	// Audit actions differ from event types: record writes use
+	// "<ktype>.create" and approval decisions use "approval.<decision>".
 	required := []string{
-		"krecord.created", "workflow.started",
-		"workflow.transitioned", "approval.requested", "approval.granted",
+		crm.KTypeDeal + ".create",
+		"workflow.started",
+		"workflow.transitioned",
+		"approval.requested",
+		"approval." + workflow.DecisionApprove,
 	}
 	for _, want := range required {
 		found := false
