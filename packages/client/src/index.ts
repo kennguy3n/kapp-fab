@@ -633,18 +633,19 @@ export interface FiscalPeriod {
 export interface TrialBalanceRow {
   account_code: string;
   account_name: string;
-  account_type: AccountType;
+  type: AccountType;
   debit: string;
   credit: string;
   balance: string;
 }
 
 export interface TrialBalanceReport {
+  tenant_id: string;
   as_of: string;
   rows: TrialBalanceRow[];
   total_debit: string;
   total_credit: string;
-  balanced: boolean;
+  residual: string;
 }
 
 export interface AgingBucket {

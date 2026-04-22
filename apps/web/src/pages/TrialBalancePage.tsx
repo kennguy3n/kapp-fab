@@ -70,7 +70,7 @@ export function TrialBalancePage() {
                     <code>{r.account_code}</code>
                   </Td>
                   <Td>{r.account_name}</Td>
-                  <Td>{r.account_type}</Td>
+                  <Td>{r.type}</Td>
                   <Td style={{ textAlign: "right" }}>{fmt(r.debit)}</Td>
                   <Td style={{ textAlign: "right" }}>{fmt(r.credit)}</Td>
                   <Td style={{ textAlign: "right" }}>{fmt(r.balance)}</Td>
@@ -90,10 +90,10 @@ export function TrialBalancePage() {
                 <Td
                   style={{
                     textAlign: "right",
-                    color: report.balanced ? "#059669" : "#b91c1c",
+                    color: isBalanced(report.residual) ? "#059669" : "#b91c1c",
                   }}
                 >
-                  {report.balanced ? "balanced" : "OUT OF BALANCE"}
+                  {isBalanced(report.residual) ? "balanced" : "OUT OF BALANCE"}
                 </Td>
               </tr>
             </tfoot>
@@ -102,6 +102,13 @@ export function TrialBalancePage() {
       )}
     </section>
   );
+}
+
+// isBalanced treats a trial balance as balanced when the backend-reported
+// residual (total_debit - total_credit) is numerically zero. The backend
+// emits residual as a decimal string.
+function isBalanced(residual: string): boolean {
+  return Number(residual) === 0;
 }
 
 // todayLocalISO returns YYYY-MM-DD in the viewer's local timezone. Using
