@@ -1,4 +1,4 @@
-.PHONY: build run-api run-worker test compose-up compose-down lint migrate
+.PHONY: build run-api run-worker test test-integration compose-up compose-down lint migrate
 
 # DB_URL defaults to the local docker-compose connection. Override via env
 # in any non-local environment.
@@ -20,6 +20,12 @@ run-worker: build
 
 test:
 	go test ./...
+
+# Phase A integration tests: require the docker-compose DB to be up and
+# migrated. Skipped in plain `make test` / CI because they open a real
+# Postgres connection.
+test-integration:
+	KAPP_TEST_DB_URL="$(DB_URL)" go test -tags=integration -v ./internal/integrationtest/...
 
 compose-up:
 	docker compose up -d
