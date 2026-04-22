@@ -19,6 +19,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/google/uuid"
+
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
@@ -56,7 +58,11 @@ func run() error {
 	workflowEngine := workflow.NewEngine(pool, eventPublisher, auditor)
 	cards := &CardRenderer{registry: registry}
 	composer := &Composer{registry: registry, records: recordStore, cards: cards}
-	_ = workflowEngine // retained for future approval-card wiring
+	// The approvals renderer is what the worker service will call when
+	// draining `approval.requested` / `approval.step_advanced` events
+	// from the outbox to DM each approver a card. Exposed over HTTP at
+	// /kchat/approvals/render so the worker stays stateless.
+	approvalCards := NewApprovalCardRenderer(registry, cards, os.Getenv("KAPP_KCHAT_ACTIONS_BASE"))
 	commands := &CommandDispatcher{
 		registry:  registry,
 		records:   recordStore,
@@ -88,6 +94,54 @@ func run() error {
 	})
 
 	r.Post("/kchat/composer/actions", composer.HandleHTTP)
+
+	// Approval-card render surface. The worker service drains
+	// `approval.requested` / `approval.step_advanced` events from the
+	// outbox and POSTs {tenant_id, approval_id} here to get the
+	// per-approver card payload it should DM. Kept separate from the
+	// decision surface (/kchat/commands approve) so rendering is
+	// idempotent and free of side effects.
+	r.Post("/kchat/approvals/render", func(w http.ResponseWriter, req *http.Request) {
+		var body struct {
+			TenantID   uuid.UUID `json:"tenant_id"`
+			ApprovalID uuid.UUID `json:"approval_id"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if body.TenantID == uuid.Nil || body.ApprovalID == uuid.Nil {
+			http.Error(w, "tenant_id and approval_id required", http.StatusBadRequest)
+			return
+		}
+		approval, err := workflowEngine.GetApproval(req.Context(), body.TenantID, body.ApprovalID)
+		if err != nil {
+			if errors.Is(err, workflow.ErrApprovalNotFound) {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Best-effort record hydration — a missing record still
+		// yields a useful card (renderer falls back to approval-only
+		// fields) so we don't let record lookup failures block the
+		// approver DM.
+		var rec *record.KRecord
+		if r, err := recordStore.Get(req.Context(), body.TenantID, approval.RecordID); err == nil {
+			rec = r
+		}
+		cardsByApprover, err := approvalCards.RenderForApprovers(req.Context(), approval, rec)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"approval_id": approval.ID,
+			"state":       approval.State,
+			"cards":       cardsByApprover,
+		})
+	})
 
 	r.Post("/kchat/commands", func(w http.ResponseWriter, req *http.Request) {
 		var body CommandRequest

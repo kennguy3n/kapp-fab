@@ -452,6 +452,392 @@ func TestRLSDealIsolation(t *testing.T) {
 	}
 }
 
+// TestAdvanceDealTool covers the crm.advance_deal tool end-to-end: a
+// deal is seeded via crm.create_deal (which also starts the pipeline
+// run), then advance_deal is invoked in dry-run and commit modes. The
+// dry-run must not mutate the run state; the commit must produce a new
+// history entry and move the run to the target state.
+func TestAdvanceDealTool(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, engine := newTenantWithCRM(t, h)
+
+	executor := agents.NewExecutor(h.records, engine, h.auditor)
+	agents.RegisterCRMTools(executor)
+
+	actor := uuid.New()
+	createInputs, _ := json.Marshal(map[string]any{
+		"name":  "Advance target",
+		"stage": "qualification",
+	})
+	created, err := executor.Invoke(ctx, agents.Invocation{
+		TenantID: tn.ID, ActorID: actor, ToolName: "crm.create_deal",
+		Inputs: createInputs, Mode: agents.ModeCommit,
+	})
+	if err != nil {
+		t.Fatalf("create_deal commit: %v", err)
+	}
+	if created.Record == nil || created.Run == nil {
+		t.Fatalf("create_deal missing record/run: %+v", created)
+	}
+
+	advanceInputs, _ := json.Marshal(map[string]any{
+		"record_id": created.Record.ID,
+		"action":    "advance_to_proposal",
+	})
+
+	// Dry-run should not mutate the run.
+	dry, err := executor.Invoke(ctx, agents.Invocation{
+		TenantID: tn.ID, ActorID: actor, ToolName: "crm.advance_deal",
+		Inputs: advanceInputs, Mode: agents.ModeDryRun,
+	})
+	if err != nil {
+		t.Fatalf("advance_deal dry: %v", err)
+	}
+	if dry.Run == nil || dry.Run.State != "qualification" {
+		t.Fatalf("dry run mutated state: %+v", dry.Run)
+	}
+	latest, err := engine.GetRunByRecord(ctx, tn.ID, created.Record.ID)
+	if err != nil {
+		t.Fatalf("get run after dry: %v", err)
+	}
+	if latest.State != "qualification" || len(latest.History) != 0 {
+		t.Fatalf("dry run persisted: state=%s history=%d", latest.State, len(latest.History))
+	}
+
+	// Commit should apply the transition.
+	commit, err := executor.Invoke(ctx, agents.Invocation{
+		TenantID: tn.ID, ActorID: actor, ToolName: "crm.advance_deal",
+		Inputs: advanceInputs, Mode: agents.ModeCommit,
+	})
+	if err != nil {
+		t.Fatalf("advance_deal commit: %v", err)
+	}
+	if commit.Run == nil || commit.Run.State != "proposal" {
+		t.Fatalf("commit state = %+v; want proposal", commit.Run)
+	}
+	if len(commit.Run.History) != 1 {
+		t.Fatalf("commit history len = %d; want 1", len(commit.Run.History))
+	}
+}
+
+// TestSummarizePipelineTool seeds three deals across three stages and
+// verifies the read-only crm.summarize_pipeline tool returns accurate
+// per-stage counts and totals. The tool is read-only so both modes
+// must behave identically.
+func TestSummarizePipelineTool(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, engine := newTenantWithCRM(t, h)
+
+	executor := agents.NewExecutor(h.records, engine, h.auditor)
+	agents.RegisterCRMTools(executor)
+
+	actor := uuid.New()
+	seed := []struct {
+		name   string
+		stage  string
+		amount float64
+	}{
+		{"Alpha", "qualification", 1000},
+		{"Beta", "qualification", 2500},
+		{"Gamma", "proposal", 4000},
+	}
+	for _, s := range seed {
+		input, _ := json.Marshal(map[string]any{
+			"name": s.name, "stage": s.stage, "amount": s.amount,
+		})
+		if _, err := executor.Invoke(ctx, agents.Invocation{
+			TenantID: tn.ID, ActorID: actor, ToolName: "crm.create_deal",
+			Inputs: input, Mode: agents.ModeCommit,
+		}); err != nil {
+			t.Fatalf("seed %s: %v", s.name, err)
+		}
+	}
+
+	res, err := executor.Invoke(ctx, agents.Invocation{
+		TenantID: tn.ID, ActorID: actor, ToolName: "crm.summarize_pipeline",
+		Inputs: json.RawMessage(`{}`), Mode: agents.ModeDryRun,
+	})
+	if err != nil {
+		t.Fatalf("summarize: %v", err)
+	}
+	type bucket struct {
+		Count int     `json:"count"`
+		Total float64 `json:"total"`
+	}
+	var got map[string]bucket
+	if err := json.Unmarshal(res.Preview, &got); err != nil {
+		t.Fatalf("decode summary: %v (preview=%s)", err, res.Preview)
+	}
+	if got["qualification"].Count != 2 || got["qualification"].Total != 3500 {
+		t.Fatalf("qualification bucket = %+v; want count=2 total=3500", got["qualification"])
+	}
+	if got["proposal"].Count != 1 || got["proposal"].Total != 4000 {
+		t.Fatalf("proposal bucket = %+v; want count=1 total=4000", got["proposal"])
+	}
+}
+
+// TestCreateTaskTool covers the tasks.create_task tool. A dry-run must
+// leave the record store untouched; a commit must insert a row with
+// the supplied title/assignee and default status=open.
+func TestCreateTaskTool(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, engine := newTenantWithCRM(t, h)
+
+	executor := agents.NewExecutor(h.records, engine, h.auditor)
+	agents.RegisterCRMTools(executor)
+
+	actor := uuid.New()
+	assignee := uuid.New()
+	inputs, _ := json.Marshal(map[string]any{
+		"title":    "Follow up with Acme",
+		"assignee": assignee.String(),
+	})
+
+	before, err := h.records.List(ctx, tn.ID, record.ListFilter{KType: crm.KTypeTask})
+	if err != nil {
+		t.Fatalf("pre-list: %v", err)
+	}
+
+	dry, err := executor.Invoke(ctx, agents.Invocation{
+		TenantID: tn.ID, ActorID: actor, ToolName: "tasks.create_task",
+		Inputs: inputs, Mode: agents.ModeDryRun,
+	})
+	if err != nil {
+		t.Fatalf("task dry: %v", err)
+	}
+	if dry.Record != nil {
+		t.Fatalf("dry run produced a record: %+v", dry.Record)
+	}
+	after, err := h.records.List(ctx, tn.ID, record.ListFilter{KType: crm.KTypeTask})
+	if err != nil {
+		t.Fatalf("post-dry list: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("dry run mutated store: before=%d after=%d", len(before), len(after))
+	}
+
+	commit, err := executor.Invoke(ctx, agents.Invocation{
+		TenantID: tn.ID, ActorID: actor, ToolName: "tasks.create_task",
+		Inputs: inputs, Mode: agents.ModeCommit,
+	})
+	if err != nil {
+		t.Fatalf("task commit: %v", err)
+	}
+	if commit.Record == nil {
+		t.Fatalf("commit missing record: %+v", commit)
+	}
+	var payload struct {
+		Title    string `json:"title"`
+		Assignee string `json:"assignee"`
+		Status   string `json:"status"`
+	}
+	if err := json.Unmarshal(commit.Record.Data, &payload); err != nil {
+		t.Fatalf("decode task: %v", err)
+	}
+	if payload.Title != "Follow up with Acme" {
+		t.Fatalf("title = %q", payload.Title)
+	}
+	if payload.Assignee != assignee.String() {
+		t.Fatalf("assignee = %q; want %s", payload.Assignee, assignee)
+	}
+	if payload.Status != "open" {
+		t.Fatalf("status = %q; want open", payload.Status)
+	}
+}
+
+// TestRequestApprovalTool verifies the approvals.request tool: a
+// dry-run must not create an approval, and a commit must create one
+// that shows up in ListPendingApprovals for the step-0 approver.
+func TestRequestApprovalTool(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, engine := newTenantWithCRM(t, h)
+
+	executor := agents.NewExecutor(h.records, engine, h.auditor)
+	agents.RegisterCRMTools(executor)
+
+	actor := uuid.New()
+	approver := uuid.New()
+
+	rec, err := h.records.Create(ctx, record.KRecord{
+		TenantID:  tn.ID,
+		KType:     crm.KTypeDeal,
+		Data:      json.RawMessage(`{"name":"Needs approval","stage":"qualification"}`),
+		CreatedBy: actor,
+	})
+	if err != nil {
+		t.Fatalf("create deal: %v", err)
+	}
+
+	chain := workflow.ApprovalChain{
+		Steps: []workflow.ApprovalStep{
+			{Approvers: []uuid.UUID{approver}, RequiredCount: 1},
+		},
+	}
+	inputs, _ := json.Marshal(map[string]any{
+		"record_ktype": crm.KTypeDeal,
+		"record_id":    rec.ID,
+		"chain":        chain,
+	})
+
+	// Dry-run: no approval created.
+	if _, err := executor.Invoke(ctx, agents.Invocation{
+		TenantID: tn.ID, ActorID: actor, ToolName: "approvals.request",
+		Inputs: inputs, Mode: agents.ModeDryRun,
+	}); err != nil {
+		t.Fatalf("approval dry: %v", err)
+	}
+	pending, err := engine.ListPendingApprovals(ctx, tn.ID, approver)
+	if err != nil {
+		t.Fatalf("list after dry: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("dry run created approval: %+v", pending)
+	}
+
+	// Commit: approval appears in the pending list.
+	commit, err := executor.Invoke(ctx, agents.Invocation{
+		TenantID: tn.ID, ActorID: actor, ToolName: "approvals.request",
+		Inputs: inputs, Mode: agents.ModeCommit,
+	})
+	if err != nil {
+		t.Fatalf("approval commit: %v", err)
+	}
+	if commit.Extra == nil || commit.Extra["approval_id"] == nil {
+		t.Fatalf("commit missing approval_id: %+v", commit.Extra)
+	}
+	pending, err = engine.ListPendingApprovals(ctx, tn.ID, approver)
+	if err != nil {
+		t.Fatalf("list after commit: %v", err)
+	}
+	if len(pending) != 1 || pending[0].RecordID != rec.ID {
+		t.Fatalf("pending after commit = %+v", pending)
+	}
+}
+
+// TestDealLifecycleEndToEnd is the Phase B acceptance test. It stitches
+// together every subsystem that a deal touches: record creation
+// (mirroring the KChat /deal command), workflow run start, a full
+// stage progression, and a two-step approval that both begins and
+// finalizes. Events and audit actions are asserted at the end so a
+// failure in any of the upstream writes surfaces a clear message.
+func TestDealLifecycleEndToEnd(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, engine := newTenantWithCRM(t, h)
+
+	creator := uuid.New()
+	approverA := uuid.New()
+	approverB := uuid.New()
+
+	// 1. Create a deal as if /deal were invoked from KChat.
+	rec, err := h.records.Create(ctx, record.KRecord{
+		TenantID: tn.ID,
+		KType:    crm.KTypeDeal,
+		Data: json.RawMessage(
+			`{"name":"Enterprise deal","stage":"qualification","amount":50000,"currency":"USD"}`,
+		),
+		CreatedBy: creator,
+	})
+	if err != nil {
+		t.Fatalf("create deal: %v", err)
+	}
+
+	// 2. Start the workflow run (mirrors the server's workflowNameFor
+	// path — the API handler would do this on the caller's behalf).
+	run, err := engine.StartRun(ctx, tn.ID, crm.WorkflowDealPipeline, rec.ID, "", creator)
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if run.State != "qualification" {
+		t.Fatalf("initial state = %q; want qualification", run.State)
+	}
+
+	// 3. Transition qualification → proposal → negotiation → won.
+	for _, action := range []string{
+		"advance_to_proposal", "advance_to_negotiation", "mark_won",
+	} {
+		run, err = engine.Transition(ctx, tn.ID, run.ID, action, creator)
+		if err != nil {
+			t.Fatalf("transition %s: %v", action, err)
+		}
+	}
+	if run.State != "won" {
+		t.Fatalf("final state = %q; want won", run.State)
+	}
+
+	// 4. Request a two-step approval on the won deal (e.g. finance
+	// sign-off before sales invoice) and drive it to approved.
+	approval, err := engine.RequestApproval(ctx, tn.ID, crm.KTypeDeal, rec.ID, workflow.ApprovalChain{
+		Steps: []workflow.ApprovalStep{
+			{Approvers: []uuid.UUID{approverA}, RequiredCount: 1},
+			{Approvers: []uuid.UUID{approverB}, RequiredCount: 1},
+		},
+	}, creator)
+	if err != nil {
+		t.Fatalf("request approval: %v", err)
+	}
+	a1, err := engine.Decide(ctx, tn.ID, approval.ID, workflow.DecisionApprove, approverA)
+	if err != nil {
+		t.Fatalf("approve step 0: %v", err)
+	}
+	if a1.Chain.CurrentStep != 1 {
+		t.Fatalf("current step after A = %d; want 1", a1.Chain.CurrentStep)
+	}
+	final, err := engine.Decide(ctx, tn.ID, approval.ID, workflow.DecisionApprove, approverB)
+	if err != nil {
+		t.Fatalf("approve step 1: %v", err)
+	}
+	if final.State != workflow.ApprovalStateApproved {
+		t.Fatalf("final approval state = %q", final.State)
+	}
+
+	// 5. Assert the event and audit trail covers the full lifecycle.
+	counts, err := eventCountsForTenant(ctx, h.pool, tn.ID)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	if counts["krecord.created"] < 1 {
+		t.Fatalf("krecord.created = %d; want >= 1 (%v)", counts["krecord.created"], counts)
+	}
+	if counts["workflow.started"] != 1 {
+		t.Fatalf("workflow.started = %d; want 1", counts["workflow.started"])
+	}
+	if counts["workflow.transitioned"] != 3 {
+		t.Fatalf("workflow.transitioned = %d; want 3", counts["workflow.transitioned"])
+	}
+	if counts["approval.requested"] != 1 {
+		t.Fatalf("approval.requested = %d; want 1", counts["approval.requested"])
+	}
+	if counts["approval.granted"] != 1 {
+		t.Fatalf("approval.granted = %d; want 1", counts["approval.granted"])
+	}
+
+	actions, err := auditActionsForTenant(ctx, h.pool, tn.ID)
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	required := []string{
+		"krecord.created", "workflow.started",
+		"workflow.transitioned", "approval.requested", "approval.granted",
+	}
+	for _, want := range required {
+		found := false
+		for _, got := range actions {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing audit action %q in %v", want, actions)
+		}
+	}
+}
+
 // --- helpers ---
 
 // eventCountsForTenant reads the events outbox for a tenant. It wraps
