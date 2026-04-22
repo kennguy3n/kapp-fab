@@ -12,15 +12,18 @@ import (
 )
 
 // User mirrors a row in the `users` table — the globally-unique identity
-// used across every tenant membership the user holds.
+// used across every tenant membership the user holds. KChatUserID is the
+// stable external identifier from KChat and is required by the schema.
 type User struct {
-	ID    uuid.UUID `json:"id"`
-	Email string    `json:"email"`
-	Name  string    `json:"name"`
+	ID          uuid.UUID `json:"id"`
+	KChatUserID string    `json:"kchat_user_id"`
+	Email       string    `json:"email"`
+	DisplayName string    `json:"display_name"`
 }
 
 // UserTenant mirrors a row in the `user_tenants` table, binding a user to a
-// tenant with a role and a membership status.
+// tenant with a role and a membership status. Status is constrained to
+// 'active' | 'invited' | 'suspended' by the schema.
 type UserTenant struct {
 	UserID   uuid.UUID `json:"user_id"`
 	TenantID uuid.UUID `json:"tenant_id"`
@@ -43,25 +46,31 @@ func NewUserStore(pool *pgxpool.Pool) *UserStore {
 	return &UserStore{pool: pool}
 }
 
-// CreateUser inserts a new user row. Email uniqueness is enforced by the
-// database; a conflict returns ErrEmailTaken.
+// CreateUser inserts a new user row. KChatUserID is required and is the
+// UNIQUE external identifier; a conflict on either kchat_user_id or email
+// returns ErrKChatUserIDTaken or ErrEmailTaken respectively.
 func (s *UserStore) CreateUser(ctx context.Context, u User) (*User, error) {
-	if u.Email == "" {
-		return nil, errors.New("tenant: user email required")
+	if u.KChatUserID == "" {
+		return nil, errors.New("tenant: kchat_user_id required")
 	}
 	if u.ID == uuid.Nil {
 		u.ID = uuid.New()
 	}
 	var out User
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO users (id, email, name)
-		 VALUES ($1, $2, $3)
-		 RETURNING id, email, name`,
-		u.ID, u.Email, u.Name,
-	).Scan(&out.ID, &out.Email, &out.Name)
+		`INSERT INTO users (id, kchat_user_id, email, display_name)
+		 VALUES ($1, $2, $3, $4)
+		 RETURNING id, kchat_user_id, email, display_name`,
+		u.ID, u.KChatUserID, nullIfEmpty(u.Email), nullIfEmpty(u.DisplayName),
+	).Scan(&out.ID, &out.KChatUserID, &out.Email, &out.DisplayName)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+			// Both kchat_user_id and email carry UNIQUE constraints; map on
+			// the constraint name so callers can surface the right message.
+			if pgErr.ConstraintName == "users_kchat_user_id_key" {
+				return nil, ErrKChatUserIDTaken
+			}
 			return nil, ErrEmailTaken
 		}
 		return nil, fmt.Errorf("tenant: insert user: %w", err)
@@ -73,8 +82,8 @@ func (s *UserStore) CreateUser(ctx context.Context, u User) (*User, error) {
 func (s *UserStore) GetUser(ctx context.Context, id uuid.UUID) (*User, error) {
 	var u User
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, name FROM users WHERE id = $1`, id,
-	).Scan(&u.ID, &u.Email, &u.Name)
+		`SELECT id, kchat_user_id, email, display_name FROM users WHERE id = $1`, id,
+	).Scan(&u.ID, &u.KChatUserID, &u.Email, &u.DisplayName)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -82,6 +91,15 @@ func (s *UserStore) GetUser(ctx context.Context, id uuid.UUID) (*User, error) {
 		return nil, fmt.Errorf("tenant: get user: %w", err)
 	}
 	return &u, nil
+}
+
+// nullIfEmpty returns nil for an empty string so that NULL is stored for
+// optional text columns rather than an empty string.
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // AddUserToTenant binds a user to a tenant with a role. The membership is
@@ -168,6 +186,7 @@ func scanMemberships(rows pgx.Rows) ([]UserTenant, error) {
 
 // Sentinel errors specific to the user/membership surface.
 var (
+	ErrKChatUserIDTaken = errors.New("tenant: kchat_user_id already taken")
 	ErrEmailTaken       = errors.New("tenant: user email already taken")
 	ErrMembershipExists = errors.New("tenant: user is already a member of this tenant")
 )
