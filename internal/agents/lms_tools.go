@@ -172,6 +172,22 @@ func (t *submitAssignmentTool) Invoke(ctx context.Context, inv Invocation) (*Res
 	if err := json.Unmarshal(rec.Data, &data); err != nil {
 		return nil, fmt.Errorf("lms.submit_assignment: decode data: %w", err)
 	}
+	// Enforce the lms.assignment.lifecycle workflow's state-machine at
+	// the tool level. The workflow definition restricts
+	// `submit_for_review` to `draft` or `returned`; applying the guard
+	// here prevents a double-submission (which would create a second
+	// approval chain + reviewer card) and prevents reverting an
+	// already-`approved` terminal state back to `submitted`.
+	currentStatus, _ := data["status"].(string)
+	if currentStatus == "" {
+		currentStatus = lms.AssignmentStatusDraft
+	}
+	if currentStatus != lms.AssignmentStatusDraft && currentStatus != lms.AssignmentStatusReturned {
+		return nil, fmt.Errorf(
+			"lms.submit_assignment: assignment %s is in status %q; only %q or %q assignments can be submitted",
+			rec.ID, currentStatus, lms.AssignmentStatusDraft, lms.AssignmentStatusReturned,
+		)
+	}
 	reviewerID, _ := data["reviewer_id"].(string)
 	if reviewerID == "" {
 		return nil, errors.New("lms.submit_assignment: reviewer_id must be set on the assignment before submission")

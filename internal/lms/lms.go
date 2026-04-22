@@ -36,7 +36,8 @@ const (
 // web UI and the lms.submit_assignment agent tool share the same
 // vocabulary. Terminal states are `approved` (reviewer accepted) and
 // `returned` (reviewer sent back for revision); the latter loops back
-// to `draft` via the `revise` transition.
+// to `submitted` via a second `submit_for_review` transition, which
+// re-triggers the approval chain for the reviewer.
 const (
 	AssignmentStatusDraft     = "draft"
 	AssignmentStatusSubmitted = "submitted"
