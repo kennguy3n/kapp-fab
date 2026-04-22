@@ -130,6 +130,11 @@ var (
 	ErrTaxCodeNotFound     = errors.New("ledger: tax code not found")
 	ErrInvoiceNotPostable  = errors.New("ledger: invoice not postable from current status")
 	ErrInvoiceAlreadyPosted = errors.New("ledger: invoice already posted")
+	ErrCreditNoteNotPostable = errors.New("ledger: credit note not postable from current status")
+	ErrCreditNoteAlreadyPosted = errors.New("ledger: credit note already posted")
+	ErrDebitNoteNotPostable  = errors.New("ledger: debit note not postable from current status")
+	ErrDebitNoteAlreadyPosted = errors.New("ledger: debit note already posted")
+	ErrOriginalNotPosted     = errors.New("ledger: original record must be posted before issuing a note")
 	// ErrDuplicateSourceEntry is surfaced when a caller tries to post
 	// a second journal entry that references the same (source_ktype,
 	// source_id). A concurrent poster or a retry-after-partial-failure

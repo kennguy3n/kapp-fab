@@ -106,6 +106,67 @@ func createARInvoiceRecord(t *testing.T, h *harness, tenantID, actorID uuid.UUID
 	return rec.ID
 }
 
+// createCreditNoteRecord inserts a draft finance.credit_note KRecord
+// pointing at the supplied (posted) invoice. Returns the created id.
+func createCreditNoteRecord(t *testing.T, h *harness, tenantID, actorID uuid.UUID, number string, originalInvoiceID uuid.UUID, amount decimal.Decimal, reason string) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	amtF, _ := amount.Float64()
+	data := map[string]any{
+		"original_invoice_id": originalInvoiceID.String(),
+		"credit_note_number":  number,
+		"issue_date":          "2026-01-20",
+		"reason":              reason,
+		"amount":              amtF,
+		"currency":            "USD",
+		"status":              "draft",
+	}
+	body, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal credit note: %v", err)
+	}
+	rec, err := h.records.Create(ctx, record.KRecord{
+		TenantID:  tenantID,
+		KType:     finance.KTypeCreditNote,
+		Data:      body,
+		CreatedBy: actorID,
+	})
+	if err != nil {
+		t.Fatalf("create credit note record: %v", err)
+	}
+	return rec.ID
+}
+
+// createDebitNoteRecord is the AP analog of createCreditNoteRecord.
+func createDebitNoteRecord(t *testing.T, h *harness, tenantID, actorID uuid.UUID, number string, originalBillID uuid.UUID, amount decimal.Decimal, reason string) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	amtF, _ := amount.Float64()
+	data := map[string]any{
+		"original_bill_id":  originalBillID.String(),
+		"debit_note_number": number,
+		"issue_date":        "2026-02-05",
+		"reason":            reason,
+		"amount":            amtF,
+		"currency":          "USD",
+		"status":            "draft",
+	}
+	body, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal debit note: %v", err)
+	}
+	rec, err := h.records.Create(ctx, record.KRecord{
+		TenantID:  tenantID,
+		KType:     finance.KTypeDebitNote,
+		Data:      body,
+		CreatedBy: actorID,
+	})
+	if err != nil {
+		t.Fatalf("create debit note record: %v", err)
+	}
+	return rec.ID
+}
+
 // createAPBillRecord is the AP analog of createARInvoiceRecord.
 func createAPBillRecord(t *testing.T, h *harness, tenantID, actorID uuid.UUID, number, supplier string, subtotal, tax decimal.Decimal, taxAcct string) uuid.UUID {
 	t.Helper()
@@ -845,5 +906,225 @@ func TestPostSalesInvoiceConcurrentPostersOnlyOneWins(t *testing.T) {
 		if id != winnerID {
 			t.Fatalf("poster returned JE %s but only %s exists in the ledger", id, winnerID)
 		}
+	}
+}
+
+// TestPostCreditNoteReversesInvoice posts an AR invoice, issues a
+// credit note for the full amount, and asserts the resulting JE
+// reverses the original legs (Dr Revenue, Cr AR) and that the credit
+// note record is patched to posted with a `journal_entry_id`.
+func TestPostCreditNoteReversesInvoice(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, store, poster := newTenantForFinance(t, h)
+
+	actor := uuid.New()
+	customer := uuid.NewString()
+	invoiceID := createARInvoiceRecord(t, h, tn.ID, actor, "INV-CN-1", customer,
+		decimal.NewFromInt(500), decimal.Zero, "")
+	if _, err := poster.PostSalesInvoice(ctx, tn.ID, invoiceID, actor); err != nil {
+		t.Fatalf("post invoice: %v", err)
+	}
+
+	noteID := createCreditNoteRecord(t, h, tn.ID, actor, "CN-1001", invoiceID, decimal.NewFromInt(500), "customer refund")
+	entry, err := poster.PostCreditNote(ctx, tn.ID, noteID, actor)
+	if err != nil {
+		t.Fatalf("post credit note: %v", err)
+	}
+	if entry.SourceKType != finance.KTypeCreditNote || entry.SourceID == nil || *entry.SourceID != noteID {
+		t.Fatalf("source linkage wrong: ktype=%q id=%v", entry.SourceKType, entry.SourceID)
+	}
+
+	// Reversed legs: Dr Revenue (4000), Cr AR (1100).
+	var debit, credit decimal.Decimal
+	legs := map[string]struct{ debit, credit decimal.Decimal }{}
+	for _, line := range entry.Lines {
+		debit = debit.Add(line.Debit)
+		credit = credit.Add(line.Credit)
+		legs[line.AccountCode] = struct{ debit, credit decimal.Decimal }{line.Debit, line.Credit}
+	}
+	if !debit.Equal(credit) {
+		t.Fatalf("unbalanced: debit=%s credit=%s", debit, credit)
+	}
+	if got := legs["4000"].debit; !got.Equal(decimal.NewFromInt(500)) {
+		t.Fatalf("Revenue debit = %s; want 500", got)
+	}
+	if got := legs["1100"].credit; !got.Equal(decimal.NewFromInt(500)) {
+		t.Fatalf("AR credit = %s; want 500", got)
+	}
+
+	// Credit note record patched to posted + JE stamped.
+	rec, err := h.records.Get(ctx, tn.ID, noteID)
+	if err != nil {
+		t.Fatalf("reload credit note: %v", err)
+	}
+	var patched struct {
+		Status         string `json:"status"`
+		JournalEntryID string `json:"journal_entry_id"`
+	}
+	if err := json.Unmarshal(rec.Data, &patched); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if patched.Status != "posted" || patched.JournalEntryID != entry.ID.String() {
+		t.Fatalf("record not patched: status=%q je=%q", patched.Status, patched.JournalEntryID)
+	}
+
+	// Trial balance must still be zero after the credit reverses the
+	// invoice — invoice +500 on AR minus credit note -500 = 0.
+	tb, err := store.TrialBalance(ctx, tn.ID, time.Now().UTC().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("trial balance: %v", err)
+	}
+	if !tb.Residual.IsZero() {
+		t.Fatalf("residual = %s; want 0", tb.Residual)
+	}
+
+	// Event is emitted.
+	counts, err := eventCountsForTenant(ctx, h.pool, tn.ID)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	if counts["finance.credit_note.posted"] != 1 {
+		t.Fatalf("finance.credit_note.posted = %d; want 1", counts["finance.credit_note.posted"])
+	}
+}
+
+// TestPostDebitNoteReversesAPBill posts an AP bill, issues a debit
+// note for the full amount, and asserts Dr AP / Cr Expense legs.
+func TestPostDebitNoteReversesAPBill(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, _, poster := newTenantForFinance(t, h)
+
+	actor := uuid.New()
+	supplier := uuid.NewString()
+	billID := createAPBillRecord(t, h, tn.ID, actor, "BILL-DN-1", supplier,
+		decimal.NewFromInt(200), decimal.Zero, "")
+	if _, err := poster.PostPurchaseBill(ctx, tn.ID, billID, actor); err != nil {
+		t.Fatalf("post bill: %v", err)
+	}
+
+	noteID := createDebitNoteRecord(t, h, tn.ID, actor, "DN-2001", billID, decimal.NewFromInt(200), "supplier adjustment")
+	entry, err := poster.PostDebitNote(ctx, tn.ID, noteID, actor)
+	if err != nil {
+		t.Fatalf("post debit note: %v", err)
+	}
+	if entry.SourceKType != finance.KTypeDebitNote || entry.SourceID == nil || *entry.SourceID != noteID {
+		t.Fatalf("source linkage wrong: ktype=%q id=%v", entry.SourceKType, entry.SourceID)
+	}
+
+	var debit, credit decimal.Decimal
+	legs := map[string]struct{ debit, credit decimal.Decimal }{}
+	for _, line := range entry.Lines {
+		debit = debit.Add(line.Debit)
+		credit = credit.Add(line.Credit)
+		legs[line.AccountCode] = struct{ debit, credit decimal.Decimal }{line.Debit, line.Credit}
+	}
+	if !debit.Equal(credit) {
+		t.Fatalf("unbalanced: debit=%s credit=%s", debit, credit)
+	}
+	if got := legs["2100"].debit; !got.Equal(decimal.NewFromInt(200)) {
+		t.Fatalf("AP debit = %s; want 200", got)
+	}
+	if got := legs["6000"].credit; !got.Equal(decimal.NewFromInt(200)) {
+		t.Fatalf("Expense credit = %s; want 200", got)
+	}
+
+	rec, err := h.records.Get(ctx, tn.ID, noteID)
+	if err != nil {
+		t.Fatalf("reload debit note: %v", err)
+	}
+	var patched struct {
+		Status         string `json:"status"`
+		JournalEntryID string `json:"journal_entry_id"`
+	}
+	if err := json.Unmarshal(rec.Data, &patched); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if patched.Status != "posted" || patched.JournalEntryID != entry.ID.String() {
+		t.Fatalf("record not patched: status=%q je=%q", patched.Status, patched.JournalEntryID)
+	}
+
+	counts, err := eventCountsForTenant(ctx, h.pool, tn.ID)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	if counts["finance.debit_note.posted"] != 1 {
+		t.Fatalf("finance.debit_note.posted = %d; want 1", counts["finance.debit_note.posted"])
+	}
+}
+
+// TestPostCreditNoteRejectsUnpostedInvoice ensures a credit note
+// cannot be posted against a draft invoice — you can only credit what
+// has already hit the ledger.
+func TestPostCreditNoteRejectsUnpostedInvoice(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, _, poster := newTenantForFinance(t, h)
+
+	actor := uuid.New()
+	// Draft invoice, NOT posted.
+	invoiceID := createARInvoiceRecord(t, h, tn.ID, actor, "INV-CN-REJ", uuid.NewString(),
+		decimal.NewFromInt(100), decimal.Zero, "")
+	noteID := createCreditNoteRecord(t, h, tn.ID, actor, "CN-REJ", invoiceID, decimal.NewFromInt(100), "too early")
+
+	_, err := poster.PostCreditNote(ctx, tn.ID, noteID, actor)
+	if !errors.Is(err, ledger.ErrOriginalNotPosted) {
+		t.Fatalf("want ErrOriginalNotPosted, got %v", err)
+	}
+}
+
+// TestPostCreditNoteIsIdempotent replays a post against the same
+// credit note after rewinding the record to draft — the second call
+// must reuse the original JE, not create a second one.
+func TestPostCreditNoteIsIdempotent(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, store, poster := newTenantForFinance(t, h)
+
+	actor := uuid.New()
+	invoiceID := createARInvoiceRecord(t, h, tn.ID, actor, "INV-CN-IDEMP", uuid.NewString(),
+		decimal.NewFromInt(300), decimal.Zero, "")
+	if _, err := poster.PostSalesInvoice(ctx, tn.ID, invoiceID, actor); err != nil {
+		t.Fatalf("post invoice: %v", err)
+	}
+	noteID := createCreditNoteRecord(t, h, tn.ID, actor, "CN-IDEMP", invoiceID, decimal.NewFromInt(300), "retry")
+
+	firstEntry, err := poster.PostCreditNote(ctx, tn.ID, noteID, actor)
+	if err != nil {
+		t.Fatalf("first post: %v", err)
+	}
+
+	// Rewind record to draft and replay.
+	rec, err := h.records.Get(ctx, tn.ID, noteID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	rewind, _ := json.Marshal(map[string]any{"status": "draft", "journal_entry_id": ""})
+	if _, err := h.records.Update(ctx, record.KRecord{
+		ID: rec.ID, TenantID: tn.ID, Version: rec.Version,
+		Data: rewind, UpdatedBy: &actor,
+	}); err != nil {
+		t.Fatalf("rewind: %v", err)
+	}
+
+	retry, err := poster.PostCreditNote(ctx, tn.ID, noteID, actor)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if retry.ID != firstEntry.ID {
+		t.Fatalf("retry produced new JE %s; want reuse of %s", retry.ID, firstEntry.ID)
+	}
+
+	srcID := noteID
+	entries, err := store.ListJournalEntries(ctx, tn.ID, ledger.JournalEntryFilter{
+		SourceKType: finance.KTypeCreditNote,
+		SourceID:    &srcID,
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d JEs; want exactly 1", len(entries))
 	}
 }

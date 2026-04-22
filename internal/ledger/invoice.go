@@ -429,3 +429,315 @@ func ptrUUID(id uuid.UUID) *uuid.UUID {
 	}
 	return &id
 }
+
+// creditNoteData is the slice of finance.credit_note schema fields we
+// need to post. `original_invoice_id` is required; the note inherits
+// the invoice's account codes + currency so the user cannot redirect
+// the reversal to the wrong ledger leg.
+type creditNoteData struct {
+	OriginalInvoiceID string          `json:"original_invoice_id"`
+	CreditNoteNumber  string          `json:"credit_note_number"`
+	IssueDate         string          `json:"issue_date"`
+	Reason            string          `json:"reason"`
+	Amount            decimal.Decimal `json:"amount"`
+	Currency          string          `json:"currency"`
+	Status            string          `json:"status"`
+	JournalEntryID    string          `json:"journal_entry_id"`
+}
+
+// debitNoteData mirrors creditNoteData for finance.debit_note. The
+// `original_bill_id` drives the AP→Expense reversal.
+type debitNoteData struct {
+	OriginalBillID  string          `json:"original_bill_id"`
+	DebitNoteNumber string          `json:"debit_note_number"`
+	IssueDate       string          `json:"issue_date"`
+	Reason          string          `json:"reason"`
+	Amount          decimal.Decimal `json:"amount"`
+	Currency        string          `json:"currency"`
+	Status          string          `json:"status"`
+	JournalEntryID  string          `json:"journal_entry_id"`
+}
+
+// PostCreditNote posts a finance.credit_note KRecord to the ledger.
+// The generated journal reverses the AR posting of the referenced
+// invoice:
+//
+//	Dr Revenue          amount
+//	Cr Accounts Receivable  amount
+//
+// Account codes are read off the posted source invoice so the reversal
+// always targets the same AR / Revenue legs the original invoice used.
+// The credit note KRecord must be in "draft" status; posting patches
+// it to "posted" and stamps `journal_entry_id`. The referenced invoice
+// must itself be posted (status="posted" or "paid") — you cannot credit
+// an invoice that never hit the ledger.
+func (p *InvoicePoster) PostCreditNote(ctx context.Context, tenantID, creditNoteID, actorID uuid.UUID) (*JournalEntry, error) {
+	if p.recordStore == nil || p.store == nil {
+		return nil, errors.New("ledger: poster not fully wired")
+	}
+	if tenantID == uuid.Nil || creditNoteID == uuid.Nil {
+		return nil, errors.New("ledger: tenant id and credit note id required")
+	}
+	if actorID == uuid.Nil {
+		return nil, errors.New("ledger: actor id required")
+	}
+
+	rec, err := p.recordStore.Get(ctx, tenantID, creditNoteID)
+	if err != nil {
+		return nil, err
+	}
+	if rec.KType != "finance.credit_note" {
+		return nil, fmt.Errorf("%w: expected finance.credit_note, got %s", ErrSourceMismatch, rec.KType)
+	}
+
+	var note creditNoteData
+	if err := json.Unmarshal(rec.Data, &note); err != nil {
+		return nil, fmt.Errorf("ledger: decode credit note: %w", err)
+	}
+	if note.Status == "posted" || note.JournalEntryID != "" {
+		return nil, ErrCreditNoteAlreadyPosted
+	}
+	if note.Status != "" && note.Status != "draft" {
+		return nil, fmt.Errorf("%w: status=%s", ErrCreditNoteNotPostable, note.Status)
+	}
+	if note.OriginalInvoiceID == "" {
+		return nil, errors.New("ledger: original_invoice_id required")
+	}
+	if !note.Amount.IsPositive() {
+		return nil, errors.New("ledger: credit note amount must be positive")
+	}
+	invoiceID, err := uuid.Parse(note.OriginalInvoiceID)
+	if err != nil {
+		return nil, fmt.Errorf("ledger: invalid original_invoice_id: %w", err)
+	}
+
+	invRec, err := p.recordStore.Get(ctx, tenantID, invoiceID)
+	if err != nil {
+		return nil, fmt.Errorf("ledger: load original invoice: %w", err)
+	}
+	if invRec.KType != "finance.ar_invoice" {
+		return nil, fmt.Errorf("%w: original must be finance.ar_invoice, got %s", ErrSourceMismatch, invRec.KType)
+	}
+	var inv invoiceData
+	if err := json.Unmarshal(invRec.Data, &inv); err != nil {
+		return nil, fmt.Errorf("ledger: decode original invoice: %w", err)
+	}
+	if inv.Status != "posted" && inv.Status != "paid" {
+		return nil, fmt.Errorf("%w: invoice status=%s", ErrOriginalNotPosted, inv.Status)
+	}
+	if inv.ARAccountCode == "" || inv.RevenueAccountCode == "" {
+		return nil, errors.New("ledger: original invoice missing account codes")
+	}
+	currency := note.Currency
+	if currency == "" {
+		currency = inv.Currency
+	}
+	if currency == "" {
+		currency = "USD"
+	}
+
+	existing, err := p.store.GetJournalEntryBySource(ctx, tenantID, "finance.credit_note", creditNoteID)
+	if err != nil && !errors.Is(err, ErrEntryNotFound) {
+		return nil, err
+	}
+
+	var entry *JournalEntry
+	if existing != nil {
+		entry = existing
+	} else {
+		lines := []JournalLine{
+			{AccountCode: inv.RevenueAccountCode, Debit: note.Amount, Credit: decimal.Zero, Currency: currency, Memo: memoFor(note.CreditNoteNumber, "Revenue reversal")},
+			{AccountCode: inv.ARAccountCode, Debit: decimal.Zero, Credit: note.Amount, Currency: currency, Memo: memoFor(note.CreditNoteNumber, "AR reversal")},
+		}
+		postedAt := parseInvoiceDate(note.IssueDate, p.store.now)
+		sourceID := creditNoteID
+		posted, postErr := p.store.PostJournalEntry(ctx, JournalEntry{
+			TenantID:    tenantID,
+			PostedAt:    postedAt,
+			Memo:        fmt.Sprintf("Credit note %s", note.CreditNoteNumber),
+			SourceKType: "finance.credit_note",
+			SourceID:    &sourceID,
+			CreatedBy:   actorID,
+			Lines:       lines,
+		})
+		if postErr != nil {
+			if errors.Is(postErr, ErrDuplicateSourceEntry) {
+				reloaded, reloadErr := p.store.GetJournalEntryBySource(ctx, tenantID, "finance.credit_note", creditNoteID)
+				if reloadErr != nil {
+					return nil, fmt.Errorf("ledger: reload duplicate credit-note entry: %w", reloadErr)
+				}
+				posted = reloaded
+			} else {
+				return nil, postErr
+			}
+		}
+		entry = posted
+	}
+
+	patch := map[string]any{
+		"status":           "posted",
+		"journal_entry_id": entry.ID.String(),
+	}
+	patchJSON, _ := json.Marshal(patch)
+	if _, err := p.recordStore.Update(ctx, record.KRecord{
+		ID:        rec.ID,
+		TenantID:  tenantID,
+		Version:   rec.Version,
+		Data:      patchJSON,
+		UpdatedBy: ptrUUID(actorID),
+	}); err != nil {
+		return entry, fmt.Errorf("ledger: patch credit note: %w", err)
+	}
+
+	if err := p.emitSourceEvent(ctx, tenantID, "finance.credit_note.posted", map[string]any{
+		"credit_note_id":      creditNoteID,
+		"credit_note_number":  note.CreditNoteNumber,
+		"original_invoice_id": invoiceID,
+		"journal_entry_id":    entry.ID,
+		"amount":              note.Amount.String(),
+		"currency":            currency,
+		"actor":               actorID,
+	}); err != nil {
+		return entry, err
+	}
+	return entry, nil
+}
+
+// PostDebitNote posts a finance.debit_note KRecord to the ledger. The
+// generated journal reverses the AP posting of the referenced bill:
+//
+//	Dr Accounts Payable  amount
+//	Cr Expense           amount
+//
+// Mirrors PostCreditNote; see that method for the full contract.
+func (p *InvoicePoster) PostDebitNote(ctx context.Context, tenantID, debitNoteID, actorID uuid.UUID) (*JournalEntry, error) {
+	if p.recordStore == nil || p.store == nil {
+		return nil, errors.New("ledger: poster not fully wired")
+	}
+	if tenantID == uuid.Nil || debitNoteID == uuid.Nil {
+		return nil, errors.New("ledger: tenant id and debit note id required")
+	}
+	if actorID == uuid.Nil {
+		return nil, errors.New("ledger: actor id required")
+	}
+
+	rec, err := p.recordStore.Get(ctx, tenantID, debitNoteID)
+	if err != nil {
+		return nil, err
+	}
+	if rec.KType != "finance.debit_note" {
+		return nil, fmt.Errorf("%w: expected finance.debit_note, got %s", ErrSourceMismatch, rec.KType)
+	}
+
+	var note debitNoteData
+	if err := json.Unmarshal(rec.Data, &note); err != nil {
+		return nil, fmt.Errorf("ledger: decode debit note: %w", err)
+	}
+	if note.Status == "posted" || note.JournalEntryID != "" {
+		return nil, ErrDebitNoteAlreadyPosted
+	}
+	if note.Status != "" && note.Status != "draft" {
+		return nil, fmt.Errorf("%w: status=%s", ErrDebitNoteNotPostable, note.Status)
+	}
+	if note.OriginalBillID == "" {
+		return nil, errors.New("ledger: original_bill_id required")
+	}
+	if !note.Amount.IsPositive() {
+		return nil, errors.New("ledger: debit note amount must be positive")
+	}
+	billID, err := uuid.Parse(note.OriginalBillID)
+	if err != nil {
+		return nil, fmt.Errorf("ledger: invalid original_bill_id: %w", err)
+	}
+
+	billRec, err := p.recordStore.Get(ctx, tenantID, billID)
+	if err != nil {
+		return nil, fmt.Errorf("ledger: load original bill: %w", err)
+	}
+	if billRec.KType != "finance.ap_bill" {
+		return nil, fmt.Errorf("%w: original must be finance.ap_bill, got %s", ErrSourceMismatch, billRec.KType)
+	}
+	var bill billData
+	if err := json.Unmarshal(billRec.Data, &bill); err != nil {
+		return nil, fmt.Errorf("ledger: decode original bill: %w", err)
+	}
+	if bill.Status != "posted" && bill.Status != "paid" {
+		return nil, fmt.Errorf("%w: bill status=%s", ErrOriginalNotPosted, bill.Status)
+	}
+	if bill.APAccountCode == "" || bill.ExpenseAccountCode == "" {
+		return nil, errors.New("ledger: original bill missing account codes")
+	}
+	currency := note.Currency
+	if currency == "" {
+		currency = bill.Currency
+	}
+	if currency == "" {
+		currency = "USD"
+	}
+
+	existing, err := p.store.GetJournalEntryBySource(ctx, tenantID, "finance.debit_note", debitNoteID)
+	if err != nil && !errors.Is(err, ErrEntryNotFound) {
+		return nil, err
+	}
+
+	var entry *JournalEntry
+	if existing != nil {
+		entry = existing
+	} else {
+		lines := []JournalLine{
+			{AccountCode: bill.APAccountCode, Debit: note.Amount, Credit: decimal.Zero, Currency: currency, Memo: memoFor(note.DebitNoteNumber, "AP reversal")},
+			{AccountCode: bill.ExpenseAccountCode, Debit: decimal.Zero, Credit: note.Amount, Currency: currency, Memo: memoFor(note.DebitNoteNumber, "Expense reversal")},
+		}
+		postedAt := parseInvoiceDate(note.IssueDate, p.store.now)
+		sourceID := debitNoteID
+		posted, postErr := p.store.PostJournalEntry(ctx, JournalEntry{
+			TenantID:    tenantID,
+			PostedAt:    postedAt,
+			Memo:        fmt.Sprintf("Debit note %s", note.DebitNoteNumber),
+			SourceKType: "finance.debit_note",
+			SourceID:    &sourceID,
+			CreatedBy:   actorID,
+			Lines:       lines,
+		})
+		if postErr != nil {
+			if errors.Is(postErr, ErrDuplicateSourceEntry) {
+				reloaded, reloadErr := p.store.GetJournalEntryBySource(ctx, tenantID, "finance.debit_note", debitNoteID)
+				if reloadErr != nil {
+					return nil, fmt.Errorf("ledger: reload duplicate debit-note entry: %w", reloadErr)
+				}
+				posted = reloaded
+			} else {
+				return nil, postErr
+			}
+		}
+		entry = posted
+	}
+
+	patch := map[string]any{
+		"status":           "posted",
+		"journal_entry_id": entry.ID.String(),
+	}
+	patchJSON, _ := json.Marshal(patch)
+	if _, err := p.recordStore.Update(ctx, record.KRecord{
+		ID:        rec.ID,
+		TenantID:  tenantID,
+		Version:   rec.Version,
+		Data:      patchJSON,
+		UpdatedBy: ptrUUID(actorID),
+	}); err != nil {
+		return entry, fmt.Errorf("ledger: patch debit note: %w", err)
+	}
+
+	if err := p.emitSourceEvent(ctx, tenantID, "finance.debit_note.posted", map[string]any{
+		"debit_note_id":    debitNoteID,
+		"debit_note_number": note.DebitNoteNumber,
+		"original_bill_id": billID,
+		"journal_entry_id": entry.ID,
+		"amount":           note.Amount.String(),
+		"currency":         currency,
+		"actor":            actorID,
+	}); err != nil {
+		return entry, err
+	}
+	return entry, nil
+}
