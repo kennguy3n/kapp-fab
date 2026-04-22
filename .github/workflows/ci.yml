@@ -1,0 +1,93 @@
+name: ci
+
+# The Kapp kernel spans a Go backend (api/worker/kchat-bridge) and a React
+# monorepo (apps/web + packages/*). CI must prove that both halves build,
+# that the backend unit tests pass, and that the integration suite — which
+# covers RLS isolation, event outbox, audit log, workflow transitions and
+# approvals — passes against a real Postgres under the same `kapp_app` /
+# `kapp_admin` roles used in production. Lint runs in a separate job so a
+# test regression and a style regression fail independently.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  go:
+    name: go build + vet + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.62.0
+          args: --timeout=5m
+
+  integration:
+    name: integration (postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: kapp
+          POSTGRES_USER: kapp
+          POSTGRES_PASSWORD: kapp_dev
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kapp -d kapp"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - name: apply migrations
+        env:
+          PGPASSWORD: kapp_dev
+        run: |
+          psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
+            -f migrations/000001_initial_schema.sql
+          psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
+            -f migrations/000002_admin_role.sql
+          psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
+            -f migrations/000003_forms.sql
+      - name: go test -tags=integration
+        env:
+          KAPP_TEST_DB_URL: postgres://kapp_app:kapp_app_dev@localhost:5432/kapp?sslmode=disable
+          KAPP_TEST_ADMIN_DB_URL: postgres://kapp_admin:kapp_admin_dev@localhost:5432/kapp?sslmode=disable
+        run: go test -tags=integration -v ./internal/integrationtest/...
+
+  web:
+    name: web build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run build -w @kapp/web

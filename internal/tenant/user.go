@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 )
 
 // User mirrors a row in the `users` table — the globally-unique identity
@@ -35,17 +37,32 @@ type UserTenant struct {
 //
 // `users` is a global table (no RLS), so its reads/writes go through the
 // shared pool directly. `user_tenants` is tenant-scoped with RLS, so every
-// operation that touches it is wrapped in platform.WithTenantTx(tenantID)
+// operation that touches it is wrapped in dbutil.WithTenantTx(tenantID)
 // which issues `SET LOCAL app.tenant_id` for the transaction. The one
 // exception is GetUserTenants, which is an intentionally cross-tenant
-// control-plane read (see its doc comment).
+// control-plane read (see its doc comment) and runs on the optional
+// adminPool that connects as `kapp_admin` (BYPASSRLS).
 type UserStore struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	adminPool *pgxpool.Pool
 }
 
-// NewUserStore binds a UserStore to the shared pool.
+// NewUserStore binds a UserStore to the shared (tenant-scoped) pool. The
+// admin pool is left unset, so GetUserTenants will return an empty slice
+// unless the caller upgrades with WithAdminPool.
 func NewUserStore(pool *pgxpool.Pool) *UserStore {
 	return &UserStore{pool: pool}
+}
+
+// WithAdminPool returns a copy of s that uses adminPool for control-plane
+// cross-tenant reads. adminPool must be connected as a role with BYPASSRLS
+// (see migrations/000002_admin_role.sql:kapp_admin). If adminPool is nil,
+// the store continues to use the shared tenant-scoped pool (and
+// GetUserTenants returns no rows under the default `kapp_app` role).
+func (s *UserStore) WithAdminPool(adminPool *pgxpool.Pool) *UserStore {
+	cp := *s
+	cp.adminPool = adminPool
+	return &cp
 }
 
 // CreateUser inserts a new user row. KChatUserID is required and is the
@@ -122,7 +139,7 @@ func (s *UserStore) AddUserToTenant(
 	if role == "" {
 		return errors.New("tenant: role required")
 	}
-	return withTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
 			`INSERT INTO user_tenants (user_id, tenant_id, role, status)
 			 VALUES ($1, $2, $3, 'active')`,
@@ -141,18 +158,23 @@ func (s *UserStore) AddUserToTenant(
 
 // GetUserTenants returns every tenant membership for the given user across
 // all tenants. This is an intentionally cross-tenant control-plane read —
-// there is no single tenant id to set app.tenant_id to, so the query runs
-// via the shared pool and relies on the caller's DB role to see rows
-// across tenants. Under the default `kapp_app` role (which has RLS
-// enforced and no BYPASSRLS grant), this will return an empty slice; it
-// is expected to be invoked from an admin connection or a future
-// control-plane role carve-out. See migrations/000001_initial_schema.sql
-// §RLS for the current policy set.
+// there is no single tenant id to set app.tenant_id to.
+//
+// The query runs on the admin pool (role `kapp_admin`, BYPASSRLS — see
+// migrations/000002_admin_role.sql) when configured via WithAdminPool.
+// Without it, the store falls back to the shared `kapp_app` pool; under
+// the default RLS policy that connection sees no rows because
+// `app.tenant_id` is NULL for a non-BYPASSRLS role, which is the
+// documented behaviour for stores constructed without an admin pool.
 func (s *UserStore) GetUserTenants(
 	ctx context.Context,
 	userID uuid.UUID,
 ) ([]UserTenant, error) {
-	rows, err := s.pool.Query(ctx,
+	pool := s.adminPool
+	if pool == nil {
+		pool = s.pool
+	}
+	rows, err := pool.Query(ctx,
 		`SELECT user_id, tenant_id, role, status
 		 FROM user_tenants
 		 WHERE user_id = $1
@@ -174,7 +196,7 @@ func (s *UserStore) GetTenantUsers(
 	tenantID uuid.UUID,
 ) ([]UserTenant, error) {
 	var out []UserTenant
-	err := withTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT user_id, tenant_id, role, status
 			 FROM user_tenants
@@ -215,47 +237,3 @@ var (
 	ErrKChatUserIDTaken = errors.New("tenant: kchat_user_id already taken")
 	ErrMembershipExists = errors.New("tenant: user is already a member of this tenant")
 )
-
-// withTenantTx runs fn inside a transaction with app.tenant_id bound via
-// SET LOCAL so RLS policies on user_tenants evaluate against the caller's
-// tenant. This is a package-local copy of the platform helper; the
-// tenant package cannot import platform because platform imports tenant
-// for its TenantMiddleware.
-func withTenantTx(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	tenantID uuid.UUID,
-	fn func(ctx context.Context, tx pgx.Tx) error,
-) (err error) {
-	if pool == nil {
-		return errors.New("tenant: nil pool")
-	}
-	if tenantID == uuid.Nil {
-		return errors.New("tenant: tenant id required")
-	}
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("tenant: begin tx: %w", err)
-	}
-	defer func() {
-		if p := recover(); p != nil {
-			_ = tx.Rollback(context.Background())
-			panic(p)
-		}
-		if err != nil {
-			if rbErr := tx.Rollback(context.Background()); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-				err = fmt.Errorf("%w; rollback: %v", err, rbErr)
-			}
-		}
-	}()
-	if _, err = tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID.String()); err != nil {
-		return fmt.Errorf("tenant: set app.tenant_id: %w", err)
-	}
-	if err = fn(ctx, tx); err != nil {
-		return err
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return fmt.Errorf("tenant: commit: %w", err)
-	}
-	return nil
-}

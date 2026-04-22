@@ -24,6 +24,16 @@ func NewPGLogger(pool *pgxpool.Pool) *PGLogger {
 	return &PGLogger{pool: pool}
 }
 
+// Log writes an entry outside the caller's transaction. Use this for
+// bookkeeping that must persist regardless of an upstream rollback —
+// e.g. agent tool invocation logs, where we want an attributable
+// breadcrumb even when the underlying tool call fails.
+func (l *PGLogger) Log(ctx context.Context, entry Entry) error {
+	return pgx.BeginFunc(ctx, l.pool, func(tx pgx.Tx) error {
+		return l.LogTx(ctx, tx, entry)
+	})
+}
+
 // LogTx inserts the entry inside the caller's transaction.
 func (l *PGLogger) LogTx(ctx context.Context, tx pgx.Tx, entry Entry) error {
 	if entry.TenantID == uuid.Nil {

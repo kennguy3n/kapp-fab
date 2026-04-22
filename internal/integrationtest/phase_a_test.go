@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
@@ -32,13 +33,21 @@ import (
 )
 
 // harness bundles the kernel collaborators against a live pool.
+//
+// The pool connects as `kapp_app` — the same non-superuser role the
+// application uses in production — so RLS is enforced during tests.
+// adminPool connects as `kapp_admin` (BYPASSRLS) and is optional; it is
+// used by the RLS default-deny test and by TestUserStoreGetUserTenants to
+// exercise the control-plane cross-tenant lookup.
 type harness struct {
 	pool      *pgxpool.Pool
+	adminPool *pgxpool.Pool
 	tenants   *tenant.PGStore
 	ktypes    *ktype.PGRegistry
 	publisher *events.PGPublisher
 	auditor   *audit.PGLogger
 	records   *record.PGStore
+	users     *tenant.UserStore
 }
 
 func newHarness(t *testing.T) *harness {
@@ -58,15 +67,26 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("ping db: %v", err)
 	}
 
+	var adminPool *pgxpool.Pool
+	if adminURL := os.Getenv("KAPP_TEST_ADMIN_DB_URL"); adminURL != "" {
+		adminPool, err = platform.NewPool(ctx, adminURL)
+		if err != nil {
+			t.Fatalf("open admin pool: %v", err)
+		}
+		t.Cleanup(func() { adminPool.Close() })
+	}
+
 	cache := platform.NewLRUCache(64, time.Minute)
 	h := &harness{
 		pool:      pool,
+		adminPool: adminPool,
 		tenants:   tenant.NewPGStore(pool),
 		ktypes:    ktype.NewPGRegistry(pool, cache),
 		publisher: events.NewPGPublisher(pool),
 		auditor:   audit.NewPGLogger(pool),
 	}
 	h.records = record.NewPGStore(pool, h.ktypes, h.publisher, h.auditor)
+	h.users = tenant.NewUserStore(pool).WithAdminPool(adminPool)
 	return h
 }
 
@@ -400,3 +420,242 @@ func sameSet(a, b []string) bool {
 
 // _ keeps the pgx import tidy if future tests use tx helpers directly.
 var _ = pgx.TxOptions{}
+
+// TestFirstCodingSlice exercises the end-to-end scenario from
+// PROGRESS.md ("First Coding Slice — Acceptance Test Checklist"): two
+// tenants `acme` and `globex`, one user each, one demo.note record each,
+// and a strict RLS check that the default role sees zero rows without a
+// tenant context. This is the scenario that elevates Phase A from "code
+// written" to "kernel proven end-to-end".
+func TestFirstCodingSlice(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	// 1. Create two tenants `acme` and `globex`.
+	acme, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("acme"), Name: "Acme Co", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("create acme: %v", err)
+	}
+	globex, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("globex"), Name: "Globex Corp", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("create globex: %v", err)
+	}
+
+	// 2. Register KType demo.note with fields title (required), body.
+	kname := uniqueSlug("demo.note")
+	if err := h.ktypes.Register(ctx, ktype.KType{
+		Name: kname, Version: 1,
+		Schema: json.RawMessage(`{"fields":[
+			{"name":"title","type":"string","required":true,"max_length":120},
+			{"name":"body","type":"text"}
+		]}`),
+	}); err != nil {
+		t.Fatalf("register demo.note: %v", err)
+	}
+
+	// 3. Create users alice (in acme) and bob (in globex).
+	alice, err := h.users.CreateUser(ctx, tenant.User{
+		KChatUserID: "u-alice-" + uuid.NewString()[:8],
+		Email:       "alice@acme.test",
+		DisplayName: "Alice",
+	})
+	if err != nil {
+		t.Fatalf("create alice: %v", err)
+	}
+	bob, err := h.users.CreateUser(ctx, tenant.User{
+		KChatUserID: "u-bob-" + uuid.NewString()[:8],
+		Email:       "bob@globex.test",
+		DisplayName: "Bob",
+	})
+	if err != nil {
+		t.Fatalf("create bob: %v", err)
+	}
+	if err := h.users.AddUserToTenant(ctx, alice.ID, acme.ID, "owner"); err != nil {
+		t.Fatalf("bind alice->acme: %v", err)
+	}
+	if err := h.users.AddUserToTenant(ctx, bob.ID, globex.ID, "owner"); err != nil {
+		t.Fatalf("bind bob->globex: %v", err)
+	}
+
+	// 4. Alice creates a note in acme; Bob creates a note in globex.
+	aliceNote, err := h.records.Create(ctx, record.KRecord{
+		TenantID:  acme.ID, KType: kname,
+		Data:      json.RawMessage(`{"title":"Acme launch plan","body":"Q1 roadmap"}`),
+		CreatedBy: alice.ID,
+	})
+	if err != nil {
+		t.Fatalf("alice create note: %v", err)
+	}
+	bobNote, err := h.records.Create(ctx, record.KRecord{
+		TenantID:  globex.ID, KType: kname,
+		Data:      json.RawMessage(`{"title":"Globex offsite","body":"Week of Nov 14"}`),
+		CreatedBy: bob.ID,
+	})
+	if err != nil {
+		t.Fatalf("bob create note: %v", err)
+	}
+
+	// 5 & 6. Each tenant's list returns only its own records.
+	aList, err := h.records.List(ctx, acme.ID, record.ListFilter{KType: kname})
+	if err != nil || len(aList) != 1 || aList[0].ID != aliceNote.ID {
+		t.Fatalf("acme list: got len=%d err=%v want 1 (alice's note %s)",
+			len(aList), err, aliceNote.ID)
+	}
+	gList, err := h.records.List(ctx, globex.ID, record.ListFilter{KType: kname})
+	if err != nil || len(gList) != 1 || gList[0].ID != bobNote.ID {
+		t.Fatalf("globex list: got len=%d err=%v want 1 (bob's note %s)",
+			len(gList), err, bobNote.ID)
+	}
+
+	// 7. Direct DB query under acme's tenant context returns only acme rows.
+	var acmeRows int
+	if err := dbutil.WithTenantTx(ctx, h.pool, acme.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM krecords WHERE ktype = $1`, kname,
+		).Scan(&acmeRows)
+	}); err != nil {
+		t.Fatalf("acme scoped scan: %v", err)
+	}
+	if acmeRows != 1 {
+		t.Fatalf("acme scoped rows = %d; want 1", acmeRows)
+	}
+
+	// 8. Direct DB query with NO tenant context returns zero rows (RLS
+	// default-deny). The query runs on the shared app pool without setting
+	// app.tenant_id.
+	var nakedRows int
+	if err := h.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM krecords WHERE ktype = $1`, kname,
+	).Scan(&nakedRows); err != nil {
+		t.Fatalf("naked scan: %v", err)
+	}
+	if nakedRows != 0 {
+		t.Fatalf("RLS default-deny breach: saw %d rows without tenant context", nakedRows)
+	}
+
+	// 9. Every create produced exactly one event and one audit entry per tenant.
+	for name, tnID := range map[string]uuid.UUID{"acme": acme.ID, "globex": globex.ID} {
+		types, err := eventTypesForTenant(ctx, h.pool, tnID)
+		if err != nil {
+			t.Fatalf("%s: events: %v", name, err)
+		}
+		if len(types) != 1 || types[0] != "krecord.created" {
+			t.Fatalf("%s: events = %v; want [krecord.created]", name, types)
+		}
+		actions, err := auditActionsForTenant(ctx, h.pool, tnID)
+		if err != nil {
+			t.Fatalf("%s: audit: %v", name, err)
+		}
+		if len(actions) != 1 {
+			t.Fatalf("%s: audit len = %d; want 1 (%v)", name, len(actions), actions)
+		}
+	}
+}
+
+// TestRateLimitKicksIn confirms that per-tenant rate limiting rejects
+// requests past the configured burst. Covered via the platform.RateLimiter
+// directly — the middleware wraps this same call.
+func TestRateLimitKicksIn(t *testing.T) {
+	_ = newHarness(t) // ensure we still skip when the DB is absent
+	limiter := platform.NewRateLimiter(platform.RateLimitConfig{
+		RequestsPerMinute: 60,
+		BurstSize:         3,
+		IdleTimeout:       time.Minute,
+	})
+	tenantID := uuid.New()
+	for i := 0; i < 3; i++ {
+		if !limiter.Allow(tenantID, 0, 0) {
+			t.Fatalf("call %d should be allowed within burst", i)
+		}
+	}
+	if limiter.Allow(tenantID, 0, 0) {
+		t.Fatalf("call past burst should be rejected")
+	}
+}
+
+// TestUserStoreGetUserTenants confirms that the admin-pool pathway sees
+// memberships for a user across multiple tenants, satisfying the login
+// flow requirement. Skips when the admin pool is unavailable — that
+// configuration is documented and not a hard error.
+func TestUserStoreGetUserTenants(t *testing.T) {
+	h := newHarness(t)
+	if h.adminPool == nil {
+		t.Skip("KAPP_TEST_ADMIN_DB_URL not set; skipping cross-tenant lookup test")
+	}
+	ctx := context.Background()
+
+	u, err := h.users.CreateUser(ctx, tenant.User{
+		KChatUserID: "u-multi-" + uuid.NewString()[:8],
+		Email:       "multi@test",
+		DisplayName: "Multi",
+	})
+	if err != nil {
+		t.Fatalf("user: %v", err)
+	}
+	a, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("ua"), Name: "UA", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("tenant ua: %v", err)
+	}
+	b, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("ub"), Name: "UB", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("tenant ub: %v", err)
+	}
+	if err := h.users.AddUserToTenant(ctx, u.ID, a.ID, "owner"); err != nil {
+		t.Fatalf("bind ua: %v", err)
+	}
+	if err := h.users.AddUserToTenant(ctx, u.ID, b.ID, "member"); err != nil {
+		t.Fatalf("bind ub: %v", err)
+	}
+	memberships, err := h.users.GetUserTenants(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("get memberships: %v", err)
+	}
+	if len(memberships) != 2 {
+		t.Fatalf("memberships len = %d; want 2 (%+v)", len(memberships), memberships)
+	}
+}
+
+// BenchmarkTenantContextSwitch measures the cost of setting
+// app.tenant_id on a fresh transaction — the primary per-request
+// overhead that the Kapp kernel imposes on top of plain pgx. The target
+// per ARCHITECTURE.md is sub-millisecond.
+func BenchmarkTenantContextSwitch(b *testing.B) {
+	dbURL := os.Getenv("KAPP_TEST_DB_URL")
+	if dbURL == "" {
+		b.Skip("KAPP_TEST_DB_URL not set")
+	}
+	ctx := context.Background()
+	pool, err := platform.NewPool(ctx, dbURL)
+	if err != nil {
+		b.Fatalf("pool: %v", err)
+	}
+	defer pool.Close()
+
+	// Pre-seed a tenant so the benchmark is meaningful on a clean DB.
+	store := tenant.NewPGStore(pool)
+	tn, err := store.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("bench"), Name: "Bench", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		b.Fatalf("seed tenant: %v", err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := dbutil.WithTenantTx(ctx, pool, tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+			// A trivial read so the tx has something to commit.
+			var one int
+			return tx.QueryRow(ctx, `SELECT 1`).Scan(&one)
+		}); err != nil {
+			b.Fatalf("tx %d: %v", i, err)
+		}
+	}
+}

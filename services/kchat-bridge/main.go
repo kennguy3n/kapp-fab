@@ -19,8 +19,12 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/kennguy3n/kapp-fab/internal/audit"
+	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/record"
+	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
 
 func main() {
@@ -46,8 +50,21 @@ func run() error {
 
 	cache := platform.NewLRUCache(512, 5*time.Minute)
 	registry := ktype.NewPGRegistry(pool, cache)
+	eventPublisher := events.NewPGPublisher(pool)
+	auditor := audit.NewPGLogger(pool)
+	recordStore := record.NewPGStore(pool, registry, eventPublisher, auditor)
+	workflowEngine := workflow.NewEngine(pool, eventPublisher, auditor)
 	cards := &CardRenderer{registry: registry}
-	commands := &CommandDispatcher{registry: registry}
+	composer := &Composer{registry: registry, records: recordStore, cards: cards}
+	_ = workflowEngine // retained for future approval-card wiring
+	commands := &CommandDispatcher{
+		registry:  registry,
+		records:   recordStore,
+		workflow:  workflowEngine,
+		approvals: workflowEngine,
+		cards:     cards,
+		formsBase: os.Getenv("KAPP_FORMS_BASE_URL"),
+	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -69,6 +86,8 @@ func run() error {
 		}
 		writeJSON(w, http.StatusOK, card)
 	})
+
+	r.Post("/kchat/composer/actions", composer.HandleHTTP)
 
 	r.Post("/kchat/commands", func(w http.ResponseWriter, req *http.Request) {
 		var body CommandRequest
