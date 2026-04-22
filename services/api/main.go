@@ -89,9 +89,13 @@ func run() error {
 	// quota enforcement, and idempotency keys on mutations.
 	r.Route("/api/v1/records", func(r chi.Router) {
 		r.Use(platform.TenantMiddleware(tenantSvc))
+		// Idempotency runs before rate-limit/quota so a replay of a
+		// previously-successful mutation returns the cached response even
+		// when the tenant has since hit its rate-limit or quota ceiling —
+		// the replay is not a new unit of work (ARCHITECTURE.md §8 rule 6).
+		r.Use(platform.IdempotencyMiddleware(pool))
 		r.Use(platform.RateLimitMiddleware(rateLimiter))
 		r.Use(platform.QuotaMiddleware(quotaEnforcer))
-		r.Use(platform.IdempotencyMiddleware(pool))
 		r.Post("/{ktype}", rh.create)
 		r.Get("/{ktype}", rh.list)
 		r.Get("/{ktype}/{id}", rh.get)

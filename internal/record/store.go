@@ -309,6 +309,11 @@ func (s *PGStore) Delete(ctx context.Context, tenantID, id, actorID uuid.UUID) e
 			}
 			return fmt.Errorf("record: select for delete: %w", err)
 		}
+		// Treat an already-deleted record as absent so a replayed DELETE
+		// does not emit a second `krecord.deleted` event or audit entry.
+		if existing.Status == "deleted" {
+			return ErrNotFound
+		}
 
 		var updatedBy *uuid.UUID
 		if actorID != uuid.Nil {
