@@ -162,7 +162,10 @@ func (s *PGStore) List(ctx context.Context, tenantID uuid.UUID, filter ListFilte
 		status = "active"
 	}
 
-	var out []KRecord
+	// Preallocate an empty (non-nil) slice so the JSON response is `[]`
+	// rather than `null` when no rows match — consistent with the OpenAPI
+	// list response contract.
+	out := make([]KRecord, 0)
 	err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT id, tenant_id, ktype, ktype_version, data, status, version,

@@ -68,15 +68,20 @@ func (c *CardRenderer) RenderCard(ctx context.Context, name string, data map[str
 	return card, nil
 }
 
-// substitute replaces `{field}` placeholders in the template with values from
-// data. If the template is empty, the fallback is returned.
+// substitute replaces placeholders in the template with values from data.
+// Supports the documented `{{ field }}` / `{{field}}` Mustache-style form
+// (ARCHITECTURE.md §6) and the shorthand `{field}` form. If the template is
+// empty, the fallback is returned.
 func substitute(tpl string, data map[string]any, fallback string) string {
 	if tpl == "" {
 		return fallback
 	}
 	out := tpl
 	for k, v := range data {
-		out = strings.ReplaceAll(out, "{"+k+"}", fmt.Sprintf("%v", v))
+		value := fmt.Sprintf("%v", v)
+		out = strings.ReplaceAll(out, "{{ "+k+" }}", value)
+		out = strings.ReplaceAll(out, "{{"+k+"}}", value)
+		out = strings.ReplaceAll(out, "{"+k+"}", value)
 	}
 	return out
 }

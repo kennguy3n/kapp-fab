@@ -70,10 +70,16 @@ func (r *RateLimiter) Allow(tenantID uuid.UUID, rpm, burst int) bool {
 	now := r.now()
 	r.evictIdle(now)
 
+	wantRPM := chooseInt(rpm, r.config.RequestsPerMinute)
+	wantBurst := chooseInt(burst, r.config.BurstSize)
 	b, ok := r.buckets[tenantID]
 	if !ok {
-		b = newTokenBucket(chooseInt(rpm, r.config.RequestsPerMinute), chooseInt(burst, r.config.BurstSize), now)
+		b = newTokenBucket(wantRPM, wantBurst, now)
 		r.buckets[tenantID] = b
+	} else {
+		// Pick up per-tenant quota changes (plan upgrade/downgrade) for an
+		// already-active tenant without waiting for idle eviction.
+		b.reshape(wantRPM, wantBurst)
 	}
 	return b.take(now)
 }
@@ -109,6 +115,21 @@ func newTokenBucket(rpm, burst int, now time.Time) *tokenBucket {
 		refillPerS: float64(rpm) / 60.0,
 		last:       now,
 		lastAccess: now,
+	}
+}
+
+// reshape adjusts the bucket's capacity and refill rate in-place when the
+// tenant's plan changes. Tokens already granted are preserved but clamped to
+// the new capacity so a downgrade cannot be used to exceed the new burst.
+func (b *tokenBucket) reshape(rpm, burst int) {
+	newRefill := float64(rpm) / 60.0
+	if b.capacity == burst && b.refillPerS == newRefill {
+		return
+	}
+	b.capacity = burst
+	b.refillPerS = newRefill
+	if b.tokens > float64(burst) {
+		b.tokens = float64(burst)
 	}
 }
 
