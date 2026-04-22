@@ -73,17 +73,17 @@ Chat-native work tracking and revenue pipeline on top of the kernel.
 
 ### Deliverables
 
-- [x] CRM KTypes: `crm.deal` (partially — only deal and task confirmed, not lead/contact/org/activity/quote)
-- [ ] CRM KTypes: `crm.lead`, `crm.contact`, `crm.organization`, `crm.activity`, `crm.quote`
+- [x] CRM KTypes: `crm.deal` (schema defined in `internal/crm/ktypes.go`)
+- [x] CRM KTypes: `crm.lead`, `crm.contact`, `crm.organization`, `crm.activity`, `crm.quote` (all schemas defined in `internal/crm/ktypes.go`)
 - [x] Tasks KType: `tasks.task`
 - [x] Approvals engine: configurable chains, KChat approve/reject cards (engine done, KChat cards not done)
 - [x] Forms KApp: anonymous and authenticated capture forms emitting KRecords
-- [ ] KChat cards for all CRM + Tasks + Approvals objects
-- [ ] Slash commands: `/lead`, `/contact`, `/deal`, `/task`, `/approve`, `/form`
-- [ ] Composer actions: turn message → Task, Deal, Activity
-- [ ] Right-pane detail views for all Phase B KTypes
+- [~] KChat cards for all CRM + Tasks + Approvals objects (renderer exists in `services/kchat-bridge/cards.go`; now handles both `cards.message` and `cards.summary` schema shapes)
+- [x] Slash commands: `/lead`, `/contact`, `/deal`, `/task`, `/approve`, `/form` (implemented in `services/kchat-bridge/commands.go`)
+- [ ] Composer actions: turn message → Task, Deal, Activity (not started)
+- [~] Right-pane detail views for all Phase B KTypes (generic `RightPane` component at `apps/web/src/components/RightPane.tsx`; per-KType tabs not wired)
 - [x] Agent tools: `crm.create_deal`, `approvals.decide` (confirmed in tests)
-- [ ] Agent tools: `crm.advance_deal`, `crm.summarize_pipeline`, `tasks.create_task`, `approvals.request`
+- [~] Agent tools: `crm.advance_deal`, `crm.summarize_pipeline`, `tasks.create_task`, `approvals.request` (executor framework in `internal/agents/` with handlers wired via `RegisterCRMTools`; individual tool coverage being hardened)
 
 ### Acceptance Criteria
 

@@ -12,10 +12,14 @@ type ViewMode = "list" | "kanban";
 /**
  * RecordListPage is the tenant-scoped browse view for a KType. It
  * supports list + kanban modes and an inline right-pane detail view.
- * The mode defaults to kanban when the KType defines a kanban view;
- * otherwise it falls back to the classic list.
+ * The mode defaults to `defaultMode` when the caller supplies one
+ * (e.g. the /kanban/:ktype deep-link route forces kanban), otherwise
+ * it falls back to kanban when the KType defines a kanban view and
+ * list otherwise. User toggles override the default via
+ * `modeOverride`, which lets the derivation stay reactive to the
+ * async-loaded KType without clobbering the user's selection.
  */
-export function RecordListPage() {
+export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {}) {
   const { ktype } = useParams<{ ktype: string }>();
   const navigate = useNavigate();
   const qc = useQueryClient();
@@ -34,7 +38,14 @@ export function RecordListPage() {
 
   const [selected, setSelected] = useState<KRecord | null>(null);
   const hasKanban = !!ktypeQuery.data?.schema?.views?.kanban;
-  const [mode, setMode] = useState<ViewMode>(hasKanban ? "kanban" : "list");
+  // The user's explicit toggle wins; otherwise the caller's `defaultMode`
+  // wins; otherwise we auto-pick kanban when the KType supports it. Using
+  // a derived value (rather than seeding useState on the first render)
+  // avoids a bug where the initial render — before ktypeQuery resolves —
+  // locks mode to "list" even for KTypes that define a kanban view.
+  const [modeOverride, setModeOverride] = useState<ViewMode | null>(null);
+  const mode: ViewMode =
+    modeOverride ?? defaultMode ?? (hasKanban ? "kanban" : "list");
 
   const moveMutation = useMutation({
     mutationFn: async ({
@@ -92,13 +103,13 @@ export function RecordListPage() {
             {hasKanban && (
               <div role="tablist" style={{ display: "flex", gap: 4 }}>
                 <button
-                  onClick={() => setMode("list")}
+                  onClick={() => setModeOverride("list")}
                   aria-pressed={mode === "list"}
                 >
                   List
                 </button>
                 <button
-                  onClick={() => setMode("kanban")}
+                  onClick={() => setModeOverride("kanban")}
                   aria-pressed={mode === "kanban"}
                 >
                   Kanban

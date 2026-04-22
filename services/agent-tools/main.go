@@ -25,6 +25,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
+	"github.com/kennguy3n/kapp-fab/internal/tenant"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
 
@@ -55,6 +56,9 @@ func run() error {
 	auditor := audit.NewPGLogger(pool)
 	recordStore := record.NewPGStore(pool, ktypeRegistry, eventPublisher, auditor)
 	workflowEngine := workflow.NewEngine(pool, eventPublisher, auditor)
+	tenantSvc := tenant.NewPGStore(pool)
+	rateLimiter := platform.NewRateLimiter(platform.DefaultRateLimitConfig())
+	quotaEnforcer := platform.NewQuotaEnforcer(pool)
 
 	executor := agents.NewExecutor(recordStore, workflowEngine, auditor)
 	agents.RegisterCRMTools(executor)
@@ -70,11 +74,18 @@ func run() error {
 	r.Get("/healthz", healthz)
 	// Tool discovery — callers list available tools by name.
 	r.Get("/api/v1/agents/tools", h.list)
-	// Tool invocation. The handler does NOT use TenantMiddleware because
-	// the tenant id is supplied inside the invocation envelope, not via
-	// the X-Tenant-ID header — agent callers are typically long-lived
-	// bots that may legitimately drive multiple tenants in one session.
-	r.Post("/api/v1/agents/tools/{name}", h.invoke)
+	// Tool invocation shares the same middleware stack as KRecord CRUD
+	// (ARCHITECTURE.md §11): TenantMiddleware authoritatively sets the
+	// tenant from X-Tenant-ID so the invocation body can't spoof it,
+	// idempotency runs first so retried agent calls don't double-write,
+	// and rate-limit + quota cap per-tenant agent traffic.
+	r.Route("/api/v1/agents/tools", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.IdempotencyMiddleware(pool))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Use(platform.QuotaMiddleware(quotaEnforcer))
+		r.Post("/{name}", h.invoke)
+	})
 
 	addr := os.Getenv("AGENT_TOOLS_LISTEN_ADDR")
 	if addr == "" {
@@ -116,11 +127,20 @@ func (h *toolsHandler) invoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tool name required", http.StatusBadRequest)
 		return
 	}
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
 	var inv agents.Invocation
 	if err := json.NewDecoder(r.Body).Decode(&inv); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
+	// The tenant on the context (set by TenantMiddleware from
+	// X-Tenant-ID) is authoritative — an attacker can't spoof
+	// cross-tenant writes by setting tenant_id in the invocation body.
+	inv.TenantID = t.ID
 	inv.ToolName = name
 	res, err := h.executor.Invoke(r.Context(), inv)
 	if err != nil {
