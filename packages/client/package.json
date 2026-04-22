@@ -1,0 +1,14 @@
+{
+  "name": "@kapp/client",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "generate": "echo 'run: openapi-typescript-codegen --input http://localhost:8080/api/v1/openapi.json --output src/generated'"
+  },
+  "devDependencies": {
+    "openapi-typescript-codegen": "^0.29.0",
+    "typescript": "^5.6.3"
+  }
+}

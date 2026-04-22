@@ -32,24 +32,24 @@ Foundation: tenant isolation, KType metadata, KRecord storage, permissions, audi
 ### Deliverables
 
 - [x] Go module skeleton (`services/api`, `services/worker`, `internal/*`)
-- [ ] PostgreSQL schema for `tenants`, `users`, `user_tenants`, `roles`, `ktypes`, `krecords`, `events`, `audit_log`
-- [ ] Row-level security policies on all tenant-scoped tables
-- [ ] Tenant-range partitioning for `krecords`, `events`, `audit_log`
-- [ ] KType schema registry and validator (Go)
-- [ ] KRecord CRUD API with idempotency keys
-- [ ] Event outbox + batched publisher
-- [ ] Append-only audit logger with field-level diffs
-- [ ] RBAC/ABAC policy evaluator
-- [ ] Connection pool with tenant context injection (`SET LOCAL`)
-- [ ] Per-tenant rate limiting middleware
-- [ ] Per-tenant quota enforcement
-- [ ] LRU metadata cache (shared, tenant-keyed)
-- [ ] Tenant lifecycle (create, suspend, archive, delete)
-- [ ] React app scaffold with generated API client
-- [ ] KType-driven form and list views
-- [ ] Storybook setup for UI components
-- [ ] KChat bridge skeleton (card renderer, slash command dispatcher)
-- [ ] OpenAPI spec generator from KType schemas
+- [x] PostgreSQL schema for `tenants`, `users`, `user_tenants`, `roles`, `ktypes`, `krecords`, `events`, `audit_log`
+- [x] Row-level security policies on all tenant-scoped tables
+- [x] Tenant-range partitioning for `krecords`, `events`, `audit_log`
+- [x] KType schema registry and validator (Go)
+- [x] KRecord CRUD API with idempotency keys
+- [x] Event outbox + batched publisher
+- [x] Append-only audit logger with field-level diffs
+- [x] RBAC/ABAC policy evaluator
+- [x] Connection pool with tenant context injection (`SET LOCAL`)
+- [x] Per-tenant rate limiting middleware
+- [x] Per-tenant quota enforcement
+- [x] LRU metadata cache (shared, tenant-keyed)
+- [x] Tenant lifecycle (create, suspend, archive, delete)
+- [x] React app scaffold with generated API client
+- [x] KType-driven form and list views
+- [x] Storybook setup for UI components
+- [x] KChat bridge skeleton (card renderer, slash command dispatcher)
+- [x] OpenAPI spec generator from KType schemas
 - [x] Local dev compose stack (api, worker, db, object store, event bus)
 
 ### Acceptance Criteria

@@ -1,0 +1,21 @@
+{
+  "name": "@kapp/storybook",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "storybook": "storybook dev -p 6006",
+    "build": "storybook build"
+  },
+  "dependencies": {
+    "@kapp/ui": "*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@storybook/react-vite": "^8.3.5",
+    "storybook": "^8.3.5",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}

@@ -17,7 +17,12 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/kennguy3n/kapp-fab/internal/audit"
+	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/record"
+	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
 
 func main() {
@@ -41,6 +46,20 @@ func run() error {
 	}
 	defer pool.Close()
 
+	tenantSvc := tenant.NewPGStore(pool)
+	ktypeCache := platform.NewLRUCache(1024, 5*time.Minute)
+	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
+	eventPublisher := events.NewPGPublisher(pool)
+	auditor := audit.NewPGLogger(pool)
+	recordStore := record.NewPGStore(pool, ktypeRegistry, eventPublisher, auditor)
+	rateLimiter := platform.NewRateLimiter(platform.DefaultRateLimitConfig())
+	quotaEnforcer := platform.NewQuotaEnforcer(pool)
+
+	th := &tenantHandlers{svc: tenantSvc}
+	kh := &ktypeHandlers{registry: ktypeRegistry}
+	rh := &recordHandlers{store: recordStore}
+	oh := &openAPIHandler{registry: ktypeRegistry}
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -49,6 +68,39 @@ func run() error {
 
 	r.Get("/healthz", healthHandler(pool))
 	r.Get("/api/v1/", rootHandler)
+
+	// Control-plane tenant lifecycle routes (not tenant-scoped).
+	r.Route("/api/v1/tenants", func(r chi.Router) {
+		r.Post("/", th.create)
+		r.Get("/{id}", th.get)
+		r.Post("/{id}/suspend", th.suspend)
+		r.Post("/{id}/archive", th.archive)
+		r.Delete("/{id}", th.delete)
+	})
+
+	// KType registry routes (shared metadata, not tenant-scoped).
+	r.Route("/api/v1/ktypes", func(r chi.Router) {
+		r.Post("/", kh.register)
+		r.Get("/", kh.list)
+		r.Get("/{name}", kh.get)
+	})
+
+	// KRecord CRUD routes. These require tenant context, rate limiting,
+	// quota enforcement, and idempotency keys on mutations.
+	r.Route("/api/v1/records", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Use(platform.QuotaMiddleware(quotaEnforcer))
+		r.Use(platform.IdempotencyMiddleware(pool))
+		r.Post("/{ktype}", rh.create)
+		r.Get("/{ktype}", rh.list)
+		r.Get("/{ktype}/{id}", rh.get)
+		r.Patch("/{ktype}/{id}", rh.update)
+		r.Delete("/{ktype}/{id}", rh.delete)
+	})
+
+	// OpenAPI machine-readable schema served for API consumers.
+	r.Get("/api/v1/openapi.json", oh.serve)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
