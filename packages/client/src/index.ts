@@ -277,8 +277,8 @@ export class ApiClient {
     name: string,
     invocation: {
       mode: "dry_run" | "commit";
-      input: Record<string, unknown>;
-      confirm?: boolean;
+      inputs: Record<string, unknown>;
+      confirmed?: boolean;
     }
   ): Promise<AgentInvocationResult> {
     return this.request(`/agents/tools/${encodeURIComponent(name)}`, {
