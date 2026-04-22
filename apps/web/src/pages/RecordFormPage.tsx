@@ -39,8 +39,13 @@ export function RecordFormPage() {
   });
 
   if (!ktype) return null;
-  if (ktypeQuery.isLoading) return <div>Loading…</div>;
+  // Edit flow must wait for the record to load too — KTypeForm seeds its
+  // state from initialData via useState, which ignores later prop updates,
+  // so mounting it before the record arrives would render a blank form.
+  if (ktypeQuery.isLoading || (id && recordQuery.isLoading))
+    return <div>Loading…</div>;
   if (!ktypeQuery.data) return <div>KType not found.</div>;
+  if (id && !recordQuery.data) return <div>Record not found.</div>;
 
   return (
     <section>

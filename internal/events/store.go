@@ -70,12 +70,19 @@ func (p *PGPublisher) DrainBatch(
 	// tenant_id` under the application role (`kapp_app`, non-superuser)
 	// evaluates the policy with no tenant GUC set and returns zero rows.
 	// The `tenants` control-plane table is intentionally not RLS-protected,
-	// so we iterate active tenants there and delegate the real drain work
-	// to drainTenant (which establishes the per-tenant GUC). This is O(N)
-	// in the active tenant count; per-tenant partitioning keeps the
-	// subsequent per-tenant query cheap when the partition is empty.
+	// so we iterate drainable tenants there and delegate the real drain
+	// work to drainTenant (which establishes the per-tenant GUC). This is
+	// O(N) in the drainable-tenant count; per-tenant partitioning keeps
+	// the subsequent per-tenant query cheap when the partition is empty.
+	//
+	// We include `suspended` alongside `active` so that pending outbox
+	// events for a tenant that was suspended mid-flight still reach their
+	// downstream consumers — suspension pauses new writes but must not
+	// strand already-committed events. `archived` and `deleting` tenants
+	// are excluded: their data is being torn down and their event streams
+	// are expected to be inert.
 	rows, err := p.pool.Query(ctx,
-		`SELECT id FROM tenants WHERE status = 'active'`)
+		`SELECT id FROM tenants WHERE status IN ('active', 'suspended')`)
 	if err != nil {
 		return 0, fmt.Errorf("events: list active tenants: %w", err)
 	}
