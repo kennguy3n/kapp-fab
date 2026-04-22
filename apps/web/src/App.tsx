@@ -13,6 +13,8 @@ import { TrialBalancePage } from "./pages/TrialBalancePage";
 import { IncomeStatementPage } from "./pages/IncomeStatementPage";
 import { StockLevelsPage } from "./pages/StockLevelsPage";
 import { InventoryValuationPage } from "./pages/InventoryValuationPage";
+import { OrgChartPage } from "./pages/OrgChartPage";
+import { LearnerProgressPage } from "./pages/LearnerProgressPage";
 
 interface NavSection {
   title: string;
@@ -66,6 +68,7 @@ const navSections: NavSection[] = [
     title: "HR",
     links: [
       { to: "/records/hr.employee", label: "Employees" },
+      { to: "/hr/org-chart", label: "Org Chart" },
       { to: "/records/hr.leave_request", label: "Leave Requests" },
       { to: "/records/hr.attendance", label: "Attendance" },
       { to: "/records/hr.expense_claim", label: "Expense Claims" },
@@ -80,6 +83,7 @@ const navSections: NavSection[] = [
       { to: "/records/lms.enrollment", label: "Enrollments" },
       { to: "/records/lms.quiz", label: "Quizzes" },
       { to: "/records/lms.assignment", label: "Assignments" },
+      { to: "/lms/progress", label: "Progress" },
     ],
   },
   {
@@ -168,6 +172,12 @@ function AppShell() {
           <Route
             path="/inventory/reports/valuation"
             element={<InventoryValuationPage />}
+          />
+          <Route path="/hr/org-chart" element={<OrgChartPage />} />
+          <Route path="/lms/progress" element={<LearnerProgressPage />} />
+          <Route
+            path="/lms/progress/:enrollmentId"
+            element={<LearnerProgressPage />}
           />
           <Route path="/records/:ktype" element={<RecordListPage />} />
           <Route path="/records/:ktype/new" element={<RecordFormPage />} />

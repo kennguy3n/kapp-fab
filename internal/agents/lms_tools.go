@@ -12,6 +12,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/lms"
 	"github.com/kennguy3n/kapp-fab/internal/record"
+	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
 
 // RegisterLMSTools attaches the Phase E LMS tools to an executor. A
@@ -20,6 +21,7 @@ import (
 func RegisterLMSTools(x *Executor, store *lms.Store) {
 	x.Register(&recommendCourseTool{executor: x})
 	x.Register(&gradeAssignmentTool{executor: x, store: store})
+	x.Register(&submitAssignmentTool{executor: x})
 }
 
 // ----- lms.recommend_course -----
@@ -133,5 +135,100 @@ func (t *gradeAssignmentTool) Invoke(ctx context.Context, inv Invocation) (*Resu
 	return &Result{
 		Summary: fmt.Sprintf("Graded lesson %s — status=%s score=%s", p.LessonID, p.Status, p.Score),
 		Preview: body,
+	}, nil
+}
+
+// ----- lms.submit_assignment -----
+
+type submitAssignmentInput struct {
+	AssignmentID uuid.UUID `json:"assignment_id"`
+}
+
+type submitAssignmentTool struct{ executor *Executor }
+
+func (t *submitAssignmentTool) Name() string               { return "lms.submit_assignment" }
+func (t *submitAssignmentTool) RequiresConfirmation() bool { return true }
+func (t *submitAssignmentTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in submitAssignmentInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.AssignmentID == uuid.Nil {
+		return nil, errors.New("lms.submit_assignment: assignment_id required")
+	}
+	if t.executor.records == nil {
+		return nil, errors.New("lms.submit_assignment: record store not configured")
+	}
+
+	rec, err := t.executor.records.Get(ctx, inv.TenantID, in.AssignmentID)
+	if err != nil {
+		return nil, fmt.Errorf("lms.submit_assignment: load assignment: %w", err)
+	}
+	if rec.KType != lms.KTypeAssignment {
+		return nil, fmt.Errorf("lms.submit_assignment: record %s is %s, not %s", rec.ID, rec.KType, lms.KTypeAssignment)
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(rec.Data, &data); err != nil {
+		return nil, fmt.Errorf("lms.submit_assignment: decode data: %w", err)
+	}
+	reviewerID, _ := data["reviewer_id"].(string)
+	if reviewerID == "" {
+		return nil, errors.New("lms.submit_assignment: reviewer_id must be set on the assignment before submission")
+	}
+	reviewerUUID, err := uuid.Parse(reviewerID)
+	if err != nil {
+		return nil, fmt.Errorf("lms.submit_assignment: invalid reviewer_id %q: %w", reviewerID, err)
+	}
+
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(map[string]any{
+			"assignment_id": in.AssignmentID,
+			"reviewer_id":   reviewerUUID,
+		})
+		return &Result{
+			Summary: fmt.Sprintf("Would submit assignment %s for review by %s", in.AssignmentID, reviewerUUID),
+			Preview: preview,
+		}, nil
+	}
+
+	data["status"] = lms.AssignmentStatusSubmitted
+	patchJSON, _ := json.Marshal(map[string]any{"status": lms.AssignmentStatusSubmitted})
+	updated, err := t.executor.records.Update(ctx, record.KRecord{
+		TenantID:  inv.TenantID,
+		ID:        rec.ID,
+		Data:      patchJSON,
+		UpdatedBy: &inv.ActorID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lms.submit_assignment: update status: %w", err)
+	}
+
+	if t.executor.workflow == nil {
+		return nil, errors.New("lms.submit_assignment: workflow engine not configured")
+	}
+	approval, err := t.executor.workflow.RequestApproval(
+		ctx, inv.TenantID,
+		lms.KTypeAssignment, rec.ID,
+		workflow.ApprovalChain{
+			Steps: []workflow.ApprovalStep{
+				{Approvers: []uuid.UUID{reviewerUUID}, RequiredCount: 1},
+			},
+		},
+		inv.ActorID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("lms.submit_assignment: request approval: %w", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"assignment": updated,
+		"approval":   approval,
+	})
+	return &Result{
+		Summary: fmt.Sprintf("Submitted assignment %s — approval %s sent to reviewer %s", rec.ID, approval.ID, reviewerUUID),
+		Record:  updated,
+		Preview: body,
+		Extra:   map[string]any{"approval_id": approval.ID},
 	}, nil
 }

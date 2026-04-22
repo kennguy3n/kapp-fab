@@ -29,6 +29,19 @@ const (
 const (
 	WorkflowCourse     = "lms.course.lifecycle"
 	WorkflowEnrollment = "lms.enrollment.lifecycle"
+	WorkflowAssignment = "lms.assignment.lifecycle"
+)
+
+// Assignment status values. The KType stores `status` as an enum so the
+// web UI and the lms.submit_assignment agent tool share the same
+// vocabulary. Terminal states are `approved` (reviewer accepted) and
+// `returned` (reviewer sent back for revision); the latter loops back
+// to `draft` via the `revise` transition.
+const (
+	AssignmentStatusDraft     = "draft"
+	AssignmentStatusSubmitted = "submitted"
+	AssignmentStatusApproved  = "approved"
+	AssignmentStatusReturned  = "returned"
 )
 
 var courseSchema = []byte(`{
@@ -144,14 +157,28 @@ var assignmentSchema = []byte(`{
     {"name": "lesson_id", "type": "ref", "ktype": "lms.lesson", "required": true},
     {"name": "title", "type": "string", "required": true, "max_length": 200},
     {"name": "description", "type": "text"},
-    {"name": "due_date", "type": "date"}
+    {"name": "due_date", "type": "date"},
+    {"name": "reviewer_id", "type": "ref", "ktype": "hr.employee"},
+    {"name": "status", "type": "enum", "values": ["draft", "submitted", "approved", "returned"], "default": "draft"}
   ],
   "views": {
-    "list": {"columns": ["lesson_id", "title", "due_date"]},
-    "form": {"sections": [{"title": "Assignment", "fields": ["lesson_id", "title", "description", "due_date"]}]}
+    "list": {"columns": ["lesson_id", "title", "due_date", "reviewer_id", "status"]},
+    "form": {"sections": [{"title": "Assignment", "fields": ["lesson_id", "title", "description", "due_date", "reviewer_id", "status"]}]},
+    "kanban": {"group_by": "status", "card_title": "title", "card_subtitle": "reviewer_id"}
   },
-  "cards": {"summary": "Assignment: {{title}}"},
-  "permissions": {"read": ["tenant.member"], "write": ["lms.admin", "tenant.admin"]}
+  "cards": {"summary": "Assignment: {{title}} ({{status}})"},
+  "permissions": {"read": ["tenant.member"], "write": ["lms.admin", "tenant.admin"]},
+  "workflow": {
+    "name": "lms.assignment.lifecycle",
+    "initial_state": "draft",
+    "states": ["draft", "submitted", "approved", "returned"],
+    "transitions": [
+      {"from": ["draft"], "to": "submitted", "action": "submit_for_review", "post": ["approvals.request"]},
+      {"from": ["submitted"], "to": "approved", "action": "approve"},
+      {"from": ["submitted"], "to": "returned", "action": "return_for_revision"},
+      {"from": ["returned"], "to": "submitted", "action": "submit_for_review", "post": ["approvals.request"]}
+    ]
+  }
 }`)
 
 var progressSchema = []byte(`{

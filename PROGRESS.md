@@ -1,6 +1,6 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2026-04-22 (Phase C/D/E complete; Phase F — Importer and Base up next)
+> **Last Updated:** 2026-04-22 (Phase E deliverables completed — org chart, learner progress pane, assignment approval chain; Phase F up next)
 >
 > Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md)
 
@@ -171,10 +171,10 @@ Employee lifecycle and structured learning.
 
 - [x] HR KTypes: `hr.employee`, `hr.leave_request`, `hr.attendance`, `hr.expense_claim` (`internal/hr/ktypes.go`; registered at API boot)
 - [x] HR workflows: onboarding, offboarding, leave approval (workflow blocks embedded in KType schemas drive the engine via `submit_for_approval` / `approve` / `reject` transitions)
-- [~] Org chart view (backing `hr.employee` KType has a `reporting_to` field; dedicated React tree view pending)
+- [x] Org chart view (`apps/web/src/pages/OrgChartPage.tsx` — tree view from `hr.employee.reporting_to`; route `/hr/org-chart`)
 - [x] LMS KTypes: `lms.course`, `lms.module`, `lms.lesson`, `lms.enrollment`, `lms.quiz`, `lms.assignment`, `lms.progress` (`internal/lms/ktypes.go`; registered at API boot)
-- [~] Learner KChat surface (`/learn` slash command in `services/kchat-bridge/commands.go`; KType `cards.summary` template drives the card renderer; dedicated progress web pane pending)
-- [~] Reviewer assignment workflow (`lms.assignment` carries a `reviewer` ref; approval-chain submission pending)
+- [x] Learner KChat surface (`/learn` slash command in `services/kchat-bridge/commands.go`; KType `cards.summary` template drives the card renderer; progress web pane at `/lms/progress/:enrollmentId` in `apps/web/src/pages/LearnerProgressPage.tsx`)
+- [x] Reviewer assignment workflow (`lms.assignment` carries `reviewer_id` ref + `status` enum + workflow block; `lms.submit_assignment` agent tool creates approval chain targeting reviewer; `ApprovalCardRenderer` in kchat-bridge delivers the KChat notification)
 - [x] Agent tools: `hr.request_leave`, `hr.approve_leave`, `lms.recommend_course`, `lms.grade_assignment` (`internal/agents/hr_tools.go`, `internal/agents/lms_tools.go`; registered at API boot)
 
 ### Acceptance Criteria
@@ -182,13 +182,13 @@ Employee lifecycle and structured learning.
 - [x] A leave request routes through approval and updates balance on decision (`TestLeaveRequestApprovalFlow` drives the full lifecycle; `TestLeaveLedgerBalanceReflectsDeltas` covers the append-only ledger invariant)
 - [x] A course enrollment tracks progress across modules and lessons (`TestCourseEnrollmentProgress` asserts the `enrollment_progress` rollup; `TestLessonProgressTracksScoreAndCompletion` covers the per-lesson projection)
 - [x] A quiz submission is scored and recorded (`TestQuizSubmissionScoring` — covers first submission, re-attempts, and attempt counting)
-- [ ] Reviewer assignment is notified via KChat
+- [x] Reviewer assignment is notified via KChat (`lms.submit_assignment` tool → `approval.requested` event → `ApprovalCardRenderer`)
 
 ### Deferred / Follow-up
 
 - [ ] Attendance integration with KChat status
 - [ ] Course completion certificates (basic)
-- [ ] Assignment submission + reviewer notification flow (rich-card variant)
+- [x] Assignment submission + reviewer notification flow (`lms.submit_assignment` agent tool patches status to `submitted`, creates single-step approval chain with `reviewer_id` as approver)
 
 ---
 
@@ -234,9 +234,9 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [ ] Report builder (pivot, aggregate, chart) over KRecords and ledgers
 - [ ] Per-tenant encryption keys (HKDF with tenant_id as salt)
 - [ ] Tenant backup/export tooling (single-tenant dump)
-- [ ] HR org chart tree view (React component backed by `hr.employee.reporting_to`)
-- [ ] LMS learner progress web pane (course progress dashboard reading `enrollment_progress`)
-- [ ] LMS reviewer assignment approval chain for `lms.assignment`
+- [x] HR org chart tree view (`apps/web/src/pages/OrgChartPage.tsx` backed by `hr.employee.reporting_to`)
+- [x] LMS learner progress web pane (`apps/web/src/pages/LearnerProgressPage.tsx` — course progress dashboard)
+- [x] LMS reviewer assignment approval chain for `lms.assignment` (`lms.submit_assignment` agent tool + workflow block)
 - [ ] Frappe REST API source adapter for importer (ERPNext, HRMS, CRM, LMS)
 - [ ] DocType → KType automatic mapping suggestions
 - [ ] Multi-tenancy: per-tenant encryption keys (HKDF with tenant_id as salt)
