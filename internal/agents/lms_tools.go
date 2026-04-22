@@ -113,6 +113,10 @@ func (t *gradeAssignmentTool) Invoke(ctx context.Context, inv Invocation) (*Resu
 	}
 	now := time.Now().UTC()
 	score := in.Score
+	var completedAt *time.Time
+	if status == lms.ProgressCompleted {
+		completedAt = &now
+	}
 	p, err := t.store.UpsertProgress(ctx, lms.Progress{
 		TenantID:     inv.TenantID,
 		EnrollmentID: in.EnrollmentID,
@@ -120,7 +124,7 @@ func (t *gradeAssignmentTool) Invoke(ctx context.Context, inv Invocation) (*Resu
 		Status:       status,
 		Score:        &score,
 		StartedAt:    &now,
-		CompletedAt:  &now,
+		CompletedAt:  completedAt,
 	})
 	if err != nil {
 		return nil, err

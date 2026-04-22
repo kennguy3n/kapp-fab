@@ -74,6 +74,24 @@ func (h *PosterHook) OnPurchaseBillPosted(
 	return h.applyLines(ctx, tenantID, rec, actorID, MoveSourcePurchaseBill, false)
 }
 
+// aggregatedLine accumulates invoice lines that share (item_id,
+// warehouse_id) so the hook emits a single Move per pair. This keeps
+// the inventory_moves_source_uniq partial unique index — which is
+// keyed on (tenant_id, source_ktype, source_id, item_id, warehouse_id)
+// — aligned 1:1 with what the hook inserts: retries are still
+// idempotent, but two lines for the same (item, warehouse) no longer
+// collide and lose the second line's qty.
+type aggregatedLine struct {
+	itemID      uuid.UUID
+	warehouseID uuid.UUID
+	qty         decimal.Decimal
+	// costTimesQty / qtyAbs compute a qty-weighted average unit cost
+	// across the contributing lines, falling back to unit_price when
+	// a line has no unit_cost.
+	costTimesQty decimal.Decimal
+	qtyAbs       decimal.Decimal
+}
+
 func (h *PosterHook) applyLines(
 	ctx context.Context, tenantID uuid.UUID,
 	rec *record.KRecord, actorID uuid.UUID,
@@ -88,7 +106,11 @@ func (h *PosterHook) applyLines(
 			return fmt.Errorf("inventory: decode invoice lines: %w", err)
 		}
 	}
-	sourceID := rec.ID
+	type pairKey struct {
+		item, warehouse uuid.UUID
+	}
+	agg := map[pairKey]*aggregatedLine{}
+	order := make([]pairKey, 0, len(parsed.Lines))
 	for i, line := range parsed.Lines {
 		if line.ItemID == "" || line.WarehouseID == "" {
 			continue
@@ -109,21 +131,45 @@ func (h *PosterHook) applyLines(
 			qty = qty.Neg()
 		}
 		unitCost := line.UnitCost
-		if !unitCost.IsPositive() && !unitCost.IsNegative() {
+		if unitCost.IsZero() {
 			unitCost = line.UnitPrice
 		}
-		_, err = h.store.RecordMove(ctx, Move{
+		key := pairKey{item: itemID, warehouse: warehouseID}
+		cur, ok := agg[key]
+		if !ok {
+			cur = &aggregatedLine{itemID: itemID, warehouseID: warehouseID}
+			agg[key] = cur
+			order = append(order, key)
+		}
+		cur.qty = cur.qty.Add(qty)
+		absQty := line.Qty.Abs()
+		cur.costTimesQty = cur.costTimesQty.Add(unitCost.Mul(absQty))
+		cur.qtyAbs = cur.qtyAbs.Add(absQty)
+	}
+
+	sourceID := rec.ID
+	for _, key := range order {
+		a := agg[key]
+		if a.qty.IsZero() {
+			continue
+		}
+		var unitCost decimal.Decimal
+		if a.qtyAbs.IsPositive() {
+			unitCost = a.costTimesQty.Div(a.qtyAbs)
+		}
+		_, err := h.store.RecordMove(ctx, Move{
 			TenantID:    tenantID,
-			ItemID:      itemID,
-			WarehouseID: warehouseID,
-			Qty:         qty,
+			ItemID:      a.itemID,
+			WarehouseID: a.warehouseID,
+			Qty:         a.qty,
 			UnitCost:    unitCost,
 			SourceKType: sourceKType,
 			SourceID:    &sourceID,
 			CreatedBy:   actorID,
 		})
 		if err != nil && !errors.Is(err, ErrDuplicateSourceMove) {
-			return fmt.Errorf("inventory: line %d: record move: %w", i, err)
+			return fmt.Errorf("inventory: record move for item %s / warehouse %s: %w",
+				a.itemID, a.warehouseID, err)
 		}
 	}
 	return nil
