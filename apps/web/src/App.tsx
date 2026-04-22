@@ -63,6 +63,24 @@ const navSections: NavSection[] = [
     ],
   },
   {
+    title: "HR",
+    links: [
+      { to: "/records/hr.employee", label: "Employees" },
+      { to: "/records/hr.leave_request", label: "Leave Requests" },
+      { to: "/records/hr.attendance", label: "Attendance" },
+      { to: "/records/hr.expense_claim", label: "Expense Claims" },
+    ],
+  },
+  {
+    title: "LMS",
+    links: [
+      { to: "/records/lms.course", label: "Courses" },
+      { to: "/records/lms.module", label: "Modules" },
+      { to: "/records/lms.lesson", label: "Lessons" },
+      { to: "/records/lms.enrollment", label: "Enrollments" },
+    ],
+  },
+  {
     title: "Admin",
     links: [
       { to: "/admin/tenants", label: "Tenants" },
