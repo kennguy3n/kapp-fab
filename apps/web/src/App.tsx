@@ -7,6 +7,10 @@ import { FormPage } from "./pages/FormPage";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
 import { AuditLogPage } from "./pages/AuditLogPage";
 import { SubledgerPage } from "./pages/SubledgerPage";
+import { ChartOfAccountsPage } from "./pages/ChartOfAccountsPage";
+import { JournalEntriesPage } from "./pages/JournalEntriesPage";
+import { TrialBalancePage } from "./pages/TrialBalancePage";
+import { IncomeStatementPage } from "./pages/IncomeStatementPage";
 
 interface NavSection {
   title: string;
@@ -35,10 +39,14 @@ const navSections: NavSection[] = [
   {
     title: "Finance",
     links: [
-      { to: "/records/finance.account", label: "Chart of Accounts" },
-      { to: "/records/finance.journal_entry", label: "Journal Entries" },
-      { to: "/records/finance.ar_invoice", label: "Sales Invoices" },
-      { to: "/records/finance.ap_bill", label: "Purchase Bills" },
+      { to: "/records/finance.ar_invoice", label: "Invoices" },
+      { to: "/records/finance.ap_bill", label: "Bills" },
+      { to: "/records/finance.credit_note", label: "Credit Notes" },
+      { to: "/records/finance.debit_note", label: "Debit Notes" },
+      { to: "/finance/accounts", label: "Chart of Accounts" },
+      { to: "/finance/journal", label: "Journal Entries" },
+      { to: "/finance/reports/trial-balance", label: "Trial Balance" },
+      { to: "/finance/reports/income-statement", label: "Income Statement" },
       { to: "/finance/ar-subledger", label: "AR Subledger" },
       { to: "/finance/ap-subledger", label: "AP Subledger" },
     ],
@@ -101,6 +109,19 @@ function AppShell() {
           <Route path="/admin/tenants" element={<TenantListPage />} />
           <Route path="/admin/audit" element={<AuditLogPage />} />
           <Route path="/approvals" element={<ApprovalsPage />} />
+          <Route
+            path="/finance/accounts"
+            element={<ChartOfAccountsPage />}
+          />
+          <Route path="/finance/journal" element={<JournalEntriesPage />} />
+          <Route
+            path="/finance/reports/trial-balance"
+            element={<TrialBalancePage />}
+          />
+          <Route
+            path="/finance/reports/income-statement"
+            element={<IncomeStatementPage />}
+          />
           <Route
             path="/finance/ar-subledger"
             element={<SubledgerPage variant="ar" />}

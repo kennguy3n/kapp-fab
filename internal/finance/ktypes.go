@@ -28,6 +28,8 @@ const (
 	KTypeJournalEntry = "finance.journal_entry"
 	KTypeARInvoice    = "finance.ar_invoice"
 	KTypeAPBill       = "finance.ap_bill"
+	KTypeCreditNote   = "finance.credit_note"
+	KTypeDebitNote    = "finance.debit_note"
 )
 
 // Canonical workflow names for finance KTypes. The workflow engine
@@ -37,6 +39,8 @@ const (
 	WorkflowJournalEntry = "finance.journal_entry.lifecycle"
 	WorkflowARInvoice    = "finance.ar_invoice.lifecycle"
 	WorkflowAPBill       = "finance.ap_bill.lifecycle"
+	WorkflowCreditNote   = "finance.credit_note.lifecycle"
+	WorkflowDebitNote    = "finance.debit_note.lifecycle"
 )
 
 // accountSchema — chart-of-accounts entry. `code` is the per-tenant
@@ -204,6 +208,84 @@ var apBillSchema = []byte(`{
   "agent_tools": ["finance.create_ap_bill"]
 }`)
 
+// creditNoteSchema — AR credit note. Reverses a previously-posted
+// sales invoice (Dr Revenue, Cr AR) for the supplied amount. The
+// `original_invoice_id` + `reason` fields drive the audit trail; the
+// posting leg account codes are inherited from the referenced invoice
+// at post time so a user cannot accidentally direct a credit to the
+// wrong ledger account.
+var creditNoteSchema = []byte(`{
+  "name": "finance.credit_note",
+  "version": 1,
+  "fields": [
+    {"name": "original_invoice_id", "type": "ref", "ktype": "finance.ar_invoice", "required": true},
+    {"name": "credit_note_number", "type": "string", "max_length": 64},
+    {"name": "issue_date", "type": "date"},
+    {"name": "reason", "type": "text"},
+    {"name": "amount", "type": "number", "min": 0, "required": true},
+    {"name": "currency", "type": "string", "pattern": "^[A-Z]{3}$", "default": "USD"},
+    {"name": "status", "type": "enum", "values": ["draft", "posted", "cancelled"], "default": "draft"},
+    {"name": "journal_entry_id", "type": "string"}
+  ],
+  "views": {
+    "list": {"columns": ["credit_note_number", "original_invoice_id", "amount", "currency", "issue_date", "status"]},
+    "form": {"sections": [
+      {"title": "Credit Note", "fields": ["credit_note_number", "original_invoice_id", "issue_date", "currency"]},
+      {"title": "Details", "fields": ["amount", "reason"]},
+      {"title": "Posting", "fields": ["status", "journal_entry_id"]}
+    ]}
+  },
+  "cards": {"summary": "Credit Note {{credit_note_number}} — {{amount}} {{currency}} ({{status}})"},
+  "permissions": {"read": ["tenant.member"], "write": ["finance.admin", "tenant.admin"]},
+  "workflow": {
+    "name": "finance.credit_note.lifecycle",
+    "initial_state": "draft",
+    "states": ["draft", "posted", "cancelled"],
+    "transitions": [
+      {"from": ["draft"], "to": "posted", "action": "post"},
+      {"from": ["draft"], "to": "cancelled", "action": "cancel"}
+    ]
+  },
+  "agent_tools": ["finance.post_credit_note"]
+}`)
+
+// debitNoteSchema — AP debit note. Reverses a previously-posted
+// supplier bill (Dr AP, Cr Expense) for the supplied amount.
+var debitNoteSchema = []byte(`{
+  "name": "finance.debit_note",
+  "version": 1,
+  "fields": [
+    {"name": "original_bill_id", "type": "ref", "ktype": "finance.ap_bill", "required": true},
+    {"name": "debit_note_number", "type": "string", "max_length": 64},
+    {"name": "issue_date", "type": "date"},
+    {"name": "reason", "type": "text"},
+    {"name": "amount", "type": "number", "min": 0, "required": true},
+    {"name": "currency", "type": "string", "pattern": "^[A-Z]{3}$", "default": "USD"},
+    {"name": "status", "type": "enum", "values": ["draft", "posted", "cancelled"], "default": "draft"},
+    {"name": "journal_entry_id", "type": "string"}
+  ],
+  "views": {
+    "list": {"columns": ["debit_note_number", "original_bill_id", "amount", "currency", "issue_date", "status"]},
+    "form": {"sections": [
+      {"title": "Debit Note", "fields": ["debit_note_number", "original_bill_id", "issue_date", "currency"]},
+      {"title": "Details", "fields": ["amount", "reason"]},
+      {"title": "Posting", "fields": ["status", "journal_entry_id"]}
+    ]}
+  },
+  "cards": {"summary": "Debit Note {{debit_note_number}} — {{amount}} {{currency}} ({{status}})"},
+  "permissions": {"read": ["tenant.member"], "write": ["finance.admin", "tenant.admin"]},
+  "workflow": {
+    "name": "finance.debit_note.lifecycle",
+    "initial_state": "draft",
+    "states": ["draft", "posted", "cancelled"],
+    "transitions": [
+      {"from": ["draft"], "to": "posted", "action": "post"},
+      {"from": ["draft"], "to": "cancelled", "action": "cancel"}
+    ]
+  },
+  "agent_tools": ["finance.post_debit_note"]
+}`)
+
 // All returns every Phase C finance KType as a freshly-constructed slice.
 func All() []ktype.KType {
 	return []ktype.KType{
@@ -211,6 +293,8 @@ func All() []ktype.KType {
 		{Name: KTypeJournalEntry, Version: 1, Schema: journalEntrySchema},
 		{Name: KTypeARInvoice, Version: 1, Schema: arInvoiceSchema},
 		{Name: KTypeAPBill, Version: 1, Schema: apBillSchema},
+		{Name: KTypeCreditNote, Version: 1, Schema: creditNoteSchema},
+		{Name: KTypeDebitNote, Version: 1, Schema: debitNoteSchema},
 	}
 }
 

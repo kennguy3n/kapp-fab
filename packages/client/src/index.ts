@@ -378,6 +378,48 @@ export class ApiClient {
     });
   }
 
+  /** Post a draft finance.credit_note KRecord. Reverses the AR posting
+   *  of the referenced invoice (Dr Revenue, Cr AR). */
+  postCreditNote(id: string): Promise<JournalEntry> {
+    return this.request(
+      `/finance/credit-notes/${encodeURIComponent(id)}/post`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({}),
+      }
+    );
+  }
+
+  /** Post a draft finance.debit_note KRecord. Reverses the AP posting
+   *  of the referenced bill (Dr AP, Cr Expense). */
+  postDebitNote(id: string): Promise<JournalEntry> {
+    return this.request(
+      `/finance/debit-notes/${encodeURIComponent(id)}/post`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({}),
+      }
+    );
+  }
+
+  listTaxCodes(): Promise<TaxCode[]> {
+    return this.request("/finance/tax-codes");
+  }
+
+  getTaxCode(code: string): Promise<TaxCode> {
+    return this.request(`/finance/tax-codes/${encodeURIComponent(code)}`);
+  }
+
+  upsertTaxCode(input: UpsertTaxCodeInput): Promise<TaxCode> {
+    return this.request("/finance/tax-codes", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
   lockPeriod(input: { period_start: string }): Promise<FiscalPeriod> {
     return this.request("/finance/periods/lock", {
       method: "POST",
@@ -562,6 +604,23 @@ export interface JournalEntry {
   lines: JournalLine[];
 }
 
+export interface TaxCode {
+  tenant_id: string;
+  code: string;
+  name: string;
+  rate: string;
+  type: "inclusive" | "exclusive";
+  active: boolean;
+}
+
+export interface UpsertTaxCodeInput {
+  code: string;
+  name: string;
+  rate: string | number;
+  type?: "inclusive" | "exclusive";
+  active?: boolean;
+}
+
 export interface FiscalPeriod {
   tenant_id: string;
   period_start: string;
@@ -574,18 +633,19 @@ export interface FiscalPeriod {
 export interface TrialBalanceRow {
   account_code: string;
   account_name: string;
-  account_type: AccountType;
+  type: AccountType;
   debit: string;
   credit: string;
   balance: string;
 }
 
 export interface TrialBalanceReport {
+  tenant_id: string;
   as_of: string;
   rows: TrialBalanceRow[];
   total_debit: string;
   total_credit: string;
-  balanced: boolean;
+  residual: string;
 }
 
 export interface AgingBucket {

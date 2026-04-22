@@ -272,6 +272,123 @@ func (h *financeHandlers) postBill(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
+// Credit / debit notes
+// ---------------------------------------------------------------------------
+
+func (h *financeHandlers) postCreditNote(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid credit note id", http.StatusBadRequest)
+		return
+	}
+	entry, err := h.poster.PostCreditNote(r.Context(), t.ID, id, actorOrDefault(r.Context()))
+	if err != nil {
+		writeFinanceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, entry)
+}
+
+func (h *financeHandlers) postDebitNote(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid debit note id", http.StatusBadRequest)
+		return
+	}
+	entry, err := h.poster.PostDebitNote(r.Context(), t.ID, id, actorOrDefault(r.Context()))
+	if err != nil {
+		writeFinanceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, entry)
+}
+
+// ---------------------------------------------------------------------------
+// Tax codes
+// ---------------------------------------------------------------------------
+
+type upsertTaxCodeRequest struct {
+	Code   string          `json:"code"`
+	Name   string          `json:"name"`
+	Rate   decimal.Decimal `json:"rate"`
+	Type   string          `json:"type"`
+	Active *bool           `json:"active"`
+}
+
+func (h *financeHandlers) upsertTaxCode(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	var req upsertTaxCodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	active := true
+	if req.Active != nil {
+		active = *req.Active
+	}
+	tc, err := h.store.UpsertTaxCode(r.Context(), ledger.TaxCode{
+		TenantID: t.ID,
+		Code:     req.Code,
+		Name:     req.Name,
+		Rate:     req.Rate,
+		Type:     req.Type,
+		Active:   active,
+	})
+	if err != nil {
+		writeFinanceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, tc)
+}
+
+func (h *financeHandlers) listTaxCodes(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	codes, err := h.store.ListTaxCodes(r.Context(), t.ID)
+	if err != nil {
+		writeFinanceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, codes)
+}
+
+func (h *financeHandlers) getTaxCode(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	code := chi.URLParam(r, "code")
+	if code == "" {
+		http.Error(w, "tax code required", http.StatusBadRequest)
+		return
+	}
+	tc, err := h.store.GetTaxCode(r.Context(), t.ID, code)
+	if err != nil {
+		writeFinanceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tc)
+}
+
+// ---------------------------------------------------------------------------
 // Period lockout
 // ---------------------------------------------------------------------------
 
@@ -448,7 +565,10 @@ func writeFinanceError(w http.ResponseWriter, err error) {
 		errors.Is(err, ledger.ErrTaxCodeNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, ledger.ErrPeriodLocked),
-		errors.Is(err, ledger.ErrInvoiceAlreadyPosted):
+		errors.Is(err, ledger.ErrInvoiceAlreadyPosted),
+		errors.Is(err, ledger.ErrCreditNoteAlreadyPosted),
+		errors.Is(err, ledger.ErrDebitNoteAlreadyPosted),
+		errors.Is(err, ledger.ErrDuplicateSourceEntry):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, ledger.ErrUnbalancedEntry),
 		errors.Is(err, ledger.ErrEmptyEntry),
@@ -456,7 +576,10 @@ func writeFinanceError(w http.ResponseWriter, err error) {
 		errors.Is(err, ledger.ErrInactiveAccount),
 		errors.Is(err, ledger.ErrCurrencyMismatch),
 		errors.Is(err, ledger.ErrSourceMismatch),
-		errors.Is(err, ledger.ErrInvoiceNotPostable):
+		errors.Is(err, ledger.ErrInvoiceNotPostable),
+		errors.Is(err, ledger.ErrCreditNoteNotPostable),
+		errors.Is(err, ledger.ErrDebitNoteNotPostable),
+		errors.Is(err, ledger.ErrOriginalNotPosted):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
 		writeRecordError(w, err)

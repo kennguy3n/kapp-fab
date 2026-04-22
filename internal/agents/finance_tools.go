@@ -28,6 +28,8 @@ func RegisterFinanceTools(x *Executor, ledgerStore *ledger.PGStore, poster *ledg
 	x.Register(&postJournalTool{executor: x, ledger: ledgerStore})
 	x.Register(&postSalesInvoiceTool{executor: x, poster: poster})
 	x.Register(&postAPBillTool{executor: x, poster: poster})
+	x.Register(&postCreditNoteTool{executor: x, poster: poster})
+	x.Register(&postDebitNoteTool{executor: x, poster: poster})
 }
 
 // ----- finance.create_sales_invoice -----
@@ -350,6 +352,92 @@ func (t *postAPBillTool) Invoke(ctx context.Context, inv Invocation) (*Result, e
 		Summary: fmt.Sprintf("Posted AP bill %s → JE %s", in.BillID, entry.ID),
 		Preview: body,
 		Extra:   map[string]any{"journal_entry_id": entry.ID, "bill_id": in.BillID},
+	}, nil
+}
+
+// ----- finance.post_credit_note -----
+
+type postCreditNoteInput struct {
+	CreditNoteID uuid.UUID `json:"credit_note_id"`
+}
+
+type postCreditNoteTool struct {
+	executor *Executor
+	poster   *ledger.InvoicePoster
+}
+
+func (t *postCreditNoteTool) Name() string               { return "finance.post_credit_note" }
+func (t *postCreditNoteTool) RequiresConfirmation() bool { return true }
+func (t *postCreditNoteTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in postCreditNoteInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.CreditNoteID == uuid.Nil {
+		return nil, errors.New("finance.post_credit_note: credit_note_id required")
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(in)
+		return &Result{
+			Summary: fmt.Sprintf("Would post credit note %s", in.CreditNoteID),
+			Preview: preview,
+		}, nil
+	}
+	if t.poster == nil {
+		return nil, errors.New("finance.post_credit_note: poster not configured")
+	}
+	entry, err := t.poster.PostCreditNote(ctx, inv.TenantID, in.CreditNoteID, inv.ActorID)
+	if err != nil {
+		return nil, err
+	}
+	body, _ := json.Marshal(entry)
+	return &Result{
+		Summary: fmt.Sprintf("Posted credit note %s → JE %s", in.CreditNoteID, entry.ID),
+		Preview: body,
+		Extra:   map[string]any{"journal_entry_id": entry.ID, "credit_note_id": in.CreditNoteID},
+	}, nil
+}
+
+// ----- finance.post_debit_note -----
+
+type postDebitNoteInput struct {
+	DebitNoteID uuid.UUID `json:"debit_note_id"`
+}
+
+type postDebitNoteTool struct {
+	executor *Executor
+	poster   *ledger.InvoicePoster
+}
+
+func (t *postDebitNoteTool) Name() string               { return "finance.post_debit_note" }
+func (t *postDebitNoteTool) RequiresConfirmation() bool { return true }
+func (t *postDebitNoteTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in postDebitNoteInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.DebitNoteID == uuid.Nil {
+		return nil, errors.New("finance.post_debit_note: debit_note_id required")
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(in)
+		return &Result{
+			Summary: fmt.Sprintf("Would post debit note %s", in.DebitNoteID),
+			Preview: preview,
+		}, nil
+	}
+	if t.poster == nil {
+		return nil, errors.New("finance.post_debit_note: poster not configured")
+	}
+	entry, err := t.poster.PostDebitNote(ctx, inv.TenantID, in.DebitNoteID, inv.ActorID)
+	if err != nil {
+		return nil, err
+	}
+	body, _ := json.Marshal(entry)
+	return &Result{
+		Summary: fmt.Sprintf("Posted debit note %s → JE %s", in.DebitNoteID, entry.ID),
+		Preview: body,
+		Extra:   map[string]any{"journal_entry_id": entry.ID, "debit_note_id": in.DebitNoteID},
 	}, nil
 }
 
