@@ -4,15 +4,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
 	"github.com/kennguy3n/kapp-fab/internal/events"
@@ -65,7 +70,19 @@ func run() error {
 
 	publisher := events.NewPGPublisher(pool)
 
-	log.Printf("worker: started; draining every %s; nats=%s", tickInterval, natsURL)
+	// kchat-bridge base URL drives the approval-card notification path.
+	// When set, the worker POSTs {tenant_id, approval_id} to
+	// <bridge>/kchat/approvals/render for every approval lifecycle
+	// event drained from the outbox so the reviewer / approver gets a
+	// DM card in KChat. Empty disables the notification (useful for
+	// local dev without a bridge) — the event is still published to
+	// NATS for the general event-bus consumers.
+	bridge := &kchatBridgeNotifier{
+		baseURL: strings.TrimRight(os.Getenv("KAPP_KCHAT_BRIDGE_URL"), "/"),
+		client:  &http.Client{Timeout: 5 * time.Second},
+	}
+
+	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 
@@ -75,15 +92,15 @@ func run() error {
 			log.Printf("worker: shutdown signal received")
 			return nil
 		case <-ticker.C:
-			if _, err := publisher.DrainBatch(ctx, drainBatch, deliver(nc)); err != nil {
+			if _, err := publisher.DrainBatch(ctx, drainBatch, deliver(nc, bridge)); err != nil {
 				log.Printf("worker: drain batch: %v", err)
 			}
 		}
 	}
 }
 
-func deliver(nc *nats.Conn) func(ctx context.Context, batch []events.Event) error {
-	return func(_ context.Context, batch []events.Event) error {
+func deliver(nc *nats.Conn, bridge *kchatBridgeNotifier) func(ctx context.Context, batch []events.Event) error {
+	return func(ctx context.Context, batch []events.Event) error {
 		for _, e := range batch {
 			subject := fmt.Sprintf("kapp.events.%s", e.Type)
 			payload, err := json.Marshal(e)
@@ -93,7 +110,90 @@ func deliver(nc *nats.Conn) func(ctx context.Context, batch []events.Event) erro
 			if err := nc.Publish(subject, payload); err != nil {
 				return fmt.Errorf("publish %s: %w", subject, err)
 			}
+			// Fan out approval lifecycle events to kchat-bridge so the
+			// reviewer / approver receives the DM card. Render failures
+			// are logged but do not fail the drain — the event is
+			// already durably on NATS and the outbox row will be marked
+			// delivered so it will not retry. Phase E treats the card
+			// notification as best-effort; the approval itself lives in
+			// Postgres and is visible via the Approvals page.
+			if bridge.enabled() && isApprovalNotificationEvent(e.Type) {
+				if err := bridge.renderApprovalCard(ctx, e); err != nil {
+					log.Printf("worker: kchat render %s: %v", e.Type, err)
+				}
+			}
 		}
 		return nc.Flush()
+	}
+}
+
+// kchatBridgeNotifier is the minimal HTTP client the worker uses to ask
+// kchat-bridge to render an approval card for a given {tenant, approval}
+// pair. The bridge already owns the renderer + KType card templates;
+// the worker just tells it which approval to hydrate.
+type kchatBridgeNotifier struct {
+	baseURL string
+	client  *http.Client
+}
+
+func (b *kchatBridgeNotifier) enabled() bool { return b != nil && b.baseURL != "" }
+
+// renderApprovalCard POSTs a render request to kchat-bridge for the
+// approval referenced by the event payload. The payload schema is the
+// one emitted by workflow.Engine.RequestApproval / Decide — `approval_id`
+// plus the event's tenant_id envelope.
+func (b *kchatBridgeNotifier) renderApprovalCard(ctx context.Context, e events.Event) error {
+	var payload struct {
+		ApprovalID uuid.UUID `json:"approval_id"`
+	}
+	if err := json.Unmarshal(e.Payload, &payload); err != nil {
+		return fmt.Errorf("decode approval event payload: %w", err)
+	}
+	if payload.ApprovalID == uuid.Nil {
+		return fmt.Errorf("approval event missing approval_id")
+	}
+	body, err := json.Marshal(map[string]any{
+		"tenant_id":   e.TenantID,
+		"approval_id": payload.ApprovalID,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal render body: %w", err)
+	}
+	url := b.baseURL + "/kchat/approvals/render"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("post: %w", err)
+	}
+	// Drain-and-close pattern so the net/http Transport can return the
+	// TCP connection to its keep-alive pool. Without the drain, each
+	// successful render POST would force a fresh connection — wasteful
+	// given this runs on every drained approval event.
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode >= 300 {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("status=%d body=%s", resp.StatusCode, string(snippet))
+	}
+	return nil
+}
+
+// isApprovalNotificationEvent returns true for the approval lifecycle
+// event types the kchat-bridge should re-render a card for. Decision
+// events (granted, rejected) and step advancement also produce follow
+// up cards so the original approver — and the requester — see the
+// state change inline.
+func isApprovalNotificationEvent(t string) bool {
+	switch t {
+	case "approval.requested", "approval.step_advanced", "approval.granted", "approval.rejected":
+		return true
+	default:
+		return false
 	}
 }

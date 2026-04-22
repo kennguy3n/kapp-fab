@@ -22,7 +22,11 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/agents"
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/hr"
+	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
+	"github.com/kennguy3n/kapp-fab/internal/ledger"
+	"github.com/kennguy3n/kapp-fab/internal/lms"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
@@ -60,8 +64,27 @@ func run() error {
 	rateLimiter := platform.NewRateLimiter(platform.DefaultRateLimitConfig())
 	quotaEnforcer := platform.NewQuotaEnforcer(pool)
 
+	// Domain stores shared between the API gateway and the standalone
+	// agent-tools executor. Wiring them here keeps the two surfaces in
+	// lock-step so an agent tool that works against the API pool also
+	// works when invoked directly via the dedicated executor service.
+	// Mirrors the wiring in services/api/main.go.
+	ledgerStore := ledger.NewPGStore(pool, eventPublisher, auditor)
+	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
+	inventoryStore := inventory.NewPGStore(pool, eventPublisher, auditor)
+	inventoryHook := inventory.NewPosterHook(inventoryStore)
+	invoicePoster.
+		WithSalesInvoiceHook(inventoryHook.OnSalesInvoicePosted).
+		WithPurchaseBillHook(inventoryHook.OnPurchaseBillPosted)
+	hrStore := hr.NewStore(pool)
+	lmsStore := lms.NewStore(pool)
+
 	executor := agents.NewExecutor(recordStore, workflowEngine, auditor)
 	agents.RegisterCRMTools(executor)
+	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster)
+	agents.RegisterInventoryTools(executor, inventoryStore)
+	agents.RegisterHRTools(executor, hrStore)
+	agents.RegisterLMSTools(executor, lmsStore)
 
 	h := &toolsHandler{executor: executor}
 
