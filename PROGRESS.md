@@ -174,7 +174,7 @@ Employee lifecycle and structured learning.
 - [x] Org chart view (`apps/web/src/pages/OrgChartPage.tsx` — tree view from `hr.employee.reporting_to`; route `/hr/org-chart`)
 - [x] LMS KTypes: `lms.course`, `lms.module`, `lms.lesson`, `lms.enrollment`, `lms.quiz`, `lms.assignment`, `lms.progress` (`internal/lms/ktypes.go`; registered at API boot)
 - [x] Learner KChat surface (`/learn` slash command in `services/kchat-bridge/commands.go`; KType `cards.summary` template drives the card renderer; progress web pane at `/lms/progress/:enrollmentId` in `apps/web/src/pages/LearnerProgressPage.tsx`)
-- [x] Reviewer assignment workflow (`lms.assignment` carries `reviewer_id` ref + `status` enum + workflow block; `lms.submit_assignment` agent tool creates approval chain targeting reviewer; `ApprovalCardRenderer` in kchat-bridge delivers the KChat notification)
+- [x] Reviewer assignment workflow (`lms.assignment` carries `reviewer_id` ref + `status` enum + workflow block; `lms.submit_assignment` agent tool creates approval chain targeting reviewer; worker drains `approval.requested` and POSTs to `/kchat/approvals/render` on kchat-bridge which returns the reviewer DM card)
 - [x] Agent tools: `hr.request_leave`, `hr.approve_leave`, `lms.recommend_course`, `lms.grade_assignment` (`internal/agents/hr_tools.go`, `internal/agents/lms_tools.go`; registered at API boot)
 
 ### Acceptance Criteria
@@ -182,7 +182,7 @@ Employee lifecycle and structured learning.
 - [x] A leave request routes through approval and updates balance on decision (`TestLeaveRequestApprovalFlow` drives the full lifecycle; `TestLeaveLedgerBalanceReflectsDeltas` covers the append-only ledger invariant)
 - [x] A course enrollment tracks progress across modules and lessons (`TestCourseEnrollmentProgress` asserts the `enrollment_progress` rollup; `TestLessonProgressTracksScoreAndCompletion` covers the per-lesson projection)
 - [x] A quiz submission is scored and recorded (`TestQuizSubmissionScoring` — covers first submission, re-attempts, and attempt counting)
-- [x] Reviewer assignment is notified via KChat (`lms.submit_assignment` tool → `approval.requested` event → `ApprovalCardRenderer`)
+- [x] Reviewer assignment is notified via KChat (`lms.submit_assignment` tool → `approval.requested` event → worker drains the outbox and POSTs to `/kchat/approvals/render` on kchat-bridge → `ApprovalCardRenderer` produces the per-approver card)
 
 ### Deferred / Follow-up
 
