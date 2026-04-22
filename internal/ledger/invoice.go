@@ -45,14 +45,47 @@ import (
 // exists, record still says draft) and the concurrent-poster race
 // (two callers reach PostJournalEntry; one wins, the other reuses).
 type InvoicePoster struct {
-	store       *PGStore
-	recordStore *record.PGStore
+	store             *PGStore
+	recordStore       *record.PGStore
+	salesInvoiceHook  PostHook
+	purchaseBillHook  PostHook
 }
+
+// PostHook is an opt-in callback invoked after a sales invoice or
+// purchase bill has been fully posted (journal entry committed, source
+// KRecord patched, lifecycle event emitted). The Phase D inventory
+// wiring uses this to append goods-delivery / goods-receipt moves on
+// the back of posted invoices and bills without importing the
+// inventory package into the ledger; the hook signature is deliberately
+// generic so unrelated consumers (notifications, webhooks, …) can
+// plug in later.
+//
+// Hook errors are returned to the caller but do NOT roll back the
+// journal entry: the ledger transaction has already committed by this
+// point, so the only sane semantic is "post succeeded, side-effect
+// failed" — the caller sees a 500 and the idempotency guards on the
+// inventory side (partial unique index on source_id) make the retry
+// safe.
+type PostHook func(ctx context.Context, tenantID uuid.UUID, rec *record.KRecord, entry *JournalEntry, actorID uuid.UUID) error
 
 // NewInvoicePoster wires the poster against an existing ledger and record
 // store. Both are required; nil returns a non-functional poster.
 func NewInvoicePoster(store *PGStore, recordStore *record.PGStore) *InvoicePoster {
 	return &InvoicePoster{store: store, recordStore: recordStore}
+}
+
+// WithSalesInvoiceHook attaches a post-commit callback to sales
+// invoice posting. Returns the receiver for chaining.
+func (p *InvoicePoster) WithSalesInvoiceHook(h PostHook) *InvoicePoster {
+	p.salesInvoiceHook = h
+	return p
+}
+
+// WithPurchaseBillHook attaches a post-commit callback to purchase
+// bill posting. Returns the receiver for chaining.
+func (p *InvoicePoster) WithPurchaseBillHook(h PostHook) *InvoicePoster {
+	p.purchaseBillHook = h
+	return p
 }
 
 // invoiceData is the slice of finance.ar_invoice schema fields we need
@@ -238,6 +271,11 @@ func (p *InvoicePoster) PostSalesInvoice(ctx context.Context, tenantID, invoiceI
 	}); err != nil {
 		return entry, err
 	}
+	if p.salesInvoiceHook != nil {
+		if err := p.salesInvoiceHook(ctx, tenantID, rec, entry, actorID); err != nil {
+			return entry, fmt.Errorf("ledger: sales invoice hook: %w", err)
+		}
+	}
 	return entry, nil
 }
 
@@ -363,6 +401,11 @@ func (p *InvoicePoster) PostPurchaseBill(ctx context.Context, tenantID, billID, 
 		"actor":            actorID,
 	}); err != nil {
 		return entry, err
+	}
+	if p.purchaseBillHook != nil {
+		if err := p.purchaseBillHook(ctx, tenantID, rec, entry, actorID); err != nil {
+			return entry, fmt.Errorf("ledger: purchase bill hook: %w", err)
+		}
 	}
 	return entry, nil
 }

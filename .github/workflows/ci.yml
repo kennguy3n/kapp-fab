@@ -76,6 +76,12 @@ jobs:
             -f migrations/000003_forms.sql
           psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
             -f migrations/000004_finance_extensions.sql
+          psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
+            -f migrations/000005_inventory.sql
+          psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
+            -f migrations/000006_hr.sql
+          psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
+            -f migrations/000007_lms.sql
       - name: go test -tags=integration
         env:
           KAPP_TEST_DB_URL: postgres://kapp_app:kapp_app_dev@localhost:5432/kapp?sslmode=disable

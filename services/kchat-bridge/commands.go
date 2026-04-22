@@ -12,6 +12,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/crm"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
+	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/record"
@@ -45,6 +46,7 @@ type CommandDispatcher struct {
 	approvals *workflow.Engine
 	ledger    *ledger.PGStore
 	poster    *ledger.InvoicePoster
+	inventory *inventory.PGStore
 	cards     *CardRenderer
 	formsBase string
 }
@@ -91,11 +93,15 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.postInvoice(ctx, req)
 	case "post-bill":
 		return d.postBill(ctx, req)
+	case "stock":
+		return d.stockLevels(ctx, req)
+	case "learn":
+		return d.learnCourses(ctx, req)
 	case "form":
 		return d.formLink(req)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /invoice, /bill, /post-invoice, /post-bill, /approve, /form, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /invoice, /bill, /post-invoice, /post-bill, /stock, /learn, /approve, /form, /help",
 		}, nil
 	default:
 		return CommandResponse{
@@ -260,6 +266,94 @@ func (d *CommandDispatcher) postBill(ctx context.Context, req CommandRequest) (C
 	return CommandResponse{
 		Text: fmt.Sprintf("Posted bill %s → journal entry %s", billID, entry.ID),
 	}, nil
+}
+
+// stockLevels implements `/stock [sku]`. Without arguments it returns a
+// summary of every item's current stock; with a single SKU it returns
+// the per-warehouse breakdown for that item. Quantities are fetched
+// from the stock_levels view which is RLS-scoped to the caller's
+// tenant.
+func (d *CommandDispatcher) stockLevels(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.inventory == nil {
+		return CommandResponse{Text: "inventory not configured"}, nil
+	}
+	if req.TenantID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id required"}, nil
+	}
+	var itemFilter *uuid.UUID
+	var sku string
+	if len(req.Args) >= 1 && req.Args[0] != "" {
+		sku = req.Args[0]
+		it, err := d.inventory.GetItemBySKU(ctx, req.TenantID, sku)
+		if err != nil {
+			if errors.Is(err, inventory.ErrItemNotFound) {
+				return CommandResponse{Text: fmt.Sprintf("/stock: no item with sku %q", sku)}, nil
+			}
+			return CommandResponse{}, err
+		}
+		id := it.ID
+		itemFilter = &id
+	}
+	levels, err := d.inventory.ListStockLevels(ctx, req.TenantID, itemFilter)
+	if err != nil {
+		return CommandResponse{}, err
+	}
+	if len(levels) == 0 {
+		if sku != "" {
+			return CommandResponse{Text: fmt.Sprintf("/stock: %s — no moves recorded", sku)}, nil
+		}
+		return CommandResponse{Text: "/stock: no stock recorded for this tenant"}, nil
+	}
+	lines := make([]string, 0, len(levels))
+	for _, l := range levels {
+		lines = append(lines, fmt.Sprintf("%s @ %s: %s", l.ItemID, l.WarehouseID, l.Qty.String()))
+	}
+	title := "Stock levels"
+	if sku != "" {
+		title = fmt.Sprintf("Stock for %s", sku)
+	}
+	return CommandResponse{
+		Text: title + "\n" + strings.Join(lines, "\n"),
+	}, nil
+}
+
+// learnCourses implements `/learn [keyword]`. Without arguments it
+// returns the first page of published courses; with a keyword it
+// filters by substring in the course title. The data-layer query
+// stays cheap by relying on the generic KRecord list endpoint since
+// courses are just KRecords of ktype=lms.course.
+func (d *CommandDispatcher) learnCourses(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.records == nil {
+		return CommandResponse{Text: "lms not configured"}, nil
+	}
+	if req.TenantID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id required"}, nil
+	}
+	filter := record.ListFilter{KType: "lms.course", Limit: 10}
+	recs, err := d.records.List(ctx, req.TenantID, filter)
+	if err != nil {
+		return CommandResponse{}, err
+	}
+	keyword := ""
+	if len(req.Args) >= 1 {
+		keyword = strings.ToLower(req.Args[0])
+	}
+	lines := make([]string, 0, len(recs))
+	for _, r := range recs {
+		var body struct {
+			Title  string `json:"title"`
+			Status string `json:"status"`
+		}
+		_ = json.Unmarshal(r.Data, &body)
+		if keyword != "" && !strings.Contains(strings.ToLower(body.Title), keyword) {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s — %s (%s)", r.ID, body.Title, body.Status))
+	}
+	if len(lines) == 0 {
+		return CommandResponse{Text: "/learn: no matching courses"}, nil
+	}
+	return CommandResponse{Text: "Courses\n" + strings.Join(lines, "\n")}, nil
 }
 
 // formLink returns a deep link the user can share to collect records via
