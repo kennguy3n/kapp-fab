@@ -98,9 +98,45 @@ func (s *PGStore) GetBySlug(ctx context.Context, slug string) (*Tenant, error) {
 	return &t, nil
 }
 
+// List returns all tenants ordered by slug. Intended for control-plane
+// admin tooling; no filtering is applied.
+func (s *PGStore) List(ctx context.Context) ([]Tenant, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at
+		 FROM tenants
+		 ORDER BY slug ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("tenant: list: %w", err)
+	}
+	defer rows.Close()
+
+	// Preallocate an empty (non-nil) slice so the JSON response is `[]`
+	// rather than `null` when no rows exist.
+	out := make([]Tenant, 0)
+	for rows.Next() {
+		var t Tenant
+		if err := rows.Scan(
+			&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status,
+			&t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("tenant: list scan: %w", err)
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("tenant: list rows: %w", err)
+	}
+	return out, nil
+}
+
 // Suspend transitions active → suspended.
 func (s *PGStore) Suspend(ctx context.Context, id uuid.UUID) error {
 	return s.transition(ctx, id, StatusActive, StatusSuspended)
+}
+
+// Activate transitions suspended → active. Use this to un-suspend a tenant.
+func (s *PGStore) Activate(ctx context.Context, id uuid.UUID) error {
+	return s.transition(ctx, id, StatusSuspended, StatusActive)
 }
 
 // Archive transitions suspended → archived.

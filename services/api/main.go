@@ -71,9 +71,11 @@ func run() error {
 
 	// Control-plane tenant lifecycle routes (not tenant-scoped).
 	r.Route("/api/v1/tenants", func(r chi.Router) {
+		r.Get("/", th.list)
 		r.Post("/", th.create)
 		r.Get("/{id}", th.get)
 		r.Post("/{id}/suspend", th.suspend)
+		r.Post("/{id}/activate", th.activate)
 		r.Post("/{id}/archive", th.archive)
 		r.Delete("/{id}", th.delete)
 	})

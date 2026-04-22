@@ -3,3 +3,9 @@
 *.test
 *.out
 .DS_Store
+
+# Node / frontend build artifacts
+node_modules/
+dist/
+storybook-static/
+*.tsbuildinfo

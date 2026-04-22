@@ -2,6 +2,7 @@ import { Route, Routes, Link } from "react-router-dom";
 import { RecordListPage } from "./pages/RecordListPage";
 import { RecordFormPage } from "./pages/RecordFormPage";
 import { LoginPage } from "./pages/LoginPage";
+import { TenantListPage } from "./pages/TenantListPage";
 
 export function App() {
   return (
@@ -18,6 +19,9 @@ export function App() {
             <li>
               <Link to="/records/hr.employee">Employees</Link>
             </li>
+            <li>
+              <Link to="/admin/tenants">Tenants</Link>
+            </li>
           </ul>
         </nav>
       </aside>
@@ -25,6 +29,7 @@ export function App() {
         <Routes>
           <Route path="/" element={<div>Select a KType from the nav.</div>} />
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/admin/tenants" element={<TenantListPage />} />
           <Route path="/records/:ktype" element={<RecordListPage />} />
           <Route path="/records/:ktype/new" element={<RecordFormPage />} />
           <Route path="/records/:ktype/:id" element={<RecordFormPage />} />

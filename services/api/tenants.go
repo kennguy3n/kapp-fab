@@ -65,13 +65,26 @@ func (h *tenantHandlers) get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, t)
 }
 
-// tenantOp abstracts the suspend/archive/delete operations which share the
-// same (ctx, id) → error signature so that runTransition can dispatch to any
-// of them.
+func (h *tenantHandlers) list(w http.ResponseWriter, r *http.Request) {
+	tenants, err := h.svc.List(r.Context())
+	if err != nil {
+		h.writeTenantError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tenants)
+}
+
+// tenantOp abstracts the suspend/activate/archive/delete operations which
+// share the same (ctx, id) → error signature so that runTransition can
+// dispatch to any of them.
 type tenantOp func(ctx context.Context, id uuid.UUID) error
 
 func (h *tenantHandlers) suspend(w http.ResponseWriter, r *http.Request) {
 	h.runTransition(w, r, h.svc.Suspend)
+}
+
+func (h *tenantHandlers) activate(w http.ResponseWriter, r *http.Request) {
+	h.runTransition(w, r, h.svc.Activate)
 }
 
 func (h *tenantHandlers) archive(w http.ResponseWriter, r *http.Request) {
