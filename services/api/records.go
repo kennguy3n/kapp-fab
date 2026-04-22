@@ -134,7 +134,7 @@ func (h *recordHandlers) delete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid record id", http.StatusBadRequest)
 		return
 	}
-	if err := h.store.Delete(r.Context(), t.ID, id); err != nil {
+	if err := h.store.Delete(r.Context(), t.ID, id, actorOrDefault(r.Context())); err != nil {
 		writeRecordError(w, err)
 		return
 	}

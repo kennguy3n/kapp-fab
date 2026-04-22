@@ -284,7 +284,9 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 
 // Delete soft-deletes a record (status=deleted, deleted_at=now()) and emits
 // krecord.deleted. Hard deletes are reserved for tenant purge operations.
-func (s *PGStore) Delete(ctx context.Context, tenantID, id uuid.UUID) error {
+// actorID attributes the deletion in the audit log; pass uuid.Nil to leave
+// actor unattributed.
+func (s *PGStore) Delete(ctx context.Context, tenantID, id, actorID uuid.UUID) error {
 	return platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var existing KRecord
 		err := tx.QueryRow(ctx,
@@ -304,21 +306,41 @@ func (s *PGStore) Delete(ctx context.Context, tenantID, id uuid.UUID) error {
 			}
 			return fmt.Errorf("record: select for delete: %w", err)
 		}
-		if _, err := tx.Exec(ctx,
+
+		var updatedBy *uuid.UUID
+		if actorID != uuid.Nil {
+			a := actorID
+			updatedBy = &a
+		}
+
+		var deleted KRecord
+		err = tx.QueryRow(ctx,
 			`UPDATE krecords
-			    SET status = 'deleted', deleted_at = now(), updated_at = now(), version = version + 1
-			  WHERE tenant_id = $1 AND id = $2`,
-			tenantID, id,
-		); err != nil {
+			    SET status = 'deleted', deleted_at = now(), updated_at = now(),
+			        updated_by = $3, version = version + 1
+			  WHERE tenant_id = $1 AND id = $2
+			  RETURNING id, tenant_id, ktype, ktype_version, data, status, version,
+			            created_by, created_at, updated_by, updated_at, deleted_at`,
+			tenantID, id, updatedBy,
+		).Scan(
+			&deleted.ID, &deleted.TenantID, &deleted.KType, &deleted.KTypeVersion,
+			&deleted.Data, &deleted.Status, &deleted.Version,
+			&deleted.CreatedBy, &deleted.CreatedAt,
+			&deleted.UpdatedBy, &deleted.UpdatedAt, &deleted.DeletedAt,
+		)
+		if err != nil {
 			return fmt.Errorf("record: soft delete: %w", err)
 		}
-		return s.emit(ctx, tx, existing, "krecord.deleted", audit.Entry{
-			TenantID:    existing.TenantID,
+
+		return s.emit(ctx, tx, deleted, "krecord.deleted", audit.Entry{
+			TenantID:    deleted.TenantID,
+			ActorID:     updatedBy,
 			ActorKind:   audit.ActorUser,
-			Action:      fmt.Sprintf("%s.delete", existing.KType),
-			TargetKType: existing.KType,
-			TargetID:    &existing.ID,
+			Action:      fmt.Sprintf("%s.delete", deleted.KType),
+			TargetKType: deleted.KType,
+			TargetID:    &deleted.ID,
 			Before:      existing.Data,
+			After:       deleted.Data,
 		})
 	})
 }

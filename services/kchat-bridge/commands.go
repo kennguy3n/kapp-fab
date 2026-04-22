@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -44,9 +43,11 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 			Text: "Available commands: /list-ktypes, /help",
 		}, nil
 	default:
+		// Unknown commands are a user-facing condition, not a server error;
+		// return 200 with a helpful text so KChat can render it inline.
 		return CommandResponse{
-			Text: fmt.Sprintf("Unknown command: %s", req.Command),
-		}, errors.New("kchat: unknown command")
+			Text: fmt.Sprintf("Unknown command: %s. Try /help.", req.Command),
+		}, nil
 	}
 }
 
