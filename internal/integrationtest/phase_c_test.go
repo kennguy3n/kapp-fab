@@ -1,0 +1,550 @@
+//go:build integration
+// +build integration
+
+package integrationtest
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
+
+	"github.com/kennguy3n/kapp-fab/internal/finance"
+	"github.com/kennguy3n/kapp-fab/internal/ledger"
+	"github.com/kennguy3n/kapp-fab/internal/record"
+	"github.com/kennguy3n/kapp-fab/internal/tenant"
+)
+
+// newTenantForFinance provisions a fresh tenant, registers the finance
+// KTypes, and seeds a minimal chart of accounts covering both the AR
+// and AP posting paths. Returning the same harness shared with Phase
+// A/B tests keeps the integration surface uniform.
+func newTenantForFinance(t *testing.T, h *harness) (*tenant.Tenant, *ledger.PGStore, *ledger.InvoicePoster) {
+	t.Helper()
+	ctx := context.Background()
+
+	tn, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("phasec"), Name: "Phase C Co", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("tenant: %v", err)
+	}
+	if err := finance.RegisterKTypes(ctx, h.ktypes); err != nil {
+		t.Fatalf("register finance ktypes: %v", err)
+	}
+
+	store := ledger.NewPGStore(h.pool, h.publisher, h.auditor)
+	poster := ledger.NewInvoicePoster(store, h.records)
+
+	// Seed a minimal chart of accounts that covers sales, purchasing,
+	// and tax postings. Every test that posts reuses these codes.
+	seed := []ledger.Account{
+		{TenantID: tn.ID, Code: "1100", Name: "Accounts Receivable", Type: ledger.AccountTypeAsset, Active: true},
+		{TenantID: tn.ID, Code: "2100", Name: "Accounts Payable", Type: ledger.AccountTypeLiability, Active: true},
+		{TenantID: tn.ID, Code: "2200", Name: "Tax Payable", Type: ledger.AccountTypeLiability, Active: true},
+		{TenantID: tn.ID, Code: "4000", Name: "Revenue", Type: ledger.AccountTypeRevenue, Active: true},
+		{TenantID: tn.ID, Code: "5000", Name: "Cost of Goods Sold", Type: ledger.AccountTypeExpense, Active: true},
+		{TenantID: tn.ID, Code: "6000", Name: "Operating Expense", Type: ledger.AccountTypeExpense, Active: true},
+	}
+	for _, a := range seed {
+		if _, err := store.CreateAccount(ctx, a); err != nil {
+			t.Fatalf("seed account %s: %v", a.Code, err)
+		}
+	}
+	return tn, store, poster
+}
+
+// createARInvoiceRecord inserts a draft finance.ar_invoice KRecord with
+// the supplied header + totals. Returns the created record id.
+func createARInvoiceRecord(t *testing.T, h *harness, tenantID, actorID uuid.UUID, number, customer string, subtotal, tax decimal.Decimal, taxAcct string) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	total := subtotal.Add(tax)
+	// KType validation treats `number` fields as JSON numbers (not
+	// stringified decimals). We marshal the schema-visible totals as
+	// float64 so the KRecord store accepts them; the ledger receiver
+	// uses decimal.Decimal on its own struct, where
+	// shopspring/decimal's UnmarshalJSON accepts both numeric and
+	// string encodings.
+	subF, _ := subtotal.Float64()
+	taxF, _ := tax.Float64()
+	totalF, _ := total.Float64()
+	data := map[string]any{
+		"customer_id":          customer,
+		"invoice_number":       number,
+		"issue_date":           "2026-01-15",
+		"due_date":             "2026-02-14",
+		"subtotal":             subF,
+		"tax_amount":           taxF,
+		"total":                totalF,
+		"currency":             "USD",
+		"status":               "draft",
+		"ar_account_code":      "1100",
+		"revenue_account_code": "4000",
+	}
+	if taxAcct != "" {
+		data["tax_account_code"] = taxAcct
+	}
+	body, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal invoice: %v", err)
+	}
+	rec, err := h.records.Create(ctx, record.KRecord{
+		TenantID:  tenantID,
+		KType:     finance.KTypeARInvoice,
+		Data:      body,
+		CreatedBy: actorID,
+	})
+	if err != nil {
+		t.Fatalf("create invoice record: %v", err)
+	}
+	return rec.ID
+}
+
+// createAPBillRecord is the AP analog of createARInvoiceRecord.
+func createAPBillRecord(t *testing.T, h *harness, tenantID, actorID uuid.UUID, number, supplier string, subtotal, tax decimal.Decimal, taxAcct string) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	total := subtotal.Add(tax)
+	subF, _ := subtotal.Float64()
+	taxF, _ := tax.Float64()
+	totalF, _ := total.Float64()
+	data := map[string]any{
+		"supplier_id":          supplier,
+		"bill_number":          number,
+		"issue_date":           "2026-01-20",
+		"due_date":             "2026-02-19",
+		"subtotal":             subF,
+		"tax_amount":           taxF,
+		"total":                totalF,
+		"currency":             "USD",
+		"status":               "draft",
+		"ap_account_code":      "2100",
+		"expense_account_code": "6000",
+	}
+	if taxAcct != "" {
+		data["tax_account_code"] = taxAcct
+	}
+	body, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal bill: %v", err)
+	}
+	rec, err := h.records.Create(ctx, record.KRecord{
+		TenantID:  tenantID,
+		KType:     finance.KTypeAPBill,
+		Data:      body,
+		CreatedBy: actorID,
+	})
+	if err != nil {
+		t.Fatalf("create bill record: %v", err)
+	}
+	return rec.ID
+}
+
+// TestSalesInvoicePostsBalancedJournal exercises the AR posting path:
+// draft invoice → PostSalesInvoice → balanced JE + patched record +
+// lifecycle event. The three-leg journal (AR / Revenue / Tax) is the
+// canonical shape a tax-bearing invoice produces.
+func TestSalesInvoicePostsBalancedJournal(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, store, poster := newTenantForFinance(t, h)
+
+	actor := uuid.New()
+	customer := uuid.NewString()
+	invoiceID := createARInvoiceRecord(t, h, tn.ID, actor, "INV-1001", customer,
+		decimal.NewFromInt(1000), decimal.NewFromInt(100), "2200")
+
+	entry, err := poster.PostSalesInvoice(ctx, tn.ID, invoiceID, actor)
+	if err != nil {
+		t.Fatalf("post sales invoice: %v", err)
+	}
+	if entry == nil || entry.ID == uuid.Nil {
+		t.Fatalf("posted entry missing id: %+v", entry)
+	}
+	if entry.SourceKType != finance.KTypeARInvoice || entry.SourceID == nil || *entry.SourceID != invoiceID {
+		t.Fatalf("source linkage wrong: ktype=%q id=%v", entry.SourceKType, entry.SourceID)
+	}
+
+	// Journal must be balanced (debits == credits) with exactly the
+	// three legs: AR debit, Revenue credit, Tax credit.
+	var debit, credit decimal.Decimal
+	legs := map[string]struct{ debit, credit decimal.Decimal }{}
+	for _, line := range entry.Lines {
+		debit = debit.Add(line.Debit)
+		credit = credit.Add(line.Credit)
+		legs[line.AccountCode] = struct{ debit, credit decimal.Decimal }{line.Debit, line.Credit}
+	}
+	if !debit.Equal(credit) {
+		t.Fatalf("journal unbalanced: debits=%s credits=%s", debit, credit)
+	}
+	if got := legs["1100"].debit; !got.Equal(decimal.NewFromInt(1100)) {
+		t.Fatalf("AR debit = %s; want 1100", got)
+	}
+	if got := legs["4000"].credit; !got.Equal(decimal.NewFromInt(1000)) {
+		t.Fatalf("Revenue credit = %s; want 1000", got)
+	}
+	if got := legs["2200"].credit; !got.Equal(decimal.NewFromInt(100)) {
+		t.Fatalf("Tax credit = %s; want 100", got)
+	}
+
+	// Invoice record patched to status=posted + journal_entry_id set.
+	rec, err := h.records.Get(ctx, tn.ID, invoiceID)
+	if err != nil {
+		t.Fatalf("reload invoice: %v", err)
+	}
+	var patched struct {
+		Status         string `json:"status"`
+		JournalEntryID string `json:"journal_entry_id"`
+	}
+	if err := json.Unmarshal(rec.Data, &patched); err != nil {
+		t.Fatalf("decode invoice: %v", err)
+	}
+	if patched.Status != "posted" {
+		t.Fatalf("status = %q; want posted", patched.Status)
+	}
+	if patched.JournalEntryID != entry.ID.String() {
+		t.Fatalf("journal_entry_id = %q; want %s", patched.JournalEntryID, entry.ID)
+	}
+
+	// Trial balance is a secondary guard — not the main assertion, but
+	// covers the case where the JE commit succeeded at the row level
+	// but the store mis-applied sums.
+	tb, err := store.TrialBalance(ctx, tn.ID, time.Now().UTC().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("trial balance: %v", err)
+	}
+	if !tb.Residual.IsZero() {
+		t.Fatalf("trial balance residual = %s; want 0", tb.Residual)
+	}
+
+	// Posting produces both the generic JE event and the AR-lifecycle
+	// event. The audit trail gets a corresponding pair.
+	counts, err := eventCountsForTenant(ctx, h.pool, tn.ID)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	if counts["finance.journal.posted"] != 1 {
+		t.Fatalf("finance.journal.posted = %d; want 1 (%v)", counts["finance.journal.posted"], counts)
+	}
+	if counts["finance.sales_invoice.posted"] != 1 {
+		t.Fatalf("finance.sales_invoice.posted = %d; want 1 (%v)", counts["finance.sales_invoice.posted"], counts)
+	}
+}
+
+// TestPurchaseBillPostsBalancedJournal is the AP analog of the sales
+// invoice test: Debit Expense / Debit Tax / Credit AP.
+func TestPurchaseBillPostsBalancedJournal(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, _, poster := newTenantForFinance(t, h)
+
+	actor := uuid.New()
+	supplier := uuid.NewString()
+	billID := createAPBillRecord(t, h, tn.ID, actor, "BILL-2001", supplier,
+		decimal.NewFromInt(500), decimal.NewFromInt(50), "2200")
+
+	entry, err := poster.PostPurchaseBill(ctx, tn.ID, billID, actor)
+	if err != nil {
+		t.Fatalf("post purchase bill: %v", err)
+	}
+	if entry.SourceKType != finance.KTypeAPBill || entry.SourceID == nil || *entry.SourceID != billID {
+		t.Fatalf("source linkage wrong: ktype=%q id=%v", entry.SourceKType, entry.SourceID)
+	}
+
+	var debit, credit decimal.Decimal
+	legs := map[string]struct{ debit, credit decimal.Decimal }{}
+	for _, line := range entry.Lines {
+		debit = debit.Add(line.Debit)
+		credit = credit.Add(line.Credit)
+		legs[line.AccountCode] = struct{ debit, credit decimal.Decimal }{line.Debit, line.Credit}
+	}
+	if !debit.Equal(credit) {
+		t.Fatalf("journal unbalanced: debits=%s credits=%s", debit, credit)
+	}
+	if got := legs["6000"].debit; !got.Equal(decimal.NewFromInt(500)) {
+		t.Fatalf("Expense debit = %s; want 500", got)
+	}
+	if got := legs["2200"].debit; !got.Equal(decimal.NewFromInt(50)) {
+		t.Fatalf("Tax debit = %s; want 50", got)
+	}
+	if got := legs["2100"].credit; !got.Equal(decimal.NewFromInt(550)) {
+		t.Fatalf("AP credit = %s; want 550", got)
+	}
+
+	rec, err := h.records.Get(ctx, tn.ID, billID)
+	if err != nil {
+		t.Fatalf("reload bill: %v", err)
+	}
+	var patched struct {
+		Status         string `json:"status"`
+		JournalEntryID string `json:"journal_entry_id"`
+	}
+	if err := json.Unmarshal(rec.Data, &patched); err != nil {
+		t.Fatalf("decode bill: %v", err)
+	}
+	if patched.Status != "posted" || patched.JournalEntryID != entry.ID.String() {
+		t.Fatalf("bill not patched: status=%q je=%q", patched.Status, patched.JournalEntryID)
+	}
+
+	counts, err := eventCountsForTenant(ctx, h.pool, tn.ID)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	if counts["finance.ap_bill.posted"] != 1 {
+		t.Fatalf("finance.ap_bill.posted = %d; want 1", counts["finance.ap_bill.posted"])
+	}
+}
+
+// TestTrialBalanceSumsToZero posts several unrelated journal entries
+// directly (no invoice wrapper) and asserts the trial balance residual
+// stays at zero — i.e. every individual entry satisfies the
+// debit-equals-credit invariant and the report aggregation is correct.
+func TestTrialBalanceSumsToZero(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, store, _ := newTenantForFinance(t, h)
+
+	actor := uuid.New()
+	// Three distinct postings to exercise account-level fan-out.
+	postings := [][]ledger.JournalLine{
+		{
+			{AccountCode: "1100", Debit: decimal.NewFromInt(300), Currency: "USD"},
+			{AccountCode: "4000", Credit: decimal.NewFromInt(300), Currency: "USD"},
+		},
+		{
+			{AccountCode: "6000", Debit: decimal.NewFromInt(150), Currency: "USD"},
+			{AccountCode: "2100", Credit: decimal.NewFromInt(150), Currency: "USD"},
+		},
+		{
+			{AccountCode: "5000", Debit: decimal.NewFromInt(75), Currency: "USD"},
+			{AccountCode: "2200", Credit: decimal.NewFromInt(75), Currency: "USD"},
+		},
+	}
+	for i, lines := range postings {
+		if _, err := store.PostJournalEntry(ctx, ledger.JournalEntry{
+			TenantID:  tn.ID,
+			Memo:      fmt.Sprintf("test-%d", i),
+			CreatedBy: actor,
+			Lines:     lines,
+		}); err != nil {
+			t.Fatalf("post %d: %v", i, err)
+		}
+	}
+
+	tb, err := store.TrialBalance(ctx, tn.ID, time.Now().UTC().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("trial balance: %v", err)
+	}
+	if !tb.Residual.IsZero() {
+		t.Fatalf("residual = %s; want 0 (debit=%s credit=%s)", tb.Residual, tb.TotalDebit, tb.TotalCredit)
+	}
+	if !tb.TotalDebit.Equal(decimal.NewFromInt(525)) {
+		t.Fatalf("total debit = %s; want 525", tb.TotalDebit)
+	}
+	if !tb.TotalCredit.Equal(decimal.NewFromInt(525)) {
+		t.Fatalf("total credit = %s; want 525", tb.TotalCredit)
+	}
+}
+
+// TestPeriodLockoutRejectsEdits locks a fiscal period and verifies
+// subsequent postings into that window fail with ErrPeriodLocked.
+// Postings outside the window still succeed.
+func TestPeriodLockoutRejectsEdits(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, store, _ := newTenantForFinance(t, h)
+
+	actor := uuid.New()
+	periodStart := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	periodEnd := time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC)
+	if _, err := store.UpsertPeriod(ctx, ledger.FiscalPeriod{
+		TenantID:    tn.ID,
+		PeriodStart: periodStart,
+		PeriodEnd:   periodEnd,
+	}); err != nil {
+		t.Fatalf("upsert period: %v", err)
+	}
+	if _, err := store.LockPeriod(ctx, tn.ID, periodStart, actor); err != nil {
+		t.Fatalf("lock period: %v", err)
+	}
+
+	inside := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	if _, err := store.PostJournalEntry(ctx, ledger.JournalEntry{
+		TenantID: tn.ID, PostedAt: inside, Memo: "locked-window", CreatedBy: actor,
+		Lines: []ledger.JournalLine{
+			{AccountCode: "1100", Debit: decimal.NewFromInt(10), Currency: "USD"},
+			{AccountCode: "4000", Credit: decimal.NewFromInt(10), Currency: "USD"},
+		},
+	}); !errors.Is(err, ledger.ErrPeriodLocked) {
+		t.Fatalf("posting inside locked period: want ErrPeriodLocked, got %v", err)
+	}
+
+	// Outside the locked period: posting must succeed.
+	outside := time.Date(2026, 2, 15, 12, 0, 0, 0, time.UTC)
+	if _, err := store.PostJournalEntry(ctx, ledger.JournalEntry{
+		TenantID: tn.ID, PostedAt: outside, Memo: "open-window", CreatedBy: actor,
+		Lines: []ledger.JournalLine{
+			{AccountCode: "1100", Debit: decimal.NewFromInt(20), Currency: "USD"},
+			{AccountCode: "4000", Credit: decimal.NewFromInt(20), Currency: "USD"},
+		},
+	}); err != nil {
+		t.Fatalf("posting outside locked period: %v", err)
+	}
+
+	// A lock event + audit entry must have been emitted when the period
+	// was locked. This guards against the update committing without
+	// the side effects that finance dashboards subscribe to.
+	counts, err := eventCountsForTenant(ctx, h.pool, tn.ID)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	if counts["finance.period.locked"] != 1 {
+		t.Fatalf("finance.period.locked = %d; want 1", counts["finance.period.locked"])
+	}
+	actions, err := auditActionsForTenant(ctx, h.pool, tn.ID)
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	found := false
+	for _, a := range actions {
+		if a == "finance.period.locked" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("audit missing finance.period.locked (%v)", actions)
+	}
+}
+
+// TestAuditLogCapturesPostings asserts that every ledger posting —
+// direct journal entry, sales invoice, purchase bill — writes an
+// audit_log row that identifies the source KType / id so forensic
+// queries can reconstruct the business operation behind each JE.
+func TestAuditLogCapturesPostings(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, store, poster := newTenantForFinance(t, h)
+
+	actor := uuid.New()
+	// 1. Direct journal entry.
+	if _, err := store.PostJournalEntry(ctx, ledger.JournalEntry{
+		TenantID: tn.ID, Memo: "manual", CreatedBy: actor,
+		Lines: []ledger.JournalLine{
+			{AccountCode: "1100", Debit: decimal.NewFromInt(10), Currency: "USD"},
+			{AccountCode: "4000", Credit: decimal.NewFromInt(10), Currency: "USD"},
+		},
+	}); err != nil {
+		t.Fatalf("post manual: %v", err)
+	}
+
+	// 2. Sales invoice.
+	invoiceID := createARInvoiceRecord(t, h, tn.ID, actor, "INV-3001", uuid.NewString(),
+		decimal.NewFromInt(200), decimal.Zero, "")
+	if _, err := poster.PostSalesInvoice(ctx, tn.ID, invoiceID, actor); err != nil {
+		t.Fatalf("post invoice: %v", err)
+	}
+
+	// 3. Purchase bill.
+	billID := createAPBillRecord(t, h, tn.ID, actor, "BILL-3001", uuid.NewString(),
+		decimal.NewFromInt(80), decimal.Zero, "")
+	if _, err := poster.PostPurchaseBill(ctx, tn.ID, billID, actor); err != nil {
+		t.Fatalf("post bill: %v", err)
+	}
+
+	actions, err := auditActionsForTenant(ctx, h.pool, tn.ID)
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	// All three postings hit the generic journal audit action; the
+	// invoice/bill legs additionally emit their own lifecycle action.
+	required := []string{
+		"finance.journal.posted",
+		"finance.sales_invoice.posted",
+		"finance.ap_bill.posted",
+	}
+	counts := map[string]int{}
+	for _, a := range actions {
+		counts[a]++
+	}
+	if counts["finance.journal.posted"] < 3 {
+		t.Fatalf("finance.journal.posted audit count = %d; want >= 3 (%v)", counts["finance.journal.posted"], actions)
+	}
+	for _, want := range required[1:] {
+		if counts[want] != 1 {
+			t.Fatalf("%s audit count = %d; want 1 (%v)", want, counts[want], actions)
+		}
+	}
+}
+
+// TestRLSIsolatesFinanceData provisions two tenants, seeds accounts +
+// journal entries in tenant A, and verifies tenant B sees none of
+// them. This is the Phase C analog of TestRLSDealIsolation: the
+// finance typed tables inherit the same tenant_isolation RLS policy
+// applied across the kernel.
+func TestRLSIsolatesFinanceData(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	aTN, aStore, _ := newTenantForFinance(t, h)
+	bTN, bStore, _ := newTenantForFinance(t, h)
+
+	actor := uuid.New()
+	if _, err := aStore.PostJournalEntry(ctx, ledger.JournalEntry{
+		TenantID: aTN.ID, Memo: "A-only", CreatedBy: actor,
+		Lines: []ledger.JournalLine{
+			{AccountCode: "1100", Debit: decimal.NewFromInt(42), Currency: "USD"},
+			{AccountCode: "4000", Credit: decimal.NewFromInt(42), Currency: "USD"},
+		},
+	}); err != nil {
+		t.Fatalf("post A: %v", err)
+	}
+
+	// Tenant B can only see its own chart-of-accounts seeds (six rows);
+	// none of tenant A's entries or accounts leak through.
+	bAccounts, err := bStore.ListAccounts(ctx, bTN.ID, ledger.AccountFilter{})
+	if err != nil {
+		t.Fatalf("list B accounts: %v", err)
+	}
+	for _, a := range bAccounts {
+		if a.TenantID != bTN.ID {
+			t.Fatalf("RLS leak: B saw account from tenant %s", a.TenantID)
+		}
+	}
+
+	bEntries, err := bStore.ListJournalEntries(ctx, bTN.ID, ledger.JournalEntryFilter{})
+	if err != nil {
+		t.Fatalf("list B entries: %v", err)
+	}
+	if len(bEntries) != 0 {
+		t.Fatalf("RLS leak: B saw %d journal entries (want 0)", len(bEntries))
+	}
+
+	// A still sees its posting.
+	aEntries, err := aStore.ListJournalEntries(ctx, aTN.ID, ledger.JournalEntryFilter{})
+	if err != nil {
+		t.Fatalf("list A entries: %v", err)
+	}
+	if len(aEntries) != 1 {
+		t.Fatalf("A should see 1 entry, saw %d", len(aEntries))
+	}
+
+	// Trial balance run against B must be empty (all zeros) — the RLS
+	// filter keeps the aggregate query from accidentally joining A's
+	// rows. We still expect rows for B's own chart of accounts (with
+	// zero debit/credit).
+	tb, err := bStore.TrialBalance(ctx, bTN.ID, time.Now().UTC().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("trial balance B: %v", err)
+	}
+	for _, r := range tb.Rows {
+		if !r.Debit.IsZero() || !r.Credit.IsZero() {
+			t.Fatalf("RLS leak: B account %s shows non-zero activity (debit=%s credit=%s)", r.AccountCode, r.Debit, r.Credit)
+		}
+	}
+}

@@ -334,7 +334,7 @@ func (h *financeHandlers) trialBalance(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tenant context missing", http.StatusInternalServerError)
 		return
 	}
-	asOf := parseDateParam(r.URL.Query().Get("as_of"), time.Now().UTC())
+	asOf := parseEndOfDayParam(r.URL.Query().Get("as_of"), time.Now().UTC())
 	report, err := h.store.TrialBalance(r.Context(), t.ID, asOf)
 	if err != nil {
 		writeFinanceError(w, err)
@@ -349,7 +349,7 @@ func (h *financeHandlers) arAging(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tenant context missing", http.StatusInternalServerError)
 		return
 	}
-	asOf := parseDateParam(r.URL.Query().Get("as_of"), time.Now().UTC())
+	asOf := parseEndOfDayParam(r.URL.Query().Get("as_of"), time.Now().UTC())
 	report, err := h.store.ARAgingReport(r.Context(), t.ID, asOf)
 	if err != nil {
 		writeFinanceError(w, err)
@@ -364,7 +364,7 @@ func (h *financeHandlers) apAging(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tenant context missing", http.StatusInternalServerError)
 		return
 	}
-	asOf := parseDateParam(r.URL.Query().Get("as_of"), time.Now().UTC())
+	asOf := parseEndOfDayParam(r.URL.Query().Get("as_of"), time.Now().UTC())
 	report, err := h.store.APAgingReport(r.Context(), t.ID, asOf)
 	if err != nil {
 		writeFinanceError(w, err)
@@ -395,6 +395,9 @@ func (h *financeHandlers) incomeStatement(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid to", http.StatusBadRequest)
 		return
 	}
+	// Bump `to` to end-of-day so BETWEEN includes entries posted later
+	// on the same calendar date (parse returns midnight UTC).
+	to = endOfDayUTC(to)
 	report, err := h.store.IncomeStatement(r.Context(), t.ID, from, to)
 	if err != nil {
 		writeFinanceError(w, err)
@@ -420,6 +423,33 @@ func parseDateParam(raw string, fallback time.Time) time.Time {
 		return t.UTC()
 	}
 	return fallback
+}
+
+// parseEndOfDayParam is the inclusive-upper-bound variant of
+// parseDateParam used by "as_of" style filters. A bare YYYY-MM-DD
+// parses to midnight UTC, which would exclude entries posted later the
+// same day from a `posted_at <= as_of` predicate; bumping the bound to
+// 23:59:59.999999999 UTC makes the comparison calendar-date-inclusive.
+// RFC3339 values carry an explicit timestamp and are used verbatim.
+func parseEndOfDayParam(raw string, fallback time.Time) time.Time {
+	if raw == "" {
+		return fallback
+	}
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		return endOfDayUTC(t)
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t.UTC()
+	}
+	return fallback
+}
+
+// endOfDayUTC returns the last representable instant of the supplied
+// day in UTC (23:59:59.999999999). Used for inclusive date ranges in
+// reports.
+func endOfDayUTC(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, int(time.Second-time.Nanosecond), time.UTC)
 }
 
 // writeFinanceError translates ledger sentinel errors into the HTTP
