@@ -2,15 +2,21 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/kapp-fab/internal/crm"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
+	"github.com/kennguy3n/kapp-fab/internal/record"
+	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
 
-// CommandRequest is the Phase A slash-command payload. KChat will POST this
+// CommandRequest is the Phase A+B slash-command payload. KChat POSTs this
 // envelope to /kchat/commands when a user invokes `/kapp ...`.
 type CommandRequest struct {
 	TenantID uuid.UUID `json:"tenant_id"`
@@ -26,25 +32,52 @@ type CommandResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
-// CommandDispatcher routes slash commands to concrete handlers. For Phase A
-// we only handle /list-ktypes which enumerates the registered KType names.
+// CommandDispatcher routes slash commands to concrete handlers. Phase B
+// extends the Phase A surface with record-creating and workflow-driving
+// commands; the dispatcher is the single funnel through which every
+// KChat user action reaches the platform services.
 type CommandDispatcher struct {
-	registry *ktype.PGRegistry
+	registry  *ktype.PGRegistry
+	records   *record.PGStore
+	workflow  *workflow.Engine
+	approvals *workflow.Engine
+	cards     *CardRenderer
+	formsBase string
 }
 
-// Dispatch runs the command and returns a response suitable for the caller
-// to send straight back to KChat.
+// Dispatch runs the command and returns a response. Unknown commands
+// are a user-facing condition — the response is still 200 so KChat can
+// render the error inline, consistent with Slack/Teams conventions.
 func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (CommandResponse, error) {
-	switch strings.ToLower(req.Command) {
+	cmd := strings.ToLower(strings.TrimPrefix(req.Command, "/"))
+	switch cmd {
 	case "list-ktypes", "ktypes":
 		return d.listKTypes(ctx)
+	case "lead":
+		return d.createRecord(ctx, req, crm.KTypeLead, leadFromArgs(req.Args, req.UserID))
+	case "contact":
+		return d.createRecord(ctx, req, crm.KTypeContact, contactFromArgs(req.Args, req.UserID))
+	case "deal":
+		data, err := dealFromArgs(req.Args, req.UserID)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/deal: %v", err)}, nil
+		}
+		return d.createRecord(ctx, req, crm.KTypeDeal, data)
+	case "task":
+		data, err := taskFromArgs(req.Args, req.UserID)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/task: %v", err)}, nil
+		}
+		return d.createRecord(ctx, req, crm.KTypeTask, data)
+	case "approve":
+		return d.decideApproval(ctx, req)
+	case "form":
+		return d.formLink(req)
 	case "help":
 		return CommandResponse{
-			Text: "Available commands: /list-ktypes, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /approve, /form, /help",
 		}, nil
 	default:
-		// Unknown commands are a user-facing condition, not a server error;
-		// return 200 with a helpful text so KChat can render it inline.
 		return CommandResponse{
 			Text: fmt.Sprintf("Unknown command: %s. Try /help.", req.Command),
 		}, nil
@@ -64,4 +97,191 @@ func (d *CommandDispatcher) listKTypes(ctx context.Context) (CommandResponse, er
 		names = append(names, fmt.Sprintf("%s@v%d", kt.Name, kt.Version))
 	}
 	return CommandResponse{Text: "Registered KTypes: " + strings.Join(names, ", ")}, nil
+}
+
+// createRecord is the common path for /lead, /contact, /deal, /task. It
+// validates tenant + user context, creates the record, and renders the
+// KType's card as the response. Record creation triggers the normal
+// event + audit pipeline through record.PGStore.Create; no extra work
+// is required here.
+func (d *CommandDispatcher) createRecord(
+	ctx context.Context,
+	req CommandRequest,
+	ktypeName string,
+	data map[string]any,
+) (CommandResponse, error) {
+	if req.TenantID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id required"}, nil
+	}
+	if req.UserID == uuid.Nil {
+		return CommandResponse{Text: "user_id required"}, nil
+	}
+	if d.records == nil {
+		return CommandResponse{Text: "record store not configured"}, nil
+	}
+	dataJSON, err := json.Marshal(data)
+	if err != nil {
+		return CommandResponse{}, fmt.Errorf("marshal data: %w", err)
+	}
+	kt, err := d.registry.Get(ctx, ktypeName, 0)
+	if err != nil {
+		return CommandResponse{Text: fmt.Sprintf("unknown ktype %s — has your tenant been set up?", ktypeName)}, nil
+	}
+	created, err := d.records.Create(ctx, record.KRecord{
+		TenantID:     req.TenantID,
+		KType:        ktypeName,
+		KTypeVersion: kt.Version,
+		Data:         dataJSON,
+		CreatedBy:    req.UserID,
+	})
+	if err != nil {
+		var verrs ktype.ValidationErrors
+		if errors.As(err, &verrs) {
+			return CommandResponse{Text: fmt.Sprintf("%s validation failed: %v", ktypeName, verrs)}, nil
+		}
+		return CommandResponse{}, fmt.Errorf("create %s: %w", ktypeName, err)
+	}
+	var cardData map[string]any
+	if err := json.Unmarshal(created.Data, &cardData); err != nil {
+		return CommandResponse{Text: fmt.Sprintf("%s created: %s", ktypeName, created.ID)}, nil
+	}
+	card, err := d.cards.RenderCard(ctx, ktypeName, cardData)
+	if err != nil {
+		return CommandResponse{Text: fmt.Sprintf("%s created: %s", ktypeName, created.ID)}, nil
+	}
+	return CommandResponse{
+		Text: fmt.Sprintf("Created %s %s", ktypeName, created.ID),
+		Card: &card,
+	}, nil
+}
+
+// decideApproval implements `/approve <id> [approve|reject]`. A missing
+// decision defaults to approve to match the common case (an approver
+// typing the command is almost always saying yes).
+func (d *CommandDispatcher) decideApproval(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.approvals == nil {
+		return CommandResponse{Text: "approvals engine not configured"}, nil
+	}
+	if len(req.Args) < 1 {
+		return CommandResponse{Text: "Usage: /approve <approval_id> [approve|reject]"}, nil
+	}
+	approvalID, err := uuid.Parse(req.Args[0])
+	if err != nil {
+		return CommandResponse{Text: "invalid approval id"}, nil
+	}
+	decision := workflow.DecisionApprove
+	if len(req.Args) >= 2 {
+		switch strings.ToLower(req.Args[1]) {
+		case "approve", "yes", "ok":
+			decision = workflow.DecisionApprove
+		case "reject", "no", "deny":
+			decision = workflow.DecisionReject
+		default:
+			return CommandResponse{Text: "decision must be approve or reject"}, nil
+		}
+	}
+	approval, err := d.approvals.Decide(ctx, req.TenantID, approvalID, decision, req.UserID)
+	if err != nil {
+		return CommandResponse{Text: fmt.Sprintf("/approve failed: %v", err)}, nil
+	}
+	return CommandResponse{
+		Text: fmt.Sprintf("Approval %s recorded: %s (state=%s)",
+			approval.ID, decision, approval.State),
+	}, nil
+}
+
+// formLink returns a deep link the user can share to collect records via
+// the public form KApp.
+func (d *CommandDispatcher) formLink(req CommandRequest) (CommandResponse, error) {
+	if len(req.Args) < 1 {
+		return CommandResponse{Text: "Usage: /form <ktype>"}, nil
+	}
+	ktypeName := req.Args[0]
+	base := strings.TrimRight(d.formsBase, "/")
+	if base == "" {
+		base = "/forms"
+	}
+	return CommandResponse{
+		Text: fmt.Sprintf("Share this link to collect %s: %s/new/%s?tenant=%s",
+			ktypeName, base, ktypeName, req.TenantID),
+	}, nil
+}
+
+// ---- argument parsers ----------------------------------------------------
+
+// Argument parsing for Phase B slash commands is deliberately simple:
+// the first token becomes the primary field (name/title/subject) and
+// trailing tokens with known prefixes are pulled out. Richer parsing
+// lives in composer actions where the full message body is available.
+
+func leadFromArgs(args []string, owner uuid.UUID) map[string]any {
+	name := strings.Join(args, " ")
+	return map[string]any{
+		"name":   name,
+		"status": "new",
+		"owner":  owner.String(),
+	}
+}
+
+func contactFromArgs(args []string, owner uuid.UUID) map[string]any {
+	name := strings.Join(args, " ")
+	return map[string]any{
+		"name":  name,
+		"owner": owner.String(),
+	}
+}
+
+// dealFromArgs expects `[name...] [amount]` — the trailing numeric token
+// is parsed as amount if present.
+func dealFromArgs(args []string, owner uuid.UUID) (map[string]any, error) {
+	if len(args) == 0 {
+		return nil, errors.New("usage: /deal <name> [amount]")
+	}
+	name := args
+	amount := 0.0
+	if last := args[len(args)-1]; last != "" {
+		if v, err := strconv.ParseFloat(last, 64); err == nil {
+			amount = v
+			name = args[:len(args)-1]
+		}
+	}
+	if len(name) == 0 {
+		return nil, errors.New("deal name required")
+	}
+	data := map[string]any{
+		"name":     strings.Join(name, " "),
+		"stage":    "qualification",
+		"currency": "USD",
+		"owner":    owner.String(),
+	}
+	if amount > 0 {
+		data["amount"] = amount
+	}
+	return data, nil
+}
+
+// taskFromArgs expects `[title...] @[assignee_id]`. KChat resolves
+// @mentions to UUIDs before dispatch, so the token arrives as
+// `@<uuid>`. Falls back to self-assignment.
+func taskFromArgs(args []string, requester uuid.UUID) (map[string]any, error) {
+	if len(args) == 0 {
+		return nil, errors.New("usage: /task <title> [@assignee]")
+	}
+	titleParts := args
+	assignee := requester
+	if last := args[len(args)-1]; strings.HasPrefix(last, "@") {
+		if id, err := uuid.Parse(strings.TrimPrefix(last, "@")); err == nil {
+			assignee = id
+			titleParts = args[:len(args)-1]
+		}
+	}
+	title := strings.Join(titleParts, " ")
+	if title == "" {
+		return nil, errors.New("task title required")
+	}
+	return map[string]any{
+		"title":    title,
+		"status":   "open",
+		"assignee": assignee.String(),
+	}, nil
 }

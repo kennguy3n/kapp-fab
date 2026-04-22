@@ -57,7 +57,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("connect nats: %w", err)
 	}
-	defer nc.Drain()
+	defer func() {
+		if err := nc.Drain(); err != nil {
+			log.Printf("worker: nats drain: %v", err)
+		}
+	}()
 
 	publisher := events.NewPGPublisher(pool)
 

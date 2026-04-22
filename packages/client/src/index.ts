@@ -17,6 +17,26 @@ export interface FieldSpec {
   default?: unknown;
 }
 
+export interface KanbanView {
+  group_by: string;
+  card_title?: string;
+  card_subtitle?: string;
+}
+
+export interface WorkflowTransition {
+  from: string[];
+  to: string;
+  action: string;
+  post?: string[];
+}
+
+export interface WorkflowDefinition {
+  name: string;
+  initial_state: string;
+  states: string[];
+  transitions: WorkflowTransition[];
+}
+
 export interface KTypeSchema {
   name: string;
   version: number;
@@ -24,7 +44,10 @@ export interface KTypeSchema {
   views?: {
     list?: { columns?: string[]; default_sort?: string };
     form?: { sections?: Array<{ title?: string; fields: string[] }> };
+    kanban?: KanbanView;
   };
+  workflow?: WorkflowDefinition;
+  cards?: { summary?: string };
 }
 
 export interface KType {
@@ -176,4 +199,76 @@ export class ApiClient {
       }
     );
   }
+
+  // --- Workflow ----------------------------------------------------------
+
+  /** Drives a workflow transition on a record. Callers pick the action
+   *  name from the KType's workflow.transitions list.
+   */
+  runAction(
+    ktype: string,
+    id: string,
+    action: string
+  ): Promise<{ record: KRecord; run: WorkflowRun }> {
+    return this.request(
+      `/records/${encodeURIComponent(ktype)}/${encodeURIComponent(id)}/actions/${encodeURIComponent(action)}`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({}),
+      }
+    );
+  }
+
+  // --- Forms ------------------------------------------------------------
+
+  /** Public (unauthenticated) fetch of a form's schema + config by id. */
+  getPublicForm(id: string): Promise<{ form: Form; schema: KTypeSchema }> {
+    return this.request(`/forms/${encodeURIComponent(id)}`);
+  }
+
+  submitPublicForm(
+    id: string,
+    data: Record<string, unknown>
+  ): Promise<KRecord> {
+    return this.request(`/forms/${encodeURIComponent(id)}/submit`, {
+      method: "POST",
+      body: JSON.stringify({ data }),
+    });
+  }
+}
+
+// --- Auxiliary types ---------------------------------------------------
+
+export interface WorkflowRun {
+  id: string;
+  tenant_id: string;
+  workflow: string;
+  record_id: string;
+  state: string;
+  history: Array<{
+    from_state: string;
+    to_state: string;
+    action: string;
+    actor_id: string;
+    timestamp: string;
+  }>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Form {
+  id: string;
+  tenant_id: string;
+  ktype: string;
+  config: {
+    allow_anonymous?: boolean;
+    require_auth?: boolean;
+    redirect_url?: string;
+    title?: string;
+    description?: string;
+  };
+  status: string;
+  created_at: string;
+  updated_at: string;
 }

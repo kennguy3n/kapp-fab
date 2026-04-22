@@ -8,6 +8,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 )
 
 // PGLogger is the PostgreSQL-backed Logger. Writes participate in the
@@ -22,6 +24,22 @@ type PGLogger struct {
 // use it directly.
 func NewPGLogger(pool *pgxpool.Pool) *PGLogger {
 	return &PGLogger{pool: pool}
+}
+
+// Log writes an entry outside the caller's transaction. Use this for
+// bookkeeping that must persist regardless of an upstream rollback —
+// e.g. agent tool invocation logs, where we want an attributable
+// breadcrumb even when the underlying tool call fails. The write runs
+// under SET LOCAL app.tenant_id = entry.TenantID so the audit_log RLS
+// policy accepts it even though this pathway doesn't participate in
+// the caller's own transaction.
+func (l *PGLogger) Log(ctx context.Context, entry Entry) error {
+	if entry.TenantID == uuid.Nil {
+		return fmt.Errorf("audit: tenant id required")
+	}
+	return dbutil.WithTenantTx(ctx, l.pool, entry.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return l.LogTx(ctx, tx, entry)
+	})
 }
 
 // LogTx inserts the entry inside the caller's transaction.

@@ -19,10 +19,12 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/forms"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
+	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
 
 func main() {
@@ -46,18 +48,38 @@ func run() error {
 	}
 	defer pool.Close()
 
+	// Optional admin pool used for cross-tenant control-plane reads
+	// (tenant → user lookups, public form resolution). Nil when
+	// ADMIN_DB_URL is unset; callers fall back to the app pool and
+	// return empty results under the default-deny RLS policy.
+	var adminPool *pgxpool.Pool
+	if cfg.AdminDatabaseURL != "" {
+		adminPool, err = platform.NewPool(ctx, cfg.AdminDatabaseURL)
+		if err != nil {
+			return err
+		}
+		defer adminPool.Close()
+	}
+
 	tenantSvc := tenant.NewPGStore(pool)
 	ktypeCache := platform.NewLRUCache(1024, 5*time.Minute)
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
 	eventPublisher := events.NewPGPublisher(pool)
 	auditor := audit.NewPGLogger(pool)
 	recordStore := record.NewPGStore(pool, ktypeRegistry, eventPublisher, auditor)
+	workflowEngine := workflow.NewEngine(pool, eventPublisher, auditor)
+	formStore := forms.NewStore(pool, ktypeRegistry, recordStore)
+	if adminPool != nil {
+		formStore = formStore.WithAdminPool(adminPool)
+	}
 	rateLimiter := platform.NewRateLimiter(platform.DefaultRateLimitConfig())
 	quotaEnforcer := platform.NewQuotaEnforcer(pool)
 
+	fh := &formsHandlers{store: formStore, registry: ktypeRegistry}
 	th := &tenantHandlers{svc: tenantSvc}
 	kh := &ktypeHandlers{registry: ktypeRegistry}
 	rh := &recordHandlers{store: recordStore}
+	wh := &workflowHandlers{engine: workflowEngine, store: recordStore}
 	oh := &openAPIHandler{registry: ktypeRegistry}
 
 	r := chi.NewRouter()
@@ -103,6 +125,24 @@ func run() error {
 		r.Get("/{ktype}/{id}", rh.get)
 		r.Patch("/{ktype}/{id}", rh.update)
 		r.Delete("/{ktype}/{id}", rh.delete)
+		// Workflow action endpoint (ARCHITECTURE.md §10). Runs under the
+		// same tenant + idempotency + rate-limit + quota stack as record
+		// CRUD so a spammed transition can't starve other tenants.
+		r.Post("/{ktype}/{id}/actions/{action}", wh.action)
+	})
+
+	// Forms KApp. Creation and tenant-scoped lookups go through the
+	// tenant middleware; public read + submit explicitly do NOT so
+	// anonymous submissions work. Public-submit rate limiting is the
+	// reverse-proxy's job since there is no X-Tenant-ID header to key
+	// on (ARCHITECTURE.md §12).
+	r.Route("/api/v1/forms", func(r chi.Router) {
+		r.Group(func(r chi.Router) {
+			r.Use(platform.TenantMiddleware(tenantSvc))
+			r.Post("/", fh.create)
+		})
+		r.Get("/{id}", fh.public)
+		r.Post("/{id}/submit", fh.submit)
 	})
 
 	// OpenAPI machine-readable schema served for API consumers.

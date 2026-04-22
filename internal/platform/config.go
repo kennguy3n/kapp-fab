@@ -11,8 +11,16 @@ import (
 // Config holds runtime configuration values shared by the API and worker
 // services. Fields are populated from environment variables by LoadConfig.
 type Config struct {
-	// DatabaseURL is a libpq-style connection string for PostgreSQL.
+	// DatabaseURL is a libpq-style connection string for PostgreSQL. In
+	// production this points at the non-superuser `kapp_app` role so that
+	// RLS is enforced on the data plane (see migrations).
 	DatabaseURL string
+	// AdminDatabaseURL optionally points at a BYPASSRLS role (kapp_admin)
+	// used only for the narrow set of control-plane reads that legitimately
+	// span tenants — notably the user→tenants lookup used by login. Empty
+	// is allowed; those reads then fall back to the main pool and return
+	// no rows under the default RLS policy.
+	AdminDatabaseURL string
 	// ListenAddr is the host:port the HTTP server binds to (API only).
 	ListenAddr string
 	// S3Endpoint is the object-store endpoint (S3 or MinIO compatible).
@@ -31,13 +39,14 @@ type Config struct {
 // validated Config. It returns an error if a required value is missing.
 func LoadConfig() (*Config, error) {
 	cfg := &Config{
-		DatabaseURL: os.Getenv("DB_URL"),
-		ListenAddr:  getenv("LISTEN_ADDR", ":8080"),
-		S3Endpoint:  os.Getenv("S3_ENDPOINT"),
-		S3Bucket:    os.Getenv("S3_BUCKET"),
-		S3AccessKey: os.Getenv("S3_ACCESS_KEY"),
-		S3SecretKey: os.Getenv("S3_SECRET_KEY"),
-		EventBusURL: os.Getenv("NATS_URL"),
+		DatabaseURL:      os.Getenv("DB_URL"),
+		AdminDatabaseURL: os.Getenv("ADMIN_DB_URL"),
+		ListenAddr:       getenv("LISTEN_ADDR", ":8080"),
+		S3Endpoint:       os.Getenv("S3_ENDPOINT"),
+		S3Bucket:         os.Getenv("S3_BUCKET"),
+		S3AccessKey:      os.Getenv("S3_ACCESS_KEY"),
+		S3SecretKey:      os.Getenv("S3_SECRET_KEY"),
+		EventBusURL:      os.Getenv("NATS_URL"),
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, errors.New("DB_URL is required")

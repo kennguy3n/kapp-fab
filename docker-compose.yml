@@ -1,4 +1,19 @@
 version: "3.9"
+
+# The platform follows least privilege for its data plane. Migrations and
+# the initial schema bootstrap run as the superuser `kapp` (so they can
+# CREATE ROLE, CREATE EXTENSION, GRANT, etc.), but every application
+# process (api, worker, kchat-bridge) connects as the non-superuser role
+# `kapp_app` — see migrations/000001_initial_schema.sql (CREATE ROLE
+# kapp_app) and the Makefile which exposes APP_DB_URL/ADMIN_DB_URL for
+# the local runs in `make run-api` / `make run-worker`. Connecting as
+# `kapp_app` ensures row-level security is enforced in local development
+# the same way it is in production; the superuser connection is kept
+# only for schema migrations.
+#
+# The control plane (tenant list, cross-tenant user lookups) uses the
+# `kapp_admin` role with BYPASSRLS — see migrations/000002_admin_role.sql.
+
 services:
   postgres:
     image: postgres:16
@@ -10,6 +25,7 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
 
   minio:
     image: minio/minio:latest
