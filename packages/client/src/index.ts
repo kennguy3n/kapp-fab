@@ -305,6 +305,107 @@ export class ApiClient {
     return this.request(`/audit${suffix}`);
   }
 
+  // --- Finance ----------------------------------------------------------
+
+  /** Create a chart-of-accounts entry. The server enforces per-tenant
+   *  uniqueness on `code`; conflicts surface as 409. */
+  createAccount(input: FinanceAccountInput): Promise<FinanceAccount> {
+    return this.request("/finance/accounts", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  listAccounts(params?: {
+    type?: "asset" | "liability" | "equity" | "revenue" | "expense";
+  }): Promise<FinanceAccount[]> {
+    const qs = new URLSearchParams();
+    if (params?.type) qs.set("type", params.type);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return this.request(`/finance/accounts${suffix}`);
+  }
+
+  getAccount(code: string): Promise<FinanceAccount> {
+    return this.request(`/finance/accounts/${encodeURIComponent(code)}`);
+  }
+
+  postJournalEntry(input: PostJournalEntryInput): Promise<JournalEntry> {
+    return this.request("/finance/journal-entries", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  listJournalEntries(params?: {
+    from?: string;
+    to?: string;
+    source_ktype?: string;
+    source_id?: string;
+  }): Promise<JournalEntry[]> {
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set("from", params.from);
+    if (params?.to) qs.set("to", params.to);
+    if (params?.source_ktype) qs.set("source_ktype", params.source_ktype);
+    if (params?.source_id) qs.set("source_id", params.source_id);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return this.request(`/finance/journal-entries${suffix}`);
+  }
+
+  getJournalEntry(id: string): Promise<JournalEntry> {
+    return this.request(`/finance/journal-entries/${encodeURIComponent(id)}`);
+  }
+
+  /** Post a draft finance.ar_invoice KRecord to the ledger. */
+  postInvoice(id: string): Promise<JournalEntry> {
+    return this.request(
+      `/finance/invoices/${encodeURIComponent(id)}/post`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({}),
+      }
+    );
+  }
+
+  /** Post a draft finance.ap_bill KRecord to the ledger. */
+  postBill(id: string): Promise<JournalEntry> {
+    return this.request(`/finance/bills/${encodeURIComponent(id)}/post`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({}),
+    });
+  }
+
+  lockPeriod(input: { period_start: string }): Promise<FiscalPeriod> {
+    return this.request("/finance/periods/lock", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  getTrialBalance(asOf?: string): Promise<TrialBalanceReport> {
+    const qs = asOf ? `?as_of=${encodeURIComponent(asOf)}` : "";
+    return this.request(`/finance/reports/trial-balance${qs}`);
+  }
+
+  getARAgingReport(asOf?: string): Promise<AgingReport> {
+    const qs = asOf ? `?as_of=${encodeURIComponent(asOf)}` : "";
+    return this.request(`/finance/reports/ar-aging${qs}`);
+  }
+
+  getAPAgingReport(asOf?: string): Promise<AgingReport> {
+    const qs = asOf ? `?as_of=${encodeURIComponent(asOf)}` : "";
+    return this.request(`/finance/reports/ap-aging${qs}`);
+  }
+
+  getIncomeStatement(from: string, to: string): Promise<IncomeStatement> {
+    const qs = new URLSearchParams({ from, to }).toString();
+    return this.request(`/finance/reports/income-statement?${qs}`);
+  }
+
   // --- Forms ------------------------------------------------------------
 
   /** Public (unauthenticated) fetch of a form's schema + config by id. */
@@ -394,6 +495,136 @@ export interface AuditEntry {
   after?: unknown;
   context?: unknown;
   created_at: string;
+}
+
+// --- Finance ------------------------------------------------------------
+
+export type AccountType =
+  | "asset"
+  | "liability"
+  | "equity"
+  | "revenue"
+  | "expense";
+
+export interface FinanceAccount {
+  tenant_id: string;
+  code: string;
+  name: string;
+  type: AccountType;
+  parent_code?: string;
+  active: boolean;
+}
+
+export interface FinanceAccountInput {
+  code: string;
+  name: string;
+  type: AccountType;
+  parent_code?: string;
+  active?: boolean;
+}
+
+export interface JournalLineInput {
+  account_code: string;
+  debit?: string | number;
+  credit?: string | number;
+  currency?: string;
+  memo?: string;
+}
+
+export interface PostJournalEntryInput {
+  posted_at?: string;
+  memo?: string;
+  source_ktype?: string;
+  source_id?: string;
+  lines: JournalLineInput[];
+}
+
+export interface JournalLine {
+  id: number;
+  tenant_id: string;
+  entry_id: string;
+  account_code: string;
+  debit: string;
+  credit: string;
+  currency: string;
+  memo: string;
+}
+
+export interface JournalEntry {
+  id: string;
+  tenant_id: string;
+  posted_at: string;
+  memo: string;
+  source_ktype: string;
+  source_id?: string | null;
+  created_by: string;
+  created_at: string;
+  lines: JournalLine[];
+}
+
+export interface FiscalPeriod {
+  tenant_id: string;
+  period_start: string;
+  period_end: string;
+  locked: boolean;
+  locked_at?: string | null;
+  locked_by?: string | null;
+}
+
+export interface TrialBalanceRow {
+  account_code: string;
+  account_name: string;
+  account_type: AccountType;
+  debit: string;
+  credit: string;
+  balance: string;
+}
+
+export interface TrialBalanceReport {
+  as_of: string;
+  rows: TrialBalanceRow[];
+  total_debit: string;
+  total_credit: string;
+  balanced: boolean;
+}
+
+export interface AgingBucket {
+  label: string;
+  amount: string;
+}
+
+export interface AgingRow {
+  source_id: string;
+  counterparty_id: string;
+  number: string;
+  due_date?: string | null;
+  total: string;
+  currency: string;
+  days_overdue: number;
+  bucket: string;
+}
+
+export interface AgingReport {
+  as_of: string;
+  rows: AgingRow[];
+  buckets: AgingBucket[];
+  total: string;
+}
+
+export interface IncomeStatementLine {
+  account_code: string;
+  account_name: string;
+  amount: string;
+}
+
+export interface IncomeStatement {
+  from: string;
+  to: string;
+  revenue: IncomeStatementLine[];
+  expense: IncomeStatementLine[];
+  total_revenue: string;
+  total_expense: string;
+  net_income: string;
 }
 
 export interface Form {

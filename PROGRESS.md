@@ -1,6 +1,6 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2026-04-22 (Phase B acceptance complete)
+> **Last Updated:** 2026-04-22 (Phase C finance basics in progress)
 >
 > Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md)
 
@@ -8,7 +8,7 @@
 
 ## Current Phase
 
-**Phase B — CRM, Tasks, Approvals, Forms**
+**Phase C — Finance Basics**
 **Status:** In Progress
 
 ---
@@ -101,26 +101,26 @@ Typed ledgers and the first postings from Kapps.
 
 ### Deliverables
 
-- [ ] Finance KTypes: `finance.account`, `finance.journal_entry`, `finance.ar_invoice`, `finance.ap_bill`
-- [ ] `accounts`, `journal_entries`, `journal_lines` tables with append-only invariants
-- [ ] Double-entry posting engine with balance checks
-- [ ] Period lockout (no edits to posted periods)
-- [ ] Sales invoice posting flow (quote → invoice → ledger)
-- [ ] Purchase bill posting flow
-- [ ] Credit and debit notes
-- [ ] AR / AP subledger views
-- [ ] Basic VAT/GST tax codes
-- [ ] Finance reports: trial balance, AR aging, AP aging, income statement
-- [ ] KChat cards for invoices and bills
-- [ ] Agent tools: `finance.create_sales_invoice`, `finance.create_ap_bill`, `finance.post_journal`
+- [x] Finance KTypes: `finance.account`, `finance.journal_entry`, `finance.ar_invoice`, `finance.ap_bill` (schemas in `internal/finance/ktypes.go`; registered at API boot)
+- [x] `accounts`, `journal_entries`, `journal_lines` tables with append-only invariants (Phase A migration enforces RLS + CHECK constraints; Phase C adds `fiscal_periods`, `tax_codes` in `migrations/000004_finance_extensions.sql`)
+- [x] Double-entry posting engine with balance checks (`internal/ledger/store.go` — `PostJournalEntry` rejects unbalanced lines and unknown/inactive accounts)
+- [x] Period lockout (no edits to posted periods) (`internal/ledger/period.go` — `LockPeriod` + `IsPeriodLocked`; `PostJournalEntry` rejects posts in locked periods)
+- [x] Sales invoice posting flow (quote → invoice → ledger) (`internal/ledger/invoice.go` — `PostSalesInvoice`; wired to `POST /api/v1/finance/invoices/{id}/post`, `/post-invoice` KChat command, and `finance.post_sales_invoice` agent tool)
+- [x] Purchase bill posting flow (`internal/ledger/invoice.go` — `PostPurchaseBill`; wired to `POST /api/v1/finance/bills/{id}/post`, `/post-bill` KChat command, and `finance.post_ap_bill` agent tool)
+- [x] Credit and debit notes (`internal/ledger/credit_note.go` — `ReverseJournalEntry` generates a contra-entry linked back to the original)
+- [x] AR / AP subledger views (`apps/web/src/pages/SubledgerPage.tsx` with `/finance/ar-subledger` and `/finance/ap-subledger` routes; quick-post button for draft rows)
+- [x] Basic VAT/GST tax codes (`internal/ledger/tax.go` — `TaxCode` registry + `CalculateTax` with inclusive/exclusive modes; `tax_codes` table with RLS)
+- [x] Finance reports: trial balance, AR aging, AP aging, income statement (`internal/ledger/reports.go`; `/api/v1/finance/reports/*`; client methods `getTrialBalance`, `getARAgingReport`, `getAPAgingReport`, `getIncomeStatement`)
+- [x] KChat cards for invoices and bills (`cards.summary` templates on `finance.ar_invoice` / `finance.ap_bill` / `finance.journal_entry` KType schemas drive the existing card renderer; `/invoice`, `/bill`, `/post-invoice`, `/post-bill` slash commands)
+- [x] Agent tools: `finance.create_sales_invoice`, `finance.create_ap_bill`, `finance.post_journal`, `finance.post_sales_invoice`, `finance.post_ap_bill` (`internal/agents/finance_tools.go`; registered via `RegisterFinanceTools`)
 
 ### Acceptance Criteria
 
-- [ ] A sales invoice posts a balanced journal entry
-- [ ] A purchase bill posts a balanced journal entry
-- [ ] Trial balance sums to zero at all times
-- [ ] Period lockout rejects edits to closed periods
-- [ ] Audit log captures every posting with source record
+- [ ] A sales invoice posts a balanced journal entry (covered by `PostSalesInvoice`; integration test pending)
+- [ ] A purchase bill posts a balanced journal entry (covered by `PostPurchaseBill`; integration test pending)
+- [ ] Trial balance sums to zero at all times (covered by `TrialBalance`; integration test pending)
+- [ ] Period lockout rejects edits to closed periods (covered by `IsPeriodLocked`; integration test pending)
+- [ ] Audit log captures every posting with source record (covered by `PostJournalEntry` + `emitSourceEvent`; integration test pending)
 
 ---
 

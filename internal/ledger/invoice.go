@@ -1,0 +1,361 @@
+package ledger
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/shopspring/decimal"
+
+	"github.com/kennguy3n/kapp-fab/internal/audit"
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
+	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/record"
+)
+
+// InvoicePoster turns a finance.ar_invoice or finance.ap_bill KRecord
+// into a balanced journal entry. It depends on the record store so it
+// can load the source record, run the posting, and then patch the
+// record with the resulting journal_entry_id + status in the same
+// tenant context. The record.PGStore itself uses WithTenantTx, so each
+// Update/Get opens its own transaction — the posting is still atomic
+// at the ledger level (journal + event + audit share one tx); the
+// record update happens as a follow-on tenant-scoped write. A failure
+// between the ledger commit and the record patch would leave an
+// orphan JE whose SourceID points at a draft invoice; callers replay
+// the post action to reconcile.
+type InvoicePoster struct {
+	store       *PGStore
+	recordStore *record.PGStore
+}
+
+// NewInvoicePoster wires the poster against an existing ledger and record
+// store. Both are required; nil returns a non-functional poster.
+func NewInvoicePoster(store *PGStore, recordStore *record.PGStore) *InvoicePoster {
+	return &InvoicePoster{store: store, recordStore: recordStore}
+}
+
+// invoiceData is the slice of finance.ar_invoice schema fields we need
+// to post. Kept small + JSON-tagged so we can Unmarshal directly from
+// KRecord.Data without hand-rolled map access.
+type invoiceData struct {
+	CustomerID         string          `json:"customer_id"`
+	DealID             string          `json:"deal_id"`
+	InvoiceNumber      string          `json:"invoice_number"`
+	IssueDate          string          `json:"issue_date"`
+	DueDate            string          `json:"due_date"`
+	Subtotal           decimal.Decimal `json:"subtotal"`
+	TaxCode            string          `json:"tax_code"`
+	TaxAmount          decimal.Decimal `json:"tax_amount"`
+	Total              decimal.Decimal `json:"total"`
+	Currency           string          `json:"currency"`
+	Status             string          `json:"status"`
+	JournalEntryID     string          `json:"journal_entry_id"`
+	ARAccountCode      string          `json:"ar_account_code"`
+	RevenueAccountCode string          `json:"revenue_account_code"`
+	TaxAccountCode     string          `json:"tax_account_code"`
+}
+
+// billData mirrors invoiceData for finance.ap_bill. Kept as a separate
+// type so the different account-code field names (ap/expense) stay
+// explicit.
+type billData struct {
+	SupplierID         string          `json:"supplier_id"`
+	BillNumber         string          `json:"bill_number"`
+	IssueDate          string          `json:"issue_date"`
+	DueDate            string          `json:"due_date"`
+	Subtotal           decimal.Decimal `json:"subtotal"`
+	TaxCode            string          `json:"tax_code"`
+	TaxAmount          decimal.Decimal `json:"tax_amount"`
+	Total              decimal.Decimal `json:"total"`
+	Currency           string          `json:"currency"`
+	Status             string          `json:"status"`
+	JournalEntryID     string          `json:"journal_entry_id"`
+	APAccountCode      string          `json:"ap_account_code"`
+	ExpenseAccountCode string          `json:"expense_account_code"`
+	TaxAccountCode     string          `json:"tax_account_code"`
+}
+
+// PostSalesInvoice posts a finance.ar_invoice KRecord to the ledger.
+//
+// The generated journal has three legs at most:
+//
+//	Dr Accounts Receivable  total
+//	Cr Revenue              subtotal
+//	Cr Tax Payable          tax_amount       (omitted when tax_amount == 0)
+//
+// The invoice KRecord is patched with status = "posted" and
+// journal_entry_id = <new JE id>. The invoice record must currently be
+// in "draft" or "pending_approval" status; other statuses return
+// ErrInvoiceNotPostable so replayed posts are explicit rather than
+// silent.
+func (p *InvoicePoster) PostSalesInvoice(ctx context.Context, tenantID, invoiceID, actorID uuid.UUID) (*JournalEntry, error) {
+	if p.recordStore == nil || p.store == nil {
+		return nil, errors.New("ledger: poster not fully wired")
+	}
+	if tenantID == uuid.Nil || invoiceID == uuid.Nil {
+		return nil, errors.New("ledger: tenant id and invoice id required")
+	}
+	if actorID == uuid.Nil {
+		return nil, errors.New("ledger: actor id required")
+	}
+
+	rec, err := p.recordStore.Get(ctx, tenantID, invoiceID)
+	if err != nil {
+		return nil, err
+	}
+	if rec.KType != "finance.ar_invoice" {
+		return nil, fmt.Errorf("%w: expected finance.ar_invoice, got %s", ErrSourceMismatch, rec.KType)
+	}
+
+	var inv invoiceData
+	if err := json.Unmarshal(rec.Data, &inv); err != nil {
+		return nil, fmt.Errorf("ledger: decode invoice: %w", err)
+	}
+	if inv.Status == "posted" || inv.JournalEntryID != "" {
+		return nil, ErrInvoiceAlreadyPosted
+	}
+	if inv.Status != "" && inv.Status != "draft" && inv.Status != "pending_approval" {
+		return nil, fmt.Errorf("%w: status=%s", ErrInvoiceNotPostable, inv.Status)
+	}
+	if inv.ARAccountCode == "" || inv.RevenueAccountCode == "" {
+		return nil, errors.New("ledger: ar_account_code and revenue_account_code required")
+	}
+	currency := inv.Currency
+	if currency == "" {
+		currency = "USD"
+	}
+	if inv.Total.IsZero() {
+		inv.Total = inv.Subtotal.Add(inv.TaxAmount)
+	}
+
+	lines := []JournalLine{
+		{AccountCode: inv.ARAccountCode, Debit: inv.Total, Credit: decimal.Zero, Currency: currency, Memo: memoFor(inv.InvoiceNumber, "AR")},
+		{AccountCode: inv.RevenueAccountCode, Debit: decimal.Zero, Credit: inv.Subtotal, Currency: currency, Memo: memoFor(inv.InvoiceNumber, "Revenue")},
+	}
+	if inv.TaxAmount.IsPositive() {
+		if inv.TaxAccountCode == "" {
+			return nil, errors.New("ledger: tax_account_code required when tax_amount > 0")
+		}
+		lines = append(lines, JournalLine{
+			AccountCode: inv.TaxAccountCode, Debit: decimal.Zero, Credit: inv.TaxAmount,
+			Currency: currency, Memo: memoFor(inv.InvoiceNumber, "Tax"),
+		})
+	}
+
+	postedAt := parseInvoiceDate(inv.IssueDate, p.store.now)
+	sourceID := invoiceID
+	entry, err := p.store.PostJournalEntry(ctx, JournalEntry{
+		TenantID:    tenantID,
+		PostedAt:    postedAt,
+		Memo:        fmt.Sprintf("Sales invoice %s", inv.InvoiceNumber),
+		SourceKType: "finance.ar_invoice",
+		SourceID:    &sourceID,
+		CreatedBy:   actorID,
+		Lines:       lines,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Patch the invoice KRecord with status=posted + journal_entry_id.
+	// Shallow-merge so existing fields (customer_id, lines, …) are kept.
+	patch := map[string]any{
+		"status":           "posted",
+		"journal_entry_id": entry.ID.String(),
+	}
+	patchJSON, _ := json.Marshal(patch)
+	if _, err := p.recordStore.Update(ctx, record.KRecord{
+		ID:        rec.ID,
+		TenantID:  tenantID,
+		Data:      patchJSON,
+		UpdatedBy: ptrUUID(actorID),
+	}); err != nil {
+		return entry, fmt.Errorf("ledger: patch invoice: %w", err)
+	}
+
+	// Lifecycle event — consumers (e.g. KChat poster, email dispatcher)
+	// can hook on this rather than the generic journal.posted emission.
+	if err := p.emitSourceEvent(ctx, tenantID, "finance.sales_invoice.posted", map[string]any{
+		"invoice_id":       invoiceID,
+		"invoice_number":   inv.InvoiceNumber,
+		"journal_entry_id": entry.ID,
+		"total":            inv.Total.String(),
+		"currency":         currency,
+		"actor":            actorID,
+	}); err != nil {
+		return entry, err
+	}
+	return entry, nil
+}
+
+// PostPurchaseBill mirrors PostSalesInvoice for finance.ap_bill:
+//
+//	Dr Expense              subtotal
+//	Dr Tax Receivable       tax_amount       (omitted when zero)
+//	Cr Accounts Payable     total
+func (p *InvoicePoster) PostPurchaseBill(ctx context.Context, tenantID, billID, actorID uuid.UUID) (*JournalEntry, error) {
+	if p.recordStore == nil || p.store == nil {
+		return nil, errors.New("ledger: poster not fully wired")
+	}
+	if tenantID == uuid.Nil || billID == uuid.Nil {
+		return nil, errors.New("ledger: tenant id and bill id required")
+	}
+	if actorID == uuid.Nil {
+		return nil, errors.New("ledger: actor id required")
+	}
+
+	rec, err := p.recordStore.Get(ctx, tenantID, billID)
+	if err != nil {
+		return nil, err
+	}
+	if rec.KType != "finance.ap_bill" {
+		return nil, fmt.Errorf("%w: expected finance.ap_bill, got %s", ErrSourceMismatch, rec.KType)
+	}
+
+	var bill billData
+	if err := json.Unmarshal(rec.Data, &bill); err != nil {
+		return nil, fmt.Errorf("ledger: decode bill: %w", err)
+	}
+	if bill.Status == "posted" || bill.JournalEntryID != "" {
+		return nil, ErrInvoiceAlreadyPosted
+	}
+	if bill.Status != "" && bill.Status != "draft" && bill.Status != "pending_approval" {
+		return nil, fmt.Errorf("%w: status=%s", ErrInvoiceNotPostable, bill.Status)
+	}
+	if bill.APAccountCode == "" || bill.ExpenseAccountCode == "" {
+		return nil, errors.New("ledger: ap_account_code and expense_account_code required")
+	}
+	currency := bill.Currency
+	if currency == "" {
+		currency = "USD"
+	}
+	if bill.Total.IsZero() {
+		bill.Total = bill.Subtotal.Add(bill.TaxAmount)
+	}
+
+	lines := []JournalLine{
+		{AccountCode: bill.ExpenseAccountCode, Debit: bill.Subtotal, Credit: decimal.Zero, Currency: currency, Memo: memoFor(bill.BillNumber, "Expense")},
+	}
+	if bill.TaxAmount.IsPositive() {
+		if bill.TaxAccountCode == "" {
+			return nil, errors.New("ledger: tax_account_code required when tax_amount > 0")
+		}
+		lines = append(lines, JournalLine{
+			AccountCode: bill.TaxAccountCode, Debit: bill.TaxAmount, Credit: decimal.Zero,
+			Currency: currency, Memo: memoFor(bill.BillNumber, "Tax"),
+		})
+	}
+	lines = append(lines, JournalLine{
+		AccountCode: bill.APAccountCode, Debit: decimal.Zero, Credit: bill.Total,
+		Currency: currency, Memo: memoFor(bill.BillNumber, "AP"),
+	})
+
+	postedAt := parseInvoiceDate(bill.IssueDate, p.store.now)
+	sourceID := billID
+	entry, err := p.store.PostJournalEntry(ctx, JournalEntry{
+		TenantID:    tenantID,
+		PostedAt:    postedAt,
+		Memo:        fmt.Sprintf("Purchase bill %s", bill.BillNumber),
+		SourceKType: "finance.ap_bill",
+		SourceID:    &sourceID,
+		CreatedBy:   actorID,
+		Lines:       lines,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	patch := map[string]any{
+		"status":           "posted",
+		"journal_entry_id": entry.ID.String(),
+	}
+	patchJSON, _ := json.Marshal(patch)
+	if _, err := p.recordStore.Update(ctx, record.KRecord{
+		ID:        rec.ID,
+		TenantID:  tenantID,
+		Data:      patchJSON,
+		UpdatedBy: ptrUUID(actorID),
+	}); err != nil {
+		return entry, fmt.Errorf("ledger: patch bill: %w", err)
+	}
+
+	if err := p.emitSourceEvent(ctx, tenantID, "finance.ap_bill.posted", map[string]any{
+		"bill_id":          billID,
+		"bill_number":      bill.BillNumber,
+		"journal_entry_id": entry.ID,
+		"total":            bill.Total.String(),
+		"currency":         currency,
+		"actor":            actorID,
+	}); err != nil {
+		return entry, err
+	}
+	return entry, nil
+}
+
+// emitSourceEvent writes a lifecycle event (not the generic journal one)
+// under its own short tenant-scoped transaction. Used from invoice/bill
+// posting after the ledger tx already committed.
+func (p *InvoicePoster) emitSourceEvent(ctx context.Context, tenantID uuid.UUID, eventType string, payload map[string]any) error {
+	if p.store.publisher == nil && p.store.auditor == nil {
+		return nil
+	}
+	body, _ := json.Marshal(payload)
+	return dbutil.WithTenantTx(ctx, p.store.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if p.store.publisher != nil {
+			if err := p.store.publisher.EmitTx(ctx, tx, events.Event{
+				TenantID: tenantID, Type: eventType, Payload: body,
+			}); err != nil {
+				return err
+			}
+		}
+		if p.store.auditor != nil {
+			var actor *uuid.UUID
+			if v, ok := payload["actor"].(uuid.UUID); ok {
+				a := v
+				actor = &a
+			}
+			if err := p.store.auditor.LogTx(ctx, tx, audit.Entry{
+				TenantID:  tenantID,
+				ActorID:   actor,
+				ActorKind: audit.ActorUser,
+				Action:    eventType,
+				After:     body,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func memoFor(number, leg string) string {
+	if number == "" {
+		return leg
+	}
+	return fmt.Sprintf("%s %s", number, leg)
+}
+
+func parseInvoiceDate(raw string, now func() time.Time) time.Time {
+	if raw == "" {
+		return now()
+	}
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		return t.UTC()
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t.UTC()
+	}
+	return now()
+}
+
+func ptrUUID(id uuid.UUID) *uuid.UUID {
+	if id == uuid.Nil {
+		return nil
+	}
+	return &id
+}
