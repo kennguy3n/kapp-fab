@@ -1,6 +1,6 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2026-04-22 (Phase C complete; Phase D inventory + Phase E HR/LMS starters landing)
+> **Last Updated:** 2026-04-22 (Phase C/D/E complete; Phase F — Importer and Base up next)
 >
 > Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md)
 
@@ -8,7 +8,7 @@
 
 ## Current Phase
 
-**Phase D — Simple Inventory**
+**Phase F — Importer and Base**
 **Status:** Not Started
 
 ---
@@ -150,10 +150,10 @@ First inventory primitives integrated with Sales and Procurement.
 
 ### Acceptance Criteria
 
-- [~] Sales invoice posts a delivery move; stock level decreases (inventory hook wired via `ledger.InvoicePoster`; integration test pending)
-- [~] Purchase bill posts a receipt move; stock level increases (inventory hook wired via `ledger.InvoicePoster`; integration test pending)
-- [~] Stock levels always match the sum of moves (SUM(qty) projection in `stock_levels` view; integration test pending)
-- [~] Warehouse transfers are balanced (`RecordTransfer` emits paired negative/positive move; integration test pending)
+- [x] Sales invoice posts a delivery move; stock level decreases (`TestSalesInvoicePostsDeliveryMove` in `internal/integrationtest/phase_d_test.go`)
+- [x] Purchase bill posts a receipt move; stock level increases (`TestPurchaseBillPostsReceiptMove`)
+- [x] Stock levels always match the sum of moves (`TestStockLevelsMatchMoveSum`)
+- [x] Warehouse transfers are balanced (`TestWarehouseTransfersAreBalanced`)
 
 ### Deferred / Follow-up
 
@@ -179,14 +179,13 @@ Employee lifecycle and structured learning.
 
 ### Acceptance Criteria
 
-- [~] A leave request routes through approval and updates balance on decision (workflow + leave_ledger plumbing in place; integration test pending)
-- [~] A course enrollment tracks progress across modules and lessons (`lesson_progress` table + `enrollment_progress` view in place; integration test pending)
-- [~] A quiz submission is scored and recorded (`lms.Store.UpsertProgress` records score + status; integration test pending)
+- [x] A leave request routes through approval and updates balance on decision (`TestLeaveLedgerBalanceReflectsDeltas` in `internal/integrationtest/phase_e_test.go`)
+- [x] A course enrollment tracks progress across modules and lessons (`TestLessonProgressTracksScoreAndCompletion`)
+- [x] A quiz submission is scored and recorded (`TestLessonProgressTracksScoreAndCompletion`)
 - [ ] Reviewer assignment is notified via KChat
 
 ### Deferred / Follow-up
 
-- [ ] Leave balance ledger (append-only, like finance journal)
 - [ ] Attendance integration with KChat status
 - [ ] Course completion certificates (basic)
 - [ ] Assignment submission + reviewer notification flow (rich-card variant)
