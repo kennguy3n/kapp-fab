@@ -145,7 +145,7 @@ func TestKTypeRegistry(t *testing.T) {
 	schema := json.RawMessage(`{"fields":[
 		{"name":"title","type":"string","required":true,"max_length":120},
 		{"name":"amount","type":"number","required":true,"min":0},
-		{"name":"stage","type":"enum","enum":["lead","qualified","won","lost"],"required":true}
+		{"name":"stage","type":"enum","values":["lead","qualified","won","lost"],"required":true}
 	]}`)
 	if err := h.ktypes.Register(ctx, ktype.KType{Name: name, Version: 1, Schema: schema}); err != nil {
 		t.Fatalf("register: %v", err)
@@ -194,7 +194,7 @@ func TestRecordCRUDEmitsEventsAndAudit(t *testing.T) {
 		Schema: json.RawMessage(`{"fields":[
 			{"name":"title","type":"string","required":true},
 			{"name":"amount","type":"number","required":true},
-			{"name":"stage","type":"enum","enum":["lead","won"],"required":true}
+			{"name":"stage","type":"enum","values":["lead","won"],"required":true}
 		]}`),
 	}); err != nil {
 		t.Fatalf("register ktype: %v", err)

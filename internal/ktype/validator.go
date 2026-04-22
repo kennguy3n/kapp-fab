@@ -22,7 +22,7 @@ type FieldSpec struct {
 	Min       *float64        `json:"min,omitempty"`
 	Max       *float64        `json:"max,omitempty"`
 	Pattern   string          `json:"pattern,omitempty"`
-	Values    []string        `json:"enum,omitempty"`
+	Values    []string        `json:"values,omitempty"`
 	Ref       string          `json:"ref,omitempty"`   // ref ktype name
 	KType     string          `json:"ktype,omitempty"` // alternative spelling
 	Default   json.RawMessage `json:"default,omitempty"`
