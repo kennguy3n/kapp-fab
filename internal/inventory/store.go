@@ -377,6 +377,7 @@ func (s *PGStore) RecordTransfer(ctx context.Context, t Transfer) ([]Move, error
 			UnitCost:    t.UnitCost,
 			SourceKType: MoveSourceTransfer,
 			MovedAt:     t.MovedAt,
+			CreatedBy:   t.CreatedBy,
 		}
 		pos := Move{
 			TenantID:    t.TenantID,
@@ -386,6 +387,7 @@ func (s *PGStore) RecordTransfer(ctx context.Context, t Transfer) ([]Move, error
 			UnitCost:    t.UnitCost,
 			SourceKType: MoveSourceTransfer,
 			MovedAt:     t.MovedAt,
+			CreatedBy:   t.CreatedBy,
 		}
 		for _, m := range []Move{neg, pos} {
 			row := m

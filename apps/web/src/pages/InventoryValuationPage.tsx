@@ -12,8 +12,8 @@ const todayLocalISO = (() => {
 
 /**
  * InventoryValuationPage shows the monetary value of on-hand stock
- * as of a user-chosen date. Rows sum qty * unit_cost per
- * (item, warehouse); the total must equal SUM(rows.value).
+ * as of a user-chosen date. Rows are grouped per item across all
+ * warehouses; total_value equals SUM(rows.value_cost).
  */
 export function InventoryValuationPage() {
   const [asOf, setAsOf] = useState<string>(todayLocalISO);
@@ -49,30 +49,28 @@ export function InventoryValuationPage() {
           >
             <thead>
               <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
+                <th style={{ padding: "6px 8px" }}>SKU</th>
                 <th style={{ padding: "6px 8px" }}>Item</th>
-                <th style={{ padding: "6px 8px" }}>Warehouse</th>
                 <th style={{ padding: "6px 8px", textAlign: "right" }}>Qty</th>
-                <th style={{ padding: "6px 8px", textAlign: "right" }}>Unit Cost</th>
                 <th style={{ padding: "6px 8px", textAlign: "right" }}>Value</th>
               </tr>
             </thead>
             <tbody>
               {report.rows.map((r) => (
                 <tr
-                  key={`${r.item_id}:${r.warehouse_id}`}
+                  key={r.item_id}
                   style={{ borderBottom: "1px solid #f3f4f6" }}
                 >
-                  <td style={{ padding: "6px 8px" }}>{r.item_id}</td>
-                  <td style={{ padding: "6px 8px" }}>{r.warehouse_id}</td>
+                  <td style={{ padding: "6px 8px" }}>{r.sku}</td>
+                  <td style={{ padding: "6px 8px" }}>{r.name}</td>
                   <td style={{ padding: "6px 8px", textAlign: "right" }}>{r.qty}</td>
-                  <td style={{ padding: "6px 8px", textAlign: "right" }}>{r.unit_cost}</td>
-                  <td style={{ padding: "6px 8px", textAlign: "right" }}>{r.value}</td>
+                  <td style={{ padding: "6px 8px", textAlign: "right" }}>{r.value_cost}</td>
                 </tr>
               ))}
             </tbody>
             <tfoot>
               <tr style={{ borderTop: "1px solid #e5e7eb", fontWeight: 600 }}>
-                <td colSpan={4} style={{ padding: "6px 8px", textAlign: "right" }}>
+                <td colSpan={3} style={{ padding: "6px 8px", textAlign: "right" }}>
                   Total
                 </td>
                 <td style={{ padding: "6px 8px", textAlign: "right" }}>

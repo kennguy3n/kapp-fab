@@ -215,6 +215,7 @@ func (h *inventoryHandlers) recordMove(w http.ResponseWriter, r *http.Request) {
 		UnitCost:    req.UnitCost,
 		SourceKType: req.SourceKType,
 		SourceID:    req.SourceID,
+		CreatedBy:   actorOrDefault(r.Context()),
 	}
 	if req.MovedAt != nil {
 		m.MovedAt = *req.MovedAt
@@ -256,6 +257,7 @@ func (h *inventoryHandlers) recordTransfer(w http.ResponseWriter, r *http.Reques
 		Qty:           req.Qty,
 		UnitCost:      req.UnitCost,
 		Memo:          req.Memo,
+		CreatedBy:     actorOrDefault(r.Context()),
 	}
 	if req.MovedAt != nil {
 		tr.MovedAt = *req.MovedAt

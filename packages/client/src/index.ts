@@ -736,10 +736,10 @@ export interface StockLevel {
 
 export interface InventoryValuationRow {
   item_id: string;
-  warehouse_id: string;
+  sku: string;
+  name: string;
   qty: string;
-  unit_cost: string;
-  value: string;
+  value_cost: string;
 }
 
 export interface InventoryValuationReport {
