@@ -410,27 +410,13 @@ func (h *financeHandlers) incomeStatement(w http.ResponseWriter, r *http.Request
 // Helpers
 // ---------------------------------------------------------------------------
 
-// parseDateParam accepts either YYYY-MM-DD or RFC3339 and falls back to
-// the supplied default when the value is empty or malformed.
-func parseDateParam(raw string, fallback time.Time) time.Time {
-	if raw == "" {
-		return fallback
-	}
-	if t, err := time.Parse("2006-01-02", raw); err == nil {
-		return t.UTC()
-	}
-	if t, err := time.Parse(time.RFC3339, raw); err == nil {
-		return t.UTC()
-	}
-	return fallback
-}
-
-// parseEndOfDayParam is the inclusive-upper-bound variant of
-// parseDateParam used by "as_of" style filters. A bare YYYY-MM-DD
-// parses to midnight UTC, which would exclude entries posted later the
-// same day from a `posted_at <= as_of` predicate; bumping the bound to
+// parseEndOfDayParam is the inclusive-upper-bound date parser used by
+// "as_of" / "to" style filters. A bare YYYY-MM-DD parses to midnight
+// UTC, which would exclude entries posted later the same day from a
+// `posted_at <= as_of` predicate; bumping the bound to
 // 23:59:59.999999999 UTC makes the comparison calendar-date-inclusive.
 // RFC3339 values carry an explicit timestamp and are used verbatim.
+// Empty or malformed input falls back to the supplied default.
 func parseEndOfDayParam(raw string, fallback time.Time) time.Time {
 	if raw == "" {
 		return fallback
