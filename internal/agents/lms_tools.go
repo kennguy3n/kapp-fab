@@ -41,7 +41,7 @@ func (t *recommendCourseTool) Invoke(ctx context.Context, inv Invocation) (*Resu
 			return nil, fmt.Errorf("lms.recommend_course: decode inputs: %w", err)
 		}
 	}
-	if in.TopN == 0 || in.TopN > 20 {
+	if in.TopN <= 0 || in.TopN > 20 {
 		in.TopN = 5
 	}
 	if t.executor.records == nil {
