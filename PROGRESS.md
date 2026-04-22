@@ -1,6 +1,6 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2026-04-21
+> **Last Updated:** 2026-04-22
 >
 > Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md)
 
@@ -8,8 +8,8 @@
 
 ## Current Phase
 
-**Phase A — Kapp Kernel**
-**Status:** In Progress
+**Phase B — CRM, Tasks, Approvals, Forms**
+**Status:** In Progress (kernel + all Phase B subsystems wired; integration suite lands in this PR)
 
 ---
 
@@ -54,13 +54,13 @@ Foundation: tenant isolation, KType metadata, KRecord storage, permissions, audi
 
 ### Acceptance Criteria
 
-- [ ] A KType can be registered and a KRecord created/updated/deleted via API
-- [ ] All mutations produce an audit record and emit an event
-- [ ] RLS prevents cross-tenant reads in negative tests
-- [ ] Tenant isolation test suite passes (see "First Coding Slice" below)
+- [x] A KType can be registered and a KRecord created/updated/deleted via API
+- [x] All mutations produce an audit record and emit an event
+- [x] RLS prevents cross-tenant reads in negative tests
+- [x] Tenant isolation test suite passes (see "First Coding Slice" below)
 - [ ] Verify zero resource consumption for idle tenants
-- [ ] Verify sub-millisecond tenant context switching overhead
-- [ ] Verify per-tenant rate limiting works correctly
+- [x] Verify sub-millisecond tenant context switching overhead (`BenchmarkTenantContextSwitch`)
+- [x] Verify per-tenant rate limiting works correctly (`TestRateLimitKicksIn`)
 - [ ] Load test: 1000 tenants on a single cell with acceptable latency
 
 ---
@@ -71,23 +71,23 @@ Chat-native work tracking and revenue pipeline on top of the kernel.
 
 ### Deliverables
 
-- [ ] CRM KTypes: `crm.lead`, `crm.contact`, `crm.organization`, `crm.deal`, `crm.activity`, `crm.quote`
-- [ ] Tasks KType: `tasks.task`
-- [ ] Approvals engine: configurable chains, KChat approve/reject cards
-- [ ] Forms KApp: anonymous and authenticated capture forms emitting KRecords
-- [ ] KChat cards for all CRM + Tasks + Approvals objects
-- [ ] Slash commands: `/lead`, `/contact`, `/deal`, `/task`, `/approve`, `/form`
-- [ ] Composer actions: turn message → Task, Deal, Activity
-- [ ] Right-pane detail views for all Phase B KTypes
-- [ ] Agent tools: `crm.create_deal`, `crm.advance_deal`, `crm.summarize_pipeline`, `tasks.create_task`, `approvals.request`, `approvals.decide`
+- [x] CRM KTypes: `crm.lead`, `crm.contact`, `crm.organization`, `crm.deal`, `crm.activity`, `crm.quote` (`internal/crm/ktypes.go`)
+- [x] Tasks KType: `tasks.task`
+- [x] Approvals engine: configurable chains, KChat approve/reject cards (`internal/workflow/approvals.go`, `services/kchat-bridge/approvals.go`)
+- [x] Forms KApp: anonymous and authenticated capture forms emitting KRecords (`internal/forms`, `services/api/forms.go`, `apps/web/src/pages/FormPage.tsx`)
+- [x] KChat cards for all CRM + Tasks + Approvals objects
+- [x] Slash commands: `/lead`, `/contact`, `/deal`, `/task`, `/approve`, `/form` (`services/kchat-bridge/commands.go`)
+- [x] Composer actions: turn message → Task, Deal, Activity (`services/kchat-bridge/composer.go`)
+- [x] Right-pane detail views for all Phase B KTypes (`apps/web/src/components/RightPane.tsx`)
+- [x] Agent tools: `crm.create_deal`, `crm.advance_deal`, `crm.summarize_pipeline`, `tasks.create_task`, `approvals.request`, `approvals.decide` (`internal/agents`, `services/agent-tools`)
 
 ### Acceptance Criteria
 
-- [ ] A Deal can be created from a KChat thread and progressed through its workflow
-- [ ] An approval card posts to the right approvers and finalizes on decision
-- [ ] All CRM records appear in the right pane and kanban views
-- [ ] Agent tools execute with dry-run and confirmation where required
-- [ ] Audit log shows the full lifecycle of each record
+- [x] A Deal can be created from a KChat thread and progressed through its workflow
+- [x] An approval card posts to the right approvers and finalizes on decision
+- [x] All CRM records appear in the right pane and kanban views
+- [x] Agent tools execute with dry-run and confirmation where required
+- [x] Audit log shows the full lifecycle of each record
 
 ---
 

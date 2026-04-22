@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -120,14 +119,4 @@ func writeWorkflowError(w http.ResponseWriter, err error) {
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
-}
-
-// ensureDocJSON is a small safety net used by request parsers that
-// accept optional JSON payloads; callers pass an interface and the
-// helper either decodes the body or leaves the target untouched.
-func ensureDocJSON(r *http.Request, dst any) error {
-	if r.ContentLength == 0 {
-		return nil
-	}
-	return json.NewDecoder(r.Body).Decode(dst)
 }
