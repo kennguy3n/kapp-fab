@@ -336,6 +336,27 @@ func (h *financeHandlers) upsertTaxCode(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
+	// Handler-level validation mirrors the pattern used by lockPeriod:
+	// reject obviously malformed input with 400 before dispatching into
+	// the ledger store, which otherwise surfaces these as 500s because
+	// writeFinanceError has no specific mapping for the raw errors.Errorf
+	// strings returned by UpsertTaxCode's own guards.
+	if req.Code == "" {
+		http.Error(w, "code is required", http.StatusBadRequest)
+		return
+	}
+	if req.Name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	if req.Type != string(ledger.TaxTypeInclusive) && req.Type != string(ledger.TaxTypeExclusive) {
+		http.Error(w, "type must be 'inclusive' or 'exclusive'", http.StatusBadRequest)
+		return
+	}
+	if req.Rate.IsNegative() {
+		http.Error(w, "rate must be non-negative", http.StatusBadRequest)
+		return
+	}
 	active := true
 	if req.Active != nil {
 		active = *req.Active

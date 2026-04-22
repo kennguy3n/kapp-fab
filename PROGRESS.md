@@ -1,6 +1,6 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2026-04-22 (Phase C finance basics in progress)
+> **Last Updated:** 2026-04-22 (Phase C complete; Phase D inventory + Phase E HR/LMS starters landing)
 >
 > Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md)
 
@@ -8,8 +8,8 @@
 
 ## Current Phase
 
-**Phase C — Finance Basics**
-**Status:** In Progress
+**Phase D — Simple Inventory**
+**Status:** Not Started
 
 ---
 
@@ -97,6 +97,8 @@ Chat-native work tracking and revenue pipeline on top of the kernel.
 
 ## Phase C — Finance Basics
 
+**Status:** Complete
+
 Typed ledgers and the first postings from Kapps.
 
 ### Deliverables
@@ -122,6 +124,11 @@ Typed ledgers and the first postings from Kapps.
 - [x] Period lockout rejects edits to closed periods (`TestPeriodLockoutRejectsEdits` — `LockPeriod` + retry surfaces `ErrPeriodLocked`)
 - [x] Audit log captures every posting with source record (`TestAuditLogCapturesPostings` — and `TestRLSIsolatesFinanceData` for tenant isolation)
 
+### Deferred / Follow-up
+
+- [ ] Bank accounts and reconciliation
+- [ ] Cost centers / dimensions on journal entries
+
 ---
 
 ## Phase D — Simple Inventory
@@ -130,23 +137,29 @@ First inventory primitives integrated with Sales and Procurement.
 
 ### Deliverables
 
-- [ ] Inventory KTypes: `inventory.item`, `inventory.warehouse`, `inventory.move`, `inventory.stock_level`
-- [ ] `inventory_items`, `inventory_warehouses`, `inventory_moves` tables
-- [ ] Append-only stock move ledger
-- [ ] Materialized stock levels with projection worker
-- [ ] Goods receipt on purchase bill posting
-- [ ] Goods delivery on sales invoice posting
-- [ ] Multi-warehouse transfers
-- [ ] Inventory valuation report
-- [ ] KChat cards for stock moves and low-stock alerts
-- [ ] Agent tools: `inventory.record_move`, `inventory.check_stock`
+- [x] Inventory KTypes: `inventory.item`, `inventory.warehouse`, `inventory.move`, `inventory.stock_level` (`internal/inventory/ktypes.go`; registered at API boot)
+- [x] `inventory_items`, `inventory_warehouses`, `inventory_moves` tables (Phase A migration enforces RLS + partitioning; `migrations/000005_inventory.sql` adds the `stock_levels` projection and helper indexes)
+- [x] Append-only stock move ledger (`internal/inventory/store.go` — `RecordMove`; no deletes, reversals issued as opposite-sign moves)
+- [x] Materialized stock levels with projection worker (`stock_levels` table updated inside `RecordMove`'s transaction; `/api/v1/inventory/stock-levels` reads the projection)
+- [x] Goods receipt on purchase bill posting (`internal/ledger/invoice.go` — `PostPurchaseBill` notifies `ledger.InventoryHook` with a receipt move)
+- [x] Goods delivery on sales invoice posting (`PostSalesInvoice` notifies `ledger.InventoryHook` with a delivery move)
+- [x] Multi-warehouse transfers (`internal/inventory/store.go` — `RecordTransfer` emits a paired negative/positive move inside one transaction)
+- [x] Inventory valuation report (`internal/inventory/store.go` — `Valuation`; served at `GET /api/v1/reports/inventory-valuation`)
+- [x] KChat cards for stock moves and low-stock alerts (`services/kchat-bridge/commands.go` — `/stock` command renders an `inventory.stock_level` card)
+- [x] Agent tools: `inventory.record_move`, `inventory.check_stock` (`internal/agents/inventory_tools.go`; registered via `RegisterInventoryTools`)
 
 ### Acceptance Criteria
 
-- [ ] Sales invoice posts a delivery move; stock level decreases
-- [ ] Purchase bill posts a receipt move; stock level increases
-- [ ] Stock levels always match the sum of moves
-- [ ] Warehouse transfers are balanced (one source decrement, one destination increment)
+- [~] Sales invoice posts a delivery move; stock level decreases (inventory hook wired via `ledger.InvoicePoster`; integration test pending)
+- [~] Purchase bill posts a receipt move; stock level increases (inventory hook wired via `ledger.InvoicePoster`; integration test pending)
+- [~] Stock levels always match the sum of moves (SUM(qty) projection in `stock_levels` view; integration test pending)
+- [~] Warehouse transfers are balanced (`RecordTransfer` emits paired negative/positive move; integration test pending)
+
+### Deferred / Follow-up
+
+- [ ] Low-stock alert worker (threshold-based notifications via KChat)
+- [ ] Stock move reversal (correction entries, not deletes — matching finance pattern)
+- [ ] Batch/lot tracking foundation (schema only, full implementation deferred)
 
 ---
 
@@ -156,20 +169,27 @@ Employee lifecycle and structured learning.
 
 ### Deliverables
 
-- [ ] HR KTypes: `hr.employee`, `hr.leave_request`, `hr.attendance`, `hr.expense_claim`
-- [ ] HR workflows: onboarding, offboarding, leave approval
-- [ ] Org chart view
-- [ ] LMS KTypes: `lms.course`, `lms.module`, `lms.lesson`, `lms.enrollment`, `lms.quiz`, `lms.assignment`, `lms.progress`
-- [ ] Learner KChat surface (enrollment card, `/learn` command, progress pane)
-- [ ] Reviewer assignment workflow
-- [ ] Agent tools: `hr.request_leave`, `hr.approve_leave`, `lms.recommend_course`, `lms.grade_assignment`
+- [x] HR KTypes: `hr.employee`, `hr.leave_request`, `hr.attendance`, `hr.expense_claim` (`internal/hr/ktypes.go`; registered at API boot)
+- [x] HR workflows: onboarding, offboarding, leave approval (workflow blocks embedded in KType schemas drive the engine via `submit_for_approval` / `approve` / `reject` transitions)
+- [~] Org chart view (backing `hr.employee` KType has a `reporting_to` field; dedicated React tree view pending)
+- [x] LMS KTypes: `lms.course`, `lms.module`, `lms.lesson`, `lms.enrollment`, `lms.quiz`, `lms.assignment`, `lms.progress` (`internal/lms/ktypes.go`; registered at API boot)
+- [~] Learner KChat surface (`/learn` slash command in `services/kchat-bridge/commands.go`; KType `cards.summary` template drives the card renderer; dedicated progress web pane pending)
+- [~] Reviewer assignment workflow (`lms.assignment` carries a `reviewer` ref; approval-chain submission pending)
+- [x] Agent tools: `hr.request_leave`, `hr.approve_leave`, `lms.recommend_course`, `lms.grade_assignment` (`internal/agents/hr_tools.go`, `internal/agents/lms_tools.go`; registered at API boot)
 
 ### Acceptance Criteria
 
-- [ ] A leave request routes through approval and updates balance on decision
-- [ ] A course enrollment tracks progress across modules and lessons
-- [ ] A quiz submission is scored and recorded
+- [~] A leave request routes through approval and updates balance on decision (workflow + leave_ledger plumbing in place; integration test pending)
+- [~] A course enrollment tracks progress across modules and lessons (`lesson_progress` table + `enrollment_progress` view in place; integration test pending)
+- [~] A quiz submission is scored and recorded (`lms.Store.UpsertProgress` records score + status; integration test pending)
 - [ ] Reviewer assignment is notified via KChat
+
+### Deferred / Follow-up
+
+- [ ] Leave balance ledger (append-only, like finance journal)
+- [ ] Attendance integration with KChat status
+- [ ] Course completion certificates (basic)
+- [ ] Assignment submission + reviewer notification flow (rich-card variant)
 
 ---
 
@@ -193,6 +213,28 @@ Onboarding existing customers and supporting ad-hoc tables.
 - [ ] Broken rows are surfaced and re-ingestible after correction
 - [ ] Base tables can be created, edited, and shared per-tenant
 - [ ] Artifact documents version and restore correctly
+
+### Deferred / Follow-up
+
+- [ ] Frappe REST API source adapter (for ERPNext, HRMS, CRM, LMS imports)
+- [ ] DocType → KType automatic mapping suggestions
+- [ ] Attachment migration with content-addressable dedup
+- [ ] Import dry-run with validation report
+- [ ] Incremental sync support (delta imports)
+
+---
+
+## Cross-cutting
+
+Platform primitives used across every Kapp — not scoped to a single phase but tracked here for visibility.
+
+- [ ] Event SSE/WebSocket endpoint (`GET /api/v1/events/stream`)
+- [ ] Notification routing (KChat cards, in-app, email, webhook)
+- [ ] File/attachment upload endpoint (`POST /api/v1/files`) with S3 integration
+- [ ] Saved views / filters per KType per user
+- [ ] Report builder (pivot, aggregate, chart) over KRecords and ledgers
+- [ ] Per-tenant encryption keys (HKDF with tenant_id as salt)
+- [ ] Tenant backup/export tooling (single-tenant dump)
 
 ---
 

@@ -22,8 +22,11 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/forms"
+	"github.com/kennguy3n/kapp-fab/internal/hr"
+	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
+	"github.com/kennguy3n/kapp-fab/internal/lms"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
@@ -85,21 +88,57 @@ func run() error {
 	ledgerStore := ledger.NewPGStore(pool, eventPublisher, auditor)
 	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
 
-	// Register the finance KTypes at boot so a fresh deployment has a
-	// working chart-of-accounts / journal-entry / AR / AP schema set
-	// without requiring an out-of-band migration. The registry upserts
-	// on conflict so repeated restarts are a no-op.
+	// Phase D inventory engine — items, warehouses, append-only stock
+	// moves, and the derived stock_levels view. Wiring the same event
+	// publisher + audit logger keeps inventory mutations on the shared
+	// outbox + audit trail. PosterHook plugs the store into
+	// InvoicePoster so a posted sales invoice automatically emits a
+	// goods-delivery move and a posted purchase bill emits a
+	// goods-receipt move; the partial unique index on
+	// inventory_moves(source_id, …) keeps replays idempotent.
+	inventoryStore := inventory.NewPGStore(pool, eventPublisher, auditor)
+	inventoryHook := inventory.NewPosterHook(inventoryStore)
+	invoicePoster.
+		WithSalesInvoiceHook(inventoryHook.OnSalesInvoicePosted).
+		WithPurchaseBillHook(inventoryHook.OnPurchaseBillPosted)
+
+	// Phase E leave-balance ledger + lesson-progress projections.
+	// Employee / leave-request / course / lesson records live in the
+	// generic KRecord store; the dedicated stores only cover the
+	// append-only and per-user rollup tables defined in
+	// migrations/000006_hr.sql and 000007_lms.sql.
+	hrStore := hr.NewStore(pool)
+	lmsStore := lms.NewStore(pool)
+
+	// Register the domain KTypes at boot so a fresh deployment has a
+	// working schema set without requiring an out-of-band migration.
+	// The registry upserts on conflict so repeated restarts are a
+	// no-op. Finance (Phase C), inventory (Phase D), and HR+LMS
+	// (Phase E) all register here.
 	if err := finance.RegisterKTypes(ctx, ktypeRegistry); err != nil {
+		return err
+	}
+	if err := inventory.RegisterKTypes(ctx, ktypeRegistry); err != nil {
+		return err
+	}
+	if err := hr.RegisterKTypes(ctx, ktypeRegistry); err != nil {
+		return err
+	}
+	if err := lms.RegisterKTypes(ctx, ktypeRegistry); err != nil {
 		return err
 	}
 
 	// Agent tool executor — Phase B wires the CRM / tasks / approvals
 	// tools against the same record store and workflow engine the HTTP
 	// surface uses so dry-run and commit mode behave identically.
-	// Phase C extends it with the finance tool suite.
+	// Phase C extends it with the finance tool suite; Phase D adds
+	// inventory read + move tools.
 	executor := agents.NewExecutor(recordStore, workflowEngine, auditor)
 	agents.RegisterCRMTools(executor)
 	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster)
+	agents.RegisterInventoryTools(executor, inventoryStore)
+	agents.RegisterHRTools(executor, hrStore)
+	agents.RegisterLMSTools(executor, lmsStore)
 
 	fh := &formsHandlers{store: formStore, registry: ktypeRegistry}
 	th := &tenantHandlers{svc: tenantSvc}
@@ -110,6 +149,7 @@ func run() error {
 	aph := &approvalsHandlers{engine: workflowEngine, store: recordStore}
 	auh := &auditHandlers{pool: pool}
 	finh := &financeHandlers{store: ledgerStore, poster: invoicePoster}
+	invh := &inventoryHandlers{store: inventoryStore}
 	oh := &openAPIHandler{registry: ktypeRegistry}
 
 	r := chi.NewRouter()
@@ -233,6 +273,31 @@ func run() error {
 		r.Get("/reports/ar-aging", finh.arAging)
 		r.Get("/reports/ap-aging", finh.apAging)
 		r.Get("/reports/income-statement", finh.incomeStatement)
+	})
+
+	// Inventory surface (Phase D). Item + warehouse masters, the
+	// append-only stock-move ledger, the stock_levels view, and the
+	// valuation report. Mutations run under the same tenant +
+	// idempotency + rate-limit + quota stack as finance because a
+	// spammed move post can't starve other tenants or double-post a
+	// source-record move under replay (the partial unique index on
+	// inventory_moves handles that at the DB layer).
+	r.Route("/api/v1/inventory", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.IdempotencyMiddleware(pool))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Use(platform.QuotaMiddleware(quotaEnforcer))
+		r.Post("/items", invh.upsertItem)
+		r.Get("/items", invh.listItems)
+		r.Get("/items/{id}", invh.getItem)
+		r.Post("/warehouses", invh.upsertWarehouse)
+		r.Get("/warehouses", invh.listWarehouses)
+		r.Post("/moves", invh.recordMove)
+		r.Get("/moves", invh.listMoves)
+		r.Post("/transfers", invh.recordTransfer)
+		r.Get("/stock-levels", invh.listStockLevels)
+		r.Get("/stock-levels/{id}", invh.stockLevelsByItem)
+		r.Get("/reports/valuation", invh.valuation)
 	})
 
 	// Forms KApp. Creation and tenant-scoped lookups go through the

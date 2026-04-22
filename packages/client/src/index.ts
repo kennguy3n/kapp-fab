@@ -448,6 +448,28 @@ export class ApiClient {
     return this.request(`/finance/reports/income-statement?${qs}`);
   }
 
+  // --- Inventory (Phase D) ----------------------------------------------
+
+  listInventoryItems(): Promise<InventoryItem[]> {
+    return this.request("/inventory/items");
+  }
+
+  listInventoryWarehouses(): Promise<InventoryWarehouse[]> {
+    return this.request("/inventory/warehouses");
+  }
+
+  listStockLevels(itemId?: string): Promise<StockLevel[]> {
+    if (itemId) {
+      return this.request(`/inventory/stock-levels/${encodeURIComponent(itemId)}`);
+    }
+    return this.request("/inventory/stock-levels");
+  }
+
+  getInventoryValuation(asOf?: string): Promise<InventoryValuationReport> {
+    const qs = asOf ? `?as_of=${encodeURIComponent(asOf)}` : "";
+    return this.request(`/inventory/reports/valuation${qs}`);
+  }
+
   // --- Forms ------------------------------------------------------------
 
   /** Public (unauthenticated) fetch of a form's schema + config by id. */
@@ -685,6 +707,45 @@ export interface IncomeStatement {
   total_revenue: string;
   total_expense: string;
   net_income: string;
+}
+
+// --- Inventory ---------------------------------------------------------
+
+export interface InventoryItem {
+  tenant_id: string;
+  id: string;
+  sku: string;
+  name: string;
+  uom: string;
+  active: boolean;
+}
+
+export interface InventoryWarehouse {
+  tenant_id: string;
+  id: string;
+  code: string;
+  name: string;
+}
+
+export interface StockLevel {
+  tenant_id: string;
+  item_id: string;
+  warehouse_id: string;
+  qty: string;
+}
+
+export interface InventoryValuationRow {
+  item_id: string;
+  warehouse_id: string;
+  qty: string;
+  unit_cost: string;
+  value: string;
+}
+
+export interface InventoryValuationReport {
+  as_of: string;
+  rows: InventoryValuationRow[];
+  total_value: string;
 }
 
 export interface Form {

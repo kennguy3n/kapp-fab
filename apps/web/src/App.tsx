@@ -11,6 +11,8 @@ import { ChartOfAccountsPage } from "./pages/ChartOfAccountsPage";
 import { JournalEntriesPage } from "./pages/JournalEntriesPage";
 import { TrialBalancePage } from "./pages/TrialBalancePage";
 import { IncomeStatementPage } from "./pages/IncomeStatementPage";
+import { StockLevelsPage } from "./pages/StockLevelsPage";
+import { InventoryValuationPage } from "./pages/InventoryValuationPage";
 
 interface NavSection {
   title: string;
@@ -49,6 +51,15 @@ const navSections: NavSection[] = [
       { to: "/finance/reports/income-statement", label: "Income Statement" },
       { to: "/finance/ar-subledger", label: "AR Subledger" },
       { to: "/finance/ap-subledger", label: "AP Subledger" },
+    ],
+  },
+  {
+    title: "Inventory",
+    links: [
+      { to: "/records/inventory.item", label: "Items" },
+      { to: "/records/inventory.warehouse", label: "Warehouses" },
+      { to: "/inventory/stock-levels", label: "Stock Levels" },
+      { to: "/inventory/reports/valuation", label: "Valuation" },
     ],
   },
   {
@@ -129,6 +140,14 @@ function AppShell() {
           <Route
             path="/finance/ap-subledger"
             element={<SubledgerPage variant="ap" />}
+          />
+          <Route
+            path="/inventory/stock-levels"
+            element={<StockLevelsPage />}
+          />
+          <Route
+            path="/inventory/reports/valuation"
+            element={<InventoryValuationPage />}
           />
           <Route path="/records/:ktype" element={<RecordListPage />} />
           <Route path="/records/:ktype/new" element={<RecordFormPage />} />
