@@ -87,11 +87,14 @@ function AppShell() {
           <Route path="/records/:ktype" element={<RecordListPage />} />
           <Route path="/records/:ktype/new" element={<RecordFormPage />} />
           <Route path="/records/:ktype/:id" element={<RecordFormPage />} />
-          {/* /kanban/:ktype is a deep-link alias for the kanban view; the
-              underlying RecordListPage already prefers kanban mode when
-              the KType defines a kanban view, so the alias is just a
-              stable URL for dashboards / KChat cards to point at. */}
-          <Route path="/kanban/:ktype" element={<RecordListPage />} />
+          {/* /kanban/:ktype is a deep-link alias that forces the kanban
+              view via the defaultMode prop. RecordListPage still allows
+              the user to toggle to the list view; defaultMode is only
+              the initial mode, not a lock. */}
+          <Route
+            path="/kanban/:ktype"
+            element={<RecordListPage defaultMode="kanban" />}
+          />
         </Routes>
       </main>
     </div>

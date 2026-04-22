@@ -46,6 +46,12 @@ func (c *CardRenderer) RenderCard(ctx context.Context, name string, data map[str
 	}
 	var schema struct {
 		Cards struct {
+			// Summary is the flat-string form used by the Phase B CRM
+			// KType schemas (e.g. "{{name}} ({{source}}) — {{status}}").
+			// When present and Message.Title is empty, it is substituted
+			// into the card title so the renderer handles both the
+			// structured and the shorthand card contracts.
+			Summary string `json:"summary"`
 			Message struct {
 				Title    string   `json:"title"`
 				Subtitle string   `json:"subtitle"`
@@ -56,8 +62,12 @@ func (c *CardRenderer) RenderCard(ctx context.Context, name string, data map[str
 	}
 	_ = json.Unmarshal(kt.Schema, &schema)
 
+	titleTpl := schema.Cards.Message.Title
+	if titleTpl == "" {
+		titleTpl = schema.Cards.Summary
+	}
 	card := Card{
-		Title:    substitute(schema.Cards.Message.Title, data, kt.Name),
+		Title:    substitute(titleTpl, data, kt.Name),
 		Subtitle: substitute(schema.Cards.Message.Subtitle, data, ""),
 		Body:     substitute(schema.Cards.Message.Body, data, ""),
 	}
