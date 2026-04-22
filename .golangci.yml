@@ -1,8 +1,0 @@
-version: "2"
-run:
-  # Pin the analysis Go version one minor below the go.mod directive so
-  # golangci-lint v2.1.x (built with go1.24) can still be invoked against
-  # a go1.25 toolchain. Dropping this pin reintroduces the
-  # "language version used to build golangci-lint is lower than the
-  # targeted Go version" loader error that blocks CI.
-  go: "1.24"
