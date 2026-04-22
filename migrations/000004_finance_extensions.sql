@@ -73,3 +73,21 @@ END $$;
 -- kapp_app (non-superuser, RLS-enforced) can write under tenant context.
 GRANT SELECT, INSERT, UPDATE, DELETE ON fiscal_periods TO kapp_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON tax_codes      TO kapp_app;
+
+-- ---------------------------------------------------------------------------
+-- Source-row idempotency for posted journal entries.
+--
+-- InvoicePoster commits a journal entry in one transaction and then
+-- patches the source KRecord (status=posted, journal_entry_id=…) in a
+-- separate transaction. If the patch fails or two posters race, the
+-- first-phase guard on the KRecord (status != 'posted') can miss the
+-- conflict and a second JE gets inserted for the same invoice/bill —
+-- double-posting the ledger.
+--
+-- This partial unique index is the DB-level safety net: every posted
+-- entry that carries a source reference is unique per tenant. The Go
+-- poster catches the 23505 SQL state and treats the collision as
+-- "already posted, reuse the existing entry" for replay safety.
+CREATE UNIQUE INDEX IF NOT EXISTS journal_entries_source_uniq
+    ON journal_entries (tenant_id, source_ktype, source_id)
+    WHERE source_id IS NOT NULL;

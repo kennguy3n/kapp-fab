@@ -548,3 +548,302 @@ func TestRLSIsolatesFinanceData(t *testing.T) {
 		}
 	}
 }
+
+// TestTrialBalanceIncludesZeroBalanceAccountsWhenLinesOutOfRange pins
+// the fix for the previous `LEFT JOIN journal_entries ... AND
+// posted_at <= $2` shape, which dropped chart-of-accounts rows whose
+// only journal lines were posted strictly after asOf. Those accounts
+// legitimately have a zero balance at the as-of date and must still
+// appear on the trial balance.
+func TestTrialBalanceIncludesZeroBalanceAccountsWhenLinesOutOfRange(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, store, _ := newTenantForFinance(t, h)
+
+	actor := uuid.New()
+	asOf := time.Date(2026, 1, 31, 23, 59, 59, 0, time.UTC)
+
+	// Post the entry after asOf. "1100" (AR) and "4000" (Revenue) are
+	// seeded in the chart; both must still surface on the TB as zero.
+	future := asOf.Add(24 * time.Hour)
+	if _, err := store.PostJournalEntry(ctx, ledger.JournalEntry{
+		TenantID: tn.ID, PostedAt: future, Memo: "future", CreatedBy: actor,
+		Lines: []ledger.JournalLine{
+			{AccountCode: "1100", Debit: decimal.NewFromInt(500), Currency: "USD"},
+			{AccountCode: "4000", Credit: decimal.NewFromInt(500), Currency: "USD"},
+		},
+	}); err != nil {
+		t.Fatalf("post future: %v", err)
+	}
+
+	tb, err := store.TrialBalance(ctx, tn.ID, asOf)
+	if err != nil {
+		t.Fatalf("trial balance: %v", err)
+	}
+	rows := map[string]ledger.TrialBalanceRow{}
+	for _, r := range tb.Rows {
+		rows[r.AccountCode] = r
+	}
+	for _, code := range []string{"1100", "4000", "2100", "6000"} {
+		r, ok := rows[code]
+		if !ok {
+			t.Fatalf("trial balance missing account %s; got rows=%v", code, tb.Rows)
+		}
+		if !r.Debit.IsZero() || !r.Credit.IsZero() {
+			t.Fatalf("account %s expected zero activity (asOf before JE); got debit=%s credit=%s", code, r.Debit, r.Credit)
+		}
+	}
+	if !tb.Residual.IsZero() {
+		t.Fatalf("residual = %s; want 0", tb.Residual)
+	}
+}
+
+// TestIncomeStatementIncludesZeroBalanceAccountsOutsideRange is the
+// IncomeStatement analog of the trial-balance regression: revenue and
+// expense accounts whose only activity sits outside [from,to] must
+// still appear with a zero net amount so the statement reflects the
+// full chart.
+func TestIncomeStatementIncludesZeroBalanceAccountsOutsideRange(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, store, _ := newTenantForFinance(t, h)
+
+	actor := uuid.New()
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 1, 31, 23, 59, 59, 0, time.UTC)
+
+	// Activity one day after `to` — must be excluded from the statement.
+	if _, err := store.PostJournalEntry(ctx, ledger.JournalEntry{
+		TenantID: tn.ID, PostedAt: to.Add(24 * time.Hour), Memo: "feb", CreatedBy: actor,
+		Lines: []ledger.JournalLine{
+			{AccountCode: "6000", Debit: decimal.NewFromInt(300), Currency: "USD"},
+			{AccountCode: "2100", Credit: decimal.NewFromInt(300), Currency: "USD"},
+		},
+	}); err != nil {
+		t.Fatalf("post out-of-range: %v", err)
+	}
+
+	is, err := store.IncomeStatement(ctx, tn.ID, from, to)
+	if err != nil {
+		t.Fatalf("income statement: %v", err)
+	}
+	codes := map[string]ledger.IncomeStatementRow{}
+	for _, r := range is.Revenue {
+		codes[r.AccountCode] = r
+	}
+	for _, r := range is.Expense {
+		codes[r.AccountCode] = r
+	}
+	// All revenue + expense accounts from the seeded chart must be
+	// present even though none had in-range activity.
+	for _, code := range []string{"4000", "5000", "6000"} {
+		r, ok := codes[code]
+		if !ok {
+			t.Fatalf("income statement missing account %s; got revenue=%+v expense=%+v", code, is.Revenue, is.Expense)
+		}
+		if !r.Amount.IsZero() {
+			t.Fatalf("account %s amount = %s; want 0 (activity is outside range)", code, r.Amount)
+		}
+	}
+	if !is.NetIncome.IsZero() {
+		t.Fatalf("net income = %s; want 0", is.NetIncome)
+	}
+}
+
+// TestPostSalesInvoiceIsIdempotent simulates the retry-after-partial-
+// failure path: the first call posts the JE but we bypass the record
+// patch by reverting the record's status back to draft, then retry the
+// poster. With the fix in place the retry must (a) not insert a second
+// JE and (b) must succeed — reusing the existing entry.
+func TestPostSalesInvoiceIsIdempotent(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, store, poster := newTenantForFinance(t, h)
+
+	actor := uuid.New()
+	customer := uuid.NewString()
+	invoiceID := createARInvoiceRecord(t, h, tn.ID, actor, "INV-RETRY-1", customer,
+		decimal.NewFromInt(400), decimal.Zero, "")
+
+	firstEntry, err := poster.PostSalesInvoice(ctx, tn.ID, invoiceID, actor)
+	if err != nil {
+		t.Fatalf("first post: %v", err)
+	}
+
+	// Simulate a partial-failure scenario where the JE committed but
+	// the record patch was rolled back: rewind the record to draft and
+	// clear journal_entry_id, then replay the post action.
+	rec, err := h.records.Get(ctx, tn.ID, invoiceID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	rewind, _ := json.Marshal(map[string]any{
+		"status":           "draft",
+		"journal_entry_id": "",
+	})
+	if _, err := h.records.Update(ctx, record.KRecord{
+		ID: rec.ID, TenantID: tn.ID, Version: rec.Version,
+		Data: rewind, UpdatedBy: &actor,
+	}); err != nil {
+		t.Fatalf("rewind record: %v", err)
+	}
+
+	// Retry. Must reuse the original JE rather than double-post.
+	retryEntry, err := poster.PostSalesInvoice(ctx, tn.ID, invoiceID, actor)
+	if err != nil {
+		t.Fatalf("retry post: %v", err)
+	}
+	if retryEntry.ID != firstEntry.ID {
+		t.Fatalf("retry posted new JE %s; want reuse of %s", retryEntry.ID, firstEntry.ID)
+	}
+
+	// Exactly one JE ever existed for this invoice.
+	srcID := invoiceID
+	entries, err := store.ListJournalEntries(ctx, tn.ID, ledger.JournalEntryFilter{
+		SourceKType: finance.KTypeARInvoice,
+		SourceID:    &srcID,
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d JEs for invoice; want exactly 1 (IDs %+v)", len(entries), entries)
+	}
+
+	// Final record state: status posted, journal_entry_id points at the
+	// (single) JE.
+	final, err := h.records.Get(ctx, tn.ID, invoiceID)
+	if err != nil {
+		t.Fatalf("reload final: %v", err)
+	}
+	var fields struct {
+		Status         string `json:"status"`
+		JournalEntryID string `json:"journal_entry_id"`
+	}
+	if err := json.Unmarshal(final.Data, &fields); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if fields.Status != "posted" || fields.JournalEntryID != firstEntry.ID.String() {
+		t.Fatalf("final record: status=%q je=%q; want posted / %s", fields.Status, fields.JournalEntryID, firstEntry.ID)
+	}
+}
+
+// TestPostPurchaseBillIsIdempotent mirrors the sales-invoice retry
+// test for AP bills.
+func TestPostPurchaseBillIsIdempotent(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, store, poster := newTenantForFinance(t, h)
+
+	actor := uuid.New()
+	supplier := uuid.NewString()
+	billID := createAPBillRecord(t, h, tn.ID, actor, "BILL-RETRY-1", supplier,
+		decimal.NewFromInt(220), decimal.Zero, "")
+
+	firstEntry, err := poster.PostPurchaseBill(ctx, tn.ID, billID, actor)
+	if err != nil {
+		t.Fatalf("first post: %v", err)
+	}
+
+	rec, err := h.records.Get(ctx, tn.ID, billID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	rewind, _ := json.Marshal(map[string]any{
+		"status":           "draft",
+		"journal_entry_id": "",
+	})
+	if _, err := h.records.Update(ctx, record.KRecord{
+		ID: rec.ID, TenantID: tn.ID, Version: rec.Version,
+		Data: rewind, UpdatedBy: &actor,
+	}); err != nil {
+		t.Fatalf("rewind record: %v", err)
+	}
+
+	retryEntry, err := poster.PostPurchaseBill(ctx, tn.ID, billID, actor)
+	if err != nil {
+		t.Fatalf("retry post: %v", err)
+	}
+	if retryEntry.ID != firstEntry.ID {
+		t.Fatalf("retry posted new JE %s; want reuse of %s", retryEntry.ID, firstEntry.ID)
+	}
+
+	srcID := billID
+	entries, err := store.ListJournalEntries(ctx, tn.ID, ledger.JournalEntryFilter{
+		SourceKType: finance.KTypeAPBill,
+		SourceID:    &srcID,
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d JEs for bill; want exactly 1", len(entries))
+	}
+}
+
+// TestPostSalesInvoiceConcurrentPostersOnlyOneWins races two
+// PostSalesInvoice callers against the same draft invoice. The partial
+// unique index on (tenant_id, source_ktype, source_id) plus the
+// GetJournalEntryBySource pre-check/reload path must ensure that at
+// most one JE is ever inserted; both callers return successfully and
+// agree on the same JE id.
+func TestPostSalesInvoiceConcurrentPostersOnlyOneWins(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, store, poster := newTenantForFinance(t, h)
+
+	actor := uuid.New()
+	customer := uuid.NewString()
+	invoiceID := createARInvoiceRecord(t, h, tn.ID, actor, "INV-RACE-1", customer,
+		decimal.NewFromInt(777), decimal.Zero, "")
+
+	type result struct {
+		entryID uuid.UUID
+		err     error
+	}
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			entry, err := poster.PostSalesInvoice(ctx, tn.ID, invoiceID, actor)
+			if entry != nil {
+				results <- result{entryID: entry.ID, err: err}
+			} else {
+				results <- result{err: err}
+			}
+		}()
+	}
+
+	var ids []uuid.UUID
+	var errs []error
+	for i := 0; i < 2; i++ {
+		r := <-results
+		if r.err != nil {
+			errs = append(errs, r.err)
+		}
+		if r.entryID != uuid.Nil {
+			ids = append(ids, r.entryID)
+		}
+	}
+
+	// Both goroutines either succeed (agreeing on the same JE) or one
+	// returns record.ErrVersionConflict because the other already
+	// patched the record first — both outcomes are acceptable. What's
+	// NOT acceptable is two distinct JEs in the ledger.
+	srcID := invoiceID
+	entries, err := store.ListJournalEntries(ctx, tn.ID, ledger.JournalEntryFilter{
+		SourceKType: finance.KTypeARInvoice,
+		SourceID:    &srcID,
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("concurrent posters produced %d JEs; want exactly 1 (errs=%v ids=%v)", len(entries), errs, ids)
+	}
+	winnerID := entries[0].ID
+	for _, id := range ids {
+		if id != winnerID {
+			t.Fatalf("poster returned JE %s but only %s exists in the ledger", id, winnerID)
+		}
+	}
+}

@@ -130,4 +130,12 @@ var (
 	ErrTaxCodeNotFound     = errors.New("ledger: tax code not found")
 	ErrInvoiceNotPostable  = errors.New("ledger: invoice not postable from current status")
 	ErrInvoiceAlreadyPosted = errors.New("ledger: invoice already posted")
+	// ErrDuplicateSourceEntry is surfaced when a caller tries to post
+	// a second journal entry that references the same (source_ktype,
+	// source_id). A concurrent poster or a retry-after-partial-failure
+	// would otherwise double-post the ledger; the DB unique index on
+	// journal_entries(tenant_id, source_ktype, source_id) WHERE
+	// source_id IS NOT NULL is the hard guarantee, and this sentinel
+	// lets callers detect the race and reuse the existing entry.
+	ErrDuplicateSourceEntry = errors.New("ledger: journal entry already exists for source record")
 )

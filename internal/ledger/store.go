@@ -10,12 +10,27 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
+)
+
+const (
+	// pgUniqueViolation is the SQLSTATE class for unique_violation.
+	// Used to detect the (tenant_id, source_ktype, source_id) partial
+	// unique index collision on journal_entries inserts.
+	pgUniqueViolation = "23505"
+
+	// journalEntriesSourceUniqIndex is the name of the partial unique
+	// index installed in migrations/000004_finance_extensions.sql. Only
+	// a 23505 on this specific index translates to ErrDuplicateSourceEntry;
+	// other unique-violations (e.g. PK collision on journal_lines) keep
+	// their generic error shape.
+	journalEntriesSourceUniqIndex = "journal_entries_source_uniq"
 )
 
 // PGStore implements the double-entry posting engine against PostgreSQL.
@@ -271,6 +286,17 @@ func (s *PGStore) PostJournalEntry(ctx context.Context, entry JournalEntry) (*Jo
 			srcKType, srcID, entry.CreatedBy, entry.CreatedAt,
 		)
 		if err != nil {
+			// A collision on the source-row partial unique index means
+			// some other poster (concurrent or a retried caller) already
+			// persisted a JE for (source_ktype, source_id). Surface
+			// ErrDuplicateSourceEntry so the invoice/bill poster can
+			// reuse the existing entry rather than double-post.
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) &&
+				pgErr.Code == pgUniqueViolation &&
+				pgErr.ConstraintName == journalEntriesSourceUniqIndex {
+				return ErrDuplicateSourceEntry
+			}
 			return fmt.Errorf("ledger: insert journal entry: %w", err)
 		}
 
@@ -378,6 +404,62 @@ func (s *PGStore) GetJournalEntry(ctx context.Context, tenantID, id uuid.UUID) (
 				return ErrEntryNotFound
 			}
 			return fmt.Errorf("ledger: load journal entry: %w", err)
+		}
+		if memo != nil {
+			out.Memo = *memo
+		}
+		if srcKType != nil {
+			out.SourceKType = *srcKType
+		}
+		out.SourceID = srcID
+
+		lines, err := loadLinesTx(ctx, tx, tenantID, out.ID)
+		if err != nil {
+			return err
+		}
+		out.Lines = lines
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetJournalEntryBySource loads the journal entry previously posted
+// for the given (source_ktype, source_id). Returns ErrEntryNotFound
+// when no matching entry exists. Used by InvoicePoster to make
+// PostSalesInvoice / PostPurchaseBill idempotent across retries: if a
+// prior posting committed the JE but crashed before patching the
+// source KRecord, the next call finds the original entry instead of
+// creating a duplicate.
+func (s *PGStore) GetJournalEntryBySource(ctx context.Context, tenantID uuid.UUID, sourceKType string, sourceID uuid.UUID) (*JournalEntry, error) {
+	if tenantID == uuid.Nil || sourceKType == "" || sourceID == uuid.Nil {
+		return nil, errors.New("ledger: tenant id, source_ktype, and source_id required")
+	}
+	var out JournalEntry
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var (
+			srcKType *string
+			srcID    *uuid.UUID
+			memo     *string
+		)
+		err := tx.QueryRow(ctx,
+			`SELECT id, tenant_id, posted_at, memo, source_ktype, source_id, created_by, created_at
+			 FROM journal_entries
+			 WHERE tenant_id = $1 AND source_ktype = $2 AND source_id = $3
+			 ORDER BY created_at ASC
+			 LIMIT 1`,
+			tenantID, sourceKType, sourceID,
+		).Scan(
+			&out.ID, &out.TenantID, &out.PostedAt, &memo,
+			&srcKType, &srcID, &out.CreatedBy, &out.CreatedAt,
+		)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrEntryNotFound
+			}
+			return fmt.Errorf("ledger: load journal entry by source: %w", err)
 		}
 		if memo != nil {
 			out.Memo = *memo

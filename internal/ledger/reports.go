@@ -98,16 +98,26 @@ func (s *PGStore) TrialBalance(ctx context.Context, tenantID uuid.UUID, asOf tim
 
 	tb := &TrialBalance{TenantID: tenantID, AsOf: asOf, Rows: []TrialBalanceRow{}}
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// We pre-filter journal_entries in a CTE so the subsequent
+		// LEFT JOIN from accounts never eliminates a chart-of-accounts
+		// row whose only journal lines happen to belong to an entry
+		// posted after asOf. Those accounts legitimately have a zero
+		// balance for the report and must still appear.
 		rows, err := tx.Query(ctx,
-			`SELECT a.code, a.name, a.type,
+			`WITH in_range AS (
+			     SELECT id FROM journal_entries
+			     WHERE tenant_id = $1
+			       AND posted_at <= $2
+			 )
+			 SELECT a.code, a.name, a.type,
 			        COALESCE(SUM(jl.debit), 0)  AS debit,
 			        COALESCE(SUM(jl.credit), 0) AS credit
 			 FROM accounts a
-			 LEFT JOIN journal_lines jl ON jl.tenant_id = a.tenant_id AND jl.account_code = a.code
-			 LEFT JOIN journal_entries je ON je.tenant_id = jl.tenant_id AND je.id = jl.entry_id
-			   AND (je.posted_at IS NULL OR je.posted_at <= $2)
+			 LEFT JOIN journal_lines jl
+			   ON jl.tenant_id = a.tenant_id
+			  AND jl.account_code = a.code
+			  AND jl.entry_id IN (SELECT id FROM in_range)
 			 WHERE a.tenant_id = $1
-			   AND (jl.entry_id IS NULL OR je.id IS NOT NULL)
 			 GROUP BY a.code, a.name, a.type
 			 ORDER BY a.code`,
 			tenantID, asOf,
@@ -336,17 +346,25 @@ func (s *PGStore) IncomeStatement(ctx context.Context, tenantID uuid.UUID, from,
 		Expense: []IncomeStatementRow{},
 	}
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// CTE pre-filter mirrors TrialBalance — a revenue/expense
+		// account with no in-range activity should still appear with
+		// a zero amount so the statement reflects the full chart.
 		rows, err := tx.Query(ctx,
-			`SELECT a.code, a.name, a.type,
+			`WITH in_range AS (
+			     SELECT id FROM journal_entries
+			     WHERE tenant_id = $1
+			       AND posted_at BETWEEN $2 AND $3
+			 )
+			 SELECT a.code, a.name, a.type,
 			        COALESCE(SUM(jl.debit), 0)  AS debit,
 			        COALESCE(SUM(jl.credit), 0) AS credit
 			 FROM accounts a
-			 LEFT JOIN journal_lines jl ON jl.tenant_id = a.tenant_id AND jl.account_code = a.code
-			 LEFT JOIN journal_entries je ON je.tenant_id = jl.tenant_id AND je.id = jl.entry_id
-			   AND je.posted_at BETWEEN $2 AND $3
+			 LEFT JOIN journal_lines jl
+			   ON jl.tenant_id = a.tenant_id
+			  AND jl.account_code = a.code
+			  AND jl.entry_id IN (SELECT id FROM in_range)
 			 WHERE a.tenant_id = $1
 			   AND a.type IN ('revenue', 'expense')
-			   AND (jl.entry_id IS NULL OR je.id IS NOT NULL)
 			 GROUP BY a.code, a.name, a.type
 			 ORDER BY a.type, a.code`,
 			tenantID, from, to,

@@ -24,10 +24,26 @@ import (
 // tenant context. The record.PGStore itself uses WithTenantTx, so each
 // Update/Get opens its own transaction — the posting is still atomic
 // at the ledger level (journal + event + audit share one tx); the
-// record update happens as a follow-on tenant-scoped write. A failure
-// between the ledger commit and the record patch would leave an
-// orphan JE whose SourceID points at a draft invoice; callers replay
-// the post action to reconcile.
+// record update is a follow-on tenant-scoped write.
+//
+// The JE insert and the record patch therefore run in separate
+// transactions, which is a well-known two-phase-commit hazard. The
+// poster relies on two safety nets so retries and concurrent callers
+// cannot double-post:
+//
+//  1. The source KRecord write uses optimistic concurrency (rec.Version
+//     is threaded into recordStore.Update), so two concurrent posters
+//     cannot both flip status=draft → posted on the same record.
+//  2. The `journal_entries_source_uniq` partial index (see
+//     migrations/000004_finance_extensions.sql) enforces one JE per
+//     (tenant_id, source_ktype, source_id). PostJournalEntry translates
+//     the resulting 23505 into ErrDuplicateSourceEntry, and the poster
+//     reloads the existing entry and patches the record against *that*
+//     JE id instead of inserting a duplicate.
+//
+// Together these cover the retry-after-partial-failure case (prior JE
+// exists, record still says draft) and the concurrent-poster race
+// (two callers reach PostJournalEntry; one wins, the other reuses).
 type InvoicePoster struct {
 	store       *PGStore
 	recordStore *record.PGStore
@@ -133,37 +149,68 @@ func (p *InvoicePoster) PostSalesInvoice(ctx context.Context, tenantID, invoiceI
 		inv.Total = inv.Subtotal.Add(inv.TaxAmount)
 	}
 
-	lines := []JournalLine{
-		{AccountCode: inv.ARAccountCode, Debit: inv.Total, Credit: decimal.Zero, Currency: currency, Memo: memoFor(inv.InvoiceNumber, "AR")},
-		{AccountCode: inv.RevenueAccountCode, Debit: decimal.Zero, Credit: inv.Subtotal, Currency: currency, Memo: memoFor(inv.InvoiceNumber, "Revenue")},
-	}
-	if inv.TaxAmount.IsPositive() {
-		if inv.TaxAccountCode == "" {
-			return nil, errors.New("ledger: tax_account_code required when tax_amount > 0")
-		}
-		lines = append(lines, JournalLine{
-			AccountCode: inv.TaxAccountCode, Debit: decimal.Zero, Credit: inv.TaxAmount,
-			Currency: currency, Memo: memoFor(inv.InvoiceNumber, "Tax"),
-		})
+	// If a previous invocation already posted the JE but failed before
+	// patching the source record, reuse that entry instead of creating
+	// a duplicate. The partial unique index on (tenant_id, source_ktype,
+	// source_id) is the DB-level guarantee; this is the happy-path
+	// fast-check that avoids an attempted insert when we already know it
+	// would 23505.
+	existing, err := p.store.GetJournalEntryBySource(ctx, tenantID, "finance.ar_invoice", invoiceID)
+	if err != nil && !errors.Is(err, ErrEntryNotFound) {
+		return nil, err
 	}
 
-	postedAt := parseInvoiceDate(inv.IssueDate, p.store.now)
-	sourceID := invoiceID
-	entry, err := p.store.PostJournalEntry(ctx, JournalEntry{
-		TenantID:    tenantID,
-		PostedAt:    postedAt,
-		Memo:        fmt.Sprintf("Sales invoice %s", inv.InvoiceNumber),
-		SourceKType: "finance.ar_invoice",
-		SourceID:    &sourceID,
-		CreatedBy:   actorID,
-		Lines:       lines,
-	})
-	if err != nil {
-		return nil, err
+	var entry *JournalEntry
+	if existing != nil {
+		entry = existing
+	} else {
+		lines := []JournalLine{
+			{AccountCode: inv.ARAccountCode, Debit: inv.Total, Credit: decimal.Zero, Currency: currency, Memo: memoFor(inv.InvoiceNumber, "AR")},
+			{AccountCode: inv.RevenueAccountCode, Debit: decimal.Zero, Credit: inv.Subtotal, Currency: currency, Memo: memoFor(inv.InvoiceNumber, "Revenue")},
+		}
+		if inv.TaxAmount.IsPositive() {
+			if inv.TaxAccountCode == "" {
+				return nil, errors.New("ledger: tax_account_code required when tax_amount > 0")
+			}
+			lines = append(lines, JournalLine{
+				AccountCode: inv.TaxAccountCode, Debit: decimal.Zero, Credit: inv.TaxAmount,
+				Currency: currency, Memo: memoFor(inv.InvoiceNumber, "Tax"),
+			})
+		}
+
+		postedAt := parseInvoiceDate(inv.IssueDate, p.store.now)
+		sourceID := invoiceID
+		posted, postErr := p.store.PostJournalEntry(ctx, JournalEntry{
+			TenantID:    tenantID,
+			PostedAt:    postedAt,
+			Memo:        fmt.Sprintf("Sales invoice %s", inv.InvoiceNumber),
+			SourceKType: "finance.ar_invoice",
+			SourceID:    &sourceID,
+			CreatedBy:   actorID,
+			Lines:       lines,
+		})
+		if postErr != nil {
+			// A concurrent poster beat us to the insert. Fall back to
+			// the entry it committed so the record patch completes.
+			if errors.Is(postErr, ErrDuplicateSourceEntry) {
+				reloaded, reloadErr := p.store.GetJournalEntryBySource(ctx, tenantID, "finance.ar_invoice", invoiceID)
+				if reloadErr != nil {
+					return nil, fmt.Errorf("ledger: reload duplicate entry: %w", reloadErr)
+				}
+				posted = reloaded
+			} else {
+				return nil, postErr
+			}
+		}
+		entry = posted
 	}
 
 	// Patch the invoice KRecord with status=posted + journal_entry_id.
 	// Shallow-merge so existing fields (customer_id, lines, …) are kept.
+	// Threading rec.Version in turns the patch into a compare-and-swap
+	// so two concurrent posters cannot both claim the record; the loser
+	// gets record.ErrVersionConflict and the caller retries (at which
+	// point the rec.Status=='posted' guard above short-circuits).
 	patch := map[string]any{
 		"status":           "posted",
 		"journal_entry_id": entry.ID.String(),
@@ -172,6 +219,7 @@ func (p *InvoicePoster) PostSalesInvoice(ctx context.Context, tenantID, invoiceI
 	if _, err := p.recordStore.Update(ctx, record.KRecord{
 		ID:        rec.ID,
 		TenantID:  tenantID,
+		Version:   rec.Version,
 		Data:      patchJSON,
 		UpdatedBy: ptrUUID(actorID),
 	}); err != nil {
@@ -238,36 +286,57 @@ func (p *InvoicePoster) PostPurchaseBill(ctx context.Context, tenantID, billID, 
 		bill.Total = bill.Subtotal.Add(bill.TaxAmount)
 	}
 
-	lines := []JournalLine{
-		{AccountCode: bill.ExpenseAccountCode, Debit: bill.Subtotal, Credit: decimal.Zero, Currency: currency, Memo: memoFor(bill.BillNumber, "Expense")},
+	// Reuse any prior JE for this bill — see the matching comment in
+	// PostSalesInvoice.
+	existing, err := p.store.GetJournalEntryBySource(ctx, tenantID, "finance.ap_bill", billID)
+	if err != nil && !errors.Is(err, ErrEntryNotFound) {
+		return nil, err
 	}
-	if bill.TaxAmount.IsPositive() {
-		if bill.TaxAccountCode == "" {
-			return nil, errors.New("ledger: tax_account_code required when tax_amount > 0")
+
+	var entry *JournalEntry
+	if existing != nil {
+		entry = existing
+	} else {
+		lines := []JournalLine{
+			{AccountCode: bill.ExpenseAccountCode, Debit: bill.Subtotal, Credit: decimal.Zero, Currency: currency, Memo: memoFor(bill.BillNumber, "Expense")},
+		}
+		if bill.TaxAmount.IsPositive() {
+			if bill.TaxAccountCode == "" {
+				return nil, errors.New("ledger: tax_account_code required when tax_amount > 0")
+			}
+			lines = append(lines, JournalLine{
+				AccountCode: bill.TaxAccountCode, Debit: bill.TaxAmount, Credit: decimal.Zero,
+				Currency: currency, Memo: memoFor(bill.BillNumber, "Tax"),
+			})
 		}
 		lines = append(lines, JournalLine{
-			AccountCode: bill.TaxAccountCode, Debit: bill.TaxAmount, Credit: decimal.Zero,
-			Currency: currency, Memo: memoFor(bill.BillNumber, "Tax"),
+			AccountCode: bill.APAccountCode, Debit: decimal.Zero, Credit: bill.Total,
+			Currency: currency, Memo: memoFor(bill.BillNumber, "AP"),
 		})
-	}
-	lines = append(lines, JournalLine{
-		AccountCode: bill.APAccountCode, Debit: decimal.Zero, Credit: bill.Total,
-		Currency: currency, Memo: memoFor(bill.BillNumber, "AP"),
-	})
 
-	postedAt := parseInvoiceDate(bill.IssueDate, p.store.now)
-	sourceID := billID
-	entry, err := p.store.PostJournalEntry(ctx, JournalEntry{
-		TenantID:    tenantID,
-		PostedAt:    postedAt,
-		Memo:        fmt.Sprintf("Purchase bill %s", bill.BillNumber),
-		SourceKType: "finance.ap_bill",
-		SourceID:    &sourceID,
-		CreatedBy:   actorID,
-		Lines:       lines,
-	})
-	if err != nil {
-		return nil, err
+		postedAt := parseInvoiceDate(bill.IssueDate, p.store.now)
+		sourceID := billID
+		posted, postErr := p.store.PostJournalEntry(ctx, JournalEntry{
+			TenantID:    tenantID,
+			PostedAt:    postedAt,
+			Memo:        fmt.Sprintf("Purchase bill %s", bill.BillNumber),
+			SourceKType: "finance.ap_bill",
+			SourceID:    &sourceID,
+			CreatedBy:   actorID,
+			Lines:       lines,
+		})
+		if postErr != nil {
+			if errors.Is(postErr, ErrDuplicateSourceEntry) {
+				reloaded, reloadErr := p.store.GetJournalEntryBySource(ctx, tenantID, "finance.ap_bill", billID)
+				if reloadErr != nil {
+					return nil, fmt.Errorf("ledger: reload duplicate entry: %w", reloadErr)
+				}
+				posted = reloaded
+			} else {
+				return nil, postErr
+			}
+		}
+		entry = posted
 	}
 
 	patch := map[string]any{
@@ -278,6 +347,7 @@ func (p *InvoicePoster) PostPurchaseBill(ctx context.Context, tenantID, billID, 
 	if _, err := p.recordStore.Update(ctx, record.KRecord{
 		ID:        rec.ID,
 		TenantID:  tenantID,
+		Version:   rec.Version,
 		Data:      patchJSON,
 		UpdatedBy: ptrUUID(actorID),
 	}); err != nil {
