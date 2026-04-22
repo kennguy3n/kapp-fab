@@ -152,7 +152,7 @@ First inventory primitives integrated with Sales and Procurement.
 
 - [x] Sales invoice posts a delivery move; stock level decreases (`TestSalesInvoicePostsDeliveryMove` in `internal/integrationtest/phase_d_test.go`)
 - [x] Purchase bill posts a receipt move; stock level increases (`TestPurchaseBillPostsReceiptMove`)
-- [x] Stock levels always match the sum of moves (`TestStockLevelsMatchMoveSum`)
+- [x] Stock levels always match the sum of moves across every move source type — receipts, deliveries, adjustments, transfers (`TestStockLevelsMatchSumOfMoves`)
 - [x] Warehouse transfers are balanced (`TestWarehouseTransfersAreBalanced`)
 
 ### Deferred / Follow-up
@@ -179,9 +179,9 @@ Employee lifecycle and structured learning.
 
 ### Acceptance Criteria
 
-- [x] A leave request routes through approval and updates balance on decision (`TestLeaveLedgerBalanceReflectsDeltas` in `internal/integrationtest/phase_e_test.go`)
-- [x] A course enrollment tracks progress across modules and lessons (`TestLessonProgressTracksScoreAndCompletion`)
-- [x] A quiz submission is scored and recorded (`TestLessonProgressTracksScoreAndCompletion`)
+- [x] A leave request routes through approval and updates balance on decision (`TestLeaveRequestApprovalFlow` drives the full lifecycle; `TestLeaveLedgerBalanceReflectsDeltas` covers the append-only ledger invariant)
+- [x] A course enrollment tracks progress across modules and lessons (`TestCourseEnrollmentProgress` asserts the `enrollment_progress` rollup; `TestLessonProgressTracksScoreAndCompletion` covers the per-lesson projection)
+- [x] A quiz submission is scored and recorded (`TestQuizSubmissionScoring` — covers first submission, re-attempts, and attempt counting)
 - [ ] Reviewer assignment is notified via KChat
 
 ### Deferred / Follow-up
@@ -234,6 +234,15 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [ ] Report builder (pivot, aggregate, chart) over KRecords and ledgers
 - [ ] Per-tenant encryption keys (HKDF with tenant_id as salt)
 - [ ] Tenant backup/export tooling (single-tenant dump)
+- [ ] HR org chart tree view (React component backed by `hr.employee.reporting_to`)
+- [ ] LMS learner progress web pane (course progress dashboard reading `enrollment_progress`)
+- [ ] LMS reviewer assignment approval chain for `lms.assignment`
+- [ ] Frappe REST API source adapter for importer (ERPNext, HRMS, CRM, LMS)
+- [ ] DocType → KType automatic mapping suggestions
+- [ ] Multi-tenancy: per-tenant encryption keys (HKDF with tenant_id as salt)
+- [ ] Multi-tenancy: zero-idle-cost verification (idle tenant resource measurement)
+- [ ] Multi-tenancy: sub-millisecond tenant context switching benchmark
+- [ ] Multi-tenancy: 1000-tenant load test on single cell
 
 ---
 
