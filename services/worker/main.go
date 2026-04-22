@@ -169,7 +169,14 @@ func (b *kchatBridgeNotifier) renderApprovalCard(ctx context.Context, e events.E
 	if err != nil {
 		return fmt.Errorf("post: %w", err)
 	}
-	defer resp.Body.Close()
+	// Drain-and-close pattern so the net/http Transport can return the
+	// TCP connection to its keep-alive pool. Without the drain, each
+	// successful render POST would force a fresh connection — wasteful
+	// given this runs on every drained approval event.
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("status=%d body=%s", resp.StatusCode, string(snippet))
