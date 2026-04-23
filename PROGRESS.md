@@ -1,15 +1,15 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2026-04-23 (Phase G kickoff: multi-tenancy hardening benchmarks, per-tenant encryption keys, low-stock alert worker, and saved views landed)
+> **Last Updated:** 2026-04-23 (Phase G second slice: sales/procurement KTypes, bank reconciliation, cost centers, payroll KTypes, Prometheus middleware, per-tenant backup CLI, Frappe delta sync + mapping suggestions, security review doc, upgrade-tier script)
 >
-> Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md)
+> Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [SECURITY_REVIEW.md](./docs/SECURITY_REVIEW.md)
 
 ---
 
 ## Current Phase
 
 **Phase G — Hardening, Observability, and Scale**
-**Status:** In Progress (first hardening slice landed: multi-tenancy benchmarks, per-tenant encryption code + boot wiring, low-stock alert worker + wiring, saved views)
+**Status:** In Progress (second hardening slice landed: sales/procurement, bank reconciliation, cost centers, payroll, per-tenant observability, backup CLI, Frappe delta sync + mapping suggestions, security review, upgrade-tier script)
 
 ---
 
@@ -216,10 +216,10 @@ Onboarding existing customers and supporting ad-hoc tables.
 ### Deferred / Follow-up
 
 - [x] Frappe REST API source adapter (for ERPNext, HRMS, CRM, LMS imports) (`internal/importer/adapters/frappe.go`)
-- [ ] DocType → KType automatic mapping suggestions (manual mapping today; auto-suggest driven by field name similarity deferred)
+- [x] DocType → KType automatic mapping suggestions (`internal/importer/adapters/frappe.go#SuggestFieldMapping` — Jaccard-on-tokens + normalised Levenshtein; returns best target per source field above a configurable threshold)
 - [x] Attachment migration with content-addressable dedup (`internal/files/files.go` + `POST /api/v1/files`)
 - [x] Import dry-run with validation report (`POST /api/v1/imports/{id}/validate` runs the validator without cutover; errors exposed via `GET /api/v1/imports/{id}/errors`)
-- [ ] Incremental sync support (delta imports)
+- [x] Incremental sync support (delta imports) (`FrappeConfig.LastSyncAt` threads through to `mergeDeltaFilter` which adds a `modified > $ts` clause to every `/api/resource/{doctype}` call; `import_jobs.last_sync_at` column added in `migrations/000011_sales_procurement_bank.sql`)
 
 ---
 
@@ -233,12 +233,12 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [x] Saved views / filters per KType per user (`internal/record/views.go` + `migrations/000010_phase_g.sql` `saved_views` table with RLS; `GET/POST /api/v1/views` + `GET/PATCH/DELETE /api/v1/views/{id}` in `services/api/views.go`; dropdown + Save/Delete view in `apps/web/src/pages/RecordListPage.tsx`)
 - [ ] Report builder (pivot, aggregate, chart) over KRecords and ledgers
 - [x] Per-tenant encryption keys (HKDF with tenant_id as salt) (`internal/tenant/encryption.go` derives per-tenant AES-256-GCM keys from `KAPP_MASTER_KEY` via HKDF-SHA256 with the tenant UUID as salt; `internal/record/store.go` transparently encrypts/decrypts fields marked `"encrypted": true` in the KType schema)
-- [ ] Tenant backup/export tooling (single-tenant dump)
+- [x] Tenant backup/export tooling (single-tenant dump) (`services/kapp-backup/main.go` — `extract` dumps every tenant-scoped table as JSONL via `row_to_json`, manifest-first; `restore` replays with optional `--remap src:dst` so a tenant can be restored into a fresh tenant_id without touching neighbours)
 - [x] HR org chart tree view (`apps/web/src/pages/OrgChartPage.tsx` backed by `hr.employee.reporting_to`)
 - [x] LMS learner progress web pane (`apps/web/src/pages/LearnerProgressPage.tsx` — course progress dashboard)
 - [x] LMS reviewer assignment approval chain for `lms.assignment` (`lms.submit_assignment` agent tool + workflow block)
 - [x] Frappe REST API source adapter for importer (ERPNext, HRMS, CRM, LMS) (`internal/importer/adapters/frappe.go`)
-- [ ] DocType → KType automatic mapping suggestions
+- [x] DocType → KType automatic mapping suggestions (`adapters/frappe.go#SuggestFieldMapping`)
 - [x] Multi-tenancy: per-tenant encryption keys (HKDF with tenant_id as salt) (`internal/tenant/encryption.go`; integrated with `internal/record/store.go` encrypted-field hooks)
 - [x] Multi-tenancy: zero-idle-cost verification (idle tenant resource measurement) (`TestIdleTenantZeroCost`)
 - [x] Multi-tenancy: sub-millisecond tenant context switching benchmark (`BenchmarkTenantContextSwitch`)
@@ -265,12 +265,12 @@ The kernel can model these as generic KRecords today, but dedicated KTypes
 (with schemas, posting hooks, and agent tools) make the user experience
 match what customers expect from an ERP/CRM.
 
-- [ ] Sales Orders (`sales.order` KType) — draft → confirmed → delivered pipeline, links to quote + invoice, triggers inventory reserve/deliver moves
-- [ ] Purchase Orders (`purchase.order` KType) — draft → approved → received pipeline, links to supplier + bill, triggers inventory receipt moves
+- [x] Sales Orders (`sales.order` KType) — draft → confirmed → fulfilled pipeline, links to deal + price list, lines with item/qty/price/discount (`internal/sales/ktypes.go`; registered in `services/api/main.go`)
+- [x] Purchase Orders (`procurement.purchase_order` KType) — draft → confirmed → received pipeline, links to supplier, same line shape as sales orders (`internal/sales/ktypes.go`)
 - [ ] Customers as a dedicated KType (`crm.customer`) — split out of `crm.organization` with AR-aging, credit limit, default tax code, and linkage from `finance.ar_invoice`
 - [ ] Suppliers as a dedicated KType (`crm.supplier`) — parallel to customers with AP-aging, default payment terms, and linkage from `finance.ap_bill`
-- [ ] Price Lists (`sales.price_list` KType) — per-currency, per-customer-segment price rules applied on quote/invoice line creation
-- [ ] Salary Components (`hr.salary_component`, `hr.salary_structure`) — earning / deduction / tax components composing a payroll run; feeds a future `hr.payroll_run` posting into the finance ledger
+- [x] Price Lists (`sales.price_list` KType) — per-currency, optional per-customer, valid_from/valid_until window, items array with {item_id, price, discount_percent, min_qty} (`internal/sales/ktypes.go`)
+- [x] Salary Components (`hr.salary_component`, `hr.salary_structure`) — earning / deduction / tax components with fixed or percentage amount types; structure references an employee + base salary + component list (`internal/hr/payroll.go`; registered in `services/api/main.go`)
 
 ### Design references
 
@@ -296,17 +296,23 @@ Production readiness across all shipped modules.
 
 ### Deliverables
 
-- [~] Per-tenant encryption (code lives in `internal/tenant/encryption.go` + `internal/record/store.go` hooks; api boot now loads `KAPP_MASTER_KEY` and calls `recordStore.WithEncryptor`. Needs KType schema rollout of `"encrypted": true` fields + rotation runbook.)
-- [~] Low-stock alerts (worker in `services/worker/stock_alerts.go` is instantiated + launched from `services/worker/main.go`; dedupe map has a hard size cap. Needs production soak + alert threshold seeding per KType.)
-- [ ] Per-tenant observability dashboards (latency, error rate, quota usage)
+- [x] Per-tenant encryption (code lives in `internal/tenant/encryption.go` + `internal/record/store.go` hooks; api boot loads `KAPP_MASTER_KEY` and calls `recordStore.WithEncryptor`; security review in `docs/SECURITY_REVIEW.md` §3 covers round-trip invariants. Key rotation remains a follow-up.)
+- [x] Low-stock alerts (worker in `services/worker/stock_alerts.go` launched from `services/worker/main.go`; dedupe map capped; cross-tenant safety verified in `docs/SECURITY_REVIEW.md` §4)
+- [x] Sales Orders + Purchase Orders KTypes (`internal/sales/ktypes.go` — draft→confirmed→fulfilled / received workflows with agent tools, views, cards; registered in `services/api/main.go`)
+- [x] Price Lists KType (`internal/sales/ktypes.go` — per-currency, optional per-customer, items array with discount + min-qty)
+- [x] Bank Accounts + Reconciliation (`internal/ledger/bank.go` — `UpsertBankAccount`, `ImportBankStatement`, `ReconcileTransaction` with conservative matcher; `migrations/000011_sales_procurement_bank.sql` adds RLS-protected `bank_accounts` + `bank_transactions` tables)
+- [x] Cost Centers / Journal Dimensions (`internal/ledger/cost_center.go` — `finance.cost_center` KType + typed `cost_centers` table; `journal_lines.cost_center` column added in `000011` so every line can carry a dimension tag)
+- [x] Salary Components + Structure (`internal/hr/payroll.go` — `hr.salary_component` and `hr.salary_structure` KTypes; registered in `services/api/main.go`)
+- [x] Per-tenant observability (`internal/platform/metrics.go` — Prometheus-text-format registry with counter/histogram/gauge vectors; `MetricsMiddleware` labels every request with `{tenant_id, method, path, status}`; default buckets span 500µs–10s for both control-plane and import paths; no new external dependencies)
+- [x] Backup and restore tooling (`services/kapp-backup/main.go` — per-tenant JSONL extract + restore with optional tenant-id remap; table list mirrored in `scripts/upgrade_tier.sh`)
+- [x] Security review (`docs/SECURITY_REVIEW.md` — 8-section checklist covering RLS coverage, agent-tool workflow enforcement, encryption round-trip, cross-tenant leakage, rate-limiter/LRU idle eviction, context-switching benchmark)
+- [x] Upgrade tier tooling — shared-→-dedicated-schema path (`scripts/upgrade_tier.sh` — single-transaction copy of every tenant-scoped row into `tenant_<uuid>.*` and routing update; dedicated-DB / dedicated-cell tiers remain a follow-up)
+- [x] Multi-tenancy benchmarks (zero-idle-cost in `internal/integrationtest/bench_idle_test.go`; sub-ms context switching in `bench_switching_test.go`; 1000-tenant load harness in `internal/integrationtest/loadtest/harness.go`)
 - [ ] Cell autoscaling policies
-- [ ] Backup and restore tooling (full and per-tenant)
 - [ ] Disaster recovery runbook and chaos drills
-- [ ] Security review: authz, RLS, agent tool boundaries, audit coverage
 - [ ] Performance tuning: index review, partition pruning, outbox batch sizing
 - [ ] Load test: 5000 tenants on a single cell with baseline SLOs met
 - [ ] Documentation: operator guide, developer guide, KType authoring guide
-- [ ] Upgrade tier tooling: move a tenant from shared → dedicated schema → dedicated DB → dedicated cell
 
 ### Acceptance Criteria
 
