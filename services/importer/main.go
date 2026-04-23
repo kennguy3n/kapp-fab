@@ -66,6 +66,10 @@ func run() error {
 	reconciler := importer.NewReconciler(stagingStore)
 	pipeline := importer.NewPipeline(jobStore, stagingStore, validator, reconciler, recordStore)
 	pipeline.RegisterAdapter(adapters.NewCSVAdapter())
+	// Wizard's "JSON" dropdown sends source_type="json"; register the
+	// JSON alias so the CSV adapter's json branch (format: "json") is
+	// reachable without a second implementation.
+	pipeline.RegisterAdapter(adapters.NewJSONAdapter())
 	pipeline.RegisterAdapter(adapters.NewFrappeAdapter())
 
 	h := &importHandlers{pipeline: pipeline, jobs: jobStore, staging: stagingStore}

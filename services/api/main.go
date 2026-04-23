@@ -174,10 +174,27 @@ func run() error {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(30 * time.Second))
 
 	r.Get("/healthz", healthHandler(pool))
 	r.Get("/api/v1/", rootHandler)
+
+	// Phase F event stream. SSE tail of the tenant's outbox so the web
+	// UI can react to state changes without polling. Defined at the root
+	// router so it does NOT inherit the 30s request timeout applied below
+	// — chi's middleware.Timeout wraps the ResponseWriter and cancels the
+	// context after the deadline, which would break any long-lived
+	// stream. Idempotency/rate-limit are also skipped because SSE is a
+	// GET and a spammed subscription is bounded by connection count.
+	r.Route("/api/v1/events", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Get("/stream", eh.stream)
+	})
+
+	// All non-streaming routes run under a 30s request deadline so a
+	// slow handler can't hold a connection open indefinitely. The SSE
+	// stream is deliberately registered above this group.
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.Timeout(30 * time.Second))
 
 	// Control-plane tenant lifecycle routes (not tenant-scoped).
 	r.Route("/api/v1/tenants", func(r chi.Router) {
@@ -384,18 +401,9 @@ func run() error {
 		r.Post("/{id}/restore", dh.restore)
 	})
 
-	// Phase F event stream. SSE tail of the tenant's outbox so the
-	// web UI can react to state changes without polling. Tenant-
-	// scoped only; no idempotency middleware because GETs are
-	// already idempotent and rate-limit middleware would close the
-	// stream on long-held connections.
-	r.Route("/api/v1/events", func(r chi.Router) {
-		r.Use(platform.TenantMiddleware(tenantSvc))
-		r.Get("/stream", eh.stream)
-	})
-
 	// OpenAPI machine-readable schema served for API consumers.
 	r.Get("/api/v1/openapi.json", oh.serve)
+	}) // end timeout-guarded group
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

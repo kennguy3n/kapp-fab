@@ -66,6 +66,20 @@ func NewCSVAdapter() *CSVAdapter { return &CSVAdapter{} }
 // SourceType discriminates the adapter for registry lookup.
 func (*CSVAdapter) SourceType() string { return importer.SourceTypeCSV }
 
+// JSONAdapter is a thin alias that registers the CSV adapter logic
+// under the "json" source type so the wizard's JSON selection maps to
+// a valid adapter. The underlying CSVAdapter already dispatches on the
+// per-entity `format` field, so the behaviour is identical to the CSV
+// path when callers pass `format: "json"` in their config.
+type JSONAdapter struct{ CSVAdapter }
+
+// NewJSONAdapter returns the JSON alias for the CSV/JSON adapter.
+func NewJSONAdapter() *JSONAdapter { return &JSONAdapter{} }
+
+// SourceType reports "json" so Pipeline.RegisterAdapter can file this
+// instance under the json key without colliding with the CSV instance.
+func (*JSONAdapter) SourceType() string { return importer.SourceTypeJSON }
+
 // Discover parses the config, counts rows per entity, and stamps a
 // SHA-256 checksum over the payload bytes so the reconciler can detect
 // truncation in long-running uploads.

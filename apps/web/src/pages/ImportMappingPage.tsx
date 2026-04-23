@@ -198,13 +198,19 @@ export function ImportMappingPage() {
                           value={em.fields[sf] ?? ""}
                           onChange={(ev) => {
                             const v = ev.target.value;
-                            setMapping((m) => ({
-                              ...m,
-                              [e.name]: {
-                                ...em,
-                                fields: { ...em.fields, [sf]: v },
-                              },
-                            }));
+                            setMapping((m) => {
+                              const current = m[e.name] ?? {
+                                target_ktype: "",
+                                fields: {},
+                              };
+                              return {
+                                ...m,
+                                [e.name]: {
+                                  ...current,
+                                  fields: { ...current.fields, [sf]: v },
+                                },
+                              };
+                            });
                           }}
                         >
                           <option value="">(skip)</option>

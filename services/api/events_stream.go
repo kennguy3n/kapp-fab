@@ -33,8 +33,11 @@ type eventsHandlers struct {
 const sseEventsPollInterval = 2 * time.Second
 
 // stream holds the connection open and pushes event frames as they
-// appear. Clients reconnect with `Last-Event-ID` (the event id) or the
-// `?since=<rfc3339>` query param to resume.
+// appear. Each frame's `id:` field is the event's created_at timestamp
+// formatted as RFC3339Nano so that a reconnecting browser's
+// `Last-Event-ID` header is a cursor `resolveSSECursor` can parse
+// directly. The event UUID is still available inside the `data:`
+// payload for client-side deduplication.
 func (h *eventsHandlers) stream(w http.ResponseWriter, r *http.Request) {
 	t := platform.TenantFromContext(r.Context())
 	if t == nil {
@@ -76,7 +79,7 @@ func (h *eventsHandlers) stream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			_, _ = fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", e.ID, e.Type, buf)
+			_, _ = fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", e.CreatedAt.UTC().Format(time.RFC3339Nano), e.Type, buf)
 			flusher.Flush()
 			if e.CreatedAt.After(cursor) {
 				cursor = e.CreatedAt
