@@ -1,6 +1,6 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2026-04-23 (Phase G second slice: sales/procurement KTypes, bank reconciliation, cost centers, payroll KTypes, Prometheus middleware, per-tenant backup CLI, Frappe delta sync + mapping suggestions, security review doc, upgrade-tier script)
+> **Last Updated:** 2026-04-23 (accuracy corrections: reconcile PROGRESS checkboxes with shipped code — bank reconciliation, cost centers, CRM boot registration, and multi-tenancy benchmarks are already in the tree and are now marked complete here; Phase G second slice: sales/procurement KTypes, bank reconciliation, cost centers, payroll KTypes, Prometheus middleware, per-tenant backup CLI, Frappe delta sync + mapping suggestions, security review doc, upgrade-tier script)
 >
 > Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [SECURITY_REVIEW.md](./docs/SECURITY_REVIEW.md)
 
@@ -126,8 +126,8 @@ Typed ledgers and the first postings from Kapps.
 
 ### Deferred / Follow-up
 
-- [ ] Bank accounts and reconciliation
-- [ ] Cost centers / dimensions on journal entries
+- [x] Bank accounts and reconciliation (Done in Phase G: internal/ledger/bank.go + migrations/000011_sales_procurement_bank.sql)
+- [x] Cost centers / dimensions on journal entries (Done in Phase G: internal/ledger/cost_center.go + journal_lines.cost_center column in 000011)
 
 ---
 
@@ -244,7 +244,7 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [x] Multi-tenancy: sub-millisecond tenant context switching benchmark (`BenchmarkTenantContextSwitch`)
 - [x] Multi-tenancy: 1000-tenant load test on single cell (`TestThousandTenantLoad`, `//go:build loadtest`)
 - [ ] Authentication layer (JWT/OAuth with KChat SSO): JWT token issuance/validation, KChat SSO exchange, session revocation on tenant suspension, per-tenant session limits
-- [ ] CRM KType boot registration (Phase B KTypes `crm.lead` / `crm.contact` / `crm.organization` / `crm.deal` / `crm.activity` / `crm.quote` / `tasks.task` register via `crm.RegisterKTypes` in `services/api/main.go` alongside finance/inventory/hr/lms)
+- [x] CRM KType boot registration (Phase B KTypes `crm.lead` / `crm.contact` / `crm.organization` / `crm.deal` / `crm.activity` / `crm.quote` / `tasks.task` register via `crm.RegisterKTypes` in `services/api/main.go` alongside finance/inventory/hr/lms) (crm.RegisterKTypes called at services/api/main.go:165)
 - [ ] S3 production object store adapter wiring (interface + MemoryStore exist in `internal/files`; production S3/MinIO adapter still needs to be wired in `services/api/main.go` behind an env-var switch)
 - [ ] Email SMTP notification adapter (router stubs email delivery in `services/worker/notifications.go`; real SMTP transport + template rendering pending)
 - [ ] Distributed rate limiting for multi-node deployment (`platform.RateLimiter` is in-process; needs a shared backend — Redis token bucket or similar — so quotas hold across api replicas)
@@ -338,5 +338,5 @@ A concrete, end-to-end demonstration that the kernel is real. Before Phase A is 
 - [x] Direct DB query with no tenant context returns zero rows (RLS default-deny)
 - [x] Every create produces one event and one audit record (TestRecordCRUDEmitsEventsAndAudit)
 - [x] Per-tenant rate limit kicks in after configured threshold (RateLimitMiddleware exists)
-- [ ] Idle tenant `globex` has no active goroutines, no open connections, and no cached entries after idle timeout
-- [ ] Tenant context switch from `acme` to `globex` measured under 1 ms on a warm gateway
+- [x] Idle tenant `globex` has no active goroutines, no open connections, and no cached entries after idle timeout (TestIdleTenantZeroCost in internal/integrationtest/bench_idle_test.go)
+- [x] Tenant context switch from `acme` to `globex` measured under 1 ms on a warm gateway (BenchmarkTenantContextSwitch in internal/integrationtest/bench_switching_test.go)
