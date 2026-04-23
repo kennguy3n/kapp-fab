@@ -18,8 +18,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 )
@@ -49,6 +51,19 @@ func run() error {
 		return err
 	}
 	defer pool.Close()
+
+	// Admin pool (BYPASSRLS) is optional but required for control-plane
+	// scans that span tenants — notably the low-stock sweep, which
+	// otherwise returns zero rows because the shared kapp_app session
+	// has no app.tenant_id set and RLS default-denies.
+	var adminPool *pgxpool.Pool
+	if cfg.AdminDatabaseURL != "" {
+		adminPool, err = platform.NewPool(ctx, cfg.AdminDatabaseURL)
+		if err != nil {
+			return fmt.Errorf("connect admin pool: %w", err)
+		}
+		defer adminPool.Close()
+	}
 
 	natsURL := cfg.EventBusURL
 	if natsURL == "" {
@@ -93,6 +108,14 @@ func run() error {
 		bridge: bridge,
 		client: &http.Client{Timeout: 5 * time.Second},
 	}
+
+	// Low-stock alert sweeper runs alongside the outbox drain so a
+	// below-threshold SKU produces a KChat alert within one sweep
+	// interval. The sweeper shares the outbox publisher, so emitted
+	// alerts go through the same delivery / dedupe pipeline as any
+	// other `inventory.*` event.
+	alerts := newStockAlertWorker(pool, adminPool, publisher, dbutil.SetTenantContext)
+	go alerts.Run(ctx)
 
 	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)
 	ticker := time.NewTicker(tickInterval)

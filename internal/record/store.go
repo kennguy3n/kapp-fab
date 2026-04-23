@@ -15,7 +15,19 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
+
+// FieldEncryptor is the subset of *tenant.KeyManager consumed by the
+// store. The interface exists so tests can swap in deterministic or
+// no-op implementations without wiring a real master key.
+type FieldEncryptor interface {
+	EncryptString(tenantID uuid.UUID, plaintext string) (string, error)
+	DecryptString(tenantID uuid.UUID, value string) (string, error)
+}
+
+// compile-time assertion that *tenant.KeyManager satisfies FieldEncryptor.
+var _ FieldEncryptor = (*tenant.KeyManager)(nil)
 
 // Sentinel errors.
 var (
@@ -39,6 +51,11 @@ type PGStore struct {
 	registry  *ktype.PGRegistry
 	publisher events.Publisher
 	auditor   audit.Logger
+	// encryptor, when non-nil, transparently encrypts fields marked
+	// {"encrypted": true} in the KType schema before INSERT and
+	// decrypts them after SELECT. Leaving it nil preserves legacy
+	// behaviour so rolling the feature on is a pure add.
+	encryptor FieldEncryptor
 }
 
 // NewPGStore wires a PGStore from the shared pool and its collaborators.
@@ -54,6 +71,14 @@ func NewPGStore(
 		publisher: publisher,
 		auditor:   auditor,
 	}
+}
+
+// WithEncryptor returns the store with per-tenant field encryption
+// enabled. The encryptor is applied on Create/Get/List/Update/Delete
+// for any KType field whose schema carries {"encrypted": true}.
+func (s *PGStore) WithEncryptor(e FieldEncryptor) *PGStore {
+	s.encryptor = e
+	return s
 }
 
 // Create inserts a new KRecord. The KType is looked up at version 0 ("latest")
@@ -75,6 +100,19 @@ func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
 	if err := ktype.ValidateData(kt.Schema, r.Data); err != nil {
 		return nil, err
 	}
+	// Preserve the plaintext payload for the audit entry and event
+	// envelope. AES-GCM picks a fresh random nonce on every encrypt,
+	// so audit diffs against ciphertext would be false positives and
+	// the audit trail itself would be unreadable.
+	plaintext := r.Data
+	// Encrypt fields the schema marks as sensitive. This happens after
+	// validation so validators still see plaintext (max_length, pattern,
+	// etc. are meaningful only against the real value).
+	encrypted, err := s.encryptFields(r.TenantID, kt.Schema, r.Data)
+	if err != nil {
+		return nil, err
+	}
+	r.Data = encrypted
 	if r.ID == uuid.Nil {
 		r.ID = uuid.New()
 	}
@@ -104,6 +142,9 @@ func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
 		if err != nil {
 			return fmt.Errorf("record: insert: %w", err)
 		}
+		// Swap the RETURNING ciphertext for the original plaintext so the
+		// event envelope and audit After are both human-readable.
+		created.Data = plaintext
 		return s.emit(ctx, tx, created, "krecord.created", audit.Entry{
 			TenantID:    created.TenantID,
 			ActorID:     &created.CreatedBy,
@@ -111,7 +152,7 @@ func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
 			Action:      fmt.Sprintf("%s.create", created.KType),
 			TargetKType: created.KType,
 			TargetID:    &created.ID,
-			After:       created.Data,
+			After:       plaintext,
 		})
 	})
 	if err != nil {
@@ -146,6 +187,11 @@ func (s *PGStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*KRecord, er
 	if err != nil {
 		return nil, err
 	}
+	decrypted, err := s.decryptRecord(ctx, &out)
+	if err != nil {
+		return nil, err
+	}
+	out.Data = decrypted
 	return &out, nil
 }
 
@@ -197,6 +243,16 @@ func (s *PGStore) List(ctx context.Context, tenantID uuid.UUID, filter ListFilte
 	if err != nil {
 		return nil, err
 	}
+	// Decrypt encrypted fields on the way out so list responses carry
+	// plaintext to callers. decryptRecord is a no-op when the store
+	// has no encryptor or the KType schema has no encrypted fields.
+	for i := range out {
+		decrypted, err := s.decryptRecord(ctx, &out[i])
+		if err != nil {
+			return nil, err
+		}
+		out[i].Data = decrypted
+	}
 	return out, nil
 }
 
@@ -235,7 +291,16 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 			return ErrVersionConflict
 		}
 
-		merged, err := mergeJSON(existing.Data, r.Data)
+		// Decrypt existing.Data before merging so the plaintext patch
+		// in r.Data is shallow-merged onto plaintext, not onto ciphertext.
+		// Without this the encrypted fields would be overwritten with
+		// whatever ciphertext survives the merge and become unreadable.
+		existingPlain, err := s.decryptRecord(ctx, &existing)
+		if err != nil {
+			return fmt.Errorf("record: decrypt existing: %w", err)
+		}
+
+		merged, err := mergeJSON(existingPlain, r.Data)
 		if err != nil {
 			return fmt.Errorf("record: merge: %w", err)
 		}
@@ -248,6 +313,13 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 			return err
 		}
 
+		// Re-encrypt the merged payload before writing so encrypted
+		// fields round-trip through the DB as ciphertext.
+		mergedEncrypted, err := s.encryptFields(r.TenantID, kt.Schema, merged)
+		if err != nil {
+			return fmt.Errorf("record: encrypt merged: %w", err)
+		}
+
 		updatedBy := r.UpdatedBy
 		err = tx.QueryRow(ctx,
 			`UPDATE krecords
@@ -255,7 +327,7 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 			  WHERE tenant_id = $3 AND id = $4
 			  RETURNING id, tenant_id, ktype, ktype_version, data, status, version,
 			            created_by, created_at, updated_by, updated_at, deleted_at`,
-			merged, updatedBy, r.TenantID, r.ID,
+			mergedEncrypted, updatedBy, r.TenantID, r.ID,
 		).Scan(
 			&updated.ID, &updated.TenantID, &updated.KType, &updated.KTypeVersion,
 			&updated.Data, &updated.Status, &updated.Version,
@@ -266,7 +338,11 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 			return fmt.Errorf("record: update: %w", err)
 		}
 
-		diff := audit.Diff(existing.Data, updated.Data)
+		// Substitute plaintext for audit diff + event envelope. Comparing
+		// ciphertext would flag every encrypted field as changed on every
+		// update (fresh GCM nonces) and leave the audit trail unreadable.
+		updated.Data = merged
+		diff := audit.Diff(existingPlain, merged)
 		return s.emit(ctx, tx, updated, "krecord.updated", audit.Entry{
 			TenantID:    updated.TenantID,
 			ActorID:     updated.UpdatedBy,
@@ -274,8 +350,8 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 			Action:      fmt.Sprintf("%s.update", updated.KType),
 			TargetKType: updated.KType,
 			TargetID:    &updated.ID,
-			Before:      existing.Data,
-			After:       updated.Data,
+			Before:      existingPlain,
+			After:       merged,
 			Context:     diff,
 		})
 	})
@@ -340,6 +416,14 @@ func (s *PGStore) Delete(ctx context.Context, tenantID, id, actorID uuid.UUID) e
 			return fmt.Errorf("record: soft delete: %w", err)
 		}
 
+		// Soft delete does not touch the data column, so existing and
+		// deleted carry the same ciphertext; decrypt once and reuse for
+		// both the audit envelope and the event payload.
+		existingPlain, err := s.decryptRecord(ctx, &existing)
+		if err != nil {
+			return fmt.Errorf("record: decrypt existing: %w", err)
+		}
+		deleted.Data = existingPlain
 		return s.emit(ctx, tx, deleted, "krecord.deleted", audit.Entry{
 			TenantID:    deleted.TenantID,
 			ActorID:     updatedBy,
@@ -347,8 +431,8 @@ func (s *PGStore) Delete(ctx context.Context, tenantID, id, actorID uuid.UUID) e
 			Action:      fmt.Sprintf("%s.delete", deleted.KType),
 			TargetKType: deleted.KType,
 			TargetID:    &deleted.ID,
-			Before:      existing.Data,
-			After:       deleted.Data,
+			Before:      existingPlain,
+			After:       existingPlain,
 		})
 	})
 }
@@ -393,6 +477,134 @@ func snapshotTypeFor(eventType string) string {
 	default:
 		return "unknown"
 	}
+}
+
+// encryptFields transforms data in-place, encrypting every top-level
+// field that the schema flags {"encrypted": true}. When no encryptor
+// is wired up, or the schema has no encrypted fields, data is
+// returned unchanged — the feature is opt-in and cheap when off.
+func (s *PGStore) encryptFields(tenantID uuid.UUID, schema, data json.RawMessage) (json.RawMessage, error) {
+	if s.encryptor == nil {
+		return data, nil
+	}
+	fields, err := encryptedFieldNames(schema)
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 0 {
+		return data, nil
+	}
+	payload, err := unmarshalData(data)
+	if err != nil {
+		return nil, err
+	}
+	changed := false
+	for name := range fields {
+		v, ok := payload[name]
+		if !ok || v == nil {
+			continue
+		}
+		plaintext, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("record: encrypted field %q must be a string", name)
+		}
+		// Always encrypt what we receive: callers only pass plaintext
+		// (validated user input on Create, decrypted-then-merged payload
+		// on Update), so a kapp:enc:v1: prefix here is user-supplied and
+		// must not be allowed to bypass encryption — doing so would
+		// store garbage verbatim and break decryption on read.
+		ct, err := s.encryptor.EncryptString(tenantID, plaintext)
+		if err != nil {
+			return nil, fmt.Errorf("record: encrypt field %q: %w", name, err)
+		}
+		payload[name] = ct
+		changed = true
+	}
+	if !changed {
+		return data, nil
+	}
+	return json.Marshal(payload)
+}
+
+// decryptRecord produces the caller-visible version of r.Data, with
+// encrypted fields decrypted transparently. r is not mutated — the
+// caller substitutes the returned payload into the outgoing record.
+func (s *PGStore) decryptRecord(ctx context.Context, r *KRecord) (json.RawMessage, error) {
+	_ = ctx
+	if s.encryptor == nil {
+		return r.Data, nil
+	}
+	kt, err := s.registry.Get(ctx, r.KType, r.KTypeVersion)
+	if err != nil {
+		return nil, err
+	}
+	fields, err := encryptedFieldNames(kt.Schema)
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 0 {
+		return r.Data, nil
+	}
+	payload, err := unmarshalData(r.Data)
+	if err != nil {
+		return nil, err
+	}
+	changed := false
+	for name := range fields {
+		v, ok := payload[name]
+		if !ok || v == nil {
+			continue
+		}
+		ct, ok := v.(string)
+		if !ok {
+			continue
+		}
+		pt, err := s.encryptor.DecryptString(r.TenantID, ct)
+		if err != nil {
+			return nil, fmt.Errorf("record: decrypt field %q: %w", name, err)
+		}
+		if pt != ct {
+			payload[name] = pt
+			changed = true
+		}
+	}
+	if !changed {
+		return r.Data, nil
+	}
+	return json.Marshal(payload)
+}
+
+// encryptedFieldNames extracts the set of field names in schema that
+// carry {"encrypted": true}. Returns an empty set (not nil) when none
+// are present so callers can range over the result unconditionally.
+func encryptedFieldNames(schema json.RawMessage) (map[string]struct{}, error) {
+	var s ktype.Schema
+	if err := json.Unmarshal(schema, &s); err != nil {
+		return nil, fmt.Errorf("record: parse schema for encryption: %w", err)
+	}
+	out := make(map[string]struct{})
+	for _, f := range s.Fields {
+		if f.Encrypted {
+			out[f.Name] = struct{}{}
+		}
+	}
+	return out, nil
+}
+
+// unmarshalData decodes a JSONB payload into a map. An empty payload
+// yields an empty map so the caller can treat it uniformly.
+func unmarshalData(data json.RawMessage) (map[string]any, error) {
+	if len(data) == 0 {
+		return map[string]any{}, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("record: parse data: %w", err)
+	}
+	if m == nil {
+		m = map[string]any{}
+	}
+	return m, nil
 }
 
 // mergeJSON performs a shallow merge of patch onto base. Keys present in

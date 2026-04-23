@@ -39,12 +39,13 @@ const (
 
 // Item is a stock-keeping unit. One row per (tenant_id, sku).
 type Item struct {
-	TenantID uuid.UUID `json:"tenant_id"`
-	ID       uuid.UUID `json:"id"`
-	SKU      string    `json:"sku"`
-	Name     string    `json:"name"`
-	UOM      string    `json:"uom"`
-	Active   bool      `json:"active"`
+	TenantID     uuid.UUID       `json:"tenant_id"`
+	ID           uuid.UUID       `json:"id"`
+	SKU          string          `json:"sku"`
+	Name         string          `json:"name"`
+	UOM          string          `json:"uom"`
+	Active       bool            `json:"active"`
+	ReorderLevel decimal.Decimal `json:"reorder_level"`
 }
 
 // Warehouse is a physical or logical stocking location. One row per

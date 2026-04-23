@@ -82,6 +82,9 @@ jobs:
             -f migrations/000006_hr.sql
           psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
             -f migrations/000007_lms.sql
+          for f in migrations/000008_*.sql migrations/000009_*.sql migrations/000010_*.sql; do
+            [ -f "$f" ] && psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 -f "$f"
+          done
       - name: go test -tags=integration
         env:
           KAPP_TEST_DB_URL: postgres://kapp_app:kapp_app_dev@localhost:5432/kapp?sslmode=disable

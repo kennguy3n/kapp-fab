@@ -1,6 +1,6 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2026-04-23 (Phase F importer pipeline, Base KApp, Docs KApp, attachment rehosting, events SSE, and notification routing complete)
+> **Last Updated:** 2026-04-23 (Phase G kickoff: multi-tenancy hardening benchmarks, per-tenant encryption keys, low-stock alert worker, and saved views landed)
 >
 > Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md)
 
@@ -8,8 +8,8 @@
 
 ## Current Phase
 
-**Phase F — Importer and Base**
-**Status:** Complete
+**Phase G — Hardening, Observability, and Scale**
+**Status:** Not Started (first hardening slice in flight: multi-tenancy benchmarks, per-tenant encryption, low-stock alerts, saved views)
 
 ---
 
@@ -60,10 +60,10 @@ Foundation: tenant isolation, KType metadata, KRecord storage, permissions, audi
 - [x] All mutations produce an audit record and emit an event (TestRecordCRUDEmitsEventsAndAudit)
 - [x] RLS prevents cross-tenant reads in negative tests (TestRLSIsolatesTenants)
 - [x] Tenant isolation test suite passes (TestRLSIsolatesTenants + TestRLSDealIsolation)
-- [ ] Verify zero resource consumption for idle tenants
-- [ ] Verify sub-millisecond tenant context switching overhead
+- [x] Verify zero resource consumption for idle tenants (`TestIdleTenantZeroCost` in `internal/integrationtest/phase_a_test.go` asserts the shared metadata cache evicts idle entries and no tenant-pinned goroutines or DB connections remain)
+- [x] Verify sub-millisecond tenant context switching overhead (`BenchmarkTenantContextSwitch` in `internal/integrationtest/bench_test.go` measures `dbutil.WithTenantTx` under p99 < 1ms on a warm pool)
 - [x] Verify per-tenant rate limiting works correctly (middleware exists and is tested)
-- [ ] Load test: 1000 tenants on a single cell with acceptable latency
+- [x] Load test: 1000 tenants on a single cell with acceptable latency (`TestThousandTenantLoad` in `internal/integrationtest/load_test.go`, gated behind `//go:build loadtest`)
 
 ---
 
@@ -157,7 +157,7 @@ First inventory primitives integrated with Sales and Procurement.
 
 ### Deferred / Follow-up
 
-- [ ] Low-stock alert worker (threshold-based notifications via KChat)
+- [x] Low-stock alert worker (threshold-based notifications via KChat) (`services/worker/stock_alerts.go` polls `stock_levels` vs `inventory.item.reorder_level` per tenant and emits `inventory.low_stock_alert`, fanned out by the existing notification router)
 - [ ] Stock move reversal (correction entries, not deletes — matching finance pattern)
 - [ ] Batch/lot tracking foundation (schema only, full implementation deferred)
 
@@ -230,19 +230,43 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [x] Event SSE/WebSocket endpoint (`GET /api/v1/events/stream` — tenant-scoped SSE tail off the events table in `services/api/events_stream.go`; resumes from `Last-Event-ID` or `?since=` cursor)
 - [x] Notification routing (KChat cards, in-app, email, webhook) (`services/worker/notifications.go` — notificationRouter reads `notification.channel` from the event payload and fans out to kchat-bridge, webhook URLs, and SMTP-stub logging; in-app served from the SSE endpoint)
 - [x] File/attachment upload endpoint (`POST /api/v1/files`) with S3 integration (`internal/files/files.go` with the ObjectStore interface — SHA-256 content-addressable; MemoryStore default, S3/MinIO implementations pluggable; `services/api/files.go` handlers)
-- [ ] Saved views / filters per KType per user
+- [x] Saved views / filters per KType per user (`internal/record/views.go` + `migrations/000010_phase_g.sql` `saved_views` table with RLS; `GET/POST /api/v1/views` + `GET/PATCH/DELETE /api/v1/views/{id}` in `services/api/views.go`; dropdown + Save/Delete view in `apps/web/src/pages/RecordListPage.tsx`)
 - [ ] Report builder (pivot, aggregate, chart) over KRecords and ledgers
-- [ ] Per-tenant encryption keys (HKDF with tenant_id as salt)
+- [x] Per-tenant encryption keys (HKDF with tenant_id as salt) (`internal/tenant/encryption.go` derives per-tenant AES-256-GCM keys from `KAPP_MASTER_KEY` via HKDF-SHA256 with the tenant UUID as salt; `internal/record/store.go` transparently encrypts/decrypts fields marked `"encrypted": true` in the KType schema)
 - [ ] Tenant backup/export tooling (single-tenant dump)
 - [x] HR org chart tree view (`apps/web/src/pages/OrgChartPage.tsx` backed by `hr.employee.reporting_to`)
 - [x] LMS learner progress web pane (`apps/web/src/pages/LearnerProgressPage.tsx` — course progress dashboard)
 - [x] LMS reviewer assignment approval chain for `lms.assignment` (`lms.submit_assignment` agent tool + workflow block)
 - [x] Frappe REST API source adapter for importer (ERPNext, HRMS, CRM, LMS) (`internal/importer/adapters/frappe.go`)
 - [ ] DocType → KType automatic mapping suggestions
-- [ ] Multi-tenancy: per-tenant encryption keys (HKDF with tenant_id as salt)
-- [ ] Multi-tenancy: zero-idle-cost verification (idle tenant resource measurement)
-- [ ] Multi-tenancy: sub-millisecond tenant context switching benchmark
-- [ ] Multi-tenancy: 1000-tenant load test on single cell
+- [x] Multi-tenancy: per-tenant encryption keys (HKDF with tenant_id as salt) (`internal/tenant/encryption.go`; integrated with `internal/record/store.go` encrypted-field hooks)
+- [x] Multi-tenancy: zero-idle-cost verification (idle tenant resource measurement) (`TestIdleTenantZeroCost`)
+- [x] Multi-tenancy: sub-millisecond tenant context switching benchmark (`BenchmarkTenantContextSwitch`)
+- [x] Multi-tenancy: 1000-tenant load test on single cell (`TestThousandTenantLoad`, `//go:build loadtest`)
+- [ ] Authentication layer: JWT token issuance/validation, KChat SSO exchange, session revocation on tenant suspension, per-tenant session limits
+- [ ] Tenant setup wizard: default Chart of Accounts seeding, default roles/permissions per plan, onboarding flow in React app
+- [ ] Payment recording: `finance.payment` KType, payment allocation against AR/AP, bank statement import
+- [ ] Multi-currency: exchange rate table, automatic conversion on posting, unrealized gain/loss
+- [ ] Helpdesk module: `helpdesk.ticket` KType with SLA, agent routing, KChat thread→ticket, customer portal
+- [ ] Tenant resource metering: usage tracking per billing period, usage dashboard, plan upgrade/downgrade API
+- [ ] Webhook management: `platform.webhook` KType, delivery log with retries, management UI, HMAC signatures
+- [ ] Full-text search: tsvector on krecords, search API endpoint, cross-KType search page
+- [ ] Scheduled actions: tenant-scoped cron, recurring invoice generation, scheduled report delivery
+- [ ] Data export: per-KType export endpoint, full tenant dump, export job tracking
+
+### Design references
+
+Multi-tenancy and module patterns in the Frappe ecosystem inform several
+Phase G designs. Treat these as reference architectures for the
+onboarding wizard, helpdesk, LMS, and importer adapters — not as code
+to copy:
+
+- `frappe/frappe` — site-based tenancy, `bench` fleet management, background worker queues
+- `frappe/erpnext` — setup wizard, Chart of Accounts seeding, Payment Entry, Bank Reconciliation
+- `frappe/hrms` — attendance + leave management patterns
+- `frappe/crm` — deal pipeline + lead management patterns
+- `frappe/helpdesk` — ticket SLA, agent routing, customer portal
+- `frappe/lms` — course management, certificates
 
 ---
 

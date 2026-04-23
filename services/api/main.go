@@ -169,6 +169,7 @@ func run() error {
 	bh := &baseHandlers{store: baseStore}
 	dh := &docsHandlers{store: docsStore}
 	eh := &eventsHandlers{pool: pool}
+	vh := &viewHandlers{store: record.NewViewStore(pool)}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -399,6 +400,24 @@ func run() error {
 		r.Post("/{id}/versions", dh.saveVersion)
 		r.Get("/{id}/versions", dh.versions)
 		r.Post("/{id}/restore", dh.restore)
+	})
+
+	// Phase G saved views — per-user, per-KType filter/sort/column
+	// layouts the RecordListPage persists so operators resume their
+	// curated worklist across sessions. Mutations run under the same
+	// idempotency + rate-limit + quota stack as record CRUD so a
+	// spammed save cannot starve other tenants. RLS on saved_views
+	// enforces tenant isolation; owner-only rules live in the store.
+	r.Route("/api/v1/views", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.IdempotencyMiddleware(pool))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Use(platform.QuotaMiddleware(quotaEnforcer))
+		r.Get("/", vh.list)
+		r.Post("/", vh.create)
+		r.Get("/{id}", vh.get)
+		r.Patch("/{id}", vh.update)
+		r.Delete("/{id}", vh.delete)
 	})
 
 	// OpenAPI machine-readable schema served for API consumers.

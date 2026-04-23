@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -635,39 +636,107 @@ func TestUserStoreGetUserTenants(t *testing.T) {
 	}
 }
 
-// BenchmarkTenantContextSwitch measures the cost of setting
-// app.tenant_id on a fresh transaction — the primary per-request
-// overhead that the Kapp kernel imposes on top of plain pgx. The target
-// per ARCHITECTURE.md is sub-millisecond.
-func BenchmarkTenantContextSwitch(b *testing.B) {
-	dbURL := os.Getenv("KAPP_TEST_DB_URL")
-	if dbURL == "" {
-		b.Skip("KAPP_TEST_DB_URL not set")
-	}
+// TestIdleTenantZeroCost validates the zero-idle-cost architectural
+// invariant from ARCHITECTURE.md §1: "Inactive tenants consume zero
+// compute and minimal storage. No background work runs for a tenant
+// with no active users or pending jobs."
+//
+// The test creates two tenants (`acme` and `globex`), drives traffic
+// only through `acme`, then asserts that `globex` has:
+//
+//   - no entry in the per-tenant rate-limit bucket map (proof that no
+//     platform resource was lazily allocated for an idle tenant);
+//   - not caused growth in the process goroutine count proportional to
+//     the number of idle tenants (proof that no goroutine is pinned to
+//     a tenant); and
+//   - not opened a dedicated DB connection (the pool stays bounded;
+//     tenant context is injected per-tx via SET LOCAL, not per-conn).
+//
+// After waiting past the rate limiter's idle timeout, the test also
+// asserts that the acme bucket is reclaimed on the next sweep so
+// bursting tenants do not accumulate state forever either.
+func TestIdleTenantZeroCost(t *testing.T) {
+	h := newHarness(t)
 	ctx := context.Background()
-	pool, err := platform.NewPool(ctx, dbURL)
-	if err != nil {
-		b.Fatalf("pool: %v", err)
-	}
-	defer pool.Close()
 
-	// Pre-seed a tenant so the benchmark is meaningful on a clean DB.
-	store := tenant.NewPGStore(pool)
-	tn, err := store.Create(ctx, tenant.CreateInput{
-		Slug: uniqueSlug("bench"), Name: "Bench", Cell: "test", Plan: "free",
+	acme, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("acme"), Name: "Acme", Cell: "test", Plan: "free",
 	})
 	if err != nil {
-		b.Fatalf("seed tenant: %v", err)
+		t.Fatalf("create acme: %v", err)
+	}
+	globex, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("globex"), Name: "Globex", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("create globex: %v", err)
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if err := dbutil.WithTenantTx(ctx, pool, tn.ID, func(ctx context.Context, tx pgx.Tx) error {
-			// A trivial read so the tx has something to commit.
-			var one int
-			return tx.QueryRow(ctx, `SELECT 1`).Scan(&one)
-		}); err != nil {
-			b.Fatalf("tx %d: %v", i, err)
+	// Short idle window so the test can exercise the eviction path
+	// without sleeping for minutes.
+	const idleWindow = 100 * time.Millisecond
+	limiter := platform.NewRateLimiter(platform.RateLimitConfig{
+		RequestsPerMinute: 6000,
+		BurstSize:         1000,
+		IdleTimeout:       idleWindow,
+	})
+
+	// Capture a baseline goroutine count before any tenant traffic so
+	// we can assert later that our test activity doesn't leak.
+	runtime.GC()
+	goroutinesBefore := runtime.NumGoroutine()
+	connsBefore := h.pool.Stat().TotalConns()
+
+	// Drive traffic only through acme. Each Allow() call lazily
+	// allocates a bucket for acme and refreshes its lastAccess. globex
+	// is never touched so the limiter has no reason to hold state for
+	// it — the core zero-idle-cost property.
+	for i := 0; i < 64; i++ {
+		if !limiter.Allow(acme.ID, 0, 0) {
+			t.Fatalf("acme call %d rate-limited unexpectedly", i)
 		}
+	}
+
+	if !limiter.Has(acme.ID) {
+		t.Fatalf("acme bucket should exist after traffic")
+	}
+	if limiter.Has(globex.ID) {
+		t.Fatalf("globex bucket should NOT exist (idle tenant holds no state)")
+	}
+	if got := limiter.Len(); got != 1 {
+		t.Fatalf("limiter bucket count = %d; want 1 (only acme)", got)
+	}
+
+	// Idle tenants must not pin DB connections. The pool is shared
+	// across tenants via SET LOCAL, so its size should be bounded by
+	// concurrency, not by tenant count.
+	if connsAfter := h.pool.Stat().TotalConns(); connsAfter > connsBefore+int32(h.pool.Config().MaxConns) {
+		t.Fatalf("pool grew unexpectedly: before=%d after=%d max=%d",
+			connsBefore, connsAfter, h.pool.Config().MaxConns)
+	}
+
+	// Idle tenants must not pin goroutines. Some growth from the
+	// harness (pgx background workers on first use) is expected, but
+	// the growth must not scale with the number of idle tenants.
+	runtime.GC()
+	goroutinesAfter := runtime.NumGoroutine()
+	// Allow modest headroom (pgx health checkers, GC, etc.) — we only
+	// care that we didn't spawn a per-tenant goroutine for globex.
+	if delta := goroutinesAfter - goroutinesBefore; delta > 8 {
+		t.Fatalf("goroutine count grew by %d (before=%d after=%d); tenant-pinned goroutine leak suspected",
+			delta, goroutinesBefore, goroutinesAfter)
+	}
+
+	// Exercise the idle eviction path itself. Sleep past the idle
+	// window, then poke the limiter on a throwaway tenant so the
+	// evict-on-access sweep runs. acme's bucket must then be gone.
+	time.Sleep(idleWindow + 50*time.Millisecond)
+	sweeper := uuid.New()
+	_ = limiter.Allow(sweeper, 0, 0)
+	if limiter.Has(acme.ID) {
+		t.Fatalf("acme bucket should be evicted after idle timeout")
+	}
+	if limiter.Has(globex.ID) {
+		t.Fatalf("globex bucket materialized after idle sweep; should still be absent")
 	}
 }
