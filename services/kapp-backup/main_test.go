@@ -46,6 +46,29 @@ func TestConflictClauseCompositePK(t *testing.T) {
 			cols:  []string{"tenant_id", "enrollment_id", "lesson_id", "status", "score"},
 			want:  `ON CONFLICT ("tenant_id", "enrollment_id", "lesson_id") DO UPDATE SET "status" = EXCLUDED."status", "score" = EXCLUDED."score"`,
 		},
+		{
+			// accounts has no `id` column — PK is (tenant_id, code).
+			// Without an explicit entry the fallback path would emit
+			// ON CONFLICT DO NOTHING and silently drop re-restored
+			// rows, so we pin the composite PK here.
+			table: "accounts",
+			cols:  []string{"tenant_id", "code", "name", "type"},
+			want:  `ON CONFLICT ("tenant_id", "code") DO UPDATE SET "name" = EXCLUDED."name", "type" = EXCLUDED."type"`,
+		},
+		{
+			// idempotency_keys has no `id` column — PK is (tenant_id, key).
+			table: "idempotency_keys",
+			cols:  []string{"tenant_id", "key", "response_code", "response_body"},
+			want:  `ON CONFLICT ("tenant_id", "key") DO UPDATE SET "response_code" = EXCLUDED."response_code", "response_body" = EXCLUDED."response_body"`,
+		},
+		{
+			// workflows has no `id` column — PK is (tenant_id, name, version).
+			// Same class of silent-DO-NOTHING regression as accounts /
+			// idempotency_keys above; caught by Devin Review on #21.
+			table: "workflows",
+			cols:  []string{"tenant_id", "name", "version", "definition"},
+			want:  `ON CONFLICT ("tenant_id", "name", "version") DO UPDATE SET "definition" = EXCLUDED."definition"`,
+		},
 	} {
 		t.Run(tc.table, func(t *testing.T) {
 			got := conflictClause(tc.table, tc.cols)

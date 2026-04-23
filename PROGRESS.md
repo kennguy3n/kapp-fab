@@ -1,6 +1,6 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2026-04-23 (accuracy corrections: reconcile PROGRESS checkboxes with shipped code — bank reconciliation, cost centers, CRM boot registration, and multi-tenancy benchmarks are already in the tree and are now marked complete here; Phase G second slice: sales/procurement KTypes, bank reconciliation, cost centers, payroll KTypes, Prometheus middleware, per-tenant backup CLI, Frappe delta sync + mapping suggestions, security review doc, upgrade-tier script)
+> **Last Updated:** 2026-04-23 (accuracy corrections + new task additions: tighten `services/kapp-backup/main.go` `tableConflictKeys` to cover `accounts` and `idempotency_keys` (no `id` column, were falling through to `ON CONFLICT DO NOTHING`); add `migrations/000012_tenants_schema_column.sql` so `scripts/upgrade_tier.sh`'s final routing update has a column to write; surface previously-tracked follow-ups (permissions table, notifications table, webhook HMAC, RLS / agent-import CI guards, audit-log integrity, upgrade_tier API, encryption key rotation) + the frontend gaps against already-shipped backend (bank reconciliation, cost centers, sales/purchase orders, price lists, payroll). Previous accuracy corrections: reconcile PROGRESS checkboxes with shipped code — bank reconciliation, cost centers, CRM boot registration, and multi-tenancy benchmarks are already in the tree and are marked complete here; Phase G second slice: sales/procurement KTypes, bank reconciliation, cost centers, payroll KTypes, Prometheus middleware, per-tenant backup CLI, Frappe delta sync + mapping suggestions, security review doc, upgrade-tier script.)
 >
 > Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [SECURITY_REVIEW.md](./docs/SECURITY_REVIEW.md)
 
@@ -257,6 +257,9 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [ ] Full-text search: tsvector on krecords, search API endpoint, cross-KType search page
 - [ ] Scheduled actions: tenant-scoped cron, recurring invoice generation, scheduled report delivery
 - [ ] Data export: per-KType export endpoint, full tenant dump, export job tracking
+- [ ] `permissions` table (ARCHITECTURE.md §5.1 — fine-grained ABAC permission grants; currently permissions live as a JSONB array on `roles.permissions`, so named / object-scoped grants cannot be revoked or audited independently of the owning role)
+- [ ] `notifications` table (ARCHITECTURE.md §5.1 — in-app notification inbox with read/unread state, per-user delivery preferences, retention; `services/worker/notifications.go` currently fans out in-flight and drops undelivered notifications on the floor)
+- [ ] Webhook HMAC signatures (prerequisite for the webhook management task below; `postWebhook` in `services/worker/notifications.go` sends JSON bodies with no signature header, so a tenant cannot verify that an inbound webhook originated from Kapp)
 
 ### Priority MVP gaps
 
@@ -313,6 +316,24 @@ Production readiness across all shipped modules.
 - [ ] Performance tuning: index review, partition pruning, outbox batch sizing
 - [ ] Load test: 5000 tenants on a single cell with baseline SLOs met
 - [ ] Documentation: operator guide, developer guide, KType authoring guide
+- [ ] CI rule: fail new migrations that don't ENABLE ROW LEVEL SECURITY on tenant-scoped tables (SECURITY_REVIEW.md §1 — currently enforced by review only; a migration that forgets the `ALTER TABLE … ENABLE ROW LEVEL SECURITY` + `tenant_isolation` policy will pass CI and silently break cross-tenant isolation)
+- [ ] CI rule: forbid `internal/agents` from importing `internal/record` outside the executor (SECURITY_REVIEW.md §2 — the agent-tool boundary relies on every mutation going through the approval / workflow gate; an accidental direct `record.Store` import inside a new agent tool would bypass the gate)
+- [ ] Audit-log integrity check / hash chain (PROPOSAL.md §7.6, SECURITY_REVIEW.md §8 — every `audit_log` row should carry a hash of the previous row so tampering is detectable on replay; today rows are append-only but unlinked)
+- [ ] Wire `scripts/upgrade_tier.sh` to a tenant-service API endpoint (SECURITY_REVIEW.md §8 item 5 — the shell script runs as DB superuser against the cluster today; the long-term path is a tenant-service RPC that handles the tier upgrade transactionally, emits an audit record, and drops the superuser requirement)
+- [ ] Encryption key rotation migration (SECURITY_REVIEW.md §3 — `internal/tenant/encryption.go` derives per-tenant keys from a single `KAPP_MASTER_KEY`; rotating the master key today would orphan every encrypted field. Needs a dual-key decrypt / re-encrypt path so the master key can be rotated without downtime)
+
+### Frontend
+
+Shipped backend surfaces that still need a first-class frontend page. The
+generic `RecordListPage` / `RightPane` already render each KType by
+schema, but dedicated pages unlock per-module workflows (reconcile,
+compare to expected, bulk-edit) that the generic view can't cover.
+
+- [ ] Bank Reconciliation UI page (backend exists in `internal/ledger/bank.go` with `UpsertBankAccount`, `ImportBankStatement`, `ReconcileTransaction`; needs a statement-import uploader, side-by-side matcher, and a "mark ignored" action surface)
+- [ ] Cost Centers management page (backend: `internal/ledger/cost_center.go` + `cost_centers` table; needs a tree view over `parent_code`, activation toggle, and an assignment filter on the trial balance / income statement views)
+- [ ] Sales Orders / Purchase Orders dedicated pages (KTypes in `internal/sales/ktypes.go`; need pipeline-stage columns, per-line editing, and linkage back to deal / supplier cards)
+- [ ] Price Lists management page (KType in `internal/sales/ktypes.go`; needs per-currency / per-customer matrix editing + effective-date window UI)
+- [ ] Salary Components / Structures / Payroll pages (KTypes in `internal/hr/payroll.go`; need a structure builder that composes components and a per-employee structure assignment view)
 
 ### Acceptance Criteria
 
