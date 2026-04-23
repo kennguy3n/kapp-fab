@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -21,9 +22,17 @@ import (
 // statement). Tenant scope is enforced by the middleware stack wired
 // in main.go; the handlers translate HTTP into ledger calls and map
 // sentinel errors to status codes the web client expects.
+// paymentPoster is the minimal surface the finance handlers need from
+// ledger.PaymentPoster so the handler file does not drag in the full
+// ledger package constructor here.
+type paymentPoster interface {
+	PostPayment(ctx context.Context, tenantID, paymentID, actorID uuid.UUID) (*ledger.JournalEntry, error)
+}
+
 type financeHandlers struct {
-	store   *ledger.PGStore
-	poster  *ledger.InvoicePoster
+	store     *ledger.PGStore
+	poster    *ledger.InvoicePoster
+	payments  paymentPoster
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +296,32 @@ func (h *financeHandlers) postCreditNote(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	entry, err := h.poster.PostCreditNote(r.Context(), t.ID, id, actorOrDefault(r.Context()))
+	if err != nil {
+		writeFinanceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, entry)
+}
+
+// postPayment posts a finance.payment draft. Same tenant-middleware +
+// Bearer-JWT stack as the other finance posters; the actor is pulled
+// from the request context. Mirrors postInvoice/postBill.
+func (h *financeHandlers) postPayment(w http.ResponseWriter, r *http.Request) {
+	if h.payments == nil {
+		http.Error(w, "payment posting not wired", http.StatusNotImplemented)
+		return
+	}
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid payment id", http.StatusBadRequest)
+		return
+	}
+	entry, err := h.payments.PostPayment(r.Context(), t.ID, id, actorOrDefault(r.Context()))
 	if err != nil {
 		writeFinanceError(w, err)
 		return

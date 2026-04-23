@@ -71,6 +71,7 @@ func run() error {
 	// Mirrors the wiring in services/api/main.go.
 	ledgerStore := ledger.NewPGStore(pool, eventPublisher, auditor)
 	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
+	paymentPoster := ledger.NewPaymentPoster(ledgerStore, recordStore)
 	inventoryStore := inventory.NewPGStore(pool, eventPublisher, auditor)
 	inventoryHook := inventory.NewPosterHook(inventoryStore)
 	invoicePoster.
@@ -81,7 +82,7 @@ func run() error {
 
 	executor := agents.NewExecutor(recordStore, workflowEngine, auditor)
 	agents.RegisterCRMTools(executor)
-	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster)
+	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster, paymentPoster)
 	agents.RegisterInventoryTools(executor, inventoryStore)
 	agents.RegisterHRTools(executor, hrStore)
 	agents.RegisterLMSTools(executor, lmsStore)

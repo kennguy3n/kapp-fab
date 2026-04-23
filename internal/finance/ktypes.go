@@ -30,6 +30,9 @@ const (
 	KTypeAPBill       = "finance.ap_bill"
 	KTypeCreditNote   = "finance.credit_note"
 	KTypeDebitNote    = "finance.debit_note"
+	// KTypePayment moved to payment.go — re-exported here via the
+	// payment.go file so the registry keeps finance.payment colocated
+	// with its schema.
 )
 
 // Canonical workflow names for finance KTypes. The workflow engine
@@ -115,7 +118,7 @@ var arInvoiceSchema = []byte(`{
   "name": "finance.ar_invoice",
   "version": 1,
   "fields": [
-    {"name": "customer_id", "type": "ref", "ktype": "crm.organization", "required": true},
+    {"name": "customer_id", "type": "ref", "ktype": "crm.customer", "required": true},
     {"name": "deal_id", "type": "ref", "ktype": "crm.deal"},
     {"name": "invoice_number", "type": "string", "max_length": 64},
     {"name": "issue_date", "type": "date"},
@@ -165,7 +168,7 @@ var apBillSchema = []byte(`{
   "name": "finance.ap_bill",
   "version": 1,
   "fields": [
-    {"name": "supplier_id", "type": "ref", "ktype": "crm.organization", "required": true},
+    {"name": "supplier_id", "type": "ref", "ktype": "crm.supplier", "required": true},
     {"name": "bill_number", "type": "string", "max_length": 64},
     {"name": "issue_date", "type": "date"},
     {"name": "due_date", "type": "date"},
@@ -295,6 +298,7 @@ func All() []ktype.KType {
 		{Name: KTypeAPBill, Version: 1, Schema: apBillSchema},
 		{Name: KTypeCreditNote, Version: 1, Schema: creditNoteSchema},
 		{Name: KTypeDebitNote, Version: 1, Schema: debitNoteSchema},
+		{Name: KTypePayment, Version: 1, Schema: paymentSchema},
 	}
 }
 

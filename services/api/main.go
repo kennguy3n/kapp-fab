@@ -113,6 +113,7 @@ func run() error {
 	// the single outbox + audit tables used by the rest of the kernel.
 	ledgerStore := ledger.NewPGStore(pool, eventPublisher, auditor)
 	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
+	paymentPoster := ledger.NewPaymentPoster(ledgerStore, recordStore)
 
 	// Phase D inventory engine — items, warehouses, append-only stock
 	// moves, and the derived stock_levels view. Wiring the same event
@@ -213,7 +214,7 @@ func run() error {
 	// inventory read + move tools.
 	executor := agents.NewExecutor(recordStore, workflowEngine, auditor)
 	agents.RegisterCRMTools(executor)
-	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster)
+	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster, paymentPoster)
 	agents.RegisterInventoryTools(executor, inventoryStore)
 	agents.RegisterHRTools(executor, hrStore)
 	agents.RegisterLMSTools(executor, lmsStore)
@@ -226,7 +227,7 @@ func run() error {
 	ah := &agentHandlers{executor: executor}
 	aph := &approvalsHandlers{engine: workflowEngine, store: recordStore}
 	auh := &auditHandlers{pool: pool}
-	finh := &financeHandlers{store: ledgerStore, poster: invoicePoster}
+	finh := &financeHandlers{store: ledgerStore, poster: invoicePoster, payments: paymentPoster}
 	invh := &inventoryHandlers{store: inventoryStore}
 	oh := &openAPIHandler{registry: ktypeRegistry}
 	fileh := &filesHandlers{store: filesStore}
@@ -400,6 +401,7 @@ func run() error {
 		r.Post("/bills/{id}/post", finh.postBill)
 		r.Post("/credit-notes/{id}/post", finh.postCreditNote)
 		r.Post("/debit-notes/{id}/post", finh.postDebitNote)
+		r.Post("/payments/{id}/post", finh.postPayment)
 		r.Post("/tax-codes", finh.upsertTaxCode)
 		r.Get("/tax-codes", finh.listTaxCodes)
 		r.Get("/tax-codes/{code}", finh.getTaxCode)

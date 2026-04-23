@@ -22,7 +22,7 @@ import (
 // record-only creation when the ledger layer is nil so Phase B tests
 // that don't spin up the ledger still pass. Production callers must
 // wire both.
-func RegisterFinanceTools(x *Executor, ledgerStore *ledger.PGStore, poster *ledger.InvoicePoster) {
+func RegisterFinanceTools(x *Executor, ledgerStore *ledger.PGStore, poster *ledger.InvoicePoster, paymentPoster *ledger.PaymentPoster) {
 	x.Register(&createSalesInvoiceTool{executor: x})
 	x.Register(&createAPBillTool{executor: x})
 	x.Register(&postJournalTool{executor: x, ledger: ledgerStore})
@@ -30,6 +30,7 @@ func RegisterFinanceTools(x *Executor, ledgerStore *ledger.PGStore, poster *ledg
 	x.Register(&postAPBillTool{executor: x, poster: poster})
 	x.Register(&postCreditNoteTool{executor: x, poster: poster})
 	x.Register(&postDebitNoteTool{executor: x, poster: poster})
+	x.Register(&recordPaymentTool{executor: x, poster: paymentPoster})
 }
 
 // ----- finance.create_sales_invoice -----
@@ -438,6 +439,112 @@ func (t *postDebitNoteTool) Invoke(ctx context.Context, inv Invocation) (*Result
 		Summary: fmt.Sprintf("Posted debit note %s → JE %s", in.DebitNoteID, entry.ID),
 		Preview: body,
 		Extra:   map[string]any{"journal_entry_id": entry.ID, "debit_note_id": in.DebitNoteID},
+	}, nil
+}
+
+// ----- finance.record_payment -----
+
+type recordPaymentAllocation struct {
+	InvoiceID       string          `json:"invoice_id"`
+	AllocatedAmount decimal.Decimal `json:"allocated_amount"`
+}
+
+type recordPaymentInput struct {
+	PaymentType   string                    `json:"payment_type"`
+	PartyType     string                    `json:"party_type"`
+	PartyID       string                    `json:"party_id"`
+	Amount        decimal.Decimal           `json:"amount"`
+	Currency      string                    `json:"currency,omitempty"`
+	PaymentDate   string                    `json:"payment_date,omitempty"`
+	Reference     string                    `json:"reference,omitempty"`
+	BankAccount   string                    `json:"bank_account"`
+	ARAccountCode string                    `json:"ar_account_code,omitempty"`
+	APAccountCode string                    `json:"ap_account_code,omitempty"`
+	Allocations   []recordPaymentAllocation `json:"allocations,omitempty"`
+	Owner         uuid.UUID                 `json:"owner,omitempty"`
+	AutoPost      bool                      `json:"auto_post,omitempty"`
+}
+
+type recordPaymentTool struct {
+	executor *Executor
+	poster   *ledger.PaymentPoster
+}
+
+func (t *recordPaymentTool) Name() string               { return "finance.record_payment" }
+func (t *recordPaymentTool) RequiresConfirmation() bool { return true }
+func (t *recordPaymentTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in recordPaymentInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.PaymentType != "receive" && in.PaymentType != "pay" {
+		return nil, errors.New("finance.record_payment: payment_type must be receive or pay")
+	}
+	if in.PartyType != "customer" && in.PartyType != "supplier" {
+		return nil, errors.New("finance.record_payment: party_type must be customer or supplier")
+	}
+	if in.PartyID == "" {
+		return nil, errors.New("finance.record_payment: party_id required")
+	}
+	if !in.Amount.IsPositive() {
+		return nil, errors.New("finance.record_payment: amount must be positive")
+	}
+	if in.Currency == "" {
+		in.Currency = "USD"
+	}
+	data := map[string]any{
+		"payment_type": in.PaymentType,
+		"party_type":   in.PartyType,
+		"party_id":     in.PartyID,
+		"amount":       in.Amount,
+		"currency":     in.Currency,
+		"status":       "draft",
+	}
+	assignIfSet(data, "payment_date", in.PaymentDate)
+	assignIfSet(data, "reference", in.Reference)
+	assignIfSet(data, "bank_account", in.BankAccount)
+	assignIfSet(data, "ar_account_code", in.ARAccountCode)
+	assignIfSet(data, "ap_account_code", in.APAccountCode)
+	if in.Owner != uuid.Nil {
+		data["owner"] = in.Owner.String()
+	}
+	if len(in.Allocations) > 0 {
+		data["allocations"] = in.Allocations
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(data)
+		return &Result{
+			Summary: fmt.Sprintf("Would record %s payment — %s %s", in.PaymentType, in.Amount, in.Currency),
+			Preview: preview,
+		}, nil
+	}
+	dataJSON, _ := json.Marshal(data)
+	rec, err := t.executor.records.Create(ctx, record.KRecord{
+		TenantID:  inv.TenantID,
+		KType:     finance.KTypePayment,
+		Data:      dataJSON,
+		CreatedBy: inv.ActorID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	extra := map[string]any{"payment_id": rec.ID}
+	if in.AutoPost && t.poster != nil {
+		entry, postErr := t.poster.PostPayment(ctx, inv.TenantID, rec.ID, inv.ActorID)
+		if postErr != nil {
+			return nil, fmt.Errorf("record payment draft %s posted but poster failed: %w", rec.ID, postErr)
+		}
+		extra["journal_entry_id"] = entry.ID
+		return &Result{
+			Summary: fmt.Sprintf("Recorded payment %s → JE %s", rec.ID, entry.ID),
+			Record:  rec,
+			Extra:   extra,
+		}, nil
+	}
+	return &Result{
+		Summary: fmt.Sprintf("Drafted %s payment %s (%s %s)", in.PaymentType, rec.ID, in.Amount, in.Currency),
+		Record:  rec,
+		Extra:   extra,
 	}, nil
 }
 

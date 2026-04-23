@@ -23,6 +23,8 @@ func RegisterCRMTools(x *Executor) {
 	x.Register(&createTaskTool{executor: x})
 	x.Register(&requestApprovalTool{executor: x})
 	x.Register(&decideApprovalTool{executor: x})
+	x.Register(&createCustomerTool{executor: x})
+	x.Register(&createSupplierTool{executor: x})
 }
 
 // ----- crm.create_deal -----
@@ -360,6 +362,148 @@ func (t *decideApprovalTool) Invoke(ctx context.Context, inv Invocation) (*Resul
 	return &Result{
 		Summary: fmt.Sprintf("Approval %s → %s", approval.ID, approval.State),
 		Preview: body,
+	}, nil
+}
+
+// ----- crm.create_customer -----
+
+type createCustomerInput struct {
+	Name                string    `json:"name"`
+	CustomerGroup       string    `json:"customer_group,omitempty"`
+	CreditLimit         float64   `json:"credit_limit,omitempty"`
+	DefaultTaxCode      string    `json:"default_tax_code,omitempty"`
+	DefaultPaymentTerms string    `json:"default_payment_terms,omitempty"`
+	Currency            string    `json:"currency,omitempty"`
+	Organization        uuid.UUID `json:"organization,omitempty"`
+	Owner               uuid.UUID `json:"owner,omitempty"`
+}
+
+type createCustomerTool struct{ executor *Executor }
+
+func (t *createCustomerTool) Name() string               { return "crm.create_customer" }
+func (t *createCustomerTool) RequiresConfirmation() bool { return false }
+func (t *createCustomerTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in createCustomerInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.Name == "" {
+		return nil, errors.New("crm.create_customer: name required")
+	}
+	if in.Currency == "" {
+		in.Currency = "USD"
+	}
+	data := map[string]any{
+		"name":            in.Name,
+		"currency":        in.Currency,
+		"status":          "active",
+		"ar_aging_bucket": "current",
+	}
+	if in.CustomerGroup != "" {
+		data["customer_group"] = in.CustomerGroup
+	}
+	if in.CreditLimit > 0 {
+		data["credit_limit"] = in.CreditLimit
+	}
+	if in.DefaultTaxCode != "" {
+		data["default_tax_code"] = in.DefaultTaxCode
+	}
+	if in.DefaultPaymentTerms != "" {
+		data["default_payment_terms"] = in.DefaultPaymentTerms
+	}
+	if in.Organization != uuid.Nil {
+		data["organization"] = in.Organization.String()
+	}
+	if in.Owner != uuid.Nil {
+		data["owner"] = in.Owner.String()
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(data)
+		return &Result{
+			Summary: fmt.Sprintf("Would create customer %q", in.Name),
+			Preview: preview,
+		}, nil
+	}
+	dataJSON, _ := json.Marshal(data)
+	rec, err := t.executor.records.Create(ctx, record.KRecord{
+		TenantID:  inv.TenantID,
+		KType:     crm.KTypeCustomer,
+		Data:      dataJSON,
+		CreatedBy: inv.ActorID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Result{
+		Summary: fmt.Sprintf("Created customer %s", rec.ID),
+		Record:  rec,
+	}, nil
+}
+
+// ----- crm.create_supplier -----
+
+type createSupplierInput struct {
+	Name                string    `json:"name"`
+	SupplierGroup       string    `json:"supplier_group,omitempty"`
+	DefaultPaymentTerms string    `json:"default_payment_terms,omitempty"`
+	Currency            string    `json:"currency,omitempty"`
+	Organization        uuid.UUID `json:"organization,omitempty"`
+	Owner               uuid.UUID `json:"owner,omitempty"`
+}
+
+type createSupplierTool struct{ executor *Executor }
+
+func (t *createSupplierTool) Name() string               { return "crm.create_supplier" }
+func (t *createSupplierTool) RequiresConfirmation() bool { return false }
+func (t *createSupplierTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in createSupplierInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.Name == "" {
+		return nil, errors.New("crm.create_supplier: name required")
+	}
+	if in.Currency == "" {
+		in.Currency = "USD"
+	}
+	data := map[string]any{
+		"name":            in.Name,
+		"currency":        in.Currency,
+		"status":          "active",
+		"ap_aging_bucket": "current",
+	}
+	if in.SupplierGroup != "" {
+		data["supplier_group"] = in.SupplierGroup
+	}
+	if in.DefaultPaymentTerms != "" {
+		data["default_payment_terms"] = in.DefaultPaymentTerms
+	}
+	if in.Organization != uuid.Nil {
+		data["organization"] = in.Organization.String()
+	}
+	if in.Owner != uuid.Nil {
+		data["owner"] = in.Owner.String()
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(data)
+		return &Result{
+			Summary: fmt.Sprintf("Would create supplier %q", in.Name),
+			Preview: preview,
+		}, nil
+	}
+	dataJSON, _ := json.Marshal(data)
+	rec, err := t.executor.records.Create(ctx, record.KRecord{
+		TenantID:  inv.TenantID,
+		KType:     crm.KTypeSupplier,
+		Data:      dataJSON,
+		CreatedBy: inv.ActorID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Result{
+		Summary: fmt.Sprintf("Created supplier %s", rec.ID),
+		Record:  rec,
 	}, nil
 }
 
