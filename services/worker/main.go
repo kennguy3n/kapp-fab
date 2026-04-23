@@ -82,6 +82,18 @@ func run() error {
 		client:  &http.Client{Timeout: 5 * time.Second},
 	}
 
+	// Phase F notification router. The worker is the single point that
+	// fans an outbox event out to the per-tenant notification channels:
+	// KChat DMs via the bridge, in-app SSE is served directly from the
+	// events table by services/api, and email + webhook are invoked
+	// here when the event payload carries a `notification` envelope.
+	// Email is logged as a stub until an SMTP adapter lands; webhook
+	// POSTs the raw event envelope to `notification.webhook_url`.
+	router := &notificationRouter{
+		bridge: bridge,
+		client: &http.Client{Timeout: 5 * time.Second},
+	}
+
 	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
@@ -92,14 +104,14 @@ func run() error {
 			log.Printf("worker: shutdown signal received")
 			return nil
 		case <-ticker.C:
-			if _, err := publisher.DrainBatch(ctx, drainBatch, deliver(nc, bridge)); err != nil {
+			if _, err := publisher.DrainBatch(ctx, drainBatch, deliver(nc, bridge, router)); err != nil {
 				log.Printf("worker: drain batch: %v", err)
 			}
 		}
 	}
 }
 
-func deliver(nc *nats.Conn, bridge *kchatBridgeNotifier) func(ctx context.Context, batch []events.Event) error {
+func deliver(nc *nats.Conn, bridge *kchatBridgeNotifier, router *notificationRouter) func(ctx context.Context, batch []events.Event) error {
 	return func(ctx context.Context, batch []events.Event) error {
 		for _, e := range batch {
 			subject := fmt.Sprintf("kapp.events.%s", e.Type)
@@ -121,6 +133,15 @@ func deliver(nc *nats.Conn, bridge *kchatBridgeNotifier) func(ctx context.Contex
 				if err := bridge.renderApprovalCard(ctx, e); err != nil {
 					log.Printf("worker: kchat render %s: %v", e.Type, err)
 				}
+			}
+			// Phase F: route generic notification events to the per-
+			// tenant configured channels (KChat DM, webhook, email).
+			// Failures are logged — the NATS publish already succeeded
+			// and the in-app SSE tail is served directly from the
+			// events table, so a failed sidecar delivery never blocks
+			// the outbox drain.
+			if router != nil {
+				router.route(ctx, e)
 			}
 		}
 		return nc.Flush()

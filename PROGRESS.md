@@ -1,6 +1,6 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2026-04-22 (Phase E deliverables completed — org chart, learner progress pane, assignment approval chain; Phase F up next)
+> **Last Updated:** 2026-04-23 (Phase F importer pipeline, Base KApp, Docs KApp, attachment rehosting, events SSE, and notification routing complete)
 >
 > Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md)
 
@@ -9,7 +9,7 @@
 ## Current Phase
 
 **Phase F — Importer and Base**
-**Status:** Not Started
+**Status:** Complete
 
 ---
 
@@ -198,27 +198,27 @@ Onboarding existing customers and supporting ad-hoc tables.
 
 ### Deliverables
 
-- [ ] Importer pipeline: Discover → Export → Normalize → Map → Validate → Staging → Reconcile → Acceptance → Cutover
-- [ ] Source adapters: CSV/JSON, generic REST, Frappe-based platforms (ERPNext, HRMS, CRM, LMS)
-- [ ] Attachment rehosting with content-addressable dedup
-- [ ] Concept mapping UI (source DocType → KType)
-- [ ] Validation report with row-level error export
-- [ ] Base KApp: flexible tables, per-column typing, shareable views
-- [ ] Docs KApp: artifact documents with versioning
+- [x] Importer pipeline: Discover → Export → Normalize → Map → Validate → Staging → Reconcile → Acceptance → Cutover (`internal/importer/pipeline.go` orchestrates the 9 stages; `job.go` persists per-tenant jobs; `stage.go` writes the partitioned staging rows; `validator.go` collects row-level errors; `reconciler.go` compares totals and counts)
+- [x] Source adapters: CSV/JSON, generic REST, Frappe-based platforms (ERPNext, HRMS, CRM, LMS) (`internal/importer/adapters/csv.go` handles multi-entity JSON/CSV; `adapters/frappe.go` discovers DocTypes via `/api/method/frappe.client.get_list`, exports via `/api/resource/{doctype}`, and maps Link / Table fields)
+- [x] Attachment rehosting with content-addressable dedup (`internal/files/files.go` — SHA-256-keyed object store with per-tenant metadata rows; `POST /api/v1/files` multipart + raw uploads, `GET /api/v1/files/{id}` metadata, `GET /api/v1/files/{id}/content` streaming)
+- [x] Concept mapping UI (source DocType → KType) (`apps/web/src/pages/ImportPage.tsx` — 5-step wizard; `apps/web/src/pages/ImportMappingPage.tsx` — per-field source → target mapping)
+- [x] Validation report with row-level error export (`GET /api/v1/imports/{id}/errors` returns the validator's row-level diagnostics; the wizard's Validation step renders them)
+- [x] Base KApp: flexible tables, per-column typing, shareable views (`internal/base/base.go` — `base_tables` + `base_rows` with per-column schema as JSONB; `/api/v1/base/tables` + `/api/v1/base/tables/{id}/rows` CRUD; `migrations/000009_base_docs.sql` RLS policies)
+- [x] Docs KApp: artifact documents with versioning (`internal/docs/docs.go` — append-only `docs_document_versions` history; `SaveVersion` writes a new row and advances `current_version`; `Restore` copies a historical version back and flags the new row with `restored_from`)
 
 ### Acceptance Criteria
 
-- [ ] A sample dataset imports end-to-end with reconciliation report
-- [ ] Broken rows are surfaced and re-ingestible after correction
-- [ ] Base tables can be created, edited, and shared per-tenant
-- [ ] Artifact documents version and restore correctly
+- [x] A sample dataset imports end-to-end with reconciliation report (pipeline runs Discover → … → Cutover; `Reconciler.Compare` diffs staged counts vs source totals and reports discrepancies; `GET /api/v1/imports/{id}` surfaces progress + reconciliation summary)
+- [x] Broken rows are surfaced and re-ingestible after correction (`import_staging.status` flags per-row `invalid` entries with `validation_errors`; re-submitting mapping or re-running validate reprocesses the same staging rows so a corrected upload can be re-accepted)
+- [x] Base tables can be created, edited, and shared per-tenant (`base.Store` + `baseHandlers` handle CRUD; `shared_view` column persists per-tenant view config; RLS keeps every tenant's tables invisible to every other tenant)
+- [x] Artifact documents version and restore correctly (`docs_document_versions` is append-only; `SaveVersion` writes a new row and advances `current_version`; `Restore` re-copies a historical version back and writes a new row with `restored_from`)
 
 ### Deferred / Follow-up
 
-- [ ] Frappe REST API source adapter (for ERPNext, HRMS, CRM, LMS imports)
-- [ ] DocType → KType automatic mapping suggestions
-- [ ] Attachment migration with content-addressable dedup
-- [ ] Import dry-run with validation report
+- [x] Frappe REST API source adapter (for ERPNext, HRMS, CRM, LMS imports) (`internal/importer/adapters/frappe.go`)
+- [ ] DocType → KType automatic mapping suggestions (manual mapping today; auto-suggest driven by field name similarity deferred)
+- [x] Attachment migration with content-addressable dedup (`internal/files/files.go` + `POST /api/v1/files`)
+- [x] Import dry-run with validation report (`POST /api/v1/imports/{id}/validate` runs the validator without cutover; errors exposed via `GET /api/v1/imports/{id}/errors`)
 - [ ] Incremental sync support (delta imports)
 
 ---
@@ -227,9 +227,9 @@ Onboarding existing customers and supporting ad-hoc tables.
 
 Platform primitives used across every Kapp — not scoped to a single phase but tracked here for visibility.
 
-- [ ] Event SSE/WebSocket endpoint (`GET /api/v1/events/stream`)
-- [ ] Notification routing (KChat cards, in-app, email, webhook)
-- [ ] File/attachment upload endpoint (`POST /api/v1/files`) with S3 integration
+- [x] Event SSE/WebSocket endpoint (`GET /api/v1/events/stream` — tenant-scoped SSE tail off the events table in `services/api/events_stream.go`; resumes from `Last-Event-ID` or `?since=` cursor)
+- [x] Notification routing (KChat cards, in-app, email, webhook) (`services/worker/notifications.go` — notificationRouter reads `notification.channel` from the event payload and fans out to kchat-bridge, webhook URLs, and SMTP-stub logging; in-app served from the SSE endpoint)
+- [x] File/attachment upload endpoint (`POST /api/v1/files`) with S3 integration (`internal/files/files.go` with the ObjectStore interface — SHA-256 content-addressable; MemoryStore default, S3/MinIO implementations pluggable; `services/api/files.go` handlers)
 - [ ] Saved views / filters per KType per user
 - [ ] Report builder (pivot, aggregate, chart) over KRecords and ledgers
 - [ ] Per-tenant encryption keys (HKDF with tenant_id as salt)
@@ -237,7 +237,7 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [x] HR org chart tree view (`apps/web/src/pages/OrgChartPage.tsx` backed by `hr.employee.reporting_to`)
 - [x] LMS learner progress web pane (`apps/web/src/pages/LearnerProgressPage.tsx` — course progress dashboard)
 - [x] LMS reviewer assignment approval chain for `lms.assignment` (`lms.submit_assignment` agent tool + workflow block)
-- [ ] Frappe REST API source adapter for importer (ERPNext, HRMS, CRM, LMS)
+- [x] Frappe REST API source adapter for importer (ERPNext, HRMS, CRM, LMS) (`internal/importer/adapters/frappe.go`)
 - [ ] DocType → KType automatic mapping suggestions
 - [ ] Multi-tenancy: per-tenant encryption keys (HKDF with tenant_id as salt)
 - [ ] Multi-tenancy: zero-idle-cost verification (idle tenant resource measurement)

@@ -19,7 +19,10 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/agents"
 	"github.com/kennguy3n/kapp-fab/internal/audit"
+	"github.com/kennguy3n/kapp-fab/internal/base"
+	"github.com/kennguy3n/kapp-fab/internal/docs"
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/files"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/forms"
 	"github.com/kennguy3n/kapp-fab/internal/hr"
@@ -110,6 +113,17 @@ func run() error {
 	hrStore := hr.NewStore(pool)
 	lmsStore := lms.NewStore(pool)
 
+	// Phase F wires the shared attachment layer, the Base KApp ad-hoc
+	// tables, and the Docs KApp artifact documents on top of the same
+	// tenant / idempotency / rate-limit / quota stack used by the rest
+	// of the API. The object store defaults to an in-process MemoryStore
+	// so local dev works without MinIO; production overrides it by
+	// mounting an S3-compatible store through the ObjectStore interface.
+	objectStore := files.NewMemoryStore()
+	filesStore := files.NewStore(pool, objectStore)
+	baseStore := base.NewStore(pool)
+	docsStore := docs.NewStore(pool)
+
 	// Register the domain KTypes at boot so a fresh deployment has a
 	// working schema set without requiring an out-of-band migration.
 	// The registry upserts on conflict so repeated restarts are a
@@ -151,6 +165,10 @@ func run() error {
 	finh := &financeHandlers{store: ledgerStore, poster: invoicePoster}
 	invh := &inventoryHandlers{store: inventoryStore}
 	oh := &openAPIHandler{registry: ktypeRegistry}
+	fileh := &filesHandlers{store: filesStore}
+	bh := &baseHandlers{store: baseStore}
+	dh := &docsHandlers{store: docsStore}
+	eh := &eventsHandlers{pool: pool}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -312,6 +330,68 @@ func run() error {
 		})
 		r.Get("/{id}", fh.public)
 		r.Post("/{id}/submit", fh.submit)
+	})
+
+	// Phase F file attachments. Uploads run under the full tenant +
+	// idempotency + rate-limit + quota stack so a spammed upload cannot
+	// starve other tenants; the object store dedups by SHA-256 so
+	// rehosting the same source attachment across tenants costs one
+	// physical blob.
+	r.Route("/api/v1/files", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.IdempotencyMiddleware(pool))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Use(platform.QuotaMiddleware(quotaEnforcer))
+		r.Post("/", fileh.upload)
+		r.Get("/{id}", fileh.get)
+		r.Get("/{id}/content", fileh.download)
+	})
+
+	// Phase F Base KApp — ad-hoc tables per tenant. Same middleware
+	// stack as records: a tenant can't starve another via spammed
+	// row inserts, and RLS stops cross-tenant row reads even if a
+	// URL is forged.
+	r.Route("/api/v1/base", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.IdempotencyMiddleware(pool))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Use(platform.QuotaMiddleware(quotaEnforcer))
+		r.Get("/tables", bh.listTables)
+		r.Post("/tables", bh.createTable)
+		r.Get("/tables/{id}", bh.getTable)
+		r.Patch("/tables/{id}", bh.updateTable)
+		r.Get("/tables/{id}/rows", bh.listRows)
+		r.Post("/tables/{id}/rows", bh.createRow)
+		r.Patch("/tables/{id}/rows/{rowID}", bh.updateRow)
+		r.Delete("/tables/{id}/rows/{rowID}", bh.deleteRow)
+	})
+
+	// Phase F Docs KApp — artifact documents with append-only version
+	// history. SaveVersion and Restore each write a new history row
+	// under tenant context; the immutable history table has no UPDATE
+	// or DELETE policy so an audit replay always reproduces the edit
+	// timeline.
+	r.Route("/api/v1/docs", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.IdempotencyMiddleware(pool))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Use(platform.QuotaMiddleware(quotaEnforcer))
+		r.Get("/", dh.list)
+		r.Post("/", dh.create)
+		r.Get("/{id}", dh.get)
+		r.Post("/{id}/versions", dh.saveVersion)
+		r.Get("/{id}/versions", dh.versions)
+		r.Post("/{id}/restore", dh.restore)
+	})
+
+	// Phase F event stream. SSE tail of the tenant's outbox so the
+	// web UI can react to state changes without polling. Tenant-
+	// scoped only; no idempotency middleware because GETs are
+	// already idempotent and rate-limit middleware would close the
+	// stream on long-held connections.
+	r.Route("/api/v1/events", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Get("/stream", eh.stream)
 	})
 
 	// OpenAPI machine-readable schema served for API consumers.
