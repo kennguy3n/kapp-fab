@@ -41,14 +41,17 @@ const stockAlertDedupeWindow = 6 * time.Hour
 // `inventory.low_stock_alert` outbox event per SKU that fell below
 // its configured reorder point.
 //
-// The worker uses the shared connection pool and issues its query as
-// a superuser-equivalent session (no tenant GUC) so a single scan
-// covers all tenants atomically. This is safe because the output
-// stream is re-tagged with the owning tenant_id on every emitted
-// event, and the subsequent publisher.EmitTx runs inside a per-tenant
-// transaction that re-establishes the RLS context.
+// The sweep query must run on a BYPASSRLS pool because it
+// legitimately spans tenants — kapp_app sessions have no
+// `app.tenant_id` GUC set at sweep time and RLS default-denies,
+// which would silently return zero rows. The per-tenant emit below
+// uses the regular pool + SET LOCAL so the outbox insert remains
+// tenant-scoped. When adminPool is nil the sweeper short-circuits
+// and logs a warning; the worker process stays up so the outbox
+// drain keeps running.
 type stockAlertWorker struct {
 	pool      *pgxpool.Pool
+	adminPool *pgxpool.Pool
 	publisher events.Publisher
 	setTenant func(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) error
 	interval  time.Duration
@@ -72,11 +75,13 @@ type alertKey struct {
 // otherwise does not depend on platform/txn.go helpers.
 func newStockAlertWorker(
 	pool *pgxpool.Pool,
+	adminPool *pgxpool.Pool,
 	publisher events.Publisher,
 	setTenant func(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) error,
 ) *stockAlertWorker {
 	return &stockAlertWorker{
 		pool:      pool,
+		adminPool: adminPool,
 		publisher: publisher,
 		setTenant: setTenant,
 		interval:  stockAlertInterval,
@@ -130,7 +135,15 @@ type lowStockRow struct {
 // all tenants, then emit a low-stock alert per row that isn't still
 // inside the per-SKU dedupe window.
 func (w *stockAlertWorker) sweep(ctx context.Context) error {
-	rows, err := w.pool.Query(ctx,
+	if w.adminPool == nil {
+		// No admin pool configured — the cross-tenant sweep would
+		// default-deny under RLS and silently return zero rows. Skip
+		// the sweep entirely and log once per tick so the operator
+		// sees the feature is disabled rather than quietly broken.
+		log.Printf("worker: stock alerts sweep skipped: ADMIN_DB_URL not set")
+		return nil
+	}
+	rows, err := w.adminPool.Query(ctx,
 		`SELECT sl.tenant_id, sl.item_id, i.sku, i.name,
 		        sl.warehouse_id, wh.code,
 		        sl.qty, i.reorder_level

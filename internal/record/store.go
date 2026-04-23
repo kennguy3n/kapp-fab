@@ -150,6 +150,14 @@ func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The RETURNING row carries ciphertext for any encrypted fields
+	// since the INSERT wrote the encrypted payload. Callers expect
+	// plaintext, so undo that transformation before handing back.
+	decrypted, err := s.decryptRecord(ctx, &created)
+	if err != nil {
+		return nil, err
+	}
+	created.Data = decrypted
 	return &created, nil
 }
 
@@ -235,6 +243,16 @@ func (s *PGStore) List(ctx context.Context, tenantID uuid.UUID, filter ListFilte
 	if err != nil {
 		return nil, err
 	}
+	// Decrypt encrypted fields on the way out so list responses carry
+	// plaintext to callers. decryptRecord is a no-op when the store
+	// has no encryptor or the KType schema has no encrypted fields.
+	for i := range out {
+		decrypted, err := s.decryptRecord(ctx, &out[i])
+		if err != nil {
+			return nil, err
+		}
+		out[i].Data = decrypted
+	}
 	return out, nil
 }
 
@@ -273,7 +291,16 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 			return ErrVersionConflict
 		}
 
-		merged, err := mergeJSON(existing.Data, r.Data)
+		// Decrypt existing.Data before merging so the plaintext patch
+		// in r.Data is shallow-merged onto plaintext, not onto ciphertext.
+		// Without this the encrypted fields would be overwritten with
+		// whatever ciphertext survives the merge and become unreadable.
+		existingPlain, err := s.decryptRecord(ctx, &existing)
+		if err != nil {
+			return fmt.Errorf("record: decrypt existing: %w", err)
+		}
+
+		merged, err := mergeJSON(existingPlain, r.Data)
 		if err != nil {
 			return fmt.Errorf("record: merge: %w", err)
 		}
@@ -286,6 +313,13 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 			return err
 		}
 
+		// Re-encrypt the merged payload before writing so encrypted
+		// fields round-trip through the DB as ciphertext.
+		mergedEncrypted, err := s.encryptFields(r.TenantID, kt.Schema, merged)
+		if err != nil {
+			return fmt.Errorf("record: encrypt merged: %w", err)
+		}
+
 		updatedBy := r.UpdatedBy
 		err = tx.QueryRow(ctx,
 			`UPDATE krecords
@@ -293,7 +327,7 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 			  WHERE tenant_id = $3 AND id = $4
 			  RETURNING id, tenant_id, ktype, ktype_version, data, status, version,
 			            created_by, created_at, updated_by, updated_at, deleted_at`,
-			merged, updatedBy, r.TenantID, r.ID,
+			mergedEncrypted, updatedBy, r.TenantID, r.ID,
 		).Scan(
 			&updated.ID, &updated.TenantID, &updated.KType, &updated.KTypeVersion,
 			&updated.Data, &updated.Status, &updated.Version,
@@ -320,6 +354,13 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 	if err != nil {
 		return nil, err
 	}
+	// updated.Data is the encrypted payload the UPDATE wrote back; decrypt
+	// for the caller so the returned record matches Create/Get semantics.
+	decrypted, err := s.decryptRecord(ctx, &updated)
+	if err != nil {
+		return nil, err
+	}
+	updated.Data = decrypted
 	return &updated, nil
 }
 
