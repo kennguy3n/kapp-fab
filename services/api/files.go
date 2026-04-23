@@ -48,7 +48,7 @@ func (h *filesHandlers) upload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "missing `file` form field", http.StatusBadRequest)
 			return
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		data, err := io.ReadAll(io.LimitReader(f, maxUploadBytes+1))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -132,7 +132,7 @@ func (h *filesHandlers) download(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	w.Header().Set("Content-Type", meta.ContentType)
 	_, _ = io.Copy(w, rc)
 }

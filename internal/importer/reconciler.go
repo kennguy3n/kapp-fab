@@ -95,10 +95,11 @@ func Checksum(records []map[string]any) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// computeChecksumsPerKType produces a deterministic per-KType digest
+// ComputeChecksumsPerKType produces a deterministic per-KType digest
 // over the staged rows so the operator can spot an accidental column
-// truncation that wouldn't change the row count.
-func (r *Reconciler) computeChecksumsPerKType(
+// truncation that wouldn't change the row count. Exposed so the
+// importer service can surface it from GET /api/v1/imports/{id}.
+func (r *Reconciler) ComputeChecksumsPerKType(
 	ctx context.Context, tenantID, jobID uuid.UUID,
 ) (map[string]string, error) {
 	rows, err := r.staging.ListByJob(ctx, tenantID, jobID, "", 5000, 0)
