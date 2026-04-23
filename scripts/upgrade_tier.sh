@@ -61,6 +61,7 @@ SCHEMA="tenant_${TENANT_ID//-/_}"
 # is re-registered at API boot, so copying it per-tenant would crash
 # the WHERE clause below.
 TABLES=(
+  user_tenants roles
   idempotency_keys saved_views
   krecords workflows workflow_runs approvals audit_log events
   accounts journal_entries journal_lines fiscal_periods tax_codes
