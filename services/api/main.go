@@ -89,12 +89,20 @@ func run() error {
 	// logged and the store falls back to plaintext so local dev keeps
 	// working without secrets plumbing.
 	if masterKey, err := tenant.LoadMasterKey(); err == nil {
-		km, err := tenant.NewKeyManager(masterKey, time.Hour)
+		prevKey, perr := tenant.LoadPrevMasterKey()
+		if perr != nil {
+			return perr
+		}
+		km, err := tenant.NewKeyManagerWithPrev(masterKey, prevKey, time.Hour)
 		if err != nil {
 			return err
 		}
 		recordStore = recordStore.WithEncryptor(km)
-		log.Printf("api: per-tenant field encryption enabled")
+		if prevKey != nil {
+			log.Printf("api: per-tenant field encryption enabled (dual-key rotation active)")
+		} else {
+			log.Printf("api: per-tenant field encryption enabled")
+		}
 	} else if !errors.Is(err, tenant.ErrMasterKeyMissing) {
 		return err
 	} else {

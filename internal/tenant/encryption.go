@@ -22,6 +22,13 @@ import (
 // secret — the deployment rotation policy documents how to roll it.
 const MasterKeyEnvVar = "KAPP_MASTER_KEY"
 
+// PrevMasterKeyEnvVar optionally holds the retiring master key during
+// a rotation window. When set, DecryptString will try the primary
+// key first and fall back to the previous key so encrypted fields
+// written before the rotation remain readable until the backfill job
+// re-encrypts them. EncryptString never uses the previous key.
+const PrevMasterKeyEnvVar = "KAPP_MASTER_KEY_PREV"
+
 // keySize is the per-tenant AES-256-GCM key length.
 const keySize = 32
 
@@ -47,7 +54,23 @@ var ErrMasterKeyMissing = errors.New("tenant: master key missing or too short; s
 // base64 path exists because most secret managers emit base64. Any
 // value shorter than 32 bytes after decoding is rejected.
 func LoadMasterKey() ([]byte, error) {
-	raw := os.Getenv(MasterKeyEnvVar)
+	return loadKeyFromEnv(MasterKeyEnvVar)
+}
+
+// LoadPrevMasterKey reads the retiring master key if present. Returns
+// (nil, nil) when the env var is unset — rotation is opt-in and the
+// absence of a previous key is the steady state. A malformed value
+// (present but shorter than 32 bytes after base64 decode) returns
+// ErrMasterKeyMissing so operators notice misconfiguration.
+func LoadPrevMasterKey() ([]byte, error) {
+	if os.Getenv(PrevMasterKeyEnvVar) == "" {
+		return nil, nil
+	}
+	return loadKeyFromEnv(PrevMasterKeyEnvVar)
+}
+
+func loadKeyFromEnv(env string) ([]byte, error) {
+	raw := os.Getenv(env)
 	if raw == "" {
 		return nil, ErrMasterKeyMissing
 	}
@@ -97,9 +120,15 @@ func DeriveKey(masterKey []byte, tenantID uuid.UUID) ([]byte, error) {
 // platform/middleware.go (which imports tenant).
 type KeyManager struct {
 	masterKey []byte
-	ttl       time.Duration
-	mu        sync.Mutex
-	entries   map[uuid.UUID]keyCacheEntry
+	// prevMasterKey is the retiring key during a rotation window.
+	// Non-nil enables dual-key decrypt: EncryptString always uses
+	// masterKey, DecryptString tries masterKey and falls back to
+	// prevMasterKey on GCM open failure.
+	prevMasterKey []byte
+	ttl           time.Duration
+	mu            sync.Mutex
+	entries       map[uuid.UUID]keyCacheEntry
+	prevEntries   map[uuid.UUID][]byte
 }
 
 type keyCacheEntry struct {
@@ -111,14 +140,47 @@ type keyCacheEntry struct {
 // ttl == 0 disables TTL-based eviction; entries then stay cached for
 // the lifetime of the process (still bounded by active tenants).
 func NewKeyManager(masterKey []byte, ttl time.Duration) (*KeyManager, error) {
+	return NewKeyManagerWithPrev(masterKey, nil, ttl)
+}
+
+// NewKeyManagerWithPrev is NewKeyManager with an additional retiring
+// master key for the rotation window. Pass nil for prevMasterKey when
+// no rotation is in progress.
+func NewKeyManagerWithPrev(masterKey, prevMasterKey []byte, ttl time.Duration) (*KeyManager, error) {
 	if len(masterKey) < keySize {
 		return nil, ErrMasterKeyMissing
 	}
+	if prevMasterKey != nil && len(prevMasterKey) < keySize {
+		return nil, ErrMasterKeyMissing
+	}
 	return &KeyManager{
-		masterKey: masterKey,
-		ttl:       ttl,
-		entries:   make(map[uuid.UUID]keyCacheEntry),
+		masterKey:     masterKey,
+		prevMasterKey: prevMasterKey,
+		ttl:           ttl,
+		entries:       make(map[uuid.UUID]keyCacheEntry),
+		prevEntries:   make(map[uuid.UUID][]byte),
 	}, nil
+}
+
+// prevKey derives and caches the tenant's previous-master-key. Called
+// only from DecryptString after the primary key fails. Cache is not
+// TTL'd — rotation windows are short and the number of tenants active
+// during one is bounded by the same ceiling as the primary cache.
+func (k *KeyManager) prevKey(tenantID uuid.UUID) ([]byte, error) {
+	if k.prevMasterKey == nil {
+		return nil, nil
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if key, ok := k.prevEntries[tenantID]; ok {
+		return key, nil
+	}
+	derived, err := DeriveKey(k.prevMasterKey, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	k.prevEntries[tenantID] = derived
+	return derived, nil
 }
 
 // Key returns the AES-256 key for tenantID, deriving and caching it
@@ -172,7 +234,11 @@ func (k *KeyManager) EncryptString(tenantID uuid.UUID, plaintext string) (string
 
 // DecryptString reverses EncryptString. Values missing the prefix
 // are returned verbatim so mixed plaintext/ciphertext columns (e.g.
-// during a rollout) degrade gracefully.
+// during a rollout) degrade gracefully. When a previous master key
+// is configured and the current key fails GCM auth (the canonical
+// signal that the ciphertext was written under the retiring key),
+// DecryptString falls back to the previous key so the rotation
+// window does not break reads.
 func (k *KeyManager) DecryptString(tenantID uuid.UUID, value string) (string, error) {
 	if !strings.HasPrefix(value, ciphertextPrefix) {
 		return value, nil
@@ -181,7 +247,32 @@ func (k *KeyManager) DecryptString(tenantID uuid.UUID, value string) (string, er
 	if err != nil {
 		return "", err
 	}
-	return decryptWithKey(key, value)
+	out, err := decryptWithKey(key, value)
+	if err == nil {
+		return out, nil
+	}
+	prev, perr := k.prevKey(tenantID)
+	if perr != nil || prev == nil {
+		return "", err
+	}
+	return decryptWithKey(prev, value)
+}
+
+// ReencryptString re-encrypts a value that was originally encrypted
+// under the previous master key so it can be written back under the
+// current key. Returns the original value unchanged when it does not
+// carry the ciphertext prefix or when no previous key is configured.
+// The rotation tool (scripts/rotate_master_key.sh + the cmd helper)
+// uses this to migrate krecord field payloads in batches.
+func (k *KeyManager) ReencryptString(tenantID uuid.UUID, value string) (string, error) {
+	if !strings.HasPrefix(value, ciphertextPrefix) {
+		return value, nil
+	}
+	plain, err := k.DecryptString(tenantID, value)
+	if err != nil {
+		return "", err
+	}
+	return k.EncryptString(tenantID, plain)
 }
 
 // IsEncrypted reports whether a value carries the envelope prefix.
