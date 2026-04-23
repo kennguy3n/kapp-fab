@@ -1,0 +1,53 @@
+name: migration-rls-check
+
+# Static check: every migration that introduces a table with a tenant_id
+# column MUST enable ROW LEVEL SECURITY for that table in the same file.
+# See docs/SECURITY_REVIEW.md §1. This runs as a lightweight awk pass so
+# we catch violations before a PR merges without bringing the real DB
+# up.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    name: migrations enforce RLS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: verify every tenant_id table enables RLS
+        run: |
+          set -euo pipefail
+          fail=0
+          shopt -s nullglob
+          for f in migrations/*.sql; do
+            # Extract CREATE TABLE blocks by gathering lines until the
+            # matching semicolon. We only care about tables whose body
+            # mentions `tenant_id` — those are tenant-scoped and MUST
+            # enable RLS somewhere in the same migration file.
+            python3 - "$f" <<'PY' || fail=1
+          import re, sys
+          path = sys.argv[1]
+          with open(path) as fh:
+              text = fh.read()
+          lowered = text.lower()
+          # Find each CREATE TABLE name and its body.
+          create = re.compile(r"create\s+table\s+(?:if\s+not\s+exists\s+)?(?:public\.)?([a-z_][a-z0-9_]*)\s*\((.*?)\);", re.DOTALL | re.IGNORECASE)
+          enable = set(m.group(1).lower() for m in re.finditer(r"alter\s+table\s+(?:public\.)?([a-z_][a-z0-9_]*)\s+enable\s+row\s+level\s+security", lowered))
+          violations = []
+          for m in create.finditer(lowered):
+              name, body = m.group(1), m.group(2)
+              if "tenant_id" in body and name not in enable:
+                  violations.append(name)
+          if violations:
+              print(f"::error file={path}::tables with tenant_id missing ENABLE ROW LEVEL SECURITY: {', '.join(violations)}")
+              sys.exit(1)
+          PY
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "migration-rls-check: one or more migrations missing RLS"
+            exit 1
+          fi
