@@ -104,11 +104,11 @@ func extractBearer(r *http.Request) (string, error) {
 	}
 	const prefix = "Bearer "
 	if !strings.HasPrefix(h, prefix) {
-		return "", errors.New("Authorization must be Bearer")
+		return "", errors.New("authorization must be Bearer")
 	}
 	tok := strings.TrimSpace(strings.TrimPrefix(h, prefix))
 	if tok == "" {
-		return "", errors.New("Authorization Bearer empty")
+		return "", errors.New("authorization Bearer empty")
 	}
 	return tok, nil
 }

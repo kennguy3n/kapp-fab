@@ -82,7 +82,7 @@ func (c *HTTPKChatClient) ExchangeCode(ctx context.Context, code, redirectURI st
 	if err != nil {
 		return nil, fmt.Errorf("auth: kchat exchange: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("auth: kchat exchange status=%d", resp.StatusCode)
 	}
@@ -109,7 +109,7 @@ func (c *HTTPKChatClient) fetchProfile(ctx context.Context, accessToken string) 
 	if err != nil {
 		return nil, fmt.Errorf("auth: kchat profile: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("auth: kchat profile status=%d", resp.StatusCode)
 	}
