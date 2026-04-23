@@ -23,6 +23,7 @@ import { SalesOrdersPage } from "./pages/SalesOrdersPage";
 import { PurchaseOrdersPage } from "./pages/PurchaseOrdersPage";
 import { PriceListsPage } from "./pages/PriceListsPage";
 import { PayrollPage } from "./pages/PayrollPage";
+import { NotificationBell } from "./components/NotificationBell";
 
 interface NavSection {
   title: string;
@@ -159,6 +160,15 @@ function AppShell() {
         </nav>
       </aside>
       <main style={{ flex: 1, padding: 24 }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "flex-end",
+            marginBottom: 12,
+          }}
+        >
+          <NotificationBell />
+        </div>
         <Routes>
           <Route path="/" element={<div>Select a KType from the nav.</div>} />
           <Route path="/admin/tenants" element={<TenantListPage />} />
