@@ -322,6 +322,7 @@ var tableConflictKeys = map[string][]string{
 	"roles":                  {"tenant_id", "name"},
 	"fiscal_periods":         {"tenant_id", "period_start"},
 	"tax_codes":              {"tenant_id", "code"},
+	"cost_centers":           {"tenant_id", "code"},
 	"docs_document_versions": {"tenant_id", "document_id", "version"},
 	"lesson_progress":        {"tenant_id", "enrollment_id", "lesson_id"},
 }
