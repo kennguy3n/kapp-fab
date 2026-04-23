@@ -3,11 +3,19 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/kapp-fab/internal/events"
 )
@@ -34,6 +42,11 @@ import (
 type notificationRouter struct {
 	bridge *kchatBridgeNotifier
 	client *http.Client
+	// pool is used to look up the per-tenant webhook signing secret
+	// (tenants.quota->>'webhook_secret'). The tenants table is
+	// control-plane, not tenant-scoped, so the app pool is fine — no
+	// SET LOCAL app.tenant_id required.
+	pool *pgxpool.Pool
 }
 
 // notificationEnvelope is the shape extracted from event payloads.
@@ -128,7 +141,12 @@ func (r *notificationRouter) postKChatNotice(
 
 // postWebhook POSTs the full event envelope to the configured URL so
 // an external consumer receives the same {id, tenant_id, type,
-// payload, created_at} shape the outbox stores.
+// payload, created_at} shape the outbox stores. The body is signed
+// with HMAC-SHA256 using the per-tenant webhook secret
+// (tenants.quota->>'webhook_secret'). Consumers verify by recomputing
+// the same HMAC and comparing against the X-Kapp-Signature header. If
+// no secret is configured for the tenant, the signature header is
+// omitted — receivers should refuse unsigned deliveries in production.
 func (r *notificationRouter) postWebhook(ctx context.Context, e events.Event, url string) error {
 	body, err := json.Marshal(e)
 	if err != nil {
@@ -142,6 +160,13 @@ func (r *notificationRouter) postWebhook(ctx context.Context, e events.Event, ur
 	req.Header.Set("X-Kapp-Event-Type", e.Type)
 	req.Header.Set("X-Kapp-Event-Id", e.ID.String())
 	req.Header.Set("X-Kapp-Tenant-Id", e.TenantID.String())
+	if sig, err := r.signWebhookBody(ctx, e.TenantID, body); err != nil {
+		// Secret lookup failures are logged and the delivery proceeds
+		// unsigned; we prefer losing integrity over dropping events.
+		log.Printf("worker: webhook sign tenant=%s: %v", e.TenantID, err)
+	} else if sig != "" {
+		req.Header.Set("X-Kapp-Signature", "sha256="+sig)
+	}
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("post: %w", err)
@@ -155,6 +180,33 @@ func (r *notificationRouter) postWebhook(ctx context.Context, e events.Event, ur
 		return fmt.Errorf("status=%d body=%s", resp.StatusCode, string(snippet))
 	}
 	return nil
+}
+
+// signWebhookBody computes the HMAC-SHA256 of body using the tenant's
+// webhook secret and returns its hex digest. The secret is read from
+// `tenants.quota->>'webhook_secret'`. Returns ("", nil) when no
+// secret is configured — caller skips the signature header.
+func (r *notificationRouter) signWebhookBody(ctx context.Context, tenantID uuid.UUID, body []byte) (string, error) {
+	if r.pool == nil {
+		return "", nil
+	}
+	var secret *string
+	err := r.pool.QueryRow(ctx,
+		`SELECT quota->>'webhook_secret' FROM tenants WHERE id = $1`,
+		tenantID,
+	).Scan(&secret)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("load webhook secret: %w", err)
+	}
+	if secret == nil || *secret == "" {
+		return "", nil
+	}
+	mac := hmac.New(sha256.New, []byte(*secret))
+	mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
 // extractNotification pulls the `notification` envelope out of the

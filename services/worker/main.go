@@ -107,6 +107,7 @@ func run() error {
 	router := &notificationRouter{
 		bridge: bridge,
 		client: &http.Client{Timeout: 5 * time.Second},
+		pool:   pool,
 	}
 
 	// Low-stock alert sweeper runs alongside the outbox drain so a
