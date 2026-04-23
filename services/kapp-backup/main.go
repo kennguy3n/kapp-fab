@@ -320,6 +320,8 @@ func restoreRows(ctx context.Context, tx pgx.Tx, dec *json.Decoder, remap map[uu
 var tableConflictKeys = map[string][]string{
 	"user_tenants":           {"user_id", "tenant_id"},
 	"roles":                  {"tenant_id", "name"},
+	"accounts":               {"tenant_id", "code"},
+	"idempotency_keys":       {"tenant_id", "key"},
 	"fiscal_periods":         {"tenant_id", "period_start"},
 	"tax_codes":              {"tenant_id", "code"},
 	"cost_centers":           {"tenant_id", "code"},
