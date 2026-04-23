@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/notifications"
 )
 
 // notificationRouter fans outbox events out to per-notification
@@ -47,6 +48,10 @@ type notificationRouter struct {
 	// control-plane, not tenant-scoped, so the app pool is fine — no
 	// SET LOCAL app.tenant_id required.
 	pool *pgxpool.Pool
+	// store persists every notification envelope to the inbox table
+	// so the web bell/inbox surface is independent of transport
+	// success. Nil is tolerated for dev setups without the schema.
+	store *notifications.Store
 }
 
 // notificationEnvelope is the shape extracted from event payloads.
@@ -73,6 +78,11 @@ func (r *notificationRouter) route(ctx context.Context, e events.Event) {
 	if env == nil {
 		return
 	}
+	// Persist first so the inbox surface does not depend on transport
+	// success: even if KChat / webhook / SMTP all fail, the user will
+	// still see the notice in the web bell dropdown. Failures here are
+	// logged and the transport delivery still proceeds.
+	r.persistNotification(ctx, e, *env)
 	switch env.Channel {
 	case "kchat":
 		if r.bridge != nil && r.bridge.enabled() {
@@ -180,6 +190,33 @@ func (r *notificationRouter) postWebhook(ctx context.Context, e events.Event, ur
 		return fmt.Errorf("status=%d body=%s", resp.StatusCode, string(snippet))
 	}
 	return nil
+}
+
+// persistNotification writes an inbox row for the supplied event so
+// the in-app bell/inbox surface is transport-independent. Failures
+// are logged; the outbox row has already been published to NATS and
+// the durable event log is the source of truth.
+func (r *notificationRouter) persistNotification(ctx context.Context, e events.Event, env notificationEnvelope) {
+	if r.store == nil {
+		return
+	}
+	var uid *uuid.UUID
+	if env.UserID != "" {
+		if parsed, err := uuid.Parse(env.UserID); err == nil {
+			uid = &parsed
+		}
+	}
+	in := notifications.CreateInput{
+		TenantID: e.TenantID,
+		UserID:   uid,
+		Type:     e.Type,
+		Title:    env.Title,
+		Body:     env.Body,
+		Payload:  e.Payload,
+	}
+	if _, err := r.store.Create(ctx, in); err != nil {
+		log.Printf("worker: persist notification tenant=%s type=%s: %v", e.TenantID, e.Type, err)
+	}
 }
 
 // signWebhookBody computes the HMAC-SHA256 of body using the tenant's

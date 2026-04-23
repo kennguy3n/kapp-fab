@@ -34,6 +34,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
+	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/sales"
@@ -502,6 +503,20 @@ func run() error {
 		r.Post("/{id}/versions", dh.saveVersion)
 		r.Get("/{id}/versions", dh.versions)
 		r.Post("/{id}/restore", dh.restore)
+	})
+
+	// Phase H notifications inbox — durable in-app bell/inbox surface
+	// backed by the notifications table. External transports (KChat,
+	// webhook, email) are served by the worker; this endpoint backs
+	// the web inbox regardless of transport success.
+	notifStore := notifications.NewStore(pool)
+	nh := newNotificationsHandlers(notifStore)
+	r.Route("/api/v1/notifications", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Get("/", nh.list)
+		r.Post("/{id}/read", nh.markRead)
+		r.Post("/read-all", nh.markAllRead)
 	})
 
 	// Phase G saved views — per-user, per-KType filter/sort/column

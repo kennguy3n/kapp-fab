@@ -23,6 +23,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 )
 
@@ -108,6 +109,7 @@ func run() error {
 		bridge: bridge,
 		client: &http.Client{Timeout: 5 * time.Second},
 		pool:   pool,
+		store:  notifications.NewStore(pool),
 	}
 
 	// Low-stock alert sweeper runs alongside the outbox drain so a
