@@ -322,6 +322,7 @@ var tableConflictKeys = map[string][]string{
 	"roles":                  {"tenant_id", "name"},
 	"accounts":               {"tenant_id", "code"},
 	"idempotency_keys":       {"tenant_id", "key"},
+	"workflows":              {"tenant_id", "name", "version"},
 	"fiscal_periods":         {"tenant_id", "period_start"},
 	"tax_codes":              {"tenant_id", "code"},
 	"cost_centers":           {"tenant_id", "code"},

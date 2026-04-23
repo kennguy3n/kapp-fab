@@ -61,6 +61,14 @@ func TestConflictClauseCompositePK(t *testing.T) {
 			cols:  []string{"tenant_id", "key", "response_code", "response_body"},
 			want:  `ON CONFLICT ("tenant_id", "key") DO UPDATE SET "response_code" = EXCLUDED."response_code", "response_body" = EXCLUDED."response_body"`,
 		},
+		{
+			// workflows has no `id` column — PK is (tenant_id, name, version).
+			// Same class of silent-DO-NOTHING regression as accounts /
+			// idempotency_keys above; caught by Devin Review on #21.
+			table: "workflows",
+			cols:  []string{"tenant_id", "name", "version", "definition"},
+			want:  `ON CONFLICT ("tenant_id", "name", "version") DO UPDATE SET "definition" = EXCLUDED."definition"`,
+		},
 	} {
 		t.Run(tc.table, func(t *testing.T) {
 			got := conflictClause(tc.table, tc.cols)
