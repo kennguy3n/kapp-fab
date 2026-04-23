@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -33,6 +34,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/lms"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
+	"github.com/kennguy3n/kapp-fab/internal/sales"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
@@ -162,6 +164,26 @@ func run() error {
 	}
 	if err := crm.RegisterKTypes(ctx, ktypeRegistry); err != nil {
 		return err
+	}
+	// Phase G additions — sales/procurement, bank reconciliation,
+	// cost centres, and payroll live next to (not inside) the
+	// finance/hr catalogs so a deployment can opt out by dropping
+	// the registration calls.
+	if err := sales.RegisterKTypes(ctx, ktypeRegistry); err != nil {
+		return err
+	}
+	for _, kt := range ledger.BankKTypes() {
+		if err := ktypeRegistry.Register(ctx, kt); err != nil {
+			return fmt.Errorf("register bank ktype %s: %w", kt.Name, err)
+		}
+	}
+	if err := ktypeRegistry.Register(ctx, ledger.CostCenterKType()); err != nil {
+		return fmt.Errorf("register cost_center ktype: %w", err)
+	}
+	for _, kt := range hr.PayrollKTypes() {
+		if err := ktypeRegistry.Register(ctx, kt); err != nil {
+			return fmt.Errorf("register payroll ktype %s: %w", kt.Name, err)
+		}
 	}
 
 	// Agent tool executor — Phase B wires the CRM / tasks / approvals

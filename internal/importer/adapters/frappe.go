@@ -32,6 +32,12 @@ type FrappeConfig struct {
 	// doctype name; each entry renames source fields to KType field
 	// names. Callers can override the defaults without editing Go code.
 	ConceptMap map[string]map[string]string `json:"concept_map,omitempty"`
+	// LastSyncAt, when non-zero, is passed through as a
+	// `modified > $LastSyncAt` filter on every /api/resource/{doctype}
+	// call so the adapter pulls only rows changed since the previous
+	// run. Callers persist this on import_jobs.last_sync_at and
+	// advance it to the run's start time on success.
+	LastSyncAt time.Time `json:"last_sync_at,omitempty"`
 }
 
 // FrappeDocType is one source DocType the adapter should mirror.
@@ -154,8 +160,12 @@ func (a *FrappeAdapter) Export(ctx context.Context, raw json.RawMessage, emit fu
 func (a *FrappeAdapter) count(ctx context.Context, cfg FrappeConfig, dt FrappeDocType) (int64, error) {
 	q := url.Values{}
 	q.Set("doctype", dt.Name)
-	if dt.Filters != "" {
-		q.Set("filters", dt.Filters)
+	// Apply the same delta filter listPage does so Discover and Export
+	// agree during incremental runs. Without this, reconciler.go flags
+	// a false discrepancy on every delta sync because Discover returns
+	// the full DocType count while Export only pulls modified rows.
+	if filter := mergeDeltaFilter(dt.Filters, cfg.LastSyncAt); filter != "" {
+		q.Set("filters", filter)
 	}
 	target := joinURL(cfg.BaseURL, "/api/method/frappe.client.get_count") + "?" + q.Encode()
 	var resp struct {
@@ -168,7 +178,9 @@ func (a *FrappeAdapter) count(ctx context.Context, cfg FrappeConfig, dt FrappeDo
 }
 
 // listPage calls /api/resource/{doctype}?fields=["*"]&limit_start=…&limit_page_length=…
-// and returns the decoded slice of records.
+// and returns the decoded slice of records. When cfg.LastSyncAt is
+// non-zero the call adds a `modified > $ts` clause to the filter list
+// so successive runs only pull delta rows.
 func (a *FrappeAdapter) listPage(ctx context.Context, cfg FrappeConfig, dt FrappeDocType, offset, size int) ([]map[string]any, error) {
 	q := url.Values{}
 	fields := dt.Fields
@@ -179,8 +191,8 @@ func (a *FrappeAdapter) listPage(ctx context.Context, cfg FrappeConfig, dt Frapp
 	q.Set("fields", string(fieldsJSON))
 	q.Set("limit_start", fmt.Sprintf("%d", offset))
 	q.Set("limit_page_length", fmt.Sprintf("%d", size))
-	if dt.Filters != "" {
-		q.Set("filters", dt.Filters)
+	if filter := mergeDeltaFilter(dt.Filters, cfg.LastSyncAt); filter != "" {
+		q.Set("filters", filter)
 	}
 	target := joinURL(cfg.BaseURL, "/api/resource/"+url.PathEscape(dt.Name)) + "?" + q.Encode()
 	var resp struct {
@@ -306,4 +318,165 @@ func applyFieldMap(row map[string]any, mapping map[string]string) map[string]any
 // leading / on suffix so callers can mix and match.
 func joinURL(base, suffix string) string {
 	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(suffix, "/")
+}
+
+// mergeDeltaFilter fuses an operator-supplied filter (already in
+// Frappe's `[[field, op, value], …]` stringified-JSON shape) with the
+// incremental-sync clause `modified > <ts>`. When `since` is zero the
+// original filter is returned unchanged. When both sides have a
+// clause the two filter arrays are concatenated — Frappe evaluates
+// them as an AND.
+func mergeDeltaFilter(existing string, since time.Time) string {
+	if since.IsZero() {
+		return existing
+	}
+	deltaClause := [][]any{{"modified", ">", since.UTC().Format("2006-01-02 15:04:05")}}
+	if existing == "" {
+		b, _ := json.Marshal(deltaClause)
+		return string(b)
+	}
+	var parsed [][]any
+	if err := json.Unmarshal([]byte(existing), &parsed); err != nil {
+		// Leave the operator's string untouched — they may have used
+		// Frappe's dict syntax or some other form we do not parse.
+		return existing
+	}
+	merged := append(parsed, deltaClause...)
+	b, _ := json.Marshal(merged)
+	return string(b)
+}
+
+// SuggestFieldMapping returns a DocType→KType field map computed from
+// name similarity alone. For each source field it finds the best
+// matching target KType field whose similarity score clears
+// minScore (0–1). The concept map published in PROPOSAL.md is still
+// the authoritative default — this helper is for DocTypes the default
+// doesn't cover and for surfacing pre-filled defaults in
+// ImportMappingPage.tsx.
+//
+// Scoring is Jaccard over the normalised field tokens with a
+// Levenshtein-based tiebreaker so similar but differently-tokenised
+// names (`customer_name` vs `customer`, `posting_date` vs `post_date`)
+// rank high. The returned map only contains pairs whose score clears
+// the threshold, so unmatched source fields fall through to the raw
+// passthrough path in applyFieldMap.
+func SuggestFieldMapping(sourceFields, targetFields []string, minScore float64) map[string]string {
+	if minScore <= 0 {
+		minScore = 0.5
+	}
+	out := make(map[string]string, len(sourceFields))
+	used := make(map[string]bool, len(targetFields))
+	for _, src := range sourceFields {
+		var (
+			bestTarget string
+			bestScore  float64
+		)
+		for _, tgt := range targetFields {
+			if used[tgt] {
+				continue
+			}
+			s := fieldSimilarity(src, tgt)
+			if s > bestScore {
+				bestScore = s
+				bestTarget = tgt
+			}
+		}
+		if bestTarget != "" && bestScore >= minScore {
+			out[src] = bestTarget
+			used[bestTarget] = true
+		}
+	}
+	return out
+}
+
+// fieldSimilarity returns a 0..1 similarity score between two field
+// names. It averages Jaccard-on-tokens (split on `_` and lowercased)
+// with a normalised Levenshtein distance so `customer_name` /
+// `customer` stays close (shared token) while `posting_date` /
+// `post_date` also stays close (shared prefix).
+func fieldSimilarity(a, b string) float64 {
+	a = strings.ToLower(strings.TrimSpace(a))
+	b = strings.ToLower(strings.TrimSpace(b))
+	if a == b {
+		return 1.0
+	}
+	if a == "" || b == "" {
+		return 0.0
+	}
+	j := jaccardTokens(a, b)
+	l := 1.0 - float64(levenshtein(a, b))/float64(maxInt(len(a), len(b)))
+	if l < 0 {
+		l = 0
+	}
+	return (j + l) / 2
+}
+
+func jaccardTokens(a, b string) float64 {
+	ta := strings.Split(a, "_")
+	tb := strings.Split(b, "_")
+	set := make(map[string]struct{}, len(ta)+len(tb))
+	inter := 0
+	for _, t := range ta {
+		set[t] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(tb))
+	for _, t := range tb {
+		if _, ok := set[t]; ok {
+			if _, dup := seen[t]; !dup {
+				inter++
+				seen[t] = struct{}{}
+			}
+		}
+		set[t] = struct{}{}
+	}
+	if len(set) == 0 {
+		return 0
+	}
+	return float64(inter) / float64(len(set))
+}
+
+// levenshtein returns the classic edit distance between a and b. The
+// implementation uses the two-row optimisation (O(min(len(a), len(b)))
+// memory) since field names are short and the importer may call this
+// hundreds of times per job.
+func levenshtein(a, b string) int {
+	ra := []rune(a)
+	rb := []rune(b)
+	if len(ra) < len(rb) {
+		ra, rb = rb, ra
+	}
+	prev := make([]int, len(rb)+1)
+	curr := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		curr[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			curr[j] = minInt(
+				curr[j-1]+1,
+				minInt(prev[j]+1, prev[j-1]+cost),
+			)
+		}
+		prev, curr = curr, prev
+	}
+	return prev[len(rb)]
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
