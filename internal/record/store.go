@@ -15,7 +15,19 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
+
+// FieldEncryptor is the subset of *tenant.KeyManager consumed by the
+// store. The interface exists so tests can swap in deterministic or
+// no-op implementations without wiring a real master key.
+type FieldEncryptor interface {
+	EncryptString(tenantID uuid.UUID, plaintext string) (string, error)
+	DecryptString(tenantID uuid.UUID, value string) (string, error)
+}
+
+// compile-time assertion that *tenant.KeyManager satisfies FieldEncryptor.
+var _ FieldEncryptor = (*tenant.KeyManager)(nil)
 
 // Sentinel errors.
 var (
@@ -39,6 +51,11 @@ type PGStore struct {
 	registry  *ktype.PGRegistry
 	publisher events.Publisher
 	auditor   audit.Logger
+	// encryptor, when non-nil, transparently encrypts fields marked
+	// {"encrypted": true} in the KType schema before INSERT and
+	// decrypts them after SELECT. Leaving it nil preserves legacy
+	// behaviour so rolling the feature on is a pure add.
+	encryptor FieldEncryptor
 }
 
 // NewPGStore wires a PGStore from the shared pool and its collaborators.
@@ -54,6 +71,14 @@ func NewPGStore(
 		publisher: publisher,
 		auditor:   auditor,
 	}
+}
+
+// WithEncryptor returns the store with per-tenant field encryption
+// enabled. The encryptor is applied on Create/Get/List/Update/Delete
+// for any KType field whose schema carries {"encrypted": true}.
+func (s *PGStore) WithEncryptor(e FieldEncryptor) *PGStore {
+	s.encryptor = e
+	return s
 }
 
 // Create inserts a new KRecord. The KType is looked up at version 0 ("latest")
@@ -75,6 +100,14 @@ func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
 	if err := ktype.ValidateData(kt.Schema, r.Data); err != nil {
 		return nil, err
 	}
+	// Encrypt fields the schema marks as sensitive. This happens after
+	// validation so validators still see plaintext (max_length, pattern,
+	// etc. are meaningful only against the real value).
+	encrypted, err := s.encryptFields(r.TenantID, kt.Schema, r.Data)
+	if err != nil {
+		return nil, err
+	}
+	r.Data = encrypted
 	if r.ID == uuid.Nil {
 		r.ID = uuid.New()
 	}
@@ -146,6 +179,11 @@ func (s *PGStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*KRecord, er
 	if err != nil {
 		return nil, err
 	}
+	decrypted, err := s.decryptRecord(ctx, &out)
+	if err != nil {
+		return nil, err
+	}
+	out.Data = decrypted
 	return &out, nil
 }
 
@@ -393,6 +431,132 @@ func snapshotTypeFor(eventType string) string {
 	default:
 		return "unknown"
 	}
+}
+
+// encryptFields transforms data in-place, encrypting every top-level
+// field that the schema flags {"encrypted": true}. When no encryptor
+// is wired up, or the schema has no encrypted fields, data is
+// returned unchanged — the feature is opt-in and cheap when off.
+func (s *PGStore) encryptFields(tenantID uuid.UUID, schema, data json.RawMessage) (json.RawMessage, error) {
+	if s.encryptor == nil {
+		return data, nil
+	}
+	fields, err := encryptedFieldNames(schema)
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 0 {
+		return data, nil
+	}
+	payload, err := unmarshalData(data)
+	if err != nil {
+		return nil, err
+	}
+	changed := false
+	for name := range fields {
+		v, ok := payload[name]
+		if !ok || v == nil {
+			continue
+		}
+		plaintext, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("record: encrypted field %q must be a string", name)
+		}
+		if tenant.IsEncrypted(plaintext) {
+			continue
+		}
+		ct, err := s.encryptor.EncryptString(tenantID, plaintext)
+		if err != nil {
+			return nil, fmt.Errorf("record: encrypt field %q: %w", name, err)
+		}
+		payload[name] = ct
+		changed = true
+	}
+	if !changed {
+		return data, nil
+	}
+	return json.Marshal(payload)
+}
+
+// decryptRecord produces the caller-visible version of r.Data, with
+// encrypted fields decrypted transparently. r is not mutated — the
+// caller substitutes the returned payload into the outgoing record.
+func (s *PGStore) decryptRecord(ctx context.Context, r *KRecord) (json.RawMessage, error) {
+	_ = ctx
+	if s.encryptor == nil {
+		return r.Data, nil
+	}
+	kt, err := s.registry.Get(ctx, r.KType, r.KTypeVersion)
+	if err != nil {
+		return nil, err
+	}
+	fields, err := encryptedFieldNames(kt.Schema)
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 0 {
+		return r.Data, nil
+	}
+	payload, err := unmarshalData(r.Data)
+	if err != nil {
+		return nil, err
+	}
+	changed := false
+	for name := range fields {
+		v, ok := payload[name]
+		if !ok || v == nil {
+			continue
+		}
+		ct, ok := v.(string)
+		if !ok {
+			continue
+		}
+		pt, err := s.encryptor.DecryptString(r.TenantID, ct)
+		if err != nil {
+			return nil, fmt.Errorf("record: decrypt field %q: %w", name, err)
+		}
+		if pt != ct {
+			payload[name] = pt
+			changed = true
+		}
+	}
+	if !changed {
+		return r.Data, nil
+	}
+	return json.Marshal(payload)
+}
+
+// encryptedFieldNames extracts the set of field names in schema that
+// carry {"encrypted": true}. Returns an empty set (not nil) when none
+// are present so callers can range over the result unconditionally.
+func encryptedFieldNames(schema json.RawMessage) (map[string]struct{}, error) {
+	var s ktype.Schema
+	if err := json.Unmarshal(schema, &s); err != nil {
+		return nil, fmt.Errorf("record: parse schema for encryption: %w", err)
+	}
+	out := make(map[string]struct{})
+	for _, f := range s.Fields {
+		if f.Encrypted {
+			out[f.Name] = struct{}{}
+		}
+	}
+	return out, nil
+}
+
+// unmarshalData decodes a JSONB payload into a map. An empty payload
+// yields an empty map so the caller can treat it uniformly.
+func unmarshalData(data json.RawMessage) (map[string]any, error) {
+	if len(data) == 0 {
+		return map[string]any{}, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("record: parse data: %w", err)
+	}
+	if m == nil {
+		m = map[string]any{}
+	}
+	return m, nil
 }
 
 // mergeJSON performs a shallow merge of patch onto base. Keys present in

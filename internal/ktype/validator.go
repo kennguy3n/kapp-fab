@@ -26,6 +26,11 @@ type FieldSpec struct {
 	Ref       string          `json:"ref,omitempty"`   // ref ktype name
 	KType     string          `json:"ktype,omitempty"` // alternative spelling
 	Default   json.RawMessage `json:"default,omitempty"`
+	// Encrypted marks a field whose stored value must be encrypted at
+	// rest with a per-tenant key. The record store enforces this on
+	// write and decrypts transparently on read — schema consumers
+	// outside the store path can treat the flag as advisory.
+	Encrypted bool `json:"encrypted,omitempty"`
 }
 
 // Schema is the minimal shape of a KType schema consumed by the validator.

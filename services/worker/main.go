@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 )
@@ -93,6 +94,14 @@ func run() error {
 		bridge: bridge,
 		client: &http.Client{Timeout: 5 * time.Second},
 	}
+
+	// Low-stock alert sweeper runs alongside the outbox drain so a
+	// below-threshold SKU produces a KChat alert within one sweep
+	// interval. The sweeper shares the outbox publisher, so emitted
+	// alerts go through the same delivery / dedupe pipeline as any
+	// other `inventory.*` event.
+	alerts := newStockAlertWorker(pool, publisher, dbutil.SetTenantContext)
+	go alerts.Run(ctx)
 
 	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)
 	ticker := time.NewTicker(tickInterval)

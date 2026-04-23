@@ -80,15 +80,16 @@ func (s *PGStore) UpsertItem(ctx context.Context, it Item) (*Item, error) {
 	out := it
 	err := dbutil.WithTenantTx(ctx, s.pool, it.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`INSERT INTO inventory_items (tenant_id, id, sku, name, uom, active)
-			 VALUES ($1, $2, $3, $4, $5, $6)
+			`INSERT INTO inventory_items (tenant_id, id, sku, name, uom, active, reorder_level)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)
 			 ON CONFLICT (tenant_id, sku) DO UPDATE SET
 			     name = EXCLUDED.name,
 			     uom = EXCLUDED.uom,
-			     active = EXCLUDED.active
-			 RETURNING id, sku, name, uom, active`,
-			it.TenantID, it.ID, it.SKU, it.Name, it.UOM, it.Active,
-		).Scan(&out.ID, &out.SKU, &out.Name, &out.UOM, &out.Active)
+			     active = EXCLUDED.active,
+			     reorder_level = EXCLUDED.reorder_level
+			 RETURNING id, sku, name, uom, active, reorder_level`,
+			it.TenantID, it.ID, it.SKU, it.Name, it.UOM, it.Active, it.ReorderLevel,
+		).Scan(&out.ID, &out.SKU, &out.Name, &out.UOM, &out.Active, &out.ReorderLevel)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("inventory: upsert item: %w", err)
@@ -104,10 +105,10 @@ func (s *PGStore) GetItem(ctx context.Context, tenantID, id uuid.UUID) (*Item, e
 	var it Item
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		err := tx.QueryRow(ctx,
-			`SELECT tenant_id, id, sku, name, uom, active
+			`SELECT tenant_id, id, sku, name, uom, active, reorder_level
 			 FROM inventory_items WHERE tenant_id = $1 AND id = $2`,
 			tenantID, id,
-		).Scan(&it.TenantID, &it.ID, &it.SKU, &it.Name, &it.UOM, &it.Active)
+		).Scan(&it.TenantID, &it.ID, &it.SKU, &it.Name, &it.UOM, &it.Active, &it.ReorderLevel)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrItemNotFound
 		}
@@ -127,10 +128,10 @@ func (s *PGStore) GetItemBySKU(ctx context.Context, tenantID uuid.UUID, sku stri
 	var it Item
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		err := tx.QueryRow(ctx,
-			`SELECT tenant_id, id, sku, name, uom, active
+			`SELECT tenant_id, id, sku, name, uom, active, reorder_level
 			 FROM inventory_items WHERE tenant_id = $1 AND sku = $2`,
 			tenantID, sku,
-		).Scan(&it.TenantID, &it.ID, &it.SKU, &it.Name, &it.UOM, &it.Active)
+		).Scan(&it.TenantID, &it.ID, &it.SKU, &it.Name, &it.UOM, &it.Active, &it.ReorderLevel)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrItemNotFound
 		}
@@ -164,7 +165,7 @@ func (s *PGStore) ListItems(ctx context.Context, tenantID uuid.UUID, filter Item
 		}
 		args = append(args, filter.Limit, filter.Offset)
 		q := fmt.Sprintf(
-			`SELECT tenant_id, id, sku, name, uom, active
+			`SELECT tenant_id, id, sku, name, uom, active, reorder_level
 			 FROM inventory_items
 			 WHERE %s
 			 ORDER BY sku
@@ -178,7 +179,7 @@ func (s *PGStore) ListItems(ctx context.Context, tenantID uuid.UUID, filter Item
 		defer rows.Close()
 		for rows.Next() {
 			var it Item
-			if err := rows.Scan(&it.TenantID, &it.ID, &it.SKU, &it.Name, &it.UOM, &it.Active); err != nil {
+			if err := rows.Scan(&it.TenantID, &it.ID, &it.SKU, &it.Name, &it.UOM, &it.Active, &it.ReorderLevel); err != nil {
 				return fmt.Errorf("inventory: scan item: %w", err)
 			}
 			out = append(out, it)

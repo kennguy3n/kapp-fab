@@ -84,6 +84,27 @@ func (r *RateLimiter) Allow(tenantID uuid.UUID, rpm, burst int) bool {
 	return b.take(now)
 }
 
+// Len returns the current number of live token buckets (i.e. tenants
+// seen within the idle window). Primarily a test / metrics hook used to
+// assert the zero-idle-cost invariant: after an idle sweep, buckets for
+// silent tenants are evicted.
+func (r *RateLimiter) Len() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.buckets)
+}
+
+// Has reports whether the limiter currently tracks a bucket for the
+// given tenant. An idle eviction sweep is NOT performed, so callers
+// measuring idle cost should pair this with an explicit Allow on any
+// other tenant (which triggers evictIdle) immediately before.
+func (r *RateLimiter) Has(tenantID uuid.UUID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.buckets[tenantID]
+	return ok
+}
+
 func (r *RateLimiter) evictIdle(now time.Time) {
 	cutoff := now.Add(-r.config.IdleTimeout)
 	for k, b := range r.buckets {

@@ -470,6 +470,38 @@ export class ApiClient {
     return this.request(`/inventory/reports/valuation${qs}`);
   }
 
+  // --- Saved views (Phase G) -------------------------------------------
+
+  /** List saved views for the caller, scoped to a KType. Returns the
+   *  user's own views plus any view another user has flagged
+   *  `shared`. Ordered with default views first. */
+  listViews(ktype: string): Promise<SavedView[]> {
+    return this.request(`/views?ktype=${encodeURIComponent(ktype)}`);
+  }
+
+  createView(input: CreateViewInput): Promise<SavedView> {
+    return this.request("/views", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateView(id: string, patch: UpdateViewInput): Promise<SavedView> {
+    return this.request(`/views/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(patch),
+    });
+  }
+
+  deleteView(id: string): Promise<void> {
+    return this.request(`/views/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  }
+
   // --- Forms ------------------------------------------------------------
 
   /** Public (unauthenticated) fetch of a form's schema + config by id. */
@@ -746,6 +778,42 @@ export interface InventoryValuationReport {
   as_of: string;
   rows: InventoryValuationRow[];
   total_value: string;
+}
+
+// --- Saved views (Phase G) ---------------------------------------------
+
+export interface SavedView {
+  tenant_id: string;
+  id: string;
+  user_id: string;
+  ktype: string;
+  name: string;
+  filters: Record<string, unknown>;
+  sort: string;
+  columns: string[];
+  is_default: boolean;
+  shared: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateViewInput {
+  ktype: string;
+  name: string;
+  filters?: Record<string, unknown>;
+  sort?: string;
+  columns?: string[];
+  is_default?: boolean;
+  shared?: boolean;
+}
+
+export interface UpdateViewInput {
+  name?: string;
+  filters?: Record<string, unknown>;
+  sort?: string;
+  columns?: string[];
+  is_default?: boolean;
+  shared?: boolean;
 }
 
 export interface Form {

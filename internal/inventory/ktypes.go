@@ -17,7 +17,8 @@ var itemSchema = []byte(`{
     {"name": "sku", "type": "string", "required": true, "max_length": 64},
     {"name": "name", "type": "string", "required": true, "max_length": 200},
     {"name": "uom", "type": "string", "required": true, "max_length": 32},
-    {"name": "active", "type": "boolean", "default": true}
+    {"name": "active", "type": "boolean", "default": true},
+    {"name": "reorder_level", "type": "number", "min": 0}
   ],
   "views": {
     "list": {"columns": ["sku", "name", "uom", "active"]},
