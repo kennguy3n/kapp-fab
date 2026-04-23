@@ -16,10 +16,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/kapp-fab/internal/agents"
 	"github.com/kennguy3n/kapp-fab/internal/audit"
+	"github.com/kennguy3n/kapp-fab/internal/auth"
 	"github.com/kennguy3n/kapp-fab/internal/base"
 	"github.com/kennguy3n/kapp-fab/internal/crm"
 	"github.com/kennguy3n/kapp-fab/internal/docs"
@@ -140,7 +142,25 @@ func run() error {
 	// of the API. The object store defaults to an in-process MemoryStore
 	// so local dev works without MinIO; production overrides it by
 	// mounting an S3-compatible store through the ObjectStore interface.
-	objectStore := files.NewMemoryStore()
+	var objectStore files.ObjectStore = files.NewMemoryStore()
+	if bucket := os.Getenv("S3_BUCKET"); bucket != "" {
+		s3cfg := files.S3StoreConfig{
+			Endpoint:       os.Getenv("S3_ENDPOINT"),
+			Region:         os.Getenv("S3_REGION"),
+			Bucket:         bucket,
+			AccessKey:      os.Getenv("S3_ACCESS_KEY"),
+			SecretKey:      os.Getenv("S3_SECRET_KEY"),
+			ForcePathStyle: true,
+		}
+		s3store, err := files.NewS3Store(ctx, s3cfg)
+		if err != nil {
+			return fmt.Errorf("files: init S3 store: %w", err)
+		}
+		objectStore = s3store
+		log.Printf("api: file object store = S3 (bucket=%s endpoint=%s)", bucket, s3cfg.Endpoint)
+	} else {
+		log.Printf("api: file object store = in-memory (S3_BUCKET unset)")
+	}
 	filesStore := files.NewStore(pool, objectStore)
 	baseStore := base.NewStore(pool)
 	docsStore := docs.NewStore(pool)
@@ -215,6 +235,32 @@ func run() error {
 	eh := &eventsHandlers{pool: pool}
 	vh := &viewHandlers{store: record.NewViewStore(pool)}
 
+	// Phase H JWT auth. The signer is built from KAPP_JWT_SECRET; when
+	// the secret is absent we log and skip wiring the SSO endpoints so
+	// local dev that still relies on the X-Tenant-ID header keeps
+	// working. The session store is tenant-scoped and is wired even
+	// when SSO is off so a future boot can pick it up without a
+	// restart-time schema change.
+	authh := &authHandlers{}
+	sessionStore := auth.NewPGSessionStore(pool)
+	if adminPool != nil {
+		sessionStore = sessionStore.WithQuotaLoader(func(ctx context.Context, tenantID uuid.UUID) (json.RawMessage, error) {
+			t, err := tenantSvc.Get(ctx, tenantID)
+			if err != nil {
+				return nil, err
+			}
+			return t.Quota, nil
+		})
+	}
+	if signer, err := newAuthSigner(); err == nil {
+		kchat := auth.NewHTTPKChatClient(os.Getenv("KCHAT_BASE_URL"), os.Getenv("KCHAT_API_KEY"))
+		authh.signer = signer
+		authh.svc = auth.NewSSOService(kchat, signer, sessionStore, pool, adminPool)
+		log.Printf("api: JWT auth enabled (HS256)")
+	} else {
+		log.Printf("api: JWT auth disabled (%v)", err)
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -222,6 +268,15 @@ func run() error {
 
 	r.Get("/healthz", healthHandler(pool))
 	r.Get("/api/v1/", rootHandler)
+
+	// Phase H auth routes. SSO and refresh are unauthenticated (they
+	// bootstrap the auth context); the rest of the surface will be
+	// migrated onto the Bearer-token middleware over subsequent PRs
+	// while the X-Tenant-ID header keeps working for local dev.
+	r.Route("/api/v1/auth", func(r chi.Router) {
+		r.Post("/sso", authh.sso)
+		r.Post("/refresh", authh.refresh)
+	})
 
 	// Phase F event stream. SSE tail of the tenant's outbox so the web
 	// UI can react to state changes without polling. Defined at the root
