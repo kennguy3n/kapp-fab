@@ -143,18 +143,26 @@ func (w *stockAlertWorker) sweep(ctx context.Context) error {
 		log.Printf("worker: stock alerts sweep skipped: ADMIN_DB_URL not set")
 		return nil
 	}
+	// stock_levels is derived from inventory_moves, so items that have
+	// never been moved do not appear there at all. The LEFT JOIN +
+	// COALESCE(qty, 0) below lets a newly-created item with reorder_level>0
+	// and no moves surface as zero-stock — arguably the most urgent case.
+	// The CROSS JOIN is bounded by the per-tenant AND i.tenant_id=wh.tenant_id
+	// predicate so it does not fan out across tenants.
 	rows, err := w.adminPool.Query(ctx,
-		`SELECT sl.tenant_id, sl.item_id, i.sku, i.name,
-		        sl.warehouse_id, wh.code,
-		        sl.qty, i.reorder_level
-		   FROM stock_levels sl
-		   JOIN inventory_items i
-		     ON i.tenant_id = sl.tenant_id AND i.id = sl.item_id
-		   JOIN inventory_warehouses wh
-		     ON wh.tenant_id = sl.tenant_id AND wh.id = sl.warehouse_id
-		  WHERE i.active = TRUE
+		`SELECT i.tenant_id, i.id, i.sku, i.name,
+		        wh.id, wh.code,
+		        COALESCE(sl.qty, 0), i.reorder_level
+		   FROM inventory_items i
+		   CROSS JOIN inventory_warehouses wh
+		   LEFT JOIN stock_levels sl
+		     ON sl.tenant_id = i.tenant_id
+		    AND sl.item_id = i.id
+		    AND sl.warehouse_id = wh.id
+		  WHERE i.tenant_id = wh.tenant_id
+		    AND i.active = TRUE
 		    AND i.reorder_level > 0
-		    AND sl.qty < i.reorder_level`,
+		    AND COALESCE(sl.qty, 0) < i.reorder_level`,
 	)
 	if err != nil {
 		return fmt.Errorf("query low stock: %w", err)
@@ -189,6 +197,15 @@ func (w *stockAlertWorker) sweep(ctx context.Context) error {
 			continue
 		}
 		w.lastSent[key] = now
+	}
+	// Evict dedupe entries whose window has expired so the map stays
+	// bounded by the number of currently-active low-stock situations
+	// rather than growing with every alert ever fired. Mirrors the
+	// idle-eviction pattern in RateLimiter.evictIdle.
+	for k, last := range w.lastSent {
+		if now.Sub(last) >= stockAlertDedupeWindow {
+			delete(w.lastSent, k)
+		}
 	}
 	return nil
 }
