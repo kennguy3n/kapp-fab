@@ -136,8 +136,8 @@ func seedBenchTenants(ctx context.Context, tb testing.TB, pool *pgxpool.Pool, n 
 // pingAs runs a trivial SELECT 1 inside a tenant-scoped transaction.
 // The bulk of the elapsed time is the SET LOCAL app.tenant_id round
 // trip that every Kapp API handler pays on entry.
-func pingAs(ctx context.Context, pool pgxPool, tenantID uuid.UUID) error {
-	return dbutil.WithTenantTx(ctx, poolAsPgxPool(pool), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+func pingAs(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID) error {
+	return dbutil.WithTenantTx(ctx, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var one int
 		return tx.QueryRow(ctx, `SELECT 1`).Scan(&one)
 	})
