@@ -21,8 +21,8 @@ var itemSchema = []byte(`{
     {"name": "reorder_level", "type": "number", "min": 0}
   ],
   "views": {
-    "list": {"columns": ["sku", "name", "uom", "active"]},
-    "form": {"sections": [{"title": "Item", "fields": ["sku", "name", "uom", "active"]}]}
+    "list": {"columns": ["sku", "name", "uom", "reorder_level", "active"]},
+    "form": {"sections": [{"title": "Item", "fields": ["sku", "name", "uom", "reorder_level", "active"]}]}
   },
   "cards": {"summary": "{{sku}} — {{name}} ({{uom}})"},
   "permissions": {"read": ["tenant.member"], "write": ["inventory.admin", "tenant.admin"]}
