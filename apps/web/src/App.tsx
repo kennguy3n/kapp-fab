@@ -17,6 +17,12 @@ import { OrgChartPage } from "./pages/OrgChartPage";
 import { LearnerProgressPage } from "./pages/LearnerProgressPage";
 import { ImportPage } from "./pages/ImportPage";
 import { ImportMappingPage } from "./pages/ImportMappingPage";
+import { BankReconciliationPage } from "./pages/BankReconciliationPage";
+import { CostCentersPage } from "./pages/CostCentersPage";
+import { SalesOrdersPage } from "./pages/SalesOrdersPage";
+import { PurchaseOrdersPage } from "./pages/PurchaseOrdersPage";
+import { PriceListsPage } from "./pages/PriceListsPage";
+import { PayrollPage } from "./pages/PayrollPage";
 
 interface NavSection {
   title: string;
@@ -55,6 +61,16 @@ const navSections: NavSection[] = [
       { to: "/finance/reports/income-statement", label: "Income Statement" },
       { to: "/finance/ar-subledger", label: "AR Subledger" },
       { to: "/finance/ap-subledger", label: "AP Subledger" },
+      { to: "/finance/cost-centers", label: "Cost Centers" },
+      { to: "/finance/bank-reconciliation", label: "Bank Reconciliation" },
+    ],
+  },
+  {
+    title: "Sales",
+    links: [
+      { to: "/sales/orders", label: "Sales Orders" },
+      { to: "/sales/price-lists", label: "Price Lists" },
+      { to: "/procurement/purchase-orders", label: "Purchase Orders" },
     ],
   },
   {
@@ -74,6 +90,7 @@ const navSections: NavSection[] = [
       { to: "/records/hr.leave_request", label: "Leave Requests" },
       { to: "/records/hr.attendance", label: "Attendance" },
       { to: "/records/hr.expense_claim", label: "Expense Claims" },
+      { to: "/hr/payroll", label: "Payroll" },
     ],
   },
   {
@@ -177,6 +194,18 @@ function AppShell() {
             element={<InventoryValuationPage />}
           />
           <Route path="/hr/org-chart" element={<OrgChartPage />} />
+          <Route path="/hr/payroll" element={<PayrollPage />} />
+          <Route path="/finance/cost-centers" element={<CostCentersPage />} />
+          <Route
+            path="/finance/bank-reconciliation"
+            element={<BankReconciliationPage />}
+          />
+          <Route path="/sales/orders" element={<SalesOrdersPage />} />
+          <Route path="/sales/price-lists" element={<PriceListsPage />} />
+          <Route
+            path="/procurement/purchase-orders"
+            element={<PurchaseOrdersPage />}
+          />
           <Route path="/imports" element={<ImportPage />} />
           <Route path="/imports/new" element={<ImportPage />} />
           <Route path="/imports/:id" element={<ImportPage />} />
