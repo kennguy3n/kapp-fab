@@ -160,8 +160,12 @@ func (a *FrappeAdapter) Export(ctx context.Context, raw json.RawMessage, emit fu
 func (a *FrappeAdapter) count(ctx context.Context, cfg FrappeConfig, dt FrappeDocType) (int64, error) {
 	q := url.Values{}
 	q.Set("doctype", dt.Name)
-	if dt.Filters != "" {
-		q.Set("filters", dt.Filters)
+	// Apply the same delta filter listPage does so Discover and Export
+	// agree during incremental runs. Without this, reconciler.go flags
+	// a false discrepancy on every delta sync because Discover returns
+	// the full DocType count while Export only pulls modified rows.
+	if filter := mergeDeltaFilter(dt.Filters, cfg.LastSyncAt); filter != "" {
+		q.Set("filters", filter)
 	}
 	target := joinURL(cfg.BaseURL, "/api/method/frappe.client.get_count") + "?" + q.Encode()
 	var resp struct {

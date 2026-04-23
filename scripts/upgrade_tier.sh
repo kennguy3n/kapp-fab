@@ -42,14 +42,27 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
   echo "DATABASE_URL must be set" >&2
   exit 2
 fi
+# $1 is interpolated into single-quoted SQL literals below, so refuse
+# anything that isn't a canonical UUID before we build the statement.
+# Defence-in-depth: the operator already has DB superuser, but the
+# tenant ID often flows through a dashboard / ticket before landing
+# here and we don't want a stray apostrophe to break out of the
+# literal.
+if ! [[ "$TENANT_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+  echo "error: invalid tenant UUID: $TENANT_ID" >&2
+  exit 2
+fi
 
 SCHEMA="tenant_${TENANT_ID//-/_}"
 
 # Table list mirrors services/kapp-backup/main.go#TenantScopedTables.
 # Keep these two files in sync when adding a new tenant-scoped table.
+# `ktypes` is intentionally excluded — it has no tenant_id column and
+# is re-registered at API boot, so copying it per-tenant would crash
+# the WHERE clause below.
 TABLES=(
   idempotency_keys saved_views
-  ktypes krecords workflows workflow_runs approvals audit_log events
+  krecords workflows workflow_runs approvals audit_log events
   accounts journal_entries journal_lines fiscal_periods tax_codes
   cost_centers bank_accounts bank_transactions
   inventory_warehouses inventory_items inventory_moves

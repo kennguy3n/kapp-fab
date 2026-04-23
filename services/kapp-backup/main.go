@@ -43,12 +43,16 @@ import (
 // tool walks. Parents first; children (anything with a FK back to a
 // row in the same dump) last. Partitioned tables use the parent name
 // so PostgreSQL can route to the right partition on restore.
+// Note: `ktypes` is intentionally NOT in this list. KTypes are the
+// metadata schema and are re-registered at boot from Go code (see
+// services/api/main.go), not per tenant. The table also has no
+// `tenant_id` column, which would make the extract query fail with
+// `column "tenant_id" does not exist` the moment we walked it.
 var TenantScopedTables = []string{
 	// Platform
 	"idempotency_keys",
 	"saved_views",
 	// Metadata
-	"ktypes",
 	"krecords",
 	"workflows",
 	"workflow_runs",
@@ -367,13 +371,16 @@ func openReader(path string) (io.Reader, func(), error) {
 	return f, func() { _ = f.Close() }, nil
 }
 
-// quoteIdent applies the minimum necessary escaping. Identifiers are
-// pulled exclusively from TenantScopedTables and row keys decoded
-// from JSON objects produced by row_to_json — they will only ever
-// contain `[a-z_]` — so we just wrap them in double quotes without
-// full PG-identifier escaping.
+// quoteIdent wraps an identifier in double quotes after escaping any
+// embedded double quotes. On the extract side the identifier list is
+// trusted (TenantScopedTables + keys produced by row_to_json), but
+// the restore path reads column names from an arbitrary JSON dump
+// provided by the operator and the table list comes from the same
+// dump's `_table` field. A crafted key like `id"); DROP TABLE …; --`
+// must not escape the quoting context, so we always double-up any
+// embedded quotes (the standard PostgreSQL identifier escape).
 func quoteIdent(s string) string {
-	return `"` + s + `"`
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 func quoteIdents(s []string) []string {
