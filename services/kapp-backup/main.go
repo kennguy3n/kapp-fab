@@ -55,9 +55,12 @@ var TenantScopedTables = []string{
 	// resolve cleanly on insert.
 	"user_tenants",
 	"roles",
+	"permissions",
+	"sessions",
 	// Platform
 	"idempotency_keys",
 	"saved_views",
+	"notifications",
 	// Metadata
 	"krecords",
 	"workflows",
