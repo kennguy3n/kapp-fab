@@ -243,13 +243,13 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [x] Multi-tenancy: zero-idle-cost verification (idle tenant resource measurement) (`TestIdleTenantZeroCost`)
 - [x] Multi-tenancy: sub-millisecond tenant context switching benchmark (`BenchmarkTenantContextSwitch`)
 - [x] Multi-tenancy: 1000-tenant load test on single cell (`TestThousandTenantLoad`, `//go:build loadtest`)
-- [ ] Authentication layer (JWT/OAuth with KChat SSO): JWT token issuance/validation, KChat SSO exchange, session revocation on tenant suspension, per-tenant session limits
+- [x] Authentication layer (JWT/OAuth with KChat SSO): JWT token issuance/validation (`internal/auth/jwt.go`), KChat SSO exchange (`internal/auth/sso.go`), session revocation on tenant suspension + per-tenant session limits (`internal/auth/session.go`), HTTP middleware (`internal/auth/middleware.go`), `migrations/000013_auth_sessions.sql`; login page wired to real JWT endpoint
 - [x] CRM KType boot registration (Phase B KTypes `crm.lead` / `crm.contact` / `crm.organization` / `crm.deal` / `crm.activity` / `crm.quote` / `tasks.task` register via `crm.RegisterKTypes` in `services/api/main.go` alongside finance/inventory/hr/lms) (crm.RegisterKTypes called at services/api/main.go:165)
-- [ ] S3 production object store adapter wiring (interface + MemoryStore exist in `internal/files`; production S3/MinIO adapter still needs to be wired in `services/api/main.go` behind an env-var switch)
-- [ ] Email SMTP notification adapter (router stubs email delivery in `services/worker/notifications.go`; real SMTP transport + template rendering pending)
+- [x] S3 production object store adapter wiring (`internal/files/s3.go` — AWS SDK v2 `ObjectStore`; `services/api/main.go` switches to `files.NewS3Store` when `S3_BUCKET` is set)
+- [x] Email SMTP notification adapter (`internal/notifications/smtp.go` — `net/smtp` transport, template rendering, graceful no-op when SMTP env is unset; wired into `services/worker/notifications.go`)
 - [ ] Distributed rate limiting for multi-node deployment (`platform.RateLimiter` is in-process; needs a shared backend — Redis token bucket or similar — so quotas hold across api replicas)
-- [ ] Tenant setup wizard: default Chart of Accounts seeding, default roles/permissions per plan, onboarding flow in React app
-- [ ] Payment recording: `finance.payment` KType, payment allocation against AR/AP, bank statement import
+- [x] Tenant setup wizard (`internal/tenant/wizard.go` — seeds CoA from `coa_templates/us_gaap_basic.json` + `ifrs_basic.json`, default roles, initial users; `POST /api/v1/tenants/{id}/setup`; `auto_setup: true` trigger on `Create`; `apps/web/src/pages/SetupWizardPage.tsx`)
+- [x] Payment recording: `finance.payment` KType (`internal/finance/payment.go`), multi-invoice allocation engine (`internal/ledger/payment.go#PostPayment`), `POST /api/v1/finance/payments/{id}/post`, `finance.record_payment` agent tool, `/payment` slash command
 - [ ] Multi-currency: exchange rate table, automatic conversion on posting, unrealized gain/loss
 - [ ] Helpdesk module: `helpdesk.ticket` KType with SLA, agent routing, KChat thread→ticket, customer portal
 - [ ] Tenant resource metering: usage tracking per billing period, usage dashboard, plan upgrade/downgrade API
@@ -257,9 +257,9 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [ ] Full-text search: tsvector on krecords, search API endpoint, cross-KType search page
 - [ ] Scheduled actions: tenant-scoped cron, recurring invoice generation, scheduled report delivery
 - [ ] Data export: per-KType export endpoint, full tenant dump, export job tracking
-- [ ] `permissions` table (ARCHITECTURE.md §5.1 — fine-grained ABAC permission grants; currently permissions live as a JSONB array on `roles.permissions`, so named / object-scoped grants cannot be revoked or audited independently of the owning role)
-- [ ] `notifications` table (ARCHITECTURE.md §5.1 — in-app notification inbox with read/unread state, per-user delivery preferences, retention; `services/worker/notifications.go` currently fans out in-flight and drops undelivered notifications on the floor)
-- [ ] Webhook HMAC signatures (prerequisite for the webhook management task below; `postWebhook` in `services/worker/notifications.go` sends JSON bodies with no signature header, so a tenant cannot verify that an inbound webhook originated from Kapp)
+- [x] `permissions` table (`migrations/000015_permissions.sql` with RLS; `internal/authz/store.go` reads granular `(role_name, ktype, action)` grants with JSONB conditions, falling back to legacy `roles.permissions` for backward compatibility)
+- [x] `notifications` table (`migrations/000014_notifications.sql` with RLS; `internal/notifications/store.go` + `services/api/notifications.go` expose `GET /api/v1/notifications` + mark-read; worker persists every routed notification; `apps/web/src/components/NotificationBell.tsx` renders the inbox)
+- [x] Webhook HMAC signatures (`services/worker/notifications.go#postWebhook` computes HMAC-SHA256 of the request body with a per-tenant secret and adds `X-Kapp-Signature: sha256=<hex>`)
 
 ### Priority MVP gaps
 
@@ -270,8 +270,8 @@ match what customers expect from an ERP/CRM.
 
 - [x] Sales Orders (`sales.order` KType) — draft → confirmed → fulfilled pipeline, links to deal + price list, lines with item/qty/price/discount (`internal/sales/ktypes.go`; registered in `services/api/main.go`)
 - [x] Purchase Orders (`procurement.purchase_order` KType) — draft → confirmed → received pipeline, links to supplier, same line shape as sales orders (`internal/sales/ktypes.go`)
-- [ ] Customers as a dedicated KType (`crm.customer`) — split out of `crm.organization` with AR-aging, credit limit, default tax code, and linkage from `finance.ar_invoice`
-- [ ] Suppliers as a dedicated KType (`crm.supplier`) — parallel to customers with AP-aging, default payment terms, and linkage from `finance.ap_bill`
+- [x] Customers as a dedicated KType (`crm.customer` in `internal/crm/ktypes.go` with `customer_group`, `credit_limit`, `default_tax_code`, `default_payment_terms`, `currency`, `ar_aging_bucket`, `status`; `finance.ar_invoice.customer_id` retargeted; `crm.create_customer` agent tool; `/customer` slash command)
+- [x] Suppliers as a dedicated KType (`crm.supplier` in `internal/crm/ktypes.go` with `supplier_group`, `default_payment_terms`, `currency`, `ap_aging_bucket`, `status`; `finance.ap_bill.supplier_id` retargeted; `crm.create_supplier` agent tool; `/supplier` slash command)
 - [x] Price Lists (`sales.price_list` KType) — per-currency, optional per-customer, valid_from/valid_until window, items array with {item_id, price, discount_percent, min_qty} (`internal/sales/ktypes.go`)
 - [x] Salary Components (`hr.salary_component`, `hr.salary_structure`) — earning / deduction / tax components with fixed or percentage amount types; structure references an employee + base salary + component list (`internal/hr/payroll.go`; registered in `services/api/main.go`)
 
@@ -316,11 +316,11 @@ Production readiness across all shipped modules.
 - [ ] Performance tuning: index review, partition pruning, outbox batch sizing
 - [ ] Load test: 5000 tenants on a single cell with baseline SLOs met
 - [ ] Documentation: operator guide, developer guide, KType authoring guide
-- [ ] CI rule: fail new migrations that don't ENABLE ROW LEVEL SECURITY on tenant-scoped tables (SECURITY_REVIEW.md §1 — currently enforced by review only; a migration that forgets the `ALTER TABLE … ENABLE ROW LEVEL SECURITY` + `tenant_isolation` policy will pass CI and silently break cross-tenant isolation)
-- [ ] CI rule: forbid `internal/agents` from importing `internal/record` outside the executor (SECURITY_REVIEW.md §2 — the agent-tool boundary relies on every mutation going through the approval / workflow gate; an accidental direct `record.Store` import inside a new agent tool would bypass the gate)
-- [ ] Audit-log integrity check / hash chain (PROPOSAL.md §7.6, SECURITY_REVIEW.md §8 — every `audit_log` row should carry a hash of the previous row so tampering is detectable on replay; today rows are append-only but unlinked)
+- [x] CI rule: fail new migrations that don't ENABLE ROW LEVEL SECURITY on tenant-scoped tables (`.github/workflows/migration-rls-check.yml` — scans `migrations/*.sql` for `CREATE TABLE` containing `tenant_id` and fails if the same migration lacks `ENABLE ROW LEVEL SECURITY` for that table)
+- [x] CI rule: forbid `internal/agents` from importing `internal/record` outside the executor (`.github/workflows/agent-import-check.yml` — `go list -json ./internal/agents/...` filtered for `internal/record` imports; executor is the only allowed path)
+- [x] Audit-log integrity check / hash chain (`migrations/000016_audit_hash_chain.sql` adds `prev_hash` + `row_hash`; `internal/audit/store.go` hash-chains each insert with SHA-256 over (prev_hash || tenant_id || target_id || action || before || after || context || created_at); `GET /api/v1/audit/verify` replays the chain and reports the first break)
 - [ ] Wire `scripts/upgrade_tier.sh` to a tenant-service API endpoint (SECURITY_REVIEW.md §8 item 5 — the shell script runs as DB superuser against the cluster today; the long-term path is a tenant-service RPC that handles the tier upgrade transactionally, emits an audit record, and drops the superuser requirement)
-- [ ] Encryption key rotation migration (SECURITY_REVIEW.md §3 — `internal/tenant/encryption.go` derives per-tenant keys from a single `KAPP_MASTER_KEY`; rotating the master key today would orphan every encrypted field. Needs a dual-key decrypt / re-encrypt path so the master key can be rotated without downtime)
+- [x] Encryption key rotation migration (`internal/tenant/encryption.go` supports dual master keys: `KAPP_MASTER_KEY` for encrypt + primary decrypt, `KAPP_MASTER_KEY_PREV` as fallback on GCM auth failure; `cmd/rotate-master-key/main.go` + `scripts/rotate_master_key.sh` batch-re-encrypt every tenant's `krecords.data` strings under the new key, idempotently)
 
 ### Frontend
 
@@ -329,11 +329,11 @@ generic `RecordListPage` / `RightPane` already render each KType by
 schema, but dedicated pages unlock per-module workflows (reconcile,
 compare to expected, bulk-edit) that the generic view can't cover.
 
-- [ ] Bank Reconciliation UI page (backend exists in `internal/ledger/bank.go` with `UpsertBankAccount`, `ImportBankStatement`, `ReconcileTransaction`; needs a statement-import uploader, side-by-side matcher, and a "mark ignored" action surface)
-- [ ] Cost Centers management page (backend: `internal/ledger/cost_center.go` + `cost_centers` table; needs a tree view over `parent_code`, activation toggle, and an assignment filter on the trial balance / income statement views)
-- [ ] Sales Orders / Purchase Orders dedicated pages (KTypes in `internal/sales/ktypes.go`; need pipeline-stage columns, per-line editing, and linkage back to deal / supplier cards)
-- [ ] Price Lists management page (KType in `internal/sales/ktypes.go`; needs per-currency / per-customer matrix editing + effective-date window UI)
-- [ ] Salary Components / Structures / Payroll pages (KTypes in `internal/hr/payroll.go`; need a structure builder that composes components and a per-employee structure assignment view)
+- [x] Bank Reconciliation UI page (`apps/web/src/pages/BankReconciliationPage.tsx` — statement upload, side-by-side transactions vs journal entries, auto-match + manual match)
+- [x] Cost Centers management page (`apps/web/src/pages/CostCentersPage.tsx` — tree view over `parent_code`, activation toggle, filter surface)
+- [x] Sales Orders / Purchase Orders dedicated pages (`apps/web/src/pages/SalesOrdersPage.tsx` + `PurchaseOrdersPage.tsx` — kanban by stage, per-line editing, linkage to deal/supplier)
+- [x] Price Lists management page (`apps/web/src/pages/PriceListsPage.tsx` — per-currency/per-customer matrix, effective date window, item search)
+- [x] Salary Components / Structures / Payroll pages (`apps/web/src/pages/PayrollPage.tsx` — component CRUD, structure builder, per-employee assignment)
 
 ### Acceptance Criteria
 
