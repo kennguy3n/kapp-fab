@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -49,6 +50,11 @@ import (
 // `tenant_id` column, which would make the extract query fail with
 // `column "tenant_id" does not exist` the moment we walked it.
 var TenantScopedTables = []string{
+	// Identity — required for a restored tenant to have any users or
+	// custom roles. Listed first so FKs from the rest of the dump
+	// resolve cleanly on insert.
+	"user_tenants",
+	"roles",
 	// Platform
 	"idempotency_keys",
 	"saved_views",
@@ -305,15 +311,40 @@ func restoreRows(ctx context.Context, tx pgx.Tx, dec *json.Decoder, remap map[uu
 	}
 }
 
+// tableConflictKeys maps tenant-scoped tables whose primary key is
+// NOT the standard `(tenant_id, id)` to their actual PK column list.
+// Tables not listed here fall back to `(tenant_id, id)` when the
+// decoded row carries an `id` column, and to `ON CONFLICT DO NOTHING`
+// otherwise. Adding a new tenant-scoped table with a non-standard PK
+// requires a new entry here.
+var tableConflictKeys = map[string][]string{
+	"user_tenants":           {"user_id", "tenant_id"},
+	"roles":                  {"tenant_id", "name"},
+	"fiscal_periods":         {"tenant_id", "period_start"},
+	"tax_codes":              {"tenant_id", "code"},
+	"docs_document_versions": {"tenant_id", "document_id", "version"},
+	"lesson_progress":        {"tenant_id", "enrollment_id", "lesson_id"},
+}
+
 // insertRow issues a parameterised INSERT that lists the columns from
-// the decoded row map. ON CONFLICT (tenant_id, id) DO UPDATE is used
-// when an `id` column is present so restores are idempotent; tables
-// without `id` fall through to the default ON CONFLICT DO NOTHING.
+// the decoded row map. The conflict clause is picked per-table:
+//
+//   - tables in tableConflictKeys upsert on the declared PK;
+//   - tables with an `id` column upsert on (tenant_id, id);
+//   - anything else falls back to ON CONFLICT DO NOTHING.
+//
+// The SET list in the DO UPDATE branch covers every column supplied
+// in the dump except the conflict keys themselves, so a second
+// restore of a corrected dump overwrites the existing row rather
+// than silently skipping it.
 func insertRow(ctx context.Context, tx pgx.Tx, table string, obj map[string]any) error {
 	cols := make([]string, 0, len(obj))
 	for k := range obj {
 		cols = append(cols, k)
 	}
+	// Sort so the generated statement is deterministic — easier on
+	// tests and on logs that grep for the raw SQL.
+	strSort(cols)
 	placeholders := make([]string, len(cols))
 	values := make([]any, len(cols))
 	for i, c := range cols {
@@ -321,14 +352,75 @@ func insertRow(ctx context.Context, tx pgx.Tx, table string, obj map[string]any)
 		values[i] = obj[c]
 	}
 	stmt := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s) ON CONFLICT DO NOTHING",
+		"INSERT INTO %s (%s) VALUES (%s) %s",
 		quoteIdent(table),
 		strings.Join(quoteIdents(cols), ", "),
 		strings.Join(placeholders, ", "),
+		conflictClause(table, cols),
 	)
 	_, err := tx.Exec(ctx, stmt, values...)
 	return err
 }
+
+// conflictClause returns the ON CONFLICT fragment appended to the
+// INSERT statement produced by insertRow. It is separated out so it
+// can be unit-tested against the static PK map without touching a
+// real database.
+func conflictClause(table string, cols []string) string {
+	key := resolveConflictKey(table, cols)
+	if len(key) == 0 {
+		return "ON CONFLICT DO NOTHING"
+	}
+	// Build the SET list: every supplied column that is not part of
+	// the conflict key gets overwritten with the EXCLUDED value.
+	setCols := make([]string, 0, len(cols))
+	keySet := make(map[string]struct{}, len(key))
+	for _, k := range key {
+		keySet[k] = struct{}{}
+	}
+	for _, c := range cols {
+		if _, isKey := keySet[c]; isKey {
+			continue
+		}
+		setCols = append(setCols, fmt.Sprintf("%s = EXCLUDED.%s", quoteIdent(c), quoteIdent(c)))
+	}
+	if len(setCols) == 0 {
+		// Every column is part of the PK — nothing to update.
+		return fmt.Sprintf("ON CONFLICT (%s) DO NOTHING", strings.Join(quoteIdents(key), ", "))
+	}
+	return fmt.Sprintf(
+		"ON CONFLICT (%s) DO UPDATE SET %s",
+		strings.Join(quoteIdents(key), ", "),
+		strings.Join(setCols, ", "),
+	)
+}
+
+// resolveConflictKey picks the PK column list to use in the ON
+// CONFLICT clause. Explicit entries in tableConflictKeys win; the
+// fallback is `(tenant_id, id)` when both columns are present in the
+// dump. Returns nil if no workable key is available — the caller
+// uses the bare `ON CONFLICT DO NOTHING` form in that case.
+func resolveConflictKey(table string, cols []string) []string {
+	if key, ok := tableConflictKeys[table]; ok {
+		return key
+	}
+	hasCol := func(name string) bool {
+		for _, c := range cols {
+			if c == name {
+				return true
+			}
+		}
+		return false
+	}
+	if hasCol("tenant_id") && hasCol("id") {
+		return []string{"tenant_id", "id"}
+	}
+	return nil
+}
+
+// strSort is pulled out so callers don't need to import sort just
+// for the one call site.
+func strSort(s []string) { sort.Strings(s) }
 
 // isKnownTable is a defence-in-depth check so a malicious dump cannot
 // name an arbitrary table and trick restore into writing into it.

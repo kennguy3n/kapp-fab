@@ -300,7 +300,15 @@ func MetricsMiddleware(reg *MetricsRegistry) func(http.Handler) http.Handler {
 			if t := TenantFromContext(r.Context()); t != nil {
 				tenantID = t.ID.String()
 			}
-			path := chi.RouteContext(r.Context()).RoutePattern()
+			// chi.RouteContext returns nil whenever the middleware runs
+			// before chi's router is on the context (for example when
+			// wired onto a bare http.ServeMux for /metrics or /health
+			// endpoints, or on unmatched 404 paths). Dereferencing a
+			// nil *Context panics, so fall back to the raw URL path.
+			path := ""
+			if rctx := chi.RouteContext(r.Context()); rctx != nil {
+				path = rctx.RoutePattern()
+			}
 			if path == "" {
 				path = r.URL.Path
 			}
