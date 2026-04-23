@@ -220,7 +220,7 @@ func run() error {
 	agents.RegisterLMSTools(executor, lmsStore)
 
 	fh := &formsHandlers{store: formStore, registry: ktypeRegistry}
-	th := &tenantHandlers{svc: tenantSvc}
+	th := &tenantHandlers{svc: tenantSvc, wizard: tenant.NewWizard(pool)}
 	kh := &ktypeHandlers{registry: ktypeRegistry}
 	rh := &recordHandlers{store: recordStore}
 	wh := &workflowHandlers{engine: workflowEngine, store: recordStore, registry: ktypeRegistry}
@@ -306,6 +306,7 @@ func run() error {
 		r.Post("/{id}/activate", th.activate)
 		r.Post("/{id}/archive", th.archive)
 		r.Delete("/{id}", th.delete)
+		r.Post("/{id}/setup", th.setup)
 	})
 
 	// KType registry routes (shared metadata, not tenant-scoped).

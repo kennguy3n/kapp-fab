@@ -16,7 +16,35 @@ import (
 // tenant.PGStore implementation. These routes are control-plane: they manage
 // the tenant registry itself and are not subject to TenantMiddleware.
 type tenantHandlers struct {
-	svc *tenant.PGStore
+	svc    *tenant.PGStore
+	wizard *tenant.Wizard
+}
+
+// setup runs the tenant setup wizard against an existing tenant row.
+// See internal/tenant/wizard.go for the seed side-effects (chart of
+// accounts, default roles, optional initial users). Control-plane
+// endpoint — no TenantMiddleware.
+func (h *tenantHandlers) setup(w http.ResponseWriter, r *http.Request) {
+	if h.wizard == nil {
+		http.Error(w, "setup wizard not wired", http.StatusNotImplemented)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid tenant id", http.StatusBadRequest)
+		return
+	}
+	var cfg tenant.SetupWizardConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	res, err := h.wizard.RunSetupWizard(r.Context(), id, cfg)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 type createTenantRequest struct {
