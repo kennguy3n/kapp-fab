@@ -241,7 +241,14 @@ func (s *PGStore) ReconcileTransaction(ctx context.Context, tenantID, txnID uuid
 	if window <= 0 {
 		window = DefaultMatchWindow
 	}
-	var matched *JournalEntry
+	// The outer tx does the statement-line read, candidate search, and
+	// UPDATE under one pool connection. Loading the matched journal
+	// entry happens after commit so we don't nest a second
+	// WithTenantTx inside the callback — doing so would grab a second
+	// pool connection per reconcile and deadlock a batch run once the
+	// pool saturates. Ledger rows are immutable after posting, so the
+	// post-commit read is safe.
+	var matchedID uuid.UUID
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var (
 			amount    decimal.Decimal
@@ -304,17 +311,13 @@ func (s *PGStore) ReconcileTransaction(ctx context.Context, tenantID, txnID uuid
 		); err != nil {
 			return fmt.Errorf("ledger: update bank_transaction: %w", err)
 		}
-		entry, err := s.GetJournalEntry(ctx, tenantID, entryID)
-		if err != nil {
-			return err
-		}
-		matched = entry
+		matchedID = entryID
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return matched, nil
+	return s.GetJournalEntry(ctx, tenantID, matchedID)
 }
 
 // ParseBankStatementCSV is a light helper: it turns a comma-separated
