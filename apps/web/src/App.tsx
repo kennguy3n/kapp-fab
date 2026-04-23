@@ -15,6 +15,8 @@ import { StockLevelsPage } from "./pages/StockLevelsPage";
 import { InventoryValuationPage } from "./pages/InventoryValuationPage";
 import { OrgChartPage } from "./pages/OrgChartPage";
 import { LearnerProgressPage } from "./pages/LearnerProgressPage";
+import { ImportPage } from "./pages/ImportPage";
+import { ImportMappingPage } from "./pages/ImportMappingPage";
 
 interface NavSection {
   title: string;
@@ -91,6 +93,7 @@ const navSections: NavSection[] = [
     links: [
       { to: "/admin/tenants", label: "Tenants" },
       { to: "/admin/audit", label: "Audit Log" },
+      { to: "/imports", label: "Imports" },
     ],
   },
 ];
@@ -174,6 +177,10 @@ function AppShell() {
             element={<InventoryValuationPage />}
           />
           <Route path="/hr/org-chart" element={<OrgChartPage />} />
+          <Route path="/imports" element={<ImportPage />} />
+          <Route path="/imports/new" element={<ImportPage />} />
+          <Route path="/imports/:id" element={<ImportPage />} />
+          <Route path="/imports/:id/mapping" element={<ImportMappingPage />} />
           <Route path="/lms/progress" element={<LearnerProgressPage />} />
           <Route
             path="/lms/progress/:enrollmentId"
