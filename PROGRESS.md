@@ -9,7 +9,7 @@
 ## Current Phase
 
 **Phase G — Hardening, Observability, and Scale**
-**Status:** Not Started (first hardening slice in flight: multi-tenancy benchmarks, per-tenant encryption, low-stock alerts, saved views)
+**Status:** In Progress (first hardening slice landed: multi-tenancy benchmarks, per-tenant encryption code + boot wiring, low-stock alert worker + wiring, saved views)
 
 ---
 
@@ -157,7 +157,7 @@ First inventory primitives integrated with Sales and Procurement.
 
 ### Deferred / Follow-up
 
-- [x] Low-stock alert worker (threshold-based notifications via KChat) (`services/worker/stock_alerts.go` polls `stock_levels` vs `inventory.item.reorder_level` per tenant and emits `inventory.low_stock_alert`, fanned out by the existing notification router)
+- [~] Low-stock alert worker (threshold-based notifications via KChat) (`services/worker/stock_alerts.go` polls `stock_levels` vs `inventory.item.reorder_level` per tenant and emits `inventory.low_stock_alert`; wired into `services/worker/main.go` and fanned out by the existing notification router. Needs production soak + dedupe-map cap tuning.)
 - [ ] Stock move reversal (correction entries, not deletes — matching finance pattern)
 - [ ] Batch/lot tracking foundation (schema only, full implementation deferred)
 
@@ -243,7 +243,11 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [x] Multi-tenancy: zero-idle-cost verification (idle tenant resource measurement) (`TestIdleTenantZeroCost`)
 - [x] Multi-tenancy: sub-millisecond tenant context switching benchmark (`BenchmarkTenantContextSwitch`)
 - [x] Multi-tenancy: 1000-tenant load test on single cell (`TestThousandTenantLoad`, `//go:build loadtest`)
-- [ ] Authentication layer: JWT token issuance/validation, KChat SSO exchange, session revocation on tenant suspension, per-tenant session limits
+- [ ] Authentication layer (JWT/OAuth with KChat SSO): JWT token issuance/validation, KChat SSO exchange, session revocation on tenant suspension, per-tenant session limits
+- [ ] CRM KType boot registration (Phase B KTypes `crm.lead` / `crm.contact` / `crm.organization` / `crm.deal` / `crm.activity` / `crm.quote` / `tasks.task` register via `crm.RegisterKTypes` in `services/api/main.go` alongside finance/inventory/hr/lms)
+- [ ] S3 production object store adapter wiring (interface + MemoryStore exist in `internal/files`; production S3/MinIO adapter still needs to be wired in `services/api/main.go` behind an env-var switch)
+- [ ] Email SMTP notification adapter (router stubs email delivery in `services/worker/notifications.go`; real SMTP transport + template rendering pending)
+- [ ] Distributed rate limiting for multi-node deployment (`platform.RateLimiter` is in-process; needs a shared backend — Redis token bucket or similar — so quotas hold across api replicas)
 - [ ] Tenant setup wizard: default Chart of Accounts seeding, default roles/permissions per plan, onboarding flow in React app
 - [ ] Payment recording: `finance.payment` KType, payment allocation against AR/AP, bank statement import
 - [ ] Multi-currency: exchange rate table, automatic conversion on posting, unrealized gain/loss
@@ -253,6 +257,20 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [ ] Full-text search: tsvector on krecords, search API endpoint, cross-KType search page
 - [ ] Scheduled actions: tenant-scoped cron, recurring invoice generation, scheduled report delivery
 - [ ] Data export: per-KType export endpoint, full tenant dump, export job tracking
+
+### Priority MVP gaps
+
+Business-object coverage gaps that surface once a real SME starts onboarding.
+The kernel can model these as generic KRecords today, but dedicated KTypes
+(with schemas, posting hooks, and agent tools) make the user experience
+match what customers expect from an ERP/CRM.
+
+- [ ] Sales Orders (`sales.order` KType) — draft → confirmed → delivered pipeline, links to quote + invoice, triggers inventory reserve/deliver moves
+- [ ] Purchase Orders (`purchase.order` KType) — draft → approved → received pipeline, links to supplier + bill, triggers inventory receipt moves
+- [ ] Customers as a dedicated KType (`crm.customer`) — split out of `crm.organization` with AR-aging, credit limit, default tax code, and linkage from `finance.ar_invoice`
+- [ ] Suppliers as a dedicated KType (`crm.supplier`) — parallel to customers with AP-aging, default payment terms, and linkage from `finance.ap_bill`
+- [ ] Price Lists (`sales.price_list` KType) — per-currency, per-customer-segment price rules applied on quote/invoice line creation
+- [ ] Salary Components (`hr.salary_component`, `hr.salary_structure`) — earning / deduction / tax components composing a payroll run; feeds a future `hr.payroll_run` posting into the finance ledger
 
 ### Design references
 
@@ -272,10 +290,14 @@ to copy:
 
 ## Phase G — Hardening, Observability, and Scale
 
+**Status:** In Progress
+
 Production readiness across all shipped modules.
 
 ### Deliverables
 
+- [~] Per-tenant encryption (code lives in `internal/tenant/encryption.go` + `internal/record/store.go` hooks; api boot now loads `KAPP_MASTER_KEY` and calls `recordStore.WithEncryptor`. Needs KType schema rollout of `"encrypted": true` fields + rotation runbook.)
+- [~] Low-stock alerts (worker in `services/worker/stock_alerts.go` is instantiated + launched from `services/worker/main.go`; dedupe map has a hard size cap. Needs production soak + alert threshold seeding per KType.)
 - [ ] Per-tenant observability dashboards (latency, error rate, quota usage)
 - [ ] Cell autoscaling policies
 - [ ] Backup and restore tooling (full and per-tenant)

@@ -36,6 +36,13 @@ const stockAlertInterval = 60 * time.Second
 // operators who miss alerts during a deploy still see them afterwards.
 const stockAlertDedupeWindow = 6 * time.Hour
 
+// maxAlertEntries caps the in-memory dedupe map so a widespread
+// shortage across thousands of tenants cannot grow lastSent without
+// bound between dedupe-window evictions. When the cap is hit the
+// worker drops the oldest entries — re-emitting a duplicate alert on
+// the next sweep is preferable to an OOM.
+const maxAlertEntries = 100_000
+
 // stockAlertWorker runs a periodic sweep over stock_levels joined
 // against inventory_items.reorder_level and emits one
 // `inventory.low_stock_alert` outbox event per SKU that fell below
@@ -207,7 +214,45 @@ func (w *stockAlertWorker) sweep(ctx context.Context) error {
 			delete(w.lastSent, k)
 		}
 	}
+	// Hard cap so a widespread shortage across tens of thousands of
+	// tenants cannot grow lastSent without bound between dedupe-window
+	// evictions. When over the cap, drop the oldest quarter of entries
+	// — re-emitting on the next sweep is preferable to an OOM and the
+	// worker logs a warning so the operator notices.
+	if len(w.lastSent) > maxAlertEntries {
+		log.Printf("worker: stock alerts dedupe map exceeded cap (%d > %d); evicting oldest entries",
+			len(w.lastSent), maxAlertEntries)
+		w.evictOldest(len(w.lastSent) - maxAlertEntries*3/4)
+	}
 	return nil
+}
+
+// evictOldest removes the n oldest entries from the dedupe map. The
+// single linear scan is fine at the map sizes we cap to — the map is
+// never scanned for lookups in the hot path, only on sweep ticks.
+func (w *stockAlertWorker) evictOldest(n int) {
+	if n <= 0 || len(w.lastSent) == 0 {
+		return
+	}
+	type kv struct {
+		k alertKey
+		t time.Time
+	}
+	entries := make([]kv, 0, len(w.lastSent))
+	for k, t := range w.lastSent {
+		entries = append(entries, kv{k, t})
+	}
+	// Partial sort by age ascending: we only need the first n keys.
+	for i := 0; i < n && i < len(entries); i++ {
+		min := i
+		for j := i + 1; j < len(entries); j++ {
+			if entries[j].t.Before(entries[min].t) {
+				min = j
+			}
+		}
+		entries[i], entries[min] = entries[min], entries[i]
+		delete(w.lastSent, entries[i].k)
+	}
 }
 
 // emit writes a single low-stock event to the outbox. The event body
