@@ -52,6 +52,10 @@ type notificationRouter struct {
 	// so the web bell/inbox surface is independent of transport
 	// success. Nil is tolerated for dev setups without the schema.
 	store *notifications.Store
+	// smtp is the optional outbound mail adapter. Nil (or a zero
+	// SMTPConfig) means SMTP is not configured and the email channel
+	// falls back to logging the notice.
+	smtp notifications.SMTPSender
 }
 
 // notificationEnvelope is the shape extracted from event payloads.
@@ -98,11 +102,13 @@ func (r *notificationRouter) route(ctx context.Context, e events.Event) {
 			log.Printf("worker: webhook %s → %s: %v", e.Type, env.WebhookURL, err)
 		}
 	case "email":
-		// SMTP adapter is deferred. Log so the event trail shows the
-		// notification was observed and routed even when delivery
-		// isn't wired yet.
-		log.Printf("worker: email notify (stub) tenant=%s type=%s to=%q title=%q",
-			e.TenantID, e.Type, env.Email, env.Title)
+		if env.Email == "" {
+			return
+		}
+		if err := r.sendEmail(ctx, e, *env); err != nil {
+			log.Printf("worker: email notify tenant=%s type=%s to=%q: %v",
+				e.TenantID, e.Type, env.Email, err)
+		}
 	default:
 		// Unknown / unset channel — ignore. Producers that only want
 		// in-app SSE emit events with no notification envelope.
@@ -190,6 +196,32 @@ func (r *notificationRouter) postWebhook(ctx context.Context, e events.Event, ur
 		return fmt.Errorf("status=%d body=%s", resp.StatusCode, string(snippet))
 	}
 	return nil
+}
+
+// sendEmail dispatches the notification envelope through the SMTP
+// adapter. When no adapter is configured (or the adapter returns
+// ErrSMTPDisabled) we degrade gracefully to a log line so the event
+// trail still shows the notice was observed.
+func (r *notificationRouter) sendEmail(ctx context.Context, e events.Event, env notificationEnvelope) error {
+	if r.smtp == nil {
+		log.Printf("worker: email notify (no smtp) tenant=%s type=%s to=%q title=%q",
+			e.TenantID, e.Type, env.Email, env.Title)
+		return nil
+	}
+	subject := env.Title
+	if subject == "" {
+		subject = e.Type
+	}
+	body := env.Body
+	if body == "" {
+		body = string(e.Payload)
+	}
+	err := r.smtp.Send(ctx, []string{env.Email}, subject, body)
+	if errors.Is(err, notifications.ErrSMTPDisabled) {
+		log.Printf("worker: email notify (smtp disabled) tenant=%s type=%s to=%q", e.TenantID, e.Type, env.Email)
+		return nil
+	}
+	return err
 }
 
 // persistNotification writes an inbox row for the supplied event so

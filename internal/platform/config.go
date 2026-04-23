@@ -33,6 +33,15 @@ type Config struct {
 	S3SecretKey string
 	// EventBusURL is the NATS/Kafka/etc. URL for the event bus.
 	EventBusURL string
+	// SMTPHost/Port/User/Password/From configure the outbound mail
+	// adapter used by the worker for `notification.channel=email`.
+	// All five are optional; when SMTPHost is empty the worker falls
+	// back to logging the notice instead of dialing an MTA.
+	SMTPHost     string
+	SMTPPort     string
+	SMTPUser     string
+	SMTPPassword string
+	SMTPFrom     string
 }
 
 // LoadConfig reads configuration from environment variables and returns a
@@ -47,6 +56,11 @@ func LoadConfig() (*Config, error) {
 		S3AccessKey:      os.Getenv("S3_ACCESS_KEY"),
 		S3SecretKey:      os.Getenv("S3_SECRET_KEY"),
 		EventBusURL:      os.Getenv("NATS_URL"),
+		SMTPHost:         os.Getenv("SMTP_HOST"),
+		SMTPPort:         os.Getenv("SMTP_PORT"),
+		SMTPUser:         os.Getenv("SMTP_USER"),
+		SMTPPassword:     os.Getenv("SMTP_PASS"),
+		SMTPFrom:         os.Getenv("SMTP_FROM"),
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, errors.New("DB_URL is required")

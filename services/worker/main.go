@@ -105,11 +105,19 @@ func run() error {
 	// here when the event payload carries a `notification` envelope.
 	// Email is logged as a stub until an SMTP adapter lands; webhook
 	// POSTs the raw event envelope to `notification.webhook_url`.
+	smtpCfg := notifications.SMTPConfig{
+		Host:     cfg.SMTPHost,
+		Port:     cfg.SMTPPort,
+		User:     cfg.SMTPUser,
+		Password: cfg.SMTPPassword,
+		From:     cfg.SMTPFrom,
+	}
 	router := &notificationRouter{
 		bridge: bridge,
 		client: &http.Client{Timeout: 5 * time.Second},
 		pool:   pool,
 		store:  notifications.NewStore(pool),
+		smtp:   notifications.NewSMTPAdapter(smtpCfg),
 	}
 
 	// Low-stock alert sweeper runs alongside the outbox drain so a
