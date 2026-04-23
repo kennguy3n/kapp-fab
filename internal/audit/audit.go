@@ -33,6 +33,12 @@ type Entry struct {
 	After       json.RawMessage `json:"after,omitempty"`
 	Context     json.RawMessage `json:"context,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
+	// PrevHash is the row_hash of the previous audit row for this
+	// tenant. Nil for the very first row per tenant (interpreted as
+	// a 32-byte zero seed by the verifier).
+	PrevHash []byte `json:"prev_hash,omitempty"`
+	// RowHash is SHA-256 over (prev_hash || canonical fields).
+	RowHash []byte `json:"row_hash,omitempty"`
 }
 
 // Logger writes audit entries. Implementations must participate in the same

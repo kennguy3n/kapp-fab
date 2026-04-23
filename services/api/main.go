@@ -381,6 +381,7 @@ func run() error {
 	r.Route("/api/v1/audit", func(r chi.Router) {
 		r.Use(platform.TenantMiddleware(tenantSvc))
 		r.Get("/", auh.list)
+		r.Get("/verify", auh.verify)
 	})
 
 	// Finance surface (Phase C). Chart of accounts, journal entries,

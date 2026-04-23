@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -22,6 +24,98 @@ import (
 // audit.LogTx inside tenant-scoped transactions.
 type auditHandlers struct {
 	pool *pgxpool.Pool
+}
+
+// verify walks the tenant's hash chain in (id) order and reports the
+// first break — either a row whose recomputed hash does not match the
+// stored row_hash, or a row whose prev_hash does not match the prior
+// row's row_hash. Returns {ok: true} when the entire chain validates.
+// Pre-chain rows (NULL row_hash, pre-dating the migration) are
+// skipped so the verifier can be rolled out without a backfill.
+func (h *auditHandlers) verify(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	res, err := verifyAuditChain(r.Context(), h.pool, t.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+type auditVerifyResult struct {
+	OK       bool   `json:"ok"`
+	Checked  int    `json:"checked"`
+	BreakAt  *int64 `json:"break_at,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+func verifyAuditChain(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID) (auditVerifyResult, error) {
+	var res auditVerifyResult
+	err := dbutil.WithTenantTx(ctx, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT id, tenant_id, target_id, action, before, after, context,
+			        created_at, prev_hash, row_hash
+			 FROM audit_log
+			 WHERE tenant_id = $1
+			 ORDER BY id ASC`,
+			tenantID,
+		)
+		if err != nil {
+			return fmt.Errorf("audit verify: query: %w", err)
+		}
+		defer rows.Close()
+		var lastHash []byte
+		for rows.Next() {
+			var (
+				id        int64
+				tID       uuid.UUID
+				targetID  *uuid.UUID
+				action    string
+				before    []byte
+				after     []byte
+				contextB  []byte
+				createdAt time.Time
+				prevHash  []byte
+				rowHash   []byte
+			)
+			if err := rows.Scan(&id, &tID, &targetID, &action, &before, &after, &contextB,
+				&createdAt, &prevHash, &rowHash); err != nil {
+				return fmt.Errorf("audit verify: scan: %w", err)
+			}
+			res.Checked++
+			// Skip rows that pre-date the chain migration.
+			if rowHash == nil {
+				continue
+			}
+			if !bytes.Equal(prevHash, lastHash) {
+				res.BreakAt = &id
+				res.Reason = "prev_hash mismatch"
+				return nil
+			}
+			entry := audit.Entry{
+				TenantID: tID,
+				Action:   action,
+				TargetID: targetID,
+			}
+			want := audit.ComputeRowHash(prevHash, entry, before, after, contextB, createdAt)
+			if !bytes.Equal(want, rowHash) {
+				res.BreakAt = &id
+				res.Reason = "row_hash mismatch"
+				return nil
+			}
+			lastHash = rowHash
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("audit verify: iterate: %w", err)
+		}
+		res.OK = true
+		return nil
+	})
+	return res, err
 }
 
 // list runs under tenant context so RLS filters rows by tenant even

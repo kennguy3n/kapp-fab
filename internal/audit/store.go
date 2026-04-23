@@ -2,8 +2,11 @@ package audit
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -57,10 +60,22 @@ func (l *PGLogger) LogTx(ctx context.Context, tx pgx.Tx, entry Entry) error {
 	after := normalizeJSON(entry.After)
 	c := normalizeJSON(entry.Context)
 
-	_, err := tx.Exec(ctx,
+	// Hash-chain: look up the previous tenant row's row_hash and
+	// stamp (prev_hash, row_hash) on this insert. The lookup runs in
+	// the same transaction (same SET LOCAL app.tenant_id) so RLS
+	// filters out other tenants for free. The (tenant_id, id) PK
+	// ordering matches the verifier traversal.
+	prevHash, err := fetchPrevHash(ctx, tx, entry.TenantID)
+	if err != nil {
+		return err
+	}
+	createdAt := time.Now().UTC()
+	rowHash := computeRowHash(prevHash, entry, before, after, c, createdAt)
+	_, err = tx.Exec(ctx,
 		`INSERT INTO audit_log
-		     (tenant_id, actor_id, actor_kind, action, target_ktype, target_id, before, after, context)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		     (tenant_id, actor_id, actor_kind, action, target_ktype, target_id,
+		      before, after, context, created_at, prev_hash, row_hash)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		entry.TenantID,
 		entry.ActorID,
 		string(entry.ActorKind),
@@ -70,11 +85,85 @@ func (l *PGLogger) LogTx(ctx context.Context, tx pgx.Tx, entry Entry) error {
 		before,
 		after,
 		c,
+		createdAt,
+		prevHash,
+		rowHash,
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert: %w", err)
 	}
 	return nil
+}
+
+// fetchPrevHash returns the row_hash of the most recent audit row for
+// this tenant. Returns nil for the first row per tenant — the verifier
+// interprets nil prev_hash as a zero seed.
+func fetchPrevHash(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]byte, error) {
+	var prev []byte
+	err := tx.QueryRow(ctx,
+		`SELECT row_hash FROM audit_log
+		 WHERE tenant_id = $1
+		 ORDER BY id DESC
+		 LIMIT 1`,
+		tenantID,
+	).Scan(&prev)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("audit: fetch prev_hash: %w", err)
+	}
+	return prev, nil
+}
+
+// ComputeRowHash is the exported wrapper used by the verifier (see
+// services/api/audit.go) so both the logger and the verifier share
+// one canonical field-order definition. Callers that hold normalized
+// JSON bytes can pass them directly; jsonBytes handles the common
+// shapes (nil, json.RawMessage, []byte, string).
+func ComputeRowHash(prev []byte, entry Entry, before, after, contextVal any, createdAt time.Time) []byte {
+	return computeRowHash(prev, entry, before, after, contextVal, createdAt)
+}
+
+// computeRowHash stitches the canonical field order (see
+// migrations/000016_audit_hash_chain.sql) into one SHA-256 digest.
+// The normalized JSON slices are passed through unchanged; nil values
+// produce empty byte slices so the tuple is deterministic.
+func computeRowHash(prev []byte, entry Entry, before, after, contextVal any, createdAt time.Time) []byte {
+	h := sha256.New()
+	if prev == nil {
+		h.Write(make([]byte, sha256.Size))
+	} else {
+		h.Write(prev)
+	}
+	h.Write(entry.TenantID[:])
+	if entry.TargetID != nil {
+		h.Write(entry.TargetID[:])
+	}
+	h.Write([]byte(entry.Action))
+	h.Write(jsonBytes(before))
+	h.Write(jsonBytes(after))
+	h.Write(jsonBytes(contextVal))
+	h.Write([]byte(createdAt.UTC().Format(time.RFC3339Nano)))
+	return h.Sum(nil)
+}
+
+// jsonBytes is the inverse of normalizeJSON: we get back whatever
+// normalizeJSON returned and want a byte slice for hashing.
+func jsonBytes(v any) []byte {
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case json.RawMessage:
+		return t
+	case []byte:
+		return t
+	case string:
+		return []byte(t)
+	default:
+		b, _ := json.Marshal(v)
+		return b
+	}
 }
 
 func normalizeJSON(v json.RawMessage) any {
