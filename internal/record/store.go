@@ -100,6 +100,11 @@ func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
 	if err := ktype.ValidateData(kt.Schema, r.Data); err != nil {
 		return nil, err
 	}
+	// Preserve the plaintext payload for the audit entry and event
+	// envelope. AES-GCM picks a fresh random nonce on every encrypt,
+	// so audit diffs against ciphertext would be false positives and
+	// the audit trail itself would be unreadable.
+	plaintext := r.Data
 	// Encrypt fields the schema marks as sensitive. This happens after
 	// validation so validators still see plaintext (max_length, pattern,
 	// etc. are meaningful only against the real value).
@@ -137,6 +142,9 @@ func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
 		if err != nil {
 			return fmt.Errorf("record: insert: %w", err)
 		}
+		// Swap the RETURNING ciphertext for the original plaintext so the
+		// event envelope and audit After are both human-readable.
+		created.Data = plaintext
 		return s.emit(ctx, tx, created, "krecord.created", audit.Entry{
 			TenantID:    created.TenantID,
 			ActorID:     &created.CreatedBy,
@@ -144,20 +152,12 @@ func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
 			Action:      fmt.Sprintf("%s.create", created.KType),
 			TargetKType: created.KType,
 			TargetID:    &created.ID,
-			After:       created.Data,
+			After:       plaintext,
 		})
 	})
 	if err != nil {
 		return nil, err
 	}
-	// The RETURNING row carries ciphertext for any encrypted fields
-	// since the INSERT wrote the encrypted payload. Callers expect
-	// plaintext, so undo that transformation before handing back.
-	decrypted, err := s.decryptRecord(ctx, &created)
-	if err != nil {
-		return nil, err
-	}
-	created.Data = decrypted
 	return &created, nil
 }
 
@@ -338,7 +338,11 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 			return fmt.Errorf("record: update: %w", err)
 		}
 
-		diff := audit.Diff(existing.Data, updated.Data)
+		// Substitute plaintext for audit diff + event envelope. Comparing
+		// ciphertext would flag every encrypted field as changed on every
+		// update (fresh GCM nonces) and leave the audit trail unreadable.
+		updated.Data = merged
+		diff := audit.Diff(existingPlain, merged)
 		return s.emit(ctx, tx, updated, "krecord.updated", audit.Entry{
 			TenantID:    updated.TenantID,
 			ActorID:     updated.UpdatedBy,
@@ -346,21 +350,14 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 			Action:      fmt.Sprintf("%s.update", updated.KType),
 			TargetKType: updated.KType,
 			TargetID:    &updated.ID,
-			Before:      existing.Data,
-			After:       updated.Data,
+			Before:      existingPlain,
+			After:       merged,
 			Context:     diff,
 		})
 	})
 	if err != nil {
 		return nil, err
 	}
-	// updated.Data is the encrypted payload the UPDATE wrote back; decrypt
-	// for the caller so the returned record matches Create/Get semantics.
-	decrypted, err := s.decryptRecord(ctx, &updated)
-	if err != nil {
-		return nil, err
-	}
-	updated.Data = decrypted
 	return &updated, nil
 }
 
@@ -419,6 +416,14 @@ func (s *PGStore) Delete(ctx context.Context, tenantID, id, actorID uuid.UUID) e
 			return fmt.Errorf("record: soft delete: %w", err)
 		}
 
+		// Soft delete does not touch the data column, so existing and
+		// deleted carry the same ciphertext; decrypt once and reuse for
+		// both the audit envelope and the event payload.
+		existingPlain, err := s.decryptRecord(ctx, &existing)
+		if err != nil {
+			return fmt.Errorf("record: decrypt existing: %w", err)
+		}
+		deleted.Data = existingPlain
 		return s.emit(ctx, tx, deleted, "krecord.deleted", audit.Entry{
 			TenantID:    deleted.TenantID,
 			ActorID:     updatedBy,
@@ -426,8 +431,8 @@ func (s *PGStore) Delete(ctx context.Context, tenantID, id, actorID uuid.UUID) e
 			Action:      fmt.Sprintf("%s.delete", deleted.KType),
 			TargetKType: deleted.KType,
 			TargetID:    &deleted.ID,
-			Before:      existing.Data,
-			After:       deleted.Data,
+			Before:      existingPlain,
+			After:       existingPlain,
 		})
 	})
 }
