@@ -259,7 +259,7 @@ func restoreTenant(ctx context.Context, pool *pgxpool.Pool, r io.Reader, remap m
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	if err := restoreRows(ctx, tx, dec, remap); err != nil {
 		return err
 	}

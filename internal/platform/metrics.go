@@ -16,6 +16,7 @@ package platform
 
 import (
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"sort"
@@ -158,13 +159,13 @@ func (c *counterVec) Add(v uint64, labelValues ...string) {
 }
 
 func (c *counterVec) write(w http.ResponseWriter) {
-	fmt.Fprintf(w, "# HELP %s %s\n", c.name, c.help)
-	fmt.Fprintf(w, "# TYPE %s counter\n", c.name)
+	fprintf(w, "# HELP %s %s\n", c.name, c.help)
+	fprintf(w, "# TYPE %s counter\n", c.name)
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	for _, key := range sortedKeys(c.series) {
 		s := c.series[key]
-		fmt.Fprintf(w, "%s%s %d\n", c.name, formatLabels(s.labels), atomic.LoadUint64(&s.value))
+		fprintf(w, "%s%s %d\n", c.name, formatLabels(s.labels), atomic.LoadUint64(&s.value))
 	}
 }
 
@@ -218,20 +219,20 @@ func (h *histogramVec) Observe(v float64, labelValues ...string) {
 }
 
 func (h *histogramVec) write(w http.ResponseWriter) {
-	fmt.Fprintf(w, "# HELP %s %s\n", h.name, h.help)
-	fmt.Fprintf(w, "# TYPE %s histogram\n", h.name)
+	fprintf(w, "# HELP %s %s\n", h.name, h.help)
+	fprintf(w, "# TYPE %s histogram\n", h.name)
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for _, key := range sortedKeys(h.series) {
 		s := h.series[key]
 		for i, ub := range h.buckets {
 			labels := cloneAdd(s.labels, "le", strconv.FormatFloat(ub, 'g', -1, 64))
-			fmt.Fprintf(w, "%s_bucket%s %d\n", h.name, formatLabels(labels), atomic.LoadUint64(&s.buckets[i]))
+			fprintf(w, "%s_bucket%s %d\n", h.name, formatLabels(labels), atomic.LoadUint64(&s.buckets[i]))
 		}
 		infLabels := cloneAdd(s.labels, "le", "+Inf")
-		fmt.Fprintf(w, "%s_bucket%s %d\n", h.name, formatLabels(infLabels), atomic.LoadUint64(&s.countN))
-		fmt.Fprintf(w, "%s_sum%s %g\n", h.name, formatLabels(s.labels), float64FromBits(atomic.LoadUint64(&s.sumBits)))
-		fmt.Fprintf(w, "%s_count%s %d\n", h.name, formatLabels(s.labels), atomic.LoadUint64(&s.countN))
+		fprintf(w, "%s_bucket%s %d\n", h.name, formatLabels(infLabels), atomic.LoadUint64(&s.countN))
+		fprintf(w, "%s_sum%s %g\n", h.name, formatLabels(s.labels), float64FromBits(atomic.LoadUint64(&s.sumBits)))
+		fprintf(w, "%s_count%s %d\n", h.name, formatLabels(s.labels), atomic.LoadUint64(&s.countN))
 	}
 }
 
@@ -271,13 +272,13 @@ func (g *gaugeVec) Set(v float64, labelValues ...string) {
 }
 
 func (g *gaugeVec) write(w http.ResponseWriter) {
-	fmt.Fprintf(w, "# HELP %s %s\n", g.name, g.help)
-	fmt.Fprintf(w, "# TYPE %s gauge\n", g.name)
+	fprintf(w, "# HELP %s %s\n", g.name, g.help)
+	fprintf(w, "# TYPE %s gauge\n", g.name)
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	for _, key := range sortedKeys(g.series) {
 		s := g.series[key]
-		fmt.Fprintf(w, "%s%s %g\n", g.name, formatLabels(s.labels), float64FromBits(atomic.LoadUint64(&s.bits)))
+		fprintf(w, "%s%s %g\n", g.name, formatLabels(s.labels), float64FromBits(atomic.LoadUint64(&s.bits)))
 	}
 }
 
@@ -392,3 +393,12 @@ func sortedKeys[V any](m map[string]V) []string {
 
 func float64ToBits(v float64) uint64   { return math.Float64bits(v) }
 func float64FromBits(u uint64) float64 { return math.Float64frombits(u) }
+
+// fprintf wraps fmt.Fprintf and drops the returned byte count /
+// error. The Prometheus exposition format is best-effort: if the
+// client disconnects mid-scrape we simply stop writing — no retry,
+// no logging. Dedicating a helper keeps errcheck happy without
+// sprinkling `_, _ =` everywhere.
+func fprintf(w io.Writer, format string, a ...any) {
+	_, _ = fmt.Fprintf(w, format, a...)
+}
