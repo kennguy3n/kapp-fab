@@ -750,6 +750,7 @@ export interface InventoryItem {
   name: string;
   uom: string;
   active: boolean;
+  reorder_level: string;
 }
 
 export interface InventoryWarehouse {

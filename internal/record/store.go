@@ -508,9 +508,11 @@ func (s *PGStore) encryptFields(tenantID uuid.UUID, schema, data json.RawMessage
 		if !ok {
 			return nil, fmt.Errorf("record: encrypted field %q must be a string", name)
 		}
-		if tenant.IsEncrypted(plaintext) {
-			continue
-		}
+		// Always encrypt what we receive: callers only pass plaintext
+		// (validated user input on Create, decrypted-then-merged payload
+		// on Update), so a kapp:enc:v1: prefix here is user-supplied and
+		// must not be allowed to bypass encryption — doing so would
+		// store garbage verbatim and break decryption on read.
 		ct, err := s.encryptor.EncryptString(tenantID, plaintext)
 		if err != nil {
 			return nil, fmt.Errorf("record: encrypt field %q: %w", name, err)
