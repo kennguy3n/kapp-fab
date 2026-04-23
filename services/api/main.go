@@ -20,6 +20,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/agents"
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/base"
+	"github.com/kennguy3n/kapp-fab/internal/crm"
 	"github.com/kennguy3n/kapp-fab/internal/docs"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/files"
@@ -76,6 +77,24 @@ func run() error {
 	eventPublisher := events.NewPGPublisher(pool)
 	auditor := audit.NewPGLogger(pool)
 	recordStore := record.NewPGStore(pool, ktypeRegistry, eventPublisher, auditor)
+	// Per-tenant field-level encryption is opt-in: when KAPP_MASTER_KEY
+	// is set, derive per-tenant keys and plug the KeyManager into the
+	// record store so schema fields marked {"encrypted": true} round-trip
+	// through the database as ciphertext. Missing/short master keys are
+	// logged and the store falls back to plaintext so local dev keeps
+	// working without secrets plumbing.
+	if masterKey, err := tenant.LoadMasterKey(); err == nil {
+		km, err := tenant.NewKeyManager(masterKey, time.Hour)
+		if err != nil {
+			return err
+		}
+		recordStore = recordStore.WithEncryptor(km)
+		log.Printf("api: per-tenant field encryption enabled")
+	} else if !errors.Is(err, tenant.ErrMasterKeyMissing) {
+		return err
+	} else {
+		log.Printf("api: per-tenant field encryption disabled (%s unset)", tenant.MasterKeyEnvVar)
+	}
 	workflowEngine := workflow.NewEngine(pool, eventPublisher, auditor)
 	formStore := forms.NewStore(pool, ktypeRegistry, recordStore)
 	if adminPool != nil {
@@ -139,6 +158,9 @@ func run() error {
 		return err
 	}
 	if err := lms.RegisterKTypes(ctx, ktypeRegistry); err != nil {
+		return err
+	}
+	if err := crm.RegisterKTypes(ctx, ktypeRegistry); err != nil {
 		return err
 	}
 
