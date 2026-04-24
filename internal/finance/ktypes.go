@@ -24,13 +24,14 @@ import (
 // KType identifiers. Kept as constants so the router, agent tools, and
 // tests all reference the same strings.
 const (
-	KTypeAccount      = "finance.account"
-	KTypeJournalEntry = "finance.journal_entry"
-	KTypeARInvoice    = "finance.ar_invoice"
-	KTypeAPBill       = "finance.ap_bill"
-	KTypeCreditNote   = "finance.credit_note"
-	KTypeDebitNote    = "finance.debit_note"
-	KTypePaymentTerms = "finance.payment_terms"
+	KTypeAccount          = "finance.account"
+	KTypeJournalEntry     = "finance.journal_entry"
+	KTypeARInvoice        = "finance.ar_invoice"
+	KTypeAPBill           = "finance.ap_bill"
+	KTypeCreditNote       = "finance.credit_note"
+	KTypeDebitNote        = "finance.debit_note"
+	KTypeRecurringInvoice = "finance.recurring_invoice"
+	KTypePaymentTerms     = "finance.payment_terms"
 	// KTypePayment moved to payment.go — re-exported here via the
 	// payment.go file so the registry keeps finance.payment colocated
 	// with its schema.
@@ -290,6 +291,40 @@ var debitNoteSchema = []byte(`{
   "agent_tools": ["finance.post_debit_note"]
 }`)
 
+// recurringInvoiceSchema — Phase J recurring AR invoice template. The
+// row stores the cadence (frequency + start/end), the next time the
+// generator should fire, the template invoice to clone, and the
+// auto-post toggle. Generation is driven by the scheduler; each fire
+// clones template_invoice_id into a fresh draft (or posted, if
+// auto_post=true) and advances next_generation_date.
+var recurringInvoiceSchema = []byte(`{
+  "name": "finance.recurring_invoice",
+  "version": 1,
+  "fields": [
+    {"name": "name", "type": "string", "required": true, "max_length": 200},
+    {"name": "template_invoice_id", "type": "ref", "ktype": "finance.ar_invoice", "required": true},
+    {"name": "frequency", "type": "enum", "values": ["daily", "weekly", "monthly", "quarterly", "yearly"], "required": true},
+    {"name": "start_date", "type": "date", "required": true},
+    {"name": "end_date", "type": "date"},
+    {"name": "next_generation_date", "type": "date", "required": true},
+    {"name": "auto_post", "type": "boolean", "default": false},
+    {"name": "last_generated_at", "type": "datetime"},
+    {"name": "last_generated_invoice_id", "type": "string"},
+    {"name": "status", "type": "enum", "values": ["active", "paused", "completed"], "default": "active"}
+  ],
+  "views": {
+    "list": {"columns": ["name", "frequency", "next_generation_date", "auto_post", "status"]},
+    "form": {"sections": [
+      {"title": "Recurring Invoice", "fields": ["name", "template_invoice_id", "frequency", "auto_post", "status"]},
+      {"title": "Schedule", "fields": ["start_date", "end_date", "next_generation_date"]},
+      {"title": "Last Run", "fields": ["last_generated_at", "last_generated_invoice_id"]}
+    ]}
+  },
+  "cards": {"summary": "{{name}} — {{frequency}} (next {{next_generation_date}})"},
+  "permissions": {"read": ["tenant.member"], "write": ["finance.admin", "tenant.admin"]},
+  "agent_tools": ["finance.create_recurring_invoice"]
+}`)
+
 // paymentTermsSchema — Phase J payment-terms template. Each row
 // stores an installment plan that the invoice/bill poster
 // materialises into a payment_schedule on the source record.
@@ -322,6 +357,7 @@ func All() []ktype.KType {
 		{Name: KTypeCreditNote, Version: 1, Schema: creditNoteSchema},
 		{Name: KTypeDebitNote, Version: 1, Schema: debitNoteSchema},
 		{Name: KTypePayment, Version: 1, Schema: paymentSchema},
+		{Name: KTypeRecurringInvoice, Version: 1, Schema: recurringInvoiceSchema},
 		{Name: KTypePaymentTerms, Version: 1, Schema: paymentTermsSchema},
 	}
 }

@@ -180,12 +180,13 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 		}
 		out.RolesInserted = rolesInserted
 
-		// Seed the default SLA breach sweeper. Every fresh tenant
-		// gets a scheduled_actions row pointing the worker at the
-		// sla_breach_check handler so tickets authored before any
-		// manual configuration still raise warnings / breaches.
-		// A DO NOTHING on (tenant_id, action_type) keeps the seed
-		// idempotent if the wizard is re-run (e.g. by a re-import).
+		// Seed the default per-tenant scheduled_actions rows the
+		// worker handlers expect (SLA breach sweeper +
+		// recurring-invoice generator). Idempotent on
+		// (tenant_id, action_type) so a re-imported tenant never
+		// duplicates queue rows. The interval defaults match the
+		// values asserted by the integration drift tests in
+		// internal/integrationtest/{sla_breach_test,recurring_invoice_test}.go.
 		if err := seedDefaultScheduledActions(ctx, tx, tenantID); err != nil {
 			return err
 		}
@@ -241,38 +242,6 @@ func seedAccounts(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, accounts [
 		inserted++
 	}
 	return inserted, nil
-}
-
-// seedDefaultScheduledActions inserts the per-tenant scheduled rows
-// every fresh tenant needs. Currently only `sla_breach_check` is
-// seeded (Task 4) — recurring-invoice generation (Task 5) will add
-// a row for each recurring_invoice KRecord at create-time rather
-// than here, so the list stays short.
-//
-// The guard against duplicates is a NOT EXISTS on
-// (tenant_id, action_type); there is no unique index on that pair
-// (action_type is not modelled as singleton — a tenant can, in
-// theory, register multiple actions of the same type with different
-// payloads). The wizard's default seed is the only caller that
-// should respect the singleton invariant.
-func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) error {
-	now := time.Now().UTC()
-	_, err := tx.Exec(ctx,
-		`INSERT INTO scheduled_actions
-		     (tenant_id, action_type, interval_seconds, next_run_at, payload, enabled)
-		 SELECT $1, $2, $3, $4, '{}'::jsonb, TRUE
-		  WHERE NOT EXISTS (
-		    SELECT 1 FROM scheduled_actions
-		     WHERE tenant_id = $1 AND action_type = $2
-		  )`,
-		tenantID, defaultSLABreachActionType,
-		defaultSLABreachIntervalSeconds, now,
-	)
-	if err != nil {
-		return fmt.Errorf("tenant: seed scheduled action %s: %w",
-			defaultSLABreachActionType, err)
-	}
-	return nil
 }
 
 func seedRoles(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, roles []WizardRole) (int, error) {
@@ -343,4 +312,46 @@ func seedUsers(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID, user
 		inserted++
 	}
 	return inserted, nil
+}
+
+// Default scheduled-action constants. Kept local — duplicating the
+// strings here avoids a tenant → finance import cycle (finance
+// already depends on internal/scheduler which depends on internal/
+// platform which the wizard reaches indirectly through dbutil).
+// The drift-check integration test
+// (internal/integrationtest/recurring_invoice_test.go::TestSetupWizardSeedsRecurringInvoiceAction)
+// asserts both sides stay in lock-step.
+const (
+	defaultRecurringInvoiceActionType      = "recurring_invoice"
+	defaultRecurringInvoiceIntervalSeconds = 3600
+)
+
+// seedDefaultScheduledActions seeds the per-tenant scheduled_actions
+// rows the platform expects to exist after a successful wizard run.
+// Uses INSERT … WHERE NOT EXISTS so re-running the wizard is a no-op
+// and never duplicates queue rows.
+func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) error {
+	now := time.Now().UTC()
+	defaults := []struct {
+		actionType      string
+		intervalSeconds int
+	}{
+		{defaultSLABreachActionType, defaultSLABreachIntervalSeconds},
+		{defaultRecurringInvoiceActionType, defaultRecurringInvoiceIntervalSeconds},
+	}
+	for _, d := range defaults {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO scheduled_actions
+			     (tenant_id, action_type, interval_seconds, next_run_at, payload, enabled)
+			 SELECT $1, $2, $3, $4, '{}'::jsonb, TRUE
+			  WHERE NOT EXISTS (
+			      SELECT 1 FROM scheduled_actions
+			       WHERE tenant_id = $1 AND action_type = $2
+			  )`,
+			tenantID, d.actionType, d.intervalSeconds, now,
+		); err != nil {
+			return fmt.Errorf("tenant: seed scheduled action %s: %w", d.actionType, err)
+		}
+	}
+	return nil
 }

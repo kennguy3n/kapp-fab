@@ -65,6 +65,7 @@ const navSections: NavSection[] = [
       { to: "/records/finance.ap_bill", label: "Bills" },
       { to: "/records/finance.credit_note", label: "Credit Notes" },
       { to: "/records/finance.debit_note", label: "Debit Notes" },
+      { to: "/records/finance.recurring_invoice", label: "Recurring Invoices" },
       { to: "/records/finance.payment_terms", label: "Payment Terms" },
       { to: "/finance/accounts", label: "Chart of Accounts" },
       { to: "/finance/journal", label: "Journal Entries" },

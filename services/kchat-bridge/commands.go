@@ -124,9 +124,15 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 			return CommandResponse{Text: fmt.Sprintf("/ticket: %v", err)}, nil
 		}
 		return d.createRecord(ctx, req, helpdesk.KTypeTicket, data)
+	case "recurring-invoice":
+		data, err := recurringInvoiceFromArgs(req.Args)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/recurring-invoice: %v", err)}, nil
+		}
+		return d.createRecord(ctx, req, finance.KTypeRecurringInvoice, data)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /learn, /approve, /ticket, /form, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /learn, /approve, /ticket, /recurring-invoice, /form, /help",
 		}, nil
 	default:
 		return CommandResponse{
@@ -700,5 +706,57 @@ func ticketFromArgs(args []string, owner uuid.UUID) (map[string]any, error) {
 		return nil, errors.New("ticket subject required")
 	}
 	data["subject"] = strings.Join(subject, " ")
+	return data, nil
+}
+
+// recurringInvoiceFromArgs parses
+//
+//	/recurring-invoice <name> <template_invoice_id> <frequency> <start_date> [end=YYYY-MM-DD] [auto_post=true]
+//
+// `name` is a single token (use underscores or hyphens for spaces);
+// frequency is one of daily|weekly|monthly|quarterly|yearly. The
+// resulting record drives the recurring engine — start_date doubles
+// as next_generation_date so the very next sweeper tick fires the
+// first run.
+func recurringInvoiceFromArgs(args []string) (map[string]any, error) {
+	if len(args) < 4 {
+		return nil, errors.New("usage: /recurring-invoice <name> <template_invoice_id> <frequency> <start_date> [end=YYYY-MM-DD] [auto_post=true]")
+	}
+	name := args[0]
+	template, err := uuid.Parse(args[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid template_invoice_id: %w", err)
+	}
+	freq := strings.ToLower(args[2])
+	switch freq {
+	case finance.FrequencyDaily, finance.FrequencyWeekly, finance.FrequencyMonthly,
+		finance.FrequencyQuarterly, finance.FrequencyYearly:
+	default:
+		return nil, fmt.Errorf("invalid frequency %q", freq)
+	}
+	start := args[3]
+	data := map[string]any{
+		"name":                 name,
+		"template_invoice_id":  template.String(),
+		"frequency":            freq,
+		"start_date":           start,
+		"next_generation_date": start,
+		"auto_post":            false,
+		"status":               finance.RecurringStatusActive,
+	}
+	for _, tok := range args[4:] {
+		idx := strings.Index(tok, "=")
+		if idx < 1 {
+			continue
+		}
+		key := strings.ToLower(tok[:idx])
+		val := tok[idx+1:]
+		switch key {
+		case "end", "end_date":
+			data["end_date"] = val
+		case "auto_post":
+			data["auto_post"] = strings.EqualFold(val, "true")
+		}
+	}
 	return data, nil
 }

@@ -21,11 +21,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
+	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
+	"github.com/kennguy3n/kapp-fab/internal/inventory"
+	"github.com/kennguy3n/kapp-fab/internal/ktype"
+	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/scheduler"
 )
 
@@ -33,6 +39,14 @@ const (
 	tickInterval = 2 * time.Second
 	drainBatch   = 100
 )
+
+// workerSystemActor is the deterministic non-nil actor attributed
+// to background-generated records in the worker (recurring invoice
+// generator, future SLA-driven writes, scheduler-owned patches).
+// Parallels phaseASystemActor in services/api/records.go so audit
+// trails remain coherent whether the originating service was the
+// API or the worker.
+var workerSystemActor = uuid.MustParse("00000000-0000-0000-0000-000000000003")
 
 func main() {
 	if err := run(); err != nil {
@@ -130,13 +144,46 @@ func run() error {
 	alerts := newStockAlertWorker(pool, adminPool, publisher, dbutil.SetTenantContext)
 	go alerts.Run(ctx)
 
-	// Scheduled actions engine. The registry starts empty on main —
-	// this PR registers the SLA breach sweeper against action_type
-	// "sla_breach_check". The tenant wizard seeds that cadence per
-	// new tenant so the handler has live work once the scheduler
-	// claims a row.
+	// Scheduled actions engine. Registers both:
+	//   - the recurring AR invoice generator against action_type
+	//     "recurring_invoice"; reuses the api's record store +
+	//     invoice poster wiring so generated invoices emit the same
+	//     audit + outbox + inventory hook chain as a hand-authored
+	//     invoice. The worker stays a lightweight subset of the api
+	//     stack — no encryption, no quota enforcer — because
+	//     neither matters for a synthetic background-generated
+	//     draft.
+	//   - the SLA breach sweeper against action_type
+	//     "sla_breach_check"; the tenant wizard seeds that cadence
+	//     per new tenant so the handler has live work once the
+	//     scheduler claims a row.
 	schedStore := scheduler.NewStore(pool, adminPool)
 	schedRegistry := scheduler.NewRegistry()
+	auditor := audit.NewPGLogger(pool)
+	ktypeCache := platform.NewLRUCache(1024, 5*time.Minute)
+	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
+	recordStore := record.NewPGStore(pool, ktypeRegistry, publisher, auditor)
+	ledgerStore := ledger.NewPGStore(pool, publisher, auditor)
+	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
+	inventoryStore := inventory.NewPGStore(pool, publisher, auditor)
+	inventoryHook := inventory.NewPosterHook(inventoryStore)
+	invoicePoster.
+		WithSalesInvoiceHook(inventoryHook.OnSalesInvoicePosted).
+		WithPurchaseBillHook(inventoryHook.OnPurchaseBillPosted)
+	// systemActor stamps Created/UpdatedBy on generated invoices and
+	// is forwarded into PostSalesInvoice, which rejects uuid.Nil.
+	// Matches the deterministic actor used by the api's records
+	// handler (services/api/records.go) so audit trails stay
+	// coherent across origin services — a generated-then-posted
+	// invoice and a hand-authored-then-posted invoice attribute to
+	// the same synthetic UUID when no human actor is in context.
+	recurringEngine := finance.NewRecurringEngine(recordStore,
+		func(ctx context.Context, tenantID, invoiceID, actorID uuid.UUID) error {
+			_, err := invoicePoster.PostSalesInvoice(ctx, tenantID, invoiceID, actorID)
+			return err
+		},
+	).WithSystemActor(workerSystemActor)
+	schedRegistry.Register(finance.ActionTypeRecurringInvoice, recurringEngine)
 	helpdeskStore := helpdesk.NewStore(pool)
 	schedRegistry.Register(
 		helpdesk.ActionTypeSLABreach,

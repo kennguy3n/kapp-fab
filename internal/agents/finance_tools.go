@@ -31,6 +31,85 @@ func RegisterFinanceTools(x *Executor, ledgerStore *ledger.PGStore, poster *ledg
 	x.Register(&postCreditNoteTool{executor: x, poster: poster})
 	x.Register(&postDebitNoteTool{executor: x, poster: poster})
 	x.Register(&recordPaymentTool{executor: x, poster: paymentPoster})
+	x.Register(&createRecurringInvoiceTool{executor: x})
+}
+
+// ----- finance.create_recurring_invoice -----
+//
+// Creates a finance.recurring_invoice KRecord wrapping an existing
+// finance.ar_invoice template. The recurring engine (Task 5) sweeps
+// active rows and clones the template each cadence; this tool is the
+// agent-facing entry point that authors the cursor.
+type createRecurringInvoiceInput struct {
+	Name               string `json:"name"`
+	TemplateInvoiceID  string `json:"template_invoice_id"`
+	Frequency          string `json:"frequency"`
+	StartDate          string `json:"start_date"`
+	EndDate            string `json:"end_date,omitempty"`
+	NextGenerationDate string `json:"next_generation_date,omitempty"`
+	AutoPost           bool   `json:"auto_post"`
+}
+
+type createRecurringInvoiceTool struct{ executor *Executor }
+
+func (t *createRecurringInvoiceTool) Name() string               { return "finance.create_recurring_invoice" }
+func (t *createRecurringInvoiceTool) RequiresConfirmation() bool { return true }
+func (t *createRecurringInvoiceTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in createRecurringInvoiceInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.Name == "" {
+		return nil, errors.New("finance.create_recurring_invoice: name required")
+	}
+	if in.TemplateInvoiceID == "" {
+		return nil, errors.New("finance.create_recurring_invoice: template_invoice_id required")
+	}
+	if in.Frequency == "" {
+		return nil, errors.New("finance.create_recurring_invoice: frequency required")
+	}
+	if in.StartDate == "" {
+		return nil, errors.New("finance.create_recurring_invoice: start_date required")
+	}
+	// next_generation_date defaults to start_date so the very next
+	// scheduler tick eligible-for that tenant fires the first run.
+	nextGen := in.NextGenerationDate
+	if nextGen == "" {
+		nextGen = in.StartDate
+	}
+	data := map[string]any{
+		"name":                 in.Name,
+		"template_invoice_id":  in.TemplateInvoiceID,
+		"frequency":            in.Frequency,
+		"start_date":           in.StartDate,
+		"next_generation_date": nextGen,
+		"auto_post":            in.AutoPost,
+		"status":               finance.RecurringStatusActive,
+	}
+	if in.EndDate != "" {
+		data["end_date"] = in.EndDate
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(data)
+		return &Result{
+			Summary: fmt.Sprintf("Would create recurring invoice %q (%s, next %s)", in.Name, in.Frequency, nextGen),
+			Preview: preview,
+		}, nil
+	}
+	dataJSON, _ := json.Marshal(data)
+	rec, err := t.executor.records.Create(ctx, record.KRecord{
+		TenantID:  inv.TenantID,
+		KType:     finance.KTypeRecurringInvoice,
+		Data:      dataJSON,
+		CreatedBy: inv.ActorID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Result{
+		Summary: fmt.Sprintf("Created recurring invoice %s (%s, next %s)", rec.ID, in.Frequency, nextGen),
+		Record:  rec,
+	}, nil
 }
 
 // ----- finance.create_sales_invoice -----
