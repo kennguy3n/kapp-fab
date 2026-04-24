@@ -87,25 +87,32 @@ func verifyAuditChain(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUI
 				return fmt.Errorf("audit verify: scan: %w", err)
 			}
 			res.Checked++
-			// Skip rows that pre-date the chain migration.
-			if rowHash == nil {
-				continue
-			}
-			if !bytes.Equal(prevHash, lastHash) {
-				res.BreakAt = &id
-				res.Reason = "prev_hash mismatch"
-				return nil
-			}
-			entry := audit.Entry{
-				TenantID: tID,
-				Action:   action,
-				TargetID: targetID,
-			}
-			want := audit.ComputeRowHash(prevHash, entry, before, after, contextB, createdAt)
-			if !bytes.Equal(want, rowHash) {
-				res.BreakAt = &id
-				res.Reason = "row_hash mismatch"
-				return nil
+			// Pre-chain rows (rowHash == nil) pre-date the chain
+			// migration and are not verifiable, but we still update
+			// lastHash so the next chain row's prev_hash is
+			// compared against what actually sits in the tenant's
+			// tail of the table (which may itself be a backfilled
+			// row with a non-nil row_hash). Skipping verification
+			// without updating lastHash can cause spurious
+			// prev_hash mismatches when pre-chain and chain rows
+			// interleave.
+			if rowHash != nil {
+				if !bytes.Equal(prevHash, lastHash) {
+					res.BreakAt = &id
+					res.Reason = "prev_hash mismatch"
+					return nil
+				}
+				entry := audit.Entry{
+					TenantID: tID,
+					Action:   action,
+					TargetID: targetID,
+				}
+				want := audit.ComputeRowHash(prevHash, entry, before, after, contextB, createdAt)
+				if !bytes.Equal(want, rowHash) {
+					res.BreakAt = &id
+					res.Reason = "row_hash mismatch"
+					return nil
+				}
 			}
 			lastHash = rowHash
 		}

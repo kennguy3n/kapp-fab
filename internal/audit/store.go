@@ -80,7 +80,14 @@ func (l *PGLogger) LogTx(ctx context.Context, tx pgx.Tx, entry Entry) error {
 	if err != nil {
 		return err
 	}
-	createdAt := time.Now().UTC()
+	// Truncate to microsecond BEFORE hashing and insertion. PostgreSQL
+	// TIMESTAMPTZ has µs precision, so a ns-precision timestamp stored
+	// and read back drops its sub-µs component. The verifier re-reads
+	// the column and re-hashes, so if we hashed the ns form here and
+	// inserted the ns form, verification would always fail by a
+	// truncated ns count. Hashing the already-truncated value keeps
+	// the write-side and read-side bit-for-bit identical.
+	createdAt := time.Now().UTC().Truncate(time.Microsecond)
 	rowHash := computeRowHash(prevHash, entry, before, after, c, createdAt)
 	_, err = tx.Exec(ctx,
 		`INSERT INTO audit_log
@@ -178,20 +185,43 @@ func computeRowHash(prev []byte, entry Entry, before, after, contextVal any, cre
 
 // jsonBytes is the inverse of normalizeJSON: we get back whatever
 // normalizeJSON returned and want a byte slice for hashing.
+//
+// The slice is canonicalized to the compact, sorted form json.Marshal
+// produces so the logger (which sees the original in-memory bytes
+// from the caller) and the verifier (which re-reads the JSONB column,
+// which PostgreSQL re-serializes with `": "` / `", "` spacing when
+// casting to text and again when returning as []byte) agree on the
+// same input regardless of storage-side normalization. Any byte slice
+// that parses as JSON is round-tripped through json.Unmarshal +
+// json.Marshal; anything else is passed through unchanged so opaque
+///empty inputs still hash deterministically.
 func jsonBytes(v any) []byte {
+	var raw []byte
 	switch t := v.(type) {
 	case nil:
 		return nil
 	case json.RawMessage:
-		return t
+		raw = []byte(t)
 	case []byte:
-		return t
+		raw = t
 	case string:
-		return []byte(t)
+		raw = []byte(t)
 	default:
 		b, _ := json.Marshal(v)
-		return b
+		raw = b
 	}
+	if len(raw) == 0 {
+		return raw
+	}
+	var out any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return raw
+	}
+	canonical, err := json.Marshal(out)
+	if err != nil {
+		return raw
+	}
+	return canonical
 }
 
 func normalizeJSON(v json.RawMessage) any {
