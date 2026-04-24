@@ -198,7 +198,8 @@ func (e *RecurringEngine) generateOne(
 			// the next sweep skips it cheaply rather than
 			// computing the cursor every time.
 			data["status"] = RecurringStatusCompleted
-			return e.persistRecurring(ctx, tenantID, row, data)
+			_, err := e.persistRecurring(ctx, tenantID, row, data)
+			return err
 		}
 	}
 	templateIDStr, _ := data["template_invoice_id"].(string)
@@ -219,8 +220,24 @@ func (e *RecurringEngine) generateOne(
 	// Catch-up loop: one iteration per missed cadence step. Each
 	// iteration clones the template against the cursor (the
 	// scheduled date — not today), advances the cursor from that
-	// same date, and stops when the cursor moves past today or the
-	// end_date.
+	// same date, persists the advanced cursor on the recurring row,
+	// and stops when the cursor moves past today or the end_date.
+	//
+	// Why the persist fires inside the loop rather than once at the
+	// end: record.Store.Create (cloneTemplate) commits in its own
+	// tx, so every successful clone is durable the moment it
+	// returns. If we batched cursor writes to the tail of the loop
+	// and the final Update then failed (ErrVersionConflict from a
+	// concurrent UI edit, transient DB error, etc.), the already-
+	// committed invoices from the preceding iterations would be
+	// re-generated on the next sweep because the cursor never
+	// advanced. Persisting after each clone makes the (clone,
+	// cursor advance) pair atomic from the sweeper's perspective:
+	// on mid-loop failure the cursor already reflects the writes
+	// that did land, so the next sweep resumes cleanly. The N
+	// extra Updates per sweep are cheap relative to the DB cost of
+	// re-posting duplicate invoices.
+	current := row
 	for i := 0; i < maxCatchUpIterations; i++ {
 		if cursor.After(today) {
 			break
@@ -246,15 +263,29 @@ func (e *RecurringEngine) generateOne(
 		if err != nil {
 			return fmt.Errorf("advance cadence: %w", err)
 		}
+		cursor = advanced
 		data["last_generated_at"] = e.now().UTC().Format(time.RFC3339)
 		data["last_generated_invoice_id"] = created.ID.String()
-		cursor = advanced
+		data["next_generation_date"] = cursor.Format(dateLayout)
+		if hasEnd && cursor.After(endDate) {
+			data["status"] = RecurringStatusCompleted
+		}
+		updated, err := e.persistRecurring(ctx, tenantID, current, data)
+		if err != nil {
+			// The clone already committed; surface the error so
+			// the sweep logs it, but leave subsequent iterations
+			// (if any) to the next sweep — by then the caller or
+			// a retry will see the fresh cursor state in storage.
+			return fmt.Errorf("persist cursor after clone %s: %w", created.ID, err)
+		}
+		current = *updated
+		// Guard against a runaway in case cloneTemplate started
+		// returning stale clones that never advance past today.
+		if hasEnd && cursor.After(endDate) {
+			break
+		}
 	}
-	data["next_generation_date"] = cursor.Format(dateLayout)
-	if hasEnd && cursor.After(endDate) {
-		data["status"] = RecurringStatusCompleted
-	}
-	return e.persistRecurring(ctx, tenantID, row, data)
+	return nil
 }
 
 // cloneTemplate copies the template invoice's data into a fresh
@@ -309,32 +340,37 @@ func (e *RecurringEngine) cloneTemplate(
 }
 
 // persistRecurring writes the updated recurring_invoice data back
-// through the record store so audit + outbox fire normally.
+// through the record store so audit + outbox fire normally. Returns
+// the stored record so callers can refresh the optimistic-concurrency
+// version between catch-up iterations — without this, looping
+// persists would trip ErrVersionConflict after the first call even
+// though no other writer touched the row.
 func (e *RecurringEngine) persistRecurring(
 	ctx context.Context,
 	tenantID uuid.UUID,
 	row record.KRecord,
 	data map[string]any,
-) error {
+) (*record.KRecord, error) {
 	patch, err := json.Marshal(data)
 	if err != nil {
-		return fmt.Errorf("encode recurring patch: %w", err)
+		return nil, fmt.Errorf("encode recurring patch: %w", err)
 	}
 	actor := e.systemActor
 	if actor == uuid.Nil {
 		actor = row.CreatedBy
 	}
-	if _, err := e.records.Update(ctx, record.KRecord{
+	updated, err := e.records.Update(ctx, record.KRecord{
 		ID:        row.ID,
 		TenantID:  tenantID,
 		KType:     row.KType,
 		Data:      patch,
 		Version:   row.Version,
 		UpdatedBy: &actor,
-	}); err != nil {
-		return fmt.Errorf("update recurring row: %w", err)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("update recurring row: %w", err)
 	}
-	return nil
+	return updated, nil
 }
 
 // AdvanceDate returns the next firing date for the given frequency.

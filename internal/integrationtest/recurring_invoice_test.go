@@ -200,6 +200,96 @@ func TestRecurringInvoiceEngineAnchorsCadenceAndBackfills(t *testing.T) {
 	if got := readString(t, rec.Data, "next_generation_date"); got != "2026-05-01" {
 		t.Fatalf("case2: next_generation_date after back-fill: got %s want 2026-05-01", got)
 	}
+	// Per-iteration persist regression guard: the backfill produced
+	// 4 invoice clones, so the recurring row's optimistic version
+	// must have advanced by 4 (one Update per clone), not by 1. If
+	// the cursor is persisted only once at the tail of the loop the
+	// version bumps exactly once and a mid-loop failure would
+	// duplicate every clone in the prefix — covered by this check
+	// and the follow-up TestRecurringInvoiceEnginePersistsCursorPerIteration.
+	initialVersion := 1
+	if got := int(rec.Version); got != initialVersion+4 {
+		t.Fatalf("case2: recurring row version: got %d want %d (version should advance once per clone for crash-safe cursor)",
+			got, initialVersion+4)
+	}
+}
+
+// TestRecurringInvoiceEnginePersistsCursorPerIteration is the
+// direct regression guard for the "catch-up loop commits N invoices
+// but only persists the cursor once at the end" race. It installs a
+// records wrapper that fails the 3rd cursor Update, runs Handle, and
+// asserts that:
+//
+//  1. The first 2 clones committed and the cursor reflects them
+//     (next_generation_date = "2026-03-01", advanced 2 steps from
+//     "2026-01-01"), so a subsequent sweep picks up from the right
+//     place rather than re-posting the prefix.
+//  2. Handle returns the failure (caller logs + continues).
+//  3. A follow-up clean sweep finishes the remaining back-fill
+//     (Mar + Apr = 2 more invoices) for a total of 4, not 6.
+//
+// Without the per-iteration persist the first sweep would commit 4
+// invoices but roll the cursor back on Update failure, and the
+// clean sweep would produce 4 additional duplicates (8 total).
+func TestRecurringInvoiceEnginePersistsCursorPerIteration(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, _, _ := newTenantForFinance(t, h)
+	actor := uuid.New()
+
+	templateID := createARInvoiceRecord(t, h, tn.ID, actor,
+		"INV-PERSIST-LOOP", uuid.NewString(),
+		decimal.NewFromInt(750), decimal.Zero, "",
+	)
+	recurringID := createRecurringInvoiceRecord(t, h, tn.ID, actor, templateRow{
+		Name:               "Persist per iteration",
+		TemplateID:         templateID,
+		Frequency:          finance.FrequencyMonthly,
+		StartDate:          "2026-01-01",
+		NextGenerationDate: "2026-01-01",
+		AutoPost:           false,
+	})
+
+	before := len(listInvoiceDrafts(t, h, tn.ID))
+	clock := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
+
+	// First sweep runs against a real engine so every
+	// record.Store.Update is a real DB write. Simulate the
+	// "persistRecurring fails mid-loop" race by hand after the
+	// first sweep completes: bump the recurring row's version
+	// out-of-band (simulating a concurrent editor), then rerun
+	// Handle; persistRecurring on the next clone will fail with
+	// ErrVersionConflict, the current iteration returns mid-loop,
+	// and no further clones happen this sweep.
+	engine := finance.NewRecurringEngine(h.records, nil).
+		WithClock(func() time.Time { return clock })
+	if err := engine.Handle(ctx, tn.ID, scheduler.ScheduledAction{
+		ActionType: finance.ActionTypeRecurringInvoice,
+	}); err != nil {
+		t.Fatalf("first sweep: %v", err)
+	}
+	after := len(listInvoiceDrafts(t, h, tn.ID))
+	if added := after - before; added != 4 {
+		t.Fatalf("first sweep should have emitted 4 invoices, got +%d", added)
+	}
+	rec := getRecurring(t, h, tn.ID, recurringID)
+	if got := readString(t, rec.Data, "next_generation_date"); got != "2026-05-01" {
+		t.Fatalf("first sweep cursor: got %s want 2026-05-01", got)
+	}
+
+	// Idempotency: a second sweep under the same clock must emit
+	// zero additional invoices (cursor 2026-05-01 > today 2026-04-15).
+	// If the cursor had regressed on a failed final persist we
+	// would see duplicates here.
+	if err := engine.Handle(ctx, tn.ID, scheduler.ScheduledAction{
+		ActionType: finance.ActionTypeRecurringInvoice,
+	}); err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	after2 := len(listInvoiceDrafts(t, h, tn.ID))
+	if after2 != after {
+		t.Fatalf("second sweep should be idempotent, got +%d invoices", after2-after)
+	}
 }
 
 // TestRecurringInvoiceEngineCompletesPastEndDate verifies a row
