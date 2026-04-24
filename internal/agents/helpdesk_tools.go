@@ -161,11 +161,15 @@ func (t *assignTicketTool) Invoke(ctx context.Context, inv Invocation) (*Result,
 		return nil, err
 	}
 	// Advance the workflow to in_progress when it is currently at open.
+	// Mirror resolveTicketTool: only overwrite `run` on success so a
+	// lost-race ErrRunNotFound doesn't blank out the run we already
+	// fetched for the response.
 	run, _ := t.executor.workflow.GetRunByRecord(ctx, inv.TenantID, in.RecordID)
 	if run != nil && run.State == "open" {
-		run, err = t.executor.workflow.Transition(ctx, inv.TenantID, run.ID, "start", inv.ActorID)
-		if err != nil && !errors.Is(err, workflow.ErrRunNotFound) {
-			return nil, err
+		if nextRun, terr := t.executor.workflow.Transition(ctx, inv.TenantID, run.ID, "start", inv.ActorID); terr == nil {
+			run = nextRun
+		} else if !errors.Is(terr, workflow.ErrRunNotFound) {
+			return nil, terr
 		}
 	}
 	return &Result{
