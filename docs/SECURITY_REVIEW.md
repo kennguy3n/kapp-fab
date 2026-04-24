@@ -1,12 +1,12 @@
-# Kapp Security Review — Phase G
+# Kapp Security Review — Phase G–I
 
 This document is the living security review checklist for Kapp's
 shared-infrastructure multi-tenancy model. It captures what was
 verified, what the evidence is, and which areas remain open.
 
-**Last reviewed**: 2026-04-23
-**Scope**: Phase A–G merged to `main`, including the Phase G hardening
-changes landed in this PR.
+**Last reviewed**: 2026-04-24
+**Scope**: Phase A–I merged to `main`, including the Phase H hardening
+slice (PR #22) and the Phase I feature slice (PR #24).
 
 ---
 
@@ -28,6 +28,13 @@ not exempt), and a policy that ties reads + writes to
 | `000009_base_docs.sql` | base_tables, base_rows, docs_documents, docs_document_versions, files | Yes |
 | `000010_phase_g.sql` | saved_views | Yes |
 | `000011_sales_procurement_bank.sql` | bank_accounts, bank_transactions, cost_centers | Yes |
+| `000013_auth_sessions.sql` | sessions | Yes |
+| `000014_notifications.sql` | notifications | Yes |
+| `000015_permissions.sql` | permissions | Yes |
+| `000016_audit_hash_chain.sql` | audit_log (prev_hash, row_hash additions — hash-chain columns on existing RLS-enabled table) | Yes |
+| `000017_multi_currency.sql` | exchange_rates | Yes |
+| `000018_helpdesk.sql` | sla_policies, ticket_sla_log | Yes |
+| `000019_reports.sql` | saved_reports | Yes |
 
 **Verification command** (run against a dev DB):
 
@@ -44,7 +51,10 @@ psql -At -c "
                      'docs_document_versions','forms','import_jobs',
                      'import_staging','leave_ledger','lesson_progress',
                      'saved_views','bank_accounts','bank_transactions',
-                     'cost_centers','idempotency_keys')
+                     'cost_centers','idempotency_keys',
+                     'sessions','notifications','permissions',
+                     'exchange_rates','sla_policies','ticket_sla_log',
+                     'saved_reports')
    ORDER BY relname;"
 ```
 
