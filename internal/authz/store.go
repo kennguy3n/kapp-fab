@@ -91,6 +91,36 @@ func (e *PGEvaluator) queryPermissions(
 			}
 			return fmt.Errorf("authz: lookup role: %w", err)
 		}
+		// Phase H: the permissions table carries fine-grained grants
+		// per (role, ktype, action). When rows exist we use those as
+		// the authoritative set; when the table is empty for this
+		// role we fall back to the legacy roles.permissions JSONB
+		// blob so existing tenants keep working without a backfill.
+		rows, err := tx.Query(ctx,
+			`SELECT action, ktype FROM permissions
+			 WHERE tenant_id = $1 AND role_name = $2 AND revoked_at IS NULL`,
+			tenantID, role,
+		)
+		if err != nil {
+			return fmt.Errorf("authz: lookup permissions rows: %w", err)
+		}
+		perms := make([]Permission, 0)
+		for rows.Next() {
+			var p Permission
+			if err := rows.Scan(&p.Action, &p.Resource); err != nil {
+				rows.Close()
+				return fmt.Errorf("authz: scan permission: %w", err)
+			}
+			perms = append(perms, p)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("authz: iterate permissions: %w", err)
+		}
+		if len(perms) > 0 {
+			out = perms
+			return nil
+		}
 		var raw json.RawMessage
 		err = tx.QueryRow(ctx,
 			`SELECT permissions FROM roles WHERE tenant_id = $1 AND name = $2`,

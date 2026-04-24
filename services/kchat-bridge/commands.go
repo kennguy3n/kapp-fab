@@ -89,6 +89,24 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 			return CommandResponse{Text: fmt.Sprintf("/bill: %v", err)}, nil
 		}
 		return d.createRecord(ctx, req, finance.KTypeAPBill, data)
+	case "customer":
+		data, err := customerFromArgs(req.Args, req.UserID)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/customer: %v", err)}, nil
+		}
+		return d.createRecord(ctx, req, crm.KTypeCustomer, data)
+	case "supplier":
+		data, err := supplierFromArgs(req.Args, req.UserID)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/supplier: %v", err)}, nil
+		}
+		return d.createRecord(ctx, req, crm.KTypeSupplier, data)
+	case "payment":
+		data, err := paymentFromArgs(req.Args, req.UserID)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/payment: %v", err)}, nil
+		}
+		return d.createRecord(ctx, req, finance.KTypePayment, data)
 	case "post-invoice":
 		return d.postInvoice(ctx, req)
 	case "post-bill":
@@ -101,7 +119,7 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.formLink(req)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /invoice, /bill, /post-invoice, /post-bill, /stock, /learn, /approve, /form, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /learn, /approve, /form, /help",
 		}, nil
 	default:
 		return CommandResponse{
@@ -484,6 +502,117 @@ func invoiceFromArgs(args []string, owner uuid.UUID) (map[string]any, error) {
 		data["invoice_number"] = args[3]
 	}
 	return data, nil
+}
+
+// customerFromArgs expects `<name...> [currency] [credit_limit]`. Trailing
+// tokens are opportunistically parsed: a 3-letter upper-case string is
+// treated as ISO-4217 currency; a numeric token becomes credit_limit.
+func customerFromArgs(args []string, owner uuid.UUID) (map[string]any, error) {
+	if len(args) == 0 {
+		return nil, errors.New("usage: /customer <name> [currency] [credit_limit]")
+	}
+	nameParts := args
+	currency := ""
+	creditLimit := 0.0
+	for len(nameParts) > 0 {
+		last := nameParts[len(nameParts)-1]
+		if v, err := strconv.ParseFloat(last, 64); err == nil && creditLimit == 0 {
+			creditLimit = v
+			nameParts = nameParts[:len(nameParts)-1]
+			continue
+		}
+		if len(last) == 3 && strings.ToUpper(last) == last && currency == "" {
+			currency = last
+			nameParts = nameParts[:len(nameParts)-1]
+			continue
+		}
+		break
+	}
+	if len(nameParts) == 0 {
+		return nil, errors.New("customer name required")
+	}
+	if currency == "" {
+		currency = "USD"
+	}
+	data := map[string]any{
+		"name":            strings.Join(nameParts, " "),
+		"currency":        currency,
+		"status":          "active",
+		"ar_aging_bucket": "current",
+		"owner":           owner.String(),
+	}
+	if creditLimit > 0 {
+		data["credit_limit"] = creditLimit
+	}
+	return data, nil
+}
+
+// supplierFromArgs mirrors customerFromArgs without credit_limit.
+func supplierFromArgs(args []string, owner uuid.UUID) (map[string]any, error) {
+	if len(args) == 0 {
+		return nil, errors.New("usage: /supplier <name> [currency]")
+	}
+	nameParts := args
+	currency := ""
+	if last := args[len(args)-1]; len(last) == 3 && strings.ToUpper(last) == last {
+		currency = last
+		nameParts = args[:len(args)-1]
+	}
+	if len(nameParts) == 0 {
+		return nil, errors.New("supplier name required")
+	}
+	if currency == "" {
+		currency = "USD"
+	}
+	return map[string]any{
+		"name":            strings.Join(nameParts, " "),
+		"currency":        currency,
+		"status":          "active",
+		"ap_aging_bucket": "current",
+		"owner":           owner.String(),
+	}, nil
+}
+
+// paymentFromArgs parses /payment <receive|pay> <party_id> <amount> [currency] [reference].
+// Optional allocation flags (invoice=id:amount) are accepted for
+// multi-invoice settlement; the slash command records the draft and
+// leaves posting to an explicit /post-payment follow-up.
+func paymentFromArgs(args []string, owner uuid.UUID) (map[string]any, error) {
+	if len(args) < 3 {
+		return nil, errors.New("usage: /payment <receive|pay> <party_id> <amount> [currency] [reference]")
+	}
+	paymentType := strings.ToLower(args[0])
+	if paymentType != "receive" && paymentType != "pay" {
+		return nil, errors.New("payment_type must be 'receive' or 'pay'")
+	}
+	partyID := args[1]
+	amount, err := strconv.ParseFloat(args[2], 64)
+	if err != nil || amount <= 0 {
+		return nil, fmt.Errorf("invalid amount: %s", args[2])
+	}
+	currency := "USD"
+	reference := ""
+	for _, a := range args[3:] {
+		if len(a) == 3 && strings.ToUpper(a) == a {
+			currency = a
+			continue
+		}
+		reference = a
+	}
+	partyType := "customer"
+	if paymentType == "pay" {
+		partyType = "supplier"
+	}
+	return map[string]any{
+		"payment_type": paymentType,
+		"party_type":   partyType,
+		"party_id":     partyID,
+		"amount":       amount,
+		"currency":     currency,
+		"reference":    reference,
+		"status":       "draft",
+		"owner":        owner.String(),
+	}, nil
 }
 
 // billFromArgs mirrors invoiceFromArgs for finance.ap_bill.

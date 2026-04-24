@@ -16,10 +16,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/kapp-fab/internal/agents"
 	"github.com/kennguy3n/kapp-fab/internal/audit"
+	"github.com/kennguy3n/kapp-fab/internal/auth"
 	"github.com/kennguy3n/kapp-fab/internal/base"
 	"github.com/kennguy3n/kapp-fab/internal/crm"
 	"github.com/kennguy3n/kapp-fab/internal/docs"
@@ -32,6 +34,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
+	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/sales"
@@ -86,12 +89,20 @@ func run() error {
 	// logged and the store falls back to plaintext so local dev keeps
 	// working without secrets plumbing.
 	if masterKey, err := tenant.LoadMasterKey(); err == nil {
-		km, err := tenant.NewKeyManager(masterKey, time.Hour)
+		prevKey, perr := tenant.LoadPrevMasterKey()
+		if perr != nil {
+			return perr
+		}
+		km, err := tenant.NewKeyManagerWithPrev(masterKey, prevKey, time.Hour)
 		if err != nil {
 			return err
 		}
 		recordStore = recordStore.WithEncryptor(km)
-		log.Printf("api: per-tenant field encryption enabled")
+		if prevKey != nil {
+			log.Printf("api: per-tenant field encryption enabled (dual-key rotation active)")
+		} else {
+			log.Printf("api: per-tenant field encryption enabled")
+		}
 	} else if !errors.Is(err, tenant.ErrMasterKeyMissing) {
 		return err
 	} else {
@@ -111,6 +122,7 @@ func run() error {
 	// the single outbox + audit tables used by the rest of the kernel.
 	ledgerStore := ledger.NewPGStore(pool, eventPublisher, auditor)
 	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
+	paymentPoster := ledger.NewPaymentPoster(ledgerStore, recordStore)
 
 	// Phase D inventory engine — items, warehouses, append-only stock
 	// moves, and the derived stock_levels view. Wiring the same event
@@ -140,7 +152,25 @@ func run() error {
 	// of the API. The object store defaults to an in-process MemoryStore
 	// so local dev works without MinIO; production overrides it by
 	// mounting an S3-compatible store through the ObjectStore interface.
-	objectStore := files.NewMemoryStore()
+	var objectStore files.ObjectStore = files.NewMemoryStore()
+	if bucket := os.Getenv("S3_BUCKET"); bucket != "" {
+		s3cfg := files.S3StoreConfig{
+			Endpoint:       os.Getenv("S3_ENDPOINT"),
+			Region:         os.Getenv("S3_REGION"),
+			Bucket:         bucket,
+			AccessKey:      os.Getenv("S3_ACCESS_KEY"),
+			SecretKey:      os.Getenv("S3_SECRET_KEY"),
+			ForcePathStyle: true,
+		}
+		s3store, err := files.NewS3Store(ctx, s3cfg)
+		if err != nil {
+			return fmt.Errorf("files: init S3 store: %w", err)
+		}
+		objectStore = s3store
+		log.Printf("api: file object store = S3 (bucket=%s endpoint=%s)", bucket, s3cfg.Endpoint)
+	} else {
+		log.Printf("api: file object store = in-memory (S3_BUCKET unset)")
+	}
 	filesStore := files.NewStore(pool, objectStore)
 	baseStore := base.NewStore(pool)
 	docsStore := docs.NewStore(pool)
@@ -193,20 +223,20 @@ func run() error {
 	// inventory read + move tools.
 	executor := agents.NewExecutor(recordStore, workflowEngine, auditor)
 	agents.RegisterCRMTools(executor)
-	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster)
+	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster, paymentPoster)
 	agents.RegisterInventoryTools(executor, inventoryStore)
 	agents.RegisterHRTools(executor, hrStore)
 	agents.RegisterLMSTools(executor, lmsStore)
 
 	fh := &formsHandlers{store: formStore, registry: ktypeRegistry}
-	th := &tenantHandlers{svc: tenantSvc}
+	th := &tenantHandlers{svc: tenantSvc, wizard: tenant.NewWizard(pool)}
 	kh := &ktypeHandlers{registry: ktypeRegistry}
 	rh := &recordHandlers{store: recordStore}
 	wh := &workflowHandlers{engine: workflowEngine, store: recordStore, registry: ktypeRegistry}
 	ah := &agentHandlers{executor: executor}
 	aph := &approvalsHandlers{engine: workflowEngine, store: recordStore}
 	auh := &auditHandlers{pool: pool}
-	finh := &financeHandlers{store: ledgerStore, poster: invoicePoster}
+	finh := &financeHandlers{store: ledgerStore, poster: invoicePoster, payments: paymentPoster}
 	invh := &inventoryHandlers{store: inventoryStore}
 	oh := &openAPIHandler{registry: ktypeRegistry}
 	fileh := &filesHandlers{store: filesStore}
@@ -215,6 +245,32 @@ func run() error {
 	eh := &eventsHandlers{pool: pool}
 	vh := &viewHandlers{store: record.NewViewStore(pool)}
 
+	// Phase H JWT auth. The signer is built from KAPP_JWT_SECRET; when
+	// the secret is absent we log and skip wiring the SSO endpoints so
+	// local dev that still relies on the X-Tenant-ID header keeps
+	// working. The session store is tenant-scoped and is wired even
+	// when SSO is off so a future boot can pick it up without a
+	// restart-time schema change.
+	authh := &authHandlers{}
+	sessionStore := auth.NewPGSessionStore(pool)
+	if adminPool != nil {
+		sessionStore = sessionStore.WithQuotaLoader(func(ctx context.Context, tenantID uuid.UUID) (json.RawMessage, error) {
+			t, err := tenantSvc.Get(ctx, tenantID)
+			if err != nil {
+				return nil, err
+			}
+			return t.Quota, nil
+		})
+	}
+	if signer, err := newAuthSigner(); err == nil {
+		kchat := auth.NewHTTPKChatClient(os.Getenv("KCHAT_BASE_URL"), os.Getenv("KCHAT_API_KEY"))
+		authh.signer = signer
+		authh.svc = auth.NewSSOService(kchat, signer, sessionStore, pool, adminPool)
+		log.Printf("api: JWT auth enabled (HS256)")
+	} else {
+		log.Printf("api: JWT auth disabled (%v)", err)
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -222,6 +278,15 @@ func run() error {
 
 	r.Get("/healthz", healthHandler(pool))
 	r.Get("/api/v1/", rootHandler)
+
+	// Phase H auth routes. SSO and refresh are unauthenticated (they
+	// bootstrap the auth context); the rest of the surface will be
+	// migrated onto the Bearer-token middleware over subsequent PRs
+	// while the X-Tenant-ID header keeps working for local dev.
+	r.Route("/api/v1/auth", func(r chi.Router) {
+		r.Post("/sso", authh.sso)
+		r.Post("/refresh", authh.refresh)
+	})
 
 	// Phase F event stream. SSE tail of the tenant's outbox so the web
 	// UI can react to state changes without polling. Defined at the root
@@ -250,6 +315,7 @@ func run() error {
 		r.Post("/{id}/activate", th.activate)
 		r.Post("/{id}/archive", th.archive)
 		r.Delete("/{id}", th.delete)
+		r.Post("/{id}/setup", th.setup)
 	})
 
 	// KType registry routes (shared metadata, not tenant-scoped).
@@ -323,6 +389,7 @@ func run() error {
 	r.Route("/api/v1/audit", func(r chi.Router) {
 		r.Use(platform.TenantMiddleware(tenantSvc))
 		r.Get("/", auh.list)
+		r.Get("/verify", auh.verify)
 	})
 
 	// Finance surface (Phase C). Chart of accounts, journal entries,
@@ -345,6 +412,7 @@ func run() error {
 		r.Post("/bills/{id}/post", finh.postBill)
 		r.Post("/credit-notes/{id}/post", finh.postCreditNote)
 		r.Post("/debit-notes/{id}/post", finh.postDebitNote)
+		r.Post("/payments/{id}/post", finh.postPayment)
 		r.Post("/tax-codes", finh.upsertTaxCode)
 		r.Get("/tax-codes", finh.listTaxCodes)
 		r.Get("/tax-codes/{code}", finh.getTaxCode)
@@ -444,6 +512,20 @@ func run() error {
 		r.Post("/{id}/versions", dh.saveVersion)
 		r.Get("/{id}/versions", dh.versions)
 		r.Post("/{id}/restore", dh.restore)
+	})
+
+	// Phase H notifications inbox — durable in-app bell/inbox surface
+	// backed by the notifications table. External transports (KChat,
+	// webhook, email) are served by the worker; this endpoint backs
+	// the web inbox regardless of transport success.
+	notifStore := notifications.NewStore(pool)
+	nh := newNotificationsHandlers(notifStore)
+	r.Route("/api/v1/notifications", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Get("/", nh.list)
+		r.Post("/{id}/read", nh.markRead)
+		r.Post("/read-all", nh.markAllRead)
 	})
 
 	// Phase G saved views — per-user, per-KType filter/sort/column

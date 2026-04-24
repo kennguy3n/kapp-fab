@@ -82,7 +82,11 @@ jobs:
             -f migrations/000006_hr.sql
           psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
             -f migrations/000007_lms.sql
-          for f in migrations/000008_*.sql migrations/000009_*.sql migrations/000010_*.sql; do
+          for f in migrations/0000[0-9][0-9]_*.sql; do
+            case "$f" in
+              migrations/000001_*|migrations/000002_*|migrations/000003_*|migrations/000004_*|migrations/000005_*|migrations/000006_*|migrations/000007_*)
+                continue ;;
+            esac
             [ -f "$f" ] && psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 -f "$f"
           done
       - name: go test -tags=integration

@@ -27,6 +27,8 @@ const (
 	KTypeActivity     = "crm.activity"
 	KTypeQuote        = "crm.quote"
 	KTypeTask         = "tasks.task"
+	KTypeCustomer     = "crm.customer"
+	KTypeSupplier     = "crm.supplier"
 )
 
 // WorkflowDealPipeline is the canonical workflow name for crm.deal. Mirrored
@@ -195,6 +197,86 @@ var taskSchema = []byte(`{
   "agent_tools": ["tasks.create_task"]
 }`)
 
+// customerSchema — billable counterparty used by finance.ar_invoice.
+// Mirrors the ERPNext "Customer" doctype: a credit_limit ceiling, a
+// payment_terms default, and an aging bucket the collections view can
+// filter on. `customer_group` is a string (not an enum) so tenants can
+// slice by industry, geography, channel, etc. without schema changes.
+var customerSchema = []byte(`{
+  "name": "crm.customer",
+  "version": 1,
+  "fields": [
+    {"name": "name", "type": "string", "required": true, "max_length": 200},
+    {"name": "customer_group", "type": "string", "max_length": 64},
+    {"name": "credit_limit", "type": "number", "min": 0},
+    {"name": "default_tax_code", "type": "string", "max_length": 32},
+    {"name": "default_payment_terms", "type": "string", "max_length": 64},
+    {"name": "currency", "type": "string", "pattern": "^[A-Z]{3}$", "default": "USD"},
+    {"name": "ar_aging_bucket", "type": "enum", "values": ["current", "30", "60", "90", "120+"], "default": "current"},
+    {"name": "status", "type": "enum", "values": ["active", "on_hold", "disabled"], "default": "active"},
+    {"name": "organization", "type": "ref", "ktype": "crm.organization"},
+    {"name": "owner", "type": "ref", "ktype": "user"}
+  ],
+  "views": {
+    "list": {"columns": ["name", "customer_group", "credit_limit", "currency", "ar_aging_bucket", "status"]},
+    "form": {"sections": [
+      {"title": "Customer", "fields": ["name", "customer_group", "organization", "owner", "status"]},
+      {"title": "Billing", "fields": ["currency", "credit_limit", "default_tax_code", "default_payment_terms", "ar_aging_bucket"]}
+    ]}
+  },
+  "cards": {"summary": "{{name}} — {{currency}} ({{status}})"},
+  "permissions": {"read": ["tenant.member"], "write": ["finance.admin", "crm.rep", "tenant.admin"]},
+  "workflow": {
+    "name": "crm.customer.lifecycle",
+    "initial_state": "active",
+    "states": ["active", "on_hold", "disabled"],
+    "transitions": [
+      {"from": ["active"], "to": "on_hold", "action": "hold"},
+      {"from": ["on_hold"], "to": "active", "action": "release"},
+      {"from": ["active", "on_hold"], "to": "disabled", "action": "disable"}
+    ]
+  },
+  "agent_tools": ["crm.create_customer"]
+}`)
+
+// supplierSchema — AP counterparty. Same structure as customerSchema but
+// with `supplier_group` and `ap_aging_bucket` so finance.ap_bill reports
+// can segment the payables side symmetrically.
+var supplierSchema = []byte(`{
+  "name": "crm.supplier",
+  "version": 1,
+  "fields": [
+    {"name": "name", "type": "string", "required": true, "max_length": 200},
+    {"name": "supplier_group", "type": "string", "max_length": 64},
+    {"name": "default_payment_terms", "type": "string", "max_length": 64},
+    {"name": "currency", "type": "string", "pattern": "^[A-Z]{3}$", "default": "USD"},
+    {"name": "ap_aging_bucket", "type": "enum", "values": ["current", "30", "60", "90", "120+"], "default": "current"},
+    {"name": "status", "type": "enum", "values": ["active", "on_hold", "disabled"], "default": "active"},
+    {"name": "organization", "type": "ref", "ktype": "crm.organization"},
+    {"name": "owner", "type": "ref", "ktype": "user"}
+  ],
+  "views": {
+    "list": {"columns": ["name", "supplier_group", "currency", "ap_aging_bucket", "status"]},
+    "form": {"sections": [
+      {"title": "Supplier", "fields": ["name", "supplier_group", "organization", "owner", "status"]},
+      {"title": "Payments", "fields": ["currency", "default_payment_terms", "ap_aging_bucket"]}
+    ]}
+  },
+  "cards": {"summary": "{{name}} — {{currency}} ({{status}})"},
+  "permissions": {"read": ["tenant.member"], "write": ["finance.admin", "tenant.admin"]},
+  "workflow": {
+    "name": "crm.supplier.lifecycle",
+    "initial_state": "active",
+    "states": ["active", "on_hold", "disabled"],
+    "transitions": [
+      {"from": ["active"], "to": "on_hold", "action": "hold"},
+      {"from": ["on_hold"], "to": "active", "action": "release"},
+      {"from": ["active", "on_hold"], "to": "disabled", "action": "disable"}
+    ]
+  },
+  "agent_tools": ["crm.create_supplier"]
+}`)
+
 // All returns every Phase B KType as a freshly-constructed slice. The
 // schemas are validated as well-formed JSON at init time so a malformed
 // literal trips tests immediately rather than at tenant-setup time.
@@ -207,6 +289,8 @@ func All() []ktype.KType {
 		{Name: KTypeActivity, Version: 1, Schema: activitySchema},
 		{Name: KTypeQuote, Version: 1, Schema: quoteSchema},
 		{Name: KTypeTask, Version: 1, Schema: taskSchema},
+		{Name: KTypeCustomer, Version: 1, Schema: customerSchema},
+		{Name: KTypeSupplier, Version: 1, Schema: supplierSchema},
 	}
 }
 

@@ -3,13 +3,22 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/notifications"
 )
 
 // notificationRouter fans outbox events out to per-notification
@@ -34,6 +43,19 @@ import (
 type notificationRouter struct {
 	bridge *kchatBridgeNotifier
 	client *http.Client
+	// pool is used to look up the per-tenant webhook signing secret
+	// (tenants.quota->>'webhook_secret'). The tenants table is
+	// control-plane, not tenant-scoped, so the app pool is fine — no
+	// SET LOCAL app.tenant_id required.
+	pool *pgxpool.Pool
+	// store persists every notification envelope to the inbox table
+	// so the web bell/inbox surface is independent of transport
+	// success. Nil is tolerated for dev setups without the schema.
+	store *notifications.Store
+	// smtp is the optional outbound mail adapter. Nil (or a zero
+	// SMTPConfig) means SMTP is not configured and the email channel
+	// falls back to logging the notice.
+	smtp notifications.SMTPSender
 }
 
 // notificationEnvelope is the shape extracted from event payloads.
@@ -60,6 +82,11 @@ func (r *notificationRouter) route(ctx context.Context, e events.Event) {
 	if env == nil {
 		return
 	}
+	// Persist first so the inbox surface does not depend on transport
+	// success: even if KChat / webhook / SMTP all fail, the user will
+	// still see the notice in the web bell dropdown. Failures here are
+	// logged and the transport delivery still proceeds.
+	r.persistNotification(ctx, e, *env)
 	switch env.Channel {
 	case "kchat":
 		if r.bridge != nil && r.bridge.enabled() {
@@ -75,11 +102,13 @@ func (r *notificationRouter) route(ctx context.Context, e events.Event) {
 			log.Printf("worker: webhook %s → %s: %v", e.Type, env.WebhookURL, err)
 		}
 	case "email":
-		// SMTP adapter is deferred. Log so the event trail shows the
-		// notification was observed and routed even when delivery
-		// isn't wired yet.
-		log.Printf("worker: email notify (stub) tenant=%s type=%s to=%q title=%q",
-			e.TenantID, e.Type, env.Email, env.Title)
+		if env.Email == "" {
+			return
+		}
+		if err := r.sendEmail(ctx, e, *env); err != nil {
+			log.Printf("worker: email notify tenant=%s type=%s to=%q: %v",
+				e.TenantID, e.Type, env.Email, err)
+		}
 	default:
 		// Unknown / unset channel — ignore. Producers that only want
 		// in-app SSE emit events with no notification envelope.
@@ -128,7 +157,12 @@ func (r *notificationRouter) postKChatNotice(
 
 // postWebhook POSTs the full event envelope to the configured URL so
 // an external consumer receives the same {id, tenant_id, type,
-// payload, created_at} shape the outbox stores.
+// payload, created_at} shape the outbox stores. The body is signed
+// with HMAC-SHA256 using the per-tenant webhook secret
+// (tenants.quota->>'webhook_secret'). Consumers verify by recomputing
+// the same HMAC and comparing against the X-Kapp-Signature header. If
+// no secret is configured for the tenant, the signature header is
+// omitted — receivers should refuse unsigned deliveries in production.
 func (r *notificationRouter) postWebhook(ctx context.Context, e events.Event, url string) error {
 	body, err := json.Marshal(e)
 	if err != nil {
@@ -142,6 +176,13 @@ func (r *notificationRouter) postWebhook(ctx context.Context, e events.Event, ur
 	req.Header.Set("X-Kapp-Event-Type", e.Type)
 	req.Header.Set("X-Kapp-Event-Id", e.ID.String())
 	req.Header.Set("X-Kapp-Tenant-Id", e.TenantID.String())
+	if sig, err := r.signWebhookBody(ctx, e.TenantID, body); err != nil {
+		// Secret lookup failures are logged and the delivery proceeds
+		// unsigned; we prefer losing integrity over dropping events.
+		log.Printf("worker: webhook sign tenant=%s: %v", e.TenantID, err)
+	} else if sig != "" {
+		req.Header.Set("X-Kapp-Signature", "sha256="+sig)
+	}
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("post: %w", err)
@@ -155,6 +196,86 @@ func (r *notificationRouter) postWebhook(ctx context.Context, e events.Event, ur
 		return fmt.Errorf("status=%d body=%s", resp.StatusCode, string(snippet))
 	}
 	return nil
+}
+
+// sendEmail dispatches the notification envelope through the SMTP
+// adapter. When no adapter is configured (or the adapter returns
+// ErrSMTPDisabled) we degrade gracefully to a log line so the event
+// trail still shows the notice was observed.
+func (r *notificationRouter) sendEmail(ctx context.Context, e events.Event, env notificationEnvelope) error {
+	if r.smtp == nil {
+		log.Printf("worker: email notify (no smtp) tenant=%s type=%s to=%q title=%q",
+			e.TenantID, e.Type, env.Email, env.Title)
+		return nil
+	}
+	subject := env.Title
+	if subject == "" {
+		subject = e.Type
+	}
+	body := env.Body
+	if body == "" {
+		body = string(e.Payload)
+	}
+	err := r.smtp.Send(ctx, []string{env.Email}, subject, body)
+	if errors.Is(err, notifications.ErrSMTPDisabled) {
+		log.Printf("worker: email notify (smtp disabled) tenant=%s type=%s to=%q", e.TenantID, e.Type, env.Email)
+		return nil
+	}
+	return err
+}
+
+// persistNotification writes an inbox row for the supplied event so
+// the in-app bell/inbox surface is transport-independent. Failures
+// are logged; the outbox row has already been published to NATS and
+// the durable event log is the source of truth.
+func (r *notificationRouter) persistNotification(ctx context.Context, e events.Event, env notificationEnvelope) {
+	if r.store == nil {
+		return
+	}
+	var uid *uuid.UUID
+	if env.UserID != "" {
+		if parsed, err := uuid.Parse(env.UserID); err == nil {
+			uid = &parsed
+		}
+	}
+	in := notifications.CreateInput{
+		TenantID: e.TenantID,
+		UserID:   uid,
+		Type:     e.Type,
+		Title:    env.Title,
+		Body:     env.Body,
+		Payload:  e.Payload,
+	}
+	if _, err := r.store.Create(ctx, in); err != nil {
+		log.Printf("worker: persist notification tenant=%s type=%s: %v", e.TenantID, e.Type, err)
+	}
+}
+
+// signWebhookBody computes the HMAC-SHA256 of body using the tenant's
+// webhook secret and returns its hex digest. The secret is read from
+// `tenants.quota->>'webhook_secret'`. Returns ("", nil) when no
+// secret is configured — caller skips the signature header.
+func (r *notificationRouter) signWebhookBody(ctx context.Context, tenantID uuid.UUID, body []byte) (string, error) {
+	if r.pool == nil {
+		return "", nil
+	}
+	var secret *string
+	err := r.pool.QueryRow(ctx,
+		`SELECT quota->>'webhook_secret' FROM tenants WHERE id = $1`,
+		tenantID,
+	).Scan(&secret)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("load webhook secret: %w", err)
+	}
+	if secret == nil || *secret == "" {
+		return "", nil
+	}
+	mac := hmac.New(sha256.New, []byte(*secret))
+	mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
 // extractNotification pulls the `notification` envelope out of the

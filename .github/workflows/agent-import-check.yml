@@ -1,0 +1,50 @@
+name: agent-import-check
+
+# Static check: nothing in internal/agents/ may construct or directly
+# wire its own record store, workflow engine, or database pool. Tool
+# handlers must only mutate through the fields exposed on Executor
+# (executor.records, executor.workflow, executor.auditor) so audit,
+# idempotency, and RLS are applied uniformly. The allow-list is
+# internal/agents/executor.go, which owns those fields.
+# See docs/SECURITY_REVIEW.md §2.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    name: agents mutate only through executor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - name: verify agent tools do not instantiate their own stores
+        run: |
+          set -euo pipefail
+          # Forbidden patterns in any internal/agents/*.go except
+          # executor.go: constructing a PGStore, a workflow Engine, or a
+          # raw pgx pool inside a tool file. Tools must only consume
+          # these through their enclosing Executor struct.
+          bad=""
+          while IFS= read -r f; do
+            rel="${f#./}"
+            if [ "$rel" = "internal/agents/executor.go" ]; then
+              continue
+            fi
+            for p in 'record\.NewPGStore' 'workflow\.NewEngine' 'pgxpool\.New' 'pgxpool\.Connect' 'sql\.Open'; do
+              if grep -Eq "$p" "$f"; then
+                bad+="$rel uses forbidden pattern: $p"$'\n'
+              fi
+            done
+          done < <(find ./internal/agents -type f -name '*.go')
+          if [ -n "$bad" ]; then
+            echo "::error::agent tools may not construct their own stores; use fields on Executor"
+            printf '%s' "$bad"
+            exit 1
+          fi
