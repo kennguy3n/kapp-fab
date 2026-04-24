@@ -68,7 +68,8 @@ func TestPayrollEngineGeneratesSlipsFromStructure(t *testing.T) {
 
 // TestPayrollEngineIsIdempotentOnReGenerate: a second call with the
 // same pay_run_id does NOT duplicate slips; skipped_existing count
-// increments instead.
+// increments instead; and the pay_run's total_gross / total_net
+// are preserved rather than overwritten to zero.
 func TestPayrollEngineIsIdempotentOnReGenerate(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
@@ -94,6 +95,25 @@ func TestPayrollEngineIsIdempotentOnReGenerate(t *testing.T) {
 	}
 	if res.SkippedExisting != 1 {
 		t.Fatalf("second call skipped_existing=%d (want 1)", res.SkippedExisting)
+	}
+
+	// Regression: idempotent re-run must preserve pay_run
+	// total_gross / total_net, not zero them.
+	runAfter := getRecord(t, h, tn.ID, runID)
+	var runData map[string]any
+	if err := json.Unmarshal(runAfter.Data, &runData); err != nil {
+		t.Fatalf("decode pay_run: %v", err)
+	}
+	gross := decimal.RequireFromString(asStrNum(t, runData["total_gross"]))
+	net := decimal.RequireFromString(asStrNum(t, runData["total_net"]))
+	if !gross.Equal(decimal.NewFromInt(4000)) {
+		t.Errorf("total_gross after re-run: got %s want 4000", gross)
+	}
+	if !net.Equal(decimal.NewFromInt(4000)) {
+		t.Errorf("total_net after re-run: got %s want 4000", net)
+	}
+	if count, _ := runData["payslip_count"].(float64); count != 1 {
+		t.Errorf("payslip_count after re-run: got %v want 1", runData["payslip_count"])
 	}
 }
 

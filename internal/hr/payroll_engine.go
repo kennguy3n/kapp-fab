@@ -171,19 +171,28 @@ func (e *PayrollEngine) GeneratePayslips(
 	if err != nil {
 		return nil, fmt.Errorf("hr: list payslips: %w", err)
 	}
+	// Accumulate existing-slip totals in the same pass that builds
+	// the coverage set so re-running GeneratePayslips preserves the
+	// pay_run's total_gross / total_net rather than zeroing them
+	// when every employee is skipped as already-covered.
 	coveredEmps := map[string]bool{}
+	var existingCount int
+	out := &GenerateResult{}
+	var totalGross, totalDeductions, totalNet decimal.Decimal
 	for _, s := range existingSlips {
 		var sd payslipData
 		if err := json.Unmarshal(s.Data, &sd); err != nil {
 			continue
 		}
-		if sd.PayRunID == payRunID.String() {
-			coveredEmps[sd.EmployeeID] = true
+		if sd.PayRunID != payRunID.String() {
+			continue
 		}
+		coveredEmps[sd.EmployeeID] = true
+		existingCount++
+		totalGross = totalGross.Add(sd.GrossPay)
+		totalDeductions = totalDeductions.Add(sd.TotalDeductions)
+		totalNet = totalNet.Add(sd.NetPay)
 	}
-
-	out := &GenerateResult{}
-	var totalGross, totalDeductions, totalNet decimal.Decimal
 
 	for _, emp := range employees {
 		var ed employeeData
@@ -249,7 +258,7 @@ func (e *PayrollEngine) GeneratePayslips(
 	// the UI signals "draft slips are being produced". The existing
 	// row version threads through as a compare-and-swap.
 	patch := map[string]any{
-		"payslip_count": out.CreatedCount + countExisting(existingSlips, payRunID),
+		"payslip_count": out.CreatedCount + existingCount,
 		"total_gross":   decimalFloat(totalGross),
 		"total_net":     decimalFloat(totalNet),
 	}
@@ -459,24 +468,6 @@ func rollStructure(sv structureData, _ string) ([]lineOut, []lineOut, decimal.De
 	}
 	net := gross.Sub(deduct)
 	return earnings, deductions, gross, deduct, net
-}
-
-// countExisting returns how many of the supplied payslip records
-// belong to the target pay_run. Used to update payslip_count after
-// a GeneratePayslips call.
-func countExisting(all []record.KRecord, payRunID uuid.UUID) int {
-	target := payRunID.String()
-	c := 0
-	for _, s := range all {
-		var sd payslipData
-		if err := json.Unmarshal(s.Data, &sd); err != nil {
-			continue
-		}
-		if sd.PayRunID == target {
-			c++
-		}
-	}
-	return c
 }
 
 // parsePayrollDate accepts the canonical `YYYY-MM-DD` pay-period
