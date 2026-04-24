@@ -518,6 +518,271 @@ export class ApiClient {
       body: JSON.stringify({ data }),
     });
   }
+
+  // --- Phase I: multi-currency ------------------------------------------
+
+  listExchangeRates(params?: {
+    from?: string;
+    to?: string;
+    limit?: number;
+  }): Promise<{ rates: ExchangeRate[] }> {
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set("from", params.from);
+    if (params?.to) qs.set("to", params.to);
+    if (params?.limit !== undefined) qs.set("limit", String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return this.request(`/finance/exchange-rates${suffix}`);
+  }
+
+  upsertExchangeRate(input: UpsertExchangeRateInput): Promise<ExchangeRate> {
+    return this.request("/finance/exchange-rates", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  convertCurrency(params: {
+    from: string;
+    to: string;
+    amount: string;
+    date?: string;
+  }): Promise<ExchangeConversion> {
+    const qs = new URLSearchParams({ from: params.from, to: params.to, amount: params.amount });
+    if (params.date) qs.set("date", params.date);
+    return this.request(`/finance/exchange-rates/convert?${qs.toString()}`);
+  }
+
+  unrealizedGainLoss(input: UnrealizedGLInput): Promise<{ unrealized_gain_loss: string }> {
+    return this.request("/finance/exchange-rates/unrealized", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  // --- Phase I: helpdesk -------------------------------------------------
+
+  listSLAPolicies(): Promise<{ policies: SLAPolicy[] }> {
+    return this.request("/helpdesk/sla-policies");
+  }
+
+  upsertSLAPolicy(input: UpsertSLAPolicyInput): Promise<SLAPolicy> {
+    return this.request("/helpdesk/sla-policies", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  getTicketSLALog(ticketId: string): Promise<{ entries: SLALogEntry[] }> {
+    return this.request(`/helpdesk/tickets/${encodeURIComponent(ticketId)}/sla-log`);
+  }
+
+  // --- Phase I: reports --------------------------------------------------
+
+  listReports(): Promise<{ reports: SavedReport[] }> {
+    return this.request("/reports");
+  }
+
+  getReport(id: string): Promise<SavedReport> {
+    return this.request(`/reports/${encodeURIComponent(id)}`);
+  }
+
+  createReport(input: {
+    name: string;
+    description?: string;
+    definition: ReportDefinition;
+  }): Promise<SavedReport> {
+    return this.request("/reports", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateReport(
+    id: string,
+    input: { name: string; description?: string; definition: ReportDefinition }
+  ): Promise<SavedReport> {
+    return this.request(`/reports/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteReport(id: string): Promise<void> {
+    return this.request(`/reports/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  }
+
+  runSavedReport(id: string): Promise<ReportResult> {
+    return this.request(`/reports/${encodeURIComponent(id)}/run`);
+  }
+
+  runAdhocReport(def: ReportDefinition): Promise<ReportResult> {
+    return this.request("/reports/run", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(def),
+    });
+  }
+
+  // --- Phase I: dashboard ------------------------------------------------
+
+  getDashboardSummary(): Promise<DashboardSummary> {
+    return this.request("/dashboard/summary");
+  }
+}
+
+// --- Phase I auxiliary types ------------------------------------------
+
+export interface ExchangeRate {
+  tenant_id: string;
+  from_currency: string;
+  to_currency: string;
+  rate_date: string;
+  rate: string;
+  provider?: string;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UpsertExchangeRateInput {
+  from_currency: string;
+  to_currency: string;
+  rate_date: string;
+  rate: string;
+  provider?: string;
+}
+
+export interface ExchangeConversion {
+  amount: string;
+  from: string;
+  to: string;
+  date: string;
+  rate: string;
+  converted: string;
+}
+
+export interface UnrealizedGLInput {
+  foreign_amount: string;
+  foreign_currency: string;
+  functional_currency: string;
+  original_rate: string;
+  as_of?: string;
+}
+
+export interface SLAPolicy {
+  tenant_id: string;
+  id: string;
+  name: string;
+  priority: "low" | "medium" | "high" | "urgent";
+  response_minutes: number;
+  resolution_minutes: number;
+  active: boolean;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UpsertSLAPolicyInput {
+  id?: string;
+  name: string;
+  priority: "low" | "medium" | "high" | "urgent";
+  response_minutes: number;
+  resolution_minutes: number;
+  active?: boolean;
+}
+
+export interface SLALogEntry {
+  id: number;
+  tenant_id: string;
+  ticket_id: string;
+  event_kind: string;
+  occurred_at: string;
+  details?: Record<string, unknown>;
+}
+
+export interface ReportFilter {
+  column: string;
+  op: string;
+  value?: unknown;
+}
+
+export interface ReportAggregation {
+  op: "count" | "sum" | "avg" | "min" | "max";
+  column?: string;
+  alias?: string;
+}
+
+export interface ReportSort {
+  column: string;
+  direction?: "asc" | "desc";
+}
+
+export interface ReportChartSpec {
+  type: "bar" | "line" | "pie";
+  x_column: string;
+  y_column: string;
+}
+
+export interface ReportPivotSpec {
+  row_column: string;
+  column_column: string;
+  value_column: string;
+}
+
+export interface ReportDefinition {
+  source: string;
+  columns: string[];
+  filters?: ReportFilter[];
+  group_by?: string[];
+  aggregations?: ReportAggregation[];
+  sort?: ReportSort[];
+  limit?: number;
+  pivot?: ReportPivotSpec;
+  chart?: ReportChartSpec;
+}
+
+export interface ReportPivotResult {
+  row_headers: unknown[];
+  column_headers: unknown[];
+  cells: unknown[][];
+}
+
+export interface ReportResult {
+  columns: string[];
+  rows: unknown[][];
+  pivot?: ReportPivotResult | null;
+  chart?: ReportChartSpec | null;
+  summary?: Record<string, unknown>;
+}
+
+export interface SavedReport {
+  tenant_id: string;
+  id: string;
+  name: string;
+  description?: string;
+  definition: ReportDefinition;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DashboardSummary {
+  open_deals_count: number;
+  pipeline_value: number;
+  outstanding_ar: number;
+  outstanding_ap: number;
+  low_stock_items_count: number;
+  pending_approvals: number;
+  open_tickets_count: number;
+  overdue_tickets_count: number;
 }
 
 // --- Auxiliary types ---------------------------------------------------

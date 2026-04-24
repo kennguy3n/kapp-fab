@@ -29,6 +29,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/files"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/forms"
+	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/hr"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
@@ -37,6 +38,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
+	"github.com/kennguy3n/kapp-fab/internal/reporting"
 	"github.com/kennguy3n/kapp-fab/internal/sales"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
@@ -215,6 +217,23 @@ func run() error {
 			return fmt.Errorf("register payroll ktype %s: %w", kt.Name, err)
 		}
 	}
+	// Phase I — register helpdesk KTypes. The helpdesk store manages
+	// typed SLA policies + breach log while tickets themselves ride
+	// the generic KRecord plumbing.
+	if err := helpdesk.RegisterKTypes(ctx, ktypeRegistry); err != nil {
+		return err
+	}
+	// Phase I — exchange-rate KType so it shows up in the KType
+	// registry + records surface alongside other finance masters.
+	if err := ktypeRegistry.Register(ctx, ledger.ExchangeRateKType()); err != nil {
+		return fmt.Errorf("register exchange_rate ktype: %w", err)
+	}
+
+	// Phase I stores — multi-currency, helpdesk, reporting.
+	exchangeRateStore := ledger.NewExchangeRateStore(pool)
+	helpdeskStore := helpdesk.NewStore(pool)
+	reportStore := reporting.NewStore(pool)
+	reportRunner := reporting.NewRunner(pool)
 
 	// Agent tool executor — Phase B wires the CRM / tasks / approvals
 	// tools against the same record store and workflow engine the HTTP
@@ -244,6 +263,12 @@ func run() error {
 	dh := &docsHandlers{store: docsStore}
 	eh := &eventsHandlers{pool: pool}
 	vh := &viewHandlers{store: record.NewViewStore(pool)}
+	// Phase I handlers — multi-currency, helpdesk (SLA policies),
+	// reports (saved + ad-hoc), and dashboard KPI aggregation.
+	curh := &currencyHandlers{store: exchangeRateStore}
+	hdh := &helpdeskHandlers{store: helpdeskStore}
+	reph := &reportsHandlers{store: reportStore, runner: reportRunner}
+	dashh := &dashboardHandlers{pool: pool}
 
 	// Phase H JWT auth. The signer is built from KAPP_JWT_SECRET; when
 	// the secret is absent we log and skip wiring the SSO endpoints so
@@ -421,6 +446,54 @@ func run() error {
 		r.Get("/reports/ar-aging", finh.arAging)
 		r.Get("/reports/ap-aging", finh.apAging)
 		r.Get("/reports/income-statement", finh.incomeStatement)
+		// Phase I — exchange rate CRUD + ad-hoc convert + unrealized
+		// gain/loss calculator. Lookups do not mutate so they skip
+		// the idempotency key requirement enforced by the middleware.
+		r.Post("/exchange-rates", curh.upsertRate)
+		r.Get("/exchange-rates", curh.listRates)
+		r.Get("/exchange-rates/convert", curh.convert)
+		r.Post("/exchange-rates/unrealized", curh.unrealizedGL)
+	})
+
+	// Phase I helpdesk surface. Tickets themselves ride the generic
+	// KRecord CRUD at /api/v1/records/helpdesk.ticket; these routes
+	// back the SLA policy list/upsert the UI needs when authoring
+	// policies and the per-ticket SLA log the right pane renders.
+	r.Route("/api/v1/helpdesk", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.IdempotencyMiddleware(pool))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Use(platform.QuotaMiddleware(quotaEnforcer))
+		r.Post("/sla-policies", hdh.upsertPolicy)
+		r.Get("/sla-policies", hdh.listPolicies)
+		r.Get("/sla-policies/resolve", hdh.resolvePolicy)
+		r.Get("/tickets/{id}/sla-log", hdh.ticketLog)
+	})
+
+	// Phase I reports surface. Saved report CRUD + ad-hoc execution
+	// under the same tenant/idempotency/rate-limit/quota stack so
+	// spammed runs cannot starve other tenants.
+	r.Route("/api/v1/reports", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.IdempotencyMiddleware(pool))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Use(platform.QuotaMiddleware(quotaEnforcer))
+		r.Get("/", reph.list)
+		r.Post("/", reph.create)
+		r.Post("/run", reph.runAdhoc)
+		r.Get("/{id}", reph.get)
+		r.Put("/{id}", reph.update)
+		r.Delete("/{id}", reph.delete)
+		r.Get("/{id}/run", reph.runSaved)
+	})
+
+	// Phase I KPI dashboard aggregation. Reads only, so no idempotency
+	// needed — quota + rate-limit keep it in bounds.
+	r.Route("/api/v1/dashboard", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Use(platform.QuotaMiddleware(quotaEnforcer))
+		r.Get("/summary", dashh.summary)
 	})
 
 	// Inventory surface (Phase D). Item + warehouse masters, the

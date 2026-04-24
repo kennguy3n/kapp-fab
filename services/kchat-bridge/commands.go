@@ -12,6 +12,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/crm"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
+	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
@@ -117,9 +118,15 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.learnCourses(ctx, req)
 	case "form":
 		return d.formLink(req)
+	case "ticket":
+		data, err := ticketFromArgs(req.Args, req.UserID)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/ticket: %v", err)}, nil
+		}
+		return d.createRecord(ctx, req, helpdesk.KTypeTicket, data)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /learn, /approve, /form, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /learn, /approve, /ticket, /form, /help",
 		}, nil
 	default:
 		return CommandResponse{
@@ -643,5 +650,55 @@ func billFromArgs(args []string, owner uuid.UUID) (map[string]any, error) {
 	if len(args) >= 4 && args[3] != "" {
 		data["bill_number"] = args[3]
 	}
+	return data, nil
+}
+
+// ticketFromArgs parses `/ticket <subject...> [priority=high] [channel=chat]
+// [customer=<uuid>]`. The subject is the concatenation of every token
+// that is not a key=value pair so operators can just type what they
+// mean. Priority defaults to `medium`, channel defaults to `chat` so
+// the ticket slots straight into the SLA policy grid.
+func ticketFromArgs(args []string, owner uuid.UUID) (map[string]any, error) {
+	if len(args) == 0 {
+		return nil, errors.New("usage: /ticket <subject...> [priority=low|medium|high|urgent] [channel=chat|email|portal|phone] [customer=<uuid>]")
+	}
+	data := map[string]any{
+		"status":   "open",
+		"priority": "medium",
+		"channel":  "chat",
+		"owner":    owner.String(),
+	}
+	subject := make([]string, 0, len(args))
+	for _, tok := range args {
+		if idx := strings.Index(tok, "="); idx > 0 {
+			key := strings.ToLower(tok[:idx])
+			val := tok[idx+1:]
+			switch key {
+			case "priority":
+				data["priority"] = strings.ToLower(val)
+				continue
+			case "channel":
+				data["channel"] = strings.ToLower(val)
+				continue
+			case "customer", "customer_id":
+				if _, err := uuid.Parse(val); err != nil {
+					return nil, fmt.Errorf("invalid customer id: %w", err)
+				}
+				data["customer_id"] = val
+				continue
+			case "assigned":
+				if _, err := uuid.Parse(val); err != nil {
+					return nil, fmt.Errorf("invalid assignee id: %w", err)
+				}
+				data["assigned_to"] = val
+				continue
+			}
+		}
+		subject = append(subject, tok)
+	}
+	if len(subject) == 0 {
+		return nil, errors.New("ticket subject required")
+	}
+	data["subject"] = strings.Join(subject, " ")
 	return data, nil
 }
