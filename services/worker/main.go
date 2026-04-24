@@ -39,6 +39,14 @@ const (
 	drainBatch   = 100
 )
 
+// workerSystemActor is the deterministic non-nil actor attributed
+// to background-generated records in the worker (recurring invoice
+// generator, future SLA-driven writes, scheduler-owned patches).
+// Parallels phaseASystemActor in services/api/records.go so audit
+// trails remain coherent whether the originating service was the
+// API or the worker.
+var workerSystemActor = uuid.MustParse("00000000-0000-0000-0000-000000000003")
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatalf("worker: %v", err)
@@ -156,12 +164,19 @@ func run() error {
 	invoicePoster.
 		WithSalesInvoiceHook(inventoryHook.OnSalesInvoicePosted).
 		WithPurchaseBillHook(inventoryHook.OnPurchaseBillPosted)
+	// systemActor stamps Created/UpdatedBy on generated invoices and
+	// is forwarded into PostSalesInvoice, which rejects uuid.Nil.
+	// Matches the deterministic actor used by the api's records
+	// handler (services/api/records.go) so audit trails stay
+	// coherent across origin services — a generated-then-posted
+	// invoice and a hand-authored-then-posted invoice attribute to
+	// the same synthetic UUID when no human actor is in context.
 	recurringEngine := finance.NewRecurringEngine(recordStore,
 		func(ctx context.Context, tenantID, invoiceID, actorID uuid.UUID) error {
 			_, err := invoicePoster.PostSalesInvoice(ctx, tenantID, invoiceID, actorID)
 			return err
 		},
-	)
+	).WithSystemActor(workerSystemActor)
 	schedRegistry.Register(finance.ActionTypeRecurringInvoice, recurringEngine)
 	go scheduler.RunLoop(ctx, schedStore, schedRegistry, 10*time.Second)
 

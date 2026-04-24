@@ -266,17 +266,30 @@ func TestRecurringInvoiceEngineAutoPosts(t *testing.T) {
 		AutoPost:           true,
 	})
 
+	// systemActor mirrors workerSystemActor in services/worker/main.go
+	// so the test covers the same wiring shape the worker uses in
+	// production. The stub fails loudly on uuid.Nil so any future
+	// regression where the engine forwards a zero actor is caught
+	// here instead of silently dropping the auto-post in prod.
+	systemActor := uuid.New()
 	var posted []uuid.UUID
-	stubPoster := func(_ context.Context, tenantID, invoiceID, _ uuid.UUID) error {
+	stubPoster := func(_ context.Context, tenantID, invoiceID, actorID uuid.UUID) error {
 		if tenantID != tn.ID {
 			t.Errorf("poster: tenant mismatch %s != %s", tenantID, tn.ID)
+		}
+		if actorID == uuid.Nil {
+			t.Fatalf("poster: actorID must not be uuid.Nil; PostSalesInvoice would reject it")
+		}
+		if actorID != systemActor {
+			t.Fatalf("poster: actorID = %s, want systemActor %s", actorID, systemActor)
 		}
 		posted = append(posted, invoiceID)
 		return nil
 	}
 
 	engine := finance.NewRecurringEngine(h.records, stubPoster).
-		WithClock(func() time.Time { return clock })
+		WithClock(func() time.Time { return clock }).
+		WithSystemActor(systemActor)
 
 	if err := engine.Handle(ctx, tn.ID, scheduler.ScheduledAction{}); err != nil {
 		t.Fatalf("handle: %v", err)
