@@ -283,11 +283,33 @@ func (e *PayrollEngine) GeneratePayslips(
 	return out, nil
 }
 
+// postPayRunMaxRetries bounds the compare-and-swap retry loop on
+// the pay_run record patch. Three is enough to absorb a handful of
+// concurrent writers while keeping the call bounded.
+const postPayRunMaxRetries = 3
+
 // PostPayRun turns every approved payslip for the run into a single
 // journal entry: Dr salary expense (gross) + Cr salary payable
 // (net) + Cr deduction liabilities (each deduction rolled into
 // salary_payable). Sets pay_run.status=paid and patches the JE id
 // back onto the pay_run record.
+//
+// The path is end-to-end idempotent so retries after a partial
+// failure converge instead of leaving the run stuck:
+//
+//   - GetJournalEntryBySource is consulted up front; when a JE
+//     already exists for the pay_run the engine reuses it and skips
+//     PostJournalEntry entirely. Mirrors ledger/invoice.go's
+//     duplicate-reload pattern.
+//   - The payslip roll-up accepts both "approved" and "paid" rows
+//     when a JE already exists (pure retry path), so totals recompute
+//     from the full set of what was previously promoted. A fresh run
+//     with zero approved slips still returns ErrNoApprovedSlips.
+//   - Slips already at status=paid are skipped in the flip loop.
+//   - The pay_run patch is retried on ErrVersionConflict up to
+//     postPayRunMaxRetries times. The JE insert is already guarded by
+//     the partial unique index on (tenant_id, source_ktype, source_id),
+//     so the retry loop only races the record's optimistic version.
 func (e *PayrollEngine) PostPayRun(
 	ctx context.Context, tenantID, payRunID, actorID uuid.UUID,
 ) (*ledger.JournalEntry, error) {
@@ -306,15 +328,34 @@ func (e *PayrollEngine) PostPayRun(
 	if err := json.Unmarshal(runRec.Data, &run); err != nil {
 		return nil, fmt.Errorf("hr: decode pay_run: %w", err)
 	}
-	if run.Status == "paid" {
-		return nil, fmt.Errorf("%w: already paid", ErrPayRunWrongStatus)
-	}
 	if run.SalaryExpenseAccountCode == "" || run.SalaryPayableAccountCode == "" {
 		return nil, ErrMissingAccounts
 	}
 	currency := strings.ToUpper(run.Currency)
 	if currency == "" {
 		currency = "USD"
+	}
+
+	// Fast-check: does a JE already exist for this pay_run? If
+	// so, this call is a retry of a previous attempt that committed
+	// the JE (and possibly flipped some slips) but failed before
+	// the pay_run patch landed. Reuse the entry so the partial
+	// state can converge rather than trip ErrNoApprovedSlips on
+	// the retry.
+	existingJE, err := e.ledger.GetJournalEntryBySource(ctx, tenantID, KTypePayRun, payRunID)
+	if err != nil && !errors.Is(err, ledger.ErrEntryNotFound) {
+		return nil, fmt.Errorf("hr: lookup pay_run je: %w", err)
+	}
+	if run.Status == "paid" && existingJE != nil {
+		// Run already fully paid — return the JE as a no-op so
+		// the HTTP caller gets an idempotent 200.
+		return existingJE, nil
+	}
+	if run.Status == "paid" && existingJE == nil {
+		// Legacy path: status=paid with no JE linked should not
+		// happen, but keep the old error contract rather than
+		// silently re-post.
+		return nil, fmt.Errorf("%w: already paid", ErrPayRunWrongStatus)
 	}
 
 	// ListAll (not List) — HTTP-facing List caps at 500 rows and
@@ -326,6 +367,10 @@ func (e *PayrollEngine) PostPayRun(
 	if err != nil {
 		return nil, fmt.Errorf("hr: list payslips: %w", err)
 	}
+	// On a fresh run only "approved" slips are in scope. On the
+	// retry path (JE already exists) previously-flipped "paid"
+	// slips also roll up into the totals — otherwise a partial
+	// success would under-report gross/net after retry.
 	var approved []record.KRecord
 	var gross, deductions, net decimal.Decimal
 	for _, s := range slips {
@@ -333,7 +378,10 @@ func (e *PayrollEngine) PostPayRun(
 		if err := json.Unmarshal(s.Data, &sd); err != nil {
 			continue
 		}
-		if sd.PayRunID != payRunID.String() || sd.Status != "approved" {
+		if sd.PayRunID != payRunID.String() {
+			continue
+		}
+		if sd.Status != "approved" && (existingJE == nil || sd.Status != "paid") {
 			continue
 		}
 		approved = append(approved, s)
@@ -341,48 +389,59 @@ func (e *PayrollEngine) PostPayRun(
 		deductions = deductions.Add(sd.TotalDeductions)
 		net = net.Add(sd.NetPay)
 	}
-	if len(approved) == 0 {
+	if len(approved) == 0 && existingJE == nil {
 		return nil, ErrNoApprovedSlips
 	}
 
-	postedAt := e.now().UTC()
-	lines := []ledger.JournalLine{
-		{AccountCode: run.SalaryExpenseAccountCode, Debit: gross, Credit: decimal.Zero, Currency: currency, Memo: "Payroll expense"},
-		{AccountCode: run.SalaryPayableAccountCode, Debit: decimal.Zero, Credit: net, Currency: currency, Memo: "Net payable"},
-	}
-	if deductions.IsPositive() {
-		// Round into the salary_payable credit so the entry
-		// balances when deduction liability accounts are not
-		// individually tracked. Tenants with per-component
-		// liability accounts can upgrade this path later.
-		lines = append(lines, ledger.JournalLine{
-			AccountCode: run.SalaryPayableAccountCode, Debit: decimal.Zero, Credit: deductions, Currency: currency, Memo: "Deductions payable",
-		})
-	}
-	sourceID := payRunID
-	entry, err := e.ledger.PostJournalEntry(ctx, ledger.JournalEntry{
-		TenantID:    tenantID,
-		PostedAt:    postedAt,
-		Memo:        fmt.Sprintf("Payroll run %s", run.Name),
-		SourceKType: KTypePayRun,
-		SourceID:    &sourceID,
-		CreatedBy:   actorID,
-		Lines:       lines,
-	})
-	if err != nil {
-		if errors.Is(err, ledger.ErrDuplicateSourceEntry) {
-			existing, reloadErr := e.ledger.GetJournalEntryBySource(ctx, tenantID, KTypePayRun, payRunID)
-			if reloadErr != nil {
-				return nil, fmt.Errorf("hr: reload duplicate pay_run JE: %w", reloadErr)
-			}
-			entry = existing
-		} else {
-			return nil, fmt.Errorf("hr: post pay_run je: %w", err)
+	entry := existingJE
+	if entry == nil {
+		postedAt := e.now().UTC()
+		lines := []ledger.JournalLine{
+			{AccountCode: run.SalaryExpenseAccountCode, Debit: gross, Credit: decimal.Zero, Currency: currency, Memo: "Payroll expense"},
+			{AccountCode: run.SalaryPayableAccountCode, Debit: decimal.Zero, Credit: net, Currency: currency, Memo: "Net payable"},
 		}
+		if deductions.IsPositive() {
+			// Round into the salary_payable credit so the entry
+			// balances when deduction liability accounts are not
+			// individually tracked. Tenants with per-component
+			// liability accounts can upgrade this path later.
+			lines = append(lines, ledger.JournalLine{
+				AccountCode: run.SalaryPayableAccountCode, Debit: decimal.Zero, Credit: deductions, Currency: currency, Memo: "Deductions payable",
+			})
+		}
+		sourceID := payRunID
+		posted, postErr := e.ledger.PostJournalEntry(ctx, ledger.JournalEntry{
+			TenantID:    tenantID,
+			PostedAt:    postedAt,
+			Memo:        fmt.Sprintf("Payroll run %s", run.Name),
+			SourceKType: KTypePayRun,
+			SourceID:    &sourceID,
+			CreatedBy:   actorID,
+			Lines:       lines,
+		})
+		if postErr != nil {
+			if errors.Is(postErr, ledger.ErrDuplicateSourceEntry) {
+				// Lost the race with a concurrent poster; reload and proceed.
+				reloaded, reloadErr := e.ledger.GetJournalEntryBySource(ctx, tenantID, KTypePayRun, payRunID)
+				if reloadErr != nil {
+					return nil, fmt.Errorf("hr: reload duplicate pay_run JE: %w", reloadErr)
+				}
+				posted = reloaded
+			} else {
+				return nil, fmt.Errorf("hr: post pay_run je: %w", postErr)
+			}
+		}
+		entry = posted
 	}
 
-	// Flip each approved slip → paid and patch its JE id.
+	// Flip each in-scope slip → paid and patch its JE id. Slips
+	// already at status=paid are skipped so re-runs don't bump
+	// their version needlessly.
 	for _, s := range approved {
+		var sd payslipData
+		if err := json.Unmarshal(s.Data, &sd); err == nil && sd.Status == "paid" {
+			continue
+		}
 		body, _ := json.Marshal(map[string]any{
 			"status":           "paid",
 			"journal_entry_id": entry.ID.String(),
@@ -398,7 +457,11 @@ func (e *PayrollEngine) PostPayRun(
 		}
 	}
 
-	// Flip the pay_run → paid.
+	// Flip the pay_run → paid with a CAS retry loop. The JE and
+	// slip writes are committed by this point; the only remaining
+	// failure mode is a concurrent patch to the pay_run record
+	// bumping its version. Re-read + re-patch up to
+	// postPayRunMaxRetries times before surfacing the conflict.
 	runPatch, _ := json.Marshal(map[string]any{
 		"status":           "paid",
 		"journal_entry_id": entry.ID.String(),
@@ -406,16 +469,28 @@ func (e *PayrollEngine) PostPayRun(
 		"total_gross":      decimalFloat(gross),
 		"total_net":        decimalFloat(net),
 	})
-	if _, err := e.records.Update(ctx, record.KRecord{
-		ID:        runRec.ID,
-		TenantID:  tenantID,
-		Version:   runRec.Version,
-		Data:      runPatch,
-		UpdatedBy: &actorID,
-	}); err != nil {
-		return entry, fmt.Errorf("hr: patch pay_run paid: %w", err)
+	currentRun := runRec
+	for attempt := 0; attempt < postPayRunMaxRetries; attempt++ {
+		if _, err := e.records.Update(ctx, record.KRecord{
+			ID:        currentRun.ID,
+			TenantID:  tenantID,
+			Version:   currentRun.Version,
+			Data:      runPatch,
+			UpdatedBy: &actorID,
+		}); err != nil {
+			if errors.Is(err, record.ErrVersionConflict) && attempt+1 < postPayRunMaxRetries {
+				reloaded, reloadErr := e.records.Get(ctx, tenantID, payRunID)
+				if reloadErr != nil {
+					return entry, fmt.Errorf("hr: reload pay_run after conflict: %w", reloadErr)
+				}
+				currentRun = reloaded
+				continue
+			}
+			return entry, fmt.Errorf("hr: patch pay_run paid: %w", err)
+		}
+		return entry, nil
 	}
-	return entry, nil
+	return entry, fmt.Errorf("hr: patch pay_run paid: exceeded %d retries", postPayRunMaxRetries)
 }
 
 // ListPayslipsForRun returns every payslip KRecord whose data

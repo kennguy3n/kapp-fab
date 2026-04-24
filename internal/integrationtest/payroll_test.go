@@ -314,6 +314,115 @@ func TestPayrollEnginePostsJournalEntry(t *testing.T) {
 	}
 }
 
+// TestPayrollEnginePostPayRunIsIdempotentAfterPartialFailure is the
+// regression guard for the "pay_run patch failed after JE + slip
+// writes committed" race. Simulates a partial-failure aftermath by:
+//
+//  1. Running PostPayRun once normally (JE committed, slips flipped
+//     paid, pay_run patched paid).
+//  2. Manually reverting pay_run.status back to "approved" to mimic
+//     the state left behind when the final CAS lost its race before
+//     landing.
+//  3. Re-invoking PostPayRun. The fast-check for an existing JE
+//     must short-circuit PostJournalEntry (no duplicate JE), roll
+//     up the already-paid slips so gross/net are non-zero, and
+//     retry the pay_run patch so the run ends in paid with the
+//     original JE id.
+func TestPayrollEnginePostPayRunIsIdempotentAfterPartialFailure(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tn, ledgerStore, _ := newTenantForFinance(t, h)
+	registerPayrollKTypes(t, h)
+	if _, err := ledgerStore.CreateAccount(ctx, ledger.Account{
+		TenantID: tn.ID, Code: "5100", Name: "Salary Expense", Type: ledger.AccountTypeExpense, Active: true,
+	}); err != nil {
+		t.Fatalf("seed salary expense: %v", err)
+	}
+	if _, err := ledgerStore.CreateAccount(ctx, ledger.Account{
+		TenantID: tn.ID, Code: "2300", Name: "Salary Payable", Type: ledger.AccountTypeLiability, Active: true,
+	}); err != nil {
+		t.Fatalf("seed salary payable: %v", err)
+	}
+
+	actor := uuid.New()
+	empID := createEmployeeRecord(t, h, tn.ID, actor, "")
+	createSalaryStructure(t, h, tn.ID, actor, empID, "USD", decimal.NewFromInt(6000), nil)
+
+	runID := createPayRunWithAccounts(t, h, tn.ID, actor,
+		"Dec 2026", "2026-12-01", "2026-12-31", "", "5100", "2300")
+
+	engine := hr.NewPayrollEngine(h.records, ledgerStore)
+	genRes, err := engine.GeneratePayslips(ctx, tn.ID, runID, actor)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	slipRec := getRecord(t, h, tn.ID, genRes.PayslipIDs[0])
+	approvePayslip(t, h, tn.ID, actor, slipRec)
+
+	firstEntry, err := engine.PostPayRun(ctx, tn.ID, runID, actor)
+	if err != nil {
+		t.Fatalf("first post: %v", err)
+	}
+
+	// Simulate the partial-failure aftermath: JE and slip flips
+	// landed, but the final pay_run patch never happened. The JE
+	// remains, slips are paid, pay_run is flipped back to
+	// "approved" (pre-CAS state).
+	runAfterFirst := getRecord(t, h, tn.ID, runID)
+	var runData map[string]any
+	if err := json.Unmarshal(runAfterFirst.Data, &runData); err != nil {
+		t.Fatalf("decode run: %v", err)
+	}
+	runData["status"] = "approved"
+	// Wipe the linked JE id so the retry cannot no-op off the
+	// status=paid + existingJE fast-path. This is the genuine
+	// partial-failure shape: JE exists in ledger, pay_run row does
+	// not yet reference it.
+	delete(runData, "journal_entry_id")
+	revertedBody, _ := json.Marshal(runData)
+	if _, err := h.records.Update(ctx, record.KRecord{
+		ID:        runAfterFirst.ID,
+		TenantID:  tn.ID,
+		Version:   runAfterFirst.Version,
+		Data:      revertedBody,
+		UpdatedBy: &actor,
+	}); err != nil {
+		t.Fatalf("revert pay_run: %v", err)
+	}
+
+	// Retry path.
+	secondEntry, err := engine.PostPayRun(ctx, tn.ID, runID, actor)
+	if err != nil {
+		t.Fatalf("second post (retry): %v", err)
+	}
+	if secondEntry.ID != firstEntry.ID {
+		t.Fatalf("retry created new JE: first=%s second=%s (want same id)",
+			firstEntry.ID, secondEntry.ID)
+	}
+
+	runFinal := getRecord(t, h, tn.ID, runID)
+	var finalData map[string]any
+	_ = json.Unmarshal(runFinal.Data, &finalData)
+	if finalData["status"] != "paid" {
+		t.Errorf("final status: got %v want paid", finalData["status"])
+	}
+	if finalData["journal_entry_id"] != firstEntry.ID.String() {
+		t.Errorf("final journal_entry_id: got %v want %s",
+			finalData["journal_entry_id"], firstEntry.ID)
+	}
+	// payslip_count and total_gross/total_net must reflect the
+	// "paid" slip on the retry path — under the old code they
+	// would silently collapse to zero because only "approved"
+	// slips were rolled up.
+	if got := asStrNum(t, finalData["total_gross"]); got == "0" {
+		t.Errorf("total_gross zero on retry — paid slips were not rolled up")
+	}
+	if got := asStrNum(t, finalData["total_net"]); got == "0" {
+		t.Errorf("total_net zero on retry — paid slips were not rolled up")
+	}
+}
+
 // TestPayrollEngineRejectsRunWithoutAccounts: PostPayRun with no
 // salary accounts configured surfaces ErrMissingAccounts.
 func TestPayrollEngineRejectsRunWithoutAccounts(t *testing.T) {
