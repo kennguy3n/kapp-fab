@@ -47,11 +47,24 @@ export function RecordFormPage() {
   if (!ktypeQuery.data) return <div>KType not found.</div>;
   if (id && !recordQuery.data) return <div>Record not found.</div>;
 
+  const pdfUrl = id ? api.recordPdfUrl(ktype, id) : null;
+  const htmlUrl = id ? api.recordHtmlUrl(ktype, id) : null;
+
   return (
     <section>
       <h1>
         {id ? "Edit" : "New"} {ktypeQuery.data.name}
       </h1>
+      {id && (
+        <div style={{ marginBottom: 12, display: "flex", gap: 8 }}>
+          <a href={pdfUrl!} target="_blank" rel="noreferrer">
+            <button type="button">Download PDF</button>
+          </a>
+          <a href={htmlUrl!} target="_blank" rel="noreferrer">
+            <button type="button">Print preview (HTML)</button>
+          </a>
+        </div>
+      )}
       <KTypeForm
         ktype={ktypeQuery.data}
         initialData={recordQuery.data?.data}

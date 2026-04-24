@@ -30,6 +30,9 @@ const (
 	FeatureLMS       = "lms"
 	FeatureHelpdesk  = "helpdesk"
 	FeatureReporting = "reporting"
+	FeatureWebhook   = "webhook"
+	FeaturePortal    = "portal"
+	FeaturePrint     = "print"
 )
 
 // AllFeatures is the canonical list of feature keys. Handlers that
@@ -44,6 +47,9 @@ var AllFeatures = []string{
 	FeatureLMS,
 	FeatureHelpdesk,
 	FeatureReporting,
+	FeatureWebhook,
+	FeaturePortal,
+	FeaturePrint,
 }
 
 // PlanLimits is the numeric ceiling each plan enforces per billing
@@ -174,6 +180,9 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureLMS:       false,
 			FeatureHelpdesk:  false,
 			FeatureReporting: false,
+			FeatureWebhook:   false,
+			FeaturePortal:    false,
+			FeaturePrint:     true,
 		}
 	case PlanBusiness, PlanEnterprise:
 		return map[string]bool{
@@ -184,6 +193,9 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureLMS:       true,
 			FeatureHelpdesk:  true,
 			FeatureReporting: true,
+			FeatureWebhook:   true,
+			FeaturePortal:    true,
+			FeaturePrint:     true,
 		}
 	default:
 		// Free plan — CRM only. Also the fallback when the plan
@@ -197,6 +209,9 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureLMS:       false,
 			FeatureHelpdesk:  false,
 			FeatureReporting: false,
+			FeatureWebhook:   false,
+			FeaturePortal:    false,
+			FeaturePrint:     false,
 		}
 	}
 }

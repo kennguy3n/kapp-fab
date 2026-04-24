@@ -38,6 +38,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/lms"
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/print"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/reporting"
 	"github.com/kennguy3n/kapp-fab/internal/sales"
@@ -297,6 +298,13 @@ func run() error {
 	meth := &meteringHandlers{metering: meteringStore, tenants: tenantSvc, plans: planStore, features: featureStore}
 	kh := &ktypeHandlers{registry: ktypeRegistry}
 	rh := &recordHandlers{store: recordStore}
+	sh := &searchHandlers{store: recordStore}
+	webhookStore := notifications.NewWebhookStore(pool)
+	whh := &webhookHandlers{store: webhookStore}
+	printTemplateStore := print.NewTemplateStore(pool)
+	printRenderer := print.NewRenderer(printTemplateStore, objectStore, nil)
+	ph := &printHandlers{records: recordStore, renderer: printRenderer}
+	portalStore := auth.NewPortalStore(pool)
 	wh := &workflowHandlers{engine: workflowEngine, store: recordStore, registry: ktypeRegistry}
 	ah := &agentHandlers{executor: executor}
 	aph := &approvalsHandlers{engine: workflowEngine, store: recordStore}
@@ -363,6 +371,36 @@ func run() error {
 		r.Post("/refresh", authh.refresh)
 	})
 
+	// Helpdesk customer portal. Auth endpoints are unauthenticated
+	// — they run the magic-link flow themselves. Ticket endpoints
+	// require a portal-scoped JWT issued by /auth/verify. No
+	// X-Tenant-ID header is expected on portal routes; the tenant
+	// is taken from the JWT (for data routes) or the request body
+	// (for auth endpoints) so external customers never have to
+	// know their tenant's internal UUID.
+	if authh.signer != nil {
+		porh := &portalHandlers{
+			tenants: tenantSvc,
+			portal:  portalStore,
+			signer:  authh.signer,
+			records: recordStore,
+			mailer:  stdoutPortalMailer{},
+		}
+		r.Route("/api/v1/portal", func(r chi.Router) {
+			r.Route("/auth", func(r chi.Router) {
+				r.Post("/request", porh.requestMagicLink)
+				r.Post("/verify", porh.verifyMagicLink)
+			})
+			r.Route("/tickets", func(r chi.Router) {
+				r.Use(portalAuthMiddleware(authh.signer))
+				r.Get("/", porh.listTickets)
+				r.Post("/", porh.createTicket)
+				r.Get("/{id}", porh.getTicket)
+				r.Post("/{id}/reply", porh.replyTicket)
+			})
+		})
+	}
+
 	// Phase F event stream. SSE tail of the tenant's outbox so the web
 	// UI can react to state changes without polling. Defined at the root
 	// router so it does NOT inherit the 30s request timeout applied below
@@ -411,6 +449,37 @@ func run() error {
 			r.Get("/{name}", kh.get)
 		})
 
+		// Webhook management + delivery-log surface. Gated behind
+		// the per-tenant `webhook` feature flag (derived from the
+		// path via DynamicFeatureMiddleware). CRUD runs under the
+		// same middleware stack as other mutation routes so the
+		// tenant cannot bypass idempotency / rate-limit / quota.
+		r.Route("/api/v1/webhooks", func(r chi.Router) {
+			r.Use(platform.TenantMiddleware(tenantSvc))
+			r.Use(apiCallMW)
+			r.Use(featureMW)
+			r.Use(platform.IdempotencyMiddleware(pool))
+			r.Use(rateLimitMW)
+			r.Use(platform.QuotaMiddleware(quotaEnforcer))
+			r.Get("/", whh.list)
+			r.Post("/", whh.create)
+			r.Get("/{id}", whh.get)
+			r.Put("/{id}", whh.update)
+			r.Delete("/{id}", whh.delete)
+			r.Get("/{id}/deliveries", whh.deliveries)
+		})
+
+		// Full-text search across the krecords table. Reads are
+		// tenant-scoped (RLS on krecords already covers it) so the
+		// group only needs tenant + api-call middleware; idempotency
+		// and quota are skipped because GET /search is a pure read.
+		r.Route("/api/v1/search", func(r chi.Router) {
+			r.Use(platform.TenantMiddleware(tenantSvc))
+			r.Use(apiCallMW)
+			r.Use(rateLimitMW)
+			r.Get("/", sh.search)
+		})
+
 		// KRecord CRUD routes. These require tenant context, rate limiting,
 		// quota enforcement, and idempotency keys on mutations.
 		r.Route("/api/v1/records", func(r chi.Router) {
@@ -426,9 +495,23 @@ func run() error {
 			r.Use(platform.QuotaMiddleware(quotaEnforcer))
 			r.Post("/{ktype}", rh.create)
 			r.Get("/{ktype}", rh.list)
+			// Bulk actions endpoint — multi-id status_change, delete,
+			// or CSV export in one transaction. Matches the pattern
+			// frappe/frappe uses on its List View: the UI collects
+			// selected rows and dispatches to a single backend entry
+			// point rather than looping over per-row endpoints.
+			r.Post("/{ktype}/bulk", rh.bulk)
 			r.Get("/{ktype}/{id}", rh.get)
 			r.Patch("/{ktype}/{id}", rh.update)
 			r.Delete("/{ktype}/{id}", rh.delete)
+			// Print surface — HTML preview + PDF download per
+			// record. Lives under /records so the tenant +
+			// feature + rate-limit middleware is inherited; the
+			// feature key is derived from the KType's domain
+			// prefix (finance.ar_invoice → "finance") so disabling
+			// a KApp also disables its printable artifacts.
+			r.Get("/{ktype}/{id}/pdf", ph.pdf)
+			r.Get("/{ktype}/{id}/html", ph.html)
 			// Workflow action endpoint (ARCHITECTURE.md §10). Runs under the
 			// same tenant + idempotency + rate-limit + quota stack as record
 			// CRUD so a spammed transition can't starve other tenants.

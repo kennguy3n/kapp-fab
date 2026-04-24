@@ -129,11 +129,13 @@ func run() error {
 		From:     cfg.SMTPFrom,
 	}
 	router := &notificationRouter{
-		bridge: bridge,
-		client: &http.Client{Timeout: 5 * time.Second},
-		pool:   pool,
-		store:  notifications.NewStore(pool),
-		smtp:   notifications.NewSMTPAdapter(smtpCfg),
+		bridge:       bridge,
+		client:       &http.Client{Timeout: 5 * time.Second},
+		pool:         pool,
+		adminPool:    adminPool,
+		store:        notifications.NewStore(pool),
+		smtp:         notifications.NewSMTPAdapter(smtpCfg),
+		webhookStore: notifications.NewWebhookStore(pool),
 	}
 
 	// Low-stock alert sweeper runs alongside the outbox drain so a

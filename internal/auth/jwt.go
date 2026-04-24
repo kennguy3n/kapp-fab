@@ -49,6 +49,15 @@ type Claims struct {
 	TenantID  uuid.UUID `json:"tid"`
 	Roles     []string  `json:"roles,omitempty"`
 	SessionID uuid.UUID `json:"sid,omitempty"`
+	// Scope narrows the token's surface. Empty (default) means a
+	// standard user session with full KApp access; "portal" means
+	// an external customer session that may only hit the /portal
+	// endpoints and only rows scoped to its Email.
+	Scope string `json:"scope,omitempty"`
+	// Email is set for portal tokens so downstream handlers can
+	// filter helpdesk tickets by customer_email without a second
+	// portal_users lookup on every request.
+	Email string `json:"email,omitempty"`
 	// Standard JWT claims (subset we actually use).
 	Issuer    string `json:"iss,omitempty"`
 	Audience  string `json:"aud,omitempty"`

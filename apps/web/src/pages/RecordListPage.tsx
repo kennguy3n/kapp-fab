@@ -90,6 +90,65 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
   });
 
   const [selected, setSelected] = useState<KRecord | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const toggleSelect = (id: string, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+  const toggleSelectAll = (checked: boolean, rows: KRecord[]) => {
+    setSelectedIds(checked ? new Set(rows.map((r) => r.id)) : new Set());
+  };
+
+  const bulkStatusMutation = useMutation({
+    mutationFn: async ({ ids, status }: { ids: string[]; status: string }) =>
+      api.bulkRecords(ktype!, {
+        ids,
+        action: "status_change",
+        payload: { status },
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["records", ktype] });
+      setSelectedIds(new Set());
+    },
+  });
+
+  const bulkDeleteMutation = useMutation({
+    mutationFn: async (ids: string[]) =>
+      api.bulkRecords(ktype!, { ids, action: "delete" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["records", ktype] });
+      setSelectedIds(new Set());
+    },
+  });
+
+  const handleBulkStatus = () => {
+    const status = window.prompt("New status");
+    if (!status) return;
+    bulkStatusMutation.mutate({ ids: [...selectedIds], status });
+  };
+
+  const handleBulkDelete = () => {
+    if (!window.confirm(`Delete ${selectedIds.size} record(s)?`)) return;
+    bulkDeleteMutation.mutate([...selectedIds]);
+  };
+
+  const handleBulkExport = async () => {
+    const csv = await api.bulkExportRecords(ktype!, [...selectedIds]);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${ktype}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const hasKanban = !!ktypeQuery.data?.schema?.views?.kanban;
   const [modeOverride, setModeOverride] = useState<ViewMode | null>(null);
   const mode: ViewMode =
@@ -224,7 +283,40 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
             ktype={kt}
             records={records}
             onRowClick={(r) => setSelected(r)}
+            selectedIds={selectedIds}
+            onToggleSelect={toggleSelect}
+            onToggleAll={(checked) => toggleSelectAll(checked, records)}
           />
+        )}
+        {selectedIds.size > 0 && (
+          <div
+            role="toolbar"
+            aria-label="Bulk actions"
+            style={{
+              position: "sticky",
+              bottom: 16,
+              marginTop: 12,
+              display: "flex",
+              gap: 8,
+              alignItems: "center",
+              background: "#111827",
+              color: "#f9fafb",
+              padding: "8px 12px",
+              borderRadius: 8,
+              boxShadow: "0 4px 12px rgba(0,0,0,0.2)",
+              zIndex: 2,
+            }}
+          >
+            <span>{selectedIds.size} selected</span>
+            <button onClick={handleBulkStatus} disabled={bulkStatusMutation.isPending}>
+              Change Status
+            </button>
+            <button onClick={handleBulkDelete} disabled={bulkDeleteMutation.isPending}>
+              Delete
+            </button>
+            <button onClick={handleBulkExport}>Export CSV</button>
+            <button onClick={() => setSelectedIds(new Set())}>Clear</button>
+          </div>
         )}
       </section>
       {selected && (

@@ -101,6 +101,11 @@ var TenantScopedTables = []string{
 	"scheduled_actions",
 	"tenant_features",
 	"tenant_usage",
+	// Phase J
+	"webhooks",
+	"webhook_deliveries",
+	"print_templates",
+	"portal_users",
 }
 
 // manifest is the first record in every dump file.

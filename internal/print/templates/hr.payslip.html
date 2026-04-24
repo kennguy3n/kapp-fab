@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Payslip {{ .ID }}</title>
+<style>
+  body { font: 12pt/1.4 "Helvetica Neue", Arial, sans-serif; color: #111; padding: 24pt; }
+  h1 { font-size: 22pt; margin: 0 0 12pt; }
+  .meta { color: #555; margin-bottom: 18pt; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 6pt 8pt; border-bottom: 1px solid #ddd; text-align: left; }
+  th { background: #f3f4f6; }
+  .right { text-align: right; }
+</style>
+</head>
+<body>
+  <h1>Payslip</h1>
+  <div class="meta">
+    Employee: {{ field .Data "employee_name" "" }}<br />
+    Period: {{ field .Data "period_start" "" }} – {{ field .Data "period_end" "" }}<br />
+    Status: {{ .Status }}
+  </div>
+
+  <h2 style="font-size:14pt">Earnings</h2>
+  <table>
+    <thead><tr><th>Component</th><th class="right">Amount</th></tr></thead>
+    <tbody>
+      {{ range lineItems .Data "earnings" }}
+      <tr><td>{{ item . "name" "" }}</td><td class="right">{{ item . "amount" "" }}</td></tr>
+      {{ end }}
+    </tbody>
+  </table>
+
+  <h2 style="font-size:14pt; margin-top:18pt">Deductions</h2>
+  <table>
+    <thead><tr><th>Component</th><th class="right">Amount</th></tr></thead>
+    <tbody>
+      {{ range lineItems .Data "deductions" }}
+      <tr><td>{{ item . "name" "" }}</td><td class="right">{{ item . "amount" "" }}</td></tr>
+      {{ end }}
+    </tbody>
+  </table>
+
+  <table style="margin-top:18pt">
+    <tr><th>Net pay</th><th class="right">{{ field .Data "net_pay" "0.00" }}</th></tr>
+  </table>
+</body>
+</html>

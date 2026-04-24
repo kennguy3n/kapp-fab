@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Purchase Order {{ .ID }}</title>
+<style>
+  body { font: 12pt/1.4 "Helvetica Neue", Arial, sans-serif; color: #111; padding: 24pt; }
+  h1 { font-size: 22pt; margin: 0 0 12pt; }
+  .meta { color: #555; margin-bottom: 18pt; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 6pt 8pt; border-bottom: 1px solid #ddd; text-align: left; }
+  th { background: #f3f4f6; }
+  .right { text-align: right; }
+</style>
+</head>
+<body>
+  <h1>Purchase Order #{{ field .Data "po_number" .ID }}</h1>
+  <div class="meta">
+    Issued: {{ field .Data "order_date" "" }}<br />
+    Supplier: {{ field .Data "supplier_name" "" }}<br />
+    Status: {{ .Status }}
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>SKU</th><th>Description</th><th class="right">Qty</th><th class="right">Unit</th><th class="right">Amount</th></tr>
+    </thead>
+    <tbody>
+      {{ range lineItems .Data "lines" }}
+      <tr>
+        <td>{{ item . "sku" "" }}</td>
+        <td>{{ item . "description" "" }}</td>
+        <td class="right">{{ item . "quantity" "" }}</td>
+        <td class="right">{{ item . "unit_price" "" }}</td>
+        <td class="right">{{ item . "amount" "" }}</td>
+      </tr>
+      {{ else }}
+      <tr><td colspan="5"><em>No line items.</em></td></tr>
+      {{ end }}
+    </tbody>
+  </table>
+
+  <table style="margin-top:18pt; width:300pt; margin-left:auto">
+    <tr><td>Subtotal</td><td class="right">{{ field .Data "subtotal" "0.00" }}</td></tr>
+    <tr><td>Tax</td><td class="right">{{ field .Data "tax" "0.00" }}</td></tr>
+    <tr><th>Total</th><th class="right">{{ field .Data "total" "0.00" }}</th></tr>
+  </table>
+</body>
+</html>

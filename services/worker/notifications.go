@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -48,6 +49,11 @@ type notificationRouter struct {
 	// control-plane, not tenant-scoped, so the app pool is fine — no
 	// SET LOCAL app.tenant_id required.
 	pool *pgxpool.Pool
+	// adminPool bypasses RLS for cross-tenant scans (e.g. the
+	// registered-webhook fan-out has to read every tenant's rows at
+	// once). The app pool cannot do this because RLS pins the query
+	// to the tenant set in app.tenant_id.
+	adminPool *pgxpool.Pool
 	// store persists every notification envelope to the inbox table
 	// so the web bell/inbox surface is independent of transport
 	// success. Nil is tolerated for dev setups without the schema.
@@ -56,6 +62,9 @@ type notificationRouter struct {
 	// SMTPConfig) means SMTP is not configured and the email channel
 	// falls back to logging the notice.
 	smtp notifications.SMTPSender
+	// webhookStore persists per-tenant outbound webhook subscriptions
+	// and their delivery log so operators can audit failed POSTs.
+	webhookStore *notifications.WebhookStore
 }
 
 // notificationEnvelope is the shape extracted from event payloads.
@@ -78,6 +87,11 @@ func (r *notificationRouter) route(ctx context.Context, e events.Event) {
 	if r == nil {
 		return
 	}
+	// Fan out to tenant-registered webhook subscriptions before the
+	// envelope gate — a producer might emit a pure event (no
+	// notification envelope) and a tenant can still subscribe
+	// external systems via the /api/v1/webhooks CRUD surface.
+	r.fanOutRegisteredWebhooks(ctx, e)
 	env := extractNotification(e.Payload)
 	if env == nil {
 		return
@@ -296,4 +310,175 @@ func extractNotification(raw []byte) *notificationEnvelope {
 		return nil
 	}
 	return wrapper.Notification
+}
+
+// maxWebhookAttempts is the hard retry ceiling. Matches the task
+// requirement (max 5 attempts) and bounds the exponential backoff
+// schedule in scheduleWebhookRetry.
+const maxWebhookAttempts = 5
+
+// fanOutRegisteredWebhooks looks up every active webhook for the
+// event's tenant, filters by event-type prefix, and POSTs the event
+// with exponential-backoff retries. Each attempt is logged to
+// webhook_deliveries so operators can inspect failures.
+func (r *notificationRouter) fanOutRegisteredWebhooks(ctx context.Context, e events.Event) {
+	if r == nil || r.webhookStore == nil || r.adminPool == nil {
+		return
+	}
+	hooks, err := r.webhookStore.ListActiveAcrossTenants(ctx, r.adminPool)
+	if err != nil {
+		log.Printf("worker: list active webhooks: %v", err)
+		return
+	}
+	for _, h := range hooks {
+		if h.TenantID != e.TenantID {
+			continue
+		}
+		if !webhookMatches(h, e.Type) {
+			continue
+		}
+		r.deliverWebhook(ctx, h, e, 1)
+	}
+}
+
+// webhookMatches returns true when the subscription's event_filters
+// array either contains the event type literally or a prefix of it
+// (ending with "*"). An empty filter list means "all events".
+func webhookMatches(h notifications.Webhook, eventType string) bool {
+	var filters []string
+	if len(h.EventFilters) == 0 {
+		return true
+	}
+	if err := json.Unmarshal(h.EventFilters, &filters); err != nil {
+		return true
+	}
+	if len(filters) == 0 {
+		return true
+	}
+	for _, f := range filters {
+		if f == "" {
+			continue
+		}
+		if f == eventType {
+			return true
+		}
+		if len(f) > 1 && f[len(f)-1] == '*' {
+			prefix := f[:len(f)-1]
+			if len(eventType) >= len(prefix) && eventType[:len(prefix)] == prefix {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// deliverWebhook posts one attempt and logs the outcome to the
+// delivery log. On a non-2xx response or transport error the row
+// is marked undelivered with a next_retry_at; the next attempt is
+// scheduled synchronously by sleeping for the backoff interval,
+// bounded at maxWebhookAttempts. Synchronous retry is acceptable
+// here because the delivery goroutine is already off the outbox
+// drain's hot path — the drain loop spawns a fanOut call per
+// event in its own goroutine upstream.
+func (r *notificationRouter) deliverWebhook(ctx context.Context, h notifications.Webhook, e events.Event, attempt int) {
+	body, err := json.Marshal(e)
+	if err != nil {
+		r.recordWebhookAttempt(ctx, h, e, attempt, nil, "", false, fmt.Errorf("marshal: %w", err), nil)
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
+	if err != nil {
+		r.recordWebhookAttempt(ctx, h, e, attempt, nil, "", false, err, nil)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Kapp-Event-Type", e.Type)
+	req.Header.Set("X-Kapp-Event-Id", e.ID.String())
+	req.Header.Set("X-Kapp-Tenant-Id", e.TenantID.String())
+	if h.Secret != "" {
+		mac := hmac.New(sha256.New, []byte(h.Secret))
+		mac.Write(body)
+		req.Header.Set("X-Kapp-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	}
+	resp, err := r.client.Do(req)
+	if err != nil {
+		var next *time.Time
+		if attempt < maxWebhookAttempts {
+			t := time.Now().UTC().Add(webhookBackoff(attempt))
+			next = &t
+		}
+		r.recordWebhookAttempt(ctx, h, e, attempt, nil, "", false, err, next)
+		if next != nil {
+			time.Sleep(webhookBackoff(attempt))
+			r.deliverWebhook(ctx, h, e, attempt+1)
+		}
+		return
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	status := resp.StatusCode
+	if status >= 200 && status < 300 {
+		r.recordWebhookAttempt(ctx, h, e, attempt, &status, string(snippet), true, nil, nil)
+		return
+	}
+	var next *time.Time
+	if attempt < maxWebhookAttempts {
+		t := time.Now().UTC().Add(webhookBackoff(attempt))
+		next = &t
+	}
+	r.recordWebhookAttempt(ctx, h, e, attempt, &status, string(snippet), false, fmt.Errorf("non-2xx"), next)
+	if next != nil {
+		time.Sleep(webhookBackoff(attempt))
+		r.deliverWebhook(ctx, h, e, attempt+1)
+	}
+}
+
+// recordWebhookAttempt is a thin wrapper over webhookStore.RecordDelivery
+// that swallows log errors so a failed delivery-log write does not
+// short-circuit the retry loop.
+func (r *notificationRouter) recordWebhookAttempt(
+	ctx context.Context,
+	h notifications.Webhook,
+	e events.Event,
+	attempt int,
+	status *int,
+	body string,
+	delivered bool,
+	err error,
+	next *time.Time,
+) {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	_, recErr := r.webhookStore.RecordDelivery(ctx, h.TenantID, notifications.DeliveryInput{
+		WebhookID:    h.ID,
+		EventID:      e.ID,
+		EventType:    e.Type,
+		StatusCode:   status,
+		ResponseBody: body,
+		Attempt:      attempt,
+		Delivered:    delivered,
+		Error:        msg,
+		NextRetryAt:  next,
+	})
+	if recErr != nil {
+		log.Printf("worker: record webhook delivery tenant=%s hook=%s: %v", h.TenantID, h.ID, recErr)
+	}
+}
+
+// webhookBackoff returns the wait before attempt N+1 given the just-
+// failed attempt. 1 → 1s, 2 → 2s, 3 → 4s, 4 → 8s, 5 → 16s.
+func webhookBackoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	d := time.Second
+	for i := 1; i < attempt; i++ {
+		d *= 2
+	}
+	return d
 }
