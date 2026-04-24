@@ -25,6 +25,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
+	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
@@ -143,14 +144,19 @@ func run() error {
 	alerts := newStockAlertWorker(pool, adminPool, publisher, dbutil.SetTenantContext)
 	go alerts.Run(ctx)
 
-	// Scheduled actions engine. This PR registers the recurring AR
-	// invoice generator against action_type "recurring_invoice".
-	// Reuses the api's record store + invoice poster wiring so
-	// generated invoices emit the same audit + outbox + inventory
-	// hook chain as a hand-authored invoice. The worker stays a
-	// lightweight subset of the api stack — no encryption, no quota
-	// enforcer — because neither matters for a synthetic
-	// background-generated draft.
+	// Scheduled actions engine. Registers both:
+	//   - the recurring AR invoice generator against action_type
+	//     "recurring_invoice"; reuses the api's record store +
+	//     invoice poster wiring so generated invoices emit the same
+	//     audit + outbox + inventory hook chain as a hand-authored
+	//     invoice. The worker stays a lightweight subset of the api
+	//     stack — no encryption, no quota enforcer — because
+	//     neither matters for a synthetic background-generated
+	//     draft.
+	//   - the SLA breach sweeper against action_type
+	//     "sla_breach_check"; the tenant wizard seeds that cadence
+	//     per new tenant so the handler has live work once the
+	//     scheduler claims a row.
 	schedStore := scheduler.NewStore(pool, adminPool)
 	schedRegistry := scheduler.NewRegistry()
 	auditor := audit.NewPGLogger(pool)
@@ -178,6 +184,11 @@ func run() error {
 		},
 	).WithSystemActor(workerSystemActor)
 	schedRegistry.Register(finance.ActionTypeRecurringInvoice, recurringEngine)
+	helpdeskStore := helpdesk.NewStore(pool)
+	schedRegistry.Register(
+		helpdesk.ActionTypeSLABreach,
+		helpdesk.NewSLABreachHandler(pool, helpdeskStore, publisher, dbutil.SetTenantContext),
+	)
 	go scheduler.RunLoop(ctx, schedStore, schedRegistry, 10*time.Second)
 
 	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)

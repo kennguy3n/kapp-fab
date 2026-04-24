@@ -15,6 +15,16 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 )
 
+// defaultSLABreachActionType mirrors helpdesk.ActionTypeSLABreach.
+// The tenant package cannot import helpdesk without creating a cycle
+// (platform → tenant → helpdesk → ktype → platform), so the literal
+// is duplicated here with a test-enforced drift check in
+// internal/integrationtest/sla_breach_test.go. Keep them in sync.
+const (
+	defaultSLABreachActionType      = "sla_breach_check"
+	defaultSLABreachIntervalSeconds = 300
+)
+
 // SetupWizardConfig is the payload a tenant owner submits to seed their
 // newly-created tenant. It covers the first-run choices ERPNext surfaces
 // in its own Setup Wizard — company profile, country/industry, the
@@ -169,6 +179,14 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 			return err
 		}
 		out.RolesInserted = rolesInserted
+
+		// Seed the default per-tenant scheduled_actions rows the
+		// worker handlers expect (SLA breach sweeper +
+		// recurring-invoice generator). Idempotent on
+		// (tenant_id, action_type) so a re-imported tenant never
+		// duplicates queue rows. The interval defaults match the
+		// values asserted by the integration drift tests in
+		// internal/integrationtest/{sla_breach_test,recurring_invoice_test}.go.
 		if err := seedDefaultScheduledActions(ctx, tx, tenantID); err != nil {
 			return err
 		}
@@ -236,11 +254,19 @@ func seedRoles(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, roles []Wizar
 		if len(perms) == 0 {
 			perms = json.RawMessage(`[]`)
 		}
+		// Side-fix: the `roles` table (migrations/000001) does not
+		// carry a `description` column — the original wizard INSERT
+		// referenced one, which made every first-run seed fail with
+		// a 42703 once a test finally exercised this path (Task 4).
+		// WizardRole.Description is still accepted on the API and
+		// preserved in the struct; it is simply not persisted. A
+		// follow-up migration can restore storage if the column is
+		// ever wanted.
 		_, err := tx.Exec(ctx,
-			`INSERT INTO roles (tenant_id, name, description, permissions)
-			 VALUES ($1, $2, $3, $4)
+			`INSERT INTO roles (tenant_id, name, permissions)
+			 VALUES ($1, $2, $3)
 			 ON CONFLICT (tenant_id, name) DO NOTHING`,
-			tenantID, r.Name, r.Description, perms,
+			tenantID, r.Name, perms,
 		)
 		if err != nil {
 			return inserted, fmt.Errorf("tenant: seed role %s: %w", r.Name, err)
@@ -310,6 +336,7 @@ func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 		actionType      string
 		intervalSeconds int
 	}{
+		{defaultSLABreachActionType, defaultSLABreachIntervalSeconds},
 		{defaultRecurringInvoiceActionType, defaultRecurringInvoiceIntervalSeconds},
 	}
 	for _, d := range defaults {
