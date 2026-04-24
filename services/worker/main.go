@@ -23,6 +23,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/scheduler"
@@ -137,6 +138,14 @@ func run() error {
 	// the queue.
 	schedStore := scheduler.NewStore(pool, adminPool)
 	schedRegistry := scheduler.NewRegistry()
+	// SLA breach sweeper (Task 4). Registered here so action_type
+	// "sla_breach_check" — the cadence the tenant wizard seeds per
+	// new tenant — has a live handler once the scheduler claims a row.
+	helpdeskStore := helpdesk.NewStore(pool)
+	schedRegistry.Register(
+		helpdesk.ActionTypeSLABreach,
+		helpdesk.NewSLABreachHandler(pool, helpdeskStore, publisher, dbutil.SetTenantContext),
+	)
 	go scheduler.RunLoop(ctx, schedStore, schedRegistry, 10*time.Second)
 
 	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)

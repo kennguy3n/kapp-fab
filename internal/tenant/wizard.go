@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -14,21 +15,31 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 )
 
+// defaultSLABreachActionType mirrors helpdesk.ActionTypeSLABreach.
+// The tenant package cannot import helpdesk without creating a cycle
+// (platform → tenant → helpdesk → ktype → platform), so the literal
+// is duplicated here with a test-enforced drift check in
+// internal/integrationtest/sla_breach_test.go. Keep them in sync.
+const (
+	defaultSLABreachActionType      = "sla_breach_check"
+	defaultSLABreachIntervalSeconds = 300
+)
+
 // SetupWizardConfig is the payload a tenant owner submits to seed their
 // newly-created tenant. It covers the first-run choices ERPNext surfaces
 // in its own Setup Wizard — company profile, country/industry, the
 // chart-of-accounts template, and the initial role roster.
 type SetupWizardConfig struct {
-	CompanyName      string           `json:"company_name"`
-	Industry         string           `json:"industry,omitempty"`
-	Country          string           `json:"country,omitempty"`
-	CurrencyCode     string           `json:"currency_code,omitempty"`
-	CoATemplate      string           `json:"coa_template,omitempty"`
-	Roles            []WizardRole     `json:"roles,omitempty"`
-	Users            []WizardUser     `json:"users,omitempty"`
-	SampleData       bool             `json:"sample_data,omitempty"`
-	Plan             string           `json:"plan,omitempty"`
-	CreatedBy        uuid.UUID        `json:"created_by,omitempty"`
+	CompanyName  string       `json:"company_name"`
+	Industry     string       `json:"industry,omitempty"`
+	Country      string       `json:"country,omitempty"`
+	CurrencyCode string       `json:"currency_code,omitempty"`
+	CoATemplate  string       `json:"coa_template,omitempty"`
+	Roles        []WizardRole `json:"roles,omitempty"`
+	Users        []WizardUser `json:"users,omitempty"`
+	SampleData   bool         `json:"sample_data,omitempty"`
+	Plan         string       `json:"plan,omitempty"`
+	CreatedBy    uuid.UUID    `json:"created_by,omitempty"`
 }
 
 // WizardRole captures a role definition the wizard should upsert into
@@ -168,6 +179,16 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 			return err
 		}
 		out.RolesInserted = rolesInserted
+
+		// Seed the default SLA breach sweeper. Every fresh tenant
+		// gets a scheduled_actions row pointing the worker at the
+		// sla_breach_check handler so tickets authored before any
+		// manual configuration still raise warnings / breaches.
+		// A DO NOTHING on (tenant_id, action_type) keeps the seed
+		// idempotent if the wizard is re-run (e.g. by a re-import).
+		if err := seedDefaultScheduledActions(ctx, tx, tenantID); err != nil {
+			return err
+		}
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("tenant: wizard seed accounts/roles: %w", err)
@@ -222,6 +243,38 @@ func seedAccounts(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, accounts [
 	return inserted, nil
 }
 
+// seedDefaultScheduledActions inserts the per-tenant scheduled rows
+// every fresh tenant needs. Currently only `sla_breach_check` is
+// seeded (Task 4) — recurring-invoice generation (Task 5) will add
+// a row for each recurring_invoice KRecord at create-time rather
+// than here, so the list stays short.
+//
+// The guard against duplicates is a NOT EXISTS on
+// (tenant_id, action_type); there is no unique index on that pair
+// (action_type is not modelled as singleton — a tenant can, in
+// theory, register multiple actions of the same type with different
+// payloads). The wizard's default seed is the only caller that
+// should respect the singleton invariant.
+func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) error {
+	now := time.Now().UTC()
+	_, err := tx.Exec(ctx,
+		`INSERT INTO scheduled_actions
+		     (tenant_id, action_type, interval_seconds, next_run_at, payload, enabled)
+		 SELECT $1, $2, $3, $4, '{}'::jsonb, TRUE
+		  WHERE NOT EXISTS (
+		    SELECT 1 FROM scheduled_actions
+		     WHERE tenant_id = $1 AND action_type = $2
+		  )`,
+		tenantID, defaultSLABreachActionType,
+		defaultSLABreachIntervalSeconds, now,
+	)
+	if err != nil {
+		return fmt.Errorf("tenant: seed scheduled action %s: %w",
+			defaultSLABreachActionType, err)
+	}
+	return nil
+}
+
 func seedRoles(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, roles []WizardRole) (int, error) {
 	inserted := 0
 	for _, r := range roles {
@@ -232,11 +285,19 @@ func seedRoles(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, roles []Wizar
 		if len(perms) == 0 {
 			perms = json.RawMessage(`[]`)
 		}
+		// Side-fix: the `roles` table (migrations/000001) does not
+		// carry a `description` column — the original wizard INSERT
+		// referenced one, which made every first-run seed fail with
+		// a 42703 once a test finally exercised this path (Task 4).
+		// WizardRole.Description is still accepted on the API and
+		// preserved in the struct; it is simply not persisted. A
+		// follow-up migration can restore storage if the column is
+		// ever wanted.
 		_, err := tx.Exec(ctx,
-			`INSERT INTO roles (tenant_id, name, description, permissions)
-			 VALUES ($1, $2, $3, $4)
+			`INSERT INTO roles (tenant_id, name, permissions)
+			 VALUES ($1, $2, $3)
 			 ON CONFLICT (tenant_id, name) DO NOTHING`,
-			tenantID, r.Name, r.Description, perms,
+			tenantID, r.Name, perms,
 		)
 		if err != nil {
 			return inserted, fmt.Errorf("tenant: seed role %s: %w", r.Name, err)

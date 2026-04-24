@@ -47,6 +47,16 @@ const (
 	EventResolutionBreach  = "resolution_breach"
 )
 
+// ActionTypeSLABreach is the scheduled_actions.action_type the worker
+// registers its SLA breach handler under. Lives in this package so
+// the tenant wizard and the worker reference the same literal.
+const ActionTypeSLABreach = "sla_breach_check"
+
+// DefaultSLABreachIntervalSeconds is the cadence the tenant wizard
+// seeds for sla_breach_check — once every five minutes, matching the
+// granularity ERPNext uses for its auto-escalation scheduler.
+const DefaultSLABreachIntervalSeconds = 300
+
 // SLALogEntry is one row of the append-only ticket_sla_log.
 type SLALogEntry struct {
 	ID         int64           `json:"id"`
