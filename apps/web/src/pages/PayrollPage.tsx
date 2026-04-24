@@ -213,11 +213,19 @@ function PayRunsTable() {
     queryFn: () => api.listRecords(KTYPE_PAYRUN),
   });
 
+  // Both generate and post mutations must invalidate the
+  // dedicated ["hr.pay_run.payslips"] key used by PayslipsForRun
+  // alongside the generic ["records", KTYPE_PAYSLIP] key.
+  // React Query's invalidateQueries prefix-matches, and those two
+  // keys no longer share a prefix — missing the new one leaves the
+  // open "View slips" panel showing stale data until the user
+  // toggles it off/on.
   const generate = useMutation({
     mutationFn: (id: string) => api.generatePayslips(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["records", KTYPE_PAYRUN] });
       qc.invalidateQueries({ queryKey: ["records", KTYPE_PAYSLIP] });
+      qc.invalidateQueries({ queryKey: ["hr.pay_run.payslips"] });
     },
   });
 
@@ -226,6 +234,7 @@ function PayRunsTable() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["records", KTYPE_PAYRUN] });
       qc.invalidateQueries({ queryKey: ["records", KTYPE_PAYSLIP] });
+      qc.invalidateQueries({ queryKey: ["hr.pay_run.payslips"] });
     },
   });
 
