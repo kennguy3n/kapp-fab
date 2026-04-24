@@ -626,6 +626,11 @@ func writeFinanceError(w http.ResponseWriter, err error) {
 		errors.Is(err, ledger.ErrDebitNoteAlreadyPosted),
 		errors.Is(err, ledger.ErrDuplicateSourceEntry):
 		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, ledger.ErrCreditLimitExceeded):
+		// 422 Unprocessable Entity matches the "request is well-formed
+		// but fails a business rule" semantic the frontend uses to
+		// render a blocking toast instead of a generic 4xx.
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 	case errors.Is(err, ledger.ErrUnbalancedEntry),
 		errors.Is(err, ledger.ErrEmptyEntry),
 		errors.Is(err, ledger.ErrInvalidLine),

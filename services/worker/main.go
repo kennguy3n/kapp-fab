@@ -135,21 +135,16 @@ func run() error {
 	alerts := newStockAlertWorker(pool, adminPool, publisher, dbutil.SetTenantContext)
 	go alerts.Run(ctx)
 
-	// Scheduled actions engine. The registry starts empty — handlers
-	// are registered by follow-up phases (SLA breach sweep, recurring
-	// invoices) once their action types land. Running the loop with
-	// an empty registry is safe: PollDue still claims due rows and
-	// advances next_run_at so an orphaned action_type cannot stall
-	// the queue.
+	// Scheduled actions engine. This PR registers the recurring AR
+	// invoice generator against action_type "recurring_invoice".
+	// Reuses the api's record store + invoice poster wiring so
+	// generated invoices emit the same audit + outbox + inventory
+	// hook chain as a hand-authored invoice. The worker stays a
+	// lightweight subset of the api stack — no encryption, no quota
+	// enforcer — because neither matters for a synthetic
+	// background-generated draft.
 	schedStore := scheduler.NewStore(pool, adminPool)
 	schedRegistry := scheduler.NewRegistry()
-
-	// Recurring AR invoice generator (Task 5). Reuses the api's
-	// record store + invoice poster wiring so generated invoices
-	// emit the same audit + outbox + inventory hook chain as a
-	// hand-authored invoice. The worker stays a lightweight subset
-	// of the api stack — no encryption, no quota enforcer — because
-	// neither matters for a synthetic background-generated draft.
 	auditor := audit.NewPGLogger(pool)
 	ktypeCache := platform.NewLRUCache(1024, 5*time.Minute)
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
@@ -168,7 +163,6 @@ func run() error {
 		},
 	)
 	schedRegistry.Register(finance.ActionTypeRecurringInvoice, recurringEngine)
-
 	go scheduler.RunLoop(ctx, schedStore, schedRegistry, 10*time.Second)
 
 	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)
