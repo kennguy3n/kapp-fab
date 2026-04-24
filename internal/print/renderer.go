@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,9 +37,15 @@ var builtin embed.FS
 // injected on construction; when none exists the renderer falls
 // back to the package-embedded defaults.
 type Renderer struct {
-	store        *TemplateStore
-	objs         files.ObjectStore
-	converter    HTMLToPDF
+	store     *TemplateStore
+	objs      files.ObjectStore
+	converter HTMLToPDF
+	// defaultTmpls is a per-ktype cache of parsed embedded templates.
+	// defaultMu guards it because resolveTemplate runs from per-request
+	// goroutines and Go maps are not safe for concurrent read/write.
+	// *template.Template itself is safe for concurrent Execute, so the
+	// lock only scopes the map, not the rendering step.
+	defaultMu    sync.RWMutex
 	defaultTmpls map[string]*template.Template
 }
 
@@ -168,7 +175,10 @@ func (r *Renderer) resolveTemplate(ctx context.Context, tenantID uuid.UUID, ktyp
 			return t, nil
 		}
 	}
-	if cached, ok := r.defaultTmpls[ktypeName]; ok {
+	r.defaultMu.RLock()
+	cached, ok := r.defaultTmpls[ktypeName]
+	r.defaultMu.RUnlock()
+	if ok {
 		return cached, nil
 	}
 	raw, err := builtin.ReadFile("templates/" + ktypeName + ".html")
@@ -182,7 +192,15 @@ func (r *Renderer) resolveTemplate(ctx context.Context, tenantID uuid.UUID, ktyp
 	if err != nil {
 		return nil, fmt.Errorf("print: parse default template: %w", err)
 	}
+	r.defaultMu.Lock()
+	// Re-check under the write lock so two concurrent misses on the
+	// same ktype produce a single cached entry rather than losing one.
+	if existing, ok := r.defaultTmpls[ktypeName]; ok {
+		r.defaultMu.Unlock()
+		return existing, nil
+	}
 	r.defaultTmpls[ktypeName] = t
+	r.defaultMu.Unlock()
 	return t, nil
 }
 

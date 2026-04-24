@@ -383,8 +383,11 @@ func buildMagicLink(r *http.Request, slug, email, token string) string {
 		scheme = "http"
 	}
 	host := r.Host
-	q := "tenant_slug=" + urlEncode(slug) + "&email=" + urlEncode(email) + "&token=" + urlEncode(token)
-	return scheme + "://" + host + "/portal/verify?" + q
+	// The frontend route is /portal/:tenant_slug, so embed the slug
+	// as a path segment — not a query parameter — otherwise React
+	// Router resolves tenant_slug to the literal "verify".
+	q := "email=" + urlEncode(email) + "&token=" + urlEncode(token)
+	return scheme + "://" + host + "/portal/" + urlEncode(slug) + "?" + q
 }
 
 func urlEncode(s string) string {

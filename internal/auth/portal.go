@@ -180,11 +180,10 @@ func (s *PortalStore) GetByEmail(ctx context.Context, tenantID uuid.UUID, email 
 
 // IssuePortalToken mints the JWT for a verified portal user. It
 // reuses the platform's Signer under the hood so rotation /
-// revocation surfaces work the same as for standard user tokens.
-// The signer's AccessTTL is substituted with PortalTokenTTL on the
-// resulting claims by overwriting ExpiresAt after issuance — we
-// deliberately do not re-use the standard-user TTL because portal
-// sessions should expire faster.
+// revocation surfaces work the same as for standard user tokens,
+// but stamps the TTL at PortalTokenTTL via IssueWithTTL — portal
+// sessions are deliberately shorter than standard user sessions
+// and this keeps the TTL atomic with signing.
 func IssuePortalToken(s *Signer, user PortalUser) (string, *Claims, error) {
 	if s == nil {
 		return "", nil, errors.New("auth: signer required")
@@ -195,7 +194,7 @@ func IssuePortalToken(s *Signer, user PortalUser) (string, *Claims, error) {
 		Scope:    PortalScope,
 		Email:    user.Email,
 	}
-	token, err := s.Issue(base)
+	token, err := s.IssueWithTTL(base, PortalTokenTTL)
 	if err != nil {
 		return "", nil, err
 	}
