@@ -24,6 +24,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/auth"
 	"github.com/kennguy3n/kapp-fab/internal/base"
 	"github.com/kennguy3n/kapp-fab/internal/crm"
+	"github.com/kennguy3n/kapp-fab/internal/dashboard"
 	"github.com/kennguy3n/kapp-fab/internal/docs"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/files"
@@ -269,7 +270,7 @@ func run() error {
 	curh := &currencyHandlers{store: exchangeRateStore}
 	hdh := &helpdeskHandlers{store: helpdeskStore}
 	reph := &reportsHandlers{store: reportStore, runner: reportRunner}
-	dashh := &dashboardHandlers{pool: pool}
+	dashh := &dashboardHandlers{store: dashboard.NewStore(pool)}
 
 	// Phase H JWT auth. The signer is built from KAPP_JWT_SECRET; when
 	// the secret is absent we log and skip wiring the SSO endpoints so

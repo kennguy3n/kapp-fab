@@ -130,17 +130,13 @@ func run() error {
 	alerts := newStockAlertWorker(pool, adminPool, publisher, dbutil.SetTenantContext)
 	go alerts.Run(ctx)
 
-	// Scheduled actions engine. The registry starts empty — handlers
-	// are registered by follow-up phases (SLA breach sweep, recurring
-	// invoices) once their action types land. Running the loop with
-	// an empty registry is safe: PollDue still claims due rows and
-	// advances next_run_at so an orphaned action_type cannot stall
-	// the queue.
+	// Scheduled actions engine. The registry starts empty on main —
+	// this PR registers the SLA breach sweeper against action_type
+	// "sla_breach_check". The tenant wizard seeds that cadence per
+	// new tenant so the handler has live work once the scheduler
+	// claims a row.
 	schedStore := scheduler.NewStore(pool, adminPool)
 	schedRegistry := scheduler.NewRegistry()
-	// SLA breach sweeper (Task 4). Registered here so action_type
-	// "sla_breach_check" — the cadence the tenant wizard seeds per
-	// new tenant — has a live handler once the scheduler claims a row.
 	helpdeskStore := helpdesk.NewStore(pool)
 	schedRegistry.Register(
 		helpdesk.ActionTypeSLABreach,

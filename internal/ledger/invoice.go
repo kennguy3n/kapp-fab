@@ -14,6 +14,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 )
 
@@ -45,10 +46,10 @@ import (
 // exists, record still says draft) and the concurrent-poster race
 // (two callers reach PostJournalEntry; one wins, the other reuses).
 type InvoicePoster struct {
-	store             *PGStore
-	recordStore       *record.PGStore
-	salesInvoiceHook  PostHook
-	purchaseBillHook  PostHook
+	store            *PGStore
+	recordStore      *record.PGStore
+	salesInvoiceHook PostHook
+	purchaseBillHook PostHook
 }
 
 // PostHook is an opt-in callback invoked after a sales invoice or
@@ -107,6 +108,7 @@ type invoiceData struct {
 	ARAccountCode      string          `json:"ar_account_code"`
 	RevenueAccountCode string          `json:"revenue_account_code"`
 	TaxAccountCode     string          `json:"tax_account_code"`
+	PaymentTermsID     string          `json:"payment_terms_id"`
 }
 
 // billData mirrors invoiceData for finance.ap_bill. Kept as a separate
@@ -127,6 +129,7 @@ type billData struct {
 	APAccountCode      string          `json:"ap_account_code"`
 	ExpenseAccountCode string          `json:"expense_account_code"`
 	TaxAccountCode     string          `json:"tax_account_code"`
+	PaymentTermsID     string          `json:"payment_terms_id"`
 }
 
 // PostSalesInvoice posts a finance.ar_invoice KRecord to the ledger.
@@ -180,6 +183,18 @@ func (p *InvoicePoster) PostSalesInvoice(ctx context.Context, tenantID, invoiceI
 	}
 	if inv.Total.IsZero() {
 		inv.Total = inv.Subtotal.Add(inv.TaxAmount)
+	}
+
+	// Credit-limit enforcement — mirrors ERPNext's credit check.
+	// Only runs when the invoice references a customer KRecord and
+	// that customer has credit_limit > 0 on its data JSONB. The
+	// check sums every un-settled AR invoice for the same customer
+	// (status NOT IN paid/cancelled/voided) and rejects the post if
+	// adding this invoice's total would push the outstanding past
+	// the limit. A zero or missing credit_limit disables the check
+	// so existing tenants keep posting without data migration.
+	if err := p.checkCreditLimit(ctx, tenantID, invoiceID, inv); err != nil {
+		return nil, err
 	}
 
 	// If a previous invocation already posted the JE but failed before
@@ -238,15 +253,28 @@ func (p *InvoicePoster) PostSalesInvoice(ctx context.Context, tenantID, invoiceI
 		entry = posted
 	}
 
-	// Patch the invoice KRecord with status=posted + journal_entry_id.
-	// Shallow-merge so existing fields (customer_id, lines, …) are kept.
-	// Threading rec.Version in turns the patch into a compare-and-swap
-	// so two concurrent posters cannot both claim the record; the loser
-	// gets record.ErrVersionConflict and the caller retries (at which
+	// Patch the invoice KRecord with status=posted + journal_entry_id
+	// + outstanding_amount=total. Seeding outstanding_amount here
+	// rather than deferring to the first payment means AR dashboards
+	// and the credit-limit check (see checkCreditLimit) see the full
+	// balance immediately after posting. Shallow-merge keeps other
+	// fields (customer_id, lines, …) intact. Threading rec.Version
+	// turns the patch into a compare-and-swap so two concurrent
+	// posters cannot both claim the record; the loser gets
+	// record.ErrVersionConflict and the caller retries (at which
 	// point the rec.Status=='posted' guard above short-circuits).
+	totalF, _ := inv.Total.Float64()
 	patch := map[string]any{
-		"status":           "posted",
-		"journal_entry_id": entry.ID.String(),
+		"status":             "posted",
+		"journal_entry_id":   entry.ID.String(),
+		"outstanding_amount": totalF,
+	}
+	if inv.PaymentTermsID != "" {
+		schedule, scheduleErr := p.computePaymentSchedule(ctx, tenantID, inv.PaymentTermsID, inv.IssueDate, inv.Total)
+		if scheduleErr != nil {
+			return entry, fmt.Errorf("ledger: compute payment_schedule: %w", scheduleErr)
+		}
+		patch["payment_schedule"] = schedule
 	}
 	patchJSON, _ := json.Marshal(patch)
 	if _, err := p.recordStore.Update(ctx, record.KRecord{
@@ -278,6 +306,101 @@ func (p *InvoicePoster) PostSalesInvoice(ctx context.Context, tenantID, invoiceI
 	}
 	return entry, nil
 }
+
+// checkCreditLimit enforces the customer's credit_limit against the
+// running outstanding AR balance. The query and the customer lookup
+// share a single tenant-scoped transaction so the balance is
+// snapshot-consistent; RLS via dbutil.WithTenantTx blocks cross-tenant
+// reads even if an attacker hand-rolls a customer_id from another
+// tenant. Returns ErrCreditLimitExceeded (wrapped with the numeric
+// context) when the new invoice would push outstanding past the
+// limit; nil in every other case — including missing customer,
+// unset/zero credit_limit, or malformed customer_id — so posting
+// remains permissive by default.
+func (p *InvoicePoster) checkCreditLimit(ctx context.Context, tenantID, invoiceID uuid.UUID, inv invoiceData) error {
+	if inv.CustomerID == "" {
+		return nil
+	}
+	customerID, err := uuid.Parse(inv.CustomerID)
+	if err != nil {
+		// Invalid UUID — schema validation will reject this at the
+		// record layer, but guard here so we do not bubble up a raw
+		// parse error from a credit check the caller did not ask for.
+		return nil
+	}
+	if inv.Total.LessThanOrEqual(decimal.Zero) {
+		return nil
+	}
+	var (
+		creditLimit decimal.Decimal
+		outstanding decimal.Decimal
+	)
+	qErr := dbutil.WithTenantTx(ctx, p.store.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var rawLimit *string
+		if err := tx.QueryRow(ctx,
+			`SELECT data->>'credit_limit'
+			   FROM krecords
+			  WHERE tenant_id = $1 AND id = $2 AND ktype = 'crm.customer'
+			    AND deleted_at IS NULL`,
+			tenantID, customerID,
+		).Scan(&rawLimit); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// No customer record — posting permissive.
+				return errSkipCreditCheck
+			}
+			return fmt.Errorf("ledger: load customer credit limit: %w", err)
+		}
+		if rawLimit == nil || *rawLimit == "" {
+			return errSkipCreditCheck
+		}
+		parsedLimit, err := decimal.NewFromString(*rawLimit)
+		if err != nil {
+			return errSkipCreditCheck
+		}
+		creditLimit = parsedLimit
+		if creditLimit.LessThanOrEqual(decimal.Zero) {
+			return errSkipCreditCheck
+		}
+		// Running outstanding AR for this customer. Draft invoices
+		// naturally drop out because only posted invoices seed
+		// outstanding_amount (see PostSalesInvoice patch above).
+		// Excludes the invoice currently being posted so its own
+		// (soon-to-be-set) outstanding isn't counted twice alongside
+		// inv.Total in the projection below.
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE(SUM(
+			          COALESCE(NULLIF(data->>'outstanding_amount','')::numeric, 0)), 0)
+			   FROM krecords
+			  WHERE tenant_id = $1 AND ktype = 'finance.ar_invoice'
+			    AND id <> $3
+			    AND data->>'customer_id' = $2
+			    AND COALESCE(data->>'status','') NOT IN ('paid','cancelled','voided')
+			    AND deleted_at IS NULL`,
+			tenantID, customerID.String(), invoiceID,
+		).Scan(&outstanding); err != nil {
+			return fmt.Errorf("ledger: sum outstanding AR: %w", err)
+		}
+		return nil
+	})
+	if errors.Is(qErr, errSkipCreditCheck) {
+		return nil
+	}
+	if qErr != nil {
+		return qErr
+	}
+	projected := outstanding.Add(inv.Total)
+	if projected.GreaterThan(creditLimit) {
+		return fmt.Errorf("%w: customer=%s limit=%s outstanding=%s invoice=%s",
+			ErrCreditLimitExceeded, customerID,
+			creditLimit.String(), outstanding.String(), inv.Total.String())
+	}
+	return nil
+}
+
+// errSkipCreditCheck is an internal sentinel the credit check uses to
+// short-circuit out of the WithTenantTx closure without treating the
+// skip as an error at the caller level. It never leaves this file.
+var errSkipCreditCheck = errors.New("ledger: credit check not applicable")
 
 // PostPurchaseBill mirrors PostSalesInvoice for finance.ap_bill:
 //
@@ -380,6 +503,13 @@ func (p *InvoicePoster) PostPurchaseBill(ctx context.Context, tenantID, billID, 
 	patch := map[string]any{
 		"status":           "posted",
 		"journal_entry_id": entry.ID.String(),
+	}
+	if bill.PaymentTermsID != "" {
+		schedule, scheduleErr := p.computePaymentSchedule(ctx, tenantID, bill.PaymentTermsID, bill.IssueDate, bill.Total)
+		if scheduleErr != nil {
+			return entry, fmt.Errorf("ledger: compute payment_schedule: %w", scheduleErr)
+		}
+		patch["payment_schedule"] = schedule
 	}
 	patchJSON, _ := json.Marshal(patch)
 	if _, err := p.recordStore.Update(ctx, record.KRecord{
@@ -772,15 +902,41 @@ func (p *InvoicePoster) PostDebitNote(ctx context.Context, tenantID, debitNoteID
 	}
 
 	if err := p.emitSourceEvent(ctx, tenantID, "finance.debit_note.posted", map[string]any{
-		"debit_note_id":    debitNoteID,
+		"debit_note_id":     debitNoteID,
 		"debit_note_number": note.DebitNoteNumber,
-		"original_bill_id": billID,
-		"journal_entry_id": entry.ID,
-		"amount":           note.Amount.String(),
-		"currency":         currency,
-		"actor":            actorID,
+		"original_bill_id":  billID,
+		"journal_entry_id":  entry.ID,
+		"amount":            note.Amount.String(),
+		"currency":          currency,
+		"actor":             actorID,
 	}); err != nil {
 		return entry, err
 	}
 	return entry, nil
+}
+
+// computePaymentSchedule loads the supplied payment_terms record and
+// renders an installment schedule against issueDate / total. Returns
+// a slice of the JSON-serializable PaymentScheduleEntry struct so
+// the caller can drop it straight into the patch map.
+//
+// The poster guarantees this only runs when payment_terms_id is set
+// — empty strings short-circuit before the helper is called.
+func (p *InvoicePoster) computePaymentSchedule(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	termsIDStr string,
+	issueDateStr string,
+	total decimal.Decimal,
+) ([]finance.PaymentScheduleEntry, error) {
+	termsID, err := uuid.Parse(termsIDStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid payment_terms_id %q: %w", termsIDStr, err)
+	}
+	installments, err := finance.LoadPaymentTermsInstallments(ctx, p.recordStore, tenantID, termsID)
+	if err != nil {
+		return nil, err
+	}
+	issue := parseInvoiceDate(issueDateStr, p.store.now)
+	return finance.ComputePaymentSchedule(issue, total, installments)
 }
