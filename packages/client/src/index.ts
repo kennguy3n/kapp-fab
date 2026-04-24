@@ -378,6 +378,32 @@ export class ApiClient {
     });
   }
 
+  /** Generate draft payslips for every eligible employee under a
+   *  pay_run. Idempotent per (pay_run_id, employee_id). */
+  generatePayslips(payRunId: string): Promise<PayslipGenerateResult> {
+    return this.request(
+      `/hr/pay-runs/${encodeURIComponent(payRunId)}/generate`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({}),
+      }
+    );
+  }
+
+  /** Post every approved payslip on a pay_run as a single journal
+   *  entry (Dr salary expense / Cr salary payable). */
+  postPayRun(payRunId: string): Promise<JournalEntry> {
+    return this.request(
+      `/hr/pay-runs/${encodeURIComponent(payRunId)}/post`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({}),
+      }
+    );
+  }
+
   /** Post a draft finance.credit_note KRecord. Reverses the AR posting
    *  of the referenced invoice (Dr Revenue, Cr AR). */
   postCreditNote(id: string): Promise<JournalEntry> {
@@ -921,6 +947,14 @@ export interface JournalEntry {
   created_by: string;
   created_at: string;
   lines: JournalLine[];
+}
+
+/** Summary returned by POST /hr/pay-runs/:id/generate. */
+export interface PayslipGenerateResult {
+  payslip_ids: string[];
+  created_count: number;
+  skipped_existing: number;
+  skipped_no_structure: number;
 }
 
 export interface TaxCode {
