@@ -196,6 +196,11 @@ func (s *PGStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*KRecord, er
 }
 
 // List returns records for the tenant, filtered by ktype/status.
+//
+// This is the HTTP-facing list method: Limit is capped at 500 and
+// defaults to 50 to protect the API from unbounded pulls. Server-side
+// batch callers that need to walk every row of a KType should use
+// ListAll instead — see payroll engine + scheduler sweepers.
 func (s *PGStore) List(ctx context.Context, tenantID uuid.UUID, filter ListFilter) ([]KRecord, error) {
 	if filter.KType == "" {
 		return nil, errors.New("record: ktype filter required")
@@ -252,6 +257,78 @@ func (s *PGStore) List(ctx context.Context, tenantID uuid.UUID, filter ListFilte
 			return nil, err
 		}
 		out[i].Data = decrypted
+	}
+	return out, nil
+}
+
+// ListAll is the server-side batch variant of List: it walks every row
+// matching filter.KType/Status for the tenant, without the 500-row
+// HTTP-facing cap. Callers like the payroll engine that need to process
+// every employee / structure / payslip for a pay_run use this to avoid
+// the silent clamp on List. Rows are paginated internally in 500-row
+// chunks so a single tenant with 50k rows still streams bounded memory
+// per tx.
+//
+// filter.Limit and filter.Offset are ignored — ListAll always returns
+// every match. To page over a subset, pair List with explicit offsets.
+// filter.KType is required and behaves identically to List; filter.Status
+// defaults to "active".
+func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFilter) ([]KRecord, error) {
+	if filter.KType == "" {
+		return nil, errors.New("record: ktype filter required")
+	}
+	status := filter.Status
+	if status == "" {
+		status = "active"
+	}
+	const chunk = 500
+	out := make([]KRecord, 0)
+	offset := 0
+	for {
+		page := make([]KRecord, 0, chunk)
+		err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			rows, err := tx.Query(ctx,
+				`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+				        created_by, created_at, updated_by, updated_at, deleted_at
+				 FROM krecords
+				 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+				 ORDER BY updated_at DESC, id DESC
+				 LIMIT $4 OFFSET $5`,
+				tenantID, filter.KType, status, chunk, offset,
+			)
+			if err != nil {
+				return fmt.Errorf("record: list_all: %w", err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var r KRecord
+				if err := rows.Scan(
+					&r.ID, &r.TenantID, &r.KType, &r.KTypeVersion,
+					&r.Data, &r.Status, &r.Version,
+					&r.CreatedBy, &r.CreatedAt,
+					&r.UpdatedBy, &r.UpdatedAt, &r.DeletedAt,
+				); err != nil {
+					return fmt.Errorf("record: scan: %w", err)
+				}
+				page = append(page, r)
+			}
+			return rows.Err()
+		})
+		if err != nil {
+			return nil, err
+		}
+		for i := range page {
+			decrypted, err := s.decryptRecord(ctx, &page[i])
+			if err != nil {
+				return nil, err
+			}
+			page[i].Data = decrypted
+		}
+		out = append(out, page...)
+		if len(page) < chunk {
+			break
+		}
+		offset += chunk
 	}
 	return out, nil
 }

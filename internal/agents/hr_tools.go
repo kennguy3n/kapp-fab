@@ -23,6 +23,105 @@ func RegisterHRTools(x *Executor, store *hr.Store) {
 	x.Register(&approveLeaveTool{executor: x, store: store})
 }
 
+// RegisterPayrollTools wires the Phase J pay_run tools. Kept as a
+// separate registration so existing deployments that only load the
+// leave surface do not gain the payroll posters until they opt in.
+// The engine may be nil at call time for tests that do not exercise
+// payroll posting — the tools report a clear error on Invoke in
+// that case.
+func RegisterPayrollTools(x *Executor, engine *hr.PayrollEngine) {
+	x.Register(&generatePayslipsTool{executor: x, engine: engine})
+	x.Register(&postPayRunTool{executor: x, engine: engine})
+}
+
+// ----- hr.generate_payslips -----
+
+type generatePayslipsInput struct {
+	PayRunID uuid.UUID `json:"pay_run_id"`
+}
+
+type generatePayslipsTool struct {
+	executor *Executor
+	engine   *hr.PayrollEngine
+}
+
+func (t *generatePayslipsTool) Name() string               { return "hr.generate_payslips" }
+func (t *generatePayslipsTool) RequiresConfirmation() bool { return true }
+func (t *generatePayslipsTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in generatePayslipsInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.PayRunID == uuid.Nil {
+		return nil, errors.New("hr.generate_payslips: pay_run_id required")
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(in)
+		return &Result{
+			Summary: fmt.Sprintf("Would generate payslips for pay_run %s", in.PayRunID),
+			Preview: preview,
+		}, nil
+	}
+	if t.engine == nil {
+		return nil, errors.New("hr.generate_payslips: payroll engine not configured")
+	}
+	res, err := t.engine.GeneratePayslips(ctx, inv.TenantID, in.PayRunID, inv.ActorID)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{
+		Summary: fmt.Sprintf("Generated %d payslip(s) (%d skipped existing, %d missing structure)",
+			res.CreatedCount, res.SkippedExisting, res.SkippedNoStruct),
+		Extra: map[string]any{
+			"created_count":        res.CreatedCount,
+			"skipped_existing":     res.SkippedExisting,
+			"skipped_no_structure": res.SkippedNoStruct,
+			"payslip_ids":          res.PayslipIDs,
+		},
+	}, nil
+}
+
+// ----- hr.post_pay_run -----
+
+type postPayRunInput struct {
+	PayRunID uuid.UUID `json:"pay_run_id"`
+}
+
+type postPayRunTool struct {
+	executor *Executor
+	engine   *hr.PayrollEngine
+}
+
+func (t *postPayRunTool) Name() string               { return "hr.post_pay_run" }
+func (t *postPayRunTool) RequiresConfirmation() bool { return true }
+func (t *postPayRunTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in postPayRunInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.PayRunID == uuid.Nil {
+		return nil, errors.New("hr.post_pay_run: pay_run_id required")
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(in)
+		return &Result{
+			Summary: fmt.Sprintf("Would post pay_run %s", in.PayRunID),
+			Preview: preview,
+		}, nil
+	}
+	if t.engine == nil {
+		return nil, errors.New("hr.post_pay_run: payroll engine not configured")
+	}
+	entry, err := t.engine.PostPayRun(ctx, inv.TenantID, in.PayRunID, inv.ActorID)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{
+		Summary: fmt.Sprintf("Pay run %s posted as journal %s", in.PayRunID, entry.ID),
+		Extra:   map[string]any{"journal_entry_id": entry.ID, "pay_run_id": in.PayRunID},
+	}, nil
+}
+
 // ----- hr.request_leave -----
 
 type requestLeaveInput struct {

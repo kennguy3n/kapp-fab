@@ -246,6 +246,7 @@ func run() error {
 	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster, paymentPoster)
 	agents.RegisterInventoryTools(executor, inventoryStore)
 	agents.RegisterHRTools(executor, hrStore)
+	agents.RegisterPayrollTools(executor, hr.NewPayrollEngine(recordStore, ledgerStore))
 	agents.RegisterLMSTools(executor, lmsStore)
 	agents.RegisterHelpdeskTools(executor, helpdeskStore)
 
@@ -271,6 +272,10 @@ func run() error {
 	hdh := &helpdeskHandlers{store: helpdeskStore}
 	reph := &reportsHandlers{store: reportStore, runner: reportRunner}
 	dashh := &dashboardHandlers{store: dashboard.NewStore(pool)}
+	// Phase J payroll engine — reuses the record store + ledger
+	// store so posted pay_runs ride the same JE / idempotency
+	// path as AR/AP.
+	hrh := &hrHandlers{engine: hr.NewPayrollEngine(recordStore, ledgerStore)}
 
 	// Phase H JWT auth. The signer is built from KAPP_JWT_SECRET; when
 	// the secret is absent we log and skip wiring the SSO endpoints so
@@ -455,6 +460,19 @@ func run() error {
 		r.Get("/exchange-rates", curh.listRates)
 		r.Get("/exchange-rates/convert", curh.convert)
 		r.Post("/exchange-rates/unrealized", curh.unrealizedGL)
+	})
+
+	// Phase J payroll surface — generate draft payslips for a
+	// pay_run and post the approved batch as a single journal
+	// entry. The pay_run / payslip KRecords themselves ride the
+	// generic CRUD at /api/v1/records/hr.pay_run and hr.payslip.
+	r.Route("/api/v1/hr", func(r chi.Router) {
+		r.Use(platform.TenantMiddleware(tenantSvc))
+		r.Use(platform.IdempotencyMiddleware(pool))
+		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		r.Use(platform.QuotaMiddleware(quotaEnforcer))
+		r.Post("/pay-runs/{id}/generate", hrh.generatePayslips)
+		r.Post("/pay-runs/{id}/post", hrh.postPayRun)
 	})
 
 	// Phase I helpdesk surface. Tickets themselves ride the generic
