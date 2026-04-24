@@ -14,6 +14,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 )
 
@@ -45,10 +46,10 @@ import (
 // exists, record still says draft) and the concurrent-poster race
 // (two callers reach PostJournalEntry; one wins, the other reuses).
 type InvoicePoster struct {
-	store             *PGStore
-	recordStore       *record.PGStore
-	salesInvoiceHook  PostHook
-	purchaseBillHook  PostHook
+	store            *PGStore
+	recordStore      *record.PGStore
+	salesInvoiceHook PostHook
+	purchaseBillHook PostHook
 }
 
 // PostHook is an opt-in callback invoked after a sales invoice or
@@ -107,6 +108,7 @@ type invoiceData struct {
 	ARAccountCode      string          `json:"ar_account_code"`
 	RevenueAccountCode string          `json:"revenue_account_code"`
 	TaxAccountCode     string          `json:"tax_account_code"`
+	PaymentTermsID     string          `json:"payment_terms_id"`
 }
 
 // billData mirrors invoiceData for finance.ap_bill. Kept as a separate
@@ -127,6 +129,7 @@ type billData struct {
 	APAccountCode      string          `json:"ap_account_code"`
 	ExpenseAccountCode string          `json:"expense_account_code"`
 	TaxAccountCode     string          `json:"tax_account_code"`
+	PaymentTermsID     string          `json:"payment_terms_id"`
 }
 
 // PostSalesInvoice posts a finance.ar_invoice KRecord to the ledger.
@@ -247,6 +250,13 @@ func (p *InvoicePoster) PostSalesInvoice(ctx context.Context, tenantID, invoiceI
 	patch := map[string]any{
 		"status":           "posted",
 		"journal_entry_id": entry.ID.String(),
+	}
+	if inv.PaymentTermsID != "" {
+		schedule, scheduleErr := p.computePaymentSchedule(ctx, tenantID, inv.PaymentTermsID, inv.IssueDate, inv.Total)
+		if scheduleErr != nil {
+			return entry, fmt.Errorf("ledger: compute payment_schedule: %w", scheduleErr)
+		}
+		patch["payment_schedule"] = schedule
 	}
 	patchJSON, _ := json.Marshal(patch)
 	if _, err := p.recordStore.Update(ctx, record.KRecord{
@@ -380,6 +390,13 @@ func (p *InvoicePoster) PostPurchaseBill(ctx context.Context, tenantID, billID, 
 	patch := map[string]any{
 		"status":           "posted",
 		"journal_entry_id": entry.ID.String(),
+	}
+	if bill.PaymentTermsID != "" {
+		schedule, scheduleErr := p.computePaymentSchedule(ctx, tenantID, bill.PaymentTermsID, bill.IssueDate, bill.Total)
+		if scheduleErr != nil {
+			return entry, fmt.Errorf("ledger: compute payment_schedule: %w", scheduleErr)
+		}
+		patch["payment_schedule"] = schedule
 	}
 	patchJSON, _ := json.Marshal(patch)
 	if _, err := p.recordStore.Update(ctx, record.KRecord{
@@ -772,15 +789,41 @@ func (p *InvoicePoster) PostDebitNote(ctx context.Context, tenantID, debitNoteID
 	}
 
 	if err := p.emitSourceEvent(ctx, tenantID, "finance.debit_note.posted", map[string]any{
-		"debit_note_id":    debitNoteID,
+		"debit_note_id":     debitNoteID,
 		"debit_note_number": note.DebitNoteNumber,
-		"original_bill_id": billID,
-		"journal_entry_id": entry.ID,
-		"amount":           note.Amount.String(),
-		"currency":         currency,
-		"actor":            actorID,
+		"original_bill_id":  billID,
+		"journal_entry_id":  entry.ID,
+		"amount":            note.Amount.String(),
+		"currency":          currency,
+		"actor":             actorID,
 	}); err != nil {
 		return entry, err
 	}
 	return entry, nil
+}
+
+// computePaymentSchedule loads the supplied payment_terms record and
+// renders an installment schedule against issueDate / total. Returns
+// a slice of the JSON-serializable PaymentScheduleEntry struct so
+// the caller can drop it straight into the patch map.
+//
+// The poster guarantees this only runs when payment_terms_id is set
+// — empty strings short-circuit before the helper is called.
+func (p *InvoicePoster) computePaymentSchedule(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	termsIDStr string,
+	issueDateStr string,
+	total decimal.Decimal,
+) ([]finance.PaymentScheduleEntry, error) {
+	termsID, err := uuid.Parse(termsIDStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid payment_terms_id %q: %w", termsIDStr, err)
+	}
+	installments, err := finance.LoadPaymentTermsInstallments(ctx, p.recordStore, tenantID, termsID)
+	if err != nil {
+		return nil, err
+	}
+	issue := parseInvoiceDate(issueDateStr, p.store.now)
+	return finance.ComputePaymentSchedule(issue, total, installments)
 }
