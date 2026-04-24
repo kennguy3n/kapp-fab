@@ -381,7 +381,7 @@ func (e *PayrollEngine) PostPayRun(
 		if sd.PayRunID != payRunID.String() {
 			continue
 		}
-		if sd.Status != "approved" && !(existingJE != nil && sd.Status == "paid") {
+		if sd.Status != "approved" && (existingJE == nil || sd.Status != "paid") {
 			continue
 		}
 		approved = append(approved, s)
