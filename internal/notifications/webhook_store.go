@@ -80,6 +80,30 @@ type DeliveryInput struct {
 	NextRetryAt  *time.Time
 }
 
+// PendingRetry is one claimed retry candidate returned by
+// ClaimPendingRetries. The Attempt field is the attempt number of
+// the previously-failed delivery row — callers re-deliver under
+// Attempt+1.
+type PendingRetry struct {
+	TenantID   uuid.UUID
+	DeliveryID uuid.UUID
+	WebhookID  uuid.UUID
+	EventID    uuid.UUID
+	EventType  string
+	Attempt    int
+}
+
+// StoredEvent is the subset of the events table the webhook retry
+// loop needs to re-assemble an events.Event for a fresh POST. Kept
+// internal to this package so callers don't pull the events package
+// just to replay one row.
+type StoredEvent struct {
+	ID       uuid.UUID
+	TenantID uuid.UUID
+	Type     string
+	Payload  json.RawMessage
+}
+
 // ErrWebhookNotFound is surfaced when the id is missing for the
 // requesting tenant — handlers map it to HTTP 404.
 var ErrWebhookNotFound = errors.New("webhook: not found")
@@ -361,4 +385,108 @@ func (s *WebhookStore) ListDeliveries(ctx context.Context, tenantID, webhookID u
 		return nil, err
 	}
 	return out, nil
+}
+
+// ClaimPendingRetries atomically selects up to `limit` delivery rows
+// whose next_retry_at has elapsed (and whose attempt count is below
+// maxAttempts) and clears their next_retry_at so subsequent polls
+// will not return them again. Rows already claimed by a concurrent
+// worker are skipped via FOR UPDATE SKIP LOCKED, so multiple worker
+// replicas can share the retry workload without double-delivery.
+//
+// This path runs under the admin pool because the worker owns no
+// single-tenant context — the cross-tenant scan is exactly the same
+// pattern as ListActiveAcrossTenants / event outbox drain.
+func (s *WebhookStore) ClaimPendingRetries(ctx context.Context, adminPool *pgxpool.Pool, maxAttempts, limit int) ([]PendingRetry, error) {
+	if adminPool == nil {
+		return nil, errors.New("webhook: admin pool required for cross-tenant scan")
+	}
+	if maxAttempts <= 0 {
+		maxAttempts = 5
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	rows, err := adminPool.Query(ctx, `
+		UPDATE webhook_deliveries
+		   SET next_retry_at = NULL
+		 WHERE (tenant_id, id) IN (
+		    SELECT tenant_id, id
+		      FROM webhook_deliveries
+		     WHERE delivered = FALSE
+		       AND next_retry_at IS NOT NULL
+		       AND next_retry_at <= now()
+		       AND attempt < $1
+		     ORDER BY next_retry_at ASC
+		     LIMIT $2
+		     FOR UPDATE SKIP LOCKED
+		 )
+		 RETURNING tenant_id, id, webhook_id, event_id, event_type, attempt`,
+		maxAttempts, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("webhook: claim retries: %w", err)
+	}
+	defer rows.Close()
+	out := make([]PendingRetry, 0)
+	for rows.Next() {
+		var p PendingRetry
+		if err := rows.Scan(&p.TenantID, &p.DeliveryID, &p.WebhookID, &p.EventID, &p.EventType, &p.Attempt); err != nil {
+			return nil, fmt.Errorf("webhook: scan retry: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// GetAdmin fetches a webhook bypassing RLS. Used by the retry loop
+// which has already selected the (tenant_id, webhook_id) pair from
+// the claimed delivery row — we trust that tuple rather than re-
+// authorising through the tenant session.
+func (s *WebhookStore) GetAdmin(ctx context.Context, adminPool *pgxpool.Pool, tenantID, id uuid.UUID) (*Webhook, error) {
+	if adminPool == nil {
+		return nil, errors.New("webhook: admin pool required")
+	}
+	var w Webhook
+	err := adminPool.QueryRow(ctx, `
+		SELECT id, tenant_id, url, secret, event_filters, active, created_at, updated_at
+		  FROM webhooks
+		 WHERE tenant_id = $1 AND id = $2`,
+		tenantID, id,
+	).Scan(
+		&w.ID, &w.TenantID, &w.URL, &w.Secret, &w.EventFilters,
+		&w.Active, &w.CreatedAt, &w.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrWebhookNotFound
+		}
+		return nil, fmt.Errorf("webhook: admin get: %w", err)
+	}
+	return &w, nil
+}
+
+// GetEvent fetches a stored event for retry replay. Reads from the
+// events table via the admin pool because the worker has no single
+// tenant context. The events table is RLS-enabled for normal app
+// sessions; admin-role bypass is the existing pattern used by the
+// cross-tenant outbox drain.
+func (s *WebhookStore) GetEvent(ctx context.Context, adminPool *pgxpool.Pool, tenantID, eventID uuid.UUID) (*StoredEvent, error) {
+	if adminPool == nil {
+		return nil, errors.New("webhook: admin pool required")
+	}
+	var e StoredEvent
+	err := adminPool.QueryRow(ctx, `
+		SELECT id, tenant_id, type, payload
+		  FROM events
+		 WHERE tenant_id = $1 AND id = $2`,
+		tenantID, eventID,
+	).Scan(&e.ID, &e.TenantID, &e.Type, &e.Payload)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("webhook: event %s not found", eventID)
+		}
+		return nil, fmt.Errorf("webhook: admin event get: %w", err)
+	}
+	return &e, nil
 }

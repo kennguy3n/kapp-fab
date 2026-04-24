@@ -314,13 +314,22 @@ func extractNotification(raw []byte) *notificationEnvelope {
 
 // maxWebhookAttempts is the hard retry ceiling. Matches the task
 // requirement (max 5 attempts) and bounds the exponential backoff
-// schedule in scheduleWebhookRetry.
+// schedule in webhookBackoff.
 const maxWebhookAttempts = 5
 
+// webhookRetryBatch is the upper bound on the number of pending
+// retries the polling loop will claim per tick. Keeps one slow
+// endpoint from starving the rest when many rows come due together.
+const webhookRetryBatch = 50
+
 // fanOutRegisteredWebhooks looks up every active webhook for the
-// event's tenant, filters by event-type prefix, and POSTs the event
-// with exponential-backoff retries. Each attempt is logged to
-// webhook_deliveries so operators can inspect failures.
+// event's tenant, filters by event-type prefix, and attempts one
+// POST per matching hook. The call is non-blocking in the sense
+// that no retry sleep happens on the drain goroutine: failed
+// attempts are logged to webhook_deliveries with a next_retry_at,
+// and a dedicated polling loop (runWebhookRetryLoop) later picks
+// those rows up. This keeps the outbox drain moving even when a
+// customer's endpoint is down.
 func (r *notificationRouter) fanOutRegisteredWebhooks(ctx context.Context, e events.Event) {
 	if r == nil || r.webhookStore == nil || r.adminPool == nil {
 		return
@@ -338,6 +347,65 @@ func (r *notificationRouter) fanOutRegisteredWebhooks(ctx context.Context, e eve
 			continue
 		}
 		r.deliverWebhook(ctx, h, e, 1)
+	}
+}
+
+// runWebhookRetryLoop polls webhook_deliveries for rows whose
+// next_retry_at has elapsed, re-assembles the original event from
+// the events table, and re-posts via deliverWebhook. Each claimed
+// row has its next_retry_at cleared atomically so a second worker
+// (or the same worker on the next tick) never double-delivers. The
+// loop survives worker restarts — pending retries sit in the table
+// until claimed, so a crash between the first failure and the retry
+// simply delays the retry by one tick rather than dropping it.
+func (r *notificationRouter) runWebhookRetryLoop(ctx context.Context, interval time.Duration) {
+	if r == nil || r.webhookStore == nil || r.adminPool == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.processPendingWebhookRetries(ctx)
+		}
+	}
+}
+
+// processPendingWebhookRetries does one tick of the retry loop.
+// Extracted so tests can drive the logic without a ticker.
+func (r *notificationRouter) processPendingWebhookRetries(ctx context.Context) {
+	pending, err := r.webhookStore.ClaimPendingRetries(ctx, r.adminPool, maxWebhookAttempts, webhookRetryBatch)
+	if err != nil {
+		log.Printf("worker: claim pending webhook retries: %v", err)
+		return
+	}
+	for _, p := range pending {
+		hook, err := r.webhookStore.GetAdmin(ctx, r.adminPool, p.TenantID, p.WebhookID)
+		if err != nil {
+			log.Printf("worker: load hook tenant=%s hook=%s: %v", p.TenantID, p.WebhookID, err)
+			continue
+		}
+		if !hook.Active {
+			continue
+		}
+		stored, err := r.webhookStore.GetEvent(ctx, r.adminPool, p.TenantID, p.EventID)
+		if err != nil {
+			log.Printf("worker: load event tenant=%s event=%s: %v", p.TenantID, p.EventID, err)
+			continue
+		}
+		ev := events.Event{
+			ID:       stored.ID,
+			TenantID: stored.TenantID,
+			Type:     stored.Type,
+			Payload:  stored.Payload,
+		}
+		r.deliverWebhook(ctx, *hook, ev, p.Attempt+1)
 	}
 }
 
@@ -372,14 +440,14 @@ func webhookMatches(h notifications.Webhook, eventType string) bool {
 	return false
 }
 
-// deliverWebhook posts one attempt and logs the outcome to the
-// delivery log. On a non-2xx response or transport error the row
-// is marked undelivered with a next_retry_at; the next attempt is
-// scheduled synchronously by sleeping for the backoff interval,
-// bounded at maxWebhookAttempts. Synchronous retry is acceptable
-// here because the delivery goroutine is already off the outbox
-// drain's hot path — the drain loop spawns a fanOut call per
-// event in its own goroutine upstream.
+// deliverWebhook POSTs one attempt and logs the outcome to the
+// delivery log. A failed attempt (transport error or non-2xx) is
+// persisted with a next_retry_at computed from webhookBackoff so
+// the retry polling loop picks it up later — this function never
+// sleeps and never recurses. That keeps the outbox drain goroutine
+// off the retry-latency critical path: a slow customer endpoint
+// can delay at most one POST worth of latency per drain, not the
+// full exponential-backoff window.
 func (r *notificationRouter) deliverWebhook(ctx context.Context, h notifications.Webhook, e events.Event, attempt int) {
 	body, err := json.Marshal(e)
 	if err != nil {
@@ -402,16 +470,7 @@ func (r *notificationRouter) deliverWebhook(ctx context.Context, h notifications
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
-		var next *time.Time
-		if attempt < maxWebhookAttempts {
-			t := time.Now().UTC().Add(webhookBackoff(attempt))
-			next = &t
-		}
-		r.recordWebhookAttempt(ctx, h, e, attempt, nil, "", false, err, next)
-		if next != nil {
-			time.Sleep(webhookBackoff(attempt))
-			r.deliverWebhook(ctx, h, e, attempt+1)
-		}
+		r.recordWebhookAttempt(ctx, h, e, attempt, nil, "", false, err, scheduleNextRetry(attempt))
 		return
 	}
 	defer func() {
@@ -424,16 +483,19 @@ func (r *notificationRouter) deliverWebhook(ctx context.Context, h notifications
 		r.recordWebhookAttempt(ctx, h, e, attempt, &status, string(snippet), true, nil, nil)
 		return
 	}
-	var next *time.Time
-	if attempt < maxWebhookAttempts {
-		t := time.Now().UTC().Add(webhookBackoff(attempt))
-		next = &t
+	r.recordWebhookAttempt(ctx, h, e, attempt, &status, string(snippet), false, fmt.Errorf("non-2xx"), scheduleNextRetry(attempt))
+}
+
+// scheduleNextRetry returns a pointer to the wall-clock time the
+// next attempt should run at, or nil when the attempt ceiling is
+// reached and the row should stay terminal (delivered=false with
+// no next_retry_at).
+func scheduleNextRetry(attempt int) *time.Time {
+	if attempt >= maxWebhookAttempts {
+		return nil
 	}
-	r.recordWebhookAttempt(ctx, h, e, attempt, &status, string(snippet), false, fmt.Errorf("non-2xx"), next)
-	if next != nil {
-		time.Sleep(webhookBackoff(attempt))
-		r.deliverWebhook(ctx, h, e, attempt+1)
-	}
+	t := time.Now().UTC().Add(webhookBackoff(attempt))
+	return &t
 }
 
 // recordWebhookAttempt is a thin wrapper over webhookStore.RecordDelivery

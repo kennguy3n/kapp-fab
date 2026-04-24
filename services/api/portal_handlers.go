@@ -179,6 +179,14 @@ func (h *portalHandlers) getTicket(w http.ResponseWriter, r *http.Request) {
 		writeRecordError(w, err)
 		return
 	}
+	// KType gate: the portal's UUID-addressable surface must refuse
+	// to return any non-ticket record, otherwise a portal user whose
+	// email happens to match a `customer_email` field on another
+	// KType (crm.deal, finance.ar_invoice, …) could peek at it.
+	if rec.KType != helpdesk.KTypeTicket {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
 	if !recordOwnedByCustomer(*rec, claims.Email) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -267,6 +275,13 @@ func (h *portalHandlers) replyTicket(w http.ResponseWriter, r *http.Request) {
 	rec, err := h.records.Get(r.Context(), claims.TenantID, id)
 	if err != nil {
 		writeRecordError(w, err)
+		return
+	}
+	// Same KType gate as getTicket: a reply must never land on a
+	// non-ticket record (which would corrupt its `data.replies` /
+	// `data.status` slots).
+	if rec.KType != helpdesk.KTypeTicket {
+		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	if !recordOwnedByCustomer(*rec, claims.Email) {
