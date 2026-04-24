@@ -47,6 +47,16 @@ const (
 	EventResolutionBreach  = "resolution_breach"
 )
 
+// ActionTypeSLABreach is the scheduled_actions.action_type the worker
+// registers its SLA breach handler under. Lives in this package so
+// the tenant wizard and the worker reference the same literal.
+const ActionTypeSLABreach = "sla_breach_check"
+
+// DefaultSLABreachIntervalSeconds is the cadence the tenant wizard
+// seeds for sla_breach_check — once every five minutes, matching the
+// granularity ERPNext uses for its auto-escalation scheduler.
+const DefaultSLABreachIntervalSeconds = 300
+
 // SLALogEntry is one row of the append-only ticket_sla_log.
 type SLALogEntry struct {
 	ID         int64           `json:"id"`
@@ -245,17 +255,48 @@ func (s *Store) LogSLAEvent(ctx context.Context, entry SLALogEntry) (*SLALogEntr
 	}
 	out := entry
 	err := dbutil.WithTenantTx(ctx, s.pool, entry.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
-			`INSERT INTO ticket_sla_log (tenant_id, ticket_id, event_kind, occurred_at, details)
-			 VALUES ($1, $2, $3, $4, $5)
-			 RETURNING id`,
-			entry.TenantID, entry.TicketID, entry.EventKind, entry.OccurredAt, entry.Details,
-		).Scan(&out.ID)
+		return logSLAEventOnTx(ctx, tx, &out)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("helpdesk: log sla event: %w", err)
 	}
 	return &out, nil
+}
+
+// LogSLAEventTx appends a ticket_sla_log row on a caller-supplied tx
+// so the log write can share a transaction with an outbox emit —
+// used by the SLA breach sweeper to keep the log + event publish
+// atomic. Caller is responsible for the tenant context + commit.
+// The returned entry has ID / OccurredAt / Details populated.
+func (s *Store) LogSLAEventTx(ctx context.Context, tx pgx.Tx, entry SLALogEntry) (*SLALogEntry, error) {
+	if entry.TenantID == uuid.Nil || entry.TicketID == uuid.Nil {
+		return nil, errors.New("helpdesk: tenant id and ticket id required")
+	}
+	if entry.EventKind == "" {
+		return nil, errors.New("helpdesk: event_kind required")
+	}
+	if len(entry.Details) == 0 {
+		entry.Details = json.RawMessage(`{}`)
+	}
+	if entry.OccurredAt.IsZero() {
+		entry.OccurredAt = s.now()
+	}
+	out := entry
+	if err := logSLAEventOnTx(ctx, tx, &out); err != nil {
+		return nil, fmt.Errorf("helpdesk: log sla event: %w", err)
+	}
+	return &out, nil
+}
+
+// logSLAEventOnTx is the shared INSERT body used by both LogSLAEvent
+// (opens its own tx) and LogSLAEventTx (rides a caller-supplied tx).
+func logSLAEventOnTx(ctx context.Context, tx pgx.Tx, entry *SLALogEntry) error {
+	return tx.QueryRow(ctx,
+		`INSERT INTO ticket_sla_log (tenant_id, ticket_id, event_kind, occurred_at, details)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING id`,
+		entry.TenantID, entry.TicketID, entry.EventKind, entry.OccurredAt, entry.Details,
+	).Scan(&entry.ID)
 }
 
 // ListTicketLog returns every SLA log row for a ticket ordered newest

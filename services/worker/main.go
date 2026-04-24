@@ -23,6 +23,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/scheduler"
@@ -129,14 +130,18 @@ func run() error {
 	alerts := newStockAlertWorker(pool, adminPool, publisher, dbutil.SetTenantContext)
 	go alerts.Run(ctx)
 
-	// Scheduled actions engine. The registry starts empty — handlers
-	// are registered by follow-up phases (SLA breach sweep, recurring
-	// invoices) once their action types land. Running the loop with
-	// an empty registry is safe: PollDue still claims due rows and
-	// advances next_run_at so an orphaned action_type cannot stall
-	// the queue.
+	// Scheduled actions engine. The registry starts empty on main —
+	// this PR registers the SLA breach sweeper against action_type
+	// "sla_breach_check". The tenant wizard seeds that cadence per
+	// new tenant so the handler has live work once the scheduler
+	// claims a row.
 	schedStore := scheduler.NewStore(pool, adminPool)
 	schedRegistry := scheduler.NewRegistry()
+	helpdeskStore := helpdesk.NewStore(pool)
+	schedRegistry.Register(
+		helpdesk.ActionTypeSLABreach,
+		helpdesk.NewSLABreachHandler(pool, helpdeskStore, publisher, dbutil.SetTenantContext),
+	)
 	go scheduler.RunLoop(ctx, schedStore, schedRegistry, 10*time.Second)
 
 	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)
