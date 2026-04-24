@@ -182,6 +182,18 @@ func (p *InvoicePoster) PostSalesInvoice(ctx context.Context, tenantID, invoiceI
 		inv.Total = inv.Subtotal.Add(inv.TaxAmount)
 	}
 
+	// Credit-limit enforcement — mirrors ERPNext's credit check.
+	// Only runs when the invoice references a customer KRecord and
+	// that customer has credit_limit > 0 on its data JSONB. The
+	// check sums every un-settled AR invoice for the same customer
+	// (status NOT IN paid/cancelled/voided) and rejects the post if
+	// adding this invoice's total would push the outstanding past
+	// the limit. A zero or missing credit_limit disables the check
+	// so existing tenants keep posting without data migration.
+	if err := p.checkCreditLimit(ctx, tenantID, invoiceID, inv); err != nil {
+		return nil, err
+	}
+
 	// If a previous invocation already posted the JE but failed before
 	// patching the source record, reuse that entry instead of creating
 	// a duplicate. The partial unique index on (tenant_id, source_ktype,
@@ -238,15 +250,21 @@ func (p *InvoicePoster) PostSalesInvoice(ctx context.Context, tenantID, invoiceI
 		entry = posted
 	}
 
-	// Patch the invoice KRecord with status=posted + journal_entry_id.
-	// Shallow-merge so existing fields (customer_id, lines, …) are kept.
-	// Threading rec.Version in turns the patch into a compare-and-swap
-	// so two concurrent posters cannot both claim the record; the loser
-	// gets record.ErrVersionConflict and the caller retries (at which
+	// Patch the invoice KRecord with status=posted + journal_entry_id
+	// + outstanding_amount=total. Seeding outstanding_amount here
+	// rather than deferring to the first payment means AR dashboards
+	// and the credit-limit check (see checkCreditLimit) see the full
+	// balance immediately after posting. Shallow-merge keeps other
+	// fields (customer_id, lines, …) intact. Threading rec.Version
+	// turns the patch into a compare-and-swap so two concurrent
+	// posters cannot both claim the record; the loser gets
+	// record.ErrVersionConflict and the caller retries (at which
 	// point the rec.Status=='posted' guard above short-circuits).
+	totalF, _ := inv.Total.Float64()
 	patch := map[string]any{
-		"status":           "posted",
-		"journal_entry_id": entry.ID.String(),
+		"status":             "posted",
+		"journal_entry_id":   entry.ID.String(),
+		"outstanding_amount": totalF,
 	}
 	patchJSON, _ := json.Marshal(patch)
 	if _, err := p.recordStore.Update(ctx, record.KRecord{
@@ -278,6 +296,101 @@ func (p *InvoicePoster) PostSalesInvoice(ctx context.Context, tenantID, invoiceI
 	}
 	return entry, nil
 }
+
+// checkCreditLimit enforces the customer's credit_limit against the
+// running outstanding AR balance. The query and the customer lookup
+// share a single tenant-scoped transaction so the balance is
+// snapshot-consistent; RLS via dbutil.WithTenantTx blocks cross-tenant
+// reads even if an attacker hand-rolls a customer_id from another
+// tenant. Returns ErrCreditLimitExceeded (wrapped with the numeric
+// context) when the new invoice would push outstanding past the
+// limit; nil in every other case — including missing customer,
+// unset/zero credit_limit, or malformed customer_id — so posting
+// remains permissive by default.
+func (p *InvoicePoster) checkCreditLimit(ctx context.Context, tenantID, invoiceID uuid.UUID, inv invoiceData) error {
+	if inv.CustomerID == "" {
+		return nil
+	}
+	customerID, err := uuid.Parse(inv.CustomerID)
+	if err != nil {
+		// Invalid UUID — schema validation will reject this at the
+		// record layer, but guard here so we do not bubble up a raw
+		// parse error from a credit check the caller did not ask for.
+		return nil
+	}
+	if inv.Total.LessThanOrEqual(decimal.Zero) {
+		return nil
+	}
+	var (
+		creditLimit decimal.Decimal
+		outstanding decimal.Decimal
+	)
+	qErr := dbutil.WithTenantTx(ctx, p.store.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var rawLimit *string
+		if err := tx.QueryRow(ctx,
+			`SELECT data->>'credit_limit'
+			   FROM krecords
+			  WHERE tenant_id = $1 AND id = $2 AND ktype = 'crm.customer'
+			    AND deleted_at IS NULL`,
+			tenantID, customerID,
+		).Scan(&rawLimit); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// No customer record — posting permissive.
+				return errSkipCreditCheck
+			}
+			return fmt.Errorf("ledger: load customer credit limit: %w", err)
+		}
+		if rawLimit == nil || *rawLimit == "" {
+			return errSkipCreditCheck
+		}
+		parsedLimit, err := decimal.NewFromString(*rawLimit)
+		if err != nil {
+			return errSkipCreditCheck
+		}
+		creditLimit = parsedLimit
+		if creditLimit.LessThanOrEqual(decimal.Zero) {
+			return errSkipCreditCheck
+		}
+		// Running outstanding AR for this customer. Draft invoices
+		// naturally drop out because only posted invoices seed
+		// outstanding_amount (see PostSalesInvoice patch above).
+		// Excludes the invoice currently being posted so its own
+		// (soon-to-be-set) outstanding isn't counted twice alongside
+		// inv.Total in the projection below.
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE(SUM(
+			          COALESCE(NULLIF(data->>'outstanding_amount','')::numeric, 0)), 0)
+			   FROM krecords
+			  WHERE tenant_id = $1 AND ktype = 'finance.ar_invoice'
+			    AND id <> $3
+			    AND data->>'customer_id' = $2
+			    AND COALESCE(data->>'status','') NOT IN ('paid','cancelled','voided')
+			    AND deleted_at IS NULL`,
+			tenantID, customerID.String(), invoiceID,
+		).Scan(&outstanding); err != nil {
+			return fmt.Errorf("ledger: sum outstanding AR: %w", err)
+		}
+		return nil
+	})
+	if errors.Is(qErr, errSkipCreditCheck) {
+		return nil
+	}
+	if qErr != nil {
+		return qErr
+	}
+	projected := outstanding.Add(inv.Total)
+	if projected.GreaterThan(creditLimit) {
+		return fmt.Errorf("%w: customer=%s limit=%s outstanding=%s invoice=%s",
+			ErrCreditLimitExceeded, customerID,
+			creditLimit.String(), outstanding.String(), inv.Total.String())
+	}
+	return nil
+}
+
+// errSkipCreditCheck is an internal sentinel the credit check uses to
+// short-circuit out of the WithTenantTx closure without treating the
+// skip as an error at the caller level. It never leaves this file.
+var errSkipCreditCheck = errors.New("ledger: credit check not applicable")
 
 // PostPurchaseBill mirrors PostSalesInvoice for finance.ap_bill:
 //
