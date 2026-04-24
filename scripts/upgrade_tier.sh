@@ -70,7 +70,7 @@ TABLES=(
   leave_ledger lesson_progress
   files base_tables base_rows docs_documents docs_document_versions
   forms import_jobs import_staging
-  exchange_rates sla_policies ticket_sla_log saved_reports
+  exchange_rates sla_policies ticket_sla_log saved_reports scheduled_actions
 )
 
 read -r -d '' SQL <<SQL || true
