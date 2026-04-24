@@ -60,6 +60,31 @@ func (h *hrHandlers) postPayRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, entry)
 }
 
+// listPayRunPayslips returns every payslip KRecord attached to a
+// pay_run. Exists because the generic records list route caps at
+// 500 rows and defaults to 50 — on tenants with >50 total payslips
+// across all runs the frontend's "View slips" panel would silently
+// truncate. The engine-backed path walks every row via ListAll and
+// filters in the tenant transaction, so it's always complete.
+func (h *hrHandlers) listPayRunPayslips(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid pay_run id", http.StatusBadRequest)
+		return
+	}
+	slips, err := h.engine.ListPayslipsForRun(r.Context(), t.ID, id)
+	if err != nil {
+		writePayrollError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, slips)
+}
+
 // writePayrollError maps engine sentinels onto HTTP status codes so
 // the UI can distinguish "no employees in scope" (422) from "pay_run
 // not found" (404) from generic failures (500).

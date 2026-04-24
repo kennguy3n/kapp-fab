@@ -473,6 +473,7 @@ func run() error {
 		r.Use(platform.QuotaMiddleware(quotaEnforcer))
 		r.Post("/pay-runs/{id}/generate", hrh.generatePayslips)
 		r.Post("/pay-runs/{id}/post", hrh.postPayRun)
+		r.Get("/pay-runs/{id}/payslips", hrh.listPayRunPayslips)
 	})
 
 	// Phase I helpdesk surface. Tickets themselves ride the generic
