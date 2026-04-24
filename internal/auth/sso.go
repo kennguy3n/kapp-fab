@@ -266,7 +266,7 @@ func (s *SSOService) Exchange(
 // The refresh token's session must still be live — revocation is
 // therefore the single lever an admin pulls to kick a user off.
 func (s *SSOService) Refresh(ctx context.Context, refreshToken string) (*ExchangeResult, error) {
-	claims, err := s.signer.Verify(refreshToken)
+	claims, err := s.signer.VerifyRefresh(refreshToken)
 	if err != nil {
 		return nil, err
 	}

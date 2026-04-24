@@ -65,6 +65,17 @@ func (l *PGLogger) LogTx(ctx context.Context, tx pgx.Tx, entry Entry) error {
 	// the same transaction (same SET LOCAL app.tenant_id) so RLS
 	// filters out other tenants for free. The (tenant_id, id) PK
 	// ordering matches the verifier traversal.
+	//
+	// Concurrency: two writers in the same tenant must not both read
+	// the same latest hash and fork the chain. We serialize the
+	// (fetchPrevHash, INSERT) pair with a transaction-scoped
+	// advisory lock keyed on the tenant UUID. The lock auto-releases
+	// on COMMIT/ROLLBACK, so callers do not need to explicitly
+	// unlock. Cross-tenant writes are uncontended because the key
+	// derives from the tenant UUID.
+	if err := lockTenantChain(ctx, tx, entry.TenantID); err != nil {
+		return err
+	}
 	prevHash, err := fetchPrevHash(ctx, tx, entry.TenantID)
 	if err != nil {
 		return err
@@ -91,6 +102,23 @@ func (l *PGLogger) LogTx(ctx context.Context, tx pgx.Tx, entry Entry) error {
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert: %w", err)
+	}
+	return nil
+}
+
+// lockTenantChain takes a transaction-scoped advisory lock keyed on
+// the tenant UUID so concurrent LogTx calls for the same tenant
+// serialize on the (fetchPrevHash, INSERT) critical section. The key
+// is derived by hashing the tenant's text form to an int4; collisions
+// across tenants just cause spurious serialization and never a
+// correctness issue. hashtext's int4 result is implicitly widened to
+// bigint by pg_advisory_xact_lock.
+func lockTenantChain(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) error {
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext($1::text))`,
+		tenantID.String(),
+	); err != nil {
+		return fmt.Errorf("audit: lock tenant chain: %w", err)
 	}
 	return nil
 }

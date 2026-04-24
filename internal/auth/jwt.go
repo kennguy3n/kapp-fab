@@ -59,19 +59,31 @@ type Claims struct {
 }
 
 // Valid returns nil when the claim set is well-formed, has not
-// expired, and the NotBefore window has opened. Leeway is handled by
-// the Signer.Verify wrapper so callers can use Validate standalone.
-func (c *Claims) Valid(now time.Time) error {
+// expired, and the NotBefore window has opened. Leeway is applied in
+// opposite directions for the two time checks:
+//
+//   - For ExpiresAt, we reject when now-leeway >= exp (more lenient:
+//     still accept a token that expired within the leeway window).
+//   - For NotBefore, we reject when now+leeway < nbf (also more
+//     lenient: accept a token whose nbf is at most leeway in the
+//     future so a freshly-issued token doesn't bounce under clock
+//     skew).
+//
+// Subtracting leeway from a single "now" and using it for both checks
+// — as an earlier revision did — silently inverted the NotBefore
+// direction and caused every fresh token to fail for the first
+// leeway-worth of seconds.
+func (c *Claims) Valid(now time.Time, leeway time.Duration) error {
 	if c.UserID == uuid.Nil {
 		return errors.New("auth: claim uid missing")
 	}
 	if c.TenantID == uuid.Nil {
 		return errors.New("auth: claim tid missing")
 	}
-	if c.ExpiresAt > 0 && now.Unix() >= c.ExpiresAt {
+	if c.ExpiresAt > 0 && now.Add(-leeway).Unix() >= c.ExpiresAt {
 		return ErrTokenExpired
 	}
-	if c.NotBefore > 0 && now.Unix() < c.NotBefore {
+	if c.NotBefore > 0 && now.Add(leeway).Unix() < c.NotBefore {
 		return errors.New("auth: token not yet valid")
 	}
 	return nil
@@ -177,10 +189,25 @@ func (s *Signer) IssueRefresh(base Claims) (string, error) {
 	return s.encode(c)
 }
 
-// Verify decodes and validates a compact-JWS token, returning the
-// carried claims. The signature is checked under the signer's
+// Verify decodes and validates an access-token compact-JWS, returning
+// the carried claims. The signature is checked under the signer's
 // algorithm; mismatch returns ErrTokenSignature without leaking why.
+// The audience claim must equal the signer's configured Audience —
+// refresh tokens (aud = Audience + ".refresh") are rejected on this
+// path. Callers handling refresh tokens must use VerifyRefresh.
 func (s *Signer) Verify(token string) (*Claims, error) {
+	return s.verify(token, s.cfg.Audience)
+}
+
+// VerifyRefresh decodes and validates a refresh-token compact-JWS.
+// Separated from Verify so a refresh token cannot be used on the
+// access path (or vice versa): the audience claim must equal the
+// configured Audience + ".refresh".
+func (s *Signer) VerifyRefresh(token string) (*Claims, error) {
+	return s.verify(token, s.cfg.Audience+".refresh")
+}
+
+func (s *Signer) verify(token, expectedAudience string) (*Claims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return nil, ErrTokenInvalid
@@ -216,8 +243,10 @@ func (s *Signer) Verify(token string) (*Claims, error) {
 	if err := json.Unmarshal(payload, &c); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrTokenInvalid, err)
 	}
-	now := s.now().Add(-s.cfg.Leeway)
-	if err := c.Valid(now); err != nil {
+	if expectedAudience != "" && c.Audience != expectedAudience {
+		return nil, ErrTokenInvalid
+	}
+	if err := c.Valid(s.now(), s.cfg.Leeway); err != nil {
 		return nil, err
 	}
 	return &c, nil

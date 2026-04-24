@@ -77,6 +77,7 @@ export function PriceListsPage() {
       <div style={{ flex: 1 }}>
         {selected ? (
           <PriceListEditor
+            key={selected.id}
             record={selected}
             onSave={(r) => updateMutation.mutate(r)}
             saving={updateMutation.isPending}
