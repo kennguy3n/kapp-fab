@@ -42,17 +42,19 @@ export function DashboardPage() {
         <Widget
           label="Open deals"
           value={s.open_deals_count}
-          sub={`Pipeline ${formatCurrency(s.pipeline_value)}`}
+          sub={`Pipeline ${formatAmount(s.pipeline_value)} (mixed currencies)`}
           to="/records/crm.deal"
         />
         <Widget
           label="Outstanding AR"
-          value={formatCurrency(s.outstanding_ar)}
+          value={formatAmount(s.outstanding_ar)}
+          sub="mixed currencies"
           to="/records/finance.ar_invoice"
         />
         <Widget
           label="Outstanding AP"
-          value={formatCurrency(s.outstanding_ap)}
+          value={formatAmount(s.outstanding_ap)}
+          sub="mixed currencies"
           to="/records/finance.ap_bill"
         />
         <Widget
@@ -109,10 +111,13 @@ function Widget({
   );
 }
 
-function formatCurrency(v: number): string {
+// formatAmount renders a monetary total without a currency symbol because
+// the dashboard sums raw amounts across all tenant currencies. A proper
+// per-currency breakdown needs exchange-rate conversion server-side — until
+// that lands, a bare number with a "mixed currencies" hint is the honest
+// representation.
+function formatAmount(v: number): string {
   return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
     maximumFractionDigits: 0,
   }).format(v);
 }

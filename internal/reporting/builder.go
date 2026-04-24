@@ -416,9 +416,14 @@ func columnExpr(col, jsonbCol string) string {
 	if jsonbCol == "" {
 		return col
 	}
+	// Only true krecords columns are projected raw. `status` is deliberately
+	// excluded because it's the lifecycle flag ('active'/'deleted'); every
+	// KType's own business status lives in `data->>'status'`, which is what
+	// report authors almost always want. Callers who really need the
+	// lifecycle flag can reference `deleted_at IS NULL` via a filter.
 	switch col {
-	case "id", "tenant_id", "ktype", "ktype_version", "status", "version",
-		"created_at", "updated_at", "created_by":
+	case "id", "tenant_id", "ktype", "ktype_version", "version",
+		"created_at", "updated_at", "created_by", "updated_by", "deleted_at":
 		return col
 	default:
 		return fmt.Sprintf("%s->>'%s'", jsonbCol, col)
