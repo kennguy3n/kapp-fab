@@ -6,6 +6,7 @@ package integrationtest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
+	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/scheduler"
@@ -129,6 +131,115 @@ func TestSLABreachHandlerWarningAndBreach(t *testing.T) {
 	if logs[1].EventKind != helpdesk.EventResponseWarning {
 		t.Fatalf("pass3: want oldest=response_warning, got %s", logs[1].EventKind)
 	}
+}
+
+// TestSLABreachHandlerEmitIsAtomic is a regression guard for the
+// "log commits but outbox publish fails → notification permanently
+// lost" bug. The emit path now runs LogSLAEventTx + EmitTx on a
+// single shared transaction, so a publisher failure must roll back
+// the log row as well.
+//
+// We stub the publisher with a flip: the first EmitTx returns a
+// canned error; subsequent calls succeed. After the first sweep
+// ticket_sla_log must still be empty (rollback worked). After
+// flipping the stub off, the second sweep must land both the log
+// row and the outbox event.
+func TestSLABreachHandlerEmitIsAtomic(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tn, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("sla-atomic"), Name: "SLA Atomic", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("tenant: %v", err)
+	}
+	if err := helpdesk.RegisterKTypes(ctx, h.ktypes); err != nil {
+		t.Fatalf("register helpdesk ktypes: %v", err)
+	}
+	hdStore := helpdesk.NewStore(h.pool)
+
+	createdAt := time.Now().UTC().Truncate(time.Second)
+	respBy := createdAt.Add(60 * time.Minute)
+	resolveBy := createdAt.Add(240 * time.Minute)
+	ticketData, err := json.Marshal(map[string]any{
+		"subject":           "atomicity regression",
+		"priority":          "high",
+		"status":            "open",
+		"channel":           "chat",
+		"sla_policy_id":     uuid.New().String(),
+		"sla_response_by":   respBy.Format(time.RFC3339Nano),
+		"sla_resolution_by": resolveBy.Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatalf("marshal ticket: %v", err)
+	}
+	rec, err := h.records.Create(ctx, record.KRecord{
+		TenantID:     tn.ID,
+		KType:        helpdesk.KTypeTicket,
+		KTypeVersion: 1,
+		Data:         ticketData,
+		CreatedBy:    uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("create ticket: %v", err)
+	}
+	ticketID := rec.ID
+
+	pub := &togglePublisher{inner: h.publisher, failNext: true}
+	clock := createdAt
+	handler := helpdesk.NewSLABreachHandler(h.pool, hdStore, pub, dbutil.SetTenantContext).
+		WithClock(func() time.Time { return clock })
+
+	// First sweep — publisher fails. Handle swallows the per-ticket
+	// error and continues, so Handle returns nil. But because the
+	// log + outbox share a tx, the tx is rolled back, and the log
+	// stays empty.
+	clock = createdAt.Add(70 * time.Minute)
+	if err := handler.Handle(ctx, tn.ID, scheduler.ScheduledAction{TenantID: tn.ID}); err != nil {
+		t.Fatalf("pass1 handle: %v", err)
+	}
+	logs, err := hdStore.ListTicketLog(ctx, tn.ID, ticketID)
+	if err != nil {
+		t.Fatalf("list log after pass1: %v", err)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("pass1 (publisher failed): log must roll back; got %d rows: %+v", len(logs), logs)
+	}
+
+	// Second sweep — flip the stub. Log + outbox both commit.
+	pub.failNext = false
+	if err := handler.Handle(ctx, tn.ID, scheduler.ScheduledAction{TenantID: tn.ID}); err != nil {
+		t.Fatalf("pass2 handle: %v", err)
+	}
+	logs, err = hdStore.ListTicketLog(ctx, tn.ID, ticketID)
+	if err != nil {
+		t.Fatalf("list log after pass2: %v", err)
+	}
+	if len(logs) != 1 || logs[0].EventKind != helpdesk.EventResponseBreach {
+		t.Fatalf("pass2: want 1 response_breach, got %+v", logs)
+	}
+}
+
+// togglePublisher wraps a real events.Publisher with a one-shot
+// failure flip used by TestSLABreachHandlerEmitIsAtomic. When
+// failNext is true the next EmitTx returns a canned error without
+// inserting; subsequent calls pass through to the inner publisher.
+type togglePublisher struct {
+	inner    events.Publisher
+	failNext bool
+}
+
+func (p *togglePublisher) EmitTx(ctx context.Context, tx pgx.Tx, event events.Event) error {
+	if p.failNext {
+		p.failNext = false
+		return fmt.Errorf("togglePublisher: synthetic emit failure")
+	}
+	return p.inner.EmitTx(ctx, tx, event)
+}
+
+func (p *togglePublisher) DrainBatch(ctx context.Context, limit int, deliver func(ctx context.Context, batch []events.Event) error) (int, error) {
+	return p.inner.DrainBatch(ctx, limit, deliver)
 }
 
 // TestSLABreachHandlerSkipsClosedTicket ensures a resolved ticket

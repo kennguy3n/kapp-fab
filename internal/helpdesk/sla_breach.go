@@ -246,9 +246,12 @@ func (h *SLABreachHandler) seenEvents(ctx context.Context, tenantID, ticketID uu
 }
 
 // emitEvent logs the SLA event and publishes a notification-shaped
-// outbox event in a single tenant-scoped transaction. The router
-// downstream decodes the `notification` envelope and fans out to
-// KChat / email according to the tenant's notification prefs.
+// outbox event on a single shared transaction. Atomic is load-bearing:
+// if the log row committed but the outbox write failed, the next
+// sweep's idempotency guard (seenEvents) would permanently suppress
+// re-emission and the KChat / email notification would be lost. The
+// router downstream decodes the `notification` envelope and fans out
+// to KChat / email according to the tenant's notification prefs.
 func (h *SLABreachHandler) emitEvent(
 	ctx context.Context,
 	tenantID uuid.UUID,
@@ -268,7 +271,37 @@ func (h *SLABreachHandler) emitEvent(
 	if err != nil {
 		return fmt.Errorf("marshal sla detail: %w", err)
 	}
-	if _, err := h.helpdesk.LogSLAEvent(ctx, SLALogEntry{
+	var eventPayload []byte
+	if h.publisher != nil {
+		title, body := slaNotificationCopy(kind, t)
+		eventPayload, err = json.Marshal(map[string]any{
+			"tenant_id":  tenantID,
+			"ticket_id":  t.TicketID,
+			"event_kind": kind,
+			"due_at":     occurredAt.Format(time.RFC3339Nano),
+			"subject":    t.Subject,
+			"priority":   t.Priority,
+			"notification": map[string]any{
+				"channel": "kchat",
+				"title":   title,
+				"body":    body,
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("marshal sla event: %w", err)
+		}
+	}
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin sla tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if h.setTenant != nil {
+		if err := h.setTenant(ctx, tx, tenantID); err != nil {
+			return fmt.Errorf("set tenant for sla tx: %w", err)
+		}
+	}
+	if _, err := h.helpdesk.LogSLAEventTx(ctx, tx, SLALogEntry{
 		TenantID:   tenantID,
 		TicketID:   t.TicketID,
 		EventKind:  kind,
@@ -277,51 +310,19 @@ func (h *SLABreachHandler) emitEvent(
 	}); err != nil {
 		return fmt.Errorf("log sla event: %w", err)
 	}
-	if h.publisher == nil {
-		return nil
-	}
-	title, body := slaNotificationCopy(kind, t)
-	eventPayload, err := json.Marshal(map[string]any{
-		"tenant_id":  tenantID,
-		"ticket_id":  t.TicketID,
-		"event_kind": kind,
-		"due_at":     occurredAt.Format(time.RFC3339Nano),
-		"subject":    t.Subject,
-		"priority":   t.Priority,
-		"notification": map[string]any{
-			"channel": "kchat",
-			"title":   title,
-			"body":    body,
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("marshal sla event: %w", err)
-	}
-	return h.publishEvent(ctx, tenantID, eventPayload)
-}
-
-// publishEvent opens a short-lived tx, sets the tenant GUC, and emits
-// a `helpdesk.sla_breach` outbox row. The outbox row is durable so the
-// notification router picks it up on its next drain.
-func (h *SLABreachHandler) publishEvent(ctx context.Context, tenantID uuid.UUID, payload []byte) error {
-	tx, err := h.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin event tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if h.setTenant != nil {
-		if err := h.setTenant(ctx, tx, tenantID); err != nil {
-			return fmt.Errorf("set tenant for event: %w", err)
+	if h.publisher != nil {
+		if err := h.publisher.EmitTx(ctx, tx, events.Event{
+			TenantID: tenantID,
+			Type:     "helpdesk.sla_breach",
+			Payload:  eventPayload,
+		}); err != nil {
+			return fmt.Errorf("emit sla event: %w", err)
 		}
 	}
-	if err := h.publisher.EmitTx(ctx, tx, events.Event{
-		TenantID: tenantID,
-		Type:     "helpdesk.sla_breach",
-		Payload:  payload,
-	}); err != nil {
-		return fmt.Errorf("emit sla event: %w", err)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit sla tx: %w", err)
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 // slaNotificationCopy generates the KChat card title + body for each
