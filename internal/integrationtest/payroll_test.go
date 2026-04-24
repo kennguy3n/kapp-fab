@@ -117,6 +117,48 @@ func TestPayrollEngineIsIdempotentOnReGenerate(t *testing.T) {
 	}
 }
 
+// TestPayrollEngineHandlesMoreThan50Employees is a regression test
+// for the silent-clamp bug on record.PGStore.List (capped at 500,
+// defaults to 50). The engine now uses ListAll; seed 51 employees
+// each with an active salary_structure and assert GeneratePayslips
+// writes 51 slips (not 50).
+func TestPayrollEngineHandlesMoreThan50Employees(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tn, ledgerStore, _ := newTenantForFinance(t, h)
+	registerPayrollKTypes(t, h)
+	actor := uuid.New()
+
+	const n = 51
+	for i := 0; i < n; i++ {
+		empID := createEmployeeRecord(t, h, tn.ID, actor, "Engineer")
+		createSalaryStructure(t, h, tn.ID, actor, empID, "USD", decimal.NewFromInt(1000), nil)
+	}
+	runID := createPayRun(t, h, tn.ID, actor, "Jun 2026", "2026-06-01", "2026-06-30", "")
+
+	engine := hr.NewPayrollEngine(h.records, ledgerStore)
+	res, err := engine.GeneratePayslips(ctx, tn.ID, runID, actor)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if res.CreatedCount != n {
+		t.Fatalf("created %d want %d (skipped_existing=%d skipped_no_struct=%d)",
+			res.CreatedCount, n, res.SkippedExisting, res.SkippedNoStruct)
+	}
+
+	// Re-run to confirm idempotency still covers every employee,
+	// not just the first 50. The second call must skip all 51.
+	res2, err := engine.GeneratePayslips(ctx, tn.ID, runID, actor)
+	if err != nil {
+		t.Fatalf("generate (second call): %v", err)
+	}
+	if res2.CreatedCount != 0 || res2.SkippedExisting != n {
+		t.Fatalf("idempotent re-run: created=%d skipped_existing=%d want 0/%d",
+			res2.CreatedCount, res2.SkippedExisting, n)
+	}
+}
+
 // TestPayrollEngineFiltersByDepartment verifies the optional
 // department filter on pay_run trims out-of-scope employees.
 func TestPayrollEngineFiltersByDepartment(t *testing.T) {

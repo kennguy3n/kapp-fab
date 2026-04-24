@@ -112,16 +112,18 @@ func (e *PayrollEngine) GeneratePayslips(
 		runCurrency = "USD"
 	}
 
-	employees, err := e.records.List(ctx, tenantID, record.ListFilter{
+	// ListAll (not List) because HTTP-facing List silently clamps to
+	// 500 rows; payroll has to walk every active employee + structure
+	// + existing-payslip row for the tenant to stay correct on
+	// re-runs and >50-employee tenants.
+	employees, err := e.records.ListAll(ctx, tenantID, record.ListFilter{
 		KType: KTypeEmployee,
-		Limit: 10_000,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("hr: list employees: %w", err)
 	}
-	structures, err := e.records.List(ctx, tenantID, record.ListFilter{
+	structures, err := e.records.ListAll(ctx, tenantID, record.ListFilter{
 		KType: KTypeSalaryStructure,
-		Limit: 10_000,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("hr: list structures: %w", err)
@@ -164,9 +166,8 @@ func (e *PayrollEngine) GeneratePayslips(
 
 	// Pre-load existing payslips for this run so re-generation is
 	// idempotent.
-	existingSlips, err := e.records.List(ctx, tenantID, record.ListFilter{
+	existingSlips, err := e.records.ListAll(ctx, tenantID, record.ListFilter{
 		KType: KTypePayslip,
-		Limit: 20_000,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("hr: list payslips: %w", err)
@@ -316,9 +317,11 @@ func (e *PayrollEngine) PostPayRun(
 		currency = "USD"
 	}
 
-	slips, err := e.records.List(ctx, tenantID, record.ListFilter{
+	// ListAll (not List) — HTTP-facing List caps at 500 rows and
+	// silently defaults to 50. PostPayRun must see every approved
+	// slip for the batch journal entry.
+	slips, err := e.records.ListAll(ctx, tenantID, record.ListFilter{
 		KType: KTypePayslip,
-		Limit: 50_000,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("hr: list payslips: %w", err)
