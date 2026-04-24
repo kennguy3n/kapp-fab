@@ -246,6 +246,7 @@ func run() error {
 	agents.RegisterInventoryTools(executor, inventoryStore)
 	agents.RegisterHRTools(executor, hrStore)
 	agents.RegisterLMSTools(executor, lmsStore)
+	agents.RegisterHelpdeskTools(executor, helpdeskStore)
 
 	fh := &formsHandlers{store: formStore, registry: ktypeRegistry}
 	th := &tenantHandlers{svc: tenantSvc, wizard: tenant.NewWizard(pool)}

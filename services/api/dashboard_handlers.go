@@ -56,7 +56,7 @@ func (h *dashboardHandlers) summary(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := scanScalar(ctx, tx,
 			`SELECT COALESCE(SUM((data->>'outstanding')::numeric), 0) FROM krecords
-			 WHERE tenant_id = $1 AND ktype = 'finance.invoice'
+			 WHERE tenant_id = $1 AND ktype = 'finance.ar_invoice'
 			   AND status NOT IN ('paid','cancelled','voided')
 			   AND deleted_at IS NULL`,
 			t.ID, &s.OutstandingAR); err != nil {
@@ -64,7 +64,7 @@ func (h *dashboardHandlers) summary(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := scanScalar(ctx, tx,
 			`SELECT COALESCE(SUM((data->>'outstanding')::numeric), 0) FROM krecords
-			 WHERE tenant_id = $1 AND ktype = 'finance.bill'
+			 WHERE tenant_id = $1 AND ktype = 'finance.ap_bill'
 			   AND status NOT IN ('paid','cancelled','voided')
 			   AND deleted_at IS NULL`,
 			t.ID, &s.OutstandingAP); err != nil {
@@ -83,7 +83,7 @@ func (h *dashboardHandlers) summary(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := scanScalar(ctx, tx,
 			`SELECT count(*) FROM approvals
-			 WHERE tenant_id = $1 AND status = 'pending'`,
+			 WHERE tenant_id = $1 AND state = 'pending'`,
 			t.ID, &s.PendingApprovals); err != nil {
 			return err
 		}

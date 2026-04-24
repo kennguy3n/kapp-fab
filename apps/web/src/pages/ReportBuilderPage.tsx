@@ -5,11 +5,11 @@ import { api } from "../lib/api";
 
 const BLANK_DEFINITION: ReportDefinition = {
   source: "ktype:crm.deal",
-  columns: ["id", "data.name", "data.stage", "data.value"],
+  columns: ["id", "name", "stage", "value"],
   filters: [],
   group_by: [],
   aggregations: [],
-  sort: [{ column: "data.value", direction: "desc" }],
+  sort: [{ column: "value", direction: "desc" }],
   limit: 100,
 };
 
