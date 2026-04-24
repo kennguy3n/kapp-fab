@@ -189,6 +189,13 @@ func run() error {
 		helpdesk.ActionTypeSLABreach,
 		helpdesk.NewSLABreachHandler(pool, helpdeskStore, publisher, dbutil.SetTenantContext),
 	)
+	// Inventory reorder automation — sweeps low-stock items per
+	// tenant and opens draft procurement.purchase_orders against
+	// each item's preferred supplier. Idempotent within a 24h
+	// window so consecutive sweeps never duplicate a draft.
+	reorderHandler := inventory.NewReorderHandler(recordStore, inventoryStore).
+		WithSystemActor(workerSystemActor)
+	schedRegistry.Register(inventory.ActionTypeReorder, reorderHandler)
 	go scheduler.RunLoop(ctx, schedStore, schedRegistry, 10*time.Second)
 
 	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)

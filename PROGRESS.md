@@ -8,8 +8,8 @@
 
 ## Current Phase
 
-**Phase I — Multi-currency, Helpdesk, Reporting, Dashboard**
-**Status:** Complete (all four deliverables merged via PR #24: multi-currency store + KType + handlers; helpdesk KTypes + SLA store + agent tools + `/ticket` command; report builder grammar + saved reports + runner; KPI dashboard summary endpoint + landing page). Phase H hardening slice remains Complete from PR #22. Next focus: recurring invoices + scheduled actions, credit-limit enforcement, full payroll, bulk actions, SLA breach worker, integration tests for Phase I, distributed rate limiting, 5000-tenant load test, documentation — tracked under Cross-cutting.
+**Phase I — Multi-currency, Helpdesk, Reporting, Dashboard + Phase J feature slice**
+**Status:** Complete (Phase I four deliverables merged via PR #24: multi-currency store + KType + handlers; helpdesk KTypes + SLA store + agent tools + `/ticket` command; report builder grammar + saved reports + runner; KPI dashboard summary endpoint + landing page). Phase H hardening slice remains Complete from PR #22. Phase J feature slice complete: scheduled actions framework (PR #27), credit-limit enforcement (PR #28), helpdesk SLA breach sweeper (PR #29), recurring invoice generator (PR #30), payment terms templates (PR #31), full payroll engine with idempotent PostPayRun (PRs #32/#33/#34). Next focus: per-tenant feature flags, inventory reorder automation, distributed rate limiting (Redis), tenant resource metering, bulk actions on RecordListPage, integration tests for Phase I, 5000-tenant load test, documentation.
 
 ---
 
@@ -251,16 +251,16 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [x] Tenant setup wizard (`internal/tenant/wizard.go` — seeds CoA from `coa_templates/us_gaap_basic.json` + `ifrs_basic.json`, default roles, initial users; `POST /api/v1/tenants/{id}/setup`; `auto_setup: true` trigger on `Create`; `apps/web/src/pages/SetupWizardPage.tsx`)
 - [x] Payment recording: `finance.payment` KType (`internal/finance/payment.go`), multi-invoice allocation engine (`internal/ledger/payment.go#PostPayment`), `POST /api/v1/finance/payments/{id}/post`, `finance.record_payment` agent tool, `/payment` slash command
 - [x] Multi-currency: exchange rate table, automatic conversion on posting, unrealized gain/loss (`migrations/000017_multi_currency.sql` — `exchange_rates` with composite PK `(tenant_id, from_currency, to_currency, rate_date)` + RLS + `tenant_isolation`; `internal/ledger/currency.go` — `ExchangeRateStore.UpsertRate` / `GetRate` (handles inverse pairs) / `Convert` / `ListRates` / `UnrealizedGainLoss`; `finance.exchange_rate` KType registered at boot; `services/api/currency_handlers.go` exposes `POST/GET /api/v1/finance/exchange-rates` + `GET /exchange-rates/convert` + `POST /exchange-rates/unrealized`; `apps/web/src/pages/ExchangeRatesPage.tsx`; reference: `frappe/erpnext` Currency Exchange)
-- [ ] Recurring invoices: `finance.recurring_invoice` KType + scheduled auto-generation (reference: `frappe/erpnext` Auto Repeat)
-- [ ] Credit limit enforcement on `PostSalesInvoice` (reference: `frappe/erpnext` Credit Limit)
+- [x] Recurring invoices: `finance.recurring_invoice` KType + scheduled auto-generation (reference: `frappe/erpnext` Auto Repeat) (PR #30, internal/finance/recurring.go + internal/scheduler/ + services/worker/main.go handler registration)
+- [x] Credit limit enforcement on `PostSalesInvoice` (reference: `frappe/erpnext` Credit Limit) (PR #28, internal/ledger/credit_limit.go; PostSalesInvoice checks crm.customer credit_limit against outstanding AR before posting)
 - [ ] Inventory reorder automation: auto-create draft PO from low-stock alert (reference: `frappe/erpnext` Material Request)
-- [ ] Payment terms templates: `finance.payment_terms` KType with installment schedules (reference: `frappe/erpnext` Payment Terms Template)
+- [x] Payment terms templates: `finance.payment_terms` KType with installment schedules (reference: `frappe/erpnext` Payment Terms Template) (PR #31, internal/finance/payment_terms.go; finance.payment_terms KType + invoice/bill schedule materialisation)
 - [ ] Per-tenant feature flags: enable/disable KApps per plan (reference: `frappe/frappe` module visibility)
 - [ ] Tenant data isolation runtime audit endpoint
 - [x] Dashboard page: tenant-level KPI dashboard (open deals, outstanding AR/AP, low stock, pending approvals, open tickets) (`services/api/dashboard_handlers.go` — `GET /api/v1/dashboard/summary` aggregates across `krecords` (crm.deal, finance.invoice, finance.bill, helpdesk.ticket), `stock_levels`, `approvals`; `apps/web/src/pages/DashboardPage.tsx` renders KPI tiles linking into the deep record lists; registered as the default landing route in `apps/web/src/App.tsx`)
 - [x] Setup wizard React page: step-by-step onboarding flow (`apps/web/src/pages/SetupWizardPage.tsx` — company profile → CoA template picker → initial users → `POST /api/v1/tenants/{id}/setup`; route registered in `apps/web/src/App.tsx` at `/setup/:id`)
 - [ ] Bulk actions on RecordListPage: multi-select, bulk status change, bulk delete, bulk export
-- [ ] Full payroll processing: payslip generation, statutory deductions (reference: `frappe/hrms` Payroll Entry)
+- [x] Full payroll processing: payslip generation, statutory deductions (reference: `frappe/hrms` Payroll Entry) (PR #32 + #33 + #34, internal/hr/payroll_engine.go; GeneratePayslips + PostPayRun with idempotent retry, dedicated /hr/pay-runs/{id}/payslips endpoint)
 - [x] Helpdesk module: `helpdesk.ticket` + `helpdesk.sla_policy` KTypes with SLA, agent routing, KChat thread→ticket (`internal/helpdesk/ktypes.go` — ticket workflow `open → in_progress → waiting → resolved → closed`, policy schema for per-priority response/resolution minutes; `internal/helpdesk/store.go` — `sla_policies` + `ticket_sla_log` tables with RLS, `UpsertPolicy` / `ResolvePolicy` / `ComputeDueTimes` / `LogSLAEvent`; `migrations/000018_helpdesk.sql`; `internal/agents/helpdesk_tools.go` — `helpdesk.create_ticket` (with auto-SLA lookup), `helpdesk.assign_ticket`, `helpdesk.resolve_ticket`; `services/api/helpdesk_handlers.go` exposes `POST/GET /api/v1/helpdesk/sla-policies` + `GET /sla-policies/resolve` + `GET /tickets/{id}/sla-log`; `/ticket` slash command in `services/kchat-bridge/commands.go`; `apps/web/src/pages/HelpdeskPage.tsx` — open-ticket triage grid + SLA policy editor; customer-portal deferred)
 - [ ] Tenant resource metering: usage tracking per billing period, usage dashboard, plan upgrade/downgrade API
 - [ ] Webhook management: `platform.webhook` KType, delivery log with retries, management UI, HMAC signatures
@@ -272,7 +272,7 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [ ] Multi-currency posting integration: auto-convert journal lines using exchange rate on posting date (reference: `frappe/erpnext` Currency Exchange on Journal Entry)
 - [ ] Unrealized gain/loss scheduled job: periodic revaluation of open foreign-currency invoices (reference: `frappe/erpnext` Exchange Rate Revaluation)
 - [ ] Dashboard multi-currency conversion: server-side conversion to tenant base currency so KPI tiles show meaningful totals
-- [ ] Helpdesk SLA breach worker: background worker to detect response/resolution breaches and log to `ticket_sla_log` (reference: `frappe/helpdesk` SLA)
+- [x] Helpdesk SLA breach worker: background worker to detect response/resolution breaches and log to `ticket_sla_log` (reference: `frappe/helpdesk` SLA) (PR #29, internal/helpdesk/sla_breach.go; atomic SLA log + outbox emit, tenant wizard seeds sla_breach_check scheduled action)
 - [ ] Helpdesk customer portal: self-service ticket submission and tracking (reference: `frappe/helpdesk` customer portal)
 - [ ] Helpdesk inbound email: parse incoming emails into `helpdesk.ticket` records (reference: `frappe/helpdesk` email integration)
 - [ ] KChat thread-to-ticket automation: auto-create helpdesk ticket from flagged KChat thread (`thread_id` field exists on ticket schema)
@@ -287,7 +287,7 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [ ] Batch/lot tracking: full implementation on top of the schema hooks already landed in Phase D
 - [ ] Attendance integration with KChat presence/status
 - [ ] Course completion certificates for `lms.enrollment`
-- [ ] Scheduled actions: tenant-scoped cron, recurring invoice generation, scheduled report delivery
+- [x] Scheduled actions: tenant-scoped cron, recurring invoice generation, scheduled report delivery (PR #27, internal/scheduler/scheduler.go + store.go; migrations/000020_scheduled_actions.sql; PollDue with FOR UPDATE SKIP LOCKED, corrupt-row resilience, worker wiring)
 - [ ] Data export: per-KType export endpoint, full tenant dump, export job tracking
 - [x] `permissions` table (`migrations/000015_permissions.sql` with RLS; `internal/authz/store.go` reads granular `(role_name, ktype, action)` grants with JSONB conditions, falling back to legacy `roles.permissions` for backward compatibility)
 - [x] `notifications` table (`migrations/000014_notifications.sql` with RLS; `internal/notifications/store.go` + `services/api/notifications.go` expose `GET /api/v1/notifications` + mark-read; worker persists every routed notification; `apps/web/src/components/NotificationBell.tsx` renders the inbox)

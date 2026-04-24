@@ -1,4 +1,6 @@
 import { Route, Routes, Link } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "./lib/api";
 import { RecordListPage } from "./pages/RecordListPage";
 import { RecordFormPage } from "./pages/RecordFormPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -28,7 +30,24 @@ import { DashboardPage } from "./pages/DashboardPage";
 import { ExchangeRatesPage } from "./pages/ExchangeRatesPage";
 import { HelpdeskPage } from "./pages/HelpdeskPage";
 import { ReportBuilderPage } from "./pages/ReportBuilderPage";
+import { TenantFeaturesPage } from "./pages/TenantFeaturesPage";
+import { UsageDashboardPage } from "./pages/UsageDashboardPage";
 import { NotificationBell } from "./components/NotificationBell";
+
+const tenantKey = (): string =>
+  localStorage.getItem("kapp.tenant") ?? "default";
+
+// featureFromSection maps a nav section title to the feature key it
+// gates on. Sections without an entry are always shown. Keep in
+// lock-step with internal/tenant/plans.go FeatureX constants.
+const featureFromSection: Record<string, string> = {
+  CRM: "crm",
+  Finance: "finance",
+  Helpdesk: "helpdesk",
+  Inventory: "inventory",
+  HR: "hr",
+  LMS: "lms",
+};
 
 interface NavSection {
   title: string;
@@ -130,6 +149,8 @@ const navSections: NavSection[] = [
     title: "Admin",
     links: [
       { to: "/admin/tenants", label: "Tenants" },
+      { to: "/admin/features", label: "Features" },
+      { to: "/admin/usage", label: "Usage" },
       { to: "/admin/audit", label: "Audit Log" },
       { to: "/imports", label: "Imports" },
     ],
@@ -152,6 +173,22 @@ export function App() {
 }
 
 function AppShell() {
+  const featuresQuery = useQuery({
+    queryKey: ["tenant-features", tenantKey()],
+    queryFn: () => api.listTenantFeatures(tenantKey()),
+    retry: false,
+    staleTime: 60_000,
+  });
+  const features = featuresQuery.data?.features ?? {};
+  // When the features API is unreachable we fail open — better to
+  // show a nav item the backend subsequently 403s than to hide
+  // every section on a transient network blip.
+  const visible = navSections.filter((s) => {
+    const key = featureFromSection[s.title];
+    if (!key) return true;
+    if (!featuresQuery.data) return true;
+    return features[key] !== false;
+  });
   return (
     <div style={{ display: "flex", minHeight: "100vh" }}>
       <aside
@@ -159,7 +196,7 @@ function AppShell() {
       >
         <h2>Kapp</h2>
         <nav>
-          {navSections.map((section) => (
+          {visible.map((section) => (
             <div key={section.title} style={{ marginBottom: 12 }}>
               <div
                 style={{
@@ -195,6 +232,8 @@ function AppShell() {
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/admin/tenants" element={<TenantListPage />} />
+          <Route path="/admin/features" element={<TenantFeaturesPage />} />
+          <Route path="/admin/usage" element={<UsageDashboardPage />} />
           <Route path="/admin/audit" element={<AuditLogPage />} />
           <Route path="/approvals" element={<ApprovalsPage />} />
           <Route path="/finance/exchange-rates" element={<ExchangeRatesPage />} />

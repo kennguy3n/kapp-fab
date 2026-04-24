@@ -10,6 +10,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
+	"github.com/kennguy3n/kapp-fab/internal/scheduler"
 )
 
 // RegisterInventoryTools attaches the Phase D inventory tools to an
@@ -22,6 +23,41 @@ import (
 func RegisterInventoryTools(x *Executor, store *inventory.PGStore) {
 	x.Register(&recordMoveTool{store: store})
 	x.Register(&checkStockTool{store: store})
+}
+
+// RegisterInventoryReorderTool wires the trigger_reorder tool against
+// the live scheduled ReorderHandler. Kept separate so callers that
+// don't care about the reorder path don't need to construct a
+// handler just to register the other two tools.
+func RegisterInventoryReorderTool(x *Executor, handler *inventory.ReorderHandler) {
+	x.Register(&triggerReorderTool{handler: handler})
+}
+
+// ----- inventory.trigger_reorder -----
+
+type triggerReorderTool struct {
+	handler *inventory.ReorderHandler
+}
+
+func (t *triggerReorderTool) Name() string               { return "inventory.trigger_reorder" }
+func (t *triggerReorderTool) RequiresConfirmation() bool { return true }
+func (t *triggerReorderTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	if inv.Mode == ModeDryRun {
+		return &Result{
+			Summary: "Would run the inventory reorder sweep for this tenant",
+			Preview: json.RawMessage(`{"action":"inventory.trigger_reorder","mode":"dry_run"}`),
+		}, nil
+	}
+	if t.handler == nil {
+		return nil, errors.New("inventory.trigger_reorder: reorder handler not configured")
+	}
+	if err := t.handler.Handle(ctx, inv.TenantID, scheduler.ScheduledAction{TenantID: inv.TenantID, ActionType: inventory.ActionTypeReorder}); err != nil {
+		return nil, fmt.Errorf("inventory.trigger_reorder: %w", err)
+	}
+	return &Result{
+		Summary: "Inventory reorder sweep completed",
+		Preview: json.RawMessage(`{"action":"inventory.trigger_reorder","mode":"commit"}`),
+	}, nil
 }
 
 // ----- inventory.record_move -----

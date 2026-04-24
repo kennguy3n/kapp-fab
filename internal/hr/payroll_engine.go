@@ -158,9 +158,9 @@ func (e *PayrollEngine) GeneratePayslips(
 			continue
 		}
 		structByEmp[sd.EmployeeID] = structureView{
-			ID:             structures[i].ID,
-			EffectiveFrom:  effFrom,
-			Data:           sd,
+			ID:            structures[i].ID,
+			EffectiveFrom: effFrom,
+			Data:          sd,
 		}
 	}
 
@@ -460,8 +460,10 @@ func (e *PayrollEngine) PostPayRun(
 	// Flip the pay_run → paid with a CAS retry loop. The JE and
 	// slip writes are committed by this point; the only remaining
 	// failure mode is a concurrent patch to the pay_run record
-	// bumping its version. Re-read + re-patch up to
-	// postPayRunMaxRetries times before surfacing the conflict.
+	// bumping its version. Re-read up front (a concurrent
+	// GeneratePayslips or other patch may have bumped the version
+	// between our initial Get and now), then re-read + re-patch up
+	// to postPayRunMaxRetries times before surfacing the conflict.
 	runPatch, _ := json.Marshal(map[string]any{
 		"status":           "paid",
 		"journal_entry_id": entry.ID.String(),
@@ -469,7 +471,10 @@ func (e *PayrollEngine) PostPayRun(
 		"total_gross":      decimalFloat(gross),
 		"total_net":        decimalFloat(net),
 	})
-	currentRun := runRec
+	currentRun, err := e.records.Get(ctx, tenantID, payRunID)
+	if err != nil {
+		return entry, fmt.Errorf("hr: reload pay_run before patch: %w", err)
+	}
 	for attempt := 0; attempt < postPayRunMaxRetries; attempt++ {
 		if _, err := e.records.Update(ctx, record.KRecord{
 			ID:        currentRun.ID,
@@ -608,18 +613,18 @@ func parsePayrollDate(s string) (time.Time, error) {
 // Internal projections.
 
 type payRunData struct {
-	Name                       string          `json:"name"`
-	PayPeriodStart             string          `json:"pay_period_start"`
-	PayPeriodEnd               string          `json:"pay_period_end"`
-	Department                 string          `json:"department"`
-	Currency                   string          `json:"currency"`
-	PayslipCount               int             `json:"payslip_count"`
-	TotalGross                 decimal.Decimal `json:"total_gross"`
-	TotalNet                   decimal.Decimal `json:"total_net"`
-	SalaryExpenseAccountCode   string          `json:"salary_expense_account_code"`
-	SalaryPayableAccountCode   string          `json:"salary_payable_account_code"`
-	JournalEntryID             string          `json:"journal_entry_id"`
-	Status                     string          `json:"status"`
+	Name                     string          `json:"name"`
+	PayPeriodStart           string          `json:"pay_period_start"`
+	PayPeriodEnd             string          `json:"pay_period_end"`
+	Department               string          `json:"department"`
+	Currency                 string          `json:"currency"`
+	PayslipCount             int             `json:"payslip_count"`
+	TotalGross               decimal.Decimal `json:"total_gross"`
+	TotalNet                 decimal.Decimal `json:"total_net"`
+	SalaryExpenseAccountCode string          `json:"salary_expense_account_code"`
+	SalaryPayableAccountCode string          `json:"salary_payable_account_code"`
+	JournalEntryID           string          `json:"journal_entry_id"`
+	Status                   string          `json:"status"`
 }
 
 type payslipData struct {
@@ -642,14 +647,14 @@ type employeeData struct {
 }
 
 type structureData struct {
-	EmployeeID        string               `json:"employee_id"`
-	EffectiveFrom     string               `json:"effective_from"`
-	EffectiveUntil    string               `json:"effective_until"`
-	Currency          string               `json:"currency"`
-	BaseSalary        decimal.Decimal      `json:"base_salary"`
-	PaymentFrequency  string               `json:"payment_frequency"`
-	Components        []structureComponent `json:"components"`
-	Status            string               `json:"status"`
+	EmployeeID       string               `json:"employee_id"`
+	EffectiveFrom    string               `json:"effective_from"`
+	EffectiveUntil   string               `json:"effective_until"`
+	Currency         string               `json:"currency"`
+	BaseSalary       decimal.Decimal      `json:"base_salary"`
+	PaymentFrequency string               `json:"payment_frequency"`
+	Components       []structureComponent `json:"components"`
+	Status           string               `json:"status"`
 }
 
 type structureComponent struct {

@@ -99,6 +99,8 @@ var TenantScopedTables = []string{
 	"ticket_sla_log",
 	"saved_reports",
 	"scheduled_actions",
+	"tenant_features",
+	"tenant_usage",
 }
 
 // manifest is the first record in every dump file.
@@ -339,6 +341,8 @@ var tableConflictKeys = map[string][]string{
 	"lesson_progress":        {"tenant_id", "enrollment_id", "lesson_id"},
 	"exchange_rates":         {"tenant_id", "from_currency", "to_currency", "rate_date"},
 	"saved_reports":          {"tenant_id", "id"},
+	"tenant_features":        {"tenant_id", "feature_key"},
+	"tenant_usage":           {"tenant_id", "period_start", "metric"},
 }
 
 // insertRow issues a parameterised INSERT that lists the columns from
