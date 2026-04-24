@@ -73,7 +73,9 @@ func (h *dashboardHandlers) summary(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if err := scanScalar(ctx, tx,
-			`SELECT count(*) FROM stock_levels sl
+			// stock_levels rows are per-warehouse; dedupe by item so the
+			// "low-stock items" widget matches its label.
+			`SELECT count(DISTINCT sl.item_id) FROM stock_levels sl
 			 JOIN krecords i ON i.tenant_id = sl.tenant_id AND i.id = sl.item_id
 			 WHERE sl.tenant_id = $1
 			   AND (i.data->>'reorder_level') IS NOT NULL

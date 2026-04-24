@@ -434,17 +434,23 @@ func aggregationExpr(a Aggregation, jsonbCol string) (string, error) {
 		return "", errors.New("reporting: aggregation column required")
 	}
 	col := columnExpr(a.Column, jsonbCol)
+	// KType sources extract from JSONB as text and need NULLIF + ::numeric;
+	// ledger sources are already typed columns and must not be cast through ''.
+	numeric := col
+	if jsonbCol != "" {
+		numeric = fmt.Sprintf("NULLIF(%s, '')::numeric", col)
+	}
 	switch a.Op {
 	case AggCount:
 		return fmt.Sprintf("COUNT(%s)", col), nil
 	case AggSum:
-		return fmt.Sprintf("COALESCE(SUM(NULLIF(%s, '')::numeric), 0)", col), nil
+		return fmt.Sprintf("COALESCE(SUM(%s), 0)", numeric), nil
 	case AggAvg:
-		return fmt.Sprintf("AVG(NULLIF(%s, '')::numeric)", col), nil
+		return fmt.Sprintf("AVG(%s)", numeric), nil
 	case AggMin:
-		return fmt.Sprintf("MIN(NULLIF(%s, '')::numeric)", col), nil
+		return fmt.Sprintf("MIN(%s)", numeric), nil
 	case AggMax:
-		return fmt.Sprintf("MAX(NULLIF(%s, '')::numeric)", col), nil
+		return fmt.Sprintf("MAX(%s)", numeric), nil
 	default:
 		return "", fmt.Errorf("reporting: unsupported aggregation %q", a.Op)
 	}
