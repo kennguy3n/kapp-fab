@@ -18,11 +18,13 @@ var itemSchema = []byte(`{
     {"name": "name", "type": "string", "required": true, "max_length": 200},
     {"name": "uom", "type": "string", "required": true, "max_length": 32},
     {"name": "active", "type": "boolean", "default": true},
-    {"name": "reorder_level", "type": "number", "min": 0}
+    {"name": "reorder_level", "type": "number", "min": 0},
+    {"name": "reorder_qty", "type": "number", "min": 0},
+    {"name": "preferred_supplier_id", "type": "ref", "ktype": "crm.organization"}
   ],
   "views": {
     "list": {"columns": ["sku", "name", "uom", "reorder_level", "active"]},
-    "form": {"sections": [{"title": "Item", "fields": ["sku", "name", "uom", "reorder_level", "active"]}]}
+    "form": {"sections": [{"title": "Item", "fields": ["sku", "name", "uom", "reorder_level", "reorder_qty", "preferred_supplier_id", "active"]}]}
   },
   "cards": {"summary": "{{sku}} — {{name}} ({{uom}})"},
   "permissions": {"read": ["tenant.member"], "write": ["inventory.admin", "tenant.admin"]}

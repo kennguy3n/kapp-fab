@@ -190,6 +190,13 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 		if err := seedDefaultScheduledActions(ctx, tx, tenantID); err != nil {
 			return err
 		}
+		// Seed plan-appropriate feature flags. Free plan tenants
+		// land on CRM-only; paid tiers unlock the rest. Uses
+		// ON CONFLICT DO NOTHING so a re-run of the wizard never
+		// overwrites operator-applied overrides.
+		if err := seedDefaultFeatures(ctx, tx, tenantID, cfg.Plan); err != nil {
+			return err
+		}
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("tenant: wizard seed accounts/roles: %w", err)
@@ -326,6 +333,16 @@ const (
 	defaultRecurringInvoiceIntervalSeconds = 3600
 )
 
+// defaultInventoryReorderActionType mirrors inventory.ActionTypeReorder.
+// Duplicated for the same cycle reason defaultSLABreachActionType is.
+// The hourly cadence matches the finance recurring-invoice sweeper:
+// row-level eligibility is gated on the item's reorder_level so a run
+// more often than once per day costs only SQL filter passes.
+const (
+	defaultInventoryReorderActionType      = "inventory_reorder"
+	defaultInventoryReorderIntervalSeconds = 3600
+)
+
 // seedDefaultScheduledActions seeds the per-tenant scheduled_actions
 // rows the platform expects to exist after a successful wizard run.
 // Uses INSERT … WHERE NOT EXISTS so re-running the wizard is a no-op
@@ -338,6 +355,7 @@ func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 	}{
 		{defaultSLABreachActionType, defaultSLABreachIntervalSeconds},
 		{defaultRecurringInvoiceActionType, defaultRecurringInvoiceIntervalSeconds},
+		{defaultInventoryReorderActionType, defaultInventoryReorderIntervalSeconds},
 	}
 	for _, d := range defaults {
 		if _, err := tx.Exec(ctx,
@@ -351,6 +369,33 @@ func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 			tenantID, d.actionType, d.intervalSeconds, now,
 		); err != nil {
 			return fmt.Errorf("tenant: seed scheduled action %s: %w", d.actionType, err)
+		}
+	}
+	return nil
+}
+
+// seedDefaultFeatures inserts one tenant_features row per canonical
+// feature flag with enabled = DefaultFeaturesForPlan(plan)[feature].
+// INSERT … ON CONFLICT DO NOTHING so re-running the wizard after a
+// tenant has manually overridden a flag is a no-op on that flag —
+// the platform only seeds the default, it never rewrites operator
+// intent.
+func seedDefaultFeatures(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, plan string) error {
+	defaults := DefaultFeaturesForPlan(plan)
+	for _, key := range AllFeatures {
+		enabled, ok := defaults[key]
+		if !ok {
+			// Unmapped feature → default enabled so new
+			// additions opt in automatically.
+			enabled = true
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO tenant_features (tenant_id, feature_key, enabled)
+			 VALUES ($1, $2, $3)
+			 ON CONFLICT (tenant_id, feature_key) DO NOTHING`,
+			tenantID, key, enabled,
+		); err != nil {
+			return fmt.Errorf("tenant: seed feature %q: %w", key, err)
 		}
 	}
 	return nil

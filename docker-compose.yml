@@ -45,6 +45,16 @@ services:
       - "4222:4222"
       - "8222:8222"
 
+  # Redis backs the distributed rate limiter when the api and
+  # agent-tools services are scaled beyond one replica. Set
+  # REDIS_URL=redis://redis:6379/0 on those services to opt in;
+  # leaving it unset falls back to the in-process limiter.
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+
 volumes:
   pgdata:
   miniodata:

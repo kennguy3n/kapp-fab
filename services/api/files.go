@@ -10,14 +10,19 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/files"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
 
 // filesHandlers exposes the Phase F attachment surface. Upload stores
 // the raw bytes in the object store keyed by SHA-256 so a second upload
 // of the same content dedups at the storage layer, then writes a
 // per-tenant metadata row under RLS so each tenant owns its own view.
+// `meter` is optional — when wired, each successful upload increments
+// the storage_bytes counter by the uploaded blob's size so the usage
+// dashboard reflects the new total within one flush interval.
 type filesHandlers struct {
 	store *files.Store
+	meter *platform.MeteringBuffer
 }
 
 // maxUploadBytes caps a single upload at 32 MiB. Larger artifacts should
@@ -83,6 +88,9 @@ func (h *filesHandlers) upload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if h.meter != nil {
+		h.meter.Increment(t.ID, tenant.MetricStorageBytes, int64(len(blob.Data)))
 	}
 	writeJSON(w, http.StatusCreated, f)
 }

@@ -61,7 +61,19 @@ func run() error {
 	recordStore := record.NewPGStore(pool, ktypeRegistry, eventPublisher, auditor)
 	workflowEngine := workflow.NewEngine(pool, eventPublisher, auditor)
 	tenantSvc := tenant.NewPGStore(pool)
-	rateLimiter := platform.NewRateLimiter(platform.DefaultRateLimitConfig())
+	rateLimitCfg := platform.DefaultRateLimitConfig()
+	rateLimiter := platform.NewRateLimiter(rateLimitCfg)
+	var redisLimiter *platform.RedisRateLimiter
+	if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
+		rl, err := platform.NewRedisRateLimiter(ctx, redisURL, rateLimitCfg)
+		if err != nil {
+			log.Printf("agent-tools: redis rate limiter init failed, falling back to in-process: %v", err)
+		} else {
+			redisLimiter = rl
+			defer func() { _ = redisLimiter.Close() }()
+			log.Printf("agent-tools: distributed rate limiter enabled (redis)")
+		}
+	}
 	quotaEnforcer := platform.NewQuotaEnforcer(pool)
 
 	// Domain stores shared between the API gateway and the standalone
@@ -106,7 +118,11 @@ func run() error {
 	r.Route("/api/v1/agents/tools", func(r chi.Router) {
 		r.Use(platform.TenantMiddleware(tenantSvc))
 		r.Use(platform.IdempotencyMiddleware(pool))
-		r.Use(platform.RateLimitMiddleware(rateLimiter))
+		if redisLimiter != nil {
+			r.Use(platform.RedisRateLimitMiddleware(redisLimiter))
+		} else {
+			r.Use(platform.RateLimitMiddleware(rateLimiter))
+		}
 		r.Use(platform.QuotaMiddleware(quotaEnforcer))
 		r.Post("/{name}", h.invoke)
 	})

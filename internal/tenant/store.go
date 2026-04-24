@@ -165,6 +165,27 @@ func (s *PGStore) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// UpdatePlan atomically updates the tenant's plan name and quota
+// JSON. Used by the /tenants/{id}/plan endpoint. Returns ErrNotFound
+// when no row matches.
+func (s *PGStore) UpdatePlan(ctx context.Context, id uuid.UUID, plan string, quota []byte) error {
+	if plan == "" {
+		return errors.New("tenant: plan required")
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE tenants SET plan = $1, quota = $2, updated_at = now()
+		 WHERE id = $3`,
+		plan, quota, id,
+	)
+	if err != nil {
+		return fmt.Errorf("tenant: update plan: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *PGStore) transition(ctx context.Context, id uuid.UUID, from, to Status) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE tenants SET status = $1, updated_at = now()

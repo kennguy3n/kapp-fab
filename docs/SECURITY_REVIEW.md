@@ -169,6 +169,21 @@ the LRU metadata cache must both drop a tenant's entry within
 warms the caches, advances time past `IdleTimeout`, and asserts both
 maps are empty. This runs on every `go test ./...`.
 
+**Distributed backend**: `platform.RedisRateLimiter`
+(`internal/platform/rate_limiter_redis.go`) is a drop-in alternative
+for multi-replica deployments. It shares the per-tenant bucket via
+Redis using an atomic sliding-window Lua script (loaded once with
+`SCRIPT LOAD` and invoked via `EVALSHA`, falling back to `EVAL` on
+`NOSCRIPT` after a Redis restart). The key schema `kapp:rl:{tenant}`
+carries the bucket HASH, and the script calls `EXPIRE` on every
+access so idle keys are dropped after `IdleTimeout` — preserving the
+zero-idle-cost invariant across replicas. Replicas opt in with
+`REDIS_URL=redis://host:6379/0`; absent the env var, services fall
+back to the in-process limiter so local dev keeps working without
+Redis. Redis outages fail open (return `allowed=true`) rather than
+blocking every request — the reverse proxy remains the outer
+ceiling on abusive traffic.
+
 **Open items**: none.
 
 ---

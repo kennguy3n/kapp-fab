@@ -88,6 +88,44 @@ export interface CreateTenantInput {
   quota?: Record<string, unknown>;
 }
 
+export interface TenantFeaturesResponse {
+  tenant_id: string;
+  features: Record<string, boolean>;
+}
+
+export interface PlanLimits {
+  api_calls?: number;
+  storage_bytes?: number;
+  krecord_count?: number;
+  user_seats?: number;
+  [key: string]: number | undefined;
+}
+
+export interface Plan {
+  name: string;
+  display_name: string;
+  limits: PlanLimits;
+  features: Record<string, boolean>;
+}
+
+export interface UsageRow {
+  tenant_id: string;
+  period_start: string;
+  metric: string;
+  value: number;
+  updated_at: string;
+}
+
+export interface TenantUsageResponse {
+  tenant_id: string;
+  plan: string;
+  period_start: string;
+  usage: Record<string, number>;
+  limits: PlanLimits;
+  rows: UsageRow[];
+  features: Record<string, boolean>;
+}
+
 interface ClientConfig {
   baseUrl: string;
   headers: () => Record<string, string>;
@@ -130,6 +168,39 @@ export class ApiClient {
       headers: { "Idempotency-Key": crypto.randomUUID() },
       body: JSON.stringify(input),
     });
+  }
+
+  // --- Feature flags ----------------------------------------------------
+  listTenantFeatures(id: string): Promise<TenantFeaturesResponse> {
+    return this.request(`/tenants/${encodeURIComponent(id)}/features`);
+  }
+
+  updateTenantFeatures(
+    id: string,
+    features: Record<string, boolean>
+  ): Promise<TenantFeaturesResponse> {
+    return this.request(`/tenants/${encodeURIComponent(id)}/features`, {
+      method: "PUT",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ features }),
+    });
+  }
+
+  // --- Metering + plans -------------------------------------------------
+  getTenantUsage(id: string): Promise<TenantUsageResponse> {
+    return this.request(`/tenants/${encodeURIComponent(id)}/usage`);
+  }
+
+  changeTenantPlan(id: string, plan: string): Promise<{ tenant_id: string; plan: Plan }> {
+    return this.request(`/tenants/${encodeURIComponent(id)}/plan`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ plan }),
+    });
+  }
+
+  listPlans(): Promise<{ plans: Plan[] }> {
+    return this.request("/plans");
   }
 
   // --- KType registry ----------------------------------------------------
