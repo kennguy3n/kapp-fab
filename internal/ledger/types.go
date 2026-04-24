@@ -135,6 +135,13 @@ var (
 	ErrDebitNoteNotPostable  = errors.New("ledger: debit note not postable from current status")
 	ErrDebitNoteAlreadyPosted = errors.New("ledger: debit note already posted")
 	ErrOriginalNotPosted     = errors.New("ledger: original record must be posted before issuing a note")
+	// ErrCreditLimitExceeded is surfaced when a sales invoice would
+	// push the customer's outstanding AR balance above the credit
+	// limit configured on the customer KRecord. The sentinel carries
+	// only the intent; the handler wraps it with a message that
+	// includes the limit, the current outstanding, and the invoice
+	// amount so the UI can render a useful toast.
+	ErrCreditLimitExceeded = errors.New("ledger: credit limit exceeded")
 	// ErrDuplicateSourceEntry is surfaced when a caller tries to post
 	// a second journal entry that references the same (source_ktype,
 	// source_id). A concurrent poster or a retry-after-partial-failure
