@@ -24,6 +24,10 @@ import { PurchaseOrdersPage } from "./pages/PurchaseOrdersPage";
 import { PriceListsPage } from "./pages/PriceListsPage";
 import { PayrollPage } from "./pages/PayrollPage";
 import { SetupWizardPage } from "./pages/SetupWizardPage";
+import { DashboardPage } from "./pages/DashboardPage";
+import { ExchangeRatesPage } from "./pages/ExchangeRatesPage";
+import { HelpdeskPage } from "./pages/HelpdeskPage";
+import { ReportBuilderPage } from "./pages/ReportBuilderPage";
 import { NotificationBell } from "./components/NotificationBell";
 
 interface NavSection {
@@ -32,6 +36,10 @@ interface NavSection {
 }
 
 const navSections: NavSection[] = [
+  {
+    title: "Overview",
+    links: [{ to: "/", label: "Dashboard" }],
+  },
   {
     title: "CRM",
     links: [
@@ -65,6 +73,15 @@ const navSections: NavSection[] = [
       { to: "/finance/ap-subledger", label: "AP Subledger" },
       { to: "/finance/cost-centers", label: "Cost Centers" },
       { to: "/finance/bank-reconciliation", label: "Bank Reconciliation" },
+      { to: "/finance/exchange-rates", label: "Exchange Rates" },
+      { to: "/reports", label: "Report Builder" },
+    ],
+  },
+  {
+    title: "Helpdesk",
+    links: [
+      { to: "/records/helpdesk.ticket", label: "Tickets" },
+      { to: "/helpdesk", label: "SLA + Triage" },
     ],
   },
   {
@@ -174,10 +191,13 @@ function AppShell() {
           <NotificationBell />
         </div>
         <Routes>
-          <Route path="/" element={<div>Select a KType from the nav.</div>} />
+          <Route path="/" element={<DashboardPage />} />
           <Route path="/admin/tenants" element={<TenantListPage />} />
           <Route path="/admin/audit" element={<AuditLogPage />} />
           <Route path="/approvals" element={<ApprovalsPage />} />
+          <Route path="/finance/exchange-rates" element={<ExchangeRatesPage />} />
+          <Route path="/helpdesk" element={<HelpdeskPage />} />
+          <Route path="/reports" element={<ReportBuilderPage />} />
           <Route
             path="/finance/accounts"
             element={<ChartOfAccountsPage />}
