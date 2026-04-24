@@ -108,7 +108,20 @@ func (h *currencyHandlers) convert(w http.ResponseWriter, r *http.Request) {
 		writeCurrencyError(w, err)
 		return
 	}
-	rate, _ := h.store.GetRate(r.Context(), t.ID, q.Get("from"), q.Get("to"), asOf)
+	// Derive the rate used by Convert from its own result so the response
+	// is internally consistent (avoids a second round-trip that could race
+	// against a concurrent UpsertRate). When amount is zero the rate is
+	// indeterminate, so fall back to a fresh lookup.
+	var rate decimal.Decimal
+	if amount.IsZero() {
+		rate, err = h.store.GetRate(r.Context(), t.ID, q.Get("from"), q.Get("to"), asOf)
+		if err != nil {
+			writeCurrencyError(w, err)
+			return
+		}
+	} else {
+		rate = converted.Div(amount)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"amount":    amount,
 		"from":      q.Get("from"),

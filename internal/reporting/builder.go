@@ -40,10 +40,9 @@ const (
 // Allowed ledger sources — explicit allow-list so a typo can't leak
 // rows from tables we haven't blessed for reporting.
 var allowedLedgerSources = map[string]struct{}{
-	"ledger.journal_lines":  {},
+	"ledger.journal_lines":   {},
 	"ledger.journal_entries": {},
-	"ledger.stock_levels":   {},
-	"ledger.invoice_aging":  {},
+	"ledger.stock_levels":    {},
 }
 
 // Aggregation operators. `count` is the only one that works on non-
