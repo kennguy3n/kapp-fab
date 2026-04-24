@@ -38,34 +38,36 @@ func (h *dashboardHandlers) summary(w http.ResponseWriter, r *http.Request) {
 	}
 	var s dashboardSummary
 	err := dbutil.WithTenantTx(r.Context(), h.pool, t.ID, func(ctx context.Context, tx pgx.Tx) error {
+		// Business status lives in the JSONB `data` column — the top-level
+		// krecords.status column is the record-lifecycle flag (active/deleted).
 		if err := scanScalar(ctx, tx,
 			`SELECT count(*) FROM krecords
 			 WHERE tenant_id = $1 AND ktype = 'crm.deal'
-			   AND status NOT IN ('closed_won','closed_lost','archived')
+			   AND COALESCE(data->>'stage','') NOT IN ('won','lost')
 			   AND deleted_at IS NULL`,
 			t.ID, &s.OpenDealsCount); err != nil {
 			return err
 		}
 		if err := scanScalar(ctx, tx,
-			`SELECT COALESCE(SUM((data->>'value')::numeric), 0) FROM krecords
+			`SELECT COALESCE(SUM((data->>'amount')::numeric), 0) FROM krecords
 			 WHERE tenant_id = $1 AND ktype = 'crm.deal'
-			   AND status NOT IN ('closed_won','closed_lost','archived')
+			   AND COALESCE(data->>'stage','') NOT IN ('won','lost')
 			   AND deleted_at IS NULL`,
 			t.ID, &s.PipelineValue); err != nil {
 			return err
 		}
 		if err := scanScalar(ctx, tx,
-			`SELECT COALESCE(SUM((data->>'outstanding')::numeric), 0) FROM krecords
+			`SELECT COALESCE(SUM((data->>'outstanding_amount')::numeric), 0) FROM krecords
 			 WHERE tenant_id = $1 AND ktype = 'finance.ar_invoice'
-			   AND status NOT IN ('paid','cancelled','voided')
+			   AND COALESCE(data->>'status','') NOT IN ('paid','cancelled','voided')
 			   AND deleted_at IS NULL`,
 			t.ID, &s.OutstandingAR); err != nil {
 			return err
 		}
 		if err := scanScalar(ctx, tx,
-			`SELECT COALESCE(SUM((data->>'outstanding')::numeric), 0) FROM krecords
+			`SELECT COALESCE(SUM((data->>'outstanding_amount')::numeric), 0) FROM krecords
 			 WHERE tenant_id = $1 AND ktype = 'finance.ap_bill'
-			   AND status NOT IN ('paid','cancelled','voided')
+			   AND COALESCE(data->>'status','') NOT IN ('paid','cancelled','voided')
 			   AND deleted_at IS NULL`,
 			t.ID, &s.OutstandingAP); err != nil {
 			return err
@@ -90,7 +92,7 @@ func (h *dashboardHandlers) summary(w http.ResponseWriter, r *http.Request) {
 		if err := scanScalar(ctx, tx,
 			`SELECT count(*) FROM krecords
 			 WHERE tenant_id = $1 AND ktype = 'helpdesk.ticket'
-			   AND status IN ('open','in_progress','waiting')
+			   AND COALESCE(data->>'status','open') IN ('open','in_progress','waiting')
 			   AND deleted_at IS NULL`,
 			t.ID, &s.OpenTicketsCount); err != nil {
 			return err
@@ -98,7 +100,7 @@ func (h *dashboardHandlers) summary(w http.ResponseWriter, r *http.Request) {
 		if err := scanScalar(ctx, tx,
 			`SELECT count(*) FROM krecords
 			 WHERE tenant_id = $1 AND ktype = 'helpdesk.ticket'
-			   AND status IN ('open','in_progress','waiting')
+			   AND COALESCE(data->>'status','open') IN ('open','in_progress','waiting')
 			   AND (data->>'sla_resolution_by') IS NOT NULL
 			   AND (data->>'sla_resolution_by')::timestamptz < now()
 			   AND deleted_at IS NULL`,
