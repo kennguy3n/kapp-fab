@@ -404,6 +404,17 @@ export class ApiClient {
     );
   }
 
+  /** List every payslip KRecord attached to a pay_run. Uses the
+   *  dedicated /hr/pay-runs/:id/payslips endpoint instead of the
+   *  generic records list route, which caps at 500 rows and
+   *  defaults to 50 — callers that need every slip for a run
+   *  should prefer this. */
+  listPayRunPayslips(payRunId: string): Promise<KRecord[]> {
+    return this.request(
+      `/hr/pay-runs/${encodeURIComponent(payRunId)}/payslips`
+    );
+  }
+
   /** Post a draft finance.credit_note KRecord. Reverses the AR posting
    *  of the referenced invoice (Dr Revenue, Cr AR). */
   postCreditNote(id: string): Promise<JournalEntry> {

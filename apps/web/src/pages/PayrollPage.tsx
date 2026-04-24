@@ -338,15 +338,14 @@ function GenerateSummary({ summary }: { summary: PayslipGenerateResult }) {
 }
 
 function PayslipsForRun({ payRunId }: { payRunId: string }) {
+  // Use the dedicated /hr/pay-runs/:id/payslips endpoint rather
+  // than listRecords(KTYPE_PAYSLIP) + client-side filter: the
+  // generic list route caps at 500 rows and defaults to 50, so
+  // on tenants with >50 total payslips across all runs the old
+  // path would silently drop results for the selected run.
   const slips = useQuery<KRecord[]>({
-    queryKey: ["records", KTYPE_PAYSLIP, payRunId],
-    queryFn: async () => {
-      const rows = await api.listRecords(KTYPE_PAYSLIP);
-      return rows.filter((r) => {
-        const d = r.data as unknown as PayslipData;
-        return d.pay_run_id === payRunId;
-      });
-    },
+    queryKey: ["hr.pay_run.payslips", payRunId],
+    queryFn: () => api.listPayRunPayslips(payRunId),
   });
   return (
     <section style={{ marginTop: 16 }}>

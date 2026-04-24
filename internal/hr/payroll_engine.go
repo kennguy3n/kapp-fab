@@ -418,6 +418,47 @@ func (e *PayrollEngine) PostPayRun(
 	return entry, nil
 }
 
+// ListPayslipsForRun returns every payslip KRecord whose data
+// pay_run_id matches the given run. Unlike the generic records
+// list route — which the HTTP layer caps at 500 rows and defaults
+// to 50 — this walks every row via PGStore.ListAll and filters
+// in-memory, so the frontend's "View slips" panel never silently
+// drops results on tenants with more than 50 payslips across all
+// pay_runs.
+//
+// Returns slips in the same relative order as ListAll (most
+// recently updated first) so the UI gets a stable-enough ordering
+// without the store having to sort by pay_period.
+func (e *PayrollEngine) ListPayslipsForRun(
+	ctx context.Context, tenantID, payRunID uuid.UUID,
+) ([]record.KRecord, error) {
+	if e.records == nil {
+		return nil, errors.New("hr: payroll engine records store nil")
+	}
+	if tenantID == uuid.Nil || payRunID == uuid.Nil {
+		return nil, errors.New("hr: tenant_id and pay_run_id required")
+	}
+	all, err := e.records.ListAll(ctx, tenantID, record.ListFilter{
+		KType: KTypePayslip,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("hr: list payslips: %w", err)
+	}
+	runIDStr := payRunID.String()
+	out := make([]record.KRecord, 0, len(all))
+	for i := range all {
+		var sd payslipData
+		if err := json.Unmarshal(all[i].Data, &sd); err != nil {
+			continue
+		}
+		if sd.PayRunID != runIDStr {
+			continue
+		}
+		out = append(out, all[i])
+	}
+	return out, nil
+}
+
 // rollStructure expands a salary_structure's components into
 // resolved earnings/deductions lines and returns gross/deductions/net.
 // Percentage components are resolved against base_salary; fixed

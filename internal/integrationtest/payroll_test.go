@@ -159,6 +159,73 @@ func TestPayrollEngineHandlesMoreThan50Employees(t *testing.T) {
 	}
 }
 
+// TestPayrollEngineListPayslipsForRunReturnsAllSlips is the
+// regression guard for the "PayslipsForRun UI silently truncates at
+// 50 rows" bug. The engine-level listing walks every row via
+// ListAll, so even with >50 total payslips across all runs in the
+// tenant, calling ListPayslipsForRun for a specific run must return
+// all matching slips.
+func TestPayrollEngineListPayslipsForRunReturnsAllSlips(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tn, ledgerStore, _ := newTenantForFinance(t, h)
+	registerPayrollKTypes(t, h)
+	actor := uuid.New()
+
+	// Seed 60 employees split across two runs: 55 into run A, 5
+	// into run B. Post-generation there are 60 payslips total, so
+	// the generic 50-row list cap would only surface a subset. The
+	// engine's dedicated path must return exactly 55 for run A and
+	// exactly 5 for run B.
+	var aEmps, bEmps []uuid.UUID
+	for i := 0; i < 55; i++ {
+		empID := createEmployeeRecord(t, h, tn.ID, actor, "Engineering")
+		createSalaryStructure(t, h, tn.ID, actor, empID, "USD", decimal.NewFromInt(1000), nil)
+		aEmps = append(aEmps, empID)
+	}
+	for i := 0; i < 5; i++ {
+		empID := createEmployeeRecord(t, h, tn.ID, actor, "Sales")
+		createSalaryStructure(t, h, tn.ID, actor, empID, "USD", decimal.NewFromInt(1000), nil)
+		bEmps = append(bEmps, empID)
+	}
+	runA := createPayRun(t, h, tn.ID, actor, "A", "2026-09-01", "2026-09-30", "Engineering")
+	runB := createPayRun(t, h, tn.ID, actor, "B", "2026-09-01", "2026-09-30", "Sales")
+
+	engine := hr.NewPayrollEngine(h.records, ledgerStore)
+	if _, err := engine.GeneratePayslips(ctx, tn.ID, runA, actor); err != nil {
+		t.Fatalf("generate A: %v", err)
+	}
+	if _, err := engine.GeneratePayslips(ctx, tn.ID, runB, actor); err != nil {
+		t.Fatalf("generate B: %v", err)
+	}
+
+	aSlips, err := engine.ListPayslipsForRun(ctx, tn.ID, runA)
+	if err != nil {
+		t.Fatalf("list A: %v", err)
+	}
+	if len(aSlips) != len(aEmps) {
+		t.Fatalf("run A: got %d slips, want %d", len(aSlips), len(aEmps))
+	}
+	bSlips, err := engine.ListPayslipsForRun(ctx, tn.ID, runB)
+	if err != nil {
+		t.Fatalf("list B: %v", err)
+	}
+	if len(bSlips) != len(bEmps) {
+		t.Fatalf("run B: got %d slips, want %d", len(bSlips), len(bEmps))
+	}
+	// Sanity: every returned slip for run A must carry pay_run_id=runA.
+	for _, s := range aSlips {
+		var sd map[string]any
+		if err := json.Unmarshal(s.Data, &sd); err != nil {
+			t.Fatalf("decode slip: %v", err)
+		}
+		if got, _ := sd["pay_run_id"].(string); got != runA.String() {
+			t.Fatalf("cross-run leak: slip %s has pay_run_id=%s want %s", s.ID, got, runA)
+		}
+	}
+}
+
 // TestPayrollEngineFiltersByDepartment verifies the optional
 // department filter on pay_run trims out-of-scope employees.
 func TestPayrollEngineFiltersByDepartment(t *testing.T) {
