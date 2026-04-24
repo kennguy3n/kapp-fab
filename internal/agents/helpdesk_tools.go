@@ -168,7 +168,11 @@ func (t *assignTicketTool) Invoke(ctx context.Context, inv Invocation) (*Result,
 	if run != nil && run.State == "open" {
 		if nextRun, terr := t.executor.workflow.Transition(ctx, inv.TenantID, run.ID, "start", inv.ActorID); terr == nil {
 			run = nextRun
-		} else if !errors.Is(terr, workflow.ErrRunNotFound) {
+		} else if !errors.Is(terr, workflow.ErrRunNotFound) && !errors.Is(terr, workflow.ErrTransitionFromWrong) {
+			// TOCTOU: a concurrent writer can flip the run out of
+			// `open` between GetRunByRecord and Transition, so treat
+			// "wrong source state" as benign — the assigned_to patch
+			// has already committed successfully.
 			return nil, terr
 		}
 	}
