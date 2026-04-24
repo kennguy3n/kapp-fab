@@ -171,6 +171,11 @@ func (d *Definition) Validate() error {
 	} else if _, ok := allowedLedgerSources[d.Source]; !ok {
 		return fmt.Errorf("reporting: unsupported source %q", d.Source)
 	}
+	for _, c := range d.Columns {
+		if !isIdentifier(c) {
+			return fmt.Errorf("reporting: invalid column identifier %q", c)
+		}
+	}
 	for _, f := range d.Filters {
 		if f.Column == "" {
 			return errors.New("reporting: filter column required")

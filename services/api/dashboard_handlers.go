@@ -76,12 +76,10 @@ func (h *dashboardHandlers) summary(w http.ResponseWriter, r *http.Request) {
 			`SELECT count(*) FROM stock_levels sl
 			 JOIN krecords i ON i.tenant_id = sl.tenant_id AND i.id = sl.item_id
 			 WHERE sl.tenant_id = $1
-			   AND sl.on_hand < COALESCE((i.data->>'reorder_level')::numeric, 0)
-			   AND (i.data->>'reorder_level') IS NOT NULL`,
+			   AND (i.data->>'reorder_level') IS NOT NULL
+			   AND sl.qty < COALESCE((i.data->>'reorder_level')::numeric, 0)`,
 			t.ID, &s.LowStockItemsCount); err != nil {
-			// Older deployments may not have stock_levels view; fall
-			// back to a count over inventory.item records marked low.
-			s.LowStockItemsCount = 0
+			return err
 		}
 		if err := scanScalar(ctx, tx,
 			`SELECT count(*) FROM approvals
