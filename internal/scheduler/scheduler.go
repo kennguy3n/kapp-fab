@@ -48,9 +48,11 @@ type ScheduledAction struct {
 }
 
 // ActionHandler is the dispatch target for a single action_type.
-// Handlers run after the scheduler has locked the row and before the
-// row's next_run_at is advanced; returning an error skips the advance
-// so the action retries on the next poll tick.
+// Handlers run after PollDue has locked the row and already advanced
+// its next_run_at inside the poll transaction. Returning an error is
+// logged but does NOT roll that advance back — a handler's own retry
+// strategy (if any) belongs in its payload. This keeps a persistently
+// failing action from stalling the whole loop.
 type ActionHandler interface {
 	Handle(ctx context.Context, tenantID uuid.UUID, action ScheduledAction) error
 }
