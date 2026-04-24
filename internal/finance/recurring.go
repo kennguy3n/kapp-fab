@@ -142,9 +142,23 @@ func (e *RecurringEngine) Handle(ctx context.Context, tenantID uuid.UUID, _ sche
 	return nil
 }
 
+// maxCatchUpIterations caps the per-sweep catch-up loop so a
+// misconfigured row (e.g. next_generation_date=2001-01-01, frequency
+// daily) cannot produce 9000 invoices in a single sweep. The next
+// sweep will pick up where this one left off.
+const maxCatchUpIterations = 120
+
 // generateOne is the per-row body. It is broken out so Handle can
 // log-and-continue on individual errors instead of aborting the
 // entire sweep.
+//
+// When next_generation_date is many cadence steps behind today (e.g.
+// worker outage across several periods), the body emits one invoice
+// per missed step and advances the cursor each time, so no periods
+// are silently squashed into a single invoice. Cadence is always
+// advanced from the stored next_generation_date, never from today —
+// that keeps monthly invoices anchored to the original day-of-month
+// even when the sweeper fires late.
 func (e *RecurringEngine) generateOne(
 	ctx context.Context,
 	tenantID uuid.UUID,
@@ -163,20 +177,23 @@ func (e *RecurringEngine) generateOne(
 	if nextDateStr == "" {
 		return errors.New("recurring_invoice missing next_generation_date")
 	}
-	nextDate, err := parseDate(nextDateStr)
+	cursor, err := parseDate(nextDateStr)
 	if err != nil {
 		return fmt.Errorf("parse next_generation_date: %w", err)
 	}
-	if nextDate.After(today) {
+	if cursor.After(today) {
 		return nil
 	}
 	endStr, _ := data["end_date"].(string)
+	var endDate time.Time
+	hasEnd := false
 	if endStr != "" {
-		endDate, err := parseDate(endStr)
+		endDate, err = parseDate(endStr)
 		if err != nil {
 			return fmt.Errorf("parse end_date: %w", err)
 		}
-		if today.After(endDate) {
+		hasEnd = true
+		if today.After(endDate) && cursor.After(endDate) {
 			// Cadence has run out — flip the row to completed so
 			// the next sweep skips it cheaply rather than
 			// computing the cursor every time.
@@ -196,36 +213,46 @@ func (e *RecurringEngine) generateOne(
 	if err != nil {
 		return fmt.Errorf("load template invoice: %w", err)
 	}
-
-	created, err := e.cloneTemplate(ctx, tenantID, template, today)
-	if err != nil {
-		return fmt.Errorf("clone template: %w", err)
-	}
-
-	autoPost, _ := data["auto_post"].(bool)
-	if autoPost {
-		if e.poster == nil {
-			log.Printf("finance: auto_post requested but poster nil; tenant=%s recurring=%s draft=%s",
-				tenantID, row.ID, created.ID)
-		} else if err := e.poster(ctx, tenantID, created.ID, e.systemActor); err != nil {
-			log.Printf("finance: auto_post failed; tenant=%s recurring=%s draft=%s: %v",
-				tenantID, row.ID, created.ID, err)
-		}
-	}
-
 	freq, _ := data["frequency"].(string)
-	advanced, err := AdvanceDate(today, freq)
-	if err != nil {
-		return fmt.Errorf("advance cadence: %w", err)
-	}
-	data["last_generated_at"] = e.now().UTC().Format(time.RFC3339)
-	data["last_generated_invoice_id"] = created.ID.String()
-	data["next_generation_date"] = advanced.Format(dateLayout)
-	if endStr != "" {
-		endDate, _ := parseDate(endStr)
-		if advanced.After(endDate) {
-			data["status"] = RecurringStatusCompleted
+	autoPost, _ := data["auto_post"].(bool)
+
+	// Catch-up loop: one iteration per missed cadence step. Each
+	// iteration clones the template against the cursor (the
+	// scheduled date — not today), advances the cursor from that
+	// same date, and stops when the cursor moves past today or the
+	// end_date.
+	for i := 0; i < maxCatchUpIterations; i++ {
+		if cursor.After(today) {
+			break
 		}
+		if hasEnd && cursor.After(endDate) {
+			data["status"] = RecurringStatusCompleted
+			break
+		}
+		created, err := e.cloneTemplate(ctx, tenantID, template, cursor)
+		if err != nil {
+			return fmt.Errorf("clone template: %w", err)
+		}
+		if autoPost {
+			if e.poster == nil {
+				log.Printf("finance: auto_post requested but poster nil; tenant=%s recurring=%s draft=%s",
+					tenantID, row.ID, created.ID)
+			} else if err := e.poster(ctx, tenantID, created.ID, e.systemActor); err != nil {
+				log.Printf("finance: auto_post failed; tenant=%s recurring=%s draft=%s: %v",
+					tenantID, row.ID, created.ID, err)
+			}
+		}
+		advanced, err := AdvanceDate(cursor, freq)
+		if err != nil {
+			return fmt.Errorf("advance cadence: %w", err)
+		}
+		data["last_generated_at"] = e.now().UTC().Format(time.RFC3339)
+		data["last_generated_invoice_id"] = created.ID.String()
+		cursor = advanced
+	}
+	data["next_generation_date"] = cursor.Format(dateLayout)
+	if hasEnd && cursor.After(endDate) {
+		data["status"] = RecurringStatusCompleted
 	}
 	return e.persistRecurring(ctx, tenantID, row, data)
 }

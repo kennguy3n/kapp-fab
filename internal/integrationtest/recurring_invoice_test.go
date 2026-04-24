@@ -114,6 +114,94 @@ func TestRecurringInvoiceEngineGeneratesAndAdvances(t *testing.T) {
 	}
 }
 
+// TestRecurringInvoiceEngineAnchorsCadenceAndBackfills is the
+// regression guard for the "AdvanceDate(today, ...) drifts the
+// cadence and collapses missed periods" bug. Two behaviours are
+// asserted in one run:
+//
+//  1. Cadence drift: when the sweeper fires one day late, the
+//     advanced cursor must stay anchored to the original day-of-
+//     month (2026-04-01), not slide to 2026-04-02.
+//  2. Multi-period catch-up: when the sweeper fires three months
+//     late with no intervening runs, the engine must emit one
+//     invoice per missed period (Jan/Feb/Mar/Apr = 4 invoices), not
+//     a single one, and leave the cursor at 2026-05-01.
+func TestRecurringInvoiceEngineAnchorsCadenceAndBackfills(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, _, _ := newTenantForFinance(t, h)
+	actor := uuid.New()
+
+	day := func(s string) time.Time {
+		t.Helper()
+		d, err := time.Parse("2006-01-02", s)
+		if err != nil {
+			t.Fatalf("parse %q: %v", s, err)
+		}
+		return d.UTC()
+	}
+
+	// --- Case 1: late-by-one-day sweep must not drift the cadence.
+	templateID := createARInvoiceRecord(t, h, tn.ID, actor,
+		"INV-ANCHOR", uuid.NewString(),
+		decimal.NewFromInt(1000), decimal.Zero, "",
+	)
+	clock := day("2026-03-02") // one day late
+	recurringID := createRecurringInvoiceRecord(t, h, tn.ID, actor, templateRow{
+		Name:               "Late anchor",
+		TemplateID:         templateID,
+		Frequency:          finance.FrequencyMonthly,
+		StartDate:          "2026-03-01",
+		NextGenerationDate: "2026-03-01",
+		AutoPost:           false,
+	})
+
+	engine := finance.NewRecurringEngine(h.records, nil).
+		WithClock(func() time.Time { return clock })
+	if err := engine.Handle(ctx, tn.ID, scheduler.ScheduledAction{
+		ActionType: finance.ActionTypeRecurringInvoice,
+	}); err != nil {
+		t.Fatalf("case1 handle: %v", err)
+	}
+	rec := getRecurring(t, h, tn.ID, recurringID)
+	if got := readString(t, rec.Data, "next_generation_date"); got != "2026-04-01" {
+		t.Fatalf("case1: cadence drifted to %s, want anchored 2026-04-01", got)
+	}
+	// Pause the case1 recurring so it does not re-fire during
+	// case2 and inflate the back-fill count.
+	pauseRecurring(t, h, tn.ID, recurringID)
+
+	// --- Case 2: three-month gap must back-fill, not squash.
+	templateID2 := createARInvoiceRecord(t, h, tn.ID, actor,
+		"INV-CATCHUP", uuid.NewString(),
+		decimal.NewFromInt(1000), decimal.Zero, "",
+	)
+	recurring2ID := createRecurringInvoiceRecord(t, h, tn.ID, actor, templateRow{
+		Name:               "Back-fill retainer",
+		TemplateID:         templateID2,
+		Frequency:          finance.FrequencyMonthly,
+		StartDate:          "2026-01-01",
+		NextGenerationDate: "2026-01-01",
+		AutoPost:           false,
+	})
+	before := len(listInvoiceDrafts(t, h, tn.ID))
+	clock = day("2026-04-15") // 3 full missed periods + current
+	if err := engine.Handle(ctx, tn.ID, scheduler.ScheduledAction{
+		ActionType: finance.ActionTypeRecurringInvoice,
+	}); err != nil {
+		t.Fatalf("case2 handle: %v", err)
+	}
+	after := len(listInvoiceDrafts(t, h, tn.ID))
+	// Jan/Feb/Mar/Apr → 4 new invoice drafts from recurring2.
+	if added := after - before; added != 4 {
+		t.Fatalf("case2: back-fill want +4 invoices, got +%d", added)
+	}
+	rec = getRecurring(t, h, tn.ID, recurring2ID)
+	if got := readString(t, rec.Data, "next_generation_date"); got != "2026-05-01" {
+		t.Fatalf("case2: next_generation_date after back-fill: got %s want 2026-05-01", got)
+	}
+}
+
 // TestRecurringInvoiceEngineCompletesPastEndDate verifies a row
 // whose end_date has elapsed flips to status="completed" rather than
 // continuing to fire forever.
@@ -276,6 +364,36 @@ func getRecurring(t *testing.T, h *harness, tenantID, recurringID uuid.UUID) *re
 		t.Fatalf("get recurring: %v", err)
 	}
 	return r
+}
+
+// pauseRecurring flips a recurring_invoice row to status=paused so
+// subsequent sweeps skip it. Used by tests that stack multiple
+// recurring rows in the same tenant and want to isolate assertions
+// to the most recently-seeded row.
+func pauseRecurring(t *testing.T, h *harness, tenantID, recurringID uuid.UUID) {
+	t.Helper()
+	r, err := h.records.Get(context.Background(), tenantID, recurringID)
+	if err != nil {
+		t.Fatalf("get recurring for pause: %v", err)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("decode recurring: %v", err)
+	}
+	data["status"] = finance.RecurringStatusPaused
+	patch, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal recurring: %v", err)
+	}
+	if _, err := h.records.Update(context.Background(), record.KRecord{
+		TenantID:  tenantID,
+		ID:        recurringID,
+		Version:   r.Version,
+		Data:      patch,
+		UpdatedBy: r.UpdatedBy,
+	}); err != nil {
+		t.Fatalf("pause recurring: %v", err)
+	}
 }
 
 func readString(t *testing.T, raw json.RawMessage, key string) string {
