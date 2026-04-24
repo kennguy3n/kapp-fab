@@ -10,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 )
 
 // SetupWizardConfig is the payload a tenant owner submits to seed their
@@ -106,9 +108,16 @@ func DefaultRoles() []WizardRole {
 
 // Wizard encapsulates the setup flow so the HTTP handler can drive
 // `RunSetupWizard` against the live pool while tests can substitute a
-// fake. The wizard writes through the shared pool directly since
-// neither roles nor accounts have RLS (they are keyed by tenant_id but
-// the control-plane owns the seed path).
+// fake.
+//
+// The `accounts`, `roles`, and `user_tenants` tables are all
+// RLS-protected (migrations/000001_initial_schema.sql). Under the
+// production `kapp_app` role (migrations/000002_admin_role.sql) every
+// INSERT/UPDATE must execute inside a transaction that has
+// `app.tenant_id` set — otherwise the RLS WITH CHECK clause rejects
+// the write. So every seed step here runs inside
+// `dbutil.WithTenantTx`, which issues `SELECT set_config('app.tenant_id', …, true)`
+// on the tx before calling the closure.
 type Wizard struct {
 	pool *pgxpool.Pool
 }
@@ -119,11 +128,12 @@ func NewWizard(pool *pgxpool.Pool) *Wizard {
 }
 
 // RunSetupWizard applies the supplied config to an existing tenant.
-// The operation is best-effort transactional: account seeding and role
-// seeding run in the same transaction so a failure halfway through
-// rolls back both. User seeding runs in a follow-up transaction
-// because creating a stub user is a control-plane mutation unrelated
-// to the tenant schema.
+// Account seeding and role seeding share one tenant-scoped tx so a
+// failure halfway through rolls both back. User seeding runs in a
+// follow-up tenant-scoped tx since the control-plane user upsert on
+// `users` (not RLS-gated) is independent of the `user_tenants` write
+// (RLS-gated), and we want the `user_tenants` INSERT under the tenant
+// GUC regardless.
 func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg SetupWizardConfig) (*WizardResult, error) {
 	if tenantID == uuid.Nil {
 		return nil, errors.New("tenant: wizard requires tenant id")
@@ -145,28 +155,22 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 	}
 
 	out := &WizardResult{TenantID: tenantID, CoATemplateUsed: templateName}
-	tx, err := w.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("tenant: wizard begin tx: %w", err)
-	}
-	defer func() {
-		_ = tx.Rollback(ctx)
-	}()
 
-	accountsInserted, err := seedAccounts(ctx, tx, tenantID, accounts)
-	if err != nil {
-		return nil, err
-	}
-	out.AccountsInserted = accountsInserted
+	if err := dbutil.WithTenantTx(ctx, w.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		accountsInserted, err := seedAccounts(ctx, tx, tenantID, accounts)
+		if err != nil {
+			return err
+		}
+		out.AccountsInserted = accountsInserted
 
-	rolesInserted, err := seedRoles(ctx, tx, tenantID, roles)
-	if err != nil {
-		return nil, err
-	}
-	out.RolesInserted = rolesInserted
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("tenant: wizard commit: %w", err)
+		rolesInserted, err := seedRoles(ctx, tx, tenantID, roles)
+		if err != nil {
+			return err
+		}
+		out.RolesInserted = rolesInserted
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("tenant: wizard seed accounts/roles: %w", err)
 	}
 
 	if len(cfg.Users) > 0 {
@@ -242,6 +246,11 @@ func seedRoles(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, roles []Wizar
 	return inserted, nil
 }
 
+// seedUsers upserts into `users` on the control-plane pool (no RLS on
+// that table) and then INSERTs into `user_tenants` under a
+// tenant-scoped tx so the RLS WITH CHECK clause on `user_tenants`
+// (migrations/000001_initial_schema.sql) is satisfied under
+// `kapp_app`.
 func seedUsers(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID, users []WizardUser) (int, error) {
 	inserted := 0
 	for _, u := range users {
@@ -259,13 +268,15 @@ func seedUsers(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID, user
 		if err != nil {
 			return inserted, fmt.Errorf("tenant: seed user %s: %w", u.Email, err)
 		}
-		_, err = pool.Exec(ctx,
-			`INSERT INTO user_tenants (tenant_id, user_id, role, status)
-			 VALUES ($1, $2, $3, 'active')
-			 ON CONFLICT (tenant_id, user_id) DO UPDATE SET role = EXCLUDED.role, status = 'active'`,
-			tenantID, userID, u.Role,
-		)
-		if err != nil {
+		if err := dbutil.WithTenantTx(ctx, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx,
+				`INSERT INTO user_tenants (tenant_id, user_id, role, status)
+				 VALUES ($1, $2, $3, 'active')
+				 ON CONFLICT (tenant_id, user_id) DO UPDATE SET role = EXCLUDED.role, status = 'active'`,
+				tenantID, userID, u.Role,
+			)
+			return err
+		}); err != nil {
 			return inserted, fmt.Errorf("tenant: seed user_tenants %s: %w", u.Email, err)
 		}
 		inserted++

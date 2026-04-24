@@ -227,7 +227,7 @@ func (s *SSOService) Exchange(
 		TenantID:   chosen.ID,
 		UserID:     user.ID,
 		IssuedAt:   time.Now().UTC(),
-		ExpiresAt:  time.Now().UTC().Add(24 * time.Hour),
+		ExpiresAt:  time.Now().UTC().Add(s.signer.cfg.RefreshTTL),
 		UserAgent:  userAgent,
 		IPAddress:  ipAddr,
 		RefreshJTI: uuid.NewString(),
