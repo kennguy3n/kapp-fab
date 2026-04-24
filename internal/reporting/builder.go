@@ -271,6 +271,17 @@ func (r *Runner) Run(ctx context.Context, tenantID uuid.UUID, def Definition) (*
 		}
 		defer pgxRows.Close()
 		fieldDescs := pgxRows.FieldDescriptions()
+		// When buildQuery emitted SELECT * as a fallback (no explicit
+		// columns, no aggregations, no group-by), the placeholder "*"
+		// in outColumns doesn't match any real row key. Rebuild columns
+		// from the actual field descriptions so Result.Columns lines
+		// up with the keys the UI looks up on each row.
+		if len(columns) == 1 && columns[0] == "*" {
+			columns = columns[:0]
+			for _, fd := range fieldDescs {
+				columns = append(columns, string(fd.Name))
+			}
+		}
 		for pgxRows.Next() {
 			vals, err := pgxRows.Values()
 			if err != nil {

@@ -224,11 +224,16 @@ func (t *resolveTicketTool) Invoke(ctx context.Context, inv Invocation) (*Result
 	if err != nil {
 		return nil, err
 	}
-	// Advance the lifecycle workflow if one exists.
+	// Advance the lifecycle workflow if one exists. Swallow only the
+	// benign "run vanished" / "wrong source state" cases so real DB
+	// errors don't leave the ticket's `status: resolved` KRecord out
+	// of sync with the workflow engine without surfacing a failure.
 	run, _ := t.executor.workflow.GetRunByRecord(ctx, inv.TenantID, in.RecordID)
 	if run != nil {
-		if nextRun, err := t.executor.workflow.Transition(ctx, inv.TenantID, run.ID, "resolve", inv.ActorID); err == nil {
+		if nextRun, terr := t.executor.workflow.Transition(ctx, inv.TenantID, run.ID, "resolve", inv.ActorID); terr == nil {
 			run = nextRun
+		} else if !errors.Is(terr, workflow.ErrRunNotFound) && !errors.Is(terr, workflow.ErrTransitionFromWrong) {
+			return nil, terr
 		}
 	}
 	return &Result{
