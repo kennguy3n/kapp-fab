@@ -1,33 +1,17 @@
 package main
 
 import (
-	"context"
 	"net/http"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/kennguy3n/kapp-fab/internal/dbutil"
+	"github.com/kennguy3n/kapp-fab/internal/dashboard"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 )
 
-// dashboardHandlers renders the Phase I KPI summary surface. Widgets
-// are authored as tenant-scoped SQL aggregations over the existing
-// tables (krecords, journal_entries, stock_levels, approvals) so a
-// new widget does not require a schema change — only a new SELECT.
+// dashboardHandlers renders the Phase I KPI summary surface. The
+// actual aggregation lives in internal/dashboard so the same code
+// powers the endpoint and the integration tests.
 type dashboardHandlers struct {
-	pool *pgxpool.Pool
-}
-
-type dashboardSummary struct {
-	OpenDealsCount      int64   `json:"open_deals_count"`
-	PipelineValue       float64 `json:"pipeline_value"`
-	OutstandingAR       float64 `json:"outstanding_ar"`
-	OutstandingAP       float64 `json:"outstanding_ap"`
-	LowStockItemsCount  int64   `json:"low_stock_items_count"`
-	PendingApprovals    int64   `json:"pending_approvals"`
-	OpenTicketsCount    int64   `json:"open_tickets_count"`
-	OverdueTicketsCount int64   `json:"overdue_tickets_count"`
+	store *dashboard.Store
 }
 
 func (h *dashboardHandlers) summary(w http.ResponseWriter, r *http.Request) {
@@ -36,89 +20,10 @@ func (h *dashboardHandlers) summary(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tenant context missing", http.StatusInternalServerError)
 		return
 	}
-	var s dashboardSummary
-	err := dbutil.WithTenantTx(r.Context(), h.pool, t.ID, func(ctx context.Context, tx pgx.Tx) error {
-		// Business status lives in the JSONB `data` column — the top-level
-		// krecords.status column is the record-lifecycle flag (active/deleted).
-		if err := scanScalar(ctx, tx,
-			`SELECT count(*) FROM krecords
-			 WHERE tenant_id = $1 AND ktype = 'crm.deal'
-			   AND COALESCE(data->>'stage','') NOT IN ('won','lost')
-			   AND deleted_at IS NULL`,
-			t.ID, &s.OpenDealsCount); err != nil {
-			return err
-		}
-		if err := scanScalar(ctx, tx,
-			`SELECT COALESCE(SUM((data->>'amount')::numeric), 0) FROM krecords
-			 WHERE tenant_id = $1 AND ktype = 'crm.deal'
-			   AND COALESCE(data->>'stage','') NOT IN ('won','lost')
-			   AND deleted_at IS NULL`,
-			t.ID, &s.PipelineValue); err != nil {
-			return err
-		}
-		if err := scanScalar(ctx, tx,
-			`SELECT COALESCE(SUM((data->>'outstanding_amount')::numeric), 0) FROM krecords
-			 WHERE tenant_id = $1 AND ktype = 'finance.ar_invoice'
-			   AND COALESCE(data->>'status','') NOT IN ('paid','cancelled','voided')
-			   AND deleted_at IS NULL`,
-			t.ID, &s.OutstandingAR); err != nil {
-			return err
-		}
-		if err := scanScalar(ctx, tx,
-			`SELECT COALESCE(SUM((data->>'outstanding_amount')::numeric), 0) FROM krecords
-			 WHERE tenant_id = $1 AND ktype = 'finance.ap_bill'
-			   AND COALESCE(data->>'status','') NOT IN ('paid','cancelled','voided')
-			   AND deleted_at IS NULL`,
-			t.ID, &s.OutstandingAP); err != nil {
-			return err
-		}
-		if err := scanScalar(ctx, tx,
-			// stock_levels rows are per-warehouse; dedupe by item so the
-			// "low-stock items" widget matches its label.
-			`SELECT count(DISTINCT sl.item_id) FROM stock_levels sl
-			 JOIN krecords i ON i.tenant_id = sl.tenant_id AND i.id = sl.item_id
-			 WHERE sl.tenant_id = $1
-			   AND (i.data->>'reorder_level') IS NOT NULL
-			   AND sl.qty < COALESCE((i.data->>'reorder_level')::numeric, 0)`,
-			t.ID, &s.LowStockItemsCount); err != nil {
-			return err
-		}
-		if err := scanScalar(ctx, tx,
-			`SELECT count(*) FROM approvals
-			 WHERE tenant_id = $1 AND state = 'pending'`,
-			t.ID, &s.PendingApprovals); err != nil {
-			return err
-		}
-		if err := scanScalar(ctx, tx,
-			`SELECT count(*) FROM krecords
-			 WHERE tenant_id = $1 AND ktype = 'helpdesk.ticket'
-			   AND COALESCE(data->>'status','open') IN ('open','in_progress','waiting')
-			   AND deleted_at IS NULL`,
-			t.ID, &s.OpenTicketsCount); err != nil {
-			return err
-		}
-		if err := scanScalar(ctx, tx,
-			`SELECT count(*) FROM krecords
-			 WHERE tenant_id = $1 AND ktype = 'helpdesk.ticket'
-			   AND COALESCE(data->>'status','open') IN ('open','in_progress','waiting')
-			   AND (data->>'sla_resolution_by') IS NOT NULL
-			   AND (data->>'sla_resolution_by')::timestamptz < now()
-			   AND deleted_at IS NULL`,
-			t.ID, &s.OverdueTicketsCount); err != nil {
-			return err
-		}
-		return nil
-	})
+	s, err := h.store.ComputeSummary(r.Context(), t.ID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, s)
-}
-
-// scanScalar runs a one-column query and scans the result into out.
-// It is tolerant of missing tables so dashboard widgets can degrade
-// gracefully on minimal deployments.
-func scanScalar(ctx context.Context, tx pgx.Tx, sql string, tenantArg any, out any) error {
-	return tx.QueryRow(ctx, sql, tenantArg).Scan(out)
 }
