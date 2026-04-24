@@ -83,12 +83,21 @@ func TestSchedulerPollDueAndDispatch(t *testing.T) {
 		return nil
 	}))
 
-	due, err := store.PollDue(ctx, 10)
+	// PollDue returns rows across every tenant (admin pool /
+	// BYPASSRLS). Filter to the tenant we seeded so other tests'
+	// leftover actions don't fail this assertion.
+	allDue, err := store.PollDue(ctx, 200)
 	if err != nil {
 		t.Fatalf("poll due: %v", err)
 	}
+	var due []scheduler.ScheduledAction
+	for _, a := range allDue {
+		if a.TenantID == tn.ID {
+			due = append(due, a)
+		}
+	}
 	if len(due) != 2 {
-		t.Fatalf("poll due: got %d want 2", len(due))
+		t.Fatalf("poll due: got %d rows for this tenant want 2 (total across tenants=%d)", len(due), len(allDue))
 	}
 	// Dispatch the claimed actions.
 	for _, a := range due {
@@ -109,14 +118,16 @@ func TestSchedulerPollDueAndDispatch(t *testing.T) {
 		t.Fatalf("dispatch counts: %v want map[alpha:1 beta:1]", got)
 	}
 
-	// A second immediate poll must not re-claim either row because
-	// PollDue advanced next_run_at inside the transaction.
-	again, err := store.PollDue(ctx, 10)
+	// A second immediate poll must not re-claim this tenant's rows
+	// because PollDue advanced next_run_at inside the transaction.
+	allAgain, err := store.PollDue(ctx, 200)
 	if err != nil {
 		t.Fatalf("poll due 2: %v", err)
 	}
-	if len(again) != 0 {
-		t.Fatalf("poll due 2: got %d want 0 (tentative advance should have taken effect)", len(again))
+	for _, a := range allAgain {
+		if a.TenantID == tn.ID {
+			t.Fatalf("poll due 2: tenant row %s re-claimed (tentative advance should have taken effect)", a.ID)
+		}
 	}
 }
 

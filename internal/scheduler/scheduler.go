@@ -282,10 +282,27 @@ func (s *Store) PollDue(ctx context.Context, batchSize int) ([]ScheduledAction, 
 	rows.Close()
 
 	now := s.now()
+	// One corrupt row (e.g. a cron_expr written by direct SQL that
+	// bypassed Upsert's validator) must not block every other due
+	// action. If NextRun rejects a row we disable it in the same
+	// transaction — a hard stop that surfaces in the scheduled_actions
+	// table without wedging the loop — and skip the claim. The row is
+	// dropped from the returned batch because a handler has no next
+	// time to run against. Successfully-advanced rows proceed normally.
+	dispatchable := out[:0]
 	for i := range out {
 		next, nerr := NextRun(out[i], now)
 		if nerr != nil {
-			return nil, nerr
+			log.Printf("scheduler: disabling action %s (tenant=%s action_type=%s): %v",
+				out[i].ID, out[i].TenantID, out[i].ActionType, nerr)
+			if _, err := tx.Exec(ctx,
+				`UPDATE scheduled_actions
+				    SET enabled = FALSE, updated_at = now()
+				  WHERE tenant_id = $1 AND id = $2`,
+				out[i].TenantID, out[i].ID); err != nil {
+				return nil, fmt.Errorf("scheduler: disable corrupt row: %w", err)
+			}
+			continue
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE scheduled_actions
@@ -296,11 +313,12 @@ func (s *Store) PollDue(ctx context.Context, batchSize int) ([]ScheduledAction, 
 			out[i].TenantID, out[i].ID, now, next); err != nil {
 			return nil, fmt.Errorf("scheduler: tentative advance: %w", err)
 		}
+		dispatchable = append(dispatchable, out[i])
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("scheduler: poll commit: %w", err)
 	}
-	return out, nil
+	return dispatchable, nil
 }
 
 // AdvanceNextRun sets last_run_at to now and next_run_at to the next
@@ -310,11 +328,11 @@ func (s *Store) PollDue(ctx context.Context, batchSize int) ([]ScheduledAction, 
 // does not stall the entire poll loop; the handler's own retry
 // strategy (if any) belongs in the payload.
 func (s *Store) AdvanceNextRun(ctx context.Context, action ScheduledAction) error {
-	next, err := NextRun(action, s.now())
+	now := s.now()
+	next, err := NextRun(action, now)
 	if err != nil {
 		return err
 	}
-	now := s.now()
 	return dbutil.WithTenantTx(ctx, s.pool, action.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
 			`UPDATE scheduled_actions
