@@ -30,6 +30,7 @@ const (
 	KTypeAPBill       = "finance.ap_bill"
 	KTypeCreditNote   = "finance.credit_note"
 	KTypeDebitNote    = "finance.debit_note"
+	KTypePaymentTerms = "finance.payment_terms"
 	// KTypePayment moved to payment.go — re-exported here via the
 	// payment.go file so the registry keeps finance.payment colocated
 	// with its schema.
@@ -289,6 +290,28 @@ var debitNoteSchema = []byte(`{
   "agent_tools": ["finance.post_debit_note"]
 }`)
 
+// paymentTermsSchema — Phase J payment-terms template. Each row
+// stores an installment plan that the invoice/bill poster
+// materialises into a payment_schedule on the source record.
+var paymentTermsSchema = []byte(`{
+  "name": "finance.payment_terms",
+  "version": 1,
+  "fields": [
+    {"name": "name", "type": "string", "required": true, "max_length": 200},
+    {"name": "installments", "type": "array", "required": true},
+    {"name": "active", "type": "boolean", "default": true}
+  ],
+  "views": {
+    "list": {"columns": ["name", "active"]},
+    "form": {"sections": [
+      {"title": "Payment Terms", "fields": ["name", "active"]},
+      {"title": "Installments", "fields": ["installments"]}
+    ]}
+  },
+  "cards": {"summary": "{{name}}"},
+  "permissions": {"read": ["tenant.member"], "write": ["finance.admin", "tenant.admin"]}
+}`)
+
 // All returns every Phase C finance KType as a freshly-constructed slice.
 func All() []ktype.KType {
 	return []ktype.KType{
@@ -299,6 +322,7 @@ func All() []ktype.KType {
 		{Name: KTypeCreditNote, Version: 1, Schema: creditNoteSchema},
 		{Name: KTypeDebitNote, Version: 1, Schema: debitNoteSchema},
 		{Name: KTypePayment, Version: 1, Schema: paymentSchema},
+		{Name: KTypePaymentTerms, Version: 1, Schema: paymentTermsSchema},
 	}
 }
 
