@@ -23,6 +23,7 @@ import { SalesOrdersPage } from "./pages/SalesOrdersPage";
 import { PurchaseOrdersPage } from "./pages/PurchaseOrdersPage";
 import { PriceListsPage } from "./pages/PriceListsPage";
 import { PayrollPage } from "./pages/PayrollPage";
+import { SetupWizardPage } from "./pages/SetupWizardPage";
 import { NotificationBell } from "./components/NotificationBell";
 
 interface NavSection {
@@ -123,6 +124,9 @@ export function App() {
           visitors don't see tenant navigation. */}
       <Route path="/forms/:formId" element={<FormPage />} />
       <Route path="/login" element={<LoginPage />} />
+      {/* Setup wizard is rendered outside the app shell because the
+          tenant has no nav-worthy data until the wizard completes. */}
+      <Route path="/setup/:id" element={<SetupWizardPage />} />
       <Route path="/*" element={<AppShell />} />
     </Routes>
   );

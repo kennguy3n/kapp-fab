@@ -1,6 +1,6 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2026-04-23 (accuracy corrections + new task additions: tighten `services/kapp-backup/main.go` `tableConflictKeys` to cover `accounts` and `idempotency_keys` (no `id` column, were falling through to `ON CONFLICT DO NOTHING`); add `migrations/000012_tenants_schema_column.sql` so `scripts/upgrade_tier.sh`'s final routing update has a column to write; surface previously-tracked follow-ups (permissions table, notifications table, webhook HMAC, RLS / agent-import CI guards, audit-log integrity, upgrade_tier API, encryption key rotation) + the frontend gaps against already-shipped backend (bank reconciliation, cost centers, sales/purchase orders, price lists, payroll). Previous accuracy corrections: reconcile PROGRESS checkboxes with shipped code — bank reconciliation, cost centers, CRM boot registration, and multi-tenancy benchmarks are already in the tree and are marked complete here; Phase G second slice: sales/procurement KTypes, bank reconciliation, cost centers, payroll KTypes, Prometheus middleware, per-tenant backup CLI, Frappe delta sync + mapping suggestions, security review doc, upgrade-tier script.)
+> **Last Updated:** 2026-04-24 (Phase H hardening slice complete via PR #22: JWT/SSO auth layer with sessions table, S3 production object store, `crm.customer` / `crm.supplier` KTypes, `finance.payment` KType + allocation engine, tenant setup wizard with CoA seeding + default roles + initial-user invites, frontend pages for bank reconciliation / cost centers / sales + purchase orders / price lists / payroll, HMAC-signed webhooks, `notifications` table + inbox API + `NotificationBell` component, `permissions` table + authz store, SMTP email adapter, audit-log hash chain with verify endpoint, dual master-key support + `cmd/rotate-master-key`, CI guards for RLS migrations + agent-import isolation; plus `SetupWizardPage.tsx` React onboarding flow and tracking entries for multi-currency, recurring invoices, credit-limit enforcement, reorder automation, payment-terms templates, feature flags, isolation audit endpoint, KPI dashboard, bulk actions, and full payroll processing.)
 >
 > Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [SECURITY_REVIEW.md](./docs/SECURITY_REVIEW.md)
 
@@ -8,8 +8,8 @@
 
 ## Current Phase
 
-**Phase G — Hardening, Observability, and Scale**
-**Status:** In Progress (second hardening slice landed: sales/procurement, bank reconciliation, cost centers, payroll, per-tenant observability, backup CLI, Frappe delta sync + mapping suggestions, security review, upgrade-tier script)
+**Phase H — Hardening Slice Complete**
+**Status:** Complete (PR #22 landed JWT/SSO auth with sessions table, S3 production object store, `crm.customer` / `crm.supplier` KTypes, `finance.payment` posting + allocation engine, tenant setup wizard, Phase G frontend pages, HMAC-signed webhooks, `notifications` + `permissions` tables, SMTP adapter, audit hash chain, dual master-key rotation tooling, and CI enforcement for RLS + agent-import boundary). Next focus: multi-currency, recurring invoices, credit-limit enforcement, helpdesk module, KPI dashboard, bulk actions, full payroll processing — tracked under Cross-cutting.
 
 ---
 
@@ -250,7 +250,17 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [ ] Distributed rate limiting for multi-node deployment (`platform.RateLimiter` is in-process; needs a shared backend — Redis token bucket or similar — so quotas hold across api replicas)
 - [x] Tenant setup wizard (`internal/tenant/wizard.go` — seeds CoA from `coa_templates/us_gaap_basic.json` + `ifrs_basic.json`, default roles, initial users; `POST /api/v1/tenants/{id}/setup`; `auto_setup: true` trigger on `Create`; `apps/web/src/pages/SetupWizardPage.tsx`)
 - [x] Payment recording: `finance.payment` KType (`internal/finance/payment.go`), multi-invoice allocation engine (`internal/ledger/payment.go#PostPayment`), `POST /api/v1/finance/payments/{id}/post`, `finance.record_payment` agent tool, `/payment` slash command
-- [ ] Multi-currency: exchange rate table, automatic conversion on posting, unrealized gain/loss
+- [ ] Multi-currency: exchange rate table, automatic conversion on posting, unrealized gain/loss (reference: `frappe/erpnext` Currency Exchange)
+- [ ] Recurring invoices: `finance.recurring_invoice` KType + scheduled auto-generation (reference: `frappe/erpnext` Auto Repeat)
+- [ ] Credit limit enforcement on `PostSalesInvoice` (reference: `frappe/erpnext` Credit Limit)
+- [ ] Inventory reorder automation: auto-create draft PO from low-stock alert (reference: `frappe/erpnext` Material Request)
+- [ ] Payment terms templates: `finance.payment_terms` KType with installment schedules (reference: `frappe/erpnext` Payment Terms Template)
+- [ ] Per-tenant feature flags: enable/disable KApps per plan (reference: `frappe/frappe` module visibility)
+- [ ] Tenant data isolation runtime audit endpoint
+- [ ] Dashboard page: tenant-level KPI dashboard (open deals, outstanding AR/AP, low stock, pending approvals)
+- [x] Setup wizard React page: step-by-step onboarding flow (`apps/web/src/pages/SetupWizardPage.tsx` — company profile → CoA template picker → initial users → `POST /api/v1/tenants/{id}/setup`; route registered in `apps/web/src/App.tsx` at `/setup/:id`)
+- [ ] Bulk actions on RecordListPage: multi-select, bulk status change, bulk delete, bulk export
+- [ ] Full payroll processing: payslip generation, statutory deductions (reference: `frappe/hrms` Payroll Entry)
 - [ ] Helpdesk module: `helpdesk.ticket` KType with SLA, agent routing, KChat thread→ticket, customer portal
 - [ ] Tenant resource metering: usage tracking per billing period, usage dashboard, plan upgrade/downgrade API
 - [ ] Webhook management: `platform.webhook` KType, delivery log with retries, management UI, HMAC signatures
@@ -278,13 +288,13 @@ match what customers expect from an ERP/CRM.
 ### Design references
 
 Multi-tenancy and module patterns in the Frappe ecosystem inform several
-Phase G designs. Treat these as reference architectures for the
-onboarding wizard, helpdesk, LMS, and importer adapters — not as code
-to copy:
+Phase G / Phase H designs. Treat these as reference architectures for
+the onboarding wizard, helpdesk, LMS, scheduled actions, and importer
+adapters — not as code to copy:
 
-- `frappe/frappe` — site-based tenancy, `bench` fleet management, background worker queues
-- `frappe/erpnext` — setup wizard, Chart of Accounts seeding, Payment Entry, Bank Reconciliation
-- `frappe/hrms` — attendance + leave management patterns
+- `frappe/frappe` — site-based tenancy, `bench` fleet management, background worker queues, Scheduled Job Type, Auto Repeat, Report Builder, rate limiting
+- `frappe/erpnext` — setup wizard, Chart of Accounts seeding, Payment Entry, Bank Reconciliation, Currency Exchange, Credit Limit, Material Request, Payment Terms Template
+- `frappe/hrms` — attendance + leave management, Payroll Entry, Salary Slip
 - `frappe/crm` — deal pipeline + lead management patterns
 - `frappe/helpdesk` — ticket SLA, agent routing, customer portal
 - `frappe/lms` — course management, certificates
