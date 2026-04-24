@@ -213,8 +213,8 @@ func (d *Definition) Validate() error {
 		}
 	}
 	if d.Pivot != nil {
-		if !isIdentifier(d.Pivot.RowColumn) || !isIdentifier(d.Pivot.ColumnColumn) {
-			return errors.New("reporting: pivot row/column required")
+		if !isIdentifier(d.Pivot.RowColumn) || !isIdentifier(d.Pivot.ColumnColumn) || !isIdentifier(d.Pivot.ValueColumn) {
+			return errors.New("reporting: pivot row/column/value required")
 		}
 	}
 	if d.Chart != nil {
@@ -371,6 +371,11 @@ func buildQuery(tenantID uuid.UUID, def Definition) (string, []any, []string, er
 		args = append(args, ktypeName)
 		where = append(where, fmt.Sprintf("ktype = $%d", nextArg))
 		nextArg++
+		// Exclude soft-deleted records by default so aggregate reports
+		// (SUM of deal amounts, outstanding AR/AP, etc.) don't silently
+		// include deleted rows. Authors who need deleted data can add
+		// an explicit `deleted_at notnull` filter.
+		where = append(where, "deleted_at IS NULL")
 	}
 	for _, f := range def.Filters {
 		expr, params, err := filterExpr(f, jsonbCol, nextArg)
