@@ -1,6 +1,6 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2026-04-24 (Phase I feature slice: multi-currency with `finance.exchange_rate` KType + `ExchangeRateStore` + conversion/unrealized GL endpoints; helpdesk module with `helpdesk.ticket` + `helpdesk.sla_policy` KTypes, `sla_policies` + `ticket_sla_log` tables, `helpdesk.create_ticket` / `assign_ticket` / `resolve_ticket` agent tools, `/ticket` slash command, `HelpdeskPage` triage + SLA page; metadata-driven report builder with `saved_reports` table, `reporting.Runner` grammar, pivot + chart support, `ReportBuilderPage`; KPI dashboard with `/dashboard/summary` aggregation + `DashboardPage` landing surface; Phase H hardening slice already complete via PR #22.)
+> **Last Updated:** 2026-04-24 (Phase I feature slice complete and merged via PR #24 with 12 rounds of review fixes applied: multi-currency with `finance.exchange_rate` KType + `ExchangeRateStore` + conversion/unrealized GL endpoints; helpdesk module with `helpdesk.ticket` + `helpdesk.sla_policy` KTypes, `sla_policies` + `ticket_sla_log` tables, `helpdesk.create_ticket` / `assign_ticket` / `resolve_ticket` agent tools, `/ticket` slash command, `HelpdeskPage` triage + SLA page; metadata-driven report builder with `saved_reports` table, `reporting.Runner` grammar, pivot + chart support, `ReportBuilderPage`; KPI dashboard with `/dashboard/summary` aggregation + `DashboardPage` landing surface; Phase H hardening slice already complete via PR #22.)
 >
 > Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [SECURITY_REVIEW.md](./docs/SECURITY_REVIEW.md)
 
@@ -9,7 +9,7 @@
 ## Current Phase
 
 **Phase I — Multi-currency, Helpdesk, Reporting, Dashboard**
-**Status:** In Progress (multi-currency store + KType + handlers landed; helpdesk KTypes + SLA store + agent tools + `/ticket` command landed; report builder grammar + saved reports + runner landed; KPI dashboard summary endpoint + landing page landed). Phase H hardening slice remains Complete from PR #22. Next focus: recurring invoices + scheduled actions, credit-limit enforcement, full payroll, bulk actions, distributed rate limiting, 5000-tenant load, disaster-recovery runbook — tracked under Cross-cutting.
+**Status:** Complete (all four deliverables merged via PR #24: multi-currency store + KType + handlers; helpdesk KTypes + SLA store + agent tools + `/ticket` command; report builder grammar + saved reports + runner; KPI dashboard summary endpoint + landing page). Phase H hardening slice remains Complete from PR #22. Next focus: recurring invoices + scheduled actions, credit-limit enforcement, full payroll, bulk actions, SLA breach worker, integration tests for Phase I, distributed rate limiting, 5000-tenant load test, documentation — tracked under Cross-cutting.
 
 ---
 
@@ -269,6 +269,20 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [ ] 5000-tenant load test harness: extend `internal/integrationtest/loadtest/harness.go` to hit the 5k concurrency target required by the Phase G acceptance
 - [ ] Disaster-recovery runbook: document backup/restore, tenant-extract, cross-region failover, and practise a chaos drill
 - [ ] Documentation: operator guide, developer guide, KType authoring guide
+- [ ] Multi-currency posting integration: auto-convert journal lines using exchange rate on posting date (reference: `frappe/erpnext` Currency Exchange on Journal Entry)
+- [ ] Unrealized gain/loss scheduled job: periodic revaluation of open foreign-currency invoices (reference: `frappe/erpnext` Exchange Rate Revaluation)
+- [ ] Dashboard multi-currency conversion: server-side conversion to tenant base currency so KPI tiles show meaningful totals
+- [ ] Helpdesk SLA breach worker: background worker to detect response/resolution breaches and log to `ticket_sla_log` (reference: `frappe/helpdesk` SLA)
+- [ ] Helpdesk customer portal: self-service ticket submission and tracking (reference: `frappe/helpdesk` customer portal)
+- [ ] Helpdesk inbound email: parse incoming emails into `helpdesk.ticket` records (reference: `frappe/helpdesk` email integration)
+- [ ] KChat thread-to-ticket automation: auto-create helpdesk ticket from flagged KChat thread (`thread_id` field exists on ticket schema)
+- [ ] Print/PDF generation: invoice, payslip, PO document rendering (reference: `frappe/frappe` Print Format)
+- [ ] Report scheduling and email delivery: cron-triggered report runs with PDF/CSV email (reference: `frappe/frappe` Auto Email Report)
+- [ ] Saved report sharing: per-tenant report sharing with role-based visibility (reference: `frappe/frappe` Report Builder)
+- [ ] Integration tests for Phase I: helpdesk, currency, reporting, dashboard (`phase_i_test.go`)
+- [ ] Security review update for Phase H/I: extend `docs/SECURITY_REVIEW.md` to cover auth sessions, helpdesk tables, reporting, currency tables
+- [ ] Data retention policies: automated cleanup of old audit logs, events, SLA logs (reference: `frappe/frappe` Log Settings)
+- [ ] API versioning strategy: document breaking change policy for `/api/v1/`
 - [ ] Stock move reversal: correction entries for `inventory_moves` following the finance credit-note pattern
 - [ ] Batch/lot tracking: full implementation on top of the schema hooks already landed in Phase D
 - [ ] Attendance integration with KChat presence/status
