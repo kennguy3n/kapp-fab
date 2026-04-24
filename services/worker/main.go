@@ -25,6 +25,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/scheduler"
 )
 
 const (
@@ -127,6 +128,16 @@ func run() error {
 	// other `inventory.*` event.
 	alerts := newStockAlertWorker(pool, adminPool, publisher, dbutil.SetTenantContext)
 	go alerts.Run(ctx)
+
+	// Scheduled actions engine. The registry starts empty — handlers
+	// are registered by follow-up phases (SLA breach sweep, recurring
+	// invoices) once their action types land. Running the loop with
+	// an empty registry is safe: PollDue still claims due rows and
+	// advances next_run_at so an orphaned action_type cannot stall
+	// the queue.
+	schedStore := scheduler.NewStore(pool, adminPool)
+	schedRegistry := scheduler.NewRegistry()
+	go scheduler.RunLoop(ctx, schedStore, schedRegistry, 10*time.Second)
 
 	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)
 	ticker := time.NewTicker(tickInterval)

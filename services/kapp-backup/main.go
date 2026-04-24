@@ -98,6 +98,7 @@ var TenantScopedTables = []string{
 	"sla_policies",
 	"ticket_sla_log",
 	"saved_reports",
+	"scheduled_actions",
 }
 
 // manifest is the first record in every dump file.
