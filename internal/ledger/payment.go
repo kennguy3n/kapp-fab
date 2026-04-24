@@ -218,6 +218,16 @@ func (p *PaymentPoster) PostPayment(ctx context.Context, tenantID, paymentID, ac
 	// zero. We read the invoice/bill fresh for each allocation so the
 	// optimistic-concurrency check catches a racing payment that might
 	// have settled part of the same invoice.
+	//
+	// A malformed invoice_id must abort rather than silently skip: the
+	// JE has already committed cash to Bank/AR (or AP/Bank) in the
+	// general ledger, so skipping the subledger update leaves the two
+	// books disagreeing by the unapplied allocation with no operator
+	// signal. Returning the error surfaces the mismatch to the HTTP
+	// handler / agent tool caller; the caller can then correct the
+	// allocation row and retry (the retry is safe: the JE exists, so
+	// the next call will reuse it via GetJournalEntryBySource instead
+	// of double-posting).
 	targetKType := "finance.ar_invoice"
 	if pay.PaymentType == "pay" {
 		targetKType = "finance.ap_bill"
@@ -225,7 +235,7 @@ func (p *PaymentPoster) PostPayment(ctx context.Context, tenantID, paymentID, ac
 	for _, a := range pay.Allocations {
 		invID, parseErr := uuid.Parse(a.InvoiceID)
 		if parseErr != nil {
-			continue
+			return entry, fmt.Errorf("ledger: invalid allocation invoice_id %q: %w", a.InvoiceID, parseErr)
 		}
 		if err := p.applyAllocation(ctx, tenantID, invID, targetKType, a.AllocatedAmount, actorID); err != nil {
 			return entry, err
