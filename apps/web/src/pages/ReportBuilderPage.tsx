@@ -176,9 +176,9 @@ export function ReportBuilderPage() {
                   <tbody>
                     {result.rows.slice(0, 500).map((row, i) => (
                       <tr key={i} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                        {row.map((cell, j) => (
-                          <td key={j} style={{ padding: "2px 8px" }}>
-                            {formatCell(cell)}
+                        {result.columns.map((col) => (
+                          <td key={col} style={{ padding: "2px 8px" }}>
+                            {formatCell(row[col])}
                           </td>
                         ))}
                       </tr>

@@ -757,7 +757,7 @@ export interface ReportPivotResult {
 
 export interface ReportResult {
   columns: string[];
-  rows: unknown[][];
+  rows: Array<Record<string, unknown>>;
   pivot?: ReportPivotResult | null;
   chart?: ReportChartSpec | null;
   summary?: Record<string, unknown>;

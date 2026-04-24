@@ -134,11 +134,14 @@ func (s *ExchangeRateStore) GetRate(ctx context.Context, tenantID uuid.UUID, fro
 	if tenantID == uuid.Nil {
 		return decimal.Zero, errors.New("ledger: tenant id required")
 	}
+	if from == to {
+		if len(from) != 3 {
+			return decimal.Zero, ErrInvalidCurrency
+		}
+		return decimal.NewFromInt(1), nil
+	}
 	if err := validateCurrencyPair(from, to); err != nil {
 		return decimal.Zero, err
-	}
-	if from == to {
-		return decimal.NewFromInt(1), nil
 	}
 	if asOf.IsZero() {
 		asOf = time.Now().UTC()

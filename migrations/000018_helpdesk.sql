@@ -27,11 +27,10 @@ CREATE TABLE IF NOT EXISTS sla_policies (
     created_by           UUID,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, id),
-    UNIQUE (tenant_id, priority, active) DEFERRABLE INITIALLY DEFERRED
+    PRIMARY KEY (tenant_id, id)
 );
 
-CREATE INDEX IF NOT EXISTS sla_policies_active_idx
+CREATE UNIQUE INDEX IF NOT EXISTS sla_policies_active_idx
     ON sla_policies (tenant_id, priority)
     WHERE active;
 
