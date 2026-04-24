@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -19,16 +20,16 @@ import (
 // in its own Setup Wizard — company profile, country/industry, the
 // chart-of-accounts template, and the initial role roster.
 type SetupWizardConfig struct {
-	CompanyName      string           `json:"company_name"`
-	Industry         string           `json:"industry,omitempty"`
-	Country          string           `json:"country,omitempty"`
-	CurrencyCode     string           `json:"currency_code,omitempty"`
-	CoATemplate      string           `json:"coa_template,omitempty"`
-	Roles            []WizardRole     `json:"roles,omitempty"`
-	Users            []WizardUser     `json:"users,omitempty"`
-	SampleData       bool             `json:"sample_data,omitempty"`
-	Plan             string           `json:"plan,omitempty"`
-	CreatedBy        uuid.UUID        `json:"created_by,omitempty"`
+	CompanyName  string       `json:"company_name"`
+	Industry     string       `json:"industry,omitempty"`
+	Country      string       `json:"country,omitempty"`
+	CurrencyCode string       `json:"currency_code,omitempty"`
+	CoATemplate  string       `json:"coa_template,omitempty"`
+	Roles        []WizardRole `json:"roles,omitempty"`
+	Users        []WizardUser `json:"users,omitempty"`
+	SampleData   bool         `json:"sample_data,omitempty"`
+	Plan         string       `json:"plan,omitempty"`
+	CreatedBy    uuid.UUID    `json:"created_by,omitempty"`
 }
 
 // WizardRole captures a role definition the wizard should upsert into
@@ -168,6 +169,9 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 			return err
 		}
 		out.RolesInserted = rolesInserted
+		if err := seedDefaultScheduledActions(ctx, tx, tenantID); err != nil {
+			return err
+		}
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("tenant: wizard seed accounts/roles: %w", err)
@@ -282,4 +286,45 @@ func seedUsers(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID, user
 		inserted++
 	}
 	return inserted, nil
+}
+
+// Default scheduled-action constants. Kept local — duplicating the
+// strings here avoids a tenant → finance import cycle (finance
+// already depends on internal/scheduler which depends on internal/
+// platform which the wizard reaches indirectly through dbutil).
+// The drift-check integration test
+// (internal/integrationtest/recurring_invoice_test.go::TestSetupWizardSeedsRecurringInvoiceAction)
+// asserts both sides stay in lock-step.
+const (
+	defaultRecurringInvoiceActionType      = "recurring_invoice"
+	defaultRecurringInvoiceIntervalSeconds = 3600
+)
+
+// seedDefaultScheduledActions seeds the per-tenant scheduled_actions
+// rows the platform expects to exist after a successful wizard run.
+// Uses INSERT … WHERE NOT EXISTS so re-running the wizard is a no-op
+// and never duplicates queue rows.
+func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) error {
+	now := time.Now().UTC()
+	defaults := []struct {
+		actionType      string
+		intervalSeconds int
+	}{
+		{defaultRecurringInvoiceActionType, defaultRecurringInvoiceIntervalSeconds},
+	}
+	for _, d := range defaults {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO scheduled_actions
+			     (tenant_id, action_type, interval_seconds, next_run_at, payload, enabled)
+			 SELECT $1, $2, $3, $4, '{}'::jsonb, TRUE
+			  WHERE NOT EXISTS (
+			      SELECT 1 FROM scheduled_actions
+			       WHERE tenant_id = $1 AND action_type = $2
+			  )`,
+			tenantID, d.actionType, d.intervalSeconds, now,
+		); err != nil {
+			return fmt.Errorf("tenant: seed scheduled action %s: %w", d.actionType, err)
+		}
+	}
+	return nil
 }
