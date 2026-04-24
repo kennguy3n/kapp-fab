@@ -323,6 +323,11 @@ func buildQuery(tenantID uuid.UUID, def Definition) (string, []any, []string, er
 
 	selectExprs := []string{}
 	outColumns := []string{}
+	// aggAliases tracks aggregation output aliases so ORDER BY can emit
+	// them as bare identifiers instead of routing through columnExpr —
+	// otherwise ktype-source sorts on an alias would become
+	// `data->>'alias'` and match nothing.
+	aggAliases := map[string]struct{}{}
 
 	if len(def.Aggregations) == 0 && len(def.GroupBy) == 0 {
 		for _, c := range def.Columns {
@@ -357,6 +362,7 @@ func buildQuery(tenantID uuid.UUID, def Definition) (string, []any, []string, er
 			}
 			selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", aggExpr, alias))
 			outColumns = append(outColumns, alias)
+			aggAliases[alias] = struct{}{}
 		}
 	}
 
@@ -387,7 +393,16 @@ func buildQuery(tenantID uuid.UUID, def Definition) (string, []any, []string, er
 		if dir == "" {
 			dir = "asc"
 		}
-		orderBy = append(orderBy, fmt.Sprintf("%s %s", columnExpr(s.Column, jsonbCol), strings.ToUpper(dir)))
+		var expr string
+		if _, ok := aggAliases[s.Column]; ok {
+			// Aggregation output aliases (e.g. "sum_amount") are already
+			// bare identifiers in the SELECT list — route them straight
+			// through without JSONB extraction.
+			expr = s.Column
+		} else {
+			expr = columnExpr(s.Column, jsonbCol)
+		}
+		orderBy = append(orderBy, fmt.Sprintf("%s %s", expr, strings.ToUpper(dir)))
 	}
 
 	query := fmt.Sprintf(

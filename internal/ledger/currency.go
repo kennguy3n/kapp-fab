@@ -201,6 +201,13 @@ func (s *ExchangeRateStore) GetRate(ctx context.Context, tenantID uuid.UUID, fro
 // requested date. Equal currencies short-circuit to the input value.
 func (s *ExchangeRateStore) Convert(ctx context.Context, tenantID uuid.UUID, amount decimal.Decimal, from, to string, asOf time.Time) (decimal.Decimal, error) {
 	if from == to {
+		// Mirror GetRate: identical codes short-circuit, but only once
+		// we've confirmed they're well-formed ISO-4217 strings.
+		// Without this, callers could pass empty strings (or junk of
+		// equal length) and get back the untouched amount.
+		if len(from) != 3 {
+			return decimal.Zero, ErrInvalidCurrency
+		}
 		return amount, nil
 	}
 	rate, err := s.GetRate(ctx, tenantID, from, to, asOf)
