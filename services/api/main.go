@@ -371,56 +371,6 @@ func run() error {
 		r.Post("/refresh", authh.refresh)
 	})
 
-	// Helpdesk customer portal. Auth endpoints are unauthenticated
-	// — they run the magic-link flow themselves. Ticket endpoints
-	// require a portal-scoped JWT issued by /auth/verify. No
-	// X-Tenant-ID header is expected on portal routes; the tenant
-	// is taken from the JWT (for data routes) or the request body
-	// (for auth endpoints) so external customers never have to
-	// know their tenant's internal UUID.
-	if authh.signer != nil {
-		porh := &portalHandlers{
-			tenants:  tenantSvc,
-			portal:   portalStore,
-			signer:   authh.signer,
-			records:  recordStore,
-			mailer:   stdoutPortalMailer{},
-			features: featureStore,
-		}
-		r.Route("/api/v1/portal", func(r chi.Router) {
-			r.Route("/auth", func(r chi.Router) {
-				// /auth/* gate inline inside the handlers — they need
-				// the tenant lookup first and can't share the
-				// claims-based middleware below.
-				r.Post("/request", porh.requestMagicLink)
-				r.Post("/verify", porh.verifyMagicLink)
-			})
-			r.Route("/tickets", func(r chi.Router) {
-				r.Use(portalAuthMiddleware(authh.signer))
-				// FeaturePortal gate sits after auth so the tenant
-				// is taken from the JWT claims — standard
-				// DynamicFeatureMiddleware cannot be used here
-				// because the portal skips TenantMiddleware.
-				r.Use(portalFeatureMiddleware(featureStore))
-				// Bridge the portal claims into the platform tenant
-				// + user context slots so the standard rate-limit /
-				// api-call / quota / idempotency middleware below
-				// runs unchanged. Without this the portal surface
-				// would have no rate limiting and a stolen portal
-				// JWT could create unbounded ticket replies.
-				r.Use(portalTenantContextMiddleware(tenantSvc))
-				r.Use(apiCallMW)
-				r.Use(platform.IdempotencyMiddleware(pool))
-				r.Use(rateLimitMW)
-				r.Use(platform.QuotaMiddleware(quotaEnforcer))
-				r.Get("/", porh.listTickets)
-				r.Post("/", porh.createTicket)
-				r.Get("/{id}", porh.getTicket)
-				r.Post("/{id}/reply", porh.replyTicket)
-			})
-		})
-	}
-
 	// Phase F event stream. SSE tail of the tenant's outbox so the web
 	// UI can react to state changes without polling. Defined at the root
 	// router so it does NOT inherit the 30s request timeout applied below
@@ -439,6 +389,61 @@ func run() error {
 	// stream is deliberately registered above this group.
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Timeout(30 * time.Second))
+
+		// Helpdesk customer portal. Auth endpoints are unauthenticated
+		// — they run the magic-link flow themselves. Ticket endpoints
+		// require a portal-scoped JWT issued by /auth/verify. No
+		// X-Tenant-ID header is expected on portal routes; the tenant
+		// is taken from the JWT (for data routes) or the request body
+		// (for auth endpoints) so external customers never have to
+		// know their tenant's internal UUID.
+		//
+		// Registered inside the 30s timeout group so a slow or
+		// malicious portal client can't hold a goroutine + DB conn
+		// open indefinitely. Portal handlers are regular request /
+		// response, no streaming, so the deadline is safe.
+		if authh.signer != nil {
+			porh := &portalHandlers{
+				tenants:  tenantSvc,
+				portal:   portalStore,
+				signer:   authh.signer,
+				records:  recordStore,
+				mailer:   stdoutPortalMailer{},
+				features: featureStore,
+			}
+			r.Route("/api/v1/portal", func(r chi.Router) {
+				r.Route("/auth", func(r chi.Router) {
+					// /auth/* gate inline inside the handlers — they need
+					// the tenant lookup first and can't share the
+					// claims-based middleware below.
+					r.Post("/request", porh.requestMagicLink)
+					r.Post("/verify", porh.verifyMagicLink)
+				})
+				r.Route("/tickets", func(r chi.Router) {
+					r.Use(portalAuthMiddleware(authh.signer))
+					// FeaturePortal gate sits after auth so the tenant
+					// is taken from the JWT claims — standard
+					// DynamicFeatureMiddleware cannot be used here
+					// because the portal skips TenantMiddleware.
+					r.Use(portalFeatureMiddleware(featureStore))
+					// Bridge the portal claims into the platform tenant
+					// + user context slots so the standard rate-limit /
+					// api-call / quota / idempotency middleware below
+					// runs unchanged. Without this the portal surface
+					// would have no rate limiting and a stolen portal
+					// JWT could create unbounded ticket replies.
+					r.Use(portalTenantContextMiddleware(tenantSvc))
+					r.Use(apiCallMW)
+					r.Use(platform.IdempotencyMiddleware(pool))
+					r.Use(rateLimitMW)
+					r.Use(platform.QuotaMiddleware(quotaEnforcer))
+					r.Get("/", porh.listTickets)
+					r.Post("/", porh.createTicket)
+					r.Get("/{id}", porh.getTicket)
+					r.Post("/{id}/reply", porh.replyTicket)
+				})
+			})
+		}
 
 		// Control-plane tenant lifecycle routes (not tenant-scoped).
 		r.Route("/api/v1/tenants", func(r chi.Router) {

@@ -242,6 +242,14 @@ func (h *recordHandlers) bulk(w http.ResponseWriter, r *http.Request) {
 // first row is the union of top-level keys across all records' data
 // payloads so the export always surfaces every field the tenant has
 // in play without requiring the caller to pre-declare columns.
+//
+// The record-level metadata columns are prefixed with "record_" so
+// they cannot collide with data fields of the same name. Most KType
+// schemas reuse names like "status", "id", "version" inside the
+// JSONB payload (e.g. helpdesk.ticket.status carries the workflow
+// state, distinct from the lifecycle column) — emitting both as
+// just "status" produced duplicate headers that pandas / Excel /
+// other CSV consumers handle inconsistently.
 func writeRecordCSV(w http.ResponseWriter, ktypeName string, rows []record.KRecord) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.csv"`, ktypeName))
@@ -265,7 +273,13 @@ func writeRecordCSV(w http.ResponseWriter, ktypeName string, rows []record.KReco
 		columns = append(columns, k)
 	}
 	sort.Strings(columns)
-	header := append([]string{"id", "status", "version", "created_at", "updated_at"}, columns...)
+	header := append([]string{
+		"record_id",
+		"record_status",
+		"record_version",
+		"record_created_at",
+		"record_updated_at",
+	}, columns...)
 	_ = cw.Write(header)
 	for i, r := range rows {
 		row := []string{
