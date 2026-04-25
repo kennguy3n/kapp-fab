@@ -263,9 +263,235 @@ review.
 
 ---
 
+## 10. Auth sessions (Phase H)
+
+`auth_sessions` stores issued JWT identifiers per tenant per user.
+The threat model: a compromised admin in tenant A must not be able
+to enumerate / revoke / impersonate sessions in tenant B; a
+suspended tenant's tokens must stop working immediately; portal
+JWTs must not unlock control-plane endpoints.
+
+**RLS.** `migrations/000013_auth_sessions.sql` enables RLS with a
+single policy: rows are visible iff `tenant_id =
+current_setting('app.tenant_id')::uuid`. The `tenant_isolation`
+policy is exercised by `phase_h_test.go`'s
+`TestAuthSessionsRLSIsolatesTenants`. Both insert (issuance) and
+delete (revocation) honour the GUC.
+
+**Suspension revocation.** `internal/tenant/lifecycle.go` calls
+`auth.SessionStore.RevokeAllForTenant` inside the same transaction
+that flips `tenants.status = 'suspended'`. Even if a token is
+still in a client cache, the next API call hits the auth
+middleware which loads the session row and returns 401 once the
+row is gone. There is no "grace window" — suspension is
+authoritative.
+
+**Per-tenant session limits.** A tenant on the free plan is
+capped at N concurrent sessions per user; the limit is enforced
+in `auth.SessionStore.Issue` under a row-level lock so two
+concurrent logins cannot both exceed the limit. Limit drops are
+plan-driven (downgrade reduces N → oldest sessions get pruned).
+
+**Portal vs standard scope isolation.** Portal JWTs carry a
+`scope: "portal"` claim and a `kapp:portal_user_id` subject; the
+control-plane middleware rejects portal-scoped tokens before any
+handler runs. Conversely, the portal handlers reject any token
+that does not carry `scope: "portal"`. The two scopes share the
+HMAC signing key but cannot be substituted.
+
+**Open items**: refresh tokens are not yet rotated on use (low
+priority — sessions are short-lived).
+
+---
+
+## 11. Helpdesk (sla_policies, ticket_sla_log, customer portal)
+
+Helpdesk tables are tenant-scoped and enforce isolation through
+the same default-deny RLS policy used everywhere else. The
+customer portal adds a public-facing surface that bypasses the
+standard JWT path, so it gets extra attention here.
+
+**RLS on policy + log tables.** `migrations/000018_helpdesk.sql`
+enables RLS on `sla_policies` and `ticket_sla_log` with the
+canonical `tenant_isolation` predicate. `phase_i_test.go`'s
+`TestRLSIsolatesPhaseITables` provisions two tenants and asserts
+that tenant B reads zero rows from each table after tenant A
+inserts. Both `UpsertPolicy` / `LogSLAEvent` write paths require a
+non-nil `app.tenant_id`; missing GUC defaults to deny.
+
+**Portal authentication.** The customer portal issues magic-link
+tokens scoped to a single ticket-tenant pair. Tokens have a 60-min
+TTL and are single-use (`portal_users` tracks `last_used_at`). The
+token claim carries `scope: "portal"` (see §10) and is rejected by
+the standard middleware. Portal handlers also enforce a `KType`
+guard: the only handlers reachable from a portal token are the
+ticket read/comment/attachment endpoints — no records, no agent
+tools, no exports.
+
+**FeaturePortal gate.** `services/api/portal_handlers.go` reads
+the per-tenant `FeaturePortal` flag before serving any portal
+request. Tenants on free/starter plans get a 404 even with a
+valid token. The gate prevents accidental portal exposure on a
+tenant that disabled it after a plan downgrade.
+
+---
+
+## 12. Reporting (saved_reports, report runner, sharing)
+
+The Phase H report builder accepts a JSON definition (columns,
+filters, group-by, aggregations) and compiles it to SQL. The two
+risks: (a) cross-tenant reads via SQL injection in column /
+filter names, and (b) cross-tenant reads via a shared report.
+
+**RLS on saved_reports.** `migrations/000019_reports.sql` enables
+RLS; the `report_sharing` follow-up (this PR) adds `visibility`
++ `shared_with` columns but keeps the RLS predicate identical so
+a "public" report in tenant A is still invisible to tenant B.
+Visibility is a per-row gate _within_ a tenant — not a
+cross-tenant escape.
+
+**SQL injection prevention.** `internal/reporting/builder.go`
+constructs SQL by mapping a fixed allow-list of column /
+aggregation tokens to safe SQL literals; user-provided values
+flow only through `pgx` parameterised arguments, never string
+concatenation. `Definition.Validate` rejects any column /
+KType / order-by name that does not match
+`^[a-zA-Z_][a-zA-Z0-9_.]*$`. The `phase_i_test.go`
+`TestReportBuilderValidateRejectsBadInput` asserts the validator
+on each axis (`SELECT`, `WHERE`, `ORDER BY`, `GROUP BY`) and is a
+required gate before any SQL is emitted.
+
+**Shared-report visibility.** `Store.ListVisible` (this PR)
+filters by `owner_id = $userID OR visibility = 'public' OR
+shared_with @> [user/role]`. The query stays inside the tenant
+RLS scope so a malformed `shared_with` JSON cannot leak rows
+across tenants. Soft-deleted records are excluded by every report
+(`TestReportBuilderExcludesSoftDeleted`).
+
+---
+
+## 13. Multi-currency (exchange_rates)
+
+Foreign-exchange rates are tenant-scoped because tenants on the
+same cell may use different rate sources or audit-mandated rate
+overrides.
+
+**RLS on exchange_rates.** `migrations/000017_multi_currency.sql`
+enables RLS with the canonical `tenant_isolation` predicate. The
+composite primary key (`tenant_id`, `from_currency`,
+`to_currency`, `rate_date`) carries `tenant_id` first so every
+read is index-bounded inside the tenant. `phase_i_test.go`'s
+`TestRLSIsolatesPhaseITables` covers cross-tenant probes.
+
+**Rate lookup isolation.** `ExchangeRateStore.Convert` and
+`GetRate` take an explicit `tenantID` and call
+`dbutil.WithTenantTx`, so a missing/zero tenant id surfaces as an
+error rather than silently picking a "default" rate. The
+unrealized gain/loss job iterates tenants explicitly — never
+runs as a single tenant-less sweep — so a misconfigured cron
+cannot post FX adjustments to the wrong tenant.
+
+---
+
+## 14. Webhooks
+
+Webhooks are an explicit egress channel, so the threat model
+extends beyond cross-tenant isolation: a misconfigured webhook
+URL must not exfiltrate other tenants' events, and the receiver
+must be able to verify authenticity.
+
+**HMAC-SHA256 signatures.** `services/worker/notifications.go#postWebhook`
+signs the request body with a per-tenant secret pulled from the
+`platform.webhook` KRecord. The signature is sent as
+`X-Kapp-Signature: sha256=<hex>` and the payload includes a
+`timestamp` field so receivers can reject replays. The secret is
+generated at webhook-create time, stored encrypted via the
+field-level encryption hook, and never logged.
+
+**Event filter validation.** Webhook subscriptions carry an
+`event_filters []string`. The runtime enforces a strict allow-list
+match (no glob, no regex) — a malformed entry fails closed (zero
+events delivered) rather than fail-open ("deliver everything"). A
+short-form regression test in `services/worker/notifications_test.go`
+asserts that a malformed `event_filters` entry blocks delivery.
+
+**Async retry decoupling.** Failed deliveries persist a row in
+`webhook_deliveries` with `next_retry_at` set. The retry loop is
+out-of-band from the outbox drain so a slow / failing customer
+endpoint cannot stall unrelated tenants' events. Each retry
+re-checks the per-tenant feature flag + endpoint URL — a
+disabled webhook stops delivering immediately even if rows are
+already queued.
+
+**Per-tenant fan-out.** Delivery is keyed off the originating
+event's `tenant_id`; the retry loop joins `webhook_deliveries`
+to `webhooks` on `(tenant_id, webhook_id)` so a webhook from
+tenant A cannot pick up tenant B's queued event.
+
+---
+
+## 15. Print / PDF
+
+Print templates render KRecord data into HTML/PDF for download.
+The risk surface is straightforward: an authenticated user in
+tenant A must not be able to render a record from tenant B, and
+the download link must not bypass the access check.
+
+**FeaturePrint gate.** `services/api/print_handlers.go` checks
+the per-tenant `FeaturePrint` flag before resolving the template
+or fetching the underlying record. Tenants without the flag get
+a 404 — including a well-crafted attempt that supplies a
+template id from another tenant.
+
+**Fetch-based download (no header-less anchor).** The frontend
+issues an authenticated `fetch` for the rendered PDF and
+materialises a blob URL for download. We deliberately do not
+use a plain `<a href="/api/v1/print/...">` because anchor
+navigation drops the `Authorization` header in some browser
+configurations; an unauthenticated request would be rejected by
+the auth middleware but the failure mode is a confusing 401 in a
+new tab rather than an inline error toast. The fetch path also
+keeps the download under the standard CSRF-token check.
+
+**Template scope.** Print templates are tenant-scoped (RLS on
+`print_templates`); only records inside the same tenant can be
+rendered against them. The renderer rejects any cross-tenant
+record id at the resolver layer — well before any HTML is
+emitted.
+
+---
+
+## 16. Data retention
+
+`data_retention_policies` lets a tenant set per-category retention
+windows (audit log, events, SLA log, notifications). The risk: a
+sweep that ignores RLS could delete rows from another tenant.
+
+**Per-tenant scope.** `internal/platform/retention.go`
+`RetentionStore` reads / writes policies under
+`dbutil.WithTenantTx`. The sweeper iterates tenants explicitly via
+the admin pool, then calls `WithTenantTx(tenantID)` so every
+`DELETE` runs under that tenant's RLS predicate. A bug that
+forgets the `WithTenantTx` wrapper would surface immediately as a
+zero-row delete — the policy table itself is RLS-scoped — rather
+than as a silent cross-tenant wipe.
+
+**RLS on the policy table.** `migrations/000030_data_retention.sql`
+(via the existing canonical migration) enables RLS on
+`data_retention_policies` with the standard `tenant_isolation`
+predicate.
+
+**Audit trail.** Each retention sweep emits an
+`audit.retention.swept` event with the pre/post row counts per
+category. The hash-chained audit log captures the deletion so a
+tenant can later prove what was purged and when.
+
+---
+
 ## Review sign-off
 
 Review is performed each phase end. A phase cannot close without a
 section here matching the merged code.
 
 - Phase G: PASS for items 1–7, open items tracked above.
+- Phase H/I/J/K: PASS for items 9–16 (this PR).

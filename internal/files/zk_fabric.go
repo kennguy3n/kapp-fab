@@ -44,6 +44,12 @@ type PerTenantConfig struct {
 	Region     string
 	MaxEntries int
 	IdleTTL    time.Duration
+
+	// OnEvict, if non-nil, is called after the cached *S3Store has
+	// had Close() invoked. Useful for metrics ("per-tenant store
+	// evictions") and for tests that need to observe the eviction
+	// pipeline without poking at internals.
+	OnEvict func(tenantID uuid.UUID, store *S3Store)
 }
 
 // PerTenantS3Store routes Put/Get to a per-tenant *S3Store keyed
@@ -99,9 +105,16 @@ func NewPerTenantS3Store(cfg PerTenantConfig) (*PerTenantS3Store, error) {
 		cfg.IdleTTL = defaultPerTenantStoreIdleTTL
 	}
 	cache := platform.NewLRUCache(cfg.MaxEntries, cfg.IdleTTL)
-	cache.SetOnEvict(func(_ string, v any) {
-		if s, ok := v.(*S3Store); ok {
-			_ = s.Close()
+	cache.SetOnEvict(func(key string, v any) {
+		s, ok := v.(*S3Store)
+		if !ok {
+			return
+		}
+		_ = s.Close()
+		if cfg.OnEvict != nil {
+			if id, err := uuid.Parse(key); err == nil {
+				cfg.OnEvict(id, s)
+			}
 		}
 	})
 	return &PerTenantS3Store{

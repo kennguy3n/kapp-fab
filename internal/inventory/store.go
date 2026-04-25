@@ -415,6 +415,111 @@ func (s *PGStore) RecordTransfer(ctx context.Context, t Transfer) ([]Move, error
 	return out, nil
 }
 
+// ReverseMove posts a contra-entry that exactly cancels the move
+// identified by moveID. The contra row is signed-opposite (negative
+// of the original Qty) and points back via reversal_of so the audit
+// trail is explicit; the original is left untouched (inventory_moves
+// is append-only). Stock levels are conserved automatically because
+// the stock_levels view sums the ledger and the contra row's
+// negative qty offsets the original.
+//
+// Idempotency: the partial unique index inventory_moves_reversal_of_uniq
+// prevents the same move from being reversed twice — a duplicate
+// surfaces ErrAlreadyReversed. Reversing a contra-entry directly
+// is rejected with ErrCannotReverseContra so callers do not
+// accidentally re-issue the original; reverse the original move
+// again instead.
+//
+// actor is recorded on the new move's audit entry; pass uuid.Nil
+// for system-driven reversals.
+//
+// Reference: frappe/erpnext Stock Entry cancellation (which posts
+// reverse Stock Ledger Entries with is_cancelled=1).
+func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID int64, actor uuid.UUID, memo string) (*Move, error) {
+	if tenantID == uuid.Nil {
+		return nil, errors.New("inventory: tenant id required")
+	}
+	if moveID <= 0 {
+		return nil, fmt.Errorf("%w: move id required", ErrMoveInvalid)
+	}
+	var out Move
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var (
+			origQty      decimal.Decimal
+			origItem     uuid.UUID
+			origWh       uuid.UUID
+			origUnitCost decimal.NullDecimal
+			origReversal *int64
+			origSrcKType *string
+			origSrcID    *uuid.UUID
+		)
+		err := tx.QueryRow(ctx,
+			`SELECT item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, reversal_of
+			   FROM inventory_moves WHERE tenant_id = $1 AND id = $2`,
+			tenantID, moveID,
+		).Scan(&origItem, &origWh, &origQty, &origUnitCost, &origSrcKType, &origSrcID, &origReversal)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrMoveNotFound
+			}
+			return fmt.Errorf("inventory: load move %d: %w", moveID, err)
+		}
+		if origReversal != nil {
+			return ErrCannotReverseContra
+		}
+
+		now := s.now()
+		newQty := origQty.Neg()
+		var unitCostArg any
+		if origUnitCost.Valid {
+			unitCostArg = origUnitCost.Decimal
+		}
+		var srcKTypeArg any
+		if origSrcKType != nil {
+			srcKTypeArg = *origSrcKType
+		}
+		var srcIDArg any
+		if origSrcID != nil {
+			srcIDArg = *origSrcID
+		}
+		err = tx.QueryRow(ctx,
+			`INSERT INTO inventory_moves
+			     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, moved_at, reversal_of)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			 RETURNING id`,
+			tenantID, origItem, origWh, newQty, unitCostArg, srcKTypeArg, srcIDArg, now, moveID,
+		).Scan(&out.ID)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+				return ErrAlreadyReversed
+			}
+			return fmt.Errorf("inventory: insert reversal: %w", err)
+		}
+		out.TenantID = tenantID
+		out.ItemID = origItem
+		out.WarehouseID = origWh
+		out.Qty = newQty
+		if origUnitCost.Valid {
+			out.UnitCost = origUnitCost.Decimal
+		}
+		if origSrcKType != nil {
+			out.SourceKType = *origSrcKType
+		}
+		out.SourceID = origSrcID
+		out.MovedAt = now
+		out.CreatedBy = actor
+		reversedID := moveID
+		out.ReversalOf = &reversedID
+		_ = memo // memo is currently informational; logged via audit when wired through the agent tool / API
+		return s.emitMove(ctx, tx, out, "inventory.move.reversed")
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ListMoves returns moves ordered by moved_at DESC, filtered by
 // optional item / warehouse / source / date range.
 func (s *PGStore) ListMoves(ctx context.Context, tenantID uuid.UUID, filter MoveFilter) ([]Move, error) {

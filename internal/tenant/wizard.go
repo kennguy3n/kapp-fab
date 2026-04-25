@@ -132,10 +132,10 @@ func DefaultRoles() []WizardRole {
 // `dbutil.WithTenantTx`, which issues `SELECT set_config('app.tenant_id', …, true)`
 // on the tx before calling the closure.
 type Wizard struct {
-	pool             *pgxpool.Pool
-	store            *PGStore
-	zkProvisioner    ZKFabricProvisioner
-	placementSource  PlacementPolicySource
+	pool            *pgxpool.Pool
+	store           *PGStore
+	zkProvisioner   ZKFabricProvisioner
+	placementSource PlacementPolicySource
 }
 
 // ZKFabricProvisioner mints a new tenant + HMAC credential pair on
@@ -479,6 +479,26 @@ const (
 	defaultDataRetentionIntervalSeconds = 86400
 )
 
+// defaultReportScheduleActionType / defaultReportScheduleIntervalSeconds
+// drive the per-tenant report dispatcher that iterates report_schedules
+// and emails the rendered output to the recipient list. Mirrors
+// reporting.ActionTypeReportSchedule / DefaultReportScheduleIntervalSeconds;
+// duplicated here for the same package-cycle reason as the SLA / reorder
+// constants above.
+const (
+	defaultReportScheduleActionType      = "report_schedule"
+	defaultReportScheduleIntervalSeconds = 300
+)
+
+// defaultLMSCertificateActionType / defaultLMSCertificateIntervalSeconds
+// drive the LMS course-completion certificate auto-issuer. Mirrors
+// services/worker/certificate_worker.go's CertificateActionType;
+// duplicated here for the package-cycle reason above.
+const (
+	defaultLMSCertificateActionType      = "lms_issue_certificates"
+	defaultLMSCertificateIntervalSeconds = 600
+)
+
 // seedDefaultScheduledActions seeds the per-tenant scheduled_actions
 // rows the platform expects to exist after a successful wizard run.
 // Uses INSERT … WHERE NOT EXISTS so re-running the wizard is a no-op
@@ -494,6 +514,8 @@ func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 		{defaultInventoryReorderActionType, defaultInventoryReorderIntervalSeconds},
 		{ActionTypeUsageSnapshot, defaultUsageSnapshotIntervalSeconds},
 		{defaultDataRetentionActionType, defaultDataRetentionIntervalSeconds},
+		{defaultReportScheduleActionType, defaultReportScheduleIntervalSeconds},
+		{defaultLMSCertificateActionType, defaultLMSCertificateIntervalSeconds},
 	}
 	if DefaultFeaturesForPlan(plan)[FeatureFinance] {
 		defaults = append(defaults, struct {

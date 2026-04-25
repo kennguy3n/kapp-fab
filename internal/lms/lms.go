@@ -16,13 +16,14 @@ import (
 
 // KType identifiers.
 const (
-	KTypeCourse     = "lms.course"
-	KTypeModule     = "lms.module"
-	KTypeLesson     = "lms.lesson"
-	KTypeEnrollment = "lms.enrollment"
-	KTypeQuiz       = "lms.quiz"
-	KTypeAssignment = "lms.assignment"
-	KTypeProgress   = "lms.progress"
+	KTypeCourse      = "lms.course"
+	KTypeModule      = "lms.module"
+	KTypeLesson      = "lms.lesson"
+	KTypeEnrollment  = "lms.enrollment"
+	KTypeQuiz        = "lms.quiz"
+	KTypeAssignment  = "lms.assignment"
+	KTypeProgress    = "lms.progress"
+	KTypeCertificate = "lms.certificate"
 )
 
 // Canonical workflow names.
@@ -200,6 +201,25 @@ var progressSchema = []byte(`{
   "permissions": {"read": ["tenant.member"], "write": ["lms.admin", "tenant.admin"]}
 }`)
 
+var certificateSchema = []byte(`{
+  "name": "lms.certificate",
+  "version": 1,
+  "fields": [
+    {"name": "enrollment_id", "type": "ref", "ktype": "lms.enrollment", "required": true},
+    {"name": "course_id", "type": "ref", "ktype": "lms.course", "required": true},
+    {"name": "learner_id", "type": "ref", "ktype": "user", "required": true},
+    {"name": "certificate_number", "type": "string", "required": true, "max_length": 64},
+    {"name": "issued_at", "type": "datetime", "required": true},
+    {"name": "template_id", "type": "string", "max_length": 64}
+  ],
+  "views": {
+    "list": {"columns": ["certificate_number", "course_id", "learner_id", "issued_at"]},
+    "form": {"sections": [{"title": "Certificate", "fields": ["enrollment_id", "course_id", "learner_id", "certificate_number", "issued_at", "template_id"]}]}
+  },
+  "cards": {"summary": "{{certificate_number}} — {{course_id}}"},
+  "permissions": {"read": ["tenant.member"], "write": ["lms.admin", "tenant.admin"]}
+}`)
+
 // All returns every Phase E LMS KType as a freshly-constructed slice.
 func All() []ktype.KType {
 	return []ktype.KType{
@@ -210,6 +230,7 @@ func All() []ktype.KType {
 		{Name: KTypeQuiz, Version: 1, Schema: quizSchema},
 		{Name: KTypeAssignment, Version: 1, Schema: assignmentSchema},
 		{Name: KTypeProgress, Version: 1, Schema: progressSchema},
+		{Name: KTypeCertificate, Version: 1, Schema: certificateSchema},
 	}
 }
 

@@ -357,17 +357,58 @@ func (h *inventoryHandlers) valuation(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rep)
 }
 
+// reverseMoveRequest carries the optional memo for a move-reversal
+// request. The move id is taken from the path parameter so the body
+// is purely metadata.
+type reverseMoveRequest struct {
+	Memo string `json:"memo,omitempty"`
+}
+
+// reverseMove cancels a previously-recorded move by posting a
+// contra-entry. POST /api/v1/inventory/moves/{id}/reverse. Returns
+// the new contra-entry move; the original row is unchanged.
+func (h *inventoryHandlers) reverseMove(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	idStr := chi.URLParam(r, "id")
+	moveID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || moveID <= 0 {
+		http.Error(w, "invalid move id", http.StatusBadRequest)
+		return
+	}
+	var req reverseMoveRequest
+	// Body is optional — empty body is fine.
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+	}
+	out, err := h.store.ReverseMove(r.Context(), t.ID, moveID, actorOrDefault(r.Context()), req.Memo)
+	if err != nil {
+		writeInventoryError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
 // writeInventoryError translates inventory sentinel errors into the
 // HTTP status codes the web client keys off for user-facing messaging.
 func writeInventoryError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, inventory.ErrItemNotFound),
-		errors.Is(err, inventory.ErrWarehouseNotFound):
+		errors.Is(err, inventory.ErrWarehouseNotFound),
+		errors.Is(err, inventory.ErrMoveNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
-	case errors.Is(err, inventory.ErrDuplicateSourceMove):
+	case errors.Is(err, inventory.ErrDuplicateSourceMove),
+		errors.Is(err, inventory.ErrAlreadyReversed):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, inventory.ErrMoveInvalid),
-		errors.Is(err, inventory.ErrTransferUnbalanced):
+		errors.Is(err, inventory.ErrTransferUnbalanced),
+		errors.Is(err, inventory.ErrCannotReverseContra):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
 		writeRecordError(w, err)

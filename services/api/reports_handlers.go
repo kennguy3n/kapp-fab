@@ -22,9 +22,9 @@ type reportsHandlers struct {
 }
 
 type createReportRequest struct {
-	Name        string                `json:"name"`
-	Description string                `json:"description,omitempty"`
-	Definition  reporting.Definition  `json:"definition"`
+	Name        string               `json:"name"`
+	Description string               `json:"description,omitempty"`
+	Definition  reporting.Definition `json:"definition"`
 }
 
 func (h *reportsHandlers) create(w http.ResponseWriter, r *http.Request) {
@@ -175,6 +175,38 @@ func (h *reportsHandlers) runAdhoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+type shareReportRequest struct {
+	Visibility string                 `json:"visibility"`
+	SharedWith []reporting.ShareEntry `json:"shared_with"`
+}
+
+// share replaces the visibility + shared_with on a saved report.
+// PATCH /api/v1/reports/{id}/share. Owner / admin enforcement lives
+// in the middleware stack so this handler is purely a data write.
+func (h *reportsHandlers) share(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid report id", http.StatusBadRequest)
+		return
+	}
+	var req shareReportRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	saved, err := h.store.SetSharing(r.Context(), t.ID, id, req.Visibility, req.SharedWith)
+	if err != nil {
+		writeReportError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, saved)
 }
 
 func writeReportError(w http.ResponseWriter, err error) {
