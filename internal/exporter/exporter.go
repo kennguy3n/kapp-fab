@@ -88,15 +88,22 @@ func (j *ExportJob) Validate() error {
 	return nil
 }
 
-// Store persists ExportJob rows. Writes happen under
-// dbutil.WithTenantTx so the tenant_isolation RLS policy applies.
+// Store persists ExportJob rows. Tenant-scoped reads and writes
+// happen under dbutil.WithTenantTx against the app pool so the
+// tenant_isolation RLS policy applies. ClaimNext, which has to
+// scan across every tenant, uses the admin pool (kapp_admin has
+// BYPASSRLS) — this mirrors the dual-pool pattern used by
+// scheduler.Store and platform.RetentionStore.
 type Store struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	adminPool *pgxpool.Pool
 }
 
-// NewStore wires a Store from the shared pool.
-func NewStore(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+// NewStore wires a Store from the shared pools. Both pools are
+// required in production; in unit tests that never call ClaimNext
+// the admin pool may be nil and ClaimNext returns a clear error.
+func NewStore(pool, adminPool *pgxpool.Pool) *Store {
+	return &Store{pool: pool, adminPool: adminPool}
 }
 
 // Enqueue creates a new export_jobs row with status `pending`. The
@@ -208,21 +215,19 @@ func (s *Store) List(ctx context.Context, tenantID uuid.UUID) ([]ExportJob, erro
 // workers do not collide. Returns nil with nil error when the
 // queue is drained — the worker uses that as the loop sentinel.
 //
-// We deliberately do NOT use dbutil.WithTenantTx here because the
-// claim has to scan across all tenants. The follow-up Process call
-// runs under the per-tenant tx so the actual export still flows
-// through the tenant_isolation policy.
+// Runs against the admin pool (BYPASSRLS) because the claim scan
+// crosses tenant boundaries. The follow-up Process call runs under
+// per-tenant WithTenantTx so the actual export still flows through
+// the tenant_isolation policy.
 func (s *Store) ClaimNext(ctx context.Context) (*ExportJob, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if s.adminPool == nil {
+		return nil, errors.New("exporter: ClaimNext requires admin pool")
+	}
+	tx, err := s.adminPool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-
-	// Disable RLS for this scan — the worker is the system principal.
-	if _, err := tx.Exec(ctx, `SET LOCAL row_security = OFF`); err != nil {
-		return nil, fmt.Errorf("exporter: disable RLS: %w", err)
-	}
 
 	var out ExportJob
 	err = scanJob(tx.QueryRow(ctx,

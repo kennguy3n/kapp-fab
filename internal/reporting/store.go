@@ -177,10 +177,26 @@ func (s *Store) Update(ctx context.Context, r SavedReport) (*SavedReport, error)
 		if tag.RowsAffected() == 0 {
 			return ErrReportNotFound
 		}
-		return tx.QueryRow(ctx,
-			`SELECT created_at, updated_at FROM saved_reports WHERE tenant_id = $1 AND id = $2`,
+		// Read back visibility / shared_with too — those columns
+		// are owned by SetSharing, not Update, so we don't mutate
+		// them here but we MUST scan them back so the response the
+		// handler returns reflects the row's actual state instead
+		// of the empty defaults on the input struct.
+		var shared []byte
+		if err := tx.QueryRow(ctx,
+			`SELECT created_at, updated_at, visibility, shared_with
+			   FROM saved_reports
+			  WHERE tenant_id = $1 AND id = $2`,
 			r.TenantID, r.ID,
-		).Scan(&out.CreatedAt, &out.UpdatedAt)
+		).Scan(&out.CreatedAt, &out.UpdatedAt, &out.Visibility, &shared); err != nil {
+			return err
+		}
+		if len(shared) > 0 {
+			if err := json.Unmarshal(shared, &out.SharedWith); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err

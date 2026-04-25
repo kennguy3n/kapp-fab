@@ -311,6 +311,7 @@ func run() error {
 	agents.RegisterHRTools(executor, hrStore)
 	agents.RegisterPayrollTools(executor, hr.NewPayrollEngine(recordStore, ledgerStore))
 	agents.RegisterLMSTools(executor, lmsStore)
+	agents.RegisterCertificateTool(executor, lms.NewCertificateIssuer(recordStore, pool))
 	agents.RegisterHelpdeskTools(executor, helpdeskStore)
 
 	// rateLimitMW picks the Redis-backed limiter when wired, otherwise
@@ -384,7 +385,7 @@ func run() error {
 	hdh := &helpdeskHandlers{store: helpdeskStore}
 	reph := &reportsHandlers{store: reportStore, runner: reportRunner}
 	repsh := &reportScheduleHandlers{store: reporting.NewScheduleStore(pool)}
-	exph := &exportHandlers{store: exporter.NewStore(pool)}
+	exph := &exportHandlers{store: exporter.NewStore(pool, adminPool)}
 	dashh := &dashboardHandlers{store: dashboard.NewStore(pool).WithConverter(dashboardRateAdapter{rates: apiExchangeRates})}
 
 	// Inbound email → ticket. Wired only when adminPool is

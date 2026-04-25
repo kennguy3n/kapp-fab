@@ -267,7 +267,7 @@ func run() error {
 	// scheduled-action loop on a separate ticker because export
 	// payloads can be large; we don't want a slow CSV render to
 	// stall the scheduled-action draining cadence.
-	go NewExportWorker(exporter.NewStore(pool), recordStore, 5*time.Second).Run(ctx)
+	go NewExportWorker(exporter.NewStore(pool, adminPool), recordStore, 5*time.Second).Run(ctx)
 
 	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)
 	ticker := time.NewTicker(tickInterval)
