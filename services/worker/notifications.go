@@ -334,15 +334,15 @@ func (r *notificationRouter) fanOutRegisteredWebhooks(ctx context.Context, e eve
 	if r == nil || r.webhookStore == nil || r.adminPool == nil {
 		return
 	}
-	hooks, err := r.webhookStore.ListActiveAcrossTenants(ctx, r.adminPool)
+	// Query scoped to the event's tenant so a single drain tick
+	// costs O(per_tenant_webhooks) — a table-wide scan would be
+	// catastrophic at the documented 1000+ tenant target.
+	hooks, err := r.webhookStore.ListActiveForTenant(ctx, r.adminPool, e.TenantID)
 	if err != nil {
-		log.Printf("worker: list active webhooks: %v", err)
+		log.Printf("worker: list active webhooks tenant=%s: %v", e.TenantID, err)
 		return
 	}
 	for _, h := range hooks {
-		if h.TenantID != e.TenantID {
-			continue
-		}
 		if !webhookMatches(h, e.Type) {
 			continue
 		}

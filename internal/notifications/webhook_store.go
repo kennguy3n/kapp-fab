@@ -186,6 +186,41 @@ func (s *WebhookStore) ListActiveAcrossTenants(ctx context.Context, adminPool *p
 	return out, rows.Err()
 }
 
+// ListActiveForTenant returns every active webhook for a single
+// tenant using the admin pool. Used by the worker's event fan-out
+// path so each event triggers an O(per_tenant_webhooks) query
+// instead of a full-table scan. The admin pool is required because
+// the worker serves every tenant from one process — RLS is
+// enforced by the explicit tenant_id predicate below rather than
+// by the GUC-based dbutil.WithTenantTx helper.
+func (s *WebhookStore) ListActiveForTenant(ctx context.Context, adminPool *pgxpool.Pool, tenantID uuid.UUID) ([]Webhook, error) {
+	if adminPool == nil {
+		return nil, errors.New("webhook: admin pool required for cross-tenant scan")
+	}
+	rows, err := adminPool.Query(ctx, `
+		SELECT id, tenant_id, url, secret, event_filters, active, created_at, updated_at
+		  FROM webhooks
+		 WHERE active = TRUE AND tenant_id = $1`,
+		tenantID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("webhook: list active for tenant: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Webhook, 0)
+	for rows.Next() {
+		var w Webhook
+		if err := rows.Scan(
+			&w.ID, &w.TenantID, &w.URL, &w.Secret, &w.EventFilters,
+			&w.Active, &w.CreatedAt, &w.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("webhook: scan: %w", err)
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
 // Get returns the webhook by id or ErrWebhookNotFound.
 func (s *WebhookStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*Webhook, error) {
 	var w Webhook

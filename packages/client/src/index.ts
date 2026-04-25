@@ -315,21 +315,34 @@ export class ApiClient {
 
   // --- Print / PDF --------------------------------------------------------
 
-  /** URL a browser can follow to stream the record's PDF. Using a
-   *  direct URL lets the anchor tag handle cookies / auth headers
-   *  the Fetch wrapper normally injects — the browser sends the
-   *  session tokens automatically. */
-  recordPdfUrl(ktype: string, id: string): string {
-    return `${this.cfg.baseUrl}/records/${encodeURIComponent(
-      ktype
-    )}/${encodeURIComponent(id)}/pdf`;
+  /** Fetch the record's PDF as a Blob. Uses the regular Fetch
+   *  pipeline so X-Tenant-ID + Authorization headers are attached;
+   *  browser anchor navigation skips custom headers, so the callers
+   *  must pipe this blob into an object URL + programmatic click. */
+  async recordPdf(ktype: string, id: string): Promise<Blob> {
+    return this.fetchBlob(
+      `/records/${encodeURIComponent(ktype)}/${encodeURIComponent(id)}/pdf`
+    );
   }
 
-  /** Same as recordPdfUrl for the HTML preview variant. */
-  recordHtmlUrl(ktype: string, id: string): string {
-    return `${this.cfg.baseUrl}/records/${encodeURIComponent(
-      ktype
-    )}/${encodeURIComponent(id)}/html`;
+  /** Same shape as recordPdf for the HTML preview variant. */
+  async recordHtml(ktype: string, id: string): Promise<Blob> {
+    return this.fetchBlob(
+      `/records/${encodeURIComponent(ktype)}/${encodeURIComponent(id)}/html`
+    );
+  }
+
+  /** Shared helper: issue a GET with the configured auth/tenant
+   *  headers and return the response body as a Blob. Used by the
+   *  print endpoints which return binary (PDF) or text (HTML). */
+  private async fetchBlob(path: string): Promise<Blob> {
+    const res = await fetch(`${this.cfg.baseUrl}${path}`, {
+      headers: { ...this.cfg.headers() },
+    });
+    if (!res.ok) {
+      throw new Error(`${res.status} ${res.statusText}`);
+    }
+    return await res.blob();
   }
 
   // --- Webhooks ----------------------------------------------------------
