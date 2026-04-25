@@ -41,6 +41,12 @@ type Tenant struct {
 	ZKAccessKey string `json:"zk_access_key,omitempty"`
 	ZKSecretKey string `json:"-"` // never serialise the secret
 	ZKBucket    string `json:"zk_bucket,omitempty"`
+
+	// BaseCurrency is the ISO-4217 functional currency for the
+	// tenant. Defaults to USD on tenants created before migration
+	// 000029. Used by PostJournalEntry to detect + auto-convert
+	// foreign-currency lines.
+	BaseCurrency string `json:"base_currency,omitempty"`
 }
 
 // HasZKFabric reports whether the tenant has been provisioned with

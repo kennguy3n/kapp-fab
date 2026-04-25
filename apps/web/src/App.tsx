@@ -32,6 +32,8 @@ import { ExchangeRatesPage } from "./pages/ExchangeRatesPage";
 import { HelpdeskPage } from "./pages/HelpdeskPage";
 import { ReportBuilderPage } from "./pages/ReportBuilderPage";
 import { TenantFeaturesPage } from "./pages/TenantFeaturesPage";
+import { PlacementPolicyPage } from "./pages/PlacementPolicyPage";
+import { RetentionPoliciesPage } from "./pages/RetentionPoliciesPage";
 import { UsageDashboardPage } from "./pages/UsageDashboardPage";
 import { SearchPage } from "./pages/SearchPage";
 import { WebhooksPage } from "./pages/WebhooksPage";
@@ -157,6 +159,8 @@ const navSections: NavSection[] = [
     links: [
       { to: "/admin/tenants", label: "Tenants" },
       { to: "/admin/features", label: "Features" },
+      { to: "/admin/placement", label: "Placement Policy" },
+      { to: "/admin/retention", label: "Retention" },
       { to: "/admin/usage", label: "Usage" },
       { to: "/admin/audit", label: "Audit Log" },
       { to: "/admin/webhooks", label: "Webhooks" },
@@ -293,6 +297,8 @@ function AppShell() {
           <Route path="/" element={<DashboardPage />} />
           <Route path="/admin/tenants" element={<TenantListPage />} />
           <Route path="/admin/features" element={<TenantFeaturesPage />} />
+          <Route path="/admin/placement" element={<PlacementPolicyPage />} />
+          <Route path="/admin/retention" element={<RetentionPoliciesPage />} />
           <Route path="/admin/usage" element={<UsageDashboardPage />} />
           <Route path="/admin/audit" element={<AuditLogPage />} />
           <Route path="/approvals" element={<ApprovalsPage />} />

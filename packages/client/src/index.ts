@@ -93,6 +93,44 @@ export interface TenantFeaturesResponse {
   features: Record<string, boolean>;
 }
 
+export interface PlacementPolicy {
+  tenant: string;
+  bucket?: string;
+  policy: {
+    encryption: { mode: string; kms?: string };
+    placement: {
+      provider: string[];
+      region?: string[];
+      country?: string[];
+      storage_class?: string[];
+      cache_location?: string;
+    };
+  };
+}
+
+export interface RetentionPolicy {
+  tenant_id: string;
+  category: string;
+  retention_days: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IsolationCheck {
+  name: string;
+  passed: boolean;
+  detail?: string;
+  elapsed?: string;
+}
+
+export interface IsolationReport {
+  passed: boolean;
+  ran_at: string;
+  duration: string;
+  checks: IsolationCheck[];
+}
+
 export interface PlanLimits {
   api_calls?: number;
   storage_bytes?: number;
@@ -196,6 +234,45 @@ export class ApiClient {
       headers: { "Idempotency-Key": crypto.randomUUID() },
       body: JSON.stringify({ features }),
     });
+  }
+
+  // --- Placement policy -------------------------------------------------
+  getPlacementPolicy(id: string): Promise<PlacementPolicy> {
+    return this.request(`/tenants/${encodeURIComponent(id)}/placement`);
+  }
+
+  updatePlacementPolicy(
+    id: string,
+    policy: PlacementPolicy
+  ): Promise<PlacementPolicy> {
+    return this.request(`/tenants/${encodeURIComponent(id)}/placement`, {
+      method: "PUT",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(policy),
+    });
+  }
+
+  // --- Data retention policies ----------------------------------------
+  listRetentionPolicies(
+    id: string
+  ): Promise<{ policies: RetentionPolicy[] }> {
+    return this.request(`/tenants/${encodeURIComponent(id)}/retention`);
+  }
+
+  upsertRetentionPolicy(
+    id: string,
+    body: { category: string; retention_days: number; enabled?: boolean }
+  ): Promise<RetentionPolicy> {
+    return this.request(`/tenants/${encodeURIComponent(id)}/retention`, {
+      method: "PUT",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(body),
+    });
+  }
+
+  // --- Runtime isolation audit ----------------------------------------
+  runIsolationAudit(): Promise<IsolationReport> {
+    return this.request(`/admin/isolation-audit`);
   }
 
   // --- Metering + plans -------------------------------------------------
@@ -1107,6 +1184,8 @@ export interface DashboardSummary {
   pending_approvals: number;
   open_tickets_count: number;
   overdue_tickets_count: number;
+  /** ISO-4217 functional currency the monetary fields are denominated in. */
+  base_currency: string;
 }
 
 // --- Auxiliary types ---------------------------------------------------

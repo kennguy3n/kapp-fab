@@ -55,10 +55,10 @@ func (s *PGStore) Create(ctx context.Context, input CreateInput) (*Tenant, error
 		`INSERT INTO tenants (id, slug, name, cell, status, plan, quota)
 		 VALUES ($1, $2, $3, $4, 'active', $5, $6)
 		 RETURNING id, slug, name, cell, status, plan, quota, created_at, updated_at,
-		           zk_access_key, zk_secret_key, zk_bucket`,
+		           zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD')`,
 		id, input.Slug, input.Name, input.Cell, input.Plan, quota,
 	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-		&zkAccess, &zkSecret, &zkBucket)
+		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
@@ -76,10 +76,10 @@ func (s *PGStore) Get(ctx context.Context, id uuid.UUID) (*Tenant, error) {
 	var zkAccess, zkSecret, zkBucket *string
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at,
-		        zk_access_key, zk_secret_key, zk_bucket
+		        zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD')
 		 FROM tenants WHERE id = $1`, id,
 	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-		&zkAccess, &zkSecret, &zkBucket)
+		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -96,10 +96,10 @@ func (s *PGStore) GetBySlug(ctx context.Context, slug string) (*Tenant, error) {
 	var zkAccess, zkSecret, zkBucket *string
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at,
-		        zk_access_key, zk_secret_key, zk_bucket
+		        zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD')
 		 FROM tenants WHERE slug = $1`, slug,
 	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-		&zkAccess, &zkSecret, &zkBucket)
+		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -115,7 +115,7 @@ func (s *PGStore) GetBySlug(ctx context.Context, slug string) (*Tenant, error) {
 func (s *PGStore) List(ctx context.Context) ([]Tenant, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at,
-		        zk_access_key, zk_secret_key, zk_bucket
+		        zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD')
 		 FROM tenants
 		 ORDER BY slug ASC`)
 	if err != nil {
@@ -132,7 +132,7 @@ func (s *PGStore) List(ctx context.Context) ([]Tenant, error) {
 		if err := rows.Scan(
 			&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status,
 			&t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-			&zkAccess, &zkSecret, &zkBucket,
+			&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency,
 		); err != nil {
 			return nil, fmt.Errorf("tenant: list scan: %w", err)
 		}
@@ -233,6 +233,27 @@ func assignZK(t *Tenant, access, secret, bucket *string) {
 	if bucket != nil {
 		t.ZKBucket = *bucket
 	}
+}
+
+// SetBaseCurrency updates the tenant's functional currency. Called by
+// the wizard once at setup time and by the admin tenant-edit form.
+// The value must be a 3-letter ISO-4217 code; the column has a CHECK
+// of length 3 in migration 000029.
+func (s *PGStore) SetBaseCurrency(ctx context.Context, id uuid.UUID, code string) error {
+	if len(code) != 3 {
+		return errors.New("tenant: base_currency must be a 3-letter ISO-4217 code")
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE tenants SET base_currency = $1, updated_at = now() WHERE id = $2`,
+		code, id,
+	)
+	if err != nil {
+		return fmt.Errorf("tenant: set base currency: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // SetZKCredentials persists the per-tenant ZK Object Fabric HMAC

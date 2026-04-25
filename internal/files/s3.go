@@ -40,6 +40,31 @@ type S3Store struct {
 	client *s3.Client
 }
 
+// Close drops any pooled HTTP transport state held by the underlying
+// SDK client so an evicted per-tenant store does not retain idle
+// connections forever. Best-effort: the SDK does not expose a
+// canonical Close, so we reach into the HTTP client (if it exposes
+// CloseIdleConnections via a *http.Client or a smithy idleCloser).
+// Safe to call on a nil receiver to keep eviction callbacks simple.
+func (s *S3Store) Close() error {
+	if s == nil {
+		return nil
+	}
+	type idleCloser interface {
+		CloseIdleConnections()
+	}
+	// Walk the SDK option chain to find the HTTP client. The SDK
+	// stores it on awsCfg.HTTPClient; we held the reference via the
+	// closure when the client was built. Since we don't have direct
+	// access here, we rely on the smithy buildable client's
+	// CloseIdleConnections (Phase 1 wiring — replace with a held
+	// reference once an SDK upgrade exposes it cleanly).
+	if c, ok := any(s.client).(idleCloser); ok {
+		c.CloseIdleConnections()
+	}
+	return nil
+}
+
 // NewS3Store builds an S3Store from the config. A context is taken
 // so credential providers (STS / IMDS) can honour cancellation
 // during startup.
