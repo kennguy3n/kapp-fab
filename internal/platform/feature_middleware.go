@@ -74,6 +74,10 @@ func FeatureFromPath(p string) string {
 		return tenant.FeatureLMS
 	case "crm":
 		return tenant.FeatureCRM
+	case "webhooks":
+		return tenant.FeatureWebhook
+	case "portal":
+		return tenant.FeaturePortal
 	default:
 		return ""
 	}

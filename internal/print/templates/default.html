@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>{{ .KType }} {{ .ID }}</title>
+<style>
+  body { font: 12pt/1.4 "Helvetica Neue", Arial, sans-serif; color: #111; padding: 24pt; }
+  h1 { font-size: 18pt; margin: 0 0 12pt; }
+  .meta { color: #555; margin-bottom: 18pt; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 6pt 8pt; border-bottom: 1px solid #ddd; text-align: left; vertical-align: top; }
+  th { background: #f3f4f6; width: 35%; }
+  pre { margin: 0; font: inherit; white-space: pre-wrap; word-break: break-word; }
+</style>
+</head>
+<body>
+  <h1>{{ .KType }} / {{ .ID }}</h1>
+  <div class="meta">
+    Status: {{ .Status }} · version {{ .Version }} · updated {{ .UpdatedAt.Format "2006-01-02 15:04 UTC" }}
+  </div>
+  <table>
+    {{ range fieldPairs .Data }}
+    <tr>
+      <th>{{ .Key }}</th>
+      <td><pre>{{ .Value }}</pre></td>
+    </tr>
+    {{ end }}
+  </table>
+</body>
+</html>

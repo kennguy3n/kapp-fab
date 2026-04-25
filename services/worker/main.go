@@ -129,11 +129,13 @@ func run() error {
 		From:     cfg.SMTPFrom,
 	}
 	router := &notificationRouter{
-		bridge: bridge,
-		client: &http.Client{Timeout: 5 * time.Second},
-		pool:   pool,
-		store:  notifications.NewStore(pool),
-		smtp:   notifications.NewSMTPAdapter(smtpCfg),
+		bridge:       bridge,
+		client:       &http.Client{Timeout: 5 * time.Second},
+		pool:         pool,
+		adminPool:    adminPool,
+		store:        notifications.NewStore(pool),
+		smtp:         notifications.NewSMTPAdapter(smtpCfg),
+		webhookStore: notifications.NewWebhookStore(pool),
 	}
 
 	// Low-stock alert sweeper runs alongside the outbox drain so a
@@ -143,6 +145,15 @@ func run() error {
 	// other `inventory.*` event.
 	alerts := newStockAlertWorker(pool, adminPool, publisher, dbutil.SetTenantContext)
 	go alerts.Run(ctx)
+
+	// Webhook retry loop. Failed webhook POSTs persist a row in
+	// webhook_deliveries with next_retry_at set; this loop atomically
+	// claims due rows across tenants and re-posts via the same
+	// deliverWebhook path. Running the retry loop out-of-band keeps
+	// the outbox drain free of any time.Sleep on a misbehaving
+	// customer endpoint — a slow tenant webhook no longer stalls
+	// unrelated tenants' events.
+	go router.runWebhookRetryLoop(ctx, 5*time.Second)
 
 	// Scheduled actions engine. Registers both:
 	//   - the recurring AR invoice generator against action_type

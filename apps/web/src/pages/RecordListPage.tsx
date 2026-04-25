@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord, SavedView } from "@kapp/client";
@@ -90,6 +90,86 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
   });
 
   const [selected, setSelected] = useState<KRecord | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  // React Router reuses this component across /records/:ktype
+  // transitions (same route pattern), so useState does not reset on
+  // the navigation. Clear the bulk-action selection and right-pane
+  // focus explicitly whenever the KType changes — otherwise the
+  // toolbar keeps showing "N selected" with stale IDs from the
+  // previous KType, and clicking a bulk action would send them to
+  // the new KType's /bulk endpoint (backend safely rejects, UX
+  // looks broken).
+  useEffect(() => {
+    setSelectedIds(new Set());
+    setSelected(null);
+  }, [ktype]);
+  const toggleSelect = (id: string, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+  const toggleSelectAll = (checked: boolean, rows: KRecord[]) => {
+    setSelectedIds(checked ? new Set(rows.map((r) => r.id)) : new Set());
+  };
+
+  const bulkStatusMutation = useMutation({
+    mutationFn: async ({ ids, status }: { ids: string[]; status: string }) =>
+      api.bulkRecords(ktype!, {
+        ids,
+        action: "status_change",
+        payload: { status },
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["records", ktype] });
+      setSelectedIds(new Set());
+    },
+  });
+
+  const bulkDeleteMutation = useMutation({
+    mutationFn: async (ids: string[]) =>
+      api.bulkRecords(ktype!, { ids, action: "delete" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["records", ktype] });
+      setSelectedIds(new Set());
+    },
+  });
+
+  const handleBulkStatus = () => {
+    const status = window.prompt("New status");
+    if (!status) return;
+    bulkStatusMutation.mutate({ ids: [...selectedIds], status });
+  };
+
+  const handleBulkDelete = () => {
+    if (!window.confirm(`Delete ${selectedIds.size} record(s)?`)) return;
+    bulkDeleteMutation.mutate([...selectedIds]);
+  };
+
+  const handleBulkExport = async () => {
+    // The two mutations above route errors through useMutation's
+    // builtin handling, but bulkExportRecords returns a plain
+    // Promise<string> because the response is a blob — without a
+    // try/catch a 4xx/5xx surfaces as an unhandled rejection and
+    // the user gets no feedback at all.
+    try {
+      const csv = await api.bulkExportRecords(ktype!, [...selectedIds]);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${ktype}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      window.alert((err as Error).message ?? "Export failed");
+    }
+  };
+
   const hasKanban = !!ktypeQuery.data?.schema?.views?.kanban;
   const [modeOverride, setModeOverride] = useState<ViewMode | null>(null);
   const mode: ViewMode =
@@ -224,7 +304,40 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
             ktype={kt}
             records={records}
             onRowClick={(r) => setSelected(r)}
+            selectedIds={selectedIds}
+            onToggleSelect={toggleSelect}
+            onToggleAll={(checked) => toggleSelectAll(checked, records)}
           />
+        )}
+        {selectedIds.size > 0 && (
+          <div
+            role="toolbar"
+            aria-label="Bulk actions"
+            style={{
+              position: "sticky",
+              bottom: 16,
+              marginTop: 12,
+              display: "flex",
+              gap: 8,
+              alignItems: "center",
+              background: "#111827",
+              color: "#f9fafb",
+              padding: "8px 12px",
+              borderRadius: 8,
+              boxShadow: "0 4px 12px rgba(0,0,0,0.2)",
+              zIndex: 2,
+            }}
+          >
+            <span>{selectedIds.size} selected</span>
+            <button onClick={handleBulkStatus} disabled={bulkStatusMutation.isPending}>
+              Change Status
+            </button>
+            <button onClick={handleBulkDelete} disabled={bulkDeleteMutation.isPending}>
+              Delete
+            </button>
+            <button onClick={handleBulkExport}>Export CSV</button>
+            <button onClick={() => setSelectedIds(new Set())}>Clear</button>
+          </div>
         )}
       </section>
       {selected && (

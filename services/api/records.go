@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
@@ -139,6 +142,173 @@ func (h *recordHandlers) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// bulkRecordRequest is the payload accepted by POST /records/{ktype}/bulk.
+// Action selects the operation applied to the selected ids; Payload
+// carries the action-specific input — a merge-patch for status_change,
+// an optional list of columns for export, or an empty object for
+// delete.
+type bulkRecordRequest struct {
+	IDs     []string        `json:"ids"`
+	Action  string          `json:"action"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+}
+
+// bulk dispatches the requested action over the selected records.
+// Each action runs inside WithTenantTx so the batch commits as a unit
+// — a partial failure rolls back the whole selection rather than
+// leaving the list in a mixed state the user cannot easily undo.
+func (h *recordHandlers) bulk(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	ktypeName := chi.URLParam(r, "ktype")
+	var req bulkRecordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if len(req.IDs) == 0 {
+		http.Error(w, "ids required", http.StatusBadRequest)
+		return
+	}
+	ids := make([]uuid.UUID, 0, len(req.IDs))
+	for _, raw := range req.IDs {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid record id %q", raw), http.StatusBadRequest)
+			return
+		}
+		ids = append(ids, id)
+	}
+	actor := actorOrDefault(r.Context())
+	switch req.Action {
+	case "status_change":
+		var payload struct {
+			Status string          `json:"status"`
+			Data   json.RawMessage `json:"data"`
+		}
+		if len(req.Payload) > 0 {
+			if err := json.Unmarshal(req.Payload, &payload); err != nil {
+				http.Error(w, "invalid payload", http.StatusBadRequest)
+				return
+			}
+		}
+		// Either {"status":"foo"} or {"data":{"status":"foo", ...}}.
+		// We normalise to a JSONB patch the store shallow-merges onto
+		// each record's data.
+		patch := payload.Data
+		if len(patch) == 0 {
+			if payload.Status == "" {
+				http.Error(w, "status required", http.StatusBadRequest)
+				return
+			}
+			p, err := json.Marshal(map[string]string{"status": payload.Status})
+			if err != nil {
+				http.Error(w, "marshal patch: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			patch = p
+		}
+		res, err := h.store.BulkPatch(r.Context(), t.ID, ktypeName, ids, patch, actor)
+		if err != nil {
+			writeRecordError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	case "delete":
+		res, err := h.store.BulkDelete(r.Context(), t.ID, ktypeName, ids, actor)
+		if err != nil {
+			writeRecordError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	case "export":
+		rows, err := h.store.BulkFetch(r.Context(), t.ID, ktypeName, ids)
+		if err != nil {
+			writeRecordError(w, err)
+			return
+		}
+		writeRecordCSV(w, ktypeName, rows)
+	default:
+		http.Error(w, fmt.Sprintf("unsupported action %q", req.Action), http.StatusBadRequest)
+	}
+}
+
+// writeRecordCSV streams the selected records as a CSV file. The
+// first row is the union of top-level keys across all records' data
+// payloads so the export always surfaces every field the tenant has
+// in play without requiring the caller to pre-declare columns.
+//
+// The record-level metadata columns are prefixed with "record_" so
+// they cannot collide with data fields of the same name. Most KType
+// schemas reuse names like "status", "id", "version" inside the
+// JSONB payload (e.g. helpdesk.ticket.status carries the workflow
+// state, distinct from the lifecycle column) — emitting both as
+// just "status" produced duplicate headers that pandas / Excel /
+// other CSV consumers handle inconsistently.
+func writeRecordCSV(w http.ResponseWriter, ktypeName string, rows []record.KRecord) {
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.csv"`, ktypeName))
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
+
+	columnSet := map[string]struct{}{}
+	parsed := make([]map[string]any, len(rows))
+	for i, r := range rows {
+		m := map[string]any{}
+		if len(r.Data) > 0 {
+			_ = json.Unmarshal(r.Data, &m)
+		}
+		parsed[i] = m
+		for k := range m {
+			columnSet[k] = struct{}{}
+		}
+	}
+	columns := make([]string, 0, len(columnSet))
+	for k := range columnSet {
+		columns = append(columns, k)
+	}
+	sort.Strings(columns)
+	header := append([]string{
+		"record_id",
+		"record_status",
+		"record_version",
+		"record_created_at",
+		"record_updated_at",
+	}, columns...)
+	_ = cw.Write(header)
+	for i, r := range rows {
+		row := []string{
+			r.ID.String(),
+			r.Status,
+			strconv.Itoa(r.Version),
+			r.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+			r.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		}
+		for _, col := range columns {
+			v, ok := parsed[i][col]
+			if !ok || v == nil {
+				row = append(row, "")
+				continue
+			}
+			switch val := v.(type) {
+			case string:
+				row = append(row, val)
+			default:
+				b, err := json.Marshal(val)
+				if err != nil {
+					row = append(row, "")
+				} else {
+					row = append(row, string(b))
+				}
+			}
+		}
+		_ = cw.Write(row)
+	}
 }
 
 func writeRecordError(w http.ResponseWriter, err error) {

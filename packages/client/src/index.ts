@@ -271,6 +271,150 @@ export class ApiClient {
     );
   }
 
+  /** Run a bulk operation over the selected record ids. The backend
+   *  runs every mutation inside one `WithTenantTx` transaction so
+   *  the batch commits as a unit; export streams CSV directly. */
+  bulkRecords(
+    ktype: string,
+    input: {
+      ids: string[];
+      action: "status_change" | "delete";
+      payload?: Record<string, unknown>;
+    }
+  ): Promise<BulkRecordResult> {
+    return this.request(`/records/${encodeURIComponent(ktype)}/bulk`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** Export the selected records as CSV. Returns the raw text
+   *  response body so callers can plug it into Blob + download. */
+  async bulkExportRecords(
+    ktype: string,
+    ids: string[]
+  ): Promise<string> {
+    const res = await fetch(
+      `${this.cfg.baseUrl}/records/${encodeURIComponent(ktype)}/bulk`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+          ...this.cfg.headers(),
+        },
+        body: JSON.stringify({ ids, action: "export" }),
+      }
+    );
+    if (!res.ok) {
+      throw new Error(`${res.status} ${res.statusText}`);
+    }
+    return await res.text();
+  }
+
+  // --- Print / PDF --------------------------------------------------------
+
+  /** Fetch the record's PDF as a Blob. Uses the regular Fetch
+   *  pipeline so X-Tenant-ID + Authorization headers are attached;
+   *  browser anchor navigation skips custom headers, so the callers
+   *  must pipe this blob into an object URL + programmatic click. */
+  async recordPdf(ktype: string, id: string): Promise<Blob> {
+    return this.fetchBlob(
+      `/records/${encodeURIComponent(ktype)}/${encodeURIComponent(id)}/pdf`
+    );
+  }
+
+  /** Same shape as recordPdf for the HTML preview variant. */
+  async recordHtml(ktype: string, id: string): Promise<Blob> {
+    return this.fetchBlob(
+      `/records/${encodeURIComponent(ktype)}/${encodeURIComponent(id)}/html`
+    );
+  }
+
+  /** Shared helper: issue a GET with the configured auth/tenant
+   *  headers and return the response body as a Blob. Used by the
+   *  print endpoints which return binary (PDF) or text (HTML). */
+  private async fetchBlob(path: string): Promise<Blob> {
+    const res = await fetch(`${this.cfg.baseUrl}${path}`, {
+      headers: { ...this.cfg.headers() },
+    });
+    if (!res.ok) {
+      throw new Error(`${res.status} ${res.statusText}`);
+    }
+    return await res.blob();
+  }
+
+  // --- Webhooks ----------------------------------------------------------
+
+  listWebhooks(): Promise<{ webhooks: Webhook[] }> {
+    return this.request(`/webhooks`);
+  }
+  getWebhook(id: string): Promise<Webhook> {
+    return this.request(`/webhooks/${encodeURIComponent(id)}`);
+  }
+  createWebhook(input: {
+    url: string;
+    secret: string;
+    event_filters?: string[];
+    active?: boolean;
+  }): Promise<Webhook> {
+    return this.request(`/webhooks`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+  updateWebhook(
+    id: string,
+    input: {
+      url?: string;
+      secret?: string;
+      event_filters?: string[];
+      active?: boolean;
+    }
+  ): Promise<Webhook> {
+    return this.request(`/webhooks/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+  deleteWebhook(id: string): Promise<void> {
+    return this.request(`/webhooks/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  }
+  listWebhookDeliveries(
+    id: string,
+    limit?: number
+  ): Promise<{ deliveries: WebhookDelivery[] }> {
+    const qs = limit ? `?limit=${limit}` : "";
+    return this.request(`/webhooks/${encodeURIComponent(id)}/deliveries${qs}`);
+  }
+
+  // --- Search ------------------------------------------------------------
+
+  /** Full-text search across krecords for the current tenant.
+   *  `ktypes`, when supplied, restricts the scan to the listed KType
+   *  names so the UI can render per-domain tabs. Results are ranked
+   *  by `ts_rank` server-side; callers should render them in order. */
+  searchRecords(params: {
+    q: string;
+    ktypes?: string[];
+    limit?: number;
+  }): Promise<SearchResponse> {
+    const qs = new URLSearchParams({ q: params.q });
+    for (const k of params.ktypes ?? []) {
+      qs.append("ktype", k);
+    }
+    if (params.limit !== undefined) {
+      qs.set("limit", String(params.limit));
+    }
+    return this.request(`/search?${qs.toString()}`);
+  }
+
   // --- Workflow ----------------------------------------------------------
 
   /** Drives a workflow transition on a record. Callers pick the action
@@ -744,6 +888,57 @@ export class ApiClient {
   getDashboardSummary(): Promise<DashboardSummary> {
     return this.request("/dashboard/summary");
   }
+}
+
+// --- Bulk actions -----------------------------------------------------
+
+export interface BulkRecordError {
+  id: string;
+  error: string;
+}
+
+export interface BulkRecordResult {
+  succeeded: string[];
+  failed: BulkRecordError[];
+}
+
+// --- Search -----------------------------------------------------------
+
+export interface SearchResult extends KRecord {
+  rank: number;
+}
+
+export interface SearchResponse {
+  query: string;
+  results: SearchResult[];
+}
+
+// --- Webhooks ---------------------------------------------------------
+
+export interface Webhook {
+  id: string;
+  tenant_id: string;
+  url: string;
+  secret: string;
+  event_filters: string[];
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WebhookDelivery {
+  id: string;
+  tenant_id: string;
+  webhook_id: string;
+  event_id: string;
+  event_type: string;
+  status_code?: number;
+  response_body?: string;
+  attempt: number;
+  delivered: boolean;
+  error?: string;
+  next_retry_at?: string;
+  created_at: string;
 }
 
 // --- Phase I auxiliary types ------------------------------------------

@@ -1,4 +1,5 @@
-import { Route, Routes, Link } from "react-router-dom";
+import { useState } from "react";
+import { Route, Routes, Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./lib/api";
 import { RecordListPage } from "./pages/RecordListPage";
@@ -32,6 +33,12 @@ import { HelpdeskPage } from "./pages/HelpdeskPage";
 import { ReportBuilderPage } from "./pages/ReportBuilderPage";
 import { TenantFeaturesPage } from "./pages/TenantFeaturesPage";
 import { UsageDashboardPage } from "./pages/UsageDashboardPage";
+import { SearchPage } from "./pages/SearchPage";
+import { WebhooksPage } from "./pages/WebhooksPage";
+import { PortalLoginPage } from "./pages/portal/PortalLoginPage";
+import { PortalTicketListPage } from "./pages/portal/PortalTicketListPage";
+import { PortalTicketDetailPage } from "./pages/portal/PortalTicketDetailPage";
+import { PortalNewTicketPage } from "./pages/portal/PortalNewTicketPage";
 import { NotificationBell } from "./components/NotificationBell";
 
 const tenantKey = (): string =>
@@ -152,6 +159,7 @@ const navSections: NavSection[] = [
       { to: "/admin/features", label: "Features" },
       { to: "/admin/usage", label: "Usage" },
       { to: "/admin/audit", label: "Audit Log" },
+      { to: "/admin/webhooks", label: "Webhooks" },
       { to: "/imports", label: "Imports" },
     ],
   },
@@ -164,11 +172,60 @@ export function App() {
           visitors don't see tenant navigation. */}
       <Route path="/forms/:formId" element={<FormPage />} />
       <Route path="/login" element={<LoginPage />} />
+      {/* Helpdesk customer portal. Runs outside the authenticated
+          AppShell — portal users never see the tenant's internal
+          nav/data; only their own tickets. */}
+      <Route path="/portal/:tenant_slug" element={<PortalLoginPage />} />
+      <Route
+        path="/portal/:tenant_slug/tickets"
+        element={<PortalTicketListPage />}
+      />
+      <Route
+        path="/portal/:tenant_slug/tickets/new"
+        element={<PortalNewTicketPage />}
+      />
+      <Route
+        path="/portal/:tenant_slug/tickets/:id"
+        element={<PortalTicketDetailPage />}
+      />
       {/* Setup wizard is rendered outside the app shell because the
           tenant has no nav-worthy data until the wizard completes. */}
       <Route path="/setup/:id" element={<SetupWizardPage />} />
       <Route path="/*" element={<AppShell />} />
     </Routes>
+  );
+}
+
+// GlobalSearchBox is the shell-level search input. Submitting routes
+// to /search?q=... which SearchPage debounces and executes via the
+// /api/v1/search endpoint.
+function GlobalSearchBox() {
+  const nav = useNavigate();
+  const [q, setQ] = useState("");
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        const v = q.trim();
+        if (!v) return;
+        nav(`/search?q=${encodeURIComponent(v)}`);
+      }}
+      style={{ flex: 1, maxWidth: 420 }}
+    >
+      <input
+        type="search"
+        placeholder="Search records…"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        aria-label="Global search"
+        style={{
+          width: "100%",
+          padding: "6px 10px",
+          border: "1px solid #d1d5db",
+          borderRadius: 6,
+        }}
+      />
+    </form>
   );
 }
 
@@ -223,10 +280,13 @@ function AppShell() {
         <div
           style={{
             display: "flex",
-            justifyContent: "flex-end",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 12,
             marginBottom: 12,
           }}
         >
+          <GlobalSearchBox />
           <NotificationBell />
         </div>
         <Routes>
@@ -239,6 +299,8 @@ function AppShell() {
           <Route path="/finance/exchange-rates" element={<ExchangeRatesPage />} />
           <Route path="/helpdesk" element={<HelpdeskPage />} />
           <Route path="/reports" element={<ReportBuilderPage />} />
+          <Route path="/search" element={<SearchPage />} />
+          <Route path="/admin/webhooks" element={<WebhooksPage />} />
           <Route
             path="/finance/accounts"
             element={<ChartOfAccountsPage />}

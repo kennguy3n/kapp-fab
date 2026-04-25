@@ -333,6 +333,86 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 	return out, nil
 }
 
+// ListByField returns every record for the tenant matching
+// filter.KType whose top-level JSONB field `field` equals `value`
+// (case-insensitively). Used by surfaces like the customer portal
+// where the caller must be restricted to rows they own
+// (helpdesk.ticket.customer_email = claims.Email) — pushing the
+// predicate into SQL avoids loading and decrypting the entire
+// KType for the tenant just to filter client-side.
+//
+// Only plain-text JSONB fields are safe targets: values on fields
+// marked `encrypted: true` in the schema are stored as ciphertext
+// and would never match. Callers must validate that `field` is a
+// public/indexable attribute before passing it in — this method is
+// not exposed to end users directly.
+//
+// Paginated internally in 500-row chunks like ListAll so large
+// tenants still stream in bounded memory.
+func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter ListFilter, field, value string) ([]KRecord, error) {
+	if filter.KType == "" {
+		return nil, errors.New("record: ktype filter required")
+	}
+	if field == "" {
+		return nil, errors.New("record: field required")
+	}
+	status := filter.Status
+	if status == "" {
+		status = "active"
+	}
+	const chunk = 500
+	out := make([]KRecord, 0)
+	offset := 0
+	for {
+		page := make([]KRecord, 0, chunk)
+		err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			rows, err := tx.Query(ctx,
+				`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+				        created_by, created_at, updated_by, updated_at, deleted_at
+				 FROM krecords
+				 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+				   AND lower(data->>$4) = lower($5)
+				 ORDER BY updated_at DESC, id DESC
+				 LIMIT $6 OFFSET $7`,
+				tenantID, filter.KType, status, field, value, chunk, offset,
+			)
+			if err != nil {
+				return fmt.Errorf("record: list_by_field: %w", err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var r KRecord
+				if err := rows.Scan(
+					&r.ID, &r.TenantID, &r.KType, &r.KTypeVersion,
+					&r.Data, &r.Status, &r.Version,
+					&r.CreatedBy, &r.CreatedAt,
+					&r.UpdatedBy, &r.UpdatedAt, &r.DeletedAt,
+				); err != nil {
+					return fmt.Errorf("record: scan: %w", err)
+				}
+				page = append(page, r)
+			}
+			return rows.Err()
+		})
+		if err != nil {
+			return nil, err
+		}
+		for i := range page {
+			decrypted, err := s.decryptRecord(ctx, &page[i])
+			if err != nil {
+				return nil, err
+			}
+			page[i].Data = decrypted
+		}
+		out = append(out, page...)
+		if len(page) < chunk {
+			break
+		}
+		offset += chunk
+	}
+	return out, nil
+}
+
 // Update applies a patch to a record. The incoming r.Data is merged shallowly
 // onto the existing row so callers can submit only the fields they want to
 // change. Optimistic concurrency is enforced by matching on the current

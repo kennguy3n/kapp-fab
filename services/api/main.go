@@ -38,6 +38,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/lms"
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/print"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/reporting"
 	"github.com/kennguy3n/kapp-fab/internal/sales"
@@ -297,6 +298,13 @@ func run() error {
 	meth := &meteringHandlers{metering: meteringStore, tenants: tenantSvc, plans: planStore, features: featureStore}
 	kh := &ktypeHandlers{registry: ktypeRegistry}
 	rh := &recordHandlers{store: recordStore}
+	sh := &searchHandlers{store: recordStore}
+	webhookStore := notifications.NewWebhookStore(pool)
+	whh := &webhookHandlers{store: webhookStore}
+	printTemplateStore := print.NewTemplateStore(pool)
+	printRenderer := print.NewRenderer(printTemplateStore, objectStore, nil)
+	ph := &printHandlers{records: recordStore, renderer: printRenderer}
+	portalStore := auth.NewPortalStore(pool)
 	wh := &workflowHandlers{engine: workflowEngine, store: recordStore, registry: ktypeRegistry}
 	ah := &agentHandlers{executor: executor}
 	aph := &approvalsHandlers{engine: workflowEngine, store: recordStore}
@@ -382,6 +390,61 @@ func run() error {
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Timeout(30 * time.Second))
 
+		// Helpdesk customer portal. Auth endpoints are unauthenticated
+		// — they run the magic-link flow themselves. Ticket endpoints
+		// require a portal-scoped JWT issued by /auth/verify. No
+		// X-Tenant-ID header is expected on portal routes; the tenant
+		// is taken from the JWT (for data routes) or the request body
+		// (for auth endpoints) so external customers never have to
+		// know their tenant's internal UUID.
+		//
+		// Registered inside the 30s timeout group so a slow or
+		// malicious portal client can't hold a goroutine + DB conn
+		// open indefinitely. Portal handlers are regular request /
+		// response, no streaming, so the deadline is safe.
+		if authh.signer != nil {
+			porh := &portalHandlers{
+				tenants:  tenantSvc,
+				portal:   portalStore,
+				signer:   authh.signer,
+				records:  recordStore,
+				mailer:   stdoutPortalMailer{},
+				features: featureStore,
+			}
+			r.Route("/api/v1/portal", func(r chi.Router) {
+				r.Route("/auth", func(r chi.Router) {
+					// /auth/* gate inline inside the handlers — they need
+					// the tenant lookup first and can't share the
+					// claims-based middleware below.
+					r.Post("/request", porh.requestMagicLink)
+					r.Post("/verify", porh.verifyMagicLink)
+				})
+				r.Route("/tickets", func(r chi.Router) {
+					r.Use(portalAuthMiddleware(authh.signer))
+					// FeaturePortal gate sits after auth so the tenant
+					// is taken from the JWT claims — standard
+					// DynamicFeatureMiddleware cannot be used here
+					// because the portal skips TenantMiddleware.
+					r.Use(portalFeatureMiddleware(featureStore))
+					// Bridge the portal claims into the platform tenant
+					// + user context slots so the standard rate-limit /
+					// api-call / quota / idempotency middleware below
+					// runs unchanged. Without this the portal surface
+					// would have no rate limiting and a stolen portal
+					// JWT could create unbounded ticket replies.
+					r.Use(portalTenantContextMiddleware(tenantSvc))
+					r.Use(apiCallMW)
+					r.Use(platform.IdempotencyMiddleware(pool))
+					r.Use(rateLimitMW)
+					r.Use(platform.QuotaMiddleware(quotaEnforcer))
+					r.Get("/", porh.listTickets)
+					r.Post("/", porh.createTicket)
+					r.Get("/{id}", porh.getTicket)
+					r.Post("/{id}/reply", porh.replyTicket)
+				})
+			})
+		}
+
 		// Control-plane tenant lifecycle routes (not tenant-scoped).
 		r.Route("/api/v1/tenants", func(r chi.Router) {
 			r.Get("/", th.list)
@@ -411,6 +474,37 @@ func run() error {
 			r.Get("/{name}", kh.get)
 		})
 
+		// Webhook management + delivery-log surface. Gated behind
+		// the per-tenant `webhook` feature flag (derived from the
+		// path via DynamicFeatureMiddleware). CRUD runs under the
+		// same middleware stack as other mutation routes so the
+		// tenant cannot bypass idempotency / rate-limit / quota.
+		r.Route("/api/v1/webhooks", func(r chi.Router) {
+			r.Use(platform.TenantMiddleware(tenantSvc))
+			r.Use(apiCallMW)
+			r.Use(featureMW)
+			r.Use(platform.IdempotencyMiddleware(pool))
+			r.Use(rateLimitMW)
+			r.Use(platform.QuotaMiddleware(quotaEnforcer))
+			r.Get("/", whh.list)
+			r.Post("/", whh.create)
+			r.Get("/{id}", whh.get)
+			r.Put("/{id}", whh.update)
+			r.Delete("/{id}", whh.delete)
+			r.Get("/{id}/deliveries", whh.deliveries)
+		})
+
+		// Full-text search across the krecords table. Reads are
+		// tenant-scoped (RLS on krecords already covers it) so the
+		// group only needs tenant + api-call middleware; idempotency
+		// and quota are skipped because GET /search is a pure read.
+		r.Route("/api/v1/search", func(r chi.Router) {
+			r.Use(platform.TenantMiddleware(tenantSvc))
+			r.Use(apiCallMW)
+			r.Use(rateLimitMW)
+			r.Get("/", sh.search)
+		})
+
 		// KRecord CRUD routes. These require tenant context, rate limiting,
 		// quota enforcement, and idempotency keys on mutations.
 		r.Route("/api/v1/records", func(r chi.Router) {
@@ -426,9 +520,29 @@ func run() error {
 			r.Use(platform.QuotaMiddleware(quotaEnforcer))
 			r.Post("/{ktype}", rh.create)
 			r.Get("/{ktype}", rh.list)
+			// Bulk actions endpoint — multi-id status_change, delete,
+			// or CSV export in one transaction. Matches the pattern
+			// frappe/frappe uses on its List View: the UI collects
+			// selected rows and dispatches to a single backend entry
+			// point rather than looping over per-row endpoints.
+			r.Post("/{ktype}/bulk", rh.bulk)
 			r.Get("/{ktype}/{id}", rh.get)
 			r.Patch("/{ktype}/{id}", rh.update)
 			r.Delete("/{ktype}/{id}", rh.delete)
+			// Print surface — HTML preview + PDF download per
+			// record. Sits under /records so the tenant +
+			// rate-limit middleware is inherited, but the
+			// FeaturePrint flag is enforced explicitly here:
+			// DynamicFeatureMiddleware keys on the URL domain
+			// segment ("records") which has no per-feature
+			// mapping, so the print routes would otherwise be
+			// silently un-gated even when the tenant's plan has
+			// FeaturePrint=false.
+			r.Group(func(pr chi.Router) {
+				pr.Use(platform.FeatureMiddleware(featureStore, tenant.FeaturePrint))
+				pr.Get("/{ktype}/{id}/pdf", ph.pdf)
+				pr.Get("/{ktype}/{id}/html", ph.html)
+			})
 			// Workflow action endpoint (ARCHITECTURE.md §10). Runs under the
 			// same tenant + idempotency + rate-limit + quota stack as record
 			// CRUD so a spammed transition can't starve other tenants.

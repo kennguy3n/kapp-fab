@@ -49,6 +49,15 @@ type Claims struct {
 	TenantID  uuid.UUID `json:"tid"`
 	Roles     []string  `json:"roles,omitempty"`
 	SessionID uuid.UUID `json:"sid,omitempty"`
+	// Scope narrows the token's surface. Empty (default) means a
+	// standard user session with full KApp access; "portal" means
+	// an external customer session that may only hit the /portal
+	// endpoints and only rows scoped to its Email.
+	Scope string `json:"scope,omitempty"`
+	// Email is set for portal tokens so downstream handlers can
+	// filter helpdesk tickets by customer_email without a second
+	// portal_users lookup on every request.
+	Email string `json:"email,omitempty"`
 	// Standard JWT claims (subset we actually use).
 	Issuer    string `json:"iss,omitempty"`
 	Audience  string `json:"aud,omitempty"`
@@ -165,6 +174,34 @@ func (s *Signer) Issue(base Claims) (string, error) {
 	c.IssuedAt = now.Unix()
 	c.NotBefore = now.Unix()
 	c.ExpiresAt = now.Add(s.cfg.AccessTTL).Unix()
+	if c.JWTID == "" {
+		c.JWTID = uuid.NewString()
+	}
+	return s.encode(c)
+}
+
+// IssueWithTTL mints an access-scoped token with a caller-supplied
+// lifetime. It is functionally equivalent to Issue except that the
+// ExpiresAt claim is stamped off `ttl` rather than the signer's
+// configured AccessTTL, so scopes with a non-default session length
+// (portal customers, short-lived machine tokens, etc.) don't have
+// to post-process the token they just signed. A zero or negative
+// ttl falls back to the signer's AccessTTL.
+func (s *Signer) IssueWithTTL(base Claims, ttl time.Duration) (string, error) {
+	now := s.now().UTC()
+	c := base
+	if c.Issuer == "" {
+		c.Issuer = s.cfg.Issuer
+	}
+	if c.Audience == "" {
+		c.Audience = s.cfg.Audience
+	}
+	if ttl <= 0 {
+		ttl = s.cfg.AccessTTL
+	}
+	c.IssuedAt = now.Unix()
+	c.NotBefore = now.Unix()
+	c.ExpiresAt = now.Add(ttl).Unix()
 	if c.JWTID == "" {
 		c.JWTID = uuid.NewString()
 	}
