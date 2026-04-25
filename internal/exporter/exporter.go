@@ -251,10 +251,15 @@ func (s *Store) ClaimNext(ctx context.Context) (*ExportJob, error) {
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var out ExportJob
+	// Match on the full composite PK (tenant_id, id): export_jobs
+	// has no unique index on `id` alone, so correlating by id only
+	// would — in the astronomically unlikely UUID-collision case —
+	// let ClaimNext touch a row from a different tenant (this query
+	// runs on the BYPASSRLS admin pool, so RLS would not catch it).
 	err = scanJob(tx.QueryRow(ctx,
 		`UPDATE export_jobs SET status = $1, started_at = now()
-		   WHERE id = (
-		       SELECT id FROM export_jobs
+		   WHERE (tenant_id, id) = (
+		       SELECT tenant_id, id FROM export_jobs
 		         WHERE status = $2
 		         ORDER BY created_at
 		         LIMIT 1
