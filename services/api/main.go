@@ -380,19 +380,28 @@ func run() error {
 	// know their tenant's internal UUID.
 	if authh.signer != nil {
 		porh := &portalHandlers{
-			tenants: tenantSvc,
-			portal:  portalStore,
-			signer:  authh.signer,
-			records: recordStore,
-			mailer:  stdoutPortalMailer{},
+			tenants:  tenantSvc,
+			portal:   portalStore,
+			signer:   authh.signer,
+			records:  recordStore,
+			mailer:   stdoutPortalMailer{},
+			features: featureStore,
 		}
 		r.Route("/api/v1/portal", func(r chi.Router) {
 			r.Route("/auth", func(r chi.Router) {
+				// /auth/* gate inline inside the handlers — they need
+				// the tenant lookup first and can't share the
+				// claims-based middleware below.
 				r.Post("/request", porh.requestMagicLink)
 				r.Post("/verify", porh.verifyMagicLink)
 			})
 			r.Route("/tickets", func(r chi.Router) {
 				r.Use(portalAuthMiddleware(authh.signer))
+				// FeaturePortal gate sits after auth so the tenant
+				// is taken from the JWT claims — standard
+				// DynamicFeatureMiddleware cannot be used here
+				// because the portal skips TenantMiddleware.
+				r.Use(portalFeatureMiddleware(featureStore))
 				r.Get("/", porh.listTickets)
 				r.Post("/", porh.createTicket)
 				r.Get("/{id}", porh.getTicket)

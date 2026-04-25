@@ -10,9 +10,19 @@ import { api } from "../lib/api";
 // the API call so rapid typing does not flood the backend.
 export function SearchPage() {
   const [params, setParams] = useSearchParams();
-  const initial = params.get("q") ?? "";
-  const [input, setInput] = useState(initial);
-  const [debounced, setDebounced] = useState(initial);
+  const urlQ = params.get("q") ?? "";
+  const [input, setInput] = useState(urlQ);
+  const [debounced, setDebounced] = useState(urlQ);
+
+  // Sync local input when the URL changes externally (e.g. the
+  // global search box navigates /search?q=foo while the page is
+  // already mounted). useState(urlQ) only runs on first mount, so
+  // without this effect the input stays latched on the initial q
+  // and the user's new query is silently discarded.
+  useEffect(() => {
+    setInput((cur) => (cur === urlQ ? cur : urlQ));
+    setDebounced((cur) => (cur === urlQ ? cur : urlQ));
+  }, [urlQ]);
 
   useEffect(() => {
     const id = window.setTimeout(() => {

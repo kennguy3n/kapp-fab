@@ -23,11 +23,12 @@ import (
 // JWT. Handlers below parse that JWT themselves (rather than using
 // TenantMiddleware) because the token carries the tenant claim.
 type portalHandlers struct {
-	tenants portalTenantLookup
-	portal  *auth.PortalStore
-	signer  *auth.Signer
-	records *record.PGStore
-	mailer  portalMailer
+	tenants  portalTenantLookup
+	portal   *auth.PortalStore
+	signer   *auth.Signer
+	records  *record.PGStore
+	mailer   portalMailer
+	features portalFeatureGate
 }
 
 // portalTenantLookup narrows the tenant surface to exactly the two
@@ -35,6 +36,25 @@ type portalHandlers struct {
 // the API keeps its richer handle on *tenant.PGStore.
 type portalTenantLookup interface {
 	GetBySlug(ctx context.Context, slug string) (*tenant.Tenant, error)
+}
+
+// portalFeatureGate is the slice of FeatureStore the portal needs.
+// Narrowed to IsEnabled so the indirection is testable without a
+// database. A nil gate is treated as "allow" so local dev without
+// the feature table still serves the portal.
+type portalFeatureGate interface {
+	IsEnabled(ctx context.Context, tenantID uuid.UUID, featureKey string) (bool, error)
+}
+
+// portalFeatureAllowed centralises the FeaturePortal check. It
+// returns (true, nil) for the no-store case so missing feature
+// infrastructure does not silently lock out tenants; callers that
+// want strict-deny should check for a nil gate themselves.
+func (h *portalHandlers) portalFeatureAllowed(ctx context.Context, tenantID uuid.UUID) (bool, error) {
+	if h == nil || h.features == nil {
+		return true, nil
+	}
+	return h.features.IsEnabled(ctx, tenantID, tenant.FeaturePortal)
 }
 
 // portalMailer abstracts the transport that delivers a magic link.
@@ -81,6 +101,17 @@ func (h *portalHandlers) requestMagicLink(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	// Per-tenant FeaturePortal gate. Checked after the slug lookup so
+	// we can pin the tenant; the response is still 204 (no
+	// enumeration leak) when the feature is off for this tenant.
+	if ok, err := h.portalFeatureAllowed(r.Context(), t.ID); err != nil {
+		log.Printf("portal: feature check tenant=%s: %v", t.ID, err)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	} else if !ok {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	token, user, err := h.portal.IssueMagicLink(r.Context(), t.ID, in.Email)
 	if err != nil {
 		log.Printf("portal: issue link tenant=%s email=%q: %v", t.ID, in.Email, err)
@@ -119,6 +150,18 @@ func (h *portalHandlers) verifyMagicLink(w http.ResponseWriter, r *http.Request)
 	}
 	t, err := h.tenants.GetBySlug(r.Context(), in.TenantSlug)
 	if err != nil {
+		http.Error(w, "invalid link", http.StatusUnauthorized)
+		return
+	}
+	// Per-tenant FeaturePortal gate. 401 ("invalid link") when the
+	// feature is off — matches the response the handler gives for
+	// every other failure in this path and avoids enumerating which
+	// tenants have the portal enabled.
+	if ok, err := h.portalFeatureAllowed(r.Context(), t.ID); err != nil {
+		log.Printf("portal: feature check tenant=%s: %v", t.ID, err)
+		http.Error(w, "invalid link", http.StatusUnauthorized)
+		return
+	} else if !ok {
 		http.Error(w, "invalid link", http.StatusUnauthorized)
 		return
 	}
@@ -363,6 +406,40 @@ func portalAuthMiddleware(signer *auth.Signer) func(http.Handler) http.Handler {
 				return
 			}
 			next.ServeHTTP(w, r.WithContext(withPortalClaims(r.Context(), claims)))
+		})
+	}
+}
+
+// portalFeatureMiddleware enforces the per-tenant FeaturePortal flag
+// on authenticated portal ticket routes. It pulls the tenant from
+// the portal claims populated by portalAuthMiddleware — standard
+// DynamicFeatureMiddleware cannot do this because portal routes
+// skip TenantMiddleware (there is no X-Tenant-ID header). Returns
+// 403 when the flag is off so the client can distinguish "feature
+// disabled" from "not authenticated".
+func portalFeatureMiddleware(gate portalFeatureGate) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if gate == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+			claims := portalClaimsFromContext(r.Context())
+			if claims == nil {
+				http.Error(w, "unauthenticated", http.StatusUnauthorized)
+				return
+			}
+			ok, err := gate.IsEnabled(r.Context(), claims.TenantID, tenant.FeaturePortal)
+			if err != nil {
+				log.Printf("portal: feature check tenant=%s: %v", claims.TenantID, err)
+				http.Error(w, "feature lookup failed", http.StatusInternalServerError)
+				return
+			}
+			if !ok {
+				http.Error(w, "portal disabled for tenant", http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
 		})
 	}
 }
