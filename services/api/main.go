@@ -402,6 +402,17 @@ func run() error {
 				// DynamicFeatureMiddleware cannot be used here
 				// because the portal skips TenantMiddleware.
 				r.Use(portalFeatureMiddleware(featureStore))
+				// Bridge the portal claims into the platform tenant
+				// + user context slots so the standard rate-limit /
+				// api-call / quota / idempotency middleware below
+				// runs unchanged. Without this the portal surface
+				// would have no rate limiting and a stolen portal
+				// JWT could create unbounded ticket replies.
+				r.Use(portalTenantContextMiddleware(tenantSvc))
+				r.Use(apiCallMW)
+				r.Use(platform.IdempotencyMiddleware(pool))
+				r.Use(rateLimitMW)
+				r.Use(platform.QuotaMiddleware(quotaEnforcer))
 				r.Get("/", porh.listTickets)
 				r.Post("/", porh.createTicket)
 				r.Get("/{id}", porh.getTicket)

@@ -13,6 +13,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/auth"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
+	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
@@ -31,11 +32,15 @@ type portalHandlers struct {
 	features portalFeatureGate
 }
 
-// portalTenantLookup narrows the tenant surface to exactly the two
-// methods the portal uses. Kept local to this file so the rest of
-// the API keeps its richer handle on *tenant.PGStore.
+// portalTenantLookup narrows the tenant surface to the methods the
+// portal uses. GetBySlug is needed by the magic-link endpoints
+// (customer-supplied slug); Get(id) is needed by the
+// portalTenantContextMiddleware to bridge JWT claims into the
+// shared platform.TenantContext slot. Kept local to this file so
+// the rest of the API keeps its richer handle on *tenant.PGStore.
 type portalTenantLookup interface {
 	GetBySlug(ctx context.Context, slug string) (*tenant.Tenant, error)
+	Get(ctx context.Context, id uuid.UUID) (*tenant.Tenant, error)
 }
 
 // portalFeatureGate is the slice of FeatureStore the portal needs.
@@ -410,6 +415,47 @@ func portalAuthMiddleware(signer *auth.Signer) func(http.Handler) http.Handler {
 	}
 }
 
+// portalTenantContextMiddleware bridges a verified portal JWT into
+// the standard platform tenant + user context slots. It is the
+// glue that lets the existing rate-limit / api-call / quota /
+// idempotency middleware (all of which key off
+// platform.TenantFromContext + platform.UserIDFromContext) run
+// unchanged on portal routes — without this, the portal would
+// either bypass those protections or each one would need a
+// portal-specific copy.
+//
+// Tenant lookup happens once per request, but the SQL is a
+// single-row PK fetch and we already accept that overhead on the
+// rest of the API.
+func portalTenantContextMiddleware(svc portalTenantLookup) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims := portalClaimsFromContext(r.Context())
+			if claims == nil {
+				http.Error(w, "unauthenticated", http.StatusUnauthorized)
+				return
+			}
+			t, err := svc.Get(r.Context(), claims.TenantID)
+			if err != nil {
+				if errors.Is(err, tenant.ErrNotFound) {
+					http.Error(w, "tenant not found", http.StatusNotFound)
+					return
+				}
+				log.Printf("portal: tenant lookup tenant=%s: %v", claims.TenantID, err)
+				http.Error(w, "tenant lookup failed", http.StatusInternalServerError)
+				return
+			}
+			if t.Status != tenant.StatusActive {
+				http.Error(w, "tenant is not active", http.StatusForbidden)
+				return
+			}
+			ctx := platform.WithTenant(r.Context(), t)
+			ctx = platform.WithUserID(ctx, claims.UserID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
 // portalFeatureMiddleware enforces the per-tenant FeaturePortal flag
 // on authenticated portal ticket routes. It pulls the tenant from
 // the portal claims populated by portalAuthMiddleware — standard
@@ -469,12 +515,28 @@ func filterByCustomerEmail(rows []record.KRecord, email string) []record.KRecord
 // buildMagicLink composes the clickable link the portal emails. The
 // scheme + host are taken from the incoming request so the same
 // binary serves multiple domains without configuration.
+//
+// Production deployments terminate TLS at a reverse proxy (ALB,
+// nginx, Cloudflare, …) so r.TLS is nil even on https-only
+// services. Honour X-Forwarded-Proto first so the magic link does
+// not point the customer at http:// — that would expose the
+// magic-link token over plaintext until the redirect kicks in.
 func buildMagicLink(r *http.Request, slug, email, token string) string {
 	scheme := "https"
-	if r.TLS == nil {
+	if proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); proto != "" {
+		// Forwarded protos can be a comma-list (proxy-of-proxy);
+		// only the first hop matters for link construction.
+		if i := strings.IndexByte(proto, ','); i != -1 {
+			proto = strings.TrimSpace(proto[:i])
+		}
+		scheme = strings.ToLower(proto)
+	} else if r.TLS == nil {
 		scheme = "http"
 	}
 	host := r.Host
+	if fh := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fh != "" {
+		host = fh
+	}
 	// The frontend route is /portal/:tenant_slug, so embed the slug
 	// as a path segment — not a query parameter — otherwise React
 	// Router resolves tenant_slug to the literal "verify".
