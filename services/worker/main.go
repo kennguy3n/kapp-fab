@@ -175,7 +175,8 @@ func run() error {
 	ktypeCache := platform.NewLRUCache(1024, 5*time.Minute)
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
 	recordStore := record.NewPGStore(pool, ktypeRegistry, publisher, auditor)
-	ledgerStore := ledger.NewPGStore(pool, publisher, auditor)
+	exchangeRates := ledger.NewExchangeRateStore(pool)
+	ledgerStore := ledger.NewPGStore(pool, publisher, auditor).WithExchangeRates(exchangeRates)
 	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
 	inventoryStore := inventory.NewPGStore(pool, publisher, auditor)
 	inventoryHook := inventory.NewPosterHook(inventoryStore)
@@ -208,6 +209,13 @@ func run() error {
 	reorderHandler := inventory.NewReorderHandler(recordStore, inventoryStore).
 		WithSystemActor(workerSystemActor)
 	schedRegistry.Register(inventory.ActionTypeReorder, reorderHandler)
+	// Monthly unrealized FX gain/loss revaluation. Walks open AR/AP
+	// foreign-currency balances per tenant, posts adjustment entries
+	// against the per-account gain/loss accounts at the current rate.
+	schedRegistry.Register(
+		ledger.ActionTypeUnrealizedGainLoss,
+		ledger.NewUnrealizedGainLossJob(ledgerStore, exchangeRates, workerSystemActor),
+	)
 	// Daily tenant usage snapshot — re-samples storage_bytes and
 	// krecord_count per tenant so the dashboard's absolute
 	// counters are accurate even on quiet days. API-call deltas
@@ -216,6 +224,16 @@ func run() error {
 	schedRegistry.Register(
 		tenant.ActionTypeUsageSnapshot,
 		tenant.NewUsageSnapshotHandler(meteringStore),
+	)
+	// Daily data retention sweep — deletes old audit/event/SLA/
+	// notification rows per tenant according to the policies in
+	// data_retention_policies. Each DELETE runs under
+	// dbutil.WithTenantTx so RLS is the final guarantor that we
+	// only ever touch the target tenant's rows.
+	retentionStore := platform.NewRetentionStore(pool, adminPool)
+	schedRegistry.Register(
+		platform.ActionTypeDataRetentionSweep,
+		platform.NewRetentionSweeper(retentionStore),
 	)
 	go scheduler.RunLoop(ctx, schedStore, schedRegistry, 10*time.Second)
 

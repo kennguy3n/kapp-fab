@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/kapp-fab/internal/crm"
+	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 )
@@ -36,7 +37,7 @@ type Composer struct {
 type ComposerRequest struct {
 	TenantID uuid.UUID `json:"tenant_id"`
 	UserID   uuid.UUID `json:"user_id"`
-	// Action is one of "task", "deal", "activity".
+	// Action is one of "task", "deal", "activity", "ticket".
 	Action string `json:"action"`
 	// Message is the original chat message body the user selected.
 	Message string `json:"message"`
@@ -45,14 +46,19 @@ type ComposerRequest struct {
 	Confirm bool `json:"confirm,omitempty"`
 	// Data is the edited payload sent with confirm=true.
 	Data map[string]any `json:"data,omitempty"`
+	// ThreadID is the KChat thread the action was triggered from.
+	// Used by the "ticket" action so the resulting helpdesk.ticket
+	// carries thread_id and the worker's notification router can
+	// post status updates back to the same thread.
+	ThreadID string `json:"thread_id,omitempty"`
 }
 
 // ComposerResponse returns the preview card on the first POST and the
 // created record on the confirmation POST.
 type ComposerResponse struct {
-	Preview *Card          `json:"preview,omitempty"`
+	Preview *Card           `json:"preview,omitempty"`
 	Record  *record.KRecord `json:"record,omitempty"`
-	Error   string         `json:"error,omitempty"`
+	Error   string          `json:"error,omitempty"`
 }
 
 // Handle routes a composer request. Two-phase: preview → confirm.
@@ -73,6 +79,9 @@ func (c *Composer) Handle(ctx context.Context, req ComposerRequest) (ComposerRes
 
 	// Preview path — derive defaults and render a card.
 	data := extractFields(action, req.Message, req.UserID)
+	if action == "ticket" && req.ThreadID != "" {
+		data["thread_id"] = req.ThreadID
+	}
 	dataJSON, _ := json.Marshal(data)
 	preview := Card{
 		Title:    fmt.Sprintf("Create %s", ktypeName),
@@ -132,6 +141,8 @@ func composerKType(action string) (string, bool) {
 		return crm.KTypeDeal, true
 	case "activity":
 		return crm.KTypeActivity, true
+	case "ticket":
+		return helpdesk.KTypeTicket, true
 	}
 	return "", false
 }
@@ -171,6 +182,20 @@ func extractFields(action, message string, author uuid.UUID) map[string]any {
 		return map[string]any{
 			"type":    "note",
 			"subject": head,
+		}
+	case "ticket":
+		// Helpdesk.ticket from the message context menu: first
+		// line → subject, remainder → description, channel
+		// hard-coded to "chat" so SLA policy lookup uses the
+		// right grid. thread_id is layered on by Handle when the
+		// action carries it.
+		return map[string]any{
+			"subject":     head,
+			"description": body,
+			"status":      "open",
+			"priority":    "medium",
+			"channel":     "chat",
+			"owner":       author.String(),
 		}
 	}
 	return map[string]any{}

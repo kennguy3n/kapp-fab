@@ -106,6 +106,9 @@ var TenantScopedTables = []string{
 	"webhook_deliveries",
 	"print_templates",
 	"portal_users",
+	// Phase J/K
+	"tenant_support_domains",
+	"data_retention_policies",
 }
 
 // manifest is the first record in every dump file.
@@ -348,6 +351,11 @@ var tableConflictKeys = map[string][]string{
 	"saved_reports":          {"tenant_id", "id"},
 	"tenant_features":        {"tenant_id", "feature_key"},
 	"tenant_usage":           {"tenant_id", "period_start", "metric"},
+	// Phase J/K — tenant_support_domains uses (tenant_id, domain_lower)
+	// via UNIQUE INDEX so the PK seen in the dump is a non-standard
+	// natural key. data_retention_policies's PK is (tenant_id, category).
+	"tenant_support_domains":  {"tenant_id", "domain"},
+	"data_retention_policies": {"tenant_id", "category"},
 }
 
 // insertRow issues a parameterised INSERT that lists the columns from

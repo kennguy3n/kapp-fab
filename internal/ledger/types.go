@@ -73,6 +73,14 @@ type JournalLine struct {
 	Credit      decimal.Decimal `json:"credit"`
 	Currency    string          `json:"currency"`
 	Memo        string          `json:"memo,omitempty"`
+
+	// BaseAmount is the line's net (Debit − Credit) converted into the
+	// tenant's base currency at the posting-date rate. PostJournalEntry
+	// sets this for foreign-currency lines so reports can sum in either
+	// the original line currency or the base currency without re-running
+	// the rate lookup. NULL on the wire means "not yet computed" (legacy
+	// rows posted before migration 000029).
+	BaseAmount *decimal.Decimal `json:"base_amount,omitempty"`
 }
 
 // FiscalPeriod represents a contiguous accounting window that may be

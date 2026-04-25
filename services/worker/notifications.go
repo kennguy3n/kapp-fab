@@ -92,6 +92,12 @@ func (r *notificationRouter) route(ctx context.Context, e events.Event) {
 	// notification envelope) and a tenant can still subscribe
 	// external systems via the /api/v1/webhooks CRUD surface.
 	r.fanOutRegisteredWebhooks(ctx, e)
+	// Helpdesk ticket lifecycle → KChat thread back-post. When a
+	// ticket carries a thread_id (set by /ticket-from-thread or the
+	// "ticket" composer action), every status / data change posts a
+	// summary card back to the originating thread so the customer
+	// sees the agent's update inline. Failures are best-effort.
+	r.maybePostTicketThreadUpdate(ctx, e)
 	env := extractNotification(e.Payload)
 	if env == nil {
 		return
@@ -550,4 +556,69 @@ func webhookBackoff(attempt int) time.Duration {
 		d *= 2
 	}
 	return d
+}
+
+// maybePostTicketThreadUpdate posts a summary card back to the
+// helpdesk.ticket's originating KChat thread. It triggers on every
+// krecord.updated event whose payload describes a helpdesk.ticket
+// with a non-empty thread_id. The function is best-effort — failures
+// are logged and the event still flows through the rest of the
+// router.
+func (r *notificationRouter) maybePostTicketThreadUpdate(ctx context.Context, e events.Event) {
+	if r == nil || r.bridge == nil || !r.bridge.enabled() {
+		return
+	}
+	if e.Type != "krecord.updated" {
+		return
+	}
+	var head struct {
+		KType string          `json:"ktype"`
+		Data  json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(e.Payload, &head); err != nil {
+		return
+	}
+	if head.KType != "helpdesk.ticket" {
+		return
+	}
+	var ticket struct {
+		Subject  string `json:"subject"`
+		Status   string `json:"status"`
+		Priority string `json:"priority"`
+		ThreadID string `json:"thread_id"`
+	}
+	if err := json.Unmarshal(head.Data, &ticket); err != nil {
+		return
+	}
+	if ticket.ThreadID == "" {
+		return
+	}
+	body, err := json.Marshal(map[string]any{
+		"tenant_id": e.TenantID,
+		"type":      "helpdesk.ticket.thread_update",
+		"thread_id": ticket.ThreadID,
+		"title":     fmt.Sprintf("Ticket %s — %s", ticket.Status, ticket.Subject),
+		"body":      fmt.Sprintf("Priority: %s • Status: %s", ticket.Priority, ticket.Status),
+	})
+	if err != nil {
+		return
+	}
+	url := r.bridge.baseURL + "/kchat/threads/post"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.client.Do(req)
+	if err != nil {
+		log.Printf("worker: kchat thread post tenant=%s ticket-thread=%s: %v", e.TenantID, ticket.ThreadID, err)
+		return
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode >= 300 {
+		log.Printf("worker: kchat thread post tenant=%s ticket-thread=%s status=%d", e.TenantID, ticket.ThreadID, resp.StatusCode)
+	}
 }

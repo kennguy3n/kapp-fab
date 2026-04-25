@@ -43,6 +43,12 @@ type PGStore struct {
 	publisher events.Publisher
 	auditor   audit.Logger
 	now       func() time.Time
+
+	// rates resolves exchange rates for foreign-currency journal
+	// lines on PostJournalEntry. Optional: when nil, posting falls
+	// back to the legacy single-currency behaviour (no auto-convert,
+	// base_amount stays NULL on the row).
+	rates *ExchangeRateStore
 }
 
 // NewPGStore wires a PGStore from the shared pool and its collaborators.
@@ -62,6 +68,15 @@ func NewPGStore(pool *pgxpool.Pool, publisher events.Publisher, auditor audit.Lo
 // WithNow lets tests pin the posting clock to a deterministic value.
 func (s *PGStore) WithNow(now func() time.Time) *PGStore {
 	s.now = now
+	return s
+}
+
+// WithExchangeRates wires the exchange-rate store so PostJournalEntry
+// can convert foreign-currency lines into the tenant's base currency.
+// Returns the same store for fluent chaining; passing a nil rates is
+// equivalent to leaving conversion off.
+func (s *PGStore) WithExchangeRates(rates *ExchangeRateStore) *PGStore {
+	s.rates = rates
 	return s
 }
 
@@ -300,6 +315,16 @@ func (s *PGStore) PostJournalEntry(ctx context.Context, entry JournalEntry) (*Jo
 			return fmt.Errorf("ledger: insert journal entry: %w", err)
 		}
 
+		// Resolve the tenant's base currency once per entry so the
+		// per-line conversion below can compare line.Currency against
+		// it. Falls back to the entry's own currency when the lookup
+		// fails (e.g. tenants table not on this connection or rates
+		// store not wired) — preserves legacy single-currency posts.
+		baseCurrency := s.resolveBaseCurrencyTx(ctx, tx, entry.TenantID)
+		if baseCurrency == "" {
+			baseCurrency = currency
+		}
+
 		// Insert each line. The DB CHECK (debit >= 0 AND credit >= 0)
 		// and (NOT (debit > 0 AND credit > 0)) backstop validateLines.
 		insertedLines := make([]JournalLine, 0, len(entry.Lines))
@@ -309,19 +334,27 @@ func (s *PGStore) PostJournalEntry(ctx context.Context, entry JournalEntry) (*Jo
 			if line.Currency == "" {
 				line.Currency = currency
 			}
+			baseAmount, err := s.computeBaseAmount(ctx, entry.TenantID, line, baseCurrency, entry.PostedAt)
+			if err != nil {
+				return fmt.Errorf("ledger: convert line currency: %w", err)
+			}
 			var id int64
-			err := tx.QueryRow(ctx,
+			err = tx.QueryRow(ctx,
 				`INSERT INTO journal_lines
-				     (tenant_id, entry_id, account_code, debit, credit, currency, memo)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7)
+				     (tenant_id, entry_id, account_code, debit, credit, currency, memo, base_amount)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 				 RETURNING id`,
 				line.TenantID, line.EntryID, line.AccountCode,
-				line.Debit, line.Credit, line.Currency, nullIfEmpty(line.Memo),
+				line.Debit, line.Credit, line.Currency, nullIfEmpty(line.Memo), baseAmount,
 			).Scan(&id)
 			if err != nil {
 				return fmt.Errorf("ledger: insert journal line: %w", err)
 			}
 			line.ID = id
+			if baseAmount != nil {
+				ba := *baseAmount
+				line.BaseAmount = &ba
+			}
 			insertedLines = append(insertedLines, line)
 		}
 		entry.Lines = insertedLines
@@ -651,7 +684,7 @@ func distinctCodes(lines []JournalLine) []string {
 
 func loadLinesTx(ctx context.Context, tx pgx.Tx, tenantID, entryID uuid.UUID) ([]JournalLine, error) {
 	rows, err := tx.Query(ctx,
-		`SELECT id, tenant_id, entry_id, account_code, debit, credit, currency, memo
+		`SELECT id, tenant_id, entry_id, account_code, debit, credit, currency, memo, base_amount
 		 FROM journal_lines
 		 WHERE tenant_id = $1 AND entry_id = $2
 		 ORDER BY id`,
@@ -664,18 +697,23 @@ func loadLinesTx(ctx context.Context, tx pgx.Tx, tenantID, entryID uuid.UUID) ([
 	out := make([]JournalLine, 0)
 	for rows.Next() {
 		var (
-			line JournalLine
-			memo *string
+			line       JournalLine
+			memo       *string
+			baseAmount *decimal.Decimal
 		)
 		if err := rows.Scan(
 			&line.ID, &line.TenantID, &line.EntryID, &line.AccountCode,
-			&line.Debit, &line.Credit, &line.Currency, &memo,
+			&line.Debit, &line.Credit, &line.Currency, &memo, &baseAmount,
 		); err != nil {
 			return nil, fmt.Errorf("ledger: scan line: %w", err)
 		}
 		if memo != nil {
 			line.Memo = *memo
 		}
+		// base_amount is nullable for legacy rows posted before
+		// migration 000029. Non-nil rows surface through the API
+		// unchanged so dashboards can display dual-currency totals.
+		line.BaseAmount = baseAmount
 		out = append(out, line)
 	}
 	if err := rows.Err(); err != nil {
@@ -698,4 +736,54 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+// resolveBaseCurrencyTx looks up the tenant's functional currency for
+// the active transaction. The tenants row is read inside the existing
+// tenant-scoped tx so RLS still applies. Returns an empty string when
+// the lookup fails (e.g. control-plane connection on a different
+// pool, mock pool in tests) — callers fall back to the entry's
+// declared currency in that case.
+func (s *PGStore) resolveBaseCurrencyTx(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) string {
+	var code string
+	err := tx.QueryRow(ctx,
+		`SELECT COALESCE(base_currency, 'USD') FROM tenants WHERE id = $1`,
+		tenantID,
+	).Scan(&code)
+	if err != nil {
+		return ""
+	}
+	return code
+}
+
+// computeBaseAmount converts the line's net (debit − credit) into the
+// tenant's base currency. Returns nil + nil when no conversion is
+// needed (currency match, no rates store wired, or a zero-amount
+// line). Returns an error when a rate lookup fails — callers should
+// surface it so the entry rolls back rather than posting an
+// inaccurate base figure.
+func (s *PGStore) computeBaseAmount(ctx context.Context, tenantID uuid.UUID, line JournalLine, baseCurrency string, asOf time.Time) (*decimal.Decimal, error) {
+	if line.Currency == "" || line.Currency == baseCurrency {
+		return nil, nil
+	}
+	net := line.Debit.Sub(line.Credit)
+	if net.IsZero() {
+		zero := decimal.Zero
+		return &zero, nil
+	}
+	if s.rates == nil {
+		// Conversion store not wired — leave base_amount NULL so
+		// reports fall back to the line currency. This is the
+		// pre-000029 behaviour and keeps unit tests with mock
+		// pools working without an exchange-rate dependency.
+		return nil, nil
+	}
+	if asOf.IsZero() {
+		asOf = s.now()
+	}
+	converted, err := s.rates.Convert(ctx, tenantID, net, line.Currency, baseCurrency, asOf)
+	if err != nil {
+		return nil, err
+	}
+	return &converted, nil
 }

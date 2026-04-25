@@ -85,16 +85,37 @@ func NewZKFabricClient(cfg ZKFabricClientConfig) *ZKFabricClient {
 //  1. POST /api/tenants/{id}            — create tenant record
 //  2. POST /api/tenants/{id}/keys       — mint access/secret pair
 //  3. POST /api/tenants/{id}/buckets    — bind a per-tenant bucket
+//  4. PUT  /api/tenants/{id}/placement  — set placement policy
+//     (when policy non-empty)
 //
-// All three are idempotent on the fabric side: re-running the
-// wizard after a partial failure converges. The returned
-// ZKCredentials hold the access/secret pair the gateway accepts on
-// SigV4 sign and the bucket name the kapp client should write to.
+// All three (now four) calls are idempotent on the fabric side:
+// re-running the wizard after a partial failure converges. The
+// returned ZKCredentials hold the access/secret pair the gateway
+// accepts on SigV4 sign and the bucket name the kapp client should
+// write to.
 func (c *ZKFabricClient) ProvisionTenant(ctx context.Context, tenantID uuid.UUID, slug string) (ZKCredentials, error) {
+	return c.ProvisionTenantWithPolicy(ctx, tenantID, slug, "", PlacementPolicy{})
+}
+
+// ProvisionTenantWithPolicy is the policy-aware variant of
+// ProvisionTenant. The wizard derives a plan-appropriate policy via
+// DerivePlacementPolicy and threads it through here so each new
+// tenant lands on the fabric with provider/country/cache hints
+// already in place. plan maps to fabric `contract_type`:
+//
+//	free                            → b2c_pooled
+//	starter / business / paid       → b2b_shared
+//	enterprise                      → b2b_dedicated
+//
+// An empty policy.Spec.Placement.Provider skips the placement PUT
+// (callers that opt out of policy management still get the legacy
+// flow). bucket on the policy is forced to match the bucket the
+// fabric just minted so the policy and the credential row agree.
+func (c *ZKFabricClient) ProvisionTenantWithPolicy(ctx context.Context, tenantID uuid.UUID, slug, plan string, policy PlacementPolicy) (ZKCredentials, error) {
 	if c == nil {
 		return ZKCredentials{}, errors.New("zk fabric: client not configured")
 	}
-	if err := c.createTenant(ctx, tenantID, slug); err != nil && !errors.Is(err, errAlreadyExists) {
+	if err := c.createTenantWithContract(ctx, tenantID, slug, plan); err != nil && !errors.Is(err, errAlreadyExists) {
 		return ZKCredentials{}, fmt.Errorf("zk fabric: create tenant: %w", err)
 	}
 	access, secret, err := c.createKey(ctx, tenantID)
@@ -105,7 +126,28 @@ func (c *ZKFabricClient) ProvisionTenant(ctx context.Context, tenantID uuid.UUID
 	if err := c.createBucket(ctx, tenantID, bucket); err != nil && !errors.Is(err, errAlreadyExists) {
 		return ZKCredentials{}, fmt.Errorf("zk fabric: create bucket: %w", err)
 	}
+	if len(policy.Spec.Placement.Provider) > 0 {
+		policy.Tenant = tenantID.String()
+		policy.Bucket = bucket
+		if err := c.SetPlacementPolicy(ctx, tenantID, policy); err != nil {
+			return ZKCredentials{}, fmt.Errorf("zk fabric: set placement policy: %w", err)
+		}
+	}
 	return ZKCredentials{AccessKey: access, SecretKey: secret, Bucket: bucket}, nil
+}
+
+// SetPlacementPolicy calls PUT /api/tenants/{id}/placement on the
+// fabric console. The body shape mirrors
+// `placement_policy.Policy` (zk-object-fabric/metadata/placement_policy/policy.go);
+// the console enforces structural validation, so a 4xx here means
+// the wizard built a malformed body and Kapp should surface the
+// detail back to the operator rather than retry blindly.
+func (c *ZKFabricClient) SetPlacementPolicy(ctx context.Context, tenantID uuid.UUID, policy PlacementPolicy) error {
+	if c == nil {
+		return errors.New("zk fabric: client not configured")
+	}
+	policy.Tenant = tenantID.String()
+	return c.do(ctx, http.MethodPut, fmt.Sprintf("/api/tenants/%s/placement", tenantID), policy, nil)
 }
 
 func (c *ZKFabricClient) bucketName(tenantID uuid.UUID, slug string) string {
@@ -115,14 +157,35 @@ func (c *ZKFabricClient) bucketName(tenantID uuid.UUID, slug string) string {
 	return out
 }
 
-func (c *ZKFabricClient) createTenant(ctx context.Context, tenantID uuid.UUID, slug string) error {
+// createTenantWithContract maps the Kapp plan tier to the fabric's
+// `contract_type`. Free plans share the pooled b2c contract; paid
+// plans default to the b2b_shared contract; enterprise lands on
+// b2b_dedicated which the fabric routes to dedicated cells. An
+// empty plan stays on the historical b2b_shared default so the
+// signature change is backward-compatible.
+func (c *ZKFabricClient) createTenantWithContract(ctx context.Context, tenantID uuid.UUID, slug, plan string) error {
+	contract := contractTypeForPlan(plan)
 	body := map[string]any{
 		"id":            tenantID.String(),
 		"name":          slug,
-		"contract_type": "b2b_shared",
+		"contract_type": contract,
 		"license_tier":  "beta",
 	}
 	return c.do(ctx, http.MethodPost, fmt.Sprintf("/api/tenants/%s", tenantID), body, nil)
+}
+
+// contractTypeForPlan maps a Kapp plan tier to the corresponding
+// fabric contract_type. Kept package-private so the wizard always
+// goes through createTenantWithContract.
+func contractTypeForPlan(plan string) string {
+	switch strings.ToLower(strings.TrimSpace(plan)) {
+	case PlanFree:
+		return "b2c_pooled"
+	case PlanEnterprise:
+		return "b2b_dedicated"
+	default:
+		return "b2b_shared"
+	}
 }
 
 // createKey calls POST /api/tenants/{id}/keys and parses the

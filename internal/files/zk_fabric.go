@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sync"
+	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/kennguy3n/kapp-fab/internal/platform"
 )
 
 // TenantResolver resolves a tenant id to its ZK Object Fabric
@@ -23,11 +25,33 @@ type TenantResolver interface {
 	ResolveZKCredentials(ctx context.Context, tenantID uuid.UUID) (cfg S3StoreConfig, ok bool, err error)
 }
 
+// PerTenantConfig configures the routing store. Endpoint and
+// Region are merged into the resolved per-tenant config so the
+// resolver only needs to surface bucket + HMAC credentials —
+// matching the shape of the row on the tenants table.
+//
+// MaxEntries / IdleTTL bound the per-tenant *S3Store cache so a
+// burst of one-shot tenants (e.g. a load test) cannot grow the
+// store map without limit. Defaults: 1000 entries, 10-minute idle
+// TTL — matching the same primitive the rate limiter uses
+// (`platform.LRUCache`). On eviction the cached *S3Store has its
+// idle HTTP connections closed via S3Store.Close so a stale store
+// does not retain pooled sockets.
+type PerTenantConfig struct {
+	Resolver   TenantResolver
+	Fallback   ObjectStore
+	Endpoint   string
+	Region     string
+	MaxEntries int
+	IdleTTL    time.Duration
+}
+
 // PerTenantS3Store routes Put/Get to a per-tenant *S3Store keyed
 // by tenant id. The first request for a tenant triggers a
 // resolver lookup + S3Store construction; subsequent requests
-// reuse the cached client. A platform-default ObjectStore covers
-// the path where the tenant has no ZK credentials yet.
+// reuse the cached client until LRU eviction or TTL expiry. A
+// platform-default ObjectStore covers the path where the tenant
+// has no ZK credentials yet.
 //
 // The store implements the same ObjectStore interface as the
 // existing MemoryStore / S3Store so callers (Store.Upload,
@@ -41,20 +65,19 @@ type PerTenantS3Store struct {
 	endpoint string
 	region   string
 
-	mu     sync.RWMutex
-	stores map[uuid.UUID]*S3Store
+	// stores holds *S3Store values keyed by tenant id (string form).
+	// Bounded with a hard cap + idle TTL so the cache cannot grow
+	// without limit on cells with thousands of one-shot tenants.
+	stores *platform.LRUCache
 }
 
-// PerTenantConfig configures the routing store. Endpoint and
-// Region are merged into the resolved per-tenant config so the
-// resolver only needs to surface bucket + HMAC credentials —
-// matching the shape of the row on the tenants table.
-type PerTenantConfig struct {
-	Resolver TenantResolver
-	Fallback ObjectStore
-	Endpoint string
-	Region   string
-}
+// Default LRU bounds. These match the values the rate limiter uses
+// for the same reason (per-tenant resource cache that must stay
+// small enough for a 5000-tenant cell).
+const (
+	defaultPerTenantStoreMax     = 1000
+	defaultPerTenantStoreIdleTTL = 10 * time.Minute
+)
 
 // NewPerTenantS3Store constructs a per-tenant routing store.
 // Fallback must be non-nil; resolver is required when ZK
@@ -69,12 +92,24 @@ func NewPerTenantS3Store(cfg PerTenantConfig) (*PerTenantS3Store, error) {
 	if cfg.Region == "" {
 		cfg.Region = "us-east-1"
 	}
+	if cfg.MaxEntries <= 0 {
+		cfg.MaxEntries = defaultPerTenantStoreMax
+	}
+	if cfg.IdleTTL <= 0 {
+		cfg.IdleTTL = defaultPerTenantStoreIdleTTL
+	}
+	cache := platform.NewLRUCache(cfg.MaxEntries, cfg.IdleTTL)
+	cache.SetOnEvict(func(_ string, v any) {
+		if s, ok := v.(*S3Store); ok {
+			_ = s.Close()
+		}
+	})
 	return &PerTenantS3Store{
 		resolver: cfg.Resolver,
 		fallback: cfg.Fallback,
 		endpoint: cfg.Endpoint,
 		region:   cfg.Region,
-		stores:   map[uuid.UUID]*S3Store{},
+		stores:   cache,
 	}, nil
 }
 
@@ -125,11 +160,11 @@ func (s *PerTenantS3Store) routeFor(ctx context.Context) (ObjectStore, error) {
 	if tenantID == uuid.Nil {
 		return s.fallback, nil
 	}
-	s.mu.RLock()
-	cached, ok := s.stores[tenantID]
-	s.mu.RUnlock()
-	if ok {
-		return cached, nil
+	key := tenantID.String()
+	if v, ok := s.stores.Get(key); ok {
+		if cached, ok := v.(*S3Store); ok {
+			return cached, nil
+		}
 	}
 	cfg, ok, err := s.resolver.ResolveZKCredentials(ctx, tenantID)
 	if err != nil {
@@ -149,23 +184,33 @@ func (s *PerTenantS3Store) routeFor(ctx context.Context) (ObjectStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("files: build per-tenant s3 store: %w", err)
 	}
-	s.mu.Lock()
-	// Re-check under the write lock; another goroutine may have
-	// cached the same tenant in the meantime.
-	if existing, dup := s.stores[tenantID]; dup {
-		s.mu.Unlock()
-		return existing, nil
+	// Race check: another goroutine may have just cached a store
+	// for the same tenant. Prefer the cached value to avoid two
+	// distinct *S3Store instances pinning two HTTP transports.
+	if v, ok := s.stores.Get(key); ok {
+		if cached, ok := v.(*S3Store); ok {
+			_ = store.Close()
+			return cached, nil
+		}
 	}
-	s.stores[tenantID] = store
-	s.mu.Unlock()
+	s.stores.Set(key, store)
 	return store, nil
 }
 
 // Invalidate drops the cached *S3Store for the tenant so the next
 // request re-resolves credentials. Called when the tenant rotates
-// its ZK fabric HMAC pair via the console.
+// its ZK fabric HMAC pair via the console. Idempotent: missing
+// entries are a no-op. The LRU OnEvict callback closes the
+// outgoing store's idle connections.
 func (s *PerTenantS3Store) Invalidate(tenantID uuid.UUID) {
-	s.mu.Lock()
-	delete(s.stores, tenantID)
-	s.mu.Unlock()
+	if tenantID == uuid.Nil {
+		return
+	}
+	s.stores.Delete(tenantID.String())
+}
+
+// CachedLen reports the current number of cached per-tenant stores.
+// Intended for the load test + metrics, NOT for normal operation.
+func (s *PerTenantS3Store) CachedLen() int {
+	return s.stores.Len()
 }

@@ -44,6 +44,21 @@ type Config struct {
 	CRUDOpsPerTenant   int
 	LedgerOpsPerTenant int
 	KTypeName          string
+	// SLO is the assertion bundle Run enforces after the run
+	// completes. Zero-values disable assertion. Phase K's 5000-
+	// tenant target uses APIp99=100ms, FailureRate=0 to fail-fast
+	// on regressions.
+	SLO SLOTargets
+}
+
+// SLOTargets bundles the latency / error-rate thresholds Run checks
+// after a successful execution. A zero target is interpreted as
+// "no assertion".
+type SLOTargets struct {
+	APIp99             time.Duration
+	PostJournalp99     time.Duration
+	MaxFailureRate     float64
+	MaxPoolUtilization float64
 }
 
 // Result is the summary emitted after a run. Latencies are reported
@@ -237,7 +252,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, cfg Config) (*Result, error) {
 	close(stopSampler)
 	samplerDone.Wait()
 
-	return &Result{
+	res := &Result{
 		Tenants:          cfg.Tenants,
 		Workers:          cfg.Workers,
 		TotalOperations:  totalOps.Load(),
@@ -251,7 +266,46 @@ func Run(ctx context.Context, pool *pgxpool.Pool, cfg Config) (*Result, error) {
 		PoolMaxConns:     pool.Config().MaxConns,
 		PoolPeakConns:    peakTotal.Load(),
 		PoolAcquiredPeak: peakAcquired.Load(),
-	}, nil
+	}
+	if err := res.checkSLO(cfg.SLO); err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+// checkSLO compares the Result against the configured targets and
+// returns a non-nil error on the first violation. Zero-valued targets
+// are skipped.
+func (r *Result) checkSLO(s SLOTargets) error {
+	if s.APIp99 > 0 {
+		if r.Create.P99 > s.APIp99 {
+			return fmt.Errorf("loadtest SLO breach: create p99=%s > %s", r.Create.P99, s.APIp99)
+		}
+		if r.Get.P99 > s.APIp99 {
+			return fmt.Errorf("loadtest SLO breach: get p99=%s > %s", r.Get.P99, s.APIp99)
+		}
+		if r.List.P99 > s.APIp99 {
+			return fmt.Errorf("loadtest SLO breach: list p99=%s > %s", r.List.P99, s.APIp99)
+		}
+	}
+	if s.PostJournalp99 > 0 && r.PostJournal.P99 > s.PostJournalp99 {
+		return fmt.Errorf("loadtest SLO breach: post_je p99=%s > %s", r.PostJournal.P99, s.PostJournalp99)
+	}
+	// MaxFailureRate is meaningful at zero (the strictest setting), so
+	// >= 0 is the right guard. A negative target means "don't check".
+	if s.MaxFailureRate >= 0 && r.TotalOperations > 0 {
+		rate := float64(r.Failures) / float64(r.TotalOperations)
+		if rate > s.MaxFailureRate {
+			return fmt.Errorf("loadtest SLO breach: failure_rate=%.4f > %.4f", rate, s.MaxFailureRate)
+		}
+	}
+	if s.MaxPoolUtilization > 0 && r.PoolMaxConns > 0 {
+		util := float64(r.PoolAcquiredPeak) / float64(r.PoolMaxConns)
+		if util > s.MaxPoolUtilization {
+			return fmt.Errorf("loadtest SLO breach: pool_utilization=%.2f > %.2f", util, s.MaxPoolUtilization)
+		}
+	}
+	return nil
 }
 
 // String renders the result in a one-block log-friendly layout so
