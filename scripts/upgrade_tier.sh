@@ -74,6 +74,7 @@ TABLES=(
   tenant_features tenant_usage
   webhooks webhook_deliveries print_templates portal_users
   tenant_support_domains data_retention_policies
+  report_schedules export_jobs
 )
 
 read -r -d '' SQL <<SQL || true
