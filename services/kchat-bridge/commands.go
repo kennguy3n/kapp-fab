@@ -27,6 +27,20 @@ type CommandRequest struct {
 	UserID   uuid.UUID `json:"user_id"`
 	Command  string    `json:"command"`
 	Args     []string  `json:"args"`
+	// ThreadID is the KChat thread the command was issued in. The
+	// /ticket-from-thread command stores it on the resulting
+	// helpdesk.ticket so status changes can post back to the
+	// same thread (services/worker/notifications.go).
+	ThreadID string `json:"thread_id,omitempty"`
+	// ThreadSubject is the (optional) parent message preview KChat
+	// renders above a thread. /ticket-from-thread uses it as the
+	// ticket's subject when the slash invocation has no args.
+	ThreadSubject string `json:"thread_subject,omitempty"`
+	// ThreadBody is the concatenated text of the thread the user
+	// turned into a ticket. /ticket-from-thread copies it into the
+	// ticket description so the agent has context without
+	// re-opening the chat.
+	ThreadBody string `json:"thread_body,omitempty"`
 }
 
 // CommandResponse is what KChat will render inline in the chat thread.
@@ -124,6 +138,12 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 			return CommandResponse{Text: fmt.Sprintf("/ticket: %v", err)}, nil
 		}
 		return d.createRecord(ctx, req, helpdesk.KTypeTicket, data)
+	case "ticket-from-thread":
+		data, err := ticketFromThread(req)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/ticket-from-thread: %v", err)}, nil
+		}
+		return d.createRecord(ctx, req, helpdesk.KTypeTicket, data)
 	case "recurring-invoice":
 		data, err := recurringInvoiceFromArgs(req.Args)
 		if err != nil {
@@ -132,7 +152,7 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.createRecord(ctx, req, finance.KTypeRecurringInvoice, data)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /learn, /approve, /ticket, /recurring-invoice, /form, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /learn, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /help",
 		}, nil
 	default:
 		return CommandResponse{
@@ -706,6 +726,37 @@ func ticketFromArgs(args []string, owner uuid.UUID) (map[string]any, error) {
 		return nil, errors.New("ticket subject required")
 	}
 	data["subject"] = strings.Join(subject, " ")
+	return data, nil
+}
+
+// ticketFromThread builds a helpdesk.ticket record from the KChat
+// thread context the bridge attached to the slash invocation. The
+// resulting ticket carries `thread_id` so the worker's notification
+// router can post status updates back to the same thread.
+//
+// Subject defaults to ThreadSubject; the slash command's args (if
+// any) override it so an agent can pin a clearer title at submit
+// time. Description is the thread body verbatim.
+func ticketFromThread(req CommandRequest) (map[string]any, error) {
+	if req.ThreadID == "" {
+		return nil, errors.New("thread_id missing — invoke /ticket-from-thread inside a thread")
+	}
+	subject := strings.TrimSpace(strings.Join(req.Args, " "))
+	if subject == "" {
+		subject = strings.TrimSpace(req.ThreadSubject)
+	}
+	if subject == "" {
+		return nil, errors.New("ticket subject required (pass as args or set thread_subject)")
+	}
+	data := map[string]any{
+		"subject":     subject,
+		"description": req.ThreadBody,
+		"status":      "open",
+		"priority":    "medium",
+		"channel":     "chat",
+		"owner":       req.UserID.String(),
+		"thread_id":   req.ThreadID,
+	}
 	return data, nil
 }
 

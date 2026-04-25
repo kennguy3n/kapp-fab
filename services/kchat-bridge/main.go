@@ -174,6 +174,33 @@ func run() error {
 		writeJSON(w, http.StatusOK, resp)
 	})
 
+	// Helpdesk thread back-post. The worker hits this surface when a
+	// helpdesk.ticket carrying thread_id changes status, so the
+	// originating KChat thread receives an inline status update card.
+	// The bridge does not own KChat connectivity here — it logs the
+	// payload at INFO and returns 202; a real KChat client adapter
+	// can hook in later without changing the worker's contract.
+	r.Post("/kchat/threads/post", func(w http.ResponseWriter, req *http.Request) {
+		var body struct {
+			TenantID uuid.UUID `json:"tenant_id"`
+			Type     string    `json:"type"`
+			ThreadID string    `json:"thread_id"`
+			Title    string    `json:"title"`
+			Body     string    `json:"body"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if body.ThreadID == "" {
+			http.Error(w, "thread_id required", http.StatusBadRequest)
+			return
+		}
+		log.Printf("kchat-bridge: thread post tenant=%s thread=%s type=%s title=%q",
+			body.TenantID, body.ThreadID, body.Type, body.Title)
+		w.WriteHeader(http.StatusAccepted)
+	})
+
 	r.Get("/healthz", func(w http.ResponseWriter, req *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
