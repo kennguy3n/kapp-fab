@@ -17,11 +17,10 @@
 ALTER TABLE inventory_moves
     ADD COLUMN IF NOT EXISTS reversal_of BIGINT;
 
+-- Partial UNIQUE also serves lookups by (tenant_id, reversal_of), so
+-- no second non-unique index is needed. Keeping one index only avoids
+-- extra write amplification on every inventory move INSERT.
 CREATE UNIQUE INDEX IF NOT EXISTS inventory_moves_reversal_of_uniq
-    ON inventory_moves (tenant_id, reversal_of)
-    WHERE reversal_of IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS inventory_moves_reversal_of_idx
     ON inventory_moves (tenant_id, reversal_of)
     WHERE reversal_of IS NOT NULL;
 

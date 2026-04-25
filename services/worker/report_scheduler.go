@@ -177,7 +177,14 @@ func renderReportCSV(result *reporting.Result) ([]byte, error) {
 	for _, row := range result.Rows {
 		rec := make([]string, 0, len(result.Columns))
 		for _, col := range result.Columns {
-			rec = append(rec, fmt.Sprint(row[col]))
+			// Nil (SQL NULL or missing key) renders as empty string,
+			// not fmt.Sprint's "<nil>" default — parity with
+			// internal/exporter.csvCell.
+			if v := row[col]; v == nil {
+				rec = append(rec, "")
+			} else {
+				rec = append(rec, fmt.Sprint(v))
+			}
 		}
 		if err := w.Write(rec); err != nil {
 			return nil, err
