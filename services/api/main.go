@@ -514,13 +514,19 @@ func run() error {
 			r.Patch("/{ktype}/{id}", rh.update)
 			r.Delete("/{ktype}/{id}", rh.delete)
 			// Print surface — HTML preview + PDF download per
-			// record. Lives under /records so the tenant +
-			// feature + rate-limit middleware is inherited; the
-			// feature key is derived from the KType's domain
-			// prefix (finance.ar_invoice → "finance") so disabling
-			// a KApp also disables its printable artifacts.
-			r.Get("/{ktype}/{id}/pdf", ph.pdf)
-			r.Get("/{ktype}/{id}/html", ph.html)
+			// record. Sits under /records so the tenant +
+			// rate-limit middleware is inherited, but the
+			// FeaturePrint flag is enforced explicitly here:
+			// DynamicFeatureMiddleware keys on the URL domain
+			// segment ("records") which has no per-feature
+			// mapping, so the print routes would otherwise be
+			// silently un-gated even when the tenant's plan has
+			// FeaturePrint=false.
+			r.Group(func(pr chi.Router) {
+				pr.Use(platform.FeatureMiddleware(featureStore, tenant.FeaturePrint))
+				pr.Get("/{ktype}/{id}/pdf", ph.pdf)
+				pr.Get("/{ktype}/{id}/html", ph.html)
+			})
 			// Workflow action endpoint (ARCHITECTURE.md §10). Runs under the
 			// same tenant + idempotency + rate-limit + quota stack as record
 			// CRUD so a spammed transition can't starve other tenants.

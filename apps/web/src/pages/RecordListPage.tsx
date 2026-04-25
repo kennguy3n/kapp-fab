@@ -137,16 +137,25 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
   };
 
   const handleBulkExport = async () => {
-    const csv = await api.bulkExportRecords(ktype!, [...selectedIds]);
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${ktype}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    // The two mutations above route errors through useMutation's
+    // builtin handling, but bulkExportRecords returns a plain
+    // Promise<string> because the response is a blob — without a
+    // try/catch a 4xx/5xx surfaces as an unhandled rejection and
+    // the user gets no feedback at all.
+    try {
+      const csv = await api.bulkExportRecords(ktype!, [...selectedIds]);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${ktype}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      window.alert((err as Error).message ?? "Export failed");
+    }
   };
 
   const hasKanban = !!ktypeQuery.data?.schema?.views?.kanban;
