@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord, SavedView } from "@kapp/client";
@@ -91,6 +91,18 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
 
   const [selected, setSelected] = useState<KRecord | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  // React Router reuses this component across /records/:ktype
+  // transitions (same route pattern), so useState does not reset on
+  // the navigation. Clear the bulk-action selection and right-pane
+  // focus explicitly whenever the KType changes — otherwise the
+  // toolbar keeps showing "N selected" with stale IDs from the
+  // previous KType, and clicking a bulk action would send them to
+  // the new KType's /bulk endpoint (backend safely rejects, UX
+  // looks broken).
+  useEffect(() => {
+    setSelectedIds(new Set());
+    setSelected(null);
+  }, [ktype]);
   const toggleSelect = (id: string, checked: boolean) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);

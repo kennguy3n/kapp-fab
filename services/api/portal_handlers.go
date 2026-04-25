@@ -194,19 +194,29 @@ func (h *portalHandlers) verifyMagicLink(w http.ResponseWriter, r *http.Request)
 // The per-tenant feature gate + RLS still runs on the underlying
 // records table; the email filter is the ABAC layer that narrows
 // the visible rows further to just the customer's own.
+//
+// The filter is pushed into SQL via ListByField rather than pulled
+// into Go after a full-tenant scan — a portal user who owns three
+// tickets on a tenant with 50k should only pay the cost of their
+// own three rows, not of every ticket plus per-row decryption.
 func (h *portalHandlers) listTickets(w http.ResponseWriter, r *http.Request) {
 	claims := portalClaimsFromContext(r.Context())
 	if claims == nil {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
-	rows, err := h.records.ListAll(r.Context(), claims.TenantID, record.ListFilter{KType: helpdesk.KTypeTicket})
+	rows, err := h.records.ListByField(
+		r.Context(),
+		claims.TenantID,
+		record.ListFilter{KType: helpdesk.KTypeTicket},
+		"customer_email",
+		claims.Email,
+	)
 	if err != nil {
 		writeRecordError(w, err)
 		return
 	}
-	filtered := filterByCustomerEmail(rows, claims.Email)
-	writeJSON(w, http.StatusOK, map[string]any{"tickets": filtered})
+	writeJSON(w, http.StatusOK, map[string]any{"tickets": rows})
 }
 
 // getTicket returns a single ticket, 404 if the customer_email
@@ -500,16 +510,6 @@ func recordOwnedByCustomer(rec record.KRecord, email string) bool {
 	}
 	v, _ := data["customer_email"].(string)
 	return strings.EqualFold(strings.TrimSpace(v), strings.TrimSpace(email))
-}
-
-func filterByCustomerEmail(rows []record.KRecord, email string) []record.KRecord {
-	out := make([]record.KRecord, 0, len(rows))
-	for _, r := range rows {
-		if recordOwnedByCustomer(r, email) {
-			out = append(out, r)
-		}
-	}
-	return out
 }
 
 // buildMagicLink composes the clickable link the portal emails. The
