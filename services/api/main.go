@@ -183,7 +183,16 @@ func run() error {
 	// of the API. The object store defaults to an in-process MemoryStore
 	// so local dev works without MinIO; production overrides it by
 	// mounting an S3-compatible store through the ObjectStore interface.
-	var objectStore files.ObjectStore = files.NewMemoryStore()
+	// Object store layering, outermost in:
+	//
+	//   1. files.PerTenantS3Store  -> routes by tenant id
+	//   2. ZK fabric per-tenant *S3Store (bucket comes off the tenants row)
+	//   3. Fallback platform-wide *S3Store (legacy MinIO bucket) or MemoryStore
+	//
+	// Tenants without ZK fabric credentials drop to (3) so existing
+	// deployments keep working — the ZK rollout can run gradually
+	// instead of all-at-once.
+	var fallbackStore files.ObjectStore = files.NewMemoryStore()
 	if bucket := os.Getenv("S3_BUCKET"); bucket != "" {
 		s3cfg := files.S3StoreConfig{
 			Endpoint:       os.Getenv("S3_ENDPOINT"),
@@ -197,10 +206,30 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("files: init S3 store: %w", err)
 		}
-		objectStore = s3store
-		log.Printf("api: file object store = S3 (bucket=%s endpoint=%s)", bucket, s3cfg.Endpoint)
+		fallbackStore = s3store
+		log.Printf("api: fallback object store = S3 (bucket=%s endpoint=%s)", bucket, s3cfg.Endpoint)
 	} else {
-		log.Printf("api: file object store = in-memory (S3_BUCKET unset)")
+		log.Printf("api: fallback object store = in-memory (S3_BUCKET unset)")
+	}
+	zkEndpoint := os.Getenv("ZK_FABRIC_ENDPOINT")
+	zkRegion := os.Getenv("ZK_FABRIC_REGION")
+	if zkRegion == "" {
+		zkRegion = "us-east-1"
+	}
+	var objectStore files.ObjectStore = fallbackStore
+	if zkEndpoint != "" {
+		resolver := newZKTenantResolver(tenantSvc, zkEndpoint, zkRegion)
+		perTenant, err := files.NewPerTenantS3Store(files.PerTenantConfig{
+			Resolver: resolver,
+			Fallback: fallbackStore,
+			Endpoint: zkEndpoint,
+			Region:   zkRegion,
+		})
+		if err != nil {
+			return fmt.Errorf("files: init per-tenant ZK store: %w", err)
+		}
+		objectStore = perTenant
+		log.Printf("api: per-tenant ZK object store enabled (endpoint=%s)", zkEndpoint)
 	}
 	filesStore := files.NewStore(pool, objectStore)
 	baseStore := base.NewStore(pool)
@@ -293,7 +322,16 @@ func run() error {
 	featureMW := platform.DynamicFeatureMiddleware(featureStore)
 
 	fh := &formsHandlers{store: formStore, registry: ktypeRegistry}
-	th := &tenantHandlers{svc: tenantSvc, wizard: tenant.NewWizard(pool)}
+	wizard := tenant.NewWizard(pool)
+	if zkClient := tenant.NewZKFabricClient(tenant.ZKFabricClientConfig{
+		Endpoint:       os.Getenv("ZK_FABRIC_CONSOLE_ENDPOINT"),
+		AdminToken:     os.Getenv("ZK_FABRIC_ADMIN_TOKEN"),
+		BucketTemplate: os.Getenv("ZK_FABRIC_BUCKET_TEMPLATE"),
+	}); zkClient != nil {
+		wizard = wizard.WithZKFabricProvisioner(zkClient)
+		log.Printf("api: ZK fabric tenant provisioning enabled (console=%s)", os.Getenv("ZK_FABRIC_CONSOLE_ENDPOINT"))
+	}
+	th := &tenantHandlers{svc: tenantSvc, wizard: wizard}
 	feath := &featuresHandlers{features: featureStore, tenants: tenantSvc}
 	meth := &meteringHandlers{metering: meteringStore, tenants: tenantSvc, plans: planStore, features: featureStore}
 	kh := &ktypeHandlers{registry: ktypeRegistry}
@@ -458,7 +496,20 @@ func run() error {
 			r.Get("/{id}/features", feath.list)
 			r.Put("/{id}/features", feath.update)
 			r.Get("/{id}/usage", meth.usage)
+			r.Get("/{id}/usage/history", meth.usageHistory)
 			r.Post("/{id}/plan", meth.changePlan)
+
+			// /tenants/me/* — JWT-resolved tenant variants. The web
+			// UI can call these without knowing its own tenant
+			// uuid; the handler resolves it off the JWT claims via
+			// TenantMiddleware.
+			r.Route("/me", func(r chi.Router) {
+				r.Use(platform.TenantMiddleware(tenantSvc))
+				r.Get("/features", feath.listMe)
+				r.Get("/usage", meth.usageMe)
+				r.Get("/usage/history", meth.usageHistory)
+				r.Post("/plan", meth.changePlanMe)
+			})
 		})
 
 		// Plan definitions are shared metadata (not tenant-scoped) so

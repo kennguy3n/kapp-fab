@@ -23,16 +23,18 @@ const (
 // domains on these strings; the constants live here so the wizard,
 // API handlers, and middleware all reference the same literals.
 const (
-	FeatureCRM       = "crm"
-	FeatureFinance   = "finance"
-	FeatureInventory = "inventory"
-	FeatureHR        = "hr"
-	FeatureLMS       = "lms"
-	FeatureHelpdesk  = "helpdesk"
-	FeatureReporting = "reporting"
-	FeatureWebhook   = "webhook"
-	FeaturePortal    = "portal"
-	FeaturePrint     = "print"
+	FeatureCRM           = "crm"
+	FeatureFinance       = "finance"
+	FeatureInventory     = "inventory"
+	FeatureHR            = "hr"
+	FeatureLMS           = "lms"
+	FeatureHelpdesk      = "helpdesk"
+	FeatureReporting     = "reporting"
+	FeatureWebhook       = "webhook"
+	FeaturePortal        = "portal"
+	FeaturePrint         = "print"
+	FeatureImporter      = "importer"
+	FeatureReportBuilder = "report_builder"
 )
 
 // AllFeatures is the canonical list of feature keys. Handlers that
@@ -50,6 +52,8 @@ var AllFeatures = []string{
 	FeatureWebhook,
 	FeaturePortal,
 	FeaturePrint,
+	FeatureImporter,
+	FeatureReportBuilder,
 }
 
 // PlanLimits is the numeric ceiling each plan enforces per billing
@@ -173,45 +177,51 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 	switch plan {
 	case PlanStarter:
 		return map[string]bool{
-			FeatureCRM:       true,
-			FeatureFinance:   true,
-			FeatureInventory: true,
-			FeatureHR:        false,
-			FeatureLMS:       false,
-			FeatureHelpdesk:  false,
-			FeatureReporting: false,
-			FeatureWebhook:   false,
-			FeaturePortal:    false,
-			FeaturePrint:     true,
+			FeatureCRM:           true,
+			FeatureFinance:       true,
+			FeatureInventory:     true,
+			FeatureHR:            false,
+			FeatureLMS:           false,
+			FeatureHelpdesk:      false,
+			FeatureReporting:     false,
+			FeatureWebhook:       false,
+			FeaturePortal:        false,
+			FeaturePrint:         true,
+			FeatureImporter:      true,
+			FeatureReportBuilder: false,
 		}
 	case PlanBusiness, PlanEnterprise:
 		return map[string]bool{
-			FeatureCRM:       true,
-			FeatureFinance:   true,
-			FeatureInventory: true,
-			FeatureHR:        true,
-			FeatureLMS:       true,
-			FeatureHelpdesk:  true,
-			FeatureReporting: true,
-			FeatureWebhook:   true,
-			FeaturePortal:    true,
-			FeaturePrint:     true,
+			FeatureCRM:           true,
+			FeatureFinance:       true,
+			FeatureInventory:     true,
+			FeatureHR:            true,
+			FeatureLMS:           true,
+			FeatureHelpdesk:      true,
+			FeatureReporting:     true,
+			FeatureWebhook:       true,
+			FeaturePortal:        true,
+			FeaturePrint:         true,
+			FeatureImporter:      true,
+			FeatureReportBuilder: true,
 		}
 	default:
 		// Free plan — CRM only. Also the fallback when the plan
 		// name does not match any canonical identifier so a typo
 		// fails closed rather than opening every feature.
 		return map[string]bool{
-			FeatureCRM:       true,
-			FeatureFinance:   false,
-			FeatureInventory: false,
-			FeatureHR:        false,
-			FeatureLMS:       false,
-			FeatureHelpdesk:  false,
-			FeatureReporting: false,
-			FeatureWebhook:   false,
-			FeaturePortal:    false,
-			FeaturePrint:     false,
+			FeatureCRM:           true,
+			FeatureFinance:       false,
+			FeatureInventory:     false,
+			FeatureHR:            false,
+			FeatureLMS:           false,
+			FeatureHelpdesk:      false,
+			FeatureReporting:     false,
+			FeatureWebhook:       false,
+			FeaturePortal:        false,
+			FeaturePrint:         false,
+			FeatureImporter:      false,
+			FeatureReportBuilder: false,
 		}
 	}
 }

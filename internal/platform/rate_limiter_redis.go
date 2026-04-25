@@ -16,7 +16,7 @@ import (
 //
 //	KEYS[1] = bucket key
 //	ARGV[1] = capacity (burst)
-//	ARGV[2] = refill tokens per second * 1000 (i.e. millis of tokens/s)
+//	ARGV[2] = refill rate in tokens per minute (the original RPM)
 //	ARGV[3] = now (unix millis)
 //	ARGV[4] = TTL in seconds
 //
@@ -27,16 +27,18 @@ import (
 //
 // Returns 1 if allowed, 0 otherwise.
 //
-// Float math is emulated via integers (millis) since Lua's numbers
-// are doubles but Redis returns strings to Go. Keeping the script
-// in redis side-steps the round-trip latency and keeps the
-// check-and-decrement atomic across replicas.
+// Refill math: tokens added over elapsed_ms = elapsed_ms * RPM /
+// 60000. We deliberately stay in milliseconds throughout so a 1ms
+// gap does not refill a meaningful fraction of a token at sane
+// RPMs. Keeping the script in redis side-steps the round-trip
+// latency and keeps the check-and-decrement atomic across
+// replicas.
 const slidingWindowLua = `
-local key        = KEYS[1]
-local capacity   = tonumber(ARGV[1])
-local refill_mils = tonumber(ARGV[2])
-local now_ms     = tonumber(ARGV[3])
-local ttl        = tonumber(ARGV[4])
+local key      = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local rpm      = tonumber(ARGV[2])
+local now_ms   = tonumber(ARGV[3])
+local ttl      = tonumber(ARGV[4])
 
 local bucket = redis.call("HMGET", key, "tokens", "last_ms")
 local tokens = tonumber(bucket[1])
@@ -47,14 +49,14 @@ if tokens == nil then
 end
 local elapsed_ms = now_ms - last_ms
 if elapsed_ms < 0 then elapsed_ms = 0 end
-tokens = tokens + (elapsed_ms * refill_mils / 1000000.0)
+tokens = tokens + (elapsed_ms * rpm / 60000.0)
 if tokens > capacity then tokens = capacity end
 local allowed = 0
 if tokens >= 1 then
   tokens = tokens - 1
   allowed = 1
 end
-redis.call("HMSET", key, "tokens", tokens, "last_ms", now_ms)
+redis.call("HMSET", key, "tokens", tostring(tokens), "last_ms", tostring(now_ms))
 redis.call("EXPIRE", key, ttl)
 return allowed
 `
@@ -123,18 +125,13 @@ func (r *RedisRateLimiter) Allow(tenantID uuid.UUID, rpm, burst int) bool {
 func (r *RedisRateLimiter) AllowCtx(ctx context.Context, tenantID uuid.UUID, rpm, burst int) bool {
 	wantRPM := chooseInt(rpm, r.cfg.RequestsPerMinute)
 	wantBurst := chooseInt(burst, r.cfg.BurstSize)
-	// Redis script expects "tokens per second * 1,000,000" so we
-	// retain sub-millisecond precision without mixing Lua floats in
-	// the critical path. 60 RPM → 1 token/s → 1,000,000 in encoded
-	// units.
-	refillMicros := int64(wantRPM) * 1_000_000 / 60
 	nowMS := time.Now().UnixMilli()
 	ttl := int64(r.cfg.IdleTimeout.Seconds())
 	if ttl <= 0 {
 		ttl = 600
 	}
 	key := fmt.Sprintf("kapp:rl:%s", tenantID.String())
-	args := []any{wantBurst, refillMicros, nowMS, ttl}
+	args := []any{wantBurst, wantRPM, nowMS, ttl}
 	// Try EVALSHA first; on NOSCRIPT (Redis restarted, script cache
 	// dropped), fall back to EVAL which also repopulates the cache.
 	res, err := r.client.EvalSha(ctx, r.sha, []string{key}, args...).Int64()

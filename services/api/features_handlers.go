@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
 
@@ -76,4 +77,24 @@ func (h *featuresHandlers) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, featuresResponse{TenantID: id, Features: features})
+}
+
+// listMe is the JWT-resolved variant of list(). The handler reads
+// the tenant id off the request context (set by TenantMiddleware)
+// rather than from a URL parameter so the web UI can call it
+// without knowing the tenant uuid up front.
+//
+// Routed at GET /api/v1/tenants/me/features.
+func (h *featuresHandlers) listMe(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusUnauthorized)
+		return
+	}
+	features, err := h.features.ListFeatures(r.Context(), t.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, featuresResponse{TenantID: t.ID, Features: features})
 }

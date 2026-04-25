@@ -1,0 +1,196 @@
+package tenant
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// ZKFabricClient is a thin HTTP client for the ZK Object Fabric
+// console at :8081. It implements ZKFabricProvisioner so the setup
+// wizard can call it during tenant onboarding to mint per-tenant
+// HMAC credentials and bucket bindings.
+//
+// The console endpoints used here:
+//
+//	POST /api/tenants/{id}            — create tenant record (admin)
+//	POST /api/tenants/{id}/keys       — issue HMAC access key pair
+//	POST /api/tenants/{id}/buckets    — create per-tenant bucket
+//
+// All three are admin-token gated; the platform operator supplies
+// the token via the ZK_FABRIC_ADMIN_TOKEN env var. If the token is
+// blank the client returns nil from NewZKFabricClient so the wizard
+// falls back to the legacy MinIO path (no ZK encryption).
+type ZKFabricClient struct {
+	endpoint   string
+	adminToken string
+	bucketTmpl string
+	httpClient *http.Client
+}
+
+// ZKFabricClientConfig configures the console client. Endpoint is
+// the console base URL (e.g. http://zk-fabric:8081). AdminToken is
+// the bearer token sent in the Authorization header. BucketTemplate
+// renders the per-tenant bucket name from {tenant_id} / {slug}; the
+// default is "kapp-{slug}".
+type ZKFabricClientConfig struct {
+	Endpoint       string
+	AdminToken     string
+	BucketTemplate string
+	HTTPClient     *http.Client
+}
+
+// NewZKFabricClient returns a console client or nil when the
+// integration is disabled (Endpoint or AdminToken blank). Returning
+// a nil interface lets callers wire the result straight into
+// Wizard.WithZKFabricProvisioner without an extra branch.
+func NewZKFabricClient(cfg ZKFabricClientConfig) *ZKFabricClient {
+	if cfg.Endpoint == "" || cfg.AdminToken == "" {
+		return nil
+	}
+	if cfg.BucketTemplate == "" {
+		cfg.BucketTemplate = "kapp-{slug}"
+	}
+	hc := cfg.HTTPClient
+	if hc == nil {
+		hc = &http.Client{Timeout: 10 * time.Second}
+	}
+	return &ZKFabricClient{
+		endpoint:   strings.TrimRight(cfg.Endpoint, "/"),
+		adminToken: cfg.AdminToken,
+		bucketTmpl: cfg.BucketTemplate,
+		httpClient: hc,
+	}
+}
+
+// ProvisionTenant implements ZKFabricProvisioner. The flow is:
+//
+//  1. POST /api/tenants/{id}            — create tenant record
+//  2. POST /api/tenants/{id}/keys       — mint access/secret pair
+//  3. POST /api/tenants/{id}/buckets    — bind a per-tenant bucket
+//
+// All three are idempotent on the fabric side: re-running the
+// wizard after a partial failure converges. The returned
+// ZKCredentials hold the access/secret pair the gateway accepts on
+// SigV4 sign and the bucket name the kapp client should write to.
+func (c *ZKFabricClient) ProvisionTenant(ctx context.Context, tenantID uuid.UUID, slug string) (ZKCredentials, error) {
+	if c == nil {
+		return ZKCredentials{}, errors.New("zk fabric: client not configured")
+	}
+	if err := c.createTenant(ctx, tenantID, slug); err != nil {
+		return ZKCredentials{}, fmt.Errorf("zk fabric: create tenant: %w", err)
+	}
+	access, secret, err := c.createKey(ctx, tenantID)
+	if err != nil {
+		return ZKCredentials{}, fmt.Errorf("zk fabric: create key: %w", err)
+	}
+	bucket := c.bucketName(tenantID, slug)
+	if err := c.createBucket(ctx, tenantID, bucket); err != nil {
+		return ZKCredentials{}, fmt.Errorf("zk fabric: create bucket: %w", err)
+	}
+	return ZKCredentials{AccessKey: access, SecretKey: secret, Bucket: bucket}, nil
+}
+
+func (c *ZKFabricClient) bucketName(tenantID uuid.UUID, slug string) string {
+	out := c.bucketTmpl
+	out = strings.ReplaceAll(out, "{slug}", slug)
+	out = strings.ReplaceAll(out, "{tenant_id}", tenantID.String())
+	return out
+}
+
+func (c *ZKFabricClient) createTenant(ctx context.Context, tenantID uuid.UUID, slug string) error {
+	body := map[string]any{
+		"id":            tenantID.String(),
+		"name":          slug,
+		"contract_type": "b2b_shared",
+		"license_tier":  "beta",
+	}
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/api/tenants/%s", tenantID), body, nil)
+}
+
+// createKey calls POST /api/tenants/{id}/keys and parses the
+// returned descriptor. The access key is generated on the fabric
+// side; we pass an empty body and read back the {accessKey,
+// secretKey} pair. Secret is shown exactly once — the platform
+// operator must persist it on the tenants row immediately.
+func (c *ZKFabricClient) createKey(ctx context.Context, tenantID uuid.UUID) (string, string, error) {
+	resp := struct {
+		AccessKey string `json:"accessKey"`
+		SecretKey string `json:"secretKey"`
+	}{}
+	// Generate a random suggested access key client-side so the
+	// fabric demo (which echoes the supplied accessKey when
+	// present) returns a deterministic value the wizard can pin.
+	suggested := suggestedAccessKey()
+	body := map[string]any{"accessKey": suggested}
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/api/tenants/%s/keys", tenantID), body, &resp); err != nil {
+		return "", "", err
+	}
+	if resp.AccessKey == "" || resp.SecretKey == "" {
+		return "", "", errors.New("zk fabric: console returned empty access/secret pair")
+	}
+	return resp.AccessKey, resp.SecretKey, nil
+}
+
+func (c *ZKFabricClient) createBucket(ctx context.Context, tenantID uuid.UUID, bucket string) error {
+	body := map[string]any{"name": bucket}
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/api/tenants/%s/buckets", tenantID), body, nil)
+}
+
+// do issues a JSON request against the console with bearer auth.
+// 2xx responses unmarshal into out (when non-nil); 409 is treated
+// as success so re-running the wizard is idempotent.
+func (c *ZKFabricClient) do(ctx context.Context, method, path string, in any, out any) error {
+	var rdr io.Reader
+	if in != nil {
+		buf, err := json.Marshal(in)
+		if err != nil {
+			return fmt.Errorf("marshal: %w", err)
+		}
+		rdr = bytes.NewReader(buf)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.endpoint+path, rdr)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.adminToken)
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusConflict {
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// suggestedAccessKey returns a 16-byte random URL-safe access key.
+// The actual secret is minted by the fabric console; we only need
+// a stable identifier so the wizard can assert idempotency on
+// retries.
+func suggestedAccessKey() string {
+	var b [12]byte
+	_, _ = rand.Read(b[:])
+	return "kapp-" + base64.RawURLEncoding.EncodeToString(b[:])
+}

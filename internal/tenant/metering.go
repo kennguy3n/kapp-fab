@@ -161,3 +161,119 @@ func (s *MeteringStore) GetAllMetrics(ctx context.Context, tenantID uuid.UUID) (
 	}
 	return out, nil
 }
+
+// HistoryRow is one (period, metric, value) tuple returned by
+// GetHistory. The period_start anchors the row to a calendar month.
+type HistoryRow struct {
+	PeriodStart time.Time `json:"period_start"`
+	Metric      string    `json:"metric"`
+	Value       int64     `json:"value"`
+}
+
+// GetHistory returns the last `months` calendar periods of usage
+// data for the tenant, ordered oldest -> newest. Used by the
+// dashboard's historical-trend chart. Caller specifies months; the
+// store guards against silly values (clamped to [1, 24]).
+func (s *MeteringStore) GetHistory(ctx context.Context, tenantID uuid.UUID, months int) ([]HistoryRow, error) {
+	if tenantID == uuid.Nil {
+		return nil, errors.New("tenant: tenant id required")
+	}
+	if months < 1 {
+		months = 6
+	}
+	if months > 24 {
+		months = 24
+	}
+	cur := s.CurrentPeriod()
+	cutoff := time.Date(cur.Year(), cur.Month()-time.Month(months-1), 1, 0, 0, 0, 0, time.UTC)
+	out := []HistoryRow{}
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT period_start, metric, value
+			   FROM tenant_usage
+			  WHERE tenant_id = $1 AND period_start >= $2
+			  ORDER BY period_start ASC, metric ASC`,
+			tenantID, cutoff,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var row HistoryRow
+			if err := rows.Scan(&row.PeriodStart, &row.Metric, &row.Value); err != nil {
+				return err
+			}
+			out = append(out, row)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("tenant: get history: %w", err)
+	}
+	return out, nil
+}
+
+// SnapshotStorageBytes records the tenant's current total storage
+// footprint (sum of files.size_bytes) into tenant_usage. Called
+// daily by the worker so the dashboard's storage line is accurate
+// across the billing period instead of only reflecting the deltas
+// observed since the last write.
+//
+// The implementation uses an absolute write rather than Increment
+// to avoid drift from missed delta events.
+func (s *MeteringStore) SnapshotStorageBytes(ctx context.Context, tenantID uuid.UUID) error {
+	if tenantID == uuid.Nil {
+		return errors.New("tenant: tenant id required")
+	}
+	period := s.CurrentPeriod()
+	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var total int64
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE(SUM(size_bytes), 0) FROM files WHERE tenant_id = $1`,
+			tenantID,
+		).Scan(&total); err != nil {
+			return fmt.Errorf("tenant: snapshot storage scan: %w", err)
+		}
+		_, err := tx.Exec(ctx,
+			`INSERT INTO tenant_usage (tenant_id, period_start, metric, value)
+			 VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (tenant_id, period_start, metric)
+			 DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+			tenantID, period, MetricStorageBytes, total,
+		)
+		if err != nil {
+			return fmt.Errorf("tenant: snapshot storage upsert: %w", err)
+		}
+		return nil
+	})
+}
+
+// SnapshotKRecordCount writes the tenant's current krecord row
+// count into tenant_usage. Same pattern as SnapshotStorageBytes.
+func (s *MeteringStore) SnapshotKRecordCount(ctx context.Context, tenantID uuid.UUID) error {
+	if tenantID == uuid.Nil {
+		return errors.New("tenant: tenant id required")
+	}
+	period := s.CurrentPeriod()
+	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var total int64
+		if err := tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM krecords WHERE tenant_id = $1`,
+			tenantID,
+		).Scan(&total); err != nil {
+			return fmt.Errorf("tenant: snapshot krecord scan: %w", err)
+		}
+		_, err := tx.Exec(ctx,
+			`INSERT INTO tenant_usage (tenant_id, period_start, metric, value)
+			 VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (tenant_id, period_start, metric)
+			 DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+			tenantID, period, MetricKRecordCount, total,
+		)
+		if err != nil {
+			return fmt.Errorf("tenant: snapshot krecord upsert: %w", err)
+		}
+		return nil
+	})
+}

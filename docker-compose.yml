@@ -55,6 +55,43 @@ services:
     ports:
       - "6379:6379"
 
+  # ZK Object Fabric — multi-tenant zero-knowledge S3-compatible
+  # storage gateway. Tenants get their own HMAC credentials + bucket;
+  # the gateway encrypts each object under a per-tenant DEK so the
+  # platform operator (or anyone with raw access to the storage
+  # backend) cannot read tenant data without the tenant's credentials.
+  #
+  # The image is published from kennguy3n/zk-object-fabric and runs
+  # the demo profile here (local_fs_dev backend, in-memory tenant
+  # store seeded from demo/tenants.json). Object bytes persist in
+  # the named volume so dev restarts don't drop attachments.
+  #
+  # Ports:
+  #   :8080 → S3 data plane (Kapp's attachment uploads land here)
+  #   :8081 → console API (tenant create + key issue, used by the
+  #            setup wizard during tenant provisioning)
+  #
+  # Set ZK_FABRIC_ENDPOINT=http://zk-fabric:8080 on the api / worker
+  # services to opt in. Leaving it unset falls back to the legacy
+  # MinIO bucket below.
+  zk-fabric:
+    image: ghcr.io/kennguy3n/zk-object-fabric:latest
+    build:
+      context: https://github.com/kennguy3n/zk-object-fabric.git
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    volumes:
+      - zkdata:/data/objects
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
 volumes:
   pgdata:
   miniodata:
+  zkdata:

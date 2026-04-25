@@ -27,6 +27,10 @@ export function UsageDashboardPage() {
     queryKey: ["tenant-usage", tenantId],
     queryFn: () => api.getTenantUsage(tenantId),
   });
+  const historyQuery = useQuery({
+    queryKey: ["tenant-usage-history", tenantId, 6],
+    queryFn: () => api.getTenantUsageHistory(tenantId, 6),
+  });
   const plansQuery = useQuery({
     queryKey: ["plans"],
     queryFn: () => api.listPlans(),
@@ -85,6 +89,12 @@ export function UsageDashboardPage() {
           );
         })}
       </div>
+      {historyQuery.data && historyQuery.data.rows.length > 0 && (
+        <section style={{ marginTop: 32 }}>
+          <h2 style={{ fontSize: 16 }}>Last 6 months</h2>
+          <UsageHistoryChart rows={historyQuery.data.rows} />
+        </section>
+      )}
       {plansQuery.data && (
         <section style={{ marginTop: 32 }}>
           <h2 style={{ fontSize: 16 }}>Available plans</h2>
@@ -127,5 +137,73 @@ export function UsageDashboardPage() {
         </section>
       )}
     </section>
+  );
+}
+
+// UsageHistoryChart renders a simple per-metric stacked bar series
+// over the supplied (period_start, metric, value) rows. No external
+// charting library is pulled in — a tiny div-based bar grouped by
+// metric keeps the bundle small and matches the rest of the
+// dashboard's visual vocabulary.
+function UsageHistoryChart({
+  rows,
+}: {
+  rows: Array<{ period_start: string; metric: string; value: number }>;
+}) {
+  // Pivot rows -> { period: { metric: value } }.
+  const periods = Array.from(new Set(rows.map((r) => r.period_start))).sort();
+  const metrics = Array.from(new Set(rows.map((r) => r.metric))).sort();
+  const byPeriod = new Map<string, Map<string, number>>();
+  for (const r of rows) {
+    if (!byPeriod.has(r.period_start)) byPeriod.set(r.period_start, new Map());
+    byPeriod.get(r.period_start)!.set(r.metric, r.value);
+  }
+  return (
+    <div>
+      {metrics.map((m) => {
+        const values = periods.map((p) => byPeriod.get(p)?.get(m) ?? 0);
+        const max = Math.max(...values, 1);
+        return (
+          <div key={m} style={{ marginBottom: 18 }}>
+            <div
+              style={{
+                fontSize: 12,
+                color: "#374151",
+                marginBottom: 4,
+                textTransform: "uppercase",
+              }}
+            >
+              {m.replaceAll("_", " ")}
+            </div>
+            <div style={{ display: "flex", gap: 4, alignItems: "flex-end", height: 80 }}>
+              {periods.map((p, i) => {
+                const v = values[i];
+                const h = (v / max) * 100;
+                return (
+                  <div
+                    key={p}
+                    title={`${new Date(p).toLocaleDateString()} — ${v}`}
+                    style={{
+                      flex: 1,
+                      background: "#3b82f6",
+                      height: `${h}%`,
+                      minHeight: v > 0 ? 4 : 0,
+                      borderRadius: "4px 4px 0 0",
+                    }}
+                  />
+                );
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+              {periods.map((p) => (
+                <div key={p} style={{ flex: 1, fontSize: 10, textAlign: "center", color: "#6b7280" }}>
+                  {new Date(p).toLocaleDateString(undefined, { month: "short" })}
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
