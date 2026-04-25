@@ -89,7 +89,16 @@ func (h *reportsHandlers) list(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tenant context missing", http.StatusInternalServerError)
 		return
 	}
-	reports, err := h.store.List(r.Context(), t.ID)
+	// Filter by the visibility / shared_with columns so private
+	// reports owned by another user are never returned to this
+	// caller. Roles aren't currently on the request context (the
+	// platform middleware only stashes tenant + user); we pass an
+	// empty role slice, which still exercises owner-match, explicit
+	// user shares, and public visibility. When role resolution
+	// lands on the context the slice can be populated without
+	// touching the store layer.
+	userID := platform.UserIDFromContext(r.Context())
+	reports, err := h.store.ListVisible(r.Context(), t.ID, userID, nil)
 	if err != nil {
 		writeReportError(w, err)
 		return

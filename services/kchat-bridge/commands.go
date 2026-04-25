@@ -423,8 +423,8 @@ func (d *CommandDispatcher) issueCertificate(ctx context.Context, req CommandReq
 	if d.lmsIssuer == nil {
 		return CommandResponse{Text: "lms certificate issuer not configured"}, nil
 	}
-	if req.TenantID == uuid.Nil {
-		return CommandResponse{Text: "tenant_id required"}, nil
+	if req.TenantID == uuid.Nil || req.UserID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id and user_id required"}, nil
 	}
 	if len(req.Args) < 1 {
 		return CommandResponse{Text: "/certificate <enrollment_id>"}, nil
