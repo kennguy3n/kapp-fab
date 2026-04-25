@@ -295,6 +295,7 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [x] `permissions` table (`migrations/000015_permissions.sql` with RLS; `internal/authz/store.go` reads granular `(role_name, ktype, action)` grants with JSONB conditions, falling back to legacy `roles.permissions` for backward compatibility)
 - [x] `notifications` table (`migrations/000014_notifications.sql` with RLS; `internal/notifications/store.go` + `services/api/notifications.go` expose `GET /api/v1/notifications` + mark-read; worker persists every routed notification; `apps/web/src/components/NotificationBell.tsx` renders the inbox)
 - [x] Webhook HMAC signatures (`services/worker/notifications.go#postWebhook` computes HMAC-SHA256 of the request body with a per-tenant secret and adds `X-Kapp-Signature: sha256=<hex>`)
+- [ ] Insights: visual query builder, composable dashboards, AI query assistant (Phase L)
 
 ### Priority MVP gaps
 
@@ -323,6 +324,7 @@ adapters — not as code to copy:
 - `frappe/crm` — deal pipeline + lead management patterns
 - `frappe/helpdesk` — ticket SLA, agent routing, customer portal
 - `frappe/lms` — course management, certificates
+- `frappe/insights` — visual query builder, dashboard composition, query caching, AI-assisted queries
 
 ---
 
@@ -377,6 +379,48 @@ compare to expected, bulk-edit) that the generic view can't cover.
 - [ ] Backup/restore verified for both shared and dedicated tiers
 - [ ] Security review signs off on tenant isolation and agent safety
 - [ ] Documentation covers onboarding a new developer to productive contribution
+
+---
+
+## Phase L — Insights
+
+**Status:** Not started
+
+Tenant-scoped BI layer: visual query builder, composable dashboards, rich visualizations, AI-assisted queries, and KChat digest cards. Reference: [Frappe Insights](https://github.com/frappe/insights).
+
+### Deliverables
+
+- [ ] `internal/insights/` package: query store, dashboard store, cache store, query engine extensions (calculated columns)
+- [ ] `insights_queries`, `insights_dashboards`, `insights_dashboard_widgets`, `insights_query_cache`, `insights_shares` tables with RLS + tenant_id partitioning
+- [ ] Query result caching with TTL and scheduled refresh via `internal/scheduler`
+- [ ] `services/api/insights_handlers.go` — full CRUD + execution endpoints under `/api/v1/insights/`
+- [ ] Visual query builder React page (`apps/web/src/pages/InsightsQueryBuilderPage.tsx`) — source picker, column drag-and-drop, filter builder, aggregation config, live preview
+- [ ] Dashboard builder React page (`apps/web/src/pages/InsightsDashboardPage.tsx`) — grid layout, widget config, linked filters, auto-refresh
+- [ ] Rich chart visualizations: bar, line, pie, donut, funnel, number card, pivot table (charting library integration)
+- [ ] Dashboard and query sharing: role-based grants, share modal UI
+- [ ] Agent tools: `insights.generate_query`, `insights.explain_result`, `insights.post_dashboard_digest` (`internal/agents/insights_tools.go`)
+- [ ] KChat surfaces: `/insight` slash command, dashboard digest card, right-pane dashboard view
+- [ ] Feature flag: `insights` gated per plan in `internal/tenant/features.go`
+- [ ] Query timeout budget: per-tenant `statement_timeout` on insight queries
+- [ ] Migration: `migrations/000031_insights.sql` (or next available number)
+
+### Acceptance Criteria
+
+- [ ] A tenant user can build a query visually, save it, and see cached results on re-run
+- [ ] A dashboard with 5+ widgets renders correctly with linked filters
+- [ ] AI agent generates a valid query from "Show me top 10 customers by revenue this quarter"
+- [ ] Dashboard digest card posts to KChat on schedule
+- [ ] RLS prevents cross-tenant query/dashboard access (negative test)
+- [ ] Query timeout prevents a single tenant from monopolizing the shared pool
+- [ ] Insights feature flag disables all routes and nav when off
+
+### Deferred / Follow-up
+
+- [ ] External data source connections (non-Kapp PostgreSQL, CSV upload)
+- [ ] SQL editor mode with parameterized tenant injection
+- [ ] Notebook/exploratory analysis interface
+- [ ] Cross-KType JOINs in visual builder
+- [ ] Dashboard embedding (iframe/public link)
 
 ---
 

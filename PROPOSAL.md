@@ -73,7 +73,7 @@ This is the single invariant Kapp optimizes for. Every feature must strengthen t
 | Forms | Auto-generated from KType view definitions; drag-drop layout overrides |
 | Lists | Filtered, paged, tenant-scoped collections with saved views |
 | Kanban | State-based columns driven by KType status fields and workflow transitions |
-| Reports | Pivot, aggregate, and chart reports over KRecords and typed ledgers |
+| Reports & Insights | Visual query builder, composable dashboards, rich visualizations (bar, line, pie, donut, funnel, number card, pivot), AI-assisted queries, scheduled digests, and KChat dashboard cards — all over KRecords and typed ledgers |
 | Workflows | State machines with guards, actions, notifications, and approval chains |
 | Permissions | Role + attribute-based access control (RBAC + ABAC), enforced at DB row and API layer |
 | Audit | Append-only audit log: who/what/when/before/after for every mutation |
@@ -236,6 +236,72 @@ Kapp file attachments live on a per-tenant zero-knowledge object storage layer p
 | Failure mode | If `ZK_FABRIC_ENDPOINT` is unset, the integration is disabled and the global MinIO path stays in place. If a per-tenant lookup fails the request errors out — the limiter never falls back to a neighbour's bucket. |
 
 Reference downstream integrations on the fabric side: kmail, zk-drive, and Kapp Business Suite.
+
+---
+
+### 3.8 Insights Module
+
+Kapp Insights is a tenant-scoped BI layer that lets SME users explore, visualize, and share business data without writing code. Reference architecture: [Frappe Insights](https://github.com/frappe/insights), adapted for Kapp's KType metadata model and multi-tenant isolation.
+
+#### Core Concepts
+
+| Concept | Description |
+| --- | --- |
+| **Query** | A saved, tenant-scoped analytical query over KRecords or typed ledgers. Defined via visual builder or SQL editor. Produces a tabular result set. |
+| **Dashboard** | A composable canvas of widgets (charts, tables, number cards, filters) backed by one or more Queries. Tenant-scoped, shareable by role. |
+| **Data Source** | An abstraction over queryable data. MVP sources: `ktype:<name>` (any KType's KRecords), `ledger.*` (finance/inventory typed tables). Later: external PostgreSQL connections, CSV uploads. |
+| **Visualization** | A chart or table rendering of a Query result. Types: bar, line, pie, donut, funnel, scatter, number card, pivot table. |
+| **Calculated Column** | A derived field defined by an expression over existing columns (e.g., `amount * quantity`, `DATEDIFF(due_date, NOW())`). Evaluated server-side in the query engine. |
+| **Cache** | Per-query result cache with configurable TTL. Scheduled refresh via the existing `internal/scheduler` framework. |
+
+#### Visual Query Builder
+
+The visual query builder replaces the current JSON editor with a drag-and-drop interface:
+
+1. **Pick source** — select a KType or ledger table from a searchable list (metadata from KType registry).
+2. **Select columns** — drag fields from the source schema; add calculated columns via expression editor.
+3. **Add filters** — visual filter rows with column/operator/value pickers; date range shortcuts.
+4. **Group & aggregate** — drag columns to group-by; pick aggregation (sum, count, avg, min, max) per measure column.
+5. **Sort & limit** — drag to reorder; set result cap.
+6. **Join** (Later) — link two KType sources on a ref field for cross-entity queries.
+7. **Preview** — live result preview with auto-refresh on definition change.
+
+The builder serializes to the existing `reporting.Definition` grammar (extended with calculated columns and join specs).
+
+#### Dashboard Builder
+
+Dashboards are composable canvases:
+
+- **Widgets**: chart, table, number card (single KPI), filter control.
+- **Layout**: grid-based positioning (row/column/width/height per widget).
+- **Linked filters**: a filter widget can drive the WHERE clause of multiple query widgets on the same dashboard.
+- **Auto-refresh**: configurable per-dashboard refresh interval; uses query cache.
+- **Sharing**: per-tenant, role-gated. Dashboard owner can grant read or edit to specific roles.
+
+#### AI Query Assistant
+
+Leverages the existing agent-tools infrastructure:
+
+- `insights.generate_query` agent tool — accepts a natural-language question (e.g., "What are my top 10 customers by revenue this quarter?"), resolves available KTypes and their fields from the registry, and returns a `reporting.Definition` for review.
+- `insights.explain_result` agent tool — accepts a query result and produces a plain-language summary suitable for posting to KChat.
+- Dry-run by default; the user confirms before saving.
+
+#### KChat Surfaces
+
+| Surface | Purpose |
+| --- | --- |
+| `/insight` slash command | Run a saved query or dashboard by name; post result as a card |
+| Dashboard digest card | Scheduled posting of a dashboard snapshot to a channel (daily/weekly) |
+| Right-pane dashboard | View a dashboard in the KChat right pane without leaving the conversation |
+| Agent: `insights.generate_query` | Natural-language query generation |
+| Agent: `insights.explain_result` | Plain-language result summary |
+
+#### Efficiency Considerations
+
+- **Query result caching**: per-tenant, per-query LRU cache with configurable TTL. Cache keys include `(tenant_id, query_hash, filter_params)`. Idle cache entries evict naturally (zero-idle-cost).
+- **Query timeout budget**: each query execution has a per-tenant timeout (default 30s) enforced via `statement_timeout` in the transaction. Prevents a single tenant's complex query from monopolizing the shared pool.
+- **Row limit**: hard cap at 10,000 rows per query result (configurable per plan). Aggregation queries are encouraged over raw dumps.
+- **Dashboard widget limit**: max 20 widgets per dashboard (configurable per plan) to bound rendering and query fan-out.
 
 ---
 
@@ -417,7 +483,7 @@ Discover  →  Export  →  Normalize  →  Map  →  Validate  →  Import stag
 
 ## 7. Recommended MVP Cut
 
-### Build (11)
+### Build (12)
 
 1. Kapp kernel (KType, KRecord, tenant isolation, permissions, audit, events)
 2. CRM (Lead, Contact, Organization, Deal, Activity, Task, Quote)
@@ -430,6 +496,7 @@ Discover  →  Export  →  Normalize  →  Map  →  Validate  →  Import stag
 9. Simple inventory (items, warehouses, stock moves)
 10. Data importer
 11. KChat cards and agent tools across all MVP KApps
+12. Insights (visual query builder, composable dashboards, AI query assistant, KChat digest cards)
 
 ### Defer (9)
 

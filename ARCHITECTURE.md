@@ -95,6 +95,7 @@ Kapp is designed for a single operator to serve **thousands of SME tenants** on 
 | `hr` | HR-specific KTypes and behaviors |
 | `lms` | LMS-specific KTypes and behaviors |
 | `reporting` | Saved queries, aggregations, pivot, chart serialization |
+| `insights` | Visual query engine extensions (calculated columns, joins), dashboard store, query cache, AI query generation |
 | `audit` | Append-only audit log writer and reader |
 | `events` | Outbox pattern, event batching, delivery, consumer management |
 | `files` | Attachment upload/download, content-addressable dedup, S3 integration |
@@ -744,3 +745,101 @@ audit:
 - Agents must surface the source KRecords they used to justify their recommendation (transparency).
 - Agents cannot bypass workflows; they call the same APIs as humans.
 - All agent actions are tagged in the audit log with agent identity and prompt trace.
+
+---
+
+## 12. Insights Engine
+
+Kapp Insights extends the `internal/reporting` query engine with BI-grade capabilities while preserving the multi-tenant isolation and efficiency invariants.
+
+### Data Flow
+
+```
+User (visual builder / SQL editor / AI assistant)
+  → insights.QueryDefinition (extended reporting.Definition)
+  → insights.Runner.Run(ctx, tenantID, def)
+    → check query cache (tenant_id, query_hash)
+    → if miss: reporting.Runner.Run() with tenant RLS
+    → cache result with TTL
+  → Result → Visualization renderer (frontend)
+  → Dashboard canvas (multiple widgets)
+```
+
+### New Tables
+
+| Table | Purpose |
+| --- | --- |
+| `insights_queries` | Saved query definitions with cache config (tenant-scoped, RLS) |
+| `insights_dashboards` | Dashboard layout + widget list (tenant-scoped, RLS) |
+| `insights_dashboard_widgets` | Per-widget config: query_id, viz type, position, linked filters (tenant-scoped, RLS) |
+| `insights_query_cache` | Materialized query results with TTL and refresh schedule (tenant-scoped, RLS) |
+| `insights_shares` | Dashboard/query sharing grants: (resource_id, role, permission) (tenant-scoped, RLS) |
+
+### Query Engine Extensions
+
+The existing `reporting.Definition` grammar is extended with:
+
+1. **Calculated columns**: `{ "name": "margin", "expression": "amount - cost", "type": "number" }` — parsed and validated server-side; only whitelisted functions allowed (no arbitrary SQL).
+2. **Joins** (Later): `{ "join": { "source": "ktype:crm.deal", "on": "customer_id", "target": "ktype:crm.customer", "on_target": "id" } }` — restricted to ref-field relationships declared in KType schemas.
+3. **SQL mode** (Later): raw SQL with parameterized tenant_id injection and statement_timeout; gated behind an `insights_sql` feature flag.
+
+### Caching
+
+- Cache key: `SHA256(tenant_id || canonical_json(definition) || filter_params)`.
+- Storage: `insights_query_cache` table (JSONB result, created_at, expires_at).
+- Refresh: scheduled action via `internal/scheduler` — `insights_cache_refresh` runs due queries and replaces cache rows.
+- Eviction: expired rows cleaned by the `data_retention_sweep` action.
+
+### Dashboard Composition
+
+Dashboards are stored as a JSONB layout definition:
+
+```json
+{
+  "widgets": [
+    { "id": "w1", "query_id": "uuid", "viz": "bar", "x": 0, "y": 0, "w": 6, "h": 4 },
+    { "id": "w2", "query_id": "uuid", "viz": "number_card", "x": 6, "y": 0, "w": 3, "h": 2 },
+    { "id": "f1", "type": "filter", "column": "stage", "linked_widgets": ["w1", "w2"], "x": 0, "y": 4, "w": 12, "h": 1 }
+  ]
+}
+```
+
+The frontend renders the grid; the API resolves each widget's query (cache-first) and returns a bundled response.
+
+### API Endpoints
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/insights/queries` | List saved queries |
+| `POST` | `/api/v1/insights/queries` | Create query |
+| `GET` | `/api/v1/insights/queries/{id}` | Get query definition |
+| `PUT` | `/api/v1/insights/queries/{id}` | Update query |
+| `DELETE` | `/api/v1/insights/queries/{id}` | Delete query |
+| `POST` | `/api/v1/insights/queries/{id}/run` | Execute query (cache-aware) |
+| `GET` | `/api/v1/insights/dashboards` | List dashboards |
+| `POST` | `/api/v1/insights/dashboards` | Create dashboard |
+| `GET` | `/api/v1/insights/dashboards/{id}` | Get dashboard + resolve widgets |
+| `PUT` | `/api/v1/insights/dashboards/{id}` | Update dashboard layout |
+| `DELETE` | `/api/v1/insights/dashboards/{id}` | Delete dashboard |
+| `POST` | `/api/v1/insights/dashboards/{id}/share` | Share dashboard with roles |
+| `POST` | `/api/v1/agents/tools/insights.generate_query` | AI query generation |
+| `POST` | `/api/v1/agents/tools/insights.explain_result` | AI result explanation |
+
+### Agent Tools
+
+```yaml
+- name: insights.generate_query
+  description: Generate a report query from a natural-language question.
+  permission: insights.query.write
+  modes: { dry_run: true, confirmation_required: true }
+
+- name: insights.explain_result
+  description: Summarize a query result in plain language for posting to KChat.
+  permission: insights.query.read
+  modes: { dry_run: false, confirmation_required: false }
+
+- name: insights.post_dashboard_digest
+  description: Post a dashboard snapshot card to a KChat channel.
+  permission: insights.dashboard.read
+  modes: { dry_run: true, confirmation_required: true }
+```
