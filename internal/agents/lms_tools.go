@@ -66,6 +66,16 @@ func (t *issueCertificateTool) Invoke(ctx context.Context, inv Invocation) (*Res
 	if err != nil && !errors.Is(err, lms.ErrCertificateAlreadyIssued) {
 		return nil, err
 	}
+	// IssueCertificate can return (nil, ErrCertificateAlreadyIssued)
+	// when a concurrent issuer wins the 23505 race and the subsequent
+	// findExisting lookup fails (pgx.ErrNoRows, pool missing, etc.).
+	// Guard the nil cert before dereferencing cert.ID.
+	if cert == nil {
+		return &Result{
+			Summary: fmt.Sprintf("Certificate already issued for enrollment %s (lookup of existing row failed)", in.EnrollmentID),
+			Extra:   map[string]any{"enrollment_id": in.EnrollmentID},
+		}, nil
+	}
 	body, _ := json.Marshal(cert)
 	summary := fmt.Sprintf("Issued certificate %s for enrollment %s", cert.ID, in.EnrollmentID)
 	if errors.Is(err, lms.ErrCertificateAlreadyIssued) {

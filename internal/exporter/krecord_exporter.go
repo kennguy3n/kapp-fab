@@ -117,8 +117,11 @@ func renderCSV(rows []record.KRecord) ([]byte, int64, error) {
 
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
+	// Fixed metadata columns match the JSON exporter (renderJSON)
+	// so CSV and JSON dumps of the same KType carry the same
+	// attribution fields and can round-trip through the importer.
 	header := append([]string{
-		"id", "ktype", "ktype_version", "status", "version", "created_at", "updated_at",
+		"id", "ktype", "ktype_version", "status", "version", "created_by", "created_at", "updated_at",
 	}, keys...)
 	if err := w.Write(header); err != nil {
 		return nil, 0, fmt.Errorf("exporter: write header: %w", err)
@@ -130,6 +133,7 @@ func renderCSV(rows []record.KRecord) ([]byte, int64, error) {
 			fmt.Sprintf("%d", r.KTypeVersion),
 			r.Status,
 			fmt.Sprintf("%d", r.Version),
+			r.CreatedBy.String(),
 			r.CreatedAt.Format(time.RFC3339Nano),
 			r.UpdatedAt.Format(time.RFC3339Nano),
 		}

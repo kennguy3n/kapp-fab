@@ -443,6 +443,13 @@ func (d *CommandDispatcher) issueCertificate(ctx context.Context, req CommandReq
 		}
 		return CommandResponse{}, err
 	}
+	// IssueCertificate can return (nil, ErrCertificateAlreadyIssued)
+	// when the 23505 race loses and findExisting can't locate the
+	// sibling row — surface a human-readable message rather than
+	// dereferencing a nil *KRecord.
+	if cert == nil {
+		return CommandResponse{Text: fmt.Sprintf("/certificate: enrollment %s already has a certificate (lookup of existing row failed)", enrollmentID)}, nil
+	}
 	prefix := "Issued"
 	if errors.Is(err, lms.ErrCertificateAlreadyIssued) {
 		prefix = "Already issued"
