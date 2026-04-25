@@ -577,9 +577,14 @@ func (s *PGStore) ListMoves(ctx context.Context, tenantID uuid.UUID, filter Move
 			nextID++
 		}
 		args = append(args, filter.Limit, filter.Offset)
+		// reversal_of is selected so callers can distinguish a
+		// contra-entry from a first-class move in list responses;
+		// ReverseMove sets it on the returned Move and emitMove
+		// includes it in the event payload, but before this fix
+		// GET /inventory/moves always returned null.
 		q := fmt.Sprintf(
 			`SELECT id, tenant_id, item_id, warehouse_id, qty, unit_cost,
-			        source_ktype, source_id, moved_at
+			        source_ktype, source_id, moved_at, reversal_of
 			 FROM inventory_moves
 			 WHERE %s
 			 ORDER BY moved_at DESC, id DESC
@@ -593,14 +598,15 @@ func (s *PGStore) ListMoves(ctx context.Context, tenantID uuid.UUID, filter Move
 		defer rows.Close()
 		for rows.Next() {
 			var (
-				m        Move
-				unitCost *decimal.Decimal
-				srcKType *string
-				srcID    *uuid.UUID
+				m          Move
+				unitCost   *decimal.Decimal
+				srcKType   *string
+				srcID      *uuid.UUID
+				reversalOf *int64
 			)
 			if err := rows.Scan(
 				&m.ID, &m.TenantID, &m.ItemID, &m.WarehouseID, &m.Qty,
-				&unitCost, &srcKType, &srcID, &m.MovedAt,
+				&unitCost, &srcKType, &srcID, &m.MovedAt, &reversalOf,
 			); err != nil {
 				return fmt.Errorf("inventory: scan move: %w", err)
 			}
@@ -611,6 +617,7 @@ func (s *PGStore) ListMoves(ctx context.Context, tenantID uuid.UUID, filter Move
 				m.SourceKType = *srcKType
 			}
 			m.SourceID = srcID
+			m.ReversalOf = reversalOf
 			out = append(out, m)
 		}
 		return rows.Err()
