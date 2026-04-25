@@ -145,7 +145,9 @@ func writeScheduleError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, reporting.ErrScheduleNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
-	default:
+	case errors.Is(err, reporting.ErrScheduleInvalidInput):
 		http.Error(w, err.Error(), http.StatusBadRequest)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }

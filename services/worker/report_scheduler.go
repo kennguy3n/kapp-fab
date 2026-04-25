@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"html"
 	"strings"
 	"time"
 
@@ -195,17 +196,21 @@ func renderReportCSV(result *reporting.Result) ([]byte, error) {
 // templates; scheduled reports get a pragmatic table.
 func renderReportHTML(reportName string, result *reporting.Result) []byte {
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "<!doctype html><html><head><meta charset=\"utf-8\"><title>%s</title>", reportName)
+	// Every interpolated string is escaped: report names come from
+	// saved_reports.name and cell values come from krecord data —
+	// both are tenant-controlled and could contain arbitrary HTML.
+	escapedName := html.EscapeString(reportName)
+	fmt.Fprintf(&b, "<!doctype html><html><head><meta charset=\"utf-8\"><title>%s</title>", escapedName)
 	b.WriteString("<style>body{font-family:sans-serif;margin:24px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:6px;text-align:left}th{background:#f0f0f0}</style></head><body>")
-	fmt.Fprintf(&b, "<h1>%s</h1><table><thead><tr>", reportName)
+	fmt.Fprintf(&b, "<h1>%s</h1><table><thead><tr>", escapedName)
 	for _, c := range result.Columns {
-		fmt.Fprintf(&b, "<th>%s</th>", c)
+		fmt.Fprintf(&b, "<th>%s</th>", html.EscapeString(c))
 	}
 	b.WriteString("</tr></thead><tbody>")
 	for _, row := range result.Rows {
 		b.WriteString("<tr>")
 		for _, c := range result.Columns {
-			fmt.Fprintf(&b, "<td>%v</td>", row[c])
+			fmt.Fprintf(&b, "<td>%s</td>", html.EscapeString(fmt.Sprintf("%v", row[c])))
 		}
 		b.WriteString("</tr>")
 	}

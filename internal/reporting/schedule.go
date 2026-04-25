@@ -66,25 +66,25 @@ var scheduleCronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cro
 // worker to choke on a malformed cron expression.
 func (s *ReportSchedule) Validate() error {
 	if s.Name == "" {
-		return errors.New("reporting: schedule name required")
+		return fmt.Errorf("%w: name required", ErrScheduleInvalidInput)
 	}
 	if s.ReportID == uuid.Nil {
-		return errors.New("reporting: schedule report_id required")
+		return fmt.Errorf("%w: report_id required", ErrScheduleInvalidInput)
 	}
 	if _, err := scheduleCronParser.Parse(s.CronExpression); err != nil {
-		return fmt.Errorf("reporting: invalid cron expression: %w", err)
+		return fmt.Errorf("%w: invalid cron expression: %v", ErrScheduleInvalidInput, err)
 	}
 	switch s.Format {
 	case ReportScheduleFormatCSV, ReportScheduleFormatPDF:
 	default:
-		return fmt.Errorf("reporting: unsupported format %q (want csv or pdf)", s.Format)
+		return fmt.Errorf("%w: unsupported format %q (want csv or pdf)", ErrScheduleInvalidInput, s.Format)
 	}
 	if len(s.Recipients) == 0 {
-		return errors.New("reporting: at least one recipient is required")
+		return fmt.Errorf("%w: at least one recipient is required", ErrScheduleInvalidInput)
 	}
 	for _, r := range s.Recipients {
 		if r == "" {
-			return errors.New("reporting: empty recipient address")
+			return fmt.Errorf("%w: empty recipient address", ErrScheduleInvalidInput)
 		}
 	}
 	return nil
@@ -100,13 +100,21 @@ func NewScheduleStore(pool *pgxpool.Pool) *ScheduleStore {
 	return &ScheduleStore{pool: pool}
 }
 
-// ErrScheduleNotFound is the sentinel for missing schedules.
-var ErrScheduleNotFound = errors.New("reporting: schedule not found")
+// Sentinel errors for the API layer.
+var (
+	// ErrScheduleNotFound is returned when a schedule id does not
+	// resolve under the active tenant.
+	ErrScheduleNotFound = errors.New("reporting: schedule not found")
+	// ErrScheduleInvalidInput wraps every validation / argument
+	// failure so the API layer can translate to 400 Bad Request
+	// rather than leaking a generic 500.
+	ErrScheduleInvalidInput = errors.New("reporting: invalid schedule input")
+)
 
 // Create inserts a new report schedule row.
 func (s *ScheduleStore) Create(ctx context.Context, in ReportSchedule) (*ReportSchedule, error) {
 	if in.TenantID == uuid.Nil {
-		return nil, errors.New("reporting: tenant id required")
+		return nil, fmt.Errorf("%w: tenant id required", ErrScheduleInvalidInput)
 	}
 	if err := in.Validate(); err != nil {
 		return nil, err
@@ -142,7 +150,7 @@ func (s *ScheduleStore) Create(ctx context.Context, in ReportSchedule) (*ReportS
 // Update replaces a schedule's editable columns.
 func (s *ScheduleStore) Update(ctx context.Context, in ReportSchedule) (*ReportSchedule, error) {
 	if in.TenantID == uuid.Nil || in.ID == uuid.Nil {
-		return nil, errors.New("reporting: tenant id and schedule id required")
+		return nil, fmt.Errorf("%w: tenant id and schedule id required", ErrScheduleInvalidInput)
 	}
 	if err := in.Validate(); err != nil {
 		return nil, err
@@ -182,7 +190,7 @@ func (s *ScheduleStore) Update(ctx context.Context, in ReportSchedule) (*ReportS
 // Get loads a single schedule.
 func (s *ScheduleStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*ReportSchedule, error) {
 	if tenantID == uuid.Nil || id == uuid.Nil {
-		return nil, errors.New("reporting: tenant id and schedule id required")
+		return nil, fmt.Errorf("%w: tenant id and schedule id required", ErrScheduleInvalidInput)
 	}
 	var out ReportSchedule
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -203,7 +211,7 @@ func (s *ScheduleStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*Repor
 // List returns every schedule for a tenant.
 func (s *ScheduleStore) List(ctx context.Context, tenantID uuid.UUID) ([]ReportSchedule, error) {
 	if tenantID == uuid.Nil {
-		return nil, errors.New("reporting: tenant id required")
+		return nil, fmt.Errorf("%w: tenant id required", ErrScheduleInvalidInput)
 	}
 	out := make([]ReportSchedule, 0)
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -237,7 +245,7 @@ func (s *ScheduleStore) List(ctx context.Context, tenantID uuid.UUID) ([]ReportS
 // is unknown so the API can emit a 404.
 func (s *ScheduleStore) Delete(ctx context.Context, tenantID, id uuid.UUID) error {
 	if tenantID == uuid.Nil || id == uuid.Nil {
-		return errors.New("reporting: tenant id and schedule id required")
+		return fmt.Errorf("%w: tenant id and schedule id required", ErrScheduleInvalidInput)
 	}
 	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
