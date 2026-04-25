@@ -42,19 +42,19 @@ export function DashboardPage() {
         <Widget
           label="Open deals"
           value={s.open_deals_count}
-          sub={`Pipeline ${formatAmount(s.pipeline_value)} (mixed currencies)`}
+          sub={`Pipeline ${formatAmount(s.pipeline_value, s.base_currency)}`}
           to="/records/crm.deal"
         />
         <Widget
           label="Outstanding AR"
-          value={formatAmount(s.outstanding_ar)}
-          sub="mixed currencies"
+          value={formatAmount(s.outstanding_ar, s.base_currency)}
+          sub={`in ${s.base_currency}`}
           to="/records/finance.ar_invoice"
         />
         <Widget
           label="Outstanding AP"
-          value={formatAmount(s.outstanding_ap)}
-          sub="mixed currencies"
+          value={formatAmount(s.outstanding_ap, s.base_currency)}
+          sub={`in ${s.base_currency}`}
           to="/records/finance.ap_bill"
         />
         <Widget
@@ -111,12 +111,23 @@ function Widget({
   );
 }
 
-// formatAmount renders a monetary total without a currency symbol because
-// the dashboard sums raw amounts across all tenant currencies. A proper
-// per-currency breakdown needs exchange-rate conversion server-side — until
-// that lands, a bare number with a "mixed currencies" hint is the honest
-// representation.
-function formatAmount(v: number): string {
+// formatAmount renders a monetary total in the tenant's base currency.
+// The server folds foreign-currency krecords through ExchangeRateStore
+// before responding, so the dashboard now gets a single converted total
+// per widget. Falls back to a bare number when the currency code is
+// missing or unknown to Intl (older browsers / synthetic ISO codes).
+function formatAmount(v: number, currency?: string): string {
+  if (currency) {
+    try {
+      return new Intl.NumberFormat("en-US", {
+        style: "currency",
+        currency,
+        maximumFractionDigits: 0,
+      }).format(v);
+    } catch {
+      // fall through to bare-number formatting
+    }
+  }
   return new Intl.NumberFormat("en-US", {
     maximumFractionDigits: 0,
   }).format(v);

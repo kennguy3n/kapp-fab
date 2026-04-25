@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -131,9 +132,10 @@ func DefaultRoles() []WizardRole {
 // `dbutil.WithTenantTx`, which issues `SELECT set_config('app.tenant_id', …, true)`
 // on the tx before calling the closure.
 type Wizard struct {
-	pool          *pgxpool.Pool
-	store         *PGStore
-	zkProvisioner ZKFabricProvisioner
+	pool             *pgxpool.Pool
+	store            *PGStore
+	zkProvisioner    ZKFabricProvisioner
+	placementSource  PlacementPolicySource
 }
 
 // ZKFabricProvisioner mints a new tenant + HMAC credential pair on
@@ -143,8 +145,25 @@ type Wizard struct {
 // encryption is wired by the time the tenant logs in for the first
 // time. A nil provisioner skips the step (legacy MinIO path stays
 // in place).
+//
+// ProvisionTenantWithPolicy is the policy-aware variant the wizard
+// uses by default: the wizard derives a plan-appropriate policy via
+// DerivePlacementPolicy and threads it through so each new tenant
+// lands on the fabric with provider/country/cache hints already in
+// place. Implementations that don't support policy management can
+// just delegate to ProvisionTenant and ignore the policy argument.
 type ZKFabricProvisioner interface {
 	ProvisionTenant(ctx context.Context, tenantID uuid.UUID, slug string) (ZKCredentials, error)
+	ProvisionTenantWithPolicy(ctx context.Context, tenantID uuid.UUID, slug, plan string, policy PlacementPolicy) (ZKCredentials, error)
+}
+
+// PlacementPolicySource lets the wizard pull platform-wide defaults
+// (provider allow-list, default cache hint) from a single place
+// without taking a hard dependency on env handling. The default
+// implementation reads ZK_FABRIC_PROVIDERS / ZK_FABRIC_CACHE_HINT.
+type PlacementPolicySource interface {
+	DefaultProviders() []string
+	DefaultCacheHint() string
 }
 
 // NewWizard binds the wizard to the shared pool. ZK fabric
@@ -158,6 +177,14 @@ func NewWizard(pool *pgxpool.Pool) *Wizard {
 // wizard. Returns the wizard for fluent chaining.
 func (w *Wizard) WithZKFabricProvisioner(p ZKFabricProvisioner) *Wizard {
 	w.zkProvisioner = p
+	return w
+}
+
+// WithPlacementPolicySource attaches a default-policy source. Without
+// one, the wizard derives a policy with no platform-wide overrides
+// (a single "wasabi" provider and no cache hint).
+func (w *Wizard) WithPlacementPolicySource(s PlacementPolicySource) *Wizard {
+	w.placementSource = s
 	return w
 }
 
@@ -203,6 +230,22 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 		}
 		out.RolesInserted = rolesInserted
 
+		// Persist the tenant's functional currency before any
+		// finance seeders run so PostJournalEntry can detect
+		// foreign-currency lines for the very first invoice. The
+		// 3-letter check matches CHECK on tenants.base_currency.
+		if cfg.CurrencyCode != "" {
+			if len(cfg.CurrencyCode) != 3 {
+				return fmt.Errorf("tenant: wizard: currency_code must be ISO-4217 (got %q)", cfg.CurrencyCode)
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE tenants SET base_currency = $1, updated_at = now() WHERE id = $2`,
+				cfg.CurrencyCode, tenantID,
+			); err != nil {
+				return fmt.Errorf("tenant: persist base currency: %w", err)
+			}
+		}
+
 		// Seed the default per-tenant scheduled_actions rows the
 		// worker handlers expect (SLA breach sweeper +
 		// recurring-invoice generator). Idempotent on
@@ -210,7 +253,7 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 		// duplicates queue rows. The interval defaults match the
 		// values asserted by the integration drift tests in
 		// internal/integrationtest/{sla_breach_test,recurring_invoice_test}.go.
-		if err := seedDefaultScheduledActions(ctx, tx, tenantID); err != nil {
+		if err := seedDefaultScheduledActions(ctx, tx, tenantID, cfg.Plan); err != nil {
 			return err
 		}
 		// Seed plan-appropriate feature flags. Free plan tenants
@@ -218,6 +261,15 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 		// ON CONFLICT DO NOTHING so a re-run of the wizard never
 		// overwrites operator-applied overrides.
 		if err := seedDefaultFeatures(ctx, tx, tenantID, cfg.Plan); err != nil {
+			return err
+		}
+		// Seed plan-appropriate retention policies. The retention
+		// sweeper scheduled action only matters if data_retention_policies
+		// has rows for this tenant — without policies the sweeper
+		// is a no-op. Free plans get aggressive 90d windows;
+		// enterprise gets 365d on the audit_log so compliance
+		// inspections can run a year back.
+		if err := seedDefaultRetentionPolicies(ctx, tx, tenantID, cfg.Plan); err != nil {
 			return err
 		}
 		return nil
@@ -246,12 +298,26 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 			return out, fmt.Errorf("tenant: wizard load tenant for zk provisioning: %w", err)
 		}
 		if !t.HasZKFabric() {
-			creds, err := w.zkProvisioner.ProvisionTenant(ctx, tenantID, t.Slug)
+			policyCfg := PlacementPolicyConfig{
+				Plan:    cfg.Plan,
+				Country: cfg.Country,
+			}
+			if w.placementSource != nil {
+				policyCfg.DefaultProviders = w.placementSource.DefaultProviders()
+				policyCfg.DefaultCacheHint = w.placementSource.DefaultCacheHint()
+			}
+			policy := DerivePlacementPolicy(policyCfg)
+			creds, err := w.zkProvisioner.ProvisionTenantWithPolicy(ctx, tenantID, t.Slug, cfg.Plan, policy)
 			if err != nil {
 				return out, fmt.Errorf("tenant: wizard zk fabric provision: %w", err)
 			}
 			if err := w.store.SetZKCredentials(ctx, tenantID, creds.AccessKey, creds.SecretKey, creds.Bucket); err != nil {
 				return out, fmt.Errorf("tenant: wizard persist zk credentials: %w", err)
+			}
+			policy.Tenant = tenantID.String()
+			policy.Bucket = creds.Bucket
+			if err := w.store.SetPlacementPolicy(ctx, tenantID, policy); err != nil {
+				return out, fmt.Errorf("tenant: wizard persist placement policy: %w", err)
 			}
 			out.ZKFabricProvisioned = true
 		}
@@ -396,11 +462,28 @@ const (
 // dashboard reflects yesterday's footprint within one day.
 const defaultUsageSnapshotIntervalSeconds = 86400
 
+// defaultUnrealizedFXActionType / defaultUnrealizedFXIntervalSeconds
+// define the monthly cadence (~30d) at which the worker re-values
+// open AR/AP foreign-currency balances per tenant. Seeded only when
+// the tenant's plan includes the finance feature.
+const (
+	defaultUnrealizedFXActionType      = "unrealized_gain_loss"
+	defaultUnrealizedFXIntervalSeconds = 30 * 86400
+)
+
+// defaultDataRetentionActionType / defaultDataRetentionIntervalSeconds
+// drive the daily retention sweeper that deletes rows older than the
+// per-tenant retention_days threshold (migration 000032).
+const (
+	defaultDataRetentionActionType      = "data_retention_sweep"
+	defaultDataRetentionIntervalSeconds = 86400
+)
+
 // seedDefaultScheduledActions seeds the per-tenant scheduled_actions
 // rows the platform expects to exist after a successful wizard run.
 // Uses INSERT … WHERE NOT EXISTS so re-running the wizard is a no-op
 // and never duplicates queue rows.
-func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) error {
+func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, plan string) error {
 	now := time.Now().UTC()
 	defaults := []struct {
 		actionType      string
@@ -410,6 +493,13 @@ func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 		{defaultRecurringInvoiceActionType, defaultRecurringInvoiceIntervalSeconds},
 		{defaultInventoryReorderActionType, defaultInventoryReorderIntervalSeconds},
 		{ActionTypeUsageSnapshot, defaultUsageSnapshotIntervalSeconds},
+		{defaultDataRetentionActionType, defaultDataRetentionIntervalSeconds},
+	}
+	if DefaultFeaturesForPlan(plan)[FeatureFinance] {
+		defaults = append(defaults, struct {
+			actionType      string
+			intervalSeconds int
+		}{defaultUnrealizedFXActionType, defaultUnrealizedFXIntervalSeconds})
 	}
 	for _, d := range defaults {
 		if _, err := tx.Exec(ctx,
@@ -450,6 +540,58 @@ func seedDefaultFeatures(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, pla
 			tenantID, key, enabled,
 		); err != nil {
 			return fmt.Errorf("tenant: seed feature %q: %w", key, err)
+		}
+	}
+	return nil
+}
+
+// retentionDefaultDays returns the (category, retention_days) pairs
+// the wizard seeds per plan. Categories are the well-known set
+// understood by platform.RetentionSweeper.
+func retentionDefaultDays(plan string) map[string]int {
+	switch strings.ToLower(plan) {
+	case "enterprise":
+		return map[string]int{
+			"audit_log":          365,
+			"events":             180,
+			"sla_log":            365,
+			"webhook_deliveries": 90,
+			"notifications":      180,
+			"import_staging":     90,
+		}
+	case "starter", "professional", "business":
+		return map[string]int{
+			"audit_log":          180,
+			"events":             90,
+			"sla_log":            180,
+			"webhook_deliveries": 60,
+			"notifications":      90,
+			"import_staging":     60,
+		}
+	default: // free / trial / unknown — keep tight retention to control storage.
+		return map[string]int{
+			"audit_log":          90,
+			"events":             30,
+			"sla_log":            90,
+			"webhook_deliveries": 30,
+			"notifications":      30,
+			"import_staging":     30,
+		}
+	}
+}
+
+// seedDefaultRetentionPolicies writes one data_retention_policies row
+// per category in retentionDefaultDays(plan). ON CONFLICT DO NOTHING
+// preserves operator-applied overrides on re-runs of the wizard.
+func seedDefaultRetentionPolicies(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, plan string) error {
+	for category, days := range retentionDefaultDays(plan) {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO data_retention_policies (tenant_id, category, retention_days, enabled)
+			 VALUES ($1, $2, $3, TRUE)
+			 ON CONFLICT (tenant_id, category) DO NOTHING`,
+			tenantID, category, days,
+		); err != nil {
+			return fmt.Errorf("tenant: seed retention policy %q: %w", category, err)
 		}
 	}
 	return nil

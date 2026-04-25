@@ -151,7 +151,8 @@ func run() error {
 	// the same event publisher + audit logger so journal postings,
 	// invoice lifecycle events, and KRecord mutations all emit into
 	// the single outbox + audit tables used by the rest of the kernel.
-	ledgerStore := ledger.NewPGStore(pool, eventPublisher, auditor)
+	apiExchangeRates := ledger.NewExchangeRateStore(pool)
+	ledgerStore := ledger.NewPGStore(pool, eventPublisher, auditor).WithExchangeRates(apiExchangeRates)
 	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
 	paymentPoster := ledger.NewPaymentPoster(ledgerStore, recordStore)
 
@@ -288,7 +289,10 @@ func run() error {
 	}
 
 	// Phase I stores — multi-currency, helpdesk, reporting.
-	exchangeRateStore := ledger.NewExchangeRateStore(pool)
+	// apiExchangeRates is shared with the ledger so foreign-currency
+	// posting (Phase J/K) and the rate browser endpoints converge on
+	// the same in-process store; aliased here for readability.
+	exchangeRateStore := apiExchangeRates
 	helpdeskStore := helpdesk.NewStore(pool)
 	reportStore := reporting.NewStore(pool)
 	reportRunner := reporting.NewRunner(pool)
@@ -323,16 +327,34 @@ func run() error {
 
 	fh := &formsHandlers{store: formStore, registry: ktypeRegistry}
 	wizard := tenant.NewWizard(pool)
+	var zkFabricClient *tenant.ZKFabricClient
 	if zkClient := tenant.NewZKFabricClient(tenant.ZKFabricClientConfig{
 		Endpoint:       os.Getenv("ZK_FABRIC_CONSOLE_ENDPOINT"),
 		AdminToken:     os.Getenv("ZK_FABRIC_ADMIN_TOKEN"),
 		BucketTemplate: os.Getenv("ZK_FABRIC_BUCKET_TEMPLATE"),
 	}); zkClient != nil {
-		wizard = wizard.WithZKFabricProvisioner(zkClient)
+		zkFabricClient = zkClient
+		wizard = wizard.WithZKFabricProvisioner(zkClient).
+			WithPlacementPolicySource(tenant.NewEnvPlacementSource(
+				os.Getenv("ZK_FABRIC_PROVIDERS"),
+				os.Getenv("ZK_FABRIC_CACHE_HINT"),
+			))
 		log.Printf("api: ZK fabric tenant provisioning enabled (console=%s)", os.Getenv("ZK_FABRIC_CONSOLE_ENDPOINT"))
 	}
 	th := &tenantHandlers{svc: tenantSvc, wizard: wizard}
 	feath := &featuresHandlers{features: featureStore, tenants: tenantSvc}
+	plch := &placementHandlers{tenants: tenantSvc, fabric: zkFabricClient}
+	// Phase J/K — data retention policies and the runtime isolation
+	// audit report. Both surfaces require adminPool because the
+	// retention sweeper bypasses RLS for cross-tenant scans and the
+	// audit probes need GUC-less queries.
+	var reth *retentionHandlers
+	var iah *isolationAuditHandlers
+	if adminPool != nil {
+		retentionStore := platform.NewRetentionStore(pool, adminPool)
+		reth = &retentionHandlers{store: retentionStore}
+		iah = &isolationAuditHandlers{auditor: platform.NewIsolationAuditor(pool, adminPool)}
+	}
 	meth := &meteringHandlers{metering: meteringStore, tenants: tenantSvc, plans: planStore, features: featureStore}
 	kh := &ktypeHandlers{registry: ktypeRegistry}
 	rh := &recordHandlers{store: recordStore}
@@ -360,7 +382,19 @@ func run() error {
 	curh := &currencyHandlers{store: exchangeRateStore}
 	hdh := &helpdeskHandlers{store: helpdeskStore}
 	reph := &reportsHandlers{store: reportStore, runner: reportRunner}
-	dashh := &dashboardHandlers{store: dashboard.NewStore(pool)}
+	dashh := &dashboardHandlers{store: dashboard.NewStore(pool).WithConverter(dashboardRateAdapter{rates: apiExchangeRates})}
+
+	// Inbound email → ticket. Wired only when adminPool is
+	// available — the resolver SELECTs against tenant_support_domains
+	// outside any tenant's RLS context (admin bypass policy).
+	var inboundHandler *helpdeskInboundHandlers
+	if adminPool != nil {
+		resolver := helpdesk.NewPGTenantResolver(adminPool)
+		inboundHandler = &helpdeskInboundHandlers{
+			handler: helpdesk.NewInboundEmailHandler(resolver, recordStore, helpdeskStore, phaseASystemActor),
+			secret:  os.Getenv("HELPDESK_INBOUND_TOKEN"),
+		}
+	}
 	// Phase J payroll engine — reuses the record store + ledger
 	// store so posted pay_runs ride the same JE / idempotency
 	// path as AR/AP.
@@ -495,6 +529,12 @@ func run() error {
 			r.Post("/{id}/setup", th.setup)
 			r.Get("/{id}/features", feath.list)
 			r.Put("/{id}/features", feath.update)
+			r.Get("/{id}/placement", plch.get)
+			r.Put("/{id}/placement", plch.put)
+			if reth != nil {
+				r.Get("/{id}/retention", reth.list)
+				r.Put("/{id}/retention", reth.put)
+			}
 			r.Get("/{id}/usage", meth.usage)
 			r.Get("/{id}/usage/history", meth.usageHistory)
 			r.Post("/{id}/plan", meth.changePlan)
@@ -517,6 +557,18 @@ func run() error {
 		r.Route("/api/v1/plans", func(r chi.Router) {
 			r.Get("/", meth.listPlans)
 		})
+
+		// Phase J/K — runtime isolation audit. Returns the JSON
+		// report from platform.IsolationAuditor.Run. Admin-only
+		// in spirit; the route group is intentionally not wrapped
+		// in TenantMiddleware because the audit must run with the
+		// admin GUC. Operators authenticate via the same JWT
+		// envelope as other admin surfaces.
+		if iah != nil {
+			r.Route("/api/v1/admin", func(r chi.Router) {
+				r.Get("/isolation-audit", iah.get)
+			})
+		}
 
 		// KType registry routes (shared metadata, not tenant-scoped).
 		r.Route("/api/v1/ktypes", func(r chi.Router) {
@@ -723,6 +775,19 @@ func run() error {
 			r.Get("/sla-policies/resolve", hdh.resolvePolicy)
 			r.Get("/tickets/{id}/sla-log", hdh.ticketLog)
 		})
+
+		// Inbound email → ticket. Sits OUTSIDE the JWT-tenant
+		// middleware because the relay does not carry session
+		// credentials; instead we authenticate by static shared
+		// secret and resolve the tenant from the recipient host.
+		// Rate limited per-IP via the shared rate limiter so a
+		// flood of inbound mail cannot starve other writers.
+		if inboundHandler != nil {
+			r.Route("/api/v1/helpdesk/inbound-email", func(r chi.Router) {
+				r.Use(rateLimitMW)
+				r.Post("/", inboundHandler.post)
+			})
+		}
 
 		// Phase I reports surface. Saved report CRUD + ad-hoc execution
 		// under the same tenant/idempotency/rate-limit/quota stack so
