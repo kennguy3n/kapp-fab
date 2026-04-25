@@ -43,11 +43,12 @@ func (h *UsageSnapshotHandler) Handle(ctx context.Context, tenantID uuid.UUID, _
 	if h == nil || h.metering == nil {
 		return errors.New("tenant: usage snapshot handler not wired")
 	}
+	var errs []error
 	if err := h.metering.SnapshotStorageBytes(ctx, tenantID); err != nil {
-		return fmt.Errorf("tenant: usage snapshot storage: %w", err)
+		errs = append(errs, fmt.Errorf("tenant: usage snapshot storage: %w", err))
 	}
 	if err := h.metering.SnapshotKRecordCount(ctx, tenantID); err != nil {
-		return fmt.Errorf("tenant: usage snapshot krecords: %w", err)
+		errs = append(errs, fmt.Errorf("tenant: usage snapshot krecords: %w", err))
 	}
-	return nil
+	return errors.Join(errs...)
 }

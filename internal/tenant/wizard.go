@@ -390,6 +390,12 @@ const (
 	defaultInventoryReorderIntervalSeconds = 3600
 )
 
+// defaultUsageSnapshotIntervalSeconds is the cadence at which the
+// daily storage_bytes / krecord_count snapshot fires per tenant.
+// 24h matches the public/PROGRESS.md commitment that the usage
+// dashboard reflects yesterday's footprint within one day.
+const defaultUsageSnapshotIntervalSeconds = 86400
+
 // seedDefaultScheduledActions seeds the per-tenant scheduled_actions
 // rows the platform expects to exist after a successful wizard run.
 // Uses INSERT … WHERE NOT EXISTS so re-running the wizard is a no-op
@@ -403,6 +409,7 @@ func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 		{defaultSLABreachActionType, defaultSLABreachIntervalSeconds},
 		{defaultRecurringInvoiceActionType, defaultRecurringInvoiceIntervalSeconds},
 		{defaultInventoryReorderActionType, defaultInventoryReorderIntervalSeconds},
+		{ActionTypeUsageSnapshot, defaultUsageSnapshotIntervalSeconds},
 	}
 	for _, d := range defaults {
 		if _, err := tx.Exec(ctx,
