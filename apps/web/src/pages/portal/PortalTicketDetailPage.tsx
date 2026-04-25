@@ -10,10 +10,14 @@ interface Reply {
 }
 
 export function PortalTicketDetailPage() {
-  const { id } = useParams<{ id: string }>();
+  const { tenant_slug, id } = useParams<{ tenant_slug: string; id: string }>();
   const qc = useQueryClient();
+  // Scope by tenant_slug alongside the ticket id so a portal user
+  // who signs in to a second tenant in the same browser session
+  // does not see a flash of the previous tenant's cached ticket
+  // that happens to share the same UUID space.
   const q = useQuery({
-    queryKey: ["portal-ticket", id],
+    queryKey: ["portal-ticket", tenant_slug, id],
     queryFn: () => portalApi.getTicket(id!),
     enabled: !!id,
   });
@@ -22,7 +26,7 @@ export function PortalTicketDetailPage() {
     mutationFn: () => portalApi.reply(id!, reply),
     onSuccess: () => {
       setReply("");
-      qc.invalidateQueries({ queryKey: ["portal-ticket", id] });
+      qc.invalidateQueries({ queryKey: ["portal-ticket", tenant_slug, id] });
     },
   });
 

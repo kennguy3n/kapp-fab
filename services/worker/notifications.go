@@ -412,13 +412,20 @@ func (r *notificationRouter) processPendingWebhookRetries(ctx context.Context) {
 // webhookMatches returns true when the subscription's event_filters
 // array either contains the event type literally or a prefix of it
 // (ending with "*"). An empty filter list means "all events".
+//
+// Fail closed on a malformed stored filter (e.g. an object instead
+// of a JSON array of strings written directly to the API by a non-
+// TypeScript caller). Returning true here would silently opt the
+// webhook in to every event the tenant produces — the opposite of
+// the caller's likely intent, and a real data-leak vector.
 func webhookMatches(h notifications.Webhook, eventType string) bool {
 	var filters []string
 	if len(h.EventFilters) == 0 {
 		return true
 	}
 	if err := json.Unmarshal(h.EventFilters, &filters); err != nil {
-		return true
+		log.Printf("worker: webhook %s malformed event_filters: %v", h.ID, err)
+		return false
 	}
 	if len(filters) == 0 {
 		return true

@@ -4,8 +4,11 @@ import { portalApi } from "../../lib/portalApi";
 
 export function PortalTicketListPage() {
   const { tenant_slug } = useParams<{ tenant_slug: string }>();
+  // Include tenant_slug in the key so a portal user switching
+  // tenants in the same browser session does not briefly see the
+  // previous tenant's cached tickets before the refetch lands.
   const q = useQuery({
-    queryKey: ["portal-tickets"],
+    queryKey: ["portal-tickets", tenant_slug],
     queryFn: () => portalApi.listTickets(),
   });
   const tickets = q.data?.tickets ?? [];
