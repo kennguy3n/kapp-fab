@@ -219,6 +219,50 @@ These are known gaps called out here so nobody forgets:
 
 ---
 
+## 9. ZK Object Fabric integration
+
+Per-tenant file storage moved to ZK Object Fabric in PR #37. The
+trust boundary and operational concerns are summarised here so an
+auditor doesn't have to chase commits.
+
+**Per-tenant key isolation.** Each tenant gets its own
+`zk_access_key` / `zk_secret_key` HMAC pair plus a dedicated bucket
+on the fabric. The fabric in managed mode derives a per-tenant DEK
+from a tenant-scoped KEK. The Kapp API process never holds a DEK
+in memory — it only forwards bytes through the S3 API — so a Kapp
+process compromise does not yield other tenants' plaintext.
+
+**Routing safety.** `PerTenantS3Store` reads the tenant id off the
+request `context.Context`. The middleware wires this id from the
+JWT claim only after the auth layer has validated the token, so a
+caller cannot direct their bytes into another tenant's bucket by
+spoofing a header. A missing tenant id surfaces as an error
+(`tenant id missing on storage context`) — never silently routed
+to a default bucket.
+
+**Credential rotation.** The wizard provisioning is idempotent;
+rotating a tenant's HMAC pair is a single `UPDATE tenants SET
+zk_access_key = …, zk_secret_key = …` followed by
+`PerTenantS3Store.Invalidate(tenantID)`. Old objects remain
+readable because the DEK does not depend on the HMAC pair.
+Operators are expected to rotate on suspected credential
+compromise; rotation is _not_ scheduled automatically because that
+would require a safe overlap window.
+
+**Console API trust boundary.** Kapp's console-side calls use
+`ZK_FABRIC_ADMIN_TOKEN`, which must be a fabric admin bearer
+scoped only to tenant provisioning. The token is read from env at
+boot and never logged. If unset the integration is disabled and
+the wizard skips provisioning (tenants fall back to the global
+MinIO bucket).
+
+**Open items**: full DEK rotation flow on the fabric side (vs.
+just credential rotation on the Kapp side) is tracked in the
+zk-object-fabric repo and out of scope for the Kapp security
+review.
+
+---
+
 ## Review sign-off
 
 Review is performed each phase end. A phase cannot close without a

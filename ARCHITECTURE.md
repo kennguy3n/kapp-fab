@@ -1,6 +1,6 @@
 # Kapp Business Suite — Architecture
 
-> **Last Updated:** 2025-04-21
+> **Last Updated:** 2026-04-25
 >
 > Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [PROGRESS.md](./PROGRESS.md)
 
@@ -132,6 +132,17 @@ Kapp is designed for a single operator to serve **thousands of SME tenants** on 
 | Dedicated cell | Separate shared infrastructure cell | Regulated tenants, VIP customers |
 | Private deployment | Fully isolated Kapp installation | Enterprise customers with their own infrastructure |
 
+### Per-Tenant File Encryption
+
+File attachments are stored on a separate per-tenant zero-knowledge object storage tier (ZK Object Fabric) — see §5.2 for the routing and provisioning details. The relevant multi-tenancy properties:
+
+- **Per-tenant DEK.** Each tenant's objects are encrypted under a dedicated data-encryption key derived from a tenant-specific KEK. The platform operator cannot decrypt one tenant's objects without that tenant's keys.
+- **Per-tenant bucket.** Tenant A's bytes never share a bucket with tenant B; cross-tenant dedup is intentionally not supported because it would break the ZK guarantee.
+- **Credential rotation.** Rotating a tenant's `zk_access_key` / `zk_secret_key` invalidates the cached `*S3Store` (via `PerTenantS3Store.Invalidate`) so the next request re-resolves credentials from the tenants row.
+- **Failure isolation.** A failed credential lookup for tenant A errors out for tenant A only — it never falls back to a neighbour's bucket.
+
+This complements the row-level encryption (HKDF-derived per-tenant keys for `data->>"encrypted"` fields) so both structured records and unstructured attachments share the same isolation posture.
+
 ### Efficiency Note
 
 The **shared tier must support thousands of tenants per cell** with **sub-millisecond overhead for tenant context switching**. Techniques:
@@ -187,9 +198,19 @@ High-integrity typed tables (finance, inventory):
 - **Indexes:** Composite indexes always **lead with `tenant_id`** so that tenant-scoped scans are cache-friendly and query plans short-circuit efficiently.
 - **Connection management:** `pgbouncer` (or equivalent) in **transaction-mode pooling**. Tenant context is set via `SET LOCAL` inside each transaction.
 
-### 5.2 Object Storage (S3-compatible)
+### 5.2 Object Storage — ZK Object Fabric
 
-Use cases:
+Kapp's object storage layer is provided by [ZK Object Fabric](https://github.com/kennguy3n/zk-object-fabric), an S3-compatible gateway with per-tenant zero-knowledge encryption.
+
+**Per-tenant routing.** The `internal/files` package exposes a single `ObjectStore` interface; the production binding is `PerTenantS3Store`, which reads the active tenant id off the request `context.Context` (set by `TenantMiddleware` via `WithTenant`) and dispatches to a tenant-specific `*S3Store` lazily constructed from the tenant's `zk_access_key` / `zk_secret_key` / `zk_bucket` columns. Tenants without those columns transparently fall back to the platform-wide MinIO bucket so the integration can be rolled out gradually.
+
+**Provisioning.** During tenant onboarding the setup wizard calls the fabric's console API at `:8081` (via `internal/tenant/zk_fabric_client.go`) to create the tenant record, mint an HMAC access/secret pair, and bind a per-tenant bucket named `kapp-{slug}`. The credentials are persisted on the tenants row inside the same control-plane transaction; a partial failure leaves the row in a consistent state and the wizard is idempotent across retries.
+
+**Encryption mode.** Managed mode — the fabric derives a per-tenant data-encryption key (DEK) from the tenant's KEK and handles AES-GCM encryption transparently on `PutObject` / `GetObject`. Kapp never sees the DEK; the platform operator cannot decrypt one tenant's bytes without rotating that tenant's keys.
+
+**Deduplication.** Content-addressable (SHA-256) within each tenant's bucket only. Cross-tenant dedup is intentionally **not** supported because it would break ZK isolation — two tenants storing identical bytes still get two distinct ciphertexts under their own DEKs.
+
+**Use cases:**
 
 1. KRecord attachments (documents, images, contracts).
 2. Import source files (CSV, JSON, DB dumps).
@@ -198,8 +219,6 @@ Use cases:
 5. Backups and snapshots.
 6. Email/notification rendered HTML bodies (for audit).
 7. Static KApp assets (card images, icons).
-
-**Efficiency:** Use **content-addressable storage** (hash-keyed objects) for deduplication where appropriate — e.g., shared KApp templates, identical attachments across tenants, cached AI-generated outputs.
 
 ### 5.3 Event Bus
 

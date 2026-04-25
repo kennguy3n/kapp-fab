@@ -59,6 +59,20 @@ func FeatureFromPath(p string) string {
 		slash = len(rest)
 	}
 	domain := rest[:slash]
+	// /api/v1/records/{ktype}/... — derive the feature key from
+	// the KType domain prefix (e.g. "crm.deal" → FeatureCRM,
+	// "finance.ar_invoice" → FeatureFinance) instead of the
+	// generic "records" segment, which has no per-feature
+	// mapping. This is the same prefix-routing rule the search
+	// + bulk endpoints follow.
+	if domain == "records" && slash != len(rest) {
+		ktypeRest := rest[slash+1:]
+		ktSlash := strings.IndexByte(ktypeRest, '/')
+		if ktSlash == -1 {
+			ktSlash = len(ktypeRest)
+		}
+		return featureFromKType(ktypeRest[:ktSlash])
+	}
 	switch domain {
 	case "finance":
 		return tenant.FeatureFinance
@@ -78,6 +92,38 @@ func FeatureFromPath(p string) string {
 		return tenant.FeatureWebhook
 	case "portal":
 		return tenant.FeaturePortal
+	case "imports", "importer":
+		return tenant.FeatureImporter
+	case "report-builder":
+		return tenant.FeatureReportBuilder
+	default:
+		return ""
+	}
+}
+
+// featureFromKType maps a KType name (e.g. "crm.deal",
+// "finance.ar_invoice") to the canonical feature key the tenant's
+// plan must enable. Unknown prefixes (e.g. core platform KTypes
+// like "platform.audit") return "" so the gate is permissive — only
+// domain KTypes are plan-gated.
+func featureFromKType(ktype string) string {
+	dot := strings.IndexByte(ktype, '.')
+	if dot == -1 {
+		return ""
+	}
+	switch ktype[:dot] {
+	case "crm":
+		return tenant.FeatureCRM
+	case "finance", "ar", "ap", "ledger":
+		return tenant.FeatureFinance
+	case "inventory", "procurement", "warehouse", "sales":
+		return tenant.FeatureInventory
+	case "hr", "payroll":
+		return tenant.FeatureHR
+	case "lms":
+		return tenant.FeatureLMS
+	case "helpdesk":
+		return tenant.FeatureHelpdesk
 	default:
 		return ""
 	}

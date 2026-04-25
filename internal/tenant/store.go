@@ -50,12 +50,15 @@ func (s *PGStore) Create(ctx context.Context, input CreateInput) (*Tenant, error
 	}
 
 	var t Tenant
+	var zkAccess, zkSecret, zkBucket *string
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO tenants (id, slug, name, cell, status, plan, quota)
 		 VALUES ($1, $2, $3, $4, 'active', $5, $6)
-		 RETURNING id, slug, name, cell, status, plan, quota, created_at, updated_at`,
+		 RETURNING id, slug, name, cell, status, plan, quota, created_at, updated_at,
+		           zk_access_key, zk_secret_key, zk_bucket`,
 		id, input.Slug, input.Name, input.Cell, input.Plan, quota,
-	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt)
+	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
+		&zkAccess, &zkSecret, &zkBucket)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
@@ -63,38 +66,47 @@ func (s *PGStore) Create(ctx context.Context, input CreateInput) (*Tenant, error
 		}
 		return nil, fmt.Errorf("tenant: insert: %w", err)
 	}
+	assignZK(&t, zkAccess, zkSecret, zkBucket)
 	return &t, nil
 }
 
 // Get returns the tenant with the given id or ErrNotFound.
 func (s *PGStore) Get(ctx context.Context, id uuid.UUID) (*Tenant, error) {
 	var t Tenant
+	var zkAccess, zkSecret, zkBucket *string
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at
+		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at,
+		        zk_access_key, zk_secret_key, zk_bucket
 		 FROM tenants WHERE id = $1`, id,
-	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt)
+	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
+		&zkAccess, &zkSecret, &zkBucket)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("tenant: get: %w", err)
 	}
+	assignZK(&t, zkAccess, zkSecret, zkBucket)
 	return &t, nil
 }
 
 // GetBySlug returns the tenant with the given slug or ErrNotFound.
 func (s *PGStore) GetBySlug(ctx context.Context, slug string) (*Tenant, error) {
 	var t Tenant
+	var zkAccess, zkSecret, zkBucket *string
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at
+		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at,
+		        zk_access_key, zk_secret_key, zk_bucket
 		 FROM tenants WHERE slug = $1`, slug,
-	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt)
+	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
+		&zkAccess, &zkSecret, &zkBucket)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("tenant: get by slug: %w", err)
 	}
+	assignZK(&t, zkAccess, zkSecret, zkBucket)
 	return &t, nil
 }
 
@@ -102,7 +114,8 @@ func (s *PGStore) GetBySlug(ctx context.Context, slug string) (*Tenant, error) {
 // admin tooling; no filtering is applied.
 func (s *PGStore) List(ctx context.Context) ([]Tenant, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at
+		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at,
+		        zk_access_key, zk_secret_key, zk_bucket
 		 FROM tenants
 		 ORDER BY slug ASC`)
 	if err != nil {
@@ -115,12 +128,15 @@ func (s *PGStore) List(ctx context.Context) ([]Tenant, error) {
 	out := make([]Tenant, 0)
 	for rows.Next() {
 		var t Tenant
+		var zkAccess, zkSecret, zkBucket *string
 		if err := rows.Scan(
 			&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status,
 			&t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
+			&zkAccess, &zkSecret, &zkBucket,
 		); err != nil {
 			return nil, fmt.Errorf("tenant: list scan: %w", err)
 		}
+		assignZK(&t, zkAccess, zkSecret, zkBucket)
 		out = append(out, t)
 	}
 	if err := rows.Err(); err != nil {
@@ -200,6 +216,48 @@ func (s *PGStore) transition(ctx context.Context, id uuid.UUID, from, to Status)
 			return gerr
 		}
 		return ErrInvalidTransition
+	}
+	return nil
+}
+
+// assignZK copies the nullable ZK columns onto the Tenant struct.
+// Pointers come straight off pgx.Scan and may be nil for tenants
+// created before migration 000027 ran.
+func assignZK(t *Tenant, access, secret, bucket *string) {
+	if access != nil {
+		t.ZKAccessKey = *access
+	}
+	if secret != nil {
+		t.ZKSecretKey = *secret
+	}
+	if bucket != nil {
+		t.ZKBucket = *bucket
+	}
+}
+
+// SetZKCredentials persists the per-tenant ZK Object Fabric HMAC
+// credentials on the tenants row. Called by the setup wizard after
+// it provisions the tenant on the ZK fabric console at :8081 (and
+// by integration tests that pre-seed credentials directly). Returns
+// ErrNotFound when the tenant id does not exist.
+func (s *PGStore) SetZKCredentials(ctx context.Context, id uuid.UUID, accessKey, secretKey, bucket string) error {
+	if accessKey == "" || secretKey == "" || bucket == "" {
+		return errors.New("tenant: zk access_key, secret_key, and bucket are required")
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE tenants
+		    SET zk_access_key = $1,
+		        zk_secret_key = $2,
+		        zk_bucket     = $3,
+		        updated_at    = now()
+		  WHERE id = $4`,
+		accessKey, secretKey, bucket, id,
+	)
+	if err != nil {
+		return fmt.Errorf("tenant: set zk credentials: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

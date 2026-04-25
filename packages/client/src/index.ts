@@ -126,6 +126,18 @@ export interface TenantUsageResponse {
   features: Record<string, boolean>;
 }
 
+export interface TenantUsageHistoryRow {
+  period_start: string;
+  metric: string;
+  value: number;
+}
+
+export interface TenantUsageHistoryResponse {
+  tenant_id: string;
+  rows: TenantUsageHistoryRow[];
+  months: number;
+}
+
 interface ClientConfig {
   baseUrl: string;
   headers: () => Record<string, string>;
@@ -189,6 +201,15 @@ export class ApiClient {
   // --- Metering + plans -------------------------------------------------
   getTenantUsage(id: string): Promise<TenantUsageResponse> {
     return this.request(`/tenants/${encodeURIComponent(id)}/usage`);
+  }
+
+  getTenantUsageHistory(
+    id: string,
+    months = 6
+  ): Promise<TenantUsageHistoryResponse> {
+    return this.request(
+      `/tenants/${encodeURIComponent(id)}/usage/history?months=${months}`
+    );
   }
 
   changeTenantPlan(id: string, plan: string): Promise<{ tenant_id: string; plan: Plan }> {

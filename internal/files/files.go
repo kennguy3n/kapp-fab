@@ -128,7 +128,11 @@ func (s *Store) Upload(
 	sum := sha256.Sum256(blob.Data)
 	hash := hex.EncodeToString(sum[:])
 	key := "sha256/" + hash[:2] + "/" + hash
-	if err := s.objs.Put(ctx, key, blob.ContentType, blob.Data); err != nil {
+	// Thread the tenant id through so the per-tenant ZK fabric
+	// router can resolve to this tenant's bucket. Stores that
+	// don't care (MemoryStore, the global S3Store) ignore it.
+	objCtx := WithTenant(ctx, tenantID)
+	if err := s.objs.Put(objCtx, key, blob.ContentType, blob.Data); err != nil {
 		return nil, fmt.Errorf("files: put: %w", err)
 	}
 
@@ -188,7 +192,8 @@ func (s *Store) Read(ctx context.Context, tenantID, fileID uuid.UUID) (*File, io
 	if err != nil {
 		return nil, nil, err
 	}
-	rc, err := s.objs.Get(ctx, f.StorageKey)
+	objCtx := WithTenant(ctx, tenantID)
+	rc, err := s.objs.Get(objCtx, f.StorageKey)
 	if err != nil {
 		return nil, nil, err
 	}

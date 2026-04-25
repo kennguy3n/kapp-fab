@@ -33,6 +33,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/scheduler"
+	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
 
 const (
@@ -207,6 +208,15 @@ func run() error {
 	reorderHandler := inventory.NewReorderHandler(recordStore, inventoryStore).
 		WithSystemActor(workerSystemActor)
 	schedRegistry.Register(inventory.ActionTypeReorder, reorderHandler)
+	// Daily tenant usage snapshot — re-samples storage_bytes and
+	// krecord_count per tenant so the dashboard's absolute
+	// counters are accurate even on quiet days. API-call deltas
+	// continue to flow through the metering middleware.
+	meteringStore := tenant.NewMeteringStore(pool)
+	schedRegistry.Register(
+		tenant.ActionTypeUsageSnapshot,
+		tenant.NewUsageSnapshotHandler(meteringStore),
+	)
 	go scheduler.RunLoop(ctx, schedStore, schedRegistry, 10*time.Second)
 
 	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)

@@ -1,6 +1,6 @@
 # Kapp Business Suite — Proposal
 
-> **Last Updated:** 2025-04-21
+> **Last Updated:** 2026-04-25
 >
 > Related documents: [README.md](./README.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [PROGRESS.md](./PROGRESS.md)
 
@@ -77,7 +77,7 @@ This is the single invariant Kapp optimizes for. Every feature must strengthen t
 | Workflows | State machines with guards, actions, notifications, and approval chains |
 | Permissions | Role + attribute-based access control (RBAC + ABAC), enforced at DB row and API layer |
 | Audit | Append-only audit log: who/what/when/before/after for every mutation |
-| Attachments | S3-backed files with per-tenant quotas and content-addressable deduplication |
+| Attachments | S3-backed files with per-tenant zero-knowledge encryption via [ZK Object Fabric](https://github.com/kennguy3n/zk-object-fabric); content-addressable deduplication within tenant scope (no cross-tenant dedup, by design) |
 | Notifications | KChat cards, in-app, email, webhook — routed by workflow and subscription |
 | Agent tools | Permissioned AI tool definitions auto-generated from KType + agent policies |
 | Import/export | Bulk import pipelines, CSV/JSON export, snapshot backups |
@@ -222,6 +222,23 @@ All manufacturing features are **Later**. Manufacturing introduces domain comple
 
 ---
 
+### 3.7 Object Storage Integration
+
+Kapp file attachments live on a per-tenant zero-knowledge object storage layer provided by [ZK Object Fabric](https://github.com/kennguy3n/zk-object-fabric).
+
+| Property | Implementation |
+| --- | --- |
+| Per-tenant credentials | Each tenant gets its own HMAC access/secret pair plus a dedicated bucket, minted by the Kapp setup wizard against the fabric's console API at `:8081`. The credentials live on the `tenants` row in `zk_access_key` / `zk_secret_key` / `zk_bucket`. |
+| Encryption mode | **Managed.** The fabric handles per-tenant data-encryption-key derivation and AES-GCM encryption transparently — Kapp does not need to change its upload/download logic and never sees plaintext keys. |
+| Routing | The `PerTenantS3Store` reads the tenant id off the request `context.Context` and either dispatches to the tenant's bucket or falls back to the platform-wide MinIO bucket when ZK columns are blank (gradual rollout). |
+| Deduplication | Content-addressable (SHA-256) **within each tenant's bucket only**. Cross-tenant dedup is intentionally not supported because it would break ZK isolation. |
+| Placement policy | Inherited from the tenant's fabric configuration (e.g. region, replication, retention) — Kapp does not override placement at the application layer. |
+| Failure mode | If `ZK_FABRIC_ENDPOINT` is unset, the integration is disabled and the global MinIO path stays in place. If a per-tenant lookup fails the request errors out — the limiter never falls back to a neighbour's bucket. |
+
+Reference downstream integrations on the fabric side: kmail, zk-drive, and Kapp Business Suite.
+
+---
+
 ## 4. KChat Integration Model
 
 ### 4.1 UI Surfaces
@@ -343,7 +360,7 @@ Kapp supports importing data from existing business systems so customers can onb
 | --- | --- |
 | Metadata export (object schemas) | Mapped to KType definitions via a normalization layer |
 | Business records via REST API | Streaming read into KRecord staging tables |
-| Attachments | Rehosted to Kapp's object storage with content-addressable deduplication |
+| Attachments | Rehosted to the tenant's ZK Object Fabric bucket (per-tenant DEK, managed encryption mode); content-addressable deduplication within that bucket only |
 | Workflows | Mapped to Kapp workflow definitions where semantically equivalent; flagged for manual review otherwise |
 | Permissions | Role mappings imported into Kapp RBAC; attribute rules imported where expressible |
 | Reports | Imported as saved queries against KRecords and ledgers; visualizations mapped to Kapp report types |

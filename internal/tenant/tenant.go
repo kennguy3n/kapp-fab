@@ -32,6 +32,23 @@ type Tenant struct {
 	Quota     json.RawMessage `json:"quota"`
 	CreatedAt time.Time       `json:"created_at"`
 	UpdatedAt time.Time       `json:"updated_at"`
+
+	// ZK Object Fabric per-tenant credentials. Populated by the
+	// setup wizard against the ZK fabric console API at :8081 so
+	// each tenant's attachments are encrypted under a tenant-
+	// specific DEK. Empty values mean "fall back to the global
+	// S3_BUCKET / S3_ENDPOINT env vars" (legacy MinIO path).
+	ZKAccessKey string `json:"zk_access_key,omitempty"`
+	ZKSecretKey string `json:"-"` // never serialise the secret
+	ZKBucket    string `json:"zk_bucket,omitempty"`
+}
+
+// HasZKFabric reports whether the tenant has been provisioned with
+// per-tenant ZK Object Fabric credentials. Used by the attachment
+// layer to decide whether to route uploads through the per-tenant
+// bucket or fall back to the platform-wide MinIO store.
+func (t *Tenant) HasZKFabric() bool {
+	return t != nil && t.ZKAccessKey != "" && t.ZKSecretKey != "" && t.ZKBucket != ""
 }
 
 // CreateInput is the request shape for provisioning a new tenant.

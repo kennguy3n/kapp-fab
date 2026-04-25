@@ -63,11 +63,12 @@ type WizardUser struct {
 // WizardResult summarises the side-effects the wizard applied. The HTTP
 // handler surfaces this so the UI can render a completion screen.
 type WizardResult struct {
-	TenantID         uuid.UUID `json:"tenant_id"`
-	AccountsInserted int       `json:"accounts_inserted"`
-	RolesInserted    int       `json:"roles_inserted"`
-	UsersInserted    int       `json:"users_inserted"`
-	CoATemplateUsed  string    `json:"coa_template_used"`
+	TenantID            uuid.UUID `json:"tenant_id"`
+	AccountsInserted    int       `json:"accounts_inserted"`
+	RolesInserted       int       `json:"roles_inserted"`
+	UsersInserted       int       `json:"users_inserted"`
+	CoATemplateUsed     string    `json:"coa_template_used"`
+	ZKFabricProvisioned bool      `json:"zk_fabric_provisioned,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -130,12 +131,34 @@ func DefaultRoles() []WizardRole {
 // `dbutil.WithTenantTx`, which issues `SELECT set_config('app.tenant_id', …, true)`
 // on the tx before calling the closure.
 type Wizard struct {
-	pool *pgxpool.Pool
+	pool          *pgxpool.Pool
+	store         *PGStore
+	zkProvisioner ZKFabricProvisioner
 }
 
-// NewWizard binds the wizard to the shared pool.
+// ZKFabricProvisioner mints a new tenant + HMAC credential pair on
+// the ZK Object Fabric console and returns the bucket / access /
+// secret triple that should be persisted on the tenants row. The
+// wizard calls it once during RunSetupWizard so per-tenant ZK
+// encryption is wired by the time the tenant logs in for the first
+// time. A nil provisioner skips the step (legacy MinIO path stays
+// in place).
+type ZKFabricProvisioner interface {
+	ProvisionTenant(ctx context.Context, tenantID uuid.UUID, slug string) (ZKCredentials, error)
+}
+
+// NewWizard binds the wizard to the shared pool. ZK fabric
+// provisioning is opt-in via WithZKFabricProvisioner so existing
+// deployments without a fabric gateway keep working.
 func NewWizard(pool *pgxpool.Pool) *Wizard {
-	return &Wizard{pool: pool}
+	return &Wizard{pool: pool, store: NewPGStore(pool)}
+}
+
+// WithZKFabricProvisioner attaches a ZK fabric provisioner to the
+// wizard. Returns the wizard for fluent chaining.
+func (w *Wizard) WithZKFabricProvisioner(p ZKFabricProvisioner) *Wizard {
+	w.zkProvisioner = p
+	return w
 }
 
 // RunSetupWizard applies the supplied config to an existing tenant.
@@ -208,6 +231,30 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 			return out, err
 		}
 		out.UsersInserted = usersInserted
+	}
+
+	// ZK Object Fabric provisioning runs after the tx so a failure
+	// here does not roll back the seeded accounts/roles. The
+	// fabric is an external dependency; we'd rather have the
+	// tenant ready to use without ZK encryption (operator can
+	// re-run provisioning later) than block setup on a fabric
+	// outage. Failures are logged via the returned error so the
+	// caller surfaces them in the wizard response.
+	if w.zkProvisioner != nil && w.store != nil {
+		t, err := w.store.Get(ctx, tenantID)
+		if err != nil {
+			return out, fmt.Errorf("tenant: wizard load tenant for zk provisioning: %w", err)
+		}
+		if !t.HasZKFabric() {
+			creds, err := w.zkProvisioner.ProvisionTenant(ctx, tenantID, t.Slug)
+			if err != nil {
+				return out, fmt.Errorf("tenant: wizard zk fabric provision: %w", err)
+			}
+			if err := w.store.SetZKCredentials(ctx, tenantID, creds.AccessKey, creds.SecretKey, creds.Bucket); err != nil {
+				return out, fmt.Errorf("tenant: wizard persist zk credentials: %w", err)
+			}
+			out.ZKFabricProvisioned = true
+		}
 	}
 	return out, nil
 }
@@ -343,6 +390,12 @@ const (
 	defaultInventoryReorderIntervalSeconds = 3600
 )
 
+// defaultUsageSnapshotIntervalSeconds is the cadence at which the
+// daily storage_bytes / krecord_count snapshot fires per tenant.
+// 24h matches the public/PROGRESS.md commitment that the usage
+// dashboard reflects yesterday's footprint within one day.
+const defaultUsageSnapshotIntervalSeconds = 86400
+
 // seedDefaultScheduledActions seeds the per-tenant scheduled_actions
 // rows the platform expects to exist after a successful wizard run.
 // Uses INSERT … WHERE NOT EXISTS so re-running the wizard is a no-op
@@ -356,6 +409,7 @@ func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 		{defaultSLABreachActionType, defaultSLABreachIntervalSeconds},
 		{defaultRecurringInvoiceActionType, defaultRecurringInvoiceIntervalSeconds},
 		{defaultInventoryReorderActionType, defaultInventoryReorderIntervalSeconds},
+		{ActionTypeUsageSnapshot, defaultUsageSnapshotIntervalSeconds},
 	}
 	for _, d := range defaults {
 		if _, err := tx.Exec(ctx,

@@ -1,6 +1,6 @@
 # Kapp Business Suite
 
-> **Last Updated:** 2025-04-21
+> **Last Updated:** 2026-04-25
 
 **An extreme-lightweight, multi-tenant business operating platform for KChat — built in Go + React for efficient operation at scale with thousands of SME tenants.**
 
@@ -134,9 +134,20 @@ kapp/
 - **Language (backend):** Go
 - **Language (frontend):** TypeScript + React
 - **Database:** PostgreSQL (row-level security, partitioning by tenant)
-- **Object storage:** S3-compatible
+- **Object storage:** [ZK Object Fabric](https://github.com/kennguy3n/zk-object-fabric) — S3-compatible gateway with per-tenant zero-knowledge encryption (managed mode); each Kapp tenant gets its own HMAC credentials and bucket so file attachments are encrypted under tenant-specific data-encryption keys.
 - **Event bus:** Compact-encoded, batched event streaming
+- **Cache + rate limit:** Redis (sliding-window token bucket via atomic Lua, shared across API replicas)
 - **Deployment:** Docker, Helm, Terraform
+
+## ZK Object Fabric Integration
+
+File attachments uploaded through `internal/files` no longer land in the platform-wide MinIO bucket. Each tenant is provisioned a dedicated bucket and HMAC credential pair on the ZK Object Fabric during the setup wizard via the fabric's console API at `:8081`. The `PerTenantS3Store` then routes Put/Get calls based on the tenant id threaded through `context.Context`, falling back to the global MinIO bucket for tenants that have not yet been provisioned (gradual rollout).
+
+Key properties:
+
+- **Per-tenant key isolation.** Every tenant's objects are encrypted under that tenant's DEK, managed by the fabric. The platform operator cannot read another tenant's bytes without rotating that tenant's keys.
+- **Content-addressable dedup stays in tenant scope.** SHA-256 keying is preserved inside each tenant's bucket; we deliberately do not deduplicate across tenants because that would break ZK isolation.
+- **Backward compatible.** Tenants without `zk_access_key` columns set on their `tenants` row continue to use the global MinIO bucket. Operators can roll out the fabric gradually.
 
 ---
 
