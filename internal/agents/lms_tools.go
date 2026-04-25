@@ -24,12 +24,76 @@ func RegisterLMSTools(x *Executor, store *lms.Store) {
 	x.Register(&submitAssignmentTool{executor: x})
 }
 
+// RegisterCertificateTool wires the Phase K issue_certificate tool.
+// Kept separate from RegisterLMSTools so callers that don't have a
+// CertificateIssuer (older test harnesses) keep working.
+func RegisterCertificateTool(x *Executor, issuer *lms.CertificateIssuer) {
+	x.Register(&issueCertificateTool{issuer: issuer})
+}
+
+// ----- lms.issue_certificate -----
+
+type issueCertificateInput struct {
+	EnrollmentID uuid.UUID `json:"enrollment_id"`
+	TemplateID   string    `json:"template_id,omitempty"`
+}
+
+type issueCertificateTool struct {
+	issuer *lms.CertificateIssuer
+}
+
+func (t *issueCertificateTool) Name() string               { return "lms.issue_certificate" }
+func (t *issueCertificateTool) RequiresConfirmation() bool { return true }
+func (t *issueCertificateTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in issueCertificateInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.EnrollmentID == uuid.Nil {
+		return nil, errors.New("lms.issue_certificate: enrollment_id required")
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(in)
+		return &Result{
+			Summary: fmt.Sprintf("Would issue certificate for enrollment %s", in.EnrollmentID),
+			Preview: preview,
+		}, nil
+	}
+	if t.issuer == nil {
+		return nil, errors.New("lms.issue_certificate: issuer not configured")
+	}
+	cert, err := t.issuer.IssueCertificate(ctx, inv.TenantID, in.EnrollmentID, inv.ActorID, lms.CertificateOptions{TemplateID: in.TemplateID})
+	if err != nil && !errors.Is(err, lms.ErrCertificateAlreadyIssued) {
+		return nil, err
+	}
+	// IssueCertificate can return (nil, ErrCertificateAlreadyIssued)
+	// when a concurrent issuer wins the 23505 race and the subsequent
+	// findExisting lookup fails (pgx.ErrNoRows, pool missing, etc.).
+	// Guard the nil cert before dereferencing cert.ID.
+	if cert == nil {
+		return &Result{
+			Summary: fmt.Sprintf("Certificate already issued for enrollment %s (lookup of existing row failed)", in.EnrollmentID),
+			Extra:   map[string]any{"enrollment_id": in.EnrollmentID},
+		}, nil
+	}
+	body, _ := json.Marshal(cert)
+	summary := fmt.Sprintf("Issued certificate %s for enrollment %s", cert.ID, in.EnrollmentID)
+	if errors.Is(err, lms.ErrCertificateAlreadyIssued) {
+		summary = fmt.Sprintf("Certificate %s already issued for enrollment %s", cert.ID, in.EnrollmentID)
+	}
+	return &Result{
+		Summary: summary,
+		Preview: body,
+		Extra:   map[string]any{"certificate_id": cert.ID, "enrollment_id": in.EnrollmentID},
+	}, nil
+}
+
 // ----- lms.recommend_course -----
 
 type recommendCourseInput struct {
-	UserID    uuid.UUID `json:"user_id,omitempty"`
-	Role      string    `json:"role,omitempty"`
-	TopN      int       `json:"top_n,omitempty"`
+	UserID uuid.UUID `json:"user_id,omitempty"`
+	Role   string    `json:"role,omitempty"`
+	TopN   int       `json:"top_n,omitempty"`
 }
 
 type recommendCourseTool struct{ executor *Executor }

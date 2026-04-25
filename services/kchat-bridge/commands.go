@@ -16,6 +16,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
+	"github.com/kennguy3n/kapp-fab/internal/lms"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
@@ -62,6 +63,7 @@ type CommandDispatcher struct {
 	ledger    *ledger.PGStore
 	poster    *ledger.InvoicePoster
 	inventory *inventory.PGStore
+	lmsIssuer *lms.CertificateIssuer
 	cards     *CardRenderer
 	formsBase string
 }
@@ -128,6 +130,10 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.postBill(ctx, req)
 	case "stock":
 		return d.stockLevels(ctx, req)
+	case "reverse-stock-move":
+		return d.reverseStockMove(ctx, req)
+	case "certificate":
+		return d.issueCertificate(ctx, req)
 	case "learn":
 		return d.learnCourses(ctx, req)
 	case "form":
@@ -152,7 +158,7 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.createRecord(ctx, req, finance.KTypeRecurringInvoice, data)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /learn, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /reverse-stock-move, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /help",
 		}, nil
 	default:
 		return CommandResponse{
@@ -365,6 +371,91 @@ func (d *CommandDispatcher) stockLevels(ctx context.Context, req CommandRequest)
 	}
 	return CommandResponse{
 		Text: title + "\n" + strings.Join(lines, "\n"),
+	}, nil
+}
+
+// reverseStockMove implements `/reverse-stock-move <move_id> [memo]`.
+// Posts a contra-entry that cancels the named inventory move.
+// Reverses are confirmation-required actions when invoked by the
+// agent tool; KChat slash commands are user-initiated so the
+// equivalent confirmation is the explicit /reverse-stock-move
+// invocation. Errors from the store are surfaced inline so the
+// operator can retry with the right id / role.
+func (d *CommandDispatcher) reverseStockMove(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.inventory == nil {
+		return CommandResponse{Text: "inventory not configured"}, nil
+	}
+	if req.TenantID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id required"}, nil
+	}
+	if len(req.Args) < 1 {
+		return CommandResponse{Text: "/reverse-stock-move <move_id> [memo]"}, nil
+	}
+	moveID, err := strconv.ParseInt(req.Args[0], 10, 64)
+	if err != nil || moveID <= 0 {
+		return CommandResponse{Text: fmt.Sprintf("/reverse-stock-move: invalid move_id %q", req.Args[0])}, nil
+	}
+	memo := ""
+	if len(req.Args) > 1 {
+		memo = strings.Join(req.Args[1:], " ")
+	}
+	move, err := d.inventory.ReverseMove(ctx, req.TenantID, moveID, req.UserID, memo)
+	if err != nil {
+		switch {
+		case errors.Is(err, inventory.ErrMoveNotFound):
+			return CommandResponse{Text: fmt.Sprintf("/reverse-stock-move: move %d not found", moveID)}, nil
+		case errors.Is(err, inventory.ErrAlreadyReversed):
+			return CommandResponse{Text: fmt.Sprintf("/reverse-stock-move: move %d already reversed", moveID)}, nil
+		case errors.Is(err, inventory.ErrCannotReverseContra):
+			return CommandResponse{Text: fmt.Sprintf("/reverse-stock-move: %d is itself a contra-entry — reverse the original instead", moveID)}, nil
+		}
+		return CommandResponse{}, err
+	}
+	return CommandResponse{
+		Text: fmt.Sprintf("Reversed stock move %d → contra-entry %d (qty=%s)", moveID, move.ID, move.Qty.String()),
+	}, nil
+}
+
+// issueCertificate implements `/certificate <enrollment_id>`. Issues
+// (or re-fetches the existing) lms.certificate KRecord for a
+// completed enrollment.
+func (d *CommandDispatcher) issueCertificate(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.lmsIssuer == nil {
+		return CommandResponse{Text: "lms certificate issuer not configured"}, nil
+	}
+	if req.TenantID == uuid.Nil || req.UserID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id and user_id required"}, nil
+	}
+	if len(req.Args) < 1 {
+		return CommandResponse{Text: "/certificate <enrollment_id>"}, nil
+	}
+	enrollmentID, err := uuid.Parse(req.Args[0])
+	if err != nil {
+		return CommandResponse{Text: fmt.Sprintf("/certificate: invalid enrollment_id %q", req.Args[0])}, nil
+	}
+	cert, err := d.lmsIssuer.IssueCertificate(ctx, req.TenantID, enrollmentID, req.UserID, lms.CertificateOptions{})
+	if err != nil && !errors.Is(err, lms.ErrCertificateAlreadyIssued) {
+		switch {
+		case errors.Is(err, lms.ErrEnrollmentNotFound):
+			return CommandResponse{Text: fmt.Sprintf("/certificate: enrollment %s not found", enrollmentID)}, nil
+		case errors.Is(err, lms.ErrEnrollmentNotComplete):
+			return CommandResponse{Text: fmt.Sprintf("/certificate: enrollment %s is not yet completed", enrollmentID)}, nil
+		}
+		return CommandResponse{}, err
+	}
+	// IssueCertificate can return (nil, ErrCertificateAlreadyIssued)
+	// when the 23505 race loses and findExisting can't locate the
+	// sibling row — surface a human-readable message rather than
+	// dereferencing a nil *KRecord.
+	if cert == nil {
+		return CommandResponse{Text: fmt.Sprintf("/certificate: enrollment %s already has a certificate (lookup of existing row failed)", enrollmentID)}, nil
+	}
+	prefix := "Issued"
+	if errors.Is(err, lms.ErrCertificateAlreadyIssued) {
+		prefix = "Already issued"
+	}
+	return CommandResponse{
+		Text: fmt.Sprintf("%s certificate %s for enrollment %s", prefix, cert.ID, enrollmentID),
 	}, nil
 }
 

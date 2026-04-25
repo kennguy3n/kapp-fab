@@ -24,14 +24,18 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/exporter"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
+	"github.com/kennguy3n/kapp-fab/internal/lms"
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/print"
 	"github.com/kennguy3n/kapp-fab/internal/record"
+	"github.com/kennguy3n/kapp-fab/internal/reporting"
 	"github.com/kennguy3n/kapp-fab/internal/scheduler"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
@@ -235,7 +239,35 @@ func run() error {
 		platform.ActionTypeDataRetentionSweep,
 		platform.NewRetentionSweeper(retentionStore),
 	)
+	// Periodic report scheduler — iterates report_schedules per
+	// tenant tick, runs each due saved report, renders to CSV or
+	// PDF, and emails the configured recipient list. Uses the same
+	// SMTP adapter the notification router does so the local-dev
+	// "SMTP disabled" path is a soft no-op.
+	reportScheduleStore := reporting.NewScheduleStore(pool)
+	reportSavedStore := reporting.NewStore(pool)
+	reportRunner := reporting.NewRunner(pool)
+	pdfConverter := print.DetectConverter()
+	schedRegistry.Register(
+		reporting.ActionTypeReportSchedule,
+		NewReportScheduleHandler(reportScheduleStore, reportSavedStore, reportRunner, pdfConverter, router.smtp),
+	)
+	// Phase K — LMS course-completion certificate auto-issuer.
+	// Walks completed lms.enrollment rows per tenant tick and issues
+	// a certificate for any that do not already have one.
+	certificateIssuer := lms.NewCertificateIssuer(recordStore, pool)
+	schedRegistry.Register(
+		CertificateActionType,
+		NewCertificateAutoIssuer(certificateIssuer, recordStore, workerSystemActor),
+	)
+
 	go scheduler.RunLoop(ctx, schedStore, schedRegistry, 10*time.Second)
+
+	// Phase K — data export queue worker. Runs alongside the
+	// scheduled-action loop on a separate ticker because export
+	// payloads can be large; we don't want a slow CSV render to
+	// stall the scheduled-action draining cadence.
+	go NewExportWorker(exporter.NewStore(pool, adminPool), recordStore, 5*time.Second).Run(ctx)
 
 	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)
 	ticker := time.NewTicker(tickInterval)

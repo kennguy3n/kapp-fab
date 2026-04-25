@@ -109,6 +109,8 @@ var TenantScopedTables = []string{
 	// Phase J/K
 	"tenant_support_domains",
 	"data_retention_policies",
+	"report_schedules",
+	"export_jobs",
 }
 
 // manifest is the first record in every dump file.

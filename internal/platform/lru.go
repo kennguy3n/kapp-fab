@@ -63,6 +63,19 @@ func (c *LRUCache) SetOnEvict(fn func(key string, value any)) {
 	c.mu.Unlock()
 }
 
+// SetClock overrides the time source used to compute and check entry
+// expiry. Intended for tests that need deterministic TTL-driven
+// eviction without sleeping. A nil argument restores time.Now.
+func (c *LRUCache) SetClock(now func() time.Time) {
+	c.mu.Lock()
+	if now == nil {
+		c.now = time.Now
+	} else {
+		c.now = now
+	}
+	c.mu.Unlock()
+}
+
 // Get returns the cached value for key, or (nil, false) if the key is absent
 // or expired. Access promotes the entry to most-recently-used.
 func (c *LRUCache) Get(key string) (any, bool) {

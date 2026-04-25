@@ -1,0 +1,67 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Certificate {{ field .Data "certificate_number" .ID }}</title>
+<style>
+  body {
+    font: 14pt/1.5 "Helvetica Neue", Arial, sans-serif;
+    color: #1f2937;
+    padding: 0;
+    margin: 0;
+  }
+  .frame {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 8.5in;
+    padding: 60pt;
+    border: 6pt double #1f2937;
+  }
+  h1 {
+    font-size: 36pt;
+    text-align: center;
+    margin: 0 0 24pt;
+    letter-spacing: 4pt;
+    text-transform: uppercase;
+  }
+  .lede {
+    text-align: center;
+    color: #4b5563;
+    font-size: 14pt;
+    margin-bottom: 36pt;
+  }
+  .recipient {
+    text-align: center;
+    font-size: 28pt;
+    margin: 36pt 0 12pt;
+    border-bottom: 1pt solid #d1d5db;
+    padding-bottom: 12pt;
+  }
+  .course {
+    text-align: center;
+    font-size: 18pt;
+    margin: 24pt 0;
+  }
+  .meta {
+    margin-top: 48pt;
+    display: flex;
+    justify-content: space-between;
+    color: #6b7280;
+    font-size: 12pt;
+  }
+</style>
+</head>
+<body>
+  <div class="frame">
+    <h1>Certificate of Completion</h1>
+    <div class="lede">This document certifies that</div>
+    <div class="recipient">{{ field .Data "learner_id" "Learner" }}</div>
+    <div class="lede">has successfully completed the course</div>
+    <div class="course">{{ field .Data "course_id" "Course" }}</div>
+    <div class="meta">
+      <div>Certificate #: {{ field .Data "certificate_number" .ID }}</div>
+      <div>Issued: {{ field .Data "issued_at" "" }}</div>
+    </div>
+  </div>
+</body>
+</html>

@@ -27,6 +27,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/dashboard"
 	"github.com/kennguy3n/kapp-fab/internal/docs"
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/exporter"
 	"github.com/kennguy3n/kapp-fab/internal/files"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/forms"
@@ -310,6 +311,7 @@ func run() error {
 	agents.RegisterHRTools(executor, hrStore)
 	agents.RegisterPayrollTools(executor, hr.NewPayrollEngine(recordStore, ledgerStore))
 	agents.RegisterLMSTools(executor, lmsStore)
+	agents.RegisterCertificateTool(executor, lms.NewCertificateIssuer(recordStore, pool))
 	agents.RegisterHelpdeskTools(executor, helpdeskStore)
 
 	// rateLimitMW picks the Redis-backed limiter when wired, otherwise
@@ -382,6 +384,8 @@ func run() error {
 	curh := &currencyHandlers{store: exchangeRateStore}
 	hdh := &helpdeskHandlers{store: helpdeskStore}
 	reph := &reportsHandlers{store: reportStore, runner: reportRunner}
+	repsh := &reportScheduleHandlers{store: reporting.NewScheduleStore(pool)}
+	exph := &exportHandlers{store: exporter.NewStore(pool, adminPool)}
 	dashh := &dashboardHandlers{store: dashboard.NewStore(pool).WithConverter(dashboardRateAdapter{rates: apiExchangeRates})}
 
 	// Inbound email → ticket. Wired only when adminPool is
@@ -806,6 +810,39 @@ func run() error {
 			r.Put("/{id}", reph.update)
 			r.Delete("/{id}", reph.delete)
 			r.Get("/{id}/run", reph.runSaved)
+			r.Patch("/{id}/share", reph.share)
+		})
+
+		// Phase K — data export queue. Submission enqueues; the
+		// worker (services/worker/export_worker.go) drains it and
+		// streams payload via /download.
+		r.Route("/api/v1/exports", func(r chi.Router) {
+			r.Use(platform.TenantMiddleware(tenantSvc))
+			r.Use(apiCallMW)
+			r.Use(featureMW)
+			r.Use(platform.IdempotencyMiddleware(pool))
+			r.Use(rateLimitMW)
+			r.Use(platform.QuotaMiddleware(quotaEnforcer))
+			r.Get("/", exph.list)
+			r.Post("/", exph.create)
+			r.Get("/{id}", exph.get)
+			r.Get("/{id}/download", exph.download)
+		})
+
+		// Phase K — report schedules. CRUD only; the worker owns
+		// dispatch via reporting.ActionTypeReportSchedule.
+		r.Route("/api/v1/report-schedules", func(r chi.Router) {
+			r.Use(platform.TenantMiddleware(tenantSvc))
+			r.Use(apiCallMW)
+			r.Use(featureMW)
+			r.Use(platform.IdempotencyMiddleware(pool))
+			r.Use(rateLimitMW)
+			r.Use(platform.QuotaMiddleware(quotaEnforcer))
+			r.Get("/", repsh.list)
+			r.Post("/", repsh.create)
+			r.Get("/{id}", repsh.get)
+			r.Put("/{id}", repsh.update)
+			r.Delete("/{id}", repsh.delete)
 		})
 
 		// Phase I KPI dashboard aggregation. Reads only, so no idempotency
@@ -840,6 +877,7 @@ func run() error {
 			r.Get("/warehouses", invh.listWarehouses)
 			r.Post("/moves", invh.recordMove)
 			r.Get("/moves", invh.listMoves)
+			r.Post("/moves/{id}/reverse", invh.reverseMove)
 			r.Post("/transfers", invh.recordTransfer)
 			r.Get("/stock-levels", invh.listStockLevels)
 			r.Get("/stock-levels/{id}", invh.stockLevelsByItem)

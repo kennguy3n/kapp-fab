@@ -23,6 +23,7 @@ import (
 func RegisterInventoryTools(x *Executor, store *inventory.PGStore) {
 	x.Register(&recordMoveTool{store: store})
 	x.Register(&checkStockTool{store: store})
+	x.Register(&reverseMoveTool{store: store})
 }
 
 // RegisterInventoryReorderTool wires the trigger_reorder tool against
@@ -121,6 +122,54 @@ func (t *recordMoveTool) Invoke(ctx context.Context, inv Invocation) (*Result, e
 		Summary: fmt.Sprintf("Recorded move %d (%s @ %s qty=%s)", move.ID, move.ItemID, move.WarehouseID, move.Qty),
 		Preview: body,
 		Extra:   map[string]any{"move_id": move.ID},
+	}, nil
+}
+
+// ----- inventory.reverse_move -----
+//
+// Cancels a previously-recorded move by posting a contra-entry.
+// Confirmation is required because reversal is a destructive
+// stock-adjusting action; reversing a contra row directly is
+// rejected at the store layer with ErrCannotReverseContra.
+
+type reverseMoveInput struct {
+	MoveID int64  `json:"move_id"`
+	Memo   string `json:"memo,omitempty"`
+}
+
+type reverseMoveTool struct {
+	store *inventory.PGStore
+}
+
+func (t *reverseMoveTool) Name() string               { return "inventory.reverse_move" }
+func (t *reverseMoveTool) RequiresConfirmation() bool { return true }
+func (t *reverseMoveTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in reverseMoveInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.MoveID == 0 {
+		return nil, errors.New("inventory.reverse_move: move_id required")
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(in)
+		return &Result{
+			Summary: fmt.Sprintf("Would reverse stock move %d", in.MoveID),
+			Preview: preview,
+		}, nil
+	}
+	if t.store == nil {
+		return nil, errors.New("inventory.reverse_move: inventory store not configured")
+	}
+	move, err := t.store.ReverseMove(ctx, inv.TenantID, in.MoveID, inv.ActorID, in.Memo)
+	if err != nil {
+		return nil, err
+	}
+	body, _ := json.Marshal(move)
+	return &Result{
+		Summary: fmt.Sprintf("Reversed move %d (new contra-entry id=%d, qty=%s)", in.MoveID, move.ID, move.Qty),
+		Preview: body,
+		Extra:   map[string]any{"contra_move_id": move.ID, "reversed_move_id": in.MoveID},
 	}, nil
 }
 

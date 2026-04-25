@@ -31,10 +31,10 @@ const (
 // purchase bill posts. Kept here so the ledger, inventory store, and
 // tests all agree on the label.
 const (
-	MoveSourceSalesInvoice  = "finance.ar_invoice"
-	MoveSourcePurchaseBill  = "finance.ap_bill"
-	MoveSourceAdjustment    = "inventory.adjustment"
-	MoveSourceTransfer      = "inventory.transfer"
+	MoveSourceSalesInvoice = "finance.ar_invoice"
+	MoveSourcePurchaseBill = "finance.ap_bill"
+	MoveSourceAdjustment   = "inventory.adjustment"
+	MoveSourceTransfer     = "inventory.transfer"
 )
 
 // Item is a stock-keeping unit. One row per (tenant_id, sku).
@@ -73,6 +73,10 @@ type Move struct {
 	SourceID    *uuid.UUID      `json:"source_id,omitempty"`
 	MovedAt     time.Time       `json:"moved_at"`
 	CreatedBy   uuid.UUID       `json:"created_by,omitempty"`
+	// ReversalOf, when non-nil, points back to the inventory_moves.id
+	// this row was created to cancel. Set by ReverseMove; remains nil
+	// for ordinary receipts / deliveries / transfers.
+	ReversalOf *int64 `json:"reversal_of,omitempty"`
 }
 
 // StockLevel is a single (item, warehouse) quantity read from the
@@ -128,4 +132,7 @@ var (
 	ErrMoveInvalid         = errors.New("inventory: invalid stock move")
 	ErrTransferUnbalanced  = errors.New("inventory: transfer warehouses must differ and qty > 0")
 	ErrDuplicateSourceMove = errors.New("inventory: stock move already recorded for source record")
+	ErrMoveNotFound        = errors.New("inventory: stock move not found")
+	ErrAlreadyReversed     = errors.New("inventory: stock move already reversed")
+	ErrCannotReverseContra = errors.New("inventory: cannot reverse a contra-entry directly; reverse the original instead")
 )
