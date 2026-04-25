@@ -28,6 +28,12 @@ const (
 	// specific constraint translates into ErrDuplicateSourceMove so
 	// retries of the ledger hook are idempotent.
 	inventoryMovesSourceUniqIndex = "inventory_moves_source_uniq"
+
+	// inventoryMovesReversalOfUniqIndex is the partial unique index
+	// installed in migrations/000035_stock_reversal.sql that prevents
+	// the same move from being reversed twice. A 23505 on this
+	// constraint translates into ErrAlreadyReversed.
+	inventoryMovesReversalOfUniqIndex = "inventory_moves_reversal_of_uniq"
 )
 
 // PGStore persists items, warehouses, and stock moves against
@@ -450,14 +456,20 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 			origWh       uuid.UUID
 			origUnitCost decimal.NullDecimal
 			origReversal *int64
-			origSrcKType *string
-			origSrcID    *uuid.UUID
 		)
+		// source_ktype / source_id are intentionally NOT copied to
+		// the contra-entry: the contra row is its own artifact, not
+		// a second move from the same source. Copying them would
+		// collide with inventory_moves_source_uniq (which only
+		// allows one move per tenant+source tuple) for every move
+		// that has a non-NULL source_id — e.g. moves created by the
+		// invoice poster via PosterHook. The contra row leaves both
+		// columns NULL so it sits outside the partial unique index.
 		err := tx.QueryRow(ctx,
-			`SELECT item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, reversal_of
+			`SELECT item_id, warehouse_id, qty, unit_cost, reversal_of
 			   FROM inventory_moves WHERE tenant_id = $1 AND id = $2`,
 			tenantID, moveID,
-		).Scan(&origItem, &origWh, &origQty, &origUnitCost, &origSrcKType, &origSrcID, &origReversal)
+		).Scan(&origItem, &origWh, &origQty, &origUnitCost, &origReversal)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrMoveNotFound
@@ -474,25 +486,25 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 		if origUnitCost.Valid {
 			unitCostArg = origUnitCost.Decimal
 		}
-		var srcKTypeArg any
-		if origSrcKType != nil {
-			srcKTypeArg = *origSrcKType
-		}
-		var srcIDArg any
-		if origSrcID != nil {
-			srcIDArg = *origSrcID
-		}
 		err = tx.QueryRow(ctx,
 			`INSERT INTO inventory_moves
 			     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, moved_at, reversal_of)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			 VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7)
 			 RETURNING id`,
-			tenantID, origItem, origWh, newQty, unitCostArg, srcKTypeArg, srcIDArg, now, moveID,
+			tenantID, origItem, origWh, newQty, unitCostArg, now, moveID,
 		).Scan(&out.ID)
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
-				return ErrAlreadyReversed
+				if pgErr.ConstraintName == inventoryMovesReversalOfUniqIndex {
+					return ErrAlreadyReversed
+				}
+				// Any other unique-violation is a programmer bug
+				// (source_uniq shouldn't fire now that we null out
+				// source_ktype/source_id on the contra row), but
+				// surface it clearly instead of masquerading as
+				// ErrAlreadyReversed.
+				return fmt.Errorf("inventory: insert reversal: unexpected unique violation on %q: %w", pgErr.ConstraintName, err)
 			}
 			return fmt.Errorf("inventory: insert reversal: %w", err)
 		}
@@ -503,10 +515,8 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 		if origUnitCost.Valid {
 			out.UnitCost = origUnitCost.Decimal
 		}
-		if origSrcKType != nil {
-			out.SourceKType = *origSrcKType
-		}
-		out.SourceID = origSrcID
+		// SourceKType / SourceID left zero: contra rows carry no
+		// forward source pointer (reversal_of is the backward one).
 		out.MovedAt = now
 		out.CreatedBy = actor
 		reversedID := moveID
@@ -795,6 +805,7 @@ func (s *PGStore) emitMove(ctx context.Context, tx pgx.Tx, m Move, eventType str
 		"unit_cost":    m.UnitCost.String(),
 		"source_ktype": m.SourceKType,
 		"source_id":    m.SourceID,
+		"reversal_of":  m.ReversalOf,
 		"moved_at":     m.MovedAt,
 	})
 	if s.publisher != nil {
