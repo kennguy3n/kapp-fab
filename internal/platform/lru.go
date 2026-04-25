@@ -94,10 +94,18 @@ func (c *LRUCache) Set(key string, value any) {
 	var evicted *cacheEntry
 	if elem, ok := c.index[key]; ok {
 		entry := elem.Value.(*cacheEntry)
+		// If the value pointer is being replaced (not just refreshed
+		// with the same instance), surface the displaced value through
+		// OnEvict so callers like PerTenantS3Store can close idle
+		// transports rather than leak them under concurrent miss-then-Set.
+		if entry.value != value {
+			evicted = &cacheEntry{key: entry.key, value: entry.value}
+		}
 		entry.value = value
 		entry.expiresAt = c.now().Add(c.ttl)
 		c.order.MoveToFront(elem)
 		c.mu.Unlock()
+		c.fireEvict(evicted)
 		return
 	}
 	entry := &cacheEntry{

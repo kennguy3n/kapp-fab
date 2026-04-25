@@ -291,7 +291,9 @@ func (r *Result) checkSLO(s SLOTargets) error {
 	if s.PostJournalp99 > 0 && r.PostJournal.P99 > s.PostJournalp99 {
 		return fmt.Errorf("loadtest SLO breach: post_je p99=%s > %s", r.PostJournal.P99, s.PostJournalp99)
 	}
-	if s.MaxFailureRate > 0 && r.TotalOperations > 0 {
+	// MaxFailureRate is meaningful at zero (the strictest setting), so
+	// >= 0 is the right guard. A negative target means "don't check".
+	if s.MaxFailureRate >= 0 && r.TotalOperations > 0 {
 		rate := float64(r.Failures) / float64(r.TotalOperations)
 		if rate > s.MaxFailureRate {
 			return fmt.Errorf("loadtest SLO breach: failure_rate=%.4f > %.4f", rate, s.MaxFailureRate)

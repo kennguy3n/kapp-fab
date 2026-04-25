@@ -86,7 +86,7 @@ func NewZKFabricClient(cfg ZKFabricClientConfig) *ZKFabricClient {
 //  2. POST /api/tenants/{id}/keys       — mint access/secret pair
 //  3. POST /api/tenants/{id}/buckets    — bind a per-tenant bucket
 //  4. PUT  /api/tenants/{id}/placement  — set placement policy
-//                                          (when policy non-empty)
+//     (when policy non-empty)
 //
 // All three (now four) calls are idempotent on the fabric side:
 // re-running the wizard after a partial failure converges. The
@@ -155,10 +155,6 @@ func (c *ZKFabricClient) bucketName(tenantID uuid.UUID, slug string) string {
 	out = strings.ReplaceAll(out, "{slug}", slug)
 	out = strings.ReplaceAll(out, "{tenant_id}", tenantID.String())
 	return out
-}
-
-func (c *ZKFabricClient) createTenant(ctx context.Context, tenantID uuid.UUID, slug string) error {
-	return c.createTenantWithContract(ctx, tenantID, slug, "")
 }
 
 // createTenantWithContract maps the Kapp plan tier to the fabric's

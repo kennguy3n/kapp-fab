@@ -135,7 +135,11 @@ func (h *InboundEmailHandler) Process(ctx context.Context, email InboundEmail) (
 	}
 	tenantID, err := h.resolver.ResolveByRecipient(ctx, email.To)
 	if err != nil {
-		return nil, ErrUnknownRecipient
+		// Preserve database / transport errors so the HTTP handler
+		// can surface them as 5xx — relays must keep retrying. Only
+		// the explicit "no tenant for this recipient" sentinel maps
+		// to a 4xx terminal failure.
+		return nil, err
 	}
 
 	// Default priority on email is "medium" — the SLA evaluator

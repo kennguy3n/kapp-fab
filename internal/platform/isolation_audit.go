@@ -159,6 +159,23 @@ func (a *IsolationAuditor) checkCrossTenantProbe(ctx context.Context) IsolationC
 	tenantB := uuid.New()
 	probeID := uuid.New().String()
 
+	// `tenant_features.tenant_id` carries an FK to `tenants(id)`, so
+	// the probe needs real rows on both sides before it can insert.
+	// Seed two synthetic, archived tenants on the admin pool, run the
+	// probe under their GUCs, then drop them on the way out.
+	if err := a.seedProbeTenant(ctx, tenantA, probeID+"-a"); err != nil {
+		check.Detail = fmt.Sprintf("seed tenantA failed: %v", err)
+		check.Elapsed = time.Since(t).String()
+		return check
+	}
+	defer a.dropProbeTenant(ctx, tenantA, probeID)
+	if err := a.seedProbeTenant(ctx, tenantB, probeID+"-b"); err != nil {
+		check.Detail = fmt.Sprintf("seed tenantB failed: %v", err)
+		check.Elapsed = time.Since(t).String()
+		return check
+	}
+	defer a.dropProbeTenant(ctx, tenantB, probeID)
+
 	// Tenant A: insert a synthetic feature flag we own.
 	if err := a.runUnderTenant(ctx, tenantA, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
@@ -223,4 +240,35 @@ func (a *IsolationAuditor) runUnderTenant(ctx context.Context, tenantID uuid.UUI
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// seedProbeTenant inserts a synthetic, archived tenant row under the
+// admin pool so the cross-tenant probe can satisfy FK constraints. The
+// `_isolation_probe_*` slug + `archived` status keep these rows out of
+// every product surface (login, search, billing, scheduler).
+func (a *IsolationAuditor) seedProbeTenant(ctx context.Context, tenantID uuid.UUID, slug string) error {
+	if a.adminPool == nil {
+		return errors.New("platform: admin pool unwired")
+	}
+	_, err := a.adminPool.Exec(ctx,
+		`INSERT INTO tenants (id, slug, name, cell, status, plan)
+		 VALUES ($1, $2, $2, 'isolation-audit', 'archived', 'free')
+		 ON CONFLICT (id) DO NOTHING`,
+		tenantID, "_isolation_probe_"+slug,
+	)
+	return err
+}
+
+// dropProbeTenant removes the rows seedProbeTenant created. We drop
+// dependent feature rows first because tenant_features.tenant_id has
+// no ON DELETE CASCADE.
+func (a *IsolationAuditor) dropProbeTenant(ctx context.Context, tenantID uuid.UUID, probeID string) {
+	if a.adminPool == nil {
+		return
+	}
+	_, _ = a.adminPool.Exec(ctx,
+		`DELETE FROM tenant_features WHERE tenant_id = $1 AND feature_key = $2`,
+		tenantID, "_isolation_probe_"+probeID,
+	)
+	_, _ = a.adminPool.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, tenantID)
 }
