@@ -70,6 +70,7 @@ kapp/
     hr/
     lms/
     reporting/
+    insights/                    # BI query engine, dashboard store, cache
     audit/
     events/
     files/
@@ -104,6 +105,7 @@ kapp/
 9. **Simple inventory** — Items, warehouses, stock moves with typed ledger.
 10. **Data importer** — Pipelines for onboarding data from existing business systems.
 11. **KChat cards and agent tools** — Chat-native surfaces and permissioned AI actions across all MVP KApps.
+12. **Insights** — Visual query builder, composable dashboards, rich chart visualizations, AI-assisted queries, and KChat digest cards over KRecords and typed ledgers.
 
 ---
 
@@ -118,6 +120,8 @@ kapp/
 - Website/CMS
 - Unrestricted low-code scripting
 - Generic marketplace
+- Insights: external data source connections (non-Kapp databases)
+- Insights: notebook/exploratory analysis interface
 
 ---
 
@@ -138,6 +142,7 @@ kapp/
 - **Event bus:** Compact-encoded, batched event streaming
 - **Cache + rate limit:** Redis (sliding-window token bucket via atomic Lua, shared across API replicas)
 - **Deployment:** Docker, Helm, Terraform
+- **Charting:** Apache ECharts (or similar lightweight library) for Insights visualizations
 
 ## ZK Object Fabric Integration
 
