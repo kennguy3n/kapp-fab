@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -97,7 +99,7 @@ func (h *exportHandlers) download(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid job id", http.StatusBadRequest)
 		return
 	}
-	job, err := h.store.Get(r.Context(), t.ID, id)
+	job, err := h.store.GetWithPayload(r.Context(), t.ID, id)
 	if err != nil {
 		writeExportError(w, err)
 		return
@@ -107,7 +109,14 @@ func (h *exportHandlers) download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", job.ContentType)
-	w.Header().Set("Content-Disposition", `attachment; filename="`+job.FileName+`"`)
+	// RFC 6266 quoted-string: escape backslash first, then double
+	// quotes, so a hostile filename can't inject CRLFs / break out
+	// of the header value. sanitizeKType currently produces only
+	// [A-Za-z0-9._-], but defence-in-depth at the point of use is
+	// cheap and keeps the guarantee if a future code path writes
+	// directly to export_jobs.file_name.
+	safeName := strings.ReplaceAll(strings.ReplaceAll(job.FileName, `\`, `\\`), `"`, `\"`)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, safeName))
 	_, _ = w.Write(job.Payload)
 }
 

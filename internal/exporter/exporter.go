@@ -149,16 +149,37 @@ func (s *Store) Enqueue(ctx context.Context, j ExportJob) (*ExportJob, error) {
 	return &out, nil
 }
 
-// Get returns one job by id or ErrJobNotFound.
+// Get returns one job's metadata by id or ErrJobNotFound. The
+// payload BYTEA column is deliberately not loaded — status-poll
+// endpoints would otherwise pull hundreds of MB per request for
+// no client benefit (ExportJob.Payload is json:"-" and never
+// round-trips through the API). Callers that actually need the
+// bytes (the download handler) must use GetWithPayload.
 func (s *Store) Get(ctx context.Context, tenantID, id uuid.UUID) (*ExportJob, error) {
+	return s.getBy(ctx, tenantID, id, false)
+}
+
+// GetWithPayload returns the full job row including the payload
+// BYTEA. Only the download handler should call this.
+func (s *Store) GetWithPayload(ctx context.Context, tenantID, id uuid.UUID) (*ExportJob, error) {
+	return s.getBy(ctx, tenantID, id, true)
+}
+
+func (s *Store) getBy(ctx context.Context, tenantID, id uuid.UUID, withPayload bool) (*ExportJob, error) {
 	if tenantID == uuid.Nil || id == uuid.Nil {
 		return nil, fmt.Errorf("%w: tenant id and job id required", ErrInvalidInput)
+	}
+	// payload expression flips between the BYTEA column and a NULL
+	// cast so the rest of scanJob's layout stays identical.
+	payloadExpr := "NULL::bytea AS payload"
+	if withPayload {
+		payloadExpr = "payload"
 	}
 	var out ExportJob
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return scanJob(tx.QueryRow(ctx,
 			`SELECT tenant_id, id, ktype, format, status, progress_pct, row_count,
-			        payload, error, file_name, content_type, created_by,
+			        `+payloadExpr+`, error, file_name, content_type, created_by,
 			        created_at, started_at, completed_at
 			   FROM export_jobs WHERE tenant_id = $1 AND id = $2`,
 			tenantID, id,
