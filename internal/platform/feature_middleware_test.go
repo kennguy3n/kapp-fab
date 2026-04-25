@@ -23,6 +23,7 @@ func TestFeatureFromPathRecordsKType(t *testing.T) {
 		{"/api/v1/records/ledger.journal", tenant.FeatureFinance},
 		{"/api/v1/records/inventory.item", tenant.FeatureInventory},
 		{"/api/v1/records/procurement.purchase_order", tenant.FeatureInventory},
+		{"/api/v1/records/sales.order", tenant.FeatureInventory},
 		{"/api/v1/records/hr.employee", tenant.FeatureHR},
 		{"/api/v1/records/payroll.run", tenant.FeatureHR},
 		{"/api/v1/records/lms.course", tenant.FeatureLMS},

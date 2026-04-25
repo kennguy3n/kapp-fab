@@ -116,7 +116,7 @@ func featureFromKType(ktype string) string {
 		return tenant.FeatureCRM
 	case "finance", "ar", "ap", "ledger":
 		return tenant.FeatureFinance
-	case "inventory", "procurement", "warehouse":
+	case "inventory", "procurement", "warehouse", "sales":
 		return tenant.FeatureInventory
 	case "hr", "payroll":
 		return tenant.FeatureHR

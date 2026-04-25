@@ -16,6 +16,13 @@ import (
 	"github.com/google/uuid"
 )
 
+// errAlreadyExists is returned by do() when the console replies
+// 409 Conflict. Callers decide whether that is a tolerable
+// idempotent re-run (createTenant, createBucket) or a hard error
+// (createKey, where the platform must rotate or recover the
+// existing secret out-of-band).
+var errAlreadyExists = errors.New("zk fabric: already exists")
+
 // ZKFabricClient is a thin HTTP client for the ZK Object Fabric
 // console at :8081. It implements ZKFabricProvisioner so the setup
 // wizard can call it during tenant onboarding to mint per-tenant
@@ -87,7 +94,7 @@ func (c *ZKFabricClient) ProvisionTenant(ctx context.Context, tenantID uuid.UUID
 	if c == nil {
 		return ZKCredentials{}, errors.New("zk fabric: client not configured")
 	}
-	if err := c.createTenant(ctx, tenantID, slug); err != nil {
+	if err := c.createTenant(ctx, tenantID, slug); err != nil && !errors.Is(err, errAlreadyExists) {
 		return ZKCredentials{}, fmt.Errorf("zk fabric: create tenant: %w", err)
 	}
 	access, secret, err := c.createKey(ctx, tenantID)
@@ -95,7 +102,7 @@ func (c *ZKFabricClient) ProvisionTenant(ctx context.Context, tenantID uuid.UUID
 		return ZKCredentials{}, fmt.Errorf("zk fabric: create key: %w", err)
 	}
 	bucket := c.bucketName(tenantID, slug)
-	if err := c.createBucket(ctx, tenantID, bucket); err != nil {
+	if err := c.createBucket(ctx, tenantID, bucket); err != nil && !errors.Is(err, errAlreadyExists) {
 		return ZKCredentials{}, fmt.Errorf("zk fabric: create bucket: %w", err)
 	}
 	return ZKCredentials{AccessKey: access, SecretKey: secret, Bucket: bucket}, nil
@@ -171,9 +178,9 @@ func (c *ZKFabricClient) do(ctx context.Context, method, path string, in any, ou
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusConflict {
-		return nil
+		return errAlreadyExists
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))

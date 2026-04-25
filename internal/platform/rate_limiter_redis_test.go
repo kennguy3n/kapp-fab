@@ -25,7 +25,7 @@ func TestRedisRateLimiter_BurstThenDeny(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new redis rate limiter: %v", err)
 	}
-	defer lim.Close()
+	t.Cleanup(func() { _ = lim.Close() })
 
 	tenant := uuid.New()
 	for i := 0; i < 3; i++ {
@@ -66,7 +66,7 @@ func TestRedisRateLimiter_PerTenantIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new redis rate limiter: %v", err)
 	}
-	defer lim.Close()
+	t.Cleanup(func() { _ = lim.Close() })
 
 	a, b := uuid.New(), uuid.New()
 	for i := 0; i < 2; i++ {

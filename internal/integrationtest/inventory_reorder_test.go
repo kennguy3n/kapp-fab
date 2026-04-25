@@ -6,7 +6,6 @@ package integrationtest
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
@@ -39,8 +38,8 @@ func TestReorderAutomation(t *testing.T) {
 		"sku":                   "WIDGET-1",
 		"name":                  "Widget",
 		"uom":                   "ea",
-		"reorder_level":         "10",
-		"reorder_qty":           "20",
+		"reorder_level":         10,
+		"reorder_qty":           20,
 		"preferred_supplier_id": supplierID.String(),
 		"active":                true,
 	}
@@ -125,8 +124,8 @@ func TestReorderAutomation(t *testing.T) {
 	if got, _ := line["item_id"].(string); got != item.ID.String() {
 		t.Fatalf("line item_id mismatch: got %q want %q", got, item.ID)
 	}
-	if got, _ := line["qty"].(string); !strings.HasPrefix(got, "20") {
-		t.Fatalf("line qty mismatch: got %q want 20", got)
+	if got, _ := line["qty"].(float64); got != 20 {
+		t.Fatalf("line qty mismatch: got %v want 20", line["qty"])
 	}
 
 	// Second sweep within the idempotency window must be a
@@ -192,16 +191,17 @@ type tenantRow struct {
 }
 
 // listDraftPOs returns every procurement.purchase_order KRecord on
-// the tenant in draft status, newest first. Used by the assertions
-// to count drafts produced by the reorder sweep.
+// the tenant whose `data.status` is "draft" (matching the shape the
+// reorder handler writes), newest first. Used by the assertions to
+// count drafts produced by the reorder sweep. We filter on the
+// JSON status because the reorder handler stamps the workflow
+// state on the data payload, not the krecord status column.
 func listDraftPOs(t *testing.T, h *harness, tenantID uuid.UUID) []record.KRecord {
 	t.Helper()
 	ctx := context.Background()
-	out, err := h.records.List(ctx, tenantID, record.ListFilter{
-		KType:  sales.KTypePurchaseOrder,
-		Status: "draft",
-		Limit:  50,
-	})
+	out, err := h.records.ListByField(ctx, tenantID, record.ListFilter{
+		KType: sales.KTypePurchaseOrder,
+	}, "status", "draft")
 	if err != nil {
 		t.Fatalf("list draft POs: %v", err)
 	}

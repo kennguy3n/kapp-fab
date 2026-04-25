@@ -216,7 +216,7 @@ func run() error {
 	if zkRegion == "" {
 		zkRegion = "us-east-1"
 	}
-	var objectStore files.ObjectStore = fallbackStore
+	objectStore := files.ObjectStore(fallbackStore)
 	if zkEndpoint != "" {
 		resolver := newZKTenantResolver(tenantSvc, zkEndpoint, zkRegion)
 		perTenant, err := files.NewPerTenantS3Store(files.PerTenantConfig{
