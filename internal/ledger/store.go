@@ -684,7 +684,7 @@ func distinctCodes(lines []JournalLine) []string {
 
 func loadLinesTx(ctx context.Context, tx pgx.Tx, tenantID, entryID uuid.UUID) ([]JournalLine, error) {
 	rows, err := tx.Query(ctx,
-		`SELECT id, tenant_id, entry_id, account_code, debit, credit, currency, memo
+		`SELECT id, tenant_id, entry_id, account_code, debit, credit, currency, memo, base_amount
 		 FROM journal_lines
 		 WHERE tenant_id = $1 AND entry_id = $2
 		 ORDER BY id`,
@@ -697,18 +697,23 @@ func loadLinesTx(ctx context.Context, tx pgx.Tx, tenantID, entryID uuid.UUID) ([
 	out := make([]JournalLine, 0)
 	for rows.Next() {
 		var (
-			line JournalLine
-			memo *string
+			line       JournalLine
+			memo       *string
+			baseAmount *decimal.Decimal
 		)
 		if err := rows.Scan(
 			&line.ID, &line.TenantID, &line.EntryID, &line.AccountCode,
-			&line.Debit, &line.Credit, &line.Currency, &memo,
+			&line.Debit, &line.Credit, &line.Currency, &memo, &baseAmount,
 		); err != nil {
 			return nil, fmt.Errorf("ledger: scan line: %w", err)
 		}
 		if memo != nil {
 			line.Memo = *memo
 		}
+		// base_amount is nullable for legacy rows posted before
+		// migration 000029. Non-nil rows surface through the API
+		// unchanged so dashboards can display dual-currency totals.
+		line.BaseAmount = baseAmount
 		out = append(out, line)
 	}
 	if err := rows.Err(); err != nil {

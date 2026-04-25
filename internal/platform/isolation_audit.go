@@ -117,27 +117,26 @@ func (a *IsolationAuditor) checkRLSCoverage(ctx context.Context) IsolationCheck 
 func (a *IsolationAuditor) checkDefaultDeny(ctx context.Context) IsolationCheck {
 	t := time.Now()
 	check := IsolationCheck{Name: "default_deny_without_guc"}
-	// Acquire a connection on the regular pool, do NOT set
-	// app.tenant_id, and confirm a tenant-scoped table is empty.
-	// We pick `audit_log` because it always exists in production.
-	conn, err := a.pool.Acquire(ctx)
+	// `SET LOCAL` is transaction-scoped, so the empty-GUC scenario
+	// must be staged inside an explicit transaction; on a bare
+	// pooled connection it would revert before the SELECT and the
+	// count would silently run against whatever residual session
+	// state the connection inherited. We rollback at the end so no
+	// session state leaks back into the pool.
+	tx, err := a.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		check.Detail = fmt.Sprintf("acquire failed: %v", err)
+		check.Detail = fmt.Sprintf("begin failed: %v", err)
 		check.Elapsed = time.Since(t).String()
 		return check
 	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, "SET LOCAL app.tenant_id TO ''"); err != nil {
-		// Some test pools forbid SET LOCAL outside a tx — fall
-		// through with a benign Detail rather than failing the
-		// whole report.
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, "SET LOCAL app.tenant_id TO ''"); err != nil {
 		check.Detail = fmt.Sprintf("could not unset app.tenant_id: %v", err)
 		check.Elapsed = time.Since(t).String()
 		return check
 	}
 	var count int64
-	row := conn.QueryRow(ctx, `SELECT count(*) FROM audit_log`)
-	if err := row.Scan(&count); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM audit_log`).Scan(&count); err != nil {
 		check.Detail = fmt.Sprintf("count failed: %v", err)
 		check.Elapsed = time.Since(t).String()
 		return check
