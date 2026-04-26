@@ -370,7 +370,7 @@ export function InsightsQueryBuilderPage() {
             />
             {preview && (
               <div style={{ fontSize: 11, color: "#6b7280", marginTop: 6 }}>
-                {preview.cache_hit ? "cache hit" : "fresh"} · {preview.result.rows.length} rows
+                {preview.cache_hit ? "cache hit" : "fresh"} · {preview.result?.rows?.length ?? 0} rows
               </div>
             )}
           </section>
