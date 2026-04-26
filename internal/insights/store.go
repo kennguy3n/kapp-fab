@@ -1,0 +1,637 @@
+package insights
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
+)
+
+// Sentinel errors surfaced to API callers.
+var (
+	ErrQueryNotFound     = errors.New("insights: query not found")
+	ErrDashboardNotFound = errors.New("insights: dashboard not found")
+	ErrWidgetNotFound    = errors.New("insights: dashboard widget not found")
+	ErrShareNotFound     = errors.New("insights: share not found")
+)
+
+// Default cache TTL applied when callers omit the field on Create.
+// 5 minutes mirrors a sensible BI default that keeps cache hit rate
+// high without serving truly stale data on hourly-changing sources.
+const DefaultCacheTTLSeconds = 300
+
+// QueryStore persists insights_queries rows.
+type QueryStore struct {
+	pool *pgxpool.Pool
+}
+
+// NewQueryStore wires the store from the shared pool.
+func NewQueryStore(pool *pgxpool.Pool) *QueryStore {
+	return &QueryStore{pool: pool}
+}
+
+// Create inserts a new saved query. Name uniqueness per tenant is
+// enforced by the insights_queries UNIQUE index.
+func (s *QueryStore) Create(ctx context.Context, q Query) (*Query, error) {
+	if q.TenantID == uuid.Nil {
+		return nil, errors.New("insights: tenant id required")
+	}
+	if q.Name == "" {
+		return nil, errors.New("insights: query name required")
+	}
+	if err := q.Definition.Validate(); err != nil {
+		return nil, err
+	}
+	if q.ID == uuid.Nil {
+		q.ID = uuid.New()
+	}
+	if q.CacheTTLSeconds < 0 {
+		return nil, errors.New("insights: cache_ttl_seconds must be >= 0")
+	}
+	if q.CacheTTLSeconds == 0 {
+		q.CacheTTLSeconds = DefaultCacheTTLSeconds
+	}
+	def, err := json.Marshal(q.Definition)
+	if err != nil {
+		return nil, fmt.Errorf("insights: marshal definition: %w", err)
+	}
+	out := q
+	err = dbutil.WithTenantTx(ctx, s.pool, q.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var createdBy any
+		if q.CreatedBy != nil {
+			createdBy = *q.CreatedBy
+		}
+		return tx.QueryRow(ctx,
+			`INSERT INTO insights_queries
+			   (tenant_id, id, name, description, definition, cache_ttl_seconds, created_by)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			 RETURNING created_at, updated_at`,
+			q.TenantID, q.ID, q.Name, q.Description, def, q.CacheTTLSeconds, createdBy,
+		).Scan(&out.CreatedAt, &out.UpdatedAt)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("insights: create query: %w", err)
+	}
+	return &out, nil
+}
+
+// Update replaces a query's name, description, definition, and TTL.
+// CreatedBy / CreatedAt are owned by Create; this handler never
+// rewrites them.
+func (s *QueryStore) Update(ctx context.Context, q Query) (*Query, error) {
+	if q.TenantID == uuid.Nil || q.ID == uuid.Nil {
+		return nil, errors.New("insights: tenant id and query id required")
+	}
+	if err := q.Definition.Validate(); err != nil {
+		return nil, err
+	}
+	def, err := json.Marshal(q.Definition)
+	if err != nil {
+		return nil, err
+	}
+	if q.CacheTTLSeconds < 0 {
+		return nil, errors.New("insights: cache_ttl_seconds must be >= 0")
+	}
+	if q.CacheTTLSeconds == 0 {
+		q.CacheTTLSeconds = DefaultCacheTTLSeconds
+	}
+	err = dbutil.WithTenantTx(ctx, s.pool, q.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`UPDATE insights_queries
+			    SET name = $3, description = $4, definition = $5,
+			        cache_ttl_seconds = $6, updated_at = now()
+			  WHERE tenant_id = $1 AND id = $2`,
+			q.TenantID, q.ID, q.Name, q.Description, def, q.CacheTTLSeconds,
+		)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrQueryNotFound
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.Get(ctx, q.TenantID, q.ID)
+}
+
+// Get loads a single query or returns ErrQueryNotFound.
+func (s *QueryStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*Query, error) {
+	if tenantID == uuid.Nil || id == uuid.Nil {
+		return nil, errors.New("insights: tenant id and query id required")
+	}
+	var (
+		out Query
+		def []byte
+	)
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var createdBy *uuid.UUID
+		row := tx.QueryRow(ctx,
+			`SELECT tenant_id, id, name, description, definition, cache_ttl_seconds,
+			        created_by, created_at, updated_at
+			   FROM insights_queries WHERE tenant_id = $1 AND id = $2`,
+			tenantID, id,
+		)
+		if err := row.Scan(
+			&out.TenantID, &out.ID, &out.Name, &out.Description, &def, &out.CacheTTLSeconds,
+			&createdBy, &out.CreatedAt, &out.UpdatedAt,
+		); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrQueryNotFound
+			}
+			return err
+		}
+		out.CreatedBy = createdBy
+		return json.Unmarshal(def, &out.Definition)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// List returns every saved query for the tenant, ordered by name.
+func (s *QueryStore) List(ctx context.Context, tenantID uuid.UUID) ([]Query, error) {
+	if tenantID == uuid.Nil {
+		return nil, errors.New("insights: tenant id required")
+	}
+	out := make([]Query, 0)
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT tenant_id, id, name, description, definition, cache_ttl_seconds,
+			        created_by, created_at, updated_at
+			   FROM insights_queries WHERE tenant_id = $1 ORDER BY name`,
+			tenantID,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				q         Query
+				def       []byte
+				createdBy *uuid.UUID
+			)
+			if err := rows.Scan(
+				&q.TenantID, &q.ID, &q.Name, &q.Description, &def, &q.CacheTTLSeconds,
+				&createdBy, &q.CreatedAt, &q.UpdatedAt,
+			); err != nil {
+				return err
+			}
+			q.CreatedBy = createdBy
+			if err := json.Unmarshal(def, &q.Definition); err != nil {
+				return err
+			}
+			out = append(out, q)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Delete removes a query. Returns ErrQueryNotFound if the id is
+// unknown. Cache rows referencing the query are NOT cascaded — they
+// expire naturally; the explicit cache invalidate path lives on
+// CacheStore.InvalidateQuery for callers that need an immediate
+// purge.
+func (s *QueryStore) Delete(ctx context.Context, tenantID, id uuid.UUID) error {
+	if tenantID == uuid.Nil || id == uuid.Nil {
+		return errors.New("insights: tenant id and query id required")
+	}
+	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM insights_queries WHERE tenant_id = $1 AND id = $2`,
+			tenantID, id,
+		)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrQueryNotFound
+		}
+		return nil
+	})
+}
+
+// DashboardStore persists insights_dashboards + insights_dashboard_widgets.
+type DashboardStore struct {
+	pool *pgxpool.Pool
+}
+
+// NewDashboardStore wires the store from the shared pool.
+func NewDashboardStore(pool *pgxpool.Pool) *DashboardStore {
+	return &DashboardStore{pool: pool}
+}
+
+// Create inserts a new dashboard. Widget rows are written by separate
+// upsert calls so the caller can mutate widgets independently of the
+// outer dashboard layout.
+func (s *DashboardStore) Create(ctx context.Context, d Dashboard) (*Dashboard, error) {
+	if d.TenantID == uuid.Nil {
+		return nil, errors.New("insights: tenant id required")
+	}
+	if d.Name == "" {
+		return nil, errors.New("insights: dashboard name required")
+	}
+	if d.ID == uuid.Nil {
+		d.ID = uuid.New()
+	}
+	if len(d.Layout) == 0 {
+		d.Layout = json.RawMessage(`{}`)
+	}
+	if d.AutoRefreshSeconds < 0 {
+		return nil, errors.New("insights: auto_refresh_seconds must be >= 0")
+	}
+	out := d
+	err := dbutil.WithTenantTx(ctx, s.pool, d.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var createdBy any
+		if d.CreatedBy != nil {
+			createdBy = *d.CreatedBy
+		}
+		return tx.QueryRow(ctx,
+			`INSERT INTO insights_dashboards
+			   (tenant_id, id, name, description, layout, auto_refresh_seconds, created_by)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			 RETURNING created_at, updated_at`,
+			d.TenantID, d.ID, d.Name, d.Description, []byte(d.Layout),
+			d.AutoRefreshSeconds, createdBy,
+		).Scan(&out.CreatedAt, &out.UpdatedAt)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("insights: create dashboard: %w", err)
+	}
+	return &out, nil
+}
+
+// Update replaces the dashboard's name, description, layout, and
+// auto-refresh interval.
+func (s *DashboardStore) Update(ctx context.Context, d Dashboard) (*Dashboard, error) {
+	if d.TenantID == uuid.Nil || d.ID == uuid.Nil {
+		return nil, errors.New("insights: tenant id and dashboard id required")
+	}
+	if d.AutoRefreshSeconds < 0 {
+		return nil, errors.New("insights: auto_refresh_seconds must be >= 0")
+	}
+	if len(d.Layout) == 0 {
+		d.Layout = json.RawMessage(`{}`)
+	}
+	err := dbutil.WithTenantTx(ctx, s.pool, d.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`UPDATE insights_dashboards
+			    SET name = $3, description = $4, layout = $5,
+			        auto_refresh_seconds = $6, updated_at = now()
+			  WHERE tenant_id = $1 AND id = $2`,
+			d.TenantID, d.ID, d.Name, d.Description, []byte(d.Layout), d.AutoRefreshSeconds,
+		)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrDashboardNotFound
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.Get(ctx, d.TenantID, d.ID)
+}
+
+// Get loads the dashboard by id. The widgets slice is populated by a
+// follow-up call to ListWidgets so callers that just need the layout
+// avoid the extra round-trip.
+func (s *DashboardStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*Dashboard, error) {
+	if tenantID == uuid.Nil || id == uuid.Nil {
+		return nil, errors.New("insights: tenant id and dashboard id required")
+	}
+	var (
+		out    Dashboard
+		layout []byte
+	)
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var createdBy *uuid.UUID
+		row := tx.QueryRow(ctx,
+			`SELECT tenant_id, id, name, description, layout, auto_refresh_seconds,
+			        created_by, created_at, updated_at
+			   FROM insights_dashboards WHERE tenant_id = $1 AND id = $2`,
+			tenantID, id,
+		)
+		if err := row.Scan(
+			&out.TenantID, &out.ID, &out.Name, &out.Description, &layout, &out.AutoRefreshSeconds,
+			&createdBy, &out.CreatedAt, &out.UpdatedAt,
+		); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrDashboardNotFound
+			}
+			return err
+		}
+		out.CreatedBy = createdBy
+		out.Layout = json.RawMessage(layout)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// List returns every dashboard for the tenant.
+func (s *DashboardStore) List(ctx context.Context, tenantID uuid.UUID) ([]Dashboard, error) {
+	if tenantID == uuid.Nil {
+		return nil, errors.New("insights: tenant id required")
+	}
+	out := make([]Dashboard, 0)
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT tenant_id, id, name, description, layout, auto_refresh_seconds,
+			        created_by, created_at, updated_at
+			   FROM insights_dashboards WHERE tenant_id = $1 ORDER BY name`,
+			tenantID,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				d         Dashboard
+				layout    []byte
+				createdBy *uuid.UUID
+			)
+			if err := rows.Scan(
+				&d.TenantID, &d.ID, &d.Name, &d.Description, &layout, &d.AutoRefreshSeconds,
+				&createdBy, &d.CreatedAt, &d.UpdatedAt,
+			); err != nil {
+				return err
+			}
+			d.CreatedBy = createdBy
+			d.Layout = json.RawMessage(layout)
+			out = append(out, d)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Delete removes the dashboard and cascades into its widgets.
+func (s *DashboardStore) Delete(ctx context.Context, tenantID, id uuid.UUID) error {
+	if tenantID == uuid.Nil || id == uuid.Nil {
+		return errors.New("insights: tenant id and dashboard id required")
+	}
+	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM insights_dashboard_widgets
+			  WHERE tenant_id = $1 AND dashboard_id = $2`,
+			tenantID, id,
+		); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM insights_dashboards WHERE tenant_id = $1 AND id = $2`,
+			tenantID, id,
+		)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrDashboardNotFound
+		}
+		return nil
+	})
+}
+
+// UpsertWidget inserts or replaces one widget. Position + Config are
+// JSONB and round-trip as raw bytes so the caller controls the shape.
+func (s *DashboardStore) UpsertWidget(ctx context.Context, w DashboardWidget) (*DashboardWidget, error) {
+	if w.TenantID == uuid.Nil || w.DashboardID == uuid.Nil {
+		return nil, errors.New("insights: tenant id and dashboard id required")
+	}
+	if err := ValidateVizType(w.VizType); err != nil {
+		return nil, err
+	}
+	if w.ID == uuid.Nil {
+		w.ID = uuid.New()
+	}
+	if len(w.Position) == 0 {
+		w.Position = json.RawMessage(`{}`)
+	}
+	if len(w.Config) == 0 {
+		w.Config = json.RawMessage(`{}`)
+	}
+	out := w
+	err := dbutil.WithTenantTx(ctx, s.pool, w.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var queryID any
+		if w.QueryID != nil {
+			queryID = *w.QueryID
+		}
+		return tx.QueryRow(ctx,
+			`INSERT INTO insights_dashboard_widgets
+			   (tenant_id, id, dashboard_id, query_id, viz_type, position, config)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			 ON CONFLICT (tenant_id, id) DO UPDATE
+			   SET dashboard_id = EXCLUDED.dashboard_id,
+			       query_id     = EXCLUDED.query_id,
+			       viz_type     = EXCLUDED.viz_type,
+			       position     = EXCLUDED.position,
+			       config       = EXCLUDED.config,
+			       updated_at   = now()
+			 RETURNING created_at, updated_at`,
+			w.TenantID, w.ID, w.DashboardID, queryID, w.VizType,
+			[]byte(w.Position), []byte(w.Config),
+		).Scan(&out.CreatedAt, &out.UpdatedAt)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("insights: upsert widget: %w", err)
+	}
+	return &out, nil
+}
+
+// ListWidgets returns every widget for one dashboard.
+func (s *DashboardStore) ListWidgets(ctx context.Context, tenantID, dashboardID uuid.UUID) ([]DashboardWidget, error) {
+	if tenantID == uuid.Nil || dashboardID == uuid.Nil {
+		return nil, errors.New("insights: tenant id and dashboard id required")
+	}
+	out := make([]DashboardWidget, 0)
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT tenant_id, id, dashboard_id, query_id, viz_type, position, config,
+			        created_at, updated_at
+			   FROM insights_dashboard_widgets
+			  WHERE tenant_id = $1 AND dashboard_id = $2
+			  ORDER BY created_at`,
+			tenantID, dashboardID,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				w        DashboardWidget
+				queryID  *uuid.UUID
+				position []byte
+				config   []byte
+			)
+			if err := rows.Scan(
+				&w.TenantID, &w.ID, &w.DashboardID, &queryID, &w.VizType,
+				&position, &config, &w.CreatedAt, &w.UpdatedAt,
+			); err != nil {
+				return err
+			}
+			w.QueryID = queryID
+			w.Position = json.RawMessage(position)
+			w.Config = json.RawMessage(config)
+			out = append(out, w)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// DeleteWidget removes a single widget from a dashboard.
+func (s *DashboardStore) DeleteWidget(ctx context.Context, tenantID, dashboardID, id uuid.UUID) error {
+	if tenantID == uuid.Nil || id == uuid.Nil {
+		return errors.New("insights: tenant id and widget id required")
+	}
+	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM insights_dashboard_widgets
+			  WHERE tenant_id = $1 AND dashboard_id = $2 AND id = $3`,
+			tenantID, dashboardID, id,
+		)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrWidgetNotFound
+		}
+		return nil
+	})
+}
+
+// CreateShare inserts a sharing grant on a query or dashboard.
+func (s *DashboardStore) CreateShare(ctx context.Context, share Share) (*Share, error) {
+	if share.TenantID == uuid.Nil || share.ResourceID == uuid.Nil {
+		return nil, errors.New("insights: tenant id and resource id required")
+	}
+	if err := ValidateResourceType(share.ResourceType); err != nil {
+		return nil, err
+	}
+	if err := ValidateGranteeType(share.GranteeType); err != nil {
+		return nil, err
+	}
+	if share.Permission == "" {
+		share.Permission = PermissionView
+	}
+	if err := ValidatePermission(share.Permission); err != nil {
+		return nil, err
+	}
+	if share.Grantee == "" {
+		return nil, errors.New("insights: grantee required")
+	}
+	if share.ID == uuid.Nil {
+		share.ID = uuid.New()
+	}
+	out := share
+	err := dbutil.WithTenantTx(ctx, s.pool, share.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`INSERT INTO insights_shares
+			   (tenant_id, id, resource_type, resource_id, grantee_type, grantee, permission)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			 ON CONFLICT (tenant_id, resource_type, resource_id, grantee_type, grantee)
+			 DO UPDATE SET permission = EXCLUDED.permission
+			 RETURNING id, created_at`,
+			share.TenantID, share.ID, share.ResourceType, share.ResourceID,
+			share.GranteeType, share.Grantee, share.Permission,
+		).Scan(&out.ID, &out.CreatedAt)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("insights: create share: %w", err)
+	}
+	return &out, nil
+}
+
+// ListShares returns every share for one resource.
+func (s *DashboardStore) ListShares(ctx context.Context, tenantID uuid.UUID, resourceType string, resourceID uuid.UUID) ([]Share, error) {
+	if err := ValidateResourceType(resourceType); err != nil {
+		return nil, err
+	}
+	if tenantID == uuid.Nil || resourceID == uuid.Nil {
+		return nil, errors.New("insights: tenant id and resource id required")
+	}
+	out := make([]Share, 0)
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT tenant_id, id, resource_type, resource_id, grantee_type, grantee,
+			        permission, created_at
+			   FROM insights_shares
+			  WHERE tenant_id = $1 AND resource_type = $2 AND resource_id = $3
+			  ORDER BY created_at`,
+			tenantID, resourceType, resourceID,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var sh Share
+			if err := rows.Scan(
+				&sh.TenantID, &sh.ID, &sh.ResourceType, &sh.ResourceID,
+				&sh.GranteeType, &sh.Grantee, &sh.Permission, &sh.CreatedAt,
+			); err != nil {
+				return err
+			}
+			out = append(out, sh)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// DeleteShare removes a share row by id.
+func (s *DashboardStore) DeleteShare(ctx context.Context, tenantID, id uuid.UUID) error {
+	if tenantID == uuid.Nil || id == uuid.Nil {
+		return errors.New("insights: tenant id and share id required")
+	}
+	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM insights_shares WHERE tenant_id = $1 AND id = $2`,
+			tenantID, id,
+		)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrShareNotFound
+		}
+		return nil
+	})
+}
+
+// timeNow is captured here so tests can inject a clock in the future
+// without rewriting the store. Today it just delegates to time.Now.
+//
+//nolint:unused // retained for future test injection
+var timeNow = func() time.Time { return time.Now().UTC() }

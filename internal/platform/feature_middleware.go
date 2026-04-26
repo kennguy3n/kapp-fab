@@ -96,6 +96,8 @@ func FeatureFromPath(p string) string {
 		return tenant.FeatureImporter
 	case "report-builder":
 		return tenant.FeatureReportBuilder
+	case "insights":
+		return tenant.FeatureInsights
 	default:
 		return ""
 	}
