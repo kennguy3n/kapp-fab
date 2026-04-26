@@ -26,7 +26,7 @@ const MaxResultRows = 10000
 // to every insights query. Ten seconds short of the 30s HTTP
 // deadline so the DB rolls back before the request times out and
 // kills the connection.
-const DefaultStatementTimeout = 30 * time.Second
+const DefaultStatementTimeout = 20 * time.Second
 
 // Runner executes insights queries with cache-awareness and per-tenant
 // statement timeouts. It wraps reporting.Runner so the underlying

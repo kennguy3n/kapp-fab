@@ -883,6 +883,7 @@ func run() error {
 				r.Delete("/{id}", insh.deleteQuery)
 				r.Post("/{id}/run", insh.runQuery)
 				r.Post("/{id}/share", insh.shareQuery)
+				r.Get("/{id}/shares", insh.listQueryShares)
 			})
 			r.Route("/dashboards", func(r chi.Router) {
 				r.Get("/", insh.listDashboards)
@@ -891,13 +892,10 @@ func run() error {
 				r.Put("/{id}", insh.updateDashboard)
 				r.Delete("/{id}", insh.deleteDashboard)
 				r.Post("/{id}/share", insh.shareDashboard)
+				r.Get("/{id}/shares", insh.listDashboardShares)
 				r.Post("/{id}/widgets", insh.upsertWidget)
 				r.Delete("/{id}/widgets/{widgetID}", insh.deleteWidget)
 			})
-			// Sharing read surface: GET /insights/{queries|dashboards}/{id}/shares.
-			// Reuses the share path namespace so the UI can list grants without
-			// a separate top-level route group.
-			r.Get("/{resource}/{id}/shares", insh.listShares)
 		})
 
 		// Phase I KPI dashboard aggregation. Reads only, so no idempotency

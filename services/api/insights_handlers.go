@@ -432,20 +432,22 @@ func (h *insightsHandlers) shareResource(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusCreated, saved)
 }
 
-func (h *insightsHandlers) listShares(w http.ResponseWriter, r *http.Request) {
+// listQueryShares + listDashboardShares are bound directly inside the
+// respective sub-routers because chi's Route() consumes the path
+// prefix — a parent-level /{resource}/{id}/shares route never sees
+// requests under /queries or /dashboards.
+func (h *insightsHandlers) listQueryShares(w http.ResponseWriter, r *http.Request) {
+	h.listSharesFor(w, r, insights.ResourceQuery)
+}
+
+func (h *insightsHandlers) listDashboardShares(w http.ResponseWriter, r *http.Request) {
+	h.listSharesFor(w, r, insights.ResourceDashboard)
+}
+
+func (h *insightsHandlers) listSharesFor(w http.ResponseWriter, r *http.Request, resourceType string) {
 	t := platform.TenantFromContext(r.Context())
 	if t == nil {
 		http.Error(w, "tenant context missing", http.StatusInternalServerError)
-		return
-	}
-	resource := chi.URLParam(r, "resource")
-	switch resource {
-	case "queries":
-		resource = insights.ResourceQuery
-	case "dashboards":
-		resource = insights.ResourceDashboard
-	default:
-		http.Error(w, "invalid resource type", http.StatusBadRequest)
 		return
 	}
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -453,7 +455,7 @@ func (h *insightsHandlers) listShares(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid resource id", http.StatusBadRequest)
 		return
 	}
-	shares, err := h.dashboards.ListShares(r.Context(), t.ID, resource, id)
+	shares, err := h.dashboards.ListShares(r.Context(), t.ID, resourceType, id)
 	if err != nil {
 		writeInsightsError(w, err)
 		return

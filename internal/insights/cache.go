@@ -45,6 +45,15 @@ func (s *CacheStore) Get(ctx context.Context, tenantID uuid.UUID, queryHash, fil
 		QueryHash:  queryHash,
 		FilterHash: filterHash,
 	}
+	// expired captures whether the row was found-but-stale so the
+	// in-line DELETE can commit alongside the read; returning
+	// ErrCacheMiss from inside the transaction would roll the DELETE
+	// back (dbutil.WithTenantTx rolls back on any non-nil error) and
+	// the stale row would persist until SweepExpired runs.
+	var (
+		miss    bool
+		expired bool
+	)
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var (
 			result    []byte
@@ -59,13 +68,14 @@ func (s *CacheStore) Get(ctx context.Context, tenantID uuid.UUID, queryHash, fil
 		)
 		if err := row.Scan(&queryID, &result, &out.RowCount, &out.CreatedAt, &expiresAt); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrCacheMiss
+				miss = true
+				return nil
 			}
 			return err
 		}
 		if !expiresAt.After(timeNow()) {
-			// Stale row — purge in-line so the caller's next
-			// Set has a clean slot to insert into.
+			// Stale row — purge in-line and let the transaction
+			// commit so the caller's next Set has a clean slot.
 			if _, err := tx.Exec(ctx,
 				`DELETE FROM insights_query_cache
 				  WHERE tenant_id = $1 AND query_hash = $2 AND filter_hash = $3`,
@@ -73,7 +83,8 @@ func (s *CacheStore) Get(ctx context.Context, tenantID uuid.UUID, queryHash, fil
 			); err != nil {
 				return err
 			}
-			return ErrCacheMiss
+			expired = true
+			return nil
 		}
 		out.QueryID = queryID
 		out.ExpiresAt = expiresAt
@@ -82,6 +93,9 @@ func (s *CacheStore) Get(ctx context.Context, tenantID uuid.UUID, queryHash, fil
 	})
 	if err != nil {
 		return nil, err
+	}
+	if miss || expired {
+		return nil, ErrCacheMiss
 	}
 	return &out, nil
 }
