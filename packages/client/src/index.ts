@@ -986,6 +986,152 @@ export class ApiClient {
   getDashboardSummary(): Promise<DashboardSummary> {
     return this.request("/dashboard/summary");
   }
+
+  // --- Phase L: insights -------------------------------------------------
+
+  listInsightsQueries(): Promise<{ queries: InsightsQuery[] }> {
+    return this.request("/insights/queries");
+  }
+
+  getInsightsQuery(id: string): Promise<InsightsQuery> {
+    return this.request(`/insights/queries/${encodeURIComponent(id)}`);
+  }
+
+  createInsightsQuery(input: InsightsQueryInput): Promise<InsightsQuery> {
+    return this.request("/insights/queries", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateInsightsQuery(
+    id: string,
+    input: InsightsQueryInput
+  ): Promise<InsightsQuery> {
+    return this.request(`/insights/queries/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteInsightsQuery(id: string): Promise<void> {
+    return this.request(`/insights/queries/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  }
+
+  runInsightsQuery(
+    id: string,
+    input?: InsightsRunInput
+  ): Promise<InsightsRunResult> {
+    return this.request(`/insights/queries/${encodeURIComponent(id)}/run`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input ?? {}),
+    });
+  }
+
+  listInsightsQueryShares(id: string): Promise<{ shares: InsightsShare[] }> {
+    return this.request(`/insights/queries/${encodeURIComponent(id)}/shares`);
+  }
+
+  createInsightsQueryShare(
+    id: string,
+    input: InsightsShareInput
+  ): Promise<InsightsShare> {
+    return this.request(`/insights/queries/${encodeURIComponent(id)}/share`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  listInsightsDashboards(): Promise<{ dashboards: InsightsDashboard[] }> {
+    return this.request("/insights/dashboards");
+  }
+
+  getInsightsDashboard(id: string): Promise<InsightsDashboardBundle> {
+    return this.request(`/insights/dashboards/${encodeURIComponent(id)}`);
+  }
+
+  createInsightsDashboard(
+    input: InsightsDashboardInput
+  ): Promise<InsightsDashboard> {
+    return this.request("/insights/dashboards", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateInsightsDashboard(
+    id: string,
+    input: InsightsDashboardInput
+  ): Promise<InsightsDashboard> {
+    return this.request(`/insights/dashboards/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteInsightsDashboard(id: string): Promise<void> {
+    return this.request(`/insights/dashboards/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  }
+
+  upsertInsightsWidget(
+    dashboardID: string,
+    input: InsightsWidgetInput
+  ): Promise<InsightsDashboardWidget> {
+    return this.request(
+      `/insights/dashboards/${encodeURIComponent(dashboardID)}/widgets`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(input),
+      }
+    );
+  }
+
+  deleteInsightsWidget(dashboardID: string, widgetID: string): Promise<void> {
+    return this.request(
+      `/insights/dashboards/${encodeURIComponent(
+        dashboardID
+      )}/widgets/${encodeURIComponent(widgetID)}`,
+      {
+        method: "DELETE",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+
+  listInsightsDashboardShares(
+    id: string
+  ): Promise<{ shares: InsightsShare[] }> {
+    return this.request(
+      `/insights/dashboards/${encodeURIComponent(id)}/shares`
+    );
+  }
+
+  createInsightsDashboardShare(
+    id: string,
+    input: InsightsShareInput
+  ): Promise<InsightsShare> {
+    return this.request(
+      `/insights/dashboards/${encodeURIComponent(id)}/share`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(input),
+      }
+    );
+  }
 }
 
 // --- Bulk actions -----------------------------------------------------
@@ -1173,6 +1319,138 @@ export interface SavedReport {
   created_by?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+// --- Phase L: insights --------------------------------------------------
+
+export type InsightsVizType =
+  | "table"
+  | "bar"
+  | "line"
+  | "pie"
+  | "donut"
+  | "funnel"
+  | "number_card"
+  | "pivot";
+
+export interface InsightsCalculatedColumn {
+  name: string;
+  expression: string;
+  type?: string;
+}
+
+/**
+ * InsightsQueryDefinition is the reporting Definition extended with
+ * BI-grade calculated columns. The backend validates the base grammar
+ * with the reporting validator and layers on calculated-column name
+ * uniqueness, so any client that can produce a ReportDefinition can
+ * produce a valid InsightsQueryDefinition by setting calculated_columns
+ * to an empty array or omitting it.
+ */
+export interface InsightsQueryDefinition extends ReportDefinition {
+  calculated_columns?: InsightsCalculatedColumn[];
+}
+
+export interface InsightsQueryInput {
+  name: string;
+  description?: string;
+  definition: InsightsQueryDefinition;
+  /**
+   * null / omitted means "use the server default (300s)"; `0` explicitly
+   * disables per-query caching.
+   */
+  cache_ttl_seconds?: number | null;
+}
+
+export interface InsightsQuery extends InsightsQueryInput {
+  tenant_id: string;
+  id: string;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InsightsRunInput {
+  filter_params?: Record<string, unknown>;
+  bypass_cache?: boolean;
+}
+
+export interface InsightsRunResult {
+  result: ReportResult;
+  cache_hit: boolean;
+  query_hash?: string;
+  filter_hash?: string;
+  expires_at?: string | null;
+}
+
+export interface InsightsDashboardInput {
+  name: string;
+  description?: string;
+  /** Opaque layout blob; the frontend owns the shape. */
+  layout?: unknown;
+  auto_refresh_seconds?: number;
+}
+
+export interface InsightsDashboardWidget {
+  tenant_id: string;
+  id: string;
+  dashboard_id: string;
+  query_id?: string | null;
+  viz_type: InsightsVizType | string;
+  position?: unknown;
+  config?: unknown;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InsightsWidgetInput {
+  id?: string;
+  query_id?: string | null;
+  viz_type: InsightsVizType | string;
+  position?: unknown;
+  config?: unknown;
+}
+
+export interface InsightsDashboard extends InsightsDashboardInput {
+  tenant_id: string;
+  id: string;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+  widgets?: InsightsDashboardWidget[];
+}
+
+/**
+ * InsightsDashboardBundle is the payload returned by GET
+ * /insights/dashboards/{id}: the dashboard plus eagerly-resolved
+ * per-widget query results, keyed by widget id. `widget_results[id]`
+ * is null when the widget has no saved query or its query failed; the
+ * UI renders an error-state per widget rather than failing the whole
+ * page.
+ */
+export interface InsightsDashboardBundle {
+  dashboard: InsightsDashboard;
+  widget_results: Record<string, InsightsRunResult | null>;
+}
+
+export type InsightsGranteeType = "user" | "role";
+export type InsightsPermission = "view" | "edit";
+
+export interface InsightsShareInput {
+  grantee_type: InsightsGranteeType | string;
+  grantee: string;
+  permission?: InsightsPermission | string;
+}
+
+export interface InsightsShare {
+  tenant_id: string;
+  id: string;
+  resource_type: "query" | "dashboard";
+  resource_id: string;
+  grantee_type: string;
+  grantee: string;
+  permission: string;
+  created_at: string;
 }
 
 export interface DashboardSummary {

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { Route, Routes, Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./lib/api";
@@ -43,6 +43,32 @@ import { PortalTicketDetailPage } from "./pages/portal/PortalTicketDetailPage";
 import { PortalNewTicketPage } from "./pages/portal/PortalNewTicketPage";
 import { NotificationBell } from "./components/NotificationBell";
 
+// Insights pages ship a recharts bundle that dwarfs the rest of the
+// SPA payload; lazy-load them so tenants without the `insights`
+// feature don't pay the transfer cost and the landing-page bundle
+// stays lean. React.lazy + Suspense is enough for this; no custom
+// loader framework required.
+const InsightsQueryListPage = lazy(() =>
+  import("./pages/InsightsQueryListPage").then((m) => ({
+    default: m.InsightsQueryListPage,
+  }))
+);
+const InsightsQueryBuilderPage = lazy(() =>
+  import("./pages/InsightsQueryBuilderPage").then((m) => ({
+    default: m.InsightsQueryBuilderPage,
+  }))
+);
+const InsightsDashboardListPage = lazy(() =>
+  import("./pages/InsightsDashboardListPage").then((m) => ({
+    default: m.InsightsDashboardListPage,
+  }))
+);
+const InsightsDashboardPage = lazy(() =>
+  import("./pages/InsightsDashboardPage").then((m) => ({
+    default: m.InsightsDashboardPage,
+  }))
+);
+
 const tenantKey = (): string =>
   localStorage.getItem("kapp.tenant") ?? "default";
 
@@ -56,6 +82,7 @@ const featureFromSection: Record<string, string> = {
   Inventory: "inventory",
   HR: "hr",
   LMS: "lms",
+  Insights: "insights",
 };
 
 interface NavSection {
@@ -140,6 +167,13 @@ const navSections: NavSection[] = [
       { to: "/records/hr.attendance", label: "Attendance" },
       { to: "/records/hr.expense_claim", label: "Expense Claims" },
       { to: "/hr/payroll", label: "Payroll" },
+    ],
+  },
+  {
+    title: "Insights",
+    links: [
+      { to: "/insights/queries", label: "Queries" },
+      { to: "/insights/dashboards", label: "Dashboards" },
     ],
   },
   {
@@ -353,6 +387,46 @@ function AppShell() {
           <Route path="/imports/new" element={<ImportPage />} />
           <Route path="/imports/:id" element={<ImportPage />} />
           <Route path="/imports/:id/mapping" element={<ImportMappingPage />} />
+          <Route
+            path="/insights/queries"
+            element={
+              <Suspense fallback={<p>Loading insights…</p>}>
+                <InsightsQueryListPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/insights/queries/new"
+            element={
+              <Suspense fallback={<p>Loading insights…</p>}>
+                <InsightsQueryBuilderPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/insights/queries/:id"
+            element={
+              <Suspense fallback={<p>Loading insights…</p>}>
+                <InsightsQueryBuilderPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/insights/dashboards"
+            element={
+              <Suspense fallback={<p>Loading insights…</p>}>
+                <InsightsDashboardListPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/insights/dashboards/:id"
+            element={
+              <Suspense fallback={<p>Loading insights…</p>}>
+                <InsightsDashboardPage />
+              </Suspense>
+            }
+          />
           <Route path="/lms/progress" element={<LearnerProgressPage />} />
           <Route
             path="/lms/progress/:enrollmentId"
