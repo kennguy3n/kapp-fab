@@ -35,10 +35,10 @@ var ErrCacheMiss = errors.New("insights: cache miss")
 // has not run yet.
 func (s *CacheStore) Get(ctx context.Context, tenantID uuid.UUID, queryHash, filterHash string) (*QueryCache, error) {
 	if tenantID == uuid.Nil {
-		return nil, errors.New("insights: tenant id required")
+		return nil, validationErr("tenant id required")
 	}
 	if queryHash == "" {
-		return nil, errors.New("insights: query hash required")
+		return nil, validationErr("query hash required")
 	}
 	out := QueryCache{
 		TenantID:   tenantID,
@@ -108,13 +108,13 @@ func (s *CacheStore) Set(ctx context.Context, tenantID uuid.UUID, queryHash, fil
 		return nil
 	}
 	if tenantID == uuid.Nil {
-		return errors.New("insights: tenant id required")
+		return validationErr("tenant id required")
 	}
 	if queryHash == "" {
-		return errors.New("insights: query hash required")
+		return validationErr("query hash required")
 	}
 	if len(result) == 0 {
-		return errors.New("insights: result required")
+		return validationErr("result required")
 	}
 	expiresAt := timeNow().Add(ttl)
 	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -144,7 +144,7 @@ func (s *CacheStore) Set(ctx context.Context, tenantID uuid.UUID, queryHash, fil
 // Invalidate removes a single (queryHash, filterHash) cache row.
 func (s *CacheStore) Invalidate(ctx context.Context, tenantID uuid.UUID, queryHash, filterHash string) error {
 	if tenantID == uuid.Nil || queryHash == "" {
-		return errors.New("insights: tenant id and query hash required")
+		return validationErr("tenant id and query hash required")
 	}
 	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
@@ -161,7 +161,7 @@ func (s *CacheStore) Invalidate(ctx context.Context, tenantID uuid.UUID, queryHa
 // the cache from scratch.
 func (s *CacheStore) InvalidateQuery(ctx context.Context, tenantID, queryID uuid.UUID) error {
 	if tenantID == uuid.Nil || queryID == uuid.Nil {
-		return errors.New("insights: tenant id and query id required")
+		return validationErr("tenant id and query id required")
 	}
 	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
@@ -178,7 +178,7 @@ func (s *CacheStore) InvalidateQuery(ctx context.Context, tenantID, queryID uuid
 // accumulate forever even when the runner stops being invoked.
 func (s *CacheStore) SweepExpired(ctx context.Context, tenantID uuid.UUID) (int64, error) {
 	if tenantID == uuid.Nil {
-		return 0, errors.New("insights: tenant id required")
+		return 0, validationErr("tenant id required")
 	}
 	var deleted int64
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {

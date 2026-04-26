@@ -13,7 +13,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
@@ -80,18 +79,21 @@ type QueryDefinition struct {
 // rules. Calculated-column names must be unique and non-empty.
 func (q QueryDefinition) Validate() error {
 	if err := q.Definition.Validate(); err != nil {
-		return err
+		// Tag reporting validation errors as ErrValidation so the
+		// HTTP layer can map them to 400 alongside the insights-
+		// native validation surface.
+		return fmt.Errorf("%w: %w", ErrValidation, err)
 	}
 	seen := make(map[string]struct{}, len(q.CalculatedColumns))
 	for _, c := range q.CalculatedColumns {
 		if c.Name == "" {
-			return errors.New("insights: calculated column name required")
+			return validationErr("calculated column name required")
 		}
 		if c.Expression == "" {
-			return fmt.Errorf("insights: calculated column %q expression required", c.Name)
+			return validationErr("calculated column %q expression required", c.Name)
 		}
 		if _, dup := seen[c.Name]; dup {
-			return fmt.Errorf("insights: duplicate calculated column %q", c.Name)
+			return validationErr("duplicate calculated column %q", c.Name)
 		}
 		seen[c.Name] = struct{}{}
 	}
@@ -171,10 +173,10 @@ type Share struct {
 // column never holds a value the frontend does not understand.
 func ValidateVizType(v string) error {
 	if v == "" {
-		return errors.New("insights: viz_type required")
+		return validationErr("viz_type required")
 	}
 	if _, ok := allowedVizTypes[v]; !ok {
-		return fmt.Errorf("insights: viz_type %q invalid", v)
+		return validationErr("viz_type %q invalid", v)
 	}
 	return nil
 }
@@ -187,7 +189,7 @@ func ValidateResourceType(v string) error {
 	case ResourceQuery, ResourceDashboard:
 		return nil
 	default:
-		return fmt.Errorf("insights: resource_type %q invalid", v)
+		return validationErr("resource_type %q invalid", v)
 	}
 }
 
@@ -196,7 +198,7 @@ func ValidateGranteeType(v string) error {
 	case GranteeUser, GranteeRole:
 		return nil
 	default:
-		return fmt.Errorf("insights: grantee_type %q invalid", v)
+		return validationErr("grantee_type %q invalid", v)
 	}
 }
 
@@ -205,7 +207,7 @@ func ValidatePermission(v string) error {
 	case PermissionView, PermissionEdit:
 		return nil
 	default:
-		return fmt.Errorf("insights: permission %q invalid", v)
+		return validationErr("permission %q invalid", v)
 	}
 }
 

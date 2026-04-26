@@ -477,6 +477,12 @@ func writeInsightsError(w http.ResponseWriter, err error) {
 		errors.Is(err, insights.ErrWidgetNotFound),
 		errors.Is(err, insights.ErrShareNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, insights.ErrValidation):
+		// User-input failures from QueryStore / DashboardStore /
+		// CacheStore validation paths and from QueryDefinition.
+		// Validate() — surface as 400 so clients can correct their
+		// payload instead of seeing a misleading 500.
+		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		// Statement timeout / Go context cancellation — DB-side
 		// budget exhausted, surface as 504 so a retry-with-tighter-

@@ -20,7 +20,19 @@ var (
 	ErrDashboardNotFound = errors.New("insights: dashboard not found")
 	ErrWidgetNotFound    = errors.New("insights: dashboard widget not found")
 	ErrShareNotFound     = errors.New("insights: share not found")
+	// ErrValidation tags errors caused by invalid client input so the
+	// HTTP layer can surface them as 400 Bad Request without resorting
+	// to message-string matching. Wrap with fmt.Errorf("%w: …", or use
+	// validationErr below.
+	ErrValidation = errors.New("insights: validation")
 )
+
+// validationErr wraps a free-form message as an ErrValidation-tagged
+// error. Stores call this in place of errors.New so writeInsightsError
+// can map every user-input failure to 400 with one errors.Is check.
+func validationErr(format string, args ...any) error {
+	return fmt.Errorf("%w: "+format, append([]any{ErrValidation}, args...)...)
+}
 
 // Default cache TTL applied when callers omit the field on Create.
 // 5 minutes mirrors a sensible BI default that keeps cache hit rate
@@ -38,7 +50,7 @@ func resolveCacheTTL(ttl *int) (int, error) {
 		return DefaultCacheTTLSeconds, nil
 	}
 	if *ttl < 0 {
-		return 0, errors.New("insights: cache_ttl_seconds must be >= 0")
+		return 0, validationErr("cache_ttl_seconds must be >= 0")
 	}
 	return *ttl, nil
 }
@@ -57,10 +69,10 @@ func NewQueryStore(pool *pgxpool.Pool) *QueryStore {
 // enforced by the insights_queries UNIQUE index.
 func (s *QueryStore) Create(ctx context.Context, q Query) (*Query, error) {
 	if q.TenantID == uuid.Nil {
-		return nil, errors.New("insights: tenant id required")
+		return nil, validationErr("tenant id required")
 	}
 	if q.Name == "" {
-		return nil, errors.New("insights: query name required")
+		return nil, validationErr("query name required")
 	}
 	if err := q.Definition.Validate(); err != nil {
 		return nil, err
@@ -102,7 +114,10 @@ func (s *QueryStore) Create(ctx context.Context, q Query) (*Query, error) {
 // rewrites them.
 func (s *QueryStore) Update(ctx context.Context, q Query) (*Query, error) {
 	if q.TenantID == uuid.Nil || q.ID == uuid.Nil {
-		return nil, errors.New("insights: tenant id and query id required")
+		return nil, validationErr("tenant id and query id required")
+	}
+	if q.Name == "" {
+		return nil, validationErr("query name required")
 	}
 	if err := q.Definition.Validate(); err != nil {
 		return nil, err
@@ -140,7 +155,7 @@ func (s *QueryStore) Update(ctx context.Context, q Query) (*Query, error) {
 // Get loads a single query or returns ErrQueryNotFound.
 func (s *QueryStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*Query, error) {
 	if tenantID == uuid.Nil || id == uuid.Nil {
-		return nil, errors.New("insights: tenant id and query id required")
+		return nil, validationErr("tenant id and query id required")
 	}
 	var (
 		out Query
@@ -179,7 +194,7 @@ func (s *QueryStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*Query, e
 // List returns every saved query for the tenant, ordered by name.
 func (s *QueryStore) List(ctx context.Context, tenantID uuid.UUID) ([]Query, error) {
 	if tenantID == uuid.Nil {
-		return nil, errors.New("insights: tenant id required")
+		return nil, validationErr("tenant id required")
 	}
 	out := make([]Query, 0)
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -228,7 +243,7 @@ func (s *QueryStore) List(ctx context.Context, tenantID uuid.UUID) ([]Query, err
 // purge.
 func (s *QueryStore) Delete(ctx context.Context, tenantID, id uuid.UUID) error {
 	if tenantID == uuid.Nil || id == uuid.Nil {
-		return errors.New("insights: tenant id and query id required")
+		return validationErr("tenant id and query id required")
 	}
 	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
@@ -260,10 +275,10 @@ func NewDashboardStore(pool *pgxpool.Pool) *DashboardStore {
 // outer dashboard layout.
 func (s *DashboardStore) Create(ctx context.Context, d Dashboard) (*Dashboard, error) {
 	if d.TenantID == uuid.Nil {
-		return nil, errors.New("insights: tenant id required")
+		return nil, validationErr("tenant id required")
 	}
 	if d.Name == "" {
-		return nil, errors.New("insights: dashboard name required")
+		return nil, validationErr("dashboard name required")
 	}
 	if d.ID == uuid.Nil {
 		d.ID = uuid.New()
@@ -272,7 +287,7 @@ func (s *DashboardStore) Create(ctx context.Context, d Dashboard) (*Dashboard, e
 		d.Layout = json.RawMessage(`{}`)
 	}
 	if d.AutoRefreshSeconds < 0 {
-		return nil, errors.New("insights: auto_refresh_seconds must be >= 0")
+		return nil, validationErr("auto_refresh_seconds must be >= 0")
 	}
 	out := d
 	err := dbutil.WithTenantTx(ctx, s.pool, d.TenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -299,10 +314,13 @@ func (s *DashboardStore) Create(ctx context.Context, d Dashboard) (*Dashboard, e
 // auto-refresh interval.
 func (s *DashboardStore) Update(ctx context.Context, d Dashboard) (*Dashboard, error) {
 	if d.TenantID == uuid.Nil || d.ID == uuid.Nil {
-		return nil, errors.New("insights: tenant id and dashboard id required")
+		return nil, validationErr("tenant id and dashboard id required")
+	}
+	if d.Name == "" {
+		return nil, validationErr("dashboard name required")
 	}
 	if d.AutoRefreshSeconds < 0 {
-		return nil, errors.New("insights: auto_refresh_seconds must be >= 0")
+		return nil, validationErr("auto_refresh_seconds must be >= 0")
 	}
 	if len(d.Layout) == 0 {
 		d.Layout = json.RawMessage(`{}`)
@@ -334,7 +352,7 @@ func (s *DashboardStore) Update(ctx context.Context, d Dashboard) (*Dashboard, e
 // avoid the extra round-trip.
 func (s *DashboardStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*Dashboard, error) {
 	if tenantID == uuid.Nil || id == uuid.Nil {
-		return nil, errors.New("insights: tenant id and dashboard id required")
+		return nil, validationErr("tenant id and dashboard id required")
 	}
 	var (
 		out    Dashboard
@@ -370,7 +388,7 @@ func (s *DashboardStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*Dash
 // List returns every dashboard for the tenant.
 func (s *DashboardStore) List(ctx context.Context, tenantID uuid.UUID) ([]Dashboard, error) {
 	if tenantID == uuid.Nil {
-		return nil, errors.New("insights: tenant id required")
+		return nil, validationErr("tenant id required")
 	}
 	out := make([]Dashboard, 0)
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -411,7 +429,7 @@ func (s *DashboardStore) List(ctx context.Context, tenantID uuid.UUID) ([]Dashbo
 // Delete removes the dashboard and cascades into its widgets.
 func (s *DashboardStore) Delete(ctx context.Context, tenantID, id uuid.UUID) error {
 	if tenantID == uuid.Nil || id == uuid.Nil {
-		return errors.New("insights: tenant id and dashboard id required")
+		return validationErr("tenant id and dashboard id required")
 	}
 	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
@@ -439,7 +457,7 @@ func (s *DashboardStore) Delete(ctx context.Context, tenantID, id uuid.UUID) err
 // JSONB and round-trip as raw bytes so the caller controls the shape.
 func (s *DashboardStore) UpsertWidget(ctx context.Context, w DashboardWidget) (*DashboardWidget, error) {
 	if w.TenantID == uuid.Nil || w.DashboardID == uuid.Nil {
-		return nil, errors.New("insights: tenant id and dashboard id required")
+		return nil, validationErr("tenant id and dashboard id required")
 	}
 	if err := ValidateVizType(w.VizType); err != nil {
 		return nil, err
@@ -484,7 +502,7 @@ func (s *DashboardStore) UpsertWidget(ctx context.Context, w DashboardWidget) (*
 // ListWidgets returns every widget for one dashboard.
 func (s *DashboardStore) ListWidgets(ctx context.Context, tenantID, dashboardID uuid.UUID) ([]DashboardWidget, error) {
 	if tenantID == uuid.Nil || dashboardID == uuid.Nil {
-		return nil, errors.New("insights: tenant id and dashboard id required")
+		return nil, validationErr("tenant id and dashboard id required")
 	}
 	out := make([]DashboardWidget, 0)
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -529,7 +547,7 @@ func (s *DashboardStore) ListWidgets(ctx context.Context, tenantID, dashboardID 
 // DeleteWidget removes a single widget from a dashboard.
 func (s *DashboardStore) DeleteWidget(ctx context.Context, tenantID, dashboardID, id uuid.UUID) error {
 	if tenantID == uuid.Nil || id == uuid.Nil {
-		return errors.New("insights: tenant id and widget id required")
+		return validationErr("tenant id and widget id required")
 	}
 	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
@@ -550,7 +568,7 @@ func (s *DashboardStore) DeleteWidget(ctx context.Context, tenantID, dashboardID
 // CreateShare inserts a sharing grant on a query or dashboard.
 func (s *DashboardStore) CreateShare(ctx context.Context, share Share) (*Share, error) {
 	if share.TenantID == uuid.Nil || share.ResourceID == uuid.Nil {
-		return nil, errors.New("insights: tenant id and resource id required")
+		return nil, validationErr("tenant id and resource id required")
 	}
 	if err := ValidateResourceType(share.ResourceType); err != nil {
 		return nil, err
@@ -565,7 +583,7 @@ func (s *DashboardStore) CreateShare(ctx context.Context, share Share) (*Share, 
 		return nil, err
 	}
 	if share.Grantee == "" {
-		return nil, errors.New("insights: grantee required")
+		return nil, validationErr("grantee required")
 	}
 	if share.ID == uuid.Nil {
 		share.ID = uuid.New()
@@ -595,7 +613,7 @@ func (s *DashboardStore) ListShares(ctx context.Context, tenantID uuid.UUID, res
 		return nil, err
 	}
 	if tenantID == uuid.Nil || resourceID == uuid.Nil {
-		return nil, errors.New("insights: tenant id and resource id required")
+		return nil, validationErr("tenant id and resource id required")
 	}
 	out := make([]Share, 0)
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -632,7 +650,7 @@ func (s *DashboardStore) ListShares(ctx context.Context, tenantID uuid.UUID, res
 // DeleteShare removes a share row by id.
 func (s *DashboardStore) DeleteShare(ctx context.Context, tenantID, id uuid.UUID) error {
 	if tenantID == uuid.Nil || id == uuid.Nil {
-		return errors.New("insights: tenant id and share id required")
+		return validationErr("tenant id and share id required")
 	}
 	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,

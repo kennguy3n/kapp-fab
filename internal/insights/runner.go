@@ -95,7 +95,7 @@ type RunResult struct {
 //     result in the cache with the configured TTL.
 func (r *Runner) Run(ctx context.Context, tenantID uuid.UUID, opts RunOptions) (*RunResult, error) {
 	if tenantID == uuid.Nil {
-		return nil, errors.New("insights: tenant id required")
+		return nil, validationErr("tenant id required")
 	}
 	if err := opts.Definition.Validate(); err != nil {
 		return nil, err
@@ -182,7 +182,7 @@ func (r *Runner) runWithTimeout(ctx context.Context, tenantID uuid.UUID, def rep
 // FilterParams may be nil for queries with no parameter inputs.
 func (r *Runner) RunSaved(ctx context.Context, tenantID, queryID uuid.UUID, filterParams map[string]any, bypassCache bool) (*RunResult, error) {
 	if r.queries == nil {
-		return nil, errors.New("insights: query store not wired")
+		return nil, validationErr("query store not wired")
 	}
 	q, err := r.queries.Get(ctx, tenantID, queryID)
 	if err != nil {
