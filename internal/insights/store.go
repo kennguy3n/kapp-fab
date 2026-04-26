@@ -546,8 +546,8 @@ func (s *DashboardStore) ListWidgets(ctx context.Context, tenantID, dashboardID 
 
 // DeleteWidget removes a single widget from a dashboard.
 func (s *DashboardStore) DeleteWidget(ctx context.Context, tenantID, dashboardID, id uuid.UUID) error {
-	if tenantID == uuid.Nil || id == uuid.Nil {
-		return validationErr("tenant id and widget id required")
+	if tenantID == uuid.Nil || dashboardID == uuid.Nil || id == uuid.Nil {
+		return validationErr("tenant id, dashboard id, and widget id required")
 	}
 	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
