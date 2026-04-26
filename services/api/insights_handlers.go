@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -476,7 +477,17 @@ func writeInsightsError(w http.ResponseWriter, err error) {
 		errors.Is(err, insights.ErrWidgetNotFound),
 		errors.Is(err, insights.ErrShareNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		// Statement timeout / Go context cancellation — DB-side
+		// budget exhausted, surface as 504 so a retry-with-tighter-
+		// filter UI can react distinctly from generic 5xx.
+		http.Error(w, err.Error(), http.StatusGatewayTimeout)
 	default:
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		// Unknown error → 500. Validation / shape errors from the
+		// handlers themselves are returned via http.Error directly
+		// (see decode failures and uuid.Parse branches), so reaching
+		// the default arm means an unexpected server-side fault
+		// (DB connection, marshalling, etc.) rather than client input.
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
