@@ -188,7 +188,14 @@ func (r *Runner) RunSaved(ctx context.Context, tenantID, queryID uuid.UUID, filt
 	if err != nil {
 		return nil, err
 	}
-	ttl := time.Duration(q.CacheTTLSeconds) * time.Second
+	// q.CacheTTLSeconds is always non-nil after QueryStore.Get
+	// (Get scans the column into a local int and assigns its
+	// address); guard defensively to keep the runner robust
+	// against future store changes.
+	var ttl time.Duration
+	if q.CacheTTLSeconds != nil {
+		ttl = time.Duration(*q.CacheTTLSeconds) * time.Second
+	}
 	return r.Run(ctx, tenantID, RunOptions{
 		Definition:   q.Definition,
 		QueryID:      &q.ID,

@@ -25,10 +25,14 @@ type insightsHandlers struct {
 // ---------- Queries ----------
 
 type insightsQueryRequest struct {
-	Name            string                   `json:"name"`
-	Description     string                   `json:"description,omitempty"`
-	Definition      insights.QueryDefinition `json:"definition"`
-	CacheTTLSeconds int                      `json:"cache_ttl_seconds,omitempty"`
+	Name        string                   `json:"name"`
+	Description string                   `json:"description,omitempty"`
+	Definition  insights.QueryDefinition `json:"definition"`
+	// Pointer so the JSON-decoder can distinguish "field omitted"
+	// (nil → server applies the default 300s) from "0" (disable
+	// caching). A plain int conflated the two and silently coerced
+	// real-time queries back to 5-minute caching.
+	CacheTTLSeconds *int `json:"cache_ttl_seconds,omitempty"`
 }
 
 func (h *insightsHandlers) listQueries(w http.ResponseWriter, r *http.Request) {

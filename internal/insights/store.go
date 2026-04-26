@@ -27,6 +27,22 @@ var (
 // high without serving truly stale data on hourly-changing sources.
 const DefaultCacheTTLSeconds = 300
 
+// resolveCacheTTL collapses the *int request value into the int
+// stored on the row. nil means "field omitted → use the server
+// default"; a non-nil 0 means "disable caching for this query"
+// (honoured downstream by CacheStore.Set / Runner.Run); a negative
+// value is rejected so storage stays in sync with the column's
+// CHECK constraint.
+func resolveCacheTTL(ttl *int) (int, error) {
+	if ttl == nil {
+		return DefaultCacheTTLSeconds, nil
+	}
+	if *ttl < 0 {
+		return 0, errors.New("insights: cache_ttl_seconds must be >= 0")
+	}
+	return *ttl, nil
+}
+
 // QueryStore persists insights_queries rows.
 type QueryStore struct {
 	pool *pgxpool.Pool
@@ -52,12 +68,11 @@ func (s *QueryStore) Create(ctx context.Context, q Query) (*Query, error) {
 	if q.ID == uuid.Nil {
 		q.ID = uuid.New()
 	}
-	if q.CacheTTLSeconds < 0 {
-		return nil, errors.New("insights: cache_ttl_seconds must be >= 0")
+	ttl, err := resolveCacheTTL(q.CacheTTLSeconds)
+	if err != nil {
+		return nil, err
 	}
-	if q.CacheTTLSeconds == 0 {
-		q.CacheTTLSeconds = DefaultCacheTTLSeconds
-	}
+	q.CacheTTLSeconds = &ttl
 	def, err := json.Marshal(q.Definition)
 	if err != nil {
 		return nil, fmt.Errorf("insights: marshal definition: %w", err)
@@ -73,7 +88,7 @@ func (s *QueryStore) Create(ctx context.Context, q Query) (*Query, error) {
 			   (tenant_id, id, name, description, definition, cache_ttl_seconds, created_by)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7)
 			 RETURNING created_at, updated_at`,
-			q.TenantID, q.ID, q.Name, q.Description, def, q.CacheTTLSeconds, createdBy,
+			q.TenantID, q.ID, q.Name, q.Description, def, ttl, createdBy,
 		).Scan(&out.CreatedAt, &out.UpdatedAt)
 	})
 	if err != nil {
@@ -96,11 +111,9 @@ func (s *QueryStore) Update(ctx context.Context, q Query) (*Query, error) {
 	if err != nil {
 		return nil, err
 	}
-	if q.CacheTTLSeconds < 0 {
-		return nil, errors.New("insights: cache_ttl_seconds must be >= 0")
-	}
-	if q.CacheTTLSeconds == 0 {
-		q.CacheTTLSeconds = DefaultCacheTTLSeconds
+	ttl, err := resolveCacheTTL(q.CacheTTLSeconds)
+	if err != nil {
+		return nil, err
 	}
 	err = dbutil.WithTenantTx(ctx, s.pool, q.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
@@ -108,7 +121,7 @@ func (s *QueryStore) Update(ctx context.Context, q Query) (*Query, error) {
 			    SET name = $3, description = $4, definition = $5,
 			        cache_ttl_seconds = $6, updated_at = now()
 			  WHERE tenant_id = $1 AND id = $2`,
-			q.TenantID, q.ID, q.Name, q.Description, def, q.CacheTTLSeconds,
+			q.TenantID, q.ID, q.Name, q.Description, def, ttl,
 		)
 		if err != nil {
 			return err
@@ -134,7 +147,10 @@ func (s *QueryStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*Query, e
 		def []byte
 	)
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var createdBy *uuid.UUID
+		var (
+			createdBy *uuid.UUID
+			ttl       int
+		)
 		row := tx.QueryRow(ctx,
 			`SELECT tenant_id, id, name, description, definition, cache_ttl_seconds,
 			        created_by, created_at, updated_at
@@ -142,7 +158,7 @@ func (s *QueryStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*Query, e
 			tenantID, id,
 		)
 		if err := row.Scan(
-			&out.TenantID, &out.ID, &out.Name, &out.Description, &def, &out.CacheTTLSeconds,
+			&out.TenantID, &out.ID, &out.Name, &out.Description, &def, &ttl,
 			&createdBy, &out.CreatedAt, &out.UpdatedAt,
 		); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -151,6 +167,7 @@ func (s *QueryStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*Query, e
 			return err
 		}
 		out.CreatedBy = createdBy
+		out.CacheTTLSeconds = &ttl
 		return json.Unmarshal(def, &out.Definition)
 	})
 	if err != nil {
@@ -181,14 +198,16 @@ func (s *QueryStore) List(ctx context.Context, tenantID uuid.UUID) ([]Query, err
 				q         Query
 				def       []byte
 				createdBy *uuid.UUID
+				ttl       int
 			)
 			if err := rows.Scan(
-				&q.TenantID, &q.ID, &q.Name, &q.Description, &def, &q.CacheTTLSeconds,
+				&q.TenantID, &q.ID, &q.Name, &q.Description, &def, &ttl,
 				&createdBy, &q.CreatedAt, &q.UpdatedAt,
 			); err != nil {
 				return err
 			}
 			q.CreatedBy = createdBy
+			q.CacheTTLSeconds = &ttl
 			if err := json.Unmarshal(def, &q.Definition); err != nil {
 				return err
 			}
