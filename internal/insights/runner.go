@@ -8,10 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/reporting"
 )
 
@@ -160,35 +158,20 @@ func (r *Runner) Run(ctx context.Context, tenantID uuid.UUID, opts RunOptions) (
 	return out, nil
 }
 
-// runWithTimeout opens a tenant-scoped transaction, applies SET LOCAL
-// statement_timeout, and delegates execution to the reporting runner.
-// The timeout is set on the same transaction the reporting runner
-// would otherwise open implicitly, which means we run the SET +
-// reporting query in two transactions today; for now we just set the
-// timeout on a sentinel transaction and rely on the per-statement
-// timeout being inherited at the session level when using a pgx
-// connection. To enforce timeout across both, we use a context
-// deadline as the authoritative fence.
+// runWithTimeout delegates to reporting.Runner.RunWithStatementTimeout
+// so the SET LOCAL statement_timeout is applied inside the same
+// transaction as the underlying reporting query (SET LOCAL is
+// transaction-scoped, so issuing it on a sibling tx that commits
+// immediately would leave the actual query unprotected). The Go
+// context deadline is layered on top as a defence-in-depth fence in
+// case the server-side timeout is somehow not honoured.
 func (r *Runner) runWithTimeout(ctx context.Context, tenantID uuid.UUID, def reporting.Definition) (*reporting.Result, error) {
 	if r.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, r.timeout)
 		defer cancel()
-
-		// Best-effort: emit a SET LOCAL statement_timeout alongside the
-		// context deadline so the server-side query is cancelled even
-		// when a slow row stream outlives the context. The reporting
-		// runner opens its own transaction; this side-effect is
-		// scoped to a sibling transaction that exits immediately and
-		// only serves to surface a configuration error early.
-		if err := dbutil.WithTenantTx(ctx, r.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", r.timeout.Milliseconds()))
-			return err
-		}); err != nil {
-			return nil, fmt.Errorf("insights: set statement_timeout: %w", err)
-		}
 	}
-	result, err := r.reporting.Run(ctx, tenantID, def)
+	result, err := r.reporting.RunWithStatementTimeout(ctx, tenantID, def, r.timeout)
 	if err != nil {
 		return nil, fmt.Errorf("insights: execute: %w", err)
 	}

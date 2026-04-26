@@ -75,6 +75,8 @@ TABLES=(
   webhooks webhook_deliveries print_templates portal_users
   tenant_support_domains data_retention_policies
   report_schedules export_jobs
+  insights_queries insights_dashboards insights_dashboard_widgets
+  insights_query_cache insights_shares
 )
 
 read -r -d '' SQL <<SQL || true
