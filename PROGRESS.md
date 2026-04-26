@@ -390,19 +390,19 @@ Tenant-scoped BI layer: visual query builder, composable dashboards, rich visual
 
 ### Deliverables
 
-- [ ] `internal/insights/` package: query store, dashboard store, cache store, query engine extensions (calculated columns)
-- [ ] `insights_queries`, `insights_dashboards`, `insights_dashboard_widgets`, `insights_query_cache`, `insights_shares` tables with RLS + tenant_id partitioning
-- [ ] Query result caching with TTL and scheduled refresh via `internal/scheduler`
-- [ ] `services/api/insights_handlers.go` — full CRUD + execution endpoints under `/api/v1/insights/`
+- [x] `internal/insights/` package: query store, dashboard store, cache store, query engine extensions (calculated columns) (PR-A)
+- [x] `insights_queries`, `insights_dashboards`, `insights_dashboard_widgets`, `insights_query_cache`, `insights_shares` tables with RLS + tenant_id partitioning (`migrations/000038_insights.sql`, PR-A)
+- [~] Query result caching with TTL and scheduled refresh via `internal/scheduler` (TTL store landed in PR-A; scheduled refresh in PR-C)
+- [x] `services/api/insights_handlers.go` — full CRUD + execution endpoints under `/api/v1/insights/` (PR-A)
 - [ ] Visual query builder React page (`apps/web/src/pages/InsightsQueryBuilderPage.tsx`) — source picker, column drag-and-drop, filter builder, aggregation config, live preview
 - [ ] Dashboard builder React page (`apps/web/src/pages/InsightsDashboardPage.tsx`) — grid layout, widget config, linked filters, auto-refresh
 - [ ] Rich chart visualizations: bar, line, pie, donut, funnel, number card, pivot table (charting library integration)
 - [ ] Dashboard and query sharing: role-based grants, share modal UI
 - [ ] Agent tools: `insights.generate_query`, `insights.explain_result`, `insights.post_dashboard_digest` (`internal/agents/insights_tools.go`)
 - [ ] KChat surfaces: `/insight` slash command, dashboard digest card, right-pane dashboard view
-- [ ] Feature flag: `insights` gated per plan in `internal/tenant/features.go`
-- [ ] Query timeout budget: per-tenant `statement_timeout` on insight queries
-- [ ] Migration: `migrations/000031_insights.sql` (or next available number)
+- [x] Feature flag: `insights` gated per plan in `internal/tenant/plans.go` (PR-A; off on free/starter, on for business+)
+- [x] Query timeout budget: per-tenant `statement_timeout` on insight queries (PR-A)
+- [x] Migration: `migrations/000038_insights.sql` (PR-A)
 
 ### Acceptance Criteria
 

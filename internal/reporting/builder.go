@@ -247,6 +247,17 @@ func NewRunner(pool *pgxpool.Pool) *Runner {
 // dbutil.WithTenantTx GUC so RLS backs up the application-level
 // filter.
 func (r *Runner) Run(ctx context.Context, tenantID uuid.UUID, def Definition) (*Result, error) {
+	return r.RunWithStatementTimeout(ctx, tenantID, def, 0)
+}
+
+// RunWithStatementTimeout behaves like Run but applies SET LOCAL
+// statement_timeout inside the same transaction as the reporting
+// query so the database cancels a runaway scan even if the Go
+// context cancellation is delayed (e.g. blocked in syscall, slow row
+// streaming). A non-positive timeout disables the SET LOCAL, which
+// keeps the helper a drop-in for callers that don't care about a
+// DB-side fence.
+func (r *Runner) RunWithStatementTimeout(ctx context.Context, tenantID uuid.UUID, def Definition, timeout time.Duration) (*Result, error) {
 	if tenantID == uuid.Nil {
 		return nil, errors.New("reporting: tenant id required")
 	}
@@ -260,6 +271,11 @@ func (r *Runner) Run(ctx context.Context, tenantID uuid.UUID, def Definition) (*
 	rows := make([]map[string]any, 0)
 	columns := []string{}
 	err := dbutil.WithTenantTx(ctx, r.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if timeout > 0 {
+			if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", timeout.Milliseconds())); err != nil {
+				return fmt.Errorf("reporting: set statement_timeout: %w", err)
+			}
+		}
 		query, args, cols, err := buildQuery(tenantID, def)
 		if err != nil {
 			return err

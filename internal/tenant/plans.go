@@ -35,6 +35,7 @@ const (
 	FeaturePrint         = "print"
 	FeatureImporter      = "importer"
 	FeatureReportBuilder = "report_builder"
+	FeatureInsights      = "insights"
 )
 
 // AllFeatures is the canonical list of feature keys. Handlers that
@@ -54,6 +55,7 @@ var AllFeatures = []string{
 	FeaturePrint,
 	FeatureImporter,
 	FeatureReportBuilder,
+	FeatureInsights,
 }
 
 // PlanLimits is the numeric ceiling each plan enforces per billing
@@ -189,6 +191,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeaturePrint:         true,
 			FeatureImporter:      true,
 			FeatureReportBuilder: false,
+			FeatureInsights:      false,
 		}
 	case PlanBusiness, PlanEnterprise:
 		return map[string]bool{
@@ -204,6 +207,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeaturePrint:         true,
 			FeatureImporter:      true,
 			FeatureReportBuilder: true,
+			FeatureInsights:      true,
 		}
 	default:
 		// Free plan — CRM only. Also the fallback when the plan
@@ -222,6 +226,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeaturePrint:         false,
 			FeatureImporter:      false,
 			FeatureReportBuilder: false,
+			FeatureInsights:      false,
 		}
 	}
 }

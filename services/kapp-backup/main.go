@@ -111,6 +111,12 @@ var TenantScopedTables = []string{
 	"data_retention_policies",
 	"report_schedules",
 	"export_jobs",
+	// Phase L — Insights
+	"insights_queries",
+	"insights_dashboards",
+	"insights_dashboard_widgets",
+	"insights_query_cache",
+	"insights_shares",
 }
 
 // manifest is the first record in every dump file.
@@ -358,6 +364,10 @@ var tableConflictKeys = map[string][]string{
 	// natural key. data_retention_policies's PK is (tenant_id, category).
 	"tenant_support_domains":  {"tenant_id", "domain"},
 	"data_retention_policies": {"tenant_id", "category"},
+	// insights_query_cache PK is (tenant_id, query_hash, filter_hash) and
+	// insights_shares enforces a (tenant_id, resource_type, resource_id,
+	// grantee_type, grantee) UNIQUE on top of the (tenant_id, id) PK.
+	"insights_query_cache": {"tenant_id", "query_hash", "filter_hash"},
 }
 
 // insertRow issues a parameterised INSERT that lists the columns from

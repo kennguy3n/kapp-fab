@@ -33,6 +33,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/forms"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/hr"
+	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
@@ -298,6 +299,15 @@ func run() error {
 	reportStore := reporting.NewStore(pool)
 	reportRunner := reporting.NewRunner(pool)
 
+	// Phase L — Insights. The query store + dashboard store back the
+	// /api/v1/insights surface; the runner wraps reporting.Runner so
+	// saved queries reuse the validated grammar but execute under
+	// per-tenant statement_timeout + cache awareness.
+	insightsQueryStore := insights.NewQueryStore(pool)
+	insightsDashboardStore := insights.NewDashboardStore(pool)
+	insightsCacheStore := insights.NewCacheStore(pool)
+	insightsRunner := insights.NewRunner(pool, insightsCacheStore, insightsQueryStore, reportRunner)
+
 	// Agent tool executor — Phase B wires the CRM / tasks / approvals
 	// tools against the same record store and workflow engine the HTTP
 	// surface uses so dry-run and commit mode behave identically.
@@ -387,6 +397,11 @@ func run() error {
 	repsh := &reportScheduleHandlers{store: reporting.NewScheduleStore(pool)}
 	exph := &exportHandlers{store: exporter.NewStore(pool, adminPool)}
 	dashh := &dashboardHandlers{store: dashboard.NewStore(pool).WithConverter(dashboardRateAdapter{rates: apiExchangeRates})}
+	insh := &insightsHandlers{
+		queries:    insightsQueryStore,
+		dashboards: insightsDashboardStore,
+		runner:     insightsRunner,
+	}
 
 	// Inbound email → ticket. Wired only when adminPool is
 	// available — the resolver SELECTs against tenant_support_domains
@@ -843,6 +858,44 @@ func run() error {
 			r.Get("/{id}", repsh.get)
 			r.Put("/{id}", repsh.update)
 			r.Delete("/{id}", repsh.delete)
+		})
+
+		// Phase L Insights. CRUD for saved queries + dashboards,
+		// cache-aware query execution under per-tenant
+		// statement_timeout, dashboard widget upsert/delete, and
+		// role/user share grants. Gated on the `insights`
+		// feature flag via DynamicFeatureMiddleware so a free /
+		// starter plan can't reach the surface even with a
+		// stolen tenant header.
+		r.Route("/api/v1/insights", func(r chi.Router) {
+			r.Use(platform.TenantMiddleware(tenantSvc))
+			r.Use(apiCallMW)
+			r.Use(featureMW)
+			r.Use(platform.IdempotencyMiddleware(pool))
+			r.Use(rateLimitMW)
+			r.Use(platform.QuotaMiddleware(quotaEnforcer))
+
+			r.Route("/queries", func(r chi.Router) {
+				r.Get("/", insh.listQueries)
+				r.Post("/", insh.createQuery)
+				r.Get("/{id}", insh.getQuery)
+				r.Put("/{id}", insh.updateQuery)
+				r.Delete("/{id}", insh.deleteQuery)
+				r.Post("/{id}/run", insh.runQuery)
+				r.Post("/{id}/share", insh.shareQuery)
+				r.Get("/{id}/shares", insh.listQueryShares)
+			})
+			r.Route("/dashboards", func(r chi.Router) {
+				r.Get("/", insh.listDashboards)
+				r.Post("/", insh.createDashboard)
+				r.Get("/{id}", insh.getDashboard)
+				r.Put("/{id}", insh.updateDashboard)
+				r.Delete("/{id}", insh.deleteDashboard)
+				r.Post("/{id}/share", insh.shareDashboard)
+				r.Get("/{id}/shares", insh.listDashboardShares)
+				r.Post("/{id}/widgets", insh.upsertWidget)
+				r.Delete("/{id}/widgets/{widgetID}", insh.deleteWidget)
+			})
 		})
 
 		// Phase I KPI dashboard aggregation. Reads only, so no idempotency
