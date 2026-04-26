@@ -280,9 +280,20 @@ function FilterBar({
             {label}:&nbsp;
             <input
               value={String(values[key] ?? "")}
-              onChange={(e) =>
-                onChange({ ...values, [key]: e.target.value || undefined })
-              }
+              onChange={(e) => {
+                // Drop the key entirely when the input is cleared so
+                // `Object.keys(activeFilters).length` is an accurate
+                // trigger for the sibling widgets' live-run effect —
+                // otherwise clearing a filter would leave a stale
+                // `{ region: undefined }` entry, pass the length guard,
+                // and fire a spurious POST /run per widget even though
+                // JSON.stringify drops the undefined in the payload.
+                const next = { ...values };
+                const v = e.target.value;
+                if (v) next[key] = v;
+                else delete next[key];
+                onChange(next);
+              }}
               placeholder="(all)"
               style={{
                 padding: "2px 4px",
