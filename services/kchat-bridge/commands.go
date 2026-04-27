@@ -172,7 +172,7 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.dashboardDigest(ctx, req)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /reverse-stock-move, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /reverse-stock-move, /batch, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /help",
 		}, nil
 	default:
 		return CommandResponse{
