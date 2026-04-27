@@ -267,7 +267,7 @@ func (s *PGStore) SetBaseCurrency(ctx context.Context, id uuid.UUID, code string
 // because the engine treats empty as "no statutory pack" and a
 // tenant operator may legitimately want to opt out.
 func (s *PGStore) SetCountry(ctx context.Context, id uuid.UUID, code string) error {
-	if len(code) > 2 {
+	if code != "" && len(code) != 2 {
 		return errors.New("tenant: country must be ISO 3166-1 alpha-2 (or empty)")
 	}
 	tag, err := s.pool.Exec(ctx,

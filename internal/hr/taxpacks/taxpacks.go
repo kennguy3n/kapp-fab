@@ -15,6 +15,7 @@ package taxpacks
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -118,5 +119,6 @@ func RegisteredCountries() []string {
 	for c := range registry {
 		out = append(out, c)
 	}
+	sort.Strings(out)
 	return out
 }

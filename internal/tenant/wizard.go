@@ -252,7 +252,7 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 		// wizard payload; longer values fail closed rather than
 		// silently truncating.
 		if cfg.Country != "" {
-			if len(cfg.Country) > 2 {
+			if len(cfg.Country) != 2 {
 				return fmt.Errorf("tenant: wizard: country must be ISO 3166-1 alpha-2 (got %q)", cfg.Country)
 			}
 			if _, err := tx.Exec(ctx,
