@@ -346,7 +346,7 @@ func run() error {
 	agents.RegisterInventoryTools(executor, inventoryStore)
 	agents.RegisterInventoryReorderTool(executor, inventory.NewReorderHandler(recordStore, inventoryStore))
 	agents.RegisterHRTools(executor, hrStore)
-	agents.RegisterPayrollTools(executor, hr.NewPayrollEngine(recordStore, ledgerStore))
+	agents.RegisterPayrollTools(executor, hr.NewPayrollEngine(recordStore, ledgerStore).WithCountryResolver(tenantCountryResolver(tenantSvc)))
 	agents.RegisterLMSTools(executor, lmsStore)
 	agents.RegisterCertificateTool(executor, lms.NewCertificateIssuer(recordStore, pool))
 	agents.RegisterHelpdeskTools(executor, helpdeskStore)
@@ -458,7 +458,7 @@ func run() error {
 	// Phase J payroll engine — reuses the record store + ledger
 	// store so posted pay_runs ride the same JE / idempotency
 	// path as AR/AP.
-	hrh := &hrHandlers{engine: hr.NewPayrollEngine(recordStore, ledgerStore)}
+	hrh := &hrHandlers{engine: hr.NewPayrollEngine(recordStore, ledgerStore).WithCountryResolver(tenantCountryResolver(tenantSvc))}
 
 	// Phase H JWT auth. The signer is built from KAPP_JWT_SECRET; when
 	// the secret is absent we log and skip wiring the SSO endpoints so
@@ -1190,4 +1190,24 @@ func writeJSON(w http.ResponseWriter, code int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// tenantCountryResolver adapts *tenant.PGStore to the
+// hr.CountryResolver shape so the payroll engine can fetch a
+// tenant's ISO 3166-1 alpha-2 country code without importing the
+// tenant package directly. Lookup failures collapse to "" + nil
+// because the engine treats both as "no statutory pack" and we'd
+// rather fail-soft a slip than block payroll on a control-plane
+// hiccup.
+func tenantCountryResolver(svc *tenant.PGStore) hr.CountryResolver {
+	if svc == nil {
+		return nil
+	}
+	return func(ctx context.Context, tenantID uuid.UUID) (string, error) {
+		t, err := svc.Get(ctx, tenantID)
+		if err != nil {
+			return "", nil
+		}
+		return t.Country, nil
+	}
 }

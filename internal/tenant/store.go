@@ -55,10 +55,11 @@ func (s *PGStore) Create(ctx context.Context, input CreateInput) (*Tenant, error
 		`INSERT INTO tenants (id, slug, name, cell, status, plan, quota)
 		 VALUES ($1, $2, $3, $4, 'active', $5, $6)
 		 RETURNING id, slug, name, cell, status, plan, quota, created_at, updated_at,
-		           zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD')`,
+		           zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD'),
+		           COALESCE(country, '')`,
 		id, input.Slug, input.Name, input.Cell, input.Plan, quota,
 	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency)
+		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
@@ -76,10 +77,11 @@ func (s *PGStore) Get(ctx context.Context, id uuid.UUID) (*Tenant, error) {
 	var zkAccess, zkSecret, zkBucket *string
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at,
-		        zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD')
+		        zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD'),
+		        COALESCE(country, '')
 		 FROM tenants WHERE id = $1`, id,
 	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency)
+		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -96,10 +98,11 @@ func (s *PGStore) GetBySlug(ctx context.Context, slug string) (*Tenant, error) {
 	var zkAccess, zkSecret, zkBucket *string
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at,
-		        zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD')
+		        zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD'),
+		        COALESCE(country, '')
 		 FROM tenants WHERE slug = $1`, slug,
 	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency)
+		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -115,7 +118,8 @@ func (s *PGStore) GetBySlug(ctx context.Context, slug string) (*Tenant, error) {
 func (s *PGStore) List(ctx context.Context) ([]Tenant, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at,
-		        zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD')
+		        zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD'),
+		        COALESCE(country, '')
 		 FROM tenants
 		 ORDER BY slug ASC`)
 	if err != nil {
@@ -132,7 +136,7 @@ func (s *PGStore) List(ctx context.Context) ([]Tenant, error) {
 		if err := rows.Scan(
 			&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status,
 			&t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-			&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency,
+			&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country,
 		); err != nil {
 			return nil, fmt.Errorf("tenant: list scan: %w", err)
 		}
@@ -249,6 +253,29 @@ func (s *PGStore) SetBaseCurrency(ctx context.Context, id uuid.UUID, code string
 	)
 	if err != nil {
 		return fmt.Errorf("tenant: set base currency: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetCountry updates the tenant's ISO 3166-1 alpha-2 country code.
+// Called by the setup wizard once at provisioning time so the
+// payroll engine can resolve a per-country tax pack at slip
+// generation time. Empty strings are accepted (clears the country)
+// because the engine treats empty as "no statutory pack" and a
+// tenant operator may legitimately want to opt out.
+func (s *PGStore) SetCountry(ctx context.Context, id uuid.UUID, code string) error {
+	if len(code) > 2 {
+		return errors.New("tenant: country must be ISO 3166-1 alpha-2 (or empty)")
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE tenants SET country = $1, updated_at = now() WHERE id = $2`,
+		code, id,
+	)
+	if err != nil {
+		return fmt.Errorf("tenant: set country: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound

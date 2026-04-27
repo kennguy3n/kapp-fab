@@ -47,6 +47,15 @@ type Tenant struct {
 	// 000029. Used by PostJournalEntry to detect + auto-convert
 	// foreign-currency lines.
 	BaseCurrency string `json:"base_currency,omitempty"`
+
+	// Country is the ISO 3166-1 alpha-2 code for the tenant's
+	// statutory jurisdiction. Set by the setup wizard from
+	// SetupWizardConfig.Country. Empty on tenants created before
+	// migration 000046; the payroll engine treats empty as "no
+	// statutory pack" and skips automatic withholding so legacy
+	// tenants keep their existing slip totals until their operator
+	// flips a country code.
+	Country string `json:"country,omitempty"`
 }
 
 // HasZKFabric reports whether the tenant has been provisioned with

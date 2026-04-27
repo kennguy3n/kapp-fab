@@ -246,6 +246,23 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 			}
 		}
 
+		// Persist the tenant's statutory country so the payroll
+		// engine can resolve a per-country tax pack at slip
+		// generation. Stored as ISO 3166-1 alpha-2 to match the
+		// wizard payload; longer values fail closed rather than
+		// silently truncating.
+		if cfg.Country != "" {
+			if len(cfg.Country) > 2 {
+				return fmt.Errorf("tenant: wizard: country must be ISO 3166-1 alpha-2 (got %q)", cfg.Country)
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE tenants SET country = $1, updated_at = now() WHERE id = $2`,
+				cfg.Country, tenantID,
+			); err != nil {
+				return fmt.Errorf("tenant: persist country: %w", err)
+			}
+		}
+
 		// Seed the default per-tenant scheduled_actions rows the
 		// worker handlers expect (SLA breach sweeper +
 		// recurring-invoice generator). Idempotent on
