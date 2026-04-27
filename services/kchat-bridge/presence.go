@@ -320,12 +320,19 @@ func (h *PresenceHandler) evaluateLateArrival(
 	if err != nil || len(assignments) == 0 {
 		return false, "", 0, false
 	}
-	var shiftTypeID string
+	// Collect every non-cancelled assignment for this date. A
+	// single match is the common case (single shift); split-shift
+	// employees may have two or three (Morning + Evening + on-call
+	// in the pathological case). We deliberately do NOT break on
+	// first match because ListByField returns rows ordered by
+	// updated_at DESC, which means re-saving Morning would steal
+	// match priority away from a still-relevant Evening shift.
+	var shiftTypeIDs []string
 	for _, a := range assignments {
-		var data map[string]any
 		if a.Data == nil {
 			continue
 		}
+		var data map[string]any
 		if err := json.Unmarshal(a.Data, &data); err != nil {
 			continue
 		}
@@ -336,39 +343,109 @@ func (h *PresenceHandler) evaluateLateArrival(
 			continue
 		}
 		if id, _ := data["shift_type_id"].(string); id != "" {
-			shiftTypeID = id
-			break
+			shiftTypeIDs = append(shiftTypeIDs, id)
 		}
 	}
-	if shiftTypeID == "" {
+	if len(shiftTypeIDs) == 0 {
 		return false, "", 0, false
 	}
-	stID, err := uuid.Parse(shiftTypeID)
-	if err != nil {
-		return false, "", 0, false
+
+	// Resolve every candidate's start_time and pick the assignment
+	// whose start is the latest value <= the local check-in time
+	// (the "shift the employee just clocked in for"). If no shift
+	// has started yet — e.g. a 05:55 check-in for the day's first
+	// 06:00 Morning slot — fall through to the earliest upcoming
+	// shift so the standard grace-window late-arrival logic still
+	// fires correctly. This mirrors the calendar UI's
+	// indexAssignments sort (by start_time) so server-side
+	// detection and the operator-facing grid agree on which shift
+	// is "the" shift for a given check-in.
+	candidates := make([]shiftCandidate, 0, len(shiftTypeIDs))
+	for _, id := range shiftTypeIDs {
+		stID, perr := uuid.Parse(id)
+		if perr != nil {
+			continue
+		}
+		stRec, gerr := h.records.Get(ctx, tenantID, stID)
+		if gerr != nil || stRec == nil {
+			continue
+		}
+		var stData map[string]any
+		if jerr := json.Unmarshal(stRec.Data, &stData); jerr != nil {
+			continue
+		}
+		startStr, _ := stData["start_time"].(string)
+		if startStr == "" {
+			continue
+		}
+		shiftStart, sok := parseShiftStart(localDateKey, startStr, tz)
+		if !sok {
+			continue
+		}
+		candidates = append(candidates, shiftCandidate{StartStr: startStr, StartUTC: shiftStart})
 	}
-	stRec, err := h.records.Get(ctx, tenantID, stID)
-	if err != nil || stRec == nil {
-		return false, "", 0, false
-	}
-	var stData map[string]any
-	if err := json.Unmarshal(stRec.Data, &stData); err != nil {
-		return false, "", 0, false
-	}
-	startStr, _ := stData["start_time"].(string)
-	if startStr == "" {
-		return false, "", 0, false
-	}
-	shiftStart, ok := parseShiftStart(localDateKey, startStr, tz)
+	pick, ok := pickShiftForCheckIn(candidates, when.UTC())
 	if !ok {
 		return false, "", 0, false
 	}
+	startStr := pick.StartStr
+	shiftStart := pick.StartUTC
 	delta := when.UTC().Sub(shiftStart)
 	if delta <= time.Duration(graceMinutes)*time.Minute {
 		return false, startStr, 0, true
 	}
 	mins := int(delta / time.Minute)
 	return true, startStr, mins, true
+}
+
+// shiftCandidate carries the resolved start info for one of the
+// employee's same-day assignments. We collect every candidate up
+// front and let pickShiftForCheckIn choose the one closest to the
+// check-in time, rather than letting ListByField's updated_at DESC
+// ordering decide for us.
+type shiftCandidate struct {
+	StartStr string
+	StartUTC time.Time
+}
+
+// pickShiftForCheckIn returns the candidate the employee is most
+// likely clocking in for, given multiple same-day shifts:
+//
+//   - If any shift has already started (StartUTC <= checkInUTC),
+//     pick the most recent of those — this matches the "Evening
+//     started 5 min ago" intent over a Morning shift that ended
+//     hours earlier. tardyMinutes then computes against that
+//     start, which is what an HR operator expects to see on a
+//     split-shift employee.
+//
+//   - If no shift has started yet — i.e. the employee is early
+//     for the day's first shift — pick the earliest upcoming so
+//     the standard 5-minute grace window still triggers correctly
+//     for early arrivals.
+//
+// Returns ok=false on an empty input.
+func pickShiftForCheckIn(candidates []shiftCandidate, checkInUTC time.Time) (shiftCandidate, bool) {
+	var (
+		best     shiftCandidate
+		bestKind int // 0 = none yet, 1 = upcoming, 2 = started
+	)
+	for _, c := range candidates {
+		started := !c.StartUTC.After(checkInUTC)
+		switch {
+		case started && (bestKind != 2 || c.StartUTC.After(best.StartUTC)):
+			best = c
+			bestKind = 2
+		case !started && bestKind == 0:
+			best = c
+			bestKind = 1
+		case !started && bestKind == 1 && c.StartUTC.Before(best.StartUTC):
+			best = c
+		}
+	}
+	if bestKind == 0 {
+		return shiftCandidate{}, false
+	}
+	return best, true
 }
 
 // localCalendarDate returns the YYYY-MM-DD wall-clock date that

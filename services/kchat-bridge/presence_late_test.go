@@ -66,6 +66,100 @@ func TestLocalCalendarDateTenantTimezone(t *testing.T) {
 	}
 }
 
+// TestPickShiftForCheckInSplitShifts is the regression guard for
+// the PR #52 review pass that flagged evaluateLateArrival picking
+// shifts in ListByField order (updated_at DESC) rather than by
+// proximity to the check-in time. For split-shift employees a
+// recently re-saved Morning could steal match priority away from a
+// still-relevant Evening shift, producing tardy_minutes computed
+// against the wrong shift (e.g. 725 instead of 5 for an 18:05
+// check-in vs Evening 18:00 / Morning 06:00).
+//
+// pickShiftForCheckIn now selects:
+//   - the latest already-started shift relative to the check-in,
+//     so the "shift the employee just clocked in for" wins;
+//   - or the earliest upcoming shift when nothing has started
+//     yet, so an early-arrival grace window still fires.
+func TestPickShiftForCheckInSplitShifts(t *testing.T) {
+	dateKey := "2026-04-15"
+	mustStart := func(hhmm string) time.Time {
+		s, ok := parseShiftStart(dateKey, hhmm, "UTC")
+		if !ok {
+			t.Fatalf("parseShiftStart(%q): not ok", hhmm)
+		}
+		return s
+	}
+	morning := shiftCandidate{StartStr: "06:00", StartUTC: mustStart("06:00")}
+	evening := shiftCandidate{StartStr: "18:00", StartUTC: mustStart("18:00")}
+	overnight := shiftCandidate{StartStr: "22:00", StartUTC: mustStart("22:00")}
+
+	cases := []struct {
+		name    string
+		input   []shiftCandidate
+		checkIn string // RFC3339 UTC
+		want    string // wanted StartStr; empty = ok=false
+	}{
+		{
+			name:    "split shift, 18:05 check-in picks Evening over Morning",
+			input:   []shiftCandidate{morning, evening},
+			checkIn: "2026-04-15T18:05:00Z",
+			want:    "18:00",
+		},
+		{
+			name:    "split shift, list ordering reversed (updated_at DESC simulation) still picks Evening",
+			input:   []shiftCandidate{evening, morning}, // morning re-saved most recently
+			checkIn: "2026-04-15T18:05:00Z",
+			want:    "18:00",
+		},
+		{
+			name:    "split shift, 06:05 check-in picks Morning, not Evening",
+			input:   []shiftCandidate{morning, evening},
+			checkIn: "2026-04-15T06:05:00Z",
+			want:    "06:00",
+		},
+		{
+			name:    "early arrival before any shift starts picks earliest upcoming",
+			input:   []shiftCandidate{evening, morning, overnight},
+			checkIn: "2026-04-15T05:55:00Z",
+			want:    "06:00",
+		},
+		{
+			name:    "single shift unchanged behaviour",
+			input:   []shiftCandidate{morning},
+			checkIn: "2026-04-15T06:05:00Z",
+			want:    "06:00",
+		},
+		{
+			name:    "empty candidates -> ok=false",
+			input:   nil,
+			checkIn: "2026-04-15T06:05:00Z",
+			want:    "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			checkIn, err := time.Parse(time.RFC3339, tc.checkIn)
+			if err != nil {
+				t.Fatalf("invalid checkIn: %v", err)
+			}
+			got, ok := pickShiftForCheckIn(tc.input, checkIn)
+			if tc.want == "" {
+				if ok {
+					t.Fatalf("expected ok=false; got %v", got)
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("expected ok=true with StartStr=%s", tc.want)
+			}
+			if got.StartStr != tc.want {
+				t.Fatalf("StartStr = %s; want %s", got.StartStr, tc.want)
+			}
+		})
+	}
+}
+
 // TestParseShiftStartTenantTimezone is the regression guard for
 // the PR #52 review finding that evaluateLateArrival parsed
 // shift_type.start_time as UTC, ignoring the tenant's wall-clock
