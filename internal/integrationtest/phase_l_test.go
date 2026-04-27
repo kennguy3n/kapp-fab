@@ -1022,3 +1022,54 @@ func TestInsightsRunSavedFeatureGateBlocksSQLMode(t *testing.T) {
 		t.Fatalf("RunSaved returned no rows: %#v", out)
 	}
 }
+
+// TestInsightsRunRawSQLRejectsDML is the regression guard for
+// the PR #50 review finding that RunRawSQL ran user-supplied SQL
+// inside a read-write transaction, letting an enterprise tenant
+// commit DML (DELETE / UPDATE / INSERT) against any RLS-scoped
+// table reachable from their session. The fix pins the tx to
+// SET TRANSACTION READ ONLY immediately after the statement_timeout
+// guard, so DML bubbles up as a pgx error containing the
+// PostgreSQL "read-only" string before it can mutate any rows.
+//
+// Strategy: seed a sentinel saved query, attempt three single-
+// statement mutations via RunRawSQL — UPDATE, DELETE, INSERT —
+// and assert each one returns a read-only error. Re-read the
+// saved row to confirm none of the attempts partially committed.
+func TestInsightsRunRawSQLRejectsDML(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, queries, _, _, runner := newTenantForInsights(t, h)
+
+	saved := makeCountQuery(t, ctx, queries, tn.ID, 60)
+	originalName := saved.Name
+
+	cases := []struct {
+		label string
+		sql   string
+	}{
+		{"update", "UPDATE insights_queries SET name = 'pwned'"},
+		{"delete", "DELETE FROM insights_queries WHERE 1 = 1"},
+		{"insert", "INSERT INTO insights_queries (id, tenant_id, name, definition, mode, raw_sql) VALUES (gen_random_uuid(), gen_random_uuid(), 'x', '{}'::jsonb, 'visual', '')"},
+	}
+	for _, c := range cases {
+		_, err := runner.RunRawSQL(ctx, tn.ID, c.sql, nil)
+		if err == nil {
+			t.Fatalf("RunRawSQL %s: nil error; want read-only failure", c.label)
+		}
+		msg := strings.ToLower(err.Error())
+		if !strings.Contains(msg, "read-only") && !strings.Contains(msg, "read only") {
+			t.Fatalf("RunRawSQL %s error = %v; want a read-only message", c.label, err)
+		}
+	}
+
+	// Confirm the saved query is unchanged — none of the
+	// attempted DML partially committed.
+	reloaded, err := queries.Get(ctx, tn.ID, saved.ID)
+	if err != nil {
+		t.Fatalf("reload saved query: %v", err)
+	}
+	if reloaded.Name != originalName {
+		t.Fatalf("saved query name = %q; want %q (DML leaked through read-only fence)", reloaded.Name, originalName)
+	}
+}

@@ -58,3 +58,18 @@ ALTER TABLE insights_queries
 
 CREATE INDEX IF NOT EXISTS insights_queries_mode_idx
     ON insights_queries (tenant_id, mode);
+
+-- Backfill tenant_features for existing tenants so the
+-- insights_sql_editor flag is explicit. FeatureStore.IsEnabled
+-- defaults missing rows to true (so a newly added flag doesn't
+-- require a backfill *for new flags meant to be on*), so without
+-- this INSERT every pre-existing business / starter / free tenant
+-- with insights=true would silently inherit SQL editor access on
+-- the first deploy of this migration. Enterprise tenants get
+-- `enabled=true`; everyone else gets `false`. ON CONFLICT DO
+-- NOTHING preserves any operator override (e.g. a beta tester
+-- granted SQL access on a business plan).
+INSERT INTO tenant_features (tenant_id, feature_key, enabled)
+SELECT id, 'insights_sql_editor', (plan = 'enterprise')
+FROM tenants
+ON CONFLICT (tenant_id, feature_key) DO NOTHING;

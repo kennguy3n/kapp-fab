@@ -399,6 +399,20 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 				return fmt.Errorf("insights: set statement_timeout: %w", err)
 			}
 		}
+		// Pin the transaction read-only before running user SQL.
+		// dbutil.WithTenantTx opens a read-write transaction and
+		// commits on success — without this guard, an enterprise
+		// user submitting `DELETE FROM crm_deals` (or any DML
+		// against an RLS-scoped table) would have the change
+		// persist. RLS bounds the blast radius to the caller's own
+		// tenant, but the editor's stated purpose is read-only ad
+		// hoc analysis, so PostgreSQL should reject DML/DDL with
+		// `cannot execute X in a read-only transaction` and surface
+		// it as a 400 rather than a silent commit. Visual runner
+		// has its own callback path and is unaffected.
+		if _, err := tx.Exec(ctx, "SET TRANSACTION READ ONLY"); err != nil {
+			return fmt.Errorf("insights: set transaction read only: %w", err)
+		}
 		pgxRows, err := tx.Query(ctx, rawSQL, params...)
 		if err != nil {
 			return fmt.Errorf("insights: execute raw sql: %w", err)
