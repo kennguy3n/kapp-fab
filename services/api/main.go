@@ -332,7 +332,8 @@ func run() error {
 	insightsExternal := insights.NewExternalRunner(insightsDataSources, insightsPools)
 	insightsRunner = insightsRunner.
 		WithExternal(insightsExternal).
-		WithPlanGate(tenantPlanLookup{store: tenantSvc}, tenant.MaxJoinsForPlan)
+		WithPlanGate(tenantPlanLookup{store: tenantSvc}, tenant.MaxJoinsForPlan).
+		WithFeaturePolicy(featureStore)
 	insightsEmbeds := insights.NewEmbedStore(pool, adminPool)
 
 	// Agent tool executor — Phase B wires the CRM / tasks / approvals
@@ -429,6 +430,7 @@ func run() error {
 		queries:    insightsQueryStore,
 		dashboards: insightsDashboardStore,
 		runner:     insightsRunner,
+		features:   featureStore,
 	}
 	insdsh := &insightsDataSourceHandlers{
 		store:    insightsDataSources,

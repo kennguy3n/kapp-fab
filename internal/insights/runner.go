@@ -37,6 +37,29 @@ type PlanLookup interface {
 	PlanForTenant(ctx context.Context, tenantID uuid.UUID) (string, error)
 }
 
+// FeaturePolicy resolves whether a feature flag is enabled for a
+// tenant. Implemented by tenant.FeatureStore in production. Kept as
+// an interface so the insights package can gate the SQL-mode
+// dispatch without importing internal/tenant (which would form an
+// import cycle through the agent tools).
+//
+// Used by RunSaved to backstop the createQuery / updateQuery gate
+// in services/api/insights_handlers.go: even if a SQL-mode row is
+// already persisted (e.g. from before the feature was disabled, or
+// from an admin downgrade), every consumer of RunSaved
+// (dashboard fan-out, cache refresh worker, agent tools, kchat
+// /insight) refuses to dispatch it for a tenant that no longer
+// holds the `insights_sql_editor` flag.
+type FeaturePolicy interface {
+	IsEnabled(ctx context.Context, tenantID uuid.UUID, featureKey string) (bool, error)
+}
+
+// FeatureKeyInsightsSQLEditor mirrors the tenant package's constant.
+// Duplicated here to keep this package free of an internal/tenant
+// import. Kept in lock-step via the integration test that exercises
+// both surfaces against the same tenant.
+const FeatureKeyInsightsSQLEditor = "insights_sql_editor"
+
 // Runner executes insights queries with cache-awareness and per-tenant
 // statement timeouts. It wraps reporting.Runner so the underlying
 // query grammar (sources, filters, aggregations, sort, limit) is the
@@ -49,6 +72,7 @@ type Runner struct {
 	external  *ExternalRunner
 	plans     PlanLookup
 	joinLimit func(plan string) int
+	features  FeaturePolicy
 	timeout   time.Duration
 	maxRows   int
 }
@@ -92,6 +116,17 @@ func (r *Runner) WithExternal(ext *ExternalRunner) *Runner {
 func (r *Runner) WithPlanGate(plans PlanLookup, joinLimit func(plan string) int) *Runner {
 	r.plans = plans
 	r.joinLimit = joinLimit
+	return r
+}
+
+// WithFeaturePolicy wires the FeaturePolicy used by RunSaved to
+// reject SQL-mode dispatches when the tenant lacks
+// insights_sql_editor. When nil, RunSaved trusts the upstream
+// gate at the create/update boundary; the test harness uses this
+// to keep deeply mocked runners working without a tenant_features
+// table. See FeaturePolicy's docstring for the threat model.
+func (r *Runner) WithFeaturePolicy(p FeaturePolicy) *Runner {
+	r.features = p
 	return r
 }
 
@@ -277,6 +312,23 @@ func (r *Runner) RunSaved(ctx context.Context, tenantID, queryID uuid.UUID, filt
 	// fingerprint scheme (raw text + params) and is tracked
 	// outside this hotfix.
 	if q.Mode == QueryModeSQL {
+		// Belt-and-suspenders gate: createQuery / updateQuery in
+		// services/api/insights_handlers.go reject a SQL-mode body
+		// from a tenant without insights_sql_editor, but a tenant
+		// that was downgraded after persisting a SQL-mode row
+		// would otherwise still execute it through any RunSaved
+		// caller. Refuse here so the gate covers the dashboard
+		// fan-out, the cache refresh worker, every agent tool, and
+		// the kchat /insight slash command in a single check.
+		if r.features != nil {
+			ok, ferr := r.features.IsEnabled(ctx, tenantID, FeatureKeyInsightsSQLEditor)
+			if ferr != nil {
+				return nil, fmt.Errorf("feature lookup: %w", ferr)
+			}
+			if !ok {
+				return nil, fmt.Errorf("%w: %s", ErrFeatureDisabled, FeatureKeyInsightsSQLEditor)
+			}
+		}
 		return r.RunRawSQL(ctx, tenantID, q.RawSQL, nil)
 	}
 	// q.CacheTTLSeconds is always non-nil after QueryStore.Get

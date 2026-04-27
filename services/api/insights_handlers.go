@@ -12,6 +12,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
 
 // insightsHandlers exposes Phase L BI surfaces under
@@ -22,6 +23,37 @@ type insightsHandlers struct {
 	queries    *insights.QueryStore
 	dashboards *insights.DashboardStore
 	runner     *insights.Runner
+	// features lets createQuery / updateQuery enforce the
+	// `insights_sql_editor` flag when the request body opts into
+	// SQL mode. Nil-tolerant: if the handler was constructed
+	// without it (e.g. a test harness that doesn't apply the
+	// tenant_features migration), the SQL-mode gate degrades to
+	// "allow" — the dynamic FeatureMiddleware on the /run-sql
+	// route still backstops execution.
+	features *tenant.FeatureStore
+}
+
+// gateSQLMode returns true when the request opts into SQL mode and
+// the tenant lacks the `insights_sql_editor` flag, after also
+// emitting the canonical 403 envelope. Returning early keeps the
+// caller's body terse: `if h.gateSQLMode(...) { return }`.
+func (h *insightsHandlers) gateSQLMode(w http.ResponseWriter, r *http.Request, t *tenant.Tenant, mode string) bool {
+	if mode != insights.QueryModeSQL {
+		return false
+	}
+	if h.features == nil {
+		return false
+	}
+	enabled, err := h.features.IsEnabled(r.Context(), t.ID, tenant.FeatureInsightsSQLEditor)
+	if err != nil {
+		http.Error(w, "feature lookup failed", http.StatusInternalServerError)
+		return true
+	}
+	if !enabled {
+		platform.WriteFeatureDisabled(w, tenant.FeatureInsightsSQLEditor)
+		return true
+	}
+	return false
 }
 
 // ---------- Queries ----------
@@ -66,6 +98,9 @@ func (h *insightsHandlers) createQuery(w http.ResponseWriter, r *http.Request) {
 	var req insightsQueryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if h.gateSQLMode(w, r, t, req.Mode) {
 		return
 	}
 	actor := actorOrDefault(r.Context())
@@ -119,6 +154,9 @@ func (h *insightsHandlers) updateQuery(w http.ResponseWriter, r *http.Request) {
 	var req insightsQueryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if h.gateSQLMode(w, r, t, req.Mode) {
 		return
 	}
 	saved, err := h.queries.Update(r.Context(), insights.Query{
@@ -603,6 +641,12 @@ func writeInsightsError(w http.ResponseWriter, err error) {
 		// Validate() — surface as 400 so clients can correct their
 		// payload instead of seeing a misleading 500.
 		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, insights.ErrFeatureDisabled):
+		// Runner-level SQL-mode gate (RunSaved → FeaturePolicy):
+		// surface with the canonical feature-disabled envelope so
+		// the React shell upgrade banner can react identically to
+		// the route-level FeatureMiddleware.
+		platform.WriteFeatureDisabled(w, tenant.FeatureInsightsSQLEditor)
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		// Statement timeout / Go context cancellation — DB-side
 		// budget exhausted, surface as 504 so a retry-with-tighter-

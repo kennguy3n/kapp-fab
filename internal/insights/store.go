@@ -25,6 +25,12 @@ var (
 	// to message-string matching. Wrap with fmt.Errorf("%w: …", or use
 	// validationErr below.
 	ErrValidation = errors.New("insights: validation")
+	// ErrFeatureDisabled fires when the runner refuses to dispatch a
+	// SQL-mode query for a tenant that no longer holds the
+	// `insights_sql_editor` flag. Distinct from ErrValidation so the
+	// HTTP layer can surface it as 403 with the canonical
+	// `feature_disabled` envelope rather than 400.
+	ErrFeatureDisabled = errors.New("insights: feature disabled")
 )
 
 // validationErr wraps a free-form message as an ErrValidation-tagged

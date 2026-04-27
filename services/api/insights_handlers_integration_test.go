@@ -139,3 +139,127 @@ func TestInsightsCreateUpdateQueryRoundTripsSQLMode(t *testing.T) {
 		t.Fatalf("update response RawSQL = %q; want empty (regression: handler retained stale raw_sql on visual update)", updated.RawSQL)
 	}
 }
+
+// TestInsightsCreateQueryGatesSQLModeOnFeatureFlag is the regression
+// guard for the second Phase M Task 1 review finding: createQuery /
+// updateQuery accepted a mode='sql' body from a non-enterprise
+// tenant who only had `insights=true`, persisting a SQL-mode row
+// the gate at /run-sql wouldn't see (because RunSaved bypassed it).
+//
+// Strategy: provision a business-tier tenant, seed
+// insights_sql_editor=false, post a SQL-mode body and assert 403
+// with the canonical `feature: insights_sql_editor` envelope. Then
+// flip the flag on and assert the same payload now returns 201.
+// updateQuery is exercised in turn against the previously-persisted
+// row to confirm the gate fires on the put path too.
+func TestInsightsCreateQueryGatesSQLModeOnFeatureFlag(t *testing.T) {
+	pool := openIntegrationPool(t, "KAPP_TEST_DB_URL")
+	ctx := context.Background()
+
+	tenants := tenant.NewPGStore(pool)
+	tn, err := tenants.Create(ctx, tenant.CreateInput{
+		Slug: "ins-h-gate-" + uuid.NewString()[:8], Name: "ins gate", Cell: "test", Plan: "business",
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+
+	queries := insights.NewQueryStore(pool)
+	features := tenant.NewFeatureStore(pool)
+	if err := features.SetFeatures(ctx, tn.ID, map[string]bool{tenant.FeatureInsightsSQLEditor: false}); err != nil {
+		t.Fatalf("seed sql editor=false: %v", err)
+	}
+	dashboards := insights.NewDashboardStore(pool)
+	runner := insights.NewRunner(pool, insights.NewCacheStore(pool), queries, nil)
+	h := &insightsHandlers{
+		queries:    queries,
+		dashboards: dashboards,
+		runner:     runner,
+		features:   features,
+	}
+
+	r := chi.NewRouter()
+	r.Route("/q", func(r chi.Router) {
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				next.ServeHTTP(w, req.WithContext(platform.WithTenant(req.Context(), tn)))
+			})
+		})
+		r.Post("/", h.createQuery)
+		r.Put("/{id}", h.updateQuery)
+		r.Get("/{id}", h.getQuery)
+	})
+
+	sqlBody := `{
+		"name": "gate-test",
+		"definition": {"source": "ktype:insights.placeholder"},
+		"mode": "sql",
+		"raw_sql": "SELECT 1::int AS one"
+	}`
+
+	// Disabled: 403 with the canonical envelope.
+	req := httptest.NewRequest(http.MethodPost, "/q/", strings.NewReader(sqlBody))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("create with sql editor disabled: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var env map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode 403 envelope: %v", err)
+	}
+	if env["feature"] != tenant.FeatureInsightsSQLEditor {
+		t.Fatalf("403 envelope feature = %v; want %s", env["feature"], tenant.FeatureInsightsSQLEditor)
+	}
+
+	// A visual-mode payload from the same tenant must still pass —
+	// the gate only fires when the request opts into SQL mode.
+	visualBody := `{
+		"name": "gate-test-visual",
+		"definition": {"source": "ktype:insights.placeholder"},
+		"mode": "visual"
+	}`
+	rr = httptest.NewRecorder()
+	r.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/q/", strings.NewReader(visualBody)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create visual with sql editor disabled: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var visual insights.Query
+	if err := json.Unmarshal(rr.Body.Bytes(), &visual); err != nil {
+		t.Fatalf("decode visual: %v", err)
+	}
+
+	// Enable the flag and the SQL payload now succeeds.
+	if err := features.SetFeatures(ctx, tn.ID, map[string]bool{tenant.FeatureInsightsSQLEditor: true}); err != nil {
+		t.Fatalf("enable sql editor: %v", err)
+	}
+	rr = httptest.NewRecorder()
+	r.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/q/", strings.NewReader(sqlBody)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create with sql editor enabled: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var saved insights.Query
+	if err := json.Unmarshal(rr.Body.Bytes(), &saved); err != nil {
+		t.Fatalf("decode created sql-mode: %v", err)
+	}
+
+	// updateQuery must fire the same gate. Disable the flag,
+	// attempt to flip the existing visual row to SQL: 403.
+	if err := features.SetFeatures(ctx, tn.ID, map[string]bool{tenant.FeatureInsightsSQLEditor: false}); err != nil {
+		t.Fatalf("re-disable sql editor: %v", err)
+	}
+	upBody := `{
+		"name": "gate-test-visual",
+		"definition": {"source": "ktype:insights.placeholder"},
+		"mode": "sql",
+		"raw_sql": "SELECT 1::int AS one"
+	}`
+	upReq := httptest.NewRequest(http.MethodPut, "/q/"+visual.ID.String(), strings.NewReader(upBody))
+	upReq.Header.Set("Content-Type", "application/json")
+	upRR := httptest.NewRecorder()
+	r.ServeHTTP(upRR, upReq)
+	if upRR.Code != http.StatusForbidden {
+		t.Fatalf("update with sql editor disabled: code=%d body=%s", upRR.Code, upRR.Body.String())
+	}
+}

@@ -970,3 +970,55 @@ func TestInsightsRunSavedDispatchesSQLMode(t *testing.T) {
 		t.Fatalf("RunSaved magic = %v (%T); want int32(7)", row["magic"], row["magic"])
 	}
 }
+
+// TestInsightsRunSavedFeatureGateBlocksSQLMode is the regression
+// guard for the Phase M Task 1 review finding that RunSaved would
+// dispatch SQL-mode queries to RunRawSQL without checking the
+// `insights_sql_editor` feature flag, letting a non-enterprise
+// tenant who'd had a SQL-mode row persisted (e.g. before downgrade)
+// continue to execute it via every RunSaved consumer (dashboard
+// fan-out, cache worker, agent tools, /insight slash command).
+//
+// Strategy: wire the runner with the FeaturePolicy backed by
+// FeatureStore, persist a SQL-mode row, then disable
+// insights_sql_editor and assert RunSaved returns ErrFeatureDisabled.
+// Re-enabling the flag must restore execution.
+func TestInsightsRunSavedFeatureGateBlocksSQLMode(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, queries, _, _, runner := newTenantForInsights(t, h)
+	features := tenant.NewFeatureStore(h.pool)
+	runner = runner.WithFeaturePolicy(features)
+
+	saved, err := queries.Create(ctx, insights.Query{
+		TenantID: tn.ID,
+		Name:     "RunSaved gate " + uuid.NewString()[:6],
+		Mode:     insights.QueryModeSQL,
+		RawSQL:   "SELECT 1::int AS one",
+	})
+	if err != nil {
+		t.Fatalf("create sql-mode query: %v", err)
+	}
+
+	// Disable the feature: RunSaved must refuse with ErrFeatureDisabled.
+	if err := features.SetFeatures(ctx, tn.ID, map[string]bool{tenant.FeatureInsightsSQLEditor: false}); err != nil {
+		t.Fatalf("disable sql editor: %v", err)
+	}
+	if _, err := runner.RunSaved(ctx, tn.ID, saved.ID, nil, true); err == nil {
+		t.Fatalf("RunSaved with feature disabled: nil error; want ErrFeatureDisabled")
+	} else if !errors.Is(err, insights.ErrFeatureDisabled) {
+		t.Fatalf("RunSaved error = %v; want ErrFeatureDisabled", err)
+	}
+
+	// Re-enable the feature: same call must succeed.
+	if err := features.SetFeatures(ctx, tn.ID, map[string]bool{tenant.FeatureInsightsSQLEditor: true}); err != nil {
+		t.Fatalf("enable sql editor: %v", err)
+	}
+	out, err := runner.RunSaved(ctx, tn.ID, saved.ID, nil, true)
+	if err != nil {
+		t.Fatalf("RunSaved with feature enabled: %v", err)
+	}
+	if out == nil || out.Result == nil || len(out.Result.Rows) == 0 {
+		t.Fatalf("RunSaved returned no rows: %#v", out)
+	}
+}
