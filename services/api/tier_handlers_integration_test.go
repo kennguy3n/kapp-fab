@@ -138,7 +138,7 @@ func TestTierUpgradeCopiesEveryTable(t *testing.T) {
 		t.Fatalf("seed B: %v", err)
 	}
 
-	schemaName := tierSchemaName(tnA.ID)
+	schemaName := tenant.SchemaName(tnA.ID)
 	if err := tenant.Promote(ctx, adminPool, tnA.ID, schemaName); err != nil {
 		t.Fatalf("promote tenant A: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestTierUpgradeCopiesEveryTable(t *testing.T) {
 	// Every tenant-scoped table the API knows about must exist in the
 	// dedicated schema. The admin pool inspection bypasses RLS so the
 	// row counts reflect the canonical state.
-	for _, table := range tierUpgradeTables {
+	for _, table := range tenant.TenantScopedTables {
 		var exists bool
 		if err := adminPool.QueryRow(ctx,
 			`SELECT EXISTS (
@@ -246,11 +246,11 @@ func TestTierUpgradeTablesMatchBackupSourceList(t *testing.T) {
 			backup = append(backup, line)
 		}
 	}
-	upgrade := append([]string{}, tierUpgradeTables...)
+	upgrade := append([]string{}, tenant.TenantScopedTables...)
 	sort.Strings(upgrade)
 	sort.Strings(backup)
 	if strings.Join(upgrade, ",") != strings.Join(backup, ",") {
-		t.Fatalf("tierUpgradeTables drifted from kapp-backup TenantScopedTables\nupgrade:\n  %s\nbackup:\n  %s",
+		t.Fatalf("tenant.TenantScopedTables drifted from kapp-backup TenantScopedTables\nupgrade:\n  %s\nbackup:\n  %s",
 			strings.Join(upgrade, "\n  "), strings.Join(backup, "\n  "))
 	}
 }

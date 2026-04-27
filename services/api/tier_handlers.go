@@ -23,13 +23,6 @@ const (
 	tierTargetDB     = "dedicated_db"
 )
 
-// tierUpgradeTables is a thin alias over tenant.TenantScopedTables so
-// the integration test that asserts byte-identity with the
-// kapp-backup slice keeps working without churn. The canonical list
-// now lives in internal/tenant/tier.go alongside the Promote
-// function that consumes it.
-var tierUpgradeTables = tenant.TenantScopedTables
-
 // tierUpgradeHandlers wraps the tier-upgrade HTTP surface. It mirrors
 // scripts/upgrade_tier.sh but as a REST endpoint so operators can
 // promote a tenant from a runbook without shelling into the database
@@ -111,13 +104,3 @@ func (h *tierUpgradeHandlers) upgrade(w http.ResponseWriter, r *http.Request) {
 	_ = t // tenant payload unused — kept for the .Get nil-check above.
 }
 
-// tierSchemaName is preserved as a thin alias over tenant.SchemaName
-// for the existing test fixtures and the few internal callers that
-// referenced it before the extraction. New code should call
-// tenant.SchemaName directly.
-func tierSchemaName(id uuid.UUID) string { return tenant.SchemaName(id) }
-
-// isSafeIdentifier mirrors tenant.IsSafeIdentifier so the legacy
-// API-package callers (the integration test fixtures, the audit
-// payload formatter) keep compiling without an explicit import.
-func isSafeIdentifier(s string) bool { return tenant.IsSafeIdentifier(s) }
