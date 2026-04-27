@@ -1,6 +1,6 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2026-04-25 (Phase J/K platform slice: per-tenant ZK Object Fabric placement policy — wizard seeds plan-derived policy, console PUT /api/tenants/{id}/placement, LRU-bounded per-tenant S3 store with on-evict idle-conn close, `/api/v1/tenants/{id}/placement` plan-gated CRUD + frontend editor; multi-currency posting auto-converts foreign-currency journal lines on `PostJournalEntry` and stores both original + base amounts, scheduled `unrealized_gain_loss` job revalues open AR/AP, dashboard summary converts KPI values to base currency; helpdesk inbound email handler + `/ticket-from-thread` KChat slash command + Create Ticket composer action wire incoming mail and chat threads into `helpdesk.ticket` records with SLA auto-resolution; data retention policies (per-tenant, per-category) with daily sweeper and isolation runtime audit (RLS coverage, cross-tenant probe, audit hash-chain, GUC enforcement); 5000-tenant load test harness with mixed workloads + ZK fabric routing assertions; disaster-recovery runbook covering backup/restore, tier upgrade, region failover, key rotation, ZK fabric migration, and chaos drills.)
+> **Last Updated:** 2026-04-26 (Phase L Insights frontend + Phase G performance + tier-upgrade API: visual query builder + dashboard builder pages with Recharts visualizations (table/bar/line/pie/donut/funnel/number_card/pivot), insights ShareModal with grantee + permission picker, full ApiClient wiring; `internal/agents/insights_tools.go` adds `insights.generate_query` / `insights.explain_result` / `insights.post_dashboard_digest`; `services/kchat-bridge` adds `/insight` + `/dashboard-digest` slash commands and dashboard right-pane render endpoint; `services/worker/insights_cache.go` registers `query_cache_refresh` scheduled action seeded by the wizard for FeatureInsights plans; `migrations/000039_insights_indexes.sql` adds composite indexes for dashboard digest, widget→query reverse lookup, case-insensitive name resolution, and grantee→resource authz; new `POST /api/v1/admin/tenants/{id}/upgrade-tier` admin endpoint replaces `scripts/upgrade_tier.sh` with a single-transaction copy + audit-log entry; `docs/PERFORMANCE_TUNING.md` documents partition-pruning EXPLAIN ANALYZE evidence and outbox batch-size tuning.)
 >
 > Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [SECURITY_REVIEW.md](./docs/SECURITY_REVIEW.md)
 
@@ -8,8 +8,8 @@
 
 ## Current Phase
 
-**Phase J — Platform polish + Phase K — DR/scale**
-**Status:** Phase I complete (PR #24). Phase J feature slice complete: scheduled actions framework (PR #27), credit-limit enforcement (PR #28), helpdesk SLA breach sweeper (PR #29), recurring invoice generator (PR #30), payment terms templates (PR #31), full payroll engine with idempotent PostPayRun (PRs #32/#33/#34), per-tenant feature flags + inventory reorder automation + Redis-backed distributed rate limiting + tenant resource metering (PR #35), bulk actions + full-text search + webhook management + print/PDF + helpdesk customer portal (PR #36), ZK Object Fabric integration + per-tenant feature gating + Redis rate-limit fix + reorder integration test + daily usage snapshot (PR #37). Phase J/K cont. (PR #38): ZK fabric per-tenant placement policy with LRU-bounded routing, multi-currency journal posting + dashboard conversion + unrealized gain/loss job, helpdesk inbound email + KChat thread-to-ticket automation, data retention policies + tenant isolation runtime audit, 5000-tenant load test harness + DR runbook. **Phase K platform follow-up (this PR):** report scheduling + email delivery, saved-report sharing with role-based visibility, stock move reversal, per-tenant data export job framework, LMS course-completion certificates, security review §9–§15, operator + developer + KType authoring guides. Next focus: Phase K acceptance criteria (5000-tenant SLO sign-off, DR drill execution, customer-portal hardening).
+**Phase L — Insights (frontend + agent + KChat) + Phase G — performance / tier upgrade**
+**Status:** Phase L backend complete in PR #41. **This PR** lands the Phase L frontend + agent + KChat surfaces and the remaining Phase G items: visual query builder (`apps/web/src/pages/InsightsQueryBuilderPage.tsx`) with source picker, drag-and-drop columns, filter builder, aggregation config, calculated columns, live preview; dashboard builder (`apps/web/src/pages/InsightsDashboardPage.tsx`) with grid layout, widget config panels, linked filters, and auto-refresh; eight Recharts-based visualizations (`apps/web/src/components/insights/Charts.tsx`); reusable share modal (`apps/web/src/components/insights/ShareModal.tsx`); `DELETE /api/v1/insights/{queries,dashboards}/{id}/shares/{shareID}` endpoint; `internal/agents/insights_tools.go` registers three insights tools (generate / explain / digest); `services/kchat-bridge` adds `/insight` + `/dashboard-digest` slash commands and a dashboard right-pane render endpoint; `services/worker/insights_cache.go` registers `query_cache_refresh` seeded by the wizard for FeatureInsights plans; `migrations/000039_insights_indexes.sql` closes the index audit; `POST /api/v1/admin/tenants/{id}/upgrade-tier` replaces `scripts/upgrade_tier.sh`; `docs/PERFORMANCE_TUNING.md` documents EXPLAIN ANALYZE evidence + outbox batch tuning. Next focus: Phase L acceptance — running the 5k load test, validating the upgrade endpoint against a real tenant, AI-query NL → QueryDefinition refinement.
 
 ---
 
@@ -346,11 +346,11 @@ Production readiness across all shipped modules.
 - [x] Per-tenant observability (`internal/platform/metrics.go` — Prometheus-text-format registry with counter/histogram/gauge vectors; `MetricsMiddleware` labels every request with `{tenant_id, method, path, status}`; default buckets span 500µs–10s for both control-plane and import paths; no new external dependencies)
 - [x] Backup and restore tooling (`services/kapp-backup/main.go` — per-tenant JSONL extract + restore with optional tenant-id remap; table list mirrored in `scripts/upgrade_tier.sh`)
 - [x] Security review (`docs/SECURITY_REVIEW.md` — 8-section checklist covering RLS coverage, agent-tool workflow enforcement, encryption round-trip, cross-tenant leakage, rate-limiter/LRU idle eviction, context-switching benchmark)
-- [x] Upgrade tier tooling — shared-→-dedicated-schema path (`scripts/upgrade_tier.sh` — single-transaction copy of every tenant-scoped row into `tenant_<uuid>.*` and routing update; dedicated-DB / dedicated-cell tiers remain a follow-up)
+- [x] Upgrade tier tooling — shared-→-dedicated-schema path: shell script (`scripts/upgrade_tier.sh`) plus admin-only API endpoint (`POST /api/v1/admin/tenants/{id}/upgrade-tier` in `services/api/tier_handlers.go`) that runs the same single-transaction copy of every tenant-scoped row into `tenant_<uuid>.*` and emits a `tenant.tier_upgrade` audit entry; dedicated-DB / dedicated-cell tiers remain a follow-up handled by the cell-router
 - [x] Multi-tenancy benchmarks (zero-idle-cost in `internal/integrationtest/bench_idle_test.go`; sub-ms context switching in `bench_switching_test.go`; 1000-tenant load harness in `internal/integrationtest/loadtest/harness.go`)
 - [ ] Cell autoscaling policies
 - [x] Disaster recovery runbook and chaos drills (PR #38, `docs/DR_RUNBOOK.md` — backup/restore, tier upgrade, region failover, key rotation, ZK fabric migration, chaos drill checklist)
-- [ ] Performance tuning: index review, partition pruning, outbox batch sizing
+- [x] Performance tuning: index review, partition pruning, outbox batch sizing (`migrations/000039_insights_indexes.sql` adds composite indexes for cache-recent / widget-query reverse / case-insensitive name / grantee→resource paths; `docs/PERFORMANCE_TUNING.md` documents EXPLAIN ANALYZE evidence for partition pruning on krecords / events / audit_log under tenant-scoped GUC and rationalises the worker `drainBatch=100` + 1 s tick interval against 5k-tenant p99 outbox-lag findings)
 - [x] Load test: 5000 tenants on a single cell with baseline SLOs met (PR #38, `internal/integrationtest/loadtest/harness.go` mixed CRUD/finance/inventory/helpdesk/files/search workload at 5k concurrency; `zk_fabric_load_test.go` asserts per-tenant LRU bound + Invalidate under concurrency; `//go:build loadtest`)
 - [x] Documentation: operator guide, developer guide, KType authoring guide (this PR, `docs/OPERATOR_GUIDE.md` deployment + envs + backup/restore + tier upgrade + monitoring + DR + multi-tenancy ops; `docs/DEVELOPER_GUIDE.md` monorepo layout + local setup + tests + adding new KType/KApp; `docs/KTYPE_AUTHORING_GUIDE.md` schema fields + workflow + posting hooks + agent-tool conventions)
 - [x] CI rule: fail new migrations that don't ENABLE ROW LEVEL SECURITY on tenant-scoped tables (`.github/workflows/migration-rls-check.yml` — scans `migrations/*.sql` for `CREATE TABLE` containing `tenant_id` and fails if the same migration lacks `ENABLE ROW LEVEL SECURITY` for that table)
@@ -384,25 +384,25 @@ compare to expected, bulk-edit) that the generic view can't cover.
 
 ## Phase L — Insights
 
-**Status:** Not started
+**Status:** In Progress
 
 Tenant-scoped BI layer: visual query builder, composable dashboards, rich visualizations, AI-assisted queries, and KChat digest cards. Reference: [Frappe Insights](https://github.com/frappe/insights).
 
 ### Deliverables
 
-- [x] `internal/insights/` package: query store, dashboard store, cache store, query engine extensions (calculated columns) (PR-A)
-- [x] `insights_queries`, `insights_dashboards`, `insights_dashboard_widgets`, `insights_query_cache`, `insights_shares` tables with RLS + tenant_id partitioning (`migrations/000038_insights.sql`, PR-A)
-- [~] Query result caching with TTL and scheduled refresh via `internal/scheduler` (TTL store landed in PR-A; scheduled refresh in PR-C)
-- [x] `services/api/insights_handlers.go` — full CRUD + execution endpoints under `/api/v1/insights/` (PR-A)
-- [ ] Visual query builder React page (`apps/web/src/pages/InsightsQueryBuilderPage.tsx`) — source picker, column drag-and-drop, filter builder, aggregation config, live preview
-- [ ] Dashboard builder React page (`apps/web/src/pages/InsightsDashboardPage.tsx`) — grid layout, widget config, linked filters, auto-refresh
-- [ ] Rich chart visualizations: bar, line, pie, donut, funnel, number card, pivot table (charting library integration)
-- [ ] Dashboard and query sharing: role-based grants, share modal UI
-- [ ] Agent tools: `insights.generate_query`, `insights.explain_result`, `insights.post_dashboard_digest` (`internal/agents/insights_tools.go`)
-- [ ] KChat surfaces: `/insight` slash command, dashboard digest card, right-pane dashboard view
-- [x] Feature flag: `insights` gated per plan in `internal/tenant/plans.go` (PR-A; off on free/starter, on for business+)
-- [x] Query timeout budget: per-tenant `statement_timeout` on insight queries (PR-A)
-- [x] Migration: `migrations/000038_insights.sql` (PR-A)
+- [x] `internal/insights/` package: query store, dashboard store, cache store, query engine extensions (calculated columns) (PR #41)
+- [x] `insights_queries`, `insights_dashboards`, `insights_dashboard_widgets`, `insights_query_cache`, `insights_shares` tables with RLS + tenant_id partitioning (`migrations/000038_insights.sql`, PR #41)
+- [x] Query result caching with TTL and scheduled refresh via `internal/scheduler` (TTL store in PR #41; this PR registers `query_cache_refresh` in `services/worker/insights_cache.go` + `internal/insights/types.go::ActionTypeQueryCacheRefresh` + wizard seed in `internal/tenant/wizard.go` for FeatureInsights plans on a 300 s default interval)
+- [x] `services/api/insights_handlers.go` — full CRUD + execution endpoints under `/api/v1/insights/` (PR #41; this PR adds `DELETE /{id}/shares/{shareID}` for both queries and dashboards)
+- [x] Visual query builder React page (`apps/web/src/pages/InsightsQueryBuilderPage.tsx`) — source picker bound to `/api/v1/ktypes`, drag-and-drop column ordering, filter builder matching `reporting.Definition`, aggregation + group_by config, calculated columns editor, live preview via `POST /insights/queries/{id}/run`
+- [x] Dashboard builder React page (`apps/web/src/pages/InsightsDashboardPage.tsx`) — 12-column CSS grid, widget config panel, linked filters that re-run affected widgets via `dashboard.layout.linked_filters`, auto-refresh toggle wired to `dashboard.auto_refresh_seconds`
+- [x] Rich chart visualizations: bar, line, pie, donut, funnel, number card, pivot table, table view in `apps/web/src/components/insights/Charts.tsx` (Recharts ^3.8.1, 8-color accessible palette, `Viz` dispatcher routes on `viz_type` from `insights_dashboard_widgets`)
+- [x] Dashboard and query sharing: role-based grants, share modal UI (`apps/web/src/components/insights/ShareModal.tsx` — grantee + permission picker, list-existing-shares + revoke, used from both query builder and dashboard pages)
+- [x] Agent tools: `insights.generate_query`, `insights.explain_result`, `insights.post_dashboard_digest` (`internal/agents/insights_tools.go`; all three set `RequiresConfirmation=true` and respect `ModeDryRun`; registered via `agents.RegisterInsightsTools` in `services/api/main.go`)
+- [x] KChat surfaces: `/insight` slash command + `/dashboard-digest` slash command in `services/kchat-bridge/commands.go`; right-pane dashboard render endpoint `POST /kchat/insights/dashboards/render` in `services/kchat-bridge/main.go` (instantiates the full insights stack — `QueryStore`, `DashboardStore`, `CacheStore`, `Runner`, `reporting.Runner` — so slash commands resolve in-process rather than re-entering the API)
+- [x] Feature flag: `insights` gated per plan in `internal/tenant/plans.go` (PR #41; off on free/starter, on for business+)
+- [x] Query timeout budget: per-tenant `statement_timeout` on insight queries (PR #41)
+- [x] Migrations: `migrations/000038_insights.sql` (PR #41) + `migrations/000039_insights_indexes.sql` (this PR — see Phase G performance tuning entry)
 
 ### Acceptance Criteria
 

@@ -46,6 +46,15 @@ const (
 	ResourceDashboard = "dashboard"
 )
 
+// ActionTypeQueryCacheRefresh is the scheduled_actions.action_type
+// value the per-tenant query cache sweeper registers under. The
+// worker handler walks every saved query for the tenant and re-runs
+// it via the cache-aware Runner so the next dashboard view lands on
+// a warm cache instead of paying the SQL cost. Mirrors
+// internal/tenant.defaultInsightsCacheRefreshActionType — duplicated
+// to avoid a tenant→insights package cycle.
+const ActionTypeQueryCacheRefresh = "query_cache_refresh"
+
 // GranteeType + Permission constants mirror the CHECK constraints in
 // migrations/000038_insights.sql.
 const (

@@ -986,6 +986,194 @@ export class ApiClient {
   getDashboardSummary(): Promise<DashboardSummary> {
     return this.request("/dashboard/summary");
   }
+
+  // --- Phase L: insights -------------------------------------------------
+
+  listInsightsQueries(): Promise<{ queries: InsightsQuery[] }> {
+    return this.request("/insights/queries");
+  }
+
+  getInsightsQuery(id: string): Promise<InsightsQuery> {
+    return this.request(`/insights/queries/${encodeURIComponent(id)}`);
+  }
+
+  createInsightsQuery(input: InsightsQueryInput): Promise<InsightsQuery> {
+    return this.request("/insights/queries", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateInsightsQuery(
+    id: string,
+    input: InsightsQueryInput
+  ): Promise<InsightsQuery> {
+    return this.request(`/insights/queries/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteInsightsQuery(id: string): Promise<void> {
+    return this.request(`/insights/queries/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  }
+
+  runInsightsQuery(
+    id: string,
+    body: InsightsRunInput = {}
+  ): Promise<InsightsRunResult> {
+    return this.request(`/insights/queries/${encodeURIComponent(id)}/run`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(body),
+    });
+  }
+
+  listInsightsQueryShares(id: string): Promise<{ shares: InsightsShare[] }> {
+    return this.request(
+      `/insights/queries/${encodeURIComponent(id)}/shares`
+    );
+  }
+
+  shareInsightsQuery(
+    id: string,
+    input: InsightsShareInput
+  ): Promise<InsightsShare> {
+    return this.request(`/insights/queries/${encodeURIComponent(id)}/share`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteInsightsQueryShare(id: string, shareId: string): Promise<void> {
+    return this.request(
+      `/insights/queries/${encodeURIComponent(id)}/shares/${encodeURIComponent(
+        shareId
+      )}`,
+      {
+        method: "DELETE",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+
+  listInsightsDashboards(): Promise<{ dashboards: InsightsDashboard[] }> {
+    return this.request("/insights/dashboards");
+  }
+
+  getInsightsDashboard(id: string): Promise<InsightsDashboardBundle> {
+    return this.request(`/insights/dashboards/${encodeURIComponent(id)}`);
+  }
+
+  createInsightsDashboard(
+    input: InsightsDashboardInput
+  ): Promise<InsightsDashboard> {
+    return this.request("/insights/dashboards", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateInsightsDashboard(
+    id: string,
+    input: InsightsDashboardInput
+  ): Promise<InsightsDashboard> {
+    return this.request(`/insights/dashboards/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteInsightsDashboard(id: string): Promise<void> {
+    return this.request(`/insights/dashboards/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  }
+
+  upsertInsightsWidget(
+    dashboardId: string,
+    input: InsightsWidgetInput
+  ): Promise<InsightsWidget> {
+    return this.request(
+      `/insights/dashboards/${encodeURIComponent(dashboardId)}/widgets`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(input),
+      }
+    );
+  }
+
+  deleteInsightsWidget(dashboardId: string, widgetId: string): Promise<void> {
+    return this.request(
+      `/insights/dashboards/${encodeURIComponent(
+        dashboardId
+      )}/widgets/${encodeURIComponent(widgetId)}`,
+      {
+        method: "DELETE",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+
+  listInsightsDashboardShares(
+    id: string
+  ): Promise<{ shares: InsightsShare[] }> {
+    return this.request(
+      `/insights/dashboards/${encodeURIComponent(id)}/shares`
+    );
+  }
+
+  shareInsightsDashboard(
+    id: string,
+    input: InsightsShareInput
+  ): Promise<InsightsShare> {
+    return this.request(
+      `/insights/dashboards/${encodeURIComponent(id)}/share`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(input),
+      }
+    );
+  }
+
+  deleteInsightsDashboardShare(id: string, shareId: string): Promise<void> {
+    return this.request(
+      `/insights/dashboards/${encodeURIComponent(
+        id
+      )}/shares/${encodeURIComponent(shareId)}`,
+      {
+        method: "DELETE",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+
+  // --- Phase G: tenant tier upgrade -------------------------------------
+
+  upgradeTenantTier(
+    id: string,
+    input: { target_tier: "dedicated_schema" | "dedicated_db" }
+  ): Promise<Tenant> {
+    return this.request(
+      `/admin/tenants/${encodeURIComponent(id)}/upgrade-tier`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(input),
+      }
+    );
+  }
 }
 
 // --- Bulk actions -----------------------------------------------------
@@ -1507,4 +1695,155 @@ export interface Form {
   status: string;
   created_at: string;
   updated_at: string;
+}
+
+// --- Phase L: Insights -------------------------------------------------
+
+export interface CalculatedColumn {
+  name: string;
+  expression: string;
+  type?: string;
+}
+
+export interface InsightsQueryDefinition extends ReportDefinition {
+  calculated_columns?: CalculatedColumn[];
+}
+
+export interface InsightsQueryInput {
+  name: string;
+  description?: string;
+  definition: InsightsQueryDefinition;
+  cache_ttl_seconds?: number;
+}
+
+export interface InsightsQuery {
+  tenant_id: string;
+  id: string;
+  name: string;
+  description?: string;
+  definition: InsightsQueryDefinition;
+  cache_ttl_seconds?: number;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InsightsRunInput {
+  filter_params?: Record<string, unknown>;
+  bypass_cache?: boolean;
+}
+
+export interface InsightsRunResult {
+  result: ReportResult;
+  cache_hit: boolean;
+  query_hash: string;
+  filter_hash: string;
+  expires_at?: string | null;
+}
+
+export type InsightsVizType =
+  | "table"
+  | "bar"
+  | "line"
+  | "pie"
+  | "donut"
+  | "funnel"
+  | "number_card"
+  | "pivot";
+
+export interface InsightsWidgetPosition {
+  x?: number;
+  y?: number;
+  w?: number;
+  h?: number;
+}
+
+export interface InsightsWidgetConfig {
+  title?: string;
+  x_column?: string;
+  y_column?: string;
+  value_column?: string;
+  category_column?: string;
+  // Linked-filter binding: when present, the dashboard's globally
+  // selected value for `linked_filter_key` is appended to the
+  // widget's per-run filter_params under this column name.
+  linked_filter_column?: string;
+  linked_filter_key?: string;
+  format?: string;
+  [extra: string]: unknown;
+}
+
+export interface InsightsWidget {
+  tenant_id: string;
+  id: string;
+  dashboard_id: string;
+  query_id?: string | null;
+  viz_type: InsightsVizType;
+  position: InsightsWidgetPosition;
+  config: InsightsWidgetConfig;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InsightsWidgetInput {
+  id?: string;
+  query_id?: string | null;
+  viz_type: InsightsVizType;
+  position?: InsightsWidgetPosition;
+  config?: InsightsWidgetConfig;
+}
+
+export interface InsightsDashboardLayout {
+  // Free-form JSON the dashboard page persists alongside widgets — used
+  // by the grid layout component to track widget positioning at the
+  // dashboard level. Per-widget position is the source of truth; layout
+  // here covers cross-widget concerns (linked filter selections, panel
+  // order, etc).
+  linked_filters?: Record<string, unknown>;
+  [extra: string]: unknown;
+}
+
+export interface InsightsDashboard {
+  tenant_id: string;
+  id: string;
+  name: string;
+  description?: string;
+  layout: InsightsDashboardLayout;
+  auto_refresh_seconds: number;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+  widgets?: InsightsWidget[];
+}
+
+export interface InsightsDashboardInput {
+  name: string;
+  description?: string;
+  layout?: InsightsDashboardLayout;
+  auto_refresh_seconds?: number;
+}
+
+export interface InsightsDashboardBundle {
+  dashboard: InsightsDashboard;
+  widget_results: Record<string, InsightsRunResult | null>;
+}
+
+export type InsightsGranteeType = "user" | "role";
+export type InsightsPermission = "view" | "edit";
+
+export interface InsightsShare {
+  tenant_id: string;
+  id: string;
+  resource_type: "query" | "dashboard";
+  resource_id: string;
+  grantee_type: InsightsGranteeType;
+  grantee: string;
+  permission: InsightsPermission;
+  created_at: string;
+}
+
+export interface InsightsShareInput {
+  grantee_type: InsightsGranteeType;
+  grantee: string;
+  permission?: InsightsPermission;
 }

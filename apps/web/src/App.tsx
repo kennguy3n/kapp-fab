@@ -31,6 +31,8 @@ import { DashboardPage } from "./pages/DashboardPage";
 import { ExchangeRatesPage } from "./pages/ExchangeRatesPage";
 import { HelpdeskPage } from "./pages/HelpdeskPage";
 import { ReportBuilderPage } from "./pages/ReportBuilderPage";
+import { InsightsQueryBuilderPage } from "./pages/InsightsQueryBuilderPage";
+import { InsightsDashboardPage } from "./pages/InsightsDashboardPage";
 import { TenantFeaturesPage } from "./pages/TenantFeaturesPage";
 import { PlacementPolicyPage } from "./pages/PlacementPolicyPage";
 import { RetentionPoliciesPage } from "./pages/RetentionPoliciesPage";
@@ -56,6 +58,7 @@ const featureFromSection: Record<string, string> = {
   Inventory: "inventory",
   HR: "hr",
   LMS: "lms",
+  Insights: "insights",
 };
 
 interface NavSection {
@@ -152,6 +155,13 @@ const navSections: NavSection[] = [
       { to: "/records/lms.quiz", label: "Quizzes" },
       { to: "/records/lms.assignment", label: "Assignments" },
       { to: "/lms/progress", label: "Learner Progress" },
+    ],
+  },
+  {
+    title: "Insights",
+    links: [
+      { to: "/insights/queries", label: "Query Builder" },
+      { to: "/insights/dashboards", label: "Dashboards" },
     ],
   },
   {
@@ -305,6 +315,14 @@ function AppShell() {
           <Route path="/finance/exchange-rates" element={<ExchangeRatesPage />} />
           <Route path="/helpdesk" element={<HelpdeskPage />} />
           <Route path="/reports" element={<ReportBuilderPage />} />
+          <Route
+            path="/insights/queries"
+            element={<InsightsQueryBuilderPage />}
+          />
+          <Route
+            path="/insights/dashboards"
+            element={<InsightsDashboardPage />}
+          />
           <Route path="/search" element={<SearchPage />} />
           <Route path="/admin/webhooks" element={<WebhooksPage />} />
           <Route
