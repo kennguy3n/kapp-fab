@@ -26,6 +26,7 @@ import { SalesOrdersPage } from "./pages/SalesOrdersPage";
 import { PurchaseOrdersPage } from "./pages/PurchaseOrdersPage";
 import { PriceListsPage } from "./pages/PriceListsPage";
 import { PayrollPage } from "./pages/PayrollPage";
+import { ShiftCalendarPage } from "./pages/ShiftCalendarPage";
 import { SetupWizardPage } from "./pages/SetupWizardPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { ExchangeRatesPage } from "./pages/ExchangeRatesPage";
@@ -145,6 +146,7 @@ const navSections: NavSection[] = [
       { to: "/records/hr.attendance", label: "Attendance" },
       { to: "/records/hr.expense_claim", label: "Expense Claims" },
       { to: "/hr/payroll", label: "Payroll" },
+      { to: "/hr/shifts", label: "Shift Schedule" },
     ],
   },
   {
@@ -366,6 +368,7 @@ function AppShell() {
           />
           <Route path="/hr/org-chart" element={<OrgChartPage />} />
           <Route path="/hr/payroll" element={<PayrollPage />} />
+          <Route path="/hr/shifts" element={<ShiftCalendarPage />} />
           <Route path="/finance/cost-centers" element={<CostCentersPage />} />
           <Route
             path="/finance/bank-reconciliation"

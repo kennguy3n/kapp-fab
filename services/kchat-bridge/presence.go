@@ -226,6 +226,21 @@ func (h *PresenceHandler) upsertAttendance(ctx context.Context, tenantID uuid.UU
 		"source":      "kchat",
 		"check_in":    when.UTC().Format(time.RFC3339),
 	}
+	// Phase M shift cross-reference. If the employee has a
+	// shift_assignment for this date, decorate the attendance
+	// record with the expected start_time + a `late` flag the
+	// scheduling UI can highlight. A missing assignment, missing
+	// shift_type, or unparseable start_time is non-fatal — we
+	// fall back to a plain `present` row so the existing flow
+	// keeps working for tenants that haven't enabled shift
+	// scheduling yet.
+	if late, expectedStart, tardyMins, found := h.evaluateLateArrival(ctx, tenantID, employeeID, dateKey, when); found {
+		body["expected_start"] = expectedStart
+		body["late"] = late
+		if late {
+			body["tardy_minutes"] = tardyMins
+		}
+	}
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return uuid.Nil, false, err
@@ -240,4 +255,89 @@ func (h *PresenceHandler) upsertAttendance(ctx context.Context, tenantID uuid.UU
 		return uuid.Nil, false, err
 	}
 	return created.ID, true, nil
+}
+
+// evaluateLateArrival looks up the employee's shift_assignment for
+// dateKey, resolves the matching shift_type, and decides whether
+// `when` constitutes a late arrival relative to the shift's
+// start_time.
+//
+// `found=false` means there is no assignment, the assignment
+// references a missing shift_type, or the start_time field can't
+// be parsed — all non-fatal cases the caller silently skips.
+//
+// `late=true` requires `when` (UTC) to be strictly later than the
+// shift start at the assignment's calendar date. We use a 5-minute
+// grace window so a check-in at exactly the shift start counts as
+// on-time. tardyMinutes returns the integer minutes past start.
+//
+// The presence sweeper invokes this once per attendance upsert so
+// the cost stays bounded by employee count, not shift count.
+func (h *PresenceHandler) evaluateLateArrival(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	employeeID uuid.UUID,
+	dateKey string,
+	when time.Time,
+) (late bool, expectedStart string, tardyMins int, found bool) {
+	const graceMinutes = 5
+
+	assignments, err := h.records.ListByField(ctx, tenantID, record.ListFilter{KType: hr.KTypeShiftAssignment}, "employee_id", employeeID.String())
+	if err != nil || len(assignments) == 0 {
+		return false, "", 0, false
+	}
+	var shiftTypeID string
+	for _, a := range assignments {
+		var data map[string]any
+		if a.Data == nil {
+			continue
+		}
+		if err := json.Unmarshal(a.Data, &data); err != nil {
+			continue
+		}
+		if d, _ := data["shift_date"].(string); d != dateKey {
+			continue
+		}
+		if status, _ := data["status"].(string); status == "cancelled" {
+			continue
+		}
+		if id, _ := data["shift_type_id"].(string); id != "" {
+			shiftTypeID = id
+			break
+		}
+	}
+	if shiftTypeID == "" {
+		return false, "", 0, false
+	}
+	stID, err := uuid.Parse(shiftTypeID)
+	if err != nil {
+		return false, "", 0, false
+	}
+	stRec, err := h.records.Get(ctx, tenantID, stID)
+	if err != nil || stRec == nil {
+		return false, "", 0, false
+	}
+	var stData map[string]any
+	if err := json.Unmarshal(stRec.Data, &stData); err != nil {
+		return false, "", 0, false
+	}
+	startStr, _ := stData["start_time"].(string)
+	if startStr == "" {
+		return false, "", 0, false
+	}
+	dayParts := strings.SplitN(dateKey, "-", 3)
+	if len(dayParts) != 3 {
+		return false, "", 0, false
+	}
+	shiftStart, err := time.Parse("2006-01-02 15:04", dateKey+" "+startStr)
+	if err != nil {
+		return false, "", 0, false
+	}
+	shiftStart = shiftStart.UTC()
+	delta := when.UTC().Sub(shiftStart)
+	if delta <= time.Duration(graceMinutes)*time.Minute {
+		return false, startStr, 0, true
+	}
+	mins := int(delta / time.Minute)
+	return true, startStr, mins, true
 }

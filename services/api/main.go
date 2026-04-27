@@ -280,6 +280,15 @@ func run() error {
 			return fmt.Errorf("register payroll ktype %s: %w", kt.Name, err)
 		}
 	}
+	// Phase M shift scheduling. Registered separately from the
+	// Phase E HR catalog so an existing deployment can opt out by
+	// dropping these two lines without touching the older
+	// hr.RegisterKTypes call.
+	for _, kt := range hr.ShiftKTypes() {
+		if err := ktypeRegistry.Register(ctx, kt); err != nil {
+			return fmt.Errorf("register shift ktype %s: %w", kt.Name, err)
+		}
+	}
 	// Phase I — register helpdesk KTypes. The helpdesk store manages
 	// typed SLA policies + breach log while tickets themselves ride
 	// the generic KRecord plumbing.

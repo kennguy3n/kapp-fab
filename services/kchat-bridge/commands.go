@@ -14,6 +14,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/crm"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
+	"github.com/kennguy3n/kapp-fab/internal/hr"
 	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
@@ -170,9 +171,15 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.runInsight(ctx, req)
 	case "dashboard-digest":
 		return d.dashboardDigest(ctx, req)
+	case "shift":
+		data, err := shiftAssignmentFromArgs(req.Args)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/shift: %v", err)}, nil
+		}
+		return d.createRecord(ctx, req, hr.KTypeShiftAssignment, data)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /reverse-stock-move, /batch, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /reverse-stock-move, /batch, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /shift, /help",
 		}, nil
 	default:
 		return CommandResponse{
@@ -1161,4 +1168,39 @@ func shortInsightSummary(out *insights.RunResult) string {
 		return strings.Join(pairs, ", ")
 	}
 	return fmt.Sprintf("%d rows", len(rows))
+}
+
+// shiftAssignmentFromArgs parses the Phase M /shift slash command
+// into a hr.shift_assignment payload. Usage:
+//
+//	/shift <employee_id> <shift_type_id> <YYYY-MM-DD> [notes...]
+//
+// Schedules a single-day assignment in `scheduled` status. Multi-
+// day ranges are out of scope for the slash surface — operators
+// schedule a recurring template via the calendar UI instead.
+func shiftAssignmentFromArgs(args []string) (map[string]any, error) {
+	if len(args) < 3 {
+		return nil, errors.New("usage: /shift <employee_id> <shift_type_id> <YYYY-MM-DD> [notes...]")
+	}
+	employeeID, err := uuid.Parse(args[0])
+	if err != nil {
+		return nil, fmt.Errorf("invalid employee_id: %w", err)
+	}
+	shiftTypeID, err := uuid.Parse(args[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid shift_type_id: %w", err)
+	}
+	if _, err := time.Parse("2006-01-02", args[2]); err != nil {
+		return nil, fmt.Errorf("invalid shift_date %q: %w", args[2], err)
+	}
+	data := map[string]any{
+		"employee_id":   employeeID.String(),
+		"shift_type_id": shiftTypeID.String(),
+		"shift_date":    args[2],
+		"status":        "scheduled",
+	}
+	if len(args) > 3 {
+		data["notes"] = strings.Join(args[3:], " ")
+	}
+	return data, nil
 }
