@@ -323,6 +323,7 @@ func run() error {
 	agents.RegisterLMSTools(executor, lmsStore)
 	agents.RegisterCertificateTool(executor, lms.NewCertificateIssuer(recordStore, pool))
 	agents.RegisterHelpdeskTools(executor, helpdeskStore)
+	agents.RegisterInsightsTools(executor, insightsQueryStore, insightsDashboardStore, insightsRunner)
 
 	// rateLimitMW picks the Redis-backed limiter when wired, otherwise
 	// falls back to the in-process limiter. Both implement the same
@@ -586,6 +587,19 @@ func run() error {
 		if iah != nil {
 			r.Route("/api/v1/admin", func(r chi.Router) {
 				r.Get("/isolation-audit", iah.get)
+				// Phase G — tier upgrade endpoint. Replaces the
+				// scripts/upgrade_tier.sh shell script with an
+				// admin-only API call. Requires adminPool because
+				// CREATE SCHEMA + cross-schema INSERT must run
+				// outside any tenant-scoped RLS context.
+				if adminPool != nil {
+					tih := &tierUpgradeHandlers{
+						tenants:   th,
+						adminPool: adminPool,
+						auditor:   auditor,
+					}
+					r.Post("/tenants/{id}/upgrade-tier", tih.upgrade)
+				}
 			})
 		}
 
@@ -884,6 +898,7 @@ func run() error {
 				r.Post("/{id}/run", insh.runQuery)
 				r.Post("/{id}/share", insh.shareQuery)
 				r.Get("/{id}/shares", insh.listQueryShares)
+				r.Delete("/{id}/shares/{shareID}", insh.deleteShare)
 			})
 			r.Route("/dashboards", func(r chi.Router) {
 				r.Get("/", insh.listDashboards)
@@ -893,6 +908,7 @@ func run() error {
 				r.Delete("/{id}", insh.deleteDashboard)
 				r.Post("/{id}/share", insh.shareDashboard)
 				r.Get("/{id}/shares", insh.listDashboardShares)
+				r.Delete("/{id}/shares/{shareID}", insh.deleteShare)
 				r.Post("/{id}/widgets", insh.upsertWidget)
 				r.Delete("/{id}/widgets/{widgetID}", insh.deleteWidget)
 			})

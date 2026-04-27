@@ -23,12 +23,14 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
+	"github.com/kennguy3n/kapp-fab/internal/reporting"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
 
@@ -78,17 +80,30 @@ func run() error {
 	// from the outbox to DM each approver a card. Exposed over HTTP at
 	// /kchat/approvals/render so the worker stays stateless.
 	approvalCards := NewApprovalCardRenderer(registry, cards, os.Getenv("KAPP_KCHAT_ACTIONS_BASE"))
+	// Phase L Insights wiring. The dispatcher owns its own slice of
+	// the insights stack so /insight + /dashboard-digest can run a
+	// saved query without having to call back over HTTP into the API
+	// service.
+	reportingRunner := reporting.NewRunner(pool)
+	insightsQueries := insights.NewQueryStore(pool)
+	insightsDashboards := insights.NewDashboardStore(pool)
+	insightsCache := insights.NewCacheStore(pool)
+	insightsRunner := insights.NewRunner(pool, insightsCache, insightsQueries, reportingRunner)
 	commands := &CommandDispatcher{
-		registry:  registry,
-		records:   recordStore,
-		workflow:  workflowEngine,
-		approvals: workflowEngine,
-		ledger:    ledgerStore,
-		poster:    invoicePoster,
-		inventory: inventoryStore,
-		lmsIssuer: lms.NewCertificateIssuer(recordStore, pool),
-		cards:     cards,
-		formsBase: os.Getenv("KAPP_FORMS_BASE_URL"),
+		registry:           registry,
+		records:            recordStore,
+		workflow:           workflowEngine,
+		approvals:          workflowEngine,
+		ledger:             ledgerStore,
+		poster:             invoicePoster,
+		inventory:          inventoryStore,
+		lmsIssuer:          lms.NewCertificateIssuer(recordStore, pool),
+		cards:              cards,
+		formsBase:          os.Getenv("KAPP_FORMS_BASE_URL"),
+		insightsQueries:    insightsQueries,
+		insightsDashboards: insightsDashboards,
+		insightsRunner:     insightsRunner,
+		dashboardBase:      os.Getenv("KAPP_DASHBOARD_BASE_URL"),
 	}
 
 	r := chi.NewRouter()
@@ -201,6 +216,41 @@ func run() error {
 		log.Printf("kchat-bridge: thread post tenant=%s thread=%s type=%s title=%q",
 			body.TenantID, body.ThreadID, body.Type, body.Title)
 		w.WriteHeader(http.StatusAccepted)
+	})
+
+	// Phase L Insights right-pane card. KChat hits this endpoint when a
+	// user opens a dashboard from the right-pane "Apps" surface; the
+	// payload is a digest card listing every widget's latest summary.
+	// Read-only — never mutates state, so no idempotency / quota needed.
+	r.Post("/kchat/insights/dashboards/render", func(w http.ResponseWriter, req *http.Request) {
+		var body struct {
+			TenantID    uuid.UUID `json:"tenant_id"`
+			DashboardID uuid.UUID `json:"dashboard_id"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if body.TenantID == uuid.Nil || body.DashboardID == uuid.Nil {
+			http.Error(w, "tenant_id and dashboard_id required", http.StatusBadRequest)
+			return
+		}
+		dash, err := insightsDashboards.Get(req.Context(), body.TenantID, body.DashboardID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		fakeReq := CommandRequest{
+			TenantID: body.TenantID,
+			Command:  "/dashboard-digest",
+			Args:     []string{dash.Name},
+		}
+		resp, err := commands.dashboardDigest(req.Context(), fakeReq)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
 	})
 
 	r.Get("/healthz", func(w http.ResponseWriter, req *http.Request) {

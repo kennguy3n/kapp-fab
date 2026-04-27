@@ -13,6 +13,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/crm"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
+	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
@@ -56,16 +57,22 @@ type CommandResponse struct {
 // commands; the dispatcher is the single funnel through which every
 // KChat user action reaches the platform services.
 type CommandDispatcher struct {
-	registry  *ktype.PGRegistry
-	records   *record.PGStore
-	workflow  *workflow.Engine
-	approvals *workflow.Engine
-	ledger    *ledger.PGStore
-	poster    *ledger.InvoicePoster
-	inventory *inventory.PGStore
-	lmsIssuer *lms.CertificateIssuer
-	cards     *CardRenderer
-	formsBase string
+	registry            *ktype.PGRegistry
+	records             *record.PGStore
+	workflow            *workflow.Engine
+	approvals           *workflow.Engine
+	ledger              *ledger.PGStore
+	poster              *ledger.InvoicePoster
+	inventory           *inventory.PGStore
+	lmsIssuer           *lms.CertificateIssuer
+	cards               *CardRenderer
+	formsBase           string
+	insightsQueries     *insights.QueryStore
+	insightsDashboards  *insights.DashboardStore
+	insightsRunner      *insights.Runner
+	// dashboardBase is the URL prefix the dashboard digest card links
+	// to (e.g. https://app.example.com). Empty disables the deep link.
+	dashboardBase string
 }
 
 // Dispatch runs the command and returns a response. Unknown commands
@@ -156,9 +163,13 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 			return CommandResponse{Text: fmt.Sprintf("/recurring-invoice: %v", err)}, nil
 		}
 		return d.createRecord(ctx, req, finance.KTypeRecurringInvoice, data)
+	case "insight":
+		return d.runInsight(ctx, req)
+	case "dashboard-digest":
+		return d.dashboardDigest(ctx, req)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /reverse-stock-move, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /reverse-stock-move, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /help",
 		}, nil
 	default:
 		return CommandResponse{
@@ -901,4 +912,188 @@ func recurringInvoiceFromArgs(args []string) (map[string]any, error) {
 		}
 	}
 	return data, nil
+}
+
+// ---------- Phase L Insights ----------
+
+// runInsight runs a saved insights query by name and returns the
+// result as an inline card. Usage: `/insight <query-name>`. Spaces in
+// the query name are joined back from the args slice. Falls back to a
+// helpful error response when the dispatcher was constructed without
+// the insights wiring (e.g. older deployment), instead of panicking.
+func (d *CommandDispatcher) runInsight(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.insightsQueries == nil || d.insightsRunner == nil {
+		return CommandResponse{Text: "/insight: insights surface not configured for this deployment"}, nil
+	}
+	if req.TenantID == uuid.Nil {
+		return CommandResponse{Text: "/insight: tenant context required"}, nil
+	}
+	if len(req.Args) == 0 {
+		return CommandResponse{Text: "/insight: usage: /insight <query name>"}, nil
+	}
+	name := strings.TrimSpace(strings.Join(req.Args, " "))
+	queries, err := d.insightsQueries.List(ctx, req.TenantID)
+	if err != nil {
+		return CommandResponse{}, err
+	}
+	var match *insights.Query
+	for i := range queries {
+		if strings.EqualFold(queries[i].Name, name) {
+			match = &queries[i]
+			break
+		}
+	}
+	if match == nil {
+		return CommandResponse{Text: fmt.Sprintf("/insight: no saved query named %q", name)}, nil
+	}
+	out, err := d.insightsRunner.RunSaved(ctx, req.TenantID, match.ID, nil, false)
+	if err != nil {
+		return CommandResponse{Text: fmt.Sprintf("/insight: %v", err)}, nil
+	}
+	card := renderInsightCard(match, out)
+	return CommandResponse{
+		Text: fmt.Sprintf("Insights — %s (%d rows)", match.Name, len(out.Result.Rows)),
+		Card: &card,
+	}, nil
+}
+
+// dashboardDigest renders a multi-section card that summarises every
+// widget on a dashboard by name. Each section gets one CardField whose
+// value is a short text summary of the widget's latest result.
+// Usage: `/dashboard-digest <dashboard-name>`.
+func (d *CommandDispatcher) dashboardDigest(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.insightsDashboards == nil || d.insightsRunner == nil {
+		return CommandResponse{Text: "/dashboard-digest: insights surface not configured for this deployment"}, nil
+	}
+	if req.TenantID == uuid.Nil {
+		return CommandResponse{Text: "/dashboard-digest: tenant context required"}, nil
+	}
+	if len(req.Args) == 0 {
+		return CommandResponse{Text: "/dashboard-digest: usage: /dashboard-digest <dashboard name>"}, nil
+	}
+	name := strings.TrimSpace(strings.Join(req.Args, " "))
+	dashboards, err := d.insightsDashboards.List(ctx, req.TenantID)
+	if err != nil {
+		return CommandResponse{}, err
+	}
+	var match *insights.Dashboard
+	for i := range dashboards {
+		if strings.EqualFold(dashboards[i].Name, name) {
+			match = &dashboards[i]
+			break
+		}
+	}
+	if match == nil {
+		return CommandResponse{Text: fmt.Sprintf("/dashboard-digest: no dashboard named %q", name)}, nil
+	}
+	widgets, err := d.insightsDashboards.ListWidgets(ctx, req.TenantID, match.ID)
+	if err != nil {
+		return CommandResponse{}, err
+	}
+
+	card := Card{
+		Title:    fmt.Sprintf("Dashboard digest — %s", match.Name),
+		Subtitle: fmt.Sprintf("%d widget(s)", len(widgets)),
+	}
+	if d.dashboardBase != "" {
+		card.Actions = append(card.Actions, CardLink{
+			Label: "Open dashboard",
+			URL:   fmt.Sprintf("%s/insights/dashboards#%s", strings.TrimRight(d.dashboardBase, "/"), match.ID),
+		})
+	}
+	for _, w := range widgets {
+		label := w.VizType
+		if w.QueryID == nil {
+			card.Fields = append(card.Fields, CardKV{
+				Label: label,
+				Value: "(no saved query bound)",
+			})
+			continue
+		}
+		out, err := d.insightsRunner.RunSaved(ctx, req.TenantID, *w.QueryID, nil, false)
+		if err != nil || out == nil || out.Result == nil {
+			card.Fields = append(card.Fields, CardKV{
+				Label: label,
+				Value: "(unable to run widget)",
+			})
+			continue
+		}
+		card.Fields = append(card.Fields, CardKV{
+			Label: label,
+			Value: shortInsightSummary(out),
+		})
+	}
+	return CommandResponse{
+		Text: fmt.Sprintf("Dashboard digest — %s", match.Name),
+		Card: &card,
+	}, nil
+}
+
+// renderInsightCard turns a single query run into a Card. Tables get
+// a column-list body with the first ~5 rows; aggregations / number
+// cards collapse to a key=value field list. Stays well under typical
+// chat-card size limits.
+func renderInsightCard(q *insights.Query, out *insights.RunResult) Card {
+	card := Card{
+		Title:    fmt.Sprintf("Insights — %s", q.Name),
+		Subtitle: q.Definition.Source,
+	}
+	if out == nil || out.Result == nil {
+		card.Body = "(no result)"
+		return card
+	}
+	rows := out.Result.Rows
+	cols := out.Result.Columns
+	if len(rows) == 0 {
+		card.Body = "0 rows"
+		return card
+	}
+	if len(rows) == 1 {
+		first := rows[0]
+		for _, c := range cols {
+			card.Fields = append(card.Fields, CardKV{
+				Label: c,
+				Value: fmt.Sprintf("%v", first[c]),
+			})
+		}
+		return card
+	}
+	limit := len(rows)
+	if limit > 5 {
+		limit = 5
+	}
+	var lines []string
+	lines = append(lines, strings.Join(cols, " | "))
+	for i := 0; i < limit; i++ {
+		row := rows[i]
+		vals := make([]string, 0, len(cols))
+		for _, c := range cols {
+			vals = append(vals, fmt.Sprintf("%v", row[c]))
+		}
+		lines = append(lines, strings.Join(vals, " | "))
+	}
+	if len(rows) > limit {
+		lines = append(lines, fmt.Sprintf("…and %d more rows", len(rows)-limit))
+	}
+	card.Body = strings.Join(lines, "\n")
+	return card
+}
+
+func shortInsightSummary(out *insights.RunResult) string {
+	if out == nil || out.Result == nil {
+		return "(no result)"
+	}
+	rows := out.Result.Rows
+	if len(rows) == 0 {
+		return "0 rows"
+	}
+	if len(rows) == 1 {
+		first := rows[0]
+		pairs := make([]string, 0, len(first))
+		for _, c := range out.Result.Columns {
+			pairs = append(pairs, fmt.Sprintf("%s=%v", c, first[c]))
+		}
+		return strings.Join(pairs, ", ")
+	}
+	return fmt.Sprintf("%d rows", len(rows))
 }

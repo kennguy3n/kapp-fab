@@ -499,6 +499,19 @@ const (
 	defaultLMSCertificateIntervalSeconds = 600
 )
 
+// defaultInsightsCacheRefreshActionType / Interval drive the per-tenant
+// query_cache_refresh sweeper for Phase L Insights. The worker handler
+// re-runs every saved query whose cache row is older than the per-query
+// auto-refresh window so dashboards land on warm cache when a user
+// opens them. Mirrors insights.ActionTypeQueryCacheRefresh; duplicated
+// here for the same package-cycle reason as the constants above. Only
+// seeded for plans that include the insights feature so free / starter
+// tenants never run the sweeper.
+const (
+	defaultInsightsCacheRefreshActionType      = "query_cache_refresh"
+	defaultInsightsCacheRefreshIntervalSeconds = 300
+)
+
 // seedDefaultScheduledActions seeds the per-tenant scheduled_actions
 // rows the platform expects to exist after a successful wizard run.
 // Uses INSERT … WHERE NOT EXISTS so re-running the wizard is a no-op
@@ -522,6 +535,12 @@ func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 			actionType      string
 			intervalSeconds int
 		}{defaultUnrealizedFXActionType, defaultUnrealizedFXIntervalSeconds})
+	}
+	if DefaultFeaturesForPlan(plan)[FeatureInsights] {
+		defaults = append(defaults, struct {
+			actionType      string
+			intervalSeconds int
+		}{defaultInsightsCacheRefreshActionType, defaultInsightsCacheRefreshIntervalSeconds})
 	}
 	for _, d := range defaults {
 		if _, err := tx.Exec(ctx,

@@ -214,8 +214,16 @@ These are known gaps called out here so nobody forgets:
    `internal/record` outside of the executor (item 2 above).
 4. Periodic audit-log integrity check (hash chain) — spec lives in
    PROPOSAL.md §7.6 and has no implementation yet.
-5. Dedicated-schema upgrade path has a tool (`scripts/upgrade_tier.sh`
-   landed in this round) but is not yet wired to the tenant service.
+5. Dedicated-schema upgrade is now exposed as
+   `POST /api/v1/admin/tenants/{id}/upgrade-tier` (Phase G). The
+   handler reuses the schema-creation + per-table copy semantics
+   that `scripts/upgrade_tier.sh` implemented, runs every mutation
+   inside one admin-pool transaction, and emits a
+   `tenant.tier_upgrade` audit entry on success. The shell script
+   remains in the repo as a manual fallback for break-glass scenarios
+   when the API service is unavailable, but operators should prefer
+   the API path because it leaves an audit-log trail and authenticates
+   under the same JWT envelope as other admin surfaces.
 
 ---
 

@@ -27,6 +27,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/exporter"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
+	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
@@ -259,6 +260,20 @@ func run() error {
 	schedRegistry.Register(
 		CertificateActionType,
 		NewCertificateAutoIssuer(certificateIssuer, recordStore, workerSystemActor),
+	)
+
+	// Phase L — Insights query cache refresh. The handler walks
+	// every saved query for the tenant and runs it through the
+	// cache-aware runner; fresh cache rows short-circuit so the
+	// sweeper effectively pays the SQL cost only for expired
+	// entries. Seeded by tenant.seedDefaultScheduledActions for
+	// plans that include FeatureInsights.
+	insightsQueryStore := insights.NewQueryStore(pool)
+	insightsCacheStore := insights.NewCacheStore(pool)
+	insightsRunner := insights.NewRunner(pool, insightsCacheStore, insightsQueryStore, reportRunner)
+	schedRegistry.Register(
+		insights.ActionTypeQueryCacheRefresh,
+		NewQueryCacheRefreshHandler(insightsQueryStore, insightsRunner),
 	)
 
 	go scheduler.RunLoop(ctx, schedStore, schedRegistry, 10*time.Second)

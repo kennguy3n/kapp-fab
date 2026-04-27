@@ -449,6 +449,30 @@ func (h *insightsHandlers) listDashboardShares(w http.ResponseWriter, r *http.Re
 	h.listSharesFor(w, r, insights.ResourceDashboard)
 }
 
+// deleteShare removes a single share grant by id. The path
+// `/{resource}/{id}/shares/{shareID}` is per-resource so chi's
+// path-prefix routing finds it. We don't need the resourceType
+// here because share rows are tenant-scoped + uniquely identified
+// by id, but we still keep the path parents as a defence-in-depth
+// scope check on the URL shape.
+func (h *insightsHandlers) deleteShare(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	shareID, err := uuid.Parse(chi.URLParam(r, "shareID"))
+	if err != nil {
+		http.Error(w, "invalid share id", http.StatusBadRequest)
+		return
+	}
+	if err := h.dashboards.DeleteShare(r.Context(), t.ID, shareID); err != nil {
+		writeInsightsError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *insightsHandlers) listSharesFor(w http.ResponseWriter, r *http.Request, resourceType string) {
 	t := platform.TenantFromContext(r.Context())
 	if t == nil {
