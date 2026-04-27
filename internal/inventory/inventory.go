@@ -25,6 +25,7 @@ const (
 	KTypeWarehouse  = "inventory.warehouse"
 	KTypeMove       = "inventory.move"
 	KTypeStockLevel = "inventory.stock_level"
+	KTypeBatch      = "inventory.batch"
 )
 
 // Move source KTypes emitted by the ledger hook when a sales invoice or
@@ -77,6 +78,30 @@ type Move struct {
 	// this row was created to cancel. Set by ReverseMove; remains nil
 	// for ordinary receipts / deliveries / transfers.
 	ReversalOf *int64 `json:"reversal_of,omitempty"`
+	// BatchID, when non-nil, ties the move to a specific
+	// inventory_batches row. The DB-level composite FK guarantees the
+	// batch belongs to the same tenant; PGStore.RecordMove additionally
+	// rejects mismatched item ids before the INSERT.
+	BatchID *uuid.UUID `json:"batch_id,omitempty"`
+}
+
+// Batch is a per-tenant lot identifier for an inventory item. Batches
+// are not strictly required — items without a batch context post moves
+// with BatchID = nil and the system behaves identically to the
+// pre-Phase-G/L flow. Tracking a batch unlocks expiry / FEFO logic and
+// per-lot stock visibility on the StockLevels page.
+type Batch struct {
+	TenantID       uuid.UUID       `json:"tenant_id"`
+	ID             uuid.UUID       `json:"id"`
+	ItemID         uuid.UUID       `json:"item_id"`
+	BatchNo        string          `json:"batch_no"`
+	ManufacturedAt *time.Time      `json:"manufactured_at,omitempty"`
+	ExpiresAt      *time.Time      `json:"expires_at,omitempty"`
+	QtyOnHand      decimal.Decimal `json:"qty_on_hand"`
+	Metadata       []byte          `json:"metadata,omitempty"`
+	CreatedBy      uuid.UUID       `json:"created_by,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
 }
 
 // StockLevel is a single (item, warehouse) quantity read from the
@@ -135,4 +160,8 @@ var (
 	ErrMoveNotFound        = errors.New("inventory: stock move not found")
 	ErrAlreadyReversed     = errors.New("inventory: stock move already reversed")
 	ErrCannotReverseContra = errors.New("inventory: cannot reverse a contra-entry directly; reverse the original instead")
+	ErrBatchNotFound       = errors.New("inventory: batch not found")
+	ErrBatchItemMismatch   = errors.New("inventory: batch belongs to a different item")
+	ErrDuplicateBatch      = errors.New("inventory: batch number already exists for this item")
+	ErrBatchInvalid        = errors.New("inventory: invalid batch")
 )

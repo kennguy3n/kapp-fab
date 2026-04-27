@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -57,19 +58,19 @@ type CommandResponse struct {
 // commands; the dispatcher is the single funnel through which every
 // KChat user action reaches the platform services.
 type CommandDispatcher struct {
-	registry            *ktype.PGRegistry
-	records             *record.PGStore
-	workflow            *workflow.Engine
-	approvals           *workflow.Engine
-	ledger              *ledger.PGStore
-	poster              *ledger.InvoicePoster
-	inventory           *inventory.PGStore
-	lmsIssuer           *lms.CertificateIssuer
-	cards               *CardRenderer
-	formsBase           string
-	insightsQueries     *insights.QueryStore
-	insightsDashboards  *insights.DashboardStore
-	insightsRunner      *insights.Runner
+	registry           *ktype.PGRegistry
+	records            *record.PGStore
+	workflow           *workflow.Engine
+	approvals          *workflow.Engine
+	ledger             *ledger.PGStore
+	poster             *ledger.InvoicePoster
+	inventory          *inventory.PGStore
+	lmsIssuer          *lms.CertificateIssuer
+	cards              *CardRenderer
+	formsBase          string
+	insightsQueries    *insights.QueryStore
+	insightsDashboards *insights.DashboardStore
+	insightsRunner     *insights.Runner
 	// dashboardBase is the URL prefix the dashboard digest card links
 	// to (e.g. https://app.example.com). Empty disables the deep link.
 	dashboardBase string
@@ -139,6 +140,8 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.stockLevels(ctx, req)
 	case "reverse-stock-move":
 		return d.reverseStockMove(ctx, req)
+	case "batch":
+		return d.assignBatch(ctx, req)
 	case "certificate":
 		return d.issueCertificate(ctx, req)
 	case "learn":
@@ -169,7 +172,7 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.dashboardDigest(ctx, req)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /reverse-stock-move, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /reverse-stock-move, /batch, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /help",
 		}, nil
 	default:
 		return CommandResponse{
@@ -424,6 +427,64 @@ func (d *CommandDispatcher) reverseStockMove(ctx context.Context, req CommandReq
 	}
 	return CommandResponse{
 		Text: fmt.Sprintf("Reversed stock move %d → contra-entry %d (qty=%s)", moveID, move.ID, move.Qty.String()),
+	}, nil
+}
+
+// parseSlashDate parses a YYYY-MM-DD date supplied to a slash command
+// (used by /batch and other commands that accept date-only inputs).
+func parseSlashDate(s string) (time.Time, error) {
+	return time.Parse("2006-01-02", s)
+}
+
+// assignBatch implements `/batch <sku> <batch_no> [expires_at]`.
+// Creates an inventory_batches row tied to the supplied item. Returns
+// the new batch id so a follow-up /move command can reference it via
+// the agent tool. Re-issuing the same batch_no surfaces the unique
+// violation as a friendly inline error.
+func (d *CommandDispatcher) assignBatch(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.inventory == nil {
+		return CommandResponse{Text: "inventory not configured"}, nil
+	}
+	if req.TenantID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id required"}, nil
+	}
+	if len(req.Args) < 2 {
+		return CommandResponse{Text: "/batch <sku> <batch_no> [expires_at YYYY-MM-DD]"}, nil
+	}
+	sku := req.Args[0]
+	batchNo := req.Args[1]
+	it, err := d.inventory.GetItemBySKU(ctx, req.TenantID, sku)
+	if err != nil {
+		if errors.Is(err, inventory.ErrItemNotFound) {
+			return CommandResponse{Text: fmt.Sprintf("/batch: no item with sku %q", sku)}, nil
+		}
+		return CommandResponse{}, err
+	}
+	b := inventory.Batch{
+		TenantID:  req.TenantID,
+		ItemID:    it.ID,
+		BatchNo:   batchNo,
+		CreatedBy: req.UserID,
+	}
+	if len(req.Args) >= 3 {
+		ts, perr := parseSlashDate(req.Args[2])
+		if perr != nil {
+			return CommandResponse{Text: fmt.Sprintf("/batch: invalid expires_at %q (want YYYY-MM-DD)", req.Args[2])}, nil
+		}
+		b.ExpiresAt = &ts
+	}
+	out, err := d.inventory.CreateBatch(ctx, b)
+	if err != nil {
+		if errors.Is(err, inventory.ErrItemNotFound) {
+			return CommandResponse{Text: fmt.Sprintf("/batch: no item with sku %q", sku)}, nil
+		}
+		if errors.Is(err, inventory.ErrDuplicateBatch) {
+			return CommandResponse{Text: fmt.Sprintf("/batch: batch %q already exists for %s", batchNo, sku)}, nil
+		}
+		return CommandResponse{}, err
+	}
+	return CommandResponse{
+		Text: fmt.Sprintf("Batch %s created for %s (batch id %s)", out.BatchNo, sku, out.ID),
 	}, nil
 }
 
