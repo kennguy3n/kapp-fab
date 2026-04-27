@@ -76,12 +76,20 @@ func TestUSPackProducesFederalAndFICA(t *testing.T) {
 	if _, ok := codes["FICA_MEDICARE"]; !ok {
 		t.Fatalf("missing FICA_MEDICARE in %v", codes)
 	}
-	// Federal must land in a sane band — the percentage method
-	// against an annualised $60k+ figure should put a single
-	// filer's monthly federal somewhere between $400 and $700.
+	// Federal must land in a sane band. Hand-derivation: a $5,000
+	// monthly slip annualises to ~$58,910 (period factor 31/365.25);
+	// Pub 15-T Step 2 subtracts the $14,600 single-filer standard
+	// deduction → $44,310 taxable; Step 3 walks the 2024 brackets
+	// (10% on first $11,600 + 12% on remainder) → ~$5,085 annual
+	// → ~$432 monthly. The $350-$550 band is intentionally narrow
+	// so a regression like the one this test was added for —
+	// applying the bracket table directly to gross without
+	// subtracting the standard deduction first, which yields ~$680
+	// — fails CI loudly. Was $300-$900 (overly tolerant); a
+	// review pass on commit 6c3f863 caught the omission.
 	fed := codes["FED_TAX"]
-	if fed.LessThan(decimal.NewFromInt(300)) || fed.GreaterThan(decimal.NewFromInt(900)) {
-		t.Fatalf("FED_TAX = %s; out of expected band $300-$900", fed)
+	if fed.LessThan(decimal.NewFromInt(350)) || fed.GreaterThan(decimal.NewFromInt(550)) {
+		t.Fatalf("FED_TAX = %s; out of expected band $350-$550", fed)
 	}
 	// OASDI = 5000 * 6.2% = 310.00 (no cap engaged).
 	if codes["FICA_OASDI"].Cmp(decimal.NewFromFloat(310)) != 0 {

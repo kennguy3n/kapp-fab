@@ -66,6 +66,16 @@ var (
 	usFICAAdditionalRate = dec("0.009")
 	usFICAAdditionalThr  = dec("200000")
 
+	// Standard deduction subtracted from annualised gross before
+	// the IRS Pub 15-T percentage method (Step 2 → Step 3). The
+	// bracket tables above start at $0, not at the deduction
+	// amount, so applying brackets directly to gross would over-
+	// withhold by ~10-12% for low-to-mid earners. 2024 amounts
+	// match the 2024 brackets we ship; bumping both in lock-step
+	// is a separate change once we adopt the 2026 Pub 15-T table.
+	usStandardDeductionSingle = dec("14600")
+	usStandardDeductionMFJ    = dec("29200")
+
 	usPeriodsPerYear = decimal.NewFromFloat(365.25)
 )
 
@@ -81,11 +91,22 @@ func (usPack) ComputeWithholding(ctx context.Context, e EmployeeInfo, gross deci
 	annualGross := gross.Div(periodFraction)
 
 	brackets := usBracketsSingle
+	stdDeduction := usStandardDeductionSingle
 	if e.FilingType == "married_filing_jointly" {
 		brackets = usBracketsMFJ
+		stdDeduction = usStandardDeductionMFJ
 	}
 
-	annualTax := walkBrackets(annualGross, brackets)
+	// Pub 15-T Step 2: subtract the standard deduction before
+	// running the bracket walk in Step 3. Clamp to zero so a
+	// part-time / partial-period employee whose annualised gross
+	// falls below the deduction owes no federal tax (rather than
+	// a negative one).
+	taxable := annualGross.Sub(stdDeduction)
+	if taxable.LessThan(decimal.Zero) {
+		taxable = decimal.Zero
+	}
+	annualTax := walkBrackets(taxable, brackets)
 	federal := annualTax.Mul(periodFraction).Round(2)
 
 	out := []Deduction{
