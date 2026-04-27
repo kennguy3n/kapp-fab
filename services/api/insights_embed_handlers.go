@@ -173,7 +173,15 @@ func (h *insightsEmbedHandlers) public(w http.ResponseWriter, r *http.Request) {
 		writeInsightsError(w, err)
 		return
 	}
-	widgets := dashboard.Widgets
+	// DashboardStore.Get returns metadata only; widgets are loaded
+	// in a follow-up call. Without this, every embed render would
+	// return an empty widgets array.
+	widgets, err := h.dashboards.ListWidgets(r.Context(), embed.TenantID, embed.DashboardID)
+	if err != nil {
+		writeInsightsError(w, err)
+		return
+	}
+	dashboard.Widgets = widgets
 	results := make([]map[string]any, 0, len(widgets))
 	for _, widget := range widgets {
 		if widget.QueryID == nil || *widget.QueryID == uuid.Nil {

@@ -288,7 +288,11 @@ func (d *Definition) Validate() error {
 	if len(d.Joins) > MaxJoinsHardCeiling {
 		return fmt.Errorf("reporting: too many joins (%d > %d)", len(d.Joins), MaxJoinsHardCeiling)
 	}
-	seenAliases := map[string]struct{}{}
+	// Pre-seed with primaryAlias so callers can't shadow the
+	// internal alias of the primary source — that would emit
+	// `FROM ... AS _p INNER JOIN ... AS _p ON ...` and surface as
+	// an unhelpful 500 from postgres at execution time.
+	seenAliases := map[string]struct{}{primaryAlias: {}}
 	for _, j := range d.Joins {
 		if !isIdentifier(j.Alias) {
 			return fmt.Errorf("reporting: invalid join alias %q", j.Alias)
