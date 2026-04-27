@@ -66,7 +66,7 @@ TABLES=(
   krecords workflows workflow_runs approvals audit_log events
   accounts journal_entries journal_lines fiscal_periods tax_codes
   cost_centers bank_accounts bank_transactions
-  inventory_warehouses inventory_items inventory_moves inventory_batches
+  inventory_warehouses inventory_items inventory_batches inventory_moves
   leave_ledger lesson_progress
   files base_tables base_rows docs_documents docs_document_versions
   forms import_jobs import_staging

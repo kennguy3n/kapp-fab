@@ -499,6 +499,7 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 			origWh       uuid.UUID
 			origUnitCost decimal.NullDecimal
 			origReversal *int64
+			origBatchID  *uuid.UUID
 		)
 		// source_ktype / source_id are intentionally NOT copied to
 		// the contra-entry: the contra row is its own artifact, not
@@ -508,11 +509,14 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 		// that has a non-NULL source_id — e.g. moves created by the
 		// invoice poster via PosterHook. The contra row leaves both
 		// columns NULL so it sits outside the partial unique index.
+		// batch_id, by contrast, IS copied: the contra row must
+		// roll the same batch's qty_on_hand so reversing a batched
+		// receipt cleanly drains the batch's running total.
 		err := tx.QueryRow(ctx,
-			`SELECT item_id, warehouse_id, qty, unit_cost, reversal_of
+			`SELECT item_id, warehouse_id, qty, unit_cost, reversal_of, batch_id
 			   FROM inventory_moves WHERE tenant_id = $1 AND id = $2`,
 			tenantID, moveID,
-		).Scan(&origItem, &origWh, &origQty, &origUnitCost, &origReversal)
+		).Scan(&origItem, &origWh, &origQty, &origUnitCost, &origReversal, &origBatchID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrMoveNotFound
@@ -529,12 +533,16 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 		if origUnitCost.Valid {
 			unitCostArg = origUnitCost.Decimal
 		}
+		var batchArg any
+		if origBatchID != nil {
+			batchArg = *origBatchID
+		}
 		err = tx.QueryRow(ctx,
 			`INSERT INTO inventory_moves
-			     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, moved_at, reversal_of)
-			 VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7)
+			     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, batch_id, moved_at, reversal_of)
+			 VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7, $8)
 			 RETURNING id`,
-			tenantID, origItem, origWh, newQty, unitCostArg, now, moveID,
+			tenantID, origItem, origWh, newQty, unitCostArg, batchArg, now, moveID,
 		).Scan(&out.ID)
 		if err != nil {
 			var pgErr *pgconn.PgError
@@ -564,6 +572,21 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 		out.CreatedBy = actor
 		reversedID := moveID
 		out.ReversalOf = &reversedID
+		out.BatchID = origBatchID
+		// Roll the batch's running qty_on_hand back by the contra
+		// qty so reversing a batched receipt cleanly drains the
+		// batch. Mirrors the same accounting RecordMove does on
+		// the forward path.
+		if origBatchID != nil {
+			if _, err := tx.Exec(ctx,
+				`UPDATE inventory_batches
+				    SET qty_on_hand = qty_on_hand + $1, updated_at = now()
+				  WHERE tenant_id = $2 AND id = $3`,
+				newQty, tenantID, *origBatchID,
+			); err != nil {
+				return fmt.Errorf("inventory: roll batch qty on reverse: %w", err)
+			}
+		}
 		_ = memo // memo is currently informational; logged via audit when wired through the agent tool / API
 		return s.emitMove(ctx, tx, out, "inventory.move.reversed")
 	})

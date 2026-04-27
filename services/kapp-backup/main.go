@@ -80,8 +80,8 @@ var TenantScopedTables = []string{
 	// Inventory
 	"inventory_warehouses",
 	"inventory_items",
-	"inventory_moves",
 	"inventory_batches",
+	"inventory_moves",
 	// HR / LMS
 	"leave_ledger",
 	"lesson_progress",

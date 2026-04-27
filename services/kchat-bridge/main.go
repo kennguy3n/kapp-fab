@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/google/uuid"
 
@@ -55,6 +56,19 @@ func run() error {
 		return err
 	}
 	defer pool.Close()
+
+	// Optional admin (BYPASSRLS) pool — required by the presence
+	// webhook to walk user_tenants across tenants. When unset the
+	// presence handler degrades to a no-op rather than 500-ing,
+	// matching how services/api treats other cross-tenant reads.
+	var adminPool *pgxpool.Pool
+	if cfg.AdminDatabaseURL != "" {
+		adminPool, err = platform.NewPool(ctx, cfg.AdminDatabaseURL)
+		if err != nil {
+			return err
+		}
+		defer adminPool.Close()
+	}
 
 	cache := platform.NewLRUCache(512, 5*time.Minute)
 	registry := ktype.NewPGRegistry(pool, cache)
@@ -111,7 +125,7 @@ func run() error {
 	// shared pool — `users` is a global table so RLS doesn't matter.
 	// The feature store gates the auto-attendance side-effect per
 	// tenant via `attendance_kchat_sync`.
-	userStore := tenant.NewUserStore(pool)
+	userStore := tenant.NewUserStore(pool).WithAdminPool(adminPool)
 	featureStore := tenant.NewFeatureStore(pool)
 	presenceHandler := NewPresenceHandler(userStore, featureStore, recordStore)
 
