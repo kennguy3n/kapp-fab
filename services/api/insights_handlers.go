@@ -35,6 +35,12 @@ type insightsQueryRequest struct {
 	// caching). A plain int conflated the two and silently coerced
 	// real-time queries back to 5-minute caching.
 	CacheTTLSeconds *int `json:"cache_ttl_seconds,omitempty"`
+	// Phase M raw-SQL editor mode. Empty Mode falls back to
+	// QueryModeVisual inside the store's normalizeMode helper, so
+	// pre-Phase-M clients keep round-tripping a visual definition
+	// without sending these fields at all.
+	Mode   string `json:"mode,omitempty"`
+	RawSQL string `json:"raw_sql,omitempty"`
 }
 
 func (h *insightsHandlers) listQueries(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +75,8 @@ func (h *insightsHandlers) createQuery(w http.ResponseWriter, r *http.Request) {
 		Description:     req.Description,
 		Definition:      req.Definition,
 		CacheTTLSeconds: req.CacheTTLSeconds,
+		Mode:            req.Mode,
+		RawSQL:          req.RawSQL,
 		CreatedBy:       &actor,
 	})
 	if err != nil {
@@ -120,6 +128,8 @@ func (h *insightsHandlers) updateQuery(w http.ResponseWriter, r *http.Request) {
 		Description:     req.Description,
 		Definition:      req.Definition,
 		CacheTTLSeconds: req.CacheTTLSeconds,
+		Mode:            req.Mode,
+		RawSQL:          req.RawSQL,
 	})
 	if err != nil {
 		writeInsightsError(w, err)
