@@ -296,6 +296,26 @@ func (h *PresenceHandler) evaluateLateArrival(
 ) (late bool, expectedStart string, tardyMins int, found bool) {
 	const graceMinutes = 5
 
+	// Resolve tenant timezone up-front. We use it twice:
+	//   1) to derive `localDateKey` for the shift_date comparison,
+	//      since shift_date stores the tenant's local calendar
+	//      date (e.g. "2026-04-15" = April 15 wall-clock) but the
+	//      `dateKey` parameter is UTC-derived from upsertAttendance
+	//      and would mis-match for non-UTC tenants near day
+	//      boundaries (a NY 23:30 ET check-in resolves to UTC
+	//      April 16, missing the April 15 assignment);
+	//   2) to interpret shift_type.start_time (also wall-clock)
+	//      via parseShiftStart below.
+	// Falling back to UTC keeps the legacy behaviour for tenants
+	// that never set a timezone or whose timezone string is bad.
+	tz := "UTC"
+	if h.tenants != nil {
+		if got, terr := h.tenants.Timezone(ctx, tenantID); terr == nil && got != "" {
+			tz = got
+		}
+	}
+	localDateKey := localCalendarDate(when, tz)
+
 	assignments, err := h.records.ListByField(ctx, tenantID, record.ListFilter{KType: hr.KTypeShiftAssignment}, "employee_id", employeeID.String())
 	if err != nil || len(assignments) == 0 {
 		return false, "", 0, false
@@ -309,7 +329,7 @@ func (h *PresenceHandler) evaluateLateArrival(
 		if err := json.Unmarshal(a.Data, &data); err != nil {
 			continue
 		}
-		if d, _ := data["shift_date"].(string); d != dateKey {
+		if d, _ := data["shift_date"].(string); d != localDateKey {
 			continue
 		}
 		if status, _ := data["status"].(string); status == "cancelled" {
@@ -339,13 +359,7 @@ func (h *PresenceHandler) evaluateLateArrival(
 	if startStr == "" {
 		return false, "", 0, false
 	}
-	tz := "UTC"
-	if h.tenants != nil {
-		if got, terr := h.tenants.Timezone(ctx, tenantID); terr == nil && got != "" {
-			tz = got
-		}
-	}
-	shiftStart, ok := parseShiftStart(dateKey, startStr, tz)
+	shiftStart, ok := parseShiftStart(localDateKey, startStr, tz)
 	if !ok {
 		return false, "", 0, false
 	}
@@ -355,6 +369,24 @@ func (h *PresenceHandler) evaluateLateArrival(
 	}
 	mins := int(delta / time.Minute)
 	return true, startStr, mins, true
+}
+
+// localCalendarDate returns the YYYY-MM-DD wall-clock date that
+// `when` falls on in the supplied IANA timezone. Used by
+// evaluateLateArrival to compare against the tenant-local
+// shift_date field on hr.shift_assignment records, which would
+// otherwise mismatch for non-UTC tenants whose check-in time
+// crosses a UTC day boundary. Falls back to UTC when the
+// timezone string isn't recognised so a misconfigured
+// tenants.timezone can't break the late-arrival path entirely.
+func localCalendarDate(when time.Time, tz string) string {
+	loc := time.UTC
+	if tz != "" {
+		if parsed, err := time.LoadLocation(tz); err == nil {
+			loc = parsed
+		}
+	}
+	return when.In(loc).Format("2006-01-02")
 }
 
 // parseShiftStart parses a (YYYY-MM-DD, HH:MM) pair in the supplied

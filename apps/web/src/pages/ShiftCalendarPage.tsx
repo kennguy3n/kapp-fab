@@ -165,21 +165,23 @@ function ScheduleGrid({
                 if (recs.length === 0) return <td key={key} style={tdEmpty()} />;
                 return (
                   <td key={key} style={tdStacked()}>
-                    {recs.map((rec) => {
-                      const data = rec.data as ShiftAssignmentData;
-                      const st = data.shift_type_id
-                        ? shiftTypes.get(data.shift_type_id)
-                        : undefined;
-                      return (
-                        <ShiftBadge
-                          key={rec.id}
-                          label={st?.name ?? "shift"}
-                          time={st ? `${st.start_time ?? ""}–${st.end_time ?? ""}` : ""}
-                          color={st?.color ?? "#dbeafe"}
-                          status={data.status ?? "scheduled"}
-                        />
-                      );
-                    })}
+                    <div style={badgeStack()}>
+                      {recs.map((rec) => {
+                        const data = rec.data as ShiftAssignmentData;
+                        const st = data.shift_type_id
+                          ? shiftTypes.get(data.shift_type_id)
+                          : undefined;
+                        return (
+                          <ShiftBadge
+                            key={rec.id}
+                            label={st?.name ?? "shift"}
+                            time={st ? `${st.start_time ?? ""}–${st.end_time ?? ""}` : ""}
+                            color={st?.color ?? "#dbeafe"}
+                            status={data.status ?? "scheduled"}
+                          />
+                        );
+                      })}
+                    </div>
                   </td>
                 );
               })}
@@ -400,8 +402,19 @@ function tdEmpty(): React.CSSProperties {
 }
 
 function tdStacked(): React.CSSProperties {
+  // Keep the <td> as the default `display: table-cell` so it
+  // participates in the table's column-width and row-height
+  // layout the same way `tdEmpty()` siblings do — putting
+  // `display: flex` on the cell itself would break alignment in
+  // any row that mixes filled and empty cells, which is the
+  // common case once any employee has a partial schedule. The
+  // flex stack lives one DOM level deeper via `badgeStack()`
+  // below.
+  return { ...td() };
+}
+
+function badgeStack(): React.CSSProperties {
   return {
-    ...td(),
     display: "flex",
     flexDirection: "column",
     gap: 4,
