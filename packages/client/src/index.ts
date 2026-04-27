@@ -829,6 +829,7 @@ export class ApiClient {
   }): Promise<InventoryBatch> {
     return this.request("/inventory/batches", {
       method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
       body: JSON.stringify(input),
     });
   }
