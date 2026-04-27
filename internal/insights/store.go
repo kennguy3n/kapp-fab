@@ -647,15 +647,27 @@ func (s *DashboardStore) ListShares(ctx context.Context, tenantID uuid.UUID, res
 	return out, nil
 }
 
-// DeleteShare removes a share row by id.
-func (s *DashboardStore) DeleteShare(ctx context.Context, tenantID, id uuid.UUID) error {
-	if tenantID == uuid.Nil || id == uuid.Nil {
-		return validationErr("tenant id and share id required")
+// DeleteShare removes a share row by id, scoped to the parent
+// resource. Both resourceType and resourceID must match the row
+// or it is treated as not-found, so a share for query A cannot be
+// deleted via DELETE /dashboards/{B}/shares/{share-id}. Without
+// this scope check the URL parents are advisory only and a caller
+// that knows any share id could remove it through any parent route.
+func (s *DashboardStore) DeleteShare(ctx context.Context, tenantID uuid.UUID, resourceType string, resourceID, shareID uuid.UUID) error {
+	if tenantID == uuid.Nil || shareID == uuid.Nil || resourceID == uuid.Nil {
+		return validationErr("tenant id, resource id and share id required")
+	}
+	if err := ValidateResourceType(resourceType); err != nil {
+		return err
 	}
 	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
-			`DELETE FROM insights_shares WHERE tenant_id = $1 AND id = $2`,
-			tenantID, id,
+			`DELETE FROM insights_shares
+			   WHERE tenant_id = $1
+			     AND id = $2
+			     AND resource_type = $3
+			     AND resource_id = $4`,
+			tenantID, shareID, resourceType, resourceID,
 		)
 		if err != nil {
 			return err

@@ -449,16 +449,28 @@ func (h *insightsHandlers) listDashboardShares(w http.ResponseWriter, r *http.Re
 	h.listSharesFor(w, r, insights.ResourceDashboard)
 }
 
-// deleteShare removes a single share grant by id. The path
-// `/{resource}/{id}/shares/{shareID}` is per-resource so chi's
-// path-prefix routing finds it. We don't need the resourceType
-// here because share rows are tenant-scoped + uniquely identified
-// by id, but we still keep the path parents as a defence-in-depth
-// scope check on the URL shape.
-func (h *insightsHandlers) deleteShare(w http.ResponseWriter, r *http.Request) {
+func (h *insightsHandlers) deleteQueryShare(w http.ResponseWriter, r *http.Request) {
+	h.deleteShareFor(w, r, insights.ResourceQuery)
+}
+
+func (h *insightsHandlers) deleteDashboardShare(w http.ResponseWriter, r *http.Request) {
+	h.deleteShareFor(w, r, insights.ResourceDashboard)
+}
+
+// deleteShareFor removes a single share grant scoped to the parent
+// resource on the URL. Both the parent {id} and the share row's
+// resource columns must match — otherwise the path parents would be
+// advisory only and a caller that knows any share id could remove
+// it via any /queries/* or /dashboards/* parent.
+func (h *insightsHandlers) deleteShareFor(w http.ResponseWriter, r *http.Request, resourceType string) {
 	t := platform.TenantFromContext(r.Context())
 	if t == nil {
 		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	resourceID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid resource id", http.StatusBadRequest)
 		return
 	}
 	shareID, err := uuid.Parse(chi.URLParam(r, "shareID"))
@@ -466,7 +478,7 @@ func (h *insightsHandlers) deleteShare(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid share id", http.StatusBadRequest)
 		return
 	}
-	if err := h.dashboards.DeleteShare(r.Context(), t.ID, shareID); err != nil {
+	if err := h.dashboards.DeleteShare(r.Context(), t.ID, resourceType, resourceID, shareID); err != nil {
 		writeInsightsError(w, err)
 		return
 	}
