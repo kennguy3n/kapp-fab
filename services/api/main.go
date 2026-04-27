@@ -94,6 +94,7 @@ func run() error {
 	// through the database as ciphertext. Missing/short master keys are
 	// logged and the store falls back to plaintext so local dev keeps
 	// working without secrets plumbing.
+	var keyManager *tenant.KeyManager
 	if masterKey, err := tenant.LoadMasterKey(); err == nil {
 		prevKey, perr := tenant.LoadPrevMasterKey()
 		if perr != nil {
@@ -103,6 +104,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		keyManager = km
 		recordStore = recordStore.WithEncryptor(km)
 		if prevKey != nil {
 			log.Printf("api: per-tenant field encryption enabled (dual-key rotation active)")
@@ -308,6 +310,31 @@ func run() error {
 	insightsCacheStore := insights.NewCacheStore(pool)
 	insightsRunner := insights.NewRunner(pool, insightsCacheStore, insightsQueryStore, reportRunner)
 
+	// Phase L deferred — external data sources, dashboard embeds. The
+	// data source store encrypts connection strings with the per-
+	// tenant key manager; the embed store uses an admin pool for the
+	// unauth lookup path so RLS doesn't gate anonymous fetches by
+	// the dashboard's owning tenant. Pool manager caps external
+	// connections at DefaultMaxPools per process.
+	// keyManager is a typed *KeyManager that may be nil when
+	// KAPP_MASTER_KEY is unset. Gate the interface assignment on the
+	// concrete-pointer check so the store's `s.enc == nil` plaintext
+	// fallback fires; otherwise the typed-nil-in-interface trap
+	// makes every encrypt/decrypt call return an error and breaks
+	// data-source CRUD in dev environments without a master key.
+	var dsEncryptor insights.Encryptor
+	if keyManager != nil {
+		dsEncryptor = keyManager
+	}
+	insightsDataSources := insights.NewDataSourceStore(pool, dsEncryptor)
+	insightsPools := insights.NewPoolManager()
+	defer insightsPools.Close()
+	insightsExternal := insights.NewExternalRunner(insightsDataSources, insightsPools)
+	insightsRunner = insightsRunner.
+		WithExternal(insightsExternal).
+		WithPlanGate(tenantPlanLookup{store: tenantSvc}, tenant.MaxJoinsForPlan)
+	insightsEmbeds := insights.NewEmbedStore(pool, adminPool)
+
 	// Agent tool executor — Phase B wires the CRM / tasks / approvals
 	// tools against the same record store and workflow engine the HTTP
 	// surface uses so dry-run and commit mode behave identically.
@@ -402,6 +429,19 @@ func run() error {
 		queries:    insightsQueryStore,
 		dashboards: insightsDashboardStore,
 		runner:     insightsRunner,
+	}
+	insdsh := &insightsDataSourceHandlers{
+		store:    insightsDataSources,
+		pools:    insightsPools,
+		features: featureStore,
+	}
+	insembh := &insightsEmbedHandlers{
+		embeds:      insightsEmbeds,
+		dashboards:  insightsDashboardStore,
+		queries:     insightsQueryStore,
+		runner:      insightsRunner,
+		features:    featureStore,
+		rateLimiter: rateLimiter,
 	}
 
 	// Inbound email → ticket. Wired only when adminPool is
@@ -911,7 +951,35 @@ func run() error {
 				r.Delete("/{id}/shares/{shareID}", insh.deleteDashboardShare)
 				r.Post("/{id}/widgets", insh.upsertWidget)
 				r.Delete("/{id}/widgets/{widgetID}", insh.deleteWidget)
+				// Embed-token CRUD on a per-dashboard collection.
+				// Auth-gated; the public unauth lookup lives at
+				// /api/v1/insights/embed/{token} (mounted below).
+				r.Get("/{id}/embeds", insembh.list)
+				r.Post("/{id}/embeds", insembh.create)
+				r.Post("/{id}/embeds/{embed_id}/revoke", insembh.revoke)
 			})
+			// External data sources (Phase L deferred). Connection
+			// strings are encrypted at rest; the test endpoint
+			// pings the remote with SELECT 1 so the UI can
+			// distinguish a typo from a credential failure.
+			r.Route("/data-sources", func(r chi.Router) {
+				r.Get("/", insdsh.list)
+				r.Post("/", insdsh.create)
+				r.Put("/{id}", insdsh.update)
+				r.Delete("/{id}", insdsh.delete)
+				r.Post("/{id}/test", insdsh.test)
+			})
+		})
+
+		// Public unauth dashboard embed endpoint. Mounted outside
+		// the auth chain so anonymous viewers can fetch a
+		// pre-rendered dashboard via a long-lived bearer token.
+		// Rate-limit middleware here uses a per-IP fallback; the
+		// handler itself bills the owning tenant's bucket so a
+		// viral embed can't starve other tenants.
+		r.Route("/api/v1/insights/embed", func(r chi.Router) {
+			r.Use(rateLimitMW)
+			r.Get("/{token}", insembh.public)
 		})
 
 		// Phase I KPI dashboard aggregation. Reads only, so no idempotency

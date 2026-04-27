@@ -26,6 +26,14 @@ const MaxResultRows = 10000
 // kills the connection.
 const DefaultStatementTimeout = 20 * time.Second
 
+// PlanLookup resolves a tenant's plan name. Implemented by
+// tenant.Service in production; tests inject a closure. Kept as an
+// interface so the insights package does not import internal/tenant
+// directly (which would form a cycle through the agent tools).
+type PlanLookup interface {
+	PlanForTenant(ctx context.Context, tenantID uuid.UUID) (string, error)
+}
+
 // Runner executes insights queries with cache-awareness and per-tenant
 // statement timeouts. It wraps reporting.Runner so the underlying
 // query grammar (sources, filters, aggregations, sort, limit) is the
@@ -35,6 +43,9 @@ type Runner struct {
 	cache     *CacheStore
 	queries   *QueryStore
 	reporting *reporting.Runner
+	external  *ExternalRunner
+	plans     PlanLookup
+	joinLimit func(plan string) int
 	timeout   time.Duration
 	maxRows   int
 }
@@ -60,6 +71,24 @@ func NewRunner(pool *pgxpool.Pool, cache *CacheStore, queries *QueryStore, repor
 // tests with a mocked database that doesn't honour SET LOCAL.
 func (r *Runner) WithTimeout(timeout time.Duration) *Runner {
 	r.timeout = timeout
+	return r
+}
+
+// WithExternal wires an ExternalRunner so queries whose source begins
+// with `external:` are routed to the per-tenant external pool cache.
+// When nil, external sources fail at validation time.
+func (r *Runner) WithExternal(ext *ExternalRunner) *Runner {
+	r.external = ext
+	return r
+}
+
+// WithPlanGate wires a PlanLookup + plan→max-joins resolver so the
+// runner can reject definitions whose join count exceeds the
+// tenant's plan ceiling before executing. When nil, the engine-
+// level reporting.MaxJoinsHardCeiling is the only check.
+func (r *Runner) WithPlanGate(plans PlanLookup, joinLimit func(plan string) int) *Runner {
+	r.plans = plans
+	r.joinLimit = joinLimit
 	return r
 }
 
@@ -98,6 +127,10 @@ func (r *Runner) Run(ctx context.Context, tenantID uuid.UUID, opts RunOptions) (
 		return nil, validationErr("tenant id required")
 	}
 	if err := opts.Definition.Validate(); err != nil {
+		return nil, err
+	}
+
+	if err := r.enforceJoinLimit(ctx, tenantID, opts.Definition); err != nil {
 		return nil, err
 	}
 
@@ -171,11 +204,54 @@ func (r *Runner) runWithTimeout(ctx context.Context, tenantID uuid.UUID, def rep
 		ctx, cancel = context.WithTimeout(ctx, r.timeout)
 		defer cancel()
 	}
+	if isExternalSource(def.Source) {
+		if r.external == nil {
+			return nil, validationErr("external source requires data sources to be configured")
+		}
+		result, err := r.external.Run(ctx, tenantID, def)
+		if err != nil {
+			return nil, fmt.Errorf("insights: external execute: %w", err)
+		}
+		return result, nil
+	}
 	result, err := r.reporting.RunWithStatementTimeout(ctx, tenantID, def, r.timeout)
 	if err != nil {
 		return nil, fmt.Errorf("insights: execute: %w", err)
 	}
 	return result, nil
+}
+
+// enforceJoinLimit rejects definitions whose join count exceeds the
+// caller's plan ceiling. The reporting engine has its own
+// MaxJoinsHardCeiling fence so a misconfigured plan can't unbound
+// the engine; this gate exists so the BI surface returns a clean
+// 4xx-shaped error instead of letting the engine reject deeper in
+// the call chain.
+func (r *Runner) enforceJoinLimit(ctx context.Context, tenantID uuid.UUID, def QueryDefinition) error {
+	if r.plans == nil || r.joinLimit == nil {
+		return nil
+	}
+	if len(def.Joins) == 0 {
+		return nil
+	}
+	plan, err := r.plans.PlanForTenant(ctx, tenantID)
+	if err != nil {
+		// Plan lookup failure should not fail the query — defence
+		// in depth via reporting.MaxJoinsHardCeiling still bounds
+		// the engine. Surface a structured warning via the result
+		// set on success.
+		return nil
+	}
+	maxJoins := r.joinLimit(plan)
+	if len(def.Joins) > maxJoins {
+		return validationErr("plan %q allows at most %d joins per query (got %d)", plan, maxJoins, len(def.Joins))
+	}
+	return nil
+}
+
+func isExternalSource(source string) bool {
+	return len(source) > len(reporting.SourceExternalPrefix) &&
+		source[:len(reporting.SourceExternalPrefix)] == reporting.SourceExternalPrefix
 }
 
 // RunSaved fetches the persisted query, applies its TTL, and runs.

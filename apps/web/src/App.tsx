@@ -33,6 +33,8 @@ import { HelpdeskPage } from "./pages/HelpdeskPage";
 import { ReportBuilderPage } from "./pages/ReportBuilderPage";
 import { InsightsQueryBuilderPage } from "./pages/InsightsQueryBuilderPage";
 import { InsightsDashboardPage } from "./pages/InsightsDashboardPage";
+import { InsightsDataSourcesPage } from "./pages/InsightsDataSourcesPage";
+import { InsightsEmbedPage } from "./pages/InsightsEmbedPage";
 import { TenantFeaturesPage } from "./pages/TenantFeaturesPage";
 import { PlacementPolicyPage } from "./pages/PlacementPolicyPage";
 import { RetentionPoliciesPage } from "./pages/RetentionPoliciesPage";
@@ -205,6 +207,10 @@ export function App() {
       {/* Setup wizard is rendered outside the app shell because the
           tenant has no nav-worthy data until the wizard completes. */}
       <Route path="/setup/:id" element={<SetupWizardPage />} />
+      {/* Public dashboard embed. Rendered without app chrome or
+          auth so it can be iframed into any external surface. The
+          owning tenant's rate-limit bucket is enforced server-side. */}
+      <Route path="/embed/:token" element={<InsightsEmbedPage />} />
       <Route path="/*" element={<AppShell />} />
     </Routes>
   );
@@ -322,6 +328,10 @@ function AppShell() {
           <Route
             path="/insights/dashboards"
             element={<InsightsDashboardPage />}
+          />
+          <Route
+            path="/insights/data-sources"
+            element={<InsightsDataSourcesPage />}
           />
           <Route path="/search" element={<SearchPage />} />
           <Route path="/admin/webhooks" element={<WebhooksPage />} />

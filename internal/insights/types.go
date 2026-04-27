@@ -111,20 +111,20 @@ func (q QueryDefinition) Validate() error {
 
 // Query mirrors one row of insights_queries.
 type Query struct {
-	TenantID        uuid.UUID       `json:"tenant_id"`
-	ID              uuid.UUID       `json:"id"`
-	Name            string          `json:"name"`
-	Description     string          `json:"description,omitempty"`
-	Definition      QueryDefinition `json:"definition"`
+	TenantID    uuid.UUID       `json:"tenant_id"`
+	ID          uuid.UUID       `json:"id"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Definition  QueryDefinition `json:"definition"`
 	// CacheTTLSeconds is a pointer so the JSON-decoder can distinguish
 	// "field omitted → use server default" (nil) from "0 → disable
 	// caching for this query". The migration column itself is still
 	// INT NOT NULL DEFAULT 300; the store dereferences with that
 	// default applied.
-	CacheTTLSeconds *int `json:"cache_ttl_seconds,omitempty"`
-	CreatedBy       *uuid.UUID      `json:"created_by,omitempty"`
-	CreatedAt       time.Time       `json:"created_at"`
-	UpdatedAt       time.Time       `json:"updated_at"`
+	CacheTTLSeconds *int       `json:"cache_ttl_seconds,omitempty"`
+	CreatedBy       *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 // Dashboard mirrors one row of insights_dashboards.
