@@ -950,6 +950,8 @@ func run() error {
 			r.Post("/transfers", invh.recordTransfer)
 			r.Get("/stock-levels", invh.listStockLevels)
 			r.Get("/stock-levels/{id}", invh.stockLevelsByItem)
+			r.Post("/batches", invh.createBatch)
+			r.Get("/items/{id}/batches", invh.listBatchesByItem)
 			r.Get("/reports/valuation", invh.valuation)
 		})
 

@@ -401,16 +401,111 @@ func writeInventoryError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, inventory.ErrItemNotFound),
 		errors.Is(err, inventory.ErrWarehouseNotFound),
-		errors.Is(err, inventory.ErrMoveNotFound):
+		errors.Is(err, inventory.ErrMoveNotFound),
+		errors.Is(err, inventory.ErrBatchNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, inventory.ErrDuplicateSourceMove),
-		errors.Is(err, inventory.ErrAlreadyReversed):
+		errors.Is(err, inventory.ErrAlreadyReversed),
+		errors.Is(err, inventory.ErrDuplicateBatch):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, inventory.ErrMoveInvalid),
 		errors.Is(err, inventory.ErrTransferUnbalanced),
-		errors.Is(err, inventory.ErrCannotReverseContra):
+		errors.Is(err, inventory.ErrCannotReverseContra),
+		errors.Is(err, inventory.ErrBatchItemMismatch),
+		errors.Is(err, inventory.ErrBatchInvalid):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
 		writeRecordError(w, err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Batches (Phase G/L)
+// ---------------------------------------------------------------------------
+
+type createBatchRequest struct {
+	ItemID         uuid.UUID `json:"item_id"`
+	BatchNo        string    `json:"batch_no"`
+	ManufacturedAt *string   `json:"manufactured_at,omitempty"`
+	ExpiresAt      *string   `json:"expires_at,omitempty"`
+}
+
+func (h *inventoryHandlers) createBatch(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	var req createBatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if req.ItemID == uuid.Nil {
+		http.Error(w, "item_id is required", http.StatusBadRequest)
+		return
+	}
+	if req.BatchNo == "" {
+		http.Error(w, "batch_no is required", http.StatusBadRequest)
+		return
+	}
+	b := inventory.Batch{
+		TenantID:  t.ID,
+		ItemID:    req.ItemID,
+		BatchNo:   req.BatchNo,
+		CreatedBy: actorOrDefault(r.Context()),
+	}
+	if req.ManufacturedAt != nil && *req.ManufacturedAt != "" {
+		ts, err := parseAPIDate(*req.ManufacturedAt)
+		if err != nil {
+			http.Error(w, "invalid manufactured_at: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		b.ManufacturedAt = &ts
+	}
+	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
+		ts, err := parseAPIDate(*req.ExpiresAt)
+		if err != nil {
+			http.Error(w, "invalid expires_at: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		b.ExpiresAt = &ts
+	}
+	out, err := h.store.CreateBatch(r.Context(), b)
+	if err != nil {
+		writeInventoryError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+// listBatchesByItem returns every batch for the supplied item.
+// Mirrors the /stock-levels/{id} convention so the StockLevels page
+// can fetch the per-item batch list with one HTTP call.
+func (h *inventoryHandlers) listBatchesByItem(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	itemID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid item id", http.StatusBadRequest)
+		return
+	}
+	out, err := h.store.ListBatchesForItem(r.Context(), t.ID, itemID)
+	if err != nil {
+		writeInventoryError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// parseAPIDate accepts ISO 8601 dates or RFC 3339 timestamps from
+// inventory_batches API requests.
+func parseAPIDate(s string) (time.Time, error) {
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339, s)
 }

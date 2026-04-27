@@ -324,14 +324,42 @@ func (s *PGStore) RecordMove(ctx context.Context, m Move) (*Move, error) {
 		unitCost = m.UnitCost
 	}
 
+	var batchID any
+	if m.BatchID != nil {
+		batchID = *m.BatchID
+	}
+
 	out := m
 	err := dbutil.WithTenantTx(ctx, s.pool, m.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// Pre-validate batch ↔ item linkage so a mismatched batch
+		// surfaces ErrBatchItemMismatch / ErrBatchNotFound rather
+		// than a generic FK violation on the INSERT below. The
+		// composite (tenant_id, batch_id) FK on inventory_moves
+		// already prevents cross-tenant linkage; this check adds
+		// the per-item invariant the schema cannot express.
+		if m.BatchID != nil {
+			var batchItemID uuid.UUID
+			err := tx.QueryRow(ctx,
+				`SELECT item_id FROM inventory_batches
+				 WHERE tenant_id = $1 AND id = $2`,
+				m.TenantID, *m.BatchID,
+			).Scan(&batchItemID)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrBatchNotFound
+				}
+				return fmt.Errorf("inventory: lookup batch: %w", err)
+			}
+			if batchItemID != m.ItemID {
+				return ErrBatchItemMismatch
+			}
+		}
 		err := tx.QueryRow(ctx,
 			`INSERT INTO inventory_moves
-			     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, moved_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, batch_id, moved_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			 RETURNING id`,
-			m.TenantID, m.ItemID, m.WarehouseID, m.Qty, unitCost, srcKType, srcID, m.MovedAt,
+			m.TenantID, m.ItemID, m.WarehouseID, m.Qty, unitCost, srcKType, srcID, batchID, m.MovedAt,
 		).Scan(&out.ID)
 		if err != nil {
 			var pgErr *pgconn.PgError
@@ -341,6 +369,21 @@ func (s *PGStore) RecordMove(ctx context.Context, m Move) (*Move, error) {
 				return ErrDuplicateSourceMove
 			}
 			return fmt.Errorf("inventory: insert move: %w", err)
+		}
+		// Best-effort qty_on_hand maintenance for the batch when
+		// the move references one. Mismatches between the batch
+		// running total and SUM(qty) on inventory_moves are
+		// surfaced by integration tests; production reconciliation
+		// is a separate scheduled job.
+		if m.BatchID != nil {
+			if _, err := tx.Exec(ctx,
+				`UPDATE inventory_batches
+				    SET qty_on_hand = qty_on_hand + $1, updated_at = now()
+				  WHERE tenant_id = $2 AND id = $3`,
+				m.Qty, m.TenantID, *m.BatchID,
+			); err != nil {
+				return fmt.Errorf("inventory: roll batch qty: %w", err)
+			}
 		}
 		return s.emitMove(ctx, tx, out, "inventory.move.recorded")
 	})
@@ -456,6 +499,7 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 			origWh       uuid.UUID
 			origUnitCost decimal.NullDecimal
 			origReversal *int64
+			origBatchID  *uuid.UUID
 		)
 		// source_ktype / source_id are intentionally NOT copied to
 		// the contra-entry: the contra row is its own artifact, not
@@ -465,11 +509,14 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 		// that has a non-NULL source_id — e.g. moves created by the
 		// invoice poster via PosterHook. The contra row leaves both
 		// columns NULL so it sits outside the partial unique index.
+		// batch_id, by contrast, IS copied: the contra row must
+		// roll the same batch's qty_on_hand so reversing a batched
+		// receipt cleanly drains the batch's running total.
 		err := tx.QueryRow(ctx,
-			`SELECT item_id, warehouse_id, qty, unit_cost, reversal_of
+			`SELECT item_id, warehouse_id, qty, unit_cost, reversal_of, batch_id
 			   FROM inventory_moves WHERE tenant_id = $1 AND id = $2`,
 			tenantID, moveID,
-		).Scan(&origItem, &origWh, &origQty, &origUnitCost, &origReversal)
+		).Scan(&origItem, &origWh, &origQty, &origUnitCost, &origReversal, &origBatchID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrMoveNotFound
@@ -486,12 +533,16 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 		if origUnitCost.Valid {
 			unitCostArg = origUnitCost.Decimal
 		}
+		var batchArg any
+		if origBatchID != nil {
+			batchArg = *origBatchID
+		}
 		err = tx.QueryRow(ctx,
 			`INSERT INTO inventory_moves
-			     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, moved_at, reversal_of)
-			 VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7)
+			     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, batch_id, moved_at, reversal_of)
+			 VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7, $8)
 			 RETURNING id`,
-			tenantID, origItem, origWh, newQty, unitCostArg, now, moveID,
+			tenantID, origItem, origWh, newQty, unitCostArg, batchArg, now, moveID,
 		).Scan(&out.ID)
 		if err != nil {
 			var pgErr *pgconn.PgError
@@ -521,6 +572,21 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 		out.CreatedBy = actor
 		reversedID := moveID
 		out.ReversalOf = &reversedID
+		out.BatchID = origBatchID
+		// Roll the batch's running qty_on_hand back by the contra
+		// qty so reversing a batched receipt cleanly drains the
+		// batch. Mirrors the same accounting RecordMove does on
+		// the forward path.
+		if origBatchID != nil {
+			if _, err := tx.Exec(ctx,
+				`UPDATE inventory_batches
+				    SET qty_on_hand = qty_on_hand + $1, updated_at = now()
+				  WHERE tenant_id = $2 AND id = $3`,
+				newQty, tenantID, *origBatchID,
+			); err != nil {
+				return fmt.Errorf("inventory: roll batch qty on reverse: %w", err)
+			}
+		}
 		_ = memo // memo is currently informational; logged via audit when wired through the agent tool / API
 		return s.emitMove(ctx, tx, out, "inventory.move.reversed")
 	})
@@ -584,7 +650,7 @@ func (s *PGStore) ListMoves(ctx context.Context, tenantID uuid.UUID, filter Move
 		// GET /inventory/moves always returned null.
 		q := fmt.Sprintf(
 			`SELECT id, tenant_id, item_id, warehouse_id, qty, unit_cost,
-			        source_ktype, source_id, moved_at, reversal_of
+			        source_ktype, source_id, moved_at, reversal_of, batch_id
 			 FROM inventory_moves
 			 WHERE %s
 			 ORDER BY moved_at DESC, id DESC
@@ -603,10 +669,11 @@ func (s *PGStore) ListMoves(ctx context.Context, tenantID uuid.UUID, filter Move
 				srcKType   *string
 				srcID      *uuid.UUID
 				reversalOf *int64
+				batchID    *uuid.UUID
 			)
 			if err := rows.Scan(
 				&m.ID, &m.TenantID, &m.ItemID, &m.WarehouseID, &m.Qty,
-				&unitCost, &srcKType, &srcID, &m.MovedAt, &reversalOf,
+				&unitCost, &srcKType, &srcID, &m.MovedAt, &reversalOf, &batchID,
 			); err != nil {
 				return fmt.Errorf("inventory: scan move: %w", err)
 			}
@@ -618,6 +685,7 @@ func (s *PGStore) ListMoves(ctx context.Context, tenantID uuid.UUID, filter Move
 			}
 			m.SourceID = srcID
 			m.ReversalOf = reversalOf
+			m.BatchID = batchID
 			out = append(out, m)
 		}
 		return rows.Err()
@@ -813,6 +881,7 @@ func (s *PGStore) emitMove(ctx context.Context, tx pgx.Tx, m Move, eventType str
 		"source_ktype": m.SourceKType,
 		"source_id":    m.SourceID,
 		"reversal_of":  m.ReversalOf,
+		"batch_id":     m.BatchID,
 		"moved_at":     m.MovedAt,
 	})
 	if s.publisher != nil {
@@ -842,4 +911,148 @@ func (s *PGStore) emitMove(ctx context.Context, tx pgx.Tx, m Move, eventType str
 		}
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Batches
+// ---------------------------------------------------------------------------
+
+// CreateBatch inserts a new (item, batch_no) lot row. Idempotent on
+// the per-tenant (item_id, batch_no) unique index — re-issuing the
+// same batch_no surfaces a unique-violation that the caller can map
+// to a 409.
+func (s *PGStore) CreateBatch(ctx context.Context, b Batch) (*Batch, error) {
+	if b.TenantID == uuid.Nil {
+		return nil, errors.New("inventory: tenant id required")
+	}
+	if b.ItemID == uuid.Nil {
+		return nil, fmt.Errorf("%w: item_id required", ErrBatchInvalid)
+	}
+	if b.BatchNo == "" {
+		return nil, fmt.Errorf("%w: batch_no required", ErrBatchInvalid)
+	}
+	if b.ID == uuid.Nil {
+		b.ID = uuid.New()
+	}
+	if len(b.Metadata) == 0 {
+		b.Metadata = []byte(`{}`)
+	}
+	now := s.now()
+	b.CreatedAt = now
+	b.UpdatedAt = now
+	out := b
+	err := dbutil.WithTenantTx(ctx, s.pool, b.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// Confirm the item exists for this tenant. inventory_batches
+		// already has a composite FK so the INSERT would fail
+		// otherwise — checking up-front lets us surface
+		// ErrItemNotFound rather than a Postgres FK error string.
+		var ok bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM inventory_items
+			                  WHERE tenant_id = $1 AND id = $2)`,
+			b.TenantID, b.ItemID,
+		).Scan(&ok); err != nil {
+			return fmt.Errorf("inventory: lookup item: %w", err)
+		}
+		if !ok {
+			return ErrItemNotFound
+		}
+		_, err := tx.Exec(ctx,
+			`INSERT INTO inventory_batches
+			     (tenant_id, id, item_id, batch_no, manufactured_at, expires_at, qty_on_hand, metadata, created_by, created_at, updated_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+			b.TenantID, b.ID, b.ItemID, b.BatchNo,
+			b.ManufacturedAt, b.ExpiresAt, b.QtyOnHand, b.Metadata,
+			nullableUUIDValue(b.CreatedBy), b.CreatedAt, b.UpdatedAt,
+		)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+				return ErrDuplicateBatch
+			}
+			return fmt.Errorf("inventory: insert batch: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetBatch returns a single batch by id under the supplied tenant.
+func (s *PGStore) GetBatch(ctx context.Context, tenantID, batchID uuid.UUID) (*Batch, error) {
+	if tenantID == uuid.Nil || batchID == uuid.Nil {
+		return nil, ErrBatchNotFound
+	}
+	var b Batch
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		row := tx.QueryRow(ctx,
+			`SELECT tenant_id, id, item_id, batch_no, manufactured_at,
+			        expires_at, qty_on_hand, metadata,
+			        COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid),
+			        created_at, updated_at
+			 FROM inventory_batches WHERE tenant_id = $1 AND id = $2`,
+			tenantID, batchID)
+		if err := row.Scan(&b.TenantID, &b.ID, &b.ItemID, &b.BatchNo,
+			&b.ManufacturedAt, &b.ExpiresAt, &b.QtyOnHand, &b.Metadata,
+			&b.CreatedBy, &b.CreatedAt, &b.UpdatedAt); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrBatchNotFound
+			}
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// ListBatchesForItem returns every batch defined for the supplied item.
+// Ordering: expires_at ASC NULLS LAST so FEFO callers walk the list
+// front-to-back. CreatedAt breaks ties for batches that share an
+// expiry date.
+func (s *PGStore) ListBatchesForItem(ctx context.Context, tenantID, itemID uuid.UUID) ([]Batch, error) {
+	if tenantID == uuid.Nil || itemID == uuid.Nil {
+		return nil, nil
+	}
+	out := make([]Batch, 0, 8)
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT tenant_id, id, item_id, batch_no, manufactured_at,
+			        expires_at, qty_on_hand, metadata,
+			        COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid),
+			        created_at, updated_at
+			   FROM inventory_batches
+			  WHERE tenant_id = $1 AND item_id = $2
+			  ORDER BY expires_at ASC NULLS LAST, created_at ASC`,
+			tenantID, itemID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var b Batch
+			if err := rows.Scan(&b.TenantID, &b.ID, &b.ItemID, &b.BatchNo,
+				&b.ManufacturedAt, &b.ExpiresAt, &b.QtyOnHand, &b.Metadata,
+				&b.CreatedBy, &b.CreatedAt, &b.UpdatedAt); err != nil {
+				return err
+			}
+			out = append(out, b)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+// nullableUUIDValue returns nil when the supplied UUID is the zero
+// value, so a parameter binding lands as NULL rather than
+// '00000000-0000-0000-0000-000000000000'.
+func nullableUUIDValue(id uuid.UUID) any {
+	if id == uuid.Nil {
+		return nil
+	}
+	return id
 }

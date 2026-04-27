@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/google/uuid"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/reporting"
+	"github.com/kennguy3n/kapp-fab/internal/tenant"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
 
@@ -54,6 +56,19 @@ func run() error {
 		return err
 	}
 	defer pool.Close()
+
+	// Optional admin (BYPASSRLS) pool — required by the presence
+	// webhook to walk user_tenants across tenants. When unset the
+	// presence handler degrades to a no-op rather than 500-ing,
+	// matching how services/api treats other cross-tenant reads.
+	var adminPool *pgxpool.Pool
+	if cfg.AdminDatabaseURL != "" {
+		adminPool, err = platform.NewPool(ctx, cfg.AdminDatabaseURL)
+		if err != nil {
+			return err
+		}
+		defer adminPool.Close()
+	}
 
 	cache := platform.NewLRUCache(512, 5*time.Minute)
 	registry := ktype.NewPGRegistry(pool, cache)
@@ -106,6 +121,14 @@ func run() error {
 		dashboardBase:      os.Getenv("KAPP_DASHBOARD_BASE_URL"),
 	}
 
+	// Presence webhook + supporting stores. The user store reuses the
+	// shared pool — `users` is a global table so RLS doesn't matter.
+	// The feature store gates the auto-attendance side-effect per
+	// tenant via `attendance_kchat_sync`.
+	userStore := tenant.NewUserStore(pool).WithAdminPool(adminPool)
+	featureStore := tenant.NewFeatureStore(pool)
+	presenceHandler := NewPresenceHandler(userStore, featureStore, recordStore)
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
@@ -128,6 +151,12 @@ func run() error {
 	})
 
 	r.Post("/kchat/composer/actions", composer.HandleHTTP)
+
+	// Phase G/L — KChat presence drives auto-attendance. Gated
+	// per-tenant by the `attendance_kchat_sync` feature flag (a
+	// no-op for tenants who haven't enabled it). Only `online`
+	// transitions create records; idle/offline returns 204.
+	r.Post("/kchat/presence", presenceHandler.HandleHTTP)
 
 	// Approval-card render surface. The worker service drains
 	// `approval.requested` / `approval.step_advanced` events from the
