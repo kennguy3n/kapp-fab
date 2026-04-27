@@ -10,6 +10,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/reporting"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
 
@@ -182,12 +183,39 @@ func (h *insightsEmbedHandlers) public(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dashboard.Widgets = widgets
+	scopedFilterParams := embedFilterParams(embed.ScopedFilters)
+	scopedFilters := embedScopedFilters(embed.ScopedFilters)
 	results := make([]map[string]any, 0, len(widgets))
 	for _, widget := range widgets {
 		if widget.QueryID == nil || *widget.QueryID == uuid.Nil {
 			continue
 		}
-		runRes, err := h.runner.RunSaved(r.Context(), embed.TenantID, *widget.QueryID, embedFilterParams(embed.ScopedFilters), false)
+		// Embeds enforce scoped_filters by injecting them as
+		// reporting.Filter rows into a per-widget copy of the saved
+		// query's definition. RunSaved would only carry them as a
+		// FilterParams cache-key contributor — that's a privacy
+		// hole if a widget result is rendered without applying the
+		// owner's promised filter.
+		q, qerr := h.queries.Get(r.Context(), embed.TenantID, *widget.QueryID)
+		if qerr != nil {
+			results = append(results, map[string]any{
+				"widget_id": widget.ID,
+				"error":     qerr.Error(),
+			})
+			continue
+		}
+		runDef := q.Definition
+		runDef.Filters = mergeFilters(runDef.Filters, scopedFilters)
+		var ttl time.Duration
+		if q.CacheTTLSeconds != nil {
+			ttl = time.Duration(*q.CacheTTLSeconds) * time.Second
+		}
+		runRes, err := h.runner.Run(r.Context(), embed.TenantID, insights.RunOptions{
+			Definition:   runDef,
+			QueryID:      &q.ID,
+			CacheTTL:     ttl,
+			FilterParams: scopedFilterParams,
+		})
 		if err != nil {
 			// Embed renders are forgiving — one widget failing
 			// must not break the whole render. Log via writeJSON
@@ -229,6 +257,55 @@ func embedFilterParams(raw json.RawMessage) map[string]any {
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil
 	}
+	return out
+}
+
+// embedScopedFilters converts the embed's scoped_filters JSON into a
+// slice of reporting.Filter entries. Each top-level key maps to a
+// `column = value` filter that is merged into the saved query's
+// definition before execution. Invalid JSON, unsupported value
+// shapes, and non-identifier keys are dropped on the floor — the
+// embed render must remain forgiving even if an operator stored
+// junk filters, but we never widen results.
+func embedScopedFilters(raw json.RawMessage) []reporting.Filter {
+	if len(raw) == 0 {
+		return nil
+	}
+	parsed := map[string]json.RawMessage{}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil
+	}
+	out := make([]reporting.Filter, 0, len(parsed))
+	for col, val := range parsed {
+		if col == "" {
+			continue
+		}
+		if len(val) == 0 || string(val) == "null" {
+			out = append(out, reporting.Filter{Column: col, Op: "null"})
+			continue
+		}
+		out = append(out, reporting.Filter{Column: col, Op: "=", Value: val})
+	}
+	return out
+}
+
+// mergeFilters appends scoped filters after any filters carried by
+// the saved query. Returns a fresh slice so callers can't mutate the
+// underlying definition stored in QueryStore's cache. Scoped filters
+// always restrict — they are never permitted to remove or overwrite
+// existing filters.
+func mergeFilters(existing []reporting.Filter, scoped []reporting.Filter) []reporting.Filter {
+	if len(scoped) == 0 {
+		if existing == nil {
+			return nil
+		}
+		out := make([]reporting.Filter, len(existing))
+		copy(out, existing)
+		return out
+	}
+	out := make([]reporting.Filter, 0, len(existing)+len(scoped))
+	out = append(out, existing...)
+	out = append(out, scoped...)
 	return out
 }
 
