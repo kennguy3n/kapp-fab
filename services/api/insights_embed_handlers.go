@@ -1,10 +1,7 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -227,18 +224,4 @@ func embedFilterParams(raw json.RawMessage) map[string]any {
 	return out
 }
 
-// embedRunTimeout caps the unauth render at 10s end-to-end. Tighter
-// than the auth'd dashboard runner because anonymous calls don't
-// pay session-cookie auth latency and we want budget to spare for
-// the rate-limit + lookup overhead.
-const embedRunTimeout = 10 * time.Second
 
-// withEmbedDeadline wraps the request context with a per-call
-// deadline that the runner respects via context.WithTimeout.
-func withEmbedDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, embedRunTimeout)
-}
-
-// silence unused-import lint while wiring up.
-var _ = errors.Is
-var _ = fmt.Sprint

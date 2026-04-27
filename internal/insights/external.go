@@ -213,10 +213,7 @@ func buildExternalQuery(def reporting.Definition, table string) (string, []any, 
 		nextArg += len(params)
 		where = append(where, expr)
 	}
-	groupBy := []string{}
-	for _, g := range def.GroupBy {
-		groupBy = append(groupBy, g)
-	}
+	groupBy := append([]string{}, def.GroupBy...)
 	orderBy := []string{}
 	for _, s := range def.Sort {
 		dir := s.Direction

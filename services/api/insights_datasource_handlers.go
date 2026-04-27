@@ -3,13 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
@@ -214,11 +212,4 @@ func (h *insightsDataSourceHandlers) test(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// connectExternalPoolForTest is the test-injection seam used by the
-// integration suite to swap the openExternalPool body without
-// reaching into private package state.
-var connectExternalPoolForTest func(ctx context.Context, dsn string) (*pgxpool.Pool, error)
 
-// silence unused-import lint while the test seam is wired through;
-// without a referencing symbol, errors-package is dead.
-var _ = errors.Is

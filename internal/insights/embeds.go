@@ -254,7 +254,10 @@ func (s *EmbedStore) LookupByToken(ctx context.Context, token string) (*Embed, e
 		return nil, ErrEmbedExceeded
 	}
 	e.ScopedFilters = scoped
-	if _, err := s.adminPool.Exec(ctx,
+	// Best-effort view-count bump. A failed update doesn't fail the
+	// fetch — the rate limit + audit trail still detect abuse, and
+	// the caller may simply observe a stale view_count by one.
+	_, _ = s.adminPool.Exec(ctx,
 		`UPDATE insights_embeds
 		    SET view_count = view_count + 1
 		  WHERE token_digest = $1
@@ -262,10 +265,6 @@ func (s *EmbedStore) LookupByToken(ctx context.Context, token string) (*Embed, e
 		    AND revoked_at IS NULL
 		    AND (expires_at IS NULL OR expires_at > now())`,
 		digest,
-	); err != nil {
-		// Failed view-count bump is logged but does not fail the
-		// fetch; the rate limit + audit trail still detect abuse.
-		// The caller may receive a stale view_count by one.
-	}
+	)
 	return &e, nil
 }

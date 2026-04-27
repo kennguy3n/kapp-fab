@@ -793,68 +793,6 @@ func filterExprWithColumn(f Filter, colExpr string, startArg int) (string, []any
 	}
 }
 
-func aggregationExpr(a Aggregation, jsonbCol string) (string, error) {
-	if a.Op == AggCount && a.Column == "" {
-		return "COUNT(*)", nil
-	}
-	if a.Column == "" {
-		return "", errors.New("reporting: aggregation column required")
-	}
-	col := columnExpr(a.Column, jsonbCol)
-	// KType sources extract from JSONB as text and need NULLIF + ::numeric;
-	// ledger sources are already typed columns and must not be cast through ''.
-	numeric := col
-	if jsonbCol != "" {
-		numeric = fmt.Sprintf("NULLIF(%s, '')::numeric", col)
-	}
-	switch a.Op {
-	case AggCount:
-		return fmt.Sprintf("COUNT(%s)", col), nil
-	case AggSum:
-		return fmt.Sprintf("COALESCE(SUM(%s), 0)", numeric), nil
-	case AggAvg:
-		return fmt.Sprintf("AVG(%s)", numeric), nil
-	case AggMin:
-		return fmt.Sprintf("MIN(%s)", numeric), nil
-	case AggMax:
-		return fmt.Sprintf("MAX(%s)", numeric), nil
-	default:
-		return "", fmt.Errorf("reporting: unsupported aggregation %q", a.Op)
-	}
-}
-
-func filterExpr(f Filter, jsonbCol string, startArg int) (string, []any, error) {
-	col := columnExpr(f.Column, jsonbCol)
-	op := strings.ToLower(f.Op)
-	switch op {
-	case "null":
-		return fmt.Sprintf("%s IS NULL", col), nil, nil
-	case "notnull":
-		return fmt.Sprintf("%s IS NOT NULL", col), nil, nil
-	case "in":
-		var list []any
-		if err := json.Unmarshal(f.Value, &list); err != nil {
-			return "", nil, fmt.Errorf("reporting: in-filter value must be array: %w", err)
-		}
-		if len(list) == 0 {
-			return "FALSE", nil, nil
-		}
-		placeholders := make([]string, len(list))
-		for i := range list {
-			placeholders[i] = fmt.Sprintf("$%d", startArg+i)
-		}
-		return fmt.Sprintf("%s IN (%s)", col, strings.Join(placeholders, ", ")), list, nil
-	default:
-		var v any
-		if len(f.Value) > 0 {
-			if err := json.Unmarshal(f.Value, &v); err != nil {
-				return "", nil, fmt.Errorf("reporting: filter value: %w", err)
-			}
-		}
-		return fmt.Sprintf("%s %s $%d", col, op, startArg), []any{v}, nil
-	}
-}
-
 // coerceValue normalises pgx-returned values so JSON serialisation
 // yields clean output: time.Time → RFC3339, numeric decimals kept as
 // strings (via fmt), byte slices → string.
