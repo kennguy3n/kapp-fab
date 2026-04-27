@@ -86,7 +86,19 @@ SQL
 
 for t in "${TABLES[@]}"; do
   SQL+=$'\n'"CREATE TABLE IF NOT EXISTS \"${SCHEMA}\".\"${t}\" (LIKE public.\"${t}\" INCLUDING ALL);"
-  SQL+=$'\n'"INSERT INTO \"${SCHEMA}\".\"${t}\" SELECT * FROM public.\"${t}\" WHERE tenant_id = '${TENANT_ID}'::uuid ON CONFLICT DO NOTHING;"
+  # Skip generated columns (e.g. krecords.search_vector) — INSERTing a
+  # value into them is rejected by PostgreSQL even when the value
+  # comes from SELECT *. We materialise the explicit column list at
+  # SQL-build time via a pg subquery against information_schema so
+  # the script stays in lock-step with the live schema.
+  SQL+=$'\n'"DO \$\$ DECLARE cols text; BEGIN
+    SELECT string_agg(quote_ident(column_name), ', ' ORDER BY ordinal_position) INTO cols
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = '${t}'
+      AND COALESCE(is_generated, 'NEVER') = 'NEVER';
+    EXECUTE format('INSERT INTO %I.%I (%s) SELECT %s FROM public.%I WHERE tenant_id = %L::uuid ON CONFLICT DO NOTHING',
+      '${SCHEMA}', '${t}', cols, cols, '${t}', '${TENANT_ID}');
+  END \$\$;"
 done
 
 SQL+=$'\n'"UPDATE public.tenants SET schema = '${SCHEMA}' WHERE id = '${TENANT_ID}'::uuid;"
