@@ -48,20 +48,34 @@ type presenceWebhookPayload struct {
 // because attendance records are KRecords (no per-ktype schema in
 // SQL), so idempotency is enforced at the application layer via
 // ListByField.
+
+// PresenceTenantStore is the subset of *tenant.PGStore the
+// presence handler needs to resolve a tenant's wall-clock
+// timezone for shift-arithmetic. Defined here as an interface so
+// tests can substitute a fixed-string fake without standing up a
+// real Postgres tenant row.
+type PresenceTenantStore interface {
+	Timezone(ctx context.Context, id uuid.UUID) (string, error)
+}
+
 type PresenceHandler struct {
 	users    *tenant.UserStore
 	features *tenant.FeatureStore
+	tenants  PresenceTenantStore
 	records  *record.PGStore
 	now      func() time.Time
 }
 
 // NewPresenceHandler constructs a handler with sensible defaults.
 // `now` is injectable so the integration test fixes the clock and
-// asserts the date partition deterministically.
-func NewPresenceHandler(users *tenant.UserStore, features *tenant.FeatureStore, records *record.PGStore) *PresenceHandler {
+// asserts the date partition deterministically. `tenants` may be
+// nil (older callers / smoke tests); the late-arrival path then
+// falls back to UTC for shift-start parsing.
+func NewPresenceHandler(users *tenant.UserStore, features *tenant.FeatureStore, tenants PresenceTenantStore, records *record.PGStore) *PresenceHandler {
 	return &PresenceHandler{
 		users:    users,
 		features: features,
+		tenants:  tenants,
 		records:  records,
 		now:      func() time.Time { return time.Now().UTC() },
 	}
@@ -325,19 +339,43 @@ func (h *PresenceHandler) evaluateLateArrival(
 	if startStr == "" {
 		return false, "", 0, false
 	}
-	dayParts := strings.SplitN(dateKey, "-", 3)
-	if len(dayParts) != 3 {
+	tz := "UTC"
+	if h.tenants != nil {
+		if got, terr := h.tenants.Timezone(ctx, tenantID); terr == nil && got != "" {
+			tz = got
+		}
+	}
+	shiftStart, ok := parseShiftStart(dateKey, startStr, tz)
+	if !ok {
 		return false, "", 0, false
 	}
-	shiftStart, err := time.Parse("2006-01-02 15:04", dateKey+" "+startStr)
-	if err != nil {
-		return false, "", 0, false
-	}
-	shiftStart = shiftStart.UTC()
 	delta := when.UTC().Sub(shiftStart)
 	if delta <= time.Duration(graceMinutes)*time.Minute {
 		return false, startStr, 0, true
 	}
 	mins := int(delta / time.Minute)
 	return true, startStr, mins, true
+}
+
+// parseShiftStart parses a (YYYY-MM-DD, HH:MM) pair in the supplied
+// IANA timezone and returns the UTC instant. Falls back to UTC if
+// the timezone string isn't recognised by time.LoadLocation so an
+// operator-misconfigured tenant.timezone can't cause attendance
+// upserts to error out — the late-arrival window just becomes less
+// accurate. Returns ok=false on a malformed date or HH:MM.
+func parseShiftStart(dateKey, startStr, tz string) (time.Time, bool) {
+	if strings.Count(dateKey, "-") != 2 {
+		return time.Time{}, false
+	}
+	loc := time.UTC
+	if tz != "" {
+		if parsed, err := time.LoadLocation(tz); err == nil {
+			loc = parsed
+		}
+	}
+	t, err := time.ParseInLocation("2006-01-02 15:04", dateKey+" "+startStr, loc)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t.UTC(), true
 }

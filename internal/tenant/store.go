@@ -90,6 +90,27 @@ func (s *PGStore) Get(ctx context.Context, id uuid.UUID) (*Tenant, error) {
 	return &t, nil
 }
 
+// Timezone returns the tenant's IANA timezone identifier (e.g.
+// "America/New_York") used to interpret wall-clock fields such as
+// hr.shift_type.start_time. The column is backfilled to "UTC" by
+// migration 000047, so a never-configured tenant always resolves
+// to UTC rather than NULL or empty. ErrNotFound is returned when
+// the tenant id doesn't exist.
+func (s *PGStore) Timezone(ctx context.Context, id uuid.UUID) (string, error) {
+	var tz string
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(timezone, 'UTC') FROM tenants WHERE id = $1`, id).Scan(&tz)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("tenant: timezone: %w", err)
+	}
+	if tz == "" {
+		tz = "UTC"
+	}
+	return tz, nil
+}
+
 // GetBySlug returns the tenant with the given slug or ErrNotFound.
 func (s *PGStore) GetBySlug(ctx context.Context, slug string) (*Tenant, error) {
 	var t Tenant

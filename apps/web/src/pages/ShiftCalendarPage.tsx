@@ -82,8 +82,8 @@ export function ShiftCalendarPage() {
     [shiftTypesQ.data],
   );
   const assignmentsByCell = useMemo(
-    () => indexAssignments(assignmentsQ.data ?? []),
-    [assignmentsQ.data],
+    () => indexAssignments(assignmentsQ.data ?? [], shiftTypes),
+    [assignmentsQ.data, shiftTypes],
   );
 
   const dates = useMemo(() => buildDateRange(anchor, view), [anchor, view]);
@@ -140,7 +140,7 @@ function ScheduleGrid({
   dates: string[];
   employees: { id: string; name?: string }[];
   shiftTypes: Map<string, { id: string } & ShiftTypeData>;
-  assignmentsByCell: Map<string, KRecord>;
+  assignmentsByCell: Map<string, KRecord[]>;
 }) {
   return (
     <div style={{ overflowX: "auto" }}>
@@ -161,18 +161,25 @@ function ScheduleGrid({
               <td style={td()}>{e.name ?? "(unnamed)"}</td>
               {dates.map((d) => {
                 const key = cellKey(e.id, d);
-                const rec = assignmentsByCell.get(key);
-                if (!rec) return <td key={key} style={tdEmpty()} />;
-                const data = rec.data as ShiftAssignmentData;
-                const st = data.shift_type_id ? shiftTypes.get(data.shift_type_id) : undefined;
+                const recs = assignmentsByCell.get(key) ?? [];
+                if (recs.length === 0) return <td key={key} style={tdEmpty()} />;
                 return (
-                  <td key={key} style={td()}>
-                    <ShiftBadge
-                      label={st?.name ?? "shift"}
-                      time={st ? `${st.start_time ?? ""}–${st.end_time ?? ""}` : ""}
-                      color={st?.color ?? "#dbeafe"}
-                      status={data.status ?? "scheduled"}
-                    />
+                  <td key={key} style={tdStacked()}>
+                    {recs.map((rec) => {
+                      const data = rec.data as ShiftAssignmentData;
+                      const st = data.shift_type_id
+                        ? shiftTypes.get(data.shift_type_id)
+                        : undefined;
+                      return (
+                        <ShiftBadge
+                          key={rec.id}
+                          label={st?.name ?? "shift"}
+                          time={st ? `${st.start_time ?? ""}–${st.end_time ?? ""}` : ""}
+                          color={st?.color ?? "#dbeafe"}
+                          status={data.status ?? "scheduled"}
+                        />
+                      );
+                    })}
                   </td>
                 );
               })}
@@ -285,12 +292,40 @@ function ScheduleForm({
   );
 }
 
-function indexAssignments(records: KRecord[]): Map<string, KRecord> {
-  const out = new Map<string, KRecord>();
+function indexAssignments(
+  records: KRecord[],
+  shiftTypes: Map<string, { id: string } & ShiftTypeData>,
+): Map<string, KRecord[]> {
+  // Split shifts (e.g. an employee scheduled for both a Morning and
+  // an Evening shift on the same date) are valid and the calendar
+  // must surface every assignment, not silently keep the last one
+  // wins. The map collects an array per (employee, date) cell, then
+  // sorts each cell by the resolved shift_type.start_time so the
+  // visual stack is stable across renders. Assignments missing a
+  // shift_type or start_time fall to the bottom via a sentinel
+  // "99:99" sort key — they're rare in practice (foreign-key drop)
+  // but shouldn't crash the grid.
+  const out = new Map<string, KRecord[]>();
   for (const r of records) {
     const data = r.data as ShiftAssignmentData;
     if (!data.employee_id || !data.shift_date) continue;
-    out.set(cellKey(data.employee_id, data.shift_date), r);
+    const key = cellKey(data.employee_id, data.shift_date);
+    const arr = out.get(key) ?? [];
+    arr.push(r);
+    out.set(key, arr);
+  }
+  for (const arr of out.values()) {
+    arr.sort((a, b) => {
+      const aData = a.data as ShiftAssignmentData;
+      const bData = b.data as ShiftAssignmentData;
+      const aStart =
+        (aData.shift_type_id ? shiftTypes.get(aData.shift_type_id)?.start_time : undefined) ??
+        "99:99";
+      const bStart =
+        (bData.shift_type_id ? shiftTypes.get(bData.shift_type_id)?.start_time : undefined) ??
+        "99:99";
+      return aStart.localeCompare(bStart);
+    });
   }
   return out;
 }
@@ -361,5 +396,14 @@ function tdEmpty(): React.CSSProperties {
   return {
     ...td(),
     background: "#fafafa",
+  };
+}
+
+function tdStacked(): React.CSSProperties {
+  return {
+    ...td(),
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
   };
 }
