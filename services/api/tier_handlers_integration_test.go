@@ -139,7 +139,7 @@ func TestTierUpgradeCopiesEveryTable(t *testing.T) {
 	}
 
 	schemaName := tierSchemaName(tnA.ID)
-	if err := promoteTenantToSchema(ctx, adminPool, tnA.ID, schemaName); err != nil {
+	if err := tenant.Promote(ctx, adminPool, tnA.ID, schemaName); err != nil {
 		t.Fatalf("promote tenant A: %v", err)
 	}
 	t.Cleanup(func() {

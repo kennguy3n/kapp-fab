@@ -3,33 +3,36 @@
 # upgrade_tier.sh — move one tenant from the shared schema to a
 # dedicated schema in the same PostgreSQL cluster.
 #
-# The Kapp architecture ships every tenant in `public.*` tables
-# protected by RLS. A tenant on a premium plan can be promoted to a
-# dedicated schema (e.g. `tenant_acme.*`) so noisy-neighbour risk is
-# reduced at the cost of a heavier per-tenant footprint. This script
-# performs that promotion: it creates the target schema, copies every
-# tenant-scoped row, applies an RLS-free variant of each table, and
-# rewrites the tenant's routing record to point the API gateway at
-# the new schema.
+# As of Phase G the actual SQL lives inside the SECURITY DEFINER
+# function `public.promote_tenant_to_schema(uuid, text, text[])`
+# installed by migrations/000042_tier_admin_role.sql. The function
+# is owned by `kapp_tier_admin` (no superuser, no BYPASSRLS) so the
+# operator running this script no longer needs cluster-wide DDL
+# rights — they just need EXECUTE on the wrapper. The default
+# install grants EXECUTE to `kapp_admin`, which is what
+# scripts/upgrade_tier.sh and services/api/tier_handlers.go connect
+# as.
 #
-# The dedicated-DB and dedicated-cell tiers build on this same flow
-# but live in separate scripts; keeping this one schema-only keeps
-# the blast radius small.
+# This script's job is therefore reduced to:
+#   1. Validating the tenant UUID
+#   2. Building the canonical schema name (`tenant_<uuid_with_dashes_to_underscores>`)
+#   3. Sending the matching list of tenant-scoped tables (kept in
+#      sync with internal/tenant/tier.go::TenantScopedTables and
+#      services/kapp-backup/main.go::TenantScopedTables — drift is
+#      caught by services/api/tier_handlers_integration_test.go)
+#   4. Calling the SECURITY DEFINER function inside one transaction
 #
 # Usage:
 #   DATABASE_URL=postgres://…  ./scripts/upgrade_tier.sh <tenant_uuid>
 #
 # Prereqs:
 #   - psql on PATH
-#   - The operator has DB superuser on the cluster (needed to CREATE
-#     SCHEMA + copy RLS-protected data across the boundary).
+#   - The operator's connection role has EXECUTE on
+#     public.promote_tenant_to_schema(uuid, text, text[]). The
+#     default install grants this to kapp_admin.
 #   - A recent `kapp-backup extract --tenant <tenant_uuid>` dump on
 #     hand, in case the migration must be rolled back by replaying
 #     the dump into a fresh tenant_id.
-#
-# Safety: the script runs every mutation in a single transaction so a
-# partial copy is never visible to the application. On failure the
-# script exits non-zero and leaves the public schema untouched.
 
 set -euo pipefail
 
@@ -44,10 +47,6 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
 fi
 # $1 is interpolated into single-quoted SQL literals below, so refuse
 # anything that isn't a canonical UUID before we build the statement.
-# Defence-in-depth: the operator already has DB superuser, but the
-# tenant ID often flows through a dashboard / ticket before landing
-# here and we don't want a stray apostrophe to break out of the
-# literal.
 if ! [[ "$TENANT_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
   echo "error: invalid tenant UUID: $TENANT_ID" >&2
   exit 2
@@ -55,11 +54,10 @@ fi
 
 SCHEMA="tenant_${TENANT_ID//-/_}"
 
-# Table list mirrors services/kapp-backup/main.go#TenantScopedTables.
-# Keep these two files in sync when adding a new tenant-scoped table.
-# `ktypes` is intentionally excluded — it has no tenant_id column and
-# is re-registered at API boot, so copying it per-tenant would crash
-# the WHERE clause below.
+# Table list mirrors internal/tenant/tier.go::TenantScopedTables and
+# services/kapp-backup/main.go::TenantScopedTables. The byte-identity
+# check in services/api/tier_handlers_integration_test.go fails CI if
+# any of the three drift.
 TABLES=(
   user_tenants roles permissions sessions
   idempotency_keys saved_views notifications
@@ -79,30 +77,22 @@ TABLES=(
   insights_query_cache insights_shares
 )
 
-read -r -d '' SQL <<SQL || true
-BEGIN;
-CREATE SCHEMA IF NOT EXISTS "${SCHEMA}";
-SQL
-
+# Build a Postgres TEXT[] literal: ARRAY['t1','t2',...]
+TABLES_LITERAL="ARRAY["
+first=1
 for t in "${TABLES[@]}"; do
-  SQL+=$'\n'"CREATE TABLE IF NOT EXISTS \"${SCHEMA}\".\"${t}\" (LIKE public.\"${t}\" INCLUDING ALL);"
-  # Skip generated columns (e.g. krecords.search_vector) — INSERTing a
-  # value into them is rejected by PostgreSQL even when the value
-  # comes from SELECT *. We materialise the explicit column list at
-  # SQL-build time via a pg subquery against information_schema so
-  # the script stays in lock-step with the live schema.
-  SQL+=$'\n'"DO \$\$ DECLARE cols text; BEGIN
-    SELECT string_agg(quote_ident(column_name), ', ' ORDER BY ordinal_position) INTO cols
-    FROM information_schema.columns
-    WHERE table_schema = 'public' AND table_name = '${t}'
-      AND COALESCE(is_generated, 'NEVER') = 'NEVER';
-    EXECUTE format('INSERT INTO %I.%I (%s) SELECT %s FROM public.%I WHERE tenant_id = %L::uuid ON CONFLICT DO NOTHING',
-      '${SCHEMA}', '${t}', cols, cols, '${t}', '${TENANT_ID}');
-  END \$\$;"
+  if [[ $first -eq 1 ]]; then
+    TABLES_LITERAL+="'${t}'"
+    first=0
+  else
+    TABLES_LITERAL+=",'${t}'"
+  fi
 done
+TABLES_LITERAL+="]::text[]"
 
-SQL+=$'\n'"UPDATE public.tenants SET schema = '${SCHEMA}' WHERE id = '${TENANT_ID}'::uuid;"
-SQL+=$'\n'"COMMIT;"
+SQL="BEGIN;
+SELECT public.promote_tenant_to_schema('${TENANT_ID}'::uuid, '${SCHEMA}', ${TABLES_LITERAL});
+COMMIT;"
 
 echo "upgrade_tier: promoting ${TENANT_ID} into ${SCHEMA}" >&2
 echo "${SQL}" | psql "${DATABASE_URL}" -v ON_ERROR_STOP=1
