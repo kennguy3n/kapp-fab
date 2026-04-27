@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -14,6 +15,36 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 )
+
+// nonGeneratedColumns returns the ordered list of column names for the
+// given table that are NOT generated (so the caller can build an
+// INSERT INTO target (col1, col2, ...) SELECT col1, col2, ... statement
+// that excludes GENERATED ALWAYS AS columns). Used by
+// promoteTenantToSchema so a `LIKE … INCLUDING ALL` clone target with
+// inherited generated columns (e.g. krecords.search_vector) does not
+// reject the row copy.
+func nonGeneratedColumns(ctx context.Context, tx pgx.Tx, schema, table string) ([]string, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT column_name FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = $2
+		   AND COALESCE(is_generated, 'NEVER') = 'NEVER'
+		 ORDER BY ordinal_position`,
+		schema, table,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]string, 0, 16)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
 
 // tierTargetSchema and tierTargetDB are the only target tiers the
 // upgrade endpoint accepts. `dedicated_schema` is what
@@ -155,7 +186,11 @@ func tierSchemaName(id uuid.UUID) string {
 //
 //  1. CREATE SCHEMA IF NOT EXISTS tenant_<uuid>
 //  2. For each TenantScopedTable: CREATE TABLE IF NOT EXISTS … (LIKE
-//     public.<table> INCLUDING ALL) and copy the tenant's rows.
+//     public.<table> INCLUDING ALL) and copy the tenant's rows. The
+//     SELECT enumerates non-generated columns explicitly so tables
+//     with GENERATED ALWAYS AS columns (e.g. krecords.search_vector)
+//     do not trigger "cannot insert a non-DEFAULT value into column"
+//     against the inherited generated column on the dedicated side.
 //  3. UPDATE public.tenants SET schema = 'tenant_<uuid>' WHERE id = $1.
 func promoteTenantToSchema(ctx context.Context, adminPool *pgxpool.Pool, tenantID uuid.UUID, schemaName string) error {
 	if !isSafeIdentifier(schemaName) {
@@ -180,9 +215,24 @@ func promoteTenantToSchema(ctx context.Context, adminPool *pgxpool.Pool, tenantI
 		if _, err := tx.Exec(ctx, createSQL); err != nil {
 			return fmt.Errorf("tier upgrade: create %s.%s: %w", schemaName, table, err)
 		}
+		cols, err := nonGeneratedColumns(ctx, tx, "public", table)
+		if err != nil {
+			return fmt.Errorf("tier upgrade: enumerate %s columns: %w", table, err)
+		}
+		if len(cols) == 0 {
+			continue
+		}
+		quoted := make([]string, 0, len(cols))
+		for _, c := range cols {
+			if !isSafeIdentifier(c) {
+				return fmt.Errorf("tier upgrade: refusing unsafe column %q", c)
+			}
+			quoted = append(quoted, fmt.Sprintf("%q", c))
+		}
+		colList := strings.Join(quoted, ", ")
 		copySQL := fmt.Sprintf(
-			`INSERT INTO %q.%q SELECT * FROM public.%q WHERE tenant_id = $1 ON CONFLICT DO NOTHING`,
-			schemaName, table, table,
+			`INSERT INTO %q.%q (%s) SELECT %s FROM public.%q WHERE tenant_id = $1 ON CONFLICT DO NOTHING`,
+			schemaName, table, colList, colList, table,
 		)
 		if _, err := tx.Exec(ctx, copySQL, tenantID); err != nil {
 			return fmt.Errorf("tier upgrade: copy %s: %w", table, err)

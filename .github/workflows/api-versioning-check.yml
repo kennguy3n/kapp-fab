@@ -1,0 +1,76 @@
+name: api-versioning-check
+
+# Static check: every public REST route mounted on a chi.Router must
+# live under /api/v1/, /api/v2/, /internal/, or the small allow-list
+# of platform endpoints (/healthz, /metrics, /.well-known/...). See
+# docs/API_VERSIONING.md.
+#
+# Implementation note: the check is a grep-based lint rather than a
+# full Go AST walk. We only need to see the *literal* path strings
+# passed to chi.Router methods — they are always single-line string
+# literals — so a regex over `services/api/**/*.go` catches every
+# violation without booting the API server. CI runs on every PR so a
+# regression trips before it ships.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    name: routes are versioned
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: scan chi routes for unversioned paths
+        run: |
+          set -euo pipefail
+          # Collect every literal path passed to chi.Router methods
+          # (Get/Post/Put/Patch/Delete/Head/Options/Connect/Trace,
+          # plus Route/Mount). The match accepts an optional receiver
+          # so it covers `r.Get(...)` and `chi.Mount(...)` style calls.
+          violations=0
+          while IFS= read -r line; do
+            # Format: file:line:match
+            file=$(printf '%s\n' "$line" | cut -d: -f1)
+            number=$(printf '%s\n' "$line" | cut -d: -f2)
+            match=$(printf '%s\n' "$line" | cut -d: -f3-)
+            # Extract the first double-quoted string in the match.
+            path=$(printf '%s\n' "$match" | grep -oE '"[^"]*"' | head -n1 | tr -d '"' || true)
+            if [ -z "$path" ]; then
+              continue
+            fi
+            # Allow these prefixes:
+            case "$path" in
+              /api/v1|/api/v1/*) ;;
+              /api/v2|/api/v2/*) ;;
+              /internal|/internal/*) ;;
+              /healthz|/metrics|/.well-known|/.well-known/*) ;;
+              # chi sub-routes inside an /api/v1 Route block are
+              # relative paths like "/", "/{id}", "/sso". Those are
+              # safe — the parent Route("/api/v1/...") is what binds
+              # the prefix, and we already validated that string.
+              /|/[^/]*|/[^/]*/|/{*|"")
+                # Sub-route bodies use relative paths — skip.
+                ;;
+              *)
+                # Any absolute path that is not /api/vN, /internal,
+                # or one of the platform endpoints is a violation.
+                if [[ "$path" == /* ]]; then
+                  echo "::error file=$file,line=$number::route $path is not under /api/v1/ — see docs/API_VERSIONING.md"
+                  violations=$((violations + 1))
+                fi
+                ;;
+            esac
+          done < <(
+            grep -nE '\b(Route|Mount|Get|Post|Put|Patch|Delete|Head|Options|Connect|Trace|Method|Handle|HandleFunc)\(' \
+              services/api/*.go services/api/**/*.go 2>/dev/null \
+              | grep -v _test.go
+          )
+          if [ "$violations" -gt 0 ]; then
+            echo "$violations route(s) violate the API versioning policy."
+            exit 1
+          fi
+          echo "all routes versioned correctly"
