@@ -316,8 +316,19 @@ func run() error {
 	// unauth lookup path so RLS doesn't gate anonymous fetches by
 	// the dashboard's owning tenant. Pool manager caps external
 	// connections at DefaultMaxPools per process.
-	insightsDataSources := insights.NewDataSourceStore(pool, keyManager)
+	// keyManager is a typed *KeyManager that may be nil when
+	// KAPP_MASTER_KEY is unset. Gate the interface assignment on the
+	// concrete-pointer check so the store's `s.enc == nil` plaintext
+	// fallback fires; otherwise the typed-nil-in-interface trap
+	// makes every encrypt/decrypt call return an error and breaks
+	// data-source CRUD in dev environments without a master key.
+	var dsEncryptor insights.Encryptor
+	if keyManager != nil {
+		dsEncryptor = keyManager
+	}
+	insightsDataSources := insights.NewDataSourceStore(pool, dsEncryptor)
 	insightsPools := insights.NewPoolManager()
+	defer insightsPools.Close()
 	insightsExternal := insights.NewExternalRunner(insightsDataSources, insightsPools)
 	insightsRunner = insightsRunner.
 		WithExternal(insightsExternal).

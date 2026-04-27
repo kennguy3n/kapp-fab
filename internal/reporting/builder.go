@@ -221,8 +221,15 @@ func (d *Definition) Validate() error {
 	} else if _, ok := allowedLedgerSources[d.Source]; !ok {
 		return fmt.Errorf("reporting: unsupported source %q", d.Source)
 	}
+	// When the definition declares joins, columns may carry an
+	// `<alias>.<col>` qualifier; otherwise the strict bare-identifier
+	// rule applies.
+	colCheck := isIdentifier
+	if len(d.Joins) > 0 {
+		colCheck = isColumnRef
+	}
 	for _, c := range d.Columns {
-		if !isIdentifier(c) {
+		if !colCheck(c) {
 			return fmt.Errorf("reporting: invalid column identifier %q", c)
 		}
 	}
@@ -233,12 +240,12 @@ func (d *Definition) Validate() error {
 		if _, ok := allowedFilterOps[strings.ToLower(f.Op)]; !ok {
 			return fmt.Errorf("reporting: unsupported filter op %q", f.Op)
 		}
-		if !isIdentifier(f.Column) {
+		if !colCheck(f.Column) {
 			return fmt.Errorf("reporting: invalid column identifier %q", f.Column)
 		}
 	}
 	for _, g := range d.GroupBy {
-		if !isIdentifier(g) {
+		if !colCheck(g) {
 			return fmt.Errorf("reporting: invalid group_by identifier %q", g)
 		}
 	}
@@ -248,7 +255,7 @@ func (d *Definition) Validate() error {
 		default:
 			return fmt.Errorf("reporting: unsupported aggregation %q", a.Op)
 		}
-		if a.Column != "" && !isIdentifier(a.Column) {
+		if a.Column != "" && !colCheck(a.Column) {
 			return fmt.Errorf("reporting: invalid aggregation column %q", a.Column)
 		}
 		if a.Alias != "" && !isIdentifier(a.Alias) {
@@ -256,7 +263,7 @@ func (d *Definition) Validate() error {
 		}
 	}
 	for _, s := range d.Sort {
-		if !isIdentifier(s.Column) {
+		if !colCheck(s.Column) {
 			return fmt.Errorf("reporting: invalid sort column %q", s.Column)
 		}
 		if s.Direction != "asc" && s.Direction != "desc" && s.Direction != "" {
@@ -871,6 +878,18 @@ func ParseExternalSource(source string) (uuid.UUID, string, error) {
 		return uuid.Nil, "", errors.New("reporting: external source table required")
 	}
 	return id, parts[1], nil
+}
+
+// isColumnRef accepts either a bare identifier or an alias-qualified
+// `alias.column` reference. Used by Validate when Joins is non-empty
+// so the engine can carry references like `t1.deal_id` from query
+// definition through to resolveColumn during execution. Bare names
+// fall through to the strict isIdentifier check.
+func isColumnRef(s string) bool {
+	if dot := strings.IndexByte(s, '.'); dot > 0 {
+		return isIdentifier(s[:dot]) && isIdentifier(s[dot+1:])
+	}
+	return isIdentifier(s)
 }
 
 // isIdentifier ensures a caller-provided string is safe to interpolate
