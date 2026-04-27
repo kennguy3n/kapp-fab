@@ -51,14 +51,24 @@ export function StockLevelsPage() {
       staleTime: 60_000,
     })),
   });
+  // useQueries returns a fresh array reference on every render, so
+  // depending on `batchQueries` directly defeats the memo. Hash the
+  // stable .data values into a string key the memo can compare.
+  const batchData = batchQueries.map((q) => q.data);
+  const batchDataKey = batchData
+    .map((d) => (d ? d.map((b) => b.id).join(",") : ""))
+    .join("|");
   const batchesByItem = useMemo(() => {
     const m = new Map<string, InventoryBatch[]>();
     itemIds.forEach((id, i) => {
-      const data = batchQueries[i]?.data;
+      const data = batchData[i];
       if (data && data.length > 0) m.set(id, data);
     });
     return m;
-  }, [itemIds, batchQueries]);
+    // batchDataKey captures the meaningful identity of every per-item
+    // batch list; itemIds is the stable item-set membership.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [itemIds, batchDataKey]);
 
   return (
     <section>

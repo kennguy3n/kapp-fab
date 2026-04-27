@@ -478,6 +478,9 @@ func (d *CommandDispatcher) assignBatch(ctx context.Context, req CommandRequest)
 		if errors.Is(err, inventory.ErrItemNotFound) {
 			return CommandResponse{Text: fmt.Sprintf("/batch: no item with sku %q", sku)}, nil
 		}
+		if errors.Is(err, inventory.ErrDuplicateBatch) {
+			return CommandResponse{Text: fmt.Sprintf("/batch: batch %q already exists for %s", batchNo, sku)}, nil
+		}
 		return CommandResponse{}, err
 	}
 	return CommandResponse{
