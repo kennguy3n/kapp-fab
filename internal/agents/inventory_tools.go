@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
@@ -12,6 +13,17 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/scheduler"
 )
+
+// parseDateOrTime accepts ISO 8601 dates or full RFC 3339 timestamps
+// from a tool input and normalises them to UTC midnight (date-only)
+// or the supplied instant. Used by inventory.assign_batch for
+// manufactured_at / expires_at.
+func parseDateOrTime(s string) (time.Time, error) {
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339, s)
+}
 
 // RegisterInventoryTools attaches the Phase D inventory tools to an
 // executor. Mirrors RegisterFinanceTools; wiring runs at service startup
@@ -24,6 +36,7 @@ func RegisterInventoryTools(x *Executor, store *inventory.PGStore) {
 	x.Register(&recordMoveTool{store: store})
 	x.Register(&checkStockTool{store: store})
 	x.Register(&reverseMoveTool{store: store})
+	x.Register(&assignBatchTool{store: store})
 }
 
 // RegisterInventoryReorderTool wires the trigger_reorder tool against
@@ -70,6 +83,7 @@ type recordMoveInput struct {
 	UnitCost    decimal.Decimal `json:"unit_cost,omitempty"`
 	SourceKType string          `json:"source_ktype,omitempty"`
 	SourceID    *uuid.UUID      `json:"source_id,omitempty"`
+	BatchID     *uuid.UUID      `json:"batch_id,omitempty"`
 	Memo        string          `json:"memo,omitempty"`
 }
 
@@ -112,6 +126,7 @@ func (t *recordMoveTool) Invoke(ctx context.Context, inv Invocation) (*Result, e
 		UnitCost:    in.UnitCost,
 		SourceKType: srcKType,
 		SourceID:    in.SourceID,
+		BatchID:     in.BatchID,
 		CreatedBy:   inv.ActorID,
 	})
 	if err != nil {
@@ -207,5 +222,69 @@ func (t *checkStockTool) Invoke(ctx context.Context, inv Invocation) (*Result, e
 	return &Result{
 		Summary: summary,
 		Preview: body,
+	}, nil
+}
+
+// ----- inventory.assign_batch -----
+//
+// Creates an inventory_batches row for the supplied item. Idempotent
+// in-tenant on (item_id, batch_no) — re-issuing the same batch_no
+// returns ErrDuplicate from the underlying unique constraint.
+type assignBatchInput struct {
+	ItemID         uuid.UUID `json:"item_id"`
+	BatchNo        string    `json:"batch_no"`
+	ManufacturedAt *string   `json:"manufactured_at,omitempty"`
+	ExpiresAt      *string   `json:"expires_at,omitempty"`
+}
+
+type assignBatchTool struct {
+	store *inventory.PGStore
+}
+
+func (t *assignBatchTool) Name() string               { return "inventory.assign_batch" }
+func (t *assignBatchTool) RequiresConfirmation() bool { return true }
+func (t *assignBatchTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in assignBatchInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.ItemID == uuid.Nil || in.BatchNo == "" {
+		return nil, errors.New("inventory.assign_batch: item_id and batch_no required")
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(in)
+		return &Result{
+			Summary: fmt.Sprintf("Would create batch %q for item %s", in.BatchNo, in.ItemID),
+			Preview: preview,
+		}, nil
+	}
+	if t.store == nil {
+		return nil, errors.New("inventory.assign_batch: inventory store not configured")
+	}
+	b := inventory.Batch{
+		TenantID:  inv.TenantID,
+		ItemID:    in.ItemID,
+		BatchNo:   in.BatchNo,
+		CreatedBy: inv.ActorID,
+	}
+	if in.ManufacturedAt != nil {
+		if ts, err := parseDateOrTime(*in.ManufacturedAt); err == nil {
+			b.ManufacturedAt = &ts
+		}
+	}
+	if in.ExpiresAt != nil {
+		if ts, err := parseDateOrTime(*in.ExpiresAt); err == nil {
+			b.ExpiresAt = &ts
+		}
+	}
+	out, err := t.store.CreateBatch(ctx, b)
+	if err != nil {
+		return nil, err
+	}
+	body, _ := json.Marshal(out)
+	return &Result{
+		Summary: fmt.Sprintf("Created batch %s (%q) for item %s", out.ID, out.BatchNo, out.ItemID),
+		Preview: body,
+		Extra:   map[string]any{"batch_id": out.ID},
 	}, nil
 }

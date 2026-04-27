@@ -61,6 +61,7 @@ var moveSchema = []byte(`{
     {"name": "unit_cost", "type": "number", "min": 0},
     {"name": "source_ktype", "type": "string", "max_length": 64},
     {"name": "source_id", "type": "string"},
+    {"name": "batch_id", "type": "ref", "ktype": "inventory.batch"},
     {"name": "moved_at", "type": "datetime"}
   ],
   "views": {
@@ -94,6 +95,28 @@ var stockLevelSchema = []byte(`{
   "agent_tools": ["inventory.check_stock"]
 }`)
 
+// batchSchema — per-tenant lot identifier. Tracking a batch unlocks
+// expiry / FEFO logic and per-lot stock visibility. Items without a
+// batch context continue to post moves with batch_id=NULL.
+var batchSchema = []byte(`{
+  "name": "inventory.batch",
+  "version": 1,
+  "fields": [
+    {"name": "item_id", "type": "ref", "ktype": "inventory.item", "required": true},
+    {"name": "batch_no", "type": "string", "required": true, "max_length": 64},
+    {"name": "manufactured_at", "type": "date"},
+    {"name": "expires_at", "type": "date"},
+    {"name": "qty_on_hand", "type": "number", "min": 0, "default": 0}
+  ],
+  "views": {
+    "list": {"columns": ["item_id", "batch_no", "manufactured_at", "expires_at", "qty_on_hand"]},
+    "form": {"sections": [{"title": "Batch", "fields": ["item_id", "batch_no", "manufactured_at", "expires_at", "qty_on_hand"]}]}
+  },
+  "cards": {"summary": "Batch {{batch_no}} of {{item_id}} (qty {{qty_on_hand}})"},
+  "permissions": {"read": ["tenant.member"], "write": ["inventory.admin", "tenant.admin"]},
+  "agent_tools": ["inventory.assign_batch"]
+}`)
+
 // All returns every Phase D inventory KType as a freshly-constructed slice.
 func All() []ktype.KType {
 	return []ktype.KType{
@@ -101,6 +124,7 @@ func All() []ktype.KType {
 		{Name: KTypeWarehouse, Version: 1, Schema: warehouseSchema},
 		{Name: KTypeMove, Version: 1, Schema: moveSchema},
 		{Name: KTypeStockLevel, Version: 1, Schema: stockLevelSchema},
+		{Name: KTypeBatch, Version: 1, Schema: batchSchema},
 	}
 }
 

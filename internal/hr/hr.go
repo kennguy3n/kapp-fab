@@ -94,13 +94,14 @@ var attendanceSchema = []byte(`{
     {"name": "status", "type": "enum", "values": ["present", "absent", "half_day", "on_leave"], "required": true},
     {"name": "check_in", "type": "datetime"},
     {"name": "check_out", "type": "datetime"},
+    {"name": "source", "type": "enum", "values": ["manual", "kchat", "biometric"], "default": "manual"},
     {"name": "note", "type": "text"}
   ],
   "views": {
-    "list": {"columns": ["date", "employee_id", "status", "check_in", "check_out"]},
-    "form": {"sections": [{"title": "Attendance", "fields": ["employee_id", "date", "status", "check_in", "check_out", "note"]}]}
+    "list": {"columns": ["date", "employee_id", "status", "source", "check_in", "check_out"]},
+    "form": {"sections": [{"title": "Attendance", "fields": ["employee_id", "date", "status", "source", "check_in", "check_out", "note"]}]}
   },
-  "cards": {"summary": "{{employee_id}} — {{date}} ({{status}})"},
+  "cards": {"summary": "{{employee_id}} — {{date}} ({{status}}, via {{source}})"},
   "permissions": {"read": ["tenant.member"], "write": ["hr.admin", "tenant.admin"]}
 }`)
 

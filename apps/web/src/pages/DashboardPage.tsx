@@ -73,6 +73,12 @@ export function DashboardPage() {
           sub={`${s.overdue_tickets_count} overdue`}
           to="/helpdesk"
         />
+        <Widget
+          label="Present today"
+          value={s.present_today ?? 0}
+          sub="hr.attendance — UTC day"
+          to="/records/hr.attendance"
+        />
       </div>
     </section>
   );

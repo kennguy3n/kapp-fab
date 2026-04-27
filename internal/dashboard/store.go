@@ -31,6 +31,13 @@ type Summary struct {
 	PendingApprovals    int64   `json:"pending_approvals"`
 	OpenTicketsCount    int64   `json:"open_tickets_count"`
 	OverdueTicketsCount int64   `json:"overdue_tickets_count"`
+	// PresentToday is the count of distinct hr.attendance KRecords for
+	// the tenant whose `date` field is the current UTC date and whose
+	// `status` is "present" (or "half_day"). Surfaced as the "Present
+	// today" tile on the Phase G/L dashboard. Renders zero when no
+	// attendance has been logged yet today, so the tile is always safe
+	// to render unconditionally.
+	PresentToday int64 `json:"present_today"`
 
 	// BaseCurrency is the ISO-4217 code the monetary fields above
 	// are expressed in. Set by ComputeSummary from the tenants
@@ -180,6 +187,20 @@ func (s *Store) ComputeSummary(ctx context.Context, tenantID uuid.UUID) (*Summar
 			   AND (data->>'sla_resolution_by')::timestamptz < now()
 			   AND deleted_at IS NULL`,
 			tenantID, &out.OverdueTicketsCount); err != nil {
+			return err
+		}
+		// Present-today tile: count distinct employees with an
+		// hr.attendance record dated today and a present-leaning
+		// status. Honours soft-deletes via deleted_at IS NULL so a
+		// retracted attendance row drops off the tile immediately.
+		if err := scanScalar(ctx, tx,
+			`SELECT count(DISTINCT COALESCE(data->>'employee_id', id::text))
+			   FROM krecords
+			  WHERE tenant_id = $1 AND ktype = 'hr.attendance'
+			    AND COALESCE(data->>'date','') = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD')
+			    AND COALESCE(data->>'status','') IN ('present','half_day')
+			    AND deleted_at IS NULL`,
+			tenantID, &out.PresentToday); err != nil {
 			return err
 		}
 		return nil

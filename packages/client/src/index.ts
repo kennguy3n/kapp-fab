@@ -820,6 +820,24 @@ export class ApiClient {
     return this.request(`/inventory/reports/valuation${qs}`);
   }
 
+  /** Create a per-tenant lot identifier for an item. */
+  createInventoryBatch(input: {
+    item_id: string;
+    batch_no: string;
+    manufactured_at?: string;
+    expires_at?: string;
+  }): Promise<InventoryBatch> {
+    return this.request("/inventory/batches", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** List the batches defined for the supplied item, ordered FEFO. */
+  listInventoryBatchesByItem(itemId: string): Promise<InventoryBatch[]> {
+    return this.request(`/inventory/items/${encodeURIComponent(itemId)}/batches`);
+  }
+
   // --- Saved views (Phase G) -------------------------------------------
 
   /** List saved views for the caller, scoped to a KType. Returns the
@@ -1372,6 +1390,11 @@ export interface DashboardSummary {
   pending_approvals: number;
   open_tickets_count: number;
   overdue_tickets_count: number;
+  /** Distinct employees with an hr.attendance record dated today and
+   *  status in {present, half_day}. Always present in API responses;
+   *  optional on the type for backward compatibility with legacy
+   *  fixtures the test suite hard-codes. */
+  present_today?: number;
   /** ISO-4217 functional currency the monetary fields are denominated in. */
   base_currency: string;
 }
@@ -1629,6 +1652,20 @@ export interface StockLevel {
   item_id: string;
   warehouse_id: string;
   qty: string;
+}
+
+export interface InventoryBatch {
+  tenant_id: string;
+  id: string;
+  item_id: string;
+  batch_no: string;
+  manufactured_at?: string | null;
+  expires_at?: string | null;
+  qty_on_hand: string;
+  metadata?: unknown;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface InventoryValuationRow {
