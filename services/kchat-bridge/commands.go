@@ -481,7 +481,7 @@ func (d *CommandDispatcher) assignBatch(ctx context.Context, req CommandRequest)
 		return CommandResponse{}, err
 	}
 	return CommandResponse{
-		Text: fmt.Sprintf("Batch %s created for %s (item %s)", out.BatchNo, sku, out.ID),
+		Text: fmt.Sprintf("Batch %s created for %s (batch id %s)", out.BatchNo, sku, out.ID),
 	}, nil
 }
 

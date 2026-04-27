@@ -650,7 +650,7 @@ func (s *PGStore) ListMoves(ctx context.Context, tenantID uuid.UUID, filter Move
 		// GET /inventory/moves always returned null.
 		q := fmt.Sprintf(
 			`SELECT id, tenant_id, item_id, warehouse_id, qty, unit_cost,
-			        source_ktype, source_id, moved_at, reversal_of
+			        source_ktype, source_id, moved_at, reversal_of, batch_id
 			 FROM inventory_moves
 			 WHERE %s
 			 ORDER BY moved_at DESC, id DESC
@@ -669,10 +669,11 @@ func (s *PGStore) ListMoves(ctx context.Context, tenantID uuid.UUID, filter Move
 				srcKType   *string
 				srcID      *uuid.UUID
 				reversalOf *int64
+				batchID    *uuid.UUID
 			)
 			if err := rows.Scan(
 				&m.ID, &m.TenantID, &m.ItemID, &m.WarehouseID, &m.Qty,
-				&unitCost, &srcKType, &srcID, &m.MovedAt, &reversalOf,
+				&unitCost, &srcKType, &srcID, &m.MovedAt, &reversalOf, &batchID,
 			); err != nil {
 				return fmt.Errorf("inventory: scan move: %w", err)
 			}
@@ -684,6 +685,7 @@ func (s *PGStore) ListMoves(ctx context.Context, tenantID uuid.UUID, filter Move
 			}
 			m.SourceID = srcID
 			m.ReversalOf = reversalOf
+			m.BatchID = batchID
 			out = append(out, m)
 		}
 		return rows.Err()
@@ -879,6 +881,7 @@ func (s *PGStore) emitMove(ctx context.Context, tx pgx.Tx, m Move, eventType str
 		"source_ktype": m.SourceKType,
 		"source_id":    m.SourceID,
 		"reversal_of":  m.ReversalOf,
+		"batch_id":     m.BatchID,
 		"moved_at":     m.MovedAt,
 	})
 	if s.publisher != nil {
@@ -963,6 +966,10 @@ func (s *PGStore) CreateBatch(ctx context.Context, b Batch) (*Batch, error) {
 			nullableUUIDValue(b.CreatedBy), b.CreatedAt, b.UpdatedAt,
 		)
 		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+				return ErrDuplicateBatch
+			}
 			return fmt.Errorf("inventory: insert batch: %w", err)
 		}
 		return nil

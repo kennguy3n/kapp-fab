@@ -405,7 +405,8 @@ func writeInventoryError(w http.ResponseWriter, err error) {
 		errors.Is(err, inventory.ErrBatchNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, inventory.ErrDuplicateSourceMove),
-		errors.Is(err, inventory.ErrAlreadyReversed):
+		errors.Is(err, inventory.ErrAlreadyReversed),
+		errors.Is(err, inventory.ErrDuplicateBatch):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, inventory.ErrMoveInvalid),
 		errors.Is(err, inventory.ErrTransferUnbalanced),
