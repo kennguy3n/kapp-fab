@@ -52,6 +52,52 @@ func openIntegrationPool(t *testing.T, key string) *pgxpool.Pool {
 	return pool
 }
 
+// ensureTierAdminCreatePrivilege grants `kapp_admin` the CREATE
+// privilege on the current database if it doesn't already have it.
+// promoteTenantToSchema needs CREATE to issue `CREATE SCHEMA tenant_<uuid>`,
+// and migrations/000002_admin_role.sql intentionally only grants the
+// schema-level subset (USAGE + CRUD on `public.*`) to keep the role
+// minimum-viable. Production grants this privilege out-of-band at deploy
+// time; in dev / CI the integration test does it on first run so the
+// suite is self-contained. Idempotent — no-op if the grant is already in
+// place. Uses the *_SUPERUSER_DB_URL or KAPP_TEST_SUPERUSER_DB_URL env
+// (defaults to the same DSN as the migrator) and falls back to the
+// canonical kapp:kapp_dev superuser the dev compose ships.
+func ensureTierAdminCreatePrivilege(t *testing.T) {
+	t.Helper()
+	candidates := []string{
+		os.Getenv("KAPP_TEST_SUPERUSER_DB_URL"),
+		"postgres://kapp:kapp_dev@localhost:5432/kapp?sslmode=disable",
+	}
+	var lastErr error
+	for _, dsn := range candidates {
+		if dsn == "" {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			cancel()
+			lastErr = err
+			continue
+		}
+		_, err = pool.Exec(ctx,
+			`DO $$ BEGIN
+			   PERFORM 1 FROM pg_roles WHERE rolname = 'kapp_admin';
+			   IF FOUND THEN
+			     EXECUTE format('GRANT CREATE ON DATABASE %I TO kapp_admin', current_database());
+			   END IF;
+			 END $$`)
+		pool.Close()
+		cancel()
+		if err == nil {
+			return
+		}
+		lastErr = err
+	}
+	t.Skipf("could not grant CREATE on db to kapp_admin (need superuser DSN): %v", lastErr)
+}
+
 // TestTierUpgradeCopiesEveryTable is the Phase G acceptance test for
 // "Test POST /api/v1/admin/tenants/{id}/upgrade-tier end-to-end
 // including all insights tables in tierUpgradeTables". It seeds one
@@ -65,6 +111,7 @@ func openIntegrationPool(t *testing.T, key string) *pgxpool.Pool {
 //     the original tier upgrade work).
 //  4. public.tenants.schema is updated to the dedicated schema name.
 func TestTierUpgradeCopiesEveryTable(t *testing.T) {
+	ensureTierAdminCreatePrivilege(t)
 	appPool := openIntegrationPool(t, "KAPP_TEST_DB_URL")
 	adminPool := openIntegrationPool(t, "KAPP_TEST_ADMIN_DB_URL")
 
