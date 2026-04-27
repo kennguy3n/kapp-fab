@@ -898,7 +898,7 @@ func run() error {
 				r.Post("/{id}/run", insh.runQuery)
 				r.Post("/{id}/share", insh.shareQuery)
 				r.Get("/{id}/shares", insh.listQueryShares)
-				r.Delete("/{id}/shares/{shareID}", insh.deleteShare)
+				r.Delete("/{id}/shares/{shareID}", insh.deleteQueryShare)
 			})
 			r.Route("/dashboards", func(r chi.Router) {
 				r.Get("/", insh.listDashboards)
@@ -908,7 +908,7 @@ func run() error {
 				r.Delete("/{id}", insh.deleteDashboard)
 				r.Post("/{id}/share", insh.shareDashboard)
 				r.Get("/{id}/shares", insh.listDashboardShares)
-				r.Delete("/{id}/shares/{shareID}", insh.deleteShare)
+				r.Delete("/{id}/shares/{shareID}", insh.deleteDashboardShare)
 				r.Post("/{id}/widgets", insh.upsertWidget)
 				r.Delete("/{id}/widgets/{widgetID}", insh.deleteWidget)
 			})
