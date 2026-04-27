@@ -284,6 +284,14 @@ func run() error {
 	// stall the scheduled-action draining cadence.
 	go NewExportWorker(exporter.NewStore(pool, adminPool), recordStore, 5*time.Second).Run(ctx)
 
+	// Phase G — cell autoscaler. Reads the `cells` table on a
+	// minute cadence, applies the configured policy thresholds,
+	// and persists each decision into platform_scale_events. Runs
+	// platform-wide (every cell) so it does NOT participate in
+	// scheduled_actions, which are tenant-scoped by design.
+	autoscaleEngine := platform.NewAutoscaleEngine(pool, platform.DefaultAutoscalePolicy(), nil)
+	go platform.NewAutoscaleLoop(autoscaleEngine, 60*time.Second).Run(ctx)
+
 	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()

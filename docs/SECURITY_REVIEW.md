@@ -214,16 +214,38 @@ These are known gaps called out here so nobody forgets:
    `internal/record` outside of the executor (item 2 above).
 4. Periodic audit-log integrity check (hash chain) — spec lives in
    PROPOSAL.md §7.6 and has no implementation yet.
-5. Dedicated-schema upgrade is now exposed as
+5. Dedicated-schema upgrade is exposed as
    `POST /api/v1/admin/tenants/{id}/upgrade-tier` (Phase G). The
-   handler reuses the schema-creation + per-table copy semantics
-   that `scripts/upgrade_tier.sh` implemented, runs every mutation
-   inside one admin-pool transaction, and emits a
-   `tenant.tier_upgrade` audit entry on success. The shell script
-   remains in the repo as a manual fallback for break-glass scenarios
-   when the API service is unavailable, but operators should prefer
-   the API path because it leaves an audit-log trail and authenticates
-   under the same JWT envelope as other admin surfaces.
+   API handler, the `scripts/upgrade_tier.sh` runbook, and any
+   future tenant-service RPC all delegate to one shared library
+   function `tenant.Promote` (`internal/tenant/tier.go`) which in
+   turn invokes the SECURITY DEFINER function
+   `public.promote_tenant_to_schema(uuid, text, text[])` installed
+   by `migrations/000042_tier_admin_role.sql`.
+
+   The function is owned by a dedicated `kapp_tier_admin` role
+   (NOSUPERUSER, NOBYPASSRLS, NOCREATEDB) that holds only:
+     * SELECT on every public table (read the source rows under
+       the function's `SET LOCAL app.tenant_id` GUC, so RLS still
+       filters to the target tenant)
+     * UPDATE on the `tenants.schema` column (flip routing at the
+       end of the upgrade)
+     * USAGE/CREATE on `public` and CREATE on the database (so it
+       can create the dedicated schema and tables inside it)
+   PUBLIC has no privilege on the function. Callers need EXECUTE,
+   which by default is granted only to `kapp_admin` — the same
+   pool the API and runbook use today. A future scoped operator
+   role can be granted EXECUTE without inheriting BYPASSRLS,
+   closing the long-standing item 5 gap from prior reviews.
+
+   The handler emits a `tenant.tier_upgrade` audit entry on
+   success. The shell script remains in the repo as a manual
+   fallback for break-glass scenarios when the API service is
+   unavailable, but operators should prefer the API path because
+   it leaves an audit-log trail and authenticates under the same
+   JWT envelope as other admin surfaces.
+
+   Status: closed (Phase G PR #3).
 
 ---
 
