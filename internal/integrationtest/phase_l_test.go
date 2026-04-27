@@ -733,3 +733,180 @@ func TestInsightsGenerateQueryAgentToolValid(t *testing.T) {
 		t.Fatalf("generated query failed to run: %v", err)
 	}
 }
+
+// TestInsightsSQLEditorMode covers the Phase M raw-SQL editor path
+// end-to-end against PostgreSQL: a SQL-mode query is persisted,
+// retrieved (mode + raw_sql round-trip through QueryStore), and
+// executed under per-tenant RLS via Runner.RunRawSQL. The test also
+// exercises the column-level CHECK in migrations/000045_insights_sql_mode.sql
+// by attempting to persist a half-state row (mode=visual but
+// raw_sql non-empty) which the store-side normalizeMode must
+// reject.
+func TestInsightsSQLEditorMode(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, queries, _, _, runner := newTenantForInsights(t, h)
+
+	// 1) Persist a SQL-mode query against a known stable system
+	// view so the assertion doesn't depend on tenant data.
+	saved, err := queries.Create(ctx, insights.Query{
+		TenantID: tn.ID,
+		Name:     "Active conn count " + uuid.NewString()[:6],
+		Mode:     insights.QueryModeSQL,
+		RawSQL:   "SELECT 1::int AS one, 2::int AS two",
+	})
+	if err != nil {
+		t.Fatalf("create sql-mode query: %v", err)
+	}
+	if saved.Mode != insights.QueryModeSQL {
+		t.Fatalf("saved.Mode = %q, want %q", saved.Mode, insights.QueryModeSQL)
+	}
+	if saved.RawSQL == "" {
+		t.Fatalf("saved.RawSQL empty after create")
+	}
+
+	// 2) Round-trip via Get to confirm mode + raw_sql columns are
+	// scanned out correctly by the Phase M store changes.
+	got, err := queries.Get(ctx, tn.ID, saved.ID)
+	if err != nil {
+		t.Fatalf("get sql-mode query: %v", err)
+	}
+	if got.Mode != insights.QueryModeSQL || got.RawSQL != saved.RawSQL {
+		t.Fatalf("get round-trip mismatch: mode=%q raw=%q", got.Mode, got.RawSQL)
+	}
+
+	// 3) Execute under tenant RLS. The two-column SELECT against
+	// PostgreSQL constants verifies the runner's tx + statement_timeout
+	// fence path without dragging in a Phase B fixture.
+	out, err := runner.RunRawSQL(ctx, tn.ID, got.RawSQL, nil)
+	if err != nil {
+		t.Fatalf("run raw sql: %v", err)
+	}
+	if out == nil || out.Result == nil {
+		t.Fatalf("nil result from RunRawSQL")
+	}
+	if len(out.Result.Rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(out.Result.Rows))
+	}
+	row := out.Result.Rows[0]
+	if row["one"] == nil || row["two"] == nil {
+		t.Fatalf("missing columns in row: %#v", row)
+	}
+
+	// 4) Half-state rejection: visual mode with raw_sql payload is
+	// rejected before the INSERT lands so the column CHECK never
+	// has to fire — keeps the API surface returning a clean 400.
+	if _, err := queries.Create(ctx, insights.Query{
+		TenantID: tn.ID,
+		Name:     "Half state " + uuid.NewString()[:6],
+		Mode:     insights.QueryModeVisual,
+		RawSQL:   "SELECT 1",
+	}); err == nil || !errors.Is(err, insights.ErrValidation) {
+		t.Fatalf("expected ErrValidation for visual+raw_sql, got %v", err)
+	}
+
+	// 5) Symmetric rejection: sql mode with no raw_sql body.
+	if _, err := queries.Create(ctx, insights.Query{
+		TenantID: tn.ID,
+		Name:     "Half state empty " + uuid.NewString()[:6],
+		Mode:     insights.QueryModeSQL,
+		RawSQL:   "",
+	}); err == nil || !errors.Is(err, insights.ErrValidation) {
+		t.Fatalf("expected ErrValidation for sql+empty raw_sql, got %v", err)
+	}
+}
+
+// TestInsightsSQLEditorRunRawSQLRespectsTenantRLS proves the Phase M
+// raw-SQL surface honours the tenant_id GUC: a query like
+// `SELECT count(*) FROM insights_queries` returns the count of rows
+// in the *caller's* tenant only, not the global table — the same
+// RLS invariant the visual builder relies on.
+func TestInsightsSQLEditorRunRawSQLRespectsTenantRLS(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tnA, queriesA, _, _, runnerA := newTenantForInsights(t, h)
+	tnB, queriesB, _, _, _ := newTenantForInsights(t, h)
+	if tnA.ID == tnB.ID {
+		t.Fatalf("test setup produced the same tenant twice")
+	}
+
+	// Seed two visual queries in A and three in B so the row counts
+	// per tenant differ. The test then runs the same SQL body under
+	// tenant A's context and expects to see only 2 rows (not 5).
+	for i := 0; i < 2; i++ {
+		_ = makeCountQuery(t, ctx, queriesA, tnA.ID, 60)
+	}
+	for i := 0; i < 3; i++ {
+		_ = makeCountQuery(t, ctx, queriesB, tnB.ID, 60)
+	}
+
+	out, err := runnerA.RunRawSQL(ctx, tnA.ID, "SELECT count(*)::int AS n FROM insights_queries", nil)
+	if err != nil {
+		t.Fatalf("run raw sql: %v", err)
+	}
+	if len(out.Result.Rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(out.Result.Rows))
+	}
+	got, ok := out.Result.Rows[0]["n"].(int32)
+	if !ok {
+		// pgx may decode count() as int32 or int64 depending on
+		// driver version — accept either to keep the test stable.
+		gotInt64, ok64 := out.Result.Rows[0]["n"].(int64)
+		if !ok64 {
+			t.Fatalf("count column is %T, want int32 or int64: %#v", out.Result.Rows[0]["n"], out.Result.Rows[0])
+		}
+		got = int32(gotInt64)
+	}
+	if got != 2 {
+		t.Fatalf("count() = %d, want 2 (RLS leak from tenant B?)", got)
+	}
+}
+
+// TestInsightsSQLEditorFeatureFlagDisablesRoute checks the
+// `insights_sql_editor` feature gate the API mounts on
+// /api/v1/insights/queries/{id}/run-sql. With the flag off the
+// platform.FeatureMiddleware short-circuits with a 403 envelope
+// keyed on `insights_sql_editor`.
+func TestInsightsSQLEditorFeatureFlagDisablesRoute(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, _, _, _, _ := newTenantForInsights(t, h)
+	features := tenant.NewFeatureStore(h.pool)
+
+	// A business-tier wizard tenant has insights=true but
+	// insights_sql_editor=false (enterprise-only). Confirm the
+	// middleware rejects with a 403 + `feature: insights_sql_editor`
+	// envelope so the React shell can surface an upgrade banner.
+	mw := platform.FeatureMiddleware(features, tenant.FeatureInsightsSQLEditor)
+	chain := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/insights/queries/"+uuid.NewString()+"/run-sql", nil).
+		WithContext(platform.WithTenant(ctx, tn))
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("with sql editor disabled: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var env map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode env: %v", err)
+	}
+	if env["feature"] != "insights_sql_editor" {
+		t.Fatalf("envelope feature=%v, want insights_sql_editor", env["feature"])
+	}
+
+	// Flip it on and the same request must pass through.
+	if err := features.SetFeatures(ctx, tn.ID, map[string]bool{tenant.FeatureInsightsSQLEditor: true}); err != nil {
+		t.Fatalf("enable feature: %v", err)
+	}
+	rr = httptest.NewRecorder()
+	chain.ServeHTTP(rr, req.Clone(req.Context()))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("with sql editor enabled: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+}

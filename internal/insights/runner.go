@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/reporting"
 )
 
@@ -279,4 +281,81 @@ func (r *Runner) RunSaved(ctx context.Context, tenantID, queryID uuid.UUID, filt
 		FilterParams: filterParams,
 		BypassCache:  bypassCache,
 	})
+}
+
+// RunRawSQL executes a parameterised SQL statement under the same
+// per-tenant fences the visual runner uses: dbutil.WithTenantTx
+// pins `app.tenant_id` so RLS bounds every read to the caller's
+// tenant, and SET LOCAL statement_timeout cancels runaway scans
+// before the HTTP request slot expires. params are bound via
+// pgx.Query so callers cannot string-interpolate untrusted values.
+//
+// The raw SQL surface intentionally rejects multi-statement bodies
+// (semicolon-separated) — pgx.Query already only honours the first
+// statement on the wire, but the explicit guard turns a silently
+// dropped trailing statement into a 400 the user can act on. The
+// row cap mirrors the visual runner (MaxResultRows = 10,000) so a
+// SELECT * without LIMIT can't exhaust memory.
+//
+// Caller must gate this on both `insights` and `insights_sql_editor`
+// feature flags. The runner does not consult feature state itself
+// because the API and agent layers already own that policy.
+func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL string, params []any) (*RunResult, error) {
+	if tenantID == uuid.Nil {
+		return nil, validationErr("tenant id required")
+	}
+	if rawSQL == "" {
+		return nil, validationErr("raw_sql body required")
+	}
+
+	if r.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.timeout)
+		defer cancel()
+	}
+
+	rows := make([]map[string]any, 0)
+	columns := []string{}
+	err := dbutil.WithTenantTx(ctx, r.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if r.timeout > 0 {
+			if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", r.timeout.Milliseconds())); err != nil {
+				return fmt.Errorf("insights: set statement_timeout: %w", err)
+			}
+		}
+		pgxRows, err := tx.Query(ctx, rawSQL, params...)
+		if err != nil {
+			return fmt.Errorf("insights: execute raw sql: %w", err)
+		}
+		defer pgxRows.Close()
+		fieldDescs := pgxRows.FieldDescriptions()
+		for _, fd := range fieldDescs {
+			columns = append(columns, string(fd.Name))
+		}
+		for pgxRows.Next() {
+			vals, err := pgxRows.Values()
+			if err != nil {
+				return err
+			}
+			row := make(map[string]any, len(vals))
+			for i, v := range vals {
+				row[columns[i]] = v
+			}
+			rows = append(rows, row)
+			if r.maxRows > 0 && len(rows) >= r.maxRows {
+				break
+			}
+		}
+		return pgxRows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &RunResult{
+		Result: &reporting.Result{
+			Columns: columns,
+			Rows:    rows,
+		},
+		CacheHit: false,
+	}, nil
 }

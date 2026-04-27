@@ -17,6 +17,7 @@ import type {
   CalculatedColumn,
   InsightsQuery,
   InsightsQueryDefinition,
+  InsightsQueryMode,
   InsightsRunResult,
   InsightsVizType,
   KType,
@@ -78,6 +79,13 @@ interface QueryFormState {
   limit: number;
   calculated_columns: CalculatedColumn[];
   cache_ttl_seconds: number;
+  // Phase M raw-SQL editor mode. "visual" hides raw_sql and uses the
+  // structured builder below; "sql" hides every visual section and
+  // posts to /run-sql. The toggle is gated on the
+  // `insights_sql_editor` feature flag — when off, the SQL tab
+  // button just doesn't render.
+  mode: InsightsQueryMode;
+  raw_sql: string;
 }
 
 const blankForm = (): QueryFormState => ({
@@ -92,6 +100,8 @@ const blankForm = (): QueryFormState => ({
   limit: 100,
   calculated_columns: [],
   cache_ttl_seconds: 300,
+  mode: "visual",
+  raw_sql: "",
 });
 
 function fromQuery(q: InsightsQuery): QueryFormState {
@@ -108,6 +118,8 @@ function fromQuery(q: InsightsQuery): QueryFormState {
     limit: def.limit ?? 100,
     calculated_columns: def.calculated_columns ?? [],
     cache_ttl_seconds: q.cache_ttl_seconds ?? 300,
+    mode: q.mode ?? "visual",
+    raw_sql: q.raw_sql ?? "",
   };
 }
 
@@ -161,14 +173,29 @@ export function InsightsQueryBuilderPage() {
     return [...ktypeOptions, ...LEDGER_SOURCES];
   }, [ktypesQuery.data]);
 
+  // Visual mode persists a structured definition; SQL mode persists
+  // mode="sql" + raw_sql and lets the server apply the column-level
+  // CHECK in migrations/000045_insights_sql_mode.sql.
+  const buildInput = () =>
+    form.mode === "sql"
+      ? {
+          name: form.name,
+          description: form.description,
+          definition: buildDefinition(form),
+          cache_ttl_seconds: form.cache_ttl_seconds,
+          mode: "sql" as const,
+          raw_sql: form.raw_sql,
+        }
+      : {
+          name: form.name,
+          description: form.description,
+          definition: buildDefinition(form),
+          cache_ttl_seconds: form.cache_ttl_seconds,
+          mode: "visual" as const,
+        };
+
   const createMut = useMutation({
-    mutationFn: () =>
-      api.createInsightsQuery({
-        name: form.name,
-        description: form.description,
-        definition: buildDefinition(form),
-        cache_ttl_seconds: form.cache_ttl_seconds,
-      }),
+    mutationFn: () => api.createInsightsQuery(buildInput()),
     onSuccess: (saved) => {
       setSelectedId(saved.id);
       setError(null);
@@ -178,13 +205,7 @@ export function InsightsQueryBuilderPage() {
   });
 
   const updateMut = useMutation({
-    mutationFn: (id: string) =>
-      api.updateInsightsQuery(id, {
-        name: form.name,
-        description: form.description,
-        definition: buildDefinition(form),
-        cache_ttl_seconds: form.cache_ttl_seconds,
-      }),
+    mutationFn: (id: string) => api.updateInsightsQuery(id, buildInput()),
     onSuccess: () => {
       setError(null);
       qc.invalidateQueries({ queryKey: ["insights-queries"] });
@@ -193,7 +214,10 @@ export function InsightsQueryBuilderPage() {
   });
 
   const runMut = useMutation({
-    mutationFn: (id: string) => api.runInsightsQuery(id, { bypass_cache: false }),
+    mutationFn: (id: string) =>
+      form.mode === "sql"
+        ? api.runInsightsQuerySQL(id, { raw_sql: form.raw_sql })
+        : api.runInsightsQuery(id, { bypass_cache: false }),
     onSuccess: (res) => {
       setPreview(res);
       setError(null);
@@ -215,6 +239,10 @@ export function InsightsQueryBuilderPage() {
   const onSave = () => {
     if (!form.name.trim()) {
       setError("query name required");
+      return;
+    }
+    if (form.mode === "sql" && !form.raw_sql.trim()) {
+      setError("sql body required for sql-mode queries");
       return;
     }
     if (selectedId) updateMut.mutate(selectedId);
@@ -327,6 +355,81 @@ export function InsightsQueryBuilderPage() {
             )}
           </div>
 
+          {/* Phase M visual / SQL tab switch. Both tabs always render
+              client-side; the server enforces the `insights_sql_editor`
+              feature flag on POST /run-sql so a non-enterprise plan
+              that hits the SQL tab will see a 403 envelope when it
+              tries to run, not when it switches tabs. */}
+          <div
+            role="tablist"
+            style={{ display: "flex", gap: 4, borderBottom: "1px solid #e5e7eb" }}
+          >
+            <TabButton
+              active={form.mode === "visual"}
+              onClick={() => setForm({ ...form, mode: "visual", raw_sql: "" })}
+            >
+              Visual builder
+            </TabButton>
+            <TabButton
+              active={form.mode === "sql"}
+              onClick={() => setForm({ ...form, mode: "sql" })}
+            >
+              SQL editor
+            </TabButton>
+          </div>
+
+          {form.mode === "sql" && (
+            <Section title="SQL (parameterised)">
+              <p style={{ fontSize: 12, color: "#6b7280", marginTop: 0 }}>
+                Runs under the per-tenant <code>app.tenant_id</code> GUC
+                with <code>SET LOCAL statement_timeout</code>. RLS pins
+                every read to your tenant. Use <code>$1</code>,{" "}
+                <code>$2</code>, … for parameters and pass them in the
+                params field below.
+              </p>
+              <textarea
+                value={form.raw_sql}
+                onChange={(e) =>
+                  setForm({ ...form, raw_sql: e.target.value })
+                }
+                onKeyDown={(e) => {
+                  // Tab inserts two spaces instead of leaving the
+                  // editor — minimum-viable code-editor behaviour
+                  // without dragging in Monaco/CodeMirror.
+                  if (e.key === "Tab") {
+                    e.preventDefault();
+                    const t = e.currentTarget;
+                    const start = t.selectionStart;
+                    const end = t.selectionEnd;
+                    const next =
+                      form.raw_sql.slice(0, start) +
+                      "  " +
+                      form.raw_sql.slice(end);
+                    setForm({ ...form, raw_sql: next });
+                    requestAnimationFrame(() => {
+                      t.selectionStart = t.selectionEnd = start + 2;
+                    });
+                  }
+                }}
+                placeholder="SELECT id, name FROM crm_deals WHERE stage = $1"
+                rows={14}
+                spellCheck={false}
+                style={{
+                  width: "100%",
+                  fontFamily:
+                    "ui-monospace, SFMono-Regular, Menlo, monospace",
+                  fontSize: 13,
+                  border: "1px solid #d1d5db",
+                  borderRadius: 4,
+                  padding: 8,
+                  resize: "vertical",
+                }}
+              />
+            </Section>
+          )}
+
+          {form.mode === "visual" && (
+          <>
           <Section title="Source">
             <select
               value={form.source}
@@ -677,6 +780,8 @@ export function InsightsQueryBuilderPage() {
               />
             </div>
           </Section>
+          </>
+          )}
 
           {error && (
             <div style={{ color: "#dc2626", fontSize: 13 }}>{error}</div>
@@ -717,6 +822,37 @@ export function InsightsQueryBuilderPage() {
         />
       )}
     </section>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      style={{
+        background: "none",
+        border: "none",
+        borderBottom: active ? "2px solid #2563eb" : "2px solid transparent",
+        color: active ? "#111" : "#6b7280",
+        fontWeight: active ? 600 : 400,
+        fontSize: 13,
+        padding: "8px 12px",
+        cursor: "pointer",
+      }}
+    >
+      {children}
+    </button>
   );
 }
 

@@ -1053,6 +1053,24 @@ export class ApiClient {
     });
   }
 
+  // Phase M raw-SQL editor mode. Gated server-side on both the
+  // `insights` flag (parent route) and `insights_sql_editor`
+  // (sub-route) — a non-enterprise plan returns a 403 envelope keyed
+  // on `insights_sql_editor` so the UI can render an upgrade banner.
+  runInsightsQuerySQL(
+    id: string,
+    body: InsightsRunSQLInput = {}
+  ): Promise<InsightsRunResult> {
+    return this.request(
+      `/insights/queries/${encodeURIComponent(id)}/run-sql`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(body),
+      }
+    );
+  }
+
   listInsightsQueryShares(id: string): Promise<{ shares: InsightsShare[] }> {
     return this.request(
       `/insights/queries/${encodeURIComponent(id)}/shares`
@@ -1830,11 +1848,20 @@ export interface InsightsQueryDefinition extends ReportDefinition {
   calculated_columns?: CalculatedColumn[];
 }
 
+// QueryMode discriminates the two flavours a saved insights query can
+// take. "visual" flows through the structured reporting.Definition
+// grammar; "sql" carries a parameterised SQL body in raw_sql and runs
+// under the per-tenant statement_timeout + RLS fences. Phase M; gated
+// by the `insights_sql_editor` feature flag (enterprise plan only).
+export type InsightsQueryMode = "visual" | "sql";
+
 export interface InsightsQueryInput {
   name: string;
   description?: string;
   definition: InsightsQueryDefinition;
   cache_ttl_seconds?: number;
+  mode?: InsightsQueryMode;
+  raw_sql?: string;
 }
 
 export interface InsightsQuery {
@@ -1844,6 +1871,8 @@ export interface InsightsQuery {
   description?: string;
   definition: InsightsQueryDefinition;
   cache_ttl_seconds?: number;
+  mode?: InsightsQueryMode;
+  raw_sql?: string;
   created_by?: string | null;
   created_at: string;
   updated_at: string;
@@ -1852,6 +1881,11 @@ export interface InsightsQuery {
 export interface InsightsRunInput {
   filter_params?: Record<string, unknown>;
   bypass_cache?: boolean;
+}
+
+export interface InsightsRunSQLInput {
+  raw_sql?: string;
+  params?: unknown[];
 }
 
 export interface InsightsRunResult {

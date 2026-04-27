@@ -47,6 +47,15 @@ const (
 	// plans because anonymous fetches consume the owning tenant's
 	// rate-limit + quota bucket.
 	FeatureInsightsEmbed = "insights_embed"
+	// FeatureInsightsSQLEditor gates the Phase M raw-SQL editor mode
+	// on insights_queries. Visual queries flow through the
+	// reporting.Definition grammar; SQL queries skip the builder and
+	// run a parameterised statement under SET LOCAL
+	// statement_timeout + RLS. Off by default on every plan except
+	// enterprise so a stolen tenant header on a non-enterprise plan
+	// can't reach the raw-SQL surface even with a valid `insights`
+	// flag.
+	FeatureInsightsSQLEditor = "insights_sql_editor"
 )
 
 // AllFeatures is the canonical list of feature keys. Handlers that
@@ -69,6 +78,7 @@ var AllFeatures = []string{
 	FeatureInsights,
 	FeatureInsightsExternal,
 	FeatureInsightsEmbed,
+	FeatureInsightsSQLEditor,
 }
 
 // PlanLimits is the numeric ceiling each plan enforces per billing
@@ -216,78 +226,82 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 	switch plan {
 	case PlanStarter:
 		return map[string]bool{
-			FeatureCRM:              true,
-			FeatureFinance:          true,
-			FeatureInventory:        true,
-			FeatureHR:               false,
-			FeatureLMS:              false,
-			FeatureHelpdesk:         false,
-			FeatureReporting:        false,
-			FeatureWebhook:          false,
-			FeaturePortal:           false,
-			FeaturePrint:            true,
-			FeatureImporter:         true,
-			FeatureReportBuilder:    false,
-			FeatureInsights:         false,
-			FeatureInsightsExternal: false,
-			FeatureInsightsEmbed:    false,
+			FeatureCRM:               true,
+			FeatureFinance:           true,
+			FeatureInventory:         true,
+			FeatureHR:                false,
+			FeatureLMS:               false,
+			FeatureHelpdesk:          false,
+			FeatureReporting:         false,
+			FeatureWebhook:           false,
+			FeaturePortal:            false,
+			FeaturePrint:             true,
+			FeatureImporter:          true,
+			FeatureReportBuilder:     false,
+			FeatureInsights:          false,
+			FeatureInsightsExternal:  false,
+			FeatureInsightsEmbed:     false,
+			FeatureInsightsSQLEditor: false,
 		}
 	case PlanBusiness:
 		return map[string]bool{
-			FeatureCRM:              true,
-			FeatureFinance:          true,
-			FeatureInventory:        true,
-			FeatureHR:               true,
-			FeatureLMS:              true,
-			FeatureHelpdesk:         true,
-			FeatureReporting:        true,
-			FeatureWebhook:          true,
-			FeaturePortal:           true,
-			FeaturePrint:            true,
-			FeatureImporter:         true,
-			FeatureReportBuilder:    true,
-			FeatureInsights:         true,
-			FeatureInsightsExternal: true,
-			FeatureInsightsEmbed:    false,
+			FeatureCRM:               true,
+			FeatureFinance:           true,
+			FeatureInventory:         true,
+			FeatureHR:                true,
+			FeatureLMS:               true,
+			FeatureHelpdesk:          true,
+			FeatureReporting:         true,
+			FeatureWebhook:           true,
+			FeaturePortal:            true,
+			FeaturePrint:             true,
+			FeatureImporter:          true,
+			FeatureReportBuilder:     true,
+			FeatureInsights:          true,
+			FeatureInsightsExternal:  true,
+			FeatureInsightsEmbed:     false,
+			FeatureInsightsSQLEditor: false,
 		}
 	case PlanEnterprise:
 		return map[string]bool{
-			FeatureCRM:              true,
-			FeatureFinance:          true,
-			FeatureInventory:        true,
-			FeatureHR:               true,
-			FeatureLMS:              true,
-			FeatureHelpdesk:         true,
-			FeatureReporting:        true,
-			FeatureWebhook:          true,
-			FeaturePortal:           true,
-			FeaturePrint:            true,
-			FeatureImporter:         true,
-			FeatureReportBuilder:    true,
-			FeatureInsights:         true,
-			FeatureInsightsExternal: true,
-			FeatureInsightsEmbed:    true,
+			FeatureCRM:               true,
+			FeatureFinance:           true,
+			FeatureInventory:         true,
+			FeatureHR:                true,
+			FeatureLMS:               true,
+			FeatureHelpdesk:          true,
+			FeatureReporting:         true,
+			FeatureWebhook:           true,
+			FeaturePortal:            true,
+			FeaturePrint:             true,
+			FeatureImporter:          true,
+			FeatureReportBuilder:     true,
+			FeatureInsights:          true,
+			FeatureInsightsExternal:  true,
+			FeatureInsightsEmbed:     true,
+			FeatureInsightsSQLEditor: true,
 		}
 	default:
 		// Free plan — CRM only. Also the fallback when the plan
 		// name does not match any canonical identifier so a typo
 		// fails closed rather than opening every feature.
 		return map[string]bool{
-			FeatureCRM:              true,
-			FeatureFinance:          false,
-			FeatureInventory:        false,
-			FeatureHR:               false,
-			FeatureLMS:              false,
-			FeatureHelpdesk:         false,
-			FeatureReporting:        false,
-			FeatureWebhook:          false,
-			FeaturePortal:           false,
-			FeaturePrint:            false,
-			FeatureImporter:         false,
-			FeatureReportBuilder:    false,
-			FeatureInsights:         false,
-			FeatureInsightsExternal: false,
-			FeatureInsightsEmbed:    false,
+			FeatureCRM:               true,
+			FeatureFinance:           false,
+			FeatureInventory:         false,
+			FeatureHR:                false,
+			FeatureLMS:               false,
+			FeatureHelpdesk:          false,
+			FeatureReporting:         false,
+			FeatureWebhook:           false,
+			FeaturePortal:            false,
+			FeaturePrint:             false,
+			FeatureImporter:          false,
+			FeatureReportBuilder:     false,
+			FeatureInsights:          false,
+			FeatureInsightsExternal:  false,
+			FeatureInsightsEmbed:     false,
+			FeatureInsightsSQLEditor: false,
 		}
 	}
 }

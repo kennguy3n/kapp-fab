@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -150,6 +151,19 @@ type runQueryRequest struct {
 	BypassCache  bool           `json:"bypass_cache,omitempty"`
 }
 
+// runRawSQLRequest is the body for POST
+// /api/v1/insights/queries/{id}/run-sql. Params is the positional
+// argument list bound by pgx.Query so callers can not string-
+// interpolate into the SQL body. RawSQL is optional: when empty the
+// runner uses the persisted insights_queries.raw_sql column, which
+// is the normal saved-query path. The override exists so the
+// frontend SQL editor can preview an unsaved draft against the
+// runner without first persisting + GET'ing the row.
+type runRawSQLRequest struct {
+	RawSQL string `json:"raw_sql,omitempty"`
+	Params []any  `json:"params,omitempty"`
+}
+
 func (h *insightsHandlers) runQuery(w http.ResponseWriter, r *http.Request) {
 	t := platform.TenantFromContext(r.Context())
 	if t == nil {
@@ -169,6 +183,56 @@ func (h *insightsHandlers) runQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out, err := h.runner.RunSaved(r.Context(), t.ID, id, req.FilterParams, req.BypassCache)
+	if err != nil {
+		writeInsightsError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// runRawSQL executes a SQL-mode insights query under the per-tenant
+// statement_timeout + RLS fences. Gated by both the `insights`
+// feature flag (via DynamicFeatureMiddleware on the parent route)
+// and the `insights_sql_editor` flag (via FeatureMiddleware on the
+// /run-sql sub-route in main.go). When the request body provides a
+// raw_sql override the runner uses that body verbatim; otherwise
+// the persisted insights_queries.raw_sql column is read first and
+// the persisted row's mode must be QueryModeSQL.
+func (h *insightsHandlers) runRawSQL(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid query id", http.StatusBadRequest)
+		return
+	}
+	var req runRawSQLRequest
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+	}
+
+	rawSQL := req.RawSQL
+	if rawSQL == "" {
+		q, err := h.queries.Get(r.Context(), t.ID, id)
+		if err != nil {
+			writeInsightsError(w, err)
+			return
+		}
+		if q.Mode != insights.QueryModeSQL {
+			writeInsightsError(w, fmt.Errorf("%w: query is in mode %q, expected %q",
+				insights.ErrValidation, q.Mode, insights.QueryModeSQL))
+			return
+		}
+		rawSQL = q.RawSQL
+	}
+
+	out, err := h.runner.RunRawSQL(r.Context(), t.ID, rawSQL, req.Params)
 	if err != nil {
 		writeInsightsError(w, err)
 		return
