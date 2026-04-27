@@ -511,8 +511,18 @@ func writeInsightsError(w http.ResponseWriter, err error) {
 	case errors.Is(err, insights.ErrQueryNotFound),
 		errors.Is(err, insights.ErrDashboardNotFound),
 		errors.Is(err, insights.ErrWidgetNotFound),
-		errors.Is(err, insights.ErrShareNotFound):
+		errors.Is(err, insights.ErrShareNotFound),
+		errors.Is(err, insights.ErrDataSourceNotFound),
+		errors.Is(err, insights.ErrEmbedNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, insights.ErrEmbedRevoked),
+		errors.Is(err, insights.ErrEmbedExpired),
+		errors.Is(err, insights.ErrEmbedExceeded):
+		// Token is no longer servable but was once valid — 410 Gone
+		// is the right semantic for revoked / expired / exhausted
+		// resources, matching how the WebShare and similar specs
+		// treat an exhausted token.
+		http.Error(w, err.Error(), http.StatusGone)
 	case errors.Is(err, insights.ErrValidation):
 		// User-input failures from QueryStore / DashboardStore /
 		// CacheStore validation paths and from QueryDefinition.

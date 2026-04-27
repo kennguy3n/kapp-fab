@@ -1178,6 +1178,89 @@ export class ApiClient {
     );
   }
 
+  // --- Phase L deferred: insights data sources --------------------------
+
+  listInsightsDataSources(): Promise<{ data_sources: InsightsDataSource[] }> {
+    return this.request("/insights/data-sources");
+  }
+
+  createInsightsDataSource(
+    input: InsightsDataSourceInput
+  ): Promise<InsightsDataSource> {
+    return this.request("/insights/data-sources", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateInsightsDataSource(
+    id: string,
+    input: InsightsDataSourceInput
+  ): Promise<InsightsDataSource> {
+    return this.request(`/insights/data-sources/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteInsightsDataSource(id: string): Promise<void> {
+    return this.request(`/insights/data-sources/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  }
+
+  testInsightsDataSource(id: string): Promise<{ ok: boolean }> {
+    return this.request(
+      `/insights/data-sources/${encodeURIComponent(id)}/test`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+
+  // --- Phase L deferred: insights dashboard embeds ----------------------
+
+  listInsightsEmbeds(
+    dashboardId: string
+  ): Promise<{ embeds: InsightsEmbed[] }> {
+    return this.request(
+      `/insights/dashboards/${encodeURIComponent(dashboardId)}/embeds`
+    );
+  }
+
+  createInsightsEmbed(
+    dashboardId: string,
+    input: InsightsEmbedInput
+  ): Promise<InsightsEmbed> {
+    return this.request(
+      `/insights/dashboards/${encodeURIComponent(dashboardId)}/embeds`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(input),
+      }
+    );
+  }
+
+  revokeInsightsEmbed(
+    dashboardId: string,
+    embedId: string
+  ): Promise<void> {
+    return this.request(
+      `/insights/dashboards/${encodeURIComponent(
+        dashboardId
+      )}/embeds/${encodeURIComponent(embedId)}/revoke`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+
   // --- Phase G: tenant tier upgrade -------------------------------------
 
   upgradeTenantTier(
@@ -1884,4 +1967,55 @@ export interface InsightsShareInput {
   grantee_type: InsightsGranteeType;
   grantee: string;
   permission?: InsightsPermission;
+}
+
+// --- Phase L deferred: external data sources --------------------------
+
+export interface InsightsDataSource {
+  tenant_id: string;
+  id: string;
+  name: string;
+  description?: string;
+  dialect: "postgres";
+  // The server returns plaintext for connection_string only on
+  // create/update; subsequent fetches return an empty string and the
+  // UI displays a "credentials hidden" placeholder.
+  connection_string?: string;
+  enabled: boolean;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InsightsDataSourceInput {
+  name: string;
+  description?: string;
+  dialect: "postgres";
+  connection_string?: string;
+  secret_blob?: string;
+  enabled?: boolean;
+}
+
+// --- Phase L deferred: dashboard embeds -------------------------------
+
+export interface InsightsEmbed {
+  tenant_id: string;
+  id: string;
+  dashboard_id: string;
+  // Plaintext token is only ever populated by createInsightsEmbed.
+  token?: string;
+  token_digest: string;
+  scoped_filters?: Record<string, unknown>;
+  max_views?: number;
+  view_count: number;
+  expires_at?: string | null;
+  revoked_at?: string | null;
+  created_by?: string;
+  created_at: string;
+}
+
+export interface InsightsEmbedInput {
+  scoped_filters?: Record<string, unknown>;
+  max_views?: number;
+  expires_in_days?: number;
 }

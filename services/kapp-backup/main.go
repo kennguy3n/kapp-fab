@@ -118,6 +118,9 @@ var TenantScopedTables = []string{
 	"insights_dashboard_widgets",
 	"insights_query_cache",
 	"insights_shares",
+	// Phase L deferred — external data sources + dashboard embeds.
+	"insights_data_sources",
+	"insights_embeds",
 }
 
 // manifest is the first record in every dump file.

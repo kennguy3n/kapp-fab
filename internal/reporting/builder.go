@@ -31,10 +31,15 @@ import (
 // Supported data sources. `ktype:<name>` selects a KRecord table slice
 // filtered by ktype; `ledger.<table>` selects one of a handful of
 // allowed typed tables so callers can't point the engine at arbitrary
-// SQL tables.
+// SQL tables; `external:<datasource_id>:<table>` routes to a tenant-
+// owned external Postgres pool resolved by insights.Runner. The
+// reporting runner does not execute external sources itself — it
+// validates the prefix shape and the calling layer (insights) routes
+// the query to the external pool via PoolManager + DataSourceStore.
 const (
-	SourceKTypePrefix = "ktype:"
-	SourceLedger      = "ledger."
+	SourceKTypePrefix    = "ktype:"
+	SourceLedger         = "ledger."
+	SourceExternalPrefix = "external:"
 )
 
 // Allowed ledger sources — explicit allow-list so a typo can't leak
@@ -59,15 +64,15 @@ const (
 // Filter operators accepted by the runner. Maintained explicitly so
 // stringly-typed JSON can't smuggle SQL fragments through.
 var allowedFilterOps = map[string]struct{}{
-	"=":    {},
-	"!=":   {},
-	">":    {},
-	">=":   {},
-	"<":    {},
-	"<=":   {},
-	"like": {},
-	"in":   {},
-	"null": {},
+	"=":       {},
+	"!=":      {},
+	">":       {},
+	">=":      {},
+	"<":       {},
+	"<=":      {},
+	"like":    {},
+	"in":      {},
+	"null":    {},
 	"notnull": {},
 }
 
@@ -119,6 +124,38 @@ type PivotSpec struct {
 	ValueColumn  string `json:"value_column,omitempty"`
 }
 
+// Join describes a tenant-scoped join from the primary source onto a
+// secondary KType or ledger table. Only inner / left joins are
+// supported in v1; the runner enforces tenant_id-on-both-sides at
+// the SQL layer so RLS is defence-in-depth and the application
+// filter is a hard ceiling.
+//
+// Alias is required; Columns referenced in the projection / filters
+// / sort / group-by use `alias.column` notation when they target the
+// joined source. The On predicate is restricted to a single equality
+// predicate: `<left_column> = <alias>.<right_column>`. Composite keys
+// can be modelled by additional Filter entries on either side.
+type Join struct {
+	Source      string `json:"source"`
+	Alias       string `json:"alias"`
+	Kind        string `json:"kind,omitempty"`
+	LeftColumn  string `json:"left_column"`
+	RightColumn string `json:"right_column"`
+}
+
+// JoinKind constants. inner is the default; left preserves
+// unmatched rows on the primary source.
+const (
+	JoinInner = "inner"
+	JoinLeft  = "left"
+)
+
+// MaxJoinsHardCeiling caps the absolute number of joins per query
+// regardless of plan tier. The plan-level limit is enforced by the
+// insights layer; the engine-level cap is a defence-in-depth fence
+// so a misconfigured plan row can't unbound the query.
+const MaxJoinsHardCeiling = 4
+
 // Definition is the persisted report grammar. `Source` is required;
 // everything else is optional. Columns + Aggregations together define
 // the projection, GroupBy defines the bucketing, Filters the WHERE,
@@ -133,28 +170,29 @@ type Definition struct {
 	Limit        int           `json:"limit,omitempty"`
 	Pivot        *PivotSpec    `json:"pivot,omitempty"`
 	Chart        *ChartSpec    `json:"chart,omitempty"`
+	Joins        []Join        `json:"joins,omitempty"`
 }
 
 // Result is what Run returns. Columns is the ordered list of keys in
 // Rows so the UI can render a table without inferring ordering.
 type Result struct {
-	Columns []string                   `json:"columns"`
-	Rows    []map[string]any           `json:"rows"`
-	Pivot   *PivotResult               `json:"pivot,omitempty"`
-	Chart   *ChartSpec                 `json:"chart,omitempty"`
-	Summary map[string]any             `json:"summary,omitempty"`
+	Columns []string         `json:"columns"`
+	Rows    []map[string]any `json:"rows"`
+	Pivot   *PivotResult     `json:"pivot,omitempty"`
+	Chart   *ChartSpec       `json:"chart,omitempty"`
+	Summary map[string]any   `json:"summary,omitempty"`
 }
 
 // PivotResult is the materialised pivot table. RowHeaders list every
 // unique row value, ColumnHeaders every unique column value, and Cells
 // is a map from row-value to (column-value → aggregated value).
 type PivotResult struct {
-	RowColumn     string                       `json:"row_column"`
-	ColumnColumn  string                       `json:"column_column"`
-	ValueColumn   string                       `json:"value_column"`
-	RowHeaders    []string                     `json:"row_headers"`
-	ColumnHeaders []string                     `json:"column_headers"`
-	Cells         map[string]map[string]any    `json:"cells"`
+	RowColumn     string                    `json:"row_column"`
+	ColumnColumn  string                    `json:"column_column"`
+	ValueColumn   string                    `json:"value_column"`
+	RowHeaders    []string                  `json:"row_headers"`
+	ColumnHeaders []string                  `json:"column_headers"`
+	Cells         map[string]map[string]any `json:"cells"`
 }
 
 // Validate enforces the grammar constraints. Called by both persist
@@ -166,6 +204,19 @@ func (d *Definition) Validate() error {
 	if strings.HasPrefix(d.Source, SourceKTypePrefix) {
 		if len(strings.TrimPrefix(d.Source, SourceKTypePrefix)) == 0 {
 			return errors.New("reporting: ktype name required")
+		}
+	} else if strings.HasPrefix(d.Source, SourceExternalPrefix) {
+		// external:<datasource_uuid>:<table>. The reporting layer
+		// only validates the shape; execution is owned by insights.
+		dsID, table, err := ParseExternalSource(d.Source)
+		if err != nil {
+			return err
+		}
+		if dsID == uuid.Nil {
+			return errors.New("reporting: external data source id required")
+		}
+		if !isIdentifier(table) {
+			return fmt.Errorf("reporting: invalid external table name %q", table)
 		}
 	} else if _, ok := allowedLedgerSources[d.Source]; !ok {
 		return fmt.Errorf("reporting: unsupported source %q", d.Source)
@@ -226,6 +277,37 @@ func (d *Definition) Validate() error {
 	}
 	if d.Limit < 0 {
 		return errors.New("reporting: limit must be non-negative")
+	}
+	if len(d.Joins) > MaxJoinsHardCeiling {
+		return fmt.Errorf("reporting: too many joins (%d > %d)", len(d.Joins), MaxJoinsHardCeiling)
+	}
+	seenAliases := map[string]struct{}{}
+	for _, j := range d.Joins {
+		if !isIdentifier(j.Alias) {
+			return fmt.Errorf("reporting: invalid join alias %q", j.Alias)
+		}
+		if _, dup := seenAliases[j.Alias]; dup {
+			return fmt.Errorf("reporting: duplicate join alias %q", j.Alias)
+		}
+		seenAliases[j.Alias] = struct{}{}
+		if !strings.HasPrefix(j.Source, SourceKTypePrefix) {
+			if _, ok := allowedLedgerSources[j.Source]; !ok {
+				return fmt.Errorf("reporting: unsupported join source %q", j.Source)
+			}
+		} else if len(strings.TrimPrefix(j.Source, SourceKTypePrefix)) == 0 {
+			return errors.New("reporting: join ktype name required")
+		}
+		switch j.Kind {
+		case "", JoinInner, JoinLeft:
+		default:
+			return fmt.Errorf("reporting: unsupported join kind %q", j.Kind)
+		}
+		if !isIdentifier(j.LeftColumn) {
+			return fmt.Errorf("reporting: invalid join left column %q", j.LeftColumn)
+		}
+		if !isIdentifier(j.RightColumn) {
+			return fmt.Errorf("reporting: invalid join right column %q", j.RightColumn)
+		}
 	}
 	return nil
 }
@@ -331,19 +413,104 @@ func (r *Runner) RunWithStatementTimeout(ctx context.Context, tenantID uuid.UUID
 // Query assembly
 // ---------------------------------------------------------------------------
 
+// primaryAlias is the SQL alias the primary source carries when joins
+// are present. Underscore-prefixed so it never collides with a user-
+// supplied identifier (which must start with [a-zA-Z_] but in practice
+// all UI-driven names are lowercase letters).
+const primaryAlias = "_p"
+
+// joinedSource is the resolved metadata for a join target. The runner
+// builds a per-join lookup so column/filter expressions can route a
+// `<alias>.<col>` reference to the right base table + jsonb column.
+type joinedSource struct {
+	alias     string
+	base      string
+	jsonbCol  string
+	ktypeName string
+	kind      string
+	leftCol   string
+	rightCol  string
+}
+
+func resolveJoins(def Definition) ([]joinedSource, error) {
+	if len(def.Joins) == 0 {
+		return nil, nil
+	}
+	out := make([]joinedSource, 0, len(def.Joins))
+	for _, j := range def.Joins {
+		js := joinedSource{alias: j.Alias, kind: j.Kind, leftCol: j.LeftColumn, rightCol: j.RightColumn}
+		if js.kind == "" {
+			js.kind = JoinInner
+		}
+		if strings.HasPrefix(j.Source, SourceKTypePrefix) {
+			js.ktypeName = strings.TrimPrefix(j.Source, SourceKTypePrefix)
+			js.base = "krecords"
+			js.jsonbCol = "data"
+		} else {
+			js.base = strings.TrimPrefix(j.Source, "ledger.")
+		}
+		out = append(out, js)
+	}
+	return out, nil
+}
+
+// resolveColumn parses a (possibly alias-qualified) column reference
+// and returns the SQL expression that reads it. Bare names target the
+// primary source; `<alias>.<col>` targets the matching join.
+func resolveColumn(name, primaryJSONBCol string, hasJoins bool, joins []joinedSource) (string, error) {
+	if dot := strings.IndexByte(name, '.'); dot > 0 && hasJoins {
+		alias := name[:dot]
+		col := name[dot+1:]
+		if !isIdentifier(alias) || !isIdentifier(col) {
+			return "", fmt.Errorf("reporting: invalid alias-qualified column %q", name)
+		}
+		for _, j := range joins {
+			if j.alias != alias {
+				continue
+			}
+			return qualifiedColumnExpr(alias, col, j.jsonbCol), nil
+		}
+		return "", fmt.Errorf("reporting: unknown join alias %q", alias)
+	}
+	if !isIdentifier(name) {
+		return "", fmt.Errorf("reporting: invalid column %q", name)
+	}
+	if hasJoins {
+		return qualifiedColumnExpr(primaryAlias, name, primaryJSONBCol), nil
+	}
+	return columnExpr(name, primaryJSONBCol), nil
+}
+
+// resolveColumnForFilter is like resolveColumn but used by filter
+// callers that already validated the column is alias-qualified.
+func resolveColumnForFilter(f Filter, primaryJSONBCol string, hasJoins bool, joins []joinedSource) (string, error) {
+	return resolveColumn(f.Column, primaryJSONBCol, hasJoins, joins)
+}
+
 func buildQuery(tenantID uuid.UUID, def Definition) (string, []any, []string, error) {
 	var (
-		base       string
-		jsonbCol   string
-		ktypeName  string
+		base      string
+		jsonbCol  string
+		ktypeName string
 	)
 	if strings.HasPrefix(def.Source, SourceKTypePrefix) {
 		ktypeName = strings.TrimPrefix(def.Source, SourceKTypePrefix)
 		base = "krecords"
 		jsonbCol = "data"
+	} else if strings.HasPrefix(def.Source, SourceExternalPrefix) {
+		// External execution is owned by the insights layer; the
+		// reporting builder rejects external sources because the
+		// runner here only knows how to talk to the local DB.
+		return "", nil, nil, fmt.Errorf("reporting: external source %q must be executed via insights.Runner", def.Source)
 	} else {
 		base = strings.TrimPrefix(def.Source, "ledger.")
 	}
+
+	joins, err := resolveJoins(def)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	hasJoins := len(joins) > 0
 
 	args := []any{tenantID}
 	nextArg := 2
@@ -358,32 +525,41 @@ func buildQuery(tenantID uuid.UUID, def Definition) (string, []any, []string, er
 
 	if len(def.Aggregations) == 0 && len(def.GroupBy) == 0 {
 		for _, c := range def.Columns {
-			if !isIdentifier(c) {
-				return "", nil, nil, fmt.Errorf("reporting: invalid column %q", c)
+			expr, err := resolveColumn(c, jsonbCol, hasJoins, joins)
+			if err != nil {
+				return "", nil, nil, err
 			}
-			expr := columnExpr(c, jsonbCol)
-			selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", expr, c))
-			outColumns = append(outColumns, c)
+			outAlias := outAliasFromColumn(c)
+			selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", expr, outAlias))
+			outColumns = append(outColumns, outAlias)
 		}
 		if len(selectExprs) == 0 {
-			selectExprs = append(selectExprs, "*")
+			if hasJoins {
+				selectExprs = append(selectExprs, primaryAlias+".*")
+			} else {
+				selectExprs = append(selectExprs, "*")
+			}
 			outColumns = append(outColumns, "*")
 		}
 	} else {
 		for _, g := range def.GroupBy {
-			expr := columnExpr(g, jsonbCol)
-			selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", expr, g))
-			outColumns = append(outColumns, g)
+			expr, err := resolveColumn(g, jsonbCol, hasJoins, joins)
+			if err != nil {
+				return "", nil, nil, err
+			}
+			outAlias := outAliasFromColumn(g)
+			selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", expr, outAlias))
+			outColumns = append(outColumns, outAlias)
 		}
 		for _, a := range def.Aggregations {
 			alias := a.Alias
 			if alias == "" {
 				alias = a.Op
 				if a.Column != "" {
-					alias = a.Op + "_" + a.Column
+					alias = a.Op + "_" + outAliasFromColumn(a.Column)
 				}
 			}
-			aggExpr, err := aggregationExpr(a, jsonbCol)
+			aggExpr, err := aggregationExprQualified(a, jsonbCol, hasJoins, joins)
 			if err != nil {
 				return "", nil, nil, err
 			}
@@ -393,19 +569,33 @@ func buildQuery(tenantID uuid.UUID, def Definition) (string, []any, []string, er
 		}
 	}
 
-	where := []string{"tenant_id = $1"}
+	tenantCol := "tenant_id"
+	if hasJoins {
+		tenantCol = primaryAlias + ".tenant_id"
+	}
+	where := []string{tenantCol + " = $1"}
 	if ktypeName != "" {
 		args = append(args, ktypeName)
-		where = append(where, fmt.Sprintf("ktype = $%d", nextArg))
+		ktCol := "ktype"
+		delCol := "deleted_at"
+		if hasJoins {
+			ktCol = primaryAlias + ".ktype"
+			delCol = primaryAlias + ".deleted_at"
+		}
+		where = append(where, fmt.Sprintf("%s = $%d", ktCol, nextArg))
 		nextArg++
 		// Exclude soft-deleted records by default so aggregate reports
 		// (SUM of deal amounts, outstanding AR/AP, etc.) don't silently
 		// include deleted rows. Authors who need deleted data can add
 		// an explicit `deleted_at notnull` filter.
-		where = append(where, "deleted_at IS NULL")
+		where = append(where, delCol+" IS NULL")
 	}
 	for _, f := range def.Filters {
-		expr, params, err := filterExpr(f, jsonbCol, nextArg)
+		colExpr, err := resolveColumnForFilter(f, jsonbCol, hasJoins, joins)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		expr, params, err := filterExprWithColumn(f, colExpr, nextArg)
 		if err != nil {
 			return "", nil, nil, err
 		}
@@ -416,7 +606,11 @@ func buildQuery(tenantID uuid.UUID, def Definition) (string, []any, []string, er
 
 	groupBy := []string{}
 	for _, g := range def.GroupBy {
-		groupBy = append(groupBy, columnExpr(g, jsonbCol))
+		expr, err := resolveColumn(g, jsonbCol, hasJoins, joins)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		groupBy = append(groupBy, expr)
 	}
 
 	orderBy := []string{}
@@ -432,15 +626,45 @@ func buildQuery(tenantID uuid.UUID, def Definition) (string, []any, []string, er
 			// through without JSONB extraction.
 			expr = s.Column
 		} else {
-			expr = columnExpr(s.Column, jsonbCol)
+			resolved, err := resolveColumn(s.Column, jsonbCol, hasJoins, joins)
+			if err != nil {
+				return "", nil, nil, err
+			}
+			expr = resolved
 		}
 		orderBy = append(orderBy, fmt.Sprintf("%s %s", expr, strings.ToUpper(dir)))
+	}
+
+	fromClause := base
+	if hasJoins {
+		fromClause = fmt.Sprintf("%s AS %s", base, primaryAlias)
+		for _, j := range joins {
+			joinKind := "INNER JOIN"
+			if j.kind == JoinLeft {
+				joinKind = "LEFT JOIN"
+			}
+			joinedTenantPredicate := fmt.Sprintf("%s.tenant_id = $1", j.alias)
+			joinedKtypePredicate := ""
+			if j.ktypeName != "" {
+				args = append(args, j.ktypeName)
+				joinedKtypePredicate = fmt.Sprintf(" AND %s.ktype = $%d AND %s.deleted_at IS NULL", j.alias, nextArg, j.alias)
+				nextArg++
+			}
+			leftQualified := qualifiedColumnExpr(primaryAlias, j.leftCol, jsonbCol)
+			rightQualified := qualifiedColumnExpr(j.alias, j.rightCol, j.jsonbCol)
+			fromClause += fmt.Sprintf(
+				" %s %s AS %s ON %s = %s AND %s%s",
+				joinKind, j.base, j.alias,
+				leftQualified, rightQualified,
+				joinedTenantPredicate, joinedKtypePredicate,
+			)
+		}
 	}
 
 	query := fmt.Sprintf(
 		"SELECT %s FROM %s WHERE %s",
 		strings.Join(selectExprs, ", "),
-		base,
+		fromClause,
 		strings.Join(where, " AND "),
 	)
 	if len(groupBy) > 0 {
@@ -474,6 +698,98 @@ func columnExpr(col, jsonbCol string) string {
 		return col
 	default:
 		return fmt.Sprintf("%s->>'%s'", jsonbCol, col)
+	}
+}
+
+// qualifiedColumnExpr is columnExpr with an explicit table-alias
+// prefix. Used when the FROM clause needs aliases (joins). Returns
+// `<alias>.<col>` for typed columns and `<alias>.<jsonbCol>->>'<col>'`
+// for JSONB-projected fields.
+func qualifiedColumnExpr(alias, col, jsonbCol string) string {
+	if jsonbCol == "" {
+		return alias + "." + col
+	}
+	switch col {
+	case "id", "tenant_id", "ktype", "ktype_version", "version",
+		"created_at", "updated_at", "created_by", "updated_by", "deleted_at":
+		return alias + "." + col
+	default:
+		return fmt.Sprintf("%s.%s->>'%s'", alias, jsonbCol, col)
+	}
+}
+
+// outAliasFromColumn turns a (possibly alias-qualified) column
+// reference into a SQL output alias. Bare `name` becomes `name`;
+// `alias.name` becomes `alias_name` so the JSON map key the runner
+// emits is a single-token identifier.
+func outAliasFromColumn(name string) string {
+	if dot := strings.IndexByte(name, '.'); dot > 0 {
+		return name[:dot] + "_" + name[dot+1:]
+	}
+	return name
+}
+
+func aggregationExprQualified(a Aggregation, primaryJSONBCol string, hasJoins bool, joins []joinedSource) (string, error) {
+	if a.Op == AggCount && a.Column == "" {
+		return "COUNT(*)", nil
+	}
+	if a.Column == "" {
+		return "", errors.New("reporting: aggregation column required")
+	}
+	colExpr, err := resolveColumn(a.Column, primaryJSONBCol, hasJoins, joins)
+	if err != nil {
+		return "", err
+	}
+	// JSONB-projected expressions need NULLIF + ::numeric for SUM/AVG/MIN/MAX;
+	// typed columns use the expression as-is. Detect via the `->>` operator.
+	numeric := colExpr
+	if strings.Contains(colExpr, "->>") {
+		numeric = fmt.Sprintf("NULLIF(%s, '')::numeric", colExpr)
+	}
+	switch a.Op {
+	case AggCount:
+		return fmt.Sprintf("COUNT(%s)", colExpr), nil
+	case AggSum:
+		return fmt.Sprintf("COALESCE(SUM(%s), 0)", numeric), nil
+	case AggAvg:
+		return fmt.Sprintf("AVG(%s)", numeric), nil
+	case AggMin:
+		return fmt.Sprintf("MIN(%s)", numeric), nil
+	case AggMax:
+		return fmt.Sprintf("MAX(%s)", numeric), nil
+	default:
+		return "", fmt.Errorf("reporting: unsupported aggregation %q", a.Op)
+	}
+}
+
+func filterExprWithColumn(f Filter, colExpr string, startArg int) (string, []any, error) {
+	op := strings.ToLower(f.Op)
+	switch op {
+	case "null":
+		return fmt.Sprintf("%s IS NULL", colExpr), nil, nil
+	case "notnull":
+		return fmt.Sprintf("%s IS NOT NULL", colExpr), nil, nil
+	case "in":
+		var list []any
+		if err := json.Unmarshal(f.Value, &list); err != nil {
+			return "", nil, fmt.Errorf("reporting: in-filter value must be array: %w", err)
+		}
+		if len(list) == 0 {
+			return "FALSE", nil, nil
+		}
+		placeholders := make([]string, len(list))
+		for i := range list {
+			placeholders[i] = fmt.Sprintf("$%d", startArg+i)
+		}
+		return fmt.Sprintf("%s IN (%s)", colExpr, strings.Join(placeholders, ", ")), list, nil
+	default:
+		var v any
+		if len(f.Value) > 0 {
+			if err := json.Unmarshal(f.Value, &v); err != nil {
+				return "", nil, fmt.Errorf("reporting: filter value: %w", err)
+			}
+		}
+		return fmt.Sprintf("%s %s $%d", colExpr, op, startArg), []any{v}, nil
 	}
 }
 
@@ -595,6 +911,28 @@ func pivot(rows []map[string]any, spec PivotSpec) *PivotResult {
 		ColumnHeaders: colHeaders,
 		Cells:         cells,
 	}
+}
+
+// ParseExternalSource splits an external:<uuid>:<table> source string
+// into its components. Returns (datasource_id, table_name, nil) on
+// success or a tagged error suitable for the validator path.
+func ParseExternalSource(source string) (uuid.UUID, string, error) {
+	if !strings.HasPrefix(source, SourceExternalPrefix) {
+		return uuid.Nil, "", fmt.Errorf("reporting: source %q is not external", source)
+	}
+	tail := strings.TrimPrefix(source, SourceExternalPrefix)
+	parts := strings.SplitN(tail, ":", 2)
+	if len(parts) != 2 {
+		return uuid.Nil, "", errors.New("reporting: external source must be external:<datasource_uuid>:<table>")
+	}
+	id, err := uuid.Parse(parts[0])
+	if err != nil {
+		return uuid.Nil, "", fmt.Errorf("reporting: external source datasource_id: %w", err)
+	}
+	if parts[1] == "" {
+		return uuid.Nil, "", errors.New("reporting: external source table required")
+	}
+	return id, parts[1], nil
 }
 
 // isIdentifier ensures a caller-provided string is safe to interpolate

@@ -36,6 +36,17 @@ const (
 	FeatureImporter      = "importer"
 	FeatureReportBuilder = "report_builder"
 	FeatureInsights      = "insights"
+	// FeatureInsightsExternal gates Insights queries that resolve
+	// `source: "external:<datasource_id>"` to per-tenant external
+	// connection pools. Off by default on free/starter; on for
+	// business/enterprise (DefaultFeaturesForPlan keeps the per-plan
+	// matrix authoritative).
+	FeatureInsightsExternal = "insights_external"
+	// FeatureInsightsEmbed gates the long-lived bearer token
+	// dashboard-embed surface. Off by default on free/starter
+	// plans because anonymous fetches consume the owning tenant's
+	// rate-limit + quota bucket.
+	FeatureInsightsEmbed = "insights_embed"
 )
 
 // AllFeatures is the canonical list of feature keys. Handlers that
@@ -56,6 +67,8 @@ var AllFeatures = []string{
 	FeatureImporter,
 	FeatureReportBuilder,
 	FeatureInsights,
+	FeatureInsightsExternal,
+	FeatureInsightsEmbed,
 }
 
 // PlanLimits is the numeric ceiling each plan enforces per billing
@@ -76,6 +89,30 @@ type Plan struct {
 	DisplayName string          `json:"display_name"`
 	Limits      PlanLimits      `json:"limits"`
 	Features    map[string]bool `json:"features"`
+}
+
+// MaxJoinsForPlan returns the per-query JOIN ceiling allowed for the
+// named plan. The reporting engine has its own hard ceiling
+// (reporting.MaxJoinsHardCeiling = 4) which acts as defence-in-depth
+// against a misconfigured plan row; this function returns the user-
+// facing limit so the UI can disable the "Add join" button at the
+// right count.
+//
+//   - free        → 0 (no joins)
+//   - starter     → 1
+//   - business    → 2
+//   - enterprise  → 4
+func MaxJoinsForPlan(plan string) int {
+	switch plan {
+	case PlanStarter:
+		return 1
+	case PlanBusiness:
+		return 2
+	case PlanEnterprise:
+		return 4
+	default:
+		return 0
+	}
 }
 
 // ErrPlanNotFound is surfaced by PlanStore.Get when no row matches.
@@ -179,54 +216,78 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 	switch plan {
 	case PlanStarter:
 		return map[string]bool{
-			FeatureCRM:           true,
-			FeatureFinance:       true,
-			FeatureInventory:     true,
-			FeatureHR:            false,
-			FeatureLMS:           false,
-			FeatureHelpdesk:      false,
-			FeatureReporting:     false,
-			FeatureWebhook:       false,
-			FeaturePortal:        false,
-			FeaturePrint:         true,
-			FeatureImporter:      true,
-			FeatureReportBuilder: false,
-			FeatureInsights:      false,
+			FeatureCRM:              true,
+			FeatureFinance:          true,
+			FeatureInventory:        true,
+			FeatureHR:               false,
+			FeatureLMS:              false,
+			FeatureHelpdesk:         false,
+			FeatureReporting:        false,
+			FeatureWebhook:          false,
+			FeaturePortal:           false,
+			FeaturePrint:            true,
+			FeatureImporter:         true,
+			FeatureReportBuilder:    false,
+			FeatureInsights:         false,
+			FeatureInsightsExternal: false,
+			FeatureInsightsEmbed:    false,
 		}
-	case PlanBusiness, PlanEnterprise:
+	case PlanBusiness:
 		return map[string]bool{
-			FeatureCRM:           true,
-			FeatureFinance:       true,
-			FeatureInventory:     true,
-			FeatureHR:            true,
-			FeatureLMS:           true,
-			FeatureHelpdesk:      true,
-			FeatureReporting:     true,
-			FeatureWebhook:       true,
-			FeaturePortal:        true,
-			FeaturePrint:         true,
-			FeatureImporter:      true,
-			FeatureReportBuilder: true,
-			FeatureInsights:      true,
+			FeatureCRM:              true,
+			FeatureFinance:          true,
+			FeatureInventory:        true,
+			FeatureHR:               true,
+			FeatureLMS:              true,
+			FeatureHelpdesk:         true,
+			FeatureReporting:        true,
+			FeatureWebhook:          true,
+			FeaturePortal:           true,
+			FeaturePrint:            true,
+			FeatureImporter:         true,
+			FeatureReportBuilder:    true,
+			FeatureInsights:         true,
+			FeatureInsightsExternal: true,
+			FeatureInsightsEmbed:    false,
+		}
+	case PlanEnterprise:
+		return map[string]bool{
+			FeatureCRM:              true,
+			FeatureFinance:          true,
+			FeatureInventory:        true,
+			FeatureHR:               true,
+			FeatureLMS:              true,
+			FeatureHelpdesk:         true,
+			FeatureReporting:        true,
+			FeatureWebhook:          true,
+			FeaturePortal:           true,
+			FeaturePrint:            true,
+			FeatureImporter:         true,
+			FeatureReportBuilder:    true,
+			FeatureInsights:         true,
+			FeatureInsightsExternal: true,
+			FeatureInsightsEmbed:    true,
 		}
 	default:
 		// Free plan — CRM only. Also the fallback when the plan
 		// name does not match any canonical identifier so a typo
 		// fails closed rather than opening every feature.
 		return map[string]bool{
-			FeatureCRM:           true,
-			FeatureFinance:       false,
-			FeatureInventory:     false,
-			FeatureHR:            false,
-			FeatureLMS:           false,
-			FeatureHelpdesk:      false,
-			FeatureReporting:     false,
-			FeatureWebhook:       false,
-			FeaturePortal:        false,
-			FeaturePrint:         false,
-			FeatureImporter:      false,
-			FeatureReportBuilder: false,
-			FeatureInsights:      false,
+			FeatureCRM:              true,
+			FeatureFinance:          false,
+			FeatureInventory:        false,
+			FeatureHR:               false,
+			FeatureLMS:              false,
+			FeatureHelpdesk:         false,
+			FeatureReporting:        false,
+			FeatureWebhook:          false,
+			FeaturePortal:           false,
+			FeaturePrint:            false,
+			FeatureImporter:         false,
+			FeatureReportBuilder:    false,
+			FeatureInsights:         false,
+			FeatureInsightsExternal: false,
+			FeatureInsightsEmbed:    false,
 		}
 	}
 }

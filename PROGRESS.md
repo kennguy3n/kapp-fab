@@ -418,11 +418,11 @@ Tenant-scoped BI layer: visual query builder, composable dashboards, rich visual
 
 ### Deferred / Follow-up
 
-- [ ] External data source connections (non-Kapp PostgreSQL, CSV upload)
+- [x] External data source connections (non-Kapp PostgreSQL, CSV upload)
 - [ ] SQL editor mode with parameterized tenant injection
 - [ ] Notebook/exploratory analysis interface
-- [ ] Cross-KType JOINs in visual builder
-- [ ] Dashboard embedding (iframe/public link)
+- [x] Cross-KType JOINs in visual builder
+- [x] Dashboard embedding (iframe/public link)
 
 ---
 

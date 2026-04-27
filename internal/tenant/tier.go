@@ -51,6 +51,7 @@ var TenantScopedTables = []string{
 	"report_schedules", "export_jobs",
 	"insights_queries", "insights_dashboards", "insights_dashboard_widgets",
 	"insights_query_cache", "insights_shares",
+	"insights_data_sources", "insights_embeds",
 }
 
 // SchemaName returns the canonical dedicated-schema name for a
