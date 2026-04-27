@@ -926,10 +926,10 @@ func (s *PGStore) CreateBatch(ctx context.Context, b Batch) (*Batch, error) {
 		return nil, errors.New("inventory: tenant id required")
 	}
 	if b.ItemID == uuid.Nil {
-		return nil, fmt.Errorf("%w: item_id required", ErrMoveInvalid)
+		return nil, fmt.Errorf("%w: item_id required", ErrBatchInvalid)
 	}
 	if b.BatchNo == "" {
-		return nil, fmt.Errorf("%w: batch_no required", ErrMoveInvalid)
+		return nil, fmt.Errorf("%w: batch_no required", ErrBatchInvalid)
 	}
 	if b.ID == uuid.Nil {
 		b.ID = uuid.New()

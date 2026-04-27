@@ -267,15 +267,19 @@ func (t *assignBatchTool) Invoke(ctx context.Context, inv Invocation) (*Result, 
 		BatchNo:   in.BatchNo,
 		CreatedBy: inv.ActorID,
 	}
-	if in.ManufacturedAt != nil {
-		if ts, err := parseDateOrTime(*in.ManufacturedAt); err == nil {
-			b.ManufacturedAt = &ts
+	if in.ManufacturedAt != nil && *in.ManufacturedAt != "" {
+		ts, err := parseDateOrTime(*in.ManufacturedAt)
+		if err != nil {
+			return nil, fmt.Errorf("inventory.assign_batch: invalid manufactured_at %q: %w", *in.ManufacturedAt, err)
 		}
+		b.ManufacturedAt = &ts
 	}
-	if in.ExpiresAt != nil {
-		if ts, err := parseDateOrTime(*in.ExpiresAt); err == nil {
-			b.ExpiresAt = &ts
+	if in.ExpiresAt != nil && *in.ExpiresAt != "" {
+		ts, err := parseDateOrTime(*in.ExpiresAt)
+		if err != nil {
+			return nil, fmt.Errorf("inventory.assign_batch: invalid expires_at %q: %w", *in.ExpiresAt, err)
 		}
+		b.ExpiresAt = &ts
 	}
 	out, err := t.store.CreateBatch(ctx, b)
 	if err != nil {

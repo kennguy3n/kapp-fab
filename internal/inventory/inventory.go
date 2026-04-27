@@ -163,4 +163,5 @@ var (
 	ErrBatchNotFound       = errors.New("inventory: batch not found")
 	ErrBatchItemMismatch   = errors.New("inventory: batch belongs to a different item")
 	ErrDuplicateBatch      = errors.New("inventory: batch number already exists for this item")
+	ErrBatchInvalid        = errors.New("inventory: invalid batch")
 )

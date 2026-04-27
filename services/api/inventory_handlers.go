@@ -411,7 +411,8 @@ func writeInventoryError(w http.ResponseWriter, err error) {
 	case errors.Is(err, inventory.ErrMoveInvalid),
 		errors.Is(err, inventory.ErrTransferUnbalanced),
 		errors.Is(err, inventory.ErrCannotReverseContra),
-		errors.Is(err, inventory.ErrBatchItemMismatch):
+		errors.Is(err, inventory.ErrBatchItemMismatch),
+		errors.Is(err, inventory.ErrBatchInvalid):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
 		writeRecordError(w, err)
@@ -454,15 +455,21 @@ func (h *inventoryHandlers) createBatch(w http.ResponseWriter, r *http.Request) 
 		BatchNo:   req.BatchNo,
 		CreatedBy: actorOrDefault(r.Context()),
 	}
-	if req.ManufacturedAt != nil {
-		if ts, err := parseAPIDate(*req.ManufacturedAt); err == nil {
-			b.ManufacturedAt = &ts
+	if req.ManufacturedAt != nil && *req.ManufacturedAt != "" {
+		ts, err := parseAPIDate(*req.ManufacturedAt)
+		if err != nil {
+			http.Error(w, "invalid manufactured_at: "+err.Error(), http.StatusBadRequest)
+			return
 		}
+		b.ManufacturedAt = &ts
 	}
-	if req.ExpiresAt != nil {
-		if ts, err := parseAPIDate(*req.ExpiresAt); err == nil {
-			b.ExpiresAt = &ts
+	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
+		ts, err := parseAPIDate(*req.ExpiresAt)
+		if err != nil {
+			http.Error(w, "invalid expires_at: "+err.Error(), http.StatusBadRequest)
+			return
 		}
+		b.ExpiresAt = &ts
 	}
 	out, err := h.store.CreateBatch(r.Context(), b)
 	if err != nil {
