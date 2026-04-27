@@ -165,7 +165,7 @@ func promoteTenantToSchema(ctx context.Context, adminPool *pgxpool.Pool, tenantI
 	if err != nil {
 		return fmt.Errorf("tier upgrade: begin: %w", err)
 	}
-	defer tx.Rollback(ctx) // safe to call after commit
+	defer func() { _ = tx.Rollback(ctx) }() // safe to call after commit; rollback after commit returns ErrTxClosed which we deliberately ignore
 	if _, err := tx.Exec(ctx, fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %q`, schemaName)); err != nil {
 		return fmt.Errorf("tier upgrade: create schema: %w", err)
 	}

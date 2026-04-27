@@ -234,11 +234,21 @@ func (t *explainInsightsResultTool) Invoke(ctx context.Context, inv Invocation) 
 		return nil, err
 	}
 	summary := summariseRunResult(q, out)
+	var rowCount int
+	var cacheHit bool
+	var queryHash string
+	if out != nil {
+		cacheHit = out.CacheHit
+		queryHash = out.QueryHash
+		if out.Result != nil {
+			rowCount = len(out.Result.Rows)
+		}
+	}
 	extraBytes, _ := json.Marshal(map[string]any{
-		"row_count":  len(out.Result.Rows),
-		"cache_hit":  out.CacheHit,
+		"row_count":  rowCount,
+		"cache_hit":  cacheHit,
 		"query_id":   q.ID,
-		"query_hash": out.QueryHash,
+		"query_hash": queryHash,
 	})
 	return &Result{
 		Tool:    t.Name(),
@@ -304,6 +314,37 @@ func (t *postDashboardDigestTool) Invoke(ctx context.Context, inv Invocation) (*
 	}
 	d.Widgets = widgets
 
+	// Dry-run path skips the per-widget RunSaved fan-out: the preview
+	// only needs the dashboard / widget metadata plus a placeholder so
+	// the human can see the shape of the digest before paying SQL for
+	// every widget. Commit mode below runs the queries.
+	if inv.Mode == ModeDryRun {
+		dryRunSections := make([]map[string]any, 0, len(widgets))
+		for _, w := range widgets {
+			dryRunSections = append(dryRunSections, map[string]any{
+				"widget_id": w.ID,
+				"viz_type":  w.VizType,
+				"text":      "(preview — query not executed in dry-run)",
+			})
+		}
+		preview := map[string]any{
+			"dashboard_id":   d.ID,
+			"dashboard_name": d.Name,
+			"channel":        in.Channel,
+			"sections":       dryRunSections,
+		}
+		previewBytes, _ := json.Marshal(preview)
+		return &Result{
+			Tool: t.Name(),
+			Mode: inv.Mode,
+			Summary: fmt.Sprintf(
+				"Would post Dashboard %q digest with %d widget sections",
+				d.Name, len(widgets),
+			),
+			Preview: previewBytes,
+		}, nil
+	}
+
 	sections := make([]map[string]any, 0, len(widgets))
 	for _, w := range widgets {
 		section := map[string]any{
@@ -339,14 +380,6 @@ func (t *postDashboardDigestTool) Invoke(ctx context.Context, inv Invocation) (*
 		"Dashboard %q digest with %d widget sections",
 		d.Name, len(sections),
 	)
-	if inv.Mode == ModeDryRun {
-		return &Result{
-			Tool:    t.Name(),
-			Mode:    inv.Mode,
-			Summary: "Would post " + summary,
-			Preview: previewBytes,
-		}, nil
-	}
 	// Commit-mode delivery is handled by the kchat-bridge process: the
 	// caller (workflow / scheduler / interactive agent) takes the
 	// preview payload and forwards it as a card. Returning the same

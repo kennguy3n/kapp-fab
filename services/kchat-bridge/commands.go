@@ -951,8 +951,12 @@ func (d *CommandDispatcher) runInsight(ctx context.Context, req CommandRequest) 
 		return CommandResponse{Text: fmt.Sprintf("/insight: %v", err)}, nil
 	}
 	card := renderInsightCard(match, out)
+	var rowCount int
+	if out != nil && out.Result != nil {
+		rowCount = len(out.Result.Rows)
+	}
 	return CommandResponse{
-		Text: fmt.Sprintf("Insights — %s (%d rows)", match.Name, len(out.Result.Rows)),
+		Text: fmt.Sprintf("Insights — %s (%d rows)", match.Name, rowCount),
 		Card: &card,
 	}, nil
 }
