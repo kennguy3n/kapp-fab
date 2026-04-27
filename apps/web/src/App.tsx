@@ -37,6 +37,7 @@ import { InsightsDashboardPage } from "./pages/InsightsDashboardPage";
 import { InsightsDataSourcesPage } from "./pages/InsightsDataSourcesPage";
 import { InsightsEmbedPage } from "./pages/InsightsEmbedPage";
 import { POSPage } from "./pages/POSPage";
+import { ProjectGanttPage } from "./pages/ProjectGanttPage";
 import { TenantFeaturesPage } from "./pages/TenantFeaturesPage";
 import { ConsolidationPage } from "./pages/ConsolidationPage";
 import { PlacementPolicyPage } from "./pages/PlacementPolicyPage";
@@ -66,6 +67,7 @@ const featureFromSection: Record<string, string> = {
   LMS: "lms",
   Insights: "insights",
   POS: "pos",
+  Projects: "projects",
 };
 
 interface NavSection {
@@ -94,6 +96,14 @@ const navSections: NavSection[] = [
     links: [
       { to: "/records/tasks.task", label: "Tasks" },
       { to: "/approvals", label: "Approvals" },
+    ],
+  },
+  {
+    title: "Projects",
+    links: [
+      { to: "/projects/gantt", label: "Gantt" },
+      { to: "/records/projects.project", label: "Projects" },
+      { to: "/records/projects.milestone", label: "Milestones" },
     ],
   },
   {
@@ -388,6 +398,7 @@ function AppShell() {
           <Route path="/hr/payroll" element={<PayrollPage />} />
           <Route path="/hr/shifts" element={<ShiftCalendarPage />} />
           <Route path="/pos" element={<POSPage />} />
+          <Route path="/projects/gantt" element={<ProjectGanttPage />} />
           <Route path="/finance/cost-centers" element={<CostCentersPage />} />
           <Route
             path="/finance/bank-reconciliation"

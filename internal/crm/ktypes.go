@@ -185,11 +185,17 @@ var taskSchema = []byte(`{
     {"name": "status", "type": "enum", "values": ["open", "in_progress", "done", "cancelled"], "default": "open"},
     {"name": "linked_ktype", "type": "string"},
     {"name": "linked_id", "type": "string"},
+    {"name": "project_id", "type": "ref", "ktype": "projects.project"},
+    {"name": "milestone_id", "type": "ref", "ktype": "projects.milestone"},
     {"name": "description", "type": "text"}
   ],
   "views": {
-    "list": {"columns": ["title", "assignee", "due_date", "status"]},
-    "form": {"sections": [{"title": "Task", "fields": ["title", "assignee", "due_date", "status", "description"]}, {"title": "Link", "fields": ["linked_ktype", "linked_id"]}]},
+    "list": {"columns": ["title", "assignee", "due_date", "project_id", "status"]},
+    "form": {"sections": [
+      {"title": "Task", "fields": ["title", "assignee", "due_date", "status", "description"]},
+      {"title": "Project", "fields": ["project_id", "milestone_id"]},
+      {"title": "Link", "fields": ["linked_ktype", "linked_id"]}
+    ]},
     "kanban": {"group_by": "status", "card_title": "title", "card_subtitle": "assignee"}
   },
   "cards": {"summary": "{{title}} — {{status}} ({{assignee}})"},
