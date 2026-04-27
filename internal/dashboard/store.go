@@ -39,6 +39,14 @@ type Summary struct {
 	// to render unconditionally.
 	PresentToday int64 `json:"present_today"`
 
+	// PendingReviews counts hr.appraisal KRecords whose status sits
+	// in the {submitted, reviewed} band. The combined count keeps
+	// the tile relevant for both the reviewer (who acts on
+	// "submitted") and the employee (who acks "reviewed") without
+	// surfacing two near-identical widgets. Renders zero when the
+	// appraisal surface isn't in use yet.
+	PendingReviews int64 `json:"pending_reviews"`
+
 	// BaseCurrency is the ISO-4217 code the monetary fields above
 	// are expressed in. Set by ComputeSummary from the tenants
 	// table; defaults to USD for tenants on the pre-000029 schema.
@@ -201,6 +209,21 @@ func (s *Store) ComputeSummary(ctx context.Context, tenantID uuid.UUID) (*Summar
 			    AND COALESCE(data->>'status','') IN ('present','half_day')
 			    AND deleted_at IS NULL`,
 			tenantID, &out.PresentToday); err != nil {
+			return err
+		}
+		// Pending reviews tile — count appraisals that are awaiting
+		// either the reviewer's response (submitted) or the
+		// employee's acknowledgement (reviewed). Honours
+		// soft-deletes so a withdrawn cycle drops off immediately.
+		// Renders zero when the appraisal KType isn't registered or
+		// no rows exist yet, keeping the tile safe to mount on
+		// every tenant.
+		if err := scanScalar(ctx, tx,
+			`SELECT count(*) FROM krecords
+			 WHERE tenant_id = $1 AND ktype = 'hr.appraisal'
+			   AND COALESCE(data->>'status','') IN ('submitted','reviewed')
+			   AND deleted_at IS NULL`,
+			tenantID, &out.PendingReviews); err != nil {
 			return err
 		}
 		return nil

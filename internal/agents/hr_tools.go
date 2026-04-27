@@ -18,10 +18,17 @@ import (
 // `store` is tolerated so kernel / Phase A-D integration tests that
 // never apply the HR migration still pass — commit-mode calls then
 // return a clear error rather than panicking.
+//
+// Phase M Task 4 adds the appraisal pair (create + submit) onto the
+// same registration so deployments that already wire RegisterHRTools
+// pick up the performance-review surface without an extra call.
+// Both tools no-op safely when `t.executor.records == nil`.
 func RegisterHRTools(x *Executor, store *hr.Store) {
 	x.Register(&requestLeaveTool{executor: x})
 	x.Register(&approveLeaveTool{executor: x, store: store})
 	x.Register(&assignShiftTool{executor: x})
+	x.Register(&createAppraisalTool{executor: x})
+	x.Register(&submitAppraisalTool{executor: x})
 }
 
 // RegisterPayrollTools wires the Phase J pay_run tools. Kept as a
@@ -337,3 +344,143 @@ func (t *assignShiftTool) Invoke(ctx context.Context, inv Invocation) (*Result, 
 		Record:  rec,
 	}, nil
 }
+
+// ----- hr.create_appraisal -----
+//
+// Creates a draft hr.appraisal record for a (cycle, employee,
+// reviewer) tuple. Status is forced to "draft" regardless of any
+// payload override so the workflow guard at the KType layer is the
+// single source of truth for transitions. Submission is a separate
+// hr.submit_appraisal call so an HR admin can stage drafts in bulk
+// before kicking off review notifications.
+
+type createAppraisalInput struct {
+	TemplateID  uuid.UUID `json:"template_id,omitempty"`
+	EmployeeID  uuid.UUID `json:"employee_id"`
+	ReviewerID  uuid.UUID `json:"reviewer_id"`
+	Cycle       string    `json:"cycle,omitempty"`
+	PeriodStart string    `json:"period_start,omitempty"`
+	PeriodEnd   string    `json:"period_end,omitempty"`
+	Summary     string    `json:"summary,omitempty"`
+}
+
+type createAppraisalTool struct{ executor *Executor }
+
+func (t *createAppraisalTool) Name() string               { return "hr.create_appraisal" }
+func (t *createAppraisalTool) RequiresConfirmation() bool { return true }
+func (t *createAppraisalTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in createAppraisalInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.EmployeeID == uuid.Nil || in.ReviewerID == uuid.Nil {
+		return nil, errors.New("hr.create_appraisal: employee_id and reviewer_id required")
+	}
+	data := map[string]any{
+		"employee_id": in.EmployeeID,
+		"reviewer_id": in.ReviewerID,
+		"status":      "draft",
+	}
+	if in.TemplateID != uuid.Nil {
+		data["template_id"] = in.TemplateID
+	}
+	if in.Cycle != "" {
+		data["cycle"] = in.Cycle
+	}
+	if in.PeriodStart != "" {
+		data["period_start"] = in.PeriodStart
+	}
+	if in.PeriodEnd != "" {
+		data["period_end"] = in.PeriodEnd
+	}
+	if in.Summary != "" {
+		data["summary"] = in.Summary
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(data)
+		return &Result{
+			Summary: fmt.Sprintf("Would create draft appraisal for %s (reviewer %s)", in.EmployeeID, in.ReviewerID),
+			Preview: preview,
+		}, nil
+	}
+	if t.executor.records == nil {
+		return nil, errors.New("hr.create_appraisal: record store not configured")
+	}
+	body, _ := json.Marshal(data)
+	rec, err := t.executor.records.Create(ctx, record.KRecord{
+		ID:        uuid.New(),
+		TenantID:  inv.TenantID,
+		KType:     hr.KTypeAppraisal,
+		Data:      body,
+		CreatedBy: inv.ActorID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Result{
+		Summary: fmt.Sprintf("Appraisal %s created (draft)", rec.ID),
+		Record:  rec,
+	}, nil
+}
+
+// ----- hr.submit_appraisal -----
+//
+// Moves a draft appraisal to "submitted", stamps submitted_at, and
+// returns the record. The dashboard's Pending Reviews tile counts
+// rows in {submitted, reviewed} so a reviewer's queue surfaces
+// without an extra worklist filter. Confirmation is required so
+// "submit all drafts" can't fire from a single agent prompt without
+// the operator seeing each preview.
+
+type submitAppraisalInput struct {
+	AppraisalID uuid.UUID `json:"appraisal_id"`
+}
+
+type submitAppraisalTool struct{ executor *Executor }
+
+func (t *submitAppraisalTool) Name() string               { return "hr.submit_appraisal" }
+func (t *submitAppraisalTool) RequiresConfirmation() bool { return true }
+func (t *submitAppraisalTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in submitAppraisalInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.AppraisalID == uuid.Nil {
+		return nil, errors.New("hr.submit_appraisal: appraisal_id required")
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(in)
+		return &Result{
+			Summary: fmt.Sprintf("Would submit appraisal %s", in.AppraisalID),
+			Preview: preview,
+		}, nil
+	}
+	if t.executor.records == nil {
+		return nil, errors.New("hr.submit_appraisal: record store not configured")
+	}
+	existing, err := t.executor.records.Get(ctx, inv.TenantID, in.AppraisalID)
+	if err != nil {
+		return nil, err
+	}
+	var body map[string]any
+	if err := json.Unmarshal(existing.Data, &body); err != nil {
+		return nil, fmt.Errorf("hr.submit_appraisal: decode record: %w", err)
+	}
+	if status, _ := body["status"].(string); status != "draft" && status != "" {
+		return nil, fmt.Errorf("hr.submit_appraisal: appraisal %s already %s", in.AppraisalID, status)
+	}
+	body["status"] = "submitted"
+	body["submitted_at"] = time.Now().UTC().Format(time.RFC3339)
+	patch, _ := json.Marshal(body)
+	existing.Data = patch
+	existing.UpdatedBy = &inv.ActorID
+	rec, err := t.executor.records.Update(ctx, *existing)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{
+		Summary: fmt.Sprintf("Appraisal %s submitted", rec.ID),
+		Record:  rec,
+	}, nil
+}
+

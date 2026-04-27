@@ -79,6 +79,12 @@ export function DashboardPage() {
           sub="hr.attendance — UTC day"
           to="/records/hr.attendance"
         />
+        <Widget
+          label="Pending reviews"
+          value={s.pending_reviews ?? 0}
+          sub="submitted + reviewed"
+          to="/records/hr.appraisal"
+        />
       </div>
     </section>
   );
