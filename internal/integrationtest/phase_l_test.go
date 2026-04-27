@@ -878,6 +878,17 @@ func TestInsightsSQLEditorFeatureFlagDisablesRoute(t *testing.T) {
 	// insights_sql_editor=false (enterprise-only). Confirm the
 	// middleware rejects with a 403 + `feature: insights_sql_editor`
 	// envelope so the React shell can surface an upgrade banner.
+	//
+	// newTenantForInsights provisions the tenant via tenants.Create
+	// directly rather than RunSetupWizard, so seedDefaultFeatures
+	// never writes the explicit `false` row. FeatureStore.IsEnabled
+	// defaults missing rows to true (so a newly added flag doesn't
+	// require a backfill), which would mask the gate. Seed the
+	// canonical business-plan default explicitly so the assertion
+	// matches the production code path.
+	if err := features.SetFeatures(ctx, tn.ID, map[string]bool{tenant.FeatureInsightsSQLEditor: false}); err != nil {
+		t.Fatalf("seed sql editor=false: %v", err)
+	}
 	mw := platform.FeatureMiddleware(features, tenant.FeatureInsightsSQLEditor)
 	chain := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -908,5 +919,54 @@ func TestInsightsSQLEditorFeatureFlagDisablesRoute(t *testing.T) {
 	chain.ServeHTTP(rr, req.Clone(req.Context()))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("with sql editor enabled: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestInsightsRunSavedDispatchesSQLMode is the regression guard for
+// the Phase M Task 1 review finding that RunSaved always routed
+// through the visual Run, even when the persisted query was
+// mode='sql'. Every consumer of RunSaved (dashboard widget fan-out,
+// cache refresh worker, /run handler, agent tools, /insight slash
+// command) must dispatch SQL-mode queries to RunRawSQL so the
+// caller sees raw-SQL rows rather than the placeholder visual
+// definition's output.
+//
+// Strategy: persist a SQL-mode query whose raw body returns a
+// distinctive sentinel column the visual runner cannot fabricate.
+// If RunSaved still routed through Run, the sentinel would never
+// appear because the placeholder definition has Aggregations:
+// AggCount which yields a single integer column.
+func TestInsightsRunSavedDispatchesSQLMode(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, queries, _, _, runner := newTenantForInsights(t, h)
+
+	saved, err := queries.Create(ctx, insights.Query{
+		TenantID: tn.ID,
+		Name:     "RunSaved SQL dispatch " + uuid.NewString()[:6],
+		Mode:     insights.QueryModeSQL,
+		RawSQL:   "SELECT 'phase-m-sentinel'::text AS marker, 7::int AS magic",
+	})
+	if err != nil {
+		t.Fatalf("create sql-mode query: %v", err)
+	}
+
+	out, err := runner.RunSaved(ctx, tn.ID, saved.ID, nil, true)
+	if err != nil {
+		t.Fatalf("RunSaved: %v", err)
+	}
+	if out == nil || out.Result == nil || len(out.Result.Rows) == 0 {
+		t.Fatalf("RunSaved returned no rows: %#v", out)
+	}
+	row := out.Result.Rows[0]
+	if row["marker"] != "phase-m-sentinel" {
+		t.Fatalf("RunSaved did not dispatch to RunRawSQL: marker=%v full=%#v", row["marker"], row)
+	}
+	if magic, ok := row["magic"].(int32); !ok || magic != 7 {
+		// pgx scans int4 into int32; assert defensively to
+		// surface a clear failure if the dispatch ever
+		// regresses to Run (which would not return a `magic`
+		// column at all).
+		t.Fatalf("RunSaved magic = %v (%T); want int32(7)", row["magic"], row["magic"])
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -266,6 +267,18 @@ func (r *Runner) RunSaved(ctx context.Context, tenantID, queryID uuid.UUID, filt
 	if err != nil {
 		return nil, err
 	}
+	// SQL-mode queries never round-trip a meaningful Definition
+	// (the store only persists the placeholder), so dispatch them
+	// to the raw runner before the visual fall-through. Caching
+	// is intentionally not honoured for raw-SQL — RunRawSQL doesn't
+	// touch insights_query_cache yet, so a SQL-mode dashboard
+	// widget re-executes on every refresh just like a 0-TTL visual
+	// query would. Adding cache support requires a separate
+	// fingerprint scheme (raw text + params) and is tracked
+	// outside this hotfix.
+	if q.Mode == QueryModeSQL {
+		return r.RunRawSQL(ctx, tenantID, q.RawSQL, nil)
+	}
 	// q.CacheTTLSeconds is always non-nil after QueryStore.Get
 	// (Get scans the column into a local int and assigns its
 	// address); guard defensively to keep the runner robust
@@ -306,6 +319,18 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 	}
 	if rawSQL == "" {
 		return nil, validationErr("raw_sql body required")
+	}
+	// Multi-statement bodies fail closed with a 400. pgx already
+	// only executes the first statement on the wire so trailing
+	// statements in `SELECT 1; DROP TABLE x` would otherwise be
+	// silently dropped — surfacing a validation error gives the
+	// caller a chance to split the body or remove the trailing
+	// `;`. The check is intentionally textual rather than parsed
+	// because we'd otherwise need a real SQL parser to reject
+	// `;` inside a string literal, and that's overkill for the
+	// editor's first cut.
+	if strings.Contains(rawSQL, ";") {
+		return nil, validationErr("multi-statement SQL is not allowed; submit one statement at a time")
 	}
 
 	if r.timeout > 0 {
