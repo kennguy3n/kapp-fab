@@ -50,6 +50,13 @@ type WizardRole struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Permissions json.RawMessage `json:"permissions"`
+	// ParentRole, when set, populates the `parent_role` column on
+	// the seeded `roles` row so the authz evaluator inherits this
+	// role's permissions through the parent chain (migration
+	// 000050). Empty means the role is a hierarchy root. The default
+	// chain (owner → tenant.admin → tenant.member, every module role
+	// → tenant.member) is encoded in DefaultRoles below.
+	ParentRole string `json:"parent_role,omitempty"`
 }
 
 // WizardUser is the minimum identifier + role(s) needed to seed an initial
@@ -121,20 +128,20 @@ type templateAccount struct {
 // the whole set without editing each role.
 func DefaultRoles() []WizardRole {
 	return []WizardRole{
-		{Name: "owner", Description: "Tenant owner", Permissions: json.RawMessage(`["*"]`)},
-		{Name: "tenant.admin", Description: "Tenant administrator", Permissions: json.RawMessage(`["tenant.admin","tenant.member","krecord.*"]`)},
+		{Name: "owner", Description: "Tenant owner", Permissions: json.RawMessage(`["*"]`), ParentRole: "tenant.admin"},
+		{Name: "tenant.admin", Description: "Tenant administrator", Permissions: json.RawMessage(`["tenant.admin","tenant.member","krecord.*"]`), ParentRole: "tenant.member"},
 		{Name: "tenant.member", Description: "Standard member", Permissions: json.RawMessage(`["tenant.member","krecord.read"]`)},
-		{Name: "finance.admin", Description: "Finance administrator", Permissions: json.RawMessage(`["tenant.member","finance.*","krecord.*"]`)},
-		{Name: "hr.admin", Description: "HR administrator", Permissions: json.RawMessage(`["tenant.member","hr.*","krecord.*"]`)},
-		{Name: "lms.admin", Description: "LMS administrator", Permissions: json.RawMessage(`["tenant.member","lms.*","krecord.*"]`)},
-		{Name: "crm.rep", Description: "CRM sales representative", Permissions: json.RawMessage(`["tenant.member","crm.*","krecord.read","krecord.write"]`)},
-		{Name: "crm.manager", Description: "CRM manager", Permissions: json.RawMessage(`["tenant.member","crm.*","krecord.*"]`)},
-		{Name: "inventory.admin", Description: "Inventory administrator", Permissions: json.RawMessage(`["tenant.member","inventory.*","krecord.*"]`)},
-		{Name: "helpdesk.agent", Description: "Helpdesk agent", Permissions: json.RawMessage(`["tenant.member","helpdesk.ticket.*","krecord.read","krecord.write"]`)},
-		{Name: "helpdesk.manager", Description: "Helpdesk manager", Permissions: json.RawMessage(`["tenant.member","helpdesk.*","krecord.*"]`)},
-		{Name: "sales.rep", Description: "Sales representative", Permissions: json.RawMessage(`["tenant.member","sales.*","krecord.read","krecord.write"]`)},
-		{Name: "procurement.rep", Description: "Procurement representative", Permissions: json.RawMessage(`["tenant.member","procurement.*","krecord.read","krecord.write"]`)},
-		{Name: "reporting.viewer", Description: "Read-only report viewer", Permissions: json.RawMessage(`["tenant.member","krecord.read","reports.read","insights.read"]`)},
+		{Name: "finance.admin", Description: "Finance administrator", Permissions: json.RawMessage(`["tenant.member","finance.*","krecord.*"]`), ParentRole: "tenant.member"},
+		{Name: "hr.admin", Description: "HR administrator", Permissions: json.RawMessage(`["tenant.member","hr.*","krecord.*"]`), ParentRole: "tenant.member"},
+		{Name: "lms.admin", Description: "LMS administrator", Permissions: json.RawMessage(`["tenant.member","lms.*","krecord.*"]`), ParentRole: "tenant.member"},
+		{Name: "crm.rep", Description: "CRM sales representative", Permissions: json.RawMessage(`["tenant.member","crm.*","krecord.read","krecord.write"]`), ParentRole: "tenant.member"},
+		{Name: "crm.manager", Description: "CRM manager", Permissions: json.RawMessage(`["tenant.member","crm.*","krecord.*"]`), ParentRole: "tenant.member"},
+		{Name: "inventory.admin", Description: "Inventory administrator", Permissions: json.RawMessage(`["tenant.member","inventory.*","krecord.*"]`), ParentRole: "tenant.member"},
+		{Name: "helpdesk.agent", Description: "Helpdesk agent", Permissions: json.RawMessage(`["tenant.member","helpdesk.ticket.*","krecord.read","krecord.write"]`), ParentRole: "tenant.member"},
+		{Name: "helpdesk.manager", Description: "Helpdesk manager", Permissions: json.RawMessage(`["tenant.member","helpdesk.*","krecord.*"]`), ParentRole: "tenant.member"},
+		{Name: "sales.rep", Description: "Sales representative", Permissions: json.RawMessage(`["tenant.member","sales.*","krecord.read","krecord.write"]`), ParentRole: "tenant.member"},
+		{Name: "procurement.rep", Description: "Procurement representative", Permissions: json.RawMessage(`["tenant.member","procurement.*","krecord.read","krecord.write"]`), ParentRole: "tenant.member"},
+		{Name: "reporting.viewer", Description: "Read-only report viewer", Permissions: json.RawMessage(`["tenant.member","krecord.read","reports.read","insights.read"]`), ParentRole: "tenant.member"},
 	}
 }
 
@@ -422,11 +429,15 @@ func seedRoles(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, roles []Wizar
 		// preserved in the struct; it is simply not persisted. A
 		// follow-up migration can restore storage if the column is
 		// ever wanted.
+		var parent any
+		if r.ParentRole != "" {
+			parent = r.ParentRole
+		}
 		_, err := tx.Exec(ctx,
-			`INSERT INTO roles (tenant_id, name, permissions)
-			 VALUES ($1, $2, $3)
+			`INSERT INTO roles (tenant_id, name, permissions, parent_role)
+			 VALUES ($1, $2, $3, $4)
 			 ON CONFLICT (tenant_id, name) DO NOTHING`,
-			tenantID, r.Name, perms,
+			tenantID, r.Name, perms, parent,
 		)
 		if err != nil {
 			return inserted, fmt.Errorf("tenant: seed role %s: %w", r.Name, err)
