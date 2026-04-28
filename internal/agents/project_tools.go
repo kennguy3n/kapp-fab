@@ -10,6 +10,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/projects"
 	"github.com/kennguy3n/kapp-fab/internal/record"
+	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
 
 // RegisterProjectTools attaches the Phase M Task 5 project tools
@@ -117,10 +118,19 @@ func (t *createProjectTool) Invoke(ctx context.Context, inv Invocation) (*Result
 	// planning → active → completed → archived transitions instead
 	// of letting tenants change status via direct record updates.
 	// Mirrors createDealTool's pattern.
-	run, _ := t.executor.workflow.StartRun(
-		ctx, inv.TenantID, projects.WorkflowProject,
-		rec.ID, "planning", inv.ActorID,
-	)
+	//
+	// Nil-guard the workflow engine so the kernel-only test
+	// harness (which wires `agents.NewExecutor(records, nil, ...)`
+	// — see phase_l_test.go) doesn't panic after a successful
+	// records.Create and leave behind an orphan project record.
+	// Matches the lms_tools.go nil check.
+	var run *workflow.WorkflowRun
+	if t.executor.workflow != nil {
+		run, _ = t.executor.workflow.StartRun(
+			ctx, inv.TenantID, projects.WorkflowProject,
+			rec.ID, "planning", inv.ActorID,
+		)
+	}
 	return &Result{
 		Summary: fmt.Sprintf("Project %s created (planning)", rec.ID),
 		Record:  rec,

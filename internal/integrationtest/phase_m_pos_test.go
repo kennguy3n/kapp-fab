@@ -360,11 +360,17 @@ func TestPOSPosterResumesAfterPartialFailure(t *testing.T) {
 	// This is the exact state the pos_invoice would be in if a
 	// previous PostPOSInvoice call had crashed between
 	// records.Create(ar_invoice) and invoice.PostSalesInvoice.
+	// Mirror the line items from the pos_invoice so the inventory
+	// hook on InvoicePoster has the same shape it would have seen
+	// in the original (non-resumed) flow.
 	preARBody, _ := json.Marshal(map[string]any{
-		"customer_id":          customerID.String(),
-		"issue_date":           "2026-04-29",
-		"due_date":             "2026-04-29",
-		"lines":                []map[string]any{},
+		"customer_id": customerID.String(),
+		"issue_date":  "2026-04-29",
+		"due_date":    "2026-04-29",
+		"lines": []map[string]any{
+			{"item_id": item.ID.String(), "warehouse_id": warehouse.ID.String(),
+				"qty": qty.String(), "unit_price": unitPrice.String()},
+		},
 		"subtotal":             total.InexactFloat64(),
 		"tax_amount":           0.0,
 		"total":                total.InexactFloat64(),
