@@ -8,8 +8,8 @@
 
 ## Current Phase
 
-**Phase G — Hardening / Acceptance + Phase L — Insights / Acceptance + API versioning strategy (closed)**
-**Status:** Phase G acceptance fully signed off — 5k-tenant load run hit every SLO with zero failures, tier upgrade and backup remap round-trip pass against a live PostgreSQL, security review §8 items 1-4 closed (item 5 — `kapp_tier_admin` SECURITY DEFINER role — tracks against PR #3), `docs/DEVELOPER_GUIDE.md` covers onboarding. Phase L acceptance signed off across all 7 criteria — visual save+cache re-run, 5-widget dashboard with linked filters, AI NL→query end-to-end runnable, dashboard digest posting, RLS negative test across all 5 insights tables, `statement_timeout` fence, and feature-flag route disabling. `docs/API_VERSIONING.md` and `.github/workflows/api-versioning-check.yml` close the API versioning task. Next focus: PR #2 (batch/lot tracking + KChat presence attendance), PR #3 (cell autoscaling + tier-upgrade RPC extraction with `kapp_tier_admin`), PR #4 (insights deferred features — external data sources, cross-KType JOINs, dashboard embedding).
+**Phase G + Phase L — closed; Phase M — vertical depth (in progress)**
+**Status:** Phase G + Phase L acceptance signed off; the Phase L deferred features (external data sources, cross-KType JOINs, dashboard embedding) shipped in PR #48; Phase G batch/lot + KChat presence attendance shipped in PR #46; Phase G cell autoscaler + scoped `kapp_tier_admin` SECURITY DEFINER role shipped in PR #47. Outstanding stale `[ ]` markers in this file have been brought up to date in this batch. **Next focus (Phase M, this batch):** (1) CI lock-step test wiring `scripts/upgrade_tier.sh::TABLES` to `tenant.TenantScopedTables` (closes PR #47 review gap); (2) Insights SQL editor mode (visual + raw SQL with `statement_timeout` + RLS); (3) HR depth — country tax packs (US, AU), shift scheduling, performance reviews; (4) Projects & milestones with Gantt + agent tools; (5) POS module with offline queue; (6) advanced accounting consolidation across child tenants; (7) webhook v2 (event-type filters, conditional matching, exponential backoff with jitter, delivery log UI).
 
 ---
 
@@ -157,9 +157,9 @@ First inventory primitives integrated with Sales and Procurement.
 
 ### Deferred / Follow-up
 
-- [~] Low-stock alert worker (threshold-based notifications via KChat) (`services/worker/stock_alerts.go` polls `stock_levels` vs `inventory.item.reorder_level` per tenant and emits `inventory.low_stock_alert`; wired into `services/worker/main.go` and fanned out by the existing notification router. Needs production soak + dedupe-map cap tuning.)
-- [ ] Stock move reversal (correction entries, not deletes — matching finance pattern)
-- [ ] Batch/lot tracking foundation (schema only, full implementation deferred)
+- [x] Low-stock alert worker (threshold-based notifications via KChat) — shipped in Phase G (see line 340; `services/worker/stock_alerts.go` + `services/worker/main.go`, dedupe-map cap tuned, cross-tenant safety verified in `docs/SECURITY_REVIEW.md` §4)
+- [x] Stock move reversal (correction entries, not deletes — matching finance pattern) — shipped as cross-cutting follow-up; see PROGRESS.md line 289 (`internal/inventory/store.go#ReverseMove`, `migrations/000035_stock_reversal.sql`)
+- [x] Batch/lot tracking — full implementation shipped as cross-cutting follow-up; see PROGRESS.md line 290 (`migrations/000040_batch_tracking.sql`, `inventory.batch` KType, `inventory.assign_batch` agent tool)
 
 ---
 
@@ -186,8 +186,8 @@ Employee lifecycle and structured learning.
 
 ### Deferred / Follow-up
 
-- [ ] Attendance integration with KChat status
-- [ ] Course completion certificates (basic)
+- [x] Attendance integration with KChat status — shipped as cross-cutting follow-up; see PROGRESS.md line 291 (`services/kchat-bridge/presence.go`, `attendance_kchat_sync` feature flag)
+- [x] Course completion certificates (basic) — shipped as cross-cutting follow-up; see PROGRESS.md line 292 (`lms.certificate` KType, `internal/lms/certificates.go`, `services/worker/certificate_worker.go`)
 - [x] Assignment submission + reviewer notification flow (`lms.submit_assignment` agent tool patches status to `submitted`, creates single-step approval chain with `reviewer_id` as approver)
 
 ---
@@ -295,7 +295,7 @@ Platform primitives used across every Kapp — not scoped to a single phase but 
 - [x] `permissions` table (`migrations/000015_permissions.sql` with RLS; `internal/authz/store.go` reads granular `(role_name, ktype, action)` grants with JSONB conditions, falling back to legacy `roles.permissions` for backward compatibility)
 - [x] `notifications` table (`migrations/000014_notifications.sql` with RLS; `internal/notifications/store.go` + `services/api/notifications.go` expose `GET /api/v1/notifications` + mark-read; worker persists every routed notification; `apps/web/src/components/NotificationBell.tsx` renders the inbox)
 - [x] Webhook HMAC signatures (`services/worker/notifications.go#postWebhook` computes HMAC-SHA256 of the request body with a per-tenant secret and adds `X-Kapp-Signature: sha256=<hex>`)
-- [ ] Insights: visual query builder, composable dashboards, AI query assistant (Phase L)
+- [x] Insights: visual query builder, composable dashboards, AI query assistant (Phase L) — shipped across PRs #41, #43, #44, #45, #48 (see Phase L section below for full deliverables list, KTypes, endpoints, UI pages, and acceptance criteria)
 
 ### Priority MVP gaps
 

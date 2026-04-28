@@ -28,12 +28,18 @@ import (
 // per-tenant data and must be copied into the dedicated schema on
 // upgrade. The order matters for the kapp-backup restore path
 // (foreign keys point backwards), so it is duplicated in
-// services/kapp-backup/main.go::TenantScopedTables (covered by the
-// byte-identity lock-step assertion in
-// services/api/tier_handlers_integration_test.go) and in
-// scripts/upgrade_tier.sh::TABLES (NOT covered by the test —
-// edit that file by hand when you change this slice). Edit one,
-// edit all three.
+// services/kapp-backup/main.go::TenantScopedTables and in
+// scripts/upgrade_tier.sh::TABLES. All three copies are covered by
+// CI lock-step assertions:
+//
+//   - services/api/tier_handlers_integration_test.go::
+//     TestTierUpgradeTablesMatchBackupSourceList covers the
+//     services/kapp-backup/main.go copy.
+//   - services/api/upgrade_tier_shell_test.go::
+//     TestUpgradeTierShellTablesMatchGoList covers the
+//     scripts/upgrade_tier.sh copy.
+//
+// Edit one, edit all three — the tests will tell you if you forget.
 var TenantScopedTables = []string{
 	"user_tenants", "roles", "permissions", "sessions",
 	"idempotency_keys", "saved_views", "notifications",
