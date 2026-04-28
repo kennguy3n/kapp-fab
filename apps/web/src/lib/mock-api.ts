@@ -17,14 +17,21 @@ import type {
   IncomeStatement,
   InsightsDashboard,
   InsightsDashboardBundle,
+  InsightsDataSource,
+  InsightsDataSourceInput,
   InsightsQuery,
   InsightsRunResult,
+  InsightsShare,
+  InsightsShareInput,
+  InsightsWidget,
+  InsightsWidgetInput,
   InventoryItem,
   InventoryValuationReport,
   InventoryWarehouse,
   JournalEntry,
   KRecord,
   KType,
+  PayslipGenerateResult,
   Plan,
   PlacementPolicy,
   RetentionPolicy,
@@ -122,6 +129,21 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function makeDemoDataSource(input: InsightsDataSourceInput): InsightsDataSource {
+  return {
+    tenant_id: DEMO_TENANT_ID,
+    id: nextId(),
+    name: input.name,
+    description: input.description,
+    dialect: input.dialect,
+    // Server returns plaintext only on create/update; mirror that here.
+    connection_string: input.connection_string,
+    enabled: input.enabled ?? true,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  };
+}
+
 // --- Method handlers --------------------------------------------------
 
 const handlers = {
@@ -192,10 +214,26 @@ const handlers = {
     return delay<KRecord>(updated);
   },
   deleteRecord: () => delay<void>(undefined as unknown as void),
-  bulkRecords: () => delay({ created: 0, updated: 0, deleted: 0, errors: [] }),
-  bulkExportRecords: () => delay<KRecord[]>([]),
-  recordPdf: () => delay<Blob>(new Blob()),
-  recordHtml: () => delay<string>("<html><body>demo</body></html>"),
+  bulkRecords: (_ktype: string, input: { ids: string[] }) =>
+    delay<{ succeeded: string[]; failed: { id: string; error: string }[] }>({
+      succeeded: [...(input?.ids ?? [])],
+      failed: [],
+    }),
+  bulkExportRecords: (ktype: string, ids: string[]) => {
+    // Mirror the real client's CSV-text response so callers that wrap
+    // it in `new Blob([csv])` produce a valid download in demo mode.
+    const list = (records[ktype] ?? []).filter((r) => ids.includes(r.id));
+    const header = "id,status,updated_at";
+    const body = list
+      .map((r) => `${r.id},${r.status},${r.updated_at}`)
+      .join("\n");
+    return delay<string>(list.length ? `${header}\n${body}\n` : `${header}\n`);
+  },
+  recordPdf: () => delay<Blob>(new Blob(["%PDF-1.4 demo"], { type: "application/pdf" })),
+  recordHtml: () =>
+    delay<Blob>(
+      new Blob(["<html><body>demo</body></html>"], { type: "text/html" })
+    ),
   runAction: (ktype: string, id: string, action: string) => {
     const list = records[ktype] ?? [];
     const idx = list.findIndex((x) => x.id === id);
@@ -389,8 +427,18 @@ const handlers = {
       filter_hash: "f-sql",
       expires_at: null,
     }),
-  listInsightsQueryShares: () => delay<{ shares: [] }>({ shares: [] }),
-  shareInsightsQuery: () => delay<{ share: null }>({ share: null }),
+  listInsightsQueryShares: () => delay<{ shares: InsightsShare[] }>({ shares: [] }),
+  shareInsightsQuery: (id: string, input: InsightsShareInput) =>
+    delay<InsightsShare>({
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      resource_type: "query",
+      resource_id: id,
+      grantee_type: input?.grantee_type ?? "user",
+      grantee: input?.grantee ?? "demo@acme.example",
+      permission: input?.permission ?? "view",
+      created_at: nowIso(),
+    }),
   deleteInsightsQueryShare: () => delay<void>(undefined as unknown as void),
   listInsightsDashboards: () =>
     delay<{ dashboards: InsightsDashboard[] }>({ dashboards: [...INSIGHTS_DASHBOARDS] }),
@@ -412,22 +460,56 @@ const handlers = {
   },
   updateInsightsDashboard: () => delay<InsightsDashboard>(INSIGHTS_DASHBOARDS[0]),
   deleteInsightsDashboard: () => delay<void>(undefined as unknown as void),
-  upsertInsightsWidget: () => delay<InsightsDashboard>(INSIGHTS_DASHBOARDS[0]),
+  upsertInsightsWidget: (dashboardId: string, input: InsightsWidgetInput) =>
+    delay<InsightsWidget>({
+      tenant_id: DEMO_TENANT_ID,
+      id: input?.id ?? nextId(),
+      dashboard_id: dashboardId,
+      query_id: input?.query_id ?? null,
+      viz_type: input?.viz_type ?? "bar",
+      position: input?.position ?? { x: 0, y: 0, w: 6, h: 4 },
+      config: input?.config ?? {},
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    }),
   deleteInsightsWidget: () => delay<void>(undefined as unknown as void),
-  listInsightsDashboardShares: () => delay<{ shares: [] }>({ shares: [] }),
-  shareInsightsDashboard: () => delay<{ share: null }>({ share: null }),
+  listInsightsDashboardShares: () =>
+    delay<{ shares: InsightsShare[] }>({ shares: [] }),
+  shareInsightsDashboard: (id: string, input: InsightsShareInput) =>
+    delay<InsightsShare>({
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      resource_type: "dashboard",
+      resource_id: id,
+      grantee_type: input?.grantee_type ?? "user",
+      grantee: input?.grantee ?? "demo@acme.example",
+      permission: input?.permission ?? "view",
+      created_at: nowIso(),
+    }),
   deleteInsightsDashboardShare: () => delay<void>(undefined as unknown as void),
-  listInsightsDataSources: () => delay<{ data_sources: [] }>({ data_sources: [] }),
-  createInsightsDataSource: () => delay({}),
-  updateInsightsDataSource: () => delay({}),
+  listInsightsDataSources: () =>
+    delay<{ data_sources: InsightsDataSource[] }>({ data_sources: [] }),
+  createInsightsDataSource: (input: InsightsDataSourceInput) =>
+    delay<InsightsDataSource>(makeDemoDataSource(input)),
+  updateInsightsDataSource: (_id: string, input: InsightsDataSourceInput) =>
+    delay<InsightsDataSource>(makeDemoDataSource(input)),
   deleteInsightsDataSource: () => delay<void>(undefined as unknown as void),
-  testInsightsDataSource: () => delay({ ok: true }),
+  testInsightsDataSource: () => delay<{ ok: boolean }>({ ok: true }),
 
   // --- Misc fallbacks -------------------------------------------------
   getPublicForm: () => delay({ id: "demo-form", title: "Demo form", fields: [] }),
   submitPublicForm: () => delay({ ok: true }),
-  generatePayslips: () => delay({ created: 5, updated: 0 }),
-  postPayRun: () => delay({ posted: true }),
+  generatePayslips: () =>
+    delay<PayslipGenerateResult>({
+      payslip_ids: (records["hr.payslip"] ?? []).map((p) => p.id),
+      created_count: (records["hr.payslip"] ?? []).length,
+      skipped_existing: 0,
+      skipped_no_structure: 0,
+    }),
+  postPayRun: () =>
+    delay<JournalEntry>({
+      ...JOURNAL_ENTRIES[0],
+    }),
   listPayRunPayslips: (id: string) =>
     delay<KRecord[]>(records["hr.payslip"]?.filter((p) => (p.data as { pay_run_id?: string }).pay_run_id === id) ?? []),
   createConsolidationGroup: () => delay({ id: nextId(), name: "" }),
@@ -439,9 +521,18 @@ const handlers = {
 // than throwing — this keeps the demo resilient as new endpoints
 // land in `ApiClient` without forcing us to update mock-api.ts in
 // lockstep.
+//
+// The "then"/"catch"/"finally" properties are explicitly omitted so the
+// proxy doesn't masquerade as a thenable. If we returned a function for
+// `.then`, anything that resolves a Promise with `mockApi` (e.g. a
+// dynamic-import chain that returns the mock client) would hang
+// forever waiting for our stub `then(resolve, reject)` to fulfil.
+const PROMISE_PROTOCOL = new Set(["then", "catch", "finally"]);
+
 export const mockApi = new Proxy({} as ApiClient, {
   get(_target, prop: string | symbol) {
     if (typeof prop !== "string") return undefined;
+    if (PROMISE_PROTOCOL.has(prop)) return undefined;
     const handler = handlers[prop];
     if (handler) return handler;
     return async (..._args: unknown[]) => {
