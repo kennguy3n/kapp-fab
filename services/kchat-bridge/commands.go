@@ -20,6 +20,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
+	"github.com/kennguy3n/kapp-fab/internal/projects"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
@@ -101,6 +102,12 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 			return CommandResponse{Text: fmt.Sprintf("/task: %v", err)}, nil
 		}
 		return d.createRecord(ctx, req, crm.KTypeTask, data)
+	case "project":
+		data, err := projectFromArgs(req.Args, req.UserID)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/project: %v", err)}, nil
+		}
+		return d.createRecord(ctx, req, projects.KTypeProject, data)
 	case "approve":
 		return d.decideApproval(ctx, req)
 	case "invoice":
@@ -179,7 +186,7 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.createRecord(ctx, req, hr.KTypeShiftAssignment, data)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /reverse-stock-move, /batch, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /shift, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /project, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /reverse-stock-move, /batch, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /shift, /help",
 		}, nil
 	default:
 		return CommandResponse{
@@ -671,6 +678,39 @@ func taskFromArgs(args []string, requester uuid.UUID) (map[string]any, error) {
 		"status":   "open",
 		"assignee": assignee.String(),
 	}, nil
+}
+
+// projectFromArgs expects `<name...> [#code]`. The name is the
+// joined free text minus an optional trailing `#CODE` token used
+// for the project's short reference. Mirrors taskFromArgs's
+// "title plus trailing token" parsing so kchat operators don't
+// have to learn a new shape per command.
+func projectFromArgs(args []string, owner uuid.UUID) (map[string]any, error) {
+	if len(args) == 0 {
+		return nil, errors.New("usage: /project <name> [#code]")
+	}
+	nameParts := args
+	code := ""
+	if last := args[len(args)-1]; strings.HasPrefix(last, "#") && len(last) > 1 {
+		code = strings.TrimPrefix(last, "#")
+		nameParts = args[:len(args)-1]
+	}
+	name := strings.Join(nameParts, " ")
+	if name == "" {
+		return nil, errors.New("project name required")
+	}
+	data := map[string]any{
+		"name":     name,
+		"status":   "planning",
+		"currency": "USD",
+	}
+	if code != "" {
+		data["code"] = code
+	}
+	if owner != uuid.Nil {
+		data["owner"] = owner.String()
+	}
+	return data, nil
 }
 
 // invoiceFromArgs expects `<customer_id> <total> [currency] [invoice_number]`.

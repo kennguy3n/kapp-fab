@@ -100,6 +100,8 @@ func FeatureFromPath(p string) string {
 		return tenant.FeatureInsights
 	case "pos":
 		return tenant.FeaturePOS
+	case "projects":
+		return tenant.FeatureProjects
 	default:
 		return ""
 	}
@@ -137,6 +139,8 @@ func featureFromKType(ktype string) string {
 		return tenant.FeatureLMS
 	case "helpdesk":
 		return tenant.FeatureHelpdesk
+	case "projects":
+		return tenant.FeatureProjects
 	default:
 		return ""
 	}

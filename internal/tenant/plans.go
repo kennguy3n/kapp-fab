@@ -63,6 +63,13 @@ const (
 	// queue + idempotent finalize handler add measurable load
 	// per active terminal.
 	FeaturePOS = "pos"
+	// FeatureProjects gates the Phase M Task 5 projects +
+	// milestones surface. Off on free, on for starter / business
+	// / enterprise so a free-tier tenant doesn't pay for the
+	// extra KType registration work in their cell. Honoured by
+	// the dynamic feature middleware on /api/v1/projects/* and
+	// /api/v1/records/projects.* and by the agent tool registry.
+	FeatureProjects = "projects"
 )
 
 // AllFeatures is the canonical list of feature keys. Handlers that
@@ -87,6 +94,7 @@ var AllFeatures = []string{
 	FeatureInsightsEmbed,
 	FeatureInsightsSQLEditor,
 	FeaturePOS,
+	FeatureProjects,
 }
 
 // PlanLimits is the numeric ceiling each plan enforces per billing
@@ -250,7 +258,8 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureInsightsExternal:  false,
 			FeatureInsightsEmbed:     false,
 			FeatureInsightsSQLEditor: false,
-			FeaturePOS:              false,
+			FeaturePOS:               false,
+			FeatureProjects:          true,
 		}
 	case PlanBusiness:
 		return map[string]bool{
@@ -270,7 +279,8 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureInsightsExternal:  true,
 			FeatureInsightsEmbed:     false,
 			FeatureInsightsSQLEditor: false,
-			FeaturePOS:              true,
+			FeaturePOS:               true,
+			FeatureProjects:          true,
 		}
 	case PlanEnterprise:
 		return map[string]bool{
@@ -290,7 +300,8 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureInsightsExternal:  true,
 			FeatureInsightsEmbed:     true,
 			FeatureInsightsSQLEditor: true,
-			FeaturePOS:              true,
+			FeaturePOS:               true,
+			FeatureProjects:          true,
 		}
 	default:
 		// Free plan — CRM only. Also the fallback when the plan
@@ -313,7 +324,8 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureInsightsExternal:  false,
 			FeatureInsightsEmbed:     false,
 			FeatureInsightsSQLEditor: false,
-			FeaturePOS:              false,
+			FeaturePOS:               false,
+			FeatureProjects:          false,
 		}
 	}
 }

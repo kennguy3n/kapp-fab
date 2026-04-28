@@ -41,6 +41,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/print"
+	"github.com/kennguy3n/kapp-fab/internal/projects"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/reporting"
 	"github.com/kennguy3n/kapp-fab/internal/sales"
@@ -299,6 +300,9 @@ func run() error {
 			return fmt.Errorf("register appraisal ktype %s: %w", kt.Name, err)
 		}
 	}
+	if err := projects.RegisterKTypes(ctx, ktypeRegistry); err != nil {
+		return err
+	}
 	// Phase I — register helpdesk KTypes. The helpdesk store manages
 	// typed SLA policies + breach log while tickets themselves ride
 	// the generic KRecord plumbing.
@@ -362,6 +366,7 @@ func run() error {
 	// inventory read + move tools.
 	executor := agents.NewExecutor(recordStore, workflowEngine, auditor)
 	agents.RegisterCRMTools(executor)
+	agents.RegisterProjectTools(executor)
 	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster, paymentPoster)
 	agents.RegisterInventoryTools(executor, inventoryStore)
 	agents.RegisterInventoryReorderTool(executor, inventory.NewReorderHandler(recordStore, inventoryStore))
