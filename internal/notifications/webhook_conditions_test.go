@@ -88,3 +88,22 @@ func TestEvaluateConditionsFailsClosedOnMalformed(t *testing.T) {
 		t.Fatal("malformed payload should fail closed")
 	}
 }
+
+func TestEvaluateConditionsUnknownOperatorFailsClosed(t *testing.T) {
+	payload := json.RawMessage(`{"data":{"status":"open"}}`)
+	// $prefxi is a typo of $prefix — must NOT silently degrade to
+	// "no filter" semantics. Same for any unrecognized operator
+	// key (forwards-compat: server may not yet ship a new $regex).
+	cases := []string{
+		`{"data.status": {"$prefxi": "op"}}`,
+		`{"data.status": {"$regex": "open"}}`,
+		`{"data.status": {"$eq": "open", "$unknown": true}}`,
+	}
+	for _, c := range cases {
+		t.Run(c, func(t *testing.T) {
+			if EvaluateConditions(json.RawMessage(c), payload) {
+				t.Fatalf("unknown operator must fail closed: %s", c)
+			}
+		})
+	}
+}

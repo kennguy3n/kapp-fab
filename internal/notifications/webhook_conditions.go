@@ -90,10 +90,24 @@ func resolvePath(doc any, path string) (any, bool) {
 
 // matchCondition compares a resolved value against the condition
 // operand. operand may be a scalar (equality match) or a map with
-// one of the supported operators.
+// one of the supported operators. Unknown operator keys (e.g. a
+// typo like `$prefxi` or a future operator the worker does not yet
+// implement) cause the condition to fail closed: it is safer to
+// silently drop a delivery than to deliver to a webhook the
+// operator believes was filtered.
 func matchCondition(got any, present bool, operand any) bool {
 	switch op := operand.(type) {
 	case map[string]any:
+		// Reject unknown operator keys before evaluating any of
+		// the recognised operators so a typo cannot accidentally
+		// degrade to "no filter" semantics.
+		for k := range op {
+			switch k {
+			case "$exists", "$in", "$prefix", "$eq":
+			default:
+				return false
+			}
+		}
 		if v, ok := op["$exists"]; ok {
 			want, _ := v.(bool)
 			if want != present {
