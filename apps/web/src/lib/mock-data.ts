@@ -1091,7 +1091,7 @@ export const TRIAL_BALANCE: TrialBalanceReport = {
     { account_code: "1500", account_name: "Property & Equipment", type: "asset", debit: "210000.00", credit: "0.00", balance: "210000.00" },
     { account_code: "2010", account_name: "Accounts Payable", type: "liability", debit: "0.00", credit: "18000.00", balance: "18000.00" },
     { account_code: "2020", account_name: "Accrued Expenses", type: "liability", debit: "0.00", credit: "41400.00", balance: "41400.00" },
-    { account_code: "3010", account_name: "Common Stock", type: "equity", debit: "0.00", credit: "200000.00", balance: "200000.00" },
+    { account_code: "3010", account_name: "Common Stock", type: "equity", debit: "0.00", credit: "350000.00", balance: "350000.00" },
     { account_code: "3020", account_name: "Retained Earnings", type: "equity", debit: "0.00", credit: "44900.00", balance: "44900.00" },
     { account_code: "4010", account_name: "Product Revenue", type: "revenue", debit: "0.00", credit: "215000.00", balance: "215000.00" },
     { account_code: "4020", account_name: "Service Revenue", type: "revenue", debit: "0.00", credit: "82000.00", balance: "82000.00" },
@@ -1100,8 +1100,11 @@ export const TRIAL_BALANCE: TrialBalanceReport = {
     { account_code: "6020", account_name: "Rent", type: "expense", debit: "8500.00", credit: "0.00", balance: "8500.00" },
     { account_code: "6030", account_name: "Marketing", type: "expense", debit: "20500.00", credit: "0.00", balance: "20500.00" },
   ],
+  // Debits and credits both sum to 751,300 — the +150k vs the previous
+  // fixture is parked in Common Stock as additional paid-in capital so
+  // the trial balance ties out cleanly (residual 0.00).
   total_debit: "751300.00",
-  total_credit: "601300.00",
+  total_credit: "751300.00",
   residual: "0.00",
 };
 
