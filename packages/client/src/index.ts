@@ -396,6 +396,17 @@ export class ApiClient {
     return this.request(`/records/${encodeURIComponent(ktype)}`);
   }
 
+  /** Finalize a sales.pos_invoice. Reuses the standard
+   *  Idempotency-Key middleware so an offline-queue replay of the
+   *  same call (matching idempotency_key) returns the prior
+   *  pos_invoice unchanged instead of double-posting. */
+  finalizePOSInvoice(id: string, idempotencyKey?: string): Promise<KRecord> {
+    return this.request(`/pos/invoices/${encodeURIComponent(id)}/finalize`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey ?? crypto.randomUUID() },
+    });
+  }
+
   getRecord(ktype: string, id: string): Promise<KRecord> {
     return this.request(
       `/records/${encodeURIComponent(ktype)}/${encodeURIComponent(id)}`

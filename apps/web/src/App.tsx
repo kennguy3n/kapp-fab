@@ -36,6 +36,7 @@ import { InsightsQueryBuilderPage } from "./pages/InsightsQueryBuilderPage";
 import { InsightsDashboardPage } from "./pages/InsightsDashboardPage";
 import { InsightsDataSourcesPage } from "./pages/InsightsDataSourcesPage";
 import { InsightsEmbedPage } from "./pages/InsightsEmbedPage";
+import { POSPage } from "./pages/POSPage";
 import { TenantFeaturesPage } from "./pages/TenantFeaturesPage";
 import { ConsolidationPage } from "./pages/ConsolidationPage";
 import { PlacementPolicyPage } from "./pages/PlacementPolicyPage";
@@ -63,6 +64,7 @@ const featureFromSection: Record<string, string> = {
   HR: "hr",
   LMS: "lms",
   Insights: "insights",
+  POS: "pos",
 };
 
 interface NavSection {
@@ -127,6 +129,14 @@ const navSections: NavSection[] = [
       { to: "/sales/orders", label: "Sales Orders" },
       { to: "/sales/price-lists", label: "Price Lists" },
       { to: "/procurement/purchase-orders", label: "Purchase Orders" },
+    ],
+  },
+  {
+    title: "POS",
+    links: [
+      { to: "/pos", label: "Register" },
+      { to: "/records/sales.pos_profile", label: "Profiles" },
+      { to: "/records/sales.pos_invoice", label: "Receipts" },
     ],
   },
   {
@@ -372,6 +382,7 @@ function AppShell() {
           <Route path="/hr/org-chart" element={<OrgChartPage />} />
           <Route path="/hr/payroll" element={<PayrollPage />} />
           <Route path="/hr/shifts" element={<ShiftCalendarPage />} />
+          <Route path="/pos" element={<POSPage />} />
           <Route path="/finance/cost-centers" element={<CostCentersPage />} />
           <Route
             path="/finance/bank-reconciliation"
