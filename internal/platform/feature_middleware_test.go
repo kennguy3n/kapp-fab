@@ -24,6 +24,12 @@ func TestFeatureFromPathRecordsKType(t *testing.T) {
 		{"/api/v1/records/inventory.item", tenant.FeatureInventory},
 		{"/api/v1/records/procurement.purchase_order", tenant.FeatureInventory},
 		{"/api/v1/records/sales.order", tenant.FeatureInventory},
+		// POS KTypes share the "sales" prefix but ride their own
+		// FeaturePOS gate so a Starter tenant (inventory=true,
+		// pos=false) cannot CRUD them through /records.
+		{"/api/v1/records/sales.pos_profile", tenant.FeaturePOS},
+		{"/api/v1/records/sales.pos_invoice", tenant.FeaturePOS},
+		{"/api/v1/records/sales.pos_invoice/abc-123", tenant.FeaturePOS},
 		{"/api/v1/records/hr.employee", tenant.FeatureHR},
 		{"/api/v1/records/payroll.run", tenant.FeatureHR},
 		{"/api/v1/records/lms.course", tenant.FeatureLMS},

@@ -90,6 +90,9 @@ export function POSPage() {
   useEffect(() => {
     let cancelled = false;
     const drain = async () => {
+      // loadQueue() reads from localStorage so concurrent drains
+      // (e.g. a stale 'online' listener firing while finalize is
+      // also racing) all start from the same source-of-truth slice.
       const pending = loadQueue();
       if (pending.length === 0) return;
       const remaining: QueuedInvoice[] = [];
@@ -101,8 +104,18 @@ export function POSPage() {
           remaining.push(q);
         }
       }
-      saveQueue(remaining);
-      if (!cancelled) setQueue(remaining);
+      if (cancelled) return;
+      // Functional setQueue avoids stomping a sibling finalize that
+      // appended to the queue between loadQueue() and now: keep any
+      // ids in `prev` that aren't in the current `pending` slice and
+      // merge them with `remaining`.
+      setQueue((prev) => {
+        const pendingIds = new Set(pending.map((p) => p.idempotencyKey));
+        const appendedDuringDrain = prev.filter((p) => !pendingIds.has(p.idempotencyKey));
+        const merged = [...remaining, ...appendedDuringDrain];
+        saveQueue(merged);
+        return merged;
+      });
     };
     void drain();
     const onOnline = () => void drain();
@@ -186,16 +199,21 @@ export function POSPage() {
         setCart([]);
         setTendered("0");
       } catch (err) {
-        // Network or transient error — queue for replay.
+        // Network or transient error — queue for replay. Functional
+        // setQueue updater so a concurrent drain that ran between
+        // this render and this catch can't overwrite the appended
+        // entry with its stale closure value.
         const queued: QueuedInvoice = {
           idempotencyKey,
           posInvoiceId: created.id,
           total,
           queuedAt: new Date().toISOString(),
         };
-        const next = [...queue, queued];
-        saveQueue(next);
-        setQueue(next);
+        setQueue((prev) => {
+          const next = [...prev, queued];
+          saveQueue(next);
+          return next;
+        });
         setStatus(`Queued offline: ${(err as Error).message}`);
       }
     } catch (err) {
