@@ -19,14 +19,26 @@ import (
 // copy-paste into their verification tooling; callers that only need
 // the dispatch metadata can ignore it.
 type Webhook struct {
-	ID           uuid.UUID       `json:"id"`
-	TenantID     uuid.UUID       `json:"tenant_id"`
-	URL          string          `json:"url"`
-	Secret       string          `json:"secret"`
-	EventFilters json.RawMessage `json:"event_filters"`
-	Active       bool            `json:"active"`
-	CreatedAt    time.Time       `json:"created_at"`
-	UpdatedAt    time.Time       `json:"updated_at"`
+	ID                 uuid.UUID       `json:"id"`
+	TenantID           uuid.UUID       `json:"tenant_id"`
+	URL                string          `json:"url"`
+	Secret             string          `json:"secret"`
+	EventFilters       json.RawMessage `json:"event_filters"`
+	// Conditions is an optional JSONB-expression filter applied to
+	// the event payload before delivery; see
+	// internal/notifications/webhook_conditions.go for syntax.
+	Conditions         json.RawMessage `json:"conditions,omitempty"`
+	// MaxRetries overrides the worker-level attempt ceiling so a
+	// tenant with a slow downstream can opt into longer retry tails.
+	// 0 means "use platform default (5)".
+	MaxRetries         int             `json:"max_retries"`
+	// BackoffBaseSeconds is the base for the exponential backoff
+	// schedule. Effective wait is base * 2^(attempt-1) plus jitter.
+	// 0 means "use platform default (10)".
+	BackoffBaseSeconds int             `json:"backoff_base_seconds"`
+	Active             bool            `json:"active"`
+	CreatedAt          time.Time       `json:"created_at"`
+	UpdatedAt          time.Time       `json:"updated_at"`
 }
 
 // WebhookDelivery mirrors a `webhook_deliveries` row. One row is
@@ -49,20 +61,26 @@ type WebhookDelivery struct {
 
 // CreateWebhookInput is the payload accepted by WebhookStore.Create.
 type CreateWebhookInput struct {
-	URL          string          `json:"url"`
-	Secret       string          `json:"secret"`
-	EventFilters json.RawMessage `json:"event_filters,omitempty"`
-	Active       *bool           `json:"active,omitempty"`
+	URL                string          `json:"url"`
+	Secret             string          `json:"secret"`
+	EventFilters       json.RawMessage `json:"event_filters,omitempty"`
+	Conditions         json.RawMessage `json:"conditions,omitempty"`
+	MaxRetries         int             `json:"max_retries,omitempty"`
+	BackoffBaseSeconds int             `json:"backoff_base_seconds,omitempty"`
+	Active             *bool           `json:"active,omitempty"`
 }
 
 // UpdateWebhookInput carries the subset of fields the PUT handler
 // allows to be modified. Nil fields are left untouched so a minimal
 // patch can flip `active` without re-sending the secret.
 type UpdateWebhookInput struct {
-	URL          *string         `json:"url,omitempty"`
-	Secret       *string         `json:"secret,omitempty"`
-	EventFilters json.RawMessage `json:"event_filters,omitempty"`
-	Active       *bool           `json:"active,omitempty"`
+	URL                *string         `json:"url,omitempty"`
+	Secret             *string         `json:"secret,omitempty"`
+	EventFilters       json.RawMessage `json:"event_filters,omitempty"`
+	Conditions         json.RawMessage `json:"conditions,omitempty"`
+	MaxRetries         *int            `json:"max_retries,omitempty"`
+	BackoffBaseSeconds *int            `json:"backoff_base_seconds,omitempty"`
+	Active             *bool           `json:"active,omitempty"`
 }
 
 // DeliveryInput is the payload the worker writes after every attempt.
@@ -127,7 +145,8 @@ func (s *WebhookStore) List(ctx context.Context, tenantID uuid.UUID) ([]Webhook,
 	out := make([]Webhook, 0)
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
-			SELECT id, tenant_id, url, secret, event_filters, active, created_at, updated_at
+			SELECT id, tenant_id, url, secret, event_filters, conditions,
+			       max_retries, backoff_base_seconds, active, created_at, updated_at
 			  FROM webhooks
 			 WHERE tenant_id = $1
 			 ORDER BY created_at DESC`,
@@ -140,8 +159,8 @@ func (s *WebhookStore) List(ctx context.Context, tenantID uuid.UUID) ([]Webhook,
 		for rows.Next() {
 			var w Webhook
 			if err := rows.Scan(
-				&w.ID, &w.TenantID, &w.URL, &w.Secret, &w.EventFilters,
-				&w.Active, &w.CreatedAt, &w.UpdatedAt,
+				&w.ID, &w.TenantID, &w.URL, &w.Secret, &w.EventFilters, &w.Conditions,
+				&w.MaxRetries, &w.BackoffBaseSeconds, &w.Active, &w.CreatedAt, &w.UpdatedAt,
 			); err != nil {
 				return fmt.Errorf("webhook: scan: %w", err)
 			}
@@ -165,7 +184,8 @@ func (s *WebhookStore) ListActiveAcrossTenants(ctx context.Context, adminPool *p
 		return nil, errors.New("webhook: admin pool required for cross-tenant scan")
 	}
 	rows, err := adminPool.Query(ctx, `
-		SELECT id, tenant_id, url, secret, event_filters, active, created_at, updated_at
+		SELECT id, tenant_id, url, secret, event_filters, conditions,
+		       max_retries, backoff_base_seconds, active, created_at, updated_at
 		  FROM webhooks
 		 WHERE active = TRUE`)
 	if err != nil {
@@ -176,8 +196,8 @@ func (s *WebhookStore) ListActiveAcrossTenants(ctx context.Context, adminPool *p
 	for rows.Next() {
 		var w Webhook
 		if err := rows.Scan(
-			&w.ID, &w.TenantID, &w.URL, &w.Secret, &w.EventFilters,
-			&w.Active, &w.CreatedAt, &w.UpdatedAt,
+			&w.ID, &w.TenantID, &w.URL, &w.Secret, &w.EventFilters, &w.Conditions,
+			&w.MaxRetries, &w.BackoffBaseSeconds, &w.Active, &w.CreatedAt, &w.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("webhook: scan: %w", err)
 		}
@@ -198,7 +218,8 @@ func (s *WebhookStore) ListActiveForTenant(ctx context.Context, adminPool *pgxpo
 		return nil, errors.New("webhook: admin pool required for cross-tenant scan")
 	}
 	rows, err := adminPool.Query(ctx, `
-		SELECT id, tenant_id, url, secret, event_filters, active, created_at, updated_at
+		SELECT id, tenant_id, url, secret, event_filters, conditions,
+		       max_retries, backoff_base_seconds, active, created_at, updated_at
 		  FROM webhooks
 		 WHERE active = TRUE AND tenant_id = $1`,
 		tenantID,
@@ -211,8 +232,8 @@ func (s *WebhookStore) ListActiveForTenant(ctx context.Context, adminPool *pgxpo
 	for rows.Next() {
 		var w Webhook
 		if err := rows.Scan(
-			&w.ID, &w.TenantID, &w.URL, &w.Secret, &w.EventFilters,
-			&w.Active, &w.CreatedAt, &w.UpdatedAt,
+			&w.ID, &w.TenantID, &w.URL, &w.Secret, &w.EventFilters, &w.Conditions,
+			&w.MaxRetries, &w.BackoffBaseSeconds, &w.Active, &w.CreatedAt, &w.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("webhook: scan: %w", err)
 		}
@@ -226,13 +247,14 @@ func (s *WebhookStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*Webhoo
 	var w Webhook
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
-			SELECT id, tenant_id, url, secret, event_filters, active, created_at, updated_at
+			SELECT id, tenant_id, url, secret, event_filters, conditions,
+			       max_retries, backoff_base_seconds, active, created_at, updated_at
 			  FROM webhooks
 			 WHERE tenant_id = $1 AND id = $2`,
 			tenantID, id,
 		).Scan(
-			&w.ID, &w.TenantID, &w.URL, &w.Secret, &w.EventFilters,
-			&w.Active, &w.CreatedAt, &w.UpdatedAt,
+			&w.ID, &w.TenantID, &w.URL, &w.Secret, &w.EventFilters, &w.Conditions,
+			&w.MaxRetries, &w.BackoffBaseSeconds, &w.Active, &w.CreatedAt, &w.UpdatedAt,
 		)
 	})
 	if err != nil {
@@ -257,24 +279,44 @@ func (s *WebhookStore) Create(ctx context.Context, tenantID uuid.UUID, in Create
 	if len(filters) == 0 {
 		filters = json.RawMessage("[]")
 	}
+	conditions := in.Conditions
+	if len(conditions) == 0 {
+		conditions = json.RawMessage("{}")
+	}
 	active := true
 	if in.Active != nil {
 		active = *in.Active
 	}
+	maxRetries := in.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 5
+	}
+	if maxRetries > 20 {
+		maxRetries = 20
+	}
+	backoffBase := in.BackoffBaseSeconds
+	if backoffBase <= 0 {
+		backoffBase = 10
+	}
 	w := Webhook{
-		ID:           uuid.New(),
-		TenantID:     tenantID,
-		URL:          in.URL,
-		Secret:       in.Secret,
-		EventFilters: filters,
-		Active:       active,
+		ID:                 uuid.New(),
+		TenantID:           tenantID,
+		URL:                in.URL,
+		Secret:             in.Secret,
+		EventFilters:       filters,
+		Conditions:         conditions,
+		MaxRetries:         maxRetries,
+		BackoffBaseSeconds: backoffBase,
+		Active:             active,
 	}
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
-			INSERT INTO webhooks (id, tenant_id, url, secret, event_filters, active)
-			VALUES ($1,$2,$3,$4,$5::jsonb,$6)
+			INSERT INTO webhooks (id, tenant_id, url, secret, event_filters,
+			                      conditions, max_retries, backoff_base_seconds, active)
+			VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9)
 			RETURNING created_at, updated_at`,
-			w.ID, w.TenantID, w.URL, w.Secret, w.EventFilters, w.Active,
+			w.ID, w.TenantID, w.URL, w.Secret, w.EventFilters,
+			w.Conditions, w.MaxRetries, w.BackoffBaseSeconds, w.Active,
 		).Scan(&w.CreatedAt, &w.UpdatedAt)
 	})
 	if err != nil {
@@ -288,14 +330,15 @@ func (s *WebhookStore) Update(ctx context.Context, tenantID, id uuid.UUID, patch
 	var w Webhook
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `
-			SELECT id, tenant_id, url, secret, event_filters, active, created_at, updated_at
+			SELECT id, tenant_id, url, secret, event_filters, conditions,
+			       max_retries, backoff_base_seconds, active, created_at, updated_at
 			  FROM webhooks
 			 WHERE tenant_id = $1 AND id = $2
 			 FOR UPDATE`,
 			tenantID, id,
 		).Scan(
-			&w.ID, &w.TenantID, &w.URL, &w.Secret, &w.EventFilters,
-			&w.Active, &w.CreatedAt, &w.UpdatedAt,
+			&w.ID, &w.TenantID, &w.URL, &w.Secret, &w.EventFilters, &w.Conditions,
+			&w.MaxRetries, &w.BackoffBaseSeconds, &w.Active, &w.CreatedAt, &w.UpdatedAt,
 		)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -312,16 +355,38 @@ func (s *WebhookStore) Update(ctx context.Context, tenantID, id uuid.UUID, patch
 		if len(patch.EventFilters) > 0 {
 			w.EventFilters = patch.EventFilters
 		}
+		if len(patch.Conditions) > 0 {
+			w.Conditions = patch.Conditions
+		}
+		if patch.MaxRetries != nil {
+			mr := *patch.MaxRetries
+			if mr <= 0 {
+				mr = 5
+			}
+			if mr > 20 {
+				mr = 20
+			}
+			w.MaxRetries = mr
+		}
+		if patch.BackoffBaseSeconds != nil {
+			bb := *patch.BackoffBaseSeconds
+			if bb <= 0 {
+				bb = 10
+			}
+			w.BackoffBaseSeconds = bb
+		}
 		if patch.Active != nil {
 			w.Active = *patch.Active
 		}
 		return tx.QueryRow(ctx, `
 			UPDATE webhooks
 			   SET url = $1, secret = $2, event_filters = $3::jsonb,
-			       active = $4, updated_at = now()
-			 WHERE tenant_id = $5 AND id = $6
+			       conditions = $4::jsonb, max_retries = $5,
+			       backoff_base_seconds = $6, active = $7, updated_at = now()
+			 WHERE tenant_id = $8 AND id = $9
 			 RETURNING updated_at`,
-			w.URL, w.Secret, w.EventFilters, w.Active, tenantID, id,
+			w.URL, w.Secret, w.EventFilters, w.Conditions, w.MaxRetries,
+			w.BackoffBaseSeconds, w.Active, tenantID, id,
 		).Scan(&w.UpdatedAt)
 	})
 	if err != nil {
@@ -484,13 +549,14 @@ func (s *WebhookStore) GetAdmin(ctx context.Context, adminPool *pgxpool.Pool, te
 	}
 	var w Webhook
 	err := adminPool.QueryRow(ctx, `
-		SELECT id, tenant_id, url, secret, event_filters, active, created_at, updated_at
+		SELECT id, tenant_id, url, secret, event_filters, conditions,
+		       max_retries, backoff_base_seconds, active, created_at, updated_at
 		  FROM webhooks
 		 WHERE tenant_id = $1 AND id = $2`,
 		tenantID, id,
 	).Scan(
-		&w.ID, &w.TenantID, &w.URL, &w.Secret, &w.EventFilters,
-		&w.Active, &w.CreatedAt, &w.UpdatedAt,
+		&w.ID, &w.TenantID, &w.URL, &w.Secret, &w.EventFilters, &w.Conditions,
+		&w.MaxRetries, &w.BackoffBaseSeconds, &w.Active, &w.CreatedAt, &w.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
