@@ -641,6 +641,16 @@ func run() error {
 						auditor:   auditor,
 					}
 					r.Post("/tenants/{id}/upgrade-tier", tih.upgrade)
+
+					// Phase M Task 7 — admin-only multi-tenant
+					// consolidation. The store reads each member
+					// tenant's trial balance via the admin pool
+					// (BYPASSRLS) so a single run can span tenants.
+					rates := ledger.NewExchangeRateStore(pool)
+					consStore := ledger.NewConsolidationStore(adminPool, ledgerStore, rates)
+					ch := &consolidationHandlers{store: consStore}
+					r.Post("/consolidation/groups", ch.createGroup)
+					r.Post("/consolidation/groups/{id}/run", ch.run)
 				}
 			})
 		}

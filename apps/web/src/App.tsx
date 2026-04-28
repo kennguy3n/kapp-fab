@@ -36,6 +36,7 @@ import { InsightsDashboardPage } from "./pages/InsightsDashboardPage";
 import { InsightsDataSourcesPage } from "./pages/InsightsDataSourcesPage";
 import { InsightsEmbedPage } from "./pages/InsightsEmbedPage";
 import { TenantFeaturesPage } from "./pages/TenantFeaturesPage";
+import { ConsolidationPage } from "./pages/ConsolidationPage";
 import { PlacementPolicyPage } from "./pages/PlacementPolicyPage";
 import { RetentionPoliciesPage } from "./pages/RetentionPoliciesPage";
 import { UsageDashboardPage } from "./pages/UsageDashboardPage";
@@ -176,6 +177,7 @@ const navSections: NavSection[] = [
       { to: "/admin/usage", label: "Usage" },
       { to: "/admin/audit", label: "Audit Log" },
       { to: "/admin/webhooks", label: "Webhooks" },
+      { to: "/admin/consolidation", label: "Consolidation" },
       { to: "/imports", label: "Imports" },
     ],
   },
@@ -312,6 +314,7 @@ function AppShell() {
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/admin/tenants" element={<TenantListPage />} />
+          <Route path="/admin/consolidation" element={<ConsolidationPage />} />
           <Route path="/admin/features" element={<TenantFeaturesPage />} />
           <Route path="/admin/placement" element={<PlacementPolicyPage />} />
           <Route path="/admin/retention" element={<RetentionPoliciesPage />} />
