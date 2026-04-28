@@ -1,32 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { ConsolidatedTrialBalance, ConsolidationGroup } from "@kapp/client";
 import { api } from "../lib/api";
-
-interface ConsolidationGroup {
-  id: string;
-  name: string;
-  presentation_currency: string;
-  member_tenant_ids: string[];
-  elimination_pairs?: { from_tenant: string; to_tenant: string; account_code: string }[];
-}
-
-interface ConsolidatedRow {
-  account_code: string;
-  debit: string;
-  credit: string;
-  balance: string;
-  contributions?: { tenant_id: string; debit: string; credit: string }[];
-}
-
-interface ConsolidatedTrialBalance {
-  group_id: string;
-  as_of: string;
-  presentation_currency: string;
-  rows: ConsolidatedRow[];
-  eliminated: ConsolidatedRow[];
-  total_debit: string;
-  total_credit: string;
-}
 
 /**
  * ConsolidationPage is the admin-only Phase M Task 7 surface.
@@ -51,19 +26,12 @@ export function ConsolidationPage() {
   const [result, setResult] = useState<ConsolidatedTrialBalance | null>(null);
 
   const createMut = useMutation({
-    mutationFn: async (): Promise<ConsolidationGroup> => {
-      const res = await fetch("/api/v1/admin/consolidation/groups", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name,
-          presentation_currency: currency,
-          member_tenant_ids: members.split(",").map((s) => s.trim()).filter(Boolean),
-        }),
-      });
-      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-      return (await res.json()) as ConsolidationGroup;
-    },
+    mutationFn: () =>
+      api.createConsolidationGroup({
+        name,
+        presentation_currency: currency,
+        member_tenant_ids: members.split(",").map((s) => s.trim()).filter(Boolean),
+      }),
     onSuccess: (g) => {
       void queryClient.invalidateQueries({ queryKey: ["admin.consolidation.groups"] });
       setRunGroup(g.id);
@@ -71,20 +39,11 @@ export function ConsolidationPage() {
   });
 
   const runMut = useMutation({
-    mutationFn: async (groupID: string): Promise<ConsolidatedTrialBalance> => {
-      const res = await fetch(`/api/v1/admin/consolidation/groups/${encodeURIComponent(groupID)}/run`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-      return (await res.json()) as ConsolidatedTrialBalance;
-    },
+    mutationFn: (groupID: string) => api.runConsolidation(groupID),
     onSuccess: (out) => setResult(out),
   });
 
   void groupsQ; // placeholder until list endpoint lands.
-  void api;
 
   return (
     <section>

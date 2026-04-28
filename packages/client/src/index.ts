@@ -131,6 +131,48 @@ export interface IsolationReport {
   checks: IsolationCheck[];
 }
 
+// --- Consolidation (Phase M Task 7) -----------------------------------
+
+export interface EliminationPair {
+  from_tenant: string;
+  to_tenant: string;
+  account_code: string;
+}
+
+export interface ConsolidationGroup {
+  id: string;
+  name: string;
+  presentation_currency: string;
+  member_tenant_ids: string[];
+  elimination_pairs?: EliminationPair[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface TenantBalanceRow {
+  tenant_id: string;
+  debit: string;
+  credit: string;
+}
+
+export interface ConsolidatedRow {
+  account_code: string;
+  debit: string;
+  credit: string;
+  balance: string;
+  contributions?: TenantBalanceRow[];
+}
+
+export interface ConsolidatedTrialBalance {
+  group_id: string;
+  as_of: string;
+  presentation_currency: string;
+  rows: ConsolidatedRow[];
+  eliminated: ConsolidatedRow[];
+  total_debit: string;
+  total_credit: string;
+}
+
 export interface PlanLimits {
   api_calls?: number;
   storage_bytes?: number;
@@ -273,6 +315,33 @@ export class ApiClient {
   // --- Runtime isolation audit ----------------------------------------
   runIsolationAudit(): Promise<IsolationReport> {
     return this.request(`/admin/isolation-audit`);
+  }
+
+  // --- Consolidation (admin-only, operator-scoped) --------------------
+  createConsolidationGroup(input: {
+    name: string;
+    presentation_currency: string;
+    member_tenant_ids: string[];
+    elimination_pairs?: { from_tenant: string; to_tenant: string; account_code: string }[];
+  }): Promise<ConsolidationGroup> {
+    return this.request(`/admin/consolidation/groups`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  runConsolidation(
+    groupID: string,
+    asOf?: Date
+  ): Promise<ConsolidatedTrialBalance> {
+    return this.request(
+      `/admin/consolidation/groups/${encodeURIComponent(groupID)}/run`,
+      {
+        method: "POST",
+        body: JSON.stringify(asOf ? { as_of: asOf.toISOString() } : {}),
+      }
+    );
   }
 
   // --- Metering + plans -------------------------------------------------

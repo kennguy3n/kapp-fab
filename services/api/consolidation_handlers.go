@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -50,6 +52,32 @@ func (h *consolidationHandlers) createGroup(w http.ResponseWriter, r *http.Reque
 	_ = json.NewEncoder(w).Encode(g)
 }
 
+// parseAsOf extracts the optional `as_of` override from a run
+// request. Returns the zero time when the body is empty or absent
+// (the run will fall back to as-of-now). chunked transfer-encoded
+// clients have ContentLength == -1, so the older `> 0` guard
+// silently skipped body parsing for them; this version attempts the
+// decode whenever a body is present and tolerates an empty stream
+// (io.EOF).
+func parseAsOf(r *http.Request) (time.Time, error) {
+	var body struct {
+		AsOf *time.Time `json:"as_of"`
+	}
+	if r.Body == nil || r.ContentLength == 0 {
+		return time.Time{}, nil
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if errors.Is(err, io.EOF) {
+			return time.Time{}, nil
+		}
+		return time.Time{}, err
+	}
+	if body.AsOf == nil {
+		return time.Time{}, nil
+	}
+	return *body.AsOf, nil
+}
+
 // run executes a consolidation. Body carries an optional `as_of`
 // override; when omitted, the call runs as-of now (UTC).
 func (h *consolidationHandlers) run(w http.ResponseWriter, r *http.Request) {
@@ -58,15 +86,10 @@ func (h *consolidationHandlers) run(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid group id", http.StatusBadRequest)
 		return
 	}
-	var body struct {
-		AsOf *time.Time `json:"as_of"`
-	}
-	if r.ContentLength > 0 {
-		_ = json.NewDecoder(r.Body).Decode(&body)
-	}
-	asOf := time.Time{}
-	if body.AsOf != nil {
-		asOf = *body.AsOf
+	asOf, err := parseAsOf(r)
+	if err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
 	}
 	actor := actorOrDefault(r.Context())
 	out, err := h.store.RunConsolidation(r.Context(), groupID, asOf, actor)
