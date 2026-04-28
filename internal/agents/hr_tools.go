@@ -466,8 +466,14 @@ func (t *submitAppraisalTool) Invoke(ctx context.Context, inv Invocation) (*Resu
 	if err := json.Unmarshal(existing.Data, &body); err != nil {
 		return nil, fmt.Errorf("hr.submit_appraisal: decode record: %w", err)
 	}
-	if status, _ := body["status"].(string); status != "draft" && status != "" {
-		return nil, fmt.Errorf("hr.submit_appraisal: appraisal %s already %s", in.AppraisalID, status)
+	// Tighten the guard: only an explicit "draft" appraisal can be
+	// submitted. Previously `status != "draft" && status != ""`
+	// allowed missing/empty status (a malformed record) to slip
+	// through and silently transition to "submitted", side-stepping
+	// the documented draft → submitted → reviewed → acknowledged
+	// workflow.
+	if status, _ := body["status"].(string); status != "draft" {
+		return nil, fmt.Errorf("hr.submit_appraisal: appraisal %s has status %q, expected draft", in.AppraisalID, status)
 	}
 	body["status"] = "submitted"
 	body["submitted_at"] = time.Now().UTC().Format(time.RFC3339)

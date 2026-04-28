@@ -112,9 +112,19 @@ func (t *createProjectTool) Invoke(ctx context.Context, inv Invocation) (*Result
 	if err != nil {
 		return nil, err
 	}
+	// Best-effort: start the project lifecycle run so the generic
+	// workflow surface (/api/v1/workflow/...) can drive
+	// planning → active → completed → archived transitions instead
+	// of letting tenants change status via direct record updates.
+	// Mirrors createDealTool's pattern.
+	run, _ := t.executor.workflow.StartRun(
+		ctx, inv.TenantID, projects.WorkflowProject,
+		rec.ID, "planning", inv.ActorID,
+	)
 	return &Result{
 		Summary: fmt.Sprintf("Project %s created (planning)", rec.ID),
 		Record:  rec,
+		Run:     run,
 	}, nil
 }
 

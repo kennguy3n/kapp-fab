@@ -227,21 +227,55 @@ func (p *POSPoster) PostPOSInvoice(ctx context.Context, tenantID, posInvoiceID, 
 		"tax_account_code":     stringOr(profile, "tax_account_code", ""),
 	}
 	arBytes, _ := json.Marshal(arBody)
-	arRec, err := p.records.Create(ctx, record.KRecord{
-		ID:        uuid.New(),
-		TenantID:  tenantID,
-		KType:     finance.KTypeARInvoice,
-		Data:      arBytes,
-		CreatedBy: actorID,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("pos: create ar_invoice: %w", err)
+
+	// Resumable state machine: if a previous attempt already
+	// allocated the AR invoice but failed before flipping the
+	// pos_invoice to posted, reuse that AR rather than creating a
+	// fresh one. Without this, every retry walks past the
+	// `status == "posted"` short-circuit, calls
+	// records.Create with a new uuid, and PostSalesInvoice's
+	// (source_ktype, source_id) idempotency check sees a different
+	// source_id — so the duplicate gets posted, double-counts
+	// revenue, and double-debits inventory.
+	var arRec *record.KRecord
+	if existingARID, _ := refUUID(current, "ar_invoice_id"); existingARID != uuid.Nil {
+		arRec, err = p.records.Get(ctx, tenantID, existingARID)
+		if err != nil {
+			return nil, fmt.Errorf("pos: load existing ar_invoice %s: %w", existingARID, err)
+		}
+	} else {
+		arRec, err = p.records.Create(ctx, record.KRecord{
+			ID:        uuid.New(),
+			TenantID:  tenantID,
+			KType:     finance.KTypeARInvoice,
+			Data:      arBytes,
+			CreatedBy: actorID,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("pos: create ar_invoice: %w", err)
+		}
+		// Persist the AR id onto the pos_invoice immediately so a
+		// retry after a partial failure reuses this AR. We have not
+		// posted it yet — that's deliberate, the post step is
+		// idempotent on (source_ktype, source_id) so calling it
+		// again with the same arRec.ID short-circuits.
+		current["ar_invoice_id"] = arRec.ID.String()
+		posRec.Data, _ = json.Marshal(current)
+		posRec.UpdatedBy = &actorID
+		updated, err := p.records.Update(ctx, *posRec)
+		if err != nil {
+			return nil, fmt.Errorf("pos: persist ar_invoice_id: %w", err)
+		}
+		posRec = updated
 	}
 	if _, err := p.invoice.PostSalesInvoice(ctx, tenantID, arRec.ID, actorID); err != nil {
 		return nil, fmt.Errorf("pos: post ar_invoice: %w", err)
 	}
 
 	// 2. Build + post payment that allocates against the AR invoice.
+	// Same resumable pattern as the AR step above so a partial
+	// failure between Create and PostPayment doesn't allocate a
+	// duplicate payment on retry.
 	payBody := map[string]any{
 		"payment_type":    "receive",
 		"party_type":      "customer",
@@ -257,15 +291,31 @@ func (p *POSPoster) PostPOSInvoice(ctx context.Context, tenantID, posInvoiceID, 
 		},
 	}
 	payBytes, _ := json.Marshal(payBody)
-	payRec, err := p.records.Create(ctx, record.KRecord{
-		ID:        uuid.New(),
-		TenantID:  tenantID,
-		KType:     finance.KTypePayment,
-		Data:      payBytes,
-		CreatedBy: actorID,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("pos: create payment: %w", err)
+	var payRec *record.KRecord
+	if existingPayID, _ := refUUID(current, "payment_id"); existingPayID != uuid.Nil {
+		payRec, err = p.records.Get(ctx, tenantID, existingPayID)
+		if err != nil {
+			return nil, fmt.Errorf("pos: load existing payment %s: %w", existingPayID, err)
+		}
+	} else {
+		payRec, err = p.records.Create(ctx, record.KRecord{
+			ID:        uuid.New(),
+			TenantID:  tenantID,
+			KType:     finance.KTypePayment,
+			Data:      payBytes,
+			CreatedBy: actorID,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("pos: create payment: %w", err)
+		}
+		current["payment_id"] = payRec.ID.String()
+		posRec.Data, _ = json.Marshal(current)
+		posRec.UpdatedBy = &actorID
+		updated, err := p.records.Update(ctx, *posRec)
+		if err != nil {
+			return nil, fmt.Errorf("pos: persist payment_id: %w", err)
+		}
+		posRec = updated
 	}
 	if _, err := p.payment.PostPayment(ctx, tenantID, payRec.ID, actorID); err != nil {
 		return nil, fmt.Errorf("pos: post payment: %w", err)
