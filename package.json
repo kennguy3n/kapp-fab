@@ -12,6 +12,10 @@
     "dev": "npm run dev --workspace=apps/web",
     "build": "npm run build --workspaces --if-present",
     "storybook": "npm run storybook --workspace=apps/storybook",
-    "generate-client": "npm run generate --workspace=packages/client"
+    "generate-client": "npm run generate --workspace=packages/client",
+    "screenshots": "VITE_DEMO_MODE=true playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
   }
 }
