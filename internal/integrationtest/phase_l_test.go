@@ -733,3 +733,343 @@ func TestInsightsGenerateQueryAgentToolValid(t *testing.T) {
 		t.Fatalf("generated query failed to run: %v", err)
 	}
 }
+
+// TestInsightsSQLEditorMode covers the Phase M raw-SQL editor path
+// end-to-end against PostgreSQL: a SQL-mode query is persisted,
+// retrieved (mode + raw_sql round-trip through QueryStore), and
+// executed under per-tenant RLS via Runner.RunRawSQL. The test also
+// exercises the column-level CHECK in migrations/000045_insights_sql_mode.sql
+// by attempting to persist a half-state row (mode=visual but
+// raw_sql non-empty) which the store-side normalizeMode must
+// reject.
+func TestInsightsSQLEditorMode(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, queries, _, _, runner := newTenantForInsights(t, h)
+
+	// 1) Persist a SQL-mode query against a known stable system
+	// view so the assertion doesn't depend on tenant data.
+	saved, err := queries.Create(ctx, insights.Query{
+		TenantID: tn.ID,
+		Name:     "Active conn count " + uuid.NewString()[:6],
+		Mode:     insights.QueryModeSQL,
+		RawSQL:   "SELECT 1::int AS one, 2::int AS two",
+	})
+	if err != nil {
+		t.Fatalf("create sql-mode query: %v", err)
+	}
+	if saved.Mode != insights.QueryModeSQL {
+		t.Fatalf("saved.Mode = %q, want %q", saved.Mode, insights.QueryModeSQL)
+	}
+	if saved.RawSQL == "" {
+		t.Fatalf("saved.RawSQL empty after create")
+	}
+
+	// 2) Round-trip via Get to confirm mode + raw_sql columns are
+	// scanned out correctly by the Phase M store changes.
+	got, err := queries.Get(ctx, tn.ID, saved.ID)
+	if err != nil {
+		t.Fatalf("get sql-mode query: %v", err)
+	}
+	if got.Mode != insights.QueryModeSQL || got.RawSQL != saved.RawSQL {
+		t.Fatalf("get round-trip mismatch: mode=%q raw=%q", got.Mode, got.RawSQL)
+	}
+
+	// 3) Execute under tenant RLS. The two-column SELECT against
+	// PostgreSQL constants verifies the runner's tx + statement_timeout
+	// fence path without dragging in a Phase B fixture.
+	out, err := runner.RunRawSQL(ctx, tn.ID, got.RawSQL, nil)
+	if err != nil {
+		t.Fatalf("run raw sql: %v", err)
+	}
+	if out == nil || out.Result == nil {
+		t.Fatalf("nil result from RunRawSQL")
+	}
+	if len(out.Result.Rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(out.Result.Rows))
+	}
+	row := out.Result.Rows[0]
+	if row["one"] == nil || row["two"] == nil {
+		t.Fatalf("missing columns in row: %#v", row)
+	}
+
+	// 4) Half-state rejection: visual mode with raw_sql payload is
+	// rejected before the INSERT lands so the column CHECK never
+	// has to fire — keeps the API surface returning a clean 400.
+	if _, err := queries.Create(ctx, insights.Query{
+		TenantID: tn.ID,
+		Name:     "Half state " + uuid.NewString()[:6],
+		Mode:     insights.QueryModeVisual,
+		RawSQL:   "SELECT 1",
+	}); err == nil || !errors.Is(err, insights.ErrValidation) {
+		t.Fatalf("expected ErrValidation for visual+raw_sql, got %v", err)
+	}
+
+	// 5) Symmetric rejection: sql mode with no raw_sql body.
+	if _, err := queries.Create(ctx, insights.Query{
+		TenantID: tn.ID,
+		Name:     "Half state empty " + uuid.NewString()[:6],
+		Mode:     insights.QueryModeSQL,
+		RawSQL:   "",
+	}); err == nil || !errors.Is(err, insights.ErrValidation) {
+		t.Fatalf("expected ErrValidation for sql+empty raw_sql, got %v", err)
+	}
+}
+
+// TestInsightsSQLEditorRunRawSQLRespectsTenantRLS proves the Phase M
+// raw-SQL surface honours the tenant_id GUC: a query like
+// `SELECT count(*) FROM insights_queries` returns the count of rows
+// in the *caller's* tenant only, not the global table — the same
+// RLS invariant the visual builder relies on.
+func TestInsightsSQLEditorRunRawSQLRespectsTenantRLS(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tnA, queriesA, _, _, runnerA := newTenantForInsights(t, h)
+	tnB, queriesB, _, _, _ := newTenantForInsights(t, h)
+	if tnA.ID == tnB.ID {
+		t.Fatalf("test setup produced the same tenant twice")
+	}
+
+	// Seed two visual queries in A and three in B so the row counts
+	// per tenant differ. The test then runs the same SQL body under
+	// tenant A's context and expects to see only 2 rows (not 5).
+	for i := 0; i < 2; i++ {
+		_ = makeCountQuery(t, ctx, queriesA, tnA.ID, 60)
+	}
+	for i := 0; i < 3; i++ {
+		_ = makeCountQuery(t, ctx, queriesB, tnB.ID, 60)
+	}
+
+	out, err := runnerA.RunRawSQL(ctx, tnA.ID, "SELECT count(*)::int AS n FROM insights_queries", nil)
+	if err != nil {
+		t.Fatalf("run raw sql: %v", err)
+	}
+	if len(out.Result.Rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(out.Result.Rows))
+	}
+	got, ok := out.Result.Rows[0]["n"].(int32)
+	if !ok {
+		// pgx may decode count() as int32 or int64 depending on
+		// driver version — accept either to keep the test stable.
+		gotInt64, ok64 := out.Result.Rows[0]["n"].(int64)
+		if !ok64 {
+			t.Fatalf("count column is %T, want int32 or int64: %#v", out.Result.Rows[0]["n"], out.Result.Rows[0])
+		}
+		got = int32(gotInt64)
+	}
+	if got != 2 {
+		t.Fatalf("count() = %d, want 2 (RLS leak from tenant B?)", got)
+	}
+}
+
+// TestInsightsSQLEditorFeatureFlagDisablesRoute checks the
+// `insights_sql_editor` feature gate the API mounts on
+// /api/v1/insights/queries/{id}/run-sql. With the flag off the
+// platform.FeatureMiddleware short-circuits with a 403 envelope
+// keyed on `insights_sql_editor`.
+func TestInsightsSQLEditorFeatureFlagDisablesRoute(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, _, _, _, _ := newTenantForInsights(t, h)
+	features := tenant.NewFeatureStore(h.pool)
+
+	// A business-tier wizard tenant has insights=true but
+	// insights_sql_editor=false (enterprise-only). Confirm the
+	// middleware rejects with a 403 + `feature: insights_sql_editor`
+	// envelope so the React shell can surface an upgrade banner.
+	//
+	// newTenantForInsights provisions the tenant via tenants.Create
+	// directly rather than RunSetupWizard, so seedDefaultFeatures
+	// never writes the explicit `false` row. FeatureStore.IsEnabled
+	// defaults missing rows to true (so a newly added flag doesn't
+	// require a backfill), which would mask the gate. Seed the
+	// canonical business-plan default explicitly so the assertion
+	// matches the production code path.
+	if err := features.SetFeatures(ctx, tn.ID, map[string]bool{tenant.FeatureInsightsSQLEditor: false}); err != nil {
+		t.Fatalf("seed sql editor=false: %v", err)
+	}
+	mw := platform.FeatureMiddleware(features, tenant.FeatureInsightsSQLEditor)
+	chain := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/insights/queries/"+uuid.NewString()+"/run-sql", nil).
+		WithContext(platform.WithTenant(ctx, tn))
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("with sql editor disabled: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var env map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode env: %v", err)
+	}
+	if env["feature"] != "insights_sql_editor" {
+		t.Fatalf("envelope feature=%v, want insights_sql_editor", env["feature"])
+	}
+
+	// Flip it on and the same request must pass through.
+	if err := features.SetFeatures(ctx, tn.ID, map[string]bool{tenant.FeatureInsightsSQLEditor: true}); err != nil {
+		t.Fatalf("enable feature: %v", err)
+	}
+	rr = httptest.NewRecorder()
+	chain.ServeHTTP(rr, req.Clone(req.Context()))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("with sql editor enabled: code=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestInsightsRunSavedDispatchesSQLMode is the regression guard for
+// the Phase M Task 1 review finding that RunSaved always routed
+// through the visual Run, even when the persisted query was
+// mode='sql'. Every consumer of RunSaved (dashboard widget fan-out,
+// cache refresh worker, /run handler, agent tools, /insight slash
+// command) must dispatch SQL-mode queries to RunRawSQL so the
+// caller sees raw-SQL rows rather than the placeholder visual
+// definition's output.
+//
+// Strategy: persist a SQL-mode query whose raw body returns a
+// distinctive sentinel column the visual runner cannot fabricate.
+// If RunSaved still routed through Run, the sentinel would never
+// appear because the placeholder definition has Aggregations:
+// AggCount which yields a single integer column.
+func TestInsightsRunSavedDispatchesSQLMode(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, queries, _, _, runner := newTenantForInsights(t, h)
+
+	saved, err := queries.Create(ctx, insights.Query{
+		TenantID: tn.ID,
+		Name:     "RunSaved SQL dispatch " + uuid.NewString()[:6],
+		Mode:     insights.QueryModeSQL,
+		RawSQL:   "SELECT 'phase-m-sentinel'::text AS marker, 7::int AS magic",
+	})
+	if err != nil {
+		t.Fatalf("create sql-mode query: %v", err)
+	}
+
+	out, err := runner.RunSaved(ctx, tn.ID, saved.ID, nil, true)
+	if err != nil {
+		t.Fatalf("RunSaved: %v", err)
+	}
+	if out == nil || out.Result == nil || len(out.Result.Rows) == 0 {
+		t.Fatalf("RunSaved returned no rows: %#v", out)
+	}
+	row := out.Result.Rows[0]
+	if row["marker"] != "phase-m-sentinel" {
+		t.Fatalf("RunSaved did not dispatch to RunRawSQL: marker=%v full=%#v", row["marker"], row)
+	}
+	if magic, ok := row["magic"].(int32); !ok || magic != 7 {
+		// pgx scans int4 into int32; assert defensively to
+		// surface a clear failure if the dispatch ever
+		// regresses to Run (which would not return a `magic`
+		// column at all).
+		t.Fatalf("RunSaved magic = %v (%T); want int32(7)", row["magic"], row["magic"])
+	}
+}
+
+// TestInsightsRunSavedFeatureGateBlocksSQLMode is the regression
+// guard for the Phase M Task 1 review finding that RunSaved would
+// dispatch SQL-mode queries to RunRawSQL without checking the
+// `insights_sql_editor` feature flag, letting a non-enterprise
+// tenant who'd had a SQL-mode row persisted (e.g. before downgrade)
+// continue to execute it via every RunSaved consumer (dashboard
+// fan-out, cache worker, agent tools, /insight slash command).
+//
+// Strategy: wire the runner with the FeaturePolicy backed by
+// FeatureStore, persist a SQL-mode row, then disable
+// insights_sql_editor and assert RunSaved returns ErrFeatureDisabled.
+// Re-enabling the flag must restore execution.
+func TestInsightsRunSavedFeatureGateBlocksSQLMode(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, queries, _, _, runner := newTenantForInsights(t, h)
+	features := tenant.NewFeatureStore(h.pool)
+	runner = runner.WithFeaturePolicy(features)
+
+	saved, err := queries.Create(ctx, insights.Query{
+		TenantID: tn.ID,
+		Name:     "RunSaved gate " + uuid.NewString()[:6],
+		Mode:     insights.QueryModeSQL,
+		RawSQL:   "SELECT 1::int AS one",
+	})
+	if err != nil {
+		t.Fatalf("create sql-mode query: %v", err)
+	}
+
+	// Disable the feature: RunSaved must refuse with ErrFeatureDisabled.
+	if err := features.SetFeatures(ctx, tn.ID, map[string]bool{tenant.FeatureInsightsSQLEditor: false}); err != nil {
+		t.Fatalf("disable sql editor: %v", err)
+	}
+	if _, err := runner.RunSaved(ctx, tn.ID, saved.ID, nil, true); err == nil {
+		t.Fatalf("RunSaved with feature disabled: nil error; want ErrFeatureDisabled")
+	} else if !errors.Is(err, insights.ErrFeatureDisabled) {
+		t.Fatalf("RunSaved error = %v; want ErrFeatureDisabled", err)
+	}
+
+	// Re-enable the feature: same call must succeed.
+	if err := features.SetFeatures(ctx, tn.ID, map[string]bool{tenant.FeatureInsightsSQLEditor: true}); err != nil {
+		t.Fatalf("enable sql editor: %v", err)
+	}
+	out, err := runner.RunSaved(ctx, tn.ID, saved.ID, nil, true)
+	if err != nil {
+		t.Fatalf("RunSaved with feature enabled: %v", err)
+	}
+	if out == nil || out.Result == nil || len(out.Result.Rows) == 0 {
+		t.Fatalf("RunSaved returned no rows: %#v", out)
+	}
+}
+
+// TestInsightsRunRawSQLRejectsDML is the regression guard for
+// the PR #50 review finding that RunRawSQL ran user-supplied SQL
+// inside a read-write transaction, letting an enterprise tenant
+// commit DML (DELETE / UPDATE / INSERT) against any RLS-scoped
+// table reachable from their session. The fix pins the tx to
+// SET TRANSACTION READ ONLY immediately after the statement_timeout
+// guard, so DML bubbles up as a pgx error containing the
+// PostgreSQL "read-only" string before it can mutate any rows.
+//
+// Strategy: seed a sentinel saved query, attempt three single-
+// statement mutations via RunRawSQL — UPDATE, DELETE, INSERT —
+// and assert each one returns a read-only error. Re-read the
+// saved row to confirm none of the attempts partially committed.
+func TestInsightsRunRawSQLRejectsDML(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, queries, _, _, runner := newTenantForInsights(t, h)
+
+	saved := makeCountQuery(t, ctx, queries, tn.ID, 60)
+	originalName := saved.Name
+
+	cases := []struct {
+		label string
+		sql   string
+	}{
+		{"update", "UPDATE insights_queries SET name = 'pwned'"},
+		{"delete", "DELETE FROM insights_queries WHERE 1 = 1"},
+		{"insert", "INSERT INTO insights_queries (id, tenant_id, name, definition, mode, raw_sql) VALUES (gen_random_uuid(), gen_random_uuid(), 'x', '{}'::jsonb, 'visual', '')"},
+	}
+	for _, c := range cases {
+		_, err := runner.RunRawSQL(ctx, tn.ID, c.sql, nil)
+		if err == nil {
+			t.Fatalf("RunRawSQL %s: nil error; want read-only failure", c.label)
+		}
+		msg := strings.ToLower(err.Error())
+		if !strings.Contains(msg, "read-only") && !strings.Contains(msg, "read only") {
+			t.Fatalf("RunRawSQL %s error = %v; want a read-only message", c.label, err)
+		}
+	}
+
+	// Confirm the saved query is unchanged — none of the
+	// attempted DML partially committed.
+	reloaded, err := queries.Get(ctx, tn.ID, saved.ID)
+	if err != nil {
+		t.Fatalf("reload saved query: %v", err)
+	}
+	if reloaded.Name != originalName {
+		t.Fatalf("saved query name = %q; want %q (DML leaked through read-only fence)", reloaded.Name, originalName)
+	}
+}

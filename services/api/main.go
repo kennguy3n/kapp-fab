@@ -332,7 +332,8 @@ func run() error {
 	insightsExternal := insights.NewExternalRunner(insightsDataSources, insightsPools)
 	insightsRunner = insightsRunner.
 		WithExternal(insightsExternal).
-		WithPlanGate(tenantPlanLookup{store: tenantSvc}, tenant.MaxJoinsForPlan)
+		WithPlanGate(tenantPlanLookup{store: tenantSvc}, tenant.MaxJoinsForPlan).
+		WithFeaturePolicy(featureStore)
 	insightsEmbeds := insights.NewEmbedStore(pool, adminPool)
 
 	// Agent tool executor — Phase B wires the CRM / tasks / approvals
@@ -429,6 +430,7 @@ func run() error {
 		queries:    insightsQueryStore,
 		dashboards: insightsDashboardStore,
 		runner:     insightsRunner,
+		features:   featureStore,
 	}
 	insdsh := &insightsDataSourceHandlers{
 		store:    insightsDataSources,
@@ -936,6 +938,16 @@ func run() error {
 				r.Put("/{id}", insh.updateQuery)
 				r.Delete("/{id}", insh.deleteQuery)
 				r.Post("/{id}/run", insh.runQuery)
+				// Raw-SQL editor mode (Phase M). Gated by an
+				// additional `insights_sql_editor` feature flag
+				// on top of the parent `insights` gate so a non-
+				// enterprise plan with a stolen tenant header
+				// can't reach the surface even with `insights`
+				// turned on.
+				r.Group(func(r chi.Router) {
+					r.Use(platform.FeatureMiddleware(featureStore, tenant.FeatureInsightsSQLEditor))
+					r.Post("/{id}/run-sql", insh.runRawSQL)
+				})
 				r.Post("/{id}/share", insh.shareQuery)
 				r.Get("/{id}/shares", insh.listQueryShares)
 				r.Delete("/{id}/shares/{shareID}", insh.deleteQueryShare)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
 
 // insightsHandlers exposes Phase L BI surfaces under
@@ -21,6 +23,37 @@ type insightsHandlers struct {
 	queries    *insights.QueryStore
 	dashboards *insights.DashboardStore
 	runner     *insights.Runner
+	// features lets createQuery / updateQuery enforce the
+	// `insights_sql_editor` flag when the request body opts into
+	// SQL mode. Nil-tolerant: if the handler was constructed
+	// without it (e.g. a test harness that doesn't apply the
+	// tenant_features migration), the SQL-mode gate degrades to
+	// "allow" — the dynamic FeatureMiddleware on the /run-sql
+	// route still backstops execution.
+	features *tenant.FeatureStore
+}
+
+// gateSQLMode returns true when the request opts into SQL mode and
+// the tenant lacks the `insights_sql_editor` flag, after also
+// emitting the canonical 403 envelope. Returning early keeps the
+// caller's body terse: `if h.gateSQLMode(...) { return }`.
+func (h *insightsHandlers) gateSQLMode(w http.ResponseWriter, r *http.Request, t *tenant.Tenant, mode string) bool {
+	if mode != insights.QueryModeSQL {
+		return false
+	}
+	if h.features == nil {
+		return false
+	}
+	enabled, err := h.features.IsEnabled(r.Context(), t.ID, tenant.FeatureInsightsSQLEditor)
+	if err != nil {
+		http.Error(w, "feature lookup failed", http.StatusInternalServerError)
+		return true
+	}
+	if !enabled {
+		platform.WriteFeatureDisabled(w, tenant.FeatureInsightsSQLEditor)
+		return true
+	}
+	return false
 }
 
 // ---------- Queries ----------
@@ -34,6 +67,12 @@ type insightsQueryRequest struct {
 	// caching). A plain int conflated the two and silently coerced
 	// real-time queries back to 5-minute caching.
 	CacheTTLSeconds *int `json:"cache_ttl_seconds,omitempty"`
+	// Phase M raw-SQL editor mode. Empty Mode falls back to
+	// QueryModeVisual inside the store's normalizeMode helper, so
+	// pre-Phase-M clients keep round-tripping a visual definition
+	// without sending these fields at all.
+	Mode   string `json:"mode,omitempty"`
+	RawSQL string `json:"raw_sql,omitempty"`
 }
 
 func (h *insightsHandlers) listQueries(w http.ResponseWriter, r *http.Request) {
@@ -61,6 +100,9 @@ func (h *insightsHandlers) createQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
+	if h.gateSQLMode(w, r, t, req.Mode) {
+		return
+	}
 	actor := actorOrDefault(r.Context())
 	saved, err := h.queries.Create(r.Context(), insights.Query{
 		TenantID:        t.ID,
@@ -68,6 +110,8 @@ func (h *insightsHandlers) createQuery(w http.ResponseWriter, r *http.Request) {
 		Description:     req.Description,
 		Definition:      req.Definition,
 		CacheTTLSeconds: req.CacheTTLSeconds,
+		Mode:            req.Mode,
+		RawSQL:          req.RawSQL,
 		CreatedBy:       &actor,
 	})
 	if err != nil {
@@ -112,6 +156,9 @@ func (h *insightsHandlers) updateQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
+	if h.gateSQLMode(w, r, t, req.Mode) {
+		return
+	}
 	saved, err := h.queries.Update(r.Context(), insights.Query{
 		TenantID:        t.ID,
 		ID:              id,
@@ -119,6 +166,8 @@ func (h *insightsHandlers) updateQuery(w http.ResponseWriter, r *http.Request) {
 		Description:     req.Description,
 		Definition:      req.Definition,
 		CacheTTLSeconds: req.CacheTTLSeconds,
+		Mode:            req.Mode,
+		RawSQL:          req.RawSQL,
 	})
 	if err != nil {
 		writeInsightsError(w, err)
@@ -150,6 +199,19 @@ type runQueryRequest struct {
 	BypassCache  bool           `json:"bypass_cache,omitempty"`
 }
 
+// runRawSQLRequest is the body for POST
+// /api/v1/insights/queries/{id}/run-sql. Params is the positional
+// argument list bound by pgx.Query so callers can not string-
+// interpolate into the SQL body. RawSQL is optional: when empty the
+// runner uses the persisted insights_queries.raw_sql column, which
+// is the normal saved-query path. The override exists so the
+// frontend SQL editor can preview an unsaved draft against the
+// runner without first persisting + GET'ing the row.
+type runRawSQLRequest struct {
+	RawSQL string `json:"raw_sql,omitempty"`
+	Params []any  `json:"params,omitempty"`
+}
+
 func (h *insightsHandlers) runQuery(w http.ResponseWriter, r *http.Request) {
 	t := platform.TenantFromContext(r.Context())
 	if t == nil {
@@ -169,6 +231,56 @@ func (h *insightsHandlers) runQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out, err := h.runner.RunSaved(r.Context(), t.ID, id, req.FilterParams, req.BypassCache)
+	if err != nil {
+		writeInsightsError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// runRawSQL executes a SQL-mode insights query under the per-tenant
+// statement_timeout + RLS fences. Gated by both the `insights`
+// feature flag (via DynamicFeatureMiddleware on the parent route)
+// and the `insights_sql_editor` flag (via FeatureMiddleware on the
+// /run-sql sub-route in main.go). When the request body provides a
+// raw_sql override the runner uses that body verbatim; otherwise
+// the persisted insights_queries.raw_sql column is read first and
+// the persisted row's mode must be QueryModeSQL.
+func (h *insightsHandlers) runRawSQL(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid query id", http.StatusBadRequest)
+		return
+	}
+	var req runRawSQLRequest
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+	}
+
+	rawSQL := req.RawSQL
+	if rawSQL == "" {
+		q, err := h.queries.Get(r.Context(), t.ID, id)
+		if err != nil {
+			writeInsightsError(w, err)
+			return
+		}
+		if q.Mode != insights.QueryModeSQL {
+			writeInsightsError(w, fmt.Errorf("%w: query is in mode %q, expected %q",
+				insights.ErrValidation, q.Mode, insights.QueryModeSQL))
+			return
+		}
+		rawSQL = q.RawSQL
+	}
+
+	out, err := h.runner.RunRawSQL(r.Context(), t.ID, rawSQL, req.Params)
 	if err != nil {
 		writeInsightsError(w, err)
 		return
@@ -529,6 +641,12 @@ func writeInsightsError(w http.ResponseWriter, err error) {
 		// Validate() — surface as 400 so clients can correct their
 		// payload instead of seeing a misleading 500.
 		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, insights.ErrFeatureDisabled):
+		// Runner-level SQL-mode gate (RunSaved → FeaturePolicy):
+		// surface with the canonical feature-disabled envelope so
+		// the React shell upgrade banner can react identically to
+		// the route-level FeatureMiddleware.
+		platform.WriteFeatureDisabled(w, tenant.FeatureInsightsSQLEditor)
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		// Statement timeout / Go context cancellation — DB-side
 		// budget exhausted, surface as 504 so a retry-with-tighter-

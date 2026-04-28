@@ -109,6 +109,16 @@ func (q QueryDefinition) Validate() error {
 	return nil
 }
 
+// QueryMode discriminates the two flavours a saved insights query
+// can take. Visual queries flow through the structured
+// reporting.Definition grammar; SQL queries skip the builder and
+// run a raw, parameterised statement under the same per-tenant
+// statement_timeout + RLS fences.
+const (
+	QueryModeVisual = "visual"
+	QueryModeSQL    = "sql"
+)
+
 // Query mirrors one row of insights_queries.
 type Query struct {
 	TenantID    uuid.UUID       `json:"tenant_id"`
@@ -116,6 +126,17 @@ type Query struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Definition  QueryDefinition `json:"definition"`
+	// Mode is QueryModeVisual (default) or QueryModeSQL. The Phase L
+	// surface only ever wrote QueryModeVisual; Phase M extends the
+	// table with a SQL editor (see migrations/000045_insights_sql_mode.sql)
+	// gated by the `insights_sql_editor` feature flag.
+	Mode string `json:"mode,omitempty"`
+	// RawSQL is the body of a SQL-mode query. Empty (and the column-
+	// level CHECK enforces it) when Mode is QueryModeVisual. The
+	// runner executes this verbatim under SET LOCAL statement_timeout
+	// inside dbutil.WithTenantTx so RLS pins every read to the
+	// caller's tenant.
+	RawSQL string `json:"raw_sql,omitempty"`
 	// CacheTTLSeconds is a pointer so the JSON-decoder can distinguish
 	// "field omitted → use server default" (nil) from "0 → disable
 	// caching for this query". The migration column itself is still

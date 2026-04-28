@@ -103,7 +103,14 @@ func run() error {
 	insightsQueries := insights.NewQueryStore(pool)
 	insightsDashboards := insights.NewDashboardStore(pool)
 	insightsCache := insights.NewCacheStore(pool)
-	insightsRunner := insights.NewRunner(pool, insightsCache, insightsQueries, reportingRunner)
+	// FeatureStore is also used by the presence handler below, but
+	// constructed here so the insights runner can pick it up via
+	// WithFeaturePolicy. Without this, RunSaved bypasses the SQL-mode
+	// gate on the /insight slash command path for tenants downgraded
+	// from enterprise to business.
+	featureStore := tenant.NewFeatureStore(pool)
+	insightsRunner := insights.NewRunner(pool, insightsCache, insightsQueries, reportingRunner).
+		WithFeaturePolicy(featureStore)
 	commands := &CommandDispatcher{
 		registry:           registry,
 		records:            recordStore,
@@ -124,9 +131,9 @@ func run() error {
 	// Presence webhook + supporting stores. The user store reuses the
 	// shared pool — `users` is a global table so RLS doesn't matter.
 	// The feature store gates the auto-attendance side-effect per
-	// tenant via `attendance_kchat_sync`.
+	// tenant via `attendance_kchat_sync` (constructed above so the
+	// insights runner can also reuse it via WithFeaturePolicy).
 	userStore := tenant.NewUserStore(pool).WithAdminPool(adminPool)
-	featureStore := tenant.NewFeatureStore(pool)
 	presenceHandler := NewPresenceHandler(userStore, featureStore, recordStore)
 
 	r := chi.NewRouter()

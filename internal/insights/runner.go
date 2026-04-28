@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/reporting"
 )
 
@@ -34,6 +37,29 @@ type PlanLookup interface {
 	PlanForTenant(ctx context.Context, tenantID uuid.UUID) (string, error)
 }
 
+// FeaturePolicy resolves whether a feature flag is enabled for a
+// tenant. Implemented by tenant.FeatureStore in production. Kept as
+// an interface so the insights package can gate the SQL-mode
+// dispatch without importing internal/tenant (which would form an
+// import cycle through the agent tools).
+//
+// Used by RunSaved to backstop the createQuery / updateQuery gate
+// in services/api/insights_handlers.go: even if a SQL-mode row is
+// already persisted (e.g. from before the feature was disabled, or
+// from an admin downgrade), every consumer of RunSaved
+// (dashboard fan-out, cache refresh worker, agent tools, kchat
+// /insight) refuses to dispatch it for a tenant that no longer
+// holds the `insights_sql_editor` flag.
+type FeaturePolicy interface {
+	IsEnabled(ctx context.Context, tenantID uuid.UUID, featureKey string) (bool, error)
+}
+
+// FeatureKeyInsightsSQLEditor mirrors the tenant package's constant.
+// Duplicated here to keep this package free of an internal/tenant
+// import. Kept in lock-step via the integration test that exercises
+// both surfaces against the same tenant.
+const FeatureKeyInsightsSQLEditor = "insights_sql_editor"
+
 // Runner executes insights queries with cache-awareness and per-tenant
 // statement timeouts. It wraps reporting.Runner so the underlying
 // query grammar (sources, filters, aggregations, sort, limit) is the
@@ -46,6 +72,7 @@ type Runner struct {
 	external  *ExternalRunner
 	plans     PlanLookup
 	joinLimit func(plan string) int
+	features  FeaturePolicy
 	timeout   time.Duration
 	maxRows   int
 }
@@ -89,6 +116,17 @@ func (r *Runner) WithExternal(ext *ExternalRunner) *Runner {
 func (r *Runner) WithPlanGate(plans PlanLookup, joinLimit func(plan string) int) *Runner {
 	r.plans = plans
 	r.joinLimit = joinLimit
+	return r
+}
+
+// WithFeaturePolicy wires the FeaturePolicy used by RunSaved to
+// reject SQL-mode dispatches when the tenant lacks
+// insights_sql_editor. When nil, RunSaved trusts the upstream
+// gate at the create/update boundary; the test harness uses this
+// to keep deeply mocked runners working without a tenant_features
+// table. See FeaturePolicy's docstring for the threat model.
+func (r *Runner) WithFeaturePolicy(p FeaturePolicy) *Runner {
+	r.features = p
 	return r
 }
 
@@ -264,6 +302,35 @@ func (r *Runner) RunSaved(ctx context.Context, tenantID, queryID uuid.UUID, filt
 	if err != nil {
 		return nil, err
 	}
+	// SQL-mode queries never round-trip a meaningful Definition
+	// (the store only persists the placeholder), so dispatch them
+	// to the raw runner before the visual fall-through. Caching
+	// is intentionally not honoured for raw-SQL — RunRawSQL doesn't
+	// touch insights_query_cache yet, so a SQL-mode dashboard
+	// widget re-executes on every refresh just like a 0-TTL visual
+	// query would. Adding cache support requires a separate
+	// fingerprint scheme (raw text + params) and is tracked
+	// outside this hotfix.
+	if q.Mode == QueryModeSQL {
+		// Belt-and-suspenders gate: createQuery / updateQuery in
+		// services/api/insights_handlers.go reject a SQL-mode body
+		// from a tenant without insights_sql_editor, but a tenant
+		// that was downgraded after persisting a SQL-mode row
+		// would otherwise still execute it through any RunSaved
+		// caller. Refuse here so the gate covers the dashboard
+		// fan-out, the cache refresh worker, every agent tool, and
+		// the kchat /insight slash command in a single check.
+		if r.features != nil {
+			ok, ferr := r.features.IsEnabled(ctx, tenantID, FeatureKeyInsightsSQLEditor)
+			if ferr != nil {
+				return nil, fmt.Errorf("feature lookup: %w", ferr)
+			}
+			if !ok {
+				return nil, fmt.Errorf("%w: %s", ErrFeatureDisabled, FeatureKeyInsightsSQLEditor)
+			}
+		}
+		return r.RunRawSQL(ctx, tenantID, q.RawSQL, nil)
+	}
 	// q.CacheTTLSeconds is always non-nil after QueryStore.Get
 	// (Get scans the column into a local int and assigns its
 	// address); guard defensively to keep the runner robust
@@ -279,4 +346,107 @@ func (r *Runner) RunSaved(ctx context.Context, tenantID, queryID uuid.UUID, filt
 		FilterParams: filterParams,
 		BypassCache:  bypassCache,
 	})
+}
+
+// RunRawSQL executes a parameterised SQL statement under the same
+// per-tenant fences the visual runner uses: dbutil.WithTenantTx
+// pins `app.tenant_id` so RLS bounds every read to the caller's
+// tenant, and SET LOCAL statement_timeout cancels runaway scans
+// before the HTTP request slot expires. params are bound via
+// pgx.Query so callers cannot string-interpolate untrusted values.
+//
+// The raw SQL surface intentionally rejects multi-statement bodies
+// (semicolon-separated) — pgx.Query already only honours the first
+// statement on the wire, but the explicit guard turns a silently
+// dropped trailing statement into a 400 the user can act on. The
+// row cap mirrors the visual runner (MaxResultRows = 10,000) so a
+// SELECT * without LIMIT can't exhaust memory.
+//
+// Caller must gate this on both `insights` and `insights_sql_editor`
+// feature flags. The runner does not consult feature state itself
+// because the API and agent layers already own that policy.
+func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL string, params []any) (*RunResult, error) {
+	if tenantID == uuid.Nil {
+		return nil, validationErr("tenant id required")
+	}
+	if rawSQL == "" {
+		return nil, validationErr("raw_sql body required")
+	}
+	// Multi-statement bodies fail closed with a 400. pgx already
+	// only executes the first statement on the wire so trailing
+	// statements in `SELECT 1; DROP TABLE x` would otherwise be
+	// silently dropped — surfacing a validation error gives the
+	// caller a chance to split the body or remove the trailing
+	// `;`. The check is intentionally textual rather than parsed
+	// because we'd otherwise need a real SQL parser to reject
+	// `;` inside a string literal, and that's overkill for the
+	// editor's first cut.
+	if strings.Contains(rawSQL, ";") {
+		return nil, validationErr("multi-statement SQL is not allowed; submit one statement at a time")
+	}
+
+	if r.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.timeout)
+		defer cancel()
+	}
+
+	rows := make([]map[string]any, 0)
+	columns := []string{}
+	err := dbutil.WithTenantTx(ctx, r.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if r.timeout > 0 {
+			if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", r.timeout.Milliseconds())); err != nil {
+				return fmt.Errorf("insights: set statement_timeout: %w", err)
+			}
+		}
+		// Pin the transaction read-only before running user SQL.
+		// dbutil.WithTenantTx opens a read-write transaction and
+		// commits on success — without this guard, an enterprise
+		// user submitting `DELETE FROM crm_deals` (or any DML
+		// against an RLS-scoped table) would have the change
+		// persist. RLS bounds the blast radius to the caller's own
+		// tenant, but the editor's stated purpose is read-only ad
+		// hoc analysis, so PostgreSQL should reject DML/DDL with
+		// `cannot execute X in a read-only transaction` and surface
+		// it as a 400 rather than a silent commit. Visual runner
+		// has its own callback path and is unaffected.
+		if _, err := tx.Exec(ctx, "SET TRANSACTION READ ONLY"); err != nil {
+			return fmt.Errorf("insights: set transaction read only: %w", err)
+		}
+		pgxRows, err := tx.Query(ctx, rawSQL, params...)
+		if err != nil {
+			return fmt.Errorf("insights: execute raw sql: %w", err)
+		}
+		defer pgxRows.Close()
+		fieldDescs := pgxRows.FieldDescriptions()
+		for _, fd := range fieldDescs {
+			columns = append(columns, string(fd.Name))
+		}
+		for pgxRows.Next() {
+			vals, err := pgxRows.Values()
+			if err != nil {
+				return err
+			}
+			row := make(map[string]any, len(vals))
+			for i, v := range vals {
+				row[columns[i]] = v
+			}
+			rows = append(rows, row)
+			if r.maxRows > 0 && len(rows) >= r.maxRows {
+				break
+			}
+		}
+		return pgxRows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &RunResult{
+		Result: &reporting.Result{
+			Columns: columns,
+			Rows:    rows,
+		},
+		CacheHit: false,
+	}, nil
 }

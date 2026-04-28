@@ -162,6 +162,16 @@ func DynamicFeatureMiddleware(store *tenant.FeatureStore) func(http.Handler) htt
 	}
 }
 
+// WriteFeatureDisabled emits the canonical 403 envelope used by the
+// feature middleware. Exported so handlers that need to gate a
+// nested code path (e.g. only when the request body opts into a
+// premium mode) can return the same shape rather than reinventing
+// it. Keeping the envelope shape in one place keeps the React shell
+// agnostic about *where* the gate fired.
+func WriteFeatureDisabled(w http.ResponseWriter, featureKey string) {
+	writeFeatureDisabled(w, featureKey)
+}
+
 func writeFeatureDisabled(w http.ResponseWriter, featureKey string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)

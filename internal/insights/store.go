@@ -25,6 +25,12 @@ var (
 	// to message-string matching. Wrap with fmt.Errorf("%w: …", or use
 	// validationErr below.
 	ErrValidation = errors.New("insights: validation")
+	// ErrFeatureDisabled fires when the runner refuses to dispatch a
+	// SQL-mode query for a tenant that no longer holds the
+	// `insights_sql_editor` flag. Distinct from ErrValidation so the
+	// HTTP layer can surface it as 403 with the canonical
+	// `feature_disabled` envelope rather than 400.
+	ErrFeatureDisabled = errors.New("insights: feature disabled")
 )
 
 // validationErr wraps a free-form message as an ErrValidation-tagged
@@ -74,8 +80,16 @@ func (s *QueryStore) Create(ctx context.Context, q Query) (*Query, error) {
 	if q.Name == "" {
 		return nil, validationErr("query name required")
 	}
-	if err := q.Definition.Validate(); err != nil {
+	mode, rawSQL, err := normalizeMode(q)
+	if err != nil {
 		return nil, err
+	}
+	q.Mode = mode
+	q.RawSQL = rawSQL
+	if mode == QueryModeVisual {
+		if err := q.Definition.Validate(); err != nil {
+			return nil, err
+		}
 	}
 	if q.ID == uuid.Nil {
 		q.ID = uuid.New()
@@ -97,16 +111,49 @@ func (s *QueryStore) Create(ctx context.Context, q Query) (*Query, error) {
 		}
 		return tx.QueryRow(ctx,
 			`INSERT INTO insights_queries
-			   (tenant_id, id, name, description, definition, cache_ttl_seconds, created_by)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			   (tenant_id, id, name, description, definition, cache_ttl_seconds, created_by, mode, raw_sql)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			 RETURNING created_at, updated_at`,
-			q.TenantID, q.ID, q.Name, q.Description, def, ttl, createdBy,
+			q.TenantID, q.ID, q.Name, q.Description, def, ttl, createdBy, mode, rawSQL,
 		).Scan(&out.CreatedAt, &out.UpdatedAt)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("insights: create query: %w", err)
 	}
 	return &out, nil
+}
+
+// normalizeMode resolves the (Mode, RawSQL) inputs into a sane
+// (mode, rawSQL) pair that satisfies the table-level CHECKs in
+// migrations/000045_insights_sql_mode.sql:
+//
+//   - Empty Mode -> QueryModeVisual (back-compat with Phase L
+//     callers that don't know about the field).
+//   - QueryModeVisual must have empty RawSQL.
+//   - QueryModeSQL must carry a non-empty RawSQL body.
+//
+// The DB CHECK is the source of truth; this helper exists so the
+// API surface returns a 400 with a structured message instead of a
+// confusing constraint-violation envelope from the driver.
+func normalizeMode(q Query) (string, string, error) {
+	mode := q.Mode
+	if mode == "" {
+		mode = QueryModeVisual
+	}
+	switch mode {
+	case QueryModeVisual:
+		if q.RawSQL != "" {
+			return "", "", validationErr("visual queries must not carry raw_sql")
+		}
+		return QueryModeVisual, "", nil
+	case QueryModeSQL:
+		if q.RawSQL == "" {
+			return "", "", validationErr("sql-mode queries require a non-empty raw_sql body")
+		}
+		return QueryModeSQL, q.RawSQL, nil
+	default:
+		return "", "", validationErr("unknown query mode %q", mode)
+	}
 }
 
 // Update replaces a query's name, description, definition, and TTL.
@@ -119,8 +166,14 @@ func (s *QueryStore) Update(ctx context.Context, q Query) (*Query, error) {
 	if q.Name == "" {
 		return nil, validationErr("query name required")
 	}
-	if err := q.Definition.Validate(); err != nil {
+	mode, rawSQL, err := normalizeMode(q)
+	if err != nil {
 		return nil, err
+	}
+	if mode == QueryModeVisual {
+		if err := q.Definition.Validate(); err != nil {
+			return nil, err
+		}
 	}
 	def, err := json.Marshal(q.Definition)
 	if err != nil {
@@ -134,9 +187,9 @@ func (s *QueryStore) Update(ctx context.Context, q Query) (*Query, error) {
 		tag, err := tx.Exec(ctx,
 			`UPDATE insights_queries
 			    SET name = $3, description = $4, definition = $5,
-			        cache_ttl_seconds = $6, updated_at = now()
+			        cache_ttl_seconds = $6, mode = $7, raw_sql = $8, updated_at = now()
 			  WHERE tenant_id = $1 AND id = $2`,
-			q.TenantID, q.ID, q.Name, q.Description, def, ttl,
+			q.TenantID, q.ID, q.Name, q.Description, def, ttl, mode, rawSQL,
 		)
 		if err != nil {
 			return err
@@ -168,13 +221,13 @@ func (s *QueryStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*Query, e
 		)
 		row := tx.QueryRow(ctx,
 			`SELECT tenant_id, id, name, description, definition, cache_ttl_seconds,
-			        created_by, created_at, updated_at
+			        created_by, created_at, updated_at, mode, raw_sql
 			   FROM insights_queries WHERE tenant_id = $1 AND id = $2`,
 			tenantID, id,
 		)
 		if err := row.Scan(
 			&out.TenantID, &out.ID, &out.Name, &out.Description, &def, &ttl,
-			&createdBy, &out.CreatedAt, &out.UpdatedAt,
+			&createdBy, &out.CreatedAt, &out.UpdatedAt, &out.Mode, &out.RawSQL,
 		); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrQueryNotFound
@@ -200,7 +253,7 @@ func (s *QueryStore) List(ctx context.Context, tenantID uuid.UUID) ([]Query, err
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT tenant_id, id, name, description, definition, cache_ttl_seconds,
-			        created_by, created_at, updated_at
+			        created_by, created_at, updated_at, mode, raw_sql
 			   FROM insights_queries WHERE tenant_id = $1 ORDER BY name`,
 			tenantID,
 		)
@@ -217,7 +270,7 @@ func (s *QueryStore) List(ctx context.Context, tenantID uuid.UUID) ([]Query, err
 			)
 			if err := rows.Scan(
 				&q.TenantID, &q.ID, &q.Name, &q.Description, &def, &ttl,
-				&createdBy, &q.CreatedAt, &q.UpdatedAt,
+				&createdBy, &q.CreatedAt, &q.UpdatedAt, &q.Mode, &q.RawSQL,
 			); err != nil {
 				return err
 			}

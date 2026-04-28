@@ -419,7 +419,7 @@ Tenant-scoped BI layer: visual query builder, composable dashboards, rich visual
 ### Deferred / Follow-up
 
 - [x] External data source connections (non-Kapp PostgreSQL, CSV upload)
-- [ ] SQL editor mode with parameterized tenant injection
+- [x] SQL editor mode with parameterized tenant injection (Phase M Task 1, this PR — `migrations/000045_insights_sql_mode.sql` adds `mode` + `raw_sql` columns with a column-level CHECK; `internal/insights/runner.go::Runner.RunRawSQL` wraps execution in `dbutil.WithTenantTx` + `SET LOCAL statement_timeout` + parameterised `pgx.Query`; `services/api/insights_handlers.go::runRawSQL` mounts at `POST /api/v1/insights/queries/{id}/run-sql` and the route is double-gated via `platform.FeatureMiddleware(tenant.FeatureInsightsSQLEditor)` on top of the parent `insights` gate so non-enterprise plans cannot reach it; new `apps/web/src/pages/InsightsQueryBuilderPage.tsx` Visual/SQL tab posts to the new endpoint; `internal/integrationtest/phase_l_test.go::TestInsightsSQLEditorMode` round-trips a SQL-mode query, `TestInsightsSQLEditorRunRawSQLRespectsTenantRLS` proves cross-tenant counts stay isolated, `TestInsightsSQLEditorFeatureFlagDisablesRoute` asserts the 403 envelope keys on `insights_sql_editor`)
 - [ ] Notebook/exploratory analysis interface
 - [x] Cross-KType JOINs in visual builder
 - [x] Dashboard embedding (iframe/public link)

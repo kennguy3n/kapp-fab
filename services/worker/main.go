@@ -270,7 +270,9 @@ func run() error {
 	// plans that include FeatureInsights.
 	insightsQueryStore := insights.NewQueryStore(pool)
 	insightsCacheStore := insights.NewCacheStore(pool)
-	insightsRunner := insights.NewRunner(pool, insightsCacheStore, insightsQueryStore, reportRunner)
+	insightsFeatures := tenant.NewFeatureStore(pool)
+	insightsRunner := insights.NewRunner(pool, insightsCacheStore, insightsQueryStore, reportRunner).
+		WithFeaturePolicy(insightsFeatures)
 	schedRegistry.Register(
 		insights.ActionTypeQueryCacheRefresh,
 		NewQueryCacheRefreshHandler(insightsQueryStore, insightsRunner),
