@@ -145,15 +145,27 @@ func TestAuthzMultiRoleAndHierarchy(t *testing.T) {
 	}
 
 	// Gap 8 — adding a fresh permission to tenant.member should be
-	// visible to descendants without editing each role.
+	// visible to descendants without editing each role. The roles
+	// table has RLS enabled (migration 000001), so the UPDATE has
+	// to run inside WithTenantTx to set app.tenant_id; otherwise
+	// the WHERE clause silently matches zero rows.
 	cache.Purge()
-	if _, err := h.pool.Exec(ctx,
-		`UPDATE roles
-		    SET permissions = $3
-		  WHERE tenant_id = $1 AND name = $2`,
-		tt.ID, "tenant.member",
-		json.RawMessage(`["tenant.member","krecord.read","platform.ping"]`),
-	); err != nil {
+	if err := dbutil.WithTenantTx(ctx, h.pool, tt.ID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`UPDATE roles
+			    SET permissions = $3
+			  WHERE tenant_id = $1 AND name = $2`,
+			tt.ID, "tenant.member",
+			json.RawMessage(`["tenant.member","krecord.read","platform.ping"]`),
+		)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			t.Fatalf("expected 1 role updated, got %d", tag.RowsAffected())
+		}
+		return nil
+	}); err != nil {
 		t.Fatalf("update tenant.member permissions: %v", err)
 	}
 	if err := eval.Authorize(ctx, tt.ID, userID, "platform.ping", ""); err != nil {
