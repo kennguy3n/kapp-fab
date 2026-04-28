@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import type { Webhook } from "@kapp/client";
 import { api } from "../lib/api";
 
@@ -18,22 +19,43 @@ export function WebhooksPage() {
   const [url, setUrl] = useState("");
   const [secret, setSecret] = useState("");
   const [filters, setFilters] = useState("");
+  const [conditions, setConditions] = useState("");
+  const [maxRetries, setMaxRetries] = useState<number>(5);
+  const [backoffBase, setBackoffBase] = useState<number>(10);
 
   const createMut = useMutation({
-    mutationFn: () =>
-      api.createWebhook({
+    mutationFn: () => {
+      let parsedConditions: Record<string, unknown> | undefined;
+      const trimmed = conditions.trim();
+      if (trimmed) {
+        try {
+          parsedConditions = JSON.parse(trimmed) as Record<string, unknown>;
+        } catch {
+          throw new Error(
+            "conditions must be valid JSON (object, e.g. {\"ktype\":\"helpdesk.ticket\"})"
+          );
+        }
+      }
+      return api.createWebhook({
         url,
         secret,
         event_filters: filters
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean),
-      }),
+        conditions: parsedConditions,
+        max_retries: maxRetries,
+        backoff_base_seconds: backoffBase,
+      });
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["webhooks"] });
       setUrl("");
       setSecret("");
       setFilters("");
+      setConditions("");
+      setMaxRetries(5);
+      setBackoffBase(10);
     },
   });
 
@@ -96,9 +118,46 @@ export function WebhooksPage() {
             style={{ width: "100%", padding: 6 }}
           />
         </label>
+        <label>
+          Conditions (JSON; matches against event payload — see docs)
+          <textarea
+            value={conditions}
+            onChange={(e) => setConditions(e.target.value)}
+            placeholder='{"ktype":"helpdesk.ticket","data.status":{"$in":["open","pending"]}}'
+            style={{ width: "100%", padding: 6, fontFamily: "monospace", minHeight: 64 }}
+          />
+        </label>
+        <div style={{ display: "flex", gap: 12 }}>
+          <label style={{ flex: 1 }}>
+            Max retries
+            <input
+              type="number"
+              min={1}
+              max={20}
+              value={maxRetries}
+              onChange={(e) => setMaxRetries(parseInt(e.target.value, 10) || 5)}
+              style={{ width: "100%", padding: 6 }}
+            />
+          </label>
+          <label style={{ flex: 1 }}>
+            Backoff base (seconds)
+            <input
+              type="number"
+              min={1}
+              value={backoffBase}
+              onChange={(e) => setBackoffBase(parseInt(e.target.value, 10) || 10)}
+              style={{ width: "100%", padding: 6 }}
+            />
+          </label>
+        </div>
         <button type="submit" disabled={createMut.isPending}>
           Register webhook
         </button>
+        {createMut.error instanceof Error && (
+          <div style={{ color: "#b91c1c", fontSize: 12 }}>
+            {createMut.error.message}
+          </div>
+        )}
       </form>
 
       <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -137,6 +196,12 @@ export function WebhooksPage() {
               </td>
               <td style={td}>{new Date(h.created_at).toLocaleString()}</td>
               <td style={td}>
+                <Link
+                  to={`/admin/webhooks/${h.id}/deliveries`}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  log
+                </Link>{" "}
                 <button
                   onClick={(e) => {
                     e.stopPropagation();

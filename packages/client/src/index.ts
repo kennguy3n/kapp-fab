@@ -524,6 +524,9 @@ export class ApiClient {
     url: string;
     secret: string;
     event_filters?: string[];
+    conditions?: Record<string, unknown>;
+    max_retries?: number;
+    backoff_base_seconds?: number;
     active?: boolean;
   }): Promise<Webhook> {
     return this.request(`/webhooks`, {
@@ -538,6 +541,9 @@ export class ApiClient {
       url?: string;
       secret?: string;
       event_filters?: string[];
+      conditions?: Record<string, unknown>;
+      max_retries?: number;
+      backoff_base_seconds?: number;
       active?: boolean;
     }
   ): Promise<Webhook> {
@@ -1396,6 +1402,9 @@ export interface Webhook {
   url: string;
   secret: string;
   event_filters: string[];
+  conditions?: Record<string, unknown>;
+  max_retries: number;
+  backoff_base_seconds: number;
   active: boolean;
   created_at: string;
   updated_at: string;

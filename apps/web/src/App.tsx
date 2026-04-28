@@ -43,6 +43,7 @@ import { RetentionPoliciesPage } from "./pages/RetentionPoliciesPage";
 import { UsageDashboardPage } from "./pages/UsageDashboardPage";
 import { SearchPage } from "./pages/SearchPage";
 import { WebhooksPage } from "./pages/WebhooksPage";
+import { WebhookDeliveryLogPage } from "./pages/WebhookDeliveryLogPage";
 import { PortalLoginPage } from "./pages/portal/PortalLoginPage";
 import { PortalTicketListPage } from "./pages/portal/PortalTicketListPage";
 import { PortalTicketDetailPage } from "./pages/portal/PortalTicketDetailPage";
@@ -340,6 +341,10 @@ function AppShell() {
           />
           <Route path="/search" element={<SearchPage />} />
           <Route path="/admin/webhooks" element={<WebhooksPage />} />
+          <Route
+            path="/admin/webhooks/:id/deliveries"
+            element={<WebhookDeliveryLogPage />}
+          />
           <Route
             path="/finance/accounts"
             element={<ChartOfAccountsPage />}

@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -318,10 +320,45 @@ func extractNotification(raw []byte) *notificationEnvelope {
 	return wrapper.Notification
 }
 
-// maxWebhookAttempts is the hard retry ceiling. Matches the task
-// requirement (max 5 attempts) and bounds the exponential backoff
+// defaultMaxWebhookAttempts is the platform default attempt ceiling
+// when a webhook does not override it via webhooks.max_retries.
+// Matches the v2 spec default and bounds the exponential backoff
 // schedule in webhookBackoff.
-const maxWebhookAttempts = 5
+const defaultMaxWebhookAttempts = 5
+
+// platformMaxWebhookAttempts is the absolute hard ceiling regardless
+// of per-webhook overrides. Bounds the worst-case retry tail in case
+// a tenant submits an unreasonably large value through the API.
+const platformMaxWebhookAttempts = 20
+
+// defaultBackoffBaseSeconds is the platform default backoff base
+// when a webhook does not override it via webhooks.backoff_base_seconds.
+const defaultBackoffBaseSeconds = 10
+
+// webhookJitterSource is the package-level RNG used to add jitter
+// to retry schedules. Wrapped in a mutex because *rand.Rand is not
+// safe for concurrent use and the worker fans out drains across
+// goroutines. Tests can swap this out via the lockedRand.replace
+// helper to make backoff deterministic.
+var webhookJitterSource = newLockedRand(time.Now().UnixNano())
+
+type lockedRand struct {
+	mu sync.Mutex
+	r  *rand.Rand
+}
+
+func newLockedRand(seed int64) *lockedRand {
+	return &lockedRand{r: rand.New(rand.NewSource(seed))}
+}
+
+func (l *lockedRand) Int63n(n int64) int64 {
+	if n <= 0 {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.r.Int63n(n)
+}
 
 // webhookRetryBatch is the upper bound on the number of pending
 // retries the polling loop will claim per tick. Keeps one slow
@@ -350,6 +387,9 @@ func (r *notificationRouter) fanOutRegisteredWebhooks(ctx context.Context, e eve
 	}
 	for _, h := range hooks {
 		if !webhookMatches(h, e.Type) {
+			continue
+		}
+		if !notifications.EvaluateConditions(h.Conditions, e.Payload) {
 			continue
 		}
 		r.deliverWebhook(ctx, h, e, 1)
@@ -386,7 +426,7 @@ func (r *notificationRouter) runWebhookRetryLoop(ctx context.Context, interval t
 // processPendingWebhookRetries does one tick of the retry loop.
 // Extracted so tests can drive the logic without a ticker.
 func (r *notificationRouter) processPendingWebhookRetries(ctx context.Context) {
-	pending, err := r.webhookStore.ClaimPendingRetries(ctx, r.adminPool, maxWebhookAttempts, webhookRetryBatch)
+	pending, err := r.webhookStore.ClaimPendingRetries(ctx, r.adminPool, platformMaxWebhookAttempts, webhookRetryBatch)
 	if err != nil {
 		log.Printf("worker: claim pending webhook retries: %v", err)
 		return
@@ -483,7 +523,7 @@ func (r *notificationRouter) deliverWebhook(ctx context.Context, h notifications
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
-		r.recordWebhookAttempt(ctx, h, e, attempt, nil, "", false, err, scheduleNextRetry(attempt))
+		r.recordWebhookAttempt(ctx, h, e, attempt, nil, "", false, err, scheduleNextRetry(h, attempt))
 		return
 	}
 	defer func() {
@@ -496,18 +536,27 @@ func (r *notificationRouter) deliverWebhook(ctx context.Context, h notifications
 		r.recordWebhookAttempt(ctx, h, e, attempt, &status, string(snippet), true, nil, nil)
 		return
 	}
-	r.recordWebhookAttempt(ctx, h, e, attempt, &status, string(snippet), false, fmt.Errorf("non-2xx"), scheduleNextRetry(attempt))
+	r.recordWebhookAttempt(ctx, h, e, attempt, &status, string(snippet), false, fmt.Errorf("non-2xx"), scheduleNextRetry(h, attempt))
 }
 
 // scheduleNextRetry returns a pointer to the wall-clock time the
 // next attempt should run at, or nil when the attempt ceiling is
 // reached and the row should stay terminal (delivered=false with
-// no next_retry_at).
-func scheduleNextRetry(attempt int) *time.Time {
-	if attempt >= maxWebhookAttempts {
+// no next_retry_at). The ceiling is the per-webhook max_retries
+// (clamped to platformMaxWebhookAttempts) so a tenant can opt into
+// longer retry tails without code changes.
+func scheduleNextRetry(h notifications.Webhook, attempt int) *time.Time {
+	limit := h.MaxRetries
+	if limit <= 0 {
+		limit = defaultMaxWebhookAttempts
+	}
+	if limit > platformMaxWebhookAttempts {
+		limit = platformMaxWebhookAttempts
+	}
+	if attempt >= limit {
 		return nil
 	}
-	t := time.Now().UTC().Add(webhookBackoff(attempt))
+	t := time.Now().UTC().Add(webhookBackoff(h, attempt))
 	return &t
 }
 
@@ -545,17 +594,35 @@ func (r *notificationRouter) recordWebhookAttempt(
 	}
 }
 
-// webhookBackoff returns the wait before attempt N+1 given the just-
-// failed attempt. 1 → 1s, 2 → 2s, 3 → 4s, 4 → 8s, 5 → 16s.
-func webhookBackoff(attempt int) time.Duration {
+// webhookBackoff returns the wait before the next attempt given
+// the just-failed attempt number. The schedule is
+// base * 2^(attempt-1) seconds plus a jitter window of [0, base/2)
+// so concurrent retries from many tenants don't pile into the same
+// wall-clock instant. base defaults to defaultBackoffBaseSeconds
+// when the webhook doesn't override it.
+func webhookBackoff(h notifications.Webhook, attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1
 	}
-	d := time.Second
+	base := h.BackoffBaseSeconds
+	if base <= 0 {
+		base = defaultBackoffBaseSeconds
+	}
+	const maxBackoff = 24 * time.Hour
+	d := time.Duration(base) * time.Second
+	// Cap during the doubling loop so an extreme attempt count
+	// (clamped at the platformMaxWebhookAttempts ceiling, but the
+	// math still has to be safe) cannot overflow into a negative
+	// duration.
 	for i := 1; i < attempt; i++ {
 		d *= 2
+		if d > maxBackoff || d < 0 {
+			d = maxBackoff
+			break
+		}
 	}
-	return d
+	jitter := time.Duration(webhookJitterSource.Int63n(int64(time.Duration(base)*time.Second/2 + 1)))
+	return d + jitter
 }
 
 // maybePostTicketThreadUpdate posts a summary card back to the
