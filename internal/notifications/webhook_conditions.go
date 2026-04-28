@@ -2,7 +2,7 @@ package notifications
 
 import (
 	"encoding/json"
-	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -76,9 +76,8 @@ func resolvePath(doc any, path string) (any, bool) {
 			}
 			cur = next
 		case []any:
-			idx := -1
-			fmt.Sscanf(seg, "%d", &idx)
-			if idx < 0 || idx >= len(v) {
+			idx, err := strconv.Atoi(seg)
+			if err != nil || idx < 0 || idx >= len(v) {
 				return nil, false
 			}
 			cur = v[idx]
