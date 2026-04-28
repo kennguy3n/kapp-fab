@@ -11,9 +11,17 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
+	"github.com/kennguy3n/kapp-fab/internal/hr/taxpacks"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 )
+
+// CountryResolver returns the ISO 3166-1 alpha-2 country code for a
+// tenant. Implemented by *tenant.PGStore via a thin adapter so the
+// hr package doesn't import tenant directly (and keeps the existing
+// no-cycle invariant). Empty + ErrNoPack are treated identically by
+// the engine — the slip simply skips statutory withholding.
+type CountryResolver func(ctx context.Context, tenantID uuid.UUID) (string, error)
 
 // Payroll engine — materialises payslips off salary structures for a
 // pay_run, and posts the approved batch as a single journal entry
@@ -37,9 +45,10 @@ var (
 // store is optional — `GeneratePayslips` does not touch it. It's
 // only required by `PostPayRun`.
 type PayrollEngine struct {
-	records *record.PGStore
-	ledger  *ledger.PGStore
-	now     func() time.Time
+	records  *record.PGStore
+	ledger   *ledger.PGStore
+	now      func() time.Time
+	resolver CountryResolver
 }
 
 // NewPayrollEngine binds the engine to a record store. Pass the
@@ -54,6 +63,16 @@ func (e *PayrollEngine) WithClock(now func() time.Time) *PayrollEngine {
 	if now != nil {
 		e.now = now
 	}
+	return e
+}
+
+// WithCountryResolver wires a tenant→country lookup so the engine
+// can resolve a per-country tax pack at slip generation time. A nil
+// resolver disables statutory withholding entirely (matching the
+// pre-Phase-M behaviour); resolvers that return "" or
+// taxpacks.ErrNoPack also fall back to the no-pack code path.
+func (e *PayrollEngine) WithCountryResolver(r CountryResolver) *PayrollEngine {
+	e.resolver = r
 	return e
 }
 
@@ -180,6 +199,22 @@ func (e *PayrollEngine) GeneratePayslips(
 	var existingCount int
 	out := &GenerateResult{}
 	var totalGross, totalDeductions, totalNet decimal.Decimal
+
+	// Resolve the tenant's tax pack once — every slip in this run
+	// shares the same jurisdiction. Failures here fail-soft: the
+	// engine logs nothing (no logger plumbed) and the slips run
+	// without statutory deductions, which matches the pre-Phase-M
+	// behaviour for tenants without a country code.
+	var pack taxpacks.TaxPack
+	if e.resolver != nil {
+		country, err := e.resolver(ctx, tenantID)
+		if err == nil && country != "" {
+			if p, err := taxpacks.Lookup(country); err == nil {
+				pack = p
+			}
+		}
+	}
+	period := taxpacks.PayPeriod{Start: periodStart, End: periodEnd}
 	for _, s := range existingSlips {
 		var sd payslipData
 		if err := json.Unmarshal(s.Data, &sd); err != nil {
@@ -221,6 +256,36 @@ func (e *PayrollEngine) GeneratePayslips(
 			slipCurrency = strings.ToUpper(sv.Data.Currency)
 		}
 		earnings, deductions, gross, deduct, net := rollStructure(sv.Data, slipCurrency)
+
+		// Statutory tax-pack deductions are appended after the
+		// structure-driven lines so the slip's `deductions` array
+		// keeps a stable ordering: structure components first,
+		// then federal / FICA / PAYG. Engine totals are
+		// recomputed below so the rollup catches the new lines.
+		if pack != nil {
+			info := taxpacks.EmployeeInfo{
+				ID:         empIDStr,
+				FilingType: ed.FilingType,
+				Allowances: ed.Allowances,
+				Resident:   ed.Resident == nil || *ed.Resident, // default resident=true
+				HasTFN:     ed.HasTFN == nil || *ed.HasTFN,     // default has_tfn=true
+				YTDGross:   ed.YTDGross,
+				Currency:   slipCurrency,
+			}
+			extraLines, err := pack.ComputeWithholding(ctx, info, gross, period)
+			if err != nil {
+				return nil, fmt.Errorf("hr: tax pack %s: %w", pack.Country(), err)
+			}
+			for _, d := range extraLines {
+				deductions = append(deductions, lineOut{
+					Code:   d.Code,
+					Name:   d.Name,
+					Amount: d.Amount,
+				})
+				deduct = deduct.Add(d.Amount)
+			}
+			net = gross.Sub(deduct)
+		}
 		slipData := map[string]any{
 			"pay_run_id":       payRunID.String(),
 			"employee_id":      empIDStr,
@@ -644,6 +709,13 @@ type payslipData struct {
 type employeeData struct {
 	Status     string `json:"status"`
 	Department string `json:"department"`
+	// Tax-pack inputs. Optional; pre-Phase-M employee KRecords
+	// don't carry these and the packs degrade gracefully.
+	FilingType string          `json:"filing_type,omitempty"`
+	Allowances int             `json:"allowances,omitempty"`
+	Resident   *bool           `json:"resident,omitempty"`
+	HasTFN     *bool           `json:"has_tfn,omitempty"`
+	YTDGross   decimal.Decimal `json:"ytd_gross,omitempty"`
 }
 
 type structureData struct {
