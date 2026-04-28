@@ -31,11 +31,19 @@ type rolesHandlers struct {
 	eval *authz.PGEvaluator
 }
 
+// roleDTO is the wire shape for /api/v1/roles. ParentRole is a
+// pointer so updateRole can distinguish between three caller
+// intents on a partial update: nil ("field omitted, preserve the
+// existing value"), pointer to "" ("clear the parent — make this
+// role a hierarchy root"), and pointer to a non-empty string ("set
+// the parent to this role"). Without the pointer, an absent field
+// would deserialise to "" and silently detach the role from its
+// parent — see Devin Review BUG_…_0001.
 type roleDTO struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Permissions json.RawMessage `json:"permissions"`
-	ParentRole  string          `json:"parent_role,omitempty"`
+	ParentRole  *string         `json:"parent_role,omitempty"`
 }
 
 type permissionDTO struct {
@@ -56,7 +64,7 @@ func (h *rolesHandlers) listRoles(w http.ResponseWriter, r *http.Request) {
 	out := make([]roleDTO, 0)
 	err := platform.WithTenantTx(r.Context(), h.pool, t.ID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
-			`SELECT name, COALESCE(parent_role, ''), permissions
+			`SELECT name, parent_role, permissions
 			   FROM roles
 			  WHERE tenant_id = $1
 			  ORDER BY name`,
@@ -67,9 +75,15 @@ func (h *rolesHandlers) listRoles(w http.ResponseWriter, r *http.Request) {
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var d roleDTO
-			if err := rows.Scan(&d.Name, &d.ParentRole, &d.Permissions); err != nil {
+			var (
+				d      roleDTO
+				parent *string
+			)
+			if err := rows.Scan(&d.Name, &parent, &d.Permissions); err != nil {
 				return err
+			}
+			if parent != nil && *parent != "" {
+				d.ParentRole = parent
 			}
 			out = append(out, d)
 		}
@@ -101,8 +115,8 @@ func (h *rolesHandlers) createRole(w http.ResponseWriter, r *http.Request) {
 		req.Permissions = json.RawMessage(`[]`)
 	}
 	err := platform.WithTenantTx(r.Context(), h.pool, t.ID, func(ctx context.Context, tx pgx.Tx) error {
-		if req.ParentRole != "" {
-			if err := assertNoCycle(ctx, tx, t.ID, req.Name, req.ParentRole); err != nil {
+		if req.ParentRole != nil && *req.ParentRole != "" {
+			if err := assertNoCycle(ctx, tx, t.ID, req.Name, *req.ParentRole); err != nil {
 				return err
 			}
 		}
@@ -110,7 +124,7 @@ func (h *rolesHandlers) createRole(w http.ResponseWriter, r *http.Request) {
 			`INSERT INTO roles (tenant_id, name, permissions, parent_role)
 			 VALUES ($1, $2, $3, NULLIF($4, ''))
 			 ON CONFLICT (tenant_id, name) DO NOTHING`,
-			t.ID, req.Name, req.Permissions, req.ParentRole,
+			t.ID, req.Name, req.Permissions, derefOrEmpty(req.ParentRole),
 		)
 		return err
 	})
@@ -143,15 +157,24 @@ func (h *rolesHandlers) updateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := platform.WithTenantTx(r.Context(), h.pool, t.ID, func(ctx context.Context, tx pgx.Tx) error {
-		if req.ParentRole != "" {
-			if err := assertNoCycle(ctx, tx, t.ID, name, req.ParentRole); err != nil {
+		if req.ParentRole != nil && *req.ParentRole != "" {
+			if err := assertNoCycle(ctx, tx, t.ID, name, *req.ParentRole); err != nil {
 				return err
 			}
 		}
+		// $4 is NULL when ParentRole was omitted from the body — the
+		// CASE then preserves the existing parent_role. An explicit
+		// empty string clears the parent (NULLIF(' ','') = NULL); a
+		// non-empty value sets it. Without this guard, every PATCH
+		// that didn't carry parent_role would unparent the role and
+		// silently break the inheritance chain.
 		ct, err := tx.Exec(ctx,
 			`UPDATE roles
 			    SET permissions = COALESCE($3, permissions),
-			        parent_role = NULLIF($4, '')
+			        parent_role = CASE
+			            WHEN $4::text IS NOT NULL THEN NULLIF($4, '')
+			            ELSE parent_role
+			        END
 			  WHERE tenant_id = $1 AND name = $2`,
 			t.ID, name, req.Permissions, req.ParentRole,
 		)
@@ -259,16 +282,22 @@ func (h *rolesHandlers) grantPermission(w http.ResponseWriter, r *http.Request) 
 	if len(req.Conditions) == 0 {
 		req.Conditions = json.RawMessage(`{}`)
 	}
-	id := uuid.New()
+	// Use INSERT ... RETURNING id so the response carries the row id
+	// that's actually persisted. Without RETURNING, an ON CONFLICT
+	// path silently drops the freshly-generated UUID and the existing
+	// row's id remains the canonical one — handing the caller a
+	// phantom id they could never DELETE against. See Devin Review
+	// BUG_…_0002.
+	var id uuid.UUID
 	err := platform.WithTenantTx(r.Context(), h.pool, t.ID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
+		return tx.QueryRow(ctx,
 			`INSERT INTO permissions (id, tenant_id, role_name, ktype, action, conditions, granted_by)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7)
 			 ON CONFLICT (tenant_id, role_name, ktype, action)
-			 DO UPDATE SET conditions = EXCLUDED.conditions, revoked_at = NULL`,
-			id, t.ID, role, req.KType, req.Action, req.Conditions, actorOrDefault(ctx),
-		)
-		return err
+			 DO UPDATE SET conditions = EXCLUDED.conditions, revoked_at = NULL
+			 RETURNING id`,
+			uuid.New(), t.ID, role, req.KType, req.Action, req.Conditions, actorOrDefault(ctx),
+		).Scan(&id)
 	})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("grant permission: %v", err), http.StatusInternalServerError)
@@ -292,14 +321,24 @@ func (h *rolesHandlers) revokePermission(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	err = platform.WithTenantTx(r.Context(), h.pool, t.ID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
+		ct, err := tx.Exec(ctx,
 			`UPDATE permissions SET revoked_at = now()
-			  WHERE tenant_id = $1 AND id = $2`,
+			  WHERE tenant_id = $1 AND id = $2 AND revoked_at IS NULL`,
 			t.ID, id,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		if ct.RowsAffected() == 0 {
+			return errPermissionNotFound
+		}
+		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errPermissionNotFound) {
+			http.Error(w, "permission not found", http.StatusNotFound)
+			return
+		}
 		http.Error(w, fmt.Sprintf("revoke permission: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -412,9 +451,20 @@ func (h *rolesHandlers) invalidateUser(tenantID, userID uuid.UUID) {
 }
 
 var (
-	errRoleNotFound  = errors.New("role not found")
-	errCycleDetected = errors.New("parent_role would create a cycle")
+	errRoleNotFound       = errors.New("role not found")
+	errCycleDetected      = errors.New("parent_role would create a cycle")
+	errPermissionNotFound = errors.New("permission not found")
 )
+
+// derefOrEmpty returns *s when s is non-nil, otherwise the empty
+// string — used to feed *string into pgx's parameter encoder when a
+// SQL site treats "" and NULL identically (e.g. NULLIF(\"\", '')).
+func derefOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
 
 // assertNoCycle walks the proposed parent chain to ensure assigning
 // `parent` as the parent of `name` does not introduce a cycle. The
