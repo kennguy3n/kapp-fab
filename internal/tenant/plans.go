@@ -86,6 +86,7 @@ var AllFeatures = []string{
 	FeatureInsightsExternal,
 	FeatureInsightsEmbed,
 	FeatureInsightsSQLEditor,
+	FeaturePOS,
 }
 
 // PlanLimits is the numeric ceiling each plan enforces per billing
