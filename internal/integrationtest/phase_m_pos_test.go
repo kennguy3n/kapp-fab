@@ -231,11 +231,16 @@ func TestPOSPosterRejectsInvalidStates(t *testing.T) {
 		t.Fatalf("create profile: %v", err)
 	}
 
-	t.Run("negative total rejected", func(t *testing.T) {
+	t.Run("zero total rejected", func(t *testing.T) {
+		// The schema clamps total to min:0, so the only path that
+		// reaches the poster's !IsPositive guard is total=0. A
+		// negative total never gets past KType validation at the
+		// record create step — that constraint is covered by the
+		// schema and asserted via the validation error.
 		body, _ := json.Marshal(map[string]any{
 			"profile_id": profileRec.ID.String(), "customer_id": customerID.String(),
 			"currency": "USD", "lines": []map[string]any{},
-			"subtotal": -1.0, "total": -1.0, "tendered": 0.0,
+			"subtotal": 0.0, "total": 0.0, "tendered": 0.0,
 			"status": "draft", "issue_date": "2026-04-28",
 		})
 		rec, err := h.records.Create(ctx, record.KRecord{
@@ -245,7 +250,21 @@ func TestPOSPosterRejectsInvalidStates(t *testing.T) {
 			t.Fatalf("create: %v", err)
 		}
 		if _, err := poster.PostPOSInvoice(ctx, tn.ID, rec.ID, actor); err == nil {
-			t.Fatalf("expected error for negative total, got nil")
+			t.Fatalf("expected error for zero total, got nil")
+		}
+		// And confirm the schema itself rejects negative totals at
+		// the record-create boundary (so the !IsPositive guard +
+		// the schema together close the door on both paths).
+		negBody, _ := json.Marshal(map[string]any{
+			"profile_id": profileRec.ID.String(), "customer_id": customerID.String(),
+			"currency": "USD", "lines": []map[string]any{},
+			"subtotal": -1.0, "total": -1.0, "tendered": 0.0,
+			"status": "draft", "issue_date": "2026-04-28",
+		})
+		if _, err := h.records.Create(ctx, record.KRecord{
+			ID: uuid.New(), TenantID: tn.ID, KType: sales.KTypePOSInvoice, Data: negBody, CreatedBy: actor,
+		}); err == nil {
+			t.Fatalf("expected schema validation to reject negative total")
 		}
 	})
 
