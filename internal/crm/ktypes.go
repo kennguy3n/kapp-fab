@@ -190,11 +190,10 @@ var taskSchema = []byte(`{
     {"name": "description", "type": "text"}
   ],
   "views": {
-    "list": {"columns": ["title", "assignee", "due_date", "project_id", "status"]},
+    "list": {"columns": ["title", "assignee", "due_date", "status"]},
     "form": {"sections": [
       {"title": "Task", "fields": ["title", "assignee", "due_date", "status", "description"]},
-      {"title": "Project", "fields": ["project_id", "milestone_id"]},
-      {"title": "Link", "fields": ["linked_ktype", "linked_id"]}
+      {"title": "Link", "fields": ["linked_ktype", "linked_id", "project_id", "milestone_id"]}
     ]},
     "kanban": {"group_by": "status", "card_title": "title", "card_subtitle": "assignee"}
   },
