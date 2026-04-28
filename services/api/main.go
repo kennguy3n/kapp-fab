@@ -456,7 +456,19 @@ func run() error {
 	}
 	meth := &meteringHandlers{metering: meteringStore, tenants: tenantSvc, plans: planStore, features: featureStore}
 	kh := &ktypeHandlers{registry: ktypeRegistry}
-	rh := &recordHandlers{store: recordStore, eval: authzEval}
+	// recordHandlers calls AuthorizeRecord from update()/delete() to
+	// enforce per-record conditions like owner_only. The handler
+	// guards the call with `h.eval != nil`, so leave eval unset when
+	// authz enforcement is off — otherwise actorOrDefault returns
+	// phaseASystemActor (a non-Nil UUID with no role rows in
+	// user_tenant_roles), the evaluator finds zero permissions, and
+	// every PATCH/DELETE on records 403s in dev/test environments
+	// that have not yet wired JWT auth.
+	var recordEval authz.Evaluator
+	if authzEnforced {
+		recordEval = authzEval
+	}
+	rh := &recordHandlers{store: recordStore, eval: recordEval}
 	sh := &searchHandlers{store: recordStore}
 	webhookStore := notifications.NewWebhookStore(pool)
 	whh := &webhookHandlers{store: webhookStore}
