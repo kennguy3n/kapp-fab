@@ -1575,6 +1575,10 @@ export interface DashboardSummary {
    *  optional on the type for backward compatibility with legacy
    *  fixtures the test suite hard-codes. */
   present_today?: number;
+  /** Count of hr.appraisal records in the {submitted, reviewed}
+   *  band — i.e. awaiting reviewer or employee action. Optional
+   *  for backward compatibility with pre-Phase-M-Task-4 servers. */
+  pending_reviews?: number;
   /** ISO-4217 functional currency the monetary fields are denominated in. */
   base_currency: string;
 }

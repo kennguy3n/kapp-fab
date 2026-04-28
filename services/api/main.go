@@ -289,6 +289,11 @@ func run() error {
 			return fmt.Errorf("register shift ktype %s: %w", kt.Name, err)
 		}
 	}
+	for _, kt := range hr.AppraisalKTypes() {
+		if err := ktypeRegistry.Register(ctx, kt); err != nil {
+			return fmt.Errorf("register appraisal ktype %s: %w", kt.Name, err)
+		}
+	}
 	// Phase I — register helpdesk KTypes. The helpdesk store manages
 	// typed SLA policies + breach log while tickets themselves ride
 	// the generic KRecord plumbing.
