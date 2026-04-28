@@ -2,12 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/sales"
 )
 
@@ -42,12 +45,47 @@ func (h *posHandlers) finalize(w http.ResponseWriter, r *http.Request) {
 	actor := actorOrDefault(r.Context())
 	rec, err := h.poster.PostPOSInvoice(r.Context(), t.ID, id, actor)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writePOSError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(rec); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+}
+
+// writePOSError translates POSPoster errors into the appropriate HTTP
+// status. Mirrors writeFinanceError / writeRecordError so the web
+// client can key off the same status codes (404 missing, 409 already
+// in a terminal state, 422 validation, 500 fallback) instead of
+// receiving a blanket 400 for every failure path.
+func writePOSError(w http.ResponseWriter, err error) {
+	if err == nil {
+		http.Error(w, "unknown error", http.StatusInternalServerError)
+		return
+	}
+	if errors.Is(err, record.ErrNotFound) {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, record.ErrVersionConflict) {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "cannot finalize invoice in"):
+		http.Error(w, msg, http.StatusConflict)
+	case strings.Contains(msg, "not a pos_invoice"),
+		strings.Contains(msg, "customer_id required"),
+		strings.Contains(msg, "total must be > 0"),
+		strings.Contains(msg, "profile_id"):
+		http.Error(w, msg, http.StatusUnprocessableEntity)
+	default:
+		// Delegate to writeRecordError so validation envelopes
+		// returned by the underlying record store keep the
+		// canonical { error, fields } shape.
+		writeRecordError(w, err)
 	}
 }

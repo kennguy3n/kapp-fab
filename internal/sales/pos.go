@@ -54,7 +54,7 @@ var posProfileSchema = []byte(`{
     "form": {"sections": [
       {"title": "Profile", "fields": ["name", "warehouse_id", "default_customer_id", "currency", "active"]},
       {"title": "Payment", "fields": ["payment_methods"]},
-      {"title": "Accounts", "fields": ["ar_account_code", "revenue_account_code", "tax_code", "tax_account_code"]}
+      {"title": "Accounts", "fields": ["ar_account_code", "revenue_account_code", "bank_account_code", "tax_code", "tax_account_code"]}
     ]}
   },
   "cards": {"summary": "{{name}} — {{warehouse_id}} ({{currency}})"},
@@ -165,8 +165,12 @@ func (p *POSPoster) PostPOSInvoice(ctx context.Context, tenantID, posInvoiceID, 
 	if err := json.Unmarshal(posRec.Data, &current); err != nil {
 		return nil, fmt.Errorf("pos: decode invoice: %w", err)
 	}
-	if status, _ := current["status"].(string); status == "posted" {
+	status, _ := current["status"].(string)
+	if status == "posted" {
 		return posRec, nil
+	}
+	if status != "draft" && status != "" {
+		return nil, fmt.Errorf("pos: cannot finalize invoice in %q state", status)
 	}
 
 	profileID, err := refUUID(current, "profile_id")
@@ -192,7 +196,7 @@ func (p *POSPoster) PostPOSInvoice(ctx context.Context, tenantID, posInvoiceID, 
 
 	currency := stringOr(current, "currency", stringOr(profile, "currency", "USD"))
 	total := decimalOr(current, "total")
-	if total.IsZero() {
+	if !total.IsPositive() {
 		return nil, errors.New("pos: total must be > 0")
 	}
 
@@ -274,10 +278,11 @@ func (p *POSPoster) PostPOSInvoice(ctx context.Context, tenantID, posInvoiceID, 
 	updated, _ := json.Marshal(current)
 	posRec.Data = updated
 	posRec.UpdatedBy = &actorID
-	if _, err := p.records.Update(ctx, *posRec); err != nil {
+	updatedRec, err := p.records.Update(ctx, *posRec)
+	if err != nil {
 		return nil, fmt.Errorf("pos: update pos_invoice: %w", err)
 	}
-	return posRec, nil
+	return updatedRec, nil
 }
 
 // helpers (unexported) ------------------------------------------

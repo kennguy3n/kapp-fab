@@ -191,3 +191,79 @@ func TestPOSPosterFinalizesARAndPayment(t *testing.T) {
 	}
 	_ = finance.KTypeARInvoice
 }
+
+// TestPOSPosterRejectsInvalidStates exercises the validation guards on
+// PostPOSInvoice that the writePOSError handler maps to the right HTTP
+// status: negative totals (422), voided invoices (409, never re-posted).
+func TestPOSPosterRejectsInvalidStates(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, ledgerStore, invoicePoster, _, _, warehouse := newTenantForInventory(t, h)
+	if _, err := ledgerStore.CreateAccount(ctx, ledger.Account{
+		TenantID: tn.ID, Code: "1000", Name: "Cash", Type: ledger.AccountTypeAsset, Active: true,
+	}); err != nil {
+		t.Fatalf("seed cash account: %v", err)
+	}
+	for _, kt := range sales.POSKTypes() {
+		if err := h.ktypes.Register(ctx, kt); err != nil {
+			t.Fatalf("register pos ktype %s: %v", kt.Name, err)
+		}
+	}
+	paymentPoster := ledger.NewPaymentPoster(ledger.NewPGStore(h.pool, h.publisher, h.auditor), h.records)
+	poster := sales.NewPOSPoster(h.records, invoicePoster, paymentPoster)
+	actor := uuid.New()
+	customerID := uuid.New()
+
+	profileBody, _ := json.Marshal(map[string]any{
+		"name":                 "Storefront 2",
+		"warehouse_id":         warehouse.ID.String(),
+		"default_customer_id":  customerID.String(),
+		"currency":             "USD",
+		"ar_account_code":      "1100",
+		"revenue_account_code": "4000",
+		"bank_account_code":    "1000",
+		"active":               true,
+	})
+	profileRec, err := h.records.Create(ctx, record.KRecord{
+		ID: uuid.New(), TenantID: tn.ID, KType: sales.KTypePOSProfile, Data: profileBody, CreatedBy: actor,
+	})
+	if err != nil {
+		t.Fatalf("create profile: %v", err)
+	}
+
+	t.Run("negative total rejected", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]any{
+			"profile_id": profileRec.ID.String(), "customer_id": customerID.String(),
+			"currency": "USD", "lines": []map[string]any{},
+			"subtotal": -1.0, "total": -1.0, "tendered": 0.0,
+			"status": "draft", "issue_date": "2026-04-28",
+		})
+		rec, err := h.records.Create(ctx, record.KRecord{
+			ID: uuid.New(), TenantID: tn.ID, KType: sales.KTypePOSInvoice, Data: body, CreatedBy: actor,
+		})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if _, err := poster.PostPOSInvoice(ctx, tn.ID, rec.ID, actor); err == nil {
+			t.Fatalf("expected error for negative total, got nil")
+		}
+	})
+
+	t.Run("voided invoice rejected", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]any{
+			"profile_id": profileRec.ID.String(), "customer_id": customerID.String(),
+			"currency": "USD", "lines": []map[string]any{},
+			"subtotal": 10.0, "total": 10.0, "tendered": 10.0,
+			"status": "voided", "issue_date": "2026-04-28",
+		})
+		rec, err := h.records.Create(ctx, record.KRecord{
+			ID: uuid.New(), TenantID: tn.ID, KType: sales.KTypePOSInvoice, Data: body, CreatedBy: actor,
+		})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if _, err := poster.PostPOSInvoice(ctx, tn.ID, rec.ID, actor); err == nil {
+			t.Fatalf("expected error for voided invoice, got nil")
+		}
+	})
+}
