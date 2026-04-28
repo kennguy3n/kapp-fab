@@ -113,21 +113,27 @@ export function WebhookDeliveryLogPage() {
   );
 }
 
-interface EventGroup {
+export interface EventGroup {
   eventId: string;
   eventType: string;
   attempts: WebhookDelivery[];
   delivered: boolean;
+  // _maxAttempt tracks the highest attempt number observed for this
+  // event so an out-of-order earlier retry can never overwrite the
+  // canonical newest status.
+  _maxAttempt: number;
   lastStatus?: number;
   lastError?: string;
   nextRetryAt?: string;
 }
 
-function groupByEvent(rows: WebhookDelivery[]): EventGroup[] {
+export function groupByEvent(rows: WebhookDelivery[]): EventGroup[] {
   const map = new Map<string, EventGroup>();
-  // The list comes newest-first; iterating in order means the
-  // latest attempt is the first one we see per event_id, which is
-  // the one we want to surface as "last status / next retry".
+  // The list usually arrives newest-first, but the worker can write
+  // a lagged retry after a higher-numbered attempt has already been
+  // recorded, so we cannot rely on arrival order. Track _maxAttempt
+  // per group and only overwrite the surfaced "last status / next
+  // retry" when we see a strictly higher attempt.
   for (const r of rows) {
     let g = map.get(r.event_id);
     if (!g) {
@@ -136,17 +142,13 @@ function groupByEvent(rows: WebhookDelivery[]): EventGroup[] {
         eventType: r.event_type,
         attempts: [],
         delivered: false,
+        _maxAttempt: 0,
       };
       map.set(r.event_id, g);
     }
     g.attempts.push(r);
-    // The "last attempt" view is the row with the highest attempt
-    // number, regardless of arrival order, so a lagged earlier
-    // retry can't overwrite the canonical newest status.
-    if (
-      g.lastStatus === undefined ||
-      r.attempt > (g.attempts[0]?.attempt ?? 0)
-    ) {
+    if (r.attempt > g._maxAttempt) {
+      g._maxAttempt = r.attempt;
       g.lastStatus = r.status_code ?? undefined;
       g.lastError = r.error ?? undefined;
       g.nextRetryAt = r.next_retry_at ?? undefined;
