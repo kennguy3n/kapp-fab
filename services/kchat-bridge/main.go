@@ -134,7 +134,8 @@ func run() error {
 	// tenant via `attendance_kchat_sync` (constructed above so the
 	// insights runner can also reuse it via WithFeaturePolicy).
 	userStore := tenant.NewUserStore(pool).WithAdminPool(adminPool)
-	presenceHandler := NewPresenceHandler(userStore, featureStore, recordStore)
+	tenantStore := tenant.NewPGStore(pool)
+	presenceHandler := NewPresenceHandler(userStore, featureStore, tenantStore, recordStore)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)

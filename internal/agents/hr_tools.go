@@ -21,6 +21,7 @@ import (
 func RegisterHRTools(x *Executor, store *hr.Store) {
 	x.Register(&requestLeaveTool{executor: x})
 	x.Register(&approveLeaveTool{executor: x, store: store})
+	x.Register(&assignShiftTool{executor: x})
 }
 
 // RegisterPayrollTools wires the Phase J pay_run tools. Kept as a
@@ -269,5 +270,70 @@ func (t *approveLeaveTool) Invoke(ctx context.Context, inv Invocation) (*Result,
 		Summary: fmt.Sprintf("Leave request %s approved", rec.ID),
 		Record:  rec,
 		Extra:   map[string]any{"leave_ledger_id": ledgerID},
+	}, nil
+}
+
+// ----- hr.assign_shift (Phase M) -----
+//
+// Assigns a previously-defined hr.shift_type to an employee on a
+// specific calendar date. The tool deliberately stays read-only on
+// hr.shift_type — operators create shift types out-of-band via the
+// regular KRecord surface — and writes a single
+// hr.shift_assignment row in `scheduled` state. The status moves
+// through the assignment lifecycle (confirmed / worked / missed)
+// via the kchat-bridge presence sweeper, not this tool.
+type assignShiftInput struct {
+	EmployeeID  uuid.UUID `json:"employee_id"`
+	ShiftTypeID uuid.UUID `json:"shift_type_id"`
+	ShiftDate   string    `json:"shift_date"`
+	Notes       string    `json:"notes,omitempty"`
+}
+
+type assignShiftTool struct{ executor *Executor }
+
+func (t *assignShiftTool) Name() string               { return "hr.assign_shift" }
+func (t *assignShiftTool) RequiresConfirmation() bool { return true }
+func (t *assignShiftTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in assignShiftInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.EmployeeID == uuid.Nil || in.ShiftTypeID == uuid.Nil || in.ShiftDate == "" {
+		return nil, errors.New("hr.assign_shift: employee_id, shift_type_id, shift_date required")
+	}
+	if _, err := time.Parse("2006-01-02", in.ShiftDate); err != nil {
+		return nil, fmt.Errorf("hr.assign_shift: shift_date must be YYYY-MM-DD: %w", err)
+	}
+	data := map[string]any{
+		"employee_id":   in.EmployeeID,
+		"shift_type_id": in.ShiftTypeID,
+		"shift_date":    in.ShiftDate,
+		"status":        "scheduled",
+		"notes":         in.Notes,
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(data)
+		return &Result{
+			Summary: fmt.Sprintf("Would assign shift %s to %s on %s", in.ShiftTypeID, in.EmployeeID, in.ShiftDate),
+			Preview: preview,
+		}, nil
+	}
+	if t.executor.records == nil {
+		return nil, errors.New("hr.assign_shift: record store not configured")
+	}
+	body, _ := json.Marshal(data)
+	rec, err := t.executor.records.Create(ctx, record.KRecord{
+		ID:        uuid.New(),
+		TenantID:  inv.TenantID,
+		KType:     hr.KTypeShiftAssignment,
+		Data:      body,
+		CreatedBy: inv.ActorID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Result{
+		Summary: fmt.Sprintf("Shift assignment %s scheduled", rec.ID),
+		Record:  rec,
 	}, nil
 }
