@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
@@ -196,15 +197,25 @@ func (p *POSPoster) PostPOSInvoice(ctx context.Context, tenantID, posInvoiceID, 
 	}
 
 	// 1. Build + post AR invoice.
+	// Numeric fields ride as float64 so the AR-invoice schema's
+	// `type: number` validator accepts them — decimal.Decimal
+	// renders as a quoted string under json.Marshal which the
+	// validator correctly rejects. decimalOr() in the AR poster
+	// unwraps either form, so we lose no precision on the values
+	// we care about (cents-scale POS totals).
+	// Dates default to today (UTC) so finalising an in-memory
+	// pos_invoice that never set issue_date doesn't trip the
+	// ISO-8601 validator one layer deeper.
+	issueDate := stringOr(current, "issue_date", time.Now().UTC().Format("2006-01-02"))
 	arBody := map[string]any{
 		"customer_id":          customerID.String(),
 		"invoice_number":       stringOr(current, "invoice_number", ""),
-		"issue_date":           stringOr(current, "issue_date", ""),
-		"due_date":             stringOr(current, "issue_date", ""),
+		"issue_date":           issueDate,
+		"due_date":             stringOr(current, "due_date", issueDate),
 		"lines":                rawArray(posRec.Data, "lines"),
-		"subtotal":             decimalOr(current, "subtotal").String(),
-		"tax_amount":           decimalOr(current, "tax_amount").String(),
-		"total":                total.String(),
+		"subtotal":             decimalOr(current, "subtotal").InexactFloat64(),
+		"tax_amount":           decimalOr(current, "tax_amount").InexactFloat64(),
+		"total":                total.InexactFloat64(),
 		"currency":             currency,
 		"status":               "draft",
 		"ar_account_code":      stringOr(profile, "ar_account_code", ""),
@@ -231,14 +242,14 @@ func (p *POSPoster) PostPOSInvoice(ctx context.Context, tenantID, posInvoiceID, 
 		"payment_type":    "receive",
 		"party_type":      "customer",
 		"party_id":        customerID.String(),
-		"amount":          total.String(),
+		"amount":          total.InexactFloat64(),
 		"currency":        currency,
-		"payment_date":    stringOr(current, "issue_date", ""),
+		"payment_date":    issueDate,
 		"reference":       stringOr(current, "invoice_number", "POS"),
 		"bank_account":    stringOr(profile, "bank_account_code", ""),
 		"ar_account_code": stringOr(profile, "ar_account_code", ""),
 		"allocations": []map[string]any{
-			{"invoice_id": arRec.ID.String(), "allocated_amount": total.String()},
+			{"invoice_id": arRec.ID.String(), "allocated_amount": total.InexactFloat64()},
 		},
 	}
 	payBytes, _ := json.Marshal(payBody)
