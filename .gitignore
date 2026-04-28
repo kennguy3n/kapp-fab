@@ -9,3 +9,7 @@ node_modules/
 dist/
 storybook-static/
 *.tsbuildinfo
+
+# Playwright artifacts (screenshots themselves are committed under docs/screenshots)
+test-results/
+playwright-report/
