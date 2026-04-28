@@ -267,6 +267,11 @@ func run() error {
 	if err := sales.RegisterKTypes(ctx, ktypeRegistry); err != nil {
 		return err
 	}
+	for _, kt := range sales.POSKTypes() {
+		if err := ktypeRegistry.Register(ctx, kt); err != nil {
+			return fmt.Errorf("register pos ktype %s: %w", kt.Name, err)
+		}
+	}
 	for _, kt := range ledger.BankKTypes() {
 		if err := ktypeRegistry.Register(ctx, kt); err != nil {
 			return fmt.Errorf("register bank ktype %s: %w", kt.Name, err)
@@ -840,6 +845,21 @@ func run() error {
 			r.Get("/exchange-rates", curh.listRates)
 			r.Get("/exchange-rates/convert", curh.convert)
 			r.Post("/exchange-rates/unrealized", curh.unrealizedGL)
+		})
+
+		// Phase M Task 6 — POS finalize. Reuses InvoicePoster +
+		// PaymentPoster for the underlying double-entry; this
+		// route just handles the orchestration. Gated on FeaturePOS
+		// via the dynamic feature middleware (path → "pos").
+		posh := &posHandlers{poster: sales.NewPOSPoster(recordStore, invoicePoster, paymentPoster)}
+		r.Route("/api/v1/pos", func(r chi.Router) {
+			r.Use(platform.TenantMiddleware(tenantSvc))
+			r.Use(apiCallMW)
+			r.Use(featureMW)
+			r.Use(platform.IdempotencyMiddleware(pool))
+			r.Use(rateLimitMW)
+			r.Use(platform.QuotaMiddleware(quotaEnforcer))
+			r.Post("/invoices/{id}/finalize", posh.finalize)
 		})
 
 		// Phase J payroll surface — generate draft payslips for a

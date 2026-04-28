@@ -56,6 +56,13 @@ const (
 	// can't reach the raw-SQL surface even with a valid `insights`
 	// flag.
 	FeatureInsightsSQLEditor = "insights_sql_editor"
+	// FeaturePOS gates the Phase M Task 6 POS surface
+	// (sales.pos_profile, sales.pos_invoice, /api/v1/pos/*). Off
+	// on free / starter, on for business / enterprise — POS
+	// storefronts are typically business-tier and the offline
+	// queue + idempotent finalize handler add measurable load
+	// per active terminal.
+	FeaturePOS = "pos"
 )
 
 // AllFeatures is the canonical list of feature keys. Handlers that
@@ -79,6 +86,7 @@ var AllFeatures = []string{
 	FeatureInsightsExternal,
 	FeatureInsightsEmbed,
 	FeatureInsightsSQLEditor,
+	FeaturePOS,
 }
 
 // PlanLimits is the numeric ceiling each plan enforces per billing
@@ -242,6 +250,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureInsightsExternal:  false,
 			FeatureInsightsEmbed:     false,
 			FeatureInsightsSQLEditor: false,
+			FeaturePOS:              false,
 		}
 	case PlanBusiness:
 		return map[string]bool{
@@ -261,6 +270,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureInsightsExternal:  true,
 			FeatureInsightsEmbed:     false,
 			FeatureInsightsSQLEditor: false,
+			FeaturePOS:              true,
 		}
 	case PlanEnterprise:
 		return map[string]bool{
@@ -280,6 +290,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureInsightsExternal:  true,
 			FeatureInsightsEmbed:     true,
 			FeatureInsightsSQLEditor: true,
+			FeaturePOS:              true,
 		}
 	default:
 		// Free plan — CRM only. Also the fallback when the plan
@@ -302,6 +313,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureInsightsExternal:  false,
 			FeatureInsightsEmbed:     false,
 			FeatureInsightsSQLEditor: false,
+			FeaturePOS:              false,
 		}
 	}
 }

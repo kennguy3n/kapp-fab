@@ -98,6 +98,8 @@ func FeatureFromPath(p string) string {
 		return tenant.FeatureReportBuilder
 	case "insights":
 		return tenant.FeatureInsights
+	case "pos":
+		return tenant.FeaturePOS
 	default:
 		return ""
 	}
@@ -109,6 +111,15 @@ func FeatureFromPath(p string) string {
 // like "platform.audit") return "" so the gate is permissive — only
 // domain KTypes are plan-gated.
 func featureFromKType(ktype string) string {
+	// POS KTypes share the "sales" prefix with the inventory
+	// feature gate, so they have to be matched on the full ktype
+	// string before the prefix switch — otherwise a Starter tenant
+	// (inventory=true, pos=false) would slip past the gate via
+	// /api/v1/records/sales.pos_*.
+	switch ktype {
+	case "sales.pos_profile", "sales.pos_invoice":
+		return tenant.FeaturePOS
+	}
 	dot := strings.IndexByte(ktype, '.')
 	if dot == -1 {
 		return ""
