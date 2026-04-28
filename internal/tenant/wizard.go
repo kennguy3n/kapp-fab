@@ -52,13 +52,21 @@ type WizardRole struct {
 	Permissions json.RawMessage `json:"permissions"`
 }
 
-// WizardUser is the minimum identifier + role needed to seed an initial
+// WizardUser is the minimum identifier + role(s) needed to seed an initial
 // membership row in `user_tenants`. If the user does not exist in
 // `users` yet, the wizard will create a stub by email.
+//
+// Role is the legacy single-role field — retained so existing callers
+// keep working — and is mirrored into both user_tenants.role and the new
+// user_tenant_roles junction. Roles is the multi-role list; when supplied
+// every entry is inserted into user_tenant_roles, and the first non-empty
+// entry is used as the primary user_tenants.role for backwards
+// compatibility with code paths that still read a single role.
 type WizardUser struct {
-	Email       string `json:"email"`
-	DisplayName string `json:"display_name,omitempty"`
-	Role        string `json:"role"`
+	Email       string   `json:"email"`
+	DisplayName string   `json:"display_name,omitempty"`
+	Role        string   `json:"role,omitempty"`
+	Roles       []string `json:"roles,omitempty"`
 }
 
 // WizardResult summarises the side-effects the wizard applied. The HTTP
@@ -104,6 +112,13 @@ type templateAccount struct {
 // DefaultRoles is the canonical role set the wizard seeds when the
 // caller does not supply their own roles list. The permission arrays
 // mirror the "role packs" discussed in ARCHITECTURE.md §6.
+//
+// Phase RBAC expanded the set so KType schemas that reference
+// granular roles (e.g. crm.rep, helpdesk.agent) resolve to a real
+// definition the wizard inserts. The hierarchy migration
+// (000050_role_hierarchy.sql) wires every module role to inherit
+// tenant.member so adding a baseline permission lifts the floor for
+// the whole set without editing each role.
 func DefaultRoles() []WizardRole {
 	return []WizardRole{
 		{Name: "owner", Description: "Tenant owner", Permissions: json.RawMessage(`["*"]`)},
@@ -112,6 +127,14 @@ func DefaultRoles() []WizardRole {
 		{Name: "finance.admin", Description: "Finance administrator", Permissions: json.RawMessage(`["tenant.member","finance.*","krecord.*"]`)},
 		{Name: "hr.admin", Description: "HR administrator", Permissions: json.RawMessage(`["tenant.member","hr.*","krecord.*"]`)},
 		{Name: "lms.admin", Description: "LMS administrator", Permissions: json.RawMessage(`["tenant.member","lms.*","krecord.*"]`)},
+		{Name: "crm.rep", Description: "CRM sales representative", Permissions: json.RawMessage(`["tenant.member","crm.*","krecord.read","krecord.write"]`)},
+		{Name: "crm.manager", Description: "CRM manager", Permissions: json.RawMessage(`["tenant.member","crm.*","krecord.*"]`)},
+		{Name: "inventory.admin", Description: "Inventory administrator", Permissions: json.RawMessage(`["tenant.member","inventory.*","krecord.*"]`)},
+		{Name: "helpdesk.agent", Description: "Helpdesk agent", Permissions: json.RawMessage(`["tenant.member","helpdesk.ticket.*","krecord.read","krecord.write"]`)},
+		{Name: "helpdesk.manager", Description: "Helpdesk manager", Permissions: json.RawMessage(`["tenant.member","helpdesk.*","krecord.*"]`)},
+		{Name: "sales.rep", Description: "Sales representative", Permissions: json.RawMessage(`["tenant.member","sales.*","krecord.read","krecord.write"]`)},
+		{Name: "procurement.rep", Description: "Procurement representative", Permissions: json.RawMessage(`["tenant.member","procurement.*","krecord.read","krecord.write"]`)},
+		{Name: "reporting.viewer", Description: "Read-only report viewer", Permissions: json.RawMessage(`["tenant.member","krecord.read","reports.read","insights.read"]`)},
 	}
 }
 
@@ -421,9 +444,34 @@ func seedRoles(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, roles []Wizar
 func seedUsers(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID, users []WizardUser) (int, error) {
 	inserted := 0
 	for _, u := range users {
-		if u.Email == "" || u.Role == "" {
+		if u.Email == "" {
 			continue
 		}
+		// Resolve the multi-role list. The legacy Role field is
+		// always honoured and merged in so callers that only set
+		// Role keep working unchanged.
+		roleSet := make(map[string]struct{}, len(u.Roles)+1)
+		ordered := make([]string, 0, len(u.Roles)+1)
+		add := func(name string) {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				return
+			}
+			if _, dup := roleSet[name]; dup {
+				return
+			}
+			roleSet[name] = struct{}{}
+			ordered = append(ordered, name)
+		}
+		add(u.Role)
+		for _, r := range u.Roles {
+			add(r)
+		}
+		if len(ordered) == 0 {
+			continue
+		}
+		primary := ordered[0]
+
 		var userID uuid.UUID
 		err := pool.QueryRow(ctx,
 			`INSERT INTO users (id, email, display_name)
@@ -436,13 +484,25 @@ func seedUsers(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID, user
 			return inserted, fmt.Errorf("tenant: seed user %s: %w", u.Email, err)
 		}
 		if err := dbutil.WithTenantTx(ctx, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx,
+			if _, err := tx.Exec(ctx,
 				`INSERT INTO user_tenants (tenant_id, user_id, role, status)
 				 VALUES ($1, $2, $3, 'active')
 				 ON CONFLICT (tenant_id, user_id) DO UPDATE SET role = EXCLUDED.role, status = 'active'`,
-				tenantID, userID, u.Role,
-			)
-			return err
+				tenantID, userID, primary,
+			); err != nil {
+				return err
+			}
+			for _, r := range ordered {
+				if _, err := tx.Exec(ctx,
+					`INSERT INTO user_tenant_roles (tenant_id, user_id, role_name)
+					 VALUES ($1, $2, $3)
+					 ON CONFLICT DO NOTHING`,
+					tenantID, userID, r,
+				); err != nil {
+					return err
+				}
+			}
+			return nil
 		}); err != nil {
 			return inserted, fmt.Errorf("tenant: seed user_tenants %s: %w", u.Email, err)
 		}

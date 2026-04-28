@@ -54,6 +54,7 @@ var TenantScopedTables = []string{
 	// custom roles. Listed first so FKs from the rest of the dump
 	// resolve cleanly on insert.
 	"user_tenants",
+	"user_tenant_roles",
 	"roles",
 	"permissions",
 	"sessions",
@@ -350,6 +351,7 @@ func restoreRows(ctx context.Context, tx pgx.Tx, dec *json.Decoder, remap map[uu
 // requires a new entry here.
 var tableConflictKeys = map[string][]string{
 	"user_tenants":           {"user_id", "tenant_id"},
+	"user_tenant_roles":      {"tenant_id", "user_id", "role_name"},
 	"roles":                  {"tenant_id", "name"},
 	"accounts":               {"tenant_id", "code"},
 	"idempotency_keys":       {"tenant_id", "key"},

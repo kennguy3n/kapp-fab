@@ -788,3 +788,111 @@ func mergeJSON(base, patch json.RawMessage) (json.RawMessage, error) {
 	}
 	return json.Marshal(baseMap)
 }
+
+// FilterFields strips fields the actor's roles are not allowed to read,
+// based on a "field_permissions" block on the KType schema. A KType
+// schema may carry an optional block:
+//
+//	"field_permissions": {
+//	    "salary":  {"read": ["hr.admin","owner"], "write": ["hr.admin"]},
+//	    "ssn":     {"read": ["hr.admin"],         "write": ["hr.admin"]}
+//	}
+//
+// For each field in the block, if the actor holds none of the listed
+// `read` roles, the field is removed from the response. A nil or empty
+// block is a no-op (every field is returned). Fields not listed in the
+// block are unrestricted by default.
+//
+// userRoles can be supplied directly or pulled from
+// platform.UserRolesFromContext(ctx) before calling.
+func FilterFields(data, schema json.RawMessage, userRoles []string) json.RawMessage {
+	if len(data) == 0 || len(schema) == 0 {
+		return data
+	}
+	rules := parseFieldPermissions(schema)
+	if len(rules) == 0 {
+		return data
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return data
+	}
+	roleSet := make(map[string]struct{}, len(userRoles))
+	for _, r := range userRoles {
+		roleSet[r] = struct{}{}
+	}
+	for field, rule := range rules {
+		if len(rule.Read) == 0 {
+			continue
+		}
+		if !roleSetMatchesAny(roleSet, rule.Read) {
+			delete(doc, field)
+		}
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return data
+	}
+	return out
+}
+
+// FieldsForbiddenForWrite returns the list of fields in `data` the actor
+// is not permitted to write according to the schema's
+// `field_permissions` block. Returns an empty slice when every field is
+// allowed (the common case) so callers can do `len(...) == 0` to detect
+// success.
+func FieldsForbiddenForWrite(data, schema json.RawMessage, userRoles []string) []string {
+	if len(data) == 0 || len(schema) == 0 {
+		return nil
+	}
+	rules := parseFieldPermissions(schema)
+	if len(rules) == 0 {
+		return nil
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil
+	}
+	roleSet := make(map[string]struct{}, len(userRoles))
+	for _, r := range userRoles {
+		roleSet[r] = struct{}{}
+	}
+	forbidden := make([]string, 0)
+	for field := range doc {
+		rule, ok := rules[field]
+		if !ok {
+			continue
+		}
+		if len(rule.Write) == 0 {
+			continue
+		}
+		if !roleSetMatchesAny(roleSet, rule.Write) {
+			forbidden = append(forbidden, field)
+		}
+	}
+	return forbidden
+}
+
+type fieldRule struct {
+	Read  []string `json:"read,omitempty"`
+	Write []string `json:"write,omitempty"`
+}
+
+func parseFieldPermissions(schema json.RawMessage) map[string]fieldRule {
+	var envelope struct {
+		FieldPermissions map[string]fieldRule `json:"field_permissions"`
+	}
+	if err := json.Unmarshal(schema, &envelope); err != nil {
+		return nil
+	}
+	return envelope.FieldPermissions
+}
+
+func roleSetMatchesAny(have map[string]struct{}, want []string) bool {
+	for _, r := range want {
+		if _, ok := have[r]; ok {
+			return true
+		}
+	}
+	return false
+}

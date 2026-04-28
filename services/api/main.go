@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/agents"
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/auth"
+	"github.com/kennguy3n/kapp-fab/internal/authz"
 	"github.com/kennguy3n/kapp-fab/internal/base"
 	"github.com/kennguy3n/kapp-fab/internal/crm"
 	"github.com/kennguy3n/kapp-fab/internal/dashboard"
@@ -86,6 +88,38 @@ func run() error {
 	tenantSvc := tenant.NewPGStore(pool)
 	ktypeCache := platform.NewLRUCache(1024, 5*time.Minute)
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
+	// Authorization evaluator. The cache TTL is intentionally short
+	// (30s) so role/permission changes propagate quickly; the role
+	// management API (rolesHandlers) also flushes the relevant
+	// entries explicitly on every mutation.
+	authzCache := platform.NewLRUCache(512, 30*time.Second)
+	authzEval := authz.NewPGEvaluator(pool, authzCache)
+	// Authorization gating is opt-in via KAPP_AUTHZ_ENFORCE so tenants
+	// that have not yet rolled out JWT auth (where the user id is
+	// pulled from the bearer token) keep working under the historical
+	// X-Tenant-ID-only header convention. When the env var is empty
+	// the gate is a no-op middleware; when truthy the middleware
+	// enforces the supplied action+resource pair on every request.
+	// Routes that always require authorization (e.g. /api/v1/roles)
+	// mount authz.Middleware directly and are not affected.
+	authzEnforced := os.Getenv("KAPP_AUTHZ_ENFORCE") == "1" || strings.EqualFold(os.Getenv("KAPP_AUTHZ_ENFORCE"), "true")
+	authzGate := func(action, resource string) func(http.Handler) http.Handler {
+		if !authzEnforced {
+			return func(next http.Handler) http.Handler { return next }
+		}
+		return authz.Middleware(authzEval, action, resource)
+	}
+	authzMethodGate := func(readAction, writeAction, resource string) func(http.Handler) http.Handler {
+		if !authzEnforced {
+			return func(next http.Handler) http.Handler { return next }
+		}
+		return authz.MethodMiddleware(authzEval, readAction, writeAction, resource)
+	}
+	if authzEnforced {
+		log.Printf("api: authz enforcement ENABLED (KAPP_AUTHZ_ENFORCE)")
+	} else {
+		log.Printf("api: authz enforcement disabled (set KAPP_AUTHZ_ENFORCE=1 to enable)")
+	}
 	eventPublisher := events.NewPGPublisher(pool)
 	auditor := audit.NewPGLogger(pool)
 	recordStore := record.NewPGStore(pool, ktypeRegistry, eventPublisher, auditor)
@@ -422,7 +456,7 @@ func run() error {
 	}
 	meth := &meteringHandlers{metering: meteringStore, tenants: tenantSvc, plans: planStore, features: featureStore}
 	kh := &ktypeHandlers{registry: ktypeRegistry}
-	rh := &recordHandlers{store: recordStore}
+	rh := &recordHandlers{store: recordStore, eval: authzEval}
 	sh := &searchHandlers{store: recordStore}
 	webhookStore := notifications.NewWebhookStore(pool)
 	whh := &webhookHandlers{store: webhookStore}
@@ -442,6 +476,7 @@ func run() error {
 	dh := &docsHandlers{store: docsStore}
 	eh := &eventsHandlers{pool: pool}
 	vh := &viewHandlers{store: record.NewViewStore(pool)}
+	roleh := &rolesHandlers{pool: pool, eval: authzEval}
 	// Phase I handlers — multi-currency, helpdesk (SLA policies),
 	// reports (saved + ad-hoc), and dashboard KPI aggregation.
 	curh := &currencyHandlers{store: exchangeRateStore}
@@ -679,6 +714,36 @@ func run() error {
 			})
 		}
 
+		// Phase RBAC — role and permission management. Tenant-scoped
+		// and gated behind authz.Middleware so only an actor with
+		// `tenant.admin` (or wildcard) can mutate the role graph.
+		// Mutations invalidate the authz cache for the affected
+		// tenant so the next request sees the new grants.
+		r.Route("/api/v1/roles", func(r chi.Router) {
+			r.Use(platform.TenantMiddleware(tenantSvc))
+			r.Use(apiCallMW)
+			r.Use(authz.Middleware(authzEval, "tenant.admin", ""))
+			r.Use(platform.IdempotencyMiddleware(pool))
+			r.Use(rateLimitMW)
+			r.Use(platform.QuotaMiddleware(quotaEnforcer))
+			r.Get("/", roleh.listRoles)
+			r.Post("/", roleh.createRole)
+			r.Put("/{name}", roleh.updateRole)
+			r.Delete("/{name}", roleh.deleteRole)
+			r.Get("/{name}/permissions", roleh.listPermissions)
+			r.Post("/{name}/permissions", roleh.grantPermission)
+			r.Delete("/{name}/permissions/{id}", roleh.revokePermission)
+		})
+		r.Route("/api/v1/users", func(r chi.Router) {
+			r.Use(platform.TenantMiddleware(tenantSvc))
+			r.Use(apiCallMW)
+			r.Use(authz.Middleware(authzEval, "tenant.admin", ""))
+			r.Use(rateLimitMW)
+			r.Get("/{id}/roles", roleh.listUserRoles)
+			r.Post("/{id}/roles", roleh.assignUserRole)
+			r.Delete("/{id}/roles/{role}", roleh.removeUserRole)
+		})
+
 		// KType registry routes (shared metadata, not tenant-scoped).
 		r.Route("/api/v1/ktypes", func(r chi.Router) {
 			r.Post("/", kh.register)
@@ -723,6 +788,7 @@ func run() error {
 			r.Use(platform.TenantMiddleware(tenantSvc))
 			r.Use(apiCallMW)
 			r.Use(featureMW)
+			r.Use(authzMethodGate("krecord.read", "krecord.write", ""))
 			// Idempotency runs before rate-limit/quota so a replay of a
 			// previously-successful mutation returns the cached response even
 			// when the tenant has since hit its rate-limit or quota ceiling —
@@ -775,6 +841,7 @@ func run() error {
 			r.Use(platform.TenantMiddleware(tenantSvc))
 			r.Use(apiCallMW)
 			r.Use(featureMW)
+			r.Use(authzGate("tenant.member", ""))
 			r.Use(platform.IdempotencyMiddleware(pool))
 			r.Use(rateLimitMW)
 			r.Use(platform.QuotaMiddleware(quotaEnforcer))
@@ -808,6 +875,7 @@ func run() error {
 			r.Use(platform.TenantMiddleware(tenantSvc))
 			r.Use(apiCallMW)
 			r.Use(featureMW)
+			r.Use(authzGate("tenant.admin", ""))
 			r.Get("/", auh.list)
 			r.Get("/verify", auh.verify)
 		})
@@ -821,6 +889,7 @@ func run() error {
 			r.Use(platform.TenantMiddleware(tenantSvc))
 			r.Use(apiCallMW)
 			r.Use(featureMW)
+			r.Use(authzMethodGate("finance.read", "finance.admin", ""))
 			r.Use(platform.IdempotencyMiddleware(pool))
 			r.Use(rateLimitMW)
 			r.Use(platform.QuotaMiddleware(quotaEnforcer))
@@ -875,6 +944,7 @@ func run() error {
 			r.Use(platform.TenantMiddleware(tenantSvc))
 			r.Use(apiCallMW)
 			r.Use(featureMW)
+			r.Use(authzGate("hr.admin", ""))
 			r.Use(platform.IdempotencyMiddleware(pool))
 			r.Use(rateLimitMW)
 			r.Use(platform.QuotaMiddleware(quotaEnforcer))
@@ -891,6 +961,7 @@ func run() error {
 			r.Use(platform.TenantMiddleware(tenantSvc))
 			r.Use(apiCallMW)
 			r.Use(featureMW)
+			r.Use(authzMethodGate("helpdesk.read", "helpdesk.admin", ""))
 			r.Use(platform.IdempotencyMiddleware(pool))
 			r.Use(rateLimitMW)
 			r.Use(platform.QuotaMiddleware(quotaEnforcer))
@@ -920,6 +991,7 @@ func run() error {
 			r.Use(platform.TenantMiddleware(tenantSvc))
 			r.Use(apiCallMW)
 			r.Use(featureMW)
+			r.Use(authzGate("reports.read", ""))
 			r.Use(platform.IdempotencyMiddleware(pool))
 			r.Use(rateLimitMW)
 			r.Use(platform.QuotaMiddleware(quotaEnforcer))
@@ -976,6 +1048,7 @@ func run() error {
 			r.Use(platform.TenantMiddleware(tenantSvc))
 			r.Use(apiCallMW)
 			r.Use(featureMW)
+			r.Use(authzGate("insights.read", ""))
 			r.Use(platform.IdempotencyMiddleware(pool))
 			r.Use(rateLimitMW)
 			r.Use(platform.QuotaMiddleware(quotaEnforcer))
@@ -1065,6 +1138,7 @@ func run() error {
 			r.Use(platform.TenantMiddleware(tenantSvc))
 			r.Use(apiCallMW)
 			r.Use(featureMW)
+			r.Use(authzMethodGate("inventory.read", "inventory.admin", ""))
 			r.Use(platform.IdempotencyMiddleware(pool))
 			r.Use(rateLimitMW)
 			r.Use(platform.QuotaMiddleware(quotaEnforcer))

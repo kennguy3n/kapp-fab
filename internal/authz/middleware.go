@@ -13,6 +13,10 @@ import (
 // supplied action + resource. It must be mounted after platform.TenantMiddleware
 // because it reads the tenant from the request context.
 //
+// On success the actor's resolved role list is attached to the context via
+// platform.WithUserRoles so downstream handlers (record store field
+// filtering, role-aware UI gates) can read it without an extra round trip.
+//
 // For Phase A the user id comes from an X-User-ID header fallback when no
 // context user is present; a later auth middleware will populate the context
 // directly from a verified JWT.
@@ -44,7 +48,29 @@ func Middleware(eval Evaluator, action, resource string) func(http.Handler) http
 				http.Error(w, "authorization failed", http.StatusInternalServerError)
 				return
 			}
-			next.ServeHTTP(w, r.WithContext(platform.WithUserID(r.Context(), userID)))
+			ctx := platform.WithUserID(r.Context(), userID)
+			if roles, err := eval.ListRoles(ctx, t.ID, userID); err == nil {
+				ctx = platform.WithUserRoles(ctx, roles)
+			}
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// MethodMiddleware is a convenience wrapper that picks the action based on
+// the HTTP method: read-style methods (GET, HEAD, OPTIONS) use readAction;
+// mutation methods (POST, PUT, PATCH, DELETE) use writeAction. Mount this
+// on route groups that mix read and write operations under a single
+// authorization gate (e.g. /api/v1/records).
+func MethodMiddleware(eval Evaluator, readAction, writeAction, resource string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			action := readAction
+			switch r.Method {
+			case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+				action = writeAction
+			}
+			Middleware(eval, action, resource)(next).ServeHTTP(w, r)
 		})
 	}
 }

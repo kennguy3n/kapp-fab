@@ -518,6 +518,95 @@ tenant can later prove what was purged and when.
 
 ---
 
+## 17. RBAC hardening (Phase RBAC)
+
+Eight gaps from the RBAC analysis are closed in this PR. All
+changes layer on top of the tenant_isolation RLS guarantee in §1
+— authorization runs *after* a tenant is on the request.
+
+**Multi-role membership.** `user_tenants.role` was a single text
+column, so a user could only hold one role per tenant. Migration
+`000049_user_tenant_roles.sql` adds a junction table
+`user_tenant_roles (tenant_id, user_id, role_name)` with the
+standard tenant_isolation policy, backfills active rows from
+`user_tenants`, and keeps the legacy column populated as the
+"primary" role for backward compatibility.
+`PGEvaluator.queryPermissions` now scans every row in the
+junction (falling back to the legacy column when the junction is
+empty) and unions the permission packs from each role.
+
+**Wildcard matching.** `Authorize` previously did exact string
+comparison. `internal/authz/store.go::matchAction` now supports
+three patterns: `"*"` (match anything), `"prefix.*"` (match any
+action with that prefix), and exact match. Unit tests in
+`store_test.go` cover the wildcard, prefix-only, and negative
+cases.
+
+**Role hierarchy.** Migration `000050_role_hierarchy.sql` adds a
+nullable `parent_role` column to `roles` and seeds the default
+chain (owner → tenant.admin → tenant.member, module roles also
+inheriting tenant.member). `queryPermissions` walks the chain
+with a recursive CTE bounded by `walkRoleChain`'s depth limit (5
+levels) to prevent runaway loops if a custom hierarchy is
+mis-edited.
+
+**Record-level conditions.** The `permissions.conditions` JSONB
+column was inert. `Evaluator.AuthorizeRecord(ctx, t, u, action,
+resource, recordAttrs)` now evaluates two condition shapes:
+`{"owner_only":true}` (matches when the record's `owner` or
+`created_by` attribute equals the actor) and
+`{"status_in":[…]}`. `services/api/records.go` calls
+`AuthorizeRecord` from `update()` and `delete()` so a `crm.rep`
+can only modify their own records unless they hold a higher
+role.
+
+**Granular module roles.** `tenant.Wizard.DefaultRoles()` now
+seeds eight additional roles — `crm.rep`, `crm.manager`,
+`inventory.admin`, `helpdesk.agent`, `helpdesk.manager`,
+`sales.rep`, `procurement.rep`, and `reporting.viewer` — so the
+KType permission strings already referenced in the schemas
+resolve to a real role. The setup wizard UI was switched to a
+multi-select to match.
+
+**Role-management API.** `services/api/roles_handlers.go` exposes
+CRUD on roles (`GET/POST/PUT/DELETE /api/v1/roles[/{name}]`),
+permissions (`/{name}/permissions`), and per-user role
+assignments (`/api/v1/users/{id}/roles`). Every route is gated
+by `authz.Middleware(eval, "tenant.admin", "")`. Mutations
+invalidate the LRU permission cache (`InvalidateUser` /
+`InvalidateTenant`) so a revoked role takes effect on the next
+request rather than after the 30-second TTL.
+
+**Field-level access.** KType schemas may now declare a
+`field_permissions` block. `internal/record/store.go::FilterFields`
+strips fields the actor's roles are not allowed to read;
+`FieldsForbiddenForWrite` returns the list of fields the actor
+cannot mutate so the record handler can return 403 with a
+specific error. Roles flow into the record store via
+`platform.WithUserRoles` /
+`platform.UserRolesFromContext`, which the auth middleware
+populates after evaluator-side resolution.
+
+**Middleware wiring.** `services/api/main.go` instantiates a
+`PGEvaluator` once at startup and gates each module route group
+(`/api/v1/finance`, `/hr`, `/inventory`, `/helpdesk`,
+`/reports`, `/insights`, `/audit`, `/agents`, `/records`) with
+`authz.Middleware`. `/records` uses a method-aware helper that
+selects `krecord.read` for `GET` and `krecord.write` for
+`POST/PUT/PATCH/DELETE`. Enforcement is opt-in via the
+`KAPP_AUTHZ_ENFORCE` env var so Phase A dev/test setups without
+a real JWT context keep working until JWT propagation is in
+place; staging and production flip the flag on.
+
+The integration test
+`internal/integrationtest/rbac_test.go::TestAuthzMultiRoleAndHierarchy`
+exercises the wizard seeding plus all four evaluator surfaces
+(multi-role union, wildcard match, hierarchy inheritance,
+owner_only condition) end-to-end against the live Postgres
+fixture under `KAPP_TEST_DB_URL`.
+
+---
+
 ## Review sign-off
 
 Review is performed each phase end. A phase cannot close without a
@@ -525,3 +614,5 @@ section here matching the merged code.
 
 - Phase G: PASS for items 1–7, open items tracked above.
 - Phase H/I/J/K: PASS for items 9–16 (this PR).
+- Phase RBAC: PASS for item 17 (this PR — closes the eight gaps
+  identified in the RBAC analysis).

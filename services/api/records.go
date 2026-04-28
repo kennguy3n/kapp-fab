@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/kapp-fab/internal/authz"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
@@ -20,6 +21,11 @@ import (
 
 type recordHandlers struct {
 	store *record.PGStore
+	// eval is consulted on update/delete to enforce record-level
+	// (owner) authorization rules carried in permission conditions.
+	// nil disables the check, preserving Phase A behaviour for
+	// integration tests that have not yet wired the evaluator.
+	eval authz.Evaluator
 }
 
 type createRecordRequest struct {
@@ -112,6 +118,21 @@ func (h *recordHandlers) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := actorOrDefault(r.Context())
+	if h.eval != nil && actor != uuid.Nil {
+		existing, err := h.store.Get(r.Context(), t.ID, id)
+		if err != nil {
+			writeRecordError(w, err)
+			return
+		}
+		if err := h.eval.AuthorizeRecord(r.Context(), t.ID, actor, "krecord.write", existing.KType, recordAttrs(existing)); err != nil {
+			if errors.Is(err, authz.ErrDenied) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			http.Error(w, "authorization failed", http.StatusInternalServerError)
+			return
+		}
+	}
 	updated, err := h.store.Update(r.Context(), record.KRecord{
 		TenantID:  t.ID,
 		ID:        id,
@@ -137,11 +158,51 @@ func (h *recordHandlers) delete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid record id", http.StatusBadRequest)
 		return
 	}
-	if err := h.store.Delete(r.Context(), t.ID, id, actorOrDefault(r.Context())); err != nil {
+	actor := actorOrDefault(r.Context())
+	if h.eval != nil && actor != uuid.Nil {
+		existing, err := h.store.Get(r.Context(), t.ID, id)
+		if err != nil {
+			writeRecordError(w, err)
+			return
+		}
+		if err := h.eval.AuthorizeRecord(r.Context(), t.ID, actor, "krecord.write", existing.KType, recordAttrs(existing)); err != nil {
+			if errors.Is(err, authz.ErrDenied) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			http.Error(w, "authorization failed", http.StatusInternalServerError)
+			return
+		}
+	}
+	if err := h.store.Delete(r.Context(), t.ID, id, actor); err != nil {
 		writeRecordError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// recordAttrs maps a record into the attribute bag accepted by
+// authz.AuthorizeRecord. We surface created_by, the data.owner field
+// (if any), and the record status so condition keys like
+// {"owner_only": true} or {"status_in": ["draft"]} can match without
+// the evaluator having to reach back into the database.
+func recordAttrs(rec *record.KRecord) map[string]any {
+	if rec == nil {
+		return nil
+	}
+	attrs := map[string]any{
+		"created_by": rec.CreatedBy,
+		"status":     rec.Status,
+	}
+	if len(rec.Data) > 0 {
+		var data map[string]any
+		if err := json.Unmarshal(rec.Data, &data); err == nil {
+			if owner, ok := data["owner"]; ok {
+				attrs["owner"] = owner
+			}
+		}
+	}
+	return attrs
 }
 
 // bulkRecordRequest is the payload accepted by POST /records/{ktype}/bulk.

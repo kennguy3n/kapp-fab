@@ -17,6 +17,7 @@ type ctxKey int
 const (
 	ctxKeyTenant ctxKey = iota
 	ctxKeyUser
+	ctxKeyUserRoles
 )
 
 // TenantMiddleware extracts the tenant identifier from the X-Tenant-ID header
@@ -103,4 +104,28 @@ func UserIDFromContext(ctx context.Context) uuid.UUID {
 // WithUserID returns a new context carrying the supplied user id.
 func WithUserID(ctx context.Context, id uuid.UUID) context.Context {
 	return context.WithValue(ctx, ctxKeyUser, id)
+}
+
+// WithUserRoles returns a new context carrying the actor's role set. The
+// authz middleware populates this after resolving permissions so handlers
+// (and downstream stores like record.PGStore field-filtering) can answer
+// "what role does this user hold?" without re-querying the database.
+//
+// A nil or empty slice clears any existing role set; callers should always
+// pass the resolved list in full rather than appending.
+func WithUserRoles(ctx context.Context, roles []string) context.Context {
+	if roles == nil {
+		roles = []string{}
+	}
+	return context.WithValue(ctx, ctxKeyUserRoles, roles)
+}
+
+// UserRolesFromContext returns the actor's roles, or nil when no role set
+// has been attached. Returned slice is safe to read but should be treated
+// as immutable — handlers should not mutate it in place.
+func UserRolesFromContext(ctx context.Context) []string {
+	if r, ok := ctx.Value(ctxKeyUserRoles).([]string); ok {
+		return r
+	}
+	return nil
 }
