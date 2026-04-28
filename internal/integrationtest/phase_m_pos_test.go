@@ -88,9 +88,15 @@ func TestPOSPosterFinalizesARAndPayment(t *testing.T) {
 				"unit_price":   unitPrice.String(),
 			},
 		},
-		"subtotal": total.String(),
-		"total":    total.String(),
-		"tendered": total.String(),
+		// subtotal/total/tendered are typed as `number` in the schema,
+		// so they must round-trip through json as actual numbers (not
+		// quoted strings) — otherwise the validator rejects them with
+		// "must be number". qty and unit_price inside `lines` are
+		// schema-less (the schema declares `lines` as `array`) so they
+		// can stay strings; the poster's decimalOr() unwraps both.
+		"subtotal": total.InexactFloat64(),
+		"total":    total.InexactFloat64(),
+		"tendered": total.InexactFloat64(),
 		"status":   "draft",
 	})
 	posRec, err := h.records.Create(ctx, record.KRecord{
