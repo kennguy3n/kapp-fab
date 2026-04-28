@@ -21,8 +21,34 @@ const COA_TEMPLATES = [
 interface InitialUser {
   email: string;
   display_name: string;
+  // role is kept for backwards-compatibility with the previous
+  // single-role wizard payload — the backend mirrors it into
+  // user_tenants.role for legacy code paths. The full multi-role
+  // assignment now lives in `roles`.
   role: string;
+  roles: string[];
 }
+
+// AVAILABLE_ROLES mirrors internal/tenant/wizard.go DefaultRoles().
+// Adding a role here without seeding it server-side will silently fail
+// the assignment because the FK on user_tenant_roles requires the
+// (tenant_id, role_name) row to exist in `roles`.
+const AVAILABLE_ROLES = [
+  "owner",
+  "tenant.admin",
+  "tenant.member",
+  "finance.admin",
+  "hr.admin",
+  "lms.admin",
+  "crm.rep",
+  "crm.manager",
+  "inventory.admin",
+  "helpdesk.agent",
+  "helpdesk.manager",
+  "sales.rep",
+  "procurement.rep",
+  "reporting.viewer",
+];
 
 interface SetupPayload {
   company_name: string;
@@ -50,7 +76,7 @@ export function SetupWizardPage() {
   const [country, setCountry] = useState("");
   const [coaTemplate, setCoaTemplate] = useState(COA_TEMPLATES[0].value);
   const [users, setUsers] = useState<InitialUser[]>([
-    { email: "", display_name: "", role: "tenant.admin" },
+    { email: "", display_name: "", role: "tenant.admin", roles: ["tenant.admin"] },
   ]);
 
   const tenantId = id ?? "";
@@ -93,11 +119,19 @@ export function SetupWizardPage() {
   const validUsers = useMemo(
     () =>
       users
-        .map((u) => ({
-          email: u.email.trim(),
-          display_name: u.display_name.trim(),
-          role: u.role.trim() || "tenant.admin",
-        }))
+        .map((u) => {
+          const trimmed = u.roles
+            .map((r) => r.trim())
+            .filter((r) => r.length > 0);
+          const fallback = u.role.trim() || "tenant.admin";
+          const list = trimmed.length > 0 ? trimmed : [fallback];
+          return {
+            email: u.email.trim(),
+            display_name: u.display_name.trim(),
+            role: list[0],
+            roles: list,
+          };
+        })
         .filter((u) => u.email !== ""),
     [users],
   );
@@ -280,21 +314,34 @@ export function SetupWizardPage() {
                   </td>
                   <td>
                     <select
-                      value={u.role}
-                      onChange={(e) =>
+                      multiple
+                      size={Math.min(6, AVAILABLE_ROLES.length)}
+                      value={u.roles}
+                      onChange={(e) => {
+                        const next = Array.from(e.target.selectedOptions).map(
+                          (o) => o.value,
+                        );
                         setUsers((prev) =>
                           prev.map((row, j) =>
-                            j === i ? { ...row, role: e.target.value } : row,
+                            j === i
+                              ? {
+                                  ...row,
+                                  // Keep `role` aligned with the first
+                                  // selection so the legacy single-role
+                                  // back-end column stays populated.
+                                  role: next[0] ?? row.role,
+                                  roles: next,
+                                }
+                              : row,
                           ),
-                        )
-                      }
+                        );
+                      }}
                     >
-                      <option value="owner">owner</option>
-                      <option value="tenant.admin">tenant.admin</option>
-                      <option value="tenant.member">tenant.member</option>
-                      <option value="finance.admin">finance.admin</option>
-                      <option value="hr.admin">hr.admin</option>
-                      <option value="lms.admin">lms.admin</option>
+                      {AVAILABLE_ROLES.map((role) => (
+                        <option key={role} value={role}>
+                          {role}
+                        </option>
+                      ))}
                     </select>
                   </td>
                   <td>
@@ -318,7 +365,12 @@ export function SetupWizardPage() {
               onClick={() =>
                 setUsers((prev) => [
                   ...prev,
-                  { email: "", display_name: "", role: "tenant.member" },
+                  {
+                    email: "",
+                    display_name: "",
+                    role: "tenant.member",
+                    roles: ["tenant.member"],
+                  },
                 ])
               }
             >

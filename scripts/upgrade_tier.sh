@@ -59,7 +59,7 @@ SCHEMA="tenant_${TENANT_ID//-/_}"
 # check in services/api/tier_handlers_integration_test.go fails CI if
 # any of the three drift.
 TABLES=(
-  user_tenants roles permissions sessions
+  user_tenants user_tenant_roles roles permissions sessions
   idempotency_keys saved_views notifications
   krecords workflows workflow_runs approvals audit_log events
   accounts journal_entries journal_lines fiscal_periods tax_codes

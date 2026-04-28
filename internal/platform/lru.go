@@ -2,6 +2,7 @@ package platform
 
 import (
 	"container/list"
+	"strings"
 	"sync"
 	"time"
 )
@@ -176,6 +177,30 @@ func (c *LRUCache) Purge() {
 	c.mu.Unlock()
 	for _, ent := range evicted {
 		c.fireEvict(ent)
+	}
+}
+
+// DeletePrefix removes every entry whose key starts with the supplied
+// prefix. Used by the authz evaluator to invalidate every cached
+// permission set for a tenant after a role-definition change. The
+// OnEvict callback fires once per removed entry.
+func (c *LRUCache) DeletePrefix(prefix string) {
+	if prefix == "" {
+		return
+	}
+	c.mu.Lock()
+	var evicted []*cacheEntry
+	for key, elem := range c.index {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		entry := elem.Value.(*cacheEntry)
+		evicted = append(evicted, entry)
+		c.removeElement(elem)
+	}
+	c.mu.Unlock()
+	for _, e := range evicted {
+		c.fireEvict(e)
 	}
 }
 

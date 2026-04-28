@@ -9,6 +9,7 @@ import { TenantListPage } from "./pages/TenantListPage";
 import { FormPage } from "./pages/FormPage";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
 import { AuditLogPage } from "./pages/AuditLogPage";
+import { RoleManagementPage } from "./pages/RoleManagementPage";
 import { SubledgerPage } from "./pages/SubledgerPage";
 import { ChartOfAccountsPage } from "./pages/ChartOfAccountsPage";
 import { JournalEntriesPage } from "./pages/JournalEntriesPage";
@@ -199,6 +200,7 @@ const navSections: NavSection[] = [
       { to: "/admin/retention", label: "Retention" },
       { to: "/admin/usage", label: "Usage" },
       { to: "/admin/audit", label: "Audit Log" },
+      { to: "/admin/roles", label: "Roles" },
       { to: "/admin/webhooks", label: "Webhooks" },
       { to: "/admin/consolidation", label: "Consolidation" },
       { to: "/imports", label: "Imports" },
@@ -343,6 +345,7 @@ function AppShell() {
           <Route path="/admin/retention" element={<RetentionPoliciesPage />} />
           <Route path="/admin/usage" element={<UsageDashboardPage />} />
           <Route path="/admin/audit" element={<AuditLogPage />} />
+          <Route path="/admin/roles" element={<RoleManagementPage />} />
           <Route path="/approvals" element={<ApprovalsPage />} />
           <Route path="/finance/exchange-rates" element={<ExchangeRatesPage />} />
           <Route path="/helpdesk" element={<HelpdeskPage />} />

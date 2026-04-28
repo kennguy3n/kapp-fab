@@ -41,7 +41,7 @@ import (
 //
 // Edit one, edit all three — the tests will tell you if you forget.
 var TenantScopedTables = []string{
-	"user_tenants", "roles", "permissions", "sessions",
+	"user_tenants", "user_tenant_roles", "roles", "permissions", "sessions",
 	"idempotency_keys", "saved_views", "notifications",
 	"krecords", "workflows", "workflow_runs", "approvals", "audit_log", "events",
 	"accounts", "journal_entries", "journal_lines", "fiscal_periods",
