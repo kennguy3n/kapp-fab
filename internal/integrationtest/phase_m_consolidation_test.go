@@ -40,8 +40,14 @@ func TestConsolidationGroupRunsAcrossTenants(t *testing.T) {
 
 	// Two child tenants each with a tiny chart of accounts and one
 	// posted JE so the trial balance has something to consolidate.
-	tnA := newConsolidationChild(t, h, "child-a")
-	tnB := newConsolidationChild(t, h, "child-b")
+	// Tenant A debits the inter-company AR (1100) against revenue;
+	// tenant B credits the same 1100 code (recording the
+	// inter-company payable to A) against an expense. After summing
+	// across tenants the 1100 row carries debit=100 / credit=100
+	// — a true inter-company wash that nets to zero on elimination,
+	// so the surviving rows still satisfy the double-entry invariant.
+	tnA := newConsolidationChild(t, h, "child-a", true)
+	tnB := newConsolidationChild(t, h, "child-b", false)
 
 	rates := ledger.NewExchangeRateStore(h.pool)
 	ledgerStore := ledger.NewPGStore(h.pool, h.publisher, h.auditor)
@@ -116,7 +122,7 @@ func TestConsolidationGroupRunsAcrossTenants(t *testing.T) {
 // contributes something to the consolidation. Mirrors the seed
 // pattern in phase_d_test.go but trimmed to what consolidation
 // needs.
-func newConsolidationChild(t *testing.T, h *harness, slugBase string) *tenant.Tenant {
+func newConsolidationChild(t *testing.T, h *harness, slugBase string, isAR bool) *tenant.Tenant {
 	t.Helper()
 	ctx := context.Background()
 	tn, err := h.tenants.Create(ctx, tenant.CreateInput{
@@ -126,23 +132,49 @@ func newConsolidationChild(t *testing.T, h *harness, slugBase string) *tenant.Te
 		t.Fatalf("create tenant %s: %v", slugBase, err)
 	}
 	ledgerStore := ledger.NewPGStore(h.pool, h.publisher, h.auditor)
-	for _, a := range []ledger.Account{
-		{TenantID: tn.ID, Code: "1100", Name: "Accounts Receivable", Type: ledger.AccountTypeAsset, Active: true},
-		{TenantID: tn.ID, Code: "4000", Name: "Revenue", Type: ledger.AccountTypeRevenue, Active: true},
-	} {
+	// Both tenants share the 1100 code as the inter-company
+	// reconciliation account. Tenant A also has a Revenue (4000);
+	// tenant B has an Expense (5000) so the surviving rows after
+	// elimination are non-overlapping and the invariant test below
+	// can match contributions per-tenant.
+	accounts := []ledger.Account{
+		{TenantID: tn.ID, Code: "1100", Name: "Inter-company AR/AP", Type: ledger.AccountTypeAsset, Active: true},
+	}
+	if isAR {
+		accounts = append(accounts, ledger.Account{
+			TenantID: tn.ID, Code: "4000", Name: "Revenue", Type: ledger.AccountTypeRevenue, Active: true,
+		})
+	} else {
+		accounts = append(accounts, ledger.Account{
+			TenantID: tn.ID, Code: "5000", Name: "Expense", Type: ledger.AccountTypeExpense, Active: true,
+		})
+	}
+	for _, a := range accounts {
 		if _, err := ledgerStore.CreateAccount(ctx, a); err != nil {
 			t.Fatalf("seed account: %v", err)
 		}
 	}
 	postedAt := time.Now().UTC()
-	if _, err := ledgerStore.PostJournalEntry(ctx, ledger.JournalEntry{
-		TenantID: tn.ID,
-		PostedAt: postedAt,
-		Memo:     "seed",
-		Lines: []ledger.JournalLine{
+	var lines []ledger.JournalLine
+	if isAR {
+		// A: receivable from B — debit AR, credit revenue.
+		lines = []ledger.JournalLine{
 			{AccountCode: "1100", Debit: decimal.NewFromInt(100), Credit: decimal.Zero, Currency: "USD"},
 			{AccountCode: "4000", Debit: decimal.Zero, Credit: decimal.NewFromInt(100), Currency: "USD"},
-		},
+		}
+	} else {
+		// B: payable to A — debit expense, credit AP (same 1100
+		// code so the consolidation merge cancels it out against A).
+		lines = []ledger.JournalLine{
+			{AccountCode: "5000", Debit: decimal.NewFromInt(100), Credit: decimal.Zero, Currency: "USD"},
+			{AccountCode: "1100", Debit: decimal.Zero, Credit: decimal.NewFromInt(100), Currency: "USD"},
+		}
+	}
+	if _, err := ledgerStore.PostJournalEntry(ctx, ledger.JournalEntry{
+		TenantID:  tn.ID,
+		PostedAt:  postedAt,
+		Memo:      "seed",
+		Lines:     lines,
 		CreatedBy: uuid.New(),
 	}); err != nil {
 		t.Fatalf("post je for %s: %v", slugBase, err)
