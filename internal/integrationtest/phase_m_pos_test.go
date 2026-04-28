@@ -436,3 +436,122 @@ func TestPOSPosterResumesAfterPartialFailure(t *testing.T) {
 		t.Fatalf("move qty = %s; want %s", moves[0].Qty, qty.Neg())
 	}
 }
+
+// TestPOSPosterResumesAfterARAlreadyPosted exercises the resume path
+// where a previous attempt successfully posted the AR (status=posted,
+// JE created) but crashed before flipping the pos_invoice to posted.
+// Without the ErrInvoiceAlreadyPosted tolerance in PostPOSInvoice,
+// the retry would permanently fail at the AR post step.
+func TestPOSPosterResumesAfterARAlreadyPosted(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, ledgerStore, invoicePoster, _, item, warehouse := newTenantForInventory(t, h)
+	if _, err := ledgerStore.CreateAccount(ctx, ledger.Account{
+		TenantID: tn.ID, Code: "1000", Name: "Cash", Type: ledger.AccountTypeAsset, Active: true,
+	}); err != nil {
+		t.Fatalf("seed cash account: %v", err)
+	}
+	for _, kt := range sales.POSKTypes() {
+		if err := h.ktypes.Register(ctx, kt); err != nil {
+			t.Fatalf("register pos ktype %s: %v", kt.Name, err)
+		}
+	}
+	paymentPoster := ledger.NewPaymentPoster(ledger.NewPGStore(h.pool, h.publisher, h.auditor), h.records)
+	poster := sales.NewPOSPoster(h.records, invoicePoster, paymentPoster)
+	actor := uuid.New()
+	customerID := uuid.New()
+
+	profileBody, _ := json.Marshal(map[string]any{
+		"name":                 "Storefront PostedAR",
+		"warehouse_id":         warehouse.ID.String(),
+		"default_customer_id":  customerID.String(),
+		"currency":             "USD",
+		"ar_account_code":      "1100",
+		"revenue_account_code": "4000",
+		"bank_account_code":    "1000",
+		"active":               true,
+	})
+	profileRec, err := h.records.Create(ctx, record.KRecord{
+		ID: uuid.New(), TenantID: tn.ID, KType: sales.KTypePOSProfile, Data: profileBody, CreatedBy: actor,
+	})
+	if err != nil {
+		t.Fatalf("create profile: %v", err)
+	}
+
+	qty := decimal.NewFromInt(1)
+	unitPrice := decimal.NewFromInt(50)
+	total := qty.Mul(unitPrice)
+	posBody, _ := json.Marshal(map[string]any{
+		"profile_id":  profileRec.ID.String(),
+		"customer_id": customerID.String(),
+		"currency":    "USD",
+		"lines": []map[string]any{
+			{"item_id": item.ID.String(), "warehouse_id": warehouse.ID.String(),
+				"qty": qty.String(), "unit_price": unitPrice.String()},
+		},
+		"subtotal":   total.InexactFloat64(),
+		"total":      total.InexactFloat64(),
+		"tendered":   total.InexactFloat64(),
+		"status":     "draft",
+		"issue_date": "2026-04-29",
+	})
+	posRec, err := h.records.Create(ctx, record.KRecord{
+		ID: uuid.New(), TenantID: tn.ID, KType: sales.KTypePOSInvoice, Data: posBody, CreatedBy: actor,
+	})
+	if err != nil {
+		t.Fatalf("create pos invoice: %v", err)
+	}
+
+	// Pre-create the AR + post it, simulating a crash between
+	// PostSalesInvoice success and the pos_invoice flip.
+	preARBody, _ := json.Marshal(map[string]any{
+		"customer_id": customerID.String(),
+		"issue_date":  "2026-04-29",
+		"due_date":    "2026-04-29",
+		"lines": []map[string]any{
+			{"item_id": item.ID.String(), "warehouse_id": warehouse.ID.String(),
+				"qty": qty.String(), "unit_price": unitPrice.String()},
+		},
+		"subtotal":             total.InexactFloat64(),
+		"tax_amount":           0.0,
+		"total":                total.InexactFloat64(),
+		"currency":             "USD",
+		"status":               "draft",
+		"ar_account_code":      "1100",
+		"revenue_account_code": "4000",
+	})
+	preARRec, err := h.records.Create(ctx, record.KRecord{
+		ID: uuid.New(), TenantID: tn.ID, KType: finance.KTypeARInvoice, Data: preARBody, CreatedBy: actor,
+	})
+	if err != nil {
+		t.Fatalf("pre-create ar: %v", err)
+	}
+	if _, err := invoicePoster.PostSalesInvoice(ctx, tn.ID, preARRec.ID, actor); err != nil {
+		t.Fatalf("pre-post ar: %v", err)
+	}
+
+	// Patch pos_invoice with the already-posted AR's id.
+	var posData map[string]any
+	_ = json.Unmarshal(posRec.Data, &posData)
+	posData["ar_invoice_id"] = preARRec.ID.String()
+	posRec.Data, _ = json.Marshal(posData)
+	posRec.UpdatedBy = &actor
+	posRec, err = h.records.Update(ctx, *posRec)
+	if err != nil {
+		t.Fatalf("patch pos with already-posted ar: %v", err)
+	}
+
+	// Resume must tolerate ErrInvoiceAlreadyPosted and complete.
+	posted, err := poster.PostPOSInvoice(ctx, tn.ID, posRec.ID, actor)
+	if err != nil {
+		t.Fatalf("PostPOSInvoice resume after AR posted: %v", err)
+	}
+	var postedData map[string]any
+	_ = json.Unmarshal(posted.Data, &postedData)
+	if got, _ := postedData["status"].(string); got != "posted" {
+		t.Fatalf("status = %q; want posted", got)
+	}
+	if got, _ := postedData["ar_invoice_id"].(string); got != preARRec.ID.String() {
+		t.Fatalf("resume allocated fresh ar_invoice (%s) instead of reusing %s", got, preARRec.ID)
+	}
+}

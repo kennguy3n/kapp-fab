@@ -268,7 +268,13 @@ func (p *POSPoster) PostPOSInvoice(ctx context.Context, tenantID, posInvoiceID, 
 		}
 		posRec = updated
 	}
-	if _, err := p.invoice.PostSalesInvoice(ctx, tenantID, arRec.ID, actorID); err != nil {
+	// Tolerate ErrInvoiceAlreadyPosted: a previous attempt may have
+	// already posted the AR (status flipped to posted, JE created)
+	// and only crashed on the way back to update the pos_invoice.
+	// The poster's status guard short-circuits with that sentinel,
+	// which the resume path treats as success — the JE is already
+	// on the ledger, calling it again would be a no-op anyway.
+	if _, err := p.invoice.PostSalesInvoice(ctx, tenantID, arRec.ID, actorID); err != nil && !errors.Is(err, ledger.ErrInvoiceAlreadyPosted) {
 		return nil, fmt.Errorf("pos: post ar_invoice: %w", err)
 	}
 
@@ -317,7 +323,10 @@ func (p *POSPoster) PostPOSInvoice(ctx context.Context, tenantID, posInvoiceID, 
 		}
 		posRec = updated
 	}
-	if _, err := p.payment.PostPayment(ctx, tenantID, payRec.ID, actorID); err != nil {
+	// Same tolerate-already-posted semantics as the AR step: a
+	// crash between PostPayment success and the pos_invoice flip
+	// would otherwise permanently block the resume.
+	if _, err := p.payment.PostPayment(ctx, tenantID, payRec.ID, actorID); err != nil && !errors.Is(err, ledger.ErrPaymentAlreadyPosted) {
 		return nil, fmt.Errorf("pos: post payment: %w", err)
 	}
 
