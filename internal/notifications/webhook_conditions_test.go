@@ -107,3 +107,47 @@ func TestEvaluateConditionsUnknownOperatorFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestEvaluateConditionsUncomparableValuesFailClosed(t *testing.T) {
+	// A condition pairing array vs array (or map vs map) used to
+	// hit `a == b` on uncomparable types and panic the worker.
+	// Now any non-scalar fails closed at scalarEqual.
+	payload := json.RawMessage(`{"tags": ["urgent", "p0"], "meta": {"foo": "bar"}}`)
+	cases := []string{
+		`{"tags": ["urgent", "p0"]}`,
+		`{"tags": {"$eq": ["urgent", "p0"]}}`,
+		`{"tags": {"$in": [["urgent"]]}}`,
+		`{"meta": {"foo": "bar"}}`,
+	}
+	for _, c := range cases {
+		t.Run(c, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("uncomparable types must not panic: %v", r)
+				}
+			}()
+			if EvaluateConditions(json.RawMessage(c), payload) {
+				t.Fatalf("uncomparable types must fail closed: %s", c)
+			}
+		})
+	}
+}
+
+func TestEvaluateConditionsPrefixNonStringFailsClosed(t *testing.T) {
+	// $prefix with a non-string operand previously coerced to ""
+	// and matched any string payload. Must now fail closed.
+	payload := json.RawMessage(`{"event_type": "ticket.created"}`)
+	cases := []string{
+		`{"event_type": {"$prefix": 123}}`,
+		`{"event_type": {"$prefix": true}}`,
+		`{"event_type": {"$prefix": null}}`,
+		`{"event_type": {"$prefix": ["t"]}}`,
+	}
+	for _, c := range cases {
+		t.Run(c, func(t *testing.T) {
+			if EvaluateConditions(json.RawMessage(c), payload) {
+				t.Fatalf("non-string $prefix operand must fail closed: %s", c)
+			}
+		})
+	}
+}

@@ -128,7 +128,17 @@ func matchCondition(got any, present bool, operand any) bool {
 			}
 		}
 		if v, ok := op["$prefix"]; ok {
-			prefix, _ := v.(string)
+			// Both the operand and the resolved value must be
+			// strings. A non-string operand (e.g. a number) was
+			// previously type-asserted to "" via the `_` discard,
+			// which silently matched every string payload thanks
+			// to strings.HasPrefix(s, "") == true — fail-open
+			// behaviour contradicting the documented fail-closed
+			// design.
+			prefix, isPrefixStr := v.(string)
+			if !isPrefixStr {
+				return false
+			}
 			s, isStr := got.(string)
 			if !isStr || !strings.HasPrefix(s, prefix) {
 				return false
@@ -152,6 +162,15 @@ func matchCondition(got any, present bool, operand any) bool {
 // scalarEqual normalises numeric types before comparing: JSON
 // numbers always decode to float64, so a cond authored as `1` and
 // a payload value of `1.0` compare equal.
+//
+// Uncomparable Go types (slices, maps, funcs) panic on the `==`
+// operator, so a tenant condition like `{"tags": ["a", "b"]}` paired
+// with a payload `tags: ["a","b"]` would crash the worker if reached
+// here. Guard the fallback path so only `string`/`bool` (and the
+// nil-handled types above) reach `==`. Anything else fails closed —
+// the caller treats false as "condition didn't match" and skips
+// delivery, which matches the documented fail-closed semantics of
+// EvaluateConditions.
 func scalarEqual(a, b any) bool {
 	if a == nil || b == nil {
 		return a == b
@@ -162,7 +181,18 @@ func scalarEqual(a, b any) bool {
 		}
 		return false
 	}
-	return a == b
+	switch a.(type) {
+	case string, bool:
+		// Only comparable scalar types reach `==` so a slice or
+		// map operand cannot panic the worker. The dynamic-type
+		// check on `a` is sufficient because Go's `==` panics
+		// only when both sides share the same uncomparable type;
+		// a string vs. slice comparison would short-circuit on
+		// the type mismatch first.
+		return a == b
+	default:
+		return false
+	}
 }
 
 func toFloat(v any) (float64, bool) {
