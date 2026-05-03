@@ -1,6 +1,6 @@
 # Kapp Business Suite — Proposal
 
-> **Last Updated:** 2026-04-25
+> **Last Updated:** 2026-05-03
 >
 > Related documents: [README.md](./README.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [PROGRESS.md](./PROGRESS.md)
 
