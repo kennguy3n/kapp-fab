@@ -1,6 +1,6 @@
 # Kapp Business Suite
 
-> **Last Updated:** 2026-04-25
+> **Last Updated:** 2026-05-03
 
 **An extreme-lightweight, multi-tenant business operating platform for KChat — built in Go + React for efficient operation at scale with thousands of SME tenants.**
 
