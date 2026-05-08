@@ -17,7 +17,7 @@ build:
 	go build -o bin/kapp-backup ./services/kapp-backup
 
 migrate:
-	@for f in migrations/*.sql; do \
+	@set -e; for f in migrations/*.sql; do \
 		echo "Running $$f..."; \
 		psql "$(DB_URL)" -f "$$f"; \
 	done
