@@ -45,49 +45,62 @@ Every business interaction in Kapp flows through this chain: what begins as a ch
 
 ```
 kapp/
+  .github/
+    workflows/              # CI: ci.yml, migration-rls-check, agent-import-check, api-versioning-check
   apps/
-    web/                         # React app
-    storybook/                   # UI component development
-  services/
-    api/                         # Go API gateway / BFF
-    worker/                      # Go async workers
-    importer/                    # Go import pipelines
-    kchat-bridge/                # KChat card + command bridge
-    agent-tools/                 # AI tool execution service
-  packages/
-    ui/                          # React component library
-    schema/                      # KType schema definitions
-    cards/                       # Card templates
-    client/                      # Generated API client
+    web/                    # React + TypeScript frontend
+    storybook/              # UI component development
+  cmd/
+    rotate-master-key/      # Master key rotation CLI
+  docs/                     # Operator guide, developer guide, KType authoring, DR runbook, etc.
   internal/
-    tenant/
-    authz/
-    ktype/
-    record/
-    workflow/
-    ledger/
-    crm/
-    hr/
-    lms/
-    reporting/
-    insights/                    # BI query engine, dashboard store, cache
-    audit/
-    events/
-    files/
-  migrations/
-    postgres/
-  deploy/
-    docker/
-    helm/
-    terraform/
-  docs/
-    adr/
-    api/
-    product/
-  tests/
-    integration/
-    isolation/
-    migration/
+    agents/                 # AI agent tool implementations
+    audit/                  # Append-only audit log
+    auth/                   # JWT, KChat SSO, sessions
+    authz/                  # RBAC/ABAC policy evaluation
+    base/                   # Base (flexible tables) KApp
+    crm/                    # CRM KTypes and behaviors
+    dashboard/              # Tenant KPI dashboard aggregation
+    dbutil/                 # Database utilities (tenant tx, SET LOCAL)
+    docs/                   # Docs/artifacts KApp
+    events/                 # Event outbox and publishing
+    exporter/               # Data export (per-KType, full tenant)
+    files/                  # File/attachment storage (S3, ZK Fabric)
+    finance/                # Finance KTypes (payment, recurring, payment terms)
+    forms/                  # Forms KApp
+    helpdesk/               # Helpdesk KTypes, SLA, inbound email
+    hr/                     # HR KTypes, payroll engine, tax packs
+    importer/               # Import pipeline and source adapters
+    insights/               # BI query engine, dashboard store, cache
+    integrationtest/        # Integration and load tests
+    inventory/              # Inventory KTypes, stock moves, batches, reorder
+    ktype/                  # KType schema registry and validation
+    ledger/                 # Typed ledgers (finance, inventory), posting engine
+    lms/                    # LMS KTypes, certificates
+    notifications/          # Notification routing (SMTP, webhook)
+    platform/               # Metrics, autoscaler, rate limiter, feature flags, metering, retention
+    print/                  # PDF/print template rendering
+    projects/               # Projects + milestones KTypes
+    record/                 # KRecord CRUD, versioning, encryption
+    reporting/              # Report builder, saved reports, scheduling
+    sales/                  # Sales/procurement KTypes, POS, price lists
+    scheduler/              # Tenant-scoped scheduled actions
+    tenant/                 # Tenant lifecycle, wizard, encryption, metering, ZK fabric client
+    workflow/               # State machines, transitions, approval chains
+  migrations/               # PostgreSQL migrations (000001–000050)
+  packages/
+    cards/                  # Card templates
+    client/                 # Generated API client
+    schema/                 # KType schema definitions
+    ui/                     # React component library
+  scripts/                  # upgrade_tier.sh, rotate_master_key.sh, capture-screenshots
+  services/
+    agent-tools/            # AI tool execution service
+    api/                    # Go API gateway / BFF
+    importer/               # Go import pipeline service
+    kapp-backup/            # Per-tenant backup/restore CLI
+    kchat-bridge/           # KChat card + command + presence bridge
+    worker/                 # Go async workers (notifications, SLA, cache, exports, etc.)
 ```
 
 ---
@@ -112,15 +125,10 @@ kapp/
 ## Deferred Scope
 
 - Manufacturing
-- Full payroll
-- Country tax packs
-- Advanced accounting consolidation
 - Advanced LMS certificates
-- POS
 - Website/CMS
 - Unrestricted low-code scripting
 - Generic marketplace
-- Insights: external data source connections (non-Kapp databases)
 - Insights: notebook/exploratory analysis interface
 
 ---
@@ -129,7 +137,61 @@ kapp/
 
 - [PROPOSAL.md](./PROPOSAL.md) — Full business and product proposal.
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — Technical architecture and engineering design.
+- [PHASES.md](./PHASES.md) — Phase roadmap and per-phase scope definitions.
 - [PROGRESS.md](./PROGRESS.md) — Development progress tracker with phases and acceptance criteria.
+
+---
+
+## Quick Start
+
+1. Clone the repo and start infrastructure:
+   ```
+   make compose-up
+   ```
+
+2. Run all migrations:
+   ```
+   make migrate
+   ```
+
+3. Start the API server:
+   ```
+   make run-api
+   ```
+
+4. Start the async worker:
+   ```
+   make run-worker
+   ```
+
+5. Start the KChat bridge:
+   ```
+   make run-kchat-bridge
+   ```
+
+---
+
+## Running Tests
+
+```sh
+# Unit tests
+make test
+
+# Integration tests (requires running PostgreSQL from docker-compose)
+make test-integration
+
+# Load tests (gated behind build tag)
+KAPP_TEST_DB_URL="..." go test -tags=integration,loadtest -v ./internal/integrationtest/loadtest/...
+
+# Lint
+make lint
+```
+
+> **Frontend test gap.** The React + TypeScript frontend under `apps/web/`
+> currently has no test files — the 55+ Go test files across `internal/`
+> and `services/` provide backend coverage, but `apps/web/` is a known gap.
+> A frontend test harness (e.g. Vitest + React Testing Library + Playwright)
+> is tracked as a follow-up.
 
 ---
 
@@ -142,7 +204,7 @@ kapp/
 - **Event bus:** Compact-encoded, batched event streaming
 - **Cache + rate limit:** Redis (sliding-window token bucket via atomic Lua, shared across API replicas)
 - **Deployment:** Docker, Helm, Terraform
-- **Charting:** Apache ECharts (or similar lightweight library) for Insights visualizations
+- **Charting:** Recharts for Insights visualizations (`recharts ^3.8.1`, used by `apps/web/src/components/insights/Charts.tsx`)
 
 ## ZK Object Fabric Integration
 
