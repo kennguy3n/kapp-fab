@@ -2,7 +2,7 @@
 
 > **Last Updated:** 2026-05-03
 >
-> Related documents: [README.md](./README.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [PROGRESS.md](./PROGRESS.md)
+> Related documents: [README.md](./README.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [PHASES.md](./PHASES.md) · [PROGRESS.md](./PROGRESS.md)
 
 ---
 
@@ -33,15 +33,17 @@ Kapp Business Suite is a **proprietary, Go + React, multi-tenant, KChat-native b
 
 Kapp Business Suite is a set of KChat-native business applications for SMEs. It covers:
 
-- **ERP-lite** — Finance, Sales, Procurement, Inventory
+- **ERP-lite** — Finance, Sales, Procurement, Inventory, POS
 - **CRM** — Leads, contacts, organizations, deals, quotes, activities
-- **HR** — Employees, leave, attendance, onboarding, offboarding
-- **LMS** — Courses, enrollments, progress, quizzes
-- **Projects** — Work, tasks, milestones
+- **HR** — Employees, leave, attendance, onboarding, offboarding, payroll, country tax packs, shift scheduling, performance reviews
+- **Helpdesk** — Tickets with SLA policies, agent routing, inbound email, customer portal, KChat thread→ticket automation
+- **Projects** — Projects, milestones, Gantt views, work, tasks
+- **LMS** — Courses, enrollments, progress, quizzes, certificates
 - **Approvals** — Configurable chains over any KType
 - **Forms** — Metadata-driven capture forms
 - **Base** — Spreadsheet-like flexible tables
 - **Docs/artifacts** — Structured documents and AI-generated artifacts
+- **Insights** — Visual + SQL query builder, composable dashboards, AI-assisted queries, KChat digest cards
 - **AI agents** — KChat AI coworkers operating business data through permissioned tools
 
 Each KApp surfaces through **three coordinated modes**:
@@ -211,7 +213,29 @@ All manufacturing features are **Later**. Manufacturing introduces domain comple
 - Agent tool: `lms.recommend_course` based on role, activity, and gaps
 - Reviewer notifications for assignment submissions
 
-### 3.6 Approvals, Forms, Base, Docs
+### 3.6 Helpdesk Module
+
+| Object / Feature | Purpose |
+| --- | --- |
+| `helpdesk.ticket` | Customer-facing ticket with workflow `open → in_progress → waiting → resolved → closed`, priority, owner, channel, and linked customer/contact |
+| `helpdesk.sla_policy` | Per-priority SLA policy with response and resolution targets, business hours, and escalation rules |
+| Inbound email | Recipient-domain → tenant routing; incoming email becomes a `helpdesk.ticket` with attachments rehosted to the tenant bucket |
+| Customer portal | Token-authenticated self-service surface for ticket submission, status tracking, and replies |
+| KChat thread → ticket | `/ticket-from-thread` slash command and Create-Ticket composer action; status updates post back to the originating thread |
+| SLA breach worker | Background worker computing response/resolution due times, logging breach events, and emitting outbox notifications |
+| Agent tools | `helpdesk.create_ticket`, `helpdesk.assign_ticket`, `helpdesk.resolve_ticket` |
+
+### 3.7 Projects Module
+
+| Object / Feature | Purpose |
+| --- | --- |
+| `projects.project` | Project record with name, owner, status (`planned → active → on_hold → completed → archived`), start / end dates, linked customer, and tenant-scoped access |
+| `projects.milestone` | Milestone within a project: name, due date, status, owner, linked deliverable records |
+| Gantt view | Timeline rendering of projects + milestones with dependency edges and per-milestone progress |
+| Agent tools | `projects.create_project`, `projects.advance_milestone` (dry-run + confirmation) |
+| KChat surfaces | `/project` slash command, project summary cards, milestone status updates routed to the project channel |
+
+### 3.8 Approvals, Forms, Base, Docs
 
 | KApp | Purpose |
 | --- | --- |
@@ -222,7 +246,7 @@ All manufacturing features are **Later**. Manufacturing introduces domain comple
 
 ---
 
-### 3.7 Object Storage Integration
+### 3.9 Object Storage Integration
 
 Kapp file attachments live on a per-tenant zero-knowledge object storage layer provided by [ZK Object Fabric](https://github.com/kennguy3n/zk-object-fabric).
 
@@ -239,7 +263,7 @@ Reference downstream integrations on the fabric side: kmail, zk-drive, and Kapp 
 
 ---
 
-### 3.8 Insights Module
+### 3.10 Insights Module
 
 Kapp Insights is a tenant-scoped BI layer that lets SME users explore, visualize, and share business data without writing code. Reference architecture: [Frappe Insights](https://github.com/frappe/insights), adapted for Kapp's KType metadata model and multi-tenant isolation.
 
@@ -498,14 +522,26 @@ Discover  →  Export  →  Normalize  →  Map  →  Validate  →  Import stag
 11. KChat cards and agent tools across all MVP KApps
 12. Insights (visual query builder, composable dashboards, AI query assistant, KChat digest cards)
 
-### Defer (9)
+### Shipped post-MVP
+
+Features that were originally deferred but have since shipped through the
+hardening / cross-cutting / Phase M work in [PROGRESS.md](./PROGRESS.md):
+
+1. **Full payroll** — payslip generation, statutory deductions, pay-run
+   posting (PRs #32 / #33 / #34)
+2. **Country tax packs** — US + AU on the payroll engine (PR #51)
+3. **POS** — KTypes, finalize-sale posting hook, offline queue, register UI
+   (PR #55)
+4. **Advanced accounting consolidation** — operator-scoped, admin-only
+   cross-tenant rollup (PR #56)
+5. **Insights: external data source connections** — non-Kapp PostgreSQL +
+   CSV upload (PR #48)
+
+### Defer (6)
 
 1. Manufacturing
-2. Full payroll
-3. Country tax packs
-4. Advanced accounting consolidation
-5. Advanced LMS certificates
-6. POS
-7. Website/CMS
-8. Unrestricted low-code scripting
-9. Generic marketplace
+2. Advanced LMS certificates
+3. Website/CMS
+4. Unrestricted low-code scripting
+5. Generic marketplace
+6. Insights: notebook / exploratory analysis interface

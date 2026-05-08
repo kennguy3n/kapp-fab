@@ -14,12 +14,13 @@ build:
 	go build -o bin/api ./services/api
 	go build -o bin/worker ./services/worker
 	go build -o bin/kchat-bridge ./services/kchat-bridge
+	go build -o bin/kapp-backup ./services/kapp-backup
 
 migrate:
-	psql "$(DB_URL)" -f migrations/000001_initial_schema.sql
-	psql "$(DB_URL)" -f migrations/000002_admin_role.sql
-	psql "$(DB_URL)" -f migrations/000003_forms.sql
-	psql "$(DB_URL)" -f migrations/000004_finance_extensions.sql
+	@set -e; for f in migrations/*.sql; do \
+		echo "Running $$f..."; \
+		psql "$(DB_URL)" -f "$$f"; \
+	done
 
 run-api: build
 	DB_URL="$(APP_DB_URL)" ADMIN_DB_URL="$(ADMIN_DB_URL)" ./bin/api

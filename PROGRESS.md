@@ -1,15 +1,15 @@
 # Kapp Business Suite — Development Progress
 
-> **Last Updated:** 2026-04-27 (Phase G + Phase L acceptance closed; API versioning strategy documented and CI-enforced. `internal/integrationtest/phase_l_test.go` adds `TestInsightsDashboardWithLinkedFilters` (5-widget dashboard + linked-filter dispatch), `TestInsightsQueryTimeoutEnforced` (sub-microsecond timeout fences `Runner.runWithTimeout`), `TestInsightsFeatureFlagDisablesRoutes` (403 envelope when `tenant_features.insights = false`), and `TestInsightsGenerateQueryAgentToolValid` (NL→query result is runnable end-to-end). `services/api/tier_handlers_integration_test.go` adds `TestTierUpgradeCopiesEveryTable`, `TestTierUpgradeTablesMatchBackupSourceList`, and `TestKappBackupRoundTripWithRemap`; the row-copy SQL was fixed to enumerate non-generated columns via `services/api/tier_handlers.go::nonGeneratedColumns` and the equivalent DO-block in `scripts/upgrade_tier.sh` so tables with `GENERATED ALWAYS AS` columns (e.g. `krecords.search_vector`) round-trip cleanly. `internal/integrationtest/loadtest/phase_g_acceptance_test.go::TestPhaseGAcceptanceLoad` produces the 5k-tenant SLO numbers checked into `docs/PHASE_G_ACCEPTANCE.md`. `docs/API_VERSIONING.md` covers path-prefix negotiation, the deprecation timeline, and per-tenant version pinning via `tenant_features`; `.github/workflows/api-versioning-check.yml` blocks any new chi route mounted outside `/api/v1/`, `/api/v2/`, `/internal/`, or the platform allow-list.)
+> **Last Updated:** 2026-05-08 (Phase M vertical-depth slice landed: Insights SQL editor mode (PR #50), country tax packs US + AU on the payroll engine (PR #51), shift scheduling with KChat presence late detection and a calendar UI (PR #52), performance review / appraisal surface (PR #53), projects + milestones with Gantt and agent tools (PR #54), POS module with offline queue and register UI (PR #55), advanced accounting consolidation as an operator-scoped admin-only rollup (PR #56), webhook v2 with conditional matching + per-webhook retries + jittered exponential backoff + delivery-log UI (PR #57), Phase M follow-up fixes on Devin Review feedback for PRs #53 / #54 / #55 / #57 (PR #58), demo mode with a mock data layer and module screenshots (PR #59), and the RBAC depth pass — multi-role, role hierarchy, wildcards, condition expressions, field-level authorization, and a role-management API (PR #60) gated behind a `KAPP_AUTHZ_ENFORCE` toggle so the new evaluator can be rolled out gradually (PR #61). Roadmap definitions for every phase are now consolidated in [PHASES.md](./PHASES.md); this file remains the live per-deliverable checklist.)
 >
-> Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [SECURITY_REVIEW.md](./docs/SECURITY_REVIEW.md)
+> Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [PHASES.md](./PHASES.md) · [SECURITY_REVIEW.md](./docs/SECURITY_REVIEW.md)
 
 ---
 
 ## Current Phase
 
-**Phase G + Phase L — closed; Phase M — vertical depth (in progress)**
-**Status:** Phase G + Phase L acceptance signed off; the Phase L deferred features (external data sources, cross-KType JOINs, dashboard embedding) shipped in PR #48; Phase G batch/lot + KChat presence attendance shipped in PR #46; Phase G cell autoscaler + scoped `kapp_tier_admin` SECURITY DEFINER role shipped in PR #47. Outstanding stale `[ ]` markers in this file have been brought up to date in this batch. **Next focus (Phase M, this batch):** (1) CI lock-step test wiring `scripts/upgrade_tier.sh::TABLES` to `tenant.TenantScopedTables` (closes PR #47 review gap); (2) Insights SQL editor mode (visual + raw SQL with `statement_timeout` + RLS); (3) HR depth — country tax packs (US, AU), shift scheduling, performance reviews; (4) Projects & milestones with Gantt + agent tools; (5) POS module with offline queue; (6) advanced accounting consolidation across child tenants; (7) webhook v2 (event-type filters, conditional matching, exponential backoff with jitter, delivery log UI).
+**Phase G + Phase L — closed; Phase M — vertical depth (in progress | ~90%)**
+**Status:** Phase G + Phase L acceptance signed off in earlier batches; the Phase L deferred features (external data sources, cross-KType JOINs, dashboard embedding) shipped in PR #48; Phase G batch/lot + KChat presence attendance shipped in PR #46; Phase G cell autoscaler + scoped `kapp_tier_admin` SECURITY DEFINER role shipped in PR #47. Phase M has now landed across PRs #50–#61: the Insights SQL editor mode, US + AU payroll tax packs, shift scheduling, the appraisal surface, projects + milestones with Gantt, POS with offline queue, advanced accounting consolidation, webhook v2, demo mode with mock data + screenshots, and the RBAC depth pass behind a `KAPP_AUTHZ_ENFORCE` toggle. **Outstanding:** the notebook / exploratory analysis interface deferred from Phase L is the only remaining open item in this phase. See [PHASES.md](./PHASES.md) for the canonical phase definitions.
 
 ---
 
@@ -423,6 +423,37 @@ Tenant-scoped BI layer: visual query builder, composable dashboards, rich visual
 - [ ] Notebook/exploratory analysis interface
 - [x] Cross-KType JOINs in visual builder
 - [x] Dashboard embedding (iframe/public link)
+
+---
+
+## Phase M — Vertical Depth
+
+**Status:** In progress (~90%)
+
+Deepens the existing modules with the features production SMEs ask for once the core platform is stable. See [PHASES.md](./PHASES.md#phase-m--vertical-depth) for the phase definition.
+
+### Deliverables
+
+- [x] Insights SQL editor mode — visual + raw SQL with per-tenant `statement_timeout` + RLS preserved (PR #50, `migrations/000045_insights_sql_mode.sql` adds `mode` + `raw_sql` columns; `internal/insights/runner.go::Runner.RunRawSQL` wraps execution in `dbutil.WithTenantTx` + `SET LOCAL statement_timeout` + parameterised `pgx.Query`; `services/api/insights_handlers.go` mounts `POST /api/v1/insights/queries/{id}/run-sql` double-gated by `platform.FeatureMiddleware(tenant.FeatureInsightsSQLEditor)`; Visual/SQL tab on `apps/web/src/pages/InsightsQueryBuilderPage.tsx`)
+- [x] Country tax packs — US + AU on the payroll engine (PR #51, `internal/hr/tax_packs/` registry with US federal + state withholding tables and AU PAYG/Medicare schedules; pack selection threaded through `internal/hr/payroll_engine.go::ComputePayslip`; per-tenant default pack on `tenants.country` from `migrations/000046_tenants_country.sql`)
+- [x] Shift scheduling — `hr.shift` + `hr.shift_assignment` KTypes, `hr.assign_shift` agent tool, `/shift` slash command, presence-based late detection, and calendar UI (PR #52, presence late detection wired through `services/kchat-bridge/presence.go` against the active shift assignment; calendar view in `apps/web/src/pages/ShiftCalendarPage.tsx`)
+- [x] Performance review / appraisal surface — `hr.appraisal` KType + lifecycle (draft → in_progress → completed) with reviewer assignment and comment threads (PR #53, `internal/hr/appraisal.go`; `apps/web/src/pages/AppraisalsPage.tsx`)
+- [x] Projects + milestones — `projects.project` + `projects.milestone` KTypes, `projects.create_project` / `projects.advance_milestone` agent tools, `/project` slash command, and Gantt view (PR #54, `internal/projects/`; Gantt rendering in `apps/web/src/pages/ProjectGanttPage.tsx`)
+- [x] POS module — `pos.register`, `pos.session`, `pos.sale` KTypes with `pos.finalize_sale` posting hook into the finance ledger; offline queue with replay; register UI (PR #55, `internal/sales/pos.go`; `apps/web/src/pages/POSRegisterPage.tsx` with IndexedDB-backed offline queue)
+- [x] Advanced accounting consolidation — operator-scoped, admin-only cross-tenant rollup driven by `consolidation_groups` + `consolidation_runs` (PR #56, `migrations/000046_consolidation.sql`; `internal/ledger/consolidation.go`; admin-only `POST /api/v1/admin/consolidation/runs`)
+- [x] Webhook v2 — conditional matching, per-webhook retry policy, jittered exponential backoff, and delivery-log UI (PR #57, `migrations/000048_webhook_v2.sql` adds `condition_expr`, `retry_policy`, `delivery_attempts`; `services/worker/webhook_v2.go` runs the new dispatcher; `apps/web/src/pages/WebhooksPage.tsx` shows the delivery log)
+- [x] Phase M follow-up fixes — addresses Devin Review findings on PR #53 (appraisal validation), PR #54 (Gantt scaling), PR #55 (POS offline replay idempotency), and PR #57 (webhook retry budget cap) (PR #58)
+- [x] Demo mode with a mock data layer and module screenshots — `KAPP_DEMO_MODE` opt-in stubs every store layer with seeded data and a screenshot catalogue under `docs/screenshots/` (PR #59)
+- [x] RBAC depth pass — multi-role membership, role hierarchy, permission wildcards, condition expressions, field-level authorization, and a role-management API (PR #60, `migrations/000049_user_tenant_roles.sql` + `migrations/000050_role_hierarchy.sql`; `internal/authz/evaluator.go` rewritten; `internal/authz/role_api.go`; `services/api/roles_handlers.go`)
+- [x] RBAC authz enforce toggle — `KAPP_AUTHZ_ENFORCE` env flag short-circuits `recordHandlers` evaluation when off so the new evaluator can be rolled out gradually (PR #61)
+- [ ] Notebook / exploratory analysis interface — still deferred from Phase L; tracked here so it lands inside Phase M's vertical-depth scope
+
+### Acceptance Criteria
+
+- [x] All Phase M PRs have shipped to `main` and Devin Review follow-ups are closed (PR #58 covers the cross-PR cleanup batch).
+- [x] New surfaces (shift calendar, appraisals, project Gantt, POS register, webhook v2 delivery log) render under demo mode against the mock data layer (PR #59).
+- [x] RBAC enhancements ship behind the `KAPP_AUTHZ_ENFORCE` toggle so the rollout is reversible (PR #61).
+- [ ] Notebook / exploratory analysis interface lands.
 
 ---
 

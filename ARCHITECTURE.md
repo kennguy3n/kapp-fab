@@ -1,8 +1,8 @@
 # Kapp Business Suite — Architecture
 
-> **Last Updated:** 2026-04-25
+> **Last Updated:** 2026-05-08
 >
-> Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [PROGRESS.md](./PROGRESS.md)
+> Related documents: [README.md](./README.md) · [PROPOSAL.md](./PROPOSAL.md) · [PHASES.md](./PHASES.md) · [PROGRESS.md](./PROGRESS.md)
 
 ---
 
@@ -85,26 +85,41 @@ Kapp is designed for a single operator to serve **thousands of SME tenants** on 
 | Service / Module | Responsibility |
 | --- | --- |
 | `api` | HTTP/gRPC gateway, auth, tenant middleware, rate limiting, request routing |
-| `tenant` | Tenant lifecycle (create, suspend, archive, delete), cell assignment, quotas |
+| `tenant` | Tenant lifecycle (create, suspend, archive, delete), cell assignment, quotas, setup wizard, encryption, metering, ZK fabric client |
+| `auth` | JWT issuance/validation, KChat SSO, session management |
 | `authz` | RBAC/ABAC policy evaluation, permission caching, role resolution |
 | `ktype` | KType schema registry, validation, code generation, migration |
-| `record` | KRecord CRUD, versioning, soft delete, list/filter, JSONB storage |
+| `record` | KRecord CRUD, versioning, soft delete, list/filter, JSONB storage, field-level encryption |
 | `workflow` | State machines, transitions, guards, actions, approval chains |
-| `ledger` | Typed append-only ledgers (finance, inventory); double-entry invariants |
+| `ledger` | Typed append-only ledgers (finance, inventory); double-entry invariants; consolidation |
+| `finance` | Finance KTypes (payment, recurring invoice, payment terms) |
 | `crm` | CRM-specific KTypes and behaviors |
-| `hr` | HR-specific KTypes and behaviors |
-| `lms` | LMS-specific KTypes and behaviors |
-| `reporting` | Saved queries, aggregations, pivot, chart serialization |
-| `insights` | Visual query engine extensions (calculated columns, joins), dashboard store, query cache, AI query generation |
-| `audit` | Append-only audit log writer and reader |
+| `sales` | Sales orders, purchase orders, price lists, POS |
+| `hr` | HR KTypes, payroll engine, country tax packs, shift scheduling, appraisals |
+| `lms` | LMS KTypes, certificates |
+| `inventory` | Inventory KTypes, stock moves, batches, reorder automation |
+| `helpdesk` | Ticket management, SLA policies, inbound email, customer portal |
+| `projects` | Projects, milestones, Gantt views |
+| `dashboard` | Tenant-level KPI aggregation |
+| `reporting` | Saved queries, aggregations, pivot, chart serialization, scheduled report delivery |
+| `insights` | Visual query engine extensions (calculated columns, joins), SQL editor mode, dashboard store, query cache, embedding, AI query generation |
+| `forms` | Metadata-driven capture forms (anonymous + authenticated) |
+| `base` | Flexible spreadsheet-like tables |
+| `docs` | Artifact documents with versioning |
+| `audit` | Append-only audit log writer and reader; hash-chain integrity |
 | `events` | Outbox pattern, event batching, delivery, consumer management |
-| `files` | Attachment upload/download, content-addressable dedup, S3 integration |
-| `kchat-bridge` | Card rendering, slash commands, thread actions, KChat API adapter |
+| `files` | Attachment upload/download, content-addressable dedup, S3 + ZK Fabric integration |
+| `notifications` | Notification routing (in-app, email, webhook, KChat cards) |
+| `print` | PDF / print template rendering |
+| `exporter` | Data export (per-KType CSV/JSON, full-tenant dump) |
+| `scheduler` | Tenant-scoped cron / scheduled actions |
+| `platform` | Observability (metrics), autoscaler, rate limiting, feature flags, metering, data retention, isolation audit |
+| `kchat-bridge` | Card rendering, slash commands, thread actions, KChat API adapter, presence-based attendance |
 | `agent-tools` | AI tool registry, permissioned execution, dry-run, confirmation, audit |
 | `worker` | Async job execution, schedulers, retries, dead-letter handling |
 | `importer` | Import pipelines (discover, export, normalize, map, validate, stage) |
 
-*(13 kernel/infra services listed as the canonical set; CRM/HR/LMS are KApp modules built atop the kernel.)*
+*Logical modules within a single Go binary; CRM / HR / LMS / sales / projects / etc. are KApp modules built atop the kernel.*
 
 ---
 
@@ -371,6 +386,19 @@ audit:
 ---
 
 ## 7. Initial Database Schema
+
+> **Note.** The schema below is the **initial Phase A** baseline. The schema
+> has grown significantly since — 50 migration files now ship under
+> `migrations/` covering finance extensions, inventory, HR, LMS, the
+> importer, the helpdesk, sales / procurement / banking, multi-currency,
+> reporting, scheduled actions, tenant features and metering, full-text
+> search, webhooks, print templates, the portal, the ZK fabric integration,
+> data retention, the audit hash chain, batch tracking, cell capacity,
+> consolidation, the Insights tables (queries, dashboards, widgets, cache,
+> shares, data sources, embeds, SQL mode), and the multi-role / role
+> hierarchy RBAC tables. Refer to `migrations/000001_initial_schema.sql`
+> through `migrations/000050_role_hierarchy.sql` for the live schema; this
+> section is preserved as the architectural starting point only.
 
 ```sql
 -- Tenants, users, roles
@@ -751,6 +779,19 @@ audit:
 ## 12. Insights Engine
 
 Kapp Insights extends the `internal/reporting` query engine with BI-grade capabilities while preserving the multi-tenant isolation and efficiency invariants.
+
+> **Shipped capabilities (post-MVP).** The Phase L deferred items have all
+> landed: the **SQL editor mode** runs raw SQL inside `dbutil.WithTenantTx` +
+> `SET LOCAL statement_timeout` with parameterised tenant injection and is
+> double-gated by the `insights_sql_editor` feature flag (PR #50);
+> **external data source connections** to non-Kapp PostgreSQL plus CSV
+> uploads are wired through `migrations/000043_insights_data_sources.sql`
+> and the new data-source store (PR #48); **cross-KType JOINs** in the
+> visual builder are restricted to ref-field relationships declared in
+> KType schemas (PR #48); and **dashboard embedding** via signed iframe
+> URLs / public links is backed by `migrations/000044_insights_embeds.sql`
+> (PR #48). The remaining open follow-up is the
+> notebook / exploratory analysis interface.
 
 ### Data Flow
 
