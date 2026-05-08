@@ -263,7 +263,7 @@ Reference downstream integrations on the fabric side: kmail, zk-drive, and Kapp 
 
 ---
 
-### 3.8 Insights Module
+### 3.10 Insights Module
 
 Kapp Insights is a tenant-scoped BI layer that lets SME users explore, visualize, and share business data without writing code. Reference architecture: [Frappe Insights](https://github.com/frappe/insights), adapted for Kapp's KType metadata model and multi-tenant isolation.
 
