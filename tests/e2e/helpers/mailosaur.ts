@@ -54,6 +54,8 @@ export interface WaitForEmailOptions {
   subject?: string;
   /** Timeout in milliseconds (default 30 000). */
   timeout?: number;
+  /** Only match messages received after this date. */
+  receivedAfter?: Date;
 }
 
 /**
@@ -63,16 +65,23 @@ export interface WaitForEmailOptions {
 export async function waitForEmail(
   opts: WaitForEmailOptions
 ): Promise<Message> {
-  const { sentTo, subject, timeout = 30_000 } = opts;
+  const { sentTo, subject, timeout = 30_000, receivedAfter } = opts;
 
   const searchCriteria: { sentTo: string; subject?: string } = { sentTo };
   if (subject) {
     searchCriteria.subject = subject;
   }
 
-  const message = await client.messages.get(SERVER_ID, searchCriteria, {
-    timeout,
-  });
+  const getOptions: { timeout: number; receivedAfter?: Date } = { timeout };
+  if (receivedAfter) {
+    getOptions.receivedAfter = receivedAfter;
+  }
+
+  const message = await client.messages.get(
+    SERVER_ID,
+    searchCriteria,
+    getOptions
+  );
 
   return message;
 }

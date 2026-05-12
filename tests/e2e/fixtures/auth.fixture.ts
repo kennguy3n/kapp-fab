@@ -62,9 +62,28 @@ export const test = base.extend<EmailTestFixtures>({
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
+
     if (AUTH_TOKEN) {
       headers["Authorization"] = `Bearer ${AUTH_TOKEN}`;
+    } else if (ADMIN_EMAIL && ADMIN_PASSWORD) {
+      // Obtain a bearer token via the login API so every apiContext
+      // call is authenticated, even when AUTH_TOKEN is not set.
+      const tempCtx = await playwright.request.newContext({
+        baseURL: API_BASE_URL,
+      });
+      const loginResp = await tempCtx.post("/v1/login", {
+        data: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
+      });
+      if (loginResp.ok()) {
+        const body = await loginResp.json();
+        const token = body.token ?? body.access_token ?? "";
+        if (token) {
+          headers["Authorization"] = `Bearer ${token}`;
+        }
+      }
+      await tempCtx.dispose();
     }
+
     const ctx = await playwright.request.newContext({
       baseURL: API_BASE_URL,
       extraHTTPHeaders: headers,

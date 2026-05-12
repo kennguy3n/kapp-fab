@@ -234,14 +234,19 @@ test.describe.serial("Employee invitation email (TC083–TC087)", () => {
   test("TC087 – Resending invite sends a new unique link", async ({
     apiContext,
   }) => {
+    // Record the current time so we only match emails received after
+    // the resend — avoids picking up the stale TC083 email.
+    const beforeResend = new Date();
+
     // Resend invitation to employee A (same email as TC083).
     await sendInvitation(apiContext, employeeAEmail);
 
-    // Wait for the NEW invitation email.
+    // Wait for the NEW invitation email (received after the resend).
     const resendEmail = await waitForEmail({
       sentTo: employeeAEmail,
       subject: "invite",
       timeout: 60_000,
+      receivedAfter: beforeResend,
     });
 
     const resendLink = extractInviteLink(resendEmail);
