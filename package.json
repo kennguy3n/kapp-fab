@@ -13,9 +13,12 @@
     "build": "npm run build --workspaces --if-present",
     "storybook": "npm run storybook --workspace=apps/storybook",
     "generate-client": "npm run generate --workspace=packages/client",
-    "screenshots": "VITE_DEMO_MODE=true playwright test"
+    "screenshots": "VITE_DEMO_MODE=true playwright test",
+    "test:e2e:email": "playwright test --config tests/e2e/playwright.config.ts"
   },
   "devDependencies": {
-    "@playwright/test": "^1.49.0"
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^25.7.0",
+    "mailosaur": "^8.6.1"
   }
 }
