@@ -187,12 +187,6 @@ KAPP_TEST_DB_URL="..." go test -tags=integration,loadtest -v ./internal/integrat
 make lint
 ```
 
-> **Frontend test gap.** The React + TypeScript frontend under `apps/web/`
-> currently has no test files — the 55+ Go test files across `internal/`
-> and `services/` provide backend coverage, but `apps/web/` is a known gap.
-> A frontend test harness (e.g. Vitest + React Testing Library + Playwright)
-> is tracked as a follow-up.
-
 ---
 
 ## Tech Stack
