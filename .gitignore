@@ -13,3 +13,4 @@ storybook-static/
 # Playwright artifacts (screenshots themselves are committed under docs/screenshots)
 test-results/
 playwright-report/
+playwright-report-email/
