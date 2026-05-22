@@ -120,9 +120,9 @@ func newAuthSigner() (*auth.Signer, error) {
 			"KAPP_JWT_SECRET is the literal dev-only placeholder from .env.example; " +
 				"rotate it to a freshly generated value (e.g. `openssl rand -base64 48`) " +
 				"or, for local development against the dev compose stack, explicitly " +
-				"opt in by setting KAPP_ALLOW_DEV_JWT_SECRET=1. The placeholder is the " +
-				"same in every checkout of the repository — anyone with a copy of " +
-				".env.example can mint admin-looking tokens against this deployment.",
+				"opt in by setting KAPP_ALLOW_DEV_JWT_SECRET=1 — the placeholder is the " +
+				"same in every checkout of the repository, so anyone with a copy of " +
+				".env.example can mint admin-looking tokens against this deployment",
 		)
 	}
 	access := parseDurationOr("KAPP_JWT_ACCESS_TTL", 15*time.Minute)
