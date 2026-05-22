@@ -706,7 +706,7 @@ func run() error {
 				pmailer = failingPortalMailer{
 					err: errors.New("portal: SMTP not configured (set SMTP_HOST); cannot send magic links"),
 				}
-				log.Printf("api: WARN portal magic-link mailer disabled (SMTP_HOST empty); /portal/auth/request will return 500 until SMTP is configured")
+				log.Printf("api: WARN portal magic-link mailer disabled (SMTP_HOST empty); /portal/auth/request will return 503 until SMTP is configured")
 			}
 			porh := &portalHandlers{
 				tenants:  tenantSvc,

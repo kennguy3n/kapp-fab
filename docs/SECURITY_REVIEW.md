@@ -624,7 +624,19 @@ operator runbooks must include each one explicitly.
 | `REDIS_URL` | Rate limiters fall back to in-process (per-pod) buckets. The IP-rate-limiter sweep goroutine still GCs old buckets so memory stays bounded, but a multi-replica deployment loses cross-replica fairness. | Medium |
 | `SMTP_HOST` | Portal magic-link delivery is disabled. `/api/v1/portal/auth/request` returns 503 instead of silently dropping the email. | High for portal users |
 | `KAPP_AUTHZ_ENFORCE` | Default is enforcement **ON**. Setting `=0` / `=false` disables the authz gate and emits a startup WARN. | Critical in prod |
-| `KAPP_PLATFORM_ADMIN_USERS` | Bootstrap-time UUID list. First SSO login by a listed user persists `is_platform_admin = TRUE` in `users`. Re-read on every SSO exchange so operators can append admin UUIDs without restarting the API. Unset is fine on any deployment that already has at least one persisted admin. | Low (bootstrap-only) |
+| `KAPP_PLATFORM_ADMIN_USERS` | Bootstrap-time UUID list, **two-step by design**. (1) the candidate user signs in via SSO — this creates the `users` row but the row is _not_ promoted because the DB-generated UUID was unknown when the env var was set. (2) operator reads the new UUID (`SELECT id FROM users WHERE email = ...`) and appends it to the env var. (3) the user's next SSO exchange (refresh OR fresh login) sees the match and persists `is_platform_admin = TRUE`. Re-read on every SSO exchange so operators can keep appending admin UUIDs without restarting. Unset is fine once at least one row in `users` already has `is_platform_admin = TRUE`. | Low (bootstrap-only) |
+
+### Platform-admin recovery window
+
+The auth middleware permits a platform admin to access routes even when their home tenant is suspended/archived (`internal/auth/middleware.go` — the locked-out-last-admin scenario). The bypass is **time-bounded** by the refresh-token TTL because `listMemberships` in `internal/auth/sso.go` filters `t.status = 'active'`. Consequence: a platform admin whose home tenant is suspended can keep using their existing JWT (and refresh it) until the refresh token reaches its `RefreshTTL` ceiling (default **24h** — see `SignerConfig.RefreshTTL`). Once that token expires, SSO `Exchange` rejects the login because no active tenant membership is visible.
+
+Operator playbook for the locked-out scenario:
+
+1. While inside the 24h window, the admin should re-activate the affected tenant via `/api/v1/admin/tenants/{id}/activate` (or whatever the recovery route is on the deployment).
+2. If the window has already lapsed: either (a) shell into the admin DB and `UPDATE tenants SET status = 'active' WHERE id = '<home_tenant>'` manually, or (b) add a second platform admin whose home tenant is healthy by inserting `KAPP_PLATFORM_ADMIN_USERS=<healthy_admin_uuid>` and restarting the API so that admin can do the recovery.
+3. The refresh TTL is configurable per deployment — if your platform-admin recovery window needs to be longer than 24h, raise `SignerConfig.RefreshTTL` at startup. The 24h default is a security-vs-recovery trade-off; sustained higher values are NOT recommended outside known-recovery scenarios because they widen the window during which a demoted user retains their cached `IsPlatformAdmin` claim.
+
+The middleware emits a `WARN` log on every request that takes this bypass path so a sustained pattern is visible in the operator audit trail. A repeated WARN means the tenant lifecycle is broken; investigate before the refresh window closes.
 
 ---
 
