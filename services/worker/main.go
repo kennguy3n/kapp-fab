@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"golang.org/x/sync/errgroup"
@@ -297,30 +299,43 @@ func run() error {
 
 	log.Printf("worker: started; nats=%s; kchat-bridge=%q", natsURL, bridge.baseURL)
 
-	// Phase 2.2: LISTEN/NOTIFY-driven drain loop. A dedicated pooled
-	// connection subscribes to the "kapp_events" channel. On INSERT the
-	// trigger fires pg_notify and the worker wakes within milliseconds.
-	// A 2-second timeout on WaitForNotification acts as a heartbeat
-	// fallback for the edge case where a notify is lost (e.g. connection
-	// hiccup between trigger and LISTEN, or events inserted by a
-	// migration script that doesn't fire the trigger).
-	listenConn, err := pool.Acquire(ctx)
+	// Phase 2.2: LISTEN/NOTIFY-driven drain loop. A dedicated *pgx.Conn
+	// (NOT a pgxpool slot) subscribes to the "kapp_events" channel. On
+	// INSERT the trigger fires pg_notify and the worker wakes within
+	// milliseconds. A 2s timeout on WaitForNotification acts as a
+	// heartbeat fallback for the edge case where a notify is lost.
+	//
+	// Using pgx.Connect directly (instead of pool.Acquire) deliberately
+	// keeps the LISTEN connection OUT of the pgxpool so it does not
+	// permanently occupy a pool slot — the worker also runs scheduler,
+	// export, autoscaler, and webhook-retry goroutines that all draw
+	// from the same pool, and stealing a slot for the life of the
+	// process would reduce concurrency for the rest of them.
+	//
+	// Failure handling: WaitForNotification's error is now inspected. A
+	// DeadlineExceeded (from the 2s wait timeout) is the expected idle
+	// path. Any other error indicates the underlying socket has died
+	// (PG restart, network partition, idle disconnect); in that case we
+	// log a warning, close the dead conn, sleep one tickInterval to
+	// avoid a hot reconnect spin if the DB itself is down, then re-dial
+	// and re-issue LISTEN. The reconnect loop never gives up — the
+	// worker is the only path that drains the outbox, so silently
+	// degrading to a permanent CPU-burning loop (the bug Devin Review
+	// caught) would be much worse than a slow recovery cycle.
+	listenConn, err := acquireListenConn(ctx, cfg.DatabaseURL)
 	if err != nil {
-		return fmt.Errorf("worker: acquire listen conn: %w", err)
+		return fmt.Errorf("worker: initial LISTEN conn: %w", err)
 	}
-	defer listenConn.Release()
-	if _, err := listenConn.Exec(ctx, "LISTEN kapp_events"); err != nil {
-		return fmt.Errorf("worker: LISTEN kapp_events: %w", err)
-	}
+	defer func() {
+		if listenConn != nil {
+			_ = listenConn.Close(context.Background())
+		}
+	}()
 
 	deliverFn := deliver(nc, bridge, router)
 	for {
-		// WaitForNotification blocks until either a notification arrives
-		// or the context deadline exceeds. We impose a 2-second deadline
-		// so the loop drains at least every 2s (matching the old ticker
-		// cadence) even when no notification arrives.
 		waitCtx, waitCancel := context.WithTimeout(ctx, tickInterval)
-		_, _ = listenConn.Conn().WaitForNotification(waitCtx)
+		_, waitErr := listenConn.WaitForNotification(waitCtx)
 		waitCancel()
 
 		if ctx.Err() != nil {
@@ -328,10 +343,55 @@ func run() error {
 			return nil
 		}
 
+		// Any error other than the expected deadline means the LISTEN
+		// socket has been disrupted. Without this branch the loop would
+		// spin at the speed of DrainBatch (hundreds of iterations per
+		// second), saturating Postgres with no useful work and silently
+		// losing the LISTEN subscription forever.
+		if waitErr != nil && !errors.Is(waitErr, context.DeadlineExceeded) {
+			log.Printf("worker: LISTEN connection error: %v; reconnecting", waitErr)
+			_ = listenConn.Close(context.Background())
+			listenConn = nil
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(tickInterval):
+			}
+			newConn, rerr := acquireListenConn(ctx, cfg.DatabaseURL)
+			if rerr != nil {
+				log.Printf("worker: LISTEN reconnect failed: %v; will retry next cycle", rerr)
+				// Sleep again before the next attempt; without a
+				// short sleep here the WaitForNotification on the
+				// nil listenConn below would panic, so we just
+				// continue and let the next loop iteration's
+				// reconnect attempt happen after the wait above.
+				continue
+			}
+			listenConn = newConn
+		}
+
 		if _, err := publisher.DrainBatch(ctx, drainBatch, deliverFn); err != nil {
 			log.Printf("worker: drain batch: %v", err)
 		}
 	}
+}
+
+// acquireListenConn dials a dedicated *pgx.Conn (outside the pgxpool) and
+// issues LISTEN kapp_events on it. Centralising the dial + LISTEN sequence
+// keeps the initial-connect path and the reconnect path identical, so a
+// future tweak to the LISTEN channel name or the conn config only needs
+// to land in one place. On any failure the connection is closed and the
+// error is returned to the caller.
+func acquireListenConn(ctx context.Context, connString string) (*pgx.Conn, error) {
+	conn, err := pgx.Connect(ctx, connString)
+	if err != nil {
+		return nil, fmt.Errorf("dial listen conn: %w", err)
+	}
+	if _, err := conn.Exec(ctx, "LISTEN kapp_events"); err != nil {
+		_ = conn.Close(context.Background())
+		return nil, fmt.Errorf("LISTEN kapp_events: %w", err)
+	}
+	return conn, nil
 }
 
 // deliver returns the drain-callback that publishes a batch of events to NATS

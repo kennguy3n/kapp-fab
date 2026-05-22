@@ -22,6 +22,18 @@ const (
 )
 
 // Tenant mirrors a row in the `tenants` table.
+//
+// Callers MUST treat *Tenant as read-only when received from PGStore.Get,
+// PGStore.GetBySlug, or platform.TenantFromContext. PGStore's optional LRU
+// cache (see WithCache) shares a single *Tenant value across every concurrent
+// reader of the same id/slug, so mutating any field — including Status,
+// PlacementPolicy, or any future column — would corrupt the cached value for
+// every other in-flight request. The store's mutation methods (Suspend,
+// Activate, Archive, Delete, UpdatePlan, SetBaseCurrency, SetCountry,
+// SetZKCredentials, SetPlacementPolicy) explicitly invalidate the cache and
+// produce a fresh row on the next read; that is the only correct way to
+// reflect a change in tenant state. To "update" a tenant struct in handler
+// code, copy the value first (`copy := *t`) before modifying.
 type Tenant struct {
 	ID        uuid.UUID       `json:"id"`
 	Slug      string          `json:"slug"`

@@ -53,30 +53,64 @@ func TestContentHash_DiffersOnVersionChange(t *testing.T) {
 	}
 }
 
-// TestCanonicalJSON_SortsKeys verifies that canonicalJSON produces key-sorted
-// output regardless of input order.
-func TestCanonicalJSON_SortsKeys(t *testing.T) {
-	input := map[string]json.RawMessage{
-		"zebra": json.RawMessage(`1`),
-		"alpha": json.RawMessage(`2`),
-		"mid":   json.RawMessage(`3`),
-	}
-	got := string(canonicalJSON(input))
+// TestCanonicalJSONValue_SortsObjectKeys verifies that top-level object keys
+// are sorted lexicographically regardless of input order.
+func TestCanonicalJSONValue_SortsObjectKeys(t *testing.T) {
+	input := json.RawMessage(`{"zebra":1,"alpha":2,"mid":3}`)
+	got := string(canonicalJSONValue(input))
 	want := `{"alpha":2,"mid":3,"zebra":1}`
 	if got != want {
-		t.Fatalf("canonicalJSON:\n got: %s\nwant: %s", got, want)
+		t.Fatalf("canonicalJSONValue:\n got: %s\nwant: %s", got, want)
 	}
 }
 
-// TestCanonicalJSON_NestedObjects verifies recursive canonicalization.
-func TestCanonicalJSON_NestedObjects(t *testing.T) {
-	input := map[string]json.RawMessage{
-		"b": json.RawMessage(`{"zz":1,"aa":2}`),
-		"a": json.RawMessage(`"leaf"`),
-	}
-	got := string(canonicalJSON(input))
+// TestCanonicalJSONValue_NestedObjects verifies recursive canonicalization
+// of nested objects.
+func TestCanonicalJSONValue_NestedObjects(t *testing.T) {
+	input := json.RawMessage(`{"b":{"zz":1,"aa":2},"a":"leaf"}`)
+	got := string(canonicalJSONValue(input))
 	want := `{"a":"leaf","b":{"aa":2,"zz":1}}`
 	if got != want {
-		t.Fatalf("canonicalJSON nested:\n got: %s\nwant: %s", got, want)
+		t.Fatalf("canonicalJSONValue nested:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// TestCanonicalJSONValue_ObjectsInsideArrays verifies that objects nested
+// inside arrays (e.g. the per-field schema objects inside a KType's "fields"
+// array) get their keys sorted too. This was the Devin Review finding
+// against the earlier object-only canonicalization.
+func TestCanonicalJSONValue_ObjectsInsideArrays(t *testing.T) {
+	// An array of two objects, each with keys in different orders.
+	// Expected: each object's keys are sorted, array element order is
+	// preserved.
+	input := json.RawMessage(`[{"z":1,"a":2},{"b":"x","a":"y"}]`)
+	got := string(canonicalJSONValue(input))
+	want := `[{"a":2,"z":1},{"a":"y","b":"x"}]`
+	if got != want {
+		t.Fatalf("canonicalJSONValue arrays-of-objects:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// TestCanonicalJSONValue_DeepNesting walks a realistic schema-like shape:
+// objects nested inside arrays nested inside objects. Every nested object
+// must be sorted.
+func TestCanonicalJSONValue_DeepNesting(t *testing.T) {
+	input := json.RawMessage(`{"fields":[{"name":"x","type":"int"},{"type":"str","name":"y"}],"version":1}`)
+	got := string(canonicalJSONValue(input))
+	want := `{"fields":[{"name":"x","type":"int"},{"name":"y","type":"str"}],"version":1}`
+	if got != want {
+		t.Fatalf("canonicalJSONValue deep:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// TestCanonicalJSONValue_PrimitivesUnchanged verifies that non-container
+// JSON values pass through unchanged.
+func TestCanonicalJSONValue_PrimitivesUnchanged(t *testing.T) {
+	cases := []string{`"hello"`, `42`, `true`, `false`, `null`}
+	for _, c := range cases {
+		got := string(canonicalJSONValue(json.RawMessage(c)))
+		if got != c {
+			t.Errorf("canonicalJSONValue(%q) = %q, want %q", c, got, c)
+		}
 	}
 }

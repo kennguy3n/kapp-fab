@@ -1,6 +1,7 @@
 package ktype
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,10 +11,17 @@ import (
 	"sort"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 )
+
+// pgErrUndefinedColumn is PostgreSQL SQLSTATE for "undefined column". Used
+// to detect the case where RegisterIfChanged runs against a database that
+// has not yet had migration 000052 applied — in that case we fall back to
+// the plain Register path so the API can still boot.
+const pgErrUndefinedColumn = "42703"
 
 // Sentinel errors.
 var (
@@ -95,7 +103,27 @@ func (r *PGRegistry) RegisterIfChanged(ctx context.Context, kt KType) error {
 		`SELECT content_hash FROM ktypes WHERE name = $1 AND version = $2`,
 		kt.Name, kt.Version,
 	).Scan(&existingHash)
-	if err == nil && existingHash != nil && *existingHash == hash {
+	if err != nil {
+		// Defense in depth: if migration 000052 has not been applied yet,
+		// the `content_hash` column does not exist and the SELECT fails
+		// with SQLSTATE 42703 (undefined_column). Fall back to plain
+		// Register so the API can still boot — RegisterIfChanged then
+		// degrades to "always upsert" (the pre-Phase-2.4 behavior) which
+		// is correct, just slower. Without this fallback, an out-of-order
+		// migrate-then-deploy sequence would hard-stop the API at startup
+		// with an opaque "column does not exist" error.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgErrUndefinedColumn {
+			return r.Register(ctx, kt)
+		}
+		// pgx.ErrNoRows is the expected "row not present yet" case — fall
+		// through to the UPSERT below. Anything else (connection reset,
+		// permission denied, etc.) is a real error and should propagate.
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("ktype: register if changed: select content_hash: %w", err)
+		}
+	}
+	if existingHash != nil && *existingHash == hash {
 		return nil
 	}
 
@@ -105,6 +133,16 @@ func (r *PGRegistry) RegisterIfChanged(ctx context.Context, kt KType) error {
 		kt.Name, kt.Version, kt.Schema, hash,
 	)
 	if err != nil {
+		// Same fallback as above for the UPSERT path: if the column was
+		// added between our SELECT and our INSERT (vanishingly unlikely
+		// but possible during a rolling deploy where one replica is
+		// running the new code and another is still mid-migration), we
+		// could see the column on SELECT but not on INSERT, or vice-versa.
+		// Treat undefined_column on INSERT the same way and fall back.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgErrUndefinedColumn {
+			return r.Register(ctx, kt)
+		}
 		return fmt.Errorf("ktype: register if changed: %w", err)
 	}
 	r.invalidate(kt.Name)
@@ -113,57 +151,86 @@ func (r *PGRegistry) RegisterIfChanged(ctx context.Context, kt KType) error {
 
 // contentHash produces a deterministic SHA-256 hex digest from the KType's
 // identifying fields. The digest is used by RegisterIfChanged to detect
-// unchanged schemas across restarts. The function sorts the JSON keys of the
-// schema before hashing to guarantee stability even if a future refactor
-// round-trips the schema through a map (which would lose key order). The
-// fallback path (used when the schema is not a JSON object — e.g. an array)
-// hashes the raw bytes directly, which is stable as long as the source
-// literal doesn't change whitespace.
+// unchanged schemas across restarts. Canonicalization is done via
+// canonicalJSONValue which recursively sorts the keys of every JSON object
+// it encounters — including objects nested inside arrays — so the hash is
+// stable across any future refactor that constructs schemas via map literals
+// (where Go's map iteration order is randomized).
 func contentHash(kt KType) string {
 	h := sha256.New()
 	h.Write([]byte(kt.Name))
 	h.Write([]byte(fmt.Sprintf(":%d:", kt.Version)))
-	// Canonicalize schema: if it's a JSON object, re-marshal with sorted
-	// keys; otherwise hash raw bytes. This guarantees stability across
-	// future schema definitions that might be constructed at runtime.
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(kt.Schema, &obj); err == nil {
-		h.Write(canonicalJSON(obj))
-	} else {
-		h.Write(kt.Schema)
-	}
+	h.Write(canonicalJSONValue(kt.Schema))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// canonicalJSON produces a stable JSON serialization of a string→RawMessage
-// map by sorting keys lexicographically and recursively canonicalizing nested
-// objects. This is the same approach used by JCS (RFC 8785) minus the
-// number/unicode normalization steps (unnecessary for schema content which is
-// always ASCII and uses integer field counts).
-func canonicalJSON(obj map[string]json.RawMessage) []byte {
-	keys := make([]string, 0, len(obj))
-	for k := range obj {
-		keys = append(keys, k)
+// canonicalJSONValue produces a stable serialization of any JSON value:
+//
+//   - Objects: keys are sorted lexicographically; values are recursively
+//     canonicalized.
+//   - Arrays: element order is preserved (arrays are ordered by definition),
+//     but each element is recursively canonicalized so objects nested inside
+//     arrays (e.g. the per-field schema objects inside a KType's "fields"
+//     array) also get their keys sorted. This was a real Devin Review finding
+//     against an earlier version that only recursed into objects — a future
+//     map-based schema construction would have produced non-deterministic
+//     hashes for the field-definition objects despite the top-level being
+//     canonical, causing unnecessary UPSERTs on every boot.
+//   - Primitives (strings, numbers, bools, null): returned as-is. We do NOT
+//     attempt to normalize number representation (e.g. 1.0 vs 1) because Go's
+//     json package emits a stable form and the KType schemas only use
+//     integer-valued field counts.
+//
+// This is the same approach as JCS (RFC 8785) minus number/Unicode
+// normalization, both of which are unnecessary for ASCII schema content.
+func canonicalJSONValue(raw json.RawMessage) []byte {
+	if len(raw) == 0 {
+		return raw
 	}
-	sort.Strings(keys)
-	buf := []byte("{")
-	for i, k := range keys {
-		if i > 0 {
-			buf = append(buf, ',')
-		}
-		keyBytes, _ := json.Marshal(k)
-		buf = append(buf, keyBytes...)
-		buf = append(buf, ':')
-		// Recursively canonicalize nested objects.
-		var nested map[string]json.RawMessage
-		if err := json.Unmarshal(obj[k], &nested); err == nil {
-			buf = append(buf, canonicalJSON(nested)...)
-		} else {
-			buf = append(buf, obj[k]...)
-		}
+	// JSON null deserialises as a nil map / nil slice, which would
+	// otherwise be mistaken for an empty object or empty array. Detect
+	// it explicitly so it round-trips faithfully.
+	trimmed := bytes.TrimSpace(raw)
+	if bytes.Equal(trimmed, []byte("null")) {
+		return raw
 	}
-	buf = append(buf, '}')
-	return buf
+	// Try JSON object.
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err == nil && obj != nil {
+		keys := make([]string, 0, len(obj))
+		for k := range obj {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		buf := []byte("{")
+		for i, k := range keys {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			keyBytes, _ := json.Marshal(k)
+			buf = append(buf, keyBytes...)
+			buf = append(buf, ':')
+			buf = append(buf, canonicalJSONValue(obj[k])...)
+		}
+		buf = append(buf, '}')
+		return buf
+	}
+	// Try JSON array.
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err == nil {
+		buf := []byte("[")
+		for i, item := range arr {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			buf = append(buf, canonicalJSONValue(item)...)
+		}
+		buf = append(buf, ']')
+		return buf
+	}
+	// Primitive: return as-is. json.RawMessage already preserves the
+	// source bytes exactly.
+	return raw
 }
 
 // Get returns the named KType at the requested version. If version is <= 0,
