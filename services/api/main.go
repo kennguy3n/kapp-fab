@@ -636,6 +636,45 @@ func run() error {
 		r.Use(auth.AdminMiddleware())
 	}
 
+	// userChain is the JWT-only counterpart to adminChain. It is for
+	// user-facing routes that should resolve the tenant from the
+	// authenticated JWT claims (auth.Middleware stamps
+	// platform.WithTenant from claims.TenantID), NOT from the
+	// X-Tenant-ID request header that platform.TenantMiddleware
+	// honored before Phase 1.
+	//
+	// The /api/v1/tenants/me sub-tree is the canonical caller:
+	// before Phase 1 it relied on platform.TenantMiddleware, which
+	// reads the header — so any unauthenticated client could send
+	// X-Tenant-ID: <victim> and call POST /api/v1/tenants/me/plan to
+	// change another tenant's plan. userChain closes that gap by
+	// requiring a valid bearer JWT and deriving the tenant from
+	// claims.TenantID.
+	//
+	// Unlike adminChain, userChain mounts auth.RequireActiveHomeTenant
+	// so the platform-admin recovery bypass in auth.Middleware (which
+	// lets admins reach the admin-recovery endpoints with an inactive
+	// home tenant) cannot also be used to mutate tenant-scoped data
+	// on the same inactive tenant via /me. Admin recovery proceeds
+	// through adminChain (which intentionally omits the guard) — that
+	// is the path operators should use to re-activate a tenant.
+	//
+	// When the JWT signer is not configured, this falls through with
+	// a 503 (mirroring adminChain) instead of silently degrading to
+	// header-based auth.
+	userChain := func(r chi.Router) {
+		if authh.signer == nil {
+			r.Use(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					http.Error(w, "user routes require JWT auth; set KAPP_JWT_SECRET", http.StatusServiceUnavailable)
+				})
+			})
+			return
+		}
+		r.Use(auth.Middleware(authh.signer, tenantSvc, sessionStore))
+		r.Use(auth.RequireActiveHomeTenant())
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -758,12 +797,38 @@ func run() error {
 		// chain. /me is registered first so chi's static-segment
 		// preference matches it before the {id} routes underneath.
 		r.Route("/api/v1/tenants", func(r chi.Router) {
-			r.Route("/me", func(r chi.Router) {
-				r.Use(platform.TenantMiddleware(tenantSvc))
-				r.Get("/features", feath.listMe)
-				r.Get("/usage", meth.usageMe)
-				r.Get("/usage/history", meth.usageHistory)
-				r.Post("/plan", meth.changePlanMe)
+			// /me — current-tenant convenience surface for the
+			// authenticated user. Before Phase 1 this resolved the
+			// tenant from the X-Tenant-ID request header via
+			// platform.TenantMiddleware, which meant an
+			// unauthenticated client could send
+			//   X-Tenant-ID: <victim-uuid>
+			//   POST /api/v1/tenants/me/plan {"plan": "free"}
+			// and downgrade another tenant's plan — `changePlan`
+			// reads the tenant from URL params (which `changePlanMe`
+			// populates from header-derived ctx) with no user-identity
+			// check of its own.
+			//
+			// userChain closes that gap by requiring a valid bearer
+			// JWT and stamping the tenant from claims.TenantID, so the
+			// only tenant a caller can act on via /me is the one their
+			// own token names. The legacy header is ignored — there is
+			// no fallback path that could re-introduce the bypass.
+			//
+			// userChain also mounts auth.RequireActiveHomeTenant so a
+			// platform admin whose home tenant is in the recovery
+			// bypass cannot ALSO downgrade their own tenant's plan or
+			// mutate features via /me. Admin recovery proceeds through
+			// the admin chain below (which intentionally omits the
+			// guard).
+			r.Group(func(r chi.Router) {
+				userChain(r)
+				r.Route("/me", func(r chi.Router) {
+					r.Get("/features", feath.listMe)
+					r.Get("/usage", meth.usageMe)
+					r.Get("/usage/history", meth.usageHistory)
+					r.Post("/plan", meth.changePlanMe)
+				})
 			})
 
 			r.Group(func(r chi.Router) {

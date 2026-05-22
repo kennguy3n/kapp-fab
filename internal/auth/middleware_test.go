@@ -139,3 +139,115 @@ func TestMiddleware_ActiveTenantStillAllowed(t *testing.T) {
 		t.Fatalf("status = %d, want 200 (body=%q)", rec.Code, rec.Body.String())
 	}
 }
+
+// TestMiddleware_StampsRecoveryBypassFlag locks in the architectural
+// narrowing: when the platform-admin bypass triggers, the request
+// context MUST carry IsRecoveryBypass=true so downstream middleware
+// (RequireActiveHomeTenant) can refuse non-admin tenant-scoped
+// routes. The bypass is intentionally narrow — admin recovery routes
+// proceed; anything else 403s when composed with the guard.
+func TestMiddleware_StampsRecoveryBypassFlag(t *testing.T) {
+	signer := newTestSigner(t)
+	tenantID := uuid.New()
+	adminUserID := uuid.New()
+	suspendedHome := &tenant.Tenant{ID: tenantID, Status: tenant.StatusSuspended}
+	activeHome := &tenant.Tenant{ID: tenantID, Status: tenant.StatusActive}
+
+	tests := []struct {
+		name          string
+		home          *tenant.Tenant
+		wantBypassSet bool
+	}{
+		{
+			name:          "active home tenant: flag NOT set",
+			home:          activeHome,
+			wantBypassSet: false,
+		},
+		{
+			name:          "suspended home tenant + platform admin: flag SET",
+			home:          suspendedHome,
+			wantBypassSet: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			token, err := signer.Issue(Claims{
+				UserID:          adminUserID,
+				TenantID:        tenantID,
+				IsPlatformAdmin: true,
+			})
+			if err != nil {
+				t.Fatalf("Issue: %v", err)
+			}
+
+			var observed bool
+			mw := Middleware(signer, stubTenantResolver{out: tc.home}, nil)
+			handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				observed = IsRecoveryBypass(r.Context())
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/isolation-audit", nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if observed != tc.wantBypassSet {
+				t.Fatalf("IsRecoveryBypass = %t, want %t", observed, tc.wantBypassSet)
+			}
+		})
+	}
+}
+
+// TestRequireActiveHomeTenant_RefusesBypassedRequests is the
+// defense-in-depth guard for non-admin tenant-scoped routes. When
+// auth.Middleware admitted the request via the platform-admin
+// recovery bypass, this middleware MUST 403 so the recovering admin
+// cannot also mutate tenant-scoped data on the suspended tenant.
+//
+// The admin chain (auth.Middleware + AdminMiddleware) intentionally
+// does NOT mount this guard — it is exactly the recovery path the
+// bypass exists to enable.
+func TestRequireActiveHomeTenant_RefusesBypassedRequests(t *testing.T) {
+	tests := []struct {
+		name       string
+		bypass     bool
+		wantStatus int
+	}{
+		{
+			name:       "no bypass: passes through",
+			bypass:     false,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "bypass set: refused with 403",
+			bypass:     true,
+			wantStatus: http.StatusForbidden,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			guard := RequireActiveHomeTenant()
+			handler := guard(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/records", nil)
+			if tc.bypass {
+				ctx := context.WithValue(req.Context(), ctxKeyRecoveryBypass, true)
+				req = req.WithContext(ctx)
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body=%q)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}

@@ -14,11 +14,13 @@ import (
 )
 
 // ctxKey avoids string-collision on the request context. Exported
-// helpers (ClaimsFromContext) are the blessed accessors.
+// helpers (ClaimsFromContext, IsRecoveryBypass) are the blessed
+// accessors.
 type ctxKey int
 
 const (
 	ctxKeyClaims ctxKey = iota
+	ctxKeyRecoveryBypass
 )
 
 // Middleware validates a Bearer JWT against the supplied Signer and
@@ -68,6 +70,7 @@ func Middleware(
 				http.Error(w, "tenant lookup failed", http.StatusInternalServerError)
 				return
 			}
+			recoveryBypass := false
 			if t.Status != tenant.StatusActive {
 				// Platform admins are exempt from the home-tenant
 				// active check. Without this exemption, a platform
@@ -85,6 +88,19 @@ func Middleware(
 				// demoted user does not retain this bypass past the
 				// refresh window.
 				//
+				// The bypass is intentionally narrow: we proceed,
+				// but we ALSO stamp ctxKeyRecoveryBypass on the
+				// context so non-admin tenant-scoped routes can
+				// refuse the request via RequireActiveHomeTenant.
+				// The admin chain intentionally does NOT mount that
+				// guard — it is exactly the recovery path the
+				// bypass exists to enable. Any handler that runs
+				// under auth.Middleware OUTSIDE the admin chain
+				// MUST mount RequireActiveHomeTenant so an admin
+				// recovering an inactive home tenant cannot also
+				// mutate tenant-scoped data on that tenant via the
+				// same bypass.
+				//
 				// We still emit a WARN so the operator audit log
 				// makes the unusual login visible — this path is
 				// expected to be rare and a sustained pattern is a
@@ -94,11 +110,15 @@ func Middleware(
 					return
 				}
 				log.Printf("auth: WARN platform admin user=%s logged in via inactive home tenant=%s status=%s; allowing for recovery", claims.UserID, t.ID, t.Status)
+				recoveryBypass = true
 			}
 			ctx := r.Context()
 			ctx = platform.WithTenant(ctx, t)
 			ctx = platform.WithUserID(ctx, claims.UserID)
 			ctx = context.WithValue(ctx, ctxKeyClaims, claims)
+			if recoveryBypass {
+				ctx = context.WithValue(ctx, ctxKeyRecoveryBypass, true)
+			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -119,6 +139,48 @@ func ClaimsFromContext(ctx context.Context) *Claims {
 		return c
 	}
 	return nil
+}
+
+// IsRecoveryBypass reports whether the supplied request context was
+// admitted via the platform-admin recovery bypass in Middleware — i.e.
+// the home tenant was suspended/archived but the user is a platform
+// admin so the auth gate let the request proceed for the locked-out-
+// last-admin scenario.
+//
+// Tenant-scoped routes that mount auth.Middleware outside the admin
+// chain should consult this (via the RequireActiveHomeTenant middleware
+// helper) so a recovering admin can reach the admin re-activation
+// endpoints but cannot also mutate tenant-scoped data on the same
+// inactive tenant via the bypass.
+func IsRecoveryBypass(ctx context.Context) bool {
+	if v, ok := ctx.Value(ctxKeyRecoveryBypass).(bool); ok {
+		return v
+	}
+	return false
+}
+
+// RequireActiveHomeTenant refuses requests admitted via the
+// platform-admin recovery bypass. Mount AFTER Middleware on any
+// chain that is NOT the admin-recovery path.
+//
+// The admin chain (auth.Middleware + auth.AdminMiddleware) intentionally
+// omits this guard — the whole point of the recovery bypass is to let
+// a platform admin reach the admin endpoints that re-activate a
+// suspended home tenant. Every OTHER chain that mounts auth.Middleware
+// (regular user routes, /me routes, future tenant-scoped routes that
+// want JWT auth) must mount this so a recovering admin cannot also
+// perform tenant-scoped mutations on the suspended tenant via the
+// same bypass.
+func RequireActiveHomeTenant() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if IsRecoveryBypass(r.Context()) {
+				http.Error(w, "home tenant is not active", http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func extractBearer(r *http.Request) (string, error) {

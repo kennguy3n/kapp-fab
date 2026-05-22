@@ -19,9 +19,16 @@
 --      email = 'admin@example.com'`).
 --   2. Operator sets KAPP_PLATFORM_ADMIN_USERS to that UUID
 --      (comma-separated for multiple admins) and restarts the API.
---   3. Second SSO (refresh OR fresh exchange): the auth bootstrap
---      reads the env var, sees the user matches, persists
+--   3. Second SSO (fresh exchange only, NOT refresh): the auth
+--      bootstrap reads the env var, sees the user matches, persists
 --      is_platform_admin = TRUE, and stamps the claim on the JWT.
+--      A session refresh would re-query `users.is_platform_admin`
+--      (which is still FALSE at this point) and mint a non-admin
+--      token — the bootstrap promotion runs inside `upsertUser`,
+--      which is only reached from `Exchange`, not from `Refresh`.
+--      In practice this means the candidate user MUST log out and
+--      log back in (or have their existing session revoked) so
+--      their next request goes through Exchange.
 -- Once at least one row has is_platform_admin = TRUE the env var
 -- should be unset and further promotions happen via the
 -- /api/v1/admin/users/{id}/promote endpoint (added in a subsequent
