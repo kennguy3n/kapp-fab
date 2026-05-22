@@ -348,26 +348,43 @@ func run() error {
 		// spin at the speed of DrainBatch (hundreds of iterations per
 		// second), saturating Postgres with no useful work and silently
 		// losing the LISTEN subscription forever.
+		//
+		// The reconnect path is an inner loop that retries with
+		// capped exponential backoff (tickInterval → 2× → 4× → ... →
+		// maxBackoff) until either ctx is cancelled or
+		// acquireListenConn succeeds. This guarantees that listenConn
+		// is non-nil when we exit the branch and re-enter
+		// WaitForNotification at the top of the next iteration —
+		// closing the nil-panic window Devin Review caught in the
+		// first iteration of this fix. The reconnect loop never gives
+		// up because the worker is the only path that drains the
+		// outbox; bailing out would silently lose every subsequent
+		// event until the process restarts.
 		if waitErr != nil && !errors.Is(waitErr, context.DeadlineExceeded) {
 			log.Printf("worker: LISTEN connection error: %v; reconnecting", waitErr)
 			_ = listenConn.Close(context.Background())
 			listenConn = nil
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(tickInterval):
+
+			backoff := tickInterval
+			const maxBackoff = 30 * time.Second
+			for {
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(backoff):
+				}
+				newConn, rerr := acquireListenConn(ctx, cfg.DatabaseURL)
+				if rerr == nil {
+					listenConn = newConn
+					log.Printf("worker: LISTEN reconnected")
+					break
+				}
+				log.Printf("worker: LISTEN reconnect failed (will retry in %s): %v", 2*backoff, rerr)
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
 			}
-			newConn, rerr := acquireListenConn(ctx, cfg.DatabaseURL)
-			if rerr != nil {
-				log.Printf("worker: LISTEN reconnect failed: %v; will retry next cycle", rerr)
-				// Sleep again before the next attempt; without a
-				// short sleep here the WaitForNotification on the
-				// nil listenConn below would panic, so we just
-				// continue and let the next loop iteration's
-				// reconnect attempt happen after the wait above.
-				continue
-			}
-			listenConn = newConn
 		}
 
 		if _, err := publisher.DrainBatch(ctx, drainBatch, deliverFn); err != nil {
