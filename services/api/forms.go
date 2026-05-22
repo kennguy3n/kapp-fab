@@ -74,12 +74,46 @@ func (h *formsHandlers) public(w http.ResponseWriter, r *http.Request) {
 
 type submitFormRequest struct {
 	Data map[string]any `json:"data"`
+	// HoneypotURL / HoneypotWebsite / HoneypotHomepage are three
+	// invisible decoy fields the public form template renders as
+	// CSS-hidden inputs alongside the real data payload. They sit
+	// at the JSON envelope's top level — NOT inside the Data map —
+	// so they cannot collide with KType schema fields that happen
+	// to be named url/website/homepage (extremely common in CRM
+	// and contact-form schemas). Real users never see the decoys,
+	// real templates never write them, so any non-empty value here
+	// indicates a scraper-style bot that submitted every visible
+	// input it could find.
+	//
+	// CONSTRAINT: do NOT add new top-level fields named url, website,
+	// or homepage to this envelope. Those three names are reserved
+	// for the honeypot triplet. If a future surface needs a
+	// top-level redirect URL or any other generic-named value, pick
+	// a non-conflicting name (e.g. redirect_url, callback) or
+	// rename the honeypot fields under a namespaced prefix (e.g.
+	// _h_*) — and update the public form template at the same time
+	// so real submissions don't suddenly look like bots.
+	HoneypotURL      string `json:"url,omitempty"`
+	HoneypotWebsite  string `json:"website,omitempty"`
+	HoneypotHomepage string `json:"homepage,omitempty"`
+}
+
+// isHoneypotTripped reports whether any of the decoy fields carry a
+// value. Any non-empty value — including whitespace — counts as a
+// trip: real templates never emit these fields, so a bot that wrote
+// " " into one of them is still a bot.
+func (r submitFormRequest) isHoneypotTripped() bool {
+	return r.HoneypotURL != "" || r.HoneypotWebsite != "" || r.HoneypotHomepage != ""
 }
 
 // submit accepts the public form payload and creates a KRecord under
-// the form's tenant. Rate limiting by IP should be enforced by the
-// reverse proxy / middleware — this handler itself does not re-enter
-// the rate limiter because there is no tenant header to key on.
+// the form's tenant. IP-based rate limiting is enforced by the
+// IPRateLimitMiddleware mounted on the route; the honeypot check
+// below catches drive-by bots that pass the rate limit but fill in
+// any of the invisible decoy fields the template emits as CSS-hidden.
+//
+// Successful spam is silently absorbed (202 Accepted with no body)
+// so the bot cannot tell its submission was rejected and adapt.
 func (h *formsHandlers) submit(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
@@ -89,6 +123,23 @@ func (h *formsHandlers) submit(w http.ResponseWriter, r *http.Request) {
 	var req submitFormRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	// Honeypot trips when any of the three top-level decoy fields
+	// carries a non-empty value. We return 202 Accepted with no
+	// body to look indistinguishable from a successful drop —
+	// bots that see 4xx adapt; bots that see 2xx without verifying
+	// do not.
+	//
+	// NOTE: we intentionally do NOT inspect req.Data for honeypot
+	// keys. req.Data carries the real KType schema payload, and a
+	// schema field named url/website/homepage (common in CRM
+	// contact forms) would otherwise be silently dropped. The
+	// top-level decoys are sufficient because the template renders
+	// them as siblings of the data envelope, so a legitimate
+	// submission never populates them.
+	if req.isHoneypotTripped() {
+		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 	var submitter *uuid.UUID

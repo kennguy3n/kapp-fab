@@ -10,16 +10,18 @@ import (
 )
 
 // Middleware authorizes the actor on the request context against the
-// supplied action + resource. It must be mounted after platform.TenantMiddleware
-// because it reads the tenant from the request context.
+// supplied action + resource. It must be mounted after
+// platform.TenantMiddleware (or auth.Middleware) because it reads the
+// tenant from the request context.
 //
 // On success the actor's resolved role list is attached to the context via
 // platform.WithUserRoles so downstream handlers (record store field
 // filtering, role-aware UI gates) can read it without an extra round trip.
 //
-// For Phase A the user id comes from an X-User-ID header fallback when no
-// context user is present; a later auth middleware will populate the context
-// directly from a verified JWT.
+// The user id MUST come from a verified JWT via platform.UserIDFromContext.
+// There is no header-based fallback — a client cannot impersonate a user
+// by sending X-User-ID, because the header is not consulted. Requests
+// that reach this middleware without a user on the context fail with 401.
 func Middleware(eval Evaluator, action, resource string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -29,13 +31,6 @@ func Middleware(eval Evaluator, action, resource string) func(http.Handler) http
 				return
 			}
 			userID := platform.UserIDFromContext(r.Context())
-			if userID == uuid.Nil {
-				if hdr := r.Header.Get("X-User-ID"); hdr != "" {
-					if id, err := uuid.Parse(hdr); err == nil {
-						userID = id
-					}
-				}
-			}
 			if userID == uuid.Nil {
 				http.Error(w, "user context missing", http.StatusUnauthorized)
 				return

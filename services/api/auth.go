@@ -80,14 +80,50 @@ func (h *authHandlers) refresh(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// devPlaceholderJWTSecret is the literal dev-only KAPP_JWT_SECRET
+// shipped in .env.example so `make dev` / docker-compose boot
+// without manual setup. It is intentionally a recognisable string
+// (not a high-entropy random value) so it stands out in log review.
+//
+// Any deployment that runs with this exact value AND has not opted
+// in via KAPP_ALLOW_DEV_JWT_SECRET=1 is almost certainly a
+// misconfiguration — somebody copied .env.example to production
+// without rotating the secret. newAuthSigner refuses to boot in
+// that state so the misconfiguration surfaces immediately instead
+// of after the first forged admin JWT shows up in the audit log.
+//
+// Keep this constant in sync with the KAPP_JWT_SECRET line in
+// .env.example. The string is exported nowhere else; it exists
+// solely as the lookup key for the dev-mode gate below.
+const devPlaceholderJWTSecret = "dev-only-kapp-jwt-secret-do-not-use-outside-localhost-fLPXuVqo9wKn"
+
 // newAuthSigner reads KAPP_JWT_SECRET / KAPP_JWT_TTL and returns a
 // configured HS256 signer. Returns a nil signer when the secret is
 // absent so local dev without auth keeps working; callers must guard
 // against nil before wiring the signer into middleware.
+//
+// As a defence-in-depth against operators copying .env.example to a
+// real deployment, the function refuses to construct a signer keyed
+// on the literal devPlaceholderJWTSecret unless KAPP_ALLOW_DEV_JWT_SECRET=1
+// is also set. The dev .env.example sets the opt-in flag explicitly;
+// production .env files never should. The check is keyed on string
+// equality of the secret value (case-sensitive, exact match) so a
+// developer who rotates the value to anything else passes through
+// without needing to clear the opt-in.
 func newAuthSigner() (*auth.Signer, error) {
 	secret := os.Getenv("KAPP_JWT_SECRET")
 	if secret == "" {
 		return nil, errors.New("KAPP_JWT_SECRET unset")
+	}
+	if secret == devPlaceholderJWTSecret && os.Getenv("KAPP_ALLOW_DEV_JWT_SECRET") != "1" {
+		return nil, errors.New(
+			"KAPP_JWT_SECRET is the literal dev-only placeholder from .env.example; " +
+				"rotate it to a freshly generated value (e.g. `openssl rand -base64 48`) " +
+				"or, for local development against the dev compose stack, explicitly " +
+				"opt in by setting KAPP_ALLOW_DEV_JWT_SECRET=1 — the placeholder is the " +
+				"same in every checkout of the repository, so anyone with a copy of " +
+				".env.example can mint admin-looking tokens against this deployment",
+		)
 	}
 	access := parseDurationOr("KAPP_JWT_ACCESS_TTL", 15*time.Minute)
 	refresh := parseDurationOr("KAPP_JWT_REFRESH_TTL", 24*time.Hour)

@@ -14,6 +14,24 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
 
+// tenantRateLimiter is the slim surface insightsEmbedHandlers (and
+// any future per-tenant billing callsites that bypass the chi
+// middleware chain) need. Both platform.RateLimiter (in-process) and
+// platform.RedisRateLimiter (distributed) satisfy it via their Allow
+// method, so the embed handler can be wired with either backend at
+// construction time.
+//
+// Keeping this interface local to the handler instead of pushing it
+// down into the platform package mirrors the rest of the API
+// service's wiring style: the platform layer exposes concrete types,
+// and the API binary defines small consumer-side interfaces only
+// where the wiring actually needs polymorphism. That keeps the
+// platform package free of seams that exist solely for testability
+// or for one specific caller.
+type tenantRateLimiter interface {
+	Allow(tenantID uuid.UUID, rpm, burst int) bool
+}
+
 // insightsEmbedHandlers exposes the dashboard-embed surface:
 //
 //   - POST /api/v1/insights/dashboards/{id}/embeds        (auth, owner)
@@ -23,14 +41,17 @@ import (
 //
 // The unauthenticated GET path is rate-limited against the *owning
 // tenant's* bucket so a viral embed cannot starve other tenants in
-// the same cell.
+// the same cell. When REDIS_URL is configured the rateLimiter field
+// is wired to the Redis-backed limiter so the per-tenant ceiling is
+// enforced across every API replica; otherwise it falls back to the
+// in-process limiter, which still enforces the ceiling per pod.
 type insightsEmbedHandlers struct {
 	embeds      *insights.EmbedStore
 	dashboards  *insights.DashboardStore
 	queries     *insights.QueryStore
 	runner      *insights.Runner
 	features    *tenant.FeatureStore
-	rateLimiter *platform.RateLimiter
+	rateLimiter tenantRateLimiter
 }
 
 type embedCreateRequest struct {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/auth"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
+	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
@@ -63,17 +64,83 @@ func (h *portalHandlers) portalFeatureAllowed(ctx context.Context, tenantID uuid
 }
 
 // portalMailer abstracts the transport that delivers a magic link.
-// Production wires an SMTP sender; dev logs the link so operators
-// can paste it into the portal manually.
+// Production wires the SMTP-backed portalSMTPMailer; deployments
+// without SMTP configured get a failingPortalMailer that returns an
+// explicit error so the request surface (and operator alerts) make
+// the misconfiguration visible instead of silently logging the
+// magic-link token to stdout.
+//
+// The Configured() probe is intentional: requestMagicLink uses it to
+// short-circuit with 503 BEFORE issuing the token, so an operator
+// who forgot to set SMTPHost sees a hard failure (503) instead of a
+// 204 that lies about delivery. We cannot rely on the post-Send
+// error path alone because that path keeps a 204 response for
+// enumeration protection — without Configured() the deployment
+// failure mode is indistinguishable from a successful send.
 type portalMailer interface {
+	Configured() bool
 	Send(ctx context.Context, tenantID uuid.UUID, to, link string) error
 }
 
-type stdoutPortalMailer struct{}
+// portalSMTPMailer adapts notifications.SMTPSender to the portal
+// mailer interface. The subject and body are deliberately terse and
+// branding-free — the magic-link URL is the only thing the customer
+// needs and any extra prose is an attack surface for templating
+// bugs that could leak the token into the message envelope.
+type portalSMTPMailer struct {
+	sender notifications.SMTPSender
+}
 
-func (stdoutPortalMailer) Send(ctx context.Context, tenantID uuid.UUID, to, link string) error {
-	log.Printf("portal: magic link tenant=%s to=%q link=%q", tenantID, to, link)
-	return nil
+// Configured reports whether the mailer is fully wired. The intended
+// construction site in services/api/main.go always provides a
+// non-nil SMTPSender, but reading that invariant directly off the
+// struct rather than hardcoding `return true` means a future
+// refactor (or a zero-valued struct in a test) cannot quietly
+// regress from "fail loudly via failingPortalMailer" to "nil-panic
+// inside Send" — Configured() is the gate requestMagicLink trusts
+// to choose between 503-with-message and 204-then-Send, so a false
+// positive here turns a misconfiguration into a 500.
+func (m portalSMTPMailer) Configured() bool { return m.sender != nil }
+
+func (m portalSMTPMailer) Send(ctx context.Context, _ uuid.UUID, to, link string) error {
+	if to == "" {
+		return errors.New("portal: empty recipient")
+	}
+	// Defense in depth: if Configured() was somehow bypassed (a future
+	// caller that builds a zero-valued portalSMTPMailer{} for a test
+	// or a refactor that drops the Configured() check upstream),
+	// fail with a real error rather than nil-panicking inside
+	// m.sender.Send. The handler logs the error and the request
+	// path still returns the enumeration-safe 204; nothing leaks.
+	if m.sender == nil {
+		return errors.New("portal: SMTP sender not configured")
+	}
+	body := "Sign in to the customer portal using the link below.\r\n\r\n" +
+		link + "\r\n\r\n" +
+		"If you did not request this email you can safely ignore it."
+	return m.sender.Send(ctx, []string{to}, "Sign in to the customer portal", body)
+}
+
+// failingPortalMailer is wired when SMTPHost is empty. It refuses
+// every Send so a misconfigured production deployment fails LOUDLY
+// (every magic-link request errors) instead of silently logging
+// tokens to stdout — a regression that previously masked credential
+// exposure across rotated logs.
+//
+// Configured() returns false so requestMagicLink can short-circuit
+// with 503 before issuing the token; this turns the deployment
+// misconfiguration into a visible HTTP-level failure instead of
+// silently masking it behind the enumeration-protection 204 path.
+type failingPortalMailer struct {
+	err error
+}
+
+// Configured reports false: by construction this mailer exists only
+// when SMTPHost was empty at boot.
+func (m failingPortalMailer) Configured() bool { return false }
+
+func (m failingPortalMailer) Send(context.Context, uuid.UUID, string, string) error {
+	return m.err
 }
 
 // --- /auth endpoints ---------------------------------------------------
@@ -87,7 +154,23 @@ type portalAuthRequest struct {
 // success — we deliberately do not surface whether the email was
 // already registered so the endpoint cannot be used to enumerate
 // valid customers.
+//
+// If the deployment has not configured an SMTP transport, the
+// handler short-circuits with 503 BEFORE issuing the token. We do
+// this once at the top of the handler — not after a failed Send —
+// because the per-Send error path keeps a 204 response for
+// enumeration protection. Without this gate, a deployment that
+// forgot to set SMTPHost would silently 204 every magic-link
+// request, users would never receive an email, and the failure mode
+// would be indistinguishable from a successful drop. 503 is the
+// right code here because the misconfiguration is global to the
+// deployment (not specific to any tenant / email), so no
+// enumeration information leaks.
 func (h *portalHandlers) requestMagicLink(w http.ResponseWriter, r *http.Request) {
+	if h.mailer == nil || !h.mailer.Configured() {
+		http.Error(w, "portal email delivery not configured", http.StatusServiceUnavailable)
+		return
+	}
 	var in portalAuthRequest
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)

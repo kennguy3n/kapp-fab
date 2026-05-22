@@ -1,0 +1,71 @@
+-- Phase 1 security hotfix — install-scoped "platform admin" flag.
+--
+-- Control-plane routes (/api/v1/tenants/*, /api/v1/admin/*, KType
+-- registration POST) are gated behind a JWT claim that is set only
+-- when this column is TRUE for the authenticating user. A tenant
+-- role (even "owner" or "tenant.admin") does NOT grant platform-admin
+-- access; that is intentional — those roles are tenant-scoped, and
+-- elevating one tenant's owner to control-plane access would let
+-- them suspend or delete other tenants.
+--
+-- Bootstrap (one-step, by design):
+--   1. Operator looks up the candidate user's KChat ID in KChat
+--      itself (the SSO provider's stable user identifier — visible
+--      in KChat's admin UI / user profile / API).
+--   2. Operator sets KAPP_PLATFORM_ADMIN_USERS to that KChat ID
+--      (comma-separated for multiple admins) and starts the API.
+--   3. First SSO (fresh exchange): the upsert in
+--      internal/auth/sso.go creates the users row, the bootstrap
+--      check sees the KChat ID matches, persists
+--      is_platform_admin = TRUE, and stamps the claim on the JWT.
+--
+-- IMPORTANT: entries in KAPP_PLATFORM_ADMIN_USERS are *KChat user
+-- identifiers* (opaque, SSO-provider-issued strings), NOT Kapp
+-- internal UUIDs. The KChat ID is the only stable identifier the
+-- operator can know BEFORE the user has ever authenticated to
+-- Kapp; keying the bootstrap on Kapp UUIDs (as an earlier revision
+-- did) would have forced a two-step "first login → look up UUID →
+-- set env var → log in again" workflow because uuid.New() at the
+-- INSERT site generates the UUID — there is no way for the
+-- operator to enumerate it in advance.
+--
+-- Operators upgrading from the pre-Phase-1 design MUST replace any
+-- Kapp UUIDs in this env var with the corresponding KChat IDs;
+-- the legacy mode is not supported. The promotion check in
+-- sso.go::bootstrapAdmin is keyed on the KChat profile's `id`
+-- field, which is what KChat returns from the SSO exchange.
+--
+-- Promotion runs inside upsertUser, which is only reached from
+-- Exchange (fresh SSO), NOT from Refresh — a refresh of an
+-- existing session would re-query users.is_platform_admin (which
+-- starts FALSE) and mint a non-admin token, so a candidate admin
+-- whose session predates the env-var change must log out and log
+-- back in so their next request goes through Exchange.
+-- Once at least one row has is_platform_admin = TRUE the env var
+-- should be unset and further promotions happen via the
+-- /api/v1/admin/users/{id}/promote endpoint (added in a subsequent
+-- PR). Operators with shell access to the admin DB can also flip
+-- the flag directly during the initial install — the env var is
+-- the documented happy path because it does not require psql
+-- access.
+--
+-- The flag lives on the `users` table (which is BYPASSRLS in
+-- migrations/000001) rather than on `user_tenants` because the
+-- concept is install-wide, not tenant-scoped. The RLS-bypassing
+-- admin pool is the only entrypoint that reads it.
+
+ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS is_platform_admin BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Partial index intentionally forward-looking: the per-user lookup
+-- in internal/auth/sso.go::lookupPlatformAdmin reads the column
+-- through the users PK and does NOT need this index. It exists for
+-- the admin-management endpoints landing alongside
+-- /api/v1/admin/users/{id}/promote in the next PR — specifically the
+-- "list all platform admins" query, which scans the table for the
+-- ≤0.1% of rows where the flag is TRUE. Building it now avoids an
+-- ALTER on a populated table later; the maintenance cost on a
+-- column that flips ≈once per admin promotion is negligible.
+CREATE INDEX IF NOT EXISTS users_is_platform_admin_idx
+    ON users (id)
+ WHERE is_platform_admin = TRUE;

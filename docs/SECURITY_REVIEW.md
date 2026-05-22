@@ -593,10 +593,25 @@ populates after evaluator-side resolution.
 `/reports`, `/insights`, `/audit`, `/agents`, `/records`) with
 `authz.Middleware`. `/records` uses a method-aware helper that
 selects `krecord.read` for `GET` and `krecord.write` for
-`POST/PUT/PATCH/DELETE`. Enforcement is opt-in via the
-`KAPP_AUTHZ_ENFORCE` env var so Phase A dev/test setups without
-a real JWT context keep working until JWT propagation is in
-place; staging and production flip the flag on.
+`POST/PUT/PATCH/DELETE`. Enforcement is **ON by default** as of
+the Phase 1 security hardening; set `KAPP_AUTHZ_ENFORCE=0` (or
+`false`) only for local development against pre-JWT clients.
+Disabling enforcement emits a startup WARN log and must never
+ship to staging or production.
+
+Every tenant-scoped route group sits behind the `tenantChain`
+helper (`auth.Middleware` → `auth.RequireActiveHomeTenant`) so
+the JWT, not the legacy `X-Tenant-ID` request header,
+establishes both the tenant and the user_id on the request
+context. Before Phase 1 these routes used
+`platform.TenantMiddleware`, which honored the header — so the
+authz default flip combined with the X-User-ID-fallback removal
+would have 401'd every gated request because no JWT-derived
+user_id was present. `tenantChain` closes that gap at the
+source: there is no header-only path that could re-introduce
+the impersonation vector the X-User-ID removal closed, and
+authz.Middleware always observes a verified user_id whether
+enforcement is ON or OFF.
 
 The integration test
 `internal/integrationtest/rbac_test.go::TestAuthzMultiRoleAndHierarchy`
@@ -604,6 +619,50 @@ exercises the wizard seeding plus all four evaluator surfaces
 (multi-role union, wildcard match, hierarchy inheritance,
 owner_only condition) end-to-end against the live Postgres
 fixture under `KAPP_TEST_DB_URL`.
+
+---
+
+## Operator-facing env var dependencies
+
+The Phase 1 security hardening assumes the following env vars are
+set in any non-dev deployment. Unset values degrade the listed
+security property to the local-dev shape (single-tenant, single-
+operator laptop) and do **not** cause an obvious failure mode —
+operator runbooks must include each one explicitly.
+
+| Env var | When unset, this is degraded | Severity |
+| --- | --- | --- |
+| `ADMIN_DB_URL` | SSO refresh **cannot** re-query `users.is_platform_admin`; the `IsPlatformAdmin` claim passes through cached from the refresh token until expiry (24h). Cross-tenant audit / tenant CRUD admin-bypass paths also fall back to the per-tenant pool. | High in prod; ignored in dev |
+| `KAPP_JWT_SECRET` | JWT auth is disabled entirely. The admin-only chain refuses to register routes and returns 503 instead of 401/403. SSO endpoints are not wired. | Critical in prod |
+| `KAPP_MASTER_KEY` | Per-tenant field-level encryption is off; schema fields marked `{"encrypted": true}` round-trip as plaintext. | High in prod for tenants with sensitive PII |
+| `REDIS_URL` | Rate limiters fall back to in-process (per-pod) buckets. The IP-rate-limiter sweep goroutine still GCs old buckets so memory stays bounded, but a multi-replica deployment loses cross-replica fairness. | Medium |
+| `SMTP_HOST` | Portal magic-link delivery is disabled. `/api/v1/portal/auth/request` returns 503 instead of silently dropping the email. | High for portal users |
+| `KAPP_AUTHZ_ENFORCE` | Default is enforcement **ON**. Setting `=0` / `=false` disables the authz gate and emits a startup WARN. | Critical in prod |
+| `KAPP_PLATFORM_ADMIN_USERS` | Bootstrap-time **KChat user ID** list (NOT Kapp UUIDs). One-step by design: (1) operator reads the candidate user's KChat ID from KChat itself, (2) sets the env var to that ID (comma-separated for multiple admins), (3) the user's first **fresh SSO exchange** (NOT a refresh) sees the match and persists `is_platform_admin = TRUE`. Promotion happens inside `upsertUser`, which only runs in `Exchange`; if the candidate already has a live session, they must log out and back in so their next request goes through `Exchange`. Re-read on every fresh exchange so operators can keep appending admin IDs without restarting. Unset is fine once at least one row in `users` already has `is_platform_admin = TRUE`. **Legacy mode**: an earlier revision keyed this on Kapp internal UUIDs, which forced an unworkable two-step bootstrap because the operator could not enumerate the UUID before INSERT — that mode is no longer supported. Operators upgrading must replace Kapp UUIDs with KChat IDs. | Low (bootstrap-only) |
+
+### Platform-admin recovery window
+
+The auth middleware permits a platform admin to access routes even when their home tenant is suspended/archived (`internal/auth/middleware.go` — the locked-out-last-admin scenario). The bypass is **time-bounded** by the refresh-token TTL because `listMemberships` in `internal/auth/sso.go` filters `t.status = 'active'`. Consequence: a platform admin whose home tenant is suspended can keep using their existing JWT (and refresh it) until the refresh token reaches its `RefreshTTL` ceiling (default **24h** — see `SignerConfig.RefreshTTL`). Once that token expires, SSO `Exchange` rejects the login because no active tenant membership is visible.
+
+Operator playbook for the locked-out scenario:
+
+1. While inside the 24h window, the admin should re-activate the affected tenant via `/api/v1/admin/tenants/{id}/activate` (or whatever the recovery route is on the deployment).
+2. If the window has already lapsed: either (a) shell into the admin DB and `UPDATE tenants SET status = 'active' WHERE id = '<home_tenant>'` manually, or (b) add a second platform admin whose home tenant is healthy by inserting `KAPP_PLATFORM_ADMIN_USERS=<healthy_admin_kchat_id>` (the KChat user ID, not the Kapp UUID — see the env-var table above) and restarting the API so that admin can do the recovery.
+3. The refresh TTL is configurable per deployment — if your platform-admin recovery window needs to be longer than 24h, raise `SignerConfig.RefreshTTL` at startup. The 24h default is a security-vs-recovery trade-off; sustained higher values are NOT recommended outside known-recovery scenarios because they widen the window during which a demoted user retains their cached `IsPlatformAdmin` claim.
+
+The middleware emits a `WARN` log on every request that takes this bypass path so a sustained pattern is visible in the operator audit trail. A repeated WARN means the tenant lifecycle is broken; investigate before the refresh window closes.
+
+### Platform-admin demotion window
+
+Symmetric to the recovery window above. SSO `Refresh` re-queries `users.is_platform_admin` on every refresh, so a demoted admin loses the `IsPlatformAdmin` JWT claim on their next refresh. **However**, the access token issued at the most recent successful exchange continues to carry the previous `IsPlatformAdmin: true` value until that access token expires (default `SignerConfig.AccessTTL = 15min` — see `internal/auth/jwt.go`). During that window the demoted user retains full platform-admin authority over the control plane.
+
+This is the standard JWT trade-off (cached claims vs revocation latency) and is acceptable for most operations — but security-sensitive demotions need an additional step:
+
+1. After `UPDATE users SET is_platform_admin = FALSE` (or `/api/v1/admin/users/{id}/demote` once that endpoint ships), also **revoke the user's active sessions** so the existing access tokens stop validating against the session store. `auth.Middleware` calls `sessions.Get(...)` on every request and a missing row immediately returns 401, closing the 15-minute cache gap.
+2. If the deployment does NOT use session storage (rare — single-replica dev installs), the 15-minute AccessTTL ceiling is the hard upper bound on demotion latency. Shortening `SignerConfig.AccessTTL` reduces this window at the cost of more JWT refresh traffic.
+3. The same revocation step also closes the recovery-window vulnerability described above for a compromised platform-admin scenario: if a platform admin's credentials are believed compromised, revoking sessions instantly invalidates every outstanding token regardless of the cached `IsPlatformAdmin` claim.
+
+The 15-minute AccessTTL and the 24-hour RefreshTTL together define the two windows a security operator needs to reason about for every platform-admin lifecycle event (promotion, demotion, locked-out recovery). Both knobs are tunable per deployment; the defaults are chosen for typical SaaS deployments and may need adjustment for higher-sensitivity installs.
 
 ---
 
