@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -366,15 +367,26 @@ func (s *SSOService) upsertUser(ctx context.Context, p KChatProfile) (*ResolvedU
 	// claim on the issued JWT without a second round trip. The
 	// column lands in migration 000051; deployments that have not
 	// applied it yet must do so before the API will start.
+	//
+	// `xmax = 0` is Postgres's way of saying "this row was just
+	// INSERTed, not updated by the ON CONFLICT DO UPDATE branch."
+	// We use the discriminator below to distinguish the
+	// expected-bootstrap case (first SSO login of a listed admin —
+	// the users row did not exist before this Exchange) from the
+	// re-promotion case (the row existed and had is_platform_admin
+	// already FALSE; an operator likely demoted the user but
+	// forgot to remove their UUID from KAPP_PLATFORM_ADMIN_USERS).
+	// The first is silent; the second emits a WARN.
+	var wasInsert bool
 	err := s.adminPool.QueryRow(ctx,
 		`INSERT INTO users (id, kchat_user_id, email, display_name)
 		 VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (kchat_user_id) DO UPDATE
 		   SET email = EXCLUDED.email,
 		       display_name = EXCLUDED.display_name
-		 RETURNING id, is_platform_admin`,
+		 RETURNING id, is_platform_admin, (xmax = 0)`,
 		uuid.New(), p.ID, p.Email, out.DisplayName,
-	).Scan(&out.ID, &out.IsPlatformAdmin)
+	).Scan(&out.ID, &out.IsPlatformAdmin, &wasInsert)
 	if err != nil {
 		return nil, fmt.Errorf("auth: upsert user: %w", err)
 	}
@@ -390,6 +402,25 @@ func (s *SSOService) upsertUser(ctx context.Context, p KChatProfile) (*ResolvedU
 			return nil, fmt.Errorf("auth: bootstrap platform admin: %w", err)
 		}
 		out.IsPlatformAdmin = true
+		if wasInsert {
+			// First login of a listed admin — this is the
+			// expected install path. A single INFO line gives
+			// operators a positive signal that the bootstrap
+			// worked without polluting the log on every
+			// subsequent login.
+			log.Printf("auth: INFO platform admin bootstrap promoted new user=%s (kchat=%s) from KAPP_PLATFORM_ADMIN_USERS", out.ID, p.ID)
+		} else {
+			// Existing row had is_platform_admin = FALSE and the
+			// env var still lists this user. Either (a) the
+			// operator demoted them in the DB but did not retire
+			// the env var, or (b) the env var was added AFTER
+			// the user's first login. Both produce a silent
+			// re-promotion that contradicts an explicit demote;
+			// surface it loudly so the operator notices and
+			// either removes the user from the env var or
+			// keeps the demotion intentional.
+			log.Printf("auth: WARN platform admin bootstrap re-promoted existing user=%s (kchat=%s) from KAPP_PLATFORM_ADMIN_USERS — if this was a deliberate demote, remove the user id from the env var so it does not re-promote on next SSO login", out.ID, p.ID)
+		}
 	}
 	return out, nil
 }

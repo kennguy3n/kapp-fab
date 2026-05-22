@@ -91,14 +91,29 @@ type portalSMTPMailer struct {
 	sender notifications.SMTPSender
 }
 
-// Configured reports true: by construction we only build a
-// portalSMTPMailer when SMTPHost is non-empty and the SMTPSender
-// has been wired through to a real transport.
-func (m portalSMTPMailer) Configured() bool { return true }
+// Configured reports whether the mailer is fully wired. The intended
+// construction site in services/api/main.go always provides a
+// non-nil SMTPSender, but reading that invariant directly off the
+// struct rather than hardcoding `return true` means a future
+// refactor (or a zero-valued struct in a test) cannot quietly
+// regress from "fail loudly via failingPortalMailer" to "nil-panic
+// inside Send" — Configured() is the gate requestMagicLink trusts
+// to choose between 503-with-message and 204-then-Send, so a false
+// positive here turns a misconfiguration into a 500.
+func (m portalSMTPMailer) Configured() bool { return m.sender != nil }
 
 func (m portalSMTPMailer) Send(ctx context.Context, _ uuid.UUID, to, link string) error {
 	if to == "" {
 		return errors.New("portal: empty recipient")
+	}
+	// Defense in depth: if Configured() was somehow bypassed (a future
+	// caller that builds a zero-valued portalSMTPMailer{} for a test
+	// or a refactor that drops the Configured() check upstream),
+	// fail with a real error rather than nil-panicking inside
+	// m.sender.Send. The handler logs the error and the request
+	// path still returns the enumeration-safe 204; nothing leaks.
+	if m.sender == nil {
+		return errors.New("portal: SMTP sender not configured")
 	}
 	body := "Sign in to the customer portal using the link below.\r\n\r\n" +
 		link + "\r\n\r\n" +

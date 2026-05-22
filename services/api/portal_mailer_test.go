@@ -91,14 +91,32 @@ func TestFailingPortalMailer_AlwaysErrors(t *testing.T) {
 // with 503 when SMTP is not wired — if either implementation lies
 // about its state, deployments would silently 204 instead of
 // surfacing the misconfiguration.
+//
+// portalSMTPMailer.Configured() reads the sender field rather than
+// hardcoding `return true`, so a zero-valued struct (test fixture or
+// future refactor) reports Configured() == false instead of
+// nil-panicking inside Send. That's the safety property under test
+// here — the *real* construction path in main.go always supplies a
+// non-nil sender, so Configured() returns true in production.
 func TestMailerConfiguredReports(t *testing.T) {
-	if !(portalSMTPMailer{}).Configured() {
-		t.Fatal("portalSMTPMailer{}.Configured() = false; want true (only built when SMTP wired)")
+	if (portalSMTPMailer{}).Configured() {
+		t.Fatal("portalSMTPMailer{}.Configured() = true with nil sender; want false (defensive nil-check protects against zero-valued construction)")
+	}
+	wired := portalSMTPMailer{sender: stubSMTPSender{}}
+	if !wired.Configured() {
+		t.Fatal("portalSMTPMailer{sender: real}.Configured() = false; want true (real construction site wires non-nil sender)")
 	}
 	if (failingPortalMailer{}).Configured() {
 		t.Fatal("failingPortalMailer{}.Configured() = true; want false (only built when SMTP empty)")
 	}
 }
+
+// stubSMTPSender satisfies notifications.SMTPSender with a no-op
+// Send so the test can exercise the wired branch of Configured()
+// without standing up a real SMTP transport.
+type stubSMTPSender struct{}
+
+func (stubSMTPSender) Send(_ context.Context, _ []string, _, _ string) error { return nil }
 
 // stubMailer lets the handler test toggle Configured() without
 // touching the SMTP stack. Send is a no-op because the unconfigured
