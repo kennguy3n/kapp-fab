@@ -1,16 +1,19 @@
 package platform
 
 import (
-	"os"
 	"testing"
 )
 
 func TestLoadConfig_CacheSizeDefaults(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
-	// Unset all cache-size env vars to verify defaults.
-	os.Unsetenv("KAPP_KTYPE_CACHE_SIZE")
-	os.Unsetenv("KAPP_AUTHZ_CACHE_SIZE")
-	os.Unsetenv("KAPP_TENANT_CACHE_SIZE")
+	// Clear cache-size env vars to verify defaults. t.Setenv to ""
+	// is functionally equivalent to Unsetenv for the getenvInt
+	// fallback path (empty string == use default) AND registers
+	// cleanup with the test framework so any caller env value is
+	// restored after the test.
+	t.Setenv("KAPP_KTYPE_CACHE_SIZE", "")
+	t.Setenv("KAPP_AUTHZ_CACHE_SIZE", "")
+	t.Setenv("KAPP_TENANT_CACHE_SIZE", "")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -123,10 +126,10 @@ func TestLoadConfig_RequireRedisGate(t *testing.T) {
 // observability config keys default safely when unset.
 func TestLoadConfig_EnvAndLogDefaults(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
-	os.Unsetenv("KAPP_ENV")
-	os.Unsetenv("KAPP_LOG_FORMAT")
-	os.Unsetenv("KAPP_LOG_LEVEL")
-	os.Unsetenv("KAPP_METRICS_ADDR")
+	t.Setenv("KAPP_ENV", "")
+	t.Setenv("KAPP_LOG_FORMAT", "")
+	t.Setenv("KAPP_LOG_LEVEL", "")
+	t.Setenv("KAPP_METRICS_ADDR", "")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -163,7 +166,13 @@ func TestLoadConfig_ValidateLogFormat(t *testing.T) {
 		{"json", "json", false},
 		{"text", "text", false},
 		{"typo-jsom", "jsom", true},
-		{"typo-uppercase-JSON", "JSON", true},
+		// Uppercase is accepted (case-insensitive) so an operator
+		// setting KAPP_LOG_FORMAT=JSON doesn't get a boot failure
+		// while KAPP_LOG_LEVEL=INFO would be accepted (which would
+		// be a surprising inconsistency). NewLogger likewise
+		// normalises via strings.ToLower.
+		{"uppercase-JSON", "JSON", false},
+		{"uppercase-Text", "Text", false},
 		{"typo-syslog", "syslog", true},
 	}
 	for _, tc := range cases {
@@ -217,11 +226,13 @@ func TestLoadConfig_ValidateLogLevel(t *testing.T) {
 // where a refactor of getenvInt accidentally accepts zero.
 func TestLoadConfig_ValidateCachePositive(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
-	// All env vars unset so cache sizes get safe defaults; Validate
-	// should pass cleanly with defaults.
-	os.Unsetenv("KAPP_KTYPE_CACHE_SIZE")
-	os.Unsetenv("KAPP_AUTHZ_CACHE_SIZE")
-	os.Unsetenv("KAPP_TENANT_CACHE_SIZE")
+	// All cache-size env vars cleared so they fall back to safe
+	// defaults; Validate should pass cleanly. Use t.Setenv to
+	// register cleanup with the test framework rather than
+	// os.Unsetenv (which would leak across tests).
+	t.Setenv("KAPP_KTYPE_CACHE_SIZE", "")
+	t.Setenv("KAPP_AUTHZ_CACHE_SIZE", "")
+	t.Setenv("KAPP_TENANT_CACHE_SIZE", "")
 	cfg, err := LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig with defaults: %v", err)

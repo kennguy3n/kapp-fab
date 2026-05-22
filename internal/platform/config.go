@@ -185,8 +185,12 @@ func (c *Config) Validate() error {
 	if c.KTypeCacheSize <= 0 || c.AuthzCacheSize <= 0 || c.TenantCacheSize <= 0 {
 		return errors.New("cache sizes (KAPP_KTYPE_CACHE_SIZE / KAPP_AUTHZ_CACHE_SIZE / KAPP_TENANT_CACHE_SIZE) must be positive; getenvInt fallback failed")
 	}
-	if c.LogFormat != "" && c.LogFormat != "json" && c.LogFormat != "text" {
-		return fmt.Errorf("KAPP_LOG_FORMAT=%q is not a recognised value; expected one of: json, text", c.LogFormat)
+	if c.LogFormat != "" {
+		switch strings.ToLower(c.LogFormat) {
+		case "json", "text":
+		default:
+			return fmt.Errorf("KAPP_LOG_FORMAT=%q is not a recognised value; expected one of: json, text", c.LogFormat)
+		}
 	}
 	if c.LogLevel != "" {
 		switch strings.ToLower(c.LogLevel) {

@@ -146,8 +146,15 @@ func run() error {
 	presenceHandler := NewPresenceHandler(userStore, featureStore, tenantStore, recordStore)
 
 	r := chi.NewRouter()
-	r.Use(platform.RequestIDMiddleware(logger))
+	// Standard chain order across all kapp services: Recoverer must
+	// be the outermost so any panic — including in RealIP /
+	// RequestIDMiddleware — is caught and turned into a 500 rather
+	// than killing the goroutine. RequestIDMiddleware then stamps
+	// every request with a stable id BEFORE handlers see it; the
+	// chi-middleware/Timeout wraps the inner handler timeout
+	// budget. See internal/platform/requestid.go for the contract.
 	r.Use(middleware.Recoverer)
+	r.Use(platform.RequestIDMiddleware(logger))
 	r.Use(middleware.Timeout(30 * time.Second))
 
 	r.Post("/kchat/cards/{ktype}", func(w http.ResponseWriter, req *http.Request) {

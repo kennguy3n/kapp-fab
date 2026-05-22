@@ -30,8 +30,6 @@ package auth_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -407,7 +405,7 @@ func TestSecurityChain_HappyPath(t *testing.T) {
 	h := newSecurityHarness(t, 6000, 100)
 	token, _ := h.issueToken(h.userA, h.tenantA.ID, false)
 	resp := h.do(token, "/api/v1/records/items", "10.0.0.1")
-	defer resp.Body.Close()
+	defer closeBody(resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d; want 200", resp.StatusCode)
 	}
@@ -431,7 +429,7 @@ func TestSecurityChain_HappyPath(t *testing.T) {
 func TestSecurityChain_NoToken(t *testing.T) {
 	h := newSecurityHarness(t, 6000, 100)
 	resp := h.do("", "/api/v1/records/items", "10.0.0.2")
-	defer resp.Body.Close()
+	defer closeBody(resp)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d; want 401", resp.StatusCode)
 	}
@@ -442,7 +440,7 @@ func TestSecurityChain_NoToken(t *testing.T) {
 func TestSecurityChain_BogusToken(t *testing.T) {
 	h := newSecurityHarness(t, 6000, 100)
 	resp := h.do("not.a.real.jwt", "/api/v1/records/items", "10.0.0.3")
-	defer resp.Body.Close()
+	defer closeBody(resp)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d; want 401", resp.StatusCode)
 	}
@@ -462,7 +460,7 @@ func TestSecurityChain_AuthzDenied(t *testing.T) {
 	// on tenant A succeeds at JWT layer but authz must deny.
 	token, _ := h.issueToken(h.userB, h.tenantA.ID, false)
 	resp := h.do(token, "/api/v1/records/items", "10.0.0.4")
-	defer resp.Body.Close()
+	defer closeBody(resp)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d; want 403", resp.StatusCode)
 	}
@@ -479,7 +477,7 @@ func TestSecurityChain_SuspendedTenantRefused(t *testing.T) {
 	token, _ := h.issueToken(h.userA, h.tenantA.ID, false)
 	h.tenants.setStatus(h.tenantA.ID, tenant.StatusSuspended)
 	resp := h.do(token, "/api/v1/records/items", "10.0.0.5")
-	defer resp.Body.Close()
+	defer closeBody(resp)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d; want 403", resp.StatusCode)
 	}
@@ -501,7 +499,7 @@ func TestSecurityChain_PlatformAdminRecoveryBypassAdminRouteAllowed(t *testing.T
 	token, _ := h.issueToken(h.adminUser, h.tenantA.ID, true)
 	h.tenants.setStatus(h.tenantA.ID, tenant.StatusSuspended)
 	resp := h.do(token, "/api/v1/admin/tenants", "10.0.0.6")
-	defer resp.Body.Close()
+	defer closeBody(resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d; want 200 (admin recovery bypass)", resp.StatusCode)
 	}
@@ -522,7 +520,7 @@ func TestSecurityChain_PlatformAdminBypassBlockedOnNonAdminChain(t *testing.T) {
 	// rejects.
 	h.evaluator.grant(h.tenantA.ID, h.adminUser, "read", "records")
 	resp := h.do(token, "/api/v1/records/items", "10.0.0.7")
-	defer resp.Body.Close()
+	defer closeBody(resp)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d; want 403 from RequireActiveHomeTenant", resp.StatusCode)
 	}
@@ -552,7 +550,7 @@ func TestSecurityChain_RevokedSession(t *testing.T) {
 		t.Fatalf("revoke: %v", err)
 	}
 	resp := h.do(token, "/api/v1/records/items", "10.0.0.8")
-	defer resp.Body.Close()
+	defer closeBody(resp)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("post-revoke status = %d; want 401", resp.StatusCode)
 	}
@@ -614,7 +612,7 @@ func TestSecurityChain_IPRateLimitPerIP(t *testing.T) {
 	// token; that's a pass-through at the rate-limit layer).
 	other := "10.2.2.2"
 	resp := h.do("", "/api/v1/records/items", other)
-	defer resp.Body.Close()
+	defer closeBody(resp)
 	if resp.StatusCode == http.StatusTooManyRequests {
 		t.Fatalf("different IP got 429; rate limiter is keyed too broadly")
 	}
@@ -663,7 +661,7 @@ func TestSecurityChain_RefreshTokenIssuanceRoundTrip(t *testing.T) {
 	// row (the session is created on the SSO exchange, not on
 	// every refresh, in our implementation).
 	resp := h.do(access, "/api/v1/records/items", "10.42.42.42")
-	defer resp.Body.Close()
+	defer closeBody(resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("refreshed-access status = %d; want 200", resp.StatusCode)
 	}
@@ -687,6 +685,14 @@ func readBody(t *testing.T, resp *http.Response) string {
 	return sb.String()
 }
 
+// closeBody is the errcheck-clean version of `defer resp.Body.Close()`
+// — Go's http.Response.Body.Close can return an error that the
+// errcheck linter insists callers acknowledge, but for test cleanup
+// there's nothing meaningful to do with it.
+func closeBody(resp *http.Response) {
+	_ = resp.Body.Close()
+}
+
 // Compile-time confirmations that the in-memory stubs implement the
 // production interfaces. If a future refactor changes the interface
 // the test stack must also be updated.
@@ -695,17 +701,3 @@ var (
 	_ auth.SessionStore   = (*memSessionStore)(nil)
 	_ authz.Evaluator     = (*memEvaluator)(nil)
 )
-
-// errSentinel asserts the test will fail if the supplied error is
-// not the expected sentinel. Used inside the in-memory stores when
-// we want production-equivalent error semantics surfaced upward.
-func errSentinel(t *testing.T, got, want error) {
-	t.Helper()
-	if !errors.Is(got, want) {
-		t.Fatalf("err = %v; want %v", got, want)
-	}
-}
-
-// _ = fmt keeps the optional fmt import alive when verbose logging
-// is enabled during local debugging.
-var _ = fmt.Sprintf
