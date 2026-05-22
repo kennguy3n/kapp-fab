@@ -216,6 +216,16 @@ func run() error {
 	// embedding work without the limit firing on first paint).
 	publicFormIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, "form", 10, 10)
 	publicEmbedIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, "embed", 60, 30)
+	// /api/v1/helpdesk/inbound-email runs outside any tenant chain
+	// (the relay does not carry a session — auth is a static shared
+	// secret resolved by the handler), so the tenant-scoped
+	// rateLimitMW would 500 on every request. Inbound mail is
+	// inherently bursty (a single forwarding rule can fan out a
+	// dozen messages in a second) but the steady-state volume is
+	// low — 30/min with a burst of 10 covers an aggressive relay
+	// without overshooting before the per-tenant inbound-quota
+	// downstream cuts in.
+	publicInboundIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, "inbound", 30, 10)
 	quotaEnforcer := platform.NewQuotaEnforcer(pool)
 
 	// Phase J — tenant feature flags, plan definitions, and usage
@@ -1192,11 +1202,18 @@ func run() error {
 		// middleware because the relay does not carry session
 		// credentials; instead we authenticate by static shared
 		// secret and resolve the tenant from the recipient host.
-		// Rate limited per-IP via the shared rate limiter so a
-		// flood of inbound mail cannot starve other writers.
+		//
+		// Rate-limit MUST be IP-keyed here, not tenant-keyed: the
+		// route runs before the handler resolves which tenant the
+		// recipient belongs to, so the tenant-scoped rateLimitMW
+		// would call TenantFromContext → nil → 500 on every
+		// request. publicInboundIPLimit is the right shape — it
+		// keeps a misconfigured relay or a forged-sender flood
+		// from saturating the inbound pipeline without depending
+		// on tenant context.
 		if inboundHandler != nil {
 			r.Route("/api/v1/helpdesk/inbound-email", func(r chi.Router) {
-				r.Use(rateLimitMW)
+				r.Use(publicInboundIPLimit)
 				r.Post("/", inboundHandler.post)
 			})
 		}
