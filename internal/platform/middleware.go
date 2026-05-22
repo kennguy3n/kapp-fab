@@ -92,6 +92,30 @@ func WithTenant(ctx context.Context, t *tenant.Tenant) context.Context {
 	return context.WithValue(ctx, ctxKeyTenant, t)
 }
 
+// ClearTenant returns a derived context with no tenant attached. This is
+// the architectural sibling of WithTenant: it lets a middleware layer
+// scrub the tenant a previous layer stamped on the context so a later
+// handler that calls TenantFromContext gets nil instead of a stale value.
+//
+// The canonical use case is auth.AdminMiddleware, which gates control-
+// plane routes behind the IsPlatformAdmin claim. Without scrubbing, the
+// auth.Middleware-supplied tenant (the admin's HOME tenant — i.e.
+// the tenant from their JWT `tid` claim) would leak into any admin
+// handler that absent-mindedly called TenantFromContext, silently
+// scoping the operation to the admin's own tenant rather than the
+// URL-supplied target tenant. RLS would not catch this because the
+// admin's own row IS visible to itself. ClearTenant turns that footgun
+// into a deterministic nil that handlers must handle explicitly.
+//
+// Implementation note: we cannot ACTUALLY remove a value from a Go
+// context — context.WithValue only adds. ClearTenant overrides the key
+// with a typed nil so TenantFromContext's type assertion succeeds with
+// (nil, true) and returns nil through the existing fast path. Existing
+// `if t == nil` checks downstream work unchanged.
+func ClearTenant(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ctxKeyTenant, (*tenant.Tenant)(nil))
+}
+
 // UserIDFromContext returns the user id stored on the request context, or
 // uuid.Nil if none is present.
 func UserIDFromContext(ctx context.Context) uuid.UUID {

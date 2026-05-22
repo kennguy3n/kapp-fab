@@ -7,6 +7,9 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
 
 func TestAdminMiddleware(t *testing.T) {
@@ -58,5 +61,48 @@ func TestAdminMiddleware(t *testing.T) {
 				t.Fatalf("body = %q, want %q", rec.Body.String(), tc.wantBody)
 			}
 		})
+	}
+}
+
+// TestAdminMiddleware_ScrubsTenantContext verifies the runtime-enforced
+// invariant that AdminMiddleware clears the tenant a previous middleware
+// stamped on the context. Without the scrub, control-plane handlers
+// could silently scope operations to the admin's home tenant when they
+// should be targeting the URL-supplied tenant — see the long coupling
+// note in services/api/deps_build.go::adminChain and the docstring on
+// platform.ClearTenant for the architectural rationale.
+func TestAdminMiddleware_ScrubsTenantContext(t *testing.T) {
+	adminHomeTenant := &tenant.Tenant{
+		ID:     uuid.New(),
+		Slug:   "admin-home",
+		Status: tenant.StatusActive,
+	}
+	ctx := context.WithValue(context.Background(), ctxKeyClaims, &Claims{
+		UserID:          uuid.New(),
+		TenantID:        adminHomeTenant.ID,
+		IsPlatformAdmin: true,
+	})
+	ctx = platform.WithTenant(ctx, adminHomeTenant)
+
+	if got := platform.TenantFromContext(ctx); got == nil || got.ID != adminHomeTenant.ID {
+		t.Fatalf("precondition: expected admin's home tenant on context, got %+v", got)
+	}
+
+	var observed *tenant.Tenant
+	mw := AdminMiddleware()
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observed = platform.TenantFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/some-other-id/suspend", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	if observed != nil {
+		t.Fatalf("TenantFromContext after AdminMiddleware = %+v, want nil (scrubbed)", observed)
 	}
 }

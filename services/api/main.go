@@ -621,28 +621,35 @@ func run() error {
 	// a confusing 404, and silently allowing them through would
 	// reintroduce the very vulnerability this chain exists to close.
 	//
-	// TENANT CONTEXT IS THE ADMIN'S, NOT THE ROUTE'S — auth.Middleware
+	// CONTEXT TENANT IS SCRUBBED AFTER ADMIN MIDDLEWARE. auth.Middleware
 	// stamps platform.WithTenant(ctx, t) using the JWT's `tid`
-	// claim, i.e. the admin's home tenant. None of the current
-	// admin handlers read tenant from context: tenantsHandlers,
-	// isolationAuditHandlers, and ktypeHandlers.register all
-	// resolve the target tenant from URL params (chi.URLParam) or
-	// the request body, and call tenant.PGStore directly without
-	// going through dbutil.WithTenantTx. That is what makes
-	// suspend/archive/delete on tenant A work when the admin's
-	// home tenant is B.
+	// claim (the admin's home tenant) so ordinary tenant-scoped
+	// routes can call platform.TenantFromContext. Control-plane
+	// routes operate on a DIFFERENT tenant — the one named in the
+	// URL (e.g. /api/v1/tenants/{id}/suspend). If a handler mounted
+	// here ever fell back to TenantFromContext (either intentionally
+	// or by absent-minded reuse of a shared helper), it would
+	// silently scope the operation to the admin's own tenant
+	// instead of the URL target — a cross-tenant correctness bug
+	// that RLS would not surface because the admin's row IS
+	// visible to itself.
 	//
-	// This coupling is fragile. Any new handler mounted under
-	// adminChain that calls platform.TenantFromContext, or routes a
-	// query through dbutil.WithTenantTx using the context tenant,
-	// will silently scope the operation to the admin's tenant
-	// instead of the route's target — a cross-tenant correctness
-	// bug that RLS will not surface because the admin's row IS
-	// visible. When adding a handler here, EITHER (a) resolve the
-	// target tenant explicitly from chi.URLParam and pass it down
-	// the call stack as a uuid.UUID, OR (b) clear the context
-	// tenant at the top of the handler before any DB call. Do not
-	// rely on platform.TenantFromContext under adminChain.
+	// auth.AdminMiddleware (the second middleware in the chain
+	// below) calls platform.ClearTenant on the way through, so any
+	// admin handler that calls platform.TenantFromContext gets nil
+	// and must handle that branch explicitly. The current handlers
+	// (tenantsHandlers, isolationAuditHandlers, ktypeHandlers.register)
+	// all resolve their target from chi.URLParam / the request body
+	// and call tenant.PGStore directly with an explicit tenant ID,
+	// so the scrub is invisible to them. The admin's home tenant
+	// remains recoverable from the JWT claims (auth.ClaimsFromContext)
+	// if a future handler genuinely needs it.
+	//
+	// When adding a handler here: resolve the target tenant
+	// explicitly from chi.URLParam (or the request body) and pass
+	// it down the call stack as a uuid.UUID. Calling
+	// platform.TenantFromContext under adminChain is by design a
+	// nil return.
 	adminChain := func(r chi.Router) {
 		if authh.signer == nil {
 			r.Use(func(next http.Handler) http.Handler {
