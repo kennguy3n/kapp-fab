@@ -92,8 +92,28 @@ func runCleanups(cleanups []func()) {
 // to match `defer` ordering — anything that depends on the pool
 // (the metering buffer drain, for instance) closes before the pool
 // itself does.
-func buildDeps(ctx context.Context, cfg *platform.Config) (*apiDeps, func(), error) {
+//
+// Panic safety: the outer `defer` below catches a panic raised during
+// construction (e.g. a sub-constructor that panics mid-init), walks
+// the cleanups slice LIFO so anything already acquired is closed,
+// then re-panics so the process still crashes with the original
+// stack trace. Without this defer a panic would skip cleanup and the
+// kernel would have to reclaim sockets / file descriptors / Redis
+// connections at process tear-down — which works for FDs but is
+// not equivalent to a graceful Close() for long-lived backends
+// (Redis would see the connection drop, pgxpool would not run its
+// shutdown hook). Error paths still use the explicit
+// `runCleanups(cleanups); return ...` pattern below because they
+// must NOT re-panic; the defer here only fires when something
+// downstream of a successful step actually panicked.
+func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanup func(), err error) {
 	var cleanups []func()
+	defer func() {
+		if rec := recover(); rec != nil {
+			runCleanups(cleanups)
+			panic(rec)
+		}
+	}()
 	pool, err := platform.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		runCleanups(cleanups)
