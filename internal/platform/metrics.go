@@ -119,6 +119,9 @@ func (r *MetricsRegistry) Handler() http.HandlerFunc {
 	}
 }
 
+// CounterVec is a labelled monotonically-increasing counter.
+type CounterVec = counterVec
+
 type counterVec struct {
 	name      string
 	help      string
@@ -168,6 +171,9 @@ func (c *counterVec) write(w http.ResponseWriter) {
 		fprintf(w, "%s%s %d\n", c.name, formatLabels(s.labels), atomic.LoadUint64(&s.value))
 	}
 }
+
+// HistogramVec is a labelled bucketised histogram.
+type HistogramVec = histogramVec
 
 type histogramVec struct {
 	name      string
@@ -235,6 +241,9 @@ func (h *histogramVec) write(w http.ResponseWriter) {
 		fprintf(w, "%s_count%s %d\n", h.name, formatLabels(s.labels), atomic.LoadUint64(&s.countN))
 	}
 }
+
+// GaugeVec is a labelled gauge.
+type GaugeVec = gaugeVec
 
 type gaugeVec struct {
 	name      string

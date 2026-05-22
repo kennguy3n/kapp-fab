@@ -46,6 +46,14 @@ func run() error {
 		return err
 	}
 
+	logger := platform.NewLogger(platform.LoggerConfig{
+		Format:  cfg.LogFormat,
+		Level:   cfg.LogLevel,
+		Service: "agent-tools",
+		Env:     cfg.Env,
+	}, os.Stderr)
+	platform.InstallDefault(logger)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -107,9 +115,16 @@ func run() error {
 	h := &toolsHandler{executor: executor}
 
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
+	// Standard chain order across all kapp services: RealIP first
+	// (rewrites RemoteAddr from forwarded headers so every layer
+	// downstream sees the originating client), Recoverer next so a
+	// panic in any subsequent middleware turns into a 500 rather
+	// than killing the goroutine, then RequestIDMiddleware so every
+	// request carries a stable id BEFORE handlers see it. Mirrors
+	// the api and importer service chains.
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
+	r.Use(platform.RequestIDMiddleware(logger))
 	r.Use(middleware.Timeout(30 * time.Second))
 
 	r.Get("/healthz", healthz)

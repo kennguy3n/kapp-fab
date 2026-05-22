@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -86,6 +87,14 @@ func run() error {
 		return err
 	}
 
+	logger := platform.NewLogger(platform.LoggerConfig{
+		Format:  cfg.LogFormat,
+		Level:   cfg.LogLevel,
+		Service: "worker",
+		Env:     cfg.Env,
+	}, os.Stderr)
+	platform.InstallDefault(logger)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -122,7 +131,9 @@ func run() error {
 	}
 	defer func() {
 		if err := nc.Drain(); err != nil {
-			log.Printf("worker: nats drain: %v", err)
+			slog.Default().Warn("nats drain",
+				slog.String("err", err.Error()),
+			)
 		}
 	}()
 
@@ -308,7 +319,10 @@ func run() error {
 	// budget). See services/worker/adaptive.go for the policy.
 	batcher := NewAdaptiveBatcher(drainBatch, adaptiveBatchMin, adaptiveBatchMax, adaptiveLatencyBudget)
 
-	log.Printf("worker: started; nats=%s; kchat-bridge=%q", natsURL, bridge.baseURL)
+	slog.Default().Info("worker started",
+		slog.String("nats", natsURL),
+		slog.String("kchat_bridge", bridge.baseURL),
+	)
 
 	// Singleton goroutines + outbox drain are gated behind a
 	// Postgres advisory-lock leader election so multi-replica
@@ -317,22 +331,64 @@ func run() error {
 	// the leader's session disconnecting (crash, SIGKILL,
 	// network partition longer than TCP keepalive).
 	identity := workerIdentity()
-	election := platform.NewLeaderElection(cfg.DatabaseURL, "kapp-worker", identity)
+
+	// Per-worker Prometheus registry, surfaced via the metrics
+	// listener wired below (KAPP_METRICS_ADDR). Wiring the registry
+	// into the leader elector and drain loop emits kapp_leader_active,
+	// kapp_outbox_drain_duration_seconds, and kapp_outbox_events_total.
+	metrics := platform.NewMetricsRegistry()
+	drainDur := metrics.Histogram("kapp_outbox_drain_duration_seconds", "Outbox drain batch latency in seconds.", platform.DefaultDurationBuckets, "result")
+	drainEvents := metrics.Counter("kapp_outbox_events_total", "Outbox events drained from the queue.", "result")
+
+	if cfg.MetricsAddr != "" {
+		go runWorkerMetricsServer(ctx, logger, cfg.MetricsAddr, metrics)
+	}
+
+	election := platform.NewLeaderElection(cfg.DatabaseURL, "kapp-worker", identity).WithMetrics(metrics)
 	return election.Run(ctx, func(leaderCtx context.Context) error {
 		return leadWorker(leaderCtx, leaderState{
-			cfg:           cfg,
-			publisher:     publisher,
-			alerts:        alerts,
-			router:        router,
-			schedStore:    schedStore,
-			schedRegistry: schedRegistry,
-			exportWorker:  exportWorker,
-			autoscaleLoop: autoscaleLoop,
-			batcher:       batcher,
-			nc:            nc,
-			bridge:        bridge,
+			cfg:            cfg,
+			publisher:      publisher,
+			alerts:         alerts,
+			router:         router,
+			schedStore:     schedStore,
+			schedRegistry:  schedRegistry,
+			exportWorker:   exportWorker,
+			autoscaleLoop:  autoscaleLoop,
+			batcher:        batcher,
+			nc:             nc,
+			bridge:         bridge,
+			drainHistogram: drainDur,
+			drainCounter:   drainEvents,
 		})
 	})
+}
+
+// runWorkerMetricsServer mounts /metrics on a dedicated http.Server
+// bound to cfg.MetricsAddr (e.g. ":9090"). Separate from the worker's
+// main loop because the worker doesn't otherwise serve HTTP — this is
+// the entire admin-port surface for the worker binary.
+func runWorkerMetricsServer(ctx context.Context, logger *slog.Logger, addr string, reg *platform.MetricsRegistry) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", reg.Handler())
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	logger.Info("metrics listening", slog.String("addr", addr))
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Error("metrics listener", slog.String("err", err.Error()))
+	}
 }
 
 // leaderState bundles the dependencies that the leader-only goroutines
@@ -351,6 +407,13 @@ type leaderState struct {
 	batcher       *AdaptiveBatcher
 	nc            *nats.Conn
 	bridge        *kchatBridgeNotifier
+
+	// Prometheus-compatible drain metrics. Observed inside drainLoop
+	// after each DrainBatch completes — latency goes into the histogram,
+	// event count goes into the counter (split by result label so
+	// success vs error cases are countable separately).
+	drainHistogram *platform.HistogramVec
+	drainCounter   *platform.CounterVec
 }
 
 // leadWorker runs the singleton goroutines + outbox drain. Invoked
@@ -421,7 +484,7 @@ func drainLoop(ctx context.Context, s leaderState) error {
 		waitCancel()
 
 		if ctx.Err() != nil {
-			log.Printf("worker: shutdown signal received")
+			slog.Default().Info("shutdown signal received")
 			return nil
 		}
 
@@ -443,7 +506,9 @@ func drainLoop(ctx context.Context, s leaderState) error {
 		// outbox; bailing out would silently lose every subsequent
 		// event until the process restarts.
 		if waitErr != nil && !errors.Is(waitErr, context.DeadlineExceeded) {
-			log.Printf("worker: LISTEN connection error: %v; reconnecting", waitErr)
+			slog.Default().Warn("LISTEN connection error, reconnecting",
+				slog.String("err", waitErr.Error()),
+			)
 			_ = listenConn.Close(context.Background())
 			listenConn = nil
 
@@ -458,14 +523,17 @@ func drainLoop(ctx context.Context, s leaderState) error {
 				newConn, rerr := acquireListenConn(ctx, s.cfg.DatabaseURL)
 				if rerr == nil {
 					listenConn = newConn
-					log.Printf("worker: LISTEN reconnected")
+					slog.Default().Info("LISTEN reconnected")
 					break
 				}
-				log.Printf("worker: LISTEN reconnect failed (will retry in %s): %v", 2*backoff, rerr)
 				backoff *= 2
 				if backoff > maxBackoff {
 					backoff = maxBackoff
 				}
+				slog.Default().Warn("LISTEN reconnect failed",
+					slog.Duration("retry_in", backoff),
+					slog.String("err", rerr.Error()),
+				)
 			}
 		}
 
@@ -479,8 +547,29 @@ func drainLoop(ctx context.Context, s leaderState) error {
 		start := time.Now()
 		n, err := s.publisher.DrainBatch(ctx, limit, deliverFn)
 		dur := time.Since(start)
+		result := "ok"
 		if err != nil {
-			log.Printf("worker: drain batch: %v", err)
+			result = "error"
+			slog.Default().Error("drain batch",
+				slog.Int("limit", limit),
+				slog.String("err", err.Error()),
+			)
+		}
+		if s.drainHistogram != nil {
+			s.drainHistogram.Observe(dur.Seconds(), result)
+		}
+		if s.drainCounter != nil && n > 0 {
+			// The `n` returned by DrainBatch counts events that
+			// were successfully delivered AND marked
+			// `delivered_at = now()` inside a per-tenant tx that
+			// committed. Even when the cycle-level `err` is
+			// non-nil (e.g. a later tenant's drain failed mid-
+			// loop), the n events that made it through are
+			// genuinely "ok" — they will not be re-delivered.
+			// Label them as such. Cycle-level success/failure
+			// is captured separately by the histogram's `result`
+			// label above.
+			s.drainCounter.Add(uint64(n), "ok")
 		}
 		s.batcher.Observe(n, dur)
 	}
@@ -546,7 +635,10 @@ func deliver(nc *nats.Conn, bridge *kchatBridgeNotifier, router *notificationRou
 				// Best-effort side-effects: failures are logged, not propagated.
 				if bridge.enabled() && isApprovalNotificationEvent(e.Type) {
 					if err := bridge.renderApprovalCard(ctx, e); err != nil {
-						log.Printf("worker: kchat render %s: %v", e.Type, err)
+						slog.Default().Warn("kchat render",
+							slog.String("event_type", e.Type),
+							slog.String("err", err.Error()),
+						)
 					}
 				}
 				if router != nil {

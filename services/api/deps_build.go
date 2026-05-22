@@ -114,6 +114,14 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 			panic(rec)
 		}
 	}()
+
+	// Process-wide metrics registry. Hoisted before any cache /
+	// middleware so the caches and the request-counting middleware
+	// can opt themselves in via WithMetrics(reg, ...). The same
+	// registry feeds both the in-router /metrics endpoint (dev) and
+	// the dedicated admin listener (KAPP_METRICS_ADDR, prod).
+	metrics := platform.NewMetricsRegistry()
+
 	pool, err := platform.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		runCleanups(cleanups)
@@ -146,16 +154,16 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// subsequent reads immediately. Size is operator-tunable via
 	// KAPP_TENANT_CACHE_SIZE; default 256 covers the typical multi-
 	// tenant fleet.
-	tenantCache := platform.NewLRUCache(cfg.TenantCacheSize, 30*time.Second)
+	tenantCache := platform.NewLRUCache(cfg.TenantCacheSize, 30*time.Second).WithMetrics(metrics, "tenant")
 	tenantSvc := tenant.NewPGStore(pool).WithCache(tenantCache)
-	ktypeCache := platform.NewLRUCache(cfg.KTypeCacheSize, 5*time.Minute)
+	ktypeCache := platform.NewLRUCache(cfg.KTypeCacheSize, 5*time.Minute).WithMetrics(metrics, "ktype")
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
 	// Authorization evaluator. The cache TTL is intentionally short
 	// (30s) so role/permission changes propagate quickly; the role
 	// management API (rolesHandlers) also flushes the relevant
 	// entries explicitly on every mutation. Size is operator-tunable
 	// via KAPP_AUTHZ_CACHE_SIZE.
-	authzCache := platform.NewLRUCache(cfg.AuthzCacheSize, 30*time.Second)
+	authzCache := platform.NewLRUCache(cfg.AuthzCacheSize, 30*time.Second).WithMetrics(metrics, "authz")
 	authzEval := authz.NewPGEvaluator(pool, authzCache)
 	// Authorization gating is ENABLED by default. Set
 	// KAPP_AUTHZ_ENFORCE=0 (or "false") to explicitly opt out — useful
@@ -811,6 +819,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		insembh:              insembh,
 		hrh:                  hrh,
 		inboundHandler:       inboundHandler,
+		metrics:              metrics,
 	}
 
 	return d, func() { runCleanups(cleanups) }, nil

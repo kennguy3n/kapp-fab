@@ -159,7 +159,11 @@ func (r *PGRegistry) RegisterIfChanged(ctx context.Context, kt KType) error {
 func contentHash(kt KType) string {
 	h := sha256.New()
 	h.Write([]byte(kt.Name))
-	h.Write([]byte(fmt.Sprintf(":%d:", kt.Version)))
+	// hash.Hash.Write never returns an error per the io.Writer
+	// contract documented on hash.Hash, so the Fprintf result is
+	// safely discarded — the errcheck linter still asks for an
+	// explicit acknowledgment.
+	_, _ = fmt.Fprintf(h, ":%d:", kt.Version)
 	h.Write(canonicalJSONValue(kt.Schema))
 	return hex.EncodeToString(h.Sum(nil))
 }

@@ -155,4 +155,11 @@ type apiDeps struct {
 	insembh        *insightsEmbedHandlers
 	hrh            *hrHandlers
 	inboundHandler *helpdeskInboundHandlers
+
+	// Prometheus-compatible metrics registry. Wired into the
+	// MetricsMiddleware for request_total + request_duration and
+	// optionally exposed on a dedicated /metrics listener (see
+	// main.go MetricsAddr). Nil when metrics are disabled
+	// (currently never — we always wire the registry).
+	metrics *platform.MetricsRegistry
 }

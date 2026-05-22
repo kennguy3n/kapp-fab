@@ -45,7 +45,7 @@ package platform
 import (
 	"context"
 	"hash/fnv"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -73,6 +73,14 @@ type LeaderElection struct {
 	// detect a silently dead socket. Lower bound for "how long can a
 	// partitioned leader believe it is leader". 15s default.
 	heartbeat time.Duration
+
+	// metrics is an optional Prometheus-compatible registry. When
+	// non-nil the elector emits a kapp_leader_active gauge keyed on
+	// (namespace, identity) so operators can confirm exactly one
+	// replica reports leadership at any time and detect failover
+	// gaps. Wired via WithMetrics; nil-safe everywhere internal.
+	metrics   *MetricsRegistry
+	namespace string
 }
 
 // NewLeaderElection derives a deterministic int64 lock key from the
@@ -95,9 +103,21 @@ func NewLeaderElection(connString, namespace, identity string) *LeaderElection {
 		connString:   connString,
 		lockKey:      lockKey,
 		identity:     identity,
+		namespace:    namespace,
 		pollInterval: 5 * time.Second,
 		heartbeat:    15 * time.Second,
 	}
+}
+
+// WithMetrics opts the elector into emitting a kapp_leader_active
+// gauge against the supplied registry. When set, acquire() pushes 1
+// keyed on (namespace, identity) and release() pushes 0 so the gauge
+// reports the *current* leader from any replica's /metrics endpoint.
+// Nil is a no-op so callers can always pass cfg.metrics without a
+// preceding nil check.
+func (le *LeaderElection) WithMetrics(reg *MetricsRegistry) *LeaderElection {
+	le.metrics = reg
+	return le
 }
 
 // WithPollInterval overrides the default acquisition retry cadence.
@@ -167,7 +187,12 @@ func (le *LeaderElection) Run(ctx context.Context, leaderFn func(ctx context.Con
 		// underlying failure persisted.
 		failed := le.lead(ctx, conn, leaderFn)
 		_ = conn.Close(context.Background())
-		log.Printf("leader[%s]: released (lockKey=%d)", le.identity, le.lockKey)
+		le.recordActive(0)
+		slog.Default().Info("leader released",
+			slog.String("namespace", le.namespace),
+			slog.String("identity", le.identity),
+			slog.Int64("lock_key", le.lockKey),
+		)
 		if failed && ctx.Err() == nil {
 			if !sleepCtx(ctx, le.pollInterval) {
 				return nil
@@ -182,14 +207,24 @@ func (le *LeaderElection) Run(ctx context.Context, leaderFn func(ctx context.Con
 func (le *LeaderElection) acquire(ctx context.Context) (bool, *pgx.Conn) {
 	conn, err := pgx.Connect(ctx, le.connString)
 	if err != nil {
-		log.Printf("leader[%s]: dial: %v; retrying in %s", le.identity, err, le.pollInterval)
+		slog.Default().Warn("leader dial",
+			slog.String("namespace", le.namespace),
+			slog.String("identity", le.identity),
+			slog.Duration("retry_in", le.pollInterval),
+			slog.String("err", err.Error()),
+		)
 		_ = sleepCtx(ctx, le.pollInterval)
 		return false, nil
 	}
 	var got bool
 	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", le.lockKey).Scan(&got); err != nil {
 		_ = conn.Close(context.Background())
-		log.Printf("leader[%s]: lock attempt: %v; retrying in %s", le.identity, err, le.pollInterval)
+		slog.Default().Warn("leader lock attempt",
+			slog.String("namespace", le.namespace),
+			slog.String("identity", le.identity),
+			slog.Duration("retry_in", le.pollInterval),
+			slog.String("err", err.Error()),
+		)
 		_ = sleepCtx(ctx, le.pollInterval)
 		return false, nil
 	}
@@ -198,7 +233,12 @@ func (le *LeaderElection) acquire(ctx context.Context) (bool, *pgx.Conn) {
 		_ = sleepCtx(ctx, le.pollInterval)
 		return false, nil
 	}
-	log.Printf("leader[%s]: acquired (lockKey=%d)", le.identity, le.lockKey)
+	le.recordActive(1)
+	slog.Default().Info("leader acquired",
+		slog.String("namespace", le.namespace),
+		slog.String("identity", le.identity),
+		slog.Int64("lock_key", le.lockKey),
+	)
 	return true, conn
 }
 
@@ -232,7 +272,11 @@ func (le *LeaderElection) lead(ctx context.Context, conn *pgx.Conn, leaderFn fun
 			return false
 		case err := <-done:
 			if err != nil {
-				log.Printf("leader[%s]: leader fn exited with error: %v", le.identity, err)
+				slog.Default().Error("leader fn exited with error",
+					slog.String("namespace", le.namespace),
+					slog.String("identity", le.identity),
+					slog.String("err", err.Error()),
+				)
 				return true
 			}
 			return false
@@ -245,7 +289,11 @@ func (le *LeaderElection) lead(ctx context.Context, conn *pgx.Conn, leaderFn fun
 			err := conn.Ping(pingCtx)
 			cancel()
 			if err != nil {
-				log.Printf("leader[%s]: heartbeat failed: %v; stepping down", le.identity, err)
+				slog.Default().Warn("leader heartbeat failed, stepping down",
+					slog.String("namespace", le.namespace),
+					slog.String("identity", le.identity),
+					slog.String("err", err.Error()),
+				)
 				leaderCancel()
 				<-done
 				return true
@@ -265,6 +313,18 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
+}
+
+// recordActive pushes the kapp_leader_active gauge (1 = this replica
+// reports leadership, 0 = released). No-op when WithMetrics was not
+// called. Labelled by (namespace, identity) so a multi-replica
+// deployment can confirm exactly one replica reports 1 at any time.
+func (le *LeaderElection) recordActive(v float64) {
+	if le.metrics == nil {
+		return
+	}
+	g := le.metrics.Gauge("kapp_leader_active", "1 when this replica holds the advisory lock for the namespace, 0 otherwise.", "namespace", "identity")
+	g.Set(v, le.namespace, le.identity)
 }
 
 // keyForNamespace exposes the deterministic hash → lock-key derivation

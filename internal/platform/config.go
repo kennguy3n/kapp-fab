@@ -5,8 +5,10 @@ package platform
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // Config holds runtime configuration values shared by the API and worker
@@ -94,6 +96,32 @@ type Config struct {
 	// to per-pod rate limiting. Default false so local dev continues
 	// to boot without Redis.
 	RequireRedis bool
+
+	// Env is the operator-supplied deployment marker emitted into
+	// every structured log line ("dev", "staging", "production").
+	// Sourced from KAPP_ENV. Empty values default to "dev" so a
+	// local boot still produces useful log attribution.
+	Env string
+
+	// LogFormat selects the slog handler: "json" (machine-parseable,
+	// expected in production) or "text" (human-readable, default).
+	// Sourced from KAPP_LOG_FORMAT.
+	LogFormat string
+
+	// LogLevel is the minimum severity emitted. Accepted values:
+	// "debug", "info", "warn", "error". Sourced from KAPP_LOG_LEVEL.
+	// Unknown values default to info.
+	LogLevel string
+
+	// MetricsAddr is the host:port the Prometheus /metrics endpoint
+	// listens on. When empty the endpoint is mounted on the main
+	// API router instead (legacy behaviour); when set, a dedicated
+	// http.Server listens on the supplied address so scrapers can
+	// hit /metrics without contending with user-facing latency.
+	// Sourced from KAPP_METRICS_ADDR. Production deployments SHOULD
+	// set this to a separate port (e.g. ":9090") behind an internal-
+	// only network policy.
+	MetricsAddr string
 }
 
 // LoadConfig reads configuration from environment variables and returns a
@@ -118,14 +146,67 @@ func LoadConfig() (*Config, error) {
 		TenantCacheSize:  getenvInt("KAPP_TENANT_CACHE_SIZE", 256),
 		RedisURL:         os.Getenv("REDIS_URL"),
 		RequireRedis:     getenvBool("KAPP_REQUIRE_REDIS", false),
+		Env:              getenv("KAPP_ENV", "dev"),
+		LogFormat:        os.Getenv("KAPP_LOG_FORMAT"),
+		LogLevel:         os.Getenv("KAPP_LOG_LEVEL"),
+		MetricsAddr:      os.Getenv("KAPP_METRICS_ADDR"),
 	}
-	if cfg.DatabaseURL == "" {
-		return nil, errors.New("DB_URL is required")
-	}
-	if cfg.RequireRedis && cfg.RedisURL == "" {
-		return nil, errors.New("KAPP_REQUIRE_REDIS=1 but REDIS_URL is empty; set REDIS_URL or unset KAPP_REQUIRE_REDIS to permit in-process fallback")
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
 	return cfg, nil
+}
+
+// Validate checks the loaded configuration for structural correctness.
+// Called from LoadConfig; exported so tests and the upcoming config-
+// validation CLI tool can re-run validation on an already-populated
+// Config. Each rule's purpose:
+//
+//  1. DB_URL is the only universally-required env var (every service
+//     opens a pgx pool). Missing → hard boot failure with a clear
+//     message.
+//  2. RequireRedis + empty REDIS_URL is the "loud-fail vs silent-
+//     degrade" gate introduced in Phase 3.
+//  3. Cache sizes must be positive when explicitly set (zero / negative
+//     would create either a no-op cache or a cache that LRU evicts on
+//     every write — both are silent perf footguns). getenvInt already
+//     falls back to the default on non-positive values, so this check
+//     is primarily a doc-comment for operators reading the source.
+//  4. LogFormat / LogLevel typos already fall back to safe defaults in
+//     parseLevel / NewLogger; we surface the warning via a structured
+//     return value so an operator can see what was actually accepted.
+func (c *Config) Validate() error {
+	if c.DatabaseURL == "" {
+		return errors.New("DB_URL is required")
+	}
+	if c.RequireRedis && c.RedisURL == "" {
+		return errors.New("KAPP_REQUIRE_REDIS=1 but REDIS_URL is empty; set REDIS_URL or unset KAPP_REQUIRE_REDIS to permit in-process fallback")
+	}
+	if c.KTypeCacheSize <= 0 || c.AuthzCacheSize <= 0 || c.TenantCacheSize <= 0 {
+		// LoadConfig() routes every KAPP_*_CACHE_SIZE through
+		// getenvInt which falls back to a positive default on
+		// missing or non-positive input, so this branch can only
+		// fire when Validate() is invoked on a Config struct
+		// constructed by hand (e.g. tests, future config-from-
+		// YAML loaders). Defense-in-depth against a caller that
+		// bypasses LoadConfig.
+		return fmt.Errorf("cache sizes must be positive; got KTypeCacheSize=%d AuthzCacheSize=%d TenantCacheSize=%d (likely set via hand-constructed Config rather than LoadConfig)", c.KTypeCacheSize, c.AuthzCacheSize, c.TenantCacheSize)
+	}
+	if c.LogFormat != "" {
+		switch strings.ToLower(c.LogFormat) {
+		case "json", "text":
+		default:
+			return fmt.Errorf("KAPP_LOG_FORMAT=%q is not a recognised value; expected one of: json, text", c.LogFormat)
+		}
+	}
+	if c.LogLevel != "" {
+		switch strings.ToLower(c.LogLevel) {
+		case "debug", "info", "warn", "warning", "error", "err":
+		default:
+			return fmt.Errorf("KAPP_LOG_LEVEL=%q is not a recognised value; expected one of: debug, info, warn, error", c.LogLevel)
+		}
+	}
+	return nil
 }
 
 // getenvBool parses a string env var as a boolean. Accepts the strings
