@@ -59,6 +59,18 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	tracingShutdown, err := platform.InitTracing(ctx, platform.LoadTracingConfig("kapp-agent-tools", cfg.Env))
+	if err != nil {
+		return fmt.Errorf("agent-tools: init tracing: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracingShutdown(shutdownCtx); err != nil {
+			logger.Warn("tracing shutdown", slog.String("err", err.Error()))
+		}
+	}()
+
 	pool, err := platform.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -127,6 +139,7 @@ func run() error {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(platform.RequestIDMiddleware(logger))
+	r.Use(platform.TracingMiddleware("kapp-agent-tools"))
 	r.Use(middleware.Timeout(30 * time.Second))
 
 	// Phase 5: JWT-derived tenant + user identity, mirroring

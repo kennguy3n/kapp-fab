@@ -1,0 +1,76 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Renovate config for kapp-fab. Groups minor + patch updates by ecosystem so the maintainer reviews one consolidated PR per week rather than dozens. Major bumps are individual so a breaking change can be evaluated on its own merits. The schedule is timed to land outside the maintainer's working hours so a freshly-opened Renovate PR does not interrupt active development.",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":dependencyDashboard"
+  ],
+  "timezone": "Asia/Singapore",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "labels": [
+    "dependencies"
+  ],
+  "prHourlyLimit": 4,
+  "prConcurrentLimit": 8,
+  "packageRules": [
+    {
+      "description": "Group Go module minor / patch bumps into a single weekly PR.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "go modules (minor + patch)"
+    },
+    {
+      "description": "Group npm devDependency minor / patch bumps so the frontend toolchain (vitest, eslint, typescript) does not generate a flood of PRs.",
+      "matchManagers": [
+        "npm"
+      ],
+      "matchDepTypes": [
+        "devDependencies"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "npm devDependencies (minor + patch)"
+    },
+    {
+      "description": "Pin GitHub Action versions; allow Renovate to bump the pin commit-by-commit. The `helpers:pinGitHubActionDigests` preset (inherited via config:recommended) enforces digest pinning.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "github actions"
+    },
+    {
+      "description": "Postgres major bumps are operator-coordinated migrations, not routine. Disable major bumps so the dashboard does not nag.",
+      "matchPackagePatterns": [
+        "^postgres$",
+        "^postgres:"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "labels": [
+      "security",
+      "dependencies"
+    ],
+    "schedule": "at any time"
+  },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 6am on the first day of the month"
+    ]
+  }
+}

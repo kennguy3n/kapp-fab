@@ -1,0 +1,106 @@
+name: supply-chain
+
+# Supply-chain hardening that runs alongside the standard ci.yml. The
+# goals are:
+#
+#   1. Catch known-vulnerable Go modules before they reach a release
+#      branch (govulncheck). govulncheck's database is the canonical
+#      Go-team-curated list of CVEs that affect specific exported
+#      symbols, so it only fails on actually-reachable vulnerabilities
+#      rather than every dependency in the transitive tree.
+#
+#   2. Generate a CycloneDX SBOM for every push to main + every PR so
+#      a regression in a dependency's license posture is visible in
+#      the run artifacts. The SBOM is uploaded as a build artifact,
+#      not committed to the repo, so a routine bump doesn't churn a
+#      multi-MB JSON file in git history.
+#
+#   3. Surface a non-blocking npm audit summary for the React monorepo
+#      so frontend dependency vulnerabilities are visible alongside
+#      the Go ones. npm audit's signal-to-noise on transitive
+#      devDependencies is famously poor, so the step uses
+#      --audit-level=high which only flags actually-actionable
+#      findings.
+#
+# Container-image scanning (Trivy on the published images) lives in a
+# release-time workflow rather than per-PR because the images are
+# built by the release pipeline, not by CI. The govulncheck +
+# CycloneDX coverage closes the per-PR gap.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # The cron run catches a CVE that was disclosed AFTER the last PR
+  # merged. Without it a quiet repo would not pick up a new advisory
+  # until the next PR opens, which can be weeks. 07:00 UTC matches
+  # the existing scheduled runs in api-versioning-check.yml.
+  schedule:
+    - cron: "0 7 * * *"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - name: install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: run govulncheck
+        # govulncheck exits non-zero when it finds a vulnerability
+        # that is actually called from this module's code (not just
+        # listed in go.sum). The -test flag also scans test code so a
+        # vulnerable mock library is caught.
+        run: govulncheck -test ./...
+
+  go-sbom:
+    name: Go SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - name: install cyclonedx-gomod
+        run: go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest
+      - name: generate SBOM
+        # `mod` mode emits a CycloneDX BOM for the entire Go module
+        # graph, including transitive dependencies. The -licenses
+        # flag attaches each module's declared license so a future
+        # license audit can grep the artifact directly.
+        run: cyclonedx-gomod mod -licenses -json -output kapp-fab-go.cyclonedx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kapp-fab-go-sbom
+          path: kapp-fab-go.cyclonedx.json
+          retention-days: 90
+
+  npm-audit:
+    name: npm audit (frontend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - name: npm audit --audit-level=high
+        # --audit-level=high suppresses the LOW / MODERATE noise on
+        # transitive devDependencies which is otherwise unmanageable.
+        # The job intentionally does NOT fail the build on the audit
+        # output (continue-on-error) — npm advisory data has too
+        # many false positives to gate merges on. The summary still
+        # surfaces in the run log so a real critical CVE is visible.
+        continue-on-error: true
+        run: npm audit --audit-level=high

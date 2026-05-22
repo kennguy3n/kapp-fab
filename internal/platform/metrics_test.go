@@ -61,6 +61,52 @@ func TestMetricsMiddlewareWithChiRouter(t *testing.T) {
 	}
 }
 
+// TestMetricsMiddleware_404UsesUnmatchedSentinel pins the cardinality
+// guard added alongside the TracingMiddleware chi-RoutePattern fix.
+// Before the sentinel, an attacker hitting /api/v1/scanner-junk-
+// <random-uuid> would walk the chi router unmatched, fall back to
+// r.URL.Path, and emit one new Prometheus series per probe. The fix
+// buckets every unmatched chi request under a single "<unmatched>"
+// path label so the series count is bounded by (tenant × method ×
+// status) and NOT by attacker creativity.
+func TestMetricsMiddleware_404UsesUnmatchedSentinel(t *testing.T) {
+	reg := NewMetricsRegistry()
+	r := chi.NewRouter()
+	r.Use(MetricsMiddleware(reg))
+	r.Get("/users/{id}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Probe a couple of attacker-shaped paths that chi will NOT
+	// match (no route registered).
+	for _, probe := range []string{
+		"/api/v1/junk/abc-123-def-456",
+		"/api/v1/junk/xyz-987",
+		"/wp-admin/setup-config.php",
+	} {
+		req := httptest.NewRequest(http.MethodGet, probe, nil)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("%s: status got %d, want %d (chi default 404)", probe, rr.Code, http.StatusNotFound)
+		}
+	}
+
+	body := scrape(t, reg)
+	if !strings.Contains(body, `path="<unmatched>"`) {
+		t.Fatalf("expected unmatched-chi requests bucketed under path=\"<unmatched>\" sentinel; got:\n%s", body)
+	}
+	for _, leaked := range []string{
+		`path="/api/v1/junk/abc-123-def-456"`,
+		`path="/api/v1/junk/xyz-987"`,
+		`path="/wp-admin/setup-config.php"`,
+	} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("attacker-controlled URL leaked into Prometheus label %q; cardinality risk. body:\n%s", leaked, body)
+		}
+	}
+}
+
 func scrape(t *testing.T, reg *MetricsRegistry) string {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)

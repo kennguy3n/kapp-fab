@@ -144,19 +144,36 @@ func MetricsHTTPTimeouts() HTTPTimeouts {
 // values fall back to the base and emit a stderr warning so an operator
 // can see the override was rejected at boot time.
 func LoadHTTPTimeouts(base HTTPTimeouts) HTTPTimeouts {
+	return LoadHTTPTimeoutsWithPrefix("KAPP_HTTP", base)
+}
+
+// LoadHTTPTimeoutsWithPrefix is LoadHTTPTimeouts but with a custom
+// env-var prefix so a single binary can host multiple HTTP listeners
+// with independent timeout-tuning surfaces. The main API listener uses
+// "KAPP_HTTP" (the default); the dedicated SSE listener uses "KAPP_SSE"
+// so an operator can raise KAPP_HTTP_WRITE_TIMEOUT to 180s for the
+// main API server without inadvertently killing every SSE stream after
+// 180s. Recognised env vars become {PREFIX}_READ_HEADER_TIMEOUT,
+// {PREFIX}_READ_TIMEOUT, {PREFIX}_WRITE_TIMEOUT, {PREFIX}_IDLE_TIMEOUT,
+// {PREFIX}_MAX_HEADER_BYTES.
+//
+// The prefix MUST NOT end with an underscore; the function joins
+// prefix + "_" + suffix internally so callers pass "KAPP_SSE" not
+// "KAPP_SSE_".
+func LoadHTTPTimeoutsWithPrefix(prefix string, base HTTPTimeouts) HTTPTimeouts {
 	out := base
-	out.ReadHeader = parseDurationEnv("KAPP_HTTP_READ_HEADER_TIMEOUT", base.ReadHeader)
+	out.ReadHeader = parseDurationEnv(prefix+"_READ_HEADER_TIMEOUT", base.ReadHeader)
 	// Read/Write can be intentionally set to 0 by a long-stream
 	// server, so we honour an explicit "0" or "0s" value. Anything
 	// negative or unparseable falls back to base.
-	out.Read = parseDurationEnvAllowZero("KAPP_HTTP_READ_TIMEOUT", base.Read)
-	out.Write = parseDurationEnvAllowZero("KAPP_HTTP_WRITE_TIMEOUT", base.Write)
-	out.Idle = parseDurationEnv("KAPP_HTTP_IDLE_TIMEOUT", base.Idle)
-	if raw := os.Getenv("KAPP_HTTP_MAX_HEADER_BYTES"); raw != "" {
+	out.Read = parseDurationEnvAllowZero(prefix+"_READ_TIMEOUT", base.Read)
+	out.Write = parseDurationEnvAllowZero(prefix+"_WRITE_TIMEOUT", base.Write)
+	out.Idle = parseDurationEnv(prefix+"_IDLE_TIMEOUT", base.Idle)
+	if raw := os.Getenv(prefix + "_MAX_HEADER_BYTES"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
 			out.MaxHeaderBytes = n
 		} else {
-			fmt.Fprintf(os.Stderr, "platform: KAPP_HTTP_MAX_HEADER_BYTES=%q invalid; using %d\n", raw, base.MaxHeaderBytes)
+			fmt.Fprintf(os.Stderr, "platform: %s_MAX_HEADER_BYTES=%q invalid; using %d\n", prefix, raw, base.MaxHeaderBytes)
 		}
 	}
 	return out

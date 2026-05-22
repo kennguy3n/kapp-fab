@@ -57,6 +57,18 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	tracingShutdown, err := platform.InitTracing(ctx, platform.LoadTracingConfig("kapp-importer", cfg.Env))
+	if err != nil {
+		return fmt.Errorf("importer: init tracing: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracingShutdown(shutdownCtx); err != nil {
+			logger.Warn("tracing shutdown", slog.String("err", err.Error()))
+		}
+	}()
+
 	pool, err := platform.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -128,6 +140,7 @@ func run() error {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(platform.RequestIDMiddleware(logger))
+	r.Use(platform.TracingMiddleware("kapp-importer"))
 	r.Use(middleware.Timeout(120 * time.Second))
 
 	r.Get("/healthz", healthHandler(pool))

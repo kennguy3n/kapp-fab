@@ -98,6 +98,23 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// OpenTelemetry tracing init runs BEFORE platform.NewPool so the
+	// otelpgx tracer attached inside NewPool finds the global
+	// TracerProvider this call sets. When KAPP_OTEL_ENDPOINT is
+	// unset the provider is a no-op and the otelpgx hot-path is a
+	// nil-check per query.
+	tracingShutdown, err := platform.InitTracing(ctx, platform.LoadTracingConfig("kapp-worker", cfg.Env))
+	if err != nil {
+		return fmt.Errorf("worker: init tracing: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracingShutdown(shutdownCtx); err != nil {
+			logger.Warn("tracing shutdown", slog.String("err", err.Error()))
+		}
+	}()
+
 	pool, err := platform.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -376,8 +393,11 @@ func runWorkerMetricsServer(ctx context.Context, logger *slog.Logger, addr strin
 	})
 	// Worker exposes only /metrics + /healthz, both short request-
 	// response cycles. MetricsHTTPTimeouts uses tighter values than
-	// the user-facing services and is overridable via env vars.
-	timeouts := platform.LoadHTTPTimeouts(platform.MetricsHTTPTimeouts())
+	// the user-facing services. Tuning lives under KAPP_METRICS_*
+	// (not KAPP_HTTP_*) so the same env namespace tunes every
+	// metrics scrape listener across the fleet (api + worker) and
+	// the user-facing KAPP_HTTP_* namespace cannot bleed in.
+	timeouts := platform.LoadHTTPTimeoutsWithPrefix("KAPP_METRICS", platform.MetricsHTTPTimeouts())
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: mux,

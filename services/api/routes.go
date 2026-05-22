@@ -39,6 +39,13 @@ func registerRoutes(d *apiDeps, logger *slog.Logger) chi.Router {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(platform.RequestIDMiddleware(logger))
+	// TracingMiddleware runs AFTER RequestIDMiddleware so the
+	// ctx-scoped logger already exists when the trace_id /
+	// span_id attributes are layered on. When KAPP_OTEL_ENDPOINT
+	// is unset the global TracerProvider is no-op so the
+	// middleware emits no spans, only the slog bridge stays
+	// active.
+	r.Use(platform.TracingMiddleware("kapp-api"))
 	if d.metrics != nil {
 		r.Use(platform.MetricsMiddleware(d.metrics))
 	}
@@ -63,17 +70,12 @@ func registerRoutes(d *apiDeps, logger *slog.Logger) chi.Router {
 	})
 
 	// Phase F event stream. SSE tail of the tenant's outbox so the web
-	// UI can react to state changes without polling. Defined at the root
-	// router so it does NOT inherit the 30s request timeout applied below
-	// — chi's middleware.Timeout wraps the ResponseWriter and cancels the
-	// context after the deadline, which would break any long-lived
-	// stream. Idempotency/rate-limit are also skipped because SSE is a
-	// GET and a spammed subscription is bounded by connection count.
-	r.Route("/api/v1/events", func(r chi.Router) {
-		d.tenantChain(r)
-		r.Use(d.apiCallMW)
-		r.Get("/stream", d.eh.stream)
-	})
+	// UI can react to state changes without polling. Mount delegated to
+	// mountEventStreamOnMainRouter so the predicate + mount block live
+	// in one place and the SSE-split unit test exercises the same code
+	// path the production binary runs — not a copy of it. See the
+	// helper's doc comment for the timeout / KAPP_SSE_ADDR rationale.
+	mountEventStreamOnMainRouter(r, d)
 
 	// All non-streaming routes run under a 30s request deadline so a
 	// slow handler can't hold a connection open indefinitely. The SSE
