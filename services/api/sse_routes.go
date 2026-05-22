@@ -66,3 +66,36 @@ func registerSSERoutes(d *apiDeps, logger *slog.Logger) chi.Router {
 
 	return r
 }
+
+// mountEventStreamOnMainRouter conditionally mounts the SSE event-stream
+// route on the supplied chi router. When KAPP_SSE_ADDR is empty (legacy
+// single-listener mode) the /api/v1/events/stream route is registered
+// on the main API router under tenantChain + apiCallMW so subscriptions
+// share the same auth + per-tenant metering as every other route. When
+// KAPP_SSE_ADDR is set this function is a no-op and registerSSERoutes
+// (above) handles the dedicated listener.
+//
+// The route is registered at the root of the main router — OUTSIDE the
+// 30s `middleware.Timeout` group applied lower in registerRoutes —
+// because chi's Timeout middleware wraps the ResponseWriter and cancels
+// the request context after the deadline, which would terminate every
+// long-lived SSE subscription. Idempotency / rate-limit middlewares are
+// also intentionally skipped: SSE is a GET, a spammed subscription is
+// bounded by connection count, and the per-IP rate limiter runs above
+// at the tenantChain layer.
+//
+// Extracted from registerRoutes so the production mount logic and the
+// SSE-split unit test (TestRegisterRoutes_OmitsSSEWhenSSEAddrSet) share
+// a single source of truth — the test calls this function directly
+// instead of reconstructing the if-block, so any refactor of the mount
+// shape (or the predicate) can never silently drift from the test.
+func mountEventStreamOnMainRouter(r chi.Router, d *apiDeps) {
+	if d.cfg.SSEAddr != "" {
+		return
+	}
+	r.Route("/api/v1/events", func(r chi.Router) {
+		d.tenantChain(r)
+		r.Use(d.apiCallMW)
+		r.Get("/stream", d.eh.stream)
+	})
+}

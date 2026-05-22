@@ -75,25 +75,25 @@ func TestRegisterRoutes_OmitsSSEWhenSSEAddrSet(t *testing.T) {
 }
 
 // mainRouterMountsStreamRoute builds a minimal apiDeps for the supplied
-// SSE address, runs the SSE-mount predicate from registerRoutes
-// against it, and reports whether /api/v1/events/stream was registered
-// on the main router. Mirrors the if-block at services/api/routes.go
-// (search for "Phase F event stream"). Kept as a stand-alone helper so
-// the test does not depend on the dozens of stores registerRoutes
-// wires elsewhere.
+// SSE address, calls the production mountEventStreamOnMainRouter helper
+// against a fresh chi router, and reports whether /api/v1/events/stream
+// was registered. The test deliberately calls the same function the
+// production registerRoutes calls so any refactor of the mount block
+// (predicate flip, route shape change, middleware reordering) is
+// caught here rather than silently drifting from a duplicated copy of
+// the logic.
+//
+// Building a full registerRoutes router would require wiring dozens
+// of handler stores the SSE-mount decision has no semantic dependency
+// on, so we exercise the extracted helper directly. Both paths share
+// the single source of truth in services/api/sse_routes.go.
 func mainRouterMountsStreamRoute(t *testing.T, sseAddr string) bool {
 	t.Helper()
 	d := newSSETestDeps()
 	d.cfg.SSEAddr = sseAddr
 
 	r := chi.NewRouter()
-	if d.cfg.SSEAddr == "" {
-		r.Route("/api/v1/events", func(r chi.Router) {
-			d.tenantChain(r)
-			r.Use(d.apiCallMW)
-			r.Get("/stream", d.eh.stream)
-		})
-	}
+	mountEventStreamOnMainRouter(r, d)
 
 	found := false
 	walkErr := chi.Walk(r, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
