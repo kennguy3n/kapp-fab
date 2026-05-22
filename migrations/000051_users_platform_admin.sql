@@ -45,6 +45,15 @@
 ALTER TABLE users
     ADD COLUMN IF NOT EXISTS is_platform_admin BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- Partial index intentionally forward-looking: the per-user lookup
+-- in internal/auth/sso.go::lookupPlatformAdmin reads the column
+-- through the users PK and does NOT need this index. It exists for
+-- the admin-management endpoints landing alongside
+-- /api/v1/admin/users/{id}/promote in the next PR — specifically the
+-- "list all platform admins" query, which scans the table for the
+-- ≤0.1% of rows where the flag is TRUE. Building it now avoids an
+-- ALTER on a populated table later; the maintenance cost on a
+-- column that flips ≈once per admin promotion is negligible.
 CREATE INDEX IF NOT EXISTS users_is_platform_admin_idx
     ON users (id)
  WHERE is_platform_admin = TRUE;
