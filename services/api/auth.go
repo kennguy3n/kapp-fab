@@ -2,11 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
-	"log"
 	"net/http"
-	"os"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -80,81 +76,15 @@ func (h *authHandlers) refresh(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
-// devPlaceholderJWTSecret is the literal dev-only KAPP_JWT_SECRET
-// shipped in .env.example so `make dev` / docker-compose boot
-// without manual setup. It is intentionally a recognisable string
-// (not a high-entropy random value) so it stands out in log review.
-//
-// Any deployment that runs with this exact value AND has not opted
-// in via KAPP_ALLOW_DEV_JWT_SECRET=1 is almost certainly a
-// misconfiguration — somebody copied .env.example to production
-// without rotating the secret. newAuthSigner refuses to boot in
-// that state so the misconfiguration surfaces immediately instead
-// of after the first forged admin JWT shows up in the audit log.
-//
-// Keep this constant in sync with the KAPP_JWT_SECRET line in
-// .env.example. The string is exported nowhere else; it exists
-// solely as the lookup key for the dev-mode gate below.
-const devPlaceholderJWTSecret = "dev-only-kapp-jwt-secret-do-not-use-outside-localhost-fLPXuVqo9wKn"
-
-// newAuthSigner reads KAPP_JWT_SECRET / KAPP_JWT_TTL and returns a
-// configured HS256 signer. Returns a nil signer when the secret is
-// absent so local dev without auth keeps working; callers must guard
-// against nil before wiring the signer into middleware.
-//
-// As a defence-in-depth against operators copying .env.example to a
-// real deployment, the function refuses to construct a signer keyed
-// on the literal devPlaceholderJWTSecret unless KAPP_ALLOW_DEV_JWT_SECRET=1
-// is also set. The dev .env.example sets the opt-in flag explicitly;
-// production .env files never should. The check is keyed on string
-// equality of the secret value (case-sensitive, exact match) so a
-// developer who rotates the value to anything else passes through
-// without needing to clear the opt-in.
+// newAuthSigner is the api gateway's thin wrapper around
+// auth.SignerFromEnv. It exists for source-grep stability (older
+// PRs reference newAuthSigner by name) and for any future api-
+// specific signer-construction behaviour (e.g. asymmetric keys
+// loaded from KMS) that wouldn't make sense to share with the
+// sidecar services. The dev-placeholder guard, TTL parsing, and
+// issuer / audience defaults all live in auth.SignerFromEnv so the
+// importer + agent-tools sidecars get the same contract without
+// copy-paste drift.
 func newAuthSigner() (*auth.Signer, error) {
-	secret := os.Getenv("KAPP_JWT_SECRET")
-	if secret == "" {
-		return nil, errors.New("KAPP_JWT_SECRET unset")
-	}
-	if secret == devPlaceholderJWTSecret && os.Getenv("KAPP_ALLOW_DEV_JWT_SECRET") != "1" {
-		return nil, errors.New(
-			"KAPP_JWT_SECRET is the literal dev-only placeholder from .env.example; " +
-				"rotate it to a freshly generated value (e.g. `openssl rand -base64 48`) " +
-				"or, for local development against the dev compose stack, explicitly " +
-				"opt in by setting KAPP_ALLOW_DEV_JWT_SECRET=1 — the placeholder is the " +
-				"same in every checkout of the repository, so anyone with a copy of " +
-				".env.example can mint admin-looking tokens against this deployment",
-		)
-	}
-	access := parseDurationOr("KAPP_JWT_ACCESS_TTL", 15*time.Minute)
-	refresh := parseDurationOr("KAPP_JWT_REFRESH_TTL", 24*time.Hour)
-	issuer := envOr("KAPP_JWT_ISSUER", "kapp")
-	audience := envOr("KAPP_JWT_AUDIENCE", "kapp")
-	return auth.NewSigner(auth.SignerConfig{
-		Algorithm:  auth.AlgHS256,
-		HMACKey:    []byte(secret),
-		Issuer:     issuer,
-		Audience:   audience,
-		AccessTTL:  access,
-		RefreshTTL: refresh,
-		Leeway:     30 * time.Second,
-	})
-}
-
-func parseDurationOr(key string, def time.Duration) time.Duration {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	if d, err := time.ParseDuration(v); err == nil {
-		return d
-	}
-	log.Printf("auth: %s=%q not parseable as duration; using %s", key, v, def)
-	return def
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
+	return auth.SignerFromEnv()
 }

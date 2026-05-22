@@ -374,11 +374,15 @@ func runWorkerMetricsServer(ctx context.Context, logger *slog.Logger, addr strin
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	// Worker exposes only /metrics + /healthz, both short request-
+	// response cycles. MetricsHTTPTimeouts uses tighter values than
+	// the user-facing services and is overridable via env vars.
+	timeouts := platform.LoadHTTPTimeouts(platform.MetricsHTTPTimeouts())
 	srv := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
+		Addr:    addr,
+		Handler: mux,
 	}
+	timeouts.Apply(srv)
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
