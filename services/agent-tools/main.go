@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -65,9 +66,12 @@ func run() error {
 	rateLimitCfg := platform.DefaultRateLimitConfig()
 	rateLimiter := platform.NewRateLimiter(rateLimitCfg)
 	var redisLimiter *platform.RedisRateLimiter
-	if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
-		rl, err := platform.NewRedisRateLimiter(ctx, redisURL, rateLimitCfg)
+	if cfg.RedisURL != "" {
+		rl, err := platform.NewRedisRateLimiter(ctx, cfg.RedisURL, rateLimitCfg)
 		if err != nil {
+			if cfg.RequireRedis {
+				return fmt.Errorf("agent-tools: redis rate limiter init failed and KAPP_REQUIRE_REDIS=1: %w", err)
+			}
 			log.Printf("agent-tools: redis rate limiter init failed, falling back to in-process: %v", err)
 		} else {
 			redisLimiter = rl

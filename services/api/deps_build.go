@@ -226,25 +226,43 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	if adminPool != nil {
 		formStore = formStore.WithAdminPool(adminPool)
 	}
-	// Rate limiter: REDIS_URL opts into the distributed Redis-backed
-	// limiter so multiple API replicas share a token bucket per
-	// tenant. Absent the env var we fall back to the in-process
-	// limiter so local dev continues to work without Redis.
+	// Rate limiter: cfg.RedisURL (sourced from REDIS_URL) opts into
+	// the distributed Redis-backed limiter so multiple API replicas
+	// share a token bucket per tenant. Absent the env var we fall
+	// back to the in-process limiter so local dev continues to work
+	// without Redis.
+	//
+	// Phase 3 hardens this: when cfg.RequireRedis is true (operator
+	// sets KAPP_REQUIRE_REDIS=1, the recommended production posture)
+	// a Redis init failure here returns an error rather than
+	// silently falling back to per-pod in-process limiting. The
+	// boot loudly fails and the deploy never starts serving with
+	// the wrong limiter, eliminating the "silent dev-mode in
+	// production" failure class. When RequireRedis is false the
+	// historical fallback-with-warning behaviour is preserved.
 	rateLimitCfg := platform.DefaultRateLimitConfig()
 	rateLimiter := platform.NewRateLimiter(rateLimitCfg)
 	var redisLimiter *platform.RedisRateLimiter
 	var ipRedisLimiter *platform.RedisIPRateLimiter
-	if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
-		rl, err := platform.NewRedisRateLimiter(ctx, redisURL, rateLimitCfg)
+	if cfg.RedisURL != "" {
+		rl, err := platform.NewRedisRateLimiter(ctx, cfg.RedisURL, rateLimitCfg)
 		if err != nil {
+			if cfg.RequireRedis {
+				runCleanups(cleanups)
+				return nil, nil, fmt.Errorf("api: redis rate limiter init failed and KAPP_REQUIRE_REDIS=1: %w", err)
+			}
 			log.Printf("api: redis rate limiter init failed, falling back to in-process: %v", err)
 		} else {
 			redisLimiter = rl
 			cleanups = append(cleanups, func() { _ = redisLimiter.Close() })
 			log.Printf("api: distributed rate limiter enabled (redis)")
 		}
-		ipRL, err := platform.NewRedisIPRateLimiter(ctx, redisURL)
+		ipRL, err := platform.NewRedisIPRateLimiter(ctx, cfg.RedisURL)
 		if err != nil {
+			if cfg.RequireRedis {
+				runCleanups(cleanups)
+				return nil, nil, fmt.Errorf("api: redis ip rate limiter init failed and KAPP_REQUIRE_REDIS=1: %w", err)
+			}
 			log.Printf("api: redis ip rate limiter init failed, falling back to in-process: %v", err)
 		} else {
 			ipRedisLimiter = ipRL
