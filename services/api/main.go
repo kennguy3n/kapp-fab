@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -25,13 +24,11 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/auth"
 	"github.com/kennguy3n/kapp-fab/internal/authz"
 	"github.com/kennguy3n/kapp-fab/internal/base"
-	"github.com/kennguy3n/kapp-fab/internal/crm"
 	"github.com/kennguy3n/kapp-fab/internal/dashboard"
 	"github.com/kennguy3n/kapp-fab/internal/docs"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/exporter"
 	"github.com/kennguy3n/kapp-fab/internal/files"
-	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/forms"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/hr"
@@ -43,10 +40,8 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/print"
-	"github.com/kennguy3n/kapp-fab/internal/projects"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/reporting"
-	"github.com/kennguy3n/kapp-fab/internal/sales"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
@@ -205,27 +200,7 @@ func run() error {
 		go inProc.RunSweeper(ctx, platform.DefaultIPSweepInterval)
 		ipRateBackend = inProc
 	}
-	// Two independent IP-keyed middlewares share the same backend
-	// (one Redis client / one in-process map) but live in distinct
-	// keyspaces so their token-bucket math does not overwrite each
-	// other on overlapping IPs. The bounds differ because the
-	// threat models differ: form submit is a low-volume mutation
-	// (10/min keeps fake-submission bots in check); embed reads
-	// are higher-volume snapshots a single viewer's page may
-	// auto-refresh (60/min, burst 30 lets legitimate dashboard
-	// embedding work without the limit firing on first paint).
-	publicFormIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, "form", 10, 10)
-	publicEmbedIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, "embed", 60, 30)
-	// /api/v1/helpdesk/inbound-email runs outside any tenant chain
-	// (the relay does not carry a session — auth is a static shared
-	// secret resolved by the handler), so the tenant-scoped
-	// rateLimitMW would 500 on every request. Inbound mail is
-	// inherently bursty (a single forwarding rule can fan out a
-	// dozen messages in a second) but the steady-state volume is
-	// low — 30/min with a burst of 10 covers an aggressive relay
-	// without overshooting before the per-tenant inbound-quota
-	// downstream cuts in.
-	publicInboundIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, "inbound", 30, 10)
+	publicFormIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, 10, 10)
 	quotaEnforcer := platform.NewQuotaEnforcer(pool)
 
 	// Phase J — tenant feature flags, plan definitions, and usage
@@ -328,78 +303,12 @@ func run() error {
 	baseStore := base.NewStore(pool)
 	docsStore := docs.NewStore(pool)
 
-	// Register the domain KTypes at boot so a fresh deployment has a
-	// working schema set without requiring an out-of-band migration.
-	// The registry upserts on conflict so repeated restarts are a
-	// no-op. Finance (Phase C), inventory (Phase D), and HR+LMS
-	// (Phase E) all register here.
-	if err := finance.RegisterKTypes(ctx, ktypeRegistry); err != nil {
+	// Domain KTypes are upserted at boot so a fresh deployment has a
+	// working schema set without requiring an out-of-band
+	// migration. See ktype_boot.go for the per-domain wiring; this
+	// call is a single seam so future domains land in one file.
+	if err := registerBootKTypes(ctx, ktypeRegistry); err != nil {
 		return err
-	}
-	if err := inventory.RegisterKTypes(ctx, ktypeRegistry); err != nil {
-		return err
-	}
-	if err := hr.RegisterKTypes(ctx, ktypeRegistry); err != nil {
-		return err
-	}
-	if err := lms.RegisterKTypes(ctx, ktypeRegistry); err != nil {
-		return err
-	}
-	if err := crm.RegisterKTypes(ctx, ktypeRegistry); err != nil {
-		return err
-	}
-	// Phase G additions — sales/procurement, bank reconciliation,
-	// cost centres, and payroll live next to (not inside) the
-	// finance/hr catalogs so a deployment can opt out by dropping
-	// the registration calls.
-	if err := sales.RegisterKTypes(ctx, ktypeRegistry); err != nil {
-		return err
-	}
-	for _, kt := range sales.POSKTypes() {
-		if err := ktypeRegistry.Register(ctx, kt); err != nil {
-			return fmt.Errorf("register pos ktype %s: %w", kt.Name, err)
-		}
-	}
-	for _, kt := range ledger.BankKTypes() {
-		if err := ktypeRegistry.Register(ctx, kt); err != nil {
-			return fmt.Errorf("register bank ktype %s: %w", kt.Name, err)
-		}
-	}
-	if err := ktypeRegistry.Register(ctx, ledger.CostCenterKType()); err != nil {
-		return fmt.Errorf("register cost_center ktype: %w", err)
-	}
-	for _, kt := range hr.PayrollKTypes() {
-		if err := ktypeRegistry.Register(ctx, kt); err != nil {
-			return fmt.Errorf("register payroll ktype %s: %w", kt.Name, err)
-		}
-	}
-	// Phase M shift scheduling. Registered separately from the
-	// Phase E HR catalog so an existing deployment can opt out by
-	// dropping these two lines without touching the older
-	// hr.RegisterKTypes call.
-	for _, kt := range hr.ShiftKTypes() {
-		if err := ktypeRegistry.Register(ctx, kt); err != nil {
-			return fmt.Errorf("register shift ktype %s: %w", kt.Name, err)
-		}
-	}
-	for _, kt := range hr.AppraisalKTypes() {
-		if err := ktypeRegistry.Register(ctx, kt); err != nil {
-			return fmt.Errorf("register appraisal ktype %s: %w", kt.Name, err)
-		}
-	}
-	if err := projects.RegisterKTypes(ctx, ktypeRegistry); err != nil {
-		return err
-	}
-	// Phase I — register helpdesk KTypes. The helpdesk store manages
-	// typed SLA policies + breach log while tickets themselves ride
-	// the generic KRecord plumbing.
-	if err := helpdesk.RegisterKTypes(ctx, ktypeRegistry); err != nil {
-		return err
-	}
-	// Phase I — exchange-rate KType so it shows up in the KType
-	// registry + records surface alongside other finance masters.
-	if err := ktypeRegistry.Register(ctx, ledger.ExchangeRateKType()); err != nil {
-		return fmt.Errorf("register exchange_rate ktype: %w", err)
 	}
 
 	// Phase I stores — multi-currency, helpdesk, reporting.
@@ -663,53 +572,18 @@ func run() error {
 		r.Use(auth.AdminMiddleware())
 	}
 
-	// tenantChain is the JWT-only counterpart to adminChain. It is
-	// used by EVERY tenant-scoped route group (records, finance,
-	// agents, helpdesk, etc., plus the /me convenience surface).
-	//
-	// Before Phase 1 these routes used platform.TenantMiddleware,
-	// which only reads the X-Tenant-ID header and does NOT populate
-	// user_id on the request context. Phase 1 then removed the
-	// X-User-ID header fallback from authz.Middleware AND flipped
-	// the authz-enforcement default to ON — so the old chain would
-	// have 401'd every gated request once those two changes
-	// landed (authz.Middleware needs a JWT-derived user_id and
-	// platform.TenantMiddleware does not supply one).
-	//
-	// tenantChain fixes that at the source: auth.Middleware parses
-	// the bearer JWT and stamps BOTH platform.WithTenant(claims.TenantID)
-	// AND platform.WithUserID(claims.UserID) on the context, so
-	// every downstream gate (authzGate / authzMethodGate,
-	// idempotency, rate-limit, quota, etc.) sees the same
-	// trustworthy identity. The legacy X-Tenant-ID header is
-	// ignored — there is no fallback path that could re-introduce
-	// the impersonation vector the X-User-ID removal closed.
-	//
-	// Unlike adminChain, tenantChain mounts
-	// auth.RequireActiveHomeTenant so the platform-admin recovery
-	// bypass in auth.Middleware (which lets admins reach admin-
-	// recovery endpoints with an inactive home tenant) cannot
-	// ALSO be used to mutate tenant-scoped data on the same
-	// inactive tenant. Admin recovery proceeds through adminChain
-	// (which intentionally omits the guard) — that is the path
-	// operators should use to re-activate a tenant.
-	//
-	// The /api/v1/tenants/me sub-tree is the canonical user-facing
-	// caller: before Phase 1 sending
-	//   POST /api/v1/tenants/me/plan
-	//   X-Tenant-ID: <victim-uuid>
-	// from an unauthenticated client downgraded the victim tenant's
-	// plan. tenantChain closes that gap.
-	//
-	// When the JWT signer is not configured, this falls through
-	// with a 503 (mirroring adminChain) instead of silently
-	// degrading to header-based auth — startup misconfiguration
-	// must be loud.
-	tenantChain := func(r chi.Router) {
+	// userChain is the JWT-only counterpart to adminChain. Used by
+	// /api/v1/tenants/me to derive the tenant from claims.TenantID
+	// instead of the X-Tenant-ID header that platform.TenantMiddleware
+	// honored before Phase 1. RequireActiveHomeTenant refuses requests
+	// admitted via the platform-admin recovery bypass so a recovering
+	// admin cannot also mutate tenant-scoped data via /me. See the
+	// coupling note in routes.go where it is mounted.
+	userChain := func(r chi.Router) {
 		if authh.signer == nil {
 			r.Use(func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-					http.Error(w, "tenant routes require JWT auth; set KAPP_JWT_SECRET", http.StatusServiceUnavailable)
+					http.Error(w, "user routes require JWT auth; set KAPP_JWT_SECRET", http.StatusServiceUnavailable)
 				})
 			})
 			return
@@ -718,820 +592,68 @@ func run() error {
 		r.Use(auth.RequireActiveHomeTenant())
 	}
 
-	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Recoverer)
-
-	r.Get("/healthz", healthHandler(pool))
-	r.Get("/api/v1/", rootHandler)
-
-	// Phase H auth routes. SSO and refresh are unauthenticated (they
-	// bootstrap the auth context); the rest of the surface will be
-	// migrated onto the Bearer-token middleware over subsequent PRs
-	// while the X-Tenant-ID header keeps working for local dev.
-	r.Route("/api/v1/auth", func(r chi.Router) {
-		r.Post("/sso", authh.sso)
-		r.Post("/refresh", authh.refresh)
-	})
-
-	// Phase F event stream. SSE tail of the tenant's outbox so the web
-	// UI can react to state changes without polling. Defined at the root
-	// router so it does NOT inherit the 30s request timeout applied below
-	// — chi's middleware.Timeout wraps the ResponseWriter and cancels the
-	// context after the deadline, which would break any long-lived
-	// stream. Idempotency/rate-limit are also skipped because SSE is a
-	// GET and a spammed subscription is bounded by connection count.
-	r.Route("/api/v1/events", func(r chi.Router) {
-		tenantChain(r)
-		r.Use(apiCallMW)
-		r.Get("/stream", eh.stream)
-	})
-
-	// All non-streaming routes run under a 30s request deadline so a
-	// slow handler can't hold a connection open indefinitely. The SSE
-	// stream is deliberately registered above this group.
-	r.Group(func(r chi.Router) {
-		r.Use(middleware.Timeout(30 * time.Second))
-
-		// Helpdesk customer portal. Auth endpoints are unauthenticated
-		// — they run the magic-link flow themselves. Ticket endpoints
-		// require a portal-scoped JWT issued by /auth/verify. No
-		// X-Tenant-ID header is expected on portal routes; the tenant
-		// is taken from the JWT (for data routes) or the request body
-		// (for auth endpoints) so external customers never have to
-		// know their tenant's internal UUID.
-		//
-		// Registered inside the 30s timeout group so a slow or
-		// malicious portal client can't hold a goroutine + DB conn
-		// open indefinitely. Portal handlers are regular request /
-		// response, no streaming, so the deadline is safe.
-		if authh.signer != nil {
-			// Real SMTP delivery for magic links. When SMTPHost is
-			// empty the failingPortalMailer is wired so every
-			// /portal/auth/request errors out — production mis-
-			// configurations must surface visibly rather than fall
-			// back to log.Printf'ing tokens to stdout, which is
-			// where they previously ended up via the old stdout
-			// stub.
-			var pmailer portalMailer
-			if cfg.SMTPHost != "" {
-				smtpAdapter := notifications.NewSMTPAdapter(notifications.SMTPConfig{
-					Host:     cfg.SMTPHost,
-					Port:     cfg.SMTPPort,
-					User:     cfg.SMTPUser,
-					Password: cfg.SMTPPassword,
-					From:     cfg.SMTPFrom,
-				})
-				pmailer = portalSMTPMailer{sender: smtpAdapter}
-			} else {
-				pmailer = failingPortalMailer{
-					err: errors.New("portal: SMTP not configured (set SMTP_HOST); cannot send magic links"),
-				}
-				log.Printf("api: WARN portal magic-link mailer disabled (SMTP_HOST empty); /portal/auth/request will return 503 until SMTP is configured")
-			}
-			porh := &portalHandlers{
-				tenants:  tenantSvc,
-				portal:   portalStore,
-				signer:   authh.signer,
-				records:  recordStore,
-				mailer:   pmailer,
-				features: featureStore,
-			}
-			r.Route("/api/v1/portal", func(r chi.Router) {
-				r.Route("/auth", func(r chi.Router) {
-					// /auth/* gate inline inside the handlers — they need
-					// the tenant lookup first and can't share the
-					// claims-based middleware below.
-					r.Post("/request", porh.requestMagicLink)
-					r.Post("/verify", porh.verifyMagicLink)
-				})
-				r.Route("/tickets", func(r chi.Router) {
-					r.Use(portalAuthMiddleware(authh.signer))
-					// FeaturePortal gate sits after auth so the tenant
-					// is taken from the JWT claims — standard
-					// DynamicFeatureMiddleware cannot be used here
-					// because the portal skips TenantMiddleware.
-					r.Use(portalFeatureMiddleware(featureStore))
-					// Bridge the portal claims into the platform tenant
-					// + user context slots so the standard rate-limit /
-					// api-call / quota / idempotency middleware below
-					// runs unchanged. Without this the portal surface
-					// would have no rate limiting and a stolen portal
-					// JWT could create unbounded ticket replies.
-					r.Use(portalTenantContextMiddleware(tenantSvc))
-					r.Use(apiCallMW)
-					r.Use(platform.IdempotencyMiddleware(pool))
-					r.Use(rateLimitMW)
-					r.Use(platform.QuotaMiddleware(quotaEnforcer))
-					r.Get("/", porh.listTickets)
-					r.Post("/", porh.createTicket)
-					r.Get("/{id}", porh.getTicket)
-					r.Post("/{id}/reply", porh.replyTicket)
-				})
-			})
-		}
-
-		// Control-plane tenant lifecycle routes. The /me sub-tree is
-		// user-facing (any authenticated tenant member can read its
-		// own features / usage / plan) so it runs under the legacy
-		// platform.TenantMiddleware; everything else mutates or reads
-		// across tenants and is gated behind the JWT + IsPlatformAdmin
-		// chain. /me is registered first so chi's static-segment
-		// preference matches it before the {id} routes underneath.
-		r.Route("/api/v1/tenants", func(r chi.Router) {
-			// /me — current-tenant convenience surface for the
-			// authenticated user. Before Phase 1 this resolved the
-			// tenant from the X-Tenant-ID request header via
-			// platform.TenantMiddleware, which meant an
-			// unauthenticated client could send
-			//   X-Tenant-ID: <victim-uuid>
-			//   POST /api/v1/tenants/me/plan {"plan": "free"}
-			// and downgrade another tenant's plan — `changePlan`
-			// reads the tenant from URL params (which `changePlanMe`
-			// populates from header-derived ctx) with no user-identity
-			// check of its own.
-			//
-			// tenantChain closes that gap by requiring a valid bearer
-			// JWT and stamping the tenant from claims.TenantID, so the
-			// only tenant a caller can act on via /me is the one their
-			// own token names. The legacy header is ignored — there is
-			// no fallback path that could re-introduce the bypass.
-			//
-			// tenantChain also mounts auth.RequireActiveHomeTenant so a
-			// platform admin whose home tenant is in the recovery
-			// bypass cannot ALSO downgrade their own tenant's plan or
-			// mutate features via /me. Admin recovery proceeds through
-			// the admin chain below (which intentionally omits the
-			// guard).
-			r.Group(func(r chi.Router) {
-				tenantChain(r)
-				r.Route("/me", func(r chi.Router) {
-					r.Get("/features", feath.listMe)
-					r.Get("/usage", meth.usageMe)
-					r.Get("/usage/history", meth.usageHistory)
-					r.Post("/plan", meth.changePlanMe)
-				})
-			})
-
-			r.Group(func(r chi.Router) {
-				adminChain(r)
-				r.Get("/", th.list)
-				r.Post("/", th.create)
-				r.Get("/{id}", th.get)
-				r.Post("/{id}/suspend", th.suspend)
-				r.Post("/{id}/activate", th.activate)
-				r.Post("/{id}/archive", th.archive)
-				r.Delete("/{id}", th.delete)
-				r.Post("/{id}/setup", th.setup)
-				r.Get("/{id}/features", feath.list)
-				r.Put("/{id}/features", feath.update)
-				r.Get("/{id}/placement", plch.get)
-				r.Put("/{id}/placement", plch.put)
-				if reth != nil {
-					r.Get("/{id}/retention", reth.list)
-					r.Put("/{id}/retention", reth.put)
-				}
-				r.Get("/{id}/usage", meth.usage)
-				r.Get("/{id}/usage/history", meth.usageHistory)
-				r.Post("/{id}/plan", meth.changePlan)
-			})
-		})
-
-		// Plan definitions are shared metadata (not tenant-scoped) so
-		// they live at /api/v1/plans alongside /api/v1/ktypes.
-		r.Route("/api/v1/plans", func(r chi.Router) {
-			r.Get("/", meth.listPlans)
-		})
-
-		// Phase J/K — runtime isolation audit. Returns the JSON
-		// report from platform.IsolationAuditor.Run. Admin-only
-		// in spirit; the route group is intentionally not wrapped
-		// in TenantMiddleware because the audit must run with the
-		// admin GUC. Operators authenticate via the same JWT
-		// envelope as other admin surfaces.
-		if iah != nil {
-			r.Route("/api/v1/admin", func(r chi.Router) {
-				adminChain(r)
-				r.Get("/isolation-audit", iah.get)
-				// Phase G — tier upgrade endpoint. Replaces the
-				// scripts/upgrade_tier.sh shell script with an
-				// admin-only API call. Requires adminPool because
-				// CREATE SCHEMA + cross-schema INSERT must run
-				// outside any tenant-scoped RLS context.
-				if adminPool != nil {
-					tih := &tierUpgradeHandlers{
-						tenants:   th,
-						adminPool: adminPool,
-						auditor:   auditor,
-					}
-					r.Post("/tenants/{id}/upgrade-tier", tih.upgrade)
-
-					// Phase M Task 7 — admin-only multi-tenant
-					// consolidation. The store reads each member
-					// tenant's trial balance via the admin pool
-					// (BYPASSRLS) so a single run can span tenants.
-					rates := ledger.NewExchangeRateStore(pool)
-					consStore := ledger.NewConsolidationStore(adminPool, ledgerStore, rates)
-					ch := &consolidationHandlers{store: consStore}
-					r.Post("/consolidation/groups", ch.createGroup)
-					r.Post("/consolidation/groups/{id}/run", ch.run)
-				}
-			})
-		}
-
-		// Phase RBAC — role and permission management. Tenant-scoped
-		// and gated behind authz.Middleware so only an actor with
-		// `tenant.admin` (or wildcard) can mutate the role graph.
-		// Mutations invalidate the authz cache for the affected
-		// tenant so the next request sees the new grants.
-		r.Route("/api/v1/roles", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(authz.Middleware(authzEval, "tenant.admin", ""))
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Get("/", roleh.listRoles)
-			r.Post("/", roleh.createRole)
-			r.Put("/{name}", roleh.updateRole)
-			r.Delete("/{name}", roleh.deleteRole)
-			r.Get("/{name}/permissions", roleh.listPermissions)
-			r.Post("/{name}/permissions", roleh.grantPermission)
-			r.Delete("/{name}/permissions/{id}", roleh.revokePermission)
-		})
-		r.Route("/api/v1/users", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(authz.Middleware(authzEval, "tenant.admin", ""))
-			r.Use(rateLimitMW)
-			r.Get("/{id}/roles", roleh.listUserRoles)
-			r.Post("/{id}/roles", roleh.assignUserRole)
-			r.Delete("/{id}/roles/{role}", roleh.removeUserRole)
-		})
-
-		// KType registry routes (shared metadata, not tenant-scoped).
-		// GET is public so the web UI can render the schema list and
-		// per-KType detail without a JWT. POST mutates the install-
-		// wide schema registry and is gated behind the platform
-		// admin chain — a misbehaving tenant should not be able to
-		// register or replace a KType that every other tenant sees.
-		r.Route("/api/v1/ktypes", func(r chi.Router) {
-			r.Get("/", kh.list)
-			r.Get("/{name}", kh.get)
-			r.Group(func(r chi.Router) {
-				adminChain(r)
-				r.Post("/", kh.register)
-			})
-		})
-
-		// Webhook management + delivery-log surface. Gated behind
-		// the per-tenant `webhook` feature flag (derived from the
-		// path via DynamicFeatureMiddleware). CRUD runs under the
-		// same middleware stack as other mutation routes so the
-		// tenant cannot bypass idempotency / rate-limit / quota.
-		r.Route("/api/v1/webhooks", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Get("/", whh.list)
-			r.Post("/", whh.create)
-			r.Get("/{id}", whh.get)
-			r.Put("/{id}", whh.update)
-			r.Delete("/{id}", whh.delete)
-			r.Get("/{id}/deliveries", whh.deliveries)
-		})
-
-		// Full-text search across the krecords table. Reads are
-		// tenant-scoped (RLS on krecords already covers it) so the
-		// group only needs tenant + api-call middleware; idempotency
-		// and quota are skipped because GET /search is a pure read.
-		r.Route("/api/v1/search", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(rateLimitMW)
-			r.Get("/", sh.search)
-		})
-
-		// KRecord CRUD routes. These require tenant context, rate limiting,
-		// quota enforcement, and idempotency keys on mutations.
-		r.Route("/api/v1/records", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(authzMethodGate("krecord.read", "krecord.write", ""))
-			// Idempotency runs before rate-limit/quota so a replay of a
-			// previously-successful mutation returns the cached response even
-			// when the tenant has since hit its rate-limit or quota ceiling —
-			// the replay is not a new unit of work (ARCHITECTURE.md §8 rule 6).
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Post("/{ktype}", rh.create)
-			r.Get("/{ktype}", rh.list)
-			// Bulk actions endpoint — multi-id status_change, delete,
-			// or CSV export in one transaction. Matches the pattern
-			// frappe/frappe uses on its List View: the UI collects
-			// selected rows and dispatches to a single backend entry
-			// point rather than looping over per-row endpoints.
-			r.Post("/{ktype}/bulk", rh.bulk)
-			r.Get("/{ktype}/{id}", rh.get)
-			r.Patch("/{ktype}/{id}", rh.update)
-			r.Delete("/{ktype}/{id}", rh.delete)
-			// Print surface — HTML preview + PDF download per
-			// record. Sits under /records so the tenant +
-			// rate-limit middleware is inherited, but the
-			// FeaturePrint flag is enforced explicitly here:
-			// DynamicFeatureMiddleware keys on the URL domain
-			// segment ("records") which has no per-feature
-			// mapping, so the print routes would otherwise be
-			// silently un-gated even when the tenant's plan has
-			// FeaturePrint=false.
-			r.Group(func(pr chi.Router) {
-				pr.Use(platform.FeatureMiddleware(featureStore, tenant.FeaturePrint))
-				pr.Get("/{ktype}/{id}/pdf", ph.pdf)
-				pr.Get("/{ktype}/{id}/html", ph.html)
-			})
-			// Workflow action endpoint (ARCHITECTURE.md §10). Runs under the
-			// same tenant + idempotency + rate-limit + quota stack as record
-			// CRUD so a spammed transition can't starve other tenants.
-			r.Post("/{ktype}/{id}/actions/{action}", wh.action)
-			// Workflow-run read endpoint. The list/kanban UI hydrates the
-			// RightPane from this so it can show the authoritative state
-			// the engine holds rather than inferring it from the record
-			// data field (ARCHITECTURE.md §7).
-			r.Get("/{ktype}/{id}/workflow-run", wh.getRunByRecord)
-		})
-
-		// Agent tool invocation surface. ARCHITECTURE.md §10-§11 requires
-		// every mutation to be tenant-scoped and attributable, so mutating
-		// calls run under the same middleware stack as record CRUD. The
-		// read-only list endpoint lives in the same route group for
-		// discoverability even though it does not need idempotency.
-		r.Route("/api/v1/agents", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(authzGate("tenant.member", ""))
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Get("/tools", ah.list)
-			r.Post("/tools/{name}", ah.invoke)
-		})
-
-		// Approvals surface. GET endpoints are safe to replay under
-		// IdempotencyMiddleware (the middleware short-circuits non-mutating
-		// methods) and the mutations (POST /, POST /{id}/decide) need the
-		// same tenant + idempotency + rate-limit + quota stack as record
-		// CRUD so a spammed approve / reject can't starve other tenants.
-		r.Route("/api/v1/approvals", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Get("/", aph.list)
-			r.Post("/", aph.create)
-			r.Get("/{id}", aph.get)
-			r.Post("/{id}/decide", aph.decide)
-		})
-
-		// Audit log read surface. Queries the audit_log table under tenant
-		// context via dbutil.WithTenantTx so RLS is enforced. Admin-only in
-		// production; auth enforcement lands with the broader auth layer
-		// in Phase C.
-		r.Route("/api/v1/audit", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(authzGate("tenant.admin", ""))
-			r.Get("/", auh.list)
-			r.Get("/verify", auh.verify)
-		})
-
-		// Finance surface (Phase C). Chart of accounts, journal entries,
-		// invoice/bill posting, period lockout, and reports. Mutations
-		// need the full tenant + idempotency + rate-limit + quota stack
-		// because a spammed post can't be allowed to starve other tenants
-		// or double-post an invoice under replay.
-		r.Route("/api/v1/finance", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(authzMethodGate("finance.read", "finance.admin", ""))
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Post("/accounts", finh.createAccount)
-			r.Get("/accounts", finh.listAccounts)
-			r.Get("/accounts/{code}", finh.getAccount)
-			r.Post("/journal-entries", finh.postJournalEntry)
-			r.Get("/journal-entries", finh.listJournalEntries)
-			r.Get("/journal-entries/{id}", finh.getJournalEntry)
-			r.Post("/invoices/{id}/post", finh.postInvoice)
-			r.Post("/bills/{id}/post", finh.postBill)
-			r.Post("/credit-notes/{id}/post", finh.postCreditNote)
-			r.Post("/debit-notes/{id}/post", finh.postDebitNote)
-			r.Post("/payments/{id}/post", finh.postPayment)
-			r.Post("/tax-codes", finh.upsertTaxCode)
-			r.Get("/tax-codes", finh.listTaxCodes)
-			r.Get("/tax-codes/{code}", finh.getTaxCode)
-			r.Post("/periods/lock", finh.lockPeriod)
-			r.Get("/reports/trial-balance", finh.trialBalance)
-			r.Get("/reports/ar-aging", finh.arAging)
-			r.Get("/reports/ap-aging", finh.apAging)
-			r.Get("/reports/income-statement", finh.incomeStatement)
-			// Phase I — exchange rate CRUD + ad-hoc convert + unrealized
-			// gain/loss calculator. Lookups do not mutate so they skip
-			// the idempotency key requirement enforced by the middleware.
-			r.Post("/exchange-rates", curh.upsertRate)
-			r.Get("/exchange-rates", curh.listRates)
-			r.Get("/exchange-rates/convert", curh.convert)
-			r.Post("/exchange-rates/unrealized", curh.unrealizedGL)
-		})
-
-		// Phase M Task 6 — POS finalize. Reuses InvoicePoster +
-		// PaymentPoster for the underlying double-entry; this
-		// route just handles the orchestration. Gated on FeaturePOS
-		// via the dynamic feature middleware (path → "pos").
-		posh := &posHandlers{poster: sales.NewPOSPoster(recordStore, invoicePoster, paymentPoster)}
-		r.Route("/api/v1/pos", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Post("/invoices/{id}/finalize", posh.finalize)
-		})
-
-		// Phase J payroll surface — generate draft payslips for a
-		// pay_run and post the approved batch as a single journal
-		// entry. The pay_run / payslip KRecords themselves ride the
-		// generic CRUD at /api/v1/records/hr.pay_run and hr.payslip.
-		r.Route("/api/v1/hr", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(authzGate("hr.admin", ""))
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Post("/pay-runs/{id}/generate", hrh.generatePayslips)
-			r.Post("/pay-runs/{id}/post", hrh.postPayRun)
-			r.Get("/pay-runs/{id}/payslips", hrh.listPayRunPayslips)
-		})
-
-		// Phase I helpdesk surface. Tickets themselves ride the generic
-		// KRecord CRUD at /api/v1/records/helpdesk.ticket; these routes
-		// back the SLA policy list/upsert the UI needs when authoring
-		// policies and the per-ticket SLA log the right pane renders.
-		r.Route("/api/v1/helpdesk", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(authzMethodGate("helpdesk.read", "helpdesk.admin", ""))
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Post("/sla-policies", hdh.upsertPolicy)
-			r.Get("/sla-policies", hdh.listPolicies)
-			r.Get("/sla-policies/resolve", hdh.resolvePolicy)
-			r.Get("/tickets/{id}/sla-log", hdh.ticketLog)
-		})
-
-		// Inbound email → ticket. Sits OUTSIDE the JWT-tenant
-		// middleware because the relay does not carry session
-		// credentials; instead we authenticate by static shared
-		// secret and resolve the tenant from the recipient host.
-		//
-		// Rate-limit MUST be IP-keyed here, not tenant-keyed: the
-		// route runs before the handler resolves which tenant the
-		// recipient belongs to, so the tenant-scoped rateLimitMW
-		// would call TenantFromContext → nil → 500 on every
-		// request. publicInboundIPLimit is the right shape — it
-		// keeps a misconfigured relay or a forged-sender flood
-		// from saturating the inbound pipeline without depending
-		// on tenant context.
-		if inboundHandler != nil {
-			r.Route("/api/v1/helpdesk/inbound-email", func(r chi.Router) {
-				r.Use(publicInboundIPLimit)
-				r.Post("/", inboundHandler.post)
-			})
-		}
-
-		// Phase I reports surface. Saved report CRUD + ad-hoc execution
-		// under the same tenant/idempotency/rate-limit/quota stack so
-		// spammed runs cannot starve other tenants.
-		r.Route("/api/v1/reports", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(authzGate("reports.read", ""))
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Get("/", reph.list)
-			r.Post("/", reph.create)
-			r.Post("/run", reph.runAdhoc)
-			r.Get("/{id}", reph.get)
-			r.Put("/{id}", reph.update)
-			r.Delete("/{id}", reph.delete)
-			r.Get("/{id}/run", reph.runSaved)
-			r.Patch("/{id}/share", reph.share)
-		})
-
-		// Phase K — data export queue. Submission enqueues; the
-		// worker (services/worker/export_worker.go) drains it and
-		// streams payload via /download.
-		r.Route("/api/v1/exports", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Get("/", exph.list)
-			r.Post("/", exph.create)
-			r.Get("/{id}", exph.get)
-			r.Get("/{id}/download", exph.download)
-		})
-
-		// Phase K — report schedules. CRUD only; the worker owns
-		// dispatch via reporting.ActionTypeReportSchedule.
-		r.Route("/api/v1/report-schedules", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Get("/", repsh.list)
-			r.Post("/", repsh.create)
-			r.Get("/{id}", repsh.get)
-			r.Put("/{id}", repsh.update)
-			r.Delete("/{id}", repsh.delete)
-		})
-
-		// Phase L Insights. CRUD for saved queries + dashboards,
-		// cache-aware query execution under per-tenant
-		// statement_timeout, dashboard widget upsert/delete, and
-		// role/user share grants. Gated on the `insights`
-		// feature flag via DynamicFeatureMiddleware so a free /
-		// starter plan can't reach the surface even with a
-		// stolen tenant header.
-		r.Route("/api/v1/insights", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(authzGate("insights.read", ""))
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-
-			r.Route("/queries", func(r chi.Router) {
-				r.Get("/", insh.listQueries)
-				r.Post("/", insh.createQuery)
-				r.Get("/{id}", insh.getQuery)
-				r.Put("/{id}", insh.updateQuery)
-				r.Delete("/{id}", insh.deleteQuery)
-				r.Post("/{id}/run", insh.runQuery)
-				// Raw-SQL editor mode (Phase M). Gated by an
-				// additional `insights_sql_editor` feature flag
-				// on top of the parent `insights` gate so a non-
-				// enterprise plan with a stolen tenant header
-				// can't reach the surface even with `insights`
-				// turned on.
-				r.Group(func(r chi.Router) {
-					r.Use(platform.FeatureMiddleware(featureStore, tenant.FeatureInsightsSQLEditor))
-					r.Post("/{id}/run-sql", insh.runRawSQL)
-				})
-				r.Post("/{id}/share", insh.shareQuery)
-				r.Get("/{id}/shares", insh.listQueryShares)
-				r.Delete("/{id}/shares/{shareID}", insh.deleteQueryShare)
-			})
-			r.Route("/dashboards", func(r chi.Router) {
-				r.Get("/", insh.listDashboards)
-				r.Post("/", insh.createDashboard)
-				r.Get("/{id}", insh.getDashboard)
-				r.Put("/{id}", insh.updateDashboard)
-				r.Delete("/{id}", insh.deleteDashboard)
-				r.Post("/{id}/share", insh.shareDashboard)
-				r.Get("/{id}/shares", insh.listDashboardShares)
-				r.Delete("/{id}/shares/{shareID}", insh.deleteDashboardShare)
-				r.Post("/{id}/widgets", insh.upsertWidget)
-				r.Delete("/{id}/widgets/{widgetID}", insh.deleteWidget)
-				// Embed-token CRUD on a per-dashboard collection.
-				// Auth-gated; the public unauth lookup lives at
-				// /api/v1/insights/embed/{token} (mounted below).
-				r.Get("/{id}/embeds", insembh.list)
-				r.Post("/{id}/embeds", insembh.create)
-				r.Post("/{id}/embeds/{embed_id}/revoke", insembh.revoke)
-			})
-			// External data sources (Phase L deferred). Connection
-			// strings are encrypted at rest; the test endpoint
-			// pings the remote with SELECT 1 so the UI can
-			// distinguish a typo from a credential failure.
-			r.Route("/data-sources", func(r chi.Router) {
-				r.Get("/", insdsh.list)
-				r.Post("/", insdsh.create)
-				r.Put("/{id}", insdsh.update)
-				r.Delete("/{id}", insdsh.delete)
-				r.Post("/{id}/test", insdsh.test)
-			})
-		})
-
-		// Public unauth dashboard embed endpoint. Mounted outside
-		// the auth chain so anonymous viewers can fetch a
-		// pre-rendered dashboard via a long-lived bearer token.
-		//
-		// Rate-limit MUST be IP-keyed here, not tenant-keyed: the
-		// route runs before any tenant context is on the request
-		// (the owning tenant is resolved from the embed token
-		// inside insembh.public, not from a header or claim).
-		// Mounting the tenant-scoped rateLimitMW would call
-		// TenantFromContext → nil → 500 on every request — exactly
-		// the bug the bot caught.
-		//
-		// The handler itself bills the owning tenant's quota
-		// bucket once it resolves the token (see
-		// insights_embed_handlers.go), so a viral embed cannot
-		// starve other tenants from the IP-tier control alone.
-		r.Route("/api/v1/insights/embed", func(r chi.Router) {
-			r.Use(publicEmbedIPLimit)
-			r.Get("/{token}", insembh.public)
-		})
-
-		// Phase I KPI dashboard aggregation. Reads only, so no idempotency
-		// needed — quota + rate-limit keep it in bounds.
-		r.Route("/api/v1/dashboard", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Get("/summary", dashh.summary)
-		})
-
-		// Inventory surface (Phase D). Item + warehouse masters, the
-		// append-only stock-move ledger, the stock_levels view, and the
-		// valuation report. Mutations run under the same tenant +
-		// idempotency + rate-limit + quota stack as finance because a
-		// spammed move post can't starve other tenants or double-post a
-		// source-record move under replay (the partial unique index on
-		// inventory_moves handles that at the DB layer).
-		r.Route("/api/v1/inventory", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(authzMethodGate("inventory.read", "inventory.admin", ""))
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Post("/items", invh.upsertItem)
-			r.Get("/items", invh.listItems)
-			r.Get("/items/{id}", invh.getItem)
-			r.Post("/warehouses", invh.upsertWarehouse)
-			r.Get("/warehouses", invh.listWarehouses)
-			r.Post("/moves", invh.recordMove)
-			r.Get("/moves", invh.listMoves)
-			r.Post("/moves/{id}/reverse", invh.reverseMove)
-			r.Post("/transfers", invh.recordTransfer)
-			r.Get("/stock-levels", invh.listStockLevels)
-			r.Get("/stock-levels/{id}", invh.stockLevelsByItem)
-			r.Post("/batches", invh.createBatch)
-			r.Get("/items/{id}/batches", invh.listBatchesByItem)
-			r.Get("/reports/valuation", invh.valuation)
-		})
-
-		// Forms KApp. Creation and tenant-scoped lookups go through the
-		// tenant middleware; public read + submit explicitly do NOT so
-		// anonymous submissions work. The public submit route mounts
-		// an IP-keyed token bucket and a honeypot check so the lack
-		// of tenant context does not translate to "wide open".
-		r.Route("/api/v1/forms", func(r chi.Router) {
-			r.Group(func(r chi.Router) {
-				tenantChain(r)
-				r.Use(apiCallMW)
-				r.Use(featureMW)
-				r.Post("/", fh.create)
-			})
-			r.Get("/{id}", fh.public)
-			// Public submit endpoint. There is no JWT or tenant
-			// header to key on, so abuse is bounded with two
-			// independent controls: an IP-keyed token bucket (10
-			// requests/minute, shared across replicas via Redis
-			// when available) and a honeypot check inside the
-			// handler. Together they cut the most common drive-by
-			// abuse vectors without breaking the public-form UX.
-			r.Group(func(r chi.Router) {
-				r.Use(publicFormIPLimit)
-				r.Post("/{id}/submit", fh.submit)
-			})
-		})
-
-		// Phase F file attachments. Uploads run under the full tenant +
-		// idempotency + rate-limit + quota stack so a spammed upload cannot
-		// starve other tenants; the object store dedups by SHA-256 so
-		// rehosting the same source attachment across tenants costs one
-		// physical blob.
-		r.Route("/api/v1/files", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Post("/", fileh.upload)
-			r.Get("/{id}", fileh.get)
-			r.Get("/{id}/content", fileh.download)
-		})
-
-		// Phase F Base KApp — ad-hoc tables per tenant. Same middleware
-		// stack as records: a tenant can't starve another via spammed
-		// row inserts, and RLS stops cross-tenant row reads even if a
-		// URL is forged.
-		r.Route("/api/v1/base", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Get("/tables", bh.listTables)
-			r.Post("/tables", bh.createTable)
-			r.Get("/tables/{id}", bh.getTable)
-			r.Patch("/tables/{id}", bh.updateTable)
-			r.Get("/tables/{id}/rows", bh.listRows)
-			r.Post("/tables/{id}/rows", bh.createRow)
-			r.Patch("/tables/{id}/rows/{rowID}", bh.updateRow)
-			r.Delete("/tables/{id}/rows/{rowID}", bh.deleteRow)
-		})
-
-		// Phase F Docs KApp — artifact documents with append-only version
-		// history. SaveVersion and Restore each write a new history row
-		// under tenant context; the immutable history table has no UPDATE
-		// or DELETE policy so an audit replay always reproduces the edit
-		// timeline.
-		r.Route("/api/v1/docs", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Get("/", dh.list)
-			r.Post("/", dh.create)
-			r.Get("/{id}", dh.get)
-			r.Post("/{id}/versions", dh.saveVersion)
-			r.Get("/{id}/versions", dh.versions)
-			r.Post("/{id}/restore", dh.restore)
-		})
-
-		// Phase H notifications inbox — durable in-app bell/inbox surface
-		// backed by the notifications table. External transports (KChat,
-		// webhook, email) are served by the worker; this endpoint backs
-		// the web inbox regardless of transport success.
-		notifStore := notifications.NewStore(pool)
-		nh := newNotificationsHandlers(notifStore)
-		r.Route("/api/v1/notifications", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(rateLimitMW)
-			r.Get("/", nh.list)
-			r.Post("/{id}/read", nh.markRead)
-			r.Post("/read-all", nh.markAllRead)
-		})
-
-		// Phase G saved views — per-user, per-KType filter/sort/column
-		// layouts the RecordListPage persists so operators resume their
-		// curated worklist across sessions. Mutations run under the same
-		// idempotency + rate-limit + quota stack as record CRUD so a
-		// spammed save cannot starve other tenants. RLS on saved_views
-		// enforces tenant isolation; owner-only rules live in the store.
-		r.Route("/api/v1/views", func(r chi.Router) {
-			tenantChain(r)
-			r.Use(apiCallMW)
-			r.Use(featureMW)
-			r.Use(platform.IdempotencyMiddleware(pool))
-			r.Use(rateLimitMW)
-			r.Use(platform.QuotaMiddleware(quotaEnforcer))
-			r.Get("/", vh.list)
-			r.Post("/", vh.create)
-			r.Get("/{id}", vh.get)
-			r.Patch("/{id}", vh.update)
-			r.Delete("/{id}", vh.delete)
-		})
-
-		// OpenAPI machine-readable schema served for API consumers.
-		r.Get("/api/v1/openapi.json", oh.serve)
-	}) // end timeout-guarded group
+	d := &apiDeps{
+		cfg:               cfg,
+		pool:              pool,
+		adminPool:         adminPool,
+		tenantSvc:         tenantSvc,
+		featureStore:      featureStore,
+		quotaEnforcer:     quotaEnforcer,
+		portalStore:       portalStore,
+		recordStore:       recordStore,
+		ledgerStore:       ledgerStore,
+		invoicePoster:     invoicePoster,
+		paymentPoster:     paymentPoster,
+		apiExchangeRates:  apiExchangeRates,
+		authzEval:         authzEval,
+		auditor:           auditor,
+		rateLimitMW:       rateLimitMW,
+		apiCallMW:         apiCallMW,
+		featureMW:         featureMW,
+		authzGate:         authzGate,
+		authzMethodGate:   authzMethodGate,
+		publicFormIPLimit: publicFormIPLimit,
+		adminChain:        adminChain,
+		userChain:         userChain,
+		authh:             authh,
+		eh:                eh,
+		th:                th,
+		feath:             feath,
+		plch:              plch,
+		reth:              reth,
+		iah:               iah,
+		meth:              meth,
+		kh:                kh,
+		whh:               whh,
+		sh:                sh,
+		rh:                rh,
+		ph:                ph,
+		fh:                fh,
+		wh:                wh,
+		ah:                ah,
+		aph:               aph,
+		auh:               auh,
+		finh:              finh,
+		invh:              invh,
+		oh:                oh,
+		fileh:             fileh,
+		bh:                bh,
+		dh:                dh,
+		vh:                vh,
+		roleh:             roleh,
+		curh:              curh,
+		hdh:               hdh,
+		reph:              reph,
+		repsh:             repsh,
+		exph:              exph,
+		dashh:             dashh,
+		insh:              insh,
+		insdsh:            insdsh,
+		insembh:           insembh,
+		hrh:               hrh,
+		inboundHandler:    inboundHandler,
+	}
+	r := registerRoutes(d)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -1564,46 +686,4 @@ func run() error {
 	}
 	log.Printf("api: shutdown complete")
 	return nil
-}
-
-func healthHandler(pool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-		if err := pool.Ping(ctx); err != nil {
-			http.Error(w, "db unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	}
-}
-
-func rootHandler(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func writeJSON(w http.ResponseWriter, code int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(body)
-}
-
-// tenantCountryResolver adapts *tenant.PGStore to the
-// hr.CountryResolver shape so the payroll engine can fetch a
-// tenant's ISO 3166-1 alpha-2 country code without importing the
-// tenant package directly. Lookup failures collapse to "" + nil
-// because the engine treats both as "no statutory pack" and we'd
-// rather fail-soft a slip than block payroll on a control-plane
-// hiccup.
-func tenantCountryResolver(svc *tenant.PGStore) hr.CountryResolver {
-	if svc == nil {
-		return nil
-	}
-	return func(ctx context.Context, tenantID uuid.UUID) (string, error) {
-		t, err := svc.Get(ctx, tenantID)
-		if err != nil {
-			return "", nil
-		}
-		return t.Country, nil
-	}
 }
