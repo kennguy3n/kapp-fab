@@ -559,7 +559,17 @@ func drainLoop(ctx context.Context, s leaderState) error {
 			s.drainHistogram.Observe(dur.Seconds(), result)
 		}
 		if s.drainCounter != nil && n > 0 {
-			s.drainCounter.Add(uint64(n), result)
+			// The `n` returned by DrainBatch counts events that
+			// were successfully delivered AND marked
+			// `delivered_at = now()` inside a per-tenant tx that
+			// committed. Even when the cycle-level `err` is
+			// non-nil (e.g. a later tenant's drain failed mid-
+			// loop), the n events that made it through are
+			// genuinely "ok" — they will not be re-delivered.
+			// Label them as such. Cycle-level success/failure
+			// is captured separately by the histogram's `result`
+			// label above.
+			s.drainCounter.Add(uint64(n), "ok")
 		}
 		s.batcher.Observe(n, dur)
 	}

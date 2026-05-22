@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"log"
 	"log/slog"
 	"strings"
 	"testing"
@@ -188,11 +190,24 @@ func TestInstallDefault_LegacyLogBridge(t *testing.T) {
 	}
 }
 
-// restoreDefaults snapshots and restores the slog/log default writers.
-// Returned closure should be passed to t.Cleanup.
+// restoreDefaults snapshots and restores both the slog default logger
+// AND the stdlib log package's output writer + flags. InstallDefault
+// mutates both (slog.SetDefault + log.SetOutput + log.SetFlags), so a
+// test that calls InstallDefault must restore all three to avoid
+// leaking the test's local *bytes.Buffer into subsequent tests in
+// the same binary that exercise stdlib log.Printf. The returned
+// closure should be passed to t.Cleanup.
 func restoreDefaults() func() {
 	prevSlog := slog.Default()
+	prevWriter := log.Writer()
+	prevFlags := log.Flags()
 	return func() {
 		slog.SetDefault(prevSlog)
+		if prevWriter != nil {
+			log.SetOutput(prevWriter)
+		} else {
+			log.SetOutput(io.Discard)
+		}
+		log.SetFlags(prevFlags)
 	}
 }

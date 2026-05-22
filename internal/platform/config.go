@@ -183,7 +183,14 @@ func (c *Config) Validate() error {
 		return errors.New("KAPP_REQUIRE_REDIS=1 but REDIS_URL is empty; set REDIS_URL or unset KAPP_REQUIRE_REDIS to permit in-process fallback")
 	}
 	if c.KTypeCacheSize <= 0 || c.AuthzCacheSize <= 0 || c.TenantCacheSize <= 0 {
-		return errors.New("cache sizes (KAPP_KTYPE_CACHE_SIZE / KAPP_AUTHZ_CACHE_SIZE / KAPP_TENANT_CACHE_SIZE) must be positive; getenvInt fallback failed")
+		// LoadConfig() routes every KAPP_*_CACHE_SIZE through
+		// getenvInt which falls back to a positive default on
+		// missing or non-positive input, so this branch can only
+		// fire when Validate() is invoked on a Config struct
+		// constructed by hand (e.g. tests, future config-from-
+		// YAML loaders). Defense-in-depth against a caller that
+		// bypasses LoadConfig.
+		return fmt.Errorf("cache sizes must be positive; got KTypeCacheSize=%d AuthzCacheSize=%d TenantCacheSize=%d (likely set via hand-constructed Config rather than LoadConfig)", c.KTypeCacheSize, c.AuthzCacheSize, c.TenantCacheSize)
 	}
 	if c.LogFormat != "" {
 		switch strings.ToLower(c.LogFormat) {
