@@ -393,8 +393,11 @@ func runWorkerMetricsServer(ctx context.Context, logger *slog.Logger, addr strin
 	})
 	// Worker exposes only /metrics + /healthz, both short request-
 	// response cycles. MetricsHTTPTimeouts uses tighter values than
-	// the user-facing services and is overridable via env vars.
-	timeouts := platform.LoadHTTPTimeouts(platform.MetricsHTTPTimeouts())
+	// the user-facing services. Tuning lives under KAPP_METRICS_*
+	// (not KAPP_HTTP_*) so the same env namespace tunes every
+	// metrics scrape listener across the fleet (api + worker) and
+	// the user-facing KAPP_HTTP_* namespace cannot bleed in.
+	timeouts := platform.LoadHTTPTimeoutsWithPrefix("KAPP_METRICS", platform.MetricsHTTPTimeouts())
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: mux,

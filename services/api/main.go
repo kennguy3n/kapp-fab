@@ -147,9 +147,13 @@ func run() error {
 			_, _ = fmt.Fprintln(w, "ok")
 		})
 		// Metrics scrape connections are short request-response
-		// cycles with tiny headers; MetricsHTTPTimeouts uses
-		// tighter values than the user-facing main server.
-		metricsTimeouts := platform.LoadHTTPTimeouts(platform.MetricsHTTPTimeouts())
+		// cycles with tiny headers; MetricsHTTPTimeouts uses tighter
+		// values than the user-facing main server. The metrics
+		// listener uses its own KAPP_METRICS_* env namespace so an
+		// operator tuning KAPP_HTTP_WRITE_TIMEOUT for the main API
+		// listener cannot inadvertently slow down the Prometheus
+		// scrape path (or vice versa).
+		metricsTimeouts := platform.LoadHTTPTimeoutsWithPrefix("KAPP_METRICS", platform.MetricsHTTPTimeouts())
 		metricsSrv = &http.Server{
 			Addr:    cfg.MetricsAddr,
 			Handler: metricsMux,

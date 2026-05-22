@@ -24,13 +24,28 @@ func NewPool(ctx context.Context, dbURL string) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse db url: %w", err)
 	}
+	// Two separate concerns govern the otelpgx options here. Both are
+	// deliberately wired; do NOT remove either thinking it's redundant.
+	//
+	//   PII protection (span attributes):
+	//     otelpgx's IncludeQueryParameters option defaults to false,
+	//     which means rendered SQL parameter values (email addresses,
+	//     tenant names, invoice line-item descriptions) are NEVER
+	//     attached to spans. We rely on this default — we MUST NOT
+	//     pass otelpgx.WithIncludeQueryParameters() here. The
+	//     parameter-less query text is still attached as the
+	//     `db.statement` attribute so the span carries enough debug
+	//     context for "which statement was slow".
+	//
+	//   Cardinality protection (span names):
+	//     WithTrimSQLInSpanName() trims the SQL text used as the span
+	//     name to a short prefix. Without this, every unique query
+	//     (different ORDER BY clauses, dynamic SELECT lists, etc.)
+	//     produces a distinct span name and explodes the span-name
+	//     index in the tracing backend, same failure mode the HTTP
+	//     middleware's chi RoutePattern rewrite guards against. Span
+	//     attributes still carry the full statement.
 	cfg.ConnConfig.Tracer = otelpgx.NewTracer(
-		// IncludeQueryParameters defaults to false. The pgx tracer
-		// would otherwise attach the rendered SQL parameters to
-		// every span, which can leak PII (email addresses, names,
-		// invoice line items) into the trace store. The parameter-
-		// less query text is still attached so the span carries
-		// enough debug context for "which statement was slow".
 		otelpgx.WithTrimSQLInSpanName(),
 	)
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)

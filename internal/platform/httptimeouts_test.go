@@ -229,6 +229,31 @@ func TestLoadHTTPTimeoutsWithPrefix_IsolatesNamespaces(t *testing.T) {
 	}
 }
 
+// Phase 6A round-2: pin the KAPP_METRICS_* prefix isolation contract.
+// The /metrics scrape listener (api + worker) must NOT pick up
+// KAPP_HTTP_* env overrides intended for the user-facing main API
+// listener — otherwise an operator raising KAPP_HTTP_WRITE_TIMEOUT
+// to 180s for slow report endpoints would also widen the metrics
+// scrape Write timeout from 30s to 180s, defeating the tighter scrape
+// timeouts that bound scraper-induced backpressure.
+func TestLoadHTTPTimeoutsWithPrefix_MetricsIsolatedFromHTTP(t *testing.T) {
+	// Main listener env: aggressive overrides.
+	t.Setenv("KAPP_HTTP_WRITE_TIMEOUT", "180s")
+	t.Setenv("KAPP_HTTP_READ_TIMEOUT", "120s")
+	// KAPP_METRICS_* unset — should keep MetricsHTTPTimeouts base.
+
+	metrics := LoadHTTPTimeoutsWithPrefix("KAPP_METRICS", MetricsHTTPTimeouts())
+	if metrics.Write != 30*time.Second {
+		t.Errorf("metrics Write: got %v, want 30s (KAPP_HTTP_WRITE_TIMEOUT must not bleed into KAPP_METRICS_ namespace)", metrics.Write)
+	}
+	if metrics.Read != 10*time.Second {
+		t.Errorf("metrics Read: got %v, want 10s (KAPP_HTTP_READ_TIMEOUT must not bleed into KAPP_METRICS_ namespace)", metrics.Read)
+	}
+	if metrics.ReadHeader != 5*time.Second {
+		t.Errorf("metrics ReadHeader: got %v, want 5s", metrics.ReadHeader)
+	}
+}
+
 // Confirm the SSE namespace IS plumbed: setting KAPP_SSE_* overrides
 // must actually reach the SSE timeouts.
 func TestLoadHTTPTimeoutsWithPrefix_SSEOverridesApply(t *testing.T) {
