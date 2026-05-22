@@ -638,6 +638,18 @@ Operator playbook for the locked-out scenario:
 
 The middleware emits a `WARN` log on every request that takes this bypass path so a sustained pattern is visible in the operator audit trail. A repeated WARN means the tenant lifecycle is broken; investigate before the refresh window closes.
 
+### Platform-admin demotion window
+
+Symmetric to the recovery window above. SSO `Refresh` re-queries `users.is_platform_admin` on every refresh, so a demoted admin loses the `IsPlatformAdmin` JWT claim on their next refresh. **However**, the access token issued at the most recent successful exchange continues to carry the previous `IsPlatformAdmin: true` value until that access token expires (default `SignerConfig.AccessTTL = 15min` — see `internal/auth/jwt.go`). During that window the demoted user retains full platform-admin authority over the control plane.
+
+This is the standard JWT trade-off (cached claims vs revocation latency) and is acceptable for most operations — but security-sensitive demotions need an additional step:
+
+1. After `UPDATE users SET is_platform_admin = FALSE` (or `/api/v1/admin/users/{id}/demote` once that endpoint ships), also **revoke the user's active sessions** so the existing access tokens stop validating against the session store. `auth.Middleware` calls `sessions.Get(...)` on every request and a missing row immediately returns 401, closing the 15-minute cache gap.
+2. If the deployment does NOT use session storage (rare — single-replica dev installs), the 15-minute AccessTTL ceiling is the hard upper bound on demotion latency. Shortening `SignerConfig.AccessTTL` reduces this window at the cost of more JWT refresh traffic.
+3. The same revocation step also closes the recovery-window vulnerability described above for a compromised platform-admin scenario: if a platform admin's credentials are believed compromised, revoking sessions instantly invalidates every outstanding token regardless of the cached `IsPlatformAdmin` claim.
+
+The 15-minute AccessTTL and the 24-hour RefreshTTL together define the two windows a security operator needs to reason about for every platform-admin lifecycle event (promotion, demotion, locked-out recovery). Both knobs are tunable per deployment; the defaults are chosen for typical SaaS deployments and may need adjustment for higher-sensitivity installs.
+
 ---
 
 ## Review sign-off

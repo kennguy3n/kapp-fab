@@ -115,9 +115,13 @@ func TestSubmitFormRequest_NoHoneypotEmptyEnvelope(t *testing.T) {
 }
 
 // TestSubmitFormRequest_WhitespaceOnlyDecoyTripsHoneypot guarantees a
-// bot can't dodge the gate by submitting " " in the decoy field. The
-// strings.TrimSpace branch is small but worth pinning so a future
-// refactor doesn't lose it.
+// bot can't dodge the gate by submitting "   " in the decoy field.
+// isHoneypotTripped uses a plain `!= ""` comparison (NOT
+// strings.TrimSpace), so any non-empty value — including pure
+// whitespace — must register as tripped. This test pins that
+// behavior so a future "let's trim whitespace before comparing"
+// refactor would surface immediately rather than silently widening
+// the bot's ability to dodge the gate by padding the decoy.
 func TestSubmitFormRequest_WhitespaceOnlyDecoyTripsHoneypot(t *testing.T) {
 	body := []byte(`{"data":{"name":"alice"},"url":"   "}`)
 	var req submitFormRequest
