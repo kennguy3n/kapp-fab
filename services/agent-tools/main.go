@@ -247,9 +247,15 @@ func (h *toolsHandler) invoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	// The tenant on the context (set by TenantMiddleware from
-	// X-Tenant-ID) is authoritative — an attacker can't spoof
-	// cross-tenant writes by setting tenant_id in the invocation body.
+	// The tenant on the context is authoritative — an attacker
+	// cannot spoof cross-tenant writes by setting tenant_id in
+	// the invocation body. The context tenant is sourced from
+	// either auth.Middleware (JWT tid claim, when KAPP_JWT_SECRET
+	// is set) or platform.TenantMiddleware (X-Tenant-ID header,
+	// legacy bridge mode), depending on which middleware was
+	// mounted on the route group above. In both cases the same
+	// invariant holds: handlers MUST use the context tenant, not
+	// any field the caller wrote into the request body.
 	inv.TenantID = t.ID
 	inv.ToolName = name
 	res, err := h.executor.Invoke(r.Context(), inv)

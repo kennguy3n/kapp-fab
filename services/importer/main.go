@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -112,7 +113,7 @@ func run() error {
 	case signer != nil:
 		logger.Info("jwt auth enabled", slog.String("algorithm", "HS256"))
 	case requireJWT:
-		return errors.New("importer: KAPP_REQUIRE_JWT=1 but KAPP_JWT_SECRET is unset or invalid: " + signerErr.Error())
+		return fmt.Errorf("importer: KAPP_REQUIRE_JWT=1 but KAPP_JWT_SECRET is unset or invalid: %w", signerErr)
 	default:
 		logger.Warn(
 			"importer running WITHOUT JWT auth — X-Tenant-ID header is trusted; "+

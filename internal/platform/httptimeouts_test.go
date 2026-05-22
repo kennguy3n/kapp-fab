@@ -55,19 +55,19 @@ func TestLongStreamTimeouts_KeepsReadDefensesDropsWrite(t *testing.T) {
 func TestMetricsHTTPTimeouts_TighterThanDefault(t *testing.T) {
 	m := MetricsHTTPTimeouts()
 	d := DefaultHTTPTimeouts()
-	if !(m.ReadHeader < d.ReadHeader) {
+	if m.ReadHeader >= d.ReadHeader {
 		t.Fatalf("metrics ReadHeader %v should be < default %v", m.ReadHeader, d.ReadHeader)
 	}
-	if !(m.Read < d.Read) {
+	if m.Read >= d.Read {
 		t.Fatalf("metrics Read %v should be < default %v", m.Read, d.Read)
 	}
-	if !(m.Write < d.Write) {
+	if m.Write >= d.Write {
 		t.Fatalf("metrics Write %v should be < default %v", m.Write, d.Write)
 	}
-	if !(m.Idle < d.Idle) {
+	if m.Idle >= d.Idle {
 		t.Fatalf("metrics Idle %v should be < default %v", m.Idle, d.Idle)
 	}
-	if !(m.MaxHeaderBytes < d.MaxHeaderBytes) {
+	if m.MaxHeaderBytes >= d.MaxHeaderBytes {
 		t.Fatalf("metrics MaxHeaderBytes %d should be < default %d", m.MaxHeaderBytes, d.MaxHeaderBytes)
 	}
 }
