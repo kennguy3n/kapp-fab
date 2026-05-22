@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -68,8 +69,31 @@ func Middleware(
 				return
 			}
 			if t.Status != tenant.StatusActive {
-				http.Error(w, "tenant is not active", http.StatusForbidden)
-				return
+				// Platform admins are exempt from the home-tenant
+				// active check. Without this exemption, a platform
+				// admin whose only tenant membership is in a
+				// suspended/archived tenant cannot reach ANY route —
+				// including the very admin routes that would let
+				// them re-activate a tenant. That is the locked-out-
+				// last-admin scenario operators hit during recovery
+				// (e.g., a billing-driven suspend cascades to the
+				// admin's home tenant, or a misclick archives the
+				// wrong one). Admin authorization itself is enforced
+				// downstream by AdminMiddleware against the
+				// IsPlatformAdmin claim, which is re-queried from
+				// users.is_platform_admin on every SSO refresh, so a
+				// demoted user does not retain this bypass past the
+				// refresh window.
+				//
+				// We still emit a WARN so the operator audit log
+				// makes the unusual login visible — this path is
+				// expected to be rare and a sustained pattern is a
+				// sign the actual tenant lifecycle is broken.
+				if !claims.IsPlatformAdmin {
+					http.Error(w, "tenant is not active", http.StatusForbidden)
+					return
+				}
+				log.Printf("auth: WARN platform admin user=%s logged in via inactive home tenant=%s status=%s; allowing for recovery", claims.UserID, t.ID, t.Status)
 			}
 			ctx := r.Context()
 			ctx = platform.WithTenant(ctx, t)

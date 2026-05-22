@@ -26,7 +26,7 @@ func AdminMiddleware() func(http.Handler) http.Handler {
 				http.Error(w, "forbidden: platform admin required", http.StatusForbidden)
 				return
 			}
-			next.ServeHTTP(w, r.WithContext(r.Context()))
+			next.ServeHTTP(w, r)
 		})
 	}
 }
