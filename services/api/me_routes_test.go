@@ -41,7 +41,7 @@ func newMeTestSigner(t *testing.T) *auth.Signer {
 	return signer
 }
 
-// meRouter mirrors the production userChain composition for the
+// meRouter mirrors the production tenantChain composition for the
 // /api/v1/tenants/me sub-tree: auth.Middleware → auth.RequireActiveHomeTenant
 // → handler. The handler is a stub that just emits the tenant UUID it
 // resolved from the request context — that is what production handlers
@@ -73,7 +73,7 @@ func meRouter(signer *auth.Signer, resolver auth.TenantResolver, handler http.Ha
 //
 // and downgrade another tenant's plan — changePlan reads the tenant
 // from URL params (populated from header-derived ctx by changePlanMe)
-// with no user-identity check of its own. userChain replaces the
+// with no user-identity check of its own. tenantChain replaces the
 // header path with auth.Middleware so the only tenant a caller can
 // act on via /me is the one their JWT claims name.
 func TestMeRoutes_RequireJWT(t *testing.T) {
@@ -98,7 +98,7 @@ func TestMeRoutes_RequireJWT(t *testing.T) {
 			name: "X-Tenant-ID header alone without JWT: 401",
 			mutate: func(r *http.Request) {
 				// Pre-Phase-1 path: header only. Must be refused
-				// outright by userChain — there is no fallback.
+				// outright by tenantChain — there is no fallback.
 				r.Header.Set("X-Tenant-ID", uuid.NewString())
 			},
 			wantStatus: http.StatusUnauthorized,
@@ -157,7 +157,7 @@ func TestMeRoutes_TenantComesFromJWTNotHeader(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/me/features", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
-	// Adversarial header — userChain must ignore it.
+	// Adversarial header — tenantChain must ignore it.
 	req.Header.Set("X-Tenant-ID", victimTenant.String())
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
@@ -176,7 +176,7 @@ func TestMeRoutes_TenantComesFromJWTNotHeader(t *testing.T) {
 // refused on /me — they can recover the tenant via the admin chain,
 // but they cannot also downgrade their own plan or mutate features
 // on the inactive tenant via /me. The admin chain intentionally does
-// NOT mount RequireActiveHomeTenant; userChain does, which is what
+// NOT mount RequireActiveHomeTenant; tenantChain does, which is what
 // produces the 403 here.
 func TestMeRoutes_RecoveryBypassedAdminCannotMutateViaMe(t *testing.T) {
 	signer := newMeTestSigner(t)

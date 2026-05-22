@@ -599,6 +599,20 @@ the Phase 1 security hardening; set `KAPP_AUTHZ_ENFORCE=0` (or
 Disabling enforcement emits a startup WARN log and must never
 ship to staging or production.
 
+Every tenant-scoped route group sits behind the `tenantChain`
+helper (`auth.Middleware` → `auth.RequireActiveHomeTenant`) so
+the JWT, not the legacy `X-Tenant-ID` request header,
+establishes both the tenant and the user_id on the request
+context. Before Phase 1 these routes used
+`platform.TenantMiddleware`, which honored the header — so the
+authz default flip combined with the X-User-ID-fallback removal
+would have 401'd every gated request because no JWT-derived
+user_id was present. `tenantChain` closes that gap at the
+source: there is no header-only path that could re-introduce
+the impersonation vector the X-User-ID removal closed, and
+authz.Middleware always observes a verified user_id whether
+enforcement is ON or OFF.
+
 The integration test
 `internal/integrationtest/rbac_test.go::TestAuthzMultiRoleAndHierarchy`
 exercises the wizard seeding plus all four evaluator surfaces

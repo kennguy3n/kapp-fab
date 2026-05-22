@@ -44,8 +44,19 @@ type IPRateLimiterBackend interface {
 
 // IPRateLimitMiddleware enforces a per-client-IP token bucket on the
 // wrapped handler. It is intended for un-authenticated public routes
-// (e.g. POST /api/v1/forms/{id}/submit) where there is no tenant
-// context to key the tenant-scoped RateLimitMiddleware off.
+// (e.g. POST /api/v1/forms/{id}/submit, GET /api/v1/insights/embed/{token})
+// where there is no tenant context to key the tenant-scoped
+// RateLimitMiddleware off.
+//
+// keyPrefix scopes the bucket keyspace so multiple middleware
+// instances sharing a backend (e.g. one for form submissions, one
+// for public embeds) maintain independent buckets per IP. Without
+// the prefix, two instances calling backend.AllowCtx(ip, ...) with
+// different (rpm, burst) would overwrite each other's bucket state
+// on every request because the in-process map and Redis HSET both
+// key on the IP alone. Pass a stable, human-readable prefix
+// ("form", "embed", etc.) — the value lands in the limiter key as
+// "<prefix>:<ip>" and is never exposed back to the client.
 //
 // The IP is taken from r.RemoteAddr — chi.middleware.RealIP must run
 // earlier in the chain so that value reflects the original client
@@ -57,17 +68,27 @@ type IPRateLimiterBackend interface {
 // rpm is the steady-state refill rate (tokens per minute). burst is
 // the bucket capacity, i.e. the maximum number of requests a single
 // IP can fire in a single moment before queuing.
-func IPRateLimitMiddleware(backend IPRateLimiterBackend, rpm, burst int) func(http.Handler) http.Handler {
+func IPRateLimitMiddleware(backend IPRateLimiterBackend, keyPrefix string, rpm, burst int) func(http.Handler) http.Handler {
 	if rpm <= 0 {
 		rpm = 10
 	}
 	if burst <= 0 {
 		burst = rpm
 	}
+	if keyPrefix == "" {
+		// Defensive default — an empty prefix collapses every
+		// IPRateLimitMiddleware instance into a single shared
+		// keyspace, which is the bug this parameter exists to
+		// prevent. Use a sentinel rather than refusing the call so
+		// a misconfigured caller still gets rate-limited (just on
+		// the shared bucket) rather than crashing the binary.
+		keyPrefix = "ip"
+	}
+	prefix := keyPrefix + ":"
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := clientIP(r)
-			if !backend.AllowCtx(r.Context(), ip, rpm, burst) {
+			key := prefix + clientIP(r)
+			if !backend.AllowCtx(r.Context(), key, rpm, burst) {
 				w.Header().Set("Retry-After", "60")
 				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 				return

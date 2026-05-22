@@ -93,7 +93,7 @@ func TestInProcIPRateLimiter_IdleEviction(t *testing.T) {
 
 func TestIPRateLimitMiddleware_Allows(t *testing.T) {
 	l := NewInProcIPRateLimiter()
-	mw := IPRateLimitMiddleware(l, 60, 5)
+	mw := IPRateLimitMiddleware(l, "form", 60, 5)
 	called := false
 	h := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -113,7 +113,7 @@ func TestIPRateLimitMiddleware_Allows(t *testing.T) {
 
 func TestIPRateLimitMiddleware_RejectsAfterBurst(t *testing.T) {
 	l := NewInProcIPRateLimiter()
-	mw := IPRateLimitMiddleware(l, 60, 2)
+	mw := IPRateLimitMiddleware(l, "form", 60, 2)
 	h := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -218,5 +218,72 @@ func TestClientIP_SplitsHostPort(t *testing.T) {
 		if got := clientIP(req); got != tc.want {
 			t.Fatalf("clientIP(%q) = %q, want %q", tc.remote, got, tc.want)
 		}
+	}
+}
+
+// TestIPRateLimitMiddleware_KeyPrefixIsolatesBuckets pins the
+// invariant that two middlewares sharing a backend but with
+// distinct prefixes do NOT collide on overlapping client IPs.
+// Without prefixing, the in-process token map and the Redis HSET
+// both key on the IP alone — so a form-submitter exhausting their
+// /form bucket would simultaneously exhaust their /embed bucket on
+// the same IP, which would re-introduce the rate-limit mathematical
+// inconsistency the prefix is designed to prevent.
+//
+// The fixture exhausts the form bucket (burst=1) on a single IP and
+// then confirms the embed middleware on the SAME IP still admits
+// the next request — proving the buckets are independent.
+func TestIPRateLimitMiddleware_KeyPrefixIsolatesBuckets(t *testing.T) {
+	l := NewInProcIPRateLimiter()
+	form := IPRateLimitMiddleware(l, "form", 60, 1)
+	embed := IPRateLimitMiddleware(l, "embed", 60, 1)
+
+	fh := form(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	eh := embed(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+
+	ip := "198.51.100.42:1"
+	hit := func(h http.Handler) int {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = ip
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if got := hit(fh); got != http.StatusOK {
+		t.Fatalf("first form request status = %d, want 200", got)
+	}
+	if got := hit(fh); got != http.StatusTooManyRequests {
+		t.Fatalf("second form request status = %d, want 429 (bucket exhausted)", got)
+	}
+	// SAME IP, DIFFERENT prefix — must still admit.
+	if got := hit(eh); got != http.StatusOK {
+		t.Fatalf("embed request on exhausted-form IP status = %d, want 200 (prefixes must isolate buckets)", got)
+	}
+	if got := hit(eh); got != http.StatusTooManyRequests {
+		t.Fatalf("second embed request status = %d, want 429 (embed bucket should now be exhausted independently)", got)
+	}
+}
+
+// TestIPRateLimitMiddleware_EmptyPrefixFallsBackToSentinel guards
+// against a misconfigured caller passing keyPrefix="" — the
+// middleware should still rate-limit (on a sentinel-prefixed
+// keyspace) rather than crashing or admitting every request.
+func TestIPRateLimitMiddleware_EmptyPrefixFallsBackToSentinel(t *testing.T) {
+	l := NewInProcIPRateLimiter()
+	mw := IPRateLimitMiddleware(l, "", 60, 1)
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	hit := func() int {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "198.51.100.99:1"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if got := hit(); got != http.StatusOK {
+		t.Fatalf("first request status = %d, want 200", got)
+	}
+	if got := hit(); got != http.StatusTooManyRequests {
+		t.Fatalf("second request status = %d, want 429 (limiter must still enforce)", got)
 	}
 }
