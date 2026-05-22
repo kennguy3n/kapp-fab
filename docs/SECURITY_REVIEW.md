@@ -613,6 +613,33 @@ the impersonation vector the X-User-ID removal closed, and
 authz.Middleware always observes a verified user_id whether
 enforcement is ON or OFF.
 
+**Phase 5 extension — sidecar JWT enforcement.** Phase 1 closed
+the X-Tenant-ID hole on `services/api` only; the two internal
+sidecars (`services/importer` and `services/agent-tools`)
+continued to trust the X-Tenant-ID header outright until Phase 5.
+Both sidecars now share the gateway's tenantChain pattern: when
+`KAPP_JWT_SECRET` is set they mount
+`auth.Middleware + auth.RequireActiveHomeTenant` in front of
+`/api/v1/imports` and `/api/v1/agents/tools` respectively, which
+authoritatively writes the JWT's `tid` claim onto the request
+context AFTER any caller-supplied X-Tenant-ID header would have
+been read. The header is effectively ignored. The regression
+guard is
+`TestSecurityChain_XTenantIDHeaderIgnoredWhenJWTPresent` in
+`internal/auth/security_chain_test.go`, which mints a JWT for
+tenant A, attaches an X-Tenant-ID header naming tenant B, and
+asserts the handler observes tenant A.
+
+For clusters that have not yet rolled JWT auth to their
+sidecars, the legacy `platform.TenantMiddleware` path is
+preserved as a fallback when `KAPP_JWT_SECRET` is unset. Each
+sidecar logs a loud WARN (`importer running WITHOUT JWT auth …`
+/ `agent-tools running WITHOUT JWT auth …`) at every boot so
+operators see the degraded state. Production deployments SHOULD
+set `KAPP_REQUIRE_JWT=1` alongside the secret so a misconfigured
+boot fails fast instead of silently falling back to the header
+path (mirrors `KAPP_REQUIRE_REDIS` in spirit).
+
 The integration test
 `internal/integrationtest/rbac_test.go::TestAuthzMultiRoleAndHierarchy`
 exercises the wizard seeding plus all four evaluator surfaces
@@ -638,6 +665,7 @@ operator runbooks must include each one explicitly.
 | `REDIS_URL` | Rate limiters fall back to in-process (per-pod) buckets. The IP-rate-limiter sweep goroutine still GCs old buckets so memory stays bounded, but a multi-replica deployment loses cross-replica fairness. | Medium |
 | `SMTP_HOST` | Portal magic-link delivery is disabled. `/api/v1/portal/auth/request` returns 503 instead of silently dropping the email. | High for portal users |
 | `KAPP_AUTHZ_ENFORCE` | Default is enforcement **ON**. Setting `=0` / `=false` disables the authz gate and emits a startup WARN. | Critical in prod |
+| `KAPP_REQUIRE_JWT` | Phase 5 sidecar gate. When unset (default), `services/importer` and `services/agent-tools` fall back to the legacy `X-Tenant-ID` header path with a loud WARN if `KAPP_JWT_SECRET` is also unset — bridge mode for clusters that haven't rolled out JWT to their sidecars. Setting to `1` makes both sidecars refuse to boot when the secret is missing, eliminating the silent-degrade path. | Critical in prod |
 | `KAPP_PLATFORM_ADMIN_USERS` | Bootstrap-time **KChat user ID** list (NOT Kapp UUIDs). One-step by design: (1) operator reads the candidate user's KChat ID from KChat itself, (2) sets the env var to that ID (comma-separated for multiple admins), (3) the user's first **fresh SSO exchange** (NOT a refresh) sees the match and persists `is_platform_admin = TRUE`. Promotion happens inside `upsertUser`, which only runs in `Exchange`; if the candidate already has a live session, they must log out and back in so their next request goes through `Exchange`. Re-read on every fresh exchange so operators can keep appending admin IDs without restarting. Unset is fine once at least one row in `users` already has `is_platform_admin = TRUE`. **Legacy mode**: an earlier revision keyed this on Kapp internal UUIDs, which forced an unworkable two-step bootstrap because the operator could not enumerate the UUID before INSERT — that mode is no longer supported. Operators upgrading must replace Kapp UUIDs with KChat IDs. | Low (bootstrap-only) |
 
 ### Platform-admin recovery window

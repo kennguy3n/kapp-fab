@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/kennguy3n/kapp-fab/internal/auth"
 )
 
 // TestNewAuthSigner_RejectsDevPlaceholderWithoutOptIn verifies the
@@ -17,7 +19,7 @@ import (
 // the opt-in flag so it exercises the rejection path regardless of
 // what the surrounding process environment looks like.
 func TestNewAuthSigner_RejectsDevPlaceholderWithoutOptIn(t *testing.T) {
-	t.Setenv("KAPP_JWT_SECRET", devPlaceholderJWTSecret)
+	t.Setenv("KAPP_JWT_SECRET", auth.DevPlaceholderJWTSecret)
 	t.Setenv("KAPP_ALLOW_DEV_JWT_SECRET", "")
 	signer, err := newAuthSigner()
 	if err == nil {
@@ -37,7 +39,7 @@ func TestNewAuthSigner_RejectsDevPlaceholderWithoutOptIn(t *testing.T) {
 // without complaint. The .env.example bundles both env vars together
 // so `make dev` continues to boot.
 func TestNewAuthSigner_AcceptsDevPlaceholderWithOptIn(t *testing.T) {
-	t.Setenv("KAPP_JWT_SECRET", devPlaceholderJWTSecret)
+	t.Setenv("KAPP_JWT_SECRET", auth.DevPlaceholderJWTSecret)
 	t.Setenv("KAPP_ALLOW_DEV_JWT_SECRET", "1")
 	signer, err := newAuthSigner()
 	if err != nil {

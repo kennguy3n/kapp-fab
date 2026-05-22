@@ -667,6 +667,66 @@ func TestSecurityChain_RefreshTokenIssuanceRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSecurityChain_XTenantIDHeaderIgnoredWhenJWTPresent pins the
+// Phase 5 contract for the importer + agent-tools sidecars: any
+// caller-supplied X-Tenant-ID header MUST be overridden by the JWT
+// tid claim. Pre-Phase-5 those sidecars trusted the header outright,
+// which let any caller on the internal network impersonate any
+// tenant. The api gateway closed the same hole in Phase 1; Phase 5
+// closes it on the sidecars by wiring auth.Middleware in front of
+// the route group.
+//
+// The test issues a JWT for tenant A, attaches a header naming
+// tenant B, and asserts that the handler observes tenant A. If a
+// future refactor reintroduces a path that lets the header win
+// (e.g. by moving auth.Middleware below platform.TenantMiddleware),
+// this test fails loudly.
+func TestSecurityChain_XTenantIDHeaderIgnoredWhenJWTPresent(t *testing.T) {
+	h := newSecurityHarness(t, 6000, 100)
+	token, _ := h.issueToken(h.userA, h.tenantA.ID, false)
+
+	// Hand-build the request so we can attach the X-Tenant-ID
+	// header — the standard h.do() helper omits it because no
+	// other test exercises this attack vector.
+	req, err := http.NewRequest(http.MethodGet, h.srv.URL+"/api/v1/records/items", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	// Spoofing attempt: claim to be tenant B despite a JWT
+	// issued for tenant A. The header value uses tenant B's id
+	// so that if auth.Middleware were absent OR ordered after
+	// platform.TenantMiddleware, the handler would actually see
+	// tenant B and the test would fail.
+	req.Header.Set("X-Tenant-ID", h.tenantB.ID.String())
+	req.Header.Set("X-Forwarded-For", "10.0.0.99")
+	req.Header.Set("X-Real-IP", "10.0.0.99")
+
+	resp, err := h.srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer closeBody(resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d; want 200 (tenant A's JWT is valid for the /records/items route)", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["tenant_id"] != h.tenantA.ID.String() {
+		t.Fatalf("tenant_id = %s; X-Tenant-ID header overrode the JWT tid claim. want %s", body["tenant_id"], h.tenantA.ID)
+	}
+	// Defence in depth: the user_id must come from the JWT
+	// uid claim too, not from any header or query parameter. A
+	// future "X-User-ID" header reintroduction would also be a
+	// security regression.
+	if body["user_id"] != h.userA.String() {
+		t.Fatalf("user_id = %s; want %s (from JWT uid claim)", body["user_id"], h.userA)
+	}
+}
+
 // readBody reads the response body fully and returns it as a string.
 // Test helper.
 func readBody(t *testing.T, resp *http.Response) string {

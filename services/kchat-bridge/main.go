@@ -313,11 +313,15 @@ func run() error {
 	if addr == ":8080" {
 		addr = ":8082"
 	}
+	// KChat bridge is a request-response webhook receiver +
+	// composer card renderer (no long-lived streams). The defaults
+	// from DefaultHTTPTimeouts are appropriate for KChat callbacks.
+	timeouts := platform.LoadHTTPTimeouts(platform.DefaultHTTPTimeouts())
 	srv := &http.Server{
-		Addr:              addr,
-		Handler:           r,
-		ReadHeaderTimeout: 10 * time.Second,
+		Addr:    addr,
+		Handler: r,
 	}
+	timeouts.Apply(srv)
 
 	errCh := make(chan error, 1)
 	go func() {

@@ -1,5 +1,16 @@
 -- Phase M Task 7 — Advanced accounting consolidation.
 --
+-- HISTORICAL NOTE: this migration was originally numbered
+-- `000046_consolidation.sql` and merged via PR #56 alongside
+-- `000046_tenants_country.sql` (PR #51), which created a duplicate
+-- numeric prefix at 46 and left a gap at 30. Phase 5 renumbered this
+-- file to `000030_` to fill the gap, eliminate the duplicate, and
+-- restore a strict monotonic sequence. The SQL is fully idempotent
+-- (every CREATE uses IF NOT EXISTS) so re-applying against a database
+-- that already saw `000046_consolidation.sql` is a no-op. No code or
+-- handler imports the migration by filename, so the rename is purely
+-- a filesystem operation.
+--
 -- A consolidation_group rolls up the trial balances of several child
 -- tenants into a single combined trial balance, eliminating
 -- inter-company balances and converting every line into the group's

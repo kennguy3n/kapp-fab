@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/agents"
 	"github.com/kennguy3n/kapp-fab/internal/audit"
+	"github.com/kennguy3n/kapp-fab/internal/auth"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/hr"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
@@ -127,16 +129,56 @@ func run() error {
 	r.Use(platform.RequestIDMiddleware(logger))
 	r.Use(middleware.Timeout(30 * time.Second))
 
+	// Phase 5: JWT-derived tenant + user identity, mirroring
+	// services/api. Before Phase 5 this sidecar trusted the
+	// X-Tenant-ID header outright, which let any caller on the
+	// internal network spoof a tenant id and run agent tools
+	// against rows that belong to somebody else. The mitigation
+	// is rate-limited by KAPP_REQUIRE_JWT:
+	//
+	//   - signer != nil  (KAPP_JWT_SECRET set): JWT required on
+	//     /api/v1/agents/tools. The X-Tenant-ID header is ignored
+	//     once auth.Middleware is active.
+	//   - signer == nil + KAPP_REQUIRE_JWT=1: refuse to boot.
+	//   - signer == nil + default: WARN + legacy header path,
+	//     bridge mode for clusters that have not rolled JWT to
+	//     their sidecars yet.
+	signer, signerErr := auth.SignerFromEnv()
+	sessionStore := auth.NewPGSessionStore(pool)
+	requireJWT := auth.RequireJWT()
+	switch {
+	case signer != nil:
+		logger.Info("jwt auth enabled", slog.String("algorithm", "HS256"))
+	case requireJWT:
+		return fmt.Errorf("agent-tools: KAPP_REQUIRE_JWT=1 but KAPP_JWT_SECRET is unset or invalid: %w", signerErr)
+	default:
+		logger.Warn(
+			"agent-tools running WITHOUT JWT auth — X-Tenant-ID header is trusted; "+
+				"this is UNSAFE for any non-trusted network. Set KAPP_JWT_SECRET to enable "+
+				"JWT-derived tenant scoping and KAPP_REQUIRE_JWT=1 to make the boot fail "+
+				"loudly when the secret is missing",
+			slog.String("signer_err", signerErr.Error()),
+		)
+	}
+
 	r.Get("/healthz", healthz)
 	// Tool discovery — callers list available tools by name.
 	r.Get("/api/v1/agents/tools", h.list)
 	// Tool invocation shares the same middleware stack as KRecord CRUD
-	// (ARCHITECTURE.md §11): TenantMiddleware authoritatively sets the
-	// tenant from X-Tenant-ID so the invocation body can't spoof it,
-	// idempotency runs first so retried agent calls don't double-write,
-	// and rate-limit + quota cap per-tenant agent traffic.
+	// (ARCHITECTURE.md §11): auth.Middleware authoritatively writes
+	// the JWT-claim tenant + user onto the request context so the
+	// invocation body can't spoof either; idempotency runs first so
+	// retried agent calls don't double-write; and rate-limit + quota
+	// cap per-tenant agent traffic. The legacy header path is
+	// preserved as a fallback for the bridge-mode case described
+	// above (signer == nil + KAPP_REQUIRE_JWT unset).
 	r.Route("/api/v1/agents/tools", func(r chi.Router) {
-		r.Use(platform.TenantMiddleware(tenantSvc))
+		if signer != nil {
+			r.Use(auth.Middleware(signer, tenantSvc, sessionStore))
+			r.Use(auth.RequireActiveHomeTenant())
+		} else {
+			r.Use(platform.TenantMiddleware(tenantSvc))
+		}
 		r.Use(platform.IdempotencyMiddleware(pool))
 		if redisLimiter != nil {
 			r.Use(platform.RedisRateLimitMiddleware(redisLimiter))
@@ -151,7 +193,15 @@ func run() error {
 	if addr == "" {
 		addr = ":8082"
 	}
-	srv := &http.Server{Addr: addr, Handler: r, ReadHeaderTimeout: 10 * time.Second}
+	// Agent-tools is a request-response service (no long-lived
+	// streams) so DefaultHTTPTimeouts applies. Tool invocations
+	// occasionally do non-trivial work (LLM-mediated calls into
+	// internal stores); WriteTimeout=120s is the upper bound and
+	// operators can bump KAPP_HTTP_WRITE_TIMEOUT if their tools
+	// legitimately need longer.
+	timeouts := platform.LoadHTTPTimeouts(platform.DefaultHTTPTimeouts())
+	srv := &http.Server{Addr: addr, Handler: r}
+	timeouts.Apply(srv)
 	errCh := make(chan error, 1)
 	go func() {
 		log.Printf("agent-tools: listening on %s", addr)
@@ -197,9 +247,15 @@ func (h *toolsHandler) invoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	// The tenant on the context (set by TenantMiddleware from
-	// X-Tenant-ID) is authoritative — an attacker can't spoof
-	// cross-tenant writes by setting tenant_id in the invocation body.
+	// The tenant on the context is authoritative — an attacker
+	// cannot spoof cross-tenant writes by setting tenant_id in
+	// the invocation body. The context tenant is sourced from
+	// either auth.Middleware (JWT tid claim, when KAPP_JWT_SECRET
+	// is set) or platform.TenantMiddleware (X-Tenant-ID header,
+	// legacy bridge mode), depending on which middleware was
+	// mounted on the route group above. In both cases the same
+	// invariant holds: handlers MUST use the context tenant, not
+	// any field the caller wrote into the request body.
 	inv.TenantID = t.ID
 	inv.ToolName = name
 	res, err := h.executor.Invoke(r.Context(), inv)

@@ -54,11 +54,23 @@ func run() error {
 
 	r := registerRoutes(d, logger)
 
+	// /api/v1/events/stream is an SSE endpoint that holds the
+	// response open for the lifetime of the client subscription.
+	// http.Server.WriteTimeout is a hard, per-connection kill — it
+	// fires from end of request headers, not idle time — so any
+	// non-zero value would terminate every SSE stream after at most
+	// that window. We therefore use LongStreamTimeouts for the main
+	// API server which sets Write=0 while keeping every other
+	// defense (ReadHeader / Read / Idle / MaxHeaderBytes) in force.
+	// Slow-write attacks on non-streaming routes are bounded by
+	// chi's middleware.Timeout (mounted in registerRoutes) and the
+	// TCP socket buffer back-pressure.
+	mainTimeouts := platform.LoadHTTPTimeouts(platform.LongStreamTimeouts())
 	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           r,
-		ReadHeaderTimeout: 10 * time.Second,
+		Addr:    cfg.ListenAddr,
+		Handler: r,
 	}
+	mainTimeouts.Apply(srv)
 
 	// Optional dedicated /metrics listener. Production deployments
 	// SHOULD set KAPP_METRICS_ADDR (e.g. ":9090") so the Prometheus
@@ -74,11 +86,15 @@ func run() error {
 			w.WriteHeader(http.StatusOK)
 			_, _ = fmt.Fprintln(w, "ok")
 		})
+		// Metrics scrape connections are short request-response
+		// cycles with tiny headers; MetricsHTTPTimeouts uses
+		// tighter values than the user-facing main server.
+		metricsTimeouts := platform.LoadHTTPTimeouts(platform.MetricsHTTPTimeouts())
 		metricsSrv = &http.Server{
-			Addr:              cfg.MetricsAddr,
-			Handler:           metricsMux,
-			ReadHeaderTimeout: 5 * time.Second,
+			Addr:    cfg.MetricsAddr,
+			Handler: metricsMux,
 		}
+		metricsTimeouts.Apply(metricsSrv)
 		go func() {
 			logger.Info("metrics listening", slog.String("addr", cfg.MetricsAddr))
 			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

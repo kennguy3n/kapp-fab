@@ -9,7 +9,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
+	"github.com/kennguy3n/kapp-fab/internal/auth"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/importer"
 	"github.com/kennguy3n/kapp-fab/internal/importer/adapters"
@@ -84,6 +87,43 @@ func run() error {
 
 	h := &importHandlers{pipeline: pipeline, jobs: jobStore, staging: stagingStore}
 
+	// Phase 5: derive tenant from a verified JWT (mirrors
+	// services/api). Before Phase 5 the importer trusted the
+	// X-Tenant-ID header outright, which let any caller with
+	// network access spoof a different tenant. The mitigation is
+	// rate-limited by KAPP_REQUIRE_JWT:
+	//
+	//   - signer != nil  (KAPP_JWT_SECRET set): JWT required on
+	//     every /api/v1/imports request. The X-Tenant-ID header
+	//     is ignored once auth.Middleware is active because the
+	//     middleware writes the JWT-claim tenant onto the context
+	//     AFTER any caller-supplied header would have been read.
+	//   - signer == nil  + KAPP_REQUIRE_JWT=1: refuse to mount the
+	//     route. Operators get a 503 + clear log line so a
+	//     misconfigured prod deploy fails the boot.
+	//   - signer == nil  + KAPP_REQUIRE_JWT unset (default): WARN
+	//     log + fall back to the legacy header path. This is the
+	//     bridge mode for clusters that haven't rolled out JWT to
+	//     their sidecars yet; the WARN is intentionally noisy so
+	//     operators see it in every boot.
+	signer, signerErr := auth.SignerFromEnv()
+	sessionStore := auth.NewPGSessionStore(pool)
+	requireJWT := auth.RequireJWT()
+	switch {
+	case signer != nil:
+		logger.Info("jwt auth enabled", slog.String("algorithm", "HS256"))
+	case requireJWT:
+		return fmt.Errorf("importer: KAPP_REQUIRE_JWT=1 but KAPP_JWT_SECRET is unset or invalid: %w", signerErr)
+	default:
+		logger.Warn(
+			"importer running WITHOUT JWT auth — X-Tenant-ID header is trusted; "+
+				"this is UNSAFE for any non-trusted network. Set KAPP_JWT_SECRET to enable "+
+				"JWT-derived tenant scoping and KAPP_REQUIRE_JWT=1 to make the boot fail "+
+				"loudly when the secret is missing",
+			slog.String("signer_err", signerErr.Error()),
+		)
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
@@ -98,7 +138,22 @@ func run() error {
 	// or bypassed quotas would be a cross-tenant data leak or a
 	// noisy-neighbour vector.
 	r.Route("/api/v1/imports", func(r chi.Router) {
-		r.Use(platform.TenantMiddleware(tenantSvc))
+		if signer != nil {
+			// JWT-mode: tenant + user come from verified
+			// claims. RequireActiveHomeTenant rejects requests
+			// admitted via the platform-admin recovery bypass so
+			// a recovering admin cannot import data on behalf
+			// of an inactive tenant through this sidecar.
+			r.Use(auth.Middleware(signer, tenantSvc, sessionStore))
+			r.Use(auth.RequireActiveHomeTenant())
+		} else {
+			// Legacy header-mode (bridge). The WARN log above
+			// explains why this path is UNSAFE for untrusted
+			// networks; we keep it so clusters that have not
+			// yet rolled out JWT to their sidecars can still
+			// boot.
+			r.Use(platform.TenantMiddleware(tenantSvc))
+		}
 		r.Use(platform.IdempotencyMiddleware(pool))
 		r.Use(platform.RateLimitMiddleware(rateLimiter))
 		r.Use(platform.QuotaMiddleware(quotaEnforcer))
@@ -111,11 +166,17 @@ func run() error {
 		r.Get("/{id}/errors", h.errors)
 	})
 
+	// Importer accepts large CSV / JSON bodies for bulk staging
+	// uploads. DefaultHTTPTimeouts (Read=60s) is generous for the
+	// 50-MiB upper bound a typical import payload hits over a slow
+	// consumer link; operators with bigger imports can bump
+	// KAPP_HTTP_READ_TIMEOUT without rebuilding.
+	timeouts := platform.LoadHTTPTimeouts(platform.DefaultHTTPTimeouts())
 	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           r,
-		ReadHeaderTimeout: 10 * time.Second,
+		Addr:    cfg.ListenAddr,
+		Handler: r,
 	}
+	timeouts.Apply(srv)
 
 	errCh := make(chan error, 1)
 	go func() {

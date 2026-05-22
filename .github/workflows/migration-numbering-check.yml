@@ -1,0 +1,37 @@
+name: migration-numbering-check
+
+# Static check: every migration filename under migrations/ must
+#   1. Start with a 6-digit zero-padded numeric prefix (\d{6}_).
+#   2. Use a unique prefix — no two migrations may share the same
+#      number (golang-migrate and most successor tools key on this).
+#   3. Form a strictly monotonic sequence starting at 000001 with no
+#      gaps — operators rely on visual ordering to find recent work.
+#
+# Phase 5 introduced this check after discovering one duplicate
+# (000046 used twice) and one gap (000030 missing) had accumulated
+# from two PRs that merged on the same day without rebasing onto
+# each other. The duplicate was silently harmless under the current
+# psql-glob apply machinery but is a loaded footgun for any future
+# migration runner (golang-migrate, sqlx-migrate, etc.) that requires
+# unique versions. This workflow makes the constraint explicit so
+# the next regression fails CI rather than landing on main.
+#
+# See docs/SECURITY_REVIEW.md and migrations/000030_consolidation.sql
+# for the historical context.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    name: migrations have unique monotonic numbering
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: enforce numeric prefix uniqueness + monotonicity
+        run: scripts/check_migration_numbering.sh migrations
+      - name: self-test the checker against fixture cases
+        run: scripts/check_migration_numbering_test.sh
