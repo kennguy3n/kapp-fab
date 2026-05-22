@@ -608,6 +608,26 @@ fixture under `KAPP_TEST_DB_URL`.
 
 ---
 
+## Operator-facing env var dependencies
+
+The Phase 1 security hardening assumes the following env vars are
+set in any non-dev deployment. Unset values degrade the listed
+security property to the local-dev shape (single-tenant, single-
+operator laptop) and do **not** cause an obvious failure mode —
+operator runbooks must include each one explicitly.
+
+| Env var | When unset, this is degraded | Severity |
+| --- | --- | --- |
+| `ADMIN_DB_URL` | SSO refresh **cannot** re-query `users.is_platform_admin`; the `IsPlatformAdmin` claim passes through cached from the refresh token until expiry (24h). Cross-tenant audit / tenant CRUD admin-bypass paths also fall back to the per-tenant pool. | High in prod; ignored in dev |
+| `KAPP_JWT_SECRET` | JWT auth is disabled entirely. The admin-only chain refuses to register routes and returns 503 instead of 401/403. SSO endpoints are not wired. | Critical in prod |
+| `KAPP_MASTER_KEY` | Per-tenant field-level encryption is off; schema fields marked `{"encrypted": true}` round-trip as plaintext. | High in prod for tenants with sensitive PII |
+| `REDIS_URL` | Rate limiters fall back to in-process (per-pod) buckets. The IP-rate-limiter sweep goroutine still GCs old buckets so memory stays bounded, but a multi-replica deployment loses cross-replica fairness. | Medium |
+| `SMTP_HOST` | Portal magic-link delivery is disabled. `/api/v1/portal/auth/request` returns 503 instead of silently dropping the email. | High for portal users |
+| `KAPP_AUTHZ_ENFORCE` | Default is enforcement **ON**. Setting `=0` / `=false` disables the authz gate and emits a startup WARN. | Critical in prod |
+| `KAPP_PLATFORM_ADMIN_USERS` | Bootstrap-time UUID list. First SSO login by a listed user persists `is_platform_admin = TRUE` in `users`. Re-read on every SSO exchange so operators can append admin UUIDs without restarting the API. Unset is fine on any deployment that already has at least one persisted admin. | Low (bootstrap-only) |
+
+---
+
 ## Review sign-off
 
 Review is performed each phase end. A phase cannot close without a

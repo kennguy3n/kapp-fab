@@ -84,6 +84,15 @@ type submitFormRequest struct {
 	// real templates never write them, so any non-empty value here
 	// indicates a scraper-style bot that submitted every visible
 	// input it could find.
+	//
+	// CONSTRAINT: do NOT add new top-level fields named url, website,
+	// or homepage to this envelope. Those three names are reserved
+	// for the honeypot triplet. If a future surface needs a
+	// top-level redirect URL or any other generic-named value, pick
+	// a non-conflicting name (e.g. redirect_url, callback) or
+	// rename the honeypot fields under a namespaced prefix (e.g.
+	// _h_*) — and update the public form template at the same time
+	// so real submissions don't suddenly look like bots.
 	HoneypotURL      string `json:"url,omitempty"`
 	HoneypotWebsite  string `json:"website,omitempty"`
 	HoneypotHomepage string `json:"homepage,omitempty"`
