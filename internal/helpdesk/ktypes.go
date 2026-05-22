@@ -125,7 +125,7 @@ func init() {
 // can call it alongside the other domain registrations.
 func RegisterKTypes(ctx context.Context, registry *ktype.PGRegistry) error {
 	for _, kt := range All() {
-		if err := registry.Register(ctx, kt); err != nil {
+		if err := registry.RegisterIfChanged(ctx, kt); err != nil {
 			return fmt.Errorf("helpdesk: register %s: %w", kt.Name, err)
 		}
 	}

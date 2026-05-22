@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
@@ -177,7 +178,7 @@ func run() error {
 	schedStore := scheduler.NewStore(pool, adminPool)
 	schedRegistry := scheduler.NewRegistry()
 	auditor := audit.NewPGLogger(pool)
-	ktypeCache := platform.NewLRUCache(1024, 5*time.Minute)
+	ktypeCache := platform.NewLRUCache(cfg.KTypeCacheSize, 5*time.Minute)
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
 	recordStore := record.NewPGStore(pool, ktypeRegistry, publisher, auditor)
 	exchangeRates := ledger.NewExchangeRateStore(pool)
@@ -294,55 +295,86 @@ func run() error {
 	autoscaleEngine := platform.NewAutoscaleEngine(pool, platform.DefaultAutoscalePolicy(), nil)
 	go platform.NewAutoscaleLoop(autoscaleEngine, 60*time.Second).Run(ctx)
 
-	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)
-	ticker := time.NewTicker(tickInterval)
-	defer ticker.Stop()
+	log.Printf("worker: started; nats=%s; kchat-bridge=%q", natsURL, bridge.baseURL)
 
+	// Phase 2.2: LISTEN/NOTIFY-driven drain loop. A dedicated pooled
+	// connection subscribes to the "kapp_events" channel. On INSERT the
+	// trigger fires pg_notify and the worker wakes within milliseconds.
+	// A 2-second timeout on WaitForNotification acts as a heartbeat
+	// fallback for the edge case where a notify is lost (e.g. connection
+	// hiccup between trigger and LISTEN, or events inserted by a
+	// migration script that doesn't fire the trigger).
+	listenConn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("worker: acquire listen conn: %w", err)
+	}
+	defer listenConn.Release()
+	if _, err := listenConn.Exec(ctx, "LISTEN kapp_events"); err != nil {
+		return fmt.Errorf("worker: LISTEN kapp_events: %w", err)
+	}
+
+	deliverFn := deliver(nc, bridge, router)
 	for {
-		select {
-		case <-ctx.Done():
+		// WaitForNotification blocks until either a notification arrives
+		// or the context deadline exceeds. We impose a 2-second deadline
+		// so the loop drains at least every 2s (matching the old ticker
+		// cadence) even when no notification arrives.
+		waitCtx, waitCancel := context.WithTimeout(ctx, tickInterval)
+		_, _ = listenConn.Conn().WaitForNotification(waitCtx)
+		waitCancel()
+
+		if ctx.Err() != nil {
 			log.Printf("worker: shutdown signal received")
 			return nil
-		case <-ticker.C:
-			if _, err := publisher.DrainBatch(ctx, drainBatch, deliver(nc, bridge, router)); err != nil {
-				log.Printf("worker: drain batch: %v", err)
-			}
+		}
+
+		if _, err := publisher.DrainBatch(ctx, drainBatch, deliverFn); err != nil {
+			log.Printf("worker: drain batch: %v", err)
 		}
 	}
 }
 
+// deliver returns the drain-callback that publishes a batch of events to NATS
+// and fans out best-effort side-effects (KChat bridge cards, notification
+// router). Each event in the batch is delivered concurrently (max 8 goroutines)
+// to cut tail latency when a single side-effect (e.g. an HTTP call to
+// kchat-bridge) is slow. The concurrency limit prevents unbounded goroutine
+// growth on very large batches.
+//
+// Error semantics: any NATS publish failure fails the entire batch (so the
+// outbox row stays undelivered and retries on the next drain cycle).
+// Side-effect failures (bridge, router) are logged but do NOT fail the batch —
+// the event is already durably on NATS, so a flapping sidecar never blocks
+// forward progress of the outbox.
 func deliver(nc *nats.Conn, bridge *kchatBridgeNotifier, router *notificationRouter) func(ctx context.Context, batch []events.Event) error {
 	return func(ctx context.Context, batch []events.Event) error {
+		g, ctx := errgroup.WithContext(ctx)
+		g.SetLimit(8)
 		for _, e := range batch {
-			subject := fmt.Sprintf("kapp.events.%s", e.Type)
-			payload, err := json.Marshal(e)
-			if err != nil {
-				return fmt.Errorf("marshal event %s: %w", e.ID, err)
-			}
-			if err := nc.Publish(subject, payload); err != nil {
-				return fmt.Errorf("publish %s: %w", subject, err)
-			}
-			// Fan out approval lifecycle events to kchat-bridge so the
-			// reviewer / approver receives the DM card. Render failures
-			// are logged but do not fail the drain — the event is
-			// already durably on NATS and the outbox row will be marked
-			// delivered so it will not retry. Phase E treats the card
-			// notification as best-effort; the approval itself lives in
-			// Postgres and is visible via the Approvals page.
-			if bridge.enabled() && isApprovalNotificationEvent(e.Type) {
-				if err := bridge.renderApprovalCard(ctx, e); err != nil {
-					log.Printf("worker: kchat render %s: %v", e.Type, err)
+			e := e
+			g.Go(func() error {
+				subject := fmt.Sprintf("kapp.events.%s", e.Type)
+				payload, err := json.Marshal(e)
+				if err != nil {
+					return fmt.Errorf("marshal event %s: %w", e.ID, err)
 				}
-			}
-			// Phase F: route generic notification events to the per-
-			// tenant configured channels (KChat DM, webhook, email).
-			// Failures are logged — the NATS publish already succeeded
-			// and the in-app SSE tail is served directly from the
-			// events table, so a failed sidecar delivery never blocks
-			// the outbox drain.
-			if router != nil {
-				router.route(ctx, e)
-			}
+				if err := nc.Publish(subject, payload); err != nil {
+					return fmt.Errorf("publish %s: %w", subject, err)
+				}
+				// Best-effort side-effects: failures are logged, not propagated.
+				if bridge.enabled() && isApprovalNotificationEvent(e.Type) {
+					if err := bridge.renderApprovalCard(ctx, e); err != nil {
+						log.Printf("worker: kchat render %s: %v", e.Type, err)
+					}
+				}
+				if router != nil {
+					router.route(ctx, e)
+				}
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return err
 		}
 		return nc.Flush()
 	}

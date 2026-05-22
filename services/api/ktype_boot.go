@@ -61,20 +61,20 @@ func registerBootKTypes(ctx context.Context, registry *ktype.PGRegistry) error {
 		return err
 	}
 	for _, kt := range sales.POSKTypes() {
-		if err := registry.Register(ctx, kt); err != nil {
+		if err := registry.RegisterIfChanged(ctx, kt); err != nil {
 			return fmt.Errorf("register pos ktype %s: %w", kt.Name, err)
 		}
 	}
 	for _, kt := range ledger.BankKTypes() {
-		if err := registry.Register(ctx, kt); err != nil {
+		if err := registry.RegisterIfChanged(ctx, kt); err != nil {
 			return fmt.Errorf("register bank ktype %s: %w", kt.Name, err)
 		}
 	}
-	if err := registry.Register(ctx, ledger.CostCenterKType()); err != nil {
+	if err := registry.RegisterIfChanged(ctx, ledger.CostCenterKType()); err != nil {
 		return fmt.Errorf("register cost_center ktype: %w", err)
 	}
 	for _, kt := range hr.PayrollKTypes() {
-		if err := registry.Register(ctx, kt); err != nil {
+		if err := registry.RegisterIfChanged(ctx, kt); err != nil {
 			return fmt.Errorf("register payroll ktype %s: %w", kt.Name, err)
 		}
 	}
@@ -83,12 +83,12 @@ func registerBootKTypes(ctx context.Context, registry *ktype.PGRegistry) error {
 	// dropping these two lines without touching the older
 	// hr.RegisterKTypes call.
 	for _, kt := range hr.ShiftKTypes() {
-		if err := registry.Register(ctx, kt); err != nil {
+		if err := registry.RegisterIfChanged(ctx, kt); err != nil {
 			return fmt.Errorf("register shift ktype %s: %w", kt.Name, err)
 		}
 	}
 	for _, kt := range hr.AppraisalKTypes() {
-		if err := registry.Register(ctx, kt); err != nil {
+		if err := registry.RegisterIfChanged(ctx, kt); err != nil {
 			return fmt.Errorf("register appraisal ktype %s: %w", kt.Name, err)
 		}
 	}
@@ -103,7 +103,7 @@ func registerBootKTypes(ctx context.Context, registry *ktype.PGRegistry) error {
 	}
 	// Phase I — exchange-rate KType so it shows up in the KType
 	// registry + records surface alongside other finance masters.
-	if err := registry.Register(ctx, ledger.ExchangeRateKType()); err != nil {
+	if err := registry.RegisterIfChanged(ctx, ledger.ExchangeRateKType()); err != nil {
 		return fmt.Errorf("register exchange_rate ktype: %w", err)
 	}
 	return nil

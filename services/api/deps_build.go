@@ -135,14 +135,27 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		cleanups = append(cleanups, func() { adminPool.Close() })
 	}
 
-	tenantSvc := tenant.NewPGStore(pool)
-	ktypeCache := platform.NewLRUCache(1024, 5*time.Minute)
+	// Tenant lookup cache. Tenant rows are small (<1 KB) and read on
+	// every authenticated request (auth.Middleware) plus every header-
+	// scoped lookup (importer / agent-tools), so a 30s read-through
+	// cache cuts a meaningful chunk of repeat DB traffic without
+	// trading much memory. Mutations on PGStore (Suspend / Activate /
+	// Archive / Delete / UpdatePlan / SetBaseCurrency / SetCountry /
+	// SetZKCredentials / SetPlacementPolicy) invalidate the entry
+	// before returning so an admin lifecycle action propagates to
+	// subsequent reads immediately. Size is operator-tunable via
+	// KAPP_TENANT_CACHE_SIZE; default 256 covers the typical multi-
+	// tenant fleet.
+	tenantCache := platform.NewLRUCache(cfg.TenantCacheSize, 30*time.Second)
+	tenantSvc := tenant.NewPGStore(pool).WithCache(tenantCache)
+	ktypeCache := platform.NewLRUCache(cfg.KTypeCacheSize, 5*time.Minute)
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
 	// Authorization evaluator. The cache TTL is intentionally short
 	// (30s) so role/permission changes propagate quickly; the role
 	// management API (rolesHandlers) also flushes the relevant
-	// entries explicitly on every mutation.
-	authzCache := platform.NewLRUCache(512, 30*time.Second)
+	// entries explicitly on every mutation. Size is operator-tunable
+	// via KAPP_AUTHZ_CACHE_SIZE.
+	authzCache := platform.NewLRUCache(cfg.AuthzCacheSize, 30*time.Second)
 	authzEval := authz.NewPGEvaluator(pool, authzCache)
 	// Authorization gating is ENABLED by default. Set
 	// KAPP_AUTHZ_ENFORCE=0 (or "false") to explicitly opt out — useful

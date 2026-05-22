@@ -4,12 +4,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// Cache is the narrow subset of platform.LRUCache that PGStore depends on for
+// optional read-through caching. It lives here (not in internal/platform)
+// because internal/platform already imports this package for the
+// platform.TenantFromContext helper — introducing the reverse import would
+// create a cycle. Anything that satisfies these four methods can be wired in
+// via WithCache, including *platform.LRUCache and any test fake.
+type Cache interface {
+	Get(key string) (any, bool)
+	Set(key string, value any)
+	Delete(key string)
+	SetOnEvict(fn func(key string, value any))
+}
 
 // Sentinel errors returned by PGStore. Callers map these to HTTP status codes
 // in transport layers (e.g. NotFound → 404, SlugTaken → 409, InvalidTransition
@@ -24,13 +38,92 @@ var (
 // the control-plane `tenants` table, which is NOT tenant-scoped and does not
 // have RLS — so these operations run against the shared pool without needing
 // `SET LOCAL app.tenant_id`.
+//
+// Optional read-through caching: callers may attach a *platform.LRUCache via
+// WithCache to short-circuit the per-request Get / GetBySlug round-trip. The
+// cache is keyed by both "tenant:id:<uuid>" and "tenant:slug:<slug>" with the
+// same *Tenant value behind each key so either lookup path warms the other.
+// Every mutation method on this store (Suspend, Activate, Archive, Delete,
+// UpdatePlan, SetBaseCurrency, SetCountry, SetZKCredentials, SetPlacementPolicy)
+// invalidates the affected tenant's cache entries before returning, so
+// subsequent reads see the new row. With no cache attached the store is a
+// plain pass-through with zero extra branches in the hot path beyond a single
+// nil check.
 type PGStore struct {
-	pool *pgxpool.Pool
+	pool  *pgxpool.Pool
+	cache Cache
 }
 
-// NewPGStore returns a PGStore backed by the supplied pool.
+const (
+	// tenantCachePrefixID / tenantCachePrefixSlug namespace cache entries so
+	// the same LRUCache instance can in principle be shared with other
+	// tenant-domain lookup paths without collision. Both prefixes are
+	// included in the explicit type assertion done by Get / GetBySlug so a
+	// value of unexpected type (e.g. left behind by a future caller that
+	// reuses the cache) falls through to the DB path rather than panicking.
+	tenantCachePrefixID   = "tenant:id:"
+	tenantCachePrefixSlug = "tenant:slug:"
+)
+
+// NewPGStore returns a PGStore backed by the supplied pool. The returned
+// store has no cache attached; call WithCache to opt in to read-through
+// caching after construction.
 func NewPGStore(pool *pgxpool.Pool) *PGStore {
 	return &PGStore{pool: pool}
+}
+
+// WithCache attaches the supplied LRU cache to this store for read-through
+// of Get / GetBySlug and write-through invalidation on every mutation method.
+// Returns the receiver so the call can be chained at construction.
+//
+// A nil argument is accepted and disables caching (the same as never having
+// called WithCache). Passing a non-nil cache replaces any previously-attached
+// cache; the eviction callback on the new cache is installed by this method
+// so an id-keyed eviction cleans up the sibling slug-keyed entry, preventing
+// stale slug→tenant mappings from outliving their id sibling and surfacing as
+// a phantom-tenant read.
+func (s *PGStore) WithCache(cache Cache) *PGStore {
+	s.cache = cache
+	if cache == nil {
+		return s
+	}
+	cache.SetOnEvict(func(key string, value any) {
+		if !strings.HasPrefix(key, tenantCachePrefixID) {
+			return
+		}
+		t, ok := value.(*Tenant)
+		if !ok || t == nil || t.Slug == "" {
+			return
+		}
+		cache.Delete(tenantCachePrefixSlug + t.Slug)
+	})
+	return s
+}
+
+// warmCache stores the tenant under both id and slug keys. Both entries point
+// at the same struct so a single mutation (which goes through
+// invalidateCache) reaps both lookup paths at once.
+func (s *PGStore) warmCache(t *Tenant) {
+	if s.cache == nil || t == nil {
+		return
+	}
+	s.cache.Set(tenantCachePrefixID+t.ID.String(), t)
+	if t.Slug != "" {
+		s.cache.Set(tenantCachePrefixSlug+t.Slug, t)
+	}
+}
+
+// invalidateCache removes the tenant's id-keyed entry; the LRUCache's
+// OnEvict callback installed by WithCache then drops the sibling slug-keyed
+// entry. If the id-keyed entry is already absent (TTL expiry, prior eviction)
+// the slug-keyed entry will reach its own TTL within the cache window — the
+// short TTL on the tenant cache (single-digit seconds in production) bounds
+// the worst-case staleness window.
+func (s *PGStore) invalidateCache(id uuid.UUID) {
+	if s.cache == nil {
+		return
+	}
+	s.cache.Delete(tenantCachePrefixID + id.String())
 }
 
 const (
@@ -68,11 +161,22 @@ func (s *PGStore) Create(ctx context.Context, input CreateInput) (*Tenant, error
 		return nil, fmt.Errorf("tenant: insert: %w", err)
 	}
 	assignZK(&t, zkAccess, zkSecret, zkBucket)
+	s.warmCache(&t)
 	return &t, nil
 }
 
-// Get returns the tenant with the given id or ErrNotFound.
+// Get returns the tenant with the given id or ErrNotFound. When a cache is
+// attached (see WithCache) the row is served from the LRU on hit and warmed
+// on miss; the slug-keyed sibling entry is warmed alongside so a subsequent
+// GetBySlug lookup hits the same cached row.
 func (s *PGStore) Get(ctx context.Context, id uuid.UUID) (*Tenant, error) {
+	if s.cache != nil {
+		if v, ok := s.cache.Get(tenantCachePrefixID + id.String()); ok {
+			if t, ok := v.(*Tenant); ok && t != nil {
+				return t, nil
+			}
+		}
+	}
 	var t Tenant
 	var zkAccess, zkSecret, zkBucket *string
 	err := s.pool.QueryRow(ctx,
@@ -89,6 +193,7 @@ func (s *PGStore) Get(ctx context.Context, id uuid.UUID) (*Tenant, error) {
 		return nil, fmt.Errorf("tenant: get: %w", err)
 	}
 	assignZK(&t, zkAccess, zkSecret, zkBucket)
+	s.warmCache(&t)
 	return &t, nil
 }
 
@@ -113,8 +218,18 @@ func (s *PGStore) Timezone(ctx context.Context, id uuid.UUID) (string, error) {
 	return tz, nil
 }
 
-// GetBySlug returns the tenant with the given slug or ErrNotFound.
+// GetBySlug returns the tenant with the given slug or ErrNotFound. When a
+// cache is attached the row is served from the LRU on hit and warmed on miss;
+// the id-keyed sibling entry is warmed alongside so a subsequent Get lookup
+// hits the same cached row.
 func (s *PGStore) GetBySlug(ctx context.Context, slug string) (*Tenant, error) {
+	if s.cache != nil {
+		if v, ok := s.cache.Get(tenantCachePrefixSlug + slug); ok {
+			if t, ok := v.(*Tenant); ok && t != nil {
+				return t, nil
+			}
+		}
+	}
 	var t Tenant
 	var zkAccess, zkSecret, zkBucket *string
 	err := s.pool.QueryRow(ctx,
@@ -131,6 +246,7 @@ func (s *PGStore) GetBySlug(ctx context.Context, slug string) (*Tenant, error) {
 		return nil, fmt.Errorf("tenant: get by slug: %w", err)
 	}
 	assignZK(&t, zkAccess, zkSecret, zkBucket)
+	s.warmCache(&t)
 	return &t, nil
 }
 
@@ -203,6 +319,7 @@ func (s *PGStore) Delete(ctx context.Context, id uuid.UUID) error {
 		}
 		return ErrInvalidTransition
 	}
+	s.invalidateCache(id)
 	return nil
 }
 
@@ -224,9 +341,14 @@ func (s *PGStore) UpdatePlan(ctx context.Context, id uuid.UUID, plan string, quo
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
+	s.invalidateCache(id)
 	return nil
 }
 
+// transition is the shared helper behind Suspend / Activate / Archive. The
+// cache is invalidated only on a successful row update; if the transition is
+// invalid (no row matched the (id, from) predicate) the cache stays warm
+// because the tenant's status is unchanged from a reader's perspective.
 func (s *PGStore) transition(ctx context.Context, id uuid.UUID, from, to Status) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE tenants SET status = $1, updated_at = now()
@@ -242,6 +364,7 @@ func (s *PGStore) transition(ctx context.Context, id uuid.UUID, from, to Status)
 		}
 		return ErrInvalidTransition
 	}
+	s.invalidateCache(id)
 	return nil
 }
 
@@ -278,6 +401,7 @@ func (s *PGStore) SetBaseCurrency(ctx context.Context, id uuid.UUID, code string
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
+	s.invalidateCache(id)
 	return nil
 }
 
@@ -301,6 +425,7 @@ func (s *PGStore) SetCountry(ctx context.Context, id uuid.UUID, code string) err
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
+	s.invalidateCache(id)
 	return nil
 }
 
@@ -328,5 +453,6 @@ func (s *PGStore) SetZKCredentials(ctx context.Context, id uuid.UUID, accessKey,
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
+	s.invalidateCache(id)
 	return nil
 }

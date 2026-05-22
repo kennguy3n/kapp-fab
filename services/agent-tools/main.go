@@ -54,13 +54,14 @@ func run() error {
 	}
 	defer pool.Close()
 
-	ktypeCache := platform.NewLRUCache(1024, 5*time.Minute)
+	ktypeCache := platform.NewLRUCache(cfg.KTypeCacheSize, 5*time.Minute)
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
 	eventPublisher := events.NewPGPublisher(pool)
 	auditor := audit.NewPGLogger(pool)
 	recordStore := record.NewPGStore(pool, ktypeRegistry, eventPublisher, auditor)
 	workflowEngine := workflow.NewEngine(pool, eventPublisher, auditor)
-	tenantSvc := tenant.NewPGStore(pool)
+	tenantCache := platform.NewLRUCache(cfg.TenantCacheSize, 30*time.Second)
+	tenantSvc := tenant.NewPGStore(pool).WithCache(tenantCache)
 	rateLimitCfg := platform.DefaultRateLimitConfig()
 	rateLimiter := platform.NewRateLimiter(rateLimitCfg)
 	var redisLimiter *platform.RedisRateLimiter
