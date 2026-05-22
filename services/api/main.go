@@ -54,23 +54,60 @@ func run() error {
 
 	r := registerRoutes(d, logger)
 
-	// /api/v1/events/stream is an SSE endpoint that holds the
-	// response open for the lifetime of the client subscription.
-	// http.Server.WriteTimeout is a hard, per-connection kill — it
-	// fires from end of request headers, not idle time — so any
-	// non-zero value would terminate every SSE stream after at most
-	// that window. We therefore use LongStreamTimeouts for the main
-	// API server which sets Write=0 while keeping every other
-	// defense (ReadHeader / Read / Idle / MaxHeaderBytes) in force.
-	// Slow-write attacks on non-streaming routes are bounded by
-	// chi's middleware.Timeout (mounted in registerRoutes) and the
-	// TCP socket buffer back-pressure.
-	mainTimeouts := platform.LoadHTTPTimeouts(platform.LongStreamTimeouts())
+	// HTTP timeout policy depends on whether SSE is being served on a
+	// dedicated port (KAPP_SSE_ADDR set) or co-mounted on the main
+	// router (legacy single-listener mode).
+	//
+	// Single-listener mode (SSEAddr empty): the main router carries
+	// /api/v1/events/stream so WriteTimeout MUST be 0 — a non-zero
+	// value is a hard per-connection kill that fires from end of
+	// request headers, not idle time, and would terminate every SSE
+	// subscription after at most that window. LongStreamTimeouts
+	// gives us ReadHeader / Read / Idle / MaxHeaderBytes intact
+	// while keeping Write=0. The slow-write surface across every
+	// non-streaming route is bounded by chi's middleware.Timeout
+	// (mounted per route group in registerRoutes) and TCP back-
+	// pressure on the socket buffer.
+	//
+	// Dual-listener mode (SSEAddr set): SSE moves off the main
+	// router (skipped by registerRoutes) onto its own http.Server
+	// below, leaving the main router with no streaming endpoints.
+	// We therefore adopt DefaultHTTPTimeouts (Write=120s) so the
+	// strict slow-write defense applies to every other API route.
+	var mainTimeouts HTTPTimeouts
+	if cfg.SSEAddr != "" {
+		mainTimeouts = platform.LoadHTTPTimeouts(platform.DefaultHTTPTimeouts())
+	} else {
+		mainTimeouts = platform.LoadHTTPTimeouts(platform.LongStreamTimeouts())
+	}
 	srv := &http.Server{
 		Addr:    cfg.ListenAddr,
 		Handler: r,
 	}
 	mainTimeouts.Apply(srv)
+
+	// Optional dedicated SSE listener. When KAPP_SSE_ADDR is set the
+	// /api/v1/events/stream endpoint is served from this dedicated
+	// http.Server under LongStreamTimeouts (Write=0) so the main
+	// API listener can adopt the strict 120s WriteTimeout above
+	// without killing client subscriptions. When unset, this block
+	// is skipped and SSE stays co-mounted on the main router.
+	var sseSrv *http.Server
+	if cfg.SSEAddr != "" {
+		sseRouter := registerSSERoutes(d, logger)
+		sseTimeouts := platform.LoadHTTPTimeouts(platform.LongStreamTimeouts())
+		sseSrv = &http.Server{
+			Addr:    cfg.SSEAddr,
+			Handler: sseRouter,
+		}
+		sseTimeouts.Apply(sseSrv)
+		go func() {
+			logger.Info("sse listening", slog.String("addr", cfg.SSEAddr))
+			if err := sseSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("sse listener", slog.String("err", err.Error()))
+			}
+		}()
+	}
 
 	// Optional dedicated /metrics listener. Production deployments
 	// SHOULD set KAPP_METRICS_ADDR (e.g. ":9090") so the Prometheus
@@ -131,6 +168,18 @@ func run() error {
 			logger.Warn("metrics shutdown", slog.String("err", err.Error()))
 		}
 	}
+	if sseSrv != nil {
+		if err := sseSrv.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("sse shutdown", slog.String("err", err.Error()))
+		}
+	}
 	logger.Info("shutdown complete")
 	return nil
 }
+
+// HTTPTimeouts is a local alias used by the conditional in run() so
+// the switch between Default and LongStream policies is a single var
+// declaration rather than a generic interface. Keeping the alias
+// inside the package avoids leaking an api-binary-only type into
+// internal/platform.
+type HTTPTimeouts = platform.HTTPTimeouts

@@ -122,6 +122,20 @@ type Config struct {
 	// set this to a separate port (e.g. ":9090") behind an internal-
 	// only network policy.
 	MetricsAddr string
+
+	// SSEAddr is the host:port the Server-Sent-Events listener
+	// binds to. When empty, /api/v1/events/stream stays mounted on
+	// the main API router (legacy behaviour) and the main
+	// http.Server keeps WriteTimeout=0 so the stream is not killed
+	// mid-flight. When set to a dedicated address (e.g. ":8081"),
+	// the SSE route is split off onto its own http.Server with
+	// LongStreamTimeouts (Write=0); the main API listener then
+	// adopts DefaultHTTPTimeouts (Write=120s) so every non-streaming
+	// route gets the strict slow-write defense too. Sourced from
+	// KAPP_SSE_ADDR. Production deployments SHOULD set this so the
+	// main API does not carry the SSE-shaped WriteTimeout=0 surface
+	// across every other route.
+	SSEAddr string
 }
 
 // LoadConfig reads configuration from environment variables and returns a
@@ -150,6 +164,7 @@ func LoadConfig() (*Config, error) {
 		LogFormat:        os.Getenv("KAPP_LOG_FORMAT"),
 		LogLevel:         os.Getenv("KAPP_LOG_LEVEL"),
 		MetricsAddr:      os.Getenv("KAPP_METRICS_ADDR"),
+		SSEAddr:          os.Getenv("KAPP_SSE_ADDR"),
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err

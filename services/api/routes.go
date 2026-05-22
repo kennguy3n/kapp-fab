@@ -69,11 +69,19 @@ func registerRoutes(d *apiDeps, logger *slog.Logger) chi.Router {
 	// context after the deadline, which would break any long-lived
 	// stream. Idempotency/rate-limit are also skipped because SSE is a
 	// GET and a spammed subscription is bounded by connection count.
-	r.Route("/api/v1/events", func(r chi.Router) {
-		d.tenantChain(r)
-		r.Use(d.apiCallMW)
-		r.Get("/stream", d.eh.stream)
-	})
+	//
+	// When KAPP_SSE_ADDR is set the SSE route is moved to its own
+	// http.Server in main.go (see registerSSERoutes) so the main
+	// API listener can adopt strict WriteTimeout. The block below
+	// is skipped in that mode; the main router serves no streaming
+	// route and the dedicated SSE listener serves only this one.
+	if d.cfg.SSEAddr == "" {
+		r.Route("/api/v1/events", func(r chi.Router) {
+			d.tenantChain(r)
+			r.Use(d.apiCallMW)
+			r.Get("/stream", d.eh.stream)
+		})
+	}
 
 	// All non-streaming routes run under a 30s request deadline so a
 	// slow handler can't hold a connection open indefinitely. The SSE
