@@ -73,12 +73,13 @@ type apiDeps struct {
 	// so handler code is oblivious to which is live; the others
 	// wrap shared infrastructure (metering, feature flags, IP-keyed
 	// token bucket) in chi-friendly shape.
-	rateLimitMW       func(http.Handler) http.Handler
-	apiCallMW         func(http.Handler) http.Handler
-	featureMW         func(http.Handler) http.Handler
-	authzGate         func(action, resource string) func(http.Handler) http.Handler
-	authzMethodGate   func(readAction, writeAction, resource string) func(http.Handler) http.Handler
-	publicFormIPLimit func(http.Handler) http.Handler
+	rateLimitMW        func(http.Handler) http.Handler
+	apiCallMW          func(http.Handler) http.Handler
+	featureMW          func(http.Handler) http.Handler
+	authzGate          func(action, resource string) func(http.Handler) http.Handler
+	authzMethodGate    func(readAction, writeAction, resource string) func(http.Handler) http.Handler
+	publicFormIPLimit  func(http.Handler) http.Handler
+	publicEmbedIPLimit func(http.Handler) http.Handler
 
 	// adminChain mounts the JWT + IsPlatformAdmin gate on a chi
 	// sub-router. Defined as a closure (not a middleware) because
@@ -87,14 +88,31 @@ type apiDeps struct {
 	// extensive coupling note in routes.go where it's first used.
 	adminChain func(r chi.Router)
 
-	// userChain mounts the JWT-only gate (auth.Middleware +
+	// tenantChain mounts the JWT-only gate (auth.Middleware +
 	// auth.RequireActiveHomeTenant) on a chi sub-router. Used by
-	// /api/v1/tenants/me — which before Phase 1 read the tenant
-	// from the X-Tenant-ID header via platform.TenantMiddleware,
-	// giving any unauthenticated client a privilege-escalation
-	// path on POST /me/plan. Same 503 fallback shape as adminChain
-	// when the JWT signer is not configured.
-	userChain func(r chi.Router)
+	// EVERY tenant-scoped route group — /api/v1/records,
+	// /api/v1/finance, /api/v1/agents, /api/v1/helpdesk,
+	// /api/v1/inventory, /api/v1/forms, /api/v1/tenants/me, etc.
+	//
+	// Before Phase 1 these routes ran under
+	// platform.TenantMiddleware, which reads the X-Tenant-ID
+	// request header and does NOT populate user_id on the
+	// context. Phase 1 then removed the X-User-ID header fallback
+	// from authz.Middleware AND flipped the authz-enforcement
+	// default to ON — so without tenantChain authz.Middleware
+	// would 401 every gated request because UserIDFromContext
+	// returns uuid.Nil. tenantChain fixes that at the source:
+	// auth.Middleware stamps both the tenant (from
+	// claims.TenantID) AND the user_id (from claims.UserID) so
+	// every downstream gate sees a JWT-verified identity. The
+	// legacy X-Tenant-ID header is ignored — there is no
+	// fallback path that could re-introduce the impersonation
+	// vector the X-User-ID removal closed.
+	//
+	// Same 503 fallback shape as adminChain when the JWT signer
+	// is not configured (startup misconfiguration must be loud,
+	// not silently degrade to header-based auth).
+	tenantChain func(r chi.Router)
 
 	// HTTP handlers, one per major route group. Each handler is a
 	// pointer struct that carries its own dependencies; this slice

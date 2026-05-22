@@ -59,7 +59,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 	// stream. Idempotency/rate-limit are also skipped because SSE is a
 	// GET and a spammed subscription is bounded by connection count.
 	r.Route("/api/v1/events", func(r chi.Router) {
-		r.Use(platform.TenantMiddleware(d.tenantSvc))
+		d.tenantChain(r)
 		r.Use(d.apiCallMW)
 		r.Get("/stream", d.eh.stream)
 	})
@@ -151,20 +151,20 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// Control-plane tenant lifecycle routes. The /me sub-tree
 		// is user-facing (any authenticated tenant member can read
 		// its own features / usage / plan) so it runs under
-		// userChain — auth.Middleware derives the tenant from the
+		// tenantChain — auth.Middleware derives the tenant from the
 		// JWT claim, not the X-Tenant-ID request header that
 		// platform.TenantMiddleware honored before Phase 1.
 		//
 		// Why this matters: changePlan reads the tenant from URL
 		// params (which changePlanMe populates from header-derived
 		// ctx) with no user-identity check of its own. Before the
-		// switch to userChain, sending
+		// switch to tenantChain, sending
 		//   POST /api/v1/tenants/me/plan
 		//   X-Tenant-ID: <victim-uuid>
 		// from an unauthenticated client downgraded the victim
-		// tenant's plan. userChain closes that gap.
+		// tenant's plan. tenantChain closes that gap.
 		//
-		// userChain also mounts auth.RequireActiveHomeTenant so a
+		// tenantChain also mounts auth.RequireActiveHomeTenant so a
 		// platform admin admitted via the recovery bypass cannot
 		// ALSO mutate tenant-scoped data on the inactive tenant
 		// via /me. Admin recovery proceeds through adminChain (the
@@ -178,7 +178,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// routes underneath.
 		r.Route("/api/v1/tenants", func(r chi.Router) {
 			r.Group(func(r chi.Router) {
-				d.userChain(r)
+				d.tenantChain(r)
 				r.Route("/me", func(r chi.Router) {
 					r.Get("/features", d.feath.listMe)
 					r.Get("/usage", d.meth.usageMe)
@@ -265,7 +265,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// Mutations invalidate the authz cache for the affected
 		// tenant so the next request sees the new grants.
 		r.Route("/api/v1/roles", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(authz.Middleware(d.authzEval, "tenant.admin", ""))
 			r.Use(platform.IdempotencyMiddleware(d.pool))
@@ -280,7 +280,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 			r.Delete("/{name}/permissions/{id}", d.roleh.revokePermission)
 		})
 		r.Route("/api/v1/users", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(authz.Middleware(d.authzEval, "tenant.admin", ""))
 			r.Use(d.rateLimitMW)
@@ -310,7 +310,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// same middleware stack as other mutation routes so the
 		// tenant cannot bypass idempotency / rate-limit / quota.
 		r.Route("/api/v1/webhooks", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(platform.IdempotencyMiddleware(d.pool))
@@ -329,7 +329,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// group only needs tenant + api-call middleware; idempotency
 		// and quota are skipped because GET /search is a pure read.
 		r.Route("/api/v1/search", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.rateLimitMW)
 			r.Get("/", d.sh.search)
@@ -338,7 +338,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// KRecord CRUD routes. These require tenant context, rate limiting,
 		// quota enforcement, and idempotency keys on mutations.
 		r.Route("/api/v1/records", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(d.authzMethodGate("krecord.read", "krecord.write", ""))
@@ -391,7 +391,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// read-only list endpoint lives in the same route group for
 		// discoverability even though it does not need idempotency.
 		r.Route("/api/v1/agents", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(d.authzGate("tenant.member", ""))
@@ -408,7 +408,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// same tenant + idempotency + rate-limit + quota stack as record
 		// CRUD so a spammed approve / reject can't starve other tenants.
 		r.Route("/api/v1/approvals", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(platform.IdempotencyMiddleware(d.pool))
@@ -425,7 +425,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// production; auth enforcement lands with the broader auth layer
 		// in Phase C.
 		r.Route("/api/v1/audit", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(d.authzGate("tenant.admin", ""))
@@ -439,7 +439,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// because a spammed post can't be allowed to starve other tenants
 		// or double-post an invoice under replay.
 		r.Route("/api/v1/finance", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(d.authzMethodGate("finance.read", "finance.admin", ""))
@@ -480,7 +480,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// via the dynamic feature middleware (path → "pos").
 		posh := &posHandlers{poster: sales.NewPOSPoster(d.recordStore, d.invoicePoster, d.paymentPoster)}
 		r.Route("/api/v1/pos", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(platform.IdempotencyMiddleware(d.pool))
@@ -494,7 +494,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// entry. The pay_run / payslip KRecords themselves ride the
 		// generic CRUD at /api/v1/records/hr.pay_run and hr.payslip.
 		r.Route("/api/v1/hr", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(d.authzGate("hr.admin", ""))
@@ -511,7 +511,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// back the SLA policy list/upsert the UI needs when authoring
 		// policies and the per-ticket SLA log the right pane renders.
 		r.Route("/api/v1/helpdesk", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(d.authzMethodGate("helpdesk.read", "helpdesk.admin", ""))
@@ -541,7 +541,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// under the same tenant/idempotency/rate-limit/quota stack so
 		// spammed runs cannot starve other tenants.
 		r.Route("/api/v1/reports", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(d.authzGate("reports.read", ""))
@@ -562,7 +562,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// worker (services/worker/export_worker.go) drains it and
 		// streams payload via /download.
 		r.Route("/api/v1/exports", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(platform.IdempotencyMiddleware(d.pool))
@@ -577,7 +577,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// Phase K — report schedules. CRUD only; the worker owns
 		// dispatch via reporting.ActionTypeReportSchedule.
 		r.Route("/api/v1/report-schedules", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(platform.IdempotencyMiddleware(d.pool))
@@ -598,7 +598,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// starter plan can't reach the surface even with a
 		// stolen tenant header.
 		r.Route("/api/v1/insights", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(d.authzGate("insights.read", ""))
@@ -661,18 +661,28 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// Public unauth dashboard embed endpoint. Mounted outside
 		// the auth chain so anonymous viewers can fetch a
 		// pre-rendered dashboard via a long-lived bearer token.
-		// Rate-limit middleware here uses a per-IP fallback; the
-		// handler itself bills the owning tenant's bucket so a
-		// viral embed can't starve other tenants.
+		//
+		// Rate-limit MUST be IP-keyed here, not tenant-keyed: the
+		// route runs before any tenant context is on the request
+		// (the owning tenant is resolved from the embed token
+		// inside insembh.public, not from a header or claim).
+		// Mounting the tenant-scoped d.rateLimitMW would call
+		// TenantFromContext → nil → 500 on every request — exactly
+		// the bug the bot caught.
+		//
+		// The handler itself bills the owning tenant's quota
+		// bucket once it resolves the token (see
+		// insights_embed_handlers.go), so a viral embed cannot
+		// starve other tenants from the IP-tier control alone.
 		r.Route("/api/v1/insights/embed", func(r chi.Router) {
-			r.Use(d.rateLimitMW)
+			r.Use(d.publicEmbedIPLimit)
 			r.Get("/{token}", d.insembh.public)
 		})
 
 		// Phase I KPI dashboard aggregation. Reads only, so no idempotency
 		// needed — quota + rate-limit keep it in bounds.
 		r.Route("/api/v1/dashboard", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(d.rateLimitMW)
@@ -688,7 +698,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// source-record move under replay (the partial unique index on
 		// inventory_moves handles that at the DB layer).
 		r.Route("/api/v1/inventory", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(d.authzMethodGate("inventory.read", "inventory.admin", ""))
@@ -718,7 +728,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// of tenant context does not translate to "wide open".
 		r.Route("/api/v1/forms", func(r chi.Router) {
 			r.Group(func(r chi.Router) {
-				r.Use(platform.TenantMiddleware(d.tenantSvc))
+				d.tenantChain(r)
 				r.Use(d.apiCallMW)
 				r.Use(d.featureMW)
 				r.Post("/", d.fh.create)
@@ -743,7 +753,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// rehosting the same source attachment across tenants costs one
 		// physical blob.
 		r.Route("/api/v1/files", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(platform.IdempotencyMiddleware(d.pool))
@@ -759,7 +769,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// row inserts, and RLS stops cross-tenant row reads even if a
 		// URL is forged.
 		r.Route("/api/v1/base", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(platform.IdempotencyMiddleware(d.pool))
@@ -781,7 +791,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// or DELETE policy so an audit replay always reproduces the edit
 		// timeline.
 		r.Route("/api/v1/docs", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(platform.IdempotencyMiddleware(d.pool))
@@ -802,7 +812,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		notifStore := notifications.NewStore(d.pool)
 		nh := newNotificationsHandlers(notifStore)
 		r.Route("/api/v1/notifications", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(d.rateLimitMW)
@@ -818,7 +828,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// spammed save cannot starve other tenants. RLS on saved_views
 		// enforces tenant isolation; owner-only rules live in the store.
 		r.Route("/api/v1/views", func(r chi.Router) {
-			r.Use(platform.TenantMiddleware(d.tenantSvc))
+			d.tenantChain(r)
 			r.Use(d.apiCallMW)
 			r.Use(d.featureMW)
 			r.Use(platform.IdempotencyMiddleware(d.pool))

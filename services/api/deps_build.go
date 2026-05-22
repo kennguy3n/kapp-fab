@@ -238,7 +238,17 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (*apiDeps, func(), err
 		go inProc.RunSweeper(ctx, platform.DefaultIPSweepInterval)
 		ipRateBackend = inProc
 	}
-	publicFormIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, 10, 10)
+	// Two independent IP-keyed middlewares share the same backend
+	// (one Redis client / one in-process map) but live in distinct
+	// keyspaces so their token-bucket math does not overwrite each
+	// other on overlapping IPs. The bounds differ because the
+	// threat models differ: form submit is a low-volume mutation
+	// (10/min keeps fake-submission bots in check); embed reads
+	// are higher-volume snapshots a single viewer's page may
+	// auto-refresh (60/min, burst 30 lets legitimate dashboard
+	// embedding work without the limit firing on first paint).
+	publicFormIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, "form", 10, 10)
+	publicEmbedIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, "embed", 60, 30)
 	quotaEnforcer := platform.NewQuotaEnforcer(pool)
 
 	// Phase J — tenant feature flags, plan definitions, and usage
@@ -627,18 +637,26 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (*apiDeps, func(), err
 		r.Use(auth.AdminMiddleware())
 	}
 
-	// userChain is the JWT-only counterpart to adminChain. Used by
-	// /api/v1/tenants/me to derive the tenant from claims.TenantID
-	// instead of the X-Tenant-ID header that platform.TenantMiddleware
-	// honored before Phase 1. RequireActiveHomeTenant refuses requests
-	// admitted via the platform-admin recovery bypass so a recovering
-	// admin cannot also mutate tenant-scoped data via /me. See the
-	// coupling note in routes.go where it is mounted.
-	userChain := func(r chi.Router) {
+	// tenantChain is the JWT-only counterpart to adminChain. Used
+	// by EVERY tenant-scoped route group (records, finance,
+	// agents, helpdesk, inventory, forms, …, plus /me) to derive
+	// the tenant and user_id from claims instead of the
+	// X-Tenant-ID header that platform.TenantMiddleware honored
+	// before Phase 1. Phase 1 removed the X-User-ID header
+	// fallback from authz.Middleware AND flipped the authz default
+	// to ON, so without this chain authz.Middleware would 401
+	// every gated request (UserIDFromContext returns uuid.Nil
+	// under the old header path). RequireActiveHomeTenant refuses
+	// requests admitted via the platform-admin recovery bypass so
+	// a recovering admin cannot also mutate tenant-scoped data
+	// via these routes — admin recovery proceeds through
+	// adminChain, which intentionally omits the guard. See the
+	// long coupling note in deps.go for the full rationale.
+	tenantChain := func(r chi.Router) {
 		if authh.signer == nil {
 			r.Use(func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-					http.Error(w, "user routes require JWT auth; set KAPP_JWT_SECRET", http.StatusServiceUnavailable)
+					http.Error(w, "tenant routes require JWT auth; set KAPP_JWT_SECRET", http.StatusServiceUnavailable)
 				})
 			})
 			return
@@ -648,65 +666,66 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (*apiDeps, func(), err
 	}
 
 	d := &apiDeps{
-		cfg:               cfg,
-		pool:              pool,
-		adminPool:         adminPool,
-		tenantSvc:         tenantSvc,
-		featureStore:      featureStore,
-		quotaEnforcer:     quotaEnforcer,
-		portalStore:       portalStore,
-		recordStore:       recordStore,
-		ledgerStore:       ledgerStore,
-		invoicePoster:     invoicePoster,
-		paymentPoster:     paymentPoster,
-		apiExchangeRates:  apiExchangeRates,
-		authzEval:         authzEval,
-		auditor:           auditor,
-		rateLimitMW:       rateLimitMW,
-		apiCallMW:         apiCallMW,
-		featureMW:         featureMW,
-		authzGate:         authzGate,
-		authzMethodGate:   authzMethodGate,
-		publicFormIPLimit: publicFormIPLimit,
-		adminChain:        adminChain,
-		userChain:         userChain,
-		authh:             authh,
-		eh:                eh,
-		th:                th,
-		feath:             feath,
-		plch:              plch,
-		reth:              reth,
-		iah:               iah,
-		meth:              meth,
-		kh:                kh,
-		whh:               whh,
-		sh:                sh,
-		rh:                rh,
-		ph:                ph,
-		fh:                fh,
-		wh:                wh,
-		ah:                ah,
-		aph:               aph,
-		auh:               auh,
-		finh:              finh,
-		invh:              invh,
-		oh:                oh,
-		fileh:             fileh,
-		bh:                bh,
-		dh:                dh,
-		vh:                vh,
-		roleh:             roleh,
-		curh:              curh,
-		hdh:               hdh,
-		reph:              reph,
-		repsh:             repsh,
-		exph:              exph,
-		dashh:             dashh,
-		insh:              insh,
-		insdsh:            insdsh,
-		insembh:           insembh,
-		hrh:               hrh,
-		inboundHandler:    inboundHandler,
+		cfg:                cfg,
+		pool:               pool,
+		adminPool:          adminPool,
+		tenantSvc:          tenantSvc,
+		featureStore:       featureStore,
+		quotaEnforcer:      quotaEnforcer,
+		portalStore:        portalStore,
+		recordStore:        recordStore,
+		ledgerStore:        ledgerStore,
+		invoicePoster:      invoicePoster,
+		paymentPoster:      paymentPoster,
+		apiExchangeRates:   apiExchangeRates,
+		authzEval:          authzEval,
+		auditor:            auditor,
+		rateLimitMW:        rateLimitMW,
+		apiCallMW:          apiCallMW,
+		featureMW:          featureMW,
+		authzGate:          authzGate,
+		authzMethodGate:    authzMethodGate,
+		publicFormIPLimit:  publicFormIPLimit,
+		publicEmbedIPLimit: publicEmbedIPLimit,
+		adminChain:         adminChain,
+		tenantChain:        tenantChain,
+		authh:              authh,
+		eh:                 eh,
+		th:                 th,
+		feath:              feath,
+		plch:               plch,
+		reth:               reth,
+		iah:                iah,
+		meth:               meth,
+		kh:                 kh,
+		whh:                whh,
+		sh:                 sh,
+		rh:                 rh,
+		ph:                 ph,
+		fh:                 fh,
+		wh:                 wh,
+		ah:                 ah,
+		aph:                aph,
+		auh:                auh,
+		finh:               finh,
+		invh:               invh,
+		oh:                 oh,
+		fileh:              fileh,
+		bh:                 bh,
+		dh:                 dh,
+		vh:                 vh,
+		roleh:              roleh,
+		curh:               curh,
+		hdh:                hdh,
+		reph:               reph,
+		repsh:              repsh,
+		exph:               exph,
+		dashh:              dashh,
+		insh:               insh,
+		insdsh:             insdsh,
+		insembh:            insembh,
+		hrh:                hrh,
+		inboundHandler:     inboundHandler,
 	}
 
 	return d, func() { runCleanups(cleanups) }, nil
