@@ -267,7 +267,27 @@ func (s *SSOService) Exchange(
 
 // Refresh mints a new access token from a presented refresh token.
 // The refresh token's session must still be live — revocation is
-// therefore the single lever an admin pulls to kick a user off.
+// the operator's primary lever to kick a user off — and the
+// IsPlatformAdmin claim is re-derived from users.is_platform_admin on
+// every refresh.
+//
+// We re-query the admin flag (rather than passing it through from the
+// refresh-token claim) because the security surface of platform admin
+// is qualitatively larger than per-tenant roles: it grants
+// suspend/archive/delete on every tenant. If an operator demotes a
+// compromised admin via `UPDATE users SET is_platform_admin = FALSE`,
+// the next refresh — typically within the access-token TTL (15 min)
+// — must drop the privilege without requiring manual session
+// revocation. Tenant `Roles` are NOT re-queried here because doing so
+// would require resolving the chosen tenant + role row on every
+// refresh; that lookup is acceptable for SSO but not for refresh's
+// hot path. Operators wanting to revoke per-tenant grants in real time
+// must continue to revoke the session.
+//
+// When the admin pool is not configured (local dev), the refresh
+// claim is honoured as-is and a debug-level fall-through path keeps
+// the previous behaviour. Production deployments MUST configure
+// ADMIN_DB_URL.
 func (s *SSOService) Refresh(ctx context.Context, refreshToken string) (*ExchangeResult, error) {
 	claims, err := s.signer.VerifyRefresh(refreshToken)
 	if err != nil {
@@ -278,12 +298,26 @@ func (s *SSOService) Refresh(ctx context.Context, refreshToken string) (*Exchang
 			return nil, err
 		}
 	}
+	// Default to whatever the refresh token claimed; the DB lookup
+	// below overrides this for production deployments. The fallback
+	// path matters only for local dev (no admin pool) and for the
+	// brief window during which migration 000051 has not been
+	// applied — both surface visibly elsewhere (startup logs / API
+	// boot error).
+	isPlatformAdmin := claims.IsPlatformAdmin
+	if s.adminPool != nil && claims.UserID != uuid.Nil {
+		current, err := s.lookupPlatformAdmin(ctx, claims.UserID)
+		if err != nil {
+			return nil, fmt.Errorf("auth: refresh platform-admin lookup: %w", err)
+		}
+		isPlatformAdmin = current
+	}
 	base := Claims{
 		UserID:          claims.UserID,
 		TenantID:        claims.TenantID,
 		Roles:           claims.Roles,
 		SessionID:       claims.SessionID,
-		IsPlatformAdmin: claims.IsPlatformAdmin,
+		IsPlatformAdmin: isPlatformAdmin,
 	}
 	access, err := s.signer.Issue(base)
 	if err != nil {
@@ -296,6 +330,27 @@ func (s *SSOService) Refresh(ctx context.Context, refreshToken string) (*Exchang
 		SessionID:    claims.SessionID,
 		ExpiresIn:    int64(s.signer.cfg.AccessTTL.Seconds()),
 	}, nil
+}
+
+// lookupPlatformAdmin returns the current value of
+// users.is_platform_admin for the supplied user id. Returns false when
+// the row is missing (e.g. user was deleted between SSO and refresh);
+// in that case the caller will mint a non-admin access token and the
+// next request will fail under whatever middleware enforces the
+// session.
+func (s *SSOService) lookupPlatformAdmin(ctx context.Context, userID uuid.UUID) (bool, error) {
+	var isAdmin bool
+	err := s.adminPool.QueryRow(ctx,
+		`SELECT is_platform_admin FROM users WHERE id = $1`,
+		userID,
+	).Scan(&isAdmin)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return isAdmin, nil
 }
 
 func (s *SSOService) upsertUser(ctx context.Context, p KChatProfile) (*ResolvedUser, error) {

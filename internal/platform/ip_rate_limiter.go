@@ -19,6 +19,13 @@ import (
 // without paying for a cold-start refill.
 const ipBucketTTL = 10 * time.Minute
 
+// DefaultIPSweepInterval is how often the in-process limiter purges
+// idle buckets when the background sweeper is running. 5 minutes is
+// half the bucket TTL — short enough that a distributed bot attack
+// with millions of unique source IPs cannot accumulate more than a
+// few minutes worth of stale entries before they are dropped.
+const DefaultIPSweepInterval = 5 * time.Minute
+
 // IPRateLimiterBackend abstracts the storage layer for the
 // IPRateLimitMiddleware. Production wiring constructs a
 // RedisIPRateLimiter so every API replica enforces the same per-IP
@@ -91,14 +98,24 @@ func clientIP(r *http.Request) string {
 // tenant-scoped RateLimiter (ratelimit.go) so the two backends agree
 // on burst / refill semantics — only the keyspace differs.
 //
-// Idle buckets are GC'd opportunistically: every Allow call after
-// ipBucketTTL of inactivity drops the entry, so a one-off spike from
-// thousands of IPs does not leak memory.
+// Idle buckets are evicted on two paths:
 //
-// now is the clock source for refill calculations. Tests override
-// it with a synthetic clock so refill behaviour can be asserted
-// deterministically without real sleeps; production callers use the
-// default time.Now via NewInProcIPRateLimiter.
+//  1. **Opportunistic, on AllowCtx**: every Allow call for the same
+//     IP after ipBucketTTL of inactivity drops the old entry and
+//     starts fresh. This covers honest traffic patterns.
+//  2. **Periodic, via RunSweeper**: a background goroutine purges
+//     buckets that have been idle past ipBucketTTL. This is what
+//     stops a distributed bot attack — millions of unique source
+//     IPs that each appear once and never return — from blowing
+//     the map up unboundedly. Callers in long-running processes
+//     MUST start the sweeper via RunSweeper; tests may use the
+//     synchronous Sweep helper instead for deterministic state.
+//
+// now is the clock source for refill calculations and the sweeper
+// horizon. Tests override it with a synthetic clock so refill
+// behaviour and eviction can be asserted deterministically without
+// real sleeps; production callers use the default time.Now via
+// NewInProcIPRateLimiter.
 type InProcIPRateLimiter struct {
 	mu      sync.Mutex
 	buckets map[string]*ipBucket
@@ -111,7 +128,11 @@ type ipBucket struct {
 }
 
 // NewInProcIPRateLimiter returns an empty in-process bucket store
-// bound to the real wall clock.
+// bound to the real wall clock. Production callers should follow this
+// with a `go limiter.RunSweeper(ctx, platform.DefaultIPSweepInterval)`
+// so idle buckets do not accumulate under a DDoS-shaped traffic
+// pattern; tests typically skip the sweeper and drive Sweep()
+// directly off a synthetic clock.
 func NewInProcIPRateLimiter() *InProcIPRateLimiter {
 	return &InProcIPRateLimiter{
 		buckets: make(map[string]*ipBucket),
@@ -150,6 +171,73 @@ func (l *InProcIPRateLimiter) AllowCtx(_ context.Context, ip string, rpm, burst 
 	}
 	b.tokens--
 	return true
+}
+
+// Sweep removes every bucket whose last activity is older than
+// ipBucketTTL. Safe to call from any goroutine. Returns the number of
+// entries dropped so tests and operators can assert on the eviction
+// path.
+//
+// Sweep is the synchronous counterpart to RunSweeper. Production code
+// almost always wants RunSweeper (which calls Sweep on a ticker);
+// Sweep itself is exported so tests can drive eviction deterministically
+// against a synthetic clock.
+func (l *InProcIPRateLimiter) Sweep() int {
+	if l == nil {
+		return 0
+	}
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	dropped := 0
+	for ip, b := range l.buckets {
+		if now.Sub(b.last) > ipBucketTTL {
+			delete(l.buckets, ip)
+			dropped++
+		}
+	}
+	return dropped
+}
+
+// Size reports the current number of tracked IP buckets. Exposed for
+// tests + operator visibility (e.g. an /admin/debug endpoint or a
+// Prometheus gauge that wraps it).
+func (l *InProcIPRateLimiter) Size() int {
+	if l == nil {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.buckets)
+}
+
+// RunSweeper drives Sweep on a ticker until ctx is cancelled. It is
+// designed to be launched as `go limiter.RunSweeper(ctx, interval)`
+// from the API service's main goroutine; the supplied context is the
+// same shutdown context that gates the HTTP server, so a clean
+// shutdown stops the sweeper too.
+//
+// interval defaults to DefaultIPSweepInterval when non-positive.
+// RunSweeper returns when ctx is cancelled; it does NOT call Sweep
+// one final time on shutdown because the limiter's whole state is
+// released along with the process.
+func (l *InProcIPRateLimiter) RunSweeper(ctx context.Context, interval time.Duration) {
+	if l == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = DefaultIPSweepInterval
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			l.Sweep()
+		}
+	}
 }
 
 // ipSlidingWindowLua is the Redis Lua script that runs the same

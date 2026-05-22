@@ -191,11 +191,19 @@ func run() error {
 	// share the bucket via Redis when REDIS_URL is set; otherwise
 	// each pod enforces independently, which is still useful as a
 	// per-pod abuse cap.
+	//
+	// When falling back to the in-process limiter we launch a
+	// background sweeper bound to the run() context so a
+	// distributed bot attack with millions of unique source IPs
+	// cannot accumulate stale bucket entries indefinitely. Redis
+	// handles the same problem natively via per-key EXPIRE.
 	var ipRateBackend platform.IPRateLimiterBackend
 	if ipRedisLimiter != nil {
 		ipRateBackend = ipRedisLimiter
 	} else {
-		ipRateBackend = platform.NewInProcIPRateLimiter()
+		inProc := platform.NewInProcIPRateLimiter()
+		go inProc.RunSweeper(ctx, platform.DefaultIPSweepInterval)
+		ipRateBackend = inProc
 	}
 	publicFormIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, 10, 10)
 	quotaEnforcer := platform.NewQuotaEnforcer(pool)
@@ -592,6 +600,29 @@ func run() error {
 	// returns 503 — refusing to register the routes would surface as
 	// a confusing 404, and silently allowing them through would
 	// reintroduce the very vulnerability this chain exists to close.
+	//
+	// TENANT CONTEXT IS THE ADMIN'S, NOT THE ROUTE'S — auth.Middleware
+	// stamps platform.WithTenant(ctx, t) using the JWT's `tid`
+	// claim, i.e. the admin's home tenant. None of the current
+	// admin handlers read tenant from context: tenantsHandlers,
+	// isolationAuditHandlers, and ktypeHandlers.register all
+	// resolve the target tenant from URL params (chi.URLParam) or
+	// the request body, and call tenant.PGStore directly without
+	// going through dbutil.WithTenantTx. That is what makes
+	// suspend/archive/delete on tenant A work when the admin's
+	// home tenant is B.
+	//
+	// This coupling is fragile. Any new handler mounted under
+	// adminChain that calls platform.TenantFromContext, or routes a
+	// query through dbutil.WithTenantTx using the context tenant,
+	// will silently scope the operation to the admin's tenant
+	// instead of the route's target — a cross-tenant correctness
+	// bug that RLS will not surface because the admin's row IS
+	// visible. When adding a handler here, EITHER (a) resolve the
+	// target tenant explicitly from chi.URLParam and pass it down
+	// the call stack as a uuid.UUID, OR (b) clear the context
+	// tenant at the top of the handler before any DB call. Do not
+	// rely on platform.TenantFromContext under adminChain.
 	adminChain := func(r chi.Router) {
 		if authh.signer == nil {
 			r.Use(func(next http.Handler) http.Handler {

@@ -74,26 +74,36 @@ func (h *formsHandlers) public(w http.ResponseWriter, r *http.Request) {
 
 type submitFormRequest struct {
 	Data map[string]any `json:"data"`
-	// Honeypot is a hidden field the public form template emits as
-	// CSS-hidden so real users never fill it in. Bots that scrape
-	// the rendered form and submit every field fill it in and trip
-	// this guard. The field name is intentionally generic ("url")
-	// so it looks like a legitimate field to a naive scraper.
-	Honeypot string `json:"url,omitempty"`
+	// HoneypotURL / HoneypotWebsite / HoneypotHomepage are three
+	// invisible decoy fields the public form template renders as
+	// CSS-hidden inputs alongside the real data payload. They sit
+	// at the JSON envelope's top level — NOT inside the Data map —
+	// so they cannot collide with KType schema fields that happen
+	// to be named url/website/homepage (extremely common in CRM
+	// and contact-form schemas). Real users never see the decoys,
+	// real templates never write them, so any non-empty value here
+	// indicates a scraper-style bot that submitted every visible
+	// input it could find.
+	HoneypotURL      string `json:"url,omitempty"`
+	HoneypotWebsite  string `json:"website,omitempty"`
+	HoneypotHomepage string `json:"homepage,omitempty"`
 }
 
-// honeypotFields are the JSON keys that, if non-empty, indicate an
-// automated submission. The HTML template renders an invisible input
-// for each one; humans never see them, bots fill them in.
-var honeypotFields = []string{"url", "website", "homepage"}
+// isHoneypotTripped reports whether any of the decoy fields carry a
+// value. Any non-empty value — including whitespace — counts as a
+// trip: real templates never emit these fields, so a bot that wrote
+// " " into one of them is still a bot.
+func (r submitFormRequest) isHoneypotTripped() bool {
+	return r.HoneypotURL != "" || r.HoneypotWebsite != "" || r.HoneypotHomepage != ""
+}
 
 // submit accepts the public form payload and creates a KRecord under
 // the form's tenant. IP-based rate limiting is enforced by the
 // IPRateLimitMiddleware mounted on the route; the honeypot check
 // below catches drive-by bots that pass the rate limit but fill in
-// the invisible decoy field that the template emits as CSS-hidden.
+// any of the invisible decoy fields the template emits as CSS-hidden.
 //
-// Successful spam is silently absorbed (200 with an empty record id)
+// Successful spam is silently absorbed (202 Accepted with no body)
 // so the bot cannot tell its submission was rejected and adapt.
 func (h *formsHandlers) submit(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -106,12 +116,20 @@ func (h *formsHandlers) submit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	// Honeypot trips when either the top-level "url" field or any
-	// of the documented decoy field names inside req.Data carries
-	// a non-empty value. We return 202 Accepted with no body to
-	// look indistinguishable from a successful drop — bots that
-	// see 4xx adapt; bots that see 2xx without verifying do not.
-	if req.Honeypot != "" || hasHoneypotValue(req.Data) {
+	// Honeypot trips when any of the three top-level decoy fields
+	// carries a non-empty value. We return 202 Accepted with no
+	// body to look indistinguishable from a successful drop —
+	// bots that see 4xx adapt; bots that see 2xx without verifying
+	// do not.
+	//
+	// NOTE: we intentionally do NOT inspect req.Data for honeypot
+	// keys. req.Data carries the real KType schema payload, and a
+	// schema field named url/website/homepage (common in CRM
+	// contact forms) would otherwise be silently dropped. The
+	// top-level decoys are sufficient because the template renders
+	// them as siblings of the data envelope, so a legitimate
+	// submission never populates them.
+	if req.isHoneypotTripped() {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -125,19 +143,6 @@ func (h *formsHandlers) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, rec)
-}
-
-func hasHoneypotValue(data map[string]any) bool {
-	for _, key := range honeypotFields {
-		v, ok := data[key]
-		if !ok {
-			continue
-		}
-		if s, ok := v.(string); ok && s != "" {
-			return true
-		}
-	}
-	return false
 }
 
 func writeFormError(w http.ResponseWriter, err error) {

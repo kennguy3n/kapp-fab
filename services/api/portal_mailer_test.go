@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -79,6 +83,64 @@ func TestFailingPortalMailer_AlwaysErrors(t *testing.T) {
 	mailer := failingPortalMailer{err: sentinel}
 	if err := mailer.Send(context.Background(), uuid.New(), "x@example.invalid", "link"); err != sentinel {
 		t.Fatalf("err = %v, want %v", err, sentinel)
+	}
+}
+
+// TestMailerConfiguredReports pins the Configured() contract on both
+// implementations. requestMagicLink uses Configured() to short-circuit
+// with 503 when SMTP is not wired — if either implementation lies
+// about its state, deployments would silently 204 instead of
+// surfacing the misconfiguration.
+func TestMailerConfiguredReports(t *testing.T) {
+	if !(portalSMTPMailer{}).Configured() {
+		t.Fatal("portalSMTPMailer{}.Configured() = false; want true (only built when SMTP wired)")
+	}
+	if (failingPortalMailer{}).Configured() {
+		t.Fatal("failingPortalMailer{}.Configured() = true; want false (only built when SMTP empty)")
+	}
+}
+
+// stubMailer lets the handler test toggle Configured() without
+// touching the SMTP stack. Send is a no-op because the unconfigured
+// path returns 503 before Send would ever be reached.
+type stubMailer struct {
+	configured bool
+}
+
+func (m stubMailer) Configured() bool                                      { return m.configured }
+func (m stubMailer) Send(context.Context, uuid.UUID, string, string) error { return nil }
+
+// TestRequestMagicLink_Unconfigured503 is the regression guard for
+// the Devin Review finding (FLAG_…0006) that the old code returned
+// 204 even when SMTP was not wired. With Configured()=false the
+// handler must short-circuit with 503 BEFORE the tenant lookup so a
+// missing SMTP transport surfaces as a hard failure instead of being
+// indistinguishable from a successful drop.
+func TestRequestMagicLink_Unconfigured503(t *testing.T) {
+	h := &portalHandlers{mailer: stubMailer{configured: false}}
+	body, _ := json.Marshal(portalAuthRequest{TenantSlug: "acme", Email: "x@example.invalid"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/portal/auth/request-link", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.requestMagicLink(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d (mailer unconfigured)", rec.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(rec.Body.String(), "not configured") {
+		t.Fatalf("body = %q, want message naming the misconfiguration", rec.Body.String())
+	}
+}
+
+// TestRequestMagicLink_NilMailer503 covers the defensive nil check
+// that protects against a wiring bug (h.mailer not assigned). It
+// must also surface 503 rather than panic on Send.
+func TestRequestMagicLink_NilMailer503(t *testing.T) {
+	h := &portalHandlers{mailer: nil}
+	body, _ := json.Marshal(portalAuthRequest{TenantSlug: "acme", Email: "x@example.invalid"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/portal/auth/request-link", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.requestMagicLink(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d (mailer nil)", rec.Code, http.StatusServiceUnavailable)
 	}
 }
 

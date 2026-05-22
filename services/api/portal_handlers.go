@@ -69,7 +69,16 @@ func (h *portalHandlers) portalFeatureAllowed(ctx context.Context, tenantID uuid
 // explicit error so the request surface (and operator alerts) make
 // the misconfiguration visible instead of silently logging the
 // magic-link token to stdout.
+//
+// The Configured() probe is intentional: requestMagicLink uses it to
+// short-circuit with 503 BEFORE issuing the token, so an operator
+// who forgot to set SMTPHost sees a hard failure (503) instead of a
+// 204 that lies about delivery. We cannot rely on the post-Send
+// error path alone because that path keeps a 204 response for
+// enumeration protection — without Configured() the deployment
+// failure mode is indistinguishable from a successful send.
 type portalMailer interface {
+	Configured() bool
 	Send(ctx context.Context, tenantID uuid.UUID, to, link string) error
 }
 
@@ -81,6 +90,11 @@ type portalMailer interface {
 type portalSMTPMailer struct {
 	sender notifications.SMTPSender
 }
+
+// Configured reports true: by construction we only build a
+// portalSMTPMailer when SMTPHost is non-empty and the SMTPSender
+// has been wired through to a real transport.
+func (m portalSMTPMailer) Configured() bool { return true }
 
 func (m portalSMTPMailer) Send(ctx context.Context, _ uuid.UUID, to, link string) error {
 	if to == "" {
@@ -97,9 +111,18 @@ func (m portalSMTPMailer) Send(ctx context.Context, _ uuid.UUID, to, link string
 // (every magic-link request errors) instead of silently logging
 // tokens to stdout — a regression that previously masked credential
 // exposure across rotated logs.
+//
+// Configured() returns false so requestMagicLink can short-circuit
+// with 503 before issuing the token; this turns the deployment
+// misconfiguration into a visible HTTP-level failure instead of
+// silently masking it behind the enumeration-protection 204 path.
 type failingPortalMailer struct {
 	err error
 }
+
+// Configured reports false: by construction this mailer exists only
+// when SMTPHost was empty at boot.
+func (m failingPortalMailer) Configured() bool { return false }
 
 func (m failingPortalMailer) Send(context.Context, uuid.UUID, string, string) error {
 	return m.err
@@ -116,7 +139,23 @@ type portalAuthRequest struct {
 // success — we deliberately do not surface whether the email was
 // already registered so the endpoint cannot be used to enumerate
 // valid customers.
+//
+// If the deployment has not configured an SMTP transport, the
+// handler short-circuits with 503 BEFORE issuing the token. We do
+// this once at the top of the handler — not after a failed Send —
+// because the per-Send error path keeps a 204 response for
+// enumeration protection. Without this gate, a deployment that
+// forgot to set SMTPHost would silently 204 every magic-link
+// request, users would never receive an email, and the failure mode
+// would be indistinguishable from a successful drop. 503 is the
+// right code here because the misconfiguration is global to the
+// deployment (not specific to any tenant / email), so no
+// enumeration information leaks.
 func (h *portalHandlers) requestMagicLink(w http.ResponseWriter, r *http.Request) {
+	if h.mailer == nil || !h.mailer.Configured() {
+		http.Error(w, "portal email delivery not configured", http.StatusServiceUnavailable)
+		return
+	}
 	var in portalAuthRequest
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)

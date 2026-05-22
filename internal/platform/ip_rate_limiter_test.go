@@ -136,6 +136,73 @@ func TestIPRateLimitMiddleware_RejectsAfterBurst(t *testing.T) {
 	}
 }
 
+// TestInProcIPRateLimiter_SweepDropsIdleEntries pins the eviction
+// path that protects against a distributed bot attack with millions
+// of unique source IPs (Devin Review BUG_…0003). Without Sweep, every
+// IP that appears once and never returns would accumulate in the map
+// forever and the process would eventually OOM.
+//
+// We use the injectable clock so the assertion is deterministic
+// (no real sleeps).
+func TestInProcIPRateLimiter_SweepDropsIdleEntries(t *testing.T) {
+	l := NewInProcIPRateLimiter()
+	clock := time.Unix(1_700_000_000, 0)
+	l.now = func() time.Time { return clock }
+	ctx := context.Background()
+	// Seed three IPs at t0.
+	for _, ip := range []string{"203.0.113.1", "203.0.113.2", "203.0.113.3"} {
+		if !l.AllowCtx(ctx, ip, 10, 1) {
+			t.Fatalf("seed %s should be allowed", ip)
+		}
+	}
+	if got := l.Size(); got != 3 {
+		t.Fatalf("Size() = %d before sweep, want 3", got)
+	}
+	// Advance just under the TTL → sweep should drop nothing.
+	clock = clock.Add(ipBucketTTL - time.Second)
+	if got := l.Sweep(); got != 0 {
+		t.Fatalf("Sweep() = %d at t0+TTL-1s, want 0 (all entries still fresh)", got)
+	}
+	if got := l.Size(); got != 3 {
+		t.Fatalf("Size() = %d after no-op sweep, want 3", got)
+	}
+	// Touch one IP so it stays fresh, then advance past TTL.
+	if !l.AllowCtx(ctx, "203.0.113.2", 10, 5) {
+		t.Fatal("203.0.113.2 should still be allowed (bucket alive)")
+	}
+	clock = clock.Add(2 * time.Second) // crosses TTL for the un-touched IPs
+	dropped := l.Sweep()
+	if dropped != 2 {
+		t.Fatalf("Sweep() = %d, want 2 (only fresh IP survives)", dropped)
+	}
+	if got := l.Size(); got != 1 {
+		t.Fatalf("Size() = %d after sweep, want 1", got)
+	}
+}
+
+// TestInProcIPRateLimiter_RunSweeperStopsOnContext guarantees the
+// production sweeper goroutine exits cleanly when the parent context
+// is cancelled, so a graceful API shutdown does not leak the
+// goroutine.
+func TestInProcIPRateLimiter_RunSweeperStopsOnContext(t *testing.T) {
+	l := NewInProcIPRateLimiter()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		l.RunSweeper(ctx, 50*time.Millisecond)
+		close(done)
+	}()
+	// Let the ticker fire at least once.
+	time.Sleep(75 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+		// good
+	case <-time.After(time.Second):
+		t.Fatal("RunSweeper did not exit within 1s of ctx cancellation")
+	}
+}
+
 func TestClientIP_SplitsHostPort(t *testing.T) {
 	tests := []struct {
 		remote string
