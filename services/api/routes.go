@@ -228,7 +228,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 				d.adminChain(r)
 				r.Get("/isolation-audit", d.iah.get)
 				// Phase G — tier upgrade endpoint. Replaces the
-				// scripts/upgrade_tier.d.sh shell script with an
+				// scripts/upgrade_tier.sh shell script with an
 				// admin-only API call. Requires d.adminPool because
 				// CREATE SCHEMA + cross-schema INSERT must run
 				// outside any tenant-scoped RLS context.
