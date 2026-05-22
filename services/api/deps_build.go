@@ -246,16 +246,32 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// per-pod abuse cap.
 	//
 	// When falling back to the in-process limiter we launch a
-	// background sweeper bound to the run() context so a
-	// distributed bot attack with millions of unique source IPs
-	// cannot accumulate stale bucket entries indefinitely. Redis
-	// handles the same problem natively via per-key EXPIRE.
+	// background sweeper so a distributed bot attack with millions
+	// of unique source IPs cannot accumulate stale bucket entries
+	// indefinitely. Redis handles the same problem natively via
+	// per-key EXPIRE.
+	//
+	// Lifecycle: the sweeper is bound to a dedicated sub-context
+	// rather than the run() signal context directly, and the
+	// cancel func is registered on the cleanups slice. This makes
+	// the sweeper's lifetime explicit — it stops on the SAME
+	// signal that closes every other resource buildDeps acquires,
+	// whether that comes from a clean shutdown OR a partial-
+	// failure unwind inside buildDeps itself. The previous shape
+	// (raw `go inProc.RunSweeper(ctx, ...)`) was technically safe
+	// because run()'s `defer stop()` would eventually cancel ctx
+	// even on a buildDeps error, but the lifetime was implicit on
+	// that defer chain. Threading it through cleanups removes the
+	// implicit coupling and matches the pgxpool / Redis / metering
+	// pattern.
 	var ipRateBackend platform.IPRateLimiterBackend
 	if ipRedisLimiter != nil {
 		ipRateBackend = ipRedisLimiter
 	} else {
 		inProc := platform.NewInProcIPRateLimiter()
-		go inProc.RunSweeper(ctx, platform.DefaultIPSweepInterval)
+		sweeperCtx, sweeperStop := context.WithCancel(ctx)
+		cleanups = append(cleanups, sweeperStop)
+		go inProc.RunSweeper(sweeperCtx, platform.DefaultIPSweepInterval)
 		ipRateBackend = inProc
 	}
 	// Two independent IP-keyed middlewares share the same backend
