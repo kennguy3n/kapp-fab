@@ -528,11 +528,18 @@ func registerRoutes(d *apiDeps) chi.Router {
 		// middleware because the relay does not carry session
 		// credentials; instead we authenticate by static shared
 		// secret and resolve the tenant from the recipient host.
-		// Rate limited per-IP via the shared rate limiter so a
-		// flood of inbound mail cannot starve other writers.
+		//
+		// Rate-limit MUST be IP-keyed here, not tenant-keyed: the
+		// route runs before the handler resolves which tenant the
+		// recipient belongs to, so the tenant-scoped d.rateLimitMW
+		// would call TenantFromContext → nil → 500 on every
+		// request. d.publicInboundIPLimit is the right shape — it
+		// keeps a misconfigured relay or a forged-sender flood
+		// from saturating the inbound pipeline without depending
+		// on tenant context.
 		if d.inboundHandler != nil {
 			r.Route("/api/v1/helpdesk/inbound-email", func(r chi.Router) {
-				r.Use(d.rateLimitMW)
+				r.Use(d.publicInboundIPLimit)
 				r.Post("/", d.inboundHandler.post)
 			})
 		}
