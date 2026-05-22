@@ -43,22 +43,39 @@ import (
 // logger.
 type HTTPTimeouts struct {
 	// ReadHeader bounds the time from connection accept to end of
-	// request headers. Zero disables.
+	// request headers. A programmatic zero disables (Go stdlib
+	// behaviour), but the KAPP_HTTP_READ_HEADER_TIMEOUT env
+	// override REJECTS zero / negative values as a defensive
+	// measure (an operator who fat-fingers "0" should not
+	// silently disable slow-loris protection); see
+	// parseDurationEnv.
 	ReadHeader time.Duration
-	// Read bounds the time from connection accept to end of request
-	// body. Zero disables (allows arbitrarily slow uploads).
+	// Read bounds the time from connection accept to end of
+	// request body. A programmatic zero allows arbitrarily slow
+	// uploads. The KAPP_HTTP_READ_TIMEOUT env override DOES
+	// accept zero so importer / agent-tools can opt out for
+	// large-CSV imports; see parseDurationEnvAllowZero.
 	Read time.Duration
-	// Write bounds the time from end of request headers to end of
-	// response body. Zero disables (required for SSE / long-lived
-	// streams).
+	// Write bounds the time from end of request headers to end
+	// of response body. A programmatic zero is required for SSE
+	// / long-lived streams. The KAPP_HTTP_WRITE_TIMEOUT env
+	// override DOES accept zero so an operator can disable the
+	// timeout for a streaming workload; see
+	// parseDurationEnvAllowZero.
 	Write time.Duration
 	// Idle bounds the time a keep-alive connection sits between
-	// requests before the server closes it. Zero falls back to the
-	// stdlib default (also zero == unlimited), so we never want zero
-	// here for production servers — DefaultHTTPTimeouts sets 120s.
+	// requests before the server closes it. A programmatic zero
+	// falls back to the stdlib default (also zero, i.e.
+	// unlimited), which is unsafe for any production server;
+	// DefaultHTTPTimeouts sets 120s. The KAPP_HTTP_IDLE_TIMEOUT
+	// env override REJECTS zero / negative values for the same
+	// reason as ReadHeader; see parseDurationEnv.
 	Idle time.Duration
 	// MaxHeaderBytes caps the total header size accepted from a
-	// request. Zero falls back to http.DefaultMaxHeaderBytes (1 MiB).
+	// request. A programmatic zero falls back to
+	// http.DefaultMaxHeaderBytes (1 MiB). The
+	// KAPP_HTTP_MAX_HEADER_BYTES env override accepts only
+	// strictly positive values.
 	MaxHeaderBytes int
 }
 
