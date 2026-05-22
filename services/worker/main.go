@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,8 +19,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
@@ -44,6 +47,23 @@ import (
 const (
 	tickInterval = 2 * time.Second
 	drainBatch   = 100
+
+	// Adaptive batcher bounds. min keeps each drain large enough
+	// to amortise the FOR UPDATE SKIP LOCKED roundtrip; max caps
+	// per-iteration work so a runaway grow loop cannot monopolise
+	// the worker. drainBatch (above) seeds the starting point so
+	// the steady-state behaviour matches the previous fixed-batch
+	// configuration until the batcher observes a reason to move.
+	adaptiveBatchMin = 16
+	adaptiveBatchMax = 512
+
+	// Latency budget for one DrainBatch + delivery cycle. Picked
+	// to leave plenty of headroom above the NATS publish RTT
+	// (~milliseconds) and the kchat-bridge side-effect calls
+	// (~tens of milliseconds), while still shrinking aggressively
+	// if a downstream goes slow and pushes the cycle past a
+	// quarter-second.
+	adaptiveLatencyBudget = 250 * time.Millisecond
 )
 
 // workerSystemActor is the deterministic non-nil actor attributed
@@ -144,22 +164,21 @@ func run() error {
 		webhookStore: notifications.NewWebhookStore(pool),
 	}
 
-	// Low-stock alert sweeper runs alongside the outbox drain so a
-	// below-threshold SKU produces a KChat alert within one sweep
-	// interval. The sweeper shares the outbox publisher, so emitted
-	// alerts go through the same delivery / dedupe pipeline as any
-	// other `inventory.*` event.
+	// Low-stock alert sweeper, webhook retry loop, scheduler,
+	// export queue, and autoscaler are all SINGLETON loops: each
+	// claims work cross-tenant against shared tables. Running
+	// them on N replicas would either produce duplicates
+	// (scheduler re-firing the same scheduled_actions row before
+	// the first replica finishes), race on shared state
+	// (autoscaler emitting conflicting platform_scale_events for
+	// the same cell), or simply waste work (alerts sweeper
+	// scanning every tenant N times). Phase 3 gates the entire
+	// singleton stack behind a Postgres advisory-lock leader
+	// election so N>1 worker pods can run hot-standby — only the
+	// leader spawns these goroutines, and a peer takes over
+	// within one poll interval when the leader's session
+	// disconnects.
 	alerts := newStockAlertWorker(pool, adminPool, publisher, dbutil.SetTenantContext)
-	go alerts.Run(ctx)
-
-	// Webhook retry loop. Failed webhook POSTs persist a row in
-	// webhook_deliveries with next_retry_at set; this loop atomically
-	// claims due rows across tenants and re-posts via the same
-	// deliverWebhook path. Running the retry loop out-of-band keeps
-	// the outbox drain free of any time.Sleep on a misbehaving
-	// customer endpoint — a slow tenant webhook no longer stalls
-	// unrelated tenants' events.
-	go router.runWebhookRetryLoop(ctx, 5*time.Second)
 
 	// Scheduled actions engine. Registers both:
 	//   - the recurring AR invoice generator against action_type
@@ -177,7 +196,7 @@ func run() error {
 	schedStore := scheduler.NewStore(pool, adminPool)
 	schedRegistry := scheduler.NewRegistry()
 	auditor := audit.NewPGLogger(pool)
-	ktypeCache := platform.NewLRUCache(1024, 5*time.Minute)
+	ktypeCache := platform.NewLRUCache(cfg.KTypeCacheSize, 5*time.Minute)
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
 	recordStore := record.NewPGStore(pool, ktypeRegistry, publisher, auditor)
 	exchangeRates := ledger.NewExchangeRateStore(pool)
@@ -278,71 +297,266 @@ func run() error {
 		NewQueryCacheRefreshHandler(insightsQueryStore, insightsRunner),
 	)
 
-	go scheduler.RunLoop(ctx, schedStore, schedRegistry, 10*time.Second)
-
-	// Phase K — data export queue worker. Runs alongside the
-	// scheduled-action loop on a separate ticker because export
-	// payloads can be large; we don't want a slow CSV render to
-	// stall the scheduled-action draining cadence.
-	go NewExportWorker(exporter.NewStore(pool, adminPool), recordStore, 5*time.Second).Run(ctx)
-
-	// Phase G — cell autoscaler. Reads the `cells` table on a
-	// minute cadence, applies the configured policy thresholds,
-	// and persists each decision into platform_scale_events. Runs
-	// platform-wide (every cell) so it does NOT participate in
-	// scheduled_actions, which are tenant-scoped by design.
+	exportWorker := NewExportWorker(exporter.NewStore(pool, adminPool), recordStore, 5*time.Second)
 	autoscaleEngine := platform.NewAutoscaleEngine(pool, platform.DefaultAutoscalePolicy(), nil)
-	go platform.NewAutoscaleLoop(autoscaleEngine, 60*time.Second).Run(ctx)
+	autoscaleLoop := platform.NewAutoscaleLoop(autoscaleEngine, 60*time.Second)
 
-	log.Printf("worker: started; draining every %s; nats=%s; kchat-bridge=%q", tickInterval, natsURL, bridge.baseURL)
-	ticker := time.NewTicker(tickInterval)
-	defer ticker.Stop()
+	// Adaptive batch sizing for the outbox drain. Starts at
+	// drainBatch (the historical fixed value) so steady-state
+	// behaviour is unchanged until the batcher observes a reason
+	// to grow (saturation + fast) or shrink (over latency
+	// budget). See services/worker/adaptive.go for the policy.
+	batcher := NewAdaptiveBatcher(drainBatch, adaptiveBatchMin, adaptiveBatchMax, adaptiveLatencyBudget)
 
+	log.Printf("worker: started; nats=%s; kchat-bridge=%q", natsURL, bridge.baseURL)
+
+	// Singleton goroutines + outbox drain are gated behind a
+	// Postgres advisory-lock leader election so multi-replica
+	// worker deployments only run them on the elected leader. A
+	// peer takes over within one pollInterval (5s default) of
+	// the leader's session disconnecting (crash, SIGKILL,
+	// network partition longer than TCP keepalive).
+	identity := workerIdentity()
+	election := platform.NewLeaderElection(cfg.DatabaseURL, "kapp-worker", identity)
+	return election.Run(ctx, func(leaderCtx context.Context) error {
+		return leadWorker(leaderCtx, leaderState{
+			cfg:           cfg,
+			publisher:     publisher,
+			alerts:        alerts,
+			router:        router,
+			schedStore:    schedStore,
+			schedRegistry: schedRegistry,
+			exportWorker:  exportWorker,
+			autoscaleLoop: autoscaleLoop,
+			batcher:       batcher,
+			nc:            nc,
+			bridge:        bridge,
+		})
+	})
+}
+
+// leaderState bundles the dependencies that the leader-only goroutines
+// + drain loop need. Keeping them in one struct lets us pass a single
+// argument into leadWorker, avoids a parameter explosion, and keeps
+// the leader-callback signature compatible with platform.LeaderElection.
+type leaderState struct {
+	cfg           *platform.Config
+	publisher     *events.PGPublisher
+	alerts        *stockAlertWorker
+	router        *notificationRouter
+	schedStore    *scheduler.Store
+	schedRegistry *scheduler.Registry
+	exportWorker  *ExportWorker
+	autoscaleLoop *platform.AutoscaleLoop
+	batcher       *AdaptiveBatcher
+	nc            *nats.Conn
+	bridge        *kchatBridgeNotifier
+}
+
+// leadWorker runs the singleton goroutines + outbox drain. Invoked
+// from inside platform.LeaderElection.Run, so it is guaranteed that
+// only one worker replica is executing this function at any time
+// (modulo the brief two-leader overlap window documented in
+// platform/leader.go). On leaderCtx cancellation (lock lost,
+// process shutting down) all sub-goroutines unwind through the
+// derived contexts and the function returns.
+func leadWorker(leaderCtx context.Context, s leaderState) error {
+	// Singleton sweepers. Each owns its own ticker / claim loop
+	// and unwinds when leaderCtx cancels, so we don't need to
+	// join them explicitly — the next leader will start fresh
+	// copies.
+	go s.alerts.Run(leaderCtx)
+	go s.router.runWebhookRetryLoop(leaderCtx, 5*time.Second)
+	go scheduler.RunLoop(leaderCtx, s.schedStore, s.schedRegistry, 10*time.Second)
+	go s.exportWorker.Run(leaderCtx)
+	go s.autoscaleLoop.Run(leaderCtx)
+
+	return drainLoop(leaderCtx, s)
+}
+
+// drainLoop is the LISTEN/NOTIFY-driven outbox drain, extracted out of
+// run() so it can be invoked as the leader callback. The body is
+// otherwise identical to the previous in-line implementation: dedicated
+// *pgx.Conn for LISTEN, capped exponential backoff on reconnect, and
+// adaptive batch sizing via s.batcher.
+func drainLoop(ctx context.Context, s leaderState) error {
+
+	// Phase 2.2: LISTEN/NOTIFY-driven drain loop. A dedicated *pgx.Conn
+	// (NOT a pgxpool slot) subscribes to the "kapp_events" channel. On
+	// INSERT the trigger fires pg_notify and the worker wakes within
+	// milliseconds. A 2s timeout on WaitForNotification acts as a
+	// heartbeat fallback for the edge case where a notify is lost.
+	//
+	// Using pgx.Connect directly (instead of pool.Acquire) deliberately
+	// keeps the LISTEN connection OUT of the pgxpool so it does not
+	// permanently occupy a pool slot — the worker also runs scheduler,
+	// export, autoscaler, and webhook-retry goroutines that all draw
+	// from the same pool, and stealing a slot for the life of the
+	// process would reduce concurrency for the rest of them.
+	//
+	// Failure handling: WaitForNotification's error is now inspected. A
+	// DeadlineExceeded (from the 2s wait timeout) is the expected idle
+	// path. Any other error indicates the underlying socket has died
+	// (PG restart, network partition, idle disconnect); in that case we
+	// log a warning, close the dead conn, sleep one tickInterval to
+	// avoid a hot reconnect spin if the DB itself is down, then re-dial
+	// and re-issue LISTEN. The reconnect loop never gives up — the
+	// worker is the only path that drains the outbox, so silently
+	// degrading to a permanent CPU-burning loop (the bug Devin Review
+	// caught) would be much worse than a slow recovery cycle.
+	listenConn, err := acquireListenConn(ctx, s.cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("worker: initial LISTEN conn: %w", err)
+	}
+	defer func() {
+		if listenConn != nil {
+			_ = listenConn.Close(context.Background())
+		}
+	}()
+
+	deliverFn := deliver(s.nc, s.bridge, s.router)
 	for {
-		select {
-		case <-ctx.Done():
+		waitCtx, waitCancel := context.WithTimeout(ctx, tickInterval)
+		_, waitErr := listenConn.WaitForNotification(waitCtx)
+		waitCancel()
+
+		if ctx.Err() != nil {
 			log.Printf("worker: shutdown signal received")
 			return nil
-		case <-ticker.C:
-			if _, err := publisher.DrainBatch(ctx, drainBatch, deliver(nc, bridge, router)); err != nil {
-				log.Printf("worker: drain batch: %v", err)
+		}
+
+		// Any error other than the expected deadline means the LISTEN
+		// socket has been disrupted. Without this branch the loop would
+		// spin at the speed of DrainBatch (hundreds of iterations per
+		// second), saturating Postgres with no useful work and silently
+		// losing the LISTEN subscription forever.
+		//
+		// The reconnect path is an inner loop that retries with
+		// capped exponential backoff (tickInterval → 2× → 4× → ... →
+		// maxBackoff) until either ctx is cancelled or
+		// acquireListenConn succeeds. This guarantees that listenConn
+		// is non-nil when we exit the branch and re-enter
+		// WaitForNotification at the top of the next iteration —
+		// closing the nil-panic window Devin Review caught in the
+		// first iteration of this fix. The reconnect loop never gives
+		// up because the worker is the only path that drains the
+		// outbox; bailing out would silently lose every subsequent
+		// event until the process restarts.
+		if waitErr != nil && !errors.Is(waitErr, context.DeadlineExceeded) {
+			log.Printf("worker: LISTEN connection error: %v; reconnecting", waitErr)
+			_ = listenConn.Close(context.Background())
+			listenConn = nil
+
+			backoff := tickInterval
+			const maxBackoff = 30 * time.Second
+			for {
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(backoff):
+				}
+				newConn, rerr := acquireListenConn(ctx, s.cfg.DatabaseURL)
+				if rerr == nil {
+					listenConn = newConn
+					log.Printf("worker: LISTEN reconnected")
+					break
+				}
+				log.Printf("worker: LISTEN reconnect failed (will retry in %s): %v", 2*backoff, rerr)
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
 			}
 		}
+
+		// Adaptive batch sizing: read the current limit, time the
+		// drain, then feed (n, duration) back into the batcher.
+		// The latency-first policy in adaptive.go aggressively
+		// shrinks on overshoots, so a sudden downstream slow-down
+		// (NATS, kchat-bridge) tightens batches within a few
+		// iterations without operator intervention.
+		limit := s.batcher.Limit()
+		start := time.Now()
+		n, err := s.publisher.DrainBatch(ctx, limit, deliverFn)
+		dur := time.Since(start)
+		if err != nil {
+			log.Printf("worker: drain batch: %v", err)
+		}
+		s.batcher.Observe(n, dur)
 	}
 }
 
+// workerIdentity returns a leader-log identity for this process. Prefers
+// the OS hostname (which in Kubernetes is the pod name, perfect for
+// correlating logs against pods); falls back to a fixed string when
+// the hostname is unavailable (rare; only happens on misconfigured
+// containers).
+func workerIdentity() string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "kapp-worker"
+}
+
+// acquireListenConn dials a dedicated *pgx.Conn (outside the pgxpool) and
+// issues LISTEN kapp_events on it. Centralising the dial + LISTEN sequence
+// keeps the initial-connect path and the reconnect path identical, so a
+// future tweak to the LISTEN channel name or the conn config only needs
+// to land in one place. On any failure the connection is closed and the
+// error is returned to the caller.
+func acquireListenConn(ctx context.Context, connString string) (*pgx.Conn, error) {
+	conn, err := pgx.Connect(ctx, connString)
+	if err != nil {
+		return nil, fmt.Errorf("dial listen conn: %w", err)
+	}
+	if _, err := conn.Exec(ctx, "LISTEN kapp_events"); err != nil {
+		_ = conn.Close(context.Background())
+		return nil, fmt.Errorf("LISTEN kapp_events: %w", err)
+	}
+	return conn, nil
+}
+
+// deliver returns the drain-callback that publishes a batch of events to NATS
+// and fans out best-effort side-effects (KChat bridge cards, notification
+// router). Each event in the batch is delivered concurrently (max 8 goroutines)
+// to cut tail latency when a single side-effect (e.g. an HTTP call to
+// kchat-bridge) is slow. The concurrency limit prevents unbounded goroutine
+// growth on very large batches.
+//
+// Error semantics: any NATS publish failure fails the entire batch (so the
+// outbox row stays undelivered and retries on the next drain cycle).
+// Side-effect failures (bridge, router) are logged but do NOT fail the batch —
+// the event is already durably on NATS, so a flapping sidecar never blocks
+// forward progress of the outbox.
 func deliver(nc *nats.Conn, bridge *kchatBridgeNotifier, router *notificationRouter) func(ctx context.Context, batch []events.Event) error {
 	return func(ctx context.Context, batch []events.Event) error {
+		g, ctx := errgroup.WithContext(ctx)
+		g.SetLimit(8)
 		for _, e := range batch {
-			subject := fmt.Sprintf("kapp.events.%s", e.Type)
-			payload, err := json.Marshal(e)
-			if err != nil {
-				return fmt.Errorf("marshal event %s: %w", e.ID, err)
-			}
-			if err := nc.Publish(subject, payload); err != nil {
-				return fmt.Errorf("publish %s: %w", subject, err)
-			}
-			// Fan out approval lifecycle events to kchat-bridge so the
-			// reviewer / approver receives the DM card. Render failures
-			// are logged but do not fail the drain — the event is
-			// already durably on NATS and the outbox row will be marked
-			// delivered so it will not retry. Phase E treats the card
-			// notification as best-effort; the approval itself lives in
-			// Postgres and is visible via the Approvals page.
-			if bridge.enabled() && isApprovalNotificationEvent(e.Type) {
-				if err := bridge.renderApprovalCard(ctx, e); err != nil {
-					log.Printf("worker: kchat render %s: %v", e.Type, err)
+			e := e
+			g.Go(func() error {
+				subject := fmt.Sprintf("kapp.events.%s", e.Type)
+				payload, err := json.Marshal(e)
+				if err != nil {
+					return fmt.Errorf("marshal event %s: %w", e.ID, err)
 				}
-			}
-			// Phase F: route generic notification events to the per-
-			// tenant configured channels (KChat DM, webhook, email).
-			// Failures are logged — the NATS publish already succeeded
-			// and the in-app SSE tail is served directly from the
-			// events table, so a failed sidecar delivery never blocks
-			// the outbox drain.
-			if router != nil {
-				router.route(ctx, e)
-			}
+				if err := nc.Publish(subject, payload); err != nil {
+					return fmt.Errorf("publish %s: %w", subject, err)
+				}
+				// Best-effort side-effects: failures are logged, not propagated.
+				if bridge.enabled() && isApprovalNotificationEvent(e.Type) {
+					if err := bridge.renderApprovalCard(ctx, e); err != nil {
+						log.Printf("worker: kchat render %s: %v", e.Type, err)
+					}
+				}
+				if router != nil {
+					router.route(ctx, e)
+				}
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return err
 		}
 		return nc.Flush()
 	}

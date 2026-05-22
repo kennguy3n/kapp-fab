@@ -377,7 +377,7 @@ func init() {
 // conflict.
 func RegisterKTypes(ctx context.Context, registry ktype.Registry) error {
 	for _, kt := range All() {
-		if err := registry.Register(ctx, kt); err != nil {
+		if err := registry.RegisterIfChanged(ctx, kt); err != nil {
 			return fmt.Errorf("finance: register %s: %w", kt.Name, err)
 		}
 	}

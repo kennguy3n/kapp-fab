@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -54,19 +55,23 @@ func run() error {
 	}
 	defer pool.Close()
 
-	ktypeCache := platform.NewLRUCache(1024, 5*time.Minute)
+	ktypeCache := platform.NewLRUCache(cfg.KTypeCacheSize, 5*time.Minute)
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
 	eventPublisher := events.NewPGPublisher(pool)
 	auditor := audit.NewPGLogger(pool)
 	recordStore := record.NewPGStore(pool, ktypeRegistry, eventPublisher, auditor)
 	workflowEngine := workflow.NewEngine(pool, eventPublisher, auditor)
-	tenantSvc := tenant.NewPGStore(pool)
+	tenantCache := platform.NewLRUCache(cfg.TenantCacheSize, 30*time.Second)
+	tenantSvc := tenant.NewPGStore(pool).WithCache(tenantCache)
 	rateLimitCfg := platform.DefaultRateLimitConfig()
 	rateLimiter := platform.NewRateLimiter(rateLimitCfg)
 	var redisLimiter *platform.RedisRateLimiter
-	if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
-		rl, err := platform.NewRedisRateLimiter(ctx, redisURL, rateLimitCfg)
+	if cfg.RedisURL != "" {
+		rl, err := platform.NewRedisRateLimiter(ctx, cfg.RedisURL, rateLimitCfg)
 		if err != nil {
+			if cfg.RequireRedis {
+				return fmt.Errorf("agent-tools: redis rate limiter init failed and KAPP_REQUIRE_REDIS=1: %w", err)
+			}
 			log.Printf("agent-tools: redis rate limiter init failed, falling back to in-process: %v", err)
 		} else {
 			redisLimiter = rl

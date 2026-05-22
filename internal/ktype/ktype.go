@@ -20,6 +20,7 @@ type KType struct {
 // Registry manages KType registration and lookup.
 type Registry interface {
 	Register(ctx context.Context, kt KType) error
+	RegisterIfChanged(ctx context.Context, kt KType) error
 	Get(ctx context.Context, name string, version int) (*KType, error)
 	List(ctx context.Context) ([]KType, error)
 }

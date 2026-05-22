@@ -37,6 +37,15 @@ func (s *PGStore) SetPlacementPolicy(ctx context.Context, id uuid.UUID, policy P
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
+	// placement_policy is on the tenants row alongside updated_at, which
+	// IS part of the cached Tenant struct. Invalidate so a subsequent Get
+	// sees the fresh updated_at; the placement_policy column itself is
+	// not read into Tenant (it has a separate GetPlacementPolicy path) so
+	// the staleness window only affects the metadata field, but keeping
+	// the invariant "every mutation invalidates" prevents future readers
+	// who add new columns to the cached struct from getting silently
+	// stale data.
+	s.invalidateCache(id)
 	return nil
 }
 

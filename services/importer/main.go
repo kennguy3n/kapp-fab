@@ -51,8 +51,9 @@ func run() error {
 	}
 	defer pool.Close()
 
-	tenantSvc := tenant.NewPGStore(pool)
-	ktypeCache := platform.NewLRUCache(1024, 5*time.Minute)
+	tenantCache := platform.NewLRUCache(cfg.TenantCacheSize, 30*time.Second)
+	tenantSvc := tenant.NewPGStore(pool).WithCache(tenantCache)
+	ktypeCache := platform.NewLRUCache(cfg.KTypeCacheSize, 5*time.Minute)
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
 	eventPublisher := events.NewPGPublisher(pool)
 	auditor := audit.NewPGLogger(pool)
@@ -304,9 +305,9 @@ func (h *importHandlers) validate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"job":           job,
-		"valid":         valid,
-		"invalid":       invalid,
+		"job":            job,
+		"valid":          valid,
+		"invalid":        invalid,
 		"reconciliation": rec,
 	})
 }
