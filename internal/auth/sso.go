@@ -289,6 +289,21 @@ func (s *SSOService) Exchange(
 // claim is honoured as-is and a debug-level fall-through path keeps
 // the previous behaviour. Production deployments MUST configure
 // ADMIN_DB_URL.
+//
+// Availability vs. freshness: when the admin pool IS configured but
+// the lookup itself fails (timeout, connection reset, pgbouncer
+// failover), Refresh fails OPEN to the refresh-token's claimed value
+// rather than rejecting every refresh for every user during the
+// transient outage. The reasoning is that admin-pool unavailability
+// is a control-plane infrastructure event whose blast radius would
+// otherwise extend to every user-facing API call (since access
+// tokens are short-lived and clients refresh constantly). The
+// staleness window introduced by fail-open is bounded by the
+// AccessTTL of the resulting access token — the same window the
+// docs already acknowledge for the demote-then-wait-15-min path. A
+// WARN log on the fail-open path keeps the event visible to
+// observability so operators can correlate against admin-pool
+// health.
 func (s *SSOService) Refresh(ctx context.Context, refreshToken string) (*ExchangeResult, error) {
 	claims, err := s.signer.VerifyRefresh(refreshToken)
 	if err != nil {
@@ -301,17 +316,21 @@ func (s *SSOService) Refresh(ctx context.Context, refreshToken string) (*Exchang
 	}
 	// Default to whatever the refresh token claimed; the DB lookup
 	// below overrides this for production deployments. The fallback
-	// path matters only for local dev (no admin pool) and for the
-	// brief window during which migration 000051 has not been
-	// applied — both surface visibly elsewhere (startup logs / API
-	// boot error).
+	// path matters for local dev (no admin pool), for the brief
+	// window during which migration 000051 has not been applied,
+	// AND for transient admin-pool unavailability — see the function
+	// doc above for the fail-open rationale.
 	isPlatformAdmin := claims.IsPlatformAdmin
 	if s.adminPool != nil && claims.UserID != uuid.Nil {
 		current, err := s.lookupPlatformAdmin(ctx, claims.UserID)
 		if err != nil {
-			return nil, fmt.Errorf("auth: refresh platform-admin lookup: %w", err)
+			// Fail open to the cached claim value rather than
+			// rejecting the refresh. See the function doc for
+			// the availability vs. freshness tradeoff.
+			log.Printf("auth: refresh platform-admin lookup failed for user=%s; honouring refresh-token claim (%t): %v", claims.UserID, isPlatformAdmin, err)
+		} else {
+			isPlatformAdmin = current
 		}
-		isPlatformAdmin = current
 	}
 	base := Claims{
 		UserID:          claims.UserID,
