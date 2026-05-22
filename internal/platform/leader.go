@@ -156,10 +156,23 @@ func (le *LeaderElection) Run(ctx context.Context, leaderFn func(ctx context.Con
 		}
 
 		// Lead until heartbeat fails, leaderFn returns, or ctx
-		// cancels.
-		le.lead(ctx, conn, leaderFn)
+		// cancels. lead returns whether leaderFn exited with an
+		// error so we can throttle the next acquisition attempt
+		// if leadership ended due to a fast-failure (e.g.
+		// drainLoop's initial LISTEN dial failed). Without this
+		// throttle, a partial outage that lets us acquire the
+		// lock but breaks leaderFn would produce a tight
+		// acquire/release cycle (~milliseconds), saturating
+		// Postgres with advisory-lock churn for as long as the
+		// underlying failure persisted.
+		failed := le.lead(ctx, conn, leaderFn)
 		_ = conn.Close(context.Background())
 		log.Printf("leader[%s]: released (lockKey=%d)", le.identity, le.lockKey)
+		if failed && ctx.Err() == nil {
+			if !sleepCtx(ctx, le.pollInterval) {
+				return nil
+			}
+		}
 	}
 }
 
@@ -194,7 +207,13 @@ func (le *LeaderElection) acquire(ctx context.Context) (bool, *pgx.Conn) {
 // conn — and the lock with it — is gone), or (c) leaderFn returns on
 // its own. In all cases the returned function has stopped and any
 // goroutines it spawned have unwound through the sub-context cancel.
-func (le *LeaderElection) lead(ctx context.Context, conn *pgx.Conn, leaderFn func(ctx context.Context) error) {
+//
+// Returns true when leadership ended due to a failure mode that should
+// throttle the next acquisition attempt: leaderFn returning a non-nil
+// error, or the heartbeat ping failing. Returns false on clean ctx
+// cancellation or on leaderFn returning nil (which is treated as a
+// voluntary stand-down rather than a failure).
+func (le *LeaderElection) lead(ctx context.Context, conn *pgx.Conn, leaderFn func(ctx context.Context) error) bool {
 	leaderCtx, leaderCancel := context.WithCancel(ctx)
 	defer leaderCancel()
 
@@ -210,12 +229,13 @@ func (le *LeaderElection) lead(ctx context.Context, conn *pgx.Conn, leaderFn fun
 		case <-ctx.Done():
 			leaderCancel()
 			<-done // wait for leaderFn to unwind
-			return
+			return false
 		case err := <-done:
 			if err != nil {
 				log.Printf("leader[%s]: leader fn exited with error: %v", le.identity, err)
+				return true
 			}
-			return
+			return false
 		case <-ticker.C:
 			// Ping the dedicated conn. If it's dead the OS may not
 			// have surfaced the failure yet (TCP keepalive ~75s on
@@ -228,7 +248,7 @@ func (le *LeaderElection) lead(ctx context.Context, conn *pgx.Conn, leaderFn fun
 				log.Printf("leader[%s]: heartbeat failed: %v; stepping down", le.identity, err)
 				leaderCancel()
 				<-done
-				return
+				return true
 			}
 		}
 	}

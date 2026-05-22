@@ -248,6 +248,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		rl, err := platform.NewRedisRateLimiter(ctx, cfg.RedisURL, rateLimitCfg)
 		if err != nil {
 			if cfg.RequireRedis {
+				runCleanups(cleanups)
 				return nil, nil, fmt.Errorf("api: redis rate limiter init failed and KAPP_REQUIRE_REDIS=1: %w", err)
 			}
 			log.Printf("api: redis rate limiter init failed, falling back to in-process: %v", err)
@@ -259,6 +260,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		ipRL, err := platform.NewRedisIPRateLimiter(ctx, cfg.RedisURL)
 		if err != nil {
 			if cfg.RequireRedis {
+				runCleanups(cleanups)
 				return nil, nil, fmt.Errorf("api: redis ip rate limiter init failed and KAPP_REQUIRE_REDIS=1: %w", err)
 			}
 			log.Printf("api: redis ip rate limiter init failed, falling back to in-process: %v", err)
