@@ -78,8 +78,16 @@ type TenantLookup interface {
 
 // TenantFromContext returns the tenant stored on the request context by
 // TenantMiddleware, or nil if the context has no tenant.
+//
+// Callers MUST go through this function rather than reading ctxKeyTenant
+// directly — the key may carry a typed nil planted by ClearTenant, which a
+// raw `ctx.Value(ctxKeyTenant) != nil` check would interpret as "tenant
+// present" and nil-deref on first field access. The explicit `t != nil`
+// branch below collapses the typed-nil and missing-key cases into a single
+// untyped nil return so downstream `if tenant == nil` checks behave
+// identically on both shapes.
 func TenantFromContext(ctx context.Context) *tenant.Tenant {
-	if t, ok := ctx.Value(ctxKeyTenant).(*tenant.Tenant); ok {
+	if t, ok := ctx.Value(ctxKeyTenant).(*tenant.Tenant); ok && t != nil {
 		return t
 	}
 	return nil
