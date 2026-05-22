@@ -70,6 +70,30 @@ type Config struct {
 	KTypeCacheSize  int
 	AuthzCacheSize  int
 	TenantCacheSize int
+
+	// RedisURL is the connection string for the shared Redis instance
+	// that backs the distributed tenant + IP rate limiters (Phase 1)
+	// and any future cross-replica coordination primitives. Empty is
+	// permitted in local-dev (`make dev`, single-process docker-compose)
+	// — both limiters then fall back to in-process maps which enforce
+	// limits per-pod rather than globally.
+	//
+	// Phase 3 introduces RequireRedis as a hard gate so production
+	// deployments cannot accidentally fall back to the in-process
+	// limiter. When RequireRedis is true and RedisURL is empty,
+	// LoadConfig returns an error rather than booting the API with
+	// non-distributed rate-limiting; this matches the existing pattern
+	// for DB_URL and avoids the "silent dev-mode in production"
+	// failure class.
+	RedisURL string
+
+	// RequireRedis (sourced from KAPP_REQUIRE_REDIS) opts a deployment
+	// into the strict Redis-required mode. Production deployments
+	// SHOULD set KAPP_REQUIRE_REDIS=1 (or =true) so a misconfigured
+	// REDIS_URL fails the boot loudly instead of silently degrading
+	// to per-pod rate limiting. Default false so local dev continues
+	// to boot without Redis.
+	RequireRedis bool
 }
 
 // LoadConfig reads configuration from environment variables and returns a
@@ -92,11 +116,37 @@ func LoadConfig() (*Config, error) {
 		KTypeCacheSize:   getenvInt("KAPP_KTYPE_CACHE_SIZE", 1024),
 		AuthzCacheSize:   getenvInt("KAPP_AUTHZ_CACHE_SIZE", 512),
 		TenantCacheSize:  getenvInt("KAPP_TENANT_CACHE_SIZE", 256),
+		RedisURL:         os.Getenv("REDIS_URL"),
+		RequireRedis:     getenvBool("KAPP_REQUIRE_REDIS", false),
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, errors.New("DB_URL is required")
 	}
+	if cfg.RequireRedis && cfg.RedisURL == "" {
+		return nil, errors.New("KAPP_REQUIRE_REDIS=1 but REDIS_URL is empty; set REDIS_URL or unset KAPP_REQUIRE_REDIS to permit in-process fallback")
+	}
 	return cfg, nil
+}
+
+// getenvBool parses a string env var as a boolean. Accepts the strings
+// "1", "true", "TRUE", "True" (true) and "0", "false", "FALSE", "False"
+// (false); anything else returns the fallback so a typo doesn't silently
+// flip the value. Centralising the parser ensures every boolean env var
+// in this package uses the same predictable semantics (notably, raw
+// presence does NOT imply truthiness — value is always inspected).
+func getenvBool(key string, fallback bool) bool {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	switch raw {
+	case "1", "true", "TRUE", "True":
+		return true
+	case "0", "false", "FALSE", "False":
+		return false
+	default:
+		return fallback
+	}
 }
 
 // getenvInt returns the integer value of the named environment variable,
