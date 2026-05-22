@@ -104,7 +104,7 @@ func registerRoutes(d *apiDeps) chi.Router {
 				pmailer = failingPortalMailer{
 					err: errors.New("portal: SMTP not configured (set SMTP_HOST); cannot send magic links"),
 				}
-				log.Printf("api: WARN portal magic-link mailer disabled (SMTP_HOST empty); /portal/auth/request will return 500 until SMTP is configured")
+				log.Printf("api: WARN portal magic-link mailer disabled (SMTP_HOST empty); /portal/auth/request will return 503 until SMTP is configured")
 			}
 			porh := &portalHandlers{
 				tenants:  d.tenantSvc,
@@ -244,8 +244,14 @@ func registerRoutes(d *apiDeps) chi.Router {
 					// consolidation. The store reads each member
 					// tenant's trial balance via the admin d.pool
 					// (BYPASSRLS) so a single run can span tenants.
-					rates := ledger.NewExchangeRateStore(d.pool)
-					consStore := ledger.NewConsolidationStore(d.adminPool, d.ledgerStore, rates)
+					// Reuses d.apiExchangeRates so the consolidation
+					// rate translations converge on the same in-process
+					// rate store that the ledger and the /currencies
+					// browser endpoints already share — a separate store
+					// would not be incorrect (both wrap the same pool)
+					// but it would split any future in-memory caching
+					// or rotation logic into two parallel copies.
+					consStore := ledger.NewConsolidationStore(d.adminPool, d.ledgerStore, d.apiExchangeRates)
 					ch := &consolidationHandlers{store: consStore}
 					r.Post("/consolidation/groups", ch.createGroup)
 					r.Post("/consolidation/groups/{id}/run", ch.run)

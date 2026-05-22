@@ -53,9 +53,24 @@ import (
 // process is in the middle of going down, the only sensible action
 // is to keep tearing down rather than block on the first close()
 // that returns an error.
+//
+// Each cleanup is wrapped in a per-iteration recover() so a panicking
+// Close() does not strand the remaining resources unclosed. This
+// matches Go's native `defer` semantics, where the runtime continues
+// unwinding through every queued defer even after a panic mid-stack.
+// The recovered value is logged so an operator looking at shutdown
+// logs can still see the panic instead of having it silently
+// swallowed by the goroutine boundary.
 func runCleanups(cleanups []func()) {
 	for i := len(cleanups) - 1; i >= 0; i-- {
-		cleanups[i]()
+		func(fn func()) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("api: cleanup panic (continuing): %v", rec)
+				}
+			}()
+			fn()
+		}(cleanups[i])
 	}
 }
 
@@ -393,7 +408,14 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (*apiDeps, func(), err
 	agents.RegisterInventoryTools(executor, inventoryStore)
 	agents.RegisterInventoryReorderTool(executor, inventory.NewReorderHandler(recordStore, inventoryStore))
 	agents.RegisterHRTools(executor, hrStore)
-	agents.RegisterPayrollTools(executor, hr.NewPayrollEngine(recordStore, ledgerStore).WithCountryResolver(tenantCountryResolver(tenantSvc)))
+	// Single payroll engine instance reused across the agent tool surface
+	// and the hrHandlers HTTP surface. The engine is stateless (it just
+	// composes recordStore + ledgerStore + a country resolver), so two
+	// instances would produce identical behavior — but a single instance
+	// keeps allocations down and makes it unambiguous to readers that
+	// both surfaces share the same posting / country-resolution path.
+	payrollEngine := hr.NewPayrollEngine(recordStore, ledgerStore).WithCountryResolver(tenantCountryResolver(tenantSvc))
+	agents.RegisterPayrollTools(executor, payrollEngine)
 	agents.RegisterLMSTools(executor, lmsStore)
 	agents.RegisterCertificateTool(executor, lms.NewCertificateIssuer(recordStore, pool))
 	agents.RegisterHelpdeskTools(executor, helpdeskStore)
@@ -496,13 +518,25 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (*apiDeps, func(), err
 		pools:    insightsPools,
 		features: featureStore,
 	}
+	// Public embed billing prefers the Redis-backed limiter when wired
+	// so multi-replica deployments share a single per-tenant token
+	// bucket. Without this, a viral embed served across N replicas
+	// could burn through N × the configured per-tenant ceiling because
+	// each pod's in-process limiter accounts independently. The
+	// in-process limiter remains the fallback when REDIS_URL is unset.
+	var embedTenantLimiter tenantRateLimiter
+	if redisLimiter != nil {
+		embedTenantLimiter = redisLimiter
+	} else {
+		embedTenantLimiter = rateLimiter
+	}
 	insembh := &insightsEmbedHandlers{
 		embeds:      insightsEmbeds,
 		dashboards:  insightsDashboardStore,
 		queries:     insightsQueryStore,
 		runner:      insightsRunner,
 		features:    featureStore,
-		rateLimiter: rateLimiter,
+		rateLimiter: embedTenantLimiter,
 	}
 
 	// Inbound email → ticket. Wired only when adminPool is
@@ -518,8 +552,10 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (*apiDeps, func(), err
 	}
 	// Phase J payroll engine — reuses the record store + ledger
 	// store so posted pay_runs ride the same JE / idempotency
-	// path as AR/AP.
-	hrh := &hrHandlers{engine: hr.NewPayrollEngine(recordStore, ledgerStore).WithCountryResolver(tenantCountryResolver(tenantSvc))}
+	// path as AR/AP. payrollEngine was constructed once above and is
+	// shared with the agent tool surface so both expose identical
+	// posting / country-resolver behaviour.
+	hrh := &hrHandlers{engine: payrollEngine}
 
 	// Phase H JWT auth. The signer is built from KAPP_JWT_SECRET; when
 	// the secret is absent we log and skip wiring the SSO endpoints so
