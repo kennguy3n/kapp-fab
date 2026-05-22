@@ -593,10 +593,11 @@ populates after evaluator-side resolution.
 `/reports`, `/insights`, `/audit`, `/agents`, `/records`) with
 `authz.Middleware`. `/records` uses a method-aware helper that
 selects `krecord.read` for `GET` and `krecord.write` for
-`POST/PUT/PATCH/DELETE`. Enforcement is opt-in via the
-`KAPP_AUTHZ_ENFORCE` env var so Phase A dev/test setups without
-a real JWT context keep working until JWT propagation is in
-place; staging and production flip the flag on.
+`POST/PUT/PATCH/DELETE`. Enforcement is **ON by default** as of
+the Phase 1 security hardening; set `KAPP_AUTHZ_ENFORCE=0` (or
+`false`) only for local development against pre-JWT clients.
+Disabling enforcement emits a startup WARN log and must never
+ship to staging or production.
 
 The integration test
 `internal/integrationtest/rbac_test.go::TestAuthzMultiRoleAndHierarchy`

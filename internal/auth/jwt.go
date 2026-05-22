@@ -58,6 +58,14 @@ type Claims struct {
 	// filter helpdesk tickets by customer_email without a second
 	// portal_users lookup on every request.
 	Email string `json:"email,omitempty"`
+	// IsPlatformAdmin grants access to control-plane routes
+	// (/api/v1/tenants/*, /api/v1/admin/*, KType registration). It
+	// is issued only by the SSO path when the user has the
+	// "platform_admin" membership role on the resolved tenant, OR
+	// the bootstrap KAPP_PLATFORM_ADMIN_USERS env var lists the
+	// user id. Tenant member roles cannot grant this claim — it is
+	// a property of the Kapp install, not of any single tenant.
+	IsPlatformAdmin bool `json:"platform_admin,omitempty"`
 	// Standard JWT claims (subset we actually use).
 	Issuer    string `json:"iss,omitempty"`
 	Audience  string `json:"aud,omitempty"`

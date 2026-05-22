@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -39,9 +40,9 @@ type KChatClient interface {
 // GET {BaseURL}/api/users/me to fetch the profile. The API key is a
 // service-to-service credential supplied by KChat admin.
 type HTTPKChatClient struct {
-	BaseURL  string
-	APIKey   string
-	client   *http.Client
+	BaseURL string
+	APIKey  string
+	client  *http.Client
 }
 
 // NewHTTPKChatClient returns a KChat SSO client. BaseURL is the
@@ -140,10 +141,11 @@ type ExchangeResult struct {
 // ResolvedUser is the lightweight row the SSO path produces. Mirrors
 // the users table columns we persist after first login.
 type ResolvedUser struct {
-	ID          uuid.UUID `json:"id"`
-	KChatUserID string    `json:"kchat_user_id"`
-	Email       string    `json:"email"`
-	DisplayName string    `json:"display_name"`
+	ID              uuid.UUID `json:"id"`
+	KChatUserID     string    `json:"kchat_user_id"`
+	Email           string    `json:"email"`
+	DisplayName     string    `json:"display_name"`
+	IsPlatformAdmin bool      `json:"is_platform_admin,omitempty"`
 }
 
 // TenantRef is the membership summary returned to the UI so users
@@ -159,11 +161,11 @@ type TenantRef struct {
 // store. A deployment instantiates one of these and calls Exchange
 // from the POST /api/v1/auth/sso handler.
 type SSOService struct {
-	client     KChatClient
-	signer     *Signer
-	sessions   SessionStore
-	pool       *pgxpool.Pool
-	adminPool  *pgxpool.Pool
+	client    KChatClient
+	signer    *Signer
+	sessions  SessionStore
+	pool      *pgxpool.Pool
+	adminPool *pgxpool.Pool
 }
 
 // NewSSOService wires an SSOService. pool is the tenant-scoped
@@ -236,10 +238,11 @@ func (s *SSOService) Exchange(
 		return nil, err
 	}
 	base := Claims{
-		UserID:    user.ID,
-		TenantID:  chosen.ID,
-		Roles:     roles,
-		SessionID: sess.ID,
+		UserID:          user.ID,
+		TenantID:        chosen.ID,
+		Roles:           roles,
+		SessionID:       sess.ID,
+		IsPlatformAdmin: user.IsPlatformAdmin,
 	}
 	access, err := s.signer.Issue(base)
 	if err != nil {
@@ -276,10 +279,11 @@ func (s *SSOService) Refresh(ctx context.Context, refreshToken string) (*Exchang
 		}
 	}
 	base := Claims{
-		UserID:    claims.UserID,
-		TenantID:  claims.TenantID,
-		Roles:     claims.Roles,
-		SessionID: claims.SessionID,
+		UserID:          claims.UserID,
+		TenantID:        claims.TenantID,
+		Roles:           claims.Roles,
+		SessionID:       claims.SessionID,
+		IsPlatformAdmin: claims.IsPlatformAdmin,
 	}
 	access, err := s.signer.Issue(base)
 	if err != nil {
@@ -303,19 +307,59 @@ func (s *SSOService) upsertUser(ctx context.Context, p KChatProfile) (*ResolvedU
 		Email:       p.Email,
 		DisplayName: fallbackStr(p.DisplayName, p.Username),
 	}
+	// RETURNING is_platform_admin so the SSO flow can stamp the
+	// claim on the issued JWT without a second round trip. The
+	// column lands in migration 000051; deployments that have not
+	// applied it yet must do so before the API will start.
 	err := s.adminPool.QueryRow(ctx,
 		`INSERT INTO users (id, kchat_user_id, email, display_name)
 		 VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (kchat_user_id) DO UPDATE
 		   SET email = EXCLUDED.email,
 		       display_name = EXCLUDED.display_name
-		 RETURNING id`,
+		 RETURNING id, is_platform_admin`,
 		uuid.New(), p.ID, p.Email, out.DisplayName,
-	).Scan(&out.ID)
+	).Scan(&out.ID, &out.IsPlatformAdmin)
 	if err != nil {
 		return nil, fmt.Errorf("auth: upsert user: %w", err)
 	}
+	if !out.IsPlatformAdmin && s.bootstrapAdmin(out.ID) {
+		// Bootstrap path: KAPP_PLATFORM_ADMIN_USERS lists this
+		// user id. Persist the flag so the first login through
+		// also promotes the row for future sessions and the env
+		// var can be retired once at least one admin exists.
+		if _, err := s.adminPool.Exec(ctx,
+			`UPDATE users SET is_platform_admin = TRUE WHERE id = $1`,
+			out.ID,
+		); err != nil {
+			return nil, fmt.Errorf("auth: bootstrap platform admin: %w", err)
+		}
+		out.IsPlatformAdmin = true
+	}
 	return out, nil
+}
+
+// bootstrapAdmin reports whether the user id is enumerated in the
+// KAPP_PLATFORM_ADMIN_USERS env var. Operators set this on a fresh
+// install so the very first SSO login auto-promotes a known user;
+// subsequent installs leave it unset and rely on the persisted
+// users.is_platform_admin column. Empty / malformed values are
+// silently ignored so a typo cannot block an otherwise valid login.
+func (s *SSOService) bootstrapAdmin(id uuid.UUID) bool {
+	raw := os.Getenv("KAPP_PLATFORM_ADMIN_USERS")
+	if raw == "" {
+		return false
+	}
+	for _, field := range strings.Split(raw, ",") {
+		candidate, err := uuid.Parse(strings.TrimSpace(field))
+		if err != nil {
+			continue
+		}
+		if candidate == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *SSOService) listMemberships(ctx context.Context, userID uuid.UUID) ([]TenantRef, error) {

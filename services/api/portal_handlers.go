@@ -13,6 +13,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/auth"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
+	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
@@ -63,17 +64,45 @@ func (h *portalHandlers) portalFeatureAllowed(ctx context.Context, tenantID uuid
 }
 
 // portalMailer abstracts the transport that delivers a magic link.
-// Production wires an SMTP sender; dev logs the link so operators
-// can paste it into the portal manually.
+// Production wires the SMTP-backed portalSMTPMailer; deployments
+// without SMTP configured get a failingPortalMailer that returns an
+// explicit error so the request surface (and operator alerts) make
+// the misconfiguration visible instead of silently logging the
+// magic-link token to stdout.
 type portalMailer interface {
 	Send(ctx context.Context, tenantID uuid.UUID, to, link string) error
 }
 
-type stdoutPortalMailer struct{}
+// portalSMTPMailer adapts notifications.SMTPSender to the portal
+// mailer interface. The subject and body are deliberately terse and
+// branding-free — the magic-link URL is the only thing the customer
+// needs and any extra prose is an attack surface for templating
+// bugs that could leak the token into the message envelope.
+type portalSMTPMailer struct {
+	sender notifications.SMTPSender
+}
 
-func (stdoutPortalMailer) Send(ctx context.Context, tenantID uuid.UUID, to, link string) error {
-	log.Printf("portal: magic link tenant=%s to=%q link=%q", tenantID, to, link)
-	return nil
+func (m portalSMTPMailer) Send(ctx context.Context, _ uuid.UUID, to, link string) error {
+	if to == "" {
+		return errors.New("portal: empty recipient")
+	}
+	body := "Sign in to the customer portal using the link below.\r\n\r\n" +
+		link + "\r\n\r\n" +
+		"If you did not request this email you can safely ignore it."
+	return m.sender.Send(ctx, []string{to}, "Sign in to the customer portal", body)
+}
+
+// failingPortalMailer is wired when SMTPHost is empty. It refuses
+// every Send so a misconfigured production deployment fails LOUDLY
+// (every magic-link request errors) instead of silently logging
+// tokens to stdout — a regression that previously masked credential
+// exposure across rotated logs.
+type failingPortalMailer struct {
+	err error
+}
+
+func (m failingPortalMailer) Send(context.Context, uuid.UUID, string, string) error {
+	return m.err
 }
 
 // --- /auth endpoints ---------------------------------------------------

@@ -74,12 +74,27 @@ func (h *formsHandlers) public(w http.ResponseWriter, r *http.Request) {
 
 type submitFormRequest struct {
 	Data map[string]any `json:"data"`
+	// Honeypot is a hidden field the public form template emits as
+	// CSS-hidden so real users never fill it in. Bots that scrape
+	// the rendered form and submit every field fill it in and trip
+	// this guard. The field name is intentionally generic ("url")
+	// so it looks like a legitimate field to a naive scraper.
+	Honeypot string `json:"url,omitempty"`
 }
 
+// honeypotFields are the JSON keys that, if non-empty, indicate an
+// automated submission. The HTML template renders an invisible input
+// for each one; humans never see them, bots fill them in.
+var honeypotFields = []string{"url", "website", "homepage"}
+
 // submit accepts the public form payload and creates a KRecord under
-// the form's tenant. Rate limiting by IP should be enforced by the
-// reverse proxy / middleware — this handler itself does not re-enter
-// the rate limiter because there is no tenant header to key on.
+// the form's tenant. IP-based rate limiting is enforced by the
+// IPRateLimitMiddleware mounted on the route; the honeypot check
+// below catches drive-by bots that pass the rate limit but fill in
+// the invisible decoy field that the template emits as CSS-hidden.
+//
+// Successful spam is silently absorbed (200 with an empty record id)
+// so the bot cannot tell its submission was rejected and adapt.
 func (h *formsHandlers) submit(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
@@ -89,6 +104,15 @@ func (h *formsHandlers) submit(w http.ResponseWriter, r *http.Request) {
 	var req submitFormRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	// Honeypot trips when either the top-level "url" field or any
+	// of the documented decoy field names inside req.Data carries
+	// a non-empty value. We return 202 Accepted with no body to
+	// look indistinguishable from a successful drop — bots that
+	// see 4xx adapt; bots that see 2xx without verifying do not.
+	if req.Honeypot != "" || hasHoneypotValue(req.Data) {
+		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 	var submitter *uuid.UUID
@@ -101,6 +125,19 @@ func (h *formsHandlers) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, rec)
+}
+
+func hasHoneypotValue(data map[string]any) bool {
+	for _, key := range honeypotFields {
+		v, ok := data[key]
+		if !ok {
+			continue
+		}
+		if s, ok := v.(string); ok && s != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func writeFormError(w http.ResponseWriter, err error) {

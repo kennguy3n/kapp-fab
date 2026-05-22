@@ -94,15 +94,19 @@ func run() error {
 	// entries explicitly on every mutation.
 	authzCache := platform.NewLRUCache(512, 30*time.Second)
 	authzEval := authz.NewPGEvaluator(pool, authzCache)
-	// Authorization gating is opt-in via KAPP_AUTHZ_ENFORCE so tenants
-	// that have not yet rolled out JWT auth (where the user id is
-	// pulled from the bearer token) keep working under the historical
-	// X-Tenant-ID-only header convention. When the env var is empty
-	// the gate is a no-op middleware; when truthy the middleware
-	// enforces the supplied action+resource pair on every request.
-	// Routes that always require authorization (e.g. /api/v1/roles)
-	// mount authz.Middleware directly and are not affected.
-	authzEnforced := os.Getenv("KAPP_AUTHZ_ENFORCE") == "1" || strings.EqualFold(os.Getenv("KAPP_AUTHZ_ENFORCE"), "true")
+	// Authorization gating is ENABLED by default. Set
+	// KAPP_AUTHZ_ENFORCE=0 (or "false") to explicitly opt out — useful
+	// only for local development against pre-JWT clients that still
+	// authenticate via X-Tenant-ID alone. Production deployments
+	// should NEVER disable this; opting out is logged at WARN so the
+	// misconfiguration is visible in operator dashboards.
+	//
+	// When enforcement is on, the gate runs authz.Middleware (or
+	// MethodMiddleware) against every gated route. Routes that always
+	// require authorization (e.g. /api/v1/roles) mount
+	// authz.Middleware directly and are not affected by this gate.
+	authzDisabled := os.Getenv("KAPP_AUTHZ_ENFORCE") == "0" || strings.EqualFold(os.Getenv("KAPP_AUTHZ_ENFORCE"), "false")
+	authzEnforced := !authzDisabled
 	authzGate := func(action, resource string) func(http.Handler) http.Handler {
 		if !authzEnforced {
 			return func(next http.Handler) http.Handler { return next }
@@ -116,9 +120,9 @@ func run() error {
 		return authz.MethodMiddleware(authzEval, readAction, writeAction, resource)
 	}
 	if authzEnforced {
-		log.Printf("api: authz enforcement ENABLED (KAPP_AUTHZ_ENFORCE)")
+		log.Printf("api: authz enforcement ENABLED (default)")
 	} else {
-		log.Printf("api: authz enforcement disabled (set KAPP_AUTHZ_ENFORCE=1 to enable)")
+		log.Printf("api: WARN authz enforcement DISABLED (KAPP_AUTHZ_ENFORCE=%q) — every gated route is wide open; do NOT run this in production", os.Getenv("KAPP_AUTHZ_ENFORCE"))
 	}
 	eventPublisher := events.NewPGPublisher(pool)
 	auditor := audit.NewPGLogger(pool)
@@ -163,6 +167,7 @@ func run() error {
 	rateLimitCfg := platform.DefaultRateLimitConfig()
 	rateLimiter := platform.NewRateLimiter(rateLimitCfg)
 	var redisLimiter *platform.RedisRateLimiter
+	var ipRedisLimiter *platform.RedisIPRateLimiter
 	if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
 		rl, err := platform.NewRedisRateLimiter(ctx, redisURL, rateLimitCfg)
 		if err != nil {
@@ -172,7 +177,27 @@ func run() error {
 			defer func() { _ = redisLimiter.Close() }()
 			log.Printf("api: distributed rate limiter enabled (redis)")
 		}
+		ipRL, err := platform.NewRedisIPRateLimiter(ctx, redisURL)
+		if err != nil {
+			log.Printf("api: redis ip rate limiter init failed, falling back to in-process: %v", err)
+		} else {
+			ipRedisLimiter = ipRL
+			defer func() { _ = ipRedisLimiter.Close() }()
+			log.Printf("api: distributed ip rate limiter enabled (redis)")
+		}
 	}
+	// IP-keyed rate limiter for public, un-authenticated routes
+	// (e.g. POST /api/v1/forms/{id}/submit). Production replicas
+	// share the bucket via Redis when REDIS_URL is set; otherwise
+	// each pod enforces independently, which is still useful as a
+	// per-pod abuse cap.
+	var ipRateBackend platform.IPRateLimiterBackend
+	if ipRedisLimiter != nil {
+		ipRateBackend = ipRedisLimiter
+	} else {
+		ipRateBackend = platform.NewInProcIPRateLimiter()
+	}
+	publicFormIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, 10, 10)
 	quotaEnforcer := platform.NewQuotaEnforcer(pool)
 
 	// Phase J — tenant feature flags, plan definitions, and usage
@@ -559,6 +584,27 @@ func run() error {
 		log.Printf("api: JWT auth disabled (%v)", err)
 	}
 
+	// adminChain wraps a chi router with the JWT + IsPlatformAdmin
+	// gate. Control-plane endpoints (tenant CRUD, /api/v1/admin/*,
+	// POST /api/v1/ktypes) call this so an unauthenticated client
+	// cannot suspend / archive / delete tenants. When the JWT signer
+	// is not configured the chain mounts a single middleware that
+	// returns 503 — refusing to register the routes would surface as
+	// a confusing 404, and silently allowing them through would
+	// reintroduce the very vulnerability this chain exists to close.
+	adminChain := func(r chi.Router) {
+		if authh.signer == nil {
+			r.Use(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					http.Error(w, "admin routes require JWT auth; set KAPP_JWT_SECRET", http.StatusServiceUnavailable)
+				})
+			})
+			return
+		}
+		r.Use(auth.Middleware(authh.signer, tenantSvc, sessionStore))
+		r.Use(auth.AdminMiddleware())
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -608,12 +654,35 @@ func run() error {
 		// open indefinitely. Portal handlers are regular request /
 		// response, no streaming, so the deadline is safe.
 		if authh.signer != nil {
+			// Real SMTP delivery for magic links. When SMTPHost is
+			// empty the failingPortalMailer is wired so every
+			// /portal/auth/request errors out — production mis-
+			// configurations must surface visibly rather than fall
+			// back to log.Printf'ing tokens to stdout, which is
+			// where they previously ended up via the old stdout
+			// stub.
+			var pmailer portalMailer
+			if cfg.SMTPHost != "" {
+				smtpAdapter := notifications.NewSMTPAdapter(notifications.SMTPConfig{
+					Host:     cfg.SMTPHost,
+					Port:     cfg.SMTPPort,
+					User:     cfg.SMTPUser,
+					Password: cfg.SMTPPassword,
+					From:     cfg.SMTPFrom,
+				})
+				pmailer = portalSMTPMailer{sender: smtpAdapter}
+			} else {
+				pmailer = failingPortalMailer{
+					err: errors.New("portal: SMTP not configured (set SMTP_HOST); cannot send magic links"),
+				}
+				log.Printf("api: WARN portal magic-link mailer disabled (SMTP_HOST empty); /portal/auth/request will return 500 until SMTP is configured")
+			}
 			porh := &portalHandlers{
 				tenants:  tenantSvc,
 				portal:   portalStore,
 				signer:   authh.signer,
 				records:  recordStore,
-				mailer:   stdoutPortalMailer{},
+				mailer:   pmailer,
 				features: featureStore,
 			}
 			r.Route("/api/v1/portal", func(r chi.Router) {
@@ -650,38 +719,43 @@ func run() error {
 			})
 		}
 
-		// Control-plane tenant lifecycle routes (not tenant-scoped).
+		// Control-plane tenant lifecycle routes. The /me sub-tree is
+		// user-facing (any authenticated tenant member can read its
+		// own features / usage / plan) so it runs under the legacy
+		// platform.TenantMiddleware; everything else mutates or reads
+		// across tenants and is gated behind the JWT + IsPlatformAdmin
+		// chain. /me is registered first so chi's static-segment
+		// preference matches it before the {id} routes underneath.
 		r.Route("/api/v1/tenants", func(r chi.Router) {
-			r.Get("/", th.list)
-			r.Post("/", th.create)
-			r.Get("/{id}", th.get)
-			r.Post("/{id}/suspend", th.suspend)
-			r.Post("/{id}/activate", th.activate)
-			r.Post("/{id}/archive", th.archive)
-			r.Delete("/{id}", th.delete)
-			r.Post("/{id}/setup", th.setup)
-			r.Get("/{id}/features", feath.list)
-			r.Put("/{id}/features", feath.update)
-			r.Get("/{id}/placement", plch.get)
-			r.Put("/{id}/placement", plch.put)
-			if reth != nil {
-				r.Get("/{id}/retention", reth.list)
-				r.Put("/{id}/retention", reth.put)
-			}
-			r.Get("/{id}/usage", meth.usage)
-			r.Get("/{id}/usage/history", meth.usageHistory)
-			r.Post("/{id}/plan", meth.changePlan)
-
-			// /tenants/me/* — JWT-resolved tenant variants. The web
-			// UI can call these without knowing its own tenant
-			// uuid; the handler resolves it off the JWT claims via
-			// TenantMiddleware.
 			r.Route("/me", func(r chi.Router) {
 				r.Use(platform.TenantMiddleware(tenantSvc))
 				r.Get("/features", feath.listMe)
 				r.Get("/usage", meth.usageMe)
 				r.Get("/usage/history", meth.usageHistory)
 				r.Post("/plan", meth.changePlanMe)
+			})
+
+			r.Group(func(r chi.Router) {
+				adminChain(r)
+				r.Get("/", th.list)
+				r.Post("/", th.create)
+				r.Get("/{id}", th.get)
+				r.Post("/{id}/suspend", th.suspend)
+				r.Post("/{id}/activate", th.activate)
+				r.Post("/{id}/archive", th.archive)
+				r.Delete("/{id}", th.delete)
+				r.Post("/{id}/setup", th.setup)
+				r.Get("/{id}/features", feath.list)
+				r.Put("/{id}/features", feath.update)
+				r.Get("/{id}/placement", plch.get)
+				r.Put("/{id}/placement", plch.put)
+				if reth != nil {
+					r.Get("/{id}/retention", reth.list)
+					r.Put("/{id}/retention", reth.put)
+				}
+				r.Get("/{id}/usage", meth.usage)
+				r.Get("/{id}/usage/history", meth.usageHistory)
+				r.Post("/{id}/plan", meth.changePlan)
 			})
 		})
 
@@ -699,6 +773,7 @@ func run() error {
 		// envelope as other admin surfaces.
 		if iah != nil {
 			r.Route("/api/v1/admin", func(r chi.Router) {
+				adminChain(r)
 				r.Get("/isolation-audit", iah.get)
 				// Phase G — tier upgrade endpoint. Replaces the
 				// scripts/upgrade_tier.sh shell script with an
@@ -757,10 +832,18 @@ func run() error {
 		})
 
 		// KType registry routes (shared metadata, not tenant-scoped).
+		// GET is public so the web UI can render the schema list and
+		// per-KType detail without a JWT. POST mutates the install-
+		// wide schema registry and is gated behind the platform
+		// admin chain — a misbehaving tenant should not be able to
+		// register or replace a KType that every other tenant sees.
 		r.Route("/api/v1/ktypes", func(r chi.Router) {
-			r.Post("/", kh.register)
 			r.Get("/", kh.list)
 			r.Get("/{name}", kh.get)
+			r.Group(func(r chi.Router) {
+				adminChain(r)
+				r.Post("/", kh.register)
+			})
 		})
 
 		// Webhook management + delivery-log surface. Gated behind
@@ -1172,9 +1255,9 @@ func run() error {
 
 		// Forms KApp. Creation and tenant-scoped lookups go through the
 		// tenant middleware; public read + submit explicitly do NOT so
-		// anonymous submissions work. Public-submit rate limiting is the
-		// reverse-proxy's job since there is no X-Tenant-ID header to key
-		// on (ARCHITECTURE.md §12).
+		// anonymous submissions work. The public submit route mounts
+		// an IP-keyed token bucket and a honeypot check so the lack
+		// of tenant context does not translate to "wide open".
 		r.Route("/api/v1/forms", func(r chi.Router) {
 			r.Group(func(r chi.Router) {
 				r.Use(platform.TenantMiddleware(tenantSvc))
@@ -1183,7 +1266,17 @@ func run() error {
 				r.Post("/", fh.create)
 			})
 			r.Get("/{id}", fh.public)
-			r.Post("/{id}/submit", fh.submit)
+			// Public submit endpoint. There is no JWT or tenant
+			// header to key on, so abuse is bounded with two
+			// independent controls: an IP-keyed token bucket (10
+			// requests/minute, shared across replicas via Redis
+			// when available) and a honeypot check inside the
+			// handler. Together they cut the most common drive-by
+			// abuse vectors without breaking the public-form UX.
+			r.Group(func(r chi.Router) {
+				r.Use(publicFormIPLimit)
+				r.Post("/{id}/submit", fh.submit)
+			})
 		})
 
 		// Phase F file attachments. Uploads run under the full tenant +
