@@ -201,6 +201,52 @@ func TestLoadHTTPTimeouts_PreservesLongStreamWriteZero(t *testing.T) {
 	}
 }
 
+// Phase 6A follow-up: pin the SSE-listener prefix isolation contract.
+// When the API service runs in dual-listener mode, the SSE listener
+// must NOT pick up KAPP_HTTP_* env overrides intended for the main
+// API listener — otherwise an operator raising KAPP_HTTP_WRITE_TIMEOUT
+// for the main listener would kill every SSE subscription after that
+// window. The fix routes the SSE listener through
+// LoadHTTPTimeoutsWithPrefix("KAPP_SSE", ...) so the namespaces are
+// independent.
+func TestLoadHTTPTimeoutsWithPrefix_IsolatesNamespaces(t *testing.T) {
+	// Main listener env: aggressive overrides that would break SSE.
+	t.Setenv("KAPP_HTTP_WRITE_TIMEOUT", "180s")
+	t.Setenv("KAPP_HTTP_READ_TIMEOUT", "30s")
+	// SSE-namespace env: unset — keeps the LongStreamTimeouts base.
+
+	main := LoadHTTPTimeoutsWithPrefix("KAPP_HTTP", DefaultHTTPTimeouts())
+	if main.Write != 180*time.Second {
+		t.Errorf("main Write: got %v, want 180s", main.Write)
+	}
+
+	sse := LoadHTTPTimeoutsWithPrefix("KAPP_SSE", LongStreamTimeouts())
+	if sse.Write != 0 {
+		t.Errorf("sse Write: got %v, want 0 (KAPP_HTTP_WRITE_TIMEOUT must not bleed into KAPP_SSE_ namespace)", sse.Write)
+	}
+	if sse.Read != 60*time.Second {
+		t.Errorf("sse Read: got %v, want 60s (KAPP_HTTP_READ_TIMEOUT must not bleed into KAPP_SSE_ namespace)", sse.Read)
+	}
+}
+
+// Confirm the SSE namespace IS plumbed: setting KAPP_SSE_* overrides
+// must actually reach the SSE timeouts.
+func TestLoadHTTPTimeoutsWithPrefix_SSEOverridesApply(t *testing.T) {
+	t.Setenv("KAPP_SSE_READ_HEADER_TIMEOUT", "3s")
+	t.Setenv("KAPP_SSE_IDLE_TIMEOUT", "300s")
+	t.Setenv("KAPP_SSE_WRITE_TIMEOUT", "0s") // explicit zero allowed
+	sse := LoadHTTPTimeoutsWithPrefix("KAPP_SSE", LongStreamTimeouts())
+	if sse.ReadHeader != 3*time.Second {
+		t.Errorf("ReadHeader: got %v, want 3s", sse.ReadHeader)
+	}
+	if sse.Idle != 300*time.Second {
+		t.Errorf("Idle: got %v, want 300s", sse.Idle)
+	}
+	if sse.Write != 0 {
+		t.Errorf("Write: got %v, want 0", sse.Write)
+	}
+}
+
 func TestParseDurationEnv_RejectsZero(t *testing.T) {
 	// Direct guard: parseDurationEnv (no AllowZero) treats zero as
 	// unsafe. IdleTimeout uses this because Idle=0 = unlimited.

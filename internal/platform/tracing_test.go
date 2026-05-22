@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -148,6 +149,89 @@ func TestTracingMiddleware_AttachesTraceIDToLogger(t *testing.T) {
 	}
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
+// TestTracingMiddleware_SpanNameUsesChiRoutePattern pins the span-name
+// cardinality fix. Without this guard, every concrete UUID / numeric id
+// in a URL would produce a distinct span name and explode the cardinality
+// of the span-name index in Tempo / Jaeger / Datadog. The middleware
+// must rewrite the span name to the chi RoutePattern (e.g.
+// "GET /api/v1/records/{id}") AFTER routing, not the concrete URL path
+// (e.g. "GET /api/v1/records/abc-123").
+func TestTracingMiddleware_SpanNameUsesChiRoutePattern(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	defer otel.SetTracerProvider(noop.NewTracerProvider())
+
+	r := chi.NewRouter()
+	r.Use(TracingMiddleware("kapp-test"))
+	r.Get("/api/v1/records/{id}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/records/abc-123-def-456", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	spans := exporter.GetSpans()
+	if len(spans) == 0 {
+		t.Fatalf("expected at least one span, got 0")
+	}
+	// The outermost span is the one otelhttp produced; its final
+	// name should be the templated route, NOT the concrete path.
+	got := spans[len(spans)-1].Name
+	want := "GET /api/v1/records/{id}"
+	if got != want {
+		t.Errorf("span name = %q, want %q (concrete URL would explode cardinality in Tempo / Jaeger)", got, want)
+	}
+}
+
+// TestTracingMiddleware_SpanName404KeepsPlaceholder pins the 404 /
+// catch-all path: when chi never matches a route the RoutePattern is
+// empty, and the middleware must leave the placeholder name in place
+// rather than fall through to r.URL.Path (which would re-introduce the
+// cardinality blow-up via attacker / scanner traffic probing junk URLs).
+func TestTracingMiddleware_SpanName404KeepsPlaceholder(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	defer otel.SetTracerProvider(noop.NewTracerProvider())
+
+	r := chi.NewRouter()
+	r.Use(TracingMiddleware("kapp-test"))
+	// Register one route so the chi tree compiles + middlewares wrap;
+	// the test request probes a DIFFERENT path that 404s.
+	r.Get("/known/{id}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/junk/some-attacker-probe-uuid", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+
+	spans := exporter.GetSpans()
+	if len(spans) == 0 {
+		t.Fatalf("expected at least one span, got 0")
+	}
+	got := spans[len(spans)-1].Name
+	// Placeholder is bounded by HTTP-verb cardinality (~9).
+	want := "HTTP GET"
+	if got != want {
+		t.Errorf("span name = %q, want %q (404 must keep placeholder to prevent attacker-driven cardinality blow-up)", got, want)
 	}
 }
 

@@ -113,7 +113,12 @@ func run() error {
 	var sseSrv *http.Server
 	if cfg.SSEAddr != "" {
 		sseRouter := registerSSERoutes(d, logger)
-		sseTimeouts := platform.LoadHTTPTimeouts(platform.LongStreamTimeouts())
+		// SSE listener uses its own KAPP_SSE_* env namespace so an
+		// operator tuning KAPP_HTTP_WRITE_TIMEOUT for the main API
+		// listener does not inadvertently kill SSE streams. The
+		// LongStreamTimeouts() base keeps Write=0 unless
+		// KAPP_SSE_WRITE_TIMEOUT is explicitly set.
+		sseTimeouts := platform.LoadHTTPTimeoutsWithPrefix("KAPP_SSE", platform.LongStreamTimeouts())
 		sseSrv = &http.Server{
 			Addr:    cfg.SSEAddr,
 			Handler: sseRouter,

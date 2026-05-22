@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -43,16 +44,27 @@ func TracingMiddleware(serviceName string) func(http.Handler) http.Handler {
 		serviceName = "kapp"
 	}
 	return func(next http.Handler) http.Handler {
-		// otelhttp.NewHandler accepts a spanNameFormatter that
-		// runs AFTER the request matches a chi route, so we can
-		// produce "GET /api/v1/records/{id}" spans rather than
-		// "GET /api/v1/records/abc-123" (avoiding span cardinality
-		// explosion). Inside the formatter we look up
-		// chi.RouteContext(r.Context()).RoutePattern() — but only
-		// AFTER chi has matched, which happens inside next.ServeHTTP.
-		// otelhttp lets us mutate the span name from the handler via
-		// trace.SpanFromContext; we do that in the slog-bridge wrapper
-		// below.
+		// Span naming is a two-phase dance because otelhttp's
+		// WithSpanNameFormatter runs at span-start time — BEFORE
+		// chi has matched the route. If we used r.URL.Path there
+		// every concrete UUID / numeric id (e.g.
+		// /api/v1/records/abc-123-def) would produce a distinct
+		// span name and blow up the cardinality of the span-name
+		// index in Tempo/Jaeger/Datadog. Instead we:
+		//
+		//   1. WithSpanNameFormatter returns a generic
+		//      "HTTP <method>" placeholder at span-start time —
+		//      bounded cardinality (one per HTTP verb).
+		//   2. Inside the bridge, AFTER next.ServeHTTP returns,
+		//      we read the chi RoutePattern (now populated by
+		//      chi's routing pass) and rewrite the span name to
+		//      "<method> <pattern>" — the same low-cardinality
+		//      label MetricsMiddleware uses on the route_pattern
+		//      attribute (see internal/platform/metrics.go).
+		//
+		// This is the same pattern MetricsMiddleware uses to avoid
+		// unbounded /api/v1/records/{id} label values on the
+		// Prometheus histogram.
 		bridge := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
 			sc := trace.SpanContextFromContext(ctx)
@@ -71,11 +83,32 @@ func TracingMiddleware(serviceName string) func(http.Handler) http.Handler {
 					r = r.WithContext(ctx)
 				}
 			}
+
 			next.ServeHTTP(w, r)
+
+			// AFTER routing: rename the active span using the chi
+			// RoutePattern so the collector sees
+			// "GET /api/v1/records/{id}" instead of
+			// "GET /api/v1/records/abc-123". If chi never matched a
+			// route (404 / catch-all) the pattern is empty and we
+			// leave the placeholder name in place; this keeps 404s
+			// bucketed under one span name rather than one per
+			// junk URL a scanner probes.
+			span := trace.SpanFromContext(r.Context())
+			if span.SpanContext().IsValid() {
+				if rctx := chi.RouteContext(r.Context()); rctx != nil {
+					if pattern := rctx.RoutePattern(); pattern != "" {
+						span.SetName(r.Method + " " + pattern)
+					}
+				}
+			}
 		})
 		return otelhttp.NewHandler(bridge, serviceName,
 			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
-				return r.Method + " " + r.URL.Path
+				// Span-start placeholder: bounded by HTTP verb
+				// count (~9), not URL cardinality. The bridge
+				// above rewrites this once chi has matched.
+				return "HTTP " + r.Method
 			}),
 		)
 	}
