@@ -48,6 +48,14 @@ func run() error {
 		return err
 	}
 
+	logger := platform.NewLogger(platform.LoggerConfig{
+		Format:  cfg.LogFormat,
+		Level:   cfg.LogLevel,
+		Service: "kchat-bridge",
+		Env:     cfg.Env,
+	}, os.Stderr)
+	platform.InstallDefault(logger)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -138,7 +146,7 @@ func run() error {
 	presenceHandler := NewPresenceHandler(userStore, featureStore, tenantStore, recordStore)
 
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
+	r.Use(platform.RequestIDMiddleware(logger))
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 

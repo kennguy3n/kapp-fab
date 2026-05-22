@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"log"
+	"log/slog"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -33,13 +34,23 @@ import (
 // apiDeps would either duplicate the nil-checks or instantiate
 // stores that the binary never serves. Leaving them inline keeps
 // the conditional shape close to the routes that use them.
-func registerRoutes(d *apiDeps) chi.Router {
+func registerRoutes(d *apiDeps, logger *slog.Logger) chi.Router {
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
+	r.Use(platform.RequestIDMiddleware(logger))
+	if d.metrics != nil {
+		r.Use(platform.MetricsMiddleware(d.metrics))
+	}
 
 	r.Get("/healthz", healthHandler(d.pool))
+	// When KAPP_METRICS_ADDR is unset (dev/single-port mode), mount
+	// /metrics on the main router so operators can scrape without a
+	// second port. In production the dedicated metrics server in
+	// main.go supersedes this path.
+	if d.metrics != nil && d.cfg.MetricsAddr == "" {
+		r.Get("/metrics", d.metrics.Handler())
+	}
 	r.Get("/api/v1/", rootHandler)
 
 	// Phase H auth routes. SSO and refresh are unauthenticated (they

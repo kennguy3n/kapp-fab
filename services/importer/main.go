@@ -42,6 +42,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
+
+	logger := platform.NewLogger(platform.LoggerConfig{
+		Format:  cfg.LogFormat,
+		Level:   cfg.LogLevel,
+		Service: "importer",
+		Env:     cfg.Env,
+	}, os.Stderr)
+	platform.InstallDefault(logger)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -76,9 +85,9 @@ func run() error {
 	h := &importHandlers{pipeline: pipeline, jobs: jobStore, staging: stagingStore}
 
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
+	r.Use(platform.RequestIDMiddleware(logger))
 	r.Use(middleware.Timeout(120 * time.Second))
 
 	r.Get("/healthz", healthHandler(pool))

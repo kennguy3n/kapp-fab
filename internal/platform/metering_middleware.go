@@ -2,7 +2,7 @@ package platform
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -149,8 +149,12 @@ func (b *MeteringBuffer) flush(ctx context.Context) {
 	b.mu.Unlock()
 	for k, delta := range toFlush {
 		if err := b.store.Increment(ctx, k.tenantID, k.metric, delta); err != nil {
-			log.Printf("metering: flush tenant=%s metric=%s delta=%d: %v",
-				k.tenantID, k.metric, delta, err)
+			slog.Default().Warn("metering flush failed",
+				slog.String("tenant_id", k.tenantID.String()),
+				slog.String("metric", k.metric),
+				slog.Int64("delta", delta),
+				slog.String("err", err.Error()),
+			)
 		}
 	}
 }

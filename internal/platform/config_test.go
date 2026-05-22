@@ -118,3 +118,122 @@ func TestLoadConfig_RequireRedisGate(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadConfig_EnvAndLogDefaults verifies that the new Phase 4
+// observability config keys default safely when unset.
+func TestLoadConfig_EnvAndLogDefaults(t *testing.T) {
+	t.Setenv("DB_URL", "postgres://localhost/test")
+	os.Unsetenv("KAPP_ENV")
+	os.Unsetenv("KAPP_LOG_FORMAT")
+	os.Unsetenv("KAPP_LOG_LEVEL")
+	os.Unsetenv("KAPP_METRICS_ADDR")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Env != "dev" {
+		t.Errorf("Env: want dev, got %q", cfg.Env)
+	}
+	if cfg.LogFormat != "" {
+		t.Errorf("LogFormat: want empty (NewLogger picks default), got %q", cfg.LogFormat)
+	}
+	if cfg.LogLevel != "" {
+		t.Errorf("LogLevel: want empty (parseLevel picks info), got %q", cfg.LogLevel)
+	}
+	if cfg.MetricsAddr != "" {
+		t.Errorf("MetricsAddr: want empty (legacy in-router mount), got %q", cfg.MetricsAddr)
+	}
+}
+
+// TestLoadConfig_ValidateLogFormat verifies typo'd KAPP_LOG_FORMAT
+// values fail the boot loudly. The slog NewLogger function silently
+// falls back to text on unknown values, which would mask a production
+// misconfiguration (operator sets KAPP_LOG_FORMAT=jsom and gets text
+// output for weeks before noticing). LoadConfig surfaces it at boot.
+func TestLoadConfig_ValidateLogFormat(t *testing.T) {
+	t.Setenv("DB_URL", "postgres://localhost/test")
+
+	cases := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{"empty", "", false},
+		{"json", "json", false},
+		{"text", "text", false},
+		{"typo-jsom", "jsom", true},
+		{"typo-uppercase-JSON", "JSON", true},
+		{"typo-syslog", "syslog", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KAPP_LOG_FORMAT", tc.value)
+			_, err := LoadConfig()
+			if (err != nil) != tc.wantErr {
+				t.Errorf("err=%v wantErr=%v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_ValidateLogLevel verifies typo'd KAPP_LOG_LEVEL
+// values fail the boot loudly. Same rationale as LogFormat: silent
+// fallback to info would mask a debug-mode-in-production attempt.
+func TestLoadConfig_ValidateLogLevel(t *testing.T) {
+	t.Setenv("DB_URL", "postgres://localhost/test")
+
+	cases := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{"empty", "", false},
+		{"debug", "debug", false},
+		{"info", "info", false},
+		{"warn", "warn", false},
+		{"warning_alias", "warning", false},
+		{"error", "error", false},
+		{"err_alias", "err", false},
+		{"uppercase", "INFO", false},
+		{"typo-verbose", "verbose", true},
+		{"typo-trace", "trace", true},
+		{"typo-fatal", "fatal", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KAPP_LOG_LEVEL", tc.value)
+			_, err := LoadConfig()
+			if (err != nil) != tc.wantErr {
+				t.Errorf("err=%v wantErr=%v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_ValidateCachePositive verifies that explicit zero or
+// negative cache sizes fail boot. getenvInt already falls back to the
+// default on invalid input, so this test catches a future regression
+// where a refactor of getenvInt accidentally accepts zero.
+func TestLoadConfig_ValidateCachePositive(t *testing.T) {
+	t.Setenv("DB_URL", "postgres://localhost/test")
+	// All env vars unset so cache sizes get safe defaults; Validate
+	// should pass cleanly with defaults.
+	os.Unsetenv("KAPP_KTYPE_CACHE_SIZE")
+	os.Unsetenv("KAPP_AUTHZ_CACHE_SIZE")
+	os.Unsetenv("KAPP_TENANT_CACHE_SIZE")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig with defaults: %v", err)
+	}
+	if cfg.KTypeCacheSize <= 0 || cfg.AuthzCacheSize <= 0 || cfg.TenantCacheSize <= 0 {
+		t.Errorf("default cache sizes should be positive; got %+v", cfg)
+	}
+
+	// Force a zero into the struct (simulating a future getenvInt
+	// regression) and verify Validate rejects it.
+	cfg.TenantCacheSize = 0
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate should reject zero TenantCacheSize")
+	}
+}

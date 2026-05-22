@@ -27,6 +27,13 @@ type LRUCache struct {
 	order      *list.List
 	index      map[string]*list.Element
 	onEvict    func(key string, value any)
+
+	// Optional metrics counters. Non-nil only after WithMetrics is
+	// called. Separated from the hot-path lock so the atomic
+	// increments don't contend with the mutex.
+	hitsCounter   *counterVec
+	missesCounter *counterVec
+	cacheName     string
 }
 
 type cacheEntry struct {
@@ -52,6 +59,19 @@ func NewLRUCache(maxEntries int, ttl time.Duration) *LRUCache {
 		order:      list.New(),
 		index:      make(map[string]*list.Element, maxEntries),
 	}
+}
+
+// WithMetrics opts the cache into emitting per-lookup hit/miss counters.
+// The `name` label distinguishes this cache instance in the metrics output
+// (e.g. "tenant", "ktype", "authz"). Nil reg is a no-op.
+func (c *LRUCache) WithMetrics(reg *MetricsRegistry, name string) *LRUCache {
+	if reg == nil {
+		return c
+	}
+	c.cacheName = name
+	c.hitsCounter = reg.Counter("kapp_cache_hits_total", "Total cache hits.", "cache")
+	c.missesCounter = reg.Counter("kapp_cache_misses_total", "Total cache misses.", "cache")
+	return c
 }
 
 // SetOnEvict registers an eviction callback. Calling SetOnEvict more than
@@ -85,6 +105,9 @@ func (c *LRUCache) Get(key string) (any, bool) {
 	elem, ok := c.index[key]
 	if !ok {
 		c.mu.Unlock()
+		if c.missesCounter != nil {
+			c.missesCounter.Inc(c.cacheName)
+		}
 		return nil, false
 	}
 	entry := elem.Value.(*cacheEntry)
@@ -93,11 +116,17 @@ func (c *LRUCache) Get(key string) (any, bool) {
 		c.removeElement(elem)
 		c.mu.Unlock()
 		c.fireEvict(evicted)
+		if c.missesCounter != nil {
+			c.missesCounter.Inc(c.cacheName)
+		}
 		return nil, false
 	}
 	c.order.MoveToFront(elem)
 	value := entry.value
 	c.mu.Unlock()
+	if c.hitsCounter != nil {
+		c.hitsCounter.Inc(c.cacheName)
+	}
 	return value, true
 }
 

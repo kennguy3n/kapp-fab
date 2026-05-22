@@ -5,7 +5,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -27,6 +29,20 @@ func run() error {
 		return err
 	}
 
+	// Install the structured logger BEFORE buildDeps so any not-yet-
+	// migrated log.Printf call sites inside dependency wiring (pool
+	// open, NATS connect, KType registration) flow through the same
+	// pipeline as request-scoped lines. slog.Default() is also
+	// updated so package-level code that does slog.Info(...) ends up
+	// in the right place.
+	logger := platform.NewLogger(platform.LoggerConfig{
+		Format:  cfg.LogFormat,
+		Level:   cfg.LogLevel,
+		Service: "api",
+		Env:     cfg.Env,
+	}, os.Stderr)
+	platform.InstallDefault(logger)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -36,7 +52,7 @@ func run() error {
 	}
 	defer cleanup()
 
-	r := registerRoutes(d)
+	r := registerRoutes(d, logger)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -44,9 +60,36 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	// Optional dedicated /metrics listener. Production deployments
+	// SHOULD set KAPP_METRICS_ADDR (e.g. ":9090") so the Prometheus
+	// scraper can hit /metrics without contending with user-facing
+	// HTTP latency or going through the auth chain. When unset, the
+	// metrics handler stays mounted inside the main router (legacy
+	// behaviour) so local dev keeps working unchanged.
+	var metricsSrv *http.Server
+	if cfg.MetricsAddr != "" && d.metrics != nil {
+		metricsMux := http.NewServeMux()
+		metricsMux.HandleFunc("/metrics", d.metrics.Handler())
+		metricsMux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintln(w, "ok")
+		})
+		metricsSrv = &http.Server{
+			Addr:              cfg.MetricsAddr,
+			Handler:           metricsMux,
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		go func() {
+			logger.Info("metrics listening", slog.String("addr", cfg.MetricsAddr))
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("metrics listener", slog.String("err", err.Error()))
+			}
+		}()
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("api: listening on %s", cfg.ListenAddr)
+		logger.Info("listening", slog.String("addr", cfg.ListenAddr))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -55,7 +98,7 @@ func run() error {
 
 	select {
 	case <-ctx.Done():
-		log.Printf("api: shutdown signal received")
+		logger.Info("shutdown signal received")
 	case err := <-errCh:
 		if err != nil {
 			return err
@@ -67,6 +110,11 @@ func run() error {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return err
 	}
-	log.Printf("api: shutdown complete")
+	if metricsSrv != nil {
+		if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("metrics shutdown", slog.String("err", err.Error()))
+		}
+	}
+	logger.Info("shutdown complete")
 	return nil
 }

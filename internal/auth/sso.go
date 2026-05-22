@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -327,7 +327,11 @@ func (s *SSOService) Refresh(ctx context.Context, refreshToken string) (*Exchang
 			// Fail open to the cached claim value rather than
 			// rejecting the refresh. See the function doc for
 			// the availability vs. freshness tradeoff.
-			log.Printf("auth: refresh platform-admin lookup failed for user=%s; honouring refresh-token claim (%t): %v", claims.UserID, isPlatformAdmin, err)
+			slog.Default().Warn("refresh platform-admin lookup failed, honouring cached claim",
+				slog.String("user_id", claims.UserID.String()),
+				slog.Bool("is_platform_admin", isPlatformAdmin),
+				slog.String("err", err.Error()),
+			)
 		} else {
 			isPlatformAdmin = current
 		}
@@ -455,9 +459,15 @@ func (s *SSOService) upsertUser(ctx context.Context, p KChatProfile) (*ResolvedU
 		}
 		out.IsPlatformAdmin = true
 		if wasInsert {
-			log.Printf("auth: INFO platform admin bootstrap promoted new user=%s (kchat=%s) from KAPP_PLATFORM_ADMIN_USERS", out.ID, p.ID)
+			slog.Default().Info("platform admin bootstrap promoted new user",
+			slog.String("user_id", out.ID.String()),
+			slog.String("kchat_id", p.ID),
+		)
 		} else {
-			log.Printf("auth: WARN platform admin bootstrap re-promoted existing user=%s (kchat=%s) from KAPP_PLATFORM_ADMIN_USERS — if this was a deliberate demote, remove the kchat_user_id from the env var so it does not re-promote on next SSO login", out.ID, p.ID)
+			slog.Default().Warn("platform admin bootstrap re-promoted existing user; if this was a deliberate demote, remove the kchat_user_id from KAPP_PLATFORM_ADMIN_USERS",
+			slog.String("user_id", out.ID.String()),
+			slog.String("kchat_id", p.ID),
+		)
 		}
 	}
 	return out, nil

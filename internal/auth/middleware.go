@@ -3,7 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -109,7 +109,11 @@ func Middleware(
 					http.Error(w, "tenant is not active", http.StatusForbidden)
 					return
 				}
-				log.Printf("auth: WARN platform admin user=%s logged in via inactive home tenant=%s status=%s; allowing for recovery", claims.UserID, t.ID, t.Status)
+				slog.Default().Warn("platform admin logged in via inactive home tenant; allowing for recovery",
+					slog.String("user_id", claims.UserID.String()),
+					slog.String("tenant_id", t.ID.String()),
+					slog.String("status", string(t.Status)),
+				)
 				recoveryBypass = true
 			}
 			ctx := r.Context()
