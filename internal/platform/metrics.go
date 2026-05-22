@@ -309,16 +309,39 @@ func MetricsMiddleware(reg *MetricsRegistry) func(http.Handler) http.Handler {
 			if t := TenantFromContext(r.Context()); t != nil {
 				tenantID = t.ID.String()
 			}
-			// chi.RouteContext returns nil whenever the middleware runs
-			// before chi's router is on the context (for example when
-			// wired onto a bare http.ServeMux for /metrics or /health
-			// endpoints, or on unmatched 404 paths). Dereferencing a
-			// nil *Context panics, so fall back to the raw URL path.
+			// Path-label derivation has THREE cases. The split matters
+			// because r.URL.Path is attacker-controllable; using it
+			// as a Prometheus label inflates cardinality without
+			// bound when a scanner probes junk URLs.
+			//
+			//   chi.RouteContext != nil, RoutePattern != ""
+			//     normal-path: chi matched a registered route — use
+			//     the templated pattern (e.g. "/users/{id}"), which
+			//     is bounded by the route table.
+			//
+			//   chi.RouteContext != nil, RoutePattern == ""
+			//     404 inside chi — the router was on the stack but
+			//     no route matched. r.URL.Path here is whatever the
+			//     scanner sent, so we bucket every unmatched chi
+			//     request under a single "<unmatched>" sentinel.
+			//     This mirrors the placeholder TracingMiddleware
+			//     uses for the same case (see
+			//     internal/platform/tracing_middleware.go).
+			//
+			//   chi.RouteContext == nil
+			//     The middleware is wired on a bare http.ServeMux
+			//     (the /metrics and /healthz scrape ports do this).
+			//     r.URL.Path is the fixed mux-registered path —
+			//     "/metrics", "/healthz" — and is NOT attacker-
+			//     controllable in cardinality terms. Falling back to
+			//     it preserves scrape-side label visibility.
 			path := ""
 			if rctx := chi.RouteContext(r.Context()); rctx != nil {
 				path = rctx.RoutePattern()
-			}
-			if path == "" {
+				if path == "" {
+					path = "<unmatched>"
+				}
+			} else {
 				path = r.URL.Path
 			}
 			status := strconv.Itoa(sw.status)
