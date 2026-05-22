@@ -39,6 +39,13 @@ func registerRoutes(d *apiDeps, logger *slog.Logger) chi.Router {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(platform.RequestIDMiddleware(logger))
+	// TracingMiddleware runs AFTER RequestIDMiddleware so the
+	// ctx-scoped logger already exists when the trace_id /
+	// span_id attributes are layered on. When KAPP_OTEL_ENDPOINT
+	// is unset the global TracerProvider is no-op so the
+	// middleware emits no spans, only the slog bridge stays
+	// active.
+	r.Use(platform.TracingMiddleware("kapp-api"))
 	if d.metrics != nil {
 		r.Use(platform.MetricsMiddleware(d.metrics))
 	}

@@ -46,6 +46,24 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// OpenTelemetry tracing init runs BEFORE buildDeps so the pgx
+	// tracer installed by NewPool inside buildDeps sees the global
+	// TracerProvider this call sets. When KAPP_OTEL_ENDPOINT is
+	// unset, InitTracing installs a no-op provider so call sites can
+	// emit spans unconditionally; the hot path is a nil-check per
+	// query and ~0 wire cost.
+	tracingShutdown, err := platform.InitTracing(ctx, platform.LoadTracingConfig("kapp-api", cfg.Env))
+	if err != nil {
+		return fmt.Errorf("api: init tracing: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracingShutdown(shutdownCtx); err != nil {
+			logger.Warn("tracing shutdown", slog.String("err", err.Error()))
+		}
+	}()
+
 	d, cleanup, err := buildDeps(ctx, cfg)
 	if err != nil {
 		return err

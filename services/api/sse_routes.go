@@ -38,6 +38,7 @@ func registerSSERoutes(d *apiDeps, logger *slog.Logger) chi.Router {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(platform.RequestIDMiddleware(logger))
+	r.Use(platform.TracingMiddleware("kapp-api-sse"))
 	if d.metrics != nil {
 		r.Use(platform.MetricsMiddleware(d.metrics))
 	}

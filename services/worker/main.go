@@ -98,6 +98,23 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// OpenTelemetry tracing init runs BEFORE platform.NewPool so the
+	// otelpgx tracer attached inside NewPool finds the global
+	// TracerProvider this call sets. When KAPP_OTEL_ENDPOINT is
+	// unset the provider is a no-op and the otelpgx hot-path is a
+	// nil-check per query.
+	tracingShutdown, err := platform.InitTracing(ctx, platform.LoadTracingConfig("kapp-worker", cfg.Env))
+	if err != nil {
+		return fmt.Errorf("worker: init tracing: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracingShutdown(shutdownCtx); err != nil {
+			logger.Warn("tracing shutdown", slog.String("err", err.Error()))
+		}
+	}()
+
 	pool, err := platform.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err

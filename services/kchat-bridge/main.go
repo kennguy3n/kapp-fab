@@ -9,7 +9,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -58,6 +60,18 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	tracingShutdown, err := platform.InitTracing(ctx, platform.LoadTracingConfig("kapp-kchat-bridge", cfg.Env))
+	if err != nil {
+		return fmt.Errorf("kchat-bridge: init tracing: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracingShutdown(shutdownCtx); err != nil {
+			logger.Warn("tracing shutdown", slog.String("err", err.Error()))
+		}
+	}()
 
 	pool, err := platform.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -155,6 +169,7 @@ func run() error {
 	// budget. See internal/platform/requestid.go for the contract.
 	r.Use(middleware.Recoverer)
 	r.Use(platform.RequestIDMiddleware(logger))
+	r.Use(platform.TracingMiddleware("kapp-kchat-bridge"))
 	r.Use(middleware.Timeout(30 * time.Second))
 
 	r.Post("/kchat/cards/{ktype}", func(w http.ResponseWriter, req *http.Request) {
