@@ -878,6 +878,39 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 	// standard request-id / tracing / metrics middleware at the
 	// top of registerRoutes still applies because chi mounts the
 	// gateway as a child route, NOT a separate router.
+	//
+	// Bypassed middleware enumeration (for the future-work checklist
+	// when more proto annotations land):
+	//
+	//   - middleware.Timeout(30s):       replaced by UnaryTimeoutInterceptor (parity).
+	//   - d.rateLimitMW:                 NO gRPC equivalent yet.
+	//   - d.apiCallMW:                   NO gRPC equivalent yet.
+	//   - d.featureMW:                   NO gRPC equivalent yet.
+	//   - platform.IdempotencyMiddleware NO gRPC equivalent yet.
+	//   - platform.QuotaMiddleware       NO gRPC equivalent yet.
+	//
+	// The rate-limit / metering / feature / idempotency / quota gap
+	// is intentional for Phase A5 because the CURRENT proto-exposed
+	// RPCs all have v1 counterparts that ALSO bypass those middleware:
+	//
+	//   /kapp.v1.AuthService/SSO       -> /api/v1/auth/sso     (no rate-limit, see routes.go:67-70)
+	//   /kapp.v1.AuthService/Refresh   -> /api/v1/auth/refresh (no rate-limit, see routes.go:67-70)
+	//   /kapp.v1.KTypeService/*        -> /api/v1/ktypes/*     (no rate-limit, see routes.go:311-318)
+	//
+	// So Phase A5 ships ZERO behavioural divergence between v1 and
+	// v2 surfaces for the currently-exposed RPCs. When a future
+	// proto annotation mirrors a v1 route that DOES enforce
+	// rate-limit / metering / feature / idempotency / quota (e.g.
+	// records, agents, webhooks, approvals, search), gRPC
+	// interceptor equivalents MUST land in the SAME PR as those
+	// proto annotations so the wire-parity invariant (HTTP/gRPC
+	// byte-identity for same condition) is preserved end-to-end.
+	// Failing to do so would create a real /api/v2 bypass route
+	// for tenant quotas. This contract is enforced by code review
+	// only today; a follow-up phase should introduce a
+	// compile-time check (e.g. a //go:generate gRPC-middleware
+	// audit pass that reads proto annotations + routes.go and
+	// fails CI on coverage drift).
 	if grpcRT != nil {
 		grpcRT.MountGateway(r)
 	}
