@@ -1,4 +1,4 @@
-.PHONY: build run-api run-worker run-kchat-bridge test test-integration compose-up compose-down lint migrate
+.PHONY: build run-api run-worker run-kchat-bridge test test-integration compose-up compose-down lint migrate proto-lint proto-gen proto-breaking proto-format
 
 # The superuser connection runs migrations and test setup.
 # The application connection uses the kapp_app role so local runs exercise
@@ -51,3 +51,27 @@ compose-down:
 
 lint:
 	golangci-lint run ./...
+
+# Protobuf / gRPC targets (Pillar A4 / A5).
+#
+# `proto-lint` enforces buf's STANDARD ruleset on proto/. Wired into
+# CI so a malformed schema is caught before code review.
+proto-lint:
+	buf lint
+
+# `proto-gen` regenerates everything under gen/go/. Generated code
+# is checked in (gen/ is NOT gitignored) so consumers do not need
+# buf to build the project — only proto authors do.
+proto-gen:
+	buf generate
+
+# `proto-breaking` rejects backwards-incompatible field/service
+# changes against origin/main. The Rust SDK depends on stable
+# field numbers; this is the load-bearing guarantee.
+proto-breaking:
+	buf breaking --against '.git#branch=main,subdir=proto' proto
+
+# `proto-format` is buf's canonical formatter. Use before
+# committing proto edits to avoid review-time formatting churn.
+proto-format:
+	buf format -w

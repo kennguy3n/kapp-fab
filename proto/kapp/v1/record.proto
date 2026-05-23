@@ -1,0 +1,216 @@
+// record.proto models the KRecord surface — the generic JSONB
+// row store every business module in kapp-fab (finance,
+// inventory, helpdesk, HR, CRM, forms, etc.) builds on top of.
+//
+// Wire compatibility: every message in this file maps line-for-
+// line to the existing JSON shape emitted by services/api/records.go.
+// The data payload is `bytes` (UTF-8 JSON) rather than a typed
+// message because the schema is dynamic per KType and lives in
+// the KType registry (see ktype.proto, internal/ktype/). The
+// Rust SDK ships a small typed-wrapper helper that the user
+// composes around a generated `Record` message for the KTypes
+// they care about — keeping the wire format opaque means the
+// SDK can ship today without a 50-message-per-KType proto
+// explosion.
+syntax = "proto3";
+
+package kapp.v1;
+
+import "kapp/v1/common.proto";
+
+// Record is the canonical KRecord representation on the wire.
+// Mirrors internal/record/record.go KRecord field-for-field
+// — the `meta` envelope carries id / tenant_id / version /
+// status / created_by / updated_by / created_at / updated_at /
+// deleted_at (see common.proto ResourceMeta), and the message
+// body adds the KType-specific bits.
+message Record {
+  ResourceMeta meta = 1;
+  // ktype is the KType registry name this record's data
+  // payload conforms to (e.g. "finance.invoice", "crm.deal").
+  // Required on Create. Immutable after first write — to
+  // re-type an existing row, delete it and create a new one.
+  string ktype = 2;
+  // ktype_version pins the schema version the data payload
+  // was validated against. Zero on Create means "latest", and
+  // the server stamps the resolved version onto the response.
+  // Required on Update to enforce optimistic concurrency
+  // against the schema layer (a tenant that migrates the
+  // KType schema between read and write gets a clear conflict
+  // rather than silent data corruption).
+  int32 ktype_version = 3;
+  // data is the JSONB payload, validated against the KType
+  // schema at this version. Opaque on the wire (raw bytes);
+  // tenants and SDK helpers decode it client-side once they
+  // know which KType they're holding. Maximum size is
+  // enforced server-side via the standard request body
+  // limit; there is no per-field cap.
+  bytes data = 4;
+}
+
+// CreateRecordRequest is the body of `POST /api/v1/records/{ktype}`.
+// tenant_id is implicit from the request's auth context (the
+// gRPC server in A5 will pull it from a `tenant-id` metadata
+// header); it is NOT a client-supplied field on the wire.
+message CreateRecordRequest {
+  string ktype = 1;
+  bytes data = 2;
+}
+
+message CreateRecordResponse {
+  Record record = 1;
+}
+
+// GetRecordRequest is the request for
+// `GET /api/v1/records/{ktype}/{id}`.
+message GetRecordRequest {
+  string ktype = 1;
+  string id = 2;
+}
+
+message GetRecordResponse {
+  Record record = 1;
+}
+
+// UpdateRecordRequest is the body of
+// `PATCH /api/v1/records/{ktype}/{id}`.
+//
+// `version` is the optimistic-concurrency token; the server
+// rejects with `record.version_conflict` (=> HTTP 409 / gRPC
+// FAILED_PRECONDITION) if the stored row has been updated
+// concurrently. Clients must read-then-write — there is no
+// "force overwrite" flag by design.
+message UpdateRecordRequest {
+  string ktype = 1;
+  string id = 2;
+  bytes data = 3;
+  int32 version = 4;
+}
+
+message UpdateRecordResponse {
+  Record record = 1;
+}
+
+message DeleteRecordRequest {
+  string ktype = 1;
+  string id = 2;
+}
+
+message DeleteRecordResponse {}
+
+// ListRecordsRequest is the request for
+// `GET /api/v1/records/{ktype}`. Cursor / offset / limit
+// semantics match the REST surface — see
+// internal/record/store.go ListPage and the file-level
+// comments at the top of records.go.
+message ListRecordsRequest {
+  string ktype = 1;
+  // status filters by KRecord lifecycle state. Empty matches
+  // every status; "active" is the conventional default for
+  // user-facing list views.
+  string status = 2;
+  PaginationRequest pagination = 3;
+}
+
+message ListRecordsResponse {
+  repeated Record records = 1;
+  ListPageMeta meta = 2;
+}
+
+// BulkRecordsRequest is the body of
+// `POST /api/v1/records/{ktype}/bulk`. The server runs the
+// selected action over every id inside a single tenant
+// transaction — partial failure rolls back the whole batch
+// (services/api/records.go bulk()).
+message BulkRecordsRequest {
+  string ktype = 1;
+  repeated string ids = 2;
+  // action is one of: "status_change", "delete", "export".
+  // Modelled as a string rather than an enum so the server
+  // can add new actions without breaking older clients that
+  // only know the legacy three.
+  string action = 3;
+  // payload is the action-specific input:
+  //   - status_change: {"status": "..."}  or  {"data": {...}}
+  //                     (shallow-merged onto each record's
+  //                     data JSON; see records.go bulk())
+  //   - delete:        {}  (no input)
+  //   - export:        {}  (no input; the server emits CSV)
+  // Opaque bytes for the same reason `Record.data` is bytes —
+  // the inner shape is action-specific and a typed message
+  // per action would explode the surface area.
+  bytes payload = 4;
+}
+
+// BulkRecordsResponse carries the per-action result.
+//
+// `csv` is populated for the "export" action only; for
+// "status_change" and "delete" the server returns the
+// per-id outcome map encoded as JSON in `result_json`.
+//
+// Two-field shape (rather than a oneof) keeps the SDK's
+// helper code tractable: every action sets `result_json` to
+// a JSON payload and may additionally set `csv` for
+// export. Read both, ignore the empty one.
+message BulkRecordsResponse {
+  // csv carries the export-action body (Content-Type
+  // text/csv on the REST side). Empty for other actions.
+  bytes csv = 1;
+  // result_json is the per-id outcome map (e.g.
+  // {"<uuid>": "updated", "<uuid>": "skipped"}). JSON-encoded
+  // for the same wire-compat reason as Record.data.
+  bytes result_json = 2;
+}
+
+// ActionRecordRequest is the body of
+// `POST /api/v1/records/{ktype}/{id}/actions/{action}`. The
+// action name is matched against the KType's workflow
+// definition — unsupported actions return `workflow.invalid_action`.
+message ActionRecordRequest {
+  string ktype = 1;
+  string id = 2;
+  string action = 3;
+  // payload is the action-specific input (e.g. transition
+  // arguments). JSON-encoded for the same reason as elsewhere.
+  bytes payload = 4;
+}
+
+message ActionRecordResponse {
+  Record record = 1;
+  // run_id is the workflow run id that was created (or
+  // resumed) by this action. Clients use it to follow up
+  // with GetWorkflowRun for status.
+  string run_id = 2;
+}
+
+// GetWorkflowRunRequest fetches the workflow run associated
+// with a KRecord (one row, one open run at a time).
+// Maps to `GET /api/v1/records/{ktype}/{id}/workflow-run`.
+message GetWorkflowRunRequest {
+  string ktype = 1;
+  string id = 2;
+}
+
+message GetWorkflowRunResponse {
+  // run_json is the workflow run document; the Rust SDK
+  // exposes typed helpers around it but the wire shape is
+  // intentionally opaque so this proto doesn't have to
+  // model the workflow engine's full state machine.
+  bytes run_json = 1;
+}
+
+// RecordService is the gRPC surface for the KRecord CRUD +
+// bulk + workflow endpoints. A5 implements this against the
+// same record.PGStore that the REST handlers in
+// services/api/records.go already use, so both surfaces share
+// one storage layer.
+service RecordService {
+  rpc CreateRecord(CreateRecordRequest) returns (CreateRecordResponse);
+  rpc GetRecord(GetRecordRequest) returns (GetRecordResponse);
+  rpc UpdateRecord(UpdateRecordRequest) returns (UpdateRecordResponse);
+  rpc DeleteRecord(DeleteRecordRequest) returns (DeleteRecordResponse);
+  rpc ListRecords(ListRecordsRequest) returns (ListRecordsResponse);
+  rpc BulkRecords(BulkRecordsRequest) returns (BulkRecordsResponse);
+  rpc ActionRecord(ActionRecordRequest) returns (ActionRecordResponse);
+  rpc GetWorkflowRun(GetWorkflowRunRequest) returns (GetWorkflowRunResponse);
+}

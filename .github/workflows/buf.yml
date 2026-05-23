@@ -1,0 +1,89 @@
+name: buf
+
+# Protobuf schema gate (Pillar A4 / A5).
+#
+# Three things this workflow guarantees on every PR:
+#
+#   1. `buf lint` — proto/ conforms to the STANDARD ruleset
+#      (package naming, message naming, no nested-message wire
+#      forms, no MapEntry types in service responses, etc.).
+#      Misshaped schemas never reach review.
+#
+#   2. `buf breaking` — no field numbers change, no service
+#      methods are removed, no enum values are deleted compared
+#      to main. This is the load-bearing guarantee that the
+#      Rust SDK (Pillars B1-B8) and any future generated TS
+#      SDK can pin a stable wire format.
+#
+#   3. `buf generate` — gen/go/ is up-to-date relative to
+#      proto/. A diff after generation means the author forgot
+#      to commit regenerated Go; CI fails so the regeneration
+#      is never deferred to a follow-up PR.
+#
+# All three jobs are intentionally fast (sub-30s each) so the
+# proto editor's feedback loop stays tight.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: buf lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - run: buf lint
+
+  breaking:
+    name: buf breaking
+    runs-on: ubuntu-latest
+    # Skip on push to main itself — the base ref equals HEAD and
+    # there is nothing to compare. Only PRs need the check.
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # buf breaking needs the merge-base; fetch enough history
+          # for `--against '.git#branch=main,subdir=proto'` to
+          # resolve the parent commit. Shallow clones (default
+          # depth=1) would make the comparison silently empty.
+          fetch-depth: 0
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - run: buf breaking --against '.git#branch=main,subdir=proto' proto
+
+  generated-up-to-date:
+    name: gen/go/ matches proto/
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - name: install codegen plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+      - name: regenerate
+        run: buf generate
+      - name: verify clean tree
+        run: |
+          if ! git diff --quiet -- gen/; then
+            echo "::error::gen/go/ is out of date — run 'make proto-gen' and commit the result."
+            git diff -- gen/
+            exit 1
+          fi

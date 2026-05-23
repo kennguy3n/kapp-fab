@@ -1,0 +1,68 @@
+// ktype.proto models the KType schema registry.
+//
+// KTypes are the per-tenant schema declarations every KRecord
+// validates against. They live in `ktypes` (Postgres) and are
+// served via `internal/ktype.PGRegistry`. A KType is a (name,
+// version, schema) triple; the schema is a JSON Schema document
+// (Draft 2020-12 + a small set of kapp-fab extensions for
+// encryption, computed columns, etc. — see
+// internal/ktype/jsonschema.go for the full extension surface).
+//
+// Versioning: every Register call either creates a new (name,
+// version=N+1) row or no-ops if the schema is identical (the
+// `RegisterIfChanged` helper). The KRecord layer pins each row
+// to a specific version so a schema migration cannot silently
+// invalidate stored data.
+syntax = "proto3";
+
+package kapp.v1;
+
+// KType is the wire form of a registered KType. `schema` is a
+// raw JSON Schema document; we keep it opaque on the wire for
+// the same reason `Record.data` is opaque — the inner shape is
+// dynamic and the SDK helpers parse it client-side.
+message KType {
+  string name = 1;
+  int32 version = 2;
+  bytes schema = 3;
+  string created_at = 4;
+}
+
+// RegisterKTypeRequest matches the body of
+// `POST /api/v1/ktypes` (see services/api/ktypes.go register()).
+// `version` may be zero to mean "auto-assign next" — the server
+// computes the next version when the schema bytes differ from
+// the latest registered one.
+message RegisterKTypeRequest {
+  string name = 1;
+  int32 version = 2;
+  bytes schema = 3;
+}
+
+message RegisterKTypeResponse {
+  string name = 1;
+  int32 version = 2;
+}
+
+message GetKTypeRequest {
+  string name = 1;
+  // version=0 means "latest". Positive values pin to a
+  // specific historical version.
+  int32 version = 2;
+}
+
+message GetKTypeResponse {
+  KType ktype = 1;
+}
+
+message ListKTypesRequest {}
+
+message ListKTypesResponse {
+  repeated KType ktypes = 1;
+}
+
+service KTypeService {
+  rpc RegisterKType(RegisterKTypeRequest) returns (RegisterKTypeResponse);
+  rpc GetKType(GetKTypeRequest) returns (GetKTypeResponse);
+  rpc ListKTypes(ListKTypesRequest) returns (ListKTypesResponse);
+}

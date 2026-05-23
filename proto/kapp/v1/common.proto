@@ -1,0 +1,140 @@
+// common.proto carries the shared types every other kapp.v1
+// service depends on: opaque identifiers, timestamp anchors,
+// pagination cursor, error envelope, ListPage envelope. Keeping
+// them in one file lets buf's `breaking` checker see the full
+// dependency graph at once and lets future generated SDKs alias
+// these into a single shared package.
+//
+// Naming conventions:
+//   - `string id`  : opaque server-issued identifier, UUIDv4 wire
+//                    format. Modelled as string rather than bytes
+//                    so the JSON/REST mirror keeps the canonical
+//                    `00000000-0000-0000-0000-000000000000` form.
+//   - `google.protobuf.Timestamp` is intentionally NOT used. We
+//                    model timestamps as `string rfc3339_nano` so
+//                    the REST-mirrored JSON stays line-for-line
+//                    identical to the existing
+//                    `time.RFC3339Nano` serialisation in the Go
+//                    handlers — preserving wire compatibility for
+//                    every existing client. A future migration to
+//                    google.protobuf.Timestamp can flip an option
+//                    in buf.gen.yaml; today's compatibility wins.
+//   - `bytes data` is used for KRecord payloads (raw JSON). The
+//                    server side is `json.RawMessage`; in proto
+//                    we keep the bytes opaque so the schema does
+//                    not have to model every KType's field set —
+//                    that contract lives in the KType registry
+//                    (see ktype.proto), not here.
+syntax = "proto3";
+
+package kapp.v1;
+
+// PaginationRequest is the shared cursor-based pagination request
+// shape. Embedded into every list-style request so the Rust SDK
+// can write a single helper that walks any list endpoint.
+//
+// The wire format intentionally matches the REST query-string
+// surface: when the gRPC server lands in A5, the same handler
+// can be exposed via grpc-gateway and produce the existing
+// `?limit=...&cursor=...&offset=...` URLs without translation.
+message PaginationRequest {
+  // limit is the maximum number of records the server may return
+  // in this page. Server clamps to 500 (configured in
+  // internal/record/store.go as the keyset hard cap). Zero or
+  // unset means "use server default" (50).
+  int32 limit = 1;
+  // cursor is an opaque base64 token returned by a prior page's
+  // `next_cursor`. Empty selects the newest row. Decoder is
+  // documented in internal/record/record.go (EncodeCursor /
+  // DecodeCursor): wire format is `<unix_nanos>|<uuid>` base64-
+  // encoded; the client never inspects the contents.
+  string cursor = 2;
+  // offset is the legacy OFFSET-based path. Mutually exclusive
+  // with cursor — when cursor is non-empty the server ignores
+  // offset. Kept for backward compatibility; new SDKs should
+  // only use cursor.
+  int32 offset = 3;
+}
+
+// ListPageMeta is the trailer carried on every list response.
+// Embedded by composition into every concrete <Resource>List
+// response so the SDK's pagination helper can read
+// `response.meta.next_cursor` regardless of the resource type.
+//
+// `next_cursor` is empty when there are no more pages, exactly
+// matching the existing REST behaviour at
+// internal/record/record.go ListPage.NextCursor.
+message ListPageMeta {
+  string next_cursor = 1;
+}
+
+// ResourceMeta is the audit/version envelope every server-issued
+// resource carries on the wire. Mirrors the fixed metadata
+// columns the KRecord exporter writes (see
+// internal/exporter/krecord_exporter.go renderJSON /
+// renderCSV header). Embedded as `meta` on every concrete
+// resource message in this file's sister .proto files.
+//
+// rfc3339_nano timestamps (rather than google.protobuf.Timestamp)
+// preserve byte-for-byte JSON parity with the existing REST
+// surface — see the file-level docstring above.
+message ResourceMeta {
+  string id = 1;
+  string tenant_id = 2;
+  int32 version = 3;
+  string status = 4;
+  // created_by / updated_by are UUIDs of the acting principal
+  // (user or service account). Empty string means "system-
+  // initiated" (workflow engine, scheduled sweep, etc.) — the
+  // REST handlers do the same when the request has no auth
+  // context. `updated_by` is optional because immutable rows
+  // (e.g. audit events) never set it.
+  string created_by = 5;
+  string updated_by = 6;
+  string created_at = 7;
+  string updated_at = 8;
+  // deleted_at is present on soft-deleted rows for the views
+  // that surface them. Most reads filter for status='active'
+  // and the field is unset.
+  string deleted_at = 9;
+}
+
+// Error is the canonical error envelope. The REST surface
+// emits errors as plain-text bodies plus an HTTP status code;
+// when the gRPC server lands in A5 the same handler will map
+// status → gRPC code and propagate the message verbatim. The
+// fields below match the format used by writeRecordError /
+// writeJSON helpers in services/api/util.go.
+message Error {
+  // code is the canonical kapp-fab error identifier, e.g.
+  // `record.not_found`, `validation.invalid_cursor`,
+  // `auth.tenant_missing`. The Rust SDK matches on this in its
+  // error-conversion helpers rather than parsing `message`.
+  string code = 1;
+  // message is the human-facing description; safe to log,
+  // never carries secrets. The REST surface returns this as
+  // the response body when content-type is text/plain.
+  string message = 2;
+  // details is an optional structured payload for errors that
+  // surface more than one issue at once (multi-field
+  // validation errors, batch failures). Empty for single-
+  // cause errors.
+  repeated ErrorDetail details = 3;
+}
+
+// ErrorDetail is one entry inside `Error.details`. The shape
+// is deliberately loose — `field` / `code` / `message` —
+// because the validation error envelope at
+// services/api/util.go ValidationFailures uses the same triple.
+message ErrorDetail {
+  string field = 1;
+  string code = 2;
+  string message = 3;
+}
+
+// Empty is the canonical request/response message for endpoints
+// that take no parameters or return no body. Defined here rather
+// than imported from google.protobuf.Empty so the kapp.v1
+// schema is fully self-contained — pulling in well-known types
+// would require a separate buf dependency.
+message Empty {}
