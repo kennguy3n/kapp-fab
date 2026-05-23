@@ -15,24 +15,34 @@
 //!   (e.g. the HTTP/gRPC handlers) that opt in, not by the
 //!   registry itself.
 //! - SDK (this module): runs the supplied document through
-//!   [`jsonschema::options().with_draft(Draft::Draft7).build`] so
-//!   structurally-malformed JSON Schema constructs (e.g.
+//!   [`jsonschema::options().with_draft(Draft::Draft202012).build`]
+//!   so structurally-malformed JSON Schema constructs (e.g.
 //!   `{"type": 12345}`) are rejected without a network round trip.
 //!   The caller gets a typed [`crate::KappError::SchemaInvalid`]
 //!   with the list of structural errors.
 //!
+//! # Why Draft 2020-12 specifically
+//!
+//! The proto contract explicitly declares JSON Schema Draft 2020-12
+//! as the wire format (`proto/kapp/v1/ktype.proto:7`). The SDK
+//! validator MUST match: an earlier draft (e.g. Draft-07) would
+//! silently accept documents that use 2020-12-only keywords
+//! (`$anchor`, `$dynamicRef`, `$dynamicAnchor`, `prefixItems`,
+//! `unevaluatedItems`, `unevaluatedProperties`) without applying
+//! their semantics — the "ignore unknown keywords" rule means the
+//! check would pass even when the document is structurally wrong
+//! at the 2020-12 level. Draft 2020-12 is also a superset of
+//! Draft-07, so users who hand-write pre-2020 schemas keep working
+//! unchanged.
+//!
 //! Note that the kapp-fab KType registry schemas are NOT pure JSON
 //! Schema documents — they use a kapp-specific shape
 //! (`{name, version, fields[]}` per `internal/ktype/validator.go`).
-//! JSON Schema Draft-07's "ignore unknown keywords" rule means our
-//! Draft-07 validator accepts these as well-formed: we're checking
-//! "is this a structurally sound JSON Schema document?" rather
-//! than "does this conform to the kapp field-spec shape?". The
-//! proto contract describes the schema as "Draft 2020-12 + kapp-fab
-//! extensions" (`proto/kapp/v1/ktype.proto:7`), but Draft-07 is a
-//! strict subset of 2020-12, so the SDK validation is conservative:
-//! a document that passes here will also pass a future 2020-12
-//! validator.
+//! JSON Schema's "ignore unknown keywords" rule means our 2020-12
+//! validator accepts these as well-formed: we're checking "is this
+//! a structurally sound JSON Schema document?" rather than "does
+//! this conform to the kapp field-spec shape?". The latter is a
+//! server-side concern (see `internal/ktype/validator.go`).
 
 use jsonschema::Draft;
 use prost::bytes::Bytes;
@@ -124,7 +134,8 @@ impl KTypeClient {
     /// exists with an identical schema).
     ///
     /// The schema is validated client-side as a JSON Schema
-    /// Draft-07 document before the RPC is attempted. Validation
+    /// Draft 2020-12 document before the RPC is attempted (matching
+    /// the proto contract at `proto/kapp/v1/ktype.proto`). Validation
     /// failure surfaces as [`KappError::SchemaInvalid`] with the
     /// list of structural errors.
     ///
@@ -145,16 +156,22 @@ impl KTypeClient {
             )));
         }
 
-        // Validate the schema document client-side. The standard
-        // jsonschema crate rejects invalid Draft-07 keywords here.
+        // Validate the schema document client-side. The jsonschema
+        // crate rejects invalid Draft 2020-12 keywords here. Picking
+        // 2020-12 matches the wire contract documented on
+        // `proto/kapp/v1/ktype.proto`; older drafts would silently
+        // accept 2020-12-only keywords (`$anchor`, `$dynamicRef`,
+        // `prefixItems`, etc.) without applying their semantics.
         let validator = jsonschema::options()
-            .with_draft(Draft::Draft7)
+            .with_draft(Draft::Draft202012)
             .build(&schema)
             .map_err(|err| KappError::SchemaInvalid {
                 errors: vec![SchemaError {
                     instance_path: String::new(),
                     schema_path: String::new(),
-                    message: format!("schema document is not valid JSON Schema Draft-07: {err}"),
+                    message: format!(
+                        "schema document is not valid JSON Schema Draft 2020-12: {err}"
+                    ),
                 }],
             })?;
         // Successful compile is enough — we are NOT validating data

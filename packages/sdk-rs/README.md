@@ -9,7 +9,7 @@ This crate is a high-level, async client that wraps the auto-generated `tonic` b
 - `x-request-id` propagation matching the server-side contract
 - Real TLS with system trust roots + Mozilla webpki roots (TLS-on-https, plaintext-on-http; mixing the two is rejected at construction)
 - Single-flight refresh: N concurrent `Unauthenticated` failures collapse onto exactly one `Refresh` RPC
-- Client-side JSON Schema (Draft-07) validation on `RegisterKType` — invalid schemas fail without a round trip
+- Client-side JSON Schema (Draft 2020-12) validation on `RegisterKType` — invalid schemas fail without a round trip (matches the wire-contract draft declared in `proto/kapp/v1/ktype.proto`)
 - Typed `KappError` enum across every fallible call (no `Box<dyn Error>` leakage)
 
 ## Quickstart
@@ -93,7 +93,7 @@ If multiple in-flight RPCs simultaneously see `Unauthenticated` (e.g. all of the
 
 ## Client-side schema validation
 
-`KTypeClient::register` validates the supplied schema **as a JSON Schema Draft-07 document** before issuing the RPC. Invalid schemas fail with a typed `KappError::SchemaInvalid` containing the list of structural errors. No network round trip is made.
+`KTypeClient::register` validates the supplied schema **as a JSON Schema Draft 2020-12 document** before issuing the RPC — matching the wire contract documented on `proto/kapp/v1/ktype.proto`. Invalid schemas fail with a typed `KappError::SchemaInvalid` containing the list of structural errors. No network round trip is made. Draft 2020-12 is backwards-compatible with older drafts, so hand-written Draft-07 or Draft-04 schemas keep working unchanged.
 
 ```rust
 use kapp_sdk::{ClientConfig, KappClient, KappError};
