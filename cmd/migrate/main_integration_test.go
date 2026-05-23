@@ -68,11 +68,30 @@ func runCLI(t *testing.T, dbURL string, argv ...string) (string, error) {
 	t.Setenv("KAPP_MIGRATIONS_DIR", filepath.Join(wd, "..", "..", "migrations"))
 
 	origStdout, origStderr := os.Stdout, os.Stderr
-	rOut, wOut, _ := os.Pipe()
-	rErr, wErr, _ := os.Pipe()
+	rOut, wOut, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe (stdout): %v", err)
+	}
+	rErr, wErr, err := os.Pipe()
+	if err != nil {
+		_ = rOut.Close()
+		_ = wOut.Close()
+		t.Fatalf("os.Pipe (stderr): %v", err)
+	}
 	os.Stdout = wOut
 	os.Stderr = wErr
-	defer func() { os.Stdout = origStdout; os.Stderr = origStderr }()
+	defer func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+		// Close the read ends so the FDs are released after runCLI
+		// returns.  The drain goroutines have already exited (we
+		// blocked on their channels just above), so this Close()
+		// only releases the OS FD — it does not interrupt any
+		// reader.  Plug for the FD leak Devin Review flagged on
+		// commit 8f49b39.
+		_ = rOut.Close()
+		_ = rErr.Close()
+	}()
 
 	// Drain stdout/stderr concurrently with run().  The OS pipe
 	// buffer is small (~64KB on Linux); if we waited for run() to
@@ -90,6 +109,18 @@ func runCLI(t *testing.T, dbURL string, argv ...string) (string, error) {
 	wOut.Close()
 	wErr.Close()
 	return <-outCh + <-errCh, cliErr
+}
+
+// quoteIdent renders a PostgreSQL identifier (table/database name)
+// using PG's native double-quote escaping: wrap in \" and double any
+// embedded \".  Used by freshDB for CREATE / DROP DATABASE because
+// identifiers cannot be bound as $1 parameters, and Go's %q would
+// produce backslash escapes that PostgreSQL would reject.  The names
+// freshDB generates never contain a \" today, but using the
+// SQL-correct quoter keeps the code robust against future format
+// changes.
+func quoteIdent(s string) string {
+	return "\"" + strings.ReplaceAll(s, "\"", "\"\"") + "\""
 }
 
 func drainPipe(r *os.File) string {
@@ -141,7 +172,7 @@ func freshDB(t *testing.T) (string, func()) {
 
 	name := fmt.Sprintf("kapp_test_%d", time.Now().UnixNano())
 	// CREATE DATABASE is non-transactional; run plain.
-	if _, err := setupAdmin.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE %q", name)); err != nil {
+	if _, err := setupAdmin.ExecContext(ctx, "CREATE DATABASE "+quoteIdent(name)); err != nil {
 		t.Fatalf("create db %s: %v", name, err)
 	}
 	cleanup := func() {
@@ -162,7 +193,7 @@ func freshDB(t *testing.T) (string, func()) {
 			"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1",
 			name,
 		)
-		if _, err := admin.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %q", name)); err != nil {
+		if _, err := admin.Exec("DROP DATABASE IF EXISTS " + quoteIdent(name)); err != nil {
 			t.Logf("cleanup drop %s: %v", name, err)
 		}
 	}

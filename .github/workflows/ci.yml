@@ -125,22 +125,39 @@ jobs:
             # under-reported on second-parent diffs.
             BEFORE_SHA="${{ github.event.before }}"
             # github.event.before is 0000...0000 on a branch's first
-            # push.  Fall back to the canonical empty-tree object
-            # in that case so --new-from-rev compares against an
-            # empty repository state and treats every line in HEAD
-            # as "new".
+            # push.  In that case there is no prior baseline to diff
+            # against -- we set LINT_BASE empty and the strict-lint
+            # step below treats that as "lint the full codebase
+            # strictly", which is the semantically correct behaviour
+            # (no baseline = every line is "new").  A previous draft
+            # tried to substitute git's canonical empty-tree object,
+            # but golangci-lint's --new-from-rev is documented to
+            # accept a git revision, not an arbitrary tree object,
+            # and silently mis-handling that argument would have
+            # made the ratchet a no-op on first push.
             if [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
-              EMPTY_TREE="$(git hash-object -t tree /dev/null)"
-              echo "LINT_BASE=${EMPTY_TREE}" >> "$GITHUB_ENV"
+              echo "LINT_BASE=" >> "$GITHUB_ENV"
             else
               echo "LINT_BASE=${BEFORE_SHA}" >> "$GITHUB_ENV"
             fi
           fi
-      - name: golangci-lint (strict on new code)
+      # On the no-baseline (first-push) path LINT_BASE is empty, in
+      # which case we skip --new-from-rev so golangci-lint examines
+      # every issue strictly.  Two separate steps with `if:` guards
+      # achieve this without conditional argument templating, which
+      # the golangci-lint-action does not support.
+      - name: golangci-lint (strict, ratcheted)
+        if: env.LINT_BASE != ''
         uses: golangci/golangci-lint-action@v7
         with:
           version: v2.5.0
           args: --timeout=5m --new-from-rev=${{ env.LINT_BASE }}
+      - name: "golangci-lint (strict, full codebase - first push only)"
+        if: env.LINT_BASE == ''
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.5.0
+          args: --timeout=10m
       - name: golangci-lint (full codebase, advisory)
         continue-on-error: true
         uses: golangci/golangci-lint-action@v7

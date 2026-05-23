@@ -32,11 +32,18 @@ migrate:
 # Roll back the last N migrations (default 1).  Each migration must
 # have a .down.sql companion in migrations/ or the CLI refuses up
 # front so the operator does not get a half-rolled-back state.
+#
+# N is resolved at the Make level rather than via `$${N:-1}` so the
+# defaulting is consistent with `migrate-force V=...` below and the
+# resolved value is visible in `make -n` output.
+migrate-down: N ?= 1
 migrate-down:
-	DB_URL="$(DB_URL)" go run ./cmd/migrate down $${N:-1}
+	DB_URL="$(DB_URL)" go run ./cmd/migrate down $(N)
 
 # Force the schema_migrations row to version V without running the
-# migration.  Use only to recover from a dirty state.
+# migration.  Use only to recover from a dirty state.  V has no
+# default -- forcing the wrong version silently corrupts state, so
+# operators must say it explicitly.
 migrate-force:
 	@if [ -z "$(V)" ]; then echo "usage: make migrate-force V=<version>"; exit 2; fi
 	DB_URL="$(DB_URL)" go run ./cmd/migrate force $(V)
