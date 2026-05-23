@@ -281,6 +281,40 @@ func TestValidateRawSQLRejectsSystemFunction(t *testing.T) {
 	}
 }
 
+// TestValidateRawSQLRejectsDangerousExtensionFunction pins rule 5c
+// for the extension-function leg of the function denylist. dblink
+// opens a new connection that bypasses RLS / READ ONLY /
+// statement_timeout from the outer tx, and lo_import / lo_export do
+// server-side file I/O — neither has a `pg_` prefix that the system
+// rule would catch, so the explicit denylist must reject them. The
+// user-facing message says "disallowed extension function" so
+// operators can distinguish the cause from a system-function block.
+func TestValidateRawSQLRejectsDangerousExtensionFunction(t *testing.T) {
+	cases := []string{
+		"SELECT dblink('dbname=other', 'SELECT * FROM krecords')",
+		"SELECT dblink_exec('dbname=other', 'DELETE FROM krecords')",
+		"SELECT dblink_connect('dbname=other')",
+		"SELECT lo_import('/etc/passwd')",
+		"SELECT lo_export(1, '/tmp/leak')",
+		"SELECT 1 FROM (SELECT dblink('dbname=other', 'x') AS y) t",
+		"SELECT public.dblink('dbname=other', 'SELECT 1')",
+		"SELECT DBLINK('dbname=other', 'SELECT 1')",
+	}
+	for _, body := range cases {
+		err := validateRawSQL(body)
+		if err == nil {
+			t.Errorf("validateRawSQL(%q) returned nil; want extension-function rejection", body)
+			continue
+		}
+		if !errors.Is(err, ErrUnsafeSQL) {
+			t.Errorf("validateRawSQL(%q) error = %q; want ErrUnsafeSQL", body, err)
+		}
+		if !strings.Contains(err.Error(), "disallowed extension function") {
+			t.Errorf("validateRawSQL(%q) error = %q; want disallowed-extension-function message", body, err)
+		}
+	}
+}
+
 // TestValidateRawSQLAcceptsUserFunction documents that the
 // function-call rule is scoped to pg_-prefixed / pg_catalog /
 // information_schema names. Normal user-callable SQL functions
@@ -304,29 +338,55 @@ func TestValidateRawSQLAcceptsUserFunction(t *testing.T) {
 }
 
 // TestIsSystemFunctionPositive covers the unit-level rule table for
-// the function-name classifier. Mirrors TestIsSystemCatalogPositive.
+// the function-name classifier. Mirrors TestIsSystemCatalogPositive
+// and pins both the (name, kind) return tuple and the system/extension
+// categorisation that the runner uses to format the user-facing error.
 func TestIsSystemFunctionPositive(t *testing.T) {
-	cases := [][]string{
-		{"pg_read_file"},
-		{"pg_ls_dir"},
-		{"PG_BACKEND_PID"}, // case-insensitive on the prefix check
-		{"pg_catalog", "pg_read_file"},
-		{"PG_CATALOG", "pg_read_file"},
-		{"information_schema", "_pg_truetypid"},
-		{"db1", "public", "fn"}, // 3-part = cross-database, rejected outright
+	cases := []struct {
+		parts []string
+		kind  funcKind
+	}{
+		{[]string{"pg_read_file"}, funcKindSystem},
+		{[]string{"pg_ls_dir"}, funcKindSystem},
+		{[]string{"PG_BACKEND_PID"}, funcKindSystem}, // case-insensitive on the prefix check
+		{[]string{"pg_catalog", "pg_read_file"}, funcKindSystem},
+		{[]string{"PG_CATALOG", "pg_read_file"}, funcKindSystem},
+		{[]string{"information_schema", "_pg_truetypid"}, funcKindSystem},
+		{[]string{"db1", "public", "fn"}, funcKindSystem}, // 3-part = cross-database, rejected outright
+		// Dangerous extension functions: dblink and large-object I/O.
+		// Both bypass the editor sandbox's safety layers (new
+		// connection / server-side file I/O) and must be rejected as
+		// funcKindExtension so the runner produces the
+		// "disallowed extension function" error message.
+		{[]string{"dblink"}, funcKindExtension},
+		{[]string{"DBLINK"}, funcKindExtension}, // case-insensitive leaf
+		{[]string{"dblink_exec"}, funcKindExtension},
+		{[]string{"dblink_send_query"}, funcKindExtension},
+		{[]string{"lo_import"}, funcKindExtension},
+		{[]string{"lo_export"}, funcKindExtension},
+		// Schema-qualified dangerous extension function: schema is
+		// irrelevant for safety, only the leaf name matters.
+		{[]string{"public", "dblink"}, funcKindExtension},
+		{[]string{"public", "lo_import"}, funcKindExtension},
 	}
-	for _, parts := range cases {
-		fc := makeFuncCall(parts...)
-		ref, ok := isSystemFunction(fc)
+	for _, tc := range cases {
+		fc := makeFuncCall(tc.parts...)
+		ref, kind, ok := isSystemFunction(fc)
 		if !ok {
-			t.Errorf("isSystemFunction(%v) = (%q, false); want true", parts, ref)
+			t.Errorf("isSystemFunction(%v) = (%q, %v, false); want true", tc.parts, ref, kind)
+			continue
+		}
+		if kind != tc.kind {
+			t.Errorf("isSystemFunction(%v) kind = %v; want %v (ref=%q)", tc.parts, kind, tc.kind, ref)
 		}
 	}
 }
 
 // TestIsSystemFunctionNegative documents the references that must
-// NOT trigger the function guard: any unqualified non-`pg_` name,
-// schema-qualified name in `public` or any other tenant schema.
+// NOT trigger the function guard: any unqualified non-`pg_` name
+// outside the dangerous-extension denylist, or a schema-qualified
+// name in `public` / any other tenant schema whose leaf isn't on
+// the denylist.
 func TestIsSystemFunctionNegative(t *testing.T) {
 	cases := [][]string{
 		{"count"},
@@ -334,11 +394,16 @@ func TestIsSystemFunctionNegative(t *testing.T) {
 		{"now"},
 		{"public", "my_function"},
 		{"app", "compute_total"},
+		// Names that share a prefix with a denylisted name but are
+		// not themselves on the denylist must be accepted: only exact
+		// leaf-name matches block.
+		{"dblink_helper"}, // not a real dblink function, allow
+		{"lower"},         // shares no chars with lo_import beyond `l`
 	}
 	for _, parts := range cases {
 		fc := makeFuncCall(parts...)
-		if ref, ok := isSystemFunction(fc); ok {
-			t.Errorf("isSystemFunction(%v) = (%q, true); want false", parts, ref)
+		if ref, kind, ok := isSystemFunction(fc); ok {
+			t.Errorf("isSystemFunction(%v) = (%q, %v, true); want false", parts, ref, kind)
 		}
 	}
 }

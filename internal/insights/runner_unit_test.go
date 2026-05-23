@@ -153,6 +153,40 @@ func TestRunRawSQLRejectsSystemFunction(t *testing.T) {
 	}
 }
 
+// TestRunRawSQLRejectsDangerousExtensionFunction covers the
+// extension-function leg of rule 5c via the full RunRawSQL path.
+// dblink, lo_import, and lo_export bypass the sandbox's safety
+// layers and must be rejected with the "disallowed extension
+// function" message that the runner emits for funcKindExtension.
+func TestRunRawSQLRejectsDangerousExtensionFunction(t *testing.T) {
+	r := &Runner{}
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"unqualified_dblink", "SELECT dblink('dbname=other', 'SELECT 1')"},
+		{"dblink_exec", "SELECT dblink_exec('dbname=other', 'DELETE FROM krecords')"},
+		{"qualified_public_dblink", "SELECT public.dblink('dbname=other', 'SELECT 1')"},
+		{"case_insensitive_dblink", "SELECT DBLINK('dbname=other', 'SELECT 1')"},
+		{"lo_import", "SELECT lo_import('/etc/passwd')"},
+		{"lo_export", "SELECT lo_export(1, '/tmp/leak')"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := r.RunRawSQL(context.Background(), uuid.New(), tc.body, nil)
+			if err == nil {
+				t.Fatalf("RunRawSQL(%q) returned nil error; want extension-function rejection", tc.body)
+			}
+			if !errors.Is(err, ErrUnsafeSQL) {
+				t.Fatalf("RunRawSQL(%q) error = %q; want ErrUnsafeSQL", tc.body, err.Error())
+			}
+			if !strings.Contains(err.Error(), "disallowed extension function") {
+				t.Fatalf("RunRawSQL(%q) error = %q; want disallowed-extension-function message", tc.body, err.Error())
+			}
+		})
+	}
+}
+
 // TestRunRawSQLRejectsSystemCatalog covers the third validator rule:
 // no references to pg_catalog / information_schema / pg_-prefixed
 // relations. The first two are explicitly scoped; the third covers

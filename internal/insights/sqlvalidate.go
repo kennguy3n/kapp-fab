@@ -77,12 +77,35 @@ var ErrUnsafeSQL = errors.New("insights: unsafe sql")
 //
 //     c. FuncCall whose name resolves to a Postgres system
 //     function (pg_catalog.*, unqualified pg_*, any non-empty
-//     catalog qualifier). Blocks `SELECT pg_read_file('/etc/passwd')`
-//     even though the function takes no RangeVar argument. RLS
-//     doesn't cover function output and the application DB user
-//     in production may not be granted pg_read_server_files,
-//     but the validator's job is to fail closed at the AST
-//     layer rather than rely on role grants downstream.
+//     catalog qualifier) OR to a known-dangerous extension
+//     function (dblink_*, large-object I/O, etc.). Blocks
+//     `SELECT pg_read_file('/etc/passwd')` and
+//     `SELECT dblink('…', 'SELECT * FROM pg_authid')` — both
+//     have no RangeVar argument that rule 5a would catch, both
+//     can bypass RLS/READ ONLY/statement_timeout from inside
+//     the function, and neither is something an editor user
+//     should be able to invoke. RLS doesn't cover function
+//     output, dblink opens a brand-new connection that is not
+//     bound by the outer tx's READ ONLY, and the application
+//     DB user in production may not be granted
+//     pg_read_server_files — but the validator's job is to fail
+//     closed at the AST layer rather than rely on role grants
+//     downstream.
+//
+// Scope notes:
+//
+//   - The contract covers *data access* (RangeVar) and *function
+//     execution* (FuncCall). It does not inspect TypeName nodes —
+//     a cast like `'1'::pg_catalog.int4` parses with `pg_catalog`
+//     in a TypeName.Names list, but the cast neither fetches a
+//     row nor calls a server-side function, so it is functionally
+//     benign and intentionally outside the validator's scope.
+//
+//   - The function denylist (rule 5c, isSystemFunction) is a
+//     known-extension list, not exhaustive coverage of every
+//     possible dangerous extension. New extensions added to the
+//     production DB image should be reviewed against this list
+//     (see dangerousExtensionFunctions).
 func validateRawSQL(rawSQL string) error {
 	rawSQL = strings.TrimSpace(rawSQL)
 	if rawSQL == "" {
@@ -114,6 +137,16 @@ func validateRawSQL(rawSQL string) error {
 	// terminates on the first violation found; the walker honours
 	// a `false` return from visit so all parent frames unwind
 	// without doing more work.
+	//
+	// `atRoot` exists to skip the outermost *pg_query.Node — which
+	// was already validated as a SelectStmt above — so rule 5b
+	// (nested-stmt rejection) only fires on inner Nodes. The walker
+	// starts at top.ProtoReflect() and `top` is itself a
+	// *pg_query.Node, so walkProtoMessages guarantees the very
+	// first `case *pg_query.Node` hit is the root; flipping atRoot
+	// to false on first hit means every subsequent Node visit
+	// (target_list entries, from_clause entries, CTE bodies, etc.)
+	// goes through nodeStmtOneofName.
 	var rejection error
 	atRoot := true
 	walkProtoMessages(top.ProtoReflect(), func(m protoreflect.Message) bool {
@@ -128,8 +161,15 @@ func validateRawSQL(rawSQL string) error {
 				return false
 			}
 		case *pg_query.FuncCall:
-			if ref, ok := isSystemFunction(n); ok {
-				rejection = wrapUnsafe("call to system function %s is not allowed", ref)
+			if ref, kind, ok := isSystemFunction(n); ok {
+				switch kind {
+				case funcKindSystem:
+					rejection = wrapUnsafe("call to system function %s is not allowed", ref)
+				case funcKindExtension:
+					rejection = wrapUnsafe("call to disallowed extension function %s is not allowed", ref)
+				default:
+					rejection = wrapUnsafe("call to disallowed function %s is not allowed", ref)
+				}
 				return false
 			}
 		case *pg_query.Node:
@@ -199,10 +239,83 @@ func isSystemCatalog(rv *pg_query.RangeVar) bool {
 	return false
 }
 
-// isSystemFunction returns the canonical dotted reference and true
-// when fc names a Postgres system function. Mirrors isSystemCatalog
-// but for function-call AST nodes — pg_read_file('/etc/passwd'),
-// pg_catalog.pg_ls_dir('/'), pg_stat_get_activity(NULL), etc.
+// dangerousExtensionFunctions enumerates non-`pg_`-prefixed function
+// names from PostgreSQL extensions that the validator must reject
+// because they bypass one or more of the editor sandbox's safety
+// layers:
+//
+//   - dblink_* (contrib/dblink): opens a NEW Postgres connection
+//     from inside the query. That new connection inherits neither
+//     the per-tenant `SET app.tenant_id` GUC (so RLS does not
+//     filter), nor the outer `SET TRANSACTION READ ONLY`, nor the
+//     `SET statement_timeout`. A single `SELECT dblink('…',
+//     'SELECT * FROM pg_authid')` would otherwise leak the entire
+//     pg_authid table to the editor user.
+//
+//   - lo_import / lo_export (large objects): read/write files on
+//     the server's filesystem. Require pg_read_server_files /
+//     pg_write_server_files in modern Postgres, which the app role
+//     normally lacks — but the validator's job is to fail closed at
+//     the AST layer rather than rely on role grants downstream.
+//
+// The list is a denylist (not exhaustive) because the universe of
+// extensions is open-ended; new extensions added to the production
+// DB image should be reviewed against this map. See the
+// validateRawSQL docstring for the scope contract.
+//
+// Keys are lowercase; isSystemFunction lowercases the leaf name
+// before lookup. The map is small enough that linear scan vs.
+// map lookup doesn't matter, but a map keeps additions tidy and
+// makes the membership test obviously O(1).
+var dangerousExtensionFunctions = map[string]struct{}{
+	// contrib/dblink — opens new connections, bypassing
+	// RLS / READ ONLY / statement_timeout from the outer tx.
+	"dblink":                  {},
+	"dblink_connect":          {},
+	"dblink_connect_u":        {},
+	"dblink_disconnect":       {},
+	"dblink_exec":             {},
+	"dblink_open":             {},
+	"dblink_fetch":            {},
+	"dblink_close":            {},
+	"dblink_cancel_query":     {},
+	"dblink_send_query":       {},
+	"dblink_get_result":       {},
+	"dblink_is_busy":          {},
+	"dblink_error_message":    {},
+	"dblink_current_query":    {},
+	"dblink_get_connections":  {},
+	"dblink_get_notify":       {},
+	"dblink_get_pkey":         {},
+	"dblink_build_sql_insert": {},
+	"dblink_build_sql_delete": {},
+	"dblink_build_sql_update": {},
+	// Large object I/O — read/write server-side files.
+	"lo_import": {},
+	"lo_export": {},
+}
+
+// funcKind distinguishes the two reasons isSystemFunction rejects a
+// function call: a Postgres-built-in system function (pg_catalog.*,
+// information_schema.*, unqualified pg_*, cross-database calls), or
+// a known-dangerous extension function (dblink_*, lo_import/lo_export,
+// …). The runner uses this to produce a user-facing error message
+// that names the actual reason rather than lumping every blocked
+// function under the misleading "system function" label.
+type funcKind int
+
+const (
+	funcKindNone funcKind = iota
+	funcKindSystem
+	funcKindExtension
+)
+
+// isSystemFunction returns the canonical dotted reference, the kind
+// of block (system vs. dangerous extension), and true when fc names
+// either a Postgres system function or a known-dangerous extension
+// function. Mirrors isSystemCatalog but for function-call AST nodes —
+// pg_read_file('/etc/passwd'), pg_catalog.pg_ls_dir('/'),
+// pg_stat_get_activity(NULL), dblink('…', '…'), lo_import('…'), etc.
 //
 // pg_query represents a function name as []*Node where each Node
 // wraps a String node holding one dotted component. So
@@ -211,18 +324,30 @@ func isSystemCatalog(rv *pg_query.RangeVar) bool {
 // "pg_read_file"}]. Three components (catalog.schema.func) only
 // parse for cross-database calls, which we also reject.
 //
+// The function-name rules, in order, return (qualified-name, kind, true):
+//
+//  1. 3+ parts → reject as system (cross-database call).
+//  2. 2 parts, schema is pg_catalog or information_schema → reject
+//     as system.
+//  3. 1 part starting with `pg_` → reject as system.
+//  4. 1 part (or 2 parts with arbitrary schema) matches
+//     dangerousExtensionFunctions on its leaf name → reject as
+//     extension. The leaf is the last component, so `public.dblink(…)`
+//     and bare `dblink(…)` both match. Lookup is case-insensitive.
+//
 // In production the application DB user normally lacks
-// `pg_read_server_files` so the file-reading functions return an
-// access-denied error, but the validator's job is to fail closed
-// at the AST layer rather than rely on role grants downstream.
-// Same fail-closed rationale as isSystemCatalog.
-func isSystemFunction(fc *pg_query.FuncCall) (string, bool) {
+// `pg_read_server_files` (so pg_read_file fails at runtime) and
+// dblink may not be installed at all, but the validator's job is to
+// fail closed at the AST layer rather than rely on role grants or
+// extension availability downstream. Same fail-closed rationale as
+// isSystemCatalog.
+func isSystemFunction(fc *pg_query.FuncCall) (string, funcKind, bool) {
 	if fc == nil {
-		return "", false
+		return "", funcKindNone, false
 	}
 	parts := fc.GetFuncname()
 	if len(parts) == 0 {
-		return "", false
+		return "", funcKindNone, false
 	}
 	names := make([]string, 0, len(parts))
 	for _, p := range parts {
@@ -231,23 +356,30 @@ func isSystemFunction(fc *pg_query.FuncCall) (string, bool) {
 		}
 	}
 	if len(names) == 0 {
-		return "", false
+		return "", funcKindNone, false
 	}
 	if len(names) >= 3 {
-		return strings.Join(names, "."), true
+		return strings.Join(names, "."), funcKindSystem, true
 	}
+	leaf := strings.ToLower(names[len(names)-1])
 	if len(names) == 2 {
 		schema := strings.ToLower(names[0])
 		if schema == "pg_catalog" || schema == "information_schema" {
-			return names[0] + "." + names[1], true
+			return names[0] + "." + names[1], funcKindSystem, true
 		}
-		return "", false
+		if _, bad := dangerousExtensionFunctions[leaf]; bad {
+			return names[0] + "." + names[1], funcKindExtension, true
+		}
+		return "", funcKindNone, false
 	}
 	name := strings.ToLower(names[0])
 	if strings.HasPrefix(name, "pg_") {
-		return names[0], true
+		return names[0], funcKindSystem, true
 	}
-	return "", false
+	if _, bad := dangerousExtensionFunctions[leaf]; bad {
+		return names[0], funcKindExtension, true
+	}
+	return "", funcKindNone, false
 }
 
 // nodeStmtOneofName returns the active oneof field name for n's
