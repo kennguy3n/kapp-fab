@@ -214,6 +214,14 @@ func openDB() (*sql.DB, error) {
 // of `db` — calling migrate.Close() will close the DB.  The caller
 // MUST NOT also defer db.Close() in this case.  On error, ownership
 // stays with the caller and the caller is responsible for closing db.
+//
+// Note on the NewWithInstance failure path: we intentionally do NOT
+// call driver.Close() if NewWithInstance returns an error.  The
+// postgres driver wraps the same *sql.DB the caller passed in; its
+// Close() would close that DB, breaking the documented contract
+// that on error the caller still owns db.  The driver itself
+// allocates no extra connections beyond the wrapped *sql.DB, so
+// dropping it without Close() is not a leak.
 func openMigrate(src *migratesource.LegacySource, db *sql.DB) (*migrate.Migrate, error) {
 	driver, err := migratepg.WithInstance(db, &migratepg.Config{
 		MigrationsTable: schemaMigrationsTable,
@@ -223,6 +231,7 @@ func openMigrate(src *migratesource.LegacySource, db *sql.DB) (*migrate.Migrate,
 	}
 	m, err := migrate.NewWithInstance("legacy", src, "postgres", driver)
 	if err != nil {
+		// See doc comment above: do not close driver here.
 		return nil, fmt.Errorf("init migrate: %w", err)
 	}
 	return m, nil
