@@ -320,17 +320,38 @@ func cmdUp(args []string) error {
 			return fmt.Errorf("up: probe %s: %w", kappSentinelTable, perr)
 		}
 		if hasSentinel {
-			// Multi-line guidance is returned via a separate Println
-			// after the short error string so staticcheck's ST1005
-			// (no punctuation/newlines in error strings) is honored.
+			// Describe schema_migrations precisely so the operator
+			// can correlate the message with what they see in psql.
+			// status here is either schemaMigrationsAbsent (no
+			// table at all) or schemaMigrationsEmpty (table exists
+			// but no rows).  Both states need bootstrap, but
+			// saying "empty" when the table is absent is
+			// factually misleading.
+			//
+			// Multi-line guidance is returned via fmt.Fprintf
+			// after the short error string so staticcheck's
+			// ST1005 (no punctuation/newlines in error strings)
+			// is honored.
+			var stateDesc string
+			switch status {
+			case schemaMigrationsAbsent:
+				stateDesc = "missing"
+			case schemaMigrationsEmpty:
+				stateDesc = "empty"
+			case schemaMigrationsPopulated:
+				// Unreachable: outer `if status != schemaMigrationsPopulated`
+				// already excludes this case.  Defensive default for
+				// future enum additions.
+				stateDesc = "in an unexpected state"
+			}
 			fmt.Fprintf(os.Stderr,
-				"%s exists but %s is empty; this DB was provisioned by the legacy psql-loop\n\n"+
+				"%s exists but %s is %s; this DB was provisioned by the legacy psql-loop\n\n"+
 					"Run:\n\n    go run ./cmd/migrate bootstrap\n\n"+
 					"to mark existing migrations as applied without re-running them.\n",
-				kappSentinelTable, schemaMigrationsTable,
+				kappSentinelTable, schemaMigrationsTable, stateDesc,
 			)
-			return fmt.Errorf("up: legacy DB detected (%s present, %s empty)",
-				kappSentinelTable, schemaMigrationsTable)
+			return fmt.Errorf("up: legacy DB detected (%s present, %s %s)",
+				kappSentinelTable, schemaMigrationsTable, stateDesc)
 		}
 	}
 
