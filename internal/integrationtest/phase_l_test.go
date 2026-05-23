@@ -838,15 +838,40 @@ func TestInsightsSQLEditorMode(t *testing.T) {
 // PostgreSQL canonicalises lock_timeout values to a "<n>ms" or
 // "<n>s" string depending on magnitude; we accept both forms.
 //
-// Each subtest re-binds lockTimeout from a known baseline so the
-// cases are order-independent and parallel-safe.  WithLockTimeout
-// mutates the receiver in place (deliberately — it's a builder),
-// so a naïve loop that shared `runner` would have the "override-3s"
-// case bleed into the "default-5s" case and make order matter.
+// Subtests are order-independent (each re-binds lockTimeout from a
+// known baseline at the top of its closure), but NOT parallel-safe:
+// they share a single Runner pointer and WithLockTimeout mutates
+// the receiver in place (that's the documented builder contract).
+// If t.Parallel() were added to the subtest closures two goroutines
+// would race on Runner.lockTimeout.  Sequential subtest execution
+// is sufficient for this PR's coverage goal (verify the SET LOCAL
+// fires for each configuration); when the surface grows enough to
+// warrant parallelism, the fix is per-case NewRunner — not adding
+// t.Parallel() with the current shape.
+//
+// The disabled-zero case self-calibrates against the role/db default
+// rather than assuming it's literally '0', so a future ops change
+// like `ALTER ROLE kapp_app SET lock_timeout = '2s'` doesn't make
+// the test flaky.  We read the baseline via the admin pool (which
+// honours role/db defaults but doesn't have a `SET LOCAL` applied
+// to it from a prior test) and compare disabled-zero's readback to
+// that value.
 func TestInsightsSQLEditorLockTimeoutApplied(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
 	tn, _, _, _, runner := newTenantForInsights(t, h)
+
+	// Self-calibrate the disabled-zero expected value against the
+	// role's effective lock_timeout default.  Pool acquired via
+	// h.pool (the kapp_app role) so it reflects the same role/db
+	// defaults that RunRawSQL's transaction would see when the
+	// SET LOCAL is skipped.  We open a one-off short-lived
+	// connection rather than a long-lived tx so we don't leak a
+	// SET LOCAL into the pool's session reset list.
+	var roleDefaultLockTimeout string
+	if err := h.pool.QueryRow(ctx, "SELECT current_setting('lock_timeout')").Scan(&roleDefaultLockTimeout); err != nil {
+		t.Fatalf("probe role default lock_timeout: %v", err)
+	}
 
 	cases := []struct {
 		name string
@@ -855,26 +880,28 @@ func TestInsightsSQLEditorLockTimeoutApplied(t *testing.T) {
 		// the SET LOCAL would emit; we read it back from
 		// current_setting to prove the wire actually fired.
 		lockTimeout time.Duration
-		// wantContains is checked as a substring on the
-		// `current_setting('lock_timeout')` result so we don't
-		// have to encode PG's canonical-string rule
-		// (1ms→"1ms", 5000ms→"5s", etc) into the test.
-		wantContains string
+		// want is the EXACT expected value of
+		// current_setting('lock_timeout') for this case.  For
+		// configured values we use PG's canonical
+		// duration-to-string form (5s/3s); for the disabled
+		// case we use whatever the role default is (probed at
+		// test start).
+		want string
 	}{
 		{
-			name:         "default-5s",
-			lockTimeout:  insights.DefaultLockTimeout,
-			wantContains: "5s",
+			name:        "default-5s",
+			lockTimeout: insights.DefaultLockTimeout,
+			want:        "5s",
 		},
 		{
-			name:         "override-3s",
-			lockTimeout:  3 * time.Second,
-			wantContains: "3s",
+			name:        "override-3s",
+			lockTimeout: 3 * time.Second,
+			want:        "3s",
 		},
 		{
-			name:         "disabled-zero",
-			lockTimeout:  0,
-			wantContains: "0",
+			name:        "disabled-zero",
+			lockTimeout: 0,
+			want:        roleDefaultLockTimeout,
 		},
 	}
 	for _, tc := range cases {
@@ -892,8 +919,8 @@ func TestInsightsSQLEditorLockTimeoutApplied(t *testing.T) {
 				t.Fatalf("unexpected result shape: %#v", out)
 			}
 			lt, _ := out.Result.Rows[0]["lt"].(string)
-			if !strings.Contains(lt, tc.wantContains) {
-				t.Fatalf("lock_timeout = %q, want substring %q", lt, tc.wantContains)
+			if lt != tc.want {
+				t.Fatalf("lock_timeout = %q, want %q", lt, tc.want)
 			}
 		})
 	}
