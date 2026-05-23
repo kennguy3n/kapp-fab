@@ -503,6 +503,12 @@ func TestValidateRawSQLRejectsSchemaQualifiedPgTable(t *testing.T) {
 // the AST layer keeps the validator as the single source of truth
 // for the editor surface's accepted shapes, with READ ONLY tx as
 // defense in depth.
+//
+// Coverage includes nested forms — FOR UPDATE inside a CTE body,
+// a RangeSubselect, a SubLink expression subquery, and a UNION
+// arm — because the LockingClause check lives inside the AST
+// walker (case *pg_query.SelectStmt) so it fires uniformly on
+// root and nested SelectStmts.
 func TestValidateRawSQLRejectsForUpdate(t *testing.T) {
 	cases := []string{
 		"SELECT * FROM krecords FOR UPDATE",
@@ -512,6 +518,18 @@ func TestValidateRawSQLRejectsForUpdate(t *testing.T) {
 		"SELECT * FROM krecords FOR UPDATE NOWAIT",
 		"SELECT * FROM krecords FOR UPDATE SKIP LOCKED",
 		"SELECT id FROM krecords WHERE tenant_id = $1 FOR UPDATE",
+		// Nested in a CTE body — the walker must recurse into
+		// WithClause.Ctes[i].Ctequery's SelectStmt and check its
+		// LockingClause there too.
+		"WITH x AS (SELECT * FROM krecords FOR UPDATE) SELECT * FROM x",
+		// Nested in a RangeSubselect (subquery in FROM).
+		"SELECT * FROM (SELECT * FROM krecords FOR UPDATE) t",
+		// Nested in a SubLink expression subquery (subquery in
+		// WHERE/SELECT-target list).
+		"SELECT id FROM krecords WHERE id IN (SELECT id FROM krecords FOR UPDATE)",
+		// Nested in a UNION arm — set-op trees have Larg/Rarg
+		// each as their own SelectStmt.
+		"SELECT 1 UNION SELECT id FROM krecords FOR UPDATE",
 	}
 	for _, body := range cases {
 		err := validateRawSQL(body)

@@ -57,10 +57,20 @@ var ErrUnsafeSQL = errors.New("insights: unsafe sql")
 //
 //     Special case: `SELECT … INTO newtable FROM …` parses as a
 //     SelectStmt with a non-nil `IntoClause` and is functionally
-//     DDL (creates a table from the result set). Rule 4 rejects
-//     it explicitly so the parser-level contract matches the
-//     docstring's "only SELECT" promise; READ ONLY tx is the
-//     backstop, not the source of truth.
+//     DDL (creates a table from the result set). It is rejected
+//     by the walker (see rule 5d below) so the AST-level contract
+//     matches the docstring's "only SELECT" promise both at the
+//     root and inside any nested CTE/subquery; READ ONLY tx is
+//     the backstop, not the source of truth.
+//
+//     Special case: `SELECT … FOR UPDATE/SHARE/NO KEY UPDATE/KEY
+//     SHARE` parses as a SelectStmt with a non-empty
+//     `LockingClause`. PostgreSQL rejects these in a read-only
+//     transaction with a runtime error, but the walker rejects
+//     them at the AST layer (rule 5d) so the validator surfaces
+//     a clean error message both at the root and inside any
+//     nested CTE/subquery, and READ ONLY tx remains as defense
+//     in depth.
 //
 //  5. Walk the entire parse tree and reject any of:
 //
@@ -98,6 +108,19 @@ var ErrUnsafeSQL = errors.New("insights: unsafe sql")
 //     pg_read_server_files — but the validator's job is to fail
 //     closed at the AST layer rather than rely on role grants
 //     downstream.
+//
+//     d. SelectStmt — root or nested — with a non-nil IntoClause
+//     (SELECT INTO masquerading as a SELECT) or non-empty
+//     LockingClause (FOR UPDATE/SHARE). Both shapes parse as a
+//     valid SelectStmt that would otherwise pass rules 5a-5c, so
+//     the walker inspects every SelectStmt node and rejects them
+//     directly. Running this check inside the walker (rather
+//     than only at the root) catches the same shape hidden in
+//     CTE bodies, RangeSubselect subqueries, SubLink expression
+//     subqueries, and UNION/INTERSECT/EXCEPT arms — all of which
+//     would otherwise reach the runtime and produce a less-
+//     friendly Postgres error instead of the validator's clean
+//     "single source of truth" message.
 //
 // Scope notes:
 //
@@ -141,8 +164,7 @@ func validateRawSQL(rawSQL string) error {
 	if top == nil {
 		return wrapUnsafe("empty top-level statement node")
 	}
-	sel := top.GetSelectStmt()
-	if sel == nil {
+	if top.GetSelectStmt() == nil {
 		// Surface the concrete oneof name so the user can see
 		// what we parsed it as. The label is the AST node type
 		// ("InsertStmt", "UpdateStmt", "AlterTableStmt", etc.) —
@@ -150,33 +172,26 @@ func validateRawSQL(rawSQL string) error {
 		kind := concreteNodeName(top)
 		return wrapUnsafe("only SELECT is permitted, got %s", kind)
 	}
-	// SELECT … INTO newtable FROM … is DDL masquerading as a
-	// SelectStmt. Postgres parses it as SelectStmt with a non-nil
-	// IntoClause and would, in a writable tx, create `newtable`
-	// from the result set. Reject at the AST layer so the
-	// validator's contract matches its docstring — the existing
-	// `SET TRANSACTION READ ONLY` in RunRawSQL remains as defense
-	// in depth, but is no longer load-bearing for this case.
-	if sel.GetIntoClause() != nil {
-		return wrapUnsafe("SELECT INTO is not allowed (creates a table from the result set)")
-	}
-	// SELECT … FOR UPDATE/SHARE/NO KEY UPDATE/KEY SHARE parses as
-	// SelectStmt with a non-nil LockingClause. Postgres rejects
-	// these in a read-only transaction with a runtime error
-	// ("cannot execute SELECT FOR UPDATE in a read-only
-	// transaction"), but surfacing it at the AST layer keeps the
-	// validator as the single source of truth for what the editor
-	// surface accepts — readers don't suddenly see a different,
-	// less friendly error category for one specific shape of
-	// rejected SELECT. The READ ONLY tx remains as defense in
-	// depth.
-	if len(sel.GetLockingClause()) > 0 {
-		return wrapUnsafe("SELECT … FOR UPDATE/SHARE/NO KEY UPDATE/KEY SHARE is not allowed (row locking is not permitted in the read-only editor surface)")
-	}
-	// Walk the full tree and apply rules 5a/5b/5c. The walk
-	// terminates on the first violation found; the walker honours
-	// a `false` return from visit so all parent frames unwind
-	// without doing more work.
+	// Walk the full tree and apply rules 5a/5b/5c PLUS the per-
+	// SelectStmt safety checks (IntoClause = SELECT INTO,
+	// LockingClause = FOR UPDATE/SHARE). The walk terminates on
+	// the first violation found; the walker honours a `false`
+	// return from visit so all parent frames unwind without doing
+	// more work.
+	//
+	// Why the IntoClause / LockingClause checks live in the walker
+	// rather than at the top-level `sel := top.GetSelectStmt()`:
+	// nested SelectStmts (CTE bodies, RangeSubselect inner selects,
+	// SubLink expression subqueries, UNION/INTERSECT/EXCEPT
+	// arms) can carry their own IntoClause or LockingClause, and a
+	// root-only check would let a query like
+	// `WITH x AS (SELECT * FROM krecords FOR UPDATE) SELECT * FROM x`
+	// pass the validator and hit the less-friendly Postgres
+	// "cannot execute SELECT FOR UPDATE in a read-only transaction"
+	// runtime error. Running the check inside the walker uniformly
+	// enforces "no SELECT in the tree, root or nested, carries
+	// IntoClause or LockingClause" — which is the contract the
+	// docstring promises.
 	//
 	// `atRoot` exists to skip the outermost *pg_query.Node — which
 	// was already validated as a SelectStmt above — so rule 5b
@@ -191,6 +206,24 @@ func validateRawSQL(rawSQL string) error {
 	atRoot := true
 	walkProtoMessages(top.ProtoReflect(), func(m protoreflect.Message) bool {
 		switch n := m.Interface().(type) {
+		case *pg_query.SelectStmt:
+			// Applies to root AND every nested SelectStmt (CTE
+			// body, subquery in FROM/WHERE/SELECT-target,
+			// set-op arm). PostgreSQL itself rejects `SELECT
+			// INTO` inside a CTE at execution time with
+			// "SELECT ... INTO is not allowed here", but the
+			// validator should produce the clean AST-layer
+			// message for both root and nested cases —
+			// consistency over relying on Postgres to surface
+			// the specific error.
+			if n.GetIntoClause() != nil {
+				rejection = wrapUnsafe("SELECT INTO is not allowed (creates a table from the result set)")
+				return false
+			}
+			if len(n.GetLockingClause()) > 0 {
+				rejection = wrapUnsafe("SELECT … FOR UPDATE/SHARE/NO KEY UPDATE/KEY SHARE is not allowed (row locking is not permitted in the read-only editor surface)")
+				return false
+			}
 		case *pg_query.RangeVar:
 			if isSystemCatalog(n) {
 				ref := n.GetRelname()
