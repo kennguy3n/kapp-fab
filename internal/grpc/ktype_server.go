@@ -83,10 +83,14 @@ func (s *ktypeServiceImpl) GetKType(ctx context.Context, req *kappv1.GetKTypeReq
 	return &kappv1.GetKTypeResponse{Ktype: ktypeToProto(kt)}, nil
 }
 
-// ListKTypes returns every KType registered for the tenant. The
-// tenant scoping is enforced by the auth interceptor (which sets
-// app.tenant_id on every connection) + RLS — this handler does
-// not need to filter manually.
+// ListKTypes returns every KType registered in the shared, non-
+// tenant-scoped `ktypes` table — KTypes are platform metadata
+// rather than tenant data (see PGRegistry doc comment), so there
+// is no per-tenant filter to apply. The HTTP handler at
+// services/api/ktypes.go:list has the same shape; authorisation
+// for who can register/list KTypes lives in the auth interceptor
+// (currently every authenticated caller can read; mutation is a
+// platform-admin operation that flows through the same pool).
 func (s *ktypeServiceImpl) ListKTypes(ctx context.Context, _ *kappv1.ListKTypesRequest) (*kappv1.ListKTypesResponse, error) {
 	kts, err := s.registry.List(ctx)
 	if err != nil {

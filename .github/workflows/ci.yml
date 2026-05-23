@@ -27,9 +27,19 @@ jobs:
       # gen/ is gitignored; regenerate Go protobuf bindings from
       # proto/ before every Go step. `make proto-gen` is idempotent
       # and installs the two protoc-gen plugins on first run.
+      #
+      # pr_comment: false disables the action's GitHub-API-based
+      # comment writer. With the default `pr_comment: true`, the
+      # action authenticates against the GitHub API even when
+      # `setup_only: true` is set, and intermittently fails with
+      # `Bad credentials` on PRs from internal branches. The
+      # comment behaviour is irrelevant here — we only want buf
+      # installed; the buf workflow (.github/workflows/buf.yml)
+      # owns lint/breaking comments separately.
       - uses: bufbuild/buf-action@v1
         with:
           setup_only: true
+          pr_comment: false
       - run: make proto-gen
       - run: go build ./...
       - run: go vet ./...
@@ -50,6 +60,7 @@ jobs:
       - uses: bufbuild/buf-action@v1
         with:
           setup_only: true
+          pr_comment: false
       - run: make proto-gen
       - uses: golangci/golangci-lint-action@v7
         with:
@@ -83,6 +94,7 @@ jobs:
       - uses: bufbuild/buf-action@v1
         with:
           setup_only: true
+          pr_comment: false
       - run: make proto-gen
       - name: apply migrations
         env:
