@@ -53,6 +53,24 @@ func (s *ktypeServiceImpl) RegisterKType(ctx context.Context, req *kappv1.Regist
 	if strings.TrimSpace(req.GetName()) == "" {
 		return nil, status.Error(codes.InvalidArgument, "name required")
 	}
+	if req.GetVersion() <= 0 {
+		// Mirrors the proto contract documented in
+		// proto/kapp/v1/ktype.proto:35 ("version is REQUIRED and
+		// must be > 0"). The registry rejects (name, version<=0)
+		// downstream with "ktype: name and version required", but
+		// that error mentions both name AND version and is mapped
+		// to InvalidArgument by mapKTypeError's fallback — the
+		// explicit handler check gives the operator a clearer
+		// "version must be > 0" message AND a single source of
+		// truth for the contract, without depending on the
+		// registry-internal error wording. The HTTP register
+		// handler does the same check (services/api/ktypes.go) so
+		// the gRPC and REST surfaces emit identical 400 / InvalidArgument
+		// responses for the same input. GetKType's `< 0` check is
+		// intentionally LESS strict than this one: version=0 on
+		// the read path means "give me latest" (see GetKType doc).
+		return nil, status.Error(codes.InvalidArgument, "version must be > 0")
+	}
 	if len(req.GetSchema()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "schema required")
 	}

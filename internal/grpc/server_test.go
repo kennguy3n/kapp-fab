@@ -400,6 +400,44 @@ func TestKTypeService_ListKTypes_Authenticated(t *testing.T) {
 	}
 }
 
+// TestKTypeService_RegisterKType_VersionRequired asserts the
+// handler rejects RegisterKType requests with version<=0 with
+// codes.InvalidArgument, matching the proto contract documented
+// in proto/kapp/v1/ktype.proto:35 ("version is REQUIRED and must
+// be > 0"). The check is duplicated at both the gRPC handler
+// (this test) and the HTTP register handler (services/api) so
+// the wire surface is uniform.
+func TestKTypeService_RegisterKType_VersionRequired(t *testing.T) {
+	ts, closer := startTestServer(t)
+	defer closer()
+
+	client := kappv1.NewKTypeServiceClient(ts.clientConn)
+	ctx := withBearer(context.Background(), ts.issueToken(t, nil))
+
+	cases := []struct {
+		name    string
+		version int32
+	}{
+		{"omitted (proto3 default)", 0},
+		{"negative", -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := client.RegisterKType(ctx, &kappv1.RegisterKTypeRequest{
+				Name:    "Deal",
+				Version: tc.version,
+				Schema:  []byte(`{"type":"object"}`),
+			})
+			if err == nil {
+				t.Fatalf("RegisterKType: want error, got nil")
+			}
+			if got, want := status.Code(err), codes.InvalidArgument; got != want {
+				t.Errorf("code = %v; want %v", got, want)
+			}
+		})
+	}
+}
+
 // TestKTypeService_MissingBearer asserts the auth interceptor
 // rejects an authenticated RPC with no bearer token.
 func TestKTypeService_MissingBearer(t *testing.T) {

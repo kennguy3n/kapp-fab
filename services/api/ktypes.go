@@ -27,6 +27,18 @@ func (h *ktypeHandlers) register(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
+	// Explicit version-required check mirrors the proto contract at
+	// proto/kapp/v1/ktype.proto:35 ("version is REQUIRED and must
+	// be > 0") and the matching gRPC handler validation in
+	// internal/grpc/ktype_server.go:RegisterKType. The registry's
+	// own (name, version<=0) check returns a less clear message
+	// ("ktype: name and version required") that mentions both
+	// fields even when only version is wrong; an explicit handler
+	// check gives the operator a precise 400.
+	if req.Version <= 0 {
+		http.Error(w, "version must be > 0", http.StatusBadRequest)
+		return
+	}
 	if err := h.registry.Register(r.Context(), ktype.KType{
 		Name:    req.Name,
 		Version: req.Version,
