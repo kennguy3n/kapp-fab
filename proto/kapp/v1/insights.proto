@@ -1,0 +1,473 @@
+// insights.proto models the Phase L BI surface — saved queries,
+// dashboards, widgets, shares, embeds, and external data sources.
+// Runs against per-tenant statement_timeout fences enforced inside
+// internal/insights.Runner.
+//
+// The query "definition" and SQL "params" payloads are bytes
+// (JSON-encoded). The QueryDefinition shape lives in
+// internal/insights/runner.go and is too dynamic for a stable
+// proto type — it carries visual-editor primitives (table, joins,
+// filters, group-by, aggregates) whose shape evolves with the
+// editor. Keeping it opaque means proto changes don't have to
+// chase the visual editor's roadmap.
+syntax = "proto3";
+
+package kapp.v1;
+
+// ---------------------------------------------------------------------------
+// Queries
+// ---------------------------------------------------------------------------
+
+// Query is the wire form of an insights_queries row. Mirrors
+// internal/insights.Query.
+message Query {
+  string id = 1;
+  string tenant_id = 2;
+  string name = 3;
+  string description = 4;
+  // definition is the visual-editor QueryDefinition, JSON-encoded.
+  // For SQL-mode queries this is set to a sentinel marker that
+  // RawSQL takes precedence over.
+  bytes definition = 5;
+  // mode is "visual" (default) or "sql" (Phase M raw-SQL editor).
+  string mode = 6;
+  // raw_sql is populated only for SQL-mode queries. Validated via
+  // the AST-based validator in internal/insights.validateRawSQL
+  // (single SELECT, no DDL/DML, no banned functions).
+  string raw_sql = 7;
+  // cache_ttl_seconds: 0 disables caching; unset (-1) uses the
+  // server default (300). Encoded as int32 with a separate
+  // has_cache_ttl boolean so the wire distinguishes "use default"
+  // from "explicit 0". int32 alone would conflate them.
+  int32 cache_ttl_seconds = 8;
+  bool has_cache_ttl = 9;
+  string created_by = 10;
+  string created_at = 11;
+  string updated_at = 12;
+}
+
+message ListQueriesRequest {}
+message ListQueriesResponse {
+  repeated Query queries = 1;
+}
+
+message CreateQueryRequest {
+  string name = 1;
+  string description = 2;
+  bytes definition = 3;
+  int32 cache_ttl_seconds = 4;
+  bool has_cache_ttl = 5;
+  string mode = 6;
+  string raw_sql = 7;
+}
+message CreateQueryResponse {
+  Query query = 1;
+}
+
+message GetQueryRequest {
+  string id = 1;
+}
+message GetQueryResponse {
+  Query query = 1;
+}
+
+message UpdateQueryRequest {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  bytes definition = 4;
+  int32 cache_ttl_seconds = 5;
+  bool has_cache_ttl = 6;
+  string mode = 7;
+  string raw_sql = 8;
+}
+message UpdateQueryResponse {
+  Query query = 1;
+}
+
+message DeleteQueryRequest {
+  string id = 1;
+}
+message DeleteQueryResponse {}
+
+// RunQueryRequest executes a saved query with optional filter
+// overrides. filter_params is JSON-encoded (the editor's filter
+// parameters are dynamic per visual-editor binding).
+message RunQueryRequest {
+  string id = 1;
+  bytes filter_params = 2;
+  // bypass_cache forces a fresh execution even when the cache
+  // entry is still warm. Used by the "Refresh" affordance in
+  // the dashboard widget UI.
+  bool bypass_cache = 3;
+}
+message RunQueryResponse {
+  // result_json is the runner's output payload (rows, columns,
+  // metadata). Opaque on the wire for the same reason
+  // QueryDefinition is opaque.
+  bytes result_json = 1;
+}
+
+// RunRawSQLRequest runs a SQL-mode query body verbatim through the
+// AST validator + per-tenant statement_timeout fences. raw_sql is
+// optional — empty means "use the persisted query body".
+message RunRawSQLRequest {
+  string id = 1;
+  string raw_sql = 2;
+  // params is the positional argument list bound by pgx.Query
+  // ($1, $2, ...). JSON-encoded because Go's `[]any` is dynamic.
+  bytes params = 3;
+}
+message RunRawSQLResponse {
+  bytes result_json = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Dashboards
+// ---------------------------------------------------------------------------
+
+message Dashboard {
+  string id = 1;
+  string tenant_id = 2;
+  string name = 3;
+  string description = 4;
+  // layout is the dashboard's grid layout (widget positions,
+  // dimensions). Opaque JSON.
+  bytes layout = 5;
+  int32 auto_refresh_seconds = 6;
+  string created_by = 7;
+  string created_at = 8;
+  string updated_at = 9;
+}
+
+message ListDashboardsRequest {}
+message ListDashboardsResponse {
+  repeated Dashboard dashboards = 1;
+}
+
+message CreateDashboardRequest {
+  string name = 1;
+  string description = 2;
+  bytes layout = 3;
+  int32 auto_refresh_seconds = 4;
+}
+message CreateDashboardResponse {
+  Dashboard dashboard = 1;
+}
+
+// GetDashboardResponse bundles the dashboard with its widgets'
+// pre-resolved query results so the frontend renders without a
+// fan-out. Per-widget failures surface as missing entries in
+// `widget_results` — the dashboard rendering still proceeds with
+// an error state for the affected widget.
+message GetDashboardRequest {
+  string id = 1;
+}
+message GetDashboardResponse {
+  Dashboard dashboard = 1;
+  // widget_results maps widget id (string) to result JSON
+  // (bytes). Map values are bytes for the same opacity reason
+  // as RunQueryResponse.result_json.
+  map<string, bytes> widget_results = 2;
+}
+
+message UpdateDashboardRequest {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  bytes layout = 4;
+  int32 auto_refresh_seconds = 5;
+}
+message UpdateDashboardResponse {
+  Dashboard dashboard = 1;
+}
+
+message DeleteDashboardRequest {
+  string id = 1;
+}
+message DeleteDashboardResponse {}
+
+// ---------------------------------------------------------------------------
+// Widgets
+// ---------------------------------------------------------------------------
+
+message DashboardWidget {
+  string id = 1;
+  string tenant_id = 2;
+  string dashboard_id = 3;
+  // query_id is optional — a widget may reference no query
+  // (e.g. a static text/markdown card).
+  string query_id = 4;
+  // viz_type is one of "table" / "bar" / "line" / "pie" / "text"
+  // / etc. Modelled as string rather than enum so the visual
+  // editor can add types without a proto bump.
+  string viz_type = 5;
+  bytes position = 6;
+  bytes config = 7;
+}
+
+message UpsertWidgetRequest {
+  string dashboard_id = 1;
+  // id is optional — empty means "create new"; non-empty
+  // means "update existing".
+  string id = 2;
+  string query_id = 3;
+  string viz_type = 4;
+  bytes position = 5;
+  bytes config = 6;
+}
+message UpsertWidgetResponse {
+  DashboardWidget widget = 1;
+}
+
+message DeleteWidgetRequest {
+  string dashboard_id = 1;
+  string widget_id = 2;
+}
+message DeleteWidgetResponse {}
+
+// ---------------------------------------------------------------------------
+// Sharing
+// ---------------------------------------------------------------------------
+
+message Share {
+  string id = 1;
+  string tenant_id = 2;
+  string resource_type = 3;
+  string resource_id = 4;
+  // grantee_type is one of "user", "role", "tenant".
+  string grantee_type = 5;
+  string grantee = 6;
+  // permission is one of "view", "edit". Empty defaults to "view".
+  string permission = 7;
+  string created_at = 8;
+}
+
+// Share-grant Create/List/Delete are split into per-resource
+// request/response types (rather than a shared ShareRequest
+// taking a resource_type field) because buf's STANDARD ruleset
+// requires each RPC to have a dedicated request/response pair.
+// The split also lets the wire format evolve independently if
+// either resource gains share fields the other doesn't need.
+message ShareQueryRequest {
+  string id = 1;
+  string grantee_type = 2;
+  string grantee = 3;
+  string permission = 4;
+}
+message ShareQueryResponse {
+  Share share = 1;
+}
+message ShareDashboardRequest {
+  string id = 1;
+  string grantee_type = 2;
+  string grantee = 3;
+  string permission = 4;
+}
+message ShareDashboardResponse {
+  Share share = 1;
+}
+
+message ListQuerySharesRequest {
+  string id = 1;
+}
+message ListQuerySharesResponse {
+  repeated Share shares = 1;
+}
+message ListDashboardSharesRequest {
+  string id = 1;
+}
+message ListDashboardSharesResponse {
+  repeated Share shares = 1;
+}
+
+message DeleteQueryShareRequest {
+  string id = 1;
+  string share_id = 2;
+}
+message DeleteQueryShareResponse {}
+message DeleteDashboardShareRequest {
+  string id = 1;
+  string share_id = 2;
+}
+message DeleteDashboardShareResponse {}
+
+// ---------------------------------------------------------------------------
+// Embeds
+// ---------------------------------------------------------------------------
+
+message Embed {
+  string id = 1;
+  string tenant_id = 2;
+  string dashboard_id = 3;
+  string token = 4;
+  bytes scoped_filters = 5;
+  int32 max_views = 6;
+  int32 view_count = 7;
+  string expires_at = 8;
+  bool revoked = 9;
+  string created_by = 10;
+  string created_at = 11;
+}
+
+message ListEmbedsRequest {
+  string dashboard_id = 1;
+}
+message ListEmbedsResponse {
+  repeated Embed embeds = 1;
+}
+
+message CreateEmbedRequest {
+  string dashboard_id = 1;
+  bytes scoped_filters = 2;
+  int32 max_views = 3;
+  int32 expires_in_days = 4;
+}
+message CreateEmbedResponse {
+  Embed embed = 1;
+}
+
+message RevokeEmbedRequest {
+  string dashboard_id = 1;
+  string embed_id = 2;
+}
+message RevokeEmbedResponse {}
+
+// PublicEmbedRequest is the unauthenticated GET path that
+// resolves a token to a rendered dashboard. Rate-limited
+// against the owning tenant's bucket.
+message PublicEmbedRequest {
+  string token = 1;
+}
+message PublicEmbedResponse {
+  Dashboard dashboard = 1;
+  map<string, bytes> widget_results = 2;
+}
+
+// ---------------------------------------------------------------------------
+// External data sources
+// ---------------------------------------------------------------------------
+
+message DataSource {
+  string id = 1;
+  string tenant_id = 2;
+  string name = 3;
+  string description = 4;
+  // dialect is one of "postgres" / "mysql" / "snowflake" /
+  // "bigquery" / etc. Validated server-side against the set
+  // the runner can connect to.
+  string dialect = 5;
+  // connection_string is the (redacted) DSN. Empty in list/get
+  // responses; only Create/Update accept it.
+  string connection_string = 6;
+  bool enabled = 7;
+  string created_at = 8;
+  string updated_at = 9;
+}
+
+message ListDataSourcesRequest {}
+message ListDataSourcesResponse {
+  repeated DataSource data_sources = 1;
+}
+
+message CreateDataSourceRequest {
+  string name = 1;
+  string description = 2;
+  string dialect = 3;
+  string connection_string = 4;
+  string secret_blob = 5;
+  bool enabled = 6;
+  bool has_enabled = 7;
+}
+message CreateDataSourceResponse {
+  DataSource data_source = 1;
+}
+
+message UpdateDataSourceRequest {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string dialect = 4;
+  string connection_string = 5;
+  string secret_blob = 6;
+  bool enabled = 7;
+  bool has_enabled = 8;
+}
+message UpdateDataSourceResponse {
+  DataSource data_source = 1;
+}
+
+message DeleteDataSourceRequest {
+  string id = 1;
+}
+message DeleteDataSourceResponse {}
+
+message TestDataSourceRequest {
+  string id = 1;
+}
+message TestDataSourceResponse {
+  bool ok = 1;
+  string error = 2;
+  // latency_ms is the round-trip time of the test SELECT 1
+  // query. Zero on failure.
+  int64 latency_ms = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+// InsightsService is the unified gRPC surface for queries,
+// dashboards, widgets, shares, embeds, and data sources.
+service InsightsService {
+  // Queries
+  rpc ListQueries(ListQueriesRequest) returns (ListQueriesResponse);
+  rpc CreateQuery(CreateQueryRequest) returns (CreateQueryResponse);
+  rpc GetQuery(GetQueryRequest) returns (GetQueryResponse);
+  rpc UpdateQuery(UpdateQueryRequest) returns (UpdateQueryResponse);
+  rpc DeleteQuery(DeleteQueryRequest) returns (DeleteQueryResponse);
+  rpc RunQuery(RunQueryRequest) returns (RunQueryResponse);
+  rpc RunRawSQL(RunRawSQLRequest) returns (RunRawSQLResponse);
+  rpc ShareQuery(ShareQueryRequest) returns (ShareQueryResponse);
+  rpc ListQueryShares(ListQuerySharesRequest) returns (ListQuerySharesResponse);
+  rpc DeleteQueryShare(DeleteQueryShareRequest) returns (DeleteQueryShareResponse);
+
+  // Dashboards
+  rpc ListDashboards(ListDashboardsRequest) returns (ListDashboardsResponse);
+  rpc CreateDashboard(CreateDashboardRequest) returns (CreateDashboardResponse);
+  rpc GetDashboard(GetDashboardRequest) returns (GetDashboardResponse);
+  rpc UpdateDashboard(UpdateDashboardRequest) returns (UpdateDashboardResponse);
+  rpc DeleteDashboard(DeleteDashboardRequest) returns (DeleteDashboardResponse);
+  rpc ShareDashboard(ShareDashboardRequest) returns (ShareDashboardResponse);
+  rpc ListDashboardShares(ListDashboardSharesRequest) returns (ListDashboardSharesResponse);
+  rpc DeleteDashboardShare(DeleteDashboardShareRequest) returns (DeleteDashboardShareResponse);
+
+  // Widgets
+  rpc UpsertWidget(UpsertWidgetRequest) returns (UpsertWidgetResponse);
+  rpc DeleteWidget(DeleteWidgetRequest) returns (DeleteWidgetResponse);
+
+  // Embeds
+  rpc ListEmbeds(ListEmbedsRequest) returns (ListEmbedsResponse);
+  rpc CreateEmbed(CreateEmbedRequest) returns (CreateEmbedResponse);
+  rpc RevokeEmbed(RevokeEmbedRequest) returns (RevokeEmbedResponse);
+  rpc PublicEmbed(PublicEmbedRequest) returns (PublicEmbedResponse);
+
+  // Data sources
+  rpc ListDataSources(ListDataSourcesRequest) returns (ListDataSourcesResponse);
+  rpc CreateDataSource(CreateDataSourceRequest) returns (CreateDataSourceResponse);
+  rpc UpdateDataSource(UpdateDataSourceRequest) returns (UpdateDataSourceResponse);
+  rpc DeleteDataSource(DeleteDataSourceRequest) returns (DeleteDataSourceResponse);
+  rpc TestDataSource(TestDataSourceRequest) returns (TestDataSourceResponse);
+
+  // Dashboard summary (the /api/v1/dashboard/summary endpoint).
+  rpc DashboardSummary(DashboardSummaryRequest) returns (DashboardSummaryResponse);
+}
+
+message DashboardSummaryRequest {}
+message DashboardSummaryResponse {
+  // summary_json is the aggregate summary payload — counts,
+  // recent activity, etc. Opaque JSON because the shape is
+  // module-specific and consumed by the React dashboard
+  // home page only.
+  bytes summary_json = 1;
+}
