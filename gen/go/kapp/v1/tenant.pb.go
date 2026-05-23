@@ -2789,593 +2789,6 @@ func (*DeleteRetentionOverrideResponse) Descriptor() ([]byte, []int) {
 	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{53}
 }
 
-type ConsolidationGroup struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	TenantId      string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
-	ParentId      string                 `protobuf:"bytes,4,opt,name=parent_id,json=parentId,proto3" json:"parent_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ConsolidationGroup) Reset() {
-	*x = ConsolidationGroup{}
-	mi := &file_kapp_v1_tenant_proto_msgTypes[54]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ConsolidationGroup) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ConsolidationGroup) ProtoMessage() {}
-
-func (x *ConsolidationGroup) ProtoReflect() protoreflect.Message {
-	mi := &file_kapp_v1_tenant_proto_msgTypes[54]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ConsolidationGroup.ProtoReflect.Descriptor instead.
-func (*ConsolidationGroup) Descriptor() ([]byte, []int) {
-	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{54}
-}
-
-func (x *ConsolidationGroup) GetId() string {
-	if x != nil {
-		return x.Id
-	}
-	return ""
-}
-
-func (x *ConsolidationGroup) GetTenantId() string {
-	if x != nil {
-		return x.TenantId
-	}
-	return ""
-}
-
-func (x *ConsolidationGroup) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *ConsolidationGroup) GetParentId() string {
-	if x != nil {
-		return x.ParentId
-	}
-	return ""
-}
-
-type ConsolidationMember struct {
-	state              protoimpl.MessageState `protogen:"open.v1"`
-	Id                 string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	GroupId            string                 `protobuf:"bytes,2,opt,name=group_id,json=groupId,proto3" json:"group_id,omitempty"`
-	SubsidiaryTenantId string                 `protobuf:"bytes,3,opt,name=subsidiary_tenant_id,json=subsidiaryTenantId,proto3" json:"subsidiary_tenant_id,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
-}
-
-func (x *ConsolidationMember) Reset() {
-	*x = ConsolidationMember{}
-	mi := &file_kapp_v1_tenant_proto_msgTypes[55]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ConsolidationMember) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ConsolidationMember) ProtoMessage() {}
-
-func (x *ConsolidationMember) ProtoReflect() protoreflect.Message {
-	mi := &file_kapp_v1_tenant_proto_msgTypes[55]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ConsolidationMember.ProtoReflect.Descriptor instead.
-func (*ConsolidationMember) Descriptor() ([]byte, []int) {
-	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{55}
-}
-
-func (x *ConsolidationMember) GetId() string {
-	if x != nil {
-		return x.Id
-	}
-	return ""
-}
-
-func (x *ConsolidationMember) GetGroupId() string {
-	if x != nil {
-		return x.GroupId
-	}
-	return ""
-}
-
-func (x *ConsolidationMember) GetSubsidiaryTenantId() string {
-	if x != nil {
-		return x.SubsidiaryTenantId
-	}
-	return ""
-}
-
-type ListConsolidationGroupsRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ListConsolidationGroupsRequest) Reset() {
-	*x = ListConsolidationGroupsRequest{}
-	mi := &file_kapp_v1_tenant_proto_msgTypes[56]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ListConsolidationGroupsRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ListConsolidationGroupsRequest) ProtoMessage() {}
-
-func (x *ListConsolidationGroupsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kapp_v1_tenant_proto_msgTypes[56]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ListConsolidationGroupsRequest.ProtoReflect.Descriptor instead.
-func (*ListConsolidationGroupsRequest) Descriptor() ([]byte, []int) {
-	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{56}
-}
-
-type ListConsolidationGroupsResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Groups        []*ConsolidationGroup  `protobuf:"bytes,1,rep,name=groups,proto3" json:"groups,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ListConsolidationGroupsResponse) Reset() {
-	*x = ListConsolidationGroupsResponse{}
-	mi := &file_kapp_v1_tenant_proto_msgTypes[57]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ListConsolidationGroupsResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ListConsolidationGroupsResponse) ProtoMessage() {}
-
-func (x *ListConsolidationGroupsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kapp_v1_tenant_proto_msgTypes[57]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ListConsolidationGroupsResponse.ProtoReflect.Descriptor instead.
-func (*ListConsolidationGroupsResponse) Descriptor() ([]byte, []int) {
-	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{57}
-}
-
-func (x *ListConsolidationGroupsResponse) GetGroups() []*ConsolidationGroup {
-	if x != nil {
-		return x.Groups
-	}
-	return nil
-}
-
-type CreateConsolidationGroupRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	ParentId      string                 `protobuf:"bytes,2,opt,name=parent_id,json=parentId,proto3" json:"parent_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *CreateConsolidationGroupRequest) Reset() {
-	*x = CreateConsolidationGroupRequest{}
-	mi := &file_kapp_v1_tenant_proto_msgTypes[58]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *CreateConsolidationGroupRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CreateConsolidationGroupRequest) ProtoMessage() {}
-
-func (x *CreateConsolidationGroupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kapp_v1_tenant_proto_msgTypes[58]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CreateConsolidationGroupRequest.ProtoReflect.Descriptor instead.
-func (*CreateConsolidationGroupRequest) Descriptor() ([]byte, []int) {
-	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{58}
-}
-
-func (x *CreateConsolidationGroupRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *CreateConsolidationGroupRequest) GetParentId() string {
-	if x != nil {
-		return x.ParentId
-	}
-	return ""
-}
-
-type CreateConsolidationGroupResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Group         *ConsolidationGroup    `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *CreateConsolidationGroupResponse) Reset() {
-	*x = CreateConsolidationGroupResponse{}
-	mi := &file_kapp_v1_tenant_proto_msgTypes[59]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *CreateConsolidationGroupResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CreateConsolidationGroupResponse) ProtoMessage() {}
-
-func (x *CreateConsolidationGroupResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kapp_v1_tenant_proto_msgTypes[59]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CreateConsolidationGroupResponse.ProtoReflect.Descriptor instead.
-func (*CreateConsolidationGroupResponse) Descriptor() ([]byte, []int) {
-	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{59}
-}
-
-func (x *CreateConsolidationGroupResponse) GetGroup() *ConsolidationGroup {
-	if x != nil {
-		return x.Group
-	}
-	return nil
-}
-
-type AddConsolidationMemberRequest struct {
-	state              protoimpl.MessageState `protogen:"open.v1"`
-	GroupId            string                 `protobuf:"bytes,1,opt,name=group_id,json=groupId,proto3" json:"group_id,omitempty"`
-	SubsidiaryTenantId string                 `protobuf:"bytes,2,opt,name=subsidiary_tenant_id,json=subsidiaryTenantId,proto3" json:"subsidiary_tenant_id,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
-}
-
-func (x *AddConsolidationMemberRequest) Reset() {
-	*x = AddConsolidationMemberRequest{}
-	mi := &file_kapp_v1_tenant_proto_msgTypes[60]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *AddConsolidationMemberRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*AddConsolidationMemberRequest) ProtoMessage() {}
-
-func (x *AddConsolidationMemberRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kapp_v1_tenant_proto_msgTypes[60]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use AddConsolidationMemberRequest.ProtoReflect.Descriptor instead.
-func (*AddConsolidationMemberRequest) Descriptor() ([]byte, []int) {
-	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{60}
-}
-
-func (x *AddConsolidationMemberRequest) GetGroupId() string {
-	if x != nil {
-		return x.GroupId
-	}
-	return ""
-}
-
-func (x *AddConsolidationMemberRequest) GetSubsidiaryTenantId() string {
-	if x != nil {
-		return x.SubsidiaryTenantId
-	}
-	return ""
-}
-
-type AddConsolidationMemberResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Member        *ConsolidationMember   `protobuf:"bytes,1,opt,name=member,proto3" json:"member,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *AddConsolidationMemberResponse) Reset() {
-	*x = AddConsolidationMemberResponse{}
-	mi := &file_kapp_v1_tenant_proto_msgTypes[61]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *AddConsolidationMemberResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*AddConsolidationMemberResponse) ProtoMessage() {}
-
-func (x *AddConsolidationMemberResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kapp_v1_tenant_proto_msgTypes[61]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use AddConsolidationMemberResponse.ProtoReflect.Descriptor instead.
-func (*AddConsolidationMemberResponse) Descriptor() ([]byte, []int) {
-	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{61}
-}
-
-func (x *AddConsolidationMemberResponse) GetMember() *ConsolidationMember {
-	if x != nil {
-		return x.Member
-	}
-	return nil
-}
-
-type RemoveConsolidationMemberRequest struct {
-	state              protoimpl.MessageState `protogen:"open.v1"`
-	GroupId            string                 `protobuf:"bytes,1,opt,name=group_id,json=groupId,proto3" json:"group_id,omitempty"`
-	SubsidiaryTenantId string                 `protobuf:"bytes,2,opt,name=subsidiary_tenant_id,json=subsidiaryTenantId,proto3" json:"subsidiary_tenant_id,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
-}
-
-func (x *RemoveConsolidationMemberRequest) Reset() {
-	*x = RemoveConsolidationMemberRequest{}
-	mi := &file_kapp_v1_tenant_proto_msgTypes[62]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RemoveConsolidationMemberRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RemoveConsolidationMemberRequest) ProtoMessage() {}
-
-func (x *RemoveConsolidationMemberRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kapp_v1_tenant_proto_msgTypes[62]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RemoveConsolidationMemberRequest.ProtoReflect.Descriptor instead.
-func (*RemoveConsolidationMemberRequest) Descriptor() ([]byte, []int) {
-	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{62}
-}
-
-func (x *RemoveConsolidationMemberRequest) GetGroupId() string {
-	if x != nil {
-		return x.GroupId
-	}
-	return ""
-}
-
-func (x *RemoveConsolidationMemberRequest) GetSubsidiaryTenantId() string {
-	if x != nil {
-		return x.SubsidiaryTenantId
-	}
-	return ""
-}
-
-type RemoveConsolidationMemberResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RemoveConsolidationMemberResponse) Reset() {
-	*x = RemoveConsolidationMemberResponse{}
-	mi := &file_kapp_v1_tenant_proto_msgTypes[63]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RemoveConsolidationMemberResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RemoveConsolidationMemberResponse) ProtoMessage() {}
-
-func (x *RemoveConsolidationMemberResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kapp_v1_tenant_proto_msgTypes[63]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RemoveConsolidationMemberResponse.ProtoReflect.Descriptor instead.
-func (*RemoveConsolidationMemberResponse) Descriptor() ([]byte, []int) {
-	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{63}
-}
-
-type ConsolidatedTrialBalanceRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	GroupId       string                 `protobuf:"bytes,1,opt,name=group_id,json=groupId,proto3" json:"group_id,omitempty"`
-	AsOf          string                 `protobuf:"bytes,2,opt,name=as_of,json=asOf,proto3" json:"as_of,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ConsolidatedTrialBalanceRequest) Reset() {
-	*x = ConsolidatedTrialBalanceRequest{}
-	mi := &file_kapp_v1_tenant_proto_msgTypes[64]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ConsolidatedTrialBalanceRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ConsolidatedTrialBalanceRequest) ProtoMessage() {}
-
-func (x *ConsolidatedTrialBalanceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kapp_v1_tenant_proto_msgTypes[64]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ConsolidatedTrialBalanceRequest.ProtoReflect.Descriptor instead.
-func (*ConsolidatedTrialBalanceRequest) Descriptor() ([]byte, []int) {
-	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{64}
-}
-
-func (x *ConsolidatedTrialBalanceRequest) GetGroupId() string {
-	if x != nil {
-		return x.GroupId
-	}
-	return ""
-}
-
-func (x *ConsolidatedTrialBalanceRequest) GetAsOf() string {
-	if x != nil {
-		return x.AsOf
-	}
-	return ""
-}
-
-type ConsolidatedTrialBalanceResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// rows is the consolidated trial balance, JSON-encoded
-	// because the row shape is dynamic (account / debit /
-	// credit per subsidiary).
-	Rows          []byte `protobuf:"bytes,1,opt,name=rows,proto3" json:"rows,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ConsolidatedTrialBalanceResponse) Reset() {
-	*x = ConsolidatedTrialBalanceResponse{}
-	mi := &file_kapp_v1_tenant_proto_msgTypes[65]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ConsolidatedTrialBalanceResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ConsolidatedTrialBalanceResponse) ProtoMessage() {}
-
-func (x *ConsolidatedTrialBalanceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kapp_v1_tenant_proto_msgTypes[65]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ConsolidatedTrialBalanceResponse.ProtoReflect.Descriptor instead.
-func (*ConsolidatedTrialBalanceResponse) Descriptor() ([]byte, []int) {
-	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{65}
-}
-
-func (x *ConsolidatedTrialBalanceResponse) GetRows() []byte {
-	if x != nil {
-		return x.Rows
-	}
-	return nil
-}
-
 type IsolationAuditEntry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -3389,7 +2802,7 @@ type IsolationAuditEntry struct {
 
 func (x *IsolationAuditEntry) Reset() {
 	*x = IsolationAuditEntry{}
-	mi := &file_kapp_v1_tenant_proto_msgTypes[66]
+	mi := &file_kapp_v1_tenant_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3401,7 +2814,7 @@ func (x *IsolationAuditEntry) String() string {
 func (*IsolationAuditEntry) ProtoMessage() {}
 
 func (x *IsolationAuditEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_kapp_v1_tenant_proto_msgTypes[66]
+	mi := &file_kapp_v1_tenant_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3414,7 +2827,7 @@ func (x *IsolationAuditEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IsolationAuditEntry.ProtoReflect.Descriptor instead.
 func (*IsolationAuditEntry) Descriptor() ([]byte, []int) {
-	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{66}
+	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *IsolationAuditEntry) GetId() string {
@@ -3462,7 +2875,7 @@ type ListIsolationAuditRequest struct {
 
 func (x *ListIsolationAuditRequest) Reset() {
 	*x = ListIsolationAuditRequest{}
-	mi := &file_kapp_v1_tenant_proto_msgTypes[67]
+	mi := &file_kapp_v1_tenant_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3474,7 +2887,7 @@ func (x *ListIsolationAuditRequest) String() string {
 func (*ListIsolationAuditRequest) ProtoMessage() {}
 
 func (x *ListIsolationAuditRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kapp_v1_tenant_proto_msgTypes[67]
+	mi := &file_kapp_v1_tenant_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3487,7 +2900,7 @@ func (x *ListIsolationAuditRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListIsolationAuditRequest.ProtoReflect.Descriptor instead.
 func (*ListIsolationAuditRequest) Descriptor() ([]byte, []int) {
-	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{67}
+	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *ListIsolationAuditRequest) GetId() string {
@@ -3514,7 +2927,7 @@ type ListIsolationAuditResponse struct {
 
 func (x *ListIsolationAuditResponse) Reset() {
 	*x = ListIsolationAuditResponse{}
-	mi := &file_kapp_v1_tenant_proto_msgTypes[68]
+	mi := &file_kapp_v1_tenant_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3526,7 +2939,7 @@ func (x *ListIsolationAuditResponse) String() string {
 func (*ListIsolationAuditResponse) ProtoMessage() {}
 
 func (x *ListIsolationAuditResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kapp_v1_tenant_proto_msgTypes[68]
+	mi := &file_kapp_v1_tenant_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3539,7 +2952,7 @@ func (x *ListIsolationAuditResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListIsolationAuditResponse.ProtoReflect.Descriptor instead.
 func (*ListIsolationAuditResponse) Descriptor() ([]byte, []int) {
-	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{68}
+	return file_kapp_v1_tenant_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *ListIsolationAuditResponse) GetEntries() []*IsolationAuditEntry {
@@ -3734,38 +3147,7 @@ const file_kapp_v1_tenant_proto_rawDesc = "" +
 	"\x1eDeleteRetentionOverrideRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05ktype\x18\x02 \x01(\tR\x05ktype\"!\n" +
-	"\x1fDeleteRetentionOverrideResponse\"r\n" +
-	"\x12ConsolidationGroup\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
-	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12\x12\n" +
-	"\x04name\x18\x03 \x01(\tR\x04name\x12\x1b\n" +
-	"\tparent_id\x18\x04 \x01(\tR\bparentId\"r\n" +
-	"\x13ConsolidationMember\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x19\n" +
-	"\bgroup_id\x18\x02 \x01(\tR\agroupId\x120\n" +
-	"\x14subsidiary_tenant_id\x18\x03 \x01(\tR\x12subsidiaryTenantId\" \n" +
-	"\x1eListConsolidationGroupsRequest\"V\n" +
-	"\x1fListConsolidationGroupsResponse\x123\n" +
-	"\x06groups\x18\x01 \x03(\v2\x1b.kapp.v1.ConsolidationGroupR\x06groups\"R\n" +
-	"\x1fCreateConsolidationGroupRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1b\n" +
-	"\tparent_id\x18\x02 \x01(\tR\bparentId\"U\n" +
-	" CreateConsolidationGroupResponse\x121\n" +
-	"\x05group\x18\x01 \x01(\v2\x1b.kapp.v1.ConsolidationGroupR\x05group\"l\n" +
-	"\x1dAddConsolidationMemberRequest\x12\x19\n" +
-	"\bgroup_id\x18\x01 \x01(\tR\agroupId\x120\n" +
-	"\x14subsidiary_tenant_id\x18\x02 \x01(\tR\x12subsidiaryTenantId\"V\n" +
-	"\x1eAddConsolidationMemberResponse\x124\n" +
-	"\x06member\x18\x01 \x01(\v2\x1c.kapp.v1.ConsolidationMemberR\x06member\"o\n" +
-	" RemoveConsolidationMemberRequest\x12\x19\n" +
-	"\bgroup_id\x18\x01 \x01(\tR\agroupId\x120\n" +
-	"\x14subsidiary_tenant_id\x18\x02 \x01(\tR\x12subsidiaryTenantId\"#\n" +
-	"!RemoveConsolidationMemberResponse\"Q\n" +
-	"\x1fConsolidatedTrialBalanceRequest\x12\x19\n" +
-	"\bgroup_id\x18\x01 \x01(\tR\agroupId\x12\x13\n" +
-	"\x05as_of\x18\x02 \x01(\tR\x04asOf\"6\n" +
-	" ConsolidatedTrialBalanceResponse\x12\x12\n" +
-	"\x04rows\x18\x01 \x01(\fR\x04rows\"\x91\x01\n" +
+	"\x1fDeleteRetentionOverrideResponse\"\x91\x01\n" +
 	"\x13IsolationAuditEntry\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12\x14\n" +
@@ -3780,7 +3162,7 @@ const file_kapp_v1_tenant_proto_rawDesc = "" +
 	"pagination\"\x7f\n" +
 	"\x1aListIsolationAuditResponse\x126\n" +
 	"\aentries\x18\x01 \x03(\v2\x1c.kapp.v1.IsolationAuditEntryR\aentries\x12)\n" +
-	"\x04page\x18\x02 \x01(\v2\x15.kapp.v1.ListPageMetaR\x04page2\x8c\x14\n" +
+	"\x04page\x18\x02 \x01(\v2\x15.kapp.v1.ListPageMetaR\x04page2\xdd\x0f\n" +
 	"\rTenantService\x12K\n" +
 	"\fCreateTenant\x12\x1c.kapp.v1.CreateTenantRequest\x1a\x1d.kapp.v1.CreateTenantResponse\x12B\n" +
 	"\tGetTenant\x12\x19.kapp.v1.GetTenantRequest\x1a\x1a.kapp.v1.GetTenantResponse\x12H\n" +
@@ -3806,12 +3188,7 @@ const file_kapp_v1_tenant_proto_rawDesc = "" +
 	"\x12PutPlacementPolicy\x12\".kapp.v1.PutPlacementPolicyRequest\x1a#.kapp.v1.PutPlacementPolicyResponse\x12i\n" +
 	"\x16ListRetentionOverrides\x12&.kapp.v1.ListRetentionOverridesRequest\x1a'.kapp.v1.ListRetentionOverridesResponse\x12l\n" +
 	"\x17UpsertRetentionOverride\x12'.kapp.v1.UpsertRetentionOverrideRequest\x1a(.kapp.v1.UpsertRetentionOverrideResponse\x12l\n" +
-	"\x17DeleteRetentionOverride\x12'.kapp.v1.DeleteRetentionOverrideRequest\x1a(.kapp.v1.DeleteRetentionOverrideResponse\x12l\n" +
-	"\x17ListConsolidationGroups\x12'.kapp.v1.ListConsolidationGroupsRequest\x1a(.kapp.v1.ListConsolidationGroupsResponse\x12o\n" +
-	"\x18CreateConsolidationGroup\x12(.kapp.v1.CreateConsolidationGroupRequest\x1a).kapp.v1.CreateConsolidationGroupResponse\x12i\n" +
-	"\x16AddConsolidationMember\x12&.kapp.v1.AddConsolidationMemberRequest\x1a'.kapp.v1.AddConsolidationMemberResponse\x12r\n" +
-	"\x19RemoveConsolidationMember\x12).kapp.v1.RemoveConsolidationMemberRequest\x1a*.kapp.v1.RemoveConsolidationMemberResponse\x12o\n" +
-	"\x18ConsolidatedTrialBalance\x12(.kapp.v1.ConsolidatedTrialBalanceRequest\x1a).kapp.v1.ConsolidatedTrialBalanceResponse\x12]\n" +
+	"\x17DeleteRetentionOverride\x12'.kapp.v1.DeleteRetentionOverrideRequest\x1a(.kapp.v1.DeleteRetentionOverrideResponse\x12]\n" +
 	"\x12ListIsolationAudit\x12\".kapp.v1.ListIsolationAuditRequest\x1a#.kapp.v1.ListIsolationAuditResponseB\x8c\x01\n" +
 	"\vcom.kapp.v1B\vTenantProtoP\x01Z3github.com/kennguy3n/kapp-fab/gen/go/kapp/v1;kappv1\xa2\x02\x03KXX\xaa\x02\aKapp.V1\xca\x02\aKapp\\V1\xe2\x02\x13Kapp\\V1\\GPBMetadata\xea\x02\bKapp::V1b\x06proto3"
 
@@ -3827,84 +3204,72 @@ func file_kapp_v1_tenant_proto_rawDescGZIP() []byte {
 	return file_kapp_v1_tenant_proto_rawDescData
 }
 
-var file_kapp_v1_tenant_proto_msgTypes = make([]protoimpl.MessageInfo, 74)
+var file_kapp_v1_tenant_proto_msgTypes = make([]protoimpl.MessageInfo, 62)
 var file_kapp_v1_tenant_proto_goTypes = []any{
-	(*Tenant)(nil),                            // 0: kapp.v1.Tenant
-	(*CreateTenantRequest)(nil),               // 1: kapp.v1.CreateTenantRequest
-	(*CreateTenantResponse)(nil),              // 2: kapp.v1.CreateTenantResponse
-	(*GetTenantRequest)(nil),                  // 3: kapp.v1.GetTenantRequest
-	(*GetTenantResponse)(nil),                 // 4: kapp.v1.GetTenantResponse
-	(*ListTenantsRequest)(nil),                // 5: kapp.v1.ListTenantsRequest
-	(*ListTenantsResponse)(nil),               // 6: kapp.v1.ListTenantsResponse
-	(*SuspendTenantRequest)(nil),              // 7: kapp.v1.SuspendTenantRequest
-	(*SuspendTenantResponse)(nil),             // 8: kapp.v1.SuspendTenantResponse
-	(*ActivateTenantRequest)(nil),             // 9: kapp.v1.ActivateTenantRequest
-	(*ActivateTenantResponse)(nil),            // 10: kapp.v1.ActivateTenantResponse
-	(*ArchiveTenantRequest)(nil),              // 11: kapp.v1.ArchiveTenantRequest
-	(*ArchiveTenantResponse)(nil),             // 12: kapp.v1.ArchiveTenantResponse
-	(*DeleteTenantRequest)(nil),               // 13: kapp.v1.DeleteTenantRequest
-	(*DeleteTenantResponse)(nil),              // 14: kapp.v1.DeleteTenantResponse
-	(*SetupTenantRequest)(nil),                // 15: kapp.v1.SetupTenantRequest
-	(*SetupTenantResponse)(nil),               // 16: kapp.v1.SetupTenantResponse
-	(*FeaturesResponse)(nil),                  // 17: kapp.v1.FeaturesResponse
-	(*ListFeaturesRequest)(nil),               // 18: kapp.v1.ListFeaturesRequest
-	(*ListFeaturesResponse)(nil),              // 19: kapp.v1.ListFeaturesResponse
-	(*ListMyFeaturesRequest)(nil),             // 20: kapp.v1.ListMyFeaturesRequest
-	(*ListMyFeaturesResponse)(nil),            // 21: kapp.v1.ListMyFeaturesResponse
-	(*UpdateFeaturesRequest)(nil),             // 22: kapp.v1.UpdateFeaturesRequest
-	(*UpdateFeaturesResponse)(nil),            // 23: kapp.v1.UpdateFeaturesResponse
-	(*PlanLimits)(nil),                        // 24: kapp.v1.PlanLimits
-	(*Plan)(nil),                              // 25: kapp.v1.Plan
-	(*ListPlansRequest)(nil),                  // 26: kapp.v1.ListPlansRequest
-	(*ListPlansResponse)(nil),                 // 27: kapp.v1.ListPlansResponse
-	(*ChangePlanRequest)(nil),                 // 28: kapp.v1.ChangePlanRequest
-	(*ChangePlanResponse)(nil),                // 29: kapp.v1.ChangePlanResponse
-	(*ChangeMyPlanRequest)(nil),               // 30: kapp.v1.ChangeMyPlanRequest
-	(*ChangeMyPlanResponse)(nil),              // 31: kapp.v1.ChangeMyPlanResponse
-	(*UsageRow)(nil),                          // 32: kapp.v1.UsageRow
-	(*UsageResponse)(nil),                     // 33: kapp.v1.UsageResponse
-	(*GetUsageRequest)(nil),                   // 34: kapp.v1.GetUsageRequest
-	(*GetUsageResponse)(nil),                  // 35: kapp.v1.GetUsageResponse
-	(*GetMyUsageRequest)(nil),                 // 36: kapp.v1.GetMyUsageRequest
-	(*GetMyUsageResponse)(nil),                // 37: kapp.v1.GetMyUsageResponse
-	(*GetUsageHistoryRequest)(nil),            // 38: kapp.v1.GetUsageHistoryRequest
-	(*GetUsageHistoryResponse)(nil),           // 39: kapp.v1.GetUsageHistoryResponse
-	(*GetMyUsageHistoryRequest)(nil),          // 40: kapp.v1.GetMyUsageHistoryRequest
-	(*GetMyUsageHistoryResponse)(nil),         // 41: kapp.v1.GetMyUsageHistoryResponse
-	(*PlacementPolicy)(nil),                   // 42: kapp.v1.PlacementPolicy
-	(*GetPlacementPolicyRequest)(nil),         // 43: kapp.v1.GetPlacementPolicyRequest
-	(*GetPlacementPolicyResponse)(nil),        // 44: kapp.v1.GetPlacementPolicyResponse
-	(*PutPlacementPolicyRequest)(nil),         // 45: kapp.v1.PutPlacementPolicyRequest
-	(*PutPlacementPolicyResponse)(nil),        // 46: kapp.v1.PutPlacementPolicyResponse
-	(*RetentionOverride)(nil),                 // 47: kapp.v1.RetentionOverride
-	(*ListRetentionOverridesRequest)(nil),     // 48: kapp.v1.ListRetentionOverridesRequest
-	(*ListRetentionOverridesResponse)(nil),    // 49: kapp.v1.ListRetentionOverridesResponse
-	(*UpsertRetentionOverrideRequest)(nil),    // 50: kapp.v1.UpsertRetentionOverrideRequest
-	(*UpsertRetentionOverrideResponse)(nil),   // 51: kapp.v1.UpsertRetentionOverrideResponse
-	(*DeleteRetentionOverrideRequest)(nil),    // 52: kapp.v1.DeleteRetentionOverrideRequest
-	(*DeleteRetentionOverrideResponse)(nil),   // 53: kapp.v1.DeleteRetentionOverrideResponse
-	(*ConsolidationGroup)(nil),                // 54: kapp.v1.ConsolidationGroup
-	(*ConsolidationMember)(nil),               // 55: kapp.v1.ConsolidationMember
-	(*ListConsolidationGroupsRequest)(nil),    // 56: kapp.v1.ListConsolidationGroupsRequest
-	(*ListConsolidationGroupsResponse)(nil),   // 57: kapp.v1.ListConsolidationGroupsResponse
-	(*CreateConsolidationGroupRequest)(nil),   // 58: kapp.v1.CreateConsolidationGroupRequest
-	(*CreateConsolidationGroupResponse)(nil),  // 59: kapp.v1.CreateConsolidationGroupResponse
-	(*AddConsolidationMemberRequest)(nil),     // 60: kapp.v1.AddConsolidationMemberRequest
-	(*AddConsolidationMemberResponse)(nil),    // 61: kapp.v1.AddConsolidationMemberResponse
-	(*RemoveConsolidationMemberRequest)(nil),  // 62: kapp.v1.RemoveConsolidationMemberRequest
-	(*RemoveConsolidationMemberResponse)(nil), // 63: kapp.v1.RemoveConsolidationMemberResponse
-	(*ConsolidatedTrialBalanceRequest)(nil),   // 64: kapp.v1.ConsolidatedTrialBalanceRequest
-	(*ConsolidatedTrialBalanceResponse)(nil),  // 65: kapp.v1.ConsolidatedTrialBalanceResponse
-	(*IsolationAuditEntry)(nil),               // 66: kapp.v1.IsolationAuditEntry
-	(*ListIsolationAuditRequest)(nil),         // 67: kapp.v1.ListIsolationAuditRequest
-	(*ListIsolationAuditResponse)(nil),        // 68: kapp.v1.ListIsolationAuditResponse
-	nil,                                       // 69: kapp.v1.FeaturesResponse.FeaturesEntry
-	nil,                                       // 70: kapp.v1.UpdateFeaturesRequest.FeaturesEntry
-	nil,                                       // 71: kapp.v1.Plan.FeaturesEntry
-	nil,                                       // 72: kapp.v1.UsageResponse.UsageEntry
-	nil,                                       // 73: kapp.v1.UsageResponse.FeaturesEntry
-	(*PaginationRequest)(nil),                 // 74: kapp.v1.PaginationRequest
-	(*ListPageMeta)(nil),                      // 75: kapp.v1.ListPageMeta
+	(*Tenant)(nil),                          // 0: kapp.v1.Tenant
+	(*CreateTenantRequest)(nil),             // 1: kapp.v1.CreateTenantRequest
+	(*CreateTenantResponse)(nil),            // 2: kapp.v1.CreateTenantResponse
+	(*GetTenantRequest)(nil),                // 3: kapp.v1.GetTenantRequest
+	(*GetTenantResponse)(nil),               // 4: kapp.v1.GetTenantResponse
+	(*ListTenantsRequest)(nil),              // 5: kapp.v1.ListTenantsRequest
+	(*ListTenantsResponse)(nil),             // 6: kapp.v1.ListTenantsResponse
+	(*SuspendTenantRequest)(nil),            // 7: kapp.v1.SuspendTenantRequest
+	(*SuspendTenantResponse)(nil),           // 8: kapp.v1.SuspendTenantResponse
+	(*ActivateTenantRequest)(nil),           // 9: kapp.v1.ActivateTenantRequest
+	(*ActivateTenantResponse)(nil),          // 10: kapp.v1.ActivateTenantResponse
+	(*ArchiveTenantRequest)(nil),            // 11: kapp.v1.ArchiveTenantRequest
+	(*ArchiveTenantResponse)(nil),           // 12: kapp.v1.ArchiveTenantResponse
+	(*DeleteTenantRequest)(nil),             // 13: kapp.v1.DeleteTenantRequest
+	(*DeleteTenantResponse)(nil),            // 14: kapp.v1.DeleteTenantResponse
+	(*SetupTenantRequest)(nil),              // 15: kapp.v1.SetupTenantRequest
+	(*SetupTenantResponse)(nil),             // 16: kapp.v1.SetupTenantResponse
+	(*FeaturesResponse)(nil),                // 17: kapp.v1.FeaturesResponse
+	(*ListFeaturesRequest)(nil),             // 18: kapp.v1.ListFeaturesRequest
+	(*ListFeaturesResponse)(nil),            // 19: kapp.v1.ListFeaturesResponse
+	(*ListMyFeaturesRequest)(nil),           // 20: kapp.v1.ListMyFeaturesRequest
+	(*ListMyFeaturesResponse)(nil),          // 21: kapp.v1.ListMyFeaturesResponse
+	(*UpdateFeaturesRequest)(nil),           // 22: kapp.v1.UpdateFeaturesRequest
+	(*UpdateFeaturesResponse)(nil),          // 23: kapp.v1.UpdateFeaturesResponse
+	(*PlanLimits)(nil),                      // 24: kapp.v1.PlanLimits
+	(*Plan)(nil),                            // 25: kapp.v1.Plan
+	(*ListPlansRequest)(nil),                // 26: kapp.v1.ListPlansRequest
+	(*ListPlansResponse)(nil),               // 27: kapp.v1.ListPlansResponse
+	(*ChangePlanRequest)(nil),               // 28: kapp.v1.ChangePlanRequest
+	(*ChangePlanResponse)(nil),              // 29: kapp.v1.ChangePlanResponse
+	(*ChangeMyPlanRequest)(nil),             // 30: kapp.v1.ChangeMyPlanRequest
+	(*ChangeMyPlanResponse)(nil),            // 31: kapp.v1.ChangeMyPlanResponse
+	(*UsageRow)(nil),                        // 32: kapp.v1.UsageRow
+	(*UsageResponse)(nil),                   // 33: kapp.v1.UsageResponse
+	(*GetUsageRequest)(nil),                 // 34: kapp.v1.GetUsageRequest
+	(*GetUsageResponse)(nil),                // 35: kapp.v1.GetUsageResponse
+	(*GetMyUsageRequest)(nil),               // 36: kapp.v1.GetMyUsageRequest
+	(*GetMyUsageResponse)(nil),              // 37: kapp.v1.GetMyUsageResponse
+	(*GetUsageHistoryRequest)(nil),          // 38: kapp.v1.GetUsageHistoryRequest
+	(*GetUsageHistoryResponse)(nil),         // 39: kapp.v1.GetUsageHistoryResponse
+	(*GetMyUsageHistoryRequest)(nil),        // 40: kapp.v1.GetMyUsageHistoryRequest
+	(*GetMyUsageHistoryResponse)(nil),       // 41: kapp.v1.GetMyUsageHistoryResponse
+	(*PlacementPolicy)(nil),                 // 42: kapp.v1.PlacementPolicy
+	(*GetPlacementPolicyRequest)(nil),       // 43: kapp.v1.GetPlacementPolicyRequest
+	(*GetPlacementPolicyResponse)(nil),      // 44: kapp.v1.GetPlacementPolicyResponse
+	(*PutPlacementPolicyRequest)(nil),       // 45: kapp.v1.PutPlacementPolicyRequest
+	(*PutPlacementPolicyResponse)(nil),      // 46: kapp.v1.PutPlacementPolicyResponse
+	(*RetentionOverride)(nil),               // 47: kapp.v1.RetentionOverride
+	(*ListRetentionOverridesRequest)(nil),   // 48: kapp.v1.ListRetentionOverridesRequest
+	(*ListRetentionOverridesResponse)(nil),  // 49: kapp.v1.ListRetentionOverridesResponse
+	(*UpsertRetentionOverrideRequest)(nil),  // 50: kapp.v1.UpsertRetentionOverrideRequest
+	(*UpsertRetentionOverrideResponse)(nil), // 51: kapp.v1.UpsertRetentionOverrideResponse
+	(*DeleteRetentionOverrideRequest)(nil),  // 52: kapp.v1.DeleteRetentionOverrideRequest
+	(*DeleteRetentionOverrideResponse)(nil), // 53: kapp.v1.DeleteRetentionOverrideResponse
+	(*IsolationAuditEntry)(nil),             // 54: kapp.v1.IsolationAuditEntry
+	(*ListIsolationAuditRequest)(nil),       // 55: kapp.v1.ListIsolationAuditRequest
+	(*ListIsolationAuditResponse)(nil),      // 56: kapp.v1.ListIsolationAuditResponse
+	nil,                                     // 57: kapp.v1.FeaturesResponse.FeaturesEntry
+	nil,                                     // 58: kapp.v1.UpdateFeaturesRequest.FeaturesEntry
+	nil,                                     // 59: kapp.v1.Plan.FeaturesEntry
+	nil,                                     // 60: kapp.v1.UsageResponse.UsageEntry
+	nil,                                     // 61: kapp.v1.UsageResponse.FeaturesEntry
+	(*PaginationRequest)(nil),               // 62: kapp.v1.PaginationRequest
+	(*ListPageMeta)(nil),                    // 63: kapp.v1.ListPageMeta
 }
 var file_kapp_v1_tenant_proto_depIdxs = []int32{
 	0,  // 0: kapp.v1.CreateTenantResponse.tenant:type_name -> kapp.v1.Tenant
@@ -3914,20 +3279,20 @@ var file_kapp_v1_tenant_proto_depIdxs = []int32{
 	0,  // 4: kapp.v1.ActivateTenantResponse.tenant:type_name -> kapp.v1.Tenant
 	0,  // 5: kapp.v1.ArchiveTenantResponse.tenant:type_name -> kapp.v1.Tenant
 	0,  // 6: kapp.v1.DeleteTenantResponse.tenant:type_name -> kapp.v1.Tenant
-	69, // 7: kapp.v1.FeaturesResponse.features:type_name -> kapp.v1.FeaturesResponse.FeaturesEntry
+	57, // 7: kapp.v1.FeaturesResponse.features:type_name -> kapp.v1.FeaturesResponse.FeaturesEntry
 	17, // 8: kapp.v1.ListFeaturesResponse.response:type_name -> kapp.v1.FeaturesResponse
 	17, // 9: kapp.v1.ListMyFeaturesResponse.response:type_name -> kapp.v1.FeaturesResponse
-	70, // 10: kapp.v1.UpdateFeaturesRequest.features:type_name -> kapp.v1.UpdateFeaturesRequest.FeaturesEntry
+	58, // 10: kapp.v1.UpdateFeaturesRequest.features:type_name -> kapp.v1.UpdateFeaturesRequest.FeaturesEntry
 	17, // 11: kapp.v1.UpdateFeaturesResponse.response:type_name -> kapp.v1.FeaturesResponse
 	24, // 12: kapp.v1.Plan.limits:type_name -> kapp.v1.PlanLimits
-	71, // 13: kapp.v1.Plan.features:type_name -> kapp.v1.Plan.FeaturesEntry
+	59, // 13: kapp.v1.Plan.features:type_name -> kapp.v1.Plan.FeaturesEntry
 	25, // 14: kapp.v1.ListPlansResponse.plans:type_name -> kapp.v1.Plan
 	25, // 15: kapp.v1.ChangePlanResponse.plan:type_name -> kapp.v1.Plan
 	25, // 16: kapp.v1.ChangeMyPlanResponse.plan:type_name -> kapp.v1.Plan
-	72, // 17: kapp.v1.UsageResponse.usage:type_name -> kapp.v1.UsageResponse.UsageEntry
+	60, // 17: kapp.v1.UsageResponse.usage:type_name -> kapp.v1.UsageResponse.UsageEntry
 	24, // 18: kapp.v1.UsageResponse.limits:type_name -> kapp.v1.PlanLimits
 	32, // 19: kapp.v1.UsageResponse.rows:type_name -> kapp.v1.UsageRow
-	73, // 20: kapp.v1.UsageResponse.features:type_name -> kapp.v1.UsageResponse.FeaturesEntry
+	61, // 20: kapp.v1.UsageResponse.features:type_name -> kapp.v1.UsageResponse.FeaturesEntry
 	33, // 21: kapp.v1.GetUsageResponse.response:type_name -> kapp.v1.UsageResponse
 	33, // 22: kapp.v1.GetMyUsageResponse.response:type_name -> kapp.v1.UsageResponse
 	32, // 23: kapp.v1.GetUsageHistoryResponse.rows:type_name -> kapp.v1.UsageRow
@@ -3937,75 +3302,62 @@ var file_kapp_v1_tenant_proto_depIdxs = []int32{
 	42, // 27: kapp.v1.PutPlacementPolicyResponse.policy:type_name -> kapp.v1.PlacementPolicy
 	47, // 28: kapp.v1.ListRetentionOverridesResponse.overrides:type_name -> kapp.v1.RetentionOverride
 	47, // 29: kapp.v1.UpsertRetentionOverrideResponse.override:type_name -> kapp.v1.RetentionOverride
-	54, // 30: kapp.v1.ListConsolidationGroupsResponse.groups:type_name -> kapp.v1.ConsolidationGroup
-	54, // 31: kapp.v1.CreateConsolidationGroupResponse.group:type_name -> kapp.v1.ConsolidationGroup
-	55, // 32: kapp.v1.AddConsolidationMemberResponse.member:type_name -> kapp.v1.ConsolidationMember
-	74, // 33: kapp.v1.ListIsolationAuditRequest.pagination:type_name -> kapp.v1.PaginationRequest
-	66, // 34: kapp.v1.ListIsolationAuditResponse.entries:type_name -> kapp.v1.IsolationAuditEntry
-	75, // 35: kapp.v1.ListIsolationAuditResponse.page:type_name -> kapp.v1.ListPageMeta
-	1,  // 36: kapp.v1.TenantService.CreateTenant:input_type -> kapp.v1.CreateTenantRequest
-	3,  // 37: kapp.v1.TenantService.GetTenant:input_type -> kapp.v1.GetTenantRequest
-	5,  // 38: kapp.v1.TenantService.ListTenants:input_type -> kapp.v1.ListTenantsRequest
-	7,  // 39: kapp.v1.TenantService.SuspendTenant:input_type -> kapp.v1.SuspendTenantRequest
-	9,  // 40: kapp.v1.TenantService.ActivateTenant:input_type -> kapp.v1.ActivateTenantRequest
-	11, // 41: kapp.v1.TenantService.ArchiveTenant:input_type -> kapp.v1.ArchiveTenantRequest
-	13, // 42: kapp.v1.TenantService.DeleteTenant:input_type -> kapp.v1.DeleteTenantRequest
-	15, // 43: kapp.v1.TenantService.SetupTenant:input_type -> kapp.v1.SetupTenantRequest
-	18, // 44: kapp.v1.TenantService.ListFeatures:input_type -> kapp.v1.ListFeaturesRequest
-	20, // 45: kapp.v1.TenantService.ListMyFeatures:input_type -> kapp.v1.ListMyFeaturesRequest
-	22, // 46: kapp.v1.TenantService.UpdateFeatures:input_type -> kapp.v1.UpdateFeaturesRequest
-	26, // 47: kapp.v1.TenantService.ListPlans:input_type -> kapp.v1.ListPlansRequest
-	28, // 48: kapp.v1.TenantService.ChangePlan:input_type -> kapp.v1.ChangePlanRequest
-	30, // 49: kapp.v1.TenantService.ChangeMyPlan:input_type -> kapp.v1.ChangeMyPlanRequest
-	34, // 50: kapp.v1.TenantService.GetUsage:input_type -> kapp.v1.GetUsageRequest
-	36, // 51: kapp.v1.TenantService.GetMyUsage:input_type -> kapp.v1.GetMyUsageRequest
-	38, // 52: kapp.v1.TenantService.GetUsageHistory:input_type -> kapp.v1.GetUsageHistoryRequest
-	40, // 53: kapp.v1.TenantService.GetMyUsageHistory:input_type -> kapp.v1.GetMyUsageHistoryRequest
-	43, // 54: kapp.v1.TenantService.GetPlacementPolicy:input_type -> kapp.v1.GetPlacementPolicyRequest
-	45, // 55: kapp.v1.TenantService.PutPlacementPolicy:input_type -> kapp.v1.PutPlacementPolicyRequest
-	48, // 56: kapp.v1.TenantService.ListRetentionOverrides:input_type -> kapp.v1.ListRetentionOverridesRequest
-	50, // 57: kapp.v1.TenantService.UpsertRetentionOverride:input_type -> kapp.v1.UpsertRetentionOverrideRequest
-	52, // 58: kapp.v1.TenantService.DeleteRetentionOverride:input_type -> kapp.v1.DeleteRetentionOverrideRequest
-	56, // 59: kapp.v1.TenantService.ListConsolidationGroups:input_type -> kapp.v1.ListConsolidationGroupsRequest
-	58, // 60: kapp.v1.TenantService.CreateConsolidationGroup:input_type -> kapp.v1.CreateConsolidationGroupRequest
-	60, // 61: kapp.v1.TenantService.AddConsolidationMember:input_type -> kapp.v1.AddConsolidationMemberRequest
-	62, // 62: kapp.v1.TenantService.RemoveConsolidationMember:input_type -> kapp.v1.RemoveConsolidationMemberRequest
-	64, // 63: kapp.v1.TenantService.ConsolidatedTrialBalance:input_type -> kapp.v1.ConsolidatedTrialBalanceRequest
-	67, // 64: kapp.v1.TenantService.ListIsolationAudit:input_type -> kapp.v1.ListIsolationAuditRequest
-	2,  // 65: kapp.v1.TenantService.CreateTenant:output_type -> kapp.v1.CreateTenantResponse
-	4,  // 66: kapp.v1.TenantService.GetTenant:output_type -> kapp.v1.GetTenantResponse
-	6,  // 67: kapp.v1.TenantService.ListTenants:output_type -> kapp.v1.ListTenantsResponse
-	8,  // 68: kapp.v1.TenantService.SuspendTenant:output_type -> kapp.v1.SuspendTenantResponse
-	10, // 69: kapp.v1.TenantService.ActivateTenant:output_type -> kapp.v1.ActivateTenantResponse
-	12, // 70: kapp.v1.TenantService.ArchiveTenant:output_type -> kapp.v1.ArchiveTenantResponse
-	14, // 71: kapp.v1.TenantService.DeleteTenant:output_type -> kapp.v1.DeleteTenantResponse
-	16, // 72: kapp.v1.TenantService.SetupTenant:output_type -> kapp.v1.SetupTenantResponse
-	19, // 73: kapp.v1.TenantService.ListFeatures:output_type -> kapp.v1.ListFeaturesResponse
-	21, // 74: kapp.v1.TenantService.ListMyFeatures:output_type -> kapp.v1.ListMyFeaturesResponse
-	23, // 75: kapp.v1.TenantService.UpdateFeatures:output_type -> kapp.v1.UpdateFeaturesResponse
-	27, // 76: kapp.v1.TenantService.ListPlans:output_type -> kapp.v1.ListPlansResponse
-	29, // 77: kapp.v1.TenantService.ChangePlan:output_type -> kapp.v1.ChangePlanResponse
-	31, // 78: kapp.v1.TenantService.ChangeMyPlan:output_type -> kapp.v1.ChangeMyPlanResponse
-	35, // 79: kapp.v1.TenantService.GetUsage:output_type -> kapp.v1.GetUsageResponse
-	37, // 80: kapp.v1.TenantService.GetMyUsage:output_type -> kapp.v1.GetMyUsageResponse
-	39, // 81: kapp.v1.TenantService.GetUsageHistory:output_type -> kapp.v1.GetUsageHistoryResponse
-	41, // 82: kapp.v1.TenantService.GetMyUsageHistory:output_type -> kapp.v1.GetMyUsageHistoryResponse
-	44, // 83: kapp.v1.TenantService.GetPlacementPolicy:output_type -> kapp.v1.GetPlacementPolicyResponse
-	46, // 84: kapp.v1.TenantService.PutPlacementPolicy:output_type -> kapp.v1.PutPlacementPolicyResponse
-	49, // 85: kapp.v1.TenantService.ListRetentionOverrides:output_type -> kapp.v1.ListRetentionOverridesResponse
-	51, // 86: kapp.v1.TenantService.UpsertRetentionOverride:output_type -> kapp.v1.UpsertRetentionOverrideResponse
-	53, // 87: kapp.v1.TenantService.DeleteRetentionOverride:output_type -> kapp.v1.DeleteRetentionOverrideResponse
-	57, // 88: kapp.v1.TenantService.ListConsolidationGroups:output_type -> kapp.v1.ListConsolidationGroupsResponse
-	59, // 89: kapp.v1.TenantService.CreateConsolidationGroup:output_type -> kapp.v1.CreateConsolidationGroupResponse
-	61, // 90: kapp.v1.TenantService.AddConsolidationMember:output_type -> kapp.v1.AddConsolidationMemberResponse
-	63, // 91: kapp.v1.TenantService.RemoveConsolidationMember:output_type -> kapp.v1.RemoveConsolidationMemberResponse
-	65, // 92: kapp.v1.TenantService.ConsolidatedTrialBalance:output_type -> kapp.v1.ConsolidatedTrialBalanceResponse
-	68, // 93: kapp.v1.TenantService.ListIsolationAudit:output_type -> kapp.v1.ListIsolationAuditResponse
-	65, // [65:94] is the sub-list for method output_type
-	36, // [36:65] is the sub-list for method input_type
-	36, // [36:36] is the sub-list for extension type_name
-	36, // [36:36] is the sub-list for extension extendee
-	0,  // [0:36] is the sub-list for field type_name
+	62, // 30: kapp.v1.ListIsolationAuditRequest.pagination:type_name -> kapp.v1.PaginationRequest
+	54, // 31: kapp.v1.ListIsolationAuditResponse.entries:type_name -> kapp.v1.IsolationAuditEntry
+	63, // 32: kapp.v1.ListIsolationAuditResponse.page:type_name -> kapp.v1.ListPageMeta
+	1,  // 33: kapp.v1.TenantService.CreateTenant:input_type -> kapp.v1.CreateTenantRequest
+	3,  // 34: kapp.v1.TenantService.GetTenant:input_type -> kapp.v1.GetTenantRequest
+	5,  // 35: kapp.v1.TenantService.ListTenants:input_type -> kapp.v1.ListTenantsRequest
+	7,  // 36: kapp.v1.TenantService.SuspendTenant:input_type -> kapp.v1.SuspendTenantRequest
+	9,  // 37: kapp.v1.TenantService.ActivateTenant:input_type -> kapp.v1.ActivateTenantRequest
+	11, // 38: kapp.v1.TenantService.ArchiveTenant:input_type -> kapp.v1.ArchiveTenantRequest
+	13, // 39: kapp.v1.TenantService.DeleteTenant:input_type -> kapp.v1.DeleteTenantRequest
+	15, // 40: kapp.v1.TenantService.SetupTenant:input_type -> kapp.v1.SetupTenantRequest
+	18, // 41: kapp.v1.TenantService.ListFeatures:input_type -> kapp.v1.ListFeaturesRequest
+	20, // 42: kapp.v1.TenantService.ListMyFeatures:input_type -> kapp.v1.ListMyFeaturesRequest
+	22, // 43: kapp.v1.TenantService.UpdateFeatures:input_type -> kapp.v1.UpdateFeaturesRequest
+	26, // 44: kapp.v1.TenantService.ListPlans:input_type -> kapp.v1.ListPlansRequest
+	28, // 45: kapp.v1.TenantService.ChangePlan:input_type -> kapp.v1.ChangePlanRequest
+	30, // 46: kapp.v1.TenantService.ChangeMyPlan:input_type -> kapp.v1.ChangeMyPlanRequest
+	34, // 47: kapp.v1.TenantService.GetUsage:input_type -> kapp.v1.GetUsageRequest
+	36, // 48: kapp.v1.TenantService.GetMyUsage:input_type -> kapp.v1.GetMyUsageRequest
+	38, // 49: kapp.v1.TenantService.GetUsageHistory:input_type -> kapp.v1.GetUsageHistoryRequest
+	40, // 50: kapp.v1.TenantService.GetMyUsageHistory:input_type -> kapp.v1.GetMyUsageHistoryRequest
+	43, // 51: kapp.v1.TenantService.GetPlacementPolicy:input_type -> kapp.v1.GetPlacementPolicyRequest
+	45, // 52: kapp.v1.TenantService.PutPlacementPolicy:input_type -> kapp.v1.PutPlacementPolicyRequest
+	48, // 53: kapp.v1.TenantService.ListRetentionOverrides:input_type -> kapp.v1.ListRetentionOverridesRequest
+	50, // 54: kapp.v1.TenantService.UpsertRetentionOverride:input_type -> kapp.v1.UpsertRetentionOverrideRequest
+	52, // 55: kapp.v1.TenantService.DeleteRetentionOverride:input_type -> kapp.v1.DeleteRetentionOverrideRequest
+	55, // 56: kapp.v1.TenantService.ListIsolationAudit:input_type -> kapp.v1.ListIsolationAuditRequest
+	2,  // 57: kapp.v1.TenantService.CreateTenant:output_type -> kapp.v1.CreateTenantResponse
+	4,  // 58: kapp.v1.TenantService.GetTenant:output_type -> kapp.v1.GetTenantResponse
+	6,  // 59: kapp.v1.TenantService.ListTenants:output_type -> kapp.v1.ListTenantsResponse
+	8,  // 60: kapp.v1.TenantService.SuspendTenant:output_type -> kapp.v1.SuspendTenantResponse
+	10, // 61: kapp.v1.TenantService.ActivateTenant:output_type -> kapp.v1.ActivateTenantResponse
+	12, // 62: kapp.v1.TenantService.ArchiveTenant:output_type -> kapp.v1.ArchiveTenantResponse
+	14, // 63: kapp.v1.TenantService.DeleteTenant:output_type -> kapp.v1.DeleteTenantResponse
+	16, // 64: kapp.v1.TenantService.SetupTenant:output_type -> kapp.v1.SetupTenantResponse
+	19, // 65: kapp.v1.TenantService.ListFeatures:output_type -> kapp.v1.ListFeaturesResponse
+	21, // 66: kapp.v1.TenantService.ListMyFeatures:output_type -> kapp.v1.ListMyFeaturesResponse
+	23, // 67: kapp.v1.TenantService.UpdateFeatures:output_type -> kapp.v1.UpdateFeaturesResponse
+	27, // 68: kapp.v1.TenantService.ListPlans:output_type -> kapp.v1.ListPlansResponse
+	29, // 69: kapp.v1.TenantService.ChangePlan:output_type -> kapp.v1.ChangePlanResponse
+	31, // 70: kapp.v1.TenantService.ChangeMyPlan:output_type -> kapp.v1.ChangeMyPlanResponse
+	35, // 71: kapp.v1.TenantService.GetUsage:output_type -> kapp.v1.GetUsageResponse
+	37, // 72: kapp.v1.TenantService.GetMyUsage:output_type -> kapp.v1.GetMyUsageResponse
+	39, // 73: kapp.v1.TenantService.GetUsageHistory:output_type -> kapp.v1.GetUsageHistoryResponse
+	41, // 74: kapp.v1.TenantService.GetMyUsageHistory:output_type -> kapp.v1.GetMyUsageHistoryResponse
+	44, // 75: kapp.v1.TenantService.GetPlacementPolicy:output_type -> kapp.v1.GetPlacementPolicyResponse
+	46, // 76: kapp.v1.TenantService.PutPlacementPolicy:output_type -> kapp.v1.PutPlacementPolicyResponse
+	49, // 77: kapp.v1.TenantService.ListRetentionOverrides:output_type -> kapp.v1.ListRetentionOverridesResponse
+	51, // 78: kapp.v1.TenantService.UpsertRetentionOverride:output_type -> kapp.v1.UpsertRetentionOverrideResponse
+	53, // 79: kapp.v1.TenantService.DeleteRetentionOverride:output_type -> kapp.v1.DeleteRetentionOverrideResponse
+	56, // 80: kapp.v1.TenantService.ListIsolationAudit:output_type -> kapp.v1.ListIsolationAuditResponse
+	57, // [57:81] is the sub-list for method output_type
+	33, // [33:57] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_kapp_v1_tenant_proto_init() }
@@ -4020,7 +3372,7 @@ func file_kapp_v1_tenant_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kapp_v1_tenant_proto_rawDesc), len(file_kapp_v1_tenant_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   74,
+			NumMessages:   62,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -1,0 +1,75 @@
+// helpdesk.proto wires the SLA policy CRUD + ticket SLA log
+// surface. Tickets themselves live behind RecordService under
+// the helpdesk.ticket KType — this module covers only the
+// typed helpdesk tables (sla_policies + ticket_sla_log).
+syntax = "proto3";
+
+package kapp.v1;
+
+message SLAPolicy {
+  string tenant_id = 1;
+  string id = 2;
+  string name = 3;
+  // priority is one of "low", "medium", "high", "urgent" —
+  // matches the CHECK constraint on sla_policies.priority.
+  string priority = 4;
+  int32 response_minutes = 5;
+  int32 resolution_minutes = 6;
+  bool active = 7;
+  string created_by = 8;
+  string created_at = 9;
+  string updated_at = 10;
+}
+
+message SLALogEntry {
+  int64 id = 1;
+  string tenant_id = 2;
+  string ticket_id = 3;
+  // event_kind is one of the breach-log values: response_warning,
+  // response_breached, resolution_warning, resolution_breached,
+  // response_met, resolution_met.
+  string event_kind = 4;
+  string occurred_at = 5;
+  // details is JSON-encoded extra context (assigned-by,
+  // policy-applied, target-at). Opaque to the gRPC layer.
+  bytes details = 6;
+}
+
+message UpsertSLAPolicyRequest {
+  string id = 1;
+  string name = 2;
+  string priority = 3;
+  int32 response_minutes = 4;
+  int32 resolution_minutes = 5;
+  bool active = 6;
+  bool has_active = 7;
+}
+message UpsertSLAPolicyResponse {
+  SLAPolicy policy = 1;
+}
+
+message ListSLAPoliciesRequest {}
+message ListSLAPoliciesResponse {
+  repeated SLAPolicy policies = 1;
+}
+
+message ResolveSLAPolicyRequest {
+  string priority = 1;
+}
+message ResolveSLAPolicyResponse {
+  SLAPolicy policy = 1;
+}
+
+message ListTicketSLALogRequest {
+  string ticket_id = 1;
+}
+message ListTicketSLALogResponse {
+  repeated SLALogEntry entries = 1;
+}
+
+service HelpdeskService {
+  rpc UpsertSLAPolicy(UpsertSLAPolicyRequest) returns (UpsertSLAPolicyResponse);
+  rpc ListSLAPolicies(ListSLAPoliciesRequest) returns (ListSLAPoliciesResponse);
+  rpc ResolveSLAPolicy(ResolveSLAPolicyRequest) returns (ResolveSLAPolicyResponse);
+  rpc ListTicketSLALog(ListTicketSLALogRequest) returns (ListTicketSLALogResponse);
+}

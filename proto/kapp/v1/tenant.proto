@@ -281,61 +281,6 @@ message DeleteRetentionOverrideRequest {
 message DeleteRetentionOverrideResponse {}
 
 // ---------------------------------------------------------------------------
-// Consolidation (group-of-tenants reporting)
-// ---------------------------------------------------------------------------
-
-message ConsolidationGroup {
-  string id = 1;
-  string tenant_id = 2;
-  string name = 3;
-  string parent_id = 4;
-}
-
-message ConsolidationMember {
-  string id = 1;
-  string group_id = 2;
-  string subsidiary_tenant_id = 3;
-}
-
-message ListConsolidationGroupsRequest {}
-message ListConsolidationGroupsResponse {
-  repeated ConsolidationGroup groups = 1;
-}
-
-message CreateConsolidationGroupRequest {
-  string name = 1;
-  string parent_id = 2;
-}
-message CreateConsolidationGroupResponse {
-  ConsolidationGroup group = 1;
-}
-
-message AddConsolidationMemberRequest {
-  string group_id = 1;
-  string subsidiary_tenant_id = 2;
-}
-message AddConsolidationMemberResponse {
-  ConsolidationMember member = 1;
-}
-
-message RemoveConsolidationMemberRequest {
-  string group_id = 1;
-  string subsidiary_tenant_id = 2;
-}
-message RemoveConsolidationMemberResponse {}
-
-message ConsolidatedTrialBalanceRequest {
-  string group_id = 1;
-  string as_of = 2;
-}
-message ConsolidatedTrialBalanceResponse {
-  // rows is the consolidated trial balance, JSON-encoded
-  // because the row shape is dynamic (account / debit /
-  // credit per subsidiary).
-  bytes rows = 1;
-}
-
-// ---------------------------------------------------------------------------
 // Isolation audit
 // ---------------------------------------------------------------------------
 
@@ -395,13 +340,6 @@ service TenantService {
   rpc ListRetentionOverrides(ListRetentionOverridesRequest) returns (ListRetentionOverridesResponse);
   rpc UpsertRetentionOverride(UpsertRetentionOverrideRequest) returns (UpsertRetentionOverrideResponse);
   rpc DeleteRetentionOverride(DeleteRetentionOverrideRequest) returns (DeleteRetentionOverrideResponse);
-
-  // Consolidation
-  rpc ListConsolidationGroups(ListConsolidationGroupsRequest) returns (ListConsolidationGroupsResponse);
-  rpc CreateConsolidationGroup(CreateConsolidationGroupRequest) returns (CreateConsolidationGroupResponse);
-  rpc AddConsolidationMember(AddConsolidationMemberRequest) returns (AddConsolidationMemberResponse);
-  rpc RemoveConsolidationMember(RemoveConsolidationMemberRequest) returns (RemoveConsolidationMemberResponse);
-  rpc ConsolidatedTrialBalance(ConsolidatedTrialBalanceRequest) returns (ConsolidatedTrialBalanceResponse);
 
   // Isolation audit
   rpc ListIsolationAudit(ListIsolationAuditRequest) returns (ListIsolationAuditResponse);

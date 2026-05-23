@@ -1,0 +1,227 @@
+// inventory.proto wires the Phase D inventory surface: items,
+// warehouses, the append-only stock-move ledger, transfers,
+// batches (Phase G/L), derived stock levels, and the valuation
+// report. Quantities and costs are encoded as decimal strings
+// (shopspring/decimal) so the wire format preserves precision.
+syntax = "proto3";
+
+package kapp.v1;
+
+message Item {
+  string tenant_id = 1;
+  string id = 2;
+  string sku = 3;
+  string name = 4;
+  string uom = 5;
+  bool active = 6;
+  // reorder_level is the threshold at which the auto-reorder
+  // engine emits a reorder suggestion. Decimal string.
+  string reorder_level = 7;
+}
+
+message Warehouse {
+  string tenant_id = 1;
+  string id = 2;
+  string code = 3;
+  string name = 4;
+}
+
+message Move {
+  int64 id = 1;
+  string tenant_id = 2;
+  string item_id = 3;
+  string warehouse_id = 4;
+  // qty is signed: positive = goods in, negative = goods out.
+  // Decimal string.
+  string qty = 5;
+  // unit_cost is the per-unit cost at the moment of the move.
+  // Decimal string.
+  string unit_cost = 6;
+  string source_ktype = 7;
+  string source_id = 8;
+  string moved_at = 9;
+  string created_by = 10;
+  // batch_id is optional; populated when the move is tied to
+  // a specific batch (Phase G/L lot tracking).
+  string batch_id = 11;
+}
+
+message Batch {
+  string tenant_id = 1;
+  string id = 2;
+  string item_id = 3;
+  string batch_no = 4;
+  string manufactured_at = 5;
+  string expires_at = 6;
+  // qty_on_hand is the derived on-hand quantity for this
+  // batch summed across all warehouses. Decimal string.
+  string qty_on_hand = 7;
+  bytes metadata = 8;
+  string created_by = 9;
+  string created_at = 10;
+  string updated_at = 11;
+}
+
+message StockLevel {
+  string tenant_id = 1;
+  string item_id = 2;
+  string warehouse_id = 3;
+  string qty = 4;
+}
+
+message UpsertItemRequest {
+  // id is optional. When empty the store generates a new
+  // UUID; when set it is used as the primary key (upsert).
+  string id = 1;
+  string sku = 2;
+  string name = 3;
+  string uom = 4;
+  bool active = 5;
+  bool has_active = 6;
+}
+message UpsertItemResponse {
+  Item item = 1;
+}
+
+message ListItemsRequest {
+  bool active = 1;
+  bool has_active = 2;
+  int32 limit = 3;
+  int32 offset = 4;
+}
+message ListItemsResponse {
+  repeated Item items = 1;
+}
+
+message GetItemRequest {
+  string id = 1;
+}
+message GetItemResponse {
+  Item item = 1;
+}
+
+message UpsertWarehouseRequest {
+  string id = 1;
+  string code = 2;
+  string name = 3;
+}
+message UpsertWarehouseResponse {
+  Warehouse warehouse = 1;
+}
+
+message ListWarehousesRequest {}
+message ListWarehousesResponse {
+  repeated Warehouse warehouses = 1;
+}
+
+message RecordMoveRequest {
+  string item_id = 1;
+  string warehouse_id = 2;
+  string qty = 3;
+  string unit_cost = 4;
+  string source_ktype = 5;
+  string source_id = 6;
+  string moved_at = 7;
+}
+message RecordMoveResponse {
+  Move move = 1;
+}
+
+message RecordTransferRequest {
+  string item_id = 1;
+  string from_warehouse_id = 2;
+  string to_warehouse_id = 3;
+  string qty = 4;
+  string unit_cost = 5;
+  string moved_at = 6;
+  string memo = 7;
+}
+message RecordTransferResponse {
+  // moves is the pair of balanced moves the transfer
+  // produced (one negative on from_warehouse_id, one
+  // positive on to_warehouse_id).
+  repeated Move moves = 1;
+}
+
+message ListMovesRequest {
+  string item_id = 1;
+  string warehouse_id = 2;
+  string source_ktype = 3;
+  string source_id = 4;
+  int32 limit = 5;
+  int32 offset = 6;
+}
+message ListMovesResponse {
+  repeated Move moves = 1;
+}
+
+message ListStockLevelsRequest {}
+message ListStockLevelsResponse {
+  repeated StockLevel levels = 1;
+}
+
+message StockLevelsByItemRequest {
+  string item_id = 1;
+}
+message StockLevelsByItemResponse {
+  repeated StockLevel levels = 1;
+}
+
+message ValuationRequest {
+  string as_of = 1;
+}
+message ValuationResponse {
+  // report is the same JSON the REST endpoint returns;
+  // opaque to the gRPC layer so we don't couple the wire
+  // format to every line of the report struct.
+  bytes report = 1;
+}
+
+message ReverseMoveRequest {
+  int64 move_id = 1;
+  string memo = 2;
+}
+message ReverseMoveResponse {
+  Move move = 1;
+}
+
+message CreateBatchRequest {
+  string item_id = 1;
+  string batch_no = 2;
+  // manufactured_at and expires_at are YYYY-MM-DD or
+  // RFC3339 strings. Empty means "not set".
+  string manufactured_at = 3;
+  string expires_at = 4;
+}
+message CreateBatchResponse {
+  Batch batch = 1;
+}
+
+message ListBatchesByItemRequest {
+  string item_id = 1;
+}
+message ListBatchesByItemResponse {
+  repeated Batch batches = 1;
+}
+
+service InventoryService {
+  rpc UpsertItem(UpsertItemRequest) returns (UpsertItemResponse);
+  rpc ListItems(ListItemsRequest) returns (ListItemsResponse);
+  rpc GetItem(GetItemRequest) returns (GetItemResponse);
+
+  rpc UpsertWarehouse(UpsertWarehouseRequest) returns (UpsertWarehouseResponse);
+  rpc ListWarehouses(ListWarehousesRequest) returns (ListWarehousesResponse);
+
+  rpc RecordMove(RecordMoveRequest) returns (RecordMoveResponse);
+  rpc RecordTransfer(RecordTransferRequest) returns (RecordTransferResponse);
+  rpc ListMoves(ListMovesRequest) returns (ListMovesResponse);
+  rpc ReverseMove(ReverseMoveRequest) returns (ReverseMoveResponse);
+
+  rpc ListStockLevels(ListStockLevelsRequest) returns (ListStockLevelsResponse);
+  rpc StockLevelsByItem(StockLevelsByItemRequest) returns (StockLevelsByItemResponse);
+
+  rpc Valuation(ValuationRequest) returns (ValuationResponse);
+
+  rpc CreateBatch(CreateBatchRequest) returns (CreateBatchResponse);
+  rpc ListBatchesByItem(ListBatchesByItemRequest) returns (ListBatchesByItemResponse);
+}

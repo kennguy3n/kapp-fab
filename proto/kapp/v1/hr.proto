@@ -1,0 +1,73 @@
+// hr.proto wires the Phase J payroll engine. Employees,
+// salary structures, and payslips are stored as KRecords; the
+// engine owns the cross-record orchestration (generate -> approve
+// -> post) and that is what this service exposes.
+syntax = "proto3";
+
+package kapp.v1;
+
+// GeneratePayslipsResult mirrors hr.GenerateResult: the engine
+// returns a per-run summary (count generated / skipped, plus
+// the materialised slip ids) so the UI can render the run
+// progress without re-fetching.
+message GeneratePayslipsResult {
+  // generated is the number of slips materialised in this
+  // invocation. Idempotent across repeated calls; only newly
+  // created slips count.
+  int32 generated = 1;
+  // skipped is the number of (pay_run_id, employee_id) pairs
+  // the engine recognised as already materialised.
+  int32 skipped = 2;
+  repeated string slip_ids = 3;
+}
+
+// PayslipSummary is the lightweight slip projection the engine
+// emits for the ListPayslipsForRun call. The full slip record
+// stays under RecordService — this surface exists because the
+// UI's "View slips" panel needs the whole list per run, which
+// the paginated record list would truncate.
+message PayslipSummary {
+  string id = 1;
+  string tenant_id = 2;
+  string pay_run_id = 3;
+  string employee_id = 4;
+  string status = 5;
+  // gross / net / deductions are decimal strings.
+  string gross = 6;
+  string net = 7;
+  string deductions = 8;
+  string currency = 9;
+  string created_at = 10;
+  string updated_at = 11;
+}
+
+message GeneratePayslipsRequest {
+  string pay_run_id = 1;
+}
+message GeneratePayslipsResponse {
+  GeneratePayslipsResult result = 1;
+}
+
+message PostPayRunRequest {
+  string pay_run_id = 1;
+}
+message PostPayRunResponse {
+  // entry is the resulting JournalEntry (declared in
+  // finance.proto). We carry the entry id + posted_at +
+  // status here as opaque bytes to avoid a cross-file
+  // import; the SDK helper decodes into the finance type.
+  bytes entry = 1;
+}
+
+message ListPayRunPayslipsRequest {
+  string pay_run_id = 1;
+}
+message ListPayRunPayslipsResponse {
+  repeated PayslipSummary slips = 1;
+}
+
+service HRService {
+  rpc GeneratePayslips(GeneratePayslipsRequest) returns (GeneratePayslipsResponse);
+  rpc PostPayRun(PostPayRunRequest) returns (PostPayRunResponse);
+  rpc ListPayRunPayslips(ListPayRunPayslipsRequest) returns (ListPayRunPayslipsResponse);
+}

@@ -26,35 +26,30 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	TenantService_CreateTenant_FullMethodName              = "/kapp.v1.TenantService/CreateTenant"
-	TenantService_GetTenant_FullMethodName                 = "/kapp.v1.TenantService/GetTenant"
-	TenantService_ListTenants_FullMethodName               = "/kapp.v1.TenantService/ListTenants"
-	TenantService_SuspendTenant_FullMethodName             = "/kapp.v1.TenantService/SuspendTenant"
-	TenantService_ActivateTenant_FullMethodName            = "/kapp.v1.TenantService/ActivateTenant"
-	TenantService_ArchiveTenant_FullMethodName             = "/kapp.v1.TenantService/ArchiveTenant"
-	TenantService_DeleteTenant_FullMethodName              = "/kapp.v1.TenantService/DeleteTenant"
-	TenantService_SetupTenant_FullMethodName               = "/kapp.v1.TenantService/SetupTenant"
-	TenantService_ListFeatures_FullMethodName              = "/kapp.v1.TenantService/ListFeatures"
-	TenantService_ListMyFeatures_FullMethodName            = "/kapp.v1.TenantService/ListMyFeatures"
-	TenantService_UpdateFeatures_FullMethodName            = "/kapp.v1.TenantService/UpdateFeatures"
-	TenantService_ListPlans_FullMethodName                 = "/kapp.v1.TenantService/ListPlans"
-	TenantService_ChangePlan_FullMethodName                = "/kapp.v1.TenantService/ChangePlan"
-	TenantService_ChangeMyPlan_FullMethodName              = "/kapp.v1.TenantService/ChangeMyPlan"
-	TenantService_GetUsage_FullMethodName                  = "/kapp.v1.TenantService/GetUsage"
-	TenantService_GetMyUsage_FullMethodName                = "/kapp.v1.TenantService/GetMyUsage"
-	TenantService_GetUsageHistory_FullMethodName           = "/kapp.v1.TenantService/GetUsageHistory"
-	TenantService_GetMyUsageHistory_FullMethodName         = "/kapp.v1.TenantService/GetMyUsageHistory"
-	TenantService_GetPlacementPolicy_FullMethodName        = "/kapp.v1.TenantService/GetPlacementPolicy"
-	TenantService_PutPlacementPolicy_FullMethodName        = "/kapp.v1.TenantService/PutPlacementPolicy"
-	TenantService_ListRetentionOverrides_FullMethodName    = "/kapp.v1.TenantService/ListRetentionOverrides"
-	TenantService_UpsertRetentionOverride_FullMethodName   = "/kapp.v1.TenantService/UpsertRetentionOverride"
-	TenantService_DeleteRetentionOverride_FullMethodName   = "/kapp.v1.TenantService/DeleteRetentionOverride"
-	TenantService_ListConsolidationGroups_FullMethodName   = "/kapp.v1.TenantService/ListConsolidationGroups"
-	TenantService_CreateConsolidationGroup_FullMethodName  = "/kapp.v1.TenantService/CreateConsolidationGroup"
-	TenantService_AddConsolidationMember_FullMethodName    = "/kapp.v1.TenantService/AddConsolidationMember"
-	TenantService_RemoveConsolidationMember_FullMethodName = "/kapp.v1.TenantService/RemoveConsolidationMember"
-	TenantService_ConsolidatedTrialBalance_FullMethodName  = "/kapp.v1.TenantService/ConsolidatedTrialBalance"
-	TenantService_ListIsolationAudit_FullMethodName        = "/kapp.v1.TenantService/ListIsolationAudit"
+	TenantService_CreateTenant_FullMethodName            = "/kapp.v1.TenantService/CreateTenant"
+	TenantService_GetTenant_FullMethodName               = "/kapp.v1.TenantService/GetTenant"
+	TenantService_ListTenants_FullMethodName             = "/kapp.v1.TenantService/ListTenants"
+	TenantService_SuspendTenant_FullMethodName           = "/kapp.v1.TenantService/SuspendTenant"
+	TenantService_ActivateTenant_FullMethodName          = "/kapp.v1.TenantService/ActivateTenant"
+	TenantService_ArchiveTenant_FullMethodName           = "/kapp.v1.TenantService/ArchiveTenant"
+	TenantService_DeleteTenant_FullMethodName            = "/kapp.v1.TenantService/DeleteTenant"
+	TenantService_SetupTenant_FullMethodName             = "/kapp.v1.TenantService/SetupTenant"
+	TenantService_ListFeatures_FullMethodName            = "/kapp.v1.TenantService/ListFeatures"
+	TenantService_ListMyFeatures_FullMethodName          = "/kapp.v1.TenantService/ListMyFeatures"
+	TenantService_UpdateFeatures_FullMethodName          = "/kapp.v1.TenantService/UpdateFeatures"
+	TenantService_ListPlans_FullMethodName               = "/kapp.v1.TenantService/ListPlans"
+	TenantService_ChangePlan_FullMethodName              = "/kapp.v1.TenantService/ChangePlan"
+	TenantService_ChangeMyPlan_FullMethodName            = "/kapp.v1.TenantService/ChangeMyPlan"
+	TenantService_GetUsage_FullMethodName                = "/kapp.v1.TenantService/GetUsage"
+	TenantService_GetMyUsage_FullMethodName              = "/kapp.v1.TenantService/GetMyUsage"
+	TenantService_GetUsageHistory_FullMethodName         = "/kapp.v1.TenantService/GetUsageHistory"
+	TenantService_GetMyUsageHistory_FullMethodName       = "/kapp.v1.TenantService/GetMyUsageHistory"
+	TenantService_GetPlacementPolicy_FullMethodName      = "/kapp.v1.TenantService/GetPlacementPolicy"
+	TenantService_PutPlacementPolicy_FullMethodName      = "/kapp.v1.TenantService/PutPlacementPolicy"
+	TenantService_ListRetentionOverrides_FullMethodName  = "/kapp.v1.TenantService/ListRetentionOverrides"
+	TenantService_UpsertRetentionOverride_FullMethodName = "/kapp.v1.TenantService/UpsertRetentionOverride"
+	TenantService_DeleteRetentionOverride_FullMethodName = "/kapp.v1.TenantService/DeleteRetentionOverride"
+	TenantService_ListIsolationAudit_FullMethodName      = "/kapp.v1.TenantService/ListIsolationAudit"
 )
 
 // TenantServiceClient is the client API for TenantService service.
@@ -90,12 +85,6 @@ type TenantServiceClient interface {
 	ListRetentionOverrides(ctx context.Context, in *ListRetentionOverridesRequest, opts ...grpc.CallOption) (*ListRetentionOverridesResponse, error)
 	UpsertRetentionOverride(ctx context.Context, in *UpsertRetentionOverrideRequest, opts ...grpc.CallOption) (*UpsertRetentionOverrideResponse, error)
 	DeleteRetentionOverride(ctx context.Context, in *DeleteRetentionOverrideRequest, opts ...grpc.CallOption) (*DeleteRetentionOverrideResponse, error)
-	// Consolidation
-	ListConsolidationGroups(ctx context.Context, in *ListConsolidationGroupsRequest, opts ...grpc.CallOption) (*ListConsolidationGroupsResponse, error)
-	CreateConsolidationGroup(ctx context.Context, in *CreateConsolidationGroupRequest, opts ...grpc.CallOption) (*CreateConsolidationGroupResponse, error)
-	AddConsolidationMember(ctx context.Context, in *AddConsolidationMemberRequest, opts ...grpc.CallOption) (*AddConsolidationMemberResponse, error)
-	RemoveConsolidationMember(ctx context.Context, in *RemoveConsolidationMemberRequest, opts ...grpc.CallOption) (*RemoveConsolidationMemberResponse, error)
-	ConsolidatedTrialBalance(ctx context.Context, in *ConsolidatedTrialBalanceRequest, opts ...grpc.CallOption) (*ConsolidatedTrialBalanceResponse, error)
 	// Isolation audit
 	ListIsolationAudit(ctx context.Context, in *ListIsolationAuditRequest, opts ...grpc.CallOption) (*ListIsolationAuditResponse, error)
 }
@@ -338,56 +327,6 @@ func (c *tenantServiceClient) DeleteRetentionOverride(ctx context.Context, in *D
 	return out, nil
 }
 
-func (c *tenantServiceClient) ListConsolidationGroups(ctx context.Context, in *ListConsolidationGroupsRequest, opts ...grpc.CallOption) (*ListConsolidationGroupsResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ListConsolidationGroupsResponse)
-	err := c.cc.Invoke(ctx, TenantService_ListConsolidationGroups_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *tenantServiceClient) CreateConsolidationGroup(ctx context.Context, in *CreateConsolidationGroupRequest, opts ...grpc.CallOption) (*CreateConsolidationGroupResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(CreateConsolidationGroupResponse)
-	err := c.cc.Invoke(ctx, TenantService_CreateConsolidationGroup_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *tenantServiceClient) AddConsolidationMember(ctx context.Context, in *AddConsolidationMemberRequest, opts ...grpc.CallOption) (*AddConsolidationMemberResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(AddConsolidationMemberResponse)
-	err := c.cc.Invoke(ctx, TenantService_AddConsolidationMember_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *tenantServiceClient) RemoveConsolidationMember(ctx context.Context, in *RemoveConsolidationMemberRequest, opts ...grpc.CallOption) (*RemoveConsolidationMemberResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(RemoveConsolidationMemberResponse)
-	err := c.cc.Invoke(ctx, TenantService_RemoveConsolidationMember_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *tenantServiceClient) ConsolidatedTrialBalance(ctx context.Context, in *ConsolidatedTrialBalanceRequest, opts ...grpc.CallOption) (*ConsolidatedTrialBalanceResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ConsolidatedTrialBalanceResponse)
-	err := c.cc.Invoke(ctx, TenantService_ConsolidatedTrialBalance_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (c *tenantServiceClient) ListIsolationAudit(ctx context.Context, in *ListIsolationAuditRequest, opts ...grpc.CallOption) (*ListIsolationAuditResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListIsolationAuditResponse)
@@ -431,12 +370,6 @@ type TenantServiceServer interface {
 	ListRetentionOverrides(context.Context, *ListRetentionOverridesRequest) (*ListRetentionOverridesResponse, error)
 	UpsertRetentionOverride(context.Context, *UpsertRetentionOverrideRequest) (*UpsertRetentionOverrideResponse, error)
 	DeleteRetentionOverride(context.Context, *DeleteRetentionOverrideRequest) (*DeleteRetentionOverrideResponse, error)
-	// Consolidation
-	ListConsolidationGroups(context.Context, *ListConsolidationGroupsRequest) (*ListConsolidationGroupsResponse, error)
-	CreateConsolidationGroup(context.Context, *CreateConsolidationGroupRequest) (*CreateConsolidationGroupResponse, error)
-	AddConsolidationMember(context.Context, *AddConsolidationMemberRequest) (*AddConsolidationMemberResponse, error)
-	RemoveConsolidationMember(context.Context, *RemoveConsolidationMemberRequest) (*RemoveConsolidationMemberResponse, error)
-	ConsolidatedTrialBalance(context.Context, *ConsolidatedTrialBalanceRequest) (*ConsolidatedTrialBalanceResponse, error)
 	// Isolation audit
 	ListIsolationAudit(context.Context, *ListIsolationAuditRequest) (*ListIsolationAuditResponse, error)
 	mustEmbedUnimplementedTenantServiceServer()
@@ -517,21 +450,6 @@ func (UnimplementedTenantServiceServer) UpsertRetentionOverride(context.Context,
 }
 func (UnimplementedTenantServiceServer) DeleteRetentionOverride(context.Context, *DeleteRetentionOverrideRequest) (*DeleteRetentionOverrideResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteRetentionOverride not implemented")
-}
-func (UnimplementedTenantServiceServer) ListConsolidationGroups(context.Context, *ListConsolidationGroupsRequest) (*ListConsolidationGroupsResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ListConsolidationGroups not implemented")
-}
-func (UnimplementedTenantServiceServer) CreateConsolidationGroup(context.Context, *CreateConsolidationGroupRequest) (*CreateConsolidationGroupResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method CreateConsolidationGroup not implemented")
-}
-func (UnimplementedTenantServiceServer) AddConsolidationMember(context.Context, *AddConsolidationMemberRequest) (*AddConsolidationMemberResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method AddConsolidationMember not implemented")
-}
-func (UnimplementedTenantServiceServer) RemoveConsolidationMember(context.Context, *RemoveConsolidationMemberRequest) (*RemoveConsolidationMemberResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method RemoveConsolidationMember not implemented")
-}
-func (UnimplementedTenantServiceServer) ConsolidatedTrialBalance(context.Context, *ConsolidatedTrialBalanceRequest) (*ConsolidatedTrialBalanceResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ConsolidatedTrialBalance not implemented")
 }
 func (UnimplementedTenantServiceServer) ListIsolationAudit(context.Context, *ListIsolationAuditRequest) (*ListIsolationAuditResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListIsolationAudit not implemented")
@@ -971,96 +889,6 @@ func _TenantService_DeleteRetentionOverride_Handler(srv interface{}, ctx context
 	return interceptor(ctx, in, info, handler)
 }
 
-func _TenantService_ListConsolidationGroups_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListConsolidationGroupsRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(TenantServiceServer).ListConsolidationGroups(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: TenantService_ListConsolidationGroups_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TenantServiceServer).ListConsolidationGroups(ctx, req.(*ListConsolidationGroupsRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _TenantService_CreateConsolidationGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(CreateConsolidationGroupRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(TenantServiceServer).CreateConsolidationGroup(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: TenantService_CreateConsolidationGroup_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TenantServiceServer).CreateConsolidationGroup(ctx, req.(*CreateConsolidationGroupRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _TenantService_AddConsolidationMember_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(AddConsolidationMemberRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(TenantServiceServer).AddConsolidationMember(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: TenantService_AddConsolidationMember_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TenantServiceServer).AddConsolidationMember(ctx, req.(*AddConsolidationMemberRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _TenantService_RemoveConsolidationMember_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RemoveConsolidationMemberRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(TenantServiceServer).RemoveConsolidationMember(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: TenantService_RemoveConsolidationMember_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TenantServiceServer).RemoveConsolidationMember(ctx, req.(*RemoveConsolidationMemberRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _TenantService_ConsolidatedTrialBalance_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ConsolidatedTrialBalanceRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(TenantServiceServer).ConsolidatedTrialBalance(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: TenantService_ConsolidatedTrialBalance_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TenantServiceServer).ConsolidatedTrialBalance(ctx, req.(*ConsolidatedTrialBalanceRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _TenantService_ListIsolationAudit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListIsolationAuditRequest)
 	if err := dec(in); err != nil {
@@ -1177,26 +1005,6 @@ var TenantService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteRetentionOverride",
 			Handler:    _TenantService_DeleteRetentionOverride_Handler,
-		},
-		{
-			MethodName: "ListConsolidationGroups",
-			Handler:    _TenantService_ListConsolidationGroups_Handler,
-		},
-		{
-			MethodName: "CreateConsolidationGroup",
-			Handler:    _TenantService_CreateConsolidationGroup_Handler,
-		},
-		{
-			MethodName: "AddConsolidationMember",
-			Handler:    _TenantService_AddConsolidationMember_Handler,
-		},
-		{
-			MethodName: "RemoveConsolidationMember",
-			Handler:    _TenantService_RemoveConsolidationMember_Handler,
-		},
-		{
-			MethodName: "ConsolidatedTrialBalance",
-			Handler:    _TenantService_ConsolidatedTrialBalance_Handler,
 		},
 		{
 			MethodName: "ListIsolationAudit",

@@ -1,0 +1,75 @@
+// currency.proto wires the finance exchange-rate surface:
+// rate upserts, listing, conversion (with the rate used for
+// each conversion echoed back), and the unrealized gain/loss
+// helper that the FX revaluation engine drives.
+syntax = "proto3";
+
+package kapp.v1;
+
+message ExchangeRate {
+  string tenant_id = 1;
+  string from_currency = 2;
+  string to_currency = 3;
+  // rate_date is YYYY-MM-DD.
+  string rate_date = 4;
+  // rate is a decimal string.
+  string rate = 5;
+  string provider = 6;
+  string created_by = 7;
+  string created_at = 8;
+}
+
+message UpsertRateRequest {
+  string from_currency = 1;
+  string to_currency = 2;
+  string rate_date = 3;
+  string rate = 4;
+  string provider = 5;
+}
+message UpsertRateResponse {
+  ExchangeRate rate = 1;
+}
+
+message ListRatesRequest {
+  string from = 1;
+  string to = 2;
+  int32 limit = 3;
+}
+message ListRatesResponse {
+  repeated ExchangeRate rates = 1;
+}
+
+message ConvertRequest {
+  string amount = 1;
+  string from = 2;
+  string to = 3;
+  string date = 4;
+}
+message ConvertResponse {
+  string amount = 1;
+  string from = 2;
+  string to = 3;
+  string date = 4;
+  string rate = 5;
+  string converted = 6;
+}
+
+message UnrealizedGainLossRequest {
+  string foreign_amount = 1;
+  string foreign_currency = 2;
+  string functional_currency = 3;
+  string original_rate = 4;
+  string as_of = 5;
+}
+message UnrealizedGainLossResponse {
+  // delta is the unrealized gain (positive) or loss (negative)
+  // in the functional currency. Decimal string.
+  string delta = 1;
+}
+
+service CurrencyService {
+  rpc UpsertRate(UpsertRateRequest) returns (UpsertRateResponse);
+  rpc ListRates(ListRatesRequest) returns (ListRatesResponse);
+  rpc Convert(ConvertRequest) returns (ConvertResponse);
+  rpc UnrealizedGainLoss(UnrealizedGainLossRequest) returns (UnrealizedGainLossResponse);
+}

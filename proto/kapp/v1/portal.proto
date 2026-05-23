@@ -1,0 +1,96 @@
+// portal.proto wires the customer-facing portal surface.
+// Two faces:
+//   - Magic-link auth (unauthenticated, email-based handshake)
+//   - Ticket lifecycle (authenticated as a portal user via a
+//     portal JWT separate from the platform JWT)
+// Tickets themselves are helpdesk.ticket KRecords; this file
+// carries only the portal-shaped projections.
+syntax = "proto3";
+
+package kapp.v1;
+
+message PortalUser {
+  string id = 1;
+  string tenant_id = 2;
+  string email = 3;
+  string display_name = 4;
+  string created_at = 5;
+}
+
+message RequestMagicLinkRequest {
+  string tenant_slug = 1;
+  string email = 2;
+}
+// RequestMagicLinkResponse is deliberately empty: the REST
+// surface returns 204 No Content for both successful and
+// silently-dropped requests to avoid enumeration. We keep
+// the same contract here.
+message RequestMagicLinkResponse {}
+
+message VerifyMagicLinkRequest {
+  string tenant_slug = 1;
+  string email = 2;
+  string token = 3;
+}
+message VerifyMagicLinkResponse {
+  // token is the portal JWT the caller must present on
+  // subsequent ticket calls.
+  string token = 1;
+  int64 expires_at = 2;
+  PortalUser user = 3;
+}
+
+message PortalTicket {
+  string id = 1;
+  string tenant_id = 2;
+  string subject = 3;
+  string description = 4;
+  string status = 5;
+  string priority = 6;
+  string channel = 7;
+  string customer_email = 8;
+  // replies is the inline thread, JSON-encoded. Each entry
+  // carries from / body / kind ("customer" | "agent").
+  bytes replies = 9;
+  string created_at = 10;
+  string updated_at = 11;
+}
+
+message ListPortalTicketsRequest {}
+message ListPortalTicketsResponse {
+  repeated PortalTicket tickets = 1;
+}
+
+message GetPortalTicketRequest {
+  string id = 1;
+}
+message GetPortalTicketResponse {
+  PortalTicket ticket = 1;
+}
+
+message CreatePortalTicketRequest {
+  string subject = 1;
+  string description = 2;
+  // priority is optional; defaults to "medium" server-side.
+  string priority = 3;
+}
+message CreatePortalTicketResponse {
+  PortalTicket ticket = 1;
+}
+
+message ReplyPortalTicketRequest {
+  string id = 1;
+  string body = 2;
+}
+message ReplyPortalTicketResponse {
+  PortalTicket ticket = 1;
+}
+
+service PortalService {
+  rpc RequestMagicLink(RequestMagicLinkRequest) returns (RequestMagicLinkResponse);
+  rpc VerifyMagicLink(VerifyMagicLinkRequest) returns (VerifyMagicLinkResponse);
+  rpc ListPortalTickets(ListPortalTicketsRequest) returns (ListPortalTicketsResponse);
+  rpc GetPortalTicket(GetPortalTicketRequest) returns (GetPortalTicketResponse);
+  rpc CreatePortalTicket(CreatePortalTicketRequest) returns (CreatePortalTicketResponse);
+  rpc ReplyPortalTicket(ReplyPortalTicketRequest) returns (ReplyPortalTicketResponse);
+}

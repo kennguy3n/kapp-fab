@@ -1,0 +1,79 @@
+// form.proto wires the Forms KApp surface. Forms have two
+// faces: an authenticated CRUD surface for tenant admins, and
+// a public surface (GetPublic + Submit) for end-users that do
+// not have a tenant context. The proto carries both.
+syntax = "proto3";
+
+package kapp.v1;
+
+message FormConfig {
+  bool allow_anonymous = 1;
+  bool require_auth = 2;
+  string redirect_url = 3;
+  string title = 4;
+  string description = 5;
+}
+
+message Form {
+  string id = 1;
+  string tenant_id = 2;
+  string ktype = 3;
+  // config is the full configuration body. The decoded
+  // FormConfig is a strict subset — additional fields
+  // (branding, conditional logic, captcha) ride inside the
+  // bytes and are interpreted client-side.
+  bytes config = 4;
+  string status = 5;
+  string created_by = 6;
+  string created_at = 7;
+  string updated_at = 8;
+}
+
+message CreateFormRequest {
+  string ktype = 1;
+  // config is the full config JSON the REST surface accepts.
+  bytes config = 2;
+}
+message CreateFormResponse {
+  Form form = 1;
+}
+
+message GetPublicFormRequest {
+  string id = 1;
+}
+message GetPublicFormResponse {
+  Form form = 1;
+  // schema is the resolved KType schema for the form's
+  // record body. Public so the renderer can build the
+  // form client-side.
+  bytes schema = 2;
+}
+
+message SubmitFormRequest {
+  string id = 1;
+  // data is the form payload, JSON-encoded. Shape matches
+  // the KType schema returned by GetPublicForm.
+  bytes data = 2;
+  // The three honeypot fields are deliberately exposed on
+  // the wire so a future non-HTTP client (e.g. a Rust SDK
+  // sending submissions from a server) can match the REST
+  // surface's bot-detection contract verbatim. Real
+  // submitters never set these.
+  string honeypot_url = 3;
+  string honeypot_website = 4;
+  string honeypot_homepage = 5;
+}
+// SubmitFormResponse is intentionally empty: the REST
+// surface returns 202 Accepted with no body for both
+// successful submissions and honeypot trips so bots cannot
+// tell their submission was dropped.
+message SubmitFormResponse {}
+
+service FormService {
+  rpc CreateForm(CreateFormRequest) returns (CreateFormResponse);
+  // GetPublicForm requires no auth context — the form's
+  // tenant is resolved from the id.
+  rpc GetPublicForm(GetPublicFormRequest) returns (GetPublicFormResponse);
+  // SubmitForm also runs without an auth context.
+  rpc SubmitForm(SubmitFormRequest) returns (SubmitFormResponse);
+}

@@ -1,0 +1,26 @@
+// tier.proto wires the operator-only tier-upgrade endpoint.
+// Promotes a tenant from the shared `public` schema to a
+// dedicated per-tenant schema (Phase L isolation step). The
+// dedicated_db target is reserved for the cell-router path and
+// is rejected with NotImplemented here. Mounted under
+// /api/v1/admin/tenants/{id}/upgrade-tier.
+syntax = "proto3";
+
+package kapp.v1;
+
+message UpgradeTierRequest {
+  string id = 1;
+  // target_tier is "dedicated_schema" today.
+  // "dedicated_db" returns NotImplemented (handled by the
+  // cell-router; see SECURITY_REVIEW.md §8).
+  string target_tier = 2;
+}
+message UpgradeTierResponse {
+  string tenant_id = 1;
+  string target_tier = 2;
+  string schema = 3;
+}
+
+service TierService {
+  rpc UpgradeTier(UpgradeTierRequest) returns (UpgradeTierResponse);
+}
