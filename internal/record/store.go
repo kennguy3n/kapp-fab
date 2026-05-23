@@ -82,6 +82,23 @@ func (s *PGStore) WithEncryptor(e FieldEncryptor) *PGStore {
 	return s
 }
 
+// dbNow returns Postgres's current timestamp. Used to capture the
+// keyset-walk snapshot ceiling in ListAll / ListByField in the same
+// clock domain that assigns `updated_at` values on commit, so
+// app-server clock skew (NTP jitter, container pause) cannot move
+// the ceiling backwards relative to row timestamps. clock_timestamp()
+// is preferred over now() / transaction_timestamp() because it is
+// not frozen at the start of the surrounding transaction — we want
+// the wall-clock instant this call is made, not the instant the
+// outer scheduler's transaction began.
+func (s *PGStore) dbNow(ctx context.Context) (time.Time, error) {
+	var t time.Time
+	if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp() AT TIME ZONE 'UTC'`).Scan(&t); err != nil {
+		return time.Time{}, fmt.Errorf("record: dbNow: %w", err)
+	}
+	return t.UTC(), nil
+}
+
 // Create inserts a new KRecord. The KType is looked up at version 0 ("latest")
 // if the caller did not specify one explicitly.
 func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
@@ -374,7 +391,18 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 	// excluded row is picked up by the next sweep — the contract is
 	// "every row whose state was committed before walk start, exactly
 	// once", not "every row that ever existed during the walk".
-	snapshot := time.Now().UTC()
+	//
+	// Snapshot is read from Postgres `now()` rather than Go's wall
+	// clock so the comparison happens entirely in the database's
+	// clock domain. App-server clock skew (NTP jitter, container
+	// pause, etc.) therefore cannot move the ceiling backwards
+	// relative to the `updated_at` timestamps the DB assigns on
+	// commit — a row committed at DB-time T would otherwise be
+	// silently excluded if Go-time briefly trailed T.
+	snapshot, err := s.dbNow(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]KRecord, 0)
 	var (
 		cursorTS  time.Time
@@ -489,9 +517,13 @@ func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter Li
 		status = "active"
 	}
 	const chunk = 500
-	// See ListAll for the snapshot rationale — same point-in-time
-	// consistency contract applies here.
-	snapshot := time.Now().UTC()
+	// See ListAll for the snapshot rationale and the DB-clock
+	// vs app-clock motivation — same point-in-time consistency
+	// contract applies here.
+	snapshot, err := s.dbNow(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]KRecord, 0)
 	var (
 		cursorTS  time.Time

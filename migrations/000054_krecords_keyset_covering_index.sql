@@ -1,0 +1,35 @@
+-- Covering index for keyset pagination on krecords.
+--
+-- The existing index `krecords_tenant_ktype_updated_idx` is
+-- `(tenant_id, ktype, updated_at DESC)` and predates the cursor
+-- pagination redesign. Postgres can use it for the `updated_at`
+-- ordering, but `status` is left as a heap filter and the
+-- secondary `id` tie-break in `(updated_at, id) < ($cursor_ts, $cursor_id)`
+-- degrades to a row-level comparison when many rows share the same
+-- microsecond `updated_at`. The new keyset queries in `PGStore.ListPage`,
+-- `PGStore.ListAll`, and `PGStore.ListByField` filter and sort by
+-- `(tenant_id, ktype, status, updated_at DESC, id DESC)` so a
+-- compound DESC index on that exact key column order lets the
+-- planner satisfy the entire `WHERE`/`ORDER BY`/`LIMIT` from the
+-- index without touching the heap until row payloads are read.
+--
+-- We keep the old single-column index in place because the bulk
+-- inventory + finance reporting jobs still issue `WHERE tenant_id = ?
+-- AND ktype = ?` aggregates that benefit from the narrower index
+-- (smaller leaf entries → better cache behaviour). Dropping it
+-- would also touch unrelated query plans we don't want to retest
+-- in this PR.
+--
+-- CONCURRENTLY is intentionally omitted, matching the pattern of
+-- the original `krecords_tenant_ktype_updated_idx` in migration
+-- 000001. krecords is a partitioned table: a non-concurrent
+-- `CREATE INDEX` on the parent recursively creates and attaches an
+-- index on each partition under AccessExclusive locks, which is
+-- atomic and consistent with how every other krecords index in
+-- this tree is built. The blocking window on each partition is
+-- bounded by partition size; switching to CONCURRENTLY would
+-- require per-partition CREATE INDEX CONCURRENTLY + ATTACH PARTITION
+-- which is not yet warranted given current tenant volumes.
+
+CREATE INDEX IF NOT EXISTS krecords_tenant_ktype_status_updated_id_idx
+    ON krecords (tenant_id, ktype, status, updated_at DESC, id DESC);
