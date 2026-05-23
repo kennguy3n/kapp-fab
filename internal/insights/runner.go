@@ -368,22 +368,25 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 	if tenantID == uuid.Nil {
 		return nil, validationErr("tenant id required")
 	}
-	if rawSQL == "" {
-		return nil, validationErr("raw_sql body required")
-	}
-	// Validate the SQL body against the parse tree (multi-statement
-	// rejection, SELECT-only, no system-catalog references). See
-	// validateRawSQL's docstring for the full contract. The previous
-	// textual `strings.Contains(rawSQL, ";")` check was both too
-	// strict (rejected harmless `SELECT 'a;b'`) and too loose
-	// (missed `SELECT 1/**/;DROP TABLE x` once we trimmed comments
-	// in normalisation). The AST gives a single source of truth for
-	// "exactly one statement, and that statement is read-only".
-	// `SET TRANSACTION READ ONLY` inside the per-tenant tx below is
-	// retained as defense-in-depth: if a future Postgres release
-	// adds a new statement node we don't yet classify, the read-only
-	// transaction surfaces it as a runtime error rather than letting
-	// it execute.
+	// validateRawSQL is the AST-level guard: multi-statement
+	// rejection, SELECT-only at the root, no nested DML inside
+	// CTEs/subqueries, no system-catalog or system-function
+	// references. See validateRawSQL's docstring for the full
+	// contract. It also rejects empty/whitespace-only bodies, so
+	// the previous `rawSQL == ""` check here is redundant.
+	//
+	// The previous textual `strings.Contains(rawSQL, ";")` check
+	// was both too strict (rejected harmless `SELECT 'a;b'`) and
+	// too loose (missed `SELECT 1/**/;DROP TABLE x` once any
+	// comment-stripping normalisation was added). The AST gives a
+	// single source of truth for "exactly one statement, and that
+	// statement is read-only".
+	//
+	// `SET TRANSACTION READ ONLY` inside the per-tenant tx below
+	// is retained as defense-in-depth: if a future Postgres
+	// release adds a new statement node we don't yet classify,
+	// the read-only transaction surfaces it as a runtime error
+	// rather than letting it execute.
 	if err := validateRawSQL(rawSQL); err != nil {
 		return nil, err
 	}

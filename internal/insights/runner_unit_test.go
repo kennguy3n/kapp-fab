@@ -67,6 +67,8 @@ func TestRunRawSQLRejectsNonSelect(t *testing.T) {
 		{"truncate", "TRUNCATE employees"},
 		{"grant", "GRANT SELECT ON employees TO public"},
 		{"vacuum", "VACUUM employees"},
+		{"explain", "EXPLAIN SELECT * FROM krecords"},
+		{"explain_analyze", "EXPLAIN ANALYZE SELECT * FROM krecords"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -79,6 +81,73 @@ func TestRunRawSQLRejectsNonSelect(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "only SELECT is permitted") {
 				t.Fatalf("RunRawSQL(%q) error = %q; want only-SELECT message", tc.body, err.Error())
+			}
+		})
+	}
+}
+
+// TestRunRawSQLRejectsDataModifyingCTE covers the CTE-bypass class
+// of attack: WITH x AS (DELETE FROM tbl RETURNING *) SELECT … parses
+// as a top-level SelectStmt with the DML hidden inside
+// WithClause.Ctes[i].Ctequery. The previous (top-level only) check
+// passed this through. The walker-based check now catches it
+// because any nested Node whose oneof field ends in `_stmt` other
+// than `select_stmt` is rejected.
+func TestRunRawSQLRejectsDataModifyingCTE(t *testing.T) {
+	r := &Runner{}
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"delete_cte", "WITH x AS (DELETE FROM krecords RETURNING *) SELECT * FROM x"},
+		{"update_cte", "WITH x AS (UPDATE krecords SET status='archived' RETURNING *) SELECT count(*) FROM x"},
+		{"insert_cte", "WITH x AS (INSERT INTO krecords(id) VALUES(gen_random_uuid()) RETURNING id) SELECT * FROM x"},
+		{"nested_in_subquery", "SELECT * FROM (WITH y AS (DELETE FROM krecords RETURNING id) SELECT id FROM y) t"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := r.RunRawSQL(context.Background(), uuid.New(), tc.body, nil)
+			if err == nil {
+				t.Fatalf("RunRawSQL(%q) returned nil error; want nested-statement rejection", tc.body)
+			}
+			if !errors.Is(err, ErrUnsafeSQL) {
+				t.Fatalf("RunRawSQL(%q) error = %q; want ErrUnsafeSQL", tc.body, err.Error())
+			}
+			if !strings.Contains(err.Error(), "nested non-SELECT statement") {
+				t.Fatalf("RunRawSQL(%q) error = %q; want nested-statement message", tc.body, err.Error())
+			}
+		})
+	}
+}
+
+// TestRunRawSQLRejectsSystemFunction covers the function-call leg
+// of the system-catalog rule: pg_read_file, pg_ls_dir, and other
+// pg_-prefixed functions can leak server-side files / process info
+// without touching a RangeVar, so the walker must inspect FuncCall
+// nodes too.
+func TestRunRawSQLRejectsSystemFunction(t *testing.T) {
+	r := &Runner{}
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"unqualified_pg_read_file", "SELECT pg_read_file('/etc/passwd')"},
+		{"unqualified_pg_ls_dir", "SELECT * FROM pg_ls_dir('/')"},
+		{"qualified_pg_catalog", "SELECT pg_catalog.pg_read_file('/etc/passwd')"},
+		{"qualified_information_schema", "SELECT information_schema._pg_truetypid(NULL, NULL)"},
+		{"hidden_in_subquery", "SELECT 1 FROM (SELECT pg_read_file('/etc/passwd') AS x) t"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := r.RunRawSQL(context.Background(), uuid.New(), tc.body, nil)
+			if err == nil {
+				t.Fatalf("RunRawSQL(%q) returned nil error; want system-function rejection", tc.body)
+			}
+			if !errors.Is(err, ErrUnsafeSQL) {
+				t.Fatalf("RunRawSQL(%q) error = %q; want ErrUnsafeSQL", tc.body, err.Error())
+			}
+			if !strings.Contains(err.Error(), "system function") {
+				t.Fatalf("RunRawSQL(%q) error = %q; want system-function message", tc.body, err.Error())
 			}
 		})
 	}
