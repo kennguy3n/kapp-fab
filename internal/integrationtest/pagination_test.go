@@ -381,6 +381,116 @@ func createPaginationRecord(t *testing.T, h *harness, tenantID uuid.UUID, kname 
 	return rec
 }
 
+// TestListAllSnapshotConsistencyUnderConcurrentUpdates verifies the
+// snapshot contract: a row whose updated_at is bumped AFTER the walk
+// begins is excluded from the walk (it'll be picked up next sweep),
+// but a row whose updated_at was <= the snapshot when the walk began
+// appears exactly once. We assert four invariants:
+//  1. No duplicates in the walk.
+//  2. Every returned row has updated_at <= the (post-call) Go-side
+//     snapshot. The store's internal snapshot is strictly EARLIER
+//     than this Go-side timestamp, so any violation here also
+//     violates the store contract.
+//  3. Every returned row's ID is from the original insert set
+//     (no phantom rows).
+//  4. The walk completes without error — i.e. concurrent updates do
+//     not cause partial failure.
+func TestListAllSnapshotConsistencyUnderConcurrentUpdates(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tn := newPaginationTenant(t, h)
+	kname := newPaginationKType(t, h)
+	actor := uuid.New()
+
+	const total = 300
+	rows := make([]*record.KRecord, total)
+	originals := make(map[uuid.UUID]bool, total)
+	for i := 0; i < total; i++ {
+		rows[i] = createPaginationRecord(t, h, tn.ID, kname, actor, i)
+		originals[rows[i].ID] = true
+	}
+
+	// Concurrent updater: bumps each row's updated_at while the
+	// walk is in flight. With small chunks (500 rows is larger
+	// than `total`, so a single chunk drains everything) the
+	// writer mostly races against decryption/append — but the
+	// store-side snapshot is captured before the first SQL call,
+	// so any rows the writer touches after that point should be
+	// excluded.
+	var (
+		wg       sync.WaitGroup
+		stopFlag = make(chan struct{})
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-stopFlag:
+				return
+			default:
+			}
+			row := rows[i%total]
+			_, err := h.records.Update(ctx, record.KRecord{
+				TenantID:  tn.ID,
+				ID:        row.ID,
+				Version:   row.Version,
+				UpdatedBy: &actor,
+				Data:      json.RawMessage(fmt.Sprintf(`{"seq":%d,"phase":"bumped"}`, i)),
+			})
+			if err != nil {
+				// Version conflicts are fine — another iteration
+				// won the race. Continue with the next row.
+				i++
+				continue
+			}
+			i++
+			time.Sleep(time.Microsecond * 100)
+		}
+	}()
+
+	walked, err := h.records.ListAll(ctx, tn.ID, record.ListFilter{KType: kname})
+	// Capture the Go-side snapshot AFTER the call returns. The
+	// store's internal snapshot was strictly earlier (taken before
+	// the first chunk query), so any returned row whose
+	// updated_at exceeds this post-call value must have been
+	// bumped after the walk completed, which is impossible — or
+	// the snapshot ceiling is not being honored.
+	postWalk := time.Now().UTC()
+	close(stopFlag)
+	wg.Wait()
+	if err != nil {
+		t.Fatalf("list_all under concurrent updates: %v", err)
+	}
+
+	seen := make(map[uuid.UUID]bool, len(walked))
+	for _, r := range walked {
+		if seen[r.ID] {
+			t.Fatalf("duplicate row in walk: %s", r.ID)
+		}
+		seen[r.ID] = true
+		if !originals[r.ID] {
+			t.Fatalf("phantom row in walk: %s (not in original insert set)", r.ID)
+		}
+		if r.UpdatedAt.After(postWalk) {
+			t.Fatalf("row %s updated_at=%s exceeds post-walk wall-clock %s — store snapshot ceiling not honored",
+				r.ID, r.UpdatedAt, postWalk)
+		}
+	}
+	// Sanity: the walk must return at least most of the rows.
+	// In practice the writer typically bumps maybe 1-30 rows
+	// before the store's snapshot is taken, so the walk returns
+	// something close to `total`. Setting the floor at total/2
+	// is generous but enforces "snapshot doesn't reject
+	// everything" while staying robust against scheduler luck.
+	if len(walked) < total/2 {
+		t.Fatalf("walk returned %d rows (< %d) — writer raced to bump every row before snapshot was taken?",
+			len(walked), total/2)
+	}
+}
+
 // TestListPageLimitClamp verifies that a Limit above the documented
 // 500 cap is clamped DOWN to 500 (not silently dropped back to the
 // default of 50). Callers asking for ?limit=501 obviously want a

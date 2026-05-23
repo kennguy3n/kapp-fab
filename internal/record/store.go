@@ -365,6 +365,16 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 		status = "active"
 	}
 	const chunk = 500
+	// snapshot is the high-water-mark captured before the first chunk
+	// query runs. Every chunk filters `updated_at <= snapshot` so a
+	// row whose updated_at is bumped by a concurrent Update mid-walk
+	// is excluded from this walk entirely (its new updated_at exceeds
+	// the snapshot ceiling) rather than being missed-or-duplicated
+	// when its (updated_at, id) tuple shifts above the cursor. The
+	// excluded row is picked up by the next sweep — the contract is
+	// "every row whose state was committed before walk start, exactly
+	// once", not "every row that ever existed during the walk".
+	snapshot := time.Now().UTC()
 	out := make([]KRecord, 0)
 	var (
 		cursorTS  time.Time
@@ -384,10 +394,11 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 					        created_by, created_at, updated_by, updated_at, deleted_at
 					 FROM krecords
 					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
-					   AND (updated_at, id) < ($4, $5)
+					   AND updated_at <= $4
+					   AND (updated_at, id) < ($5, $6)
 					 ORDER BY updated_at DESC, id DESC
-					 LIMIT $6`,
-					tenantID, filter.KType, status, cursorTS, cursorID, chunk,
+					 LIMIT $7`,
+					tenantID, filter.KType, status, snapshot, cursorTS, cursorID, chunk,
 				)
 			} else {
 				rows, err = tx.Query(ctx,
@@ -395,9 +406,10 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 					        created_by, created_at, updated_by, updated_at, deleted_at
 					 FROM krecords
 					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+					   AND updated_at <= $4
 					 ORDER BY updated_at DESC, id DESC
-					 LIMIT $4`,
-					tenantID, filter.KType, status, chunk,
+					 LIMIT $5`,
+					tenantID, filter.KType, status, snapshot, chunk,
 				)
 			}
 			if err != nil {
@@ -421,6 +433,13 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 		if err != nil {
 			return nil, err
 		}
+		// Tight cap: refuse to grow `out` past ListAllMaxRows even by a
+		// single chunk's worth. A loose post-append check would let a
+		// 100k cap balloon to 100,499 in the worst case.
+		if len(out)+len(page) > ListAllMaxRows {
+			return nil, fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
+				ErrListAllExceedsCap, filter.KType, len(out)+len(page), ListAllMaxRows)
+		}
 		for i := range page {
 			decrypted, err := s.decryptRecord(ctx, &page[i])
 			if err != nil {
@@ -429,10 +448,6 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 			page[i].Data = decrypted
 		}
 		out = append(out, page...)
-		if len(out) > ListAllMaxRows {
-			return nil, fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
-				ErrListAllExceedsCap, filter.KType, len(out), ListAllMaxRows)
-		}
 		if len(page) < chunk {
 			break
 		}
@@ -474,6 +489,9 @@ func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter Li
 		status = "active"
 	}
 	const chunk = 500
+	// See ListAll for the snapshot rationale — same point-in-time
+	// consistency contract applies here.
+	snapshot := time.Now().UTC()
 	out := make([]KRecord, 0)
 	var (
 		cursorTS  time.Time
@@ -494,10 +512,11 @@ func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter Li
 					 FROM krecords
 					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
 					   AND lower(data->>$4) = lower($5)
-					   AND (updated_at, id) < ($6, $7)
+					   AND updated_at <= $6
+					   AND (updated_at, id) < ($7, $8)
 					 ORDER BY updated_at DESC, id DESC
-					 LIMIT $8`,
-					tenantID, filter.KType, status, field, value, cursorTS, cursorID, chunk,
+					 LIMIT $9`,
+					tenantID, filter.KType, status, field, value, snapshot, cursorTS, cursorID, chunk,
 				)
 			} else {
 				rows, err = tx.Query(ctx,
@@ -506,9 +525,10 @@ func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter Li
 					 FROM krecords
 					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
 					   AND lower(data->>$4) = lower($5)
+					   AND updated_at <= $6
 					 ORDER BY updated_at DESC, id DESC
-					 LIMIT $6`,
-					tenantID, filter.KType, status, field, value, chunk,
+					 LIMIT $7`,
+					tenantID, filter.KType, status, field, value, snapshot, chunk,
 				)
 			}
 			if err != nil {
@@ -532,6 +552,10 @@ func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter Li
 		if err != nil {
 			return nil, err
 		}
+		if len(out)+len(page) > ListAllMaxRows {
+			return nil, fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
+				ErrListAllExceedsCap, filter.KType, len(out)+len(page), ListAllMaxRows)
+		}
 		for i := range page {
 			decrypted, err := s.decryptRecord(ctx, &page[i])
 			if err != nil {
@@ -540,10 +564,6 @@ func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter Li
 			page[i].Data = decrypted
 		}
 		out = append(out, page...)
-		if len(out) > ListAllMaxRows {
-			return nil, fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
-				ErrListAllExceedsCap, filter.KType, len(out), ListAllMaxRows)
-		}
 		if len(page) < chunk {
 			break
 		}
