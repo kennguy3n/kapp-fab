@@ -539,7 +539,13 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 			return fmt.Errorf("insights: probe rls/tenant context: %w", err)
 		}
 		if rowSecurity != "on" {
-			return fmt.Errorf("insights: refusing to run raw SQL with row_security=%q (must be 'on')", rowSecurity)
+			// Tag with ErrSecurityAssertion so the HTTP layer
+			// can map this to a 500 with a distinguishable
+			// envelope (not folded into the generic 5xx bucket)
+			// and so future alerting / structured-log middleware
+			// can errors.Is on the sentinel without parsing the
+			// human-readable message.
+			return fmt.Errorf("%w: refusing to run raw SQL with row_security=%q (must be 'on')", ErrSecurityAssertion, rowSecurity)
 		}
 		// Strict equality, not just non-empty.  dbutil.WithTenantTx
 		// is the only call site that should set app.tenant_id
@@ -566,9 +572,9 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 		// is byte-equal in the happy path.
 		if want := tenantID.String(); tenantGUC != want {
 			if tenantGUC == "" {
-				return errors.New("insights: refusing to run raw SQL with empty app.tenant_id GUC")
+				return fmt.Errorf("%w: refusing to run raw SQL with empty app.tenant_id GUC", ErrSecurityAssertion)
 			}
-			return fmt.Errorf("insights: refusing to run raw SQL with mismatched app.tenant_id (got %q, want %q)", tenantGUC, want)
+			return fmt.Errorf("%w: refusing to run raw SQL with mismatched app.tenant_id (got %q, want %q)", ErrSecurityAssertion, tenantGUC, want)
 		}
 		pgxRows, err := tx.Query(ctx, rawSQL, params...)
 		if err != nil {

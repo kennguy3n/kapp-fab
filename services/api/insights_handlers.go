@@ -652,6 +652,19 @@ func writeInsightsError(w http.ResponseWriter, err error) {
 		// budget exhausted, surface as 504 so a retry-with-tighter-
 		// filter UI can react distinctly from generic 5xx.
 		http.Error(w, err.Error(), http.StatusGatewayTimeout)
+	case errors.Is(err, insights.ErrSecurityAssertion):
+		// Defense-in-depth failure from Runner.RunRawSQL — RLS is
+		// disabled, app.tenant_id GUC is unset, or the GUC value
+		// doesn't match the request's tenant. Status remains 500
+		// (it's a server-side misconfiguration, not bad client
+		// input) but routing it through an explicit case rather
+		// than the default arm gives ops a stable, errors.Is-able
+		// distinction from generic 5xx (e.g. DB connection
+		// failures, marshalling bugs) and preserves the diagnostic
+		// message verbatim so the security-assertion details are
+		// still visible to operators tailing the response body
+		// or grepping access logs.
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 	default:
 		// Unknown error → 500. Validation / shape errors from the
 		// handlers themselves are returned via http.Error directly

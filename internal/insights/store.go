@@ -31,6 +31,19 @@ var (
 	// HTTP layer can surface it as 403 with the canonical
 	// `feature_disabled` envelope rather than 400.
 	ErrFeatureDisabled = errors.New("insights: feature disabled")
+	// ErrSecurityAssertion tags defense-in-depth failures from the
+	// raw-SQL runner's per-tx safety probes — currently the
+	// row_security and app.tenant_id GUC assertions in
+	// Runner.RunRawSQL. These represent server-side misconfigurations
+	// (a DBA flipped row_security off, a refactor stopped binding
+	// app.tenant_id, etc.) rather than client input errors, so the
+	// HTTP layer maps them to 500 (not 400) — but the sentinel
+	// distinguishes them from generic 5xx so operators can alert
+	// on security-assertion failures specifically and tests can
+	// assert the right failure mode without string matching. Wrap
+	// with fmt.Errorf("%w: …", ErrSecurityAssertion, …) at the
+	// detection site so the diagnostic message survives.
+	ErrSecurityAssertion = errors.New("insights: security assertion")
 )
 
 // validationErr wraps a free-form message as an ErrValidation-tagged
