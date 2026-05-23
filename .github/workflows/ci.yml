@@ -26,20 +26,22 @@ jobs:
           cache: true
       # gen/ is gitignored; regenerate Go protobuf bindings from
       # proto/ before every Go step. `make proto-gen` is idempotent
-      # and installs the two protoc-gen plugins on first run.
+      # and installs the protoc-gen plugins on first run.
       #
-      # pr_comment: false disables the action's GitHub-API-based
-      # comment writer. With the default `pr_comment: true`, the
-      # action authenticates against the GitHub API even when
-      # `setup_only: true` is set, and intermittently fails with
-      # `Bad credentials` on PRs from internal branches. The
-      # comment behaviour is irrelevant here — we only want buf
-      # installed; the buf workflow (.github/workflows/buf.yml)
-      # owns lint/breaking comments separately.
-      - uses: bufbuild/buf-action@v1
-        with:
-          setup_only: true
-          pr_comment: false
+      # We install buf via `go install` rather than
+      # `bufbuild/buf-action@v1` because the action authenticates
+      # against the GitHub REST API on every run (to fetch the
+      # latest release metadata, post annotations, etc.) even when
+      # `setup_only: true` AND `pr_comment: false` are both set,
+      # and intermittently fails with `Bad credentials` on PRs
+      # from internal branches whose GITHUB_TOKEN has reduced
+      # scope. `go install` only talks to the Go module proxy and
+      # is fully version-pinned, matching the blueprint's pinned
+      # buf version. (The buf lint/breaking workflow at
+      # .github/workflows/buf.yml still uses buf-action because
+      # that job intentionally needs PR-comment behaviour.)
+      - name: install buf
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.55.1
       - run: make proto-gen
       - run: go build ./...
       - run: go vet ./...
@@ -56,11 +58,11 @@ jobs:
           cache: true
       # Regenerate protobuf Go bindings before linting, otherwise
       # golangci-lint sees a missing gen/ package and the build
-      # half of the linter (typecheck) fails immediately.
-      - uses: bufbuild/buf-action@v1
-        with:
-          setup_only: true
-          pr_comment: false
+      # half of the linter (typecheck) fails immediately. Buf is
+      # installed via `go install` to avoid the buf-action GitHub
+      # API auth flakiness; see the `go` job for full rationale.
+      - name: install buf
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.55.1
       - run: make proto-gen
       - uses: golangci/golangci-lint-action@v7
         with:
@@ -90,11 +92,11 @@ jobs:
           go-version: "1.25.x"
           cache: true
       # Integration tests link against the gen/go/kapp/v1 package;
-      # regenerate it before running the suite.
-      - uses: bufbuild/buf-action@v1
-        with:
-          setup_only: true
-          pr_comment: false
+      # regenerate it before running the suite. Buf is installed
+      # via `go install` to avoid the buf-action GitHub API auth
+      # flakiness; see the `go` job for full rationale.
+      - name: install buf
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.55.1
       - run: make proto-gen
       - name: apply migrations
         env:

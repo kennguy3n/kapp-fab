@@ -55,14 +55,15 @@ jobs:
           cache: true
       # gen/ is gitignored; govulncheck loads the full package graph
       # so the generated kapp.v1 bindings must be on disk before the
-      # scan runs. Mirrors the proto-gen step in ci.yml.
-      # pr_comment: false avoids the GitHub-API auth path the
-      # action takes by default even with setup_only: true; see
-      # the matching note in .github/workflows/ci.yml.
-      - uses: bufbuild/buf-action@v1
-        with:
-          setup_only: true
-          pr_comment: false
+      # scan runs. Mirrors the proto-gen step in ci.yml. Buf is
+      # installed via `go install` rather than bufbuild/buf-action
+      # because the action authenticates to the GitHub REST API on
+      # every run (even with setup_only:true + pr_comment:false)
+      # and intermittently fails with "Bad credentials" on PRs from
+      # internal branches; see the rationale block in ci.yml's `go`
+      # job.
+      - name: install buf
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.55.1
       - run: make proto-gen
       - name: install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
