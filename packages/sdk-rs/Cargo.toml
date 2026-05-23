@@ -66,8 +66,14 @@ uuid = { version = "1.10", features = ["v7"] }
 arc-swap = "1.7"
 async-trait = "0.1"
 parking_lot = "0.12"
-futures-util = { version = "0.3", default-features = false }
-once_cell = "1.20"
+# NOTE on what is NOT here:
+#   - `futures-util` is only needed by the e2e test harness (`join_all`
+#     for the concurrent-refresh assertion). It lives in `dev-dependencies`
+#     below so the published crate's transitive footprint stays minimal.
+#   - `once_cell` is intentionally absent: we use `tokio::sync::OnceCell`
+#     for the singleflight outcome cell (it's `Future`-aware in a way
+#     the synchronous `once_cell::sync::OnceCell` is not), so there is
+#     no need for the separate crate.
 
 [build-dependencies]
 # tonic-build 0.12 matches the runtime tonic version. We deliberately
@@ -81,6 +87,12 @@ protox = "0.7"
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["full", "test-util"] }
+# `futures-util` is a test-only dep: the only call site is
+# `tests/sdk_e2e.rs` (`futures_util::future::join_all` for the
+# concurrent-refresh assertion). Keeping it out of `[dependencies]`
+# means downstream consumers don't transitively pull it through the
+# published kapp-sdk crate.
+futures-util = { version = "0.3", default-features = false }
 tonic = { version = "0.12.3", default-features = false, features = [
     "transport",
     "codegen",
