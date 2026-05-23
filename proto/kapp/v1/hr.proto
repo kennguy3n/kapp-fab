@@ -6,6 +6,12 @@ syntax = "proto3";
 
 package kapp.v1;
 
+// finance.proto is imported for the typed JournalEntry returned by
+// PostPayRun. The cross-file import keeps the SDK strongly typed:
+// consumers get a real JournalEntry struct rather than a bytes
+// blob they have to decode separately.
+import "kapp/v1/finance.proto";
+
 // GeneratePayslipsResult mirrors hr.GenerateResult: the engine
 // returns a per-run summary (count generated / skipped, plus
 // the materialised slip ids) so the UI can render the run
@@ -52,11 +58,12 @@ message PostPayRunRequest {
   string pay_run_id = 1;
 }
 message PostPayRunResponse {
-  // entry is the resulting JournalEntry (declared in
-  // finance.proto). We carry the entry id + posted_at +
-  // status here as opaque bytes to avoid a cross-file
-  // import; the SDK helper decodes into the finance type.
-  bytes entry = 1;
+  // entry is the JournalEntry the payroll engine posted to the
+  // ledger. Typed (not opaque bytes) so the Rust SDK and any
+  // future TS SDK get compile-time access to the entry fields
+  // (entry.id, entry.posted_at, entry.status, lines, etc.) and
+  // pick up any future finance.proto additions automatically.
+  JournalEntry entry = 1;
 }
 
 message ListPayRunPayslipsRequest {

@@ -8,8 +8,8 @@ syntax = "proto3";
 package kapp.v1;
 
 message Item {
-  string tenant_id = 1;
-  string id = 2;
+  string id = 1;
+  string tenant_id = 2;
   string sku = 3;
   string name = 4;
   string uom = 5;
@@ -20,8 +20,8 @@ message Item {
 }
 
 message Warehouse {
-  string tenant_id = 1;
-  string id = 2;
+  string id = 1;
+  string tenant_id = 2;
   string code = 3;
   string name = 4;
 }
@@ -47,8 +47,8 @@ message Move {
 }
 
 message Batch {
-  string tenant_id = 1;
-  string id = 2;
+  string id = 1;
+  string tenant_id = 2;
   string item_id = 3;
   string batch_no = 4;
   string manufactured_at = 5;
