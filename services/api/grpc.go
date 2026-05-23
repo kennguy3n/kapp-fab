@@ -38,6 +38,18 @@ import (
 func startGRPCServer(ctx context.Context, d *apiDeps, logger *slog.Logger) (*grpcRuntime, error) {
 	cfg := d.cfg
 	if cfg.GRPCAddr == "" {
+		// Refuse to silently no-op when the operator clearly *wanted*
+		// the gateway to be reachable but forgot to enable the gRPC
+		// listener it dials. Without this guard a misconfigured
+		// deployment would 404 every /api/v2 request with no signal
+		// other than an info-level "disabled" log; the symptom looks
+		// like a missing handler rather than a config mistake.
+		if cfg.GatewayMount != "" {
+			return nil, fmt.Errorf(
+				"grpc: KAPP_GRPC_GATEWAY_MOUNT=%q requires KAPP_GRPC_ADDR to be set (the gateway dials the gRPC listener)",
+				cfg.GatewayMount,
+			)
+		}
 		logger.Info("grpc: disabled (KAPP_GRPC_ADDR not set)")
 		return &grpcRuntime{}, nil
 	}
@@ -83,8 +95,13 @@ func startGRPCServer(ctx context.Context, d *apiDeps, logger *slog.Logger) (*grp
 	srv := apigrpc.NewServer(srvCfg)
 
 	go func() {
+		// Log the listener's bound address rather than the configured
+		// string so the operator sees the actual port when GRPCAddr
+		// is e.g. ":0" (ephemeral port, common in tests + containerised
+		// deployments). The configured value remains visible upstream
+		// in the boot manifest.
 		logger.Info("grpc: serving",
-			slog.String("addr", cfg.GRPCAddr),
+			slog.String("addr", lis.Addr().String()),
 			slog.Bool("reflection", cfg.GRPCReflection),
 		)
 		if err := srv.Serve(lis); err != nil && !errors.Is(err, gogrpc.ErrServerStopped) {

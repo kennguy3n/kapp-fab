@@ -15,7 +15,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
 
-// UnauthenticatedMethods is the set of fully-qualified gRPC method
+// unauthenticatedMethods is the set of fully-qualified gRPC method
 // names that bypass the auth interceptor. The format matches
 // grpc.UnaryServerInfo.FullMethod ("/<package>.<Service>/<Method>").
 //
@@ -28,11 +28,28 @@ import (
 // The grpc.health.v1 surface is also exempt: a load balancer's
 // health probe should not need a JWT to inquire whether the server
 // is up. Standard practice across grpc-go deployments.
-var UnauthenticatedMethods = map[string]struct{}{
+//
+// Kept unexported so the set is read-only outside this file. The
+// interceptor reads it concurrently from many goroutines; we rely
+// on the post-init read-only invariant rather than a sync.Map to
+// avoid the per-RPC atomic load on a 4-entry hot path. Anyone
+// needing to query exemption from outside the package should call
+// IsUnauthenticatedMethod, NOT mutate this map.
+var unauthenticatedMethods = map[string]struct{}{
 	"/kapp.v1.AuthService/SSO":     {},
 	"/kapp.v1.AuthService/Refresh": {},
 	"/grpc.health.v1.Health/Check": {},
 	"/grpc.health.v1.Health/Watch": {},
+}
+
+// IsUnauthenticatedMethod reports whether the given fully-qualified
+// gRPC method bypasses the auth interceptor. Tests and observability
+// code (e.g. a future request-level audit logger) can use this to
+// reason about which RPCs ARE expected to run without claims on
+// the context, without having to import a mutable global.
+func IsUnauthenticatedMethod(fullMethod string) bool {
+	_, ok := unauthenticatedMethods[fullMethod]
+	return ok
 }
 
 // AuthConfig bundles the dependencies the auth interceptor needs.
@@ -67,7 +84,7 @@ func UnaryAuthInterceptor(cfg AuthConfig) grpc.UnaryServerInterceptor {
 		logger = slog.Default()
 	}
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		if _, exempt := UnauthenticatedMethods[info.FullMethod]; exempt {
+		if IsUnauthenticatedMethod(info.FullMethod) {
 			return handler(ctx, req)
 		}
 		newCtx, err := authenticateContext(ctx, cfg, logger)
@@ -88,7 +105,7 @@ func StreamAuthInterceptor(cfg AuthConfig) grpc.StreamServerInterceptor {
 		logger = slog.Default()
 	}
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		if _, exempt := UnauthenticatedMethods[info.FullMethod]; exempt {
+		if IsUnauthenticatedMethod(info.FullMethod) {
 			return handler(srv, ss)
 		}
 		newCtx, err := authenticateContext(ss.Context(), cfg, logger)

@@ -32,9 +32,14 @@ message KType {
 
 // RegisterKTypeRequest matches the body of
 // `POST /api/v1/ktypes` (see services/api/ktypes.go register()).
-// `version` may be zero to mean "auto-assign next" — the server
-// computes the next version when the schema bytes differ from
-// the latest registered one.
+// `version` is REQUIRED and must be > 0 — the registry uses the
+// caller-supplied `(name, version)` as the idempotency key and
+// performs an UPSERT, so an explicit version number is part of
+// the request contract. There is no server-side auto-assign
+// today; a future server-assigned-version feature would require
+// changing `RegisterKTypeResponse.version` to surface the
+// assigned value AND changing `PGRegistry.Register` to return
+// the assigned version, neither of which is wired in this PR.
 message RegisterKTypeRequest {
   string name = 1;
   int32 version = 2;

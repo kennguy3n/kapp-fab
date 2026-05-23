@@ -168,9 +168,11 @@ type apiDeps struct {
 	// sessionStore are exposed on apiDeps so the gRPC server
 	// (services/api/grpc.go) can reach them with the same
 	// pointers the HTTP gateway uses — single source of truth
-	// per dependency. ssoSvc points at the authHandlers' service
-	// (if SSO is configured) so the gRPC AuthService wraps the
-	// identical business-logic call path as the REST handler.
+	// per dependency. The gRPC AuthService backend is reached
+	// indirectly through `authh.svc` rather than promoted to its
+	// own apiDeps field; authh is the canonical owner of the
+	// SSOService instance and there is no benefit to a duplicate
+	// pointer here.
 	ktypeRegistry *ktype.PGRegistry
 	sessionStore  auth.SessionStore
 }

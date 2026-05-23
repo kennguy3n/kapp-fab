@@ -27,7 +27,9 @@ const DefaultUnaryTimeout = 30 * time.Second
 // service singletons) so there is exactly one source of truth per
 // dependency in the process.
 type ServerConfig struct {
-	// Auth gates every RPC except those in UnauthenticatedMethods.
+	// Auth gates every RPC except those for which
+	// IsUnauthenticatedMethod returns true (the AuthService SSO /
+	// Refresh trust-anchor RPCs and the gRPC health probes).
 	Auth AuthConfig
 
 	// AuthSvc is the business-logic service the AuthService gRPC

@@ -299,9 +299,9 @@ func withBearer(ctx context.Context, tok string) context.Context {
 // --- Tests ---
 
 // TestAuthService_SSO_Unauthenticated exercises the no-bearer path
-// — SSO is in UnauthenticatedMethods so the call MUST succeed even
-// without a JWT. Also verifies the response shape is preserved
-// byte-for-byte through the gRPC translation.
+// — IsUnauthenticatedMethod returns true for SSO so the call MUST
+// succeed even without a JWT. Also verifies the response shape is
+// preserved byte-for-byte through the gRPC translation.
 func TestAuthService_SSO_Unauthenticated(t *testing.T) {
 	ts, closer := startTestServer(t)
 	defer closer()
