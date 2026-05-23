@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +13,21 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/insights"
 )
+
+// captureSlog redirects slog.Default() to a buffer for the duration
+// of the calling test. Returns the buffer (drained at test
+// completion) and a t.Cleanup that restores the previous handler.
+// Use to assert structured-log emissions without parsing global
+// stdio. The default handler restoration is important — leaking
+// the test handler into a later test would conflate output.
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	prev := slog.Default()
+	buf := &bytes.Buffer{}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
+}
 
 // TestWriteInsightsErrorRoutesSecurityAssertion proves the HTTP
 // error mapper recognises insights.ErrSecurityAssertion via
@@ -30,27 +47,50 @@ import (
 // gives them an errors.Is-able predicate instead.
 func TestWriteInsightsErrorRoutesSecurityAssertion(t *testing.T) {
 	cases := []struct {
-		name     string
-		err      error
-		wantBody string
+		name string
+		err  error
+		// wantLogSubstring is what must appear in the
+		// server-side slog body — the FULL diagnostic
+		// including any tenant IDs is preserved for
+		// operator forensics.
+		wantLogSubstring string
+		// wantHTTPBodyAbsent is content that MUST NOT
+		// appear in the HTTP response body — this is the
+		// information-disclosure surface we're guarding.
+		// For the mismatch case, both UUIDs must be
+		// scrubbed; for the others, no PII to scrub but
+		// we still verify the sanitized envelope fires.
+		wantHTTPBodyAbsent []string
 	}{
 		{
 			name: "row_security-off",
 			err: fmt.Errorf("%w: refusing to run raw SQL with row_security=%q (must be 'on')",
 				insights.ErrSecurityAssertion, "off"),
-			wantBody: `row_security="off"`,
+			wantLogSubstring: `row_security=\"off\"`,
 		},
 		{
 			name: "empty-tenant-guc",
 			err: fmt.Errorf("%w: refusing to run raw SQL with empty app.tenant_id GUC",
 				insights.ErrSecurityAssertion),
-			wantBody: "empty app.tenant_id GUC",
+			wantLogSubstring: "empty app.tenant_id GUC",
 		},
 		{
 			name: "mismatched-tenant-guc",
 			err: fmt.Errorf("%w: refusing to run raw SQL with mismatched app.tenant_id (got %q, want %q)",
-				insights.ErrSecurityAssertion, "00000000-0000-0000-0000-000000000000", "11111111-1111-1111-1111-111111111111"),
-			wantBody: "mismatched app.tenant_id",
+				insights.ErrSecurityAssertion,
+				"00000000-0000-0000-0000-000000000001",
+				"11111111-1111-1111-1111-111111111112"),
+			wantLogSubstring: "mismatched app.tenant_id",
+			// Critical: the cross-tenant UUIDs must NOT
+			// be exposed to the HTTP response — only to
+			// server-side logs.  This guards against a
+			// regression where a future maintainer
+			// switches the sanitized body back to
+			// err.Error() and re-introduces the leak.
+			wantHTTPBodyAbsent: []string{
+				"00000000-0000-0000-0000-000000000001",
+				"11111111-1111-1111-1111-111111111112",
+			},
 		},
 	}
 	for _, tc := range cases {
@@ -58,13 +98,35 @@ func TestWriteInsightsErrorRoutesSecurityAssertion(t *testing.T) {
 			if !errors.Is(tc.err, insights.ErrSecurityAssertion) {
 				t.Fatalf("errors.Is(%q, ErrSecurityAssertion) = false; want true (wrap broke the sentinel chain)", tc.err.Error())
 			}
+			logBuf := captureSlog(t)
 			rec := httptest.NewRecorder()
 			writeInsightsError(rec, tc.err)
 			if rec.Code != http.StatusInternalServerError {
 				t.Fatalf("status = %d; want %d", rec.Code, http.StatusInternalServerError)
 			}
-			if got := rec.Body.String(); !strings.Contains(got, tc.wantBody) {
-				t.Fatalf("body = %q; want substring %q (diagnostic message must survive the wrap)", got, tc.wantBody)
+			// The HTTP body must be the sanitized envelope,
+			// not the verbose diagnostic.  Pin the literal
+			// so a future refactor that loosens it back to
+			// err.Error() trips this test.
+			httpBody := rec.Body.String()
+			if !strings.Contains(httpBody, "internal security assertion failed") {
+				t.Fatalf("HTTP body = %q; want sanitized envelope containing 'internal security assertion failed'", httpBody)
+			}
+			for _, absent := range tc.wantHTTPBodyAbsent {
+				if strings.Contains(httpBody, absent) {
+					t.Fatalf("HTTP body leaked sensitive content %q; body = %q (information-disclosure regression)", absent, httpBody)
+				}
+			}
+			// The slog output gets the FULL diagnostic so
+			// operators tailing logs can root-cause the
+			// failure.  This is the forensic path that the
+			// sanitized HTTP body sacrifices.
+			logOutput := logBuf.String()
+			if !strings.Contains(logOutput, tc.wantLogSubstring) {
+				t.Fatalf("slog output = %q; want substring %q (diagnostic message must reach server logs)", logOutput, tc.wantLogSubstring)
+			}
+			if !strings.Contains(logOutput, `"kind":"insights_security_assertion"`) {
+				t.Fatalf("slog output = %q; want kind=insights_security_assertion field (alerting hook contract)", logOutput)
 			}
 		})
 	}

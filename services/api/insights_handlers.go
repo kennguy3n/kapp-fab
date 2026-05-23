@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -655,16 +656,25 @@ func writeInsightsError(w http.ResponseWriter, err error) {
 	case errors.Is(err, insights.ErrSecurityAssertion):
 		// Defense-in-depth failure from Runner.RunRawSQL — RLS is
 		// disabled, app.tenant_id GUC is unset, or the GUC value
-		// doesn't match the request's tenant. Status remains 500
-		// (it's a server-side misconfiguration, not bad client
-		// input) but routing it through an explicit case rather
-		// than the default arm gives ops a stable, errors.Is-able
-		// distinction from generic 5xx (e.g. DB connection
-		// failures, marshalling bugs) and preserves the diagnostic
-		// message verbatim so the security-assertion details are
-		// still visible to operators tailing the response body
-		// or grepping access logs.
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// doesn't match the request's tenant. Status is 500
+		// (server-side misconfiguration, not client input), but
+		// we MUST NOT leak the diagnostic body verbatim to the
+		// caller — the mismatched-tenant message contains the
+		// other tenant's UUID (`got %q, want %q`) and exposing
+		// that to the HTTP response would turn a hypothetical
+		// future internal bug into a cross-tenant information
+		// disclosure.  Instead, log the full diagnostic
+		// server-side (operators can grep slog output by
+		// kind=insights_security_assertion) and return a
+		// sanitized body that names the failure class without
+		// embedding any IDs.  This keeps the sentinel useful for
+		// alerting / errors.Is and keeps the operator forensics
+		// path intact while closing the leak surface.
+		slog.Default().Error("insights security assertion",
+			slog.String("kind", "insights_security_assertion"),
+			slog.String("err", err.Error()),
+		)
+		http.Error(w, "insights: internal security assertion failed (see server logs)", http.StatusInternalServerError)
 	default:
 		// Unknown error → 500. Validation / shape errors from the
 		// handlers themselves are returned via http.Error directly
