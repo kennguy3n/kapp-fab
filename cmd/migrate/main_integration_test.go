@@ -63,18 +63,22 @@ func runCLI(t *testing.T, dbURL string, argv ...string) (string, error) {
 	os.Stderr = wErr
 	defer func() { os.Stdout = origStdout; os.Stderr = origStderr }()
 
-	errCh := make(chan error, 1)
-	go func() { errCh <- run(argv) }()
+	// Drain stdout/stderr concurrently with run().  The OS pipe
+	// buffer is small (~64KB on Linux); if we waited for run() to
+	// finish before reading, a future subcommand emitting more than
+	// the buffer size would block its write call and the test would
+	// deadlock.  Concurrent drains keep the buffer empty no matter
+	// how much output run() produces.
+	outCh := make(chan string, 1)
+	errCh := make(chan string, 1)
+	go func() { outCh <- drainPipe(rOut) }()
+	go func() { errCh <- drainPipe(rErr) }()
 
-	// Close writers when run() returns so the reader goroutines
-	// finish.  We then drain the pipes.
-	cliErr := <-errCh
+	cliErr := run(argv)
+	// Close writers so the drain goroutines see io.EOF and return.
 	wOut.Close()
 	wErr.Close()
-
-	out := drainPipe(rOut)
-	errs := drainPipe(rErr)
-	return out + errs, cliErr
+	return <-outCh + <-errCh, cliErr
 }
 
 func drainPipe(r *os.File) string {

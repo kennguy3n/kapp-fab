@@ -24,7 +24,11 @@
 //	                          DB that already has Kapp tables but no
 //	                          tracking table.  V defaults to the highest
 //	                          version found on disk.  Refuses to run if
-//	                          schema_migrations already exists.
+//	                          schema_migrations already has rows; an
+//	                          empty schema_migrations table (e.g. left
+//	                          behind by a crashed `up` after
+//	                          WithInstance's CREATE TABLE) is treated
+//	                          as safe to bootstrap into.
 //
 // Configuration:
 //
@@ -446,6 +450,16 @@ func cmdDown(args []string) error {
 	// Probe every rollback target's HasDown.  We walk i in [0, n)
 	// using the bounded uint computed above, so the loop counter is
 	// always representable and there is no dead overflow guard.
+	//
+	// Coupling note: this arithmetic (probe := current - step)
+	// assumes migration versions are strictly contiguous starting at
+	// 000001.  That invariant is enforced by
+	// migratesource.LegacySource.Validate(), which the
+	// openSourceValidated() call above runs before we get here.  If
+	// the contiguity rule is ever relaxed (e.g. allowing gaps in the
+	// numbering), this loop must be reworked to walk the sorted
+	// applied-versions list returned by golang-migrate instead of
+	// computing positions arithmetically.
 	for step := uint(0); step < nu; step++ {
 		probe := current - step
 		if !src.HasDown(probe) {
