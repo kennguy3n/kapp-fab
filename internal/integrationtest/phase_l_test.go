@@ -837,6 +837,12 @@ func TestInsightsSQLEditorMode(t *testing.T) {
 //
 // PostgreSQL canonicalises lock_timeout values to a "<n>ms" or
 // "<n>s" string depending on magnitude; we accept both forms.
+//
+// Each subtest re-binds lockTimeout from a known baseline so the
+// cases are order-independent and parallel-safe.  WithLockTimeout
+// mutates the receiver in place (deliberately — it's a builder),
+// so a naïve loop that shared `runner` would have the "override-3s"
+// case bleed into the "default-5s" case and make order matter.
 func TestInsightsSQLEditorLockTimeoutApplied(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
@@ -844,9 +850,11 @@ func TestInsightsSQLEditorLockTimeoutApplied(t *testing.T) {
 
 	cases := []struct {
 		name string
-		// configure mutates `runner` to set the lock_timeout under
-		// test.  Returns the runner the test should use.
-		configure func(*insights.Runner) *insights.Runner
+		// lockTimeout is the value to bind via WithLockTimeout
+		// at the start of each case.  Note this is the value
+		// the SET LOCAL would emit; we read it back from
+		// current_setting to prove the wire actually fired.
+		lockTimeout time.Duration
 		// wantContains is checked as a substring on the
 		// `current_setting('lock_timeout')` result so we don't
 		// have to encode PG's canonical-string rule
@@ -855,24 +863,28 @@ func TestInsightsSQLEditorLockTimeoutApplied(t *testing.T) {
 	}{
 		{
 			name:         "default-5s",
-			configure:    func(r *insights.Runner) *insights.Runner { return r },
+			lockTimeout:  insights.DefaultLockTimeout,
 			wantContains: "5s",
 		},
 		{
 			name:         "override-3s",
-			configure:    func(r *insights.Runner) *insights.Runner { return r.WithLockTimeout(3 * time.Second) },
+			lockTimeout:  3 * time.Second,
 			wantContains: "3s",
 		},
 		{
 			name:         "disabled-zero",
-			configure:    func(r *insights.Runner) *insights.Runner { return r.WithLockTimeout(0) },
+			lockTimeout:  0,
 			wantContains: "0",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfgRunner := tc.configure(runner)
-			out, err := cfgRunner.RunRawSQL(ctx, tn.ID, "SELECT current_setting('lock_timeout') AS lt", nil)
+			// Re-bind from a known baseline at the top of every
+			// case.  This makes the suite order-independent —
+			// the previous case's WithLockTimeout(0) doesn't
+			// poison the next case's expected "5s" reading.
+			runner.WithLockTimeout(tc.lockTimeout)
+			out, err := runner.RunRawSQL(ctx, tn.ID, "SELECT current_setting('lock_timeout') AS lt", nil)
 			if err != nil {
 				t.Fatalf("run raw sql: %v", err)
 			}
@@ -885,6 +897,10 @@ func TestInsightsSQLEditorLockTimeoutApplied(t *testing.T) {
 			}
 		})
 	}
+	// Restore the default so subsequent tests that reuse the
+	// runner (e.g. via newTenantForInsights returning the
+	// harness-scoped instance) start from a clean baseline.
+	runner.WithLockTimeout(insights.DefaultLockTimeout)
 }
 
 // TestInsightsSQLEditorRunRawSQLRespectsTenantRLS proves the Phase M
