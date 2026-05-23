@@ -37,7 +37,16 @@ type ktypeServiceImpl struct {
 
 // RegisterKType registers a new KType version. Mirrors POST
 // /api/v1/ktypes (services/api/ktypes.go:register).
+//
+// When the registry backend is not configured, returns
+// codes.Unavailable (grpc-gateway maps to HTTP 503). This
+// unifies the wire response with the HTTP surface, which would
+// return 503 in the same condition; see the matching note on
+// authServiceImpl.SSO.
 func (s *ktypeServiceImpl) RegisterKType(ctx context.Context, req *kappv1.RegisterKTypeRequest) (*kappv1.RegisterKTypeResponse, error) {
+	if s.registry == nil {
+		return nil, status.Error(codes.Unavailable, "ktype registry not configured")
+	}
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is nil")
 	}
@@ -65,8 +74,12 @@ func (s *ktypeServiceImpl) RegisterKType(ctx context.Context, req *kappv1.Regist
 }
 
 // GetKType returns a specific KType row. version=0 means "latest"
-// to match the registry's behaviour and the HTTP handler.
+// to match the registry's behaviour and the HTTP handler. See
+// RegisterKType for the registry-nil rationale.
 func (s *ktypeServiceImpl) GetKType(ctx context.Context, req *kappv1.GetKTypeRequest) (*kappv1.GetKTypeResponse, error) {
+	if s.registry == nil {
+		return nil, status.Error(codes.Unavailable, "ktype registry not configured")
+	}
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is nil")
 	}
@@ -92,6 +105,9 @@ func (s *ktypeServiceImpl) GetKType(ctx context.Context, req *kappv1.GetKTypeReq
 // (currently every authenticated caller can read; mutation is a
 // platform-admin operation that flows through the same pool).
 func (s *ktypeServiceImpl) ListKTypes(ctx context.Context, _ *kappv1.ListKTypesRequest) (*kappv1.ListKTypesResponse, error) {
+	if s.registry == nil {
+		return nil, status.Error(codes.Unavailable, "ktype registry not configured")
+	}
 	kts, err := s.registry.List(ctx)
 	if err != nil {
 		return nil, mapKTypeError(err, codes.Internal)

@@ -710,3 +710,93 @@ func TestUnaryTimeoutInterceptor_RespectsCallerDeadline(t *testing.T) {
 		t.Errorf("caller deadline was 25ms but call took %v", elapsed)
 	}
 }
+
+// TestServices_NilBackend_ReturnsUnavailable pins the wire-code
+// unification described in authServiceImpl.SSO / ktypeServiceImpl
+// doc comments: when AuthSvc / KTypeRegistry are nil on
+// ServerConfig, the gRPC handlers MUST still be registered and
+// each method MUST return codes.Unavailable — grpc-gateway then
+// maps that to HTTP 503, matching the HTTP surface's "503 sso not
+// configured" response in services/api/auth.go. If a future
+// contributor reverts to conditional registration in server.go,
+// this test fails with codes.Unimplemented (501 via gateway).
+func TestServices_NilBackend_ReturnsUnavailable(t *testing.T) {
+	signer, err := auth.NewSigner(auth.SignerConfig{
+		Algorithm:  auth.AlgHS256,
+		HMACKey:    []byte("0123456789abcdef0123456789abcdef"),
+		Issuer:     "kapp-test",
+		Audience:   "kapp-test",
+		AccessTTL:  10 * time.Minute,
+		RefreshTTL: 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+
+	srvCfg := apigrpc.ServerConfig{
+		Auth: apigrpc.AuthConfig{
+			Signer:        signer,
+			TenantResolve: &fakeTenantResolver{tenant: &tenant.Tenant{ID: uuid.New(), Status: tenant.StatusActive}},
+			Logger:        slog.Default(),
+		},
+		AuthSvc:       nil, // deliberately nil
+		KTypeRegistry: nil, // deliberately nil
+		Logger:        slog.Default(),
+	}
+	srv := apigrpc.NewServer(srvCfg)
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = lis.Close() }()
+	go func() { _ = srv.Serve(lis) }()
+	defer srv.GracefulStop()
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// SSO with nil AuthSvc must return Unavailable (NOT Unimplemented).
+	authClient := kappv1.NewAuthServiceClient(conn)
+	_, ssoErr := authClient.SSO(ctx, &kappv1.SSORequest{Code: "x", RedirectUri: "y"})
+	if ssoErr == nil {
+		t.Fatalf("SSO with nil backend: expected error; got nil")
+	}
+	if st, _ := status.FromError(ssoErr); st.Code() != codes.Unavailable {
+		t.Errorf("SSO nil backend: code = %s, want Unavailable", st.Code())
+	}
+
+	// Refresh with nil AuthSvc must return Unavailable as well.
+	_, refErr := authClient.Refresh(ctx, &kappv1.RefreshRequest{RefreshToken: "tok"})
+	if refErr == nil {
+		t.Fatalf("Refresh with nil backend: expected error; got nil")
+	}
+	if st, _ := status.FromError(refErr); st.Code() != codes.Unavailable {
+		t.Errorf("Refresh nil backend: code = %s, want Unavailable", st.Code())
+	}
+
+	// KType handlers also gated by auth — issue a real bearer so
+	// we reach the handler rather than tripping Unauthenticated.
+	tok, err := signer.Issue(auth.Claims{
+		UserID:   uuid.New(),
+		TenantID: srvCfg.Auth.TenantResolve.(*fakeTenantResolver).tenant.ID,
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	mdCtx := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+tok)
+	ktClient := kappv1.NewKTypeServiceClient(conn)
+	_, listErr := ktClient.ListKTypes(mdCtx, &kappv1.ListKTypesRequest{})
+	if listErr == nil {
+		t.Fatalf("ListKTypes with nil registry: expected error; got nil")
+	}
+	if st, _ := status.FromError(listErr); st.Code() != codes.Unavailable {
+		t.Errorf("ListKTypes nil registry: code = %s, want Unavailable", st.Code())
+	}
+}

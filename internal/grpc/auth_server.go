@@ -43,7 +43,18 @@ type authServiceImpl struct {
 // services/api/auth.go's sso() HTTP handler one-to-one: same input
 // shape, same dependency call, same error mapping (the HTTP handler
 // returns 401 on every Exchange error; we return Unauthenticated).
+//
+// When the SSO backend is not configured (KAPP_KCHAT_URL unset on
+// boot), the HTTP handler returns 503 + "sso not configured". The
+// equivalent here is codes.Unavailable, which grpc-gateway maps to
+// HTTP 503 — same wire response on both surfaces. We register the
+// gRPC service unconditionally (see server.go) so a gateway client
+// gets the unified 503 rather than 501/Unimplemented, matching the
+// HTTP surface byte-for-byte.
 func (s *authServiceImpl) SSO(ctx context.Context, req *kappv1.SSORequest) (*kappv1.SSOResponse, error) {
+	if s.backend == nil {
+		return nil, status.Error(codes.Unavailable, "sso not configured")
+	}
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is nil")
 	}
@@ -63,8 +74,12 @@ func (s *authServiceImpl) SSO(ctx context.Context, req *kappv1.SSORequest) (*kap
 }
 
 // Refresh swaps a refresh token for a fresh access token. Same
-// translation pattern as SSO.
+// translation pattern as SSO — including the "backend not
+// configured" branch that mirrors the HTTP 503.
 func (s *authServiceImpl) Refresh(ctx context.Context, req *kappv1.RefreshRequest) (*kappv1.RefreshResponse, error) {
+	if s.backend == nil {
+		return nil, status.Error(codes.Unavailable, "sso not configured")
+	}
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is nil")
 	}

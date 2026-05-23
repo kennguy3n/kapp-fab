@@ -121,14 +121,32 @@ func NewServer(cfg ServerConfig) *grpc.Server {
 	// health is added per-service below.
 	healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 
+	// Services are registered UNCONDITIONALLY so the gateway
+	// (services/api/grpc.go) — which always registers both proto
+	// handlers — gets a consistent wire response on calls to
+	// "not-configured" backends. The per-method nil-backend guards
+	// in authServiceImpl / ktypeServiceImpl return codes.Unavailable
+	// (HTTP 503 via grpc-gateway), matching the HTTP surface's
+	// "sso not configured" 503. If we conditionally skipped the
+	// registration here the gateway would surface 501/Unimplemented
+	// for the same condition — a needless divergence.
+	//
+	// Health status (kapp.v1.AuthService / kapp.v1.KTypeService) is
+	// still set per-backend so a load balancer's per-service health
+	// probe can distinguish "configured + serving" from "registered
+	// stub returning Unavailable".
+	kappv1.RegisterAuthServiceServer(srv, &authServiceImpl{backend: cfg.AuthSvc})
 	if cfg.AuthSvc != nil {
-		kappv1.RegisterAuthServiceServer(srv, &authServiceImpl{backend: cfg.AuthSvc})
 		healthSrv.SetServingStatus("kapp.v1.AuthService", healthpb.HealthCheckResponse_SERVING)
+	} else {
+		healthSrv.SetServingStatus("kapp.v1.AuthService", healthpb.HealthCheckResponse_NOT_SERVING)
 	}
 
+	kappv1.RegisterKTypeServiceServer(srv, &ktypeServiceImpl{registry: cfg.KTypeRegistry})
 	if cfg.KTypeRegistry != nil {
-		kappv1.RegisterKTypeServiceServer(srv, &ktypeServiceImpl{registry: cfg.KTypeRegistry})
 		healthSrv.SetServingStatus("kapp.v1.KTypeService", healthpb.HealthCheckResponse_SERVING)
+	} else {
+		healthSrv.SetServingStatus("kapp.v1.KTypeService", healthpb.HealthCheckResponse_NOT_SERVING)
 	}
 
 	if cfg.EnableReflection {
