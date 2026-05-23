@@ -29,7 +29,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -342,7 +341,7 @@ func TestInvalidSubcommand(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error on bogus subcommand")
 	}
-	if !errors.Is(err, err) || !strings.Contains(err.Error(), "unknown subcommand") {
+	if !strings.Contains(err.Error(), "unknown subcommand") {
 		t.Fatalf("expected 'unknown subcommand', got: %v", err)
 	}
 }

@@ -43,12 +43,17 @@ import (
 // ones.
 var filenameRE = regexp.MustCompile(`^(\d{6})_([^.]+?)(?:\.(up|down))?\.sql$`)
 
-// LegacySource implements source.Driver.  It is registered with the
-// `legacy://` scheme so callers can do
-//
-//	migrate.New("legacy:///abs/path/to/migrations", dbURL)
-//
-// instead of the file:// scheme.  Registration is wired in init().
+// LegacySource implements source.Driver.  The CLI always constructs
+// it via NewFromDir() + migrate.NewWithInstance("legacy", src, ...),
+// which is the documented "instance-based" entrypoint in
+// golang-migrate.  We intentionally do NOT call source.Register to
+// expose a `legacy://` URL scheme: the dependency injection path is
+// always available, exposes the same Source.Driver contract, and
+// avoids the package-init side effect that source.Register would
+// introduce.  The Open() method below is still implemented because
+// source.Driver requires it; it parses a legacy:// URL pointing at
+// the on-disk migrations directory and is reachable from tests, but
+// production callers should prefer NewFromDir().
 type LegacySource struct {
 	dir        string
 	migrations *source.Migrations

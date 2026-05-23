@@ -383,8 +383,10 @@ func cmdDown(args []string) error {
 	// companions.  Trying to roll them back via golang-migrate would
 	// surface as a generic ErrNotExist that doesn't explain the
 	// situation.  We probe the current version and refuse early when
-	// the rollback target lacks a .down.sql.
-	m, closeFn, err := openMigrateForDB()
+	// the rollback target lacks a .down.sql.  The source is threaded
+	// into openMigrateForDBWithSource so the pre-check and the migrate
+	// instance share a single directory scan.
+	m, closeFn, err := openMigrateForDBWithSource(src)
 	if err != nil {
 		return err
 	}
@@ -396,17 +398,25 @@ func cmdDown(args []string) error {
 	if vErr != nil {
 		return fmt.Errorf("down: read version: %w", vErr)
 	}
-	for i := 0; i < n; i++ {
-		// guard the uint subtraction explicitly so gosec's
-		// integer-overflow check is satisfied AND so we don't silently
-		// wrap around when n exceeds the current applied count.
-		if i < 0 {
-			return fmt.Errorf("down: negative step counter %d", i)
-		}
-		step := uint(i) //nolint:gosec // i is bounded by n which is checked >= 1 above
-		if step >= current {
-			break
-		}
+	// Bounds check: refuse up front when n exceeds the number of
+	// applied migrations.  golang-migrate's Steps(-n) would surface a
+	// generic error in that case; this gives operators a clear
+	// message and lets the HasDown loop below assume probe>=1 so its
+	// arithmetic is straightforward.
+	//
+	// uint(n) is safe here: n is checked >= 1 above so the cast does
+	// not wrap, and current is a uint so the comparison is exact.
+	nu := uint(n) //nolint:gosec // n is bounded >=1 above; no sign change
+	if nu > current {
+		return fmt.Errorf(
+			"down: N=%d exceeds current version %06d (only %d migration(s) applied)",
+			n, current, current,
+		)
+	}
+	// Probe every rollback target's HasDown.  We walk i in [0, n)
+	// using the bounded uint computed above, so the loop counter is
+	// always representable and there is no dead overflow guard.
+	for step := uint(0); step < nu; step++ {
 		probe := current - step
 		if !src.HasDown(probe) {
 			return fmt.Errorf(
@@ -614,11 +624,26 @@ SELECT EXISTS (
 // have no need to probe schema state before WithInstance runs (down,
 // force, version).  It opens the source + db, constructs the migrate
 // instance, and returns a single cleanup function the caller defers.
+//
+// Callers that already hold a validated *migratesource.LegacySource
+// (e.g. cmdDown, which needs the source for its HasDown pre-check
+// before opening the migrate instance) should call
+// openMigrateForDBWithSource instead to avoid a second filesystem
+// scan of the migrations directory.
 func openMigrateForDB() (*migrate.Migrate, func(), error) {
 	src, err := openSourceValidated()
 	if err != nil {
 		return nil, nil, err
 	}
+	return openMigrateForDBWithSource(src)
+}
+
+// openMigrateForDBWithSource is identical to openMigrateForDB but
+// reuses an already-validated LegacySource.  Threading the source
+// through the call sites lets cmdDown (which validates the source
+// once for its HasDown pre-check) avoid re-scanning the migrations
+// directory inside this helper.
+func openMigrateForDBWithSource(src *migratesource.LegacySource) (*migrate.Migrate, func(), error) {
 	db, err := openDB()
 	if err != nil {
 		return nil, nil, err

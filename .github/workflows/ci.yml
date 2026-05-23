@@ -64,19 +64,32 @@ jobs:
       - name: install buf
         run: go install github.com/bufbuild/buf/cmd/buf@v1.55.1
       - run: make proto-gen
-      # Two-stage lint: (1) strict ratchet on changes introduced in this
-      # PR vs. the merge base — these MUST pass.  (2) full-codebase
+      # Two-stage lint: (1) strict ratchet on changes introduced by
+      # this commit / PR — these MUST pass.  (2) full-codebase
       # advisory run captured in the job output for visibility, but
       # marked continue-on-error so legacy findings don't block the
       # ratchet job.  Follow-up PRs drive the legacy count to zero.
-      - name: fetch merge base
+      #
+      # For `pull_request` events, the ratchet diffs against the PR's
+      # base branch (the merge base).  For `push` events (notably
+      # push-to-main), there is no base branch in the GitHub payload,
+      # so we diff against the parent commit (HEAD~1).  This catches
+      # bypasses where someone lands code directly on main without a
+      # PR — the previous design used `origin/main` as the base on
+      # push events, which made --new-from-rev a no-op because the
+      # checkout IS that ref.
+      - name: resolve lint base
         run: |
-          BASE_REF="${{ github.base_ref }}"
-          if [ -z "$BASE_REF" ]; then
-            BASE_REF="${{ github.event.repository.default_branch }}"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_REF="${{ github.base_ref }}"
+            git fetch --no-tags --depth=200 origin "$BASE_REF"
+            echo "LINT_BASE=origin/$BASE_REF" >> "$GITHUB_ENV"
+          else
+            # push event: lint the just-pushed commit(s) against
+            # their parent.  --depth=2 is enough to expose HEAD~1.
+            git fetch --no-tags --deepen=1 origin "${{ github.sha }}" || true
+            echo "LINT_BASE=HEAD~1" >> "$GITHUB_ENV"
           fi
-          git fetch --no-tags --depth=200 origin "$BASE_REF"
-          echo "LINT_BASE=origin/$BASE_REF" >> "$GITHUB_ENV"
       - name: golangci-lint (strict on new code)
         uses: golangci/golangci-lint-action@v7
         with:
