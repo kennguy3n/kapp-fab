@@ -48,22 +48,24 @@ func (a *CertificateAutoIssuer) Handle(ctx context.Context, tenantID uuid.UUID, 
 	if a.records == nil || a.issuer == nil {
 		return errors.New("certificate-auto-issuer: not configured")
 	}
-	rows, err := a.records.ListAll(ctx, tenantID, record.ListFilter{
+	// ForEach (not ListAll): the per-row work is fully streaming —
+	// decode the JSON, check status, attempt issuance, log on
+	// failure. Nothing accumulates across rows, so there is no
+	// reason to materialise the entire enrollment table. Streaming
+	// keeps peak memory bounded to one chunk and lifts the
+	// ListAllMaxRows cap.
+	issued := 0
+	if err := a.records.ForEach(ctx, tenantID, record.ListFilter{
 		KType:  lms.KTypeEnrollment,
 		Status: "active",
-	})
-	if err != nil {
-		return fmt.Errorf("certificate-auto-issuer: list enrollments: %w", err)
-	}
-	issued := 0
-	for _, r := range rows {
+	}, func(r record.KRecord) error {
 		var body map[string]any
 		if err := json.Unmarshal(r.Data, &body); err != nil {
 			log.Printf("certificate-auto-issuer: decode %s: %v", r.ID, err)
-			continue
+			return nil
 		}
 		if status, _ := body["status"].(string); status != "completed" {
-			continue
+			return nil
 		}
 		_, err := a.issuer.IssueCertificate(ctx, tenantID, r.ID, a.actor, lms.CertificateOptions{})
 		switch {
@@ -74,6 +76,9 @@ func (a *CertificateAutoIssuer) Handle(ctx context.Context, tenantID uuid.UUID, 
 		default:
 			log.Printf("certificate-auto-issuer: enrollment %s: %v", r.ID, err)
 		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("certificate-auto-issuer: walk enrollments: %w", err)
 	}
 	if issued > 0 {
 		log.Printf("certificate-auto-issuer: tenant %s issued %d certificates", tenantID, issued)

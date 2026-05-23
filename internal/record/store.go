@@ -368,46 +368,132 @@ func (s *PGStore) ListPage(ctx context.Context, tenantID uuid.UUID, filter ListF
 //
 // Safety cap: ListAll aborts with ErrListAllExceedsCap once it has
 // accumulated more than ListAllMaxRows rows. This is a defensive
-// guard against unbounded memory growth on huge tenants — the proper
-// streaming alternative (PGStore.ForEach) will land in Pillar A2 and
-// every batch caller in the tree should migrate to it. The cap fires
-// only on truly outlier tenants (>100k records of a single KType);
-// for everything else the slice cost is bounded by total dataset size.
+// guard against unbounded memory growth on huge tenants. For callers
+// that need to walk arbitrarily large KTypes without materialising
+// every row, use PGStore.ForEach: it iterates the same keyset and
+// snapshot but invokes a callback per row, bounding peak memory to
+// one chunk (≤500 rows) and lifting the row cap entirely.
+//
+// ListAll is now a thin wrapper around ForEach + slice accumulation;
+// the streaming path is the source of truth for the SQL and
+// consistency contract — see PGStore.ForEach for the full
+// description of the snapshot ceiling, DB-clock rationale, and
+// per-chunk transaction semantics.
 func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFilter) ([]KRecord, error) {
+	out := make([]KRecord, 0)
+	err := s.ForEach(ctx, tenantID, filter, func(r KRecord) error {
+		// Tight cap: refuse to grow `out` past ListAllMaxRows even
+		// by a single row. Returning a typed error here surfaces
+		// the overflow to the caller (and the test suite) with
+		// enough context (ktype, rows-so-far, cap) to migrate them
+		// to ForEach.
+		if len(out)+1 > ListAllMaxRows {
+			return fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
+				ErrListAllExceedsCap, filter.KType, len(out)+1, ListAllMaxRows)
+		}
+		out = append(out, r)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ForEach walks every record matching filter, invoking fn for each
+// decrypted KRecord. Memory stays bounded to a single chunk (≤500
+// records) regardless of total row count, so this is the right
+// primitive for any sweep / batch caller that does not need a
+// materialised slice — recurring engine, summarize_pipeline, payroll
+// repost, exporter, certificate worker, etc.
+//
+// Behavioural contract:
+//
+//  1. Rows are visited in the same (updated_at DESC, id DESC) order
+//     as ListAll and ListPage, paginated internally via keyset.
+//  2. Snapshot consistency: a wall-clock ceiling is captured from
+//     Postgres clock_timestamp() before the first chunk. Every chunk
+//     filters `updated_at <= snapshot`. A row whose updated_at is
+//     bumped by a concurrent Update mid-walk is excluded from this
+//     walk and picked up by the next sweep. The contract is "every
+//     row whose state was committed before walk start, exactly
+//     once", not "every row that ever existed during the walk". See
+//     PGStore.dbNow for the DB-clock vs app-clock rationale.
+//  3. Each chunk runs in its own per-tenant transaction
+//     (platform.WithTenantTx). The walk does NOT hold a long-lived
+//     transaction, so it does not block autovacuum and cannot fail
+//     with a serialization-near-end-of-walk error.
+//  4. Decryption happens after the SQL result is read but before fn
+//     is called. fn receives plaintext.
+//  5. fn errors propagate up unchanged, EXCEPT the sentinel
+//     ErrStopForEach which is trapped and causes ForEach to return
+//     nil. Use ErrStopForEach for non-error early termination ("I
+//     found what I was looking for, stop walking"); return any
+//     other non-nil error to abort and propagate.
+//  6. Unlike ListAll, ForEach has NO ListAllMaxRows cap — peak
+//     memory is bounded by one chunk regardless of total row count.
+//
+// filter.Limit and filter.Offset are ignored. filter.KType is
+// required; filter.Status defaults to "active".
+func (s *PGStore) ForEach(ctx context.Context, tenantID uuid.UUID, filter ListFilter, fn ForEachFunc) error {
 	if filter.KType == "" {
-		return nil, errors.New("record: ktype filter required")
+		return errors.New("record: ktype filter required")
+	}
+	if fn == nil {
+		return errors.New("record: ForEach callback required")
 	}
 	status := filter.Status
 	if status == "" {
 		status = "active"
 	}
+	return s.foreachKeyset(ctx, tenantID, func(haveLower bool, cursorTS time.Time, cursorID uuid.UUID, snapshot time.Time, chunk int) (string, []any) {
+		if haveLower {
+			return `SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+				        created_by, created_at, updated_by, updated_at, deleted_at
+				 FROM krecords
+				 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+				   AND updated_at <= $4
+				   AND (updated_at, id) < ($5, $6)
+				 ORDER BY updated_at DESC, id DESC
+				 LIMIT $7`,
+				[]any{tenantID, filter.KType, status, snapshot, cursorTS, cursorID, chunk}
+		}
+		return `SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+			        created_by, created_at, updated_by, updated_at, deleted_at
+			 FROM krecords
+			 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+			   AND updated_at <= $4
+			 ORDER BY updated_at DESC, id DESC
+			 LIMIT $5`,
+			[]any{tenantID, filter.KType, status, snapshot, chunk}
+	}, fn)
+}
+
+// foreachKeyset is the shared internal driver for ForEach and
+// ForEachByField. It captures the snapshot, loops per-chunk under
+// platform.WithTenantTx, decrypts each row, invokes fn, and handles
+// the ErrStopForEach sentinel. The caller supplies the SQL+args via
+// queryBuilder: a function that, given the cursor state and chunk
+// size, returns the SQL string and bind arguments for the next
+// chunk's query.
+//
+// Splitting the SQL-building out of the loop keeps ForEach and
+// ForEachByField from each having to carry their own copy of the
+// snapshot + cursor + transaction + decrypt loop — the loop is
+// non-trivial and was previously duplicated between ListAll and
+// ListByField, which is exactly the kind of duplication that drifts
+// over time (one branch gains a cap check, the other does not, etc.).
+func (s *PGStore) foreachKeyset(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	queryBuilder func(haveLower bool, cursorTS time.Time, cursorID uuid.UUID, snapshot time.Time, chunk int) (string, []any),
+	fn ForEachFunc,
+) error {
 	const chunk = 500
-	// snapshot is the high-water-mark captured before the first chunk
-	// query runs. Every chunk filters `updated_at <= snapshot` so a
-	// row whose updated_at is bumped by a concurrent Update mid-walk
-	// is excluded from this walk entirely (its new updated_at exceeds
-	// the snapshot ceiling) rather than being missed-or-duplicated
-	// when its (updated_at, id) tuple shifts above the cursor. The
-	// excluded row is picked up by the next sweep — the contract is
-	// "every row whose state was committed before walk start, exactly
-	// once", not "every row that ever existed during the walk".
-	//
-	// Snapshot is read from Postgres via `clock_timestamp()` (see
-	// PGStore.dbNow) rather than Go's wall clock, so the comparison
-	// happens entirely in the database's clock domain. App-server
-	// clock skew (NTP jitter, container pause, VM migration) therefore
-	// cannot move the ceiling backwards relative to the `updated_at`
-	// timestamps the DB assigns on commit — a row committed at
-	// DB-time T would otherwise be silently excluded if Go-time
-	// briefly trailed T. clock_timestamp() (not now()) is used so the
-	// ceiling reflects the wall-clock instant of this call rather
-	// than the start of any outer transaction the caller may be
-	// running inside; see the dbNow docstring for the full rationale.
 	snapshot, err := s.dbNow(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	out := make([]KRecord, 0)
 	var (
 		cursorTS  time.Time
 		cursorID  uuid.UUID
@@ -416,36 +502,10 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 	for {
 		page := make([]KRecord, 0, chunk)
 		err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			var (
-				rows pgx.Rows
-				err  error
-			)
-			if haveLower {
-				rows, err = tx.Query(ctx,
-					`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
-					        created_by, created_at, updated_by, updated_at, deleted_at
-					 FROM krecords
-					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
-					   AND updated_at <= $4
-					   AND (updated_at, id) < ($5, $6)
-					 ORDER BY updated_at DESC, id DESC
-					 LIMIT $7`,
-					tenantID, filter.KType, status, snapshot, cursorTS, cursorID, chunk,
-				)
-			} else {
-				rows, err = tx.Query(ctx,
-					`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
-					        created_by, created_at, updated_by, updated_at, deleted_at
-					 FROM krecords
-					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
-					   AND updated_at <= $4
-					 ORDER BY updated_at DESC, id DESC
-					 LIMIT $5`,
-					tenantID, filter.KType, status, snapshot, chunk,
-				)
-			}
+			sql, args := queryBuilder(haveLower, cursorTS, cursorID, snapshot, chunk)
+			rows, err := tx.Query(ctx, sql, args...)
 			if err != nil {
-				return fmt.Errorf("record: list_all: %w", err)
+				return fmt.Errorf("record: foreach: %w", err)
 			}
 			defer rows.Close()
 			for rows.Next() {
@@ -463,30 +523,27 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 			return rows.Err()
 		})
 		if err != nil {
-			return nil, err
-		}
-		// Tight cap: refuse to grow `out` past ListAllMaxRows even by a
-		// single chunk's worth. A loose post-append check would let a
-		// 100k cap balloon to 100,499 in the worst case.
-		if len(out)+len(page) > ListAllMaxRows {
-			return nil, fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
-				ErrListAllExceedsCap, filter.KType, len(out)+len(page), ListAllMaxRows)
+			return err
 		}
 		for i := range page {
 			decrypted, err := s.decryptRecord(ctx, &page[i])
 			if err != nil {
-				return nil, err
+				return err
 			}
 			page[i].Data = decrypted
+			if err := fn(page[i]); err != nil {
+				if errors.Is(err, ErrStopForEach) {
+					return nil
+				}
+				return err
+			}
 		}
-		out = append(out, page...)
 		if len(page) < chunk {
-			break
+			return nil
 		}
 		last := page[len(page)-1]
 		cursorTS, cursorID, haveLower = last.UpdatedAt, last.ID, true
 	}
-	return out, nil
 }
 
 // ListByField returns every record for the tenant matching
@@ -503,111 +560,76 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 // public/indexable attribute before passing it in — this method is
 // not exposed to end users directly.
 //
-// Paginated internally via keyset (the same `(updated_at, id) < cursor`
-// pattern as ListAll) so concurrent inserts cannot shift a row from
-// one chunk to the next. Subject to the same ListAllMaxRows safety
-// cap as ListAll — see PGStore.ForEach (Pillar A2) for the streaming
-// alternative when a single filter is expected to match more than
-// ListAllMaxRows rows.
+// Now a thin wrapper around PGStore.ForEachByField + slice
+// accumulation with the same ListAllMaxRows cap as ListAll. Callers
+// that walk filtered sets too large to materialise should use
+// ForEachByField directly. The streaming primitive is the source of
+// truth for the SQL and consistency contract — see ForEachByField.
 func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter ListFilter, field, value string) ([]KRecord, error) {
+	out := make([]KRecord, 0)
+	err := s.ForEachByField(ctx, tenantID, filter, field, value, func(r KRecord) error {
+		if len(out)+1 > ListAllMaxRows {
+			return fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
+				ErrListAllExceedsCap, filter.KType, len(out)+1, ListAllMaxRows)
+		}
+		out = append(out, r)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ForEachByField is the streaming variant of ListByField. It walks
+// every record matching filter.KType whose JSONB field `field`
+// equals `value` (case-insensitive), invoking fn for each decrypted
+// KRecord. Same consistency, snapshot, and per-chunk-tx semantics as
+// ForEach — see ForEach for the full contract. Memory stays bounded
+// to one chunk regardless of how many rows match.
+//
+// Use this over ListByField when the matching set is potentially
+// large (e.g. all payslips across a multi-year history when filtering
+// by pay_run_id is no longer enough to keep the result set small).
+// Use ListByField when the matching set is bounded and the caller
+// wants a slice for downstream processing.
+func (s *PGStore) ForEachByField(ctx context.Context, tenantID uuid.UUID, filter ListFilter, field, value string, fn ForEachFunc) error {
 	if filter.KType == "" {
-		return nil, errors.New("record: ktype filter required")
+		return errors.New("record: ktype filter required")
 	}
 	if field == "" {
-		return nil, errors.New("record: field required")
+		return errors.New("record: field required")
+	}
+	if fn == nil {
+		return errors.New("record: ForEachByField callback required")
 	}
 	status := filter.Status
 	if status == "" {
 		status = "active"
 	}
-	const chunk = 500
-	// See ListAll for the snapshot rationale and the DB-clock
-	// vs app-clock motivation (including why clock_timestamp() is
-	// the right Postgres function to use, not now()). Same
-	// point-in-time consistency contract applies here.
-	snapshot, err := s.dbNow(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]KRecord, 0)
-	var (
-		cursorTS  time.Time
-		cursorID  uuid.UUID
-		haveLower bool
-	)
-	for {
-		page := make([]KRecord, 0, chunk)
-		err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			var (
-				rows pgx.Rows
-				err  error
-			)
-			if haveLower {
-				rows, err = tx.Query(ctx,
-					`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
-					        created_by, created_at, updated_by, updated_at, deleted_at
-					 FROM krecords
-					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
-					   AND lower(data->>$4) = lower($5)
-					   AND updated_at <= $6
-					   AND (updated_at, id) < ($7, $8)
-					 ORDER BY updated_at DESC, id DESC
-					 LIMIT $9`,
-					tenantID, filter.KType, status, field, value, snapshot, cursorTS, cursorID, chunk,
-				)
-			} else {
-				rows, err = tx.Query(ctx,
-					`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
-					        created_by, created_at, updated_by, updated_at, deleted_at
-					 FROM krecords
-					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
-					   AND lower(data->>$4) = lower($5)
-					   AND updated_at <= $6
-					 ORDER BY updated_at DESC, id DESC
-					 LIMIT $7`,
-					tenantID, filter.KType, status, field, value, snapshot, chunk,
-				)
-			}
-			if err != nil {
-				return fmt.Errorf("record: list_by_field: %w", err)
-			}
-			defer rows.Close()
-			for rows.Next() {
-				var r KRecord
-				if err := rows.Scan(
-					&r.ID, &r.TenantID, &r.KType, &r.KTypeVersion,
-					&r.Data, &r.Status, &r.Version,
-					&r.CreatedBy, &r.CreatedAt,
-					&r.UpdatedBy, &r.UpdatedAt, &r.DeletedAt,
-				); err != nil {
-					return fmt.Errorf("record: scan: %w", err)
-				}
-				page = append(page, r)
-			}
-			return rows.Err()
-		})
-		if err != nil {
-			return nil, err
+	return s.foreachKeyset(ctx, tenantID, func(haveLower bool, cursorTS time.Time, cursorID uuid.UUID, snapshot time.Time, chunk int) (string, []any) {
+		if haveLower {
+			return `SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+				        created_by, created_at, updated_by, updated_at, deleted_at
+				 FROM krecords
+				 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+				   AND lower(data->>$4) = lower($5)
+				   AND updated_at <= $6
+				   AND (updated_at, id) < ($7, $8)
+				 ORDER BY updated_at DESC, id DESC
+				 LIMIT $9`,
+				[]any{tenantID, filter.KType, status, field, value, snapshot, cursorTS, cursorID, chunk}
 		}
-		if len(out)+len(page) > ListAllMaxRows {
-			return nil, fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
-				ErrListAllExceedsCap, filter.KType, len(out)+len(page), ListAllMaxRows)
-		}
-		for i := range page {
-			decrypted, err := s.decryptRecord(ctx, &page[i])
-			if err != nil {
-				return nil, err
-			}
-			page[i].Data = decrypted
-		}
-		out = append(out, page...)
-		if len(page) < chunk {
-			break
-		}
-		last := page[len(page)-1]
-		cursorTS, cursorID, haveLower = last.UpdatedAt, last.ID, true
-	}
-	return out, nil
+		return `SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+			        created_by, created_at, updated_by, updated_at, deleted_at
+			 FROM krecords
+			 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+			   AND lower(data->>$4) = lower($5)
+			   AND updated_at <= $6
+			 ORDER BY updated_at DESC, id DESC
+			 LIMIT $7`,
+			[]any{tenantID, filter.KType, status, field, value, snapshot, chunk}
+	}, fn)
 }
 
 // Update applies a patch to a record. The incoming r.Data is merged shallowly

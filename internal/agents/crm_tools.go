@@ -175,26 +175,24 @@ type summarizePipelineTool struct{ executor *Executor }
 func (t *summarizePipelineTool) Name() string               { return "crm.summarize_pipeline" }
 func (t *summarizePipelineTool) RequiresConfirmation() bool { return false }
 func (t *summarizePipelineTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
-	// ListAll, not List(Limit:500): pipeline summaries must cover the
-	// whole deal book — capping at 500 would silently under-count
-	// tenants with larger pipelines. ListAll paginates internally via
-	// keyset chunks and is subject to a ListAllMaxRows safety cap
-	// (returns ErrListAllExceedsCap above ~100k deals); the streaming
-	// alternative record.PGStore.ForEach (Pillar A2) is the long-term
-	// home for this aggregation and will let very-large pipelines
-	// summarise without materialising every deal.
-	rows, err := t.executor.records.ListAll(ctx, inv.TenantID, record.ListFilter{
-		KType: crm.KTypeDeal,
-	})
-	if err != nil {
-		return nil, err
-	}
+	// ForEach (not ListAll): the aggregation is a streaming reduce
+	// — every row contributes count+amount to a single per-stage
+	// bucket and is then dropped — so there is no reason to
+	// materialise the entire deal book just to add up two numbers
+	// per row. Streaming keeps peak memory bounded to one 500-row
+	// chunk regardless of pipeline size and lifts the
+	// ListAllMaxRows cap, so tenants with arbitrarily large deal
+	// pipelines summarise correctly without hitting
+	// ErrListAllExceedsCap.
 	type bucket struct {
 		Count int     `json:"count"`
 		Total float64 `json:"total"`
 	}
 	totals := map[string]*bucket{}
-	for _, r := range rows {
+	dealCount := 0
+	if err := t.executor.records.ForEach(ctx, inv.TenantID, record.ListFilter{
+		KType: crm.KTypeDeal,
+	}, func(r record.KRecord) error {
 		var payload struct {
 			Stage  string  `json:"stage"`
 			Amount float64 `json:"amount"`
@@ -211,10 +209,14 @@ func (t *summarizePipelineTool) Invoke(ctx context.Context, inv Invocation) (*Re
 		}
 		b.Count++
 		b.Total += payload.Amount
+		dealCount++
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	summary, _ := json.Marshal(totals)
 	return &Result{
-		Summary: fmt.Sprintf("Pipeline summary across %d deals", len(rows)),
+		Summary: fmt.Sprintf("Pipeline summary across %d deals", dealCount),
 		Preview: summary,
 	}, nil
 }

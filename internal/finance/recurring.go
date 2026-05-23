@@ -123,28 +123,27 @@ func (e *RecurringEngine) Handle(ctx context.Context, tenantID uuid.UUID, _ sche
 		return errors.New("finance: recurring engine not wired")
 	}
 	today := e.now().UTC().Truncate(24 * time.Hour)
-	// ListAll, not List(Limit:500): a tenant with >500 active recurring
-	// invoice templates would otherwise silently miss everything past
-	// the cap on every sweep. ListAll keysets internally in 500-row
-	// chunks and is subject to a ListAllMaxRows safety cap; the proper
-	// streaming alternative (record.PGStore.ForEach, Pillar A2) will
-	// land alongside this so we never have to materialise the whole
-	// template set at once. Until then the cap protects the worker
-	// process from outlier tenants.
-	rows, err := e.records.ListAll(ctx, tenantID, record.ListFilter{
+	// ForEach (not ListAll): the per-row callback is fully
+	// self-contained — generateOne reads the row, advances the
+	// cursor, and writes either an invoice or a status flip — so
+	// we never need the full template set materialised. Streaming
+	// keeps peak memory bounded to a single 500-row chunk
+	// regardless of how many recurring templates the tenant has,
+	// and lifts the ListAllMaxRows cap that ListAll enforces. The
+	// log-and-continue policy for per-row errors is preserved:
+	// returning nil from the callback after logging means a bad
+	// template never aborts the sweep.
+	if err := e.records.ForEach(ctx, tenantID, record.ListFilter{
 		KType:  KTypeRecurringInvoice,
 		Status: "active",
-	})
-	if err != nil {
-		return fmt.Errorf("finance: list recurring invoices: %w", err)
-	}
-	for i := range rows {
-		row := rows[i]
+	}, func(row record.KRecord) error {
 		if err := e.generateOne(ctx, tenantID, row, today); err != nil {
 			log.Printf("finance: recurring tenant=%s row=%s: %v",
 				tenantID, row.ID, err)
-			continue
 		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("finance: walk recurring invoices: %w", err)
 	}
 	return nil
 }
