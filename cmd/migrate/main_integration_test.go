@@ -107,9 +107,17 @@ func drainPipe(r *os.File) string {
 	return sb.String()
 }
 
-// freshDB clones the `kapp` template DB into a uniquely-named scratch
-// DB so each test starts from a known schema.  Returns the DSN of the
-// scratch DB and a cleanup that drops it.
+// freshDB creates a uniquely-named empty scratch DB so each test
+// starts from a known empty schema.  Returns the DSN of the scratch
+// DB and a cleanup that drops it.
+//
+// We intentionally do NOT use `CREATE DATABASE ... TEMPLATE kapp` to
+// pre-seed the schema, because the migrate CLI tests we run here
+// (TestUpFreshDB, TestValidateAccepts, …) explicitly need to exercise
+// `migrate up` on an empty DB.  Cloning the populated `kapp` template
+// would skip the very behaviour the tests assert.  Tests that need a
+// schema (e.g. TestDownRefusesForwardOnly, TestBootstrapPrimes) call
+// `migrate up` themselves as part of the test body.
 func freshDB(t *testing.T) (string, func()) {
 	t.Helper()
 	base := os.Getenv(testBaseEnv)
@@ -145,11 +153,15 @@ func freshDB(t *testing.T) (string, func()) {
 		defer admin.Close()
 		// Disconnect any lingering connections, then drop.  Cancel
 		// running queries on the test DB first so DROP DATABASE
-		// doesn't block.
-		_, _ = admin.Exec(fmt.Sprintf(
-			"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s'",
+		// doesn't block.  pg_stat_activity.datname can be bound as a
+		// regular parameter, so we use $1 here for style consistency
+		// with the rest of the codebase (e.g. tableExists in
+		// cmd/migrate/main.go).  The DROP DATABASE below still uses
+		// %q because identifiers cannot be bound parameters in SQL.
+		_, _ = admin.Exec(
+			"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1",
 			name,
-		))
+		)
 		if _, err := admin.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %q", name)); err != nil {
 			t.Logf("cleanup drop %s: %v", name, err)
 		}

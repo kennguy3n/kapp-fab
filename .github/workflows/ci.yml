@@ -106,20 +106,34 @@ jobs:
             MERGE_BASE="$(git merge-base "HEAD" "origin/$BASE_REF")"
             echo "LINT_BASE=${MERGE_BASE}" >> "$GITHUB_ENV"
           else
-            # push event: lint the just-pushed commit(s) against
-            # their parent.  Full history is already available from
-            # fetch-depth: 0, so HEAD~1 always resolves on any
-            # non-initial commit.
-            if git rev-parse --verify --quiet HEAD~1 >/dev/null; then
-              echo "LINT_BASE=HEAD~1" >> "$GITHUB_ENV"
-            else
-              # Initial commit edge case: HEAD has no parent.  Fall
-              # back to the canonical empty-tree object so
-              # --new-from-rev compares against an empty repository
-              # state and treats every line in HEAD as "new", which
-              # is the correct behavior on a brand-new repo.
+            # push event: lint the just-pushed commit(s) against the
+            # ref's state BEFORE the push.  GitHub sets
+            # github.event.before to that SHA.  This is the correct
+            # base regardless of merge strategy:
+            #   - fast-forward push: before == HEAD~N where N is the
+            #     number of new commits.
+            #   - merge-commit push (e.g. PR merged via "Create a
+            #     merge commit"): before is the pre-merge tip of
+            #     main, so the diff captures every line introduced
+            #     by the merge — including the second-parent side
+            #     that HEAD~1 would miss.
+            #   - squash merge: before is the pre-squash tip of
+            #     main, so the diff captures the squashed commit's
+            #     full contents.
+            # The previous heuristic of HEAD~1 was correct only for
+            # standard ff or first-parent merges and silently
+            # under-reported on second-parent diffs.
+            BEFORE_SHA="${{ github.event.before }}"
+            # github.event.before is 0000...0000 on a branch's first
+            # push.  Fall back to the canonical empty-tree object
+            # in that case so --new-from-rev compares against an
+            # empty repository state and treats every line in HEAD
+            # as "new".
+            if [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
               EMPTY_TREE="$(git hash-object -t tree /dev/null)"
               echo "LINT_BASE=${EMPTY_TREE}" >> "$GITHUB_ENV"
+            else
+              echo "LINT_BASE=${BEFORE_SHA}" >> "$GITHUB_ENV"
             fi
           fi
       - name: golangci-lint (strict on new code)
