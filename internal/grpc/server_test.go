@@ -915,3 +915,63 @@ func TestNewServer_RejectsMissingAuthDeps(t *testing.T) {
 		})
 	}
 }
+
+// TestRequestIDFromMetadata_Sanitisation pins the wire-parity guard
+// that the gRPC surface applies the same sanitisation to the
+// incoming x-request-id metadata header as the HTTP middleware
+// applies to X-Request-ID. Values that exceed
+// platform.MaxIncomingRequestIDLen (128) or contain non-printable /
+// non-ASCII bytes are rejected (returned as "") so the logging
+// interceptor mints a fresh id rather than echoing attacker-
+// controlled content into structured logs or back to the caller
+// via the response trailer.
+//
+// Without this guard a direct gRPC client could supply a 10 MB
+// x-request-id and the value would land in every log line for the
+// RPC (log-injection / log-storage abuse vector). The HTTP surface
+// already guards against this via platform.SanitizeIncomingRequestID
+// in internal/platform/requestid.go; this test asserts the gRPC
+// surface delegates to the same helper.
+func TestRequestIDFromMetadata_Sanitisation(t *testing.T) {
+	bg := context.Background()
+	cases := []struct {
+		name     string
+		value    string
+		wantKept bool
+	}{
+		{"empty", "", false},
+		{"whitespace only", "   ", false},
+		{"clean ascii", "rid-fixture-12345", true},
+		{"too long", strings.Repeat("a", 129), false},
+		{"max-len boundary kept", strings.Repeat("a", 128), true},
+		{"contains space", "rid with space", false},
+		{"contains tab", "rid\twith\ttab", false},
+		{"contains newline", "rid\nnewline", false},
+		{"contains control char", "rid\x01ctrl", false},
+		{"contains non-ascii", "rid-ünicode", false},
+		{"contains del", "rid\x7fdel", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			md := metadata.Pairs(apigrpc.MetadataRequestID, tc.value)
+			ctx := metadata.NewIncomingContext(bg, md)
+			got := apigrpc.RequestIDFromMetadata(ctx)
+			if tc.wantKept {
+				want := strings.TrimSpace(tc.value)
+				if got != want {
+					t.Errorf("RequestIDFromMetadata(%q) = %q; want %q", tc.value, got, want)
+				}
+			} else {
+				if got != "" {
+					t.Errorf("RequestIDFromMetadata(%q) = %q; want empty (rejected)", tc.value, got)
+				}
+			}
+		})
+	}
+
+	t.Run("no metadata on context", func(t *testing.T) {
+		if got := apigrpc.RequestIDFromMetadata(bg); got != "" {
+			t.Errorf("RequestIDFromMetadata(no md) = %q; want empty", got)
+		}
+	})
+}

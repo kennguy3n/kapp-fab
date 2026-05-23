@@ -19,6 +19,8 @@ import (
 	"strings"
 
 	"google.golang.org/grpc/metadata"
+
+	"github.com/kennguy3n/kapp-fab/internal/platform"
 )
 
 // Standard metadata keys consumed by the interceptor chain. gRPC
@@ -86,8 +88,18 @@ func BearerFromMetadata(ctx context.Context) (string, error) {
 }
 
 // RequestIDFromMetadata returns the x-request-id metadata value if
-// present, or empty string. Empty triggers the logging interceptor
-// to mint a fresh id.
+// present (after applying the same sanitisation the HTTP middleware
+// applies to incoming X-Request-ID headers), or empty string. Empty
+// triggers the logging interceptor to mint a fresh id.
+//
+// Sanitisation is delegated to platform.SanitizeIncomingRequestID so
+// the gRPC and HTTP surfaces enforce identical length + charset
+// rules (MaxIncomingRequestIDLen = 128, ASCII printable only). A
+// direct gRPC client cannot inject an arbitrarily long or
+// specially-crafted value into structured log lines or into the
+// outgoing trailer set by the logging interceptor — values that
+// fail validation are silently replaced with a freshly minted id,
+// matching the HTTP behaviour exactly.
 func RequestIDFromMetadata(ctx context.Context) string {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
@@ -97,7 +109,7 @@ func RequestIDFromMetadata(ctx context.Context) string {
 	if len(values) == 0 {
 		return ""
 	}
-	return strings.TrimSpace(values[0])
+	return platform.SanitizeIncomingRequestID(values[0])
 }
 
 // incomingMetadataKey returns all values for a metadata key on the
