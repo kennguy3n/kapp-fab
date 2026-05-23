@@ -392,13 +392,17 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 	// "every row whose state was committed before walk start, exactly
 	// once", not "every row that ever existed during the walk".
 	//
-	// Snapshot is read from Postgres `now()` rather than Go's wall
-	// clock so the comparison happens entirely in the database's
-	// clock domain. App-server clock skew (NTP jitter, container
-	// pause, etc.) therefore cannot move the ceiling backwards
-	// relative to the `updated_at` timestamps the DB assigns on
-	// commit — a row committed at DB-time T would otherwise be
-	// silently excluded if Go-time briefly trailed T.
+	// Snapshot is read from Postgres via `clock_timestamp()` (see
+	// PGStore.dbNow) rather than Go's wall clock, so the comparison
+	// happens entirely in the database's clock domain. App-server
+	// clock skew (NTP jitter, container pause, VM migration) therefore
+	// cannot move the ceiling backwards relative to the `updated_at`
+	// timestamps the DB assigns on commit — a row committed at
+	// DB-time T would otherwise be silently excluded if Go-time
+	// briefly trailed T. clock_timestamp() (not now()) is used so the
+	// ceiling reflects the wall-clock instant of this call rather
+	// than the start of any outer transaction the caller may be
+	// running inside; see the dbNow docstring for the full rationale.
 	snapshot, err := s.dbNow(ctx)
 	if err != nil {
 		return nil, err
@@ -518,8 +522,9 @@ func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter Li
 	}
 	const chunk = 500
 	// See ListAll for the snapshot rationale and the DB-clock
-	// vs app-clock motivation — same point-in-time consistency
-	// contract applies here.
+	// vs app-clock motivation (including why clock_timestamp() is
+	// the right Postgres function to use, not now()). Same
+	// point-in-time consistency contract applies here.
 	snapshot, err := s.dbNow(ctx)
 	if err != nil {
 		return nil, err
