@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -200,8 +201,29 @@ func (s *PGStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*KRecord, er
 // This is the HTTP-facing list method: Limit is capped at 500 and
 // defaults to 50 to protect the API from unbounded pulls. Server-side
 // batch callers that need to walk every row of a KType should use
-// ListAll instead — see payroll engine + scheduler sweepers.
+// ListAll / ForEach instead — see payroll engine + scheduler sweepers.
+//
+// Pagination strategy: when filter.Cursor is non-empty the query uses
+// keyset pagination (`WHERE (updated_at, id) < (cursor_ts, cursor_id)`)
+// which is stable under concurrent inserts. Otherwise, when filter.Offset
+// is > 0, the legacy `OFFSET` path runs (kept for backward compat).
+// When neither is set the query starts from the newest row.
 func (s *PGStore) List(ctx context.Context, tenantID uuid.UUID, filter ListFilter) ([]KRecord, error) {
+	page, err := s.ListPage(ctx, tenantID, filter)
+	if err != nil {
+		return nil, err
+	}
+	return page.Records, nil
+}
+
+// ListPage is the cursor-aware variant of List: in addition to the
+// page of records it returns the opaque NextCursor token for the
+// next page, or "" when the page is the last one. New callers (the
+// HTTP list handler, the Rust SDK, the agent tools that paginate
+// large KTypes) should use this method directly so the cursor is
+// not lost. The legacy List helper drops the cursor for callers
+// that only need the page slice.
+func (s *PGStore) ListPage(ctx context.Context, tenantID uuid.UUID, filter ListFilter) (*ListPage, error) {
 	if filter.KType == "" {
 		return nil, errors.New("record: ktype filter required")
 	}
@@ -212,21 +234,59 @@ func (s *PGStore) List(ctx context.Context, tenantID uuid.UUID, filter ListFilte
 	if status == "" {
 		status = "active"
 	}
+	cursorTS, cursorID, err := DecodeCursor(filter.Cursor)
+	if err != nil {
+		return nil, err
+	}
 
 	// Preallocate an empty (non-nil) slice so the JSON response is `[]`
 	// rather than `null` when no rows match — consistent with the OpenAPI
 	// list response contract.
-	out := make([]KRecord, 0)
-	err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		rows, err := tx.Query(ctx,
-			`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
-			        created_by, created_at, updated_by, updated_at, deleted_at
-			 FROM krecords
-			 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
-			 ORDER BY updated_at DESC, id DESC
-			 LIMIT $4 OFFSET $5`,
-			tenantID, filter.KType, status, filter.Limit, filter.Offset,
+	out := make([]KRecord, 0, filter.Limit)
+	err = platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var (
+			rows pgx.Rows
+			err  error
 		)
+		switch {
+		case filter.Cursor != "":
+			// Keyset pagination: row comparison handles ties on
+			// updated_at by using the id as the secondary sort key.
+			rows, err = tx.Query(ctx,
+				`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+				        created_by, created_at, updated_by, updated_at, deleted_at
+				 FROM krecords
+				 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+				   AND (updated_at, id) < ($4, $5)
+				 ORDER BY updated_at DESC, id DESC
+				 LIMIT $6`,
+				tenantID, filter.KType, status, cursorTS, cursorID, filter.Limit,
+			)
+		case filter.Offset > 0:
+			// Legacy OFFSET path. New callers should switch to
+			// cursor-based pagination — see the deprecation
+			// notice surfaced by the HTTP list handler.
+			rows, err = tx.Query(ctx,
+				`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+				        created_by, created_at, updated_by, updated_at, deleted_at
+				 FROM krecords
+				 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+				 ORDER BY updated_at DESC, id DESC
+				 LIMIT $4 OFFSET $5`,
+				tenantID, filter.KType, status, filter.Limit, filter.Offset,
+			)
+		default:
+			// First page, no cursor — keyset with no lower bound.
+			rows, err = tx.Query(ctx,
+				`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+				        created_by, created_at, updated_by, updated_at, deleted_at
+				 FROM krecords
+				 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+				 ORDER BY updated_at DESC, id DESC
+				 LIMIT $4`,
+				tenantID, filter.KType, status, filter.Limit,
+			)
+		}
 		if err != nil {
 			return fmt.Errorf("record: list: %w", err)
 		}
@@ -258,21 +318,30 @@ func (s *PGStore) List(ctx context.Context, tenantID uuid.UUID, filter ListFilte
 		}
 		out[i].Data = decrypted
 	}
-	return out, nil
+	page := &ListPage{Records: out}
+	// Only emit a next cursor when we filled the page — otherwise
+	// the caller has reached the end and an empty NextCursor lets
+	// them stop iterating without an extra round trip.
+	if len(out) == filter.Limit {
+		last := out[len(out)-1]
+		page.NextCursor = EncodeCursor(last.UpdatedAt, last.ID)
+	}
+	return page, nil
 }
 
 // ListAll is the server-side batch variant of List: it walks every row
 // matching filter.KType/Status for the tenant, without the 500-row
 // HTTP-facing cap. Callers like the payroll engine that need to process
 // every employee / structure / payslip for a pay_run use this to avoid
-// the silent clamp on List. Rows are paginated internally in 500-row
-// chunks so a single tenant with 50k rows still streams bounded memory
-// per tx.
+// the silent clamp on List. Rows are paginated internally via keyset
+// (the same `(updated_at, id) < cursor` pattern that the public List
+// uses) so concurrent inserts cannot shift a row from one chunk to the
+// next and we never re-scan rows we've already returned.
 //
 // filter.Limit and filter.Offset are ignored — ListAll always returns
-// every match. To page over a subset, pair List with explicit offsets.
-// filter.KType is required and behaves identically to List; filter.Status
-// defaults to "active".
+// every match. To page over a subset, pair List with explicit offsets
+// or use the cursor-aware ListPage. filter.KType is required and behaves
+// identically to List; filter.Status defaults to "active".
 func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFilter) ([]KRecord, error) {
 	if filter.KType == "" {
 		return nil, errors.New("record: ktype filter required")
@@ -283,19 +352,40 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 	}
 	const chunk = 500
 	out := make([]KRecord, 0)
-	offset := 0
+	var (
+		cursorTS  time.Time
+		cursorID  uuid.UUID
+		haveLower bool
+	)
 	for {
 		page := make([]KRecord, 0, chunk)
 		err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			rows, err := tx.Query(ctx,
-				`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
-				        created_by, created_at, updated_by, updated_at, deleted_at
-				 FROM krecords
-				 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
-				 ORDER BY updated_at DESC, id DESC
-				 LIMIT $4 OFFSET $5`,
-				tenantID, filter.KType, status, chunk, offset,
+			var (
+				rows pgx.Rows
+				err  error
 			)
+			if haveLower {
+				rows, err = tx.Query(ctx,
+					`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+					        created_by, created_at, updated_by, updated_at, deleted_at
+					 FROM krecords
+					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+					   AND (updated_at, id) < ($4, $5)
+					 ORDER BY updated_at DESC, id DESC
+					 LIMIT $6`,
+					tenantID, filter.KType, status, cursorTS, cursorID, chunk,
+				)
+			} else {
+				rows, err = tx.Query(ctx,
+					`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+					        created_by, created_at, updated_by, updated_at, deleted_at
+					 FROM krecords
+					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+					 ORDER BY updated_at DESC, id DESC
+					 LIMIT $4`,
+					tenantID, filter.KType, status, chunk,
+				)
+			}
 			if err != nil {
 				return fmt.Errorf("record: list_all: %w", err)
 			}
@@ -328,7 +418,8 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 		if len(page) < chunk {
 			break
 		}
-		offset += chunk
+		last := page[len(page)-1]
+		cursorTS, cursorID, haveLower = last.UpdatedAt, last.ID, true
 	}
 	return out, nil
 }
@@ -347,8 +438,9 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 // public/indexable attribute before passing it in — this method is
 // not exposed to end users directly.
 //
-// Paginated internally in 500-row chunks like ListAll so large
-// tenants still stream in bounded memory.
+// Paginated internally via keyset (the same `(updated_at, id) < cursor`
+// pattern as ListAll) so large tenants still stream in bounded memory
+// and concurrent inserts cannot shift a row from one chunk to the next.
 func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter ListFilter, field, value string) ([]KRecord, error) {
 	if filter.KType == "" {
 		return nil, errors.New("record: ktype filter required")
@@ -362,20 +454,42 @@ func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter Li
 	}
 	const chunk = 500
 	out := make([]KRecord, 0)
-	offset := 0
+	var (
+		cursorTS  time.Time
+		cursorID  uuid.UUID
+		haveLower bool
+	)
 	for {
 		page := make([]KRecord, 0, chunk)
 		err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			rows, err := tx.Query(ctx,
-				`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
-				        created_by, created_at, updated_by, updated_at, deleted_at
-				 FROM krecords
-				 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
-				   AND lower(data->>$4) = lower($5)
-				 ORDER BY updated_at DESC, id DESC
-				 LIMIT $6 OFFSET $7`,
-				tenantID, filter.KType, status, field, value, chunk, offset,
+			var (
+				rows pgx.Rows
+				err  error
 			)
+			if haveLower {
+				rows, err = tx.Query(ctx,
+					`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+					        created_by, created_at, updated_by, updated_at, deleted_at
+					 FROM krecords
+					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+					   AND lower(data->>$4) = lower($5)
+					   AND (updated_at, id) < ($6, $7)
+					 ORDER BY updated_at DESC, id DESC
+					 LIMIT $8`,
+					tenantID, filter.KType, status, field, value, cursorTS, cursorID, chunk,
+				)
+			} else {
+				rows, err = tx.Query(ctx,
+					`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+					        created_by, created_at, updated_by, updated_at, deleted_at
+					 FROM krecords
+					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+					   AND lower(data->>$4) = lower($5)
+					 ORDER BY updated_at DESC, id DESC
+					 LIMIT $6`,
+					tenantID, filter.KType, status, field, value, chunk,
+				)
+			}
 			if err != nil {
 				return fmt.Errorf("record: list_by_field: %w", err)
 			}
@@ -408,7 +522,8 @@ func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter Li
 		if len(page) < chunk {
 			break
 		}
-		offset += chunk
+		last := page[len(page)-1]
+		cursorTS, cursorID, haveLower = last.UpdatedAt, last.ID, true
 	}
 	return out, nil
 }

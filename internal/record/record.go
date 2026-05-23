@@ -4,7 +4,12 @@ package record
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,11 +32,67 @@ type KRecord struct {
 }
 
 // ListFilter narrows a List query by KType and optional status.
+//
+// Cursor (opaque base64 token from a prior page's NextCursor) selects
+// keyset pagination — `WHERE (updated_at, id) < (cursor_ts, cursor_id)`
+// — which is stable under concurrent inserts. When Cursor is empty
+// the store starts from the newest row. Offset is the legacy
+// OFFSET-based path, kept for backward compatibility and is only
+// consulted when Cursor is empty.
 type ListFilter struct {
 	KType  string
 	Status string
 	Limit  int
 	Offset int
+	Cursor string
+}
+
+// ListPage is the envelope returned by ListPage / the HTTP list
+// handler. NextCursor is empty when there are no more pages.
+type ListPage struct {
+	Records    []KRecord `json:"records"`
+	NextCursor string    `json:"next_cursor,omitempty"`
+}
+
+// ErrInvalidCursor is returned when a cursor token cannot be
+// decoded — malformed base64, wrong field count, unparseable
+// timestamp, or unparseable UUID. Callers should treat this as a
+// 400-class error.
+var ErrInvalidCursor = errors.New("record: invalid cursor")
+
+// EncodeCursor packs a (updated_at, id) pair into an opaque
+// base64 token. The wire format is `<unix_nanos>|<uuid>` so future
+// fields can be appended without breaking existing tokens — the
+// decoder ignores trailing segments.
+func EncodeCursor(updatedAt time.Time, id uuid.UUID) string {
+	raw := fmt.Sprintf("%d|%s", updatedAt.UnixNano(), id.String())
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+// DecodeCursor reverses EncodeCursor. Empty tokens map to the zero
+// (time, uuid) pair with a nil error so callers can treat the
+// first-page case uniformly.
+func DecodeCursor(token string) (time.Time, uuid.UUID, error) {
+	if token == "" {
+		return time.Time{}, uuid.Nil, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("%w: %v", ErrInvalidCursor, err)
+	}
+	parts := strings.SplitN(string(raw), "|", 3)
+	if len(parts) < 2 {
+		return time.Time{}, uuid.Nil, fmt.Errorf("%w: missing field", ErrInvalidCursor)
+	}
+	nanos, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("%w: %v", ErrInvalidCursor, err)
+	}
+	id, err := uuid.Parse(parts[1])
+	if err != nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("%w: %v", ErrInvalidCursor, err)
+	}
+	return time.Unix(0, nanos).UTC(), id, nil
 }
 
 // Store captures KRecord CRUD operations. Implementations must set tenant
