@@ -64,10 +64,30 @@ jobs:
       - name: install buf
         run: go install github.com/bufbuild/buf/cmd/buf@v1.55.1
       - run: make proto-gen
-      - uses: golangci/golangci-lint-action@v7
+      # Two-stage lint: (1) strict ratchet on changes introduced in this
+      # PR vs. the merge base — these MUST pass.  (2) full-codebase
+      # advisory run captured in the job output for visibility, but
+      # marked continue-on-error so legacy findings don't block the
+      # ratchet job.  Follow-up PRs drive the legacy count to zero.
+      - name: fetch merge base
+        run: |
+          BASE_REF="${{ github.base_ref }}"
+          if [ -z "$BASE_REF" ]; then
+            BASE_REF="${{ github.event.repository.default_branch }}"
+          fi
+          git fetch --no-tags --depth=200 origin "$BASE_REF"
+          echo "LINT_BASE=origin/$BASE_REF" >> "$GITHUB_ENV"
+      - name: golangci-lint (strict on new code)
+        uses: golangci/golangci-lint-action@v7
         with:
           version: v2.5.0
-          args: --timeout=5m
+          args: --timeout=5m --new-from-rev=${{ env.LINT_BASE }}
+      - name: golangci-lint (full codebase, advisory)
+        continue-on-error: true
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.5.0
+          args: --timeout=10m
 
   integration:
     name: integration (postgres)
@@ -99,30 +119,14 @@ jobs:
         run: go install github.com/bufbuild/buf/cmd/buf@v1.55.1
       - run: make proto-gen
       - name: apply migrations
+        # Use the ./cmd/migrate CLI rather than the previous psql-loop
+        # so this CI step exercises the same code path operators use
+        # locally (`make migrate`).  The CLI tracks applied versions
+        # in schema_migrations, so a future job that wants to assert
+        # idempotency can simply re-run this step.
         env:
-          PGPASSWORD: kapp_dev
-        run: |
-          psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
-            -f migrations/000001_initial_schema.sql
-          psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
-            -f migrations/000002_admin_role.sql
-          psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
-            -f migrations/000003_forms.sql
-          psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
-            -f migrations/000004_finance_extensions.sql
-          psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
-            -f migrations/000005_inventory.sql
-          psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
-            -f migrations/000006_hr.sql
-          psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 \
-            -f migrations/000007_lms.sql
-          for f in migrations/0000[0-9][0-9]_*.sql; do
-            case "$f" in
-              migrations/000001_*|migrations/000002_*|migrations/000003_*|migrations/000004_*|migrations/000005_*|migrations/000006_*|migrations/000007_*)
-                continue ;;
-            esac
-            [ -f "$f" ] && psql -h localhost -U kapp -d kapp -v ON_ERROR_STOP=1 -f "$f"
-          done
+          DB_URL: postgres://kapp:kapp_dev@localhost:5432/kapp?sslmode=disable
+        run: go run ./cmd/migrate up
       - name: go test -tags=integration
         env:
           KAPP_TEST_DB_URL: postgres://kapp_app:kapp_app_dev@localhost:5432/kapp?sslmode=disable

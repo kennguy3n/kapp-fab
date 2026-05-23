@@ -1,4 +1,4 @@
-.PHONY: build run-api run-worker run-kchat-bridge test test-integration compose-up compose-down lint migrate proto-lint proto-gen proto-breaking proto-format
+.PHONY: build run-api run-worker run-kchat-bridge test test-integration compose-up compose-down lint migrate migrate-down migrate-force migrate-version migrate-bootstrap migrate-validate proto-lint proto-gen proto-breaking proto-format
 
 # The superuser connection runs migrations and test setup.
 # The application connection uses the kapp_app role so local runs exercise
@@ -16,11 +16,44 @@ build:
 	go build -o bin/kchat-bridge ./services/kchat-bridge
 	go build -o bin/kapp-backup ./services/kapp-backup
 
+# Migration CLI targets — backed by ./cmd/migrate, which wraps
+# github.com/golang-migrate/migrate/v4 with a custom source driver
+# (internal/dbutil/migratesource) that reads the existing
+# `NNNNNN_name.sql` files as up-only migrations without forcing the
+# .up.sql / .down.sql split.  See cmd/migrate/main.go for full docs.
+#
+# `migrate` is idempotent: re-running it on a fully migrated DB is a
+# no-op.  If the DB was provisioned by the previous psql-loop (no
+# schema_migrations table), the CLI refuses with instructions to run
+# `make migrate-bootstrap` first.
 migrate:
-	@set -e; for f in migrations/*.sql; do \
-		echo "Running $$f..."; \
-		psql "$(DB_URL)" -f "$$f"; \
-	done
+	DB_URL="$(DB_URL)" go run ./cmd/migrate up
+
+# Roll back the last N migrations (default 1).  Each migration must
+# have a .down.sql companion in migrations/ or the CLI refuses up
+# front so the operator does not get a half-rolled-back state.
+migrate-down:
+	DB_URL="$(DB_URL)" go run ./cmd/migrate down $${N:-1}
+
+# Force the schema_migrations row to version V without running the
+# migration.  Use only to recover from a dirty state.
+migrate-force:
+	@if [ -z "$(V)" ]; then echo "usage: make migrate-force V=<version>"; exit 2; fi
+	DB_URL="$(DB_URL)" go run ./cmd/migrate force $(V)
+
+migrate-version:
+	DB_URL="$(DB_URL)" go run ./cmd/migrate version
+
+# Prime schema_migrations on a DB that already has the Kapp schema
+# (e.g. one provisioned by docker-entrypoint-initdb.d or by the
+# previous psql-loop migrate target).
+migrate-bootstrap:
+	DB_URL="$(DB_URL)" go run ./cmd/migrate bootstrap
+
+# Check that the migrations directory has a contiguous, gap-free,
+# duplicate-free sequence starting at 000001.  Does not touch the DB.
+migrate-validate:
+	go run ./cmd/migrate validate
 
 run-api: build
 	DB_URL="$(APP_DB_URL)" ADMIN_DB_URL="$(ADMIN_DB_URL)" ./bin/api
