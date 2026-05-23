@@ -1027,15 +1027,32 @@ func TestInsightsRunSavedFeatureGateBlocksSQLMode(t *testing.T) {
 // the PR #50 review finding that RunRawSQL ran user-supplied SQL
 // inside a read-write transaction, letting an enterprise tenant
 // commit DML (DELETE / UPDATE / INSERT) against any RLS-scoped
-// table reachable from their session. The fix pins the tx to
-// SET TRANSACTION READ ONLY immediately after the statement_timeout
-// guard, so DML bubbles up as a pgx error containing the
-// PostgreSQL "read-only" string before it can mutate any rows.
+// table reachable from their session.
+//
+// Two defenses now stand in DML's way, in order:
+//
+//  1. The AST-based validator (Pillar A3): RunRawSQL parses the
+//     body with libpg_query and rejects any non-SELECT root, any
+//     nested non-SELECT statement (CTE bypass), any system-catalog
+//     reference, and any pg_-prefixed system function. The
+//     validator returns insights.ErrUnsafeSQL (wrapping
+//     insights.ErrValidation) before pgx ever sees the SQL — which
+//     is what this test now exercises.
+//  2. `SET TRANSACTION READ ONLY` inside the per-tenant tx
+//     (defense-in-depth): if a future Postgres release adds a
+//     statement node the validator doesn't yet classify, the
+//     read-only transaction still rejects the DML at the database
+//     layer with a PostgreSQL "read-only" error. That layer can't
+//     be reached from this test once the validator is in place,
+//     but the assertion below verifies the validator's error
+//     envelope and the post-test "saved row unchanged" check
+//     confirms nothing leaked through either layer.
 //
 // Strategy: seed a sentinel saved query, attempt three single-
 // statement mutations via RunRawSQL — UPDATE, DELETE, INSERT —
-// and assert each one returns a read-only error. Re-read the
-// saved row to confirm none of the attempts partially committed.
+// and assert each one returns an ErrUnsafeSQL-wrapped error
+// before any DB round trip. Re-read the saved row to confirm
+// none of the attempts partially committed.
 func TestInsightsRunRawSQLRejectsDML(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
@@ -1055,21 +1072,36 @@ func TestInsightsRunRawSQLRejectsDML(t *testing.T) {
 	for _, c := range cases {
 		_, err := runner.RunRawSQL(ctx, tn.ID, c.sql, nil)
 		if err == nil {
-			t.Fatalf("RunRawSQL %s: nil error; want read-only failure", c.label)
+			t.Fatalf("RunRawSQL %s: nil error; want unsafe-SQL rejection", c.label)
 		}
-		msg := strings.ToLower(err.Error())
-		if !strings.Contains(msg, "read-only") && !strings.Contains(msg, "read only") {
-			t.Fatalf("RunRawSQL %s error = %v; want a read-only message", c.label, err)
+		// The AST validator catches DML before pgx executes
+		// anything, so the error must carry both sentinels:
+		// ErrUnsafeSQL (unsafe-SQL-specific) and ErrValidation
+		// (so the HTTP layer's existing 400 mapping continues
+		// to work).
+		if !errors.Is(err, insights.ErrUnsafeSQL) {
+			t.Fatalf("RunRawSQL %s error = %v; want errors.Is(err, insights.ErrUnsafeSQL)", c.label, err)
+		}
+		if !errors.Is(err, insights.ErrValidation) {
+			t.Fatalf("RunRawSQL %s error = %v; want errors.Is(err, insights.ErrValidation) for HTTP 400 mapping", c.label, err)
+		}
+		if !strings.Contains(err.Error(), "only SELECT is permitted") {
+			t.Fatalf("RunRawSQL %s error = %v; want only-SELECT message", c.label, err)
 		}
 	}
 
 	// Confirm the saved query is unchanged — none of the
-	// attempted DML partially committed.
+	// attempted DML partially committed. With the validator in
+	// place this is trivially true (the validator returns before
+	// pgx is called), but the assertion is retained so that any
+	// future regression — e.g. someone bypassing the validator
+	// or weakening it — surfaces here as a data-leak failure
+	// rather than a silent semantic shift.
 	reloaded, err := queries.Get(ctx, tn.ID, saved.ID)
 	if err != nil {
 		t.Fatalf("reload saved query: %v", err)
 	}
 	if reloaded.Name != originalName {
-		t.Fatalf("saved query name = %q; want %q (DML leaked through read-only fence)", reloaded.Name, originalName)
+		t.Fatalf("saved query name = %q; want %q (DML leaked through validator + read-only fence)", reloaded.Name, originalName)
 	}
 }

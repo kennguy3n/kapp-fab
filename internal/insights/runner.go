@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -355,10 +354,17 @@ func (r *Runner) RunSaved(ctx context.Context, tenantID, queryID uuid.UUID, filt
 // before the HTTP request slot expires. params are bound via
 // pgx.Query so callers cannot string-interpolate untrusted values.
 //
-// The raw SQL surface intentionally rejects multi-statement bodies
-// (semicolon-separated) — pgx.Query already only honours the first
-// statement on the wire, but the explicit guard turns a silently
-// dropped trailing statement into a 400 the user can act on. The
+// The raw SQL surface is gated by validateRawSQL, an AST-based
+// validator (see internal/insights/sqlvalidate.go). It enforces
+// five rules in order: non-empty body, parses via libpg_query,
+// exactly one top-level statement, top statement is SELECT (with
+// no IntoClause), and a tree walk rejecting system catalogs,
+// nested non-SELECT statements (CTE-DML), and system or known-
+// dangerous extension functions (pg_*, dblink_*, lo_import/export,
+// set_config, schema-qualified pg_*). The previous textual
+// `strings.Contains(rawSQL, ";")` heuristic is gone — it was both
+// too strict (rejected `SELECT 'a;b'`) and too loose (would have
+// missed `SELECT 1/**/;DROP TABLE x` under comment-stripping). The
 // row cap mirrors the visual runner (MaxResultRows = 10,000) so a
 // SELECT * without LIMIT can't exhaust memory.
 //
@@ -369,20 +375,27 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 	if tenantID == uuid.Nil {
 		return nil, validationErr("tenant id required")
 	}
-	if rawSQL == "" {
-		return nil, validationErr("raw_sql body required")
-	}
-	// Multi-statement bodies fail closed with a 400. pgx already
-	// only executes the first statement on the wire so trailing
-	// statements in `SELECT 1; DROP TABLE x` would otherwise be
-	// silently dropped — surfacing a validation error gives the
-	// caller a chance to split the body or remove the trailing
-	// `;`. The check is intentionally textual rather than parsed
-	// because we'd otherwise need a real SQL parser to reject
-	// `;` inside a string literal, and that's overkill for the
-	// editor's first cut.
-	if strings.Contains(rawSQL, ";") {
-		return nil, validationErr("multi-statement SQL is not allowed; submit one statement at a time")
+	// validateRawSQL is the AST-level guard: multi-statement
+	// rejection, SELECT-only at the root, no nested DML inside
+	// CTEs/subqueries, no system-catalog or system-function
+	// references. See validateRawSQL's docstring for the full
+	// contract. It also rejects empty/whitespace-only bodies, so
+	// the previous `rawSQL == ""` check here is redundant.
+	//
+	// The previous textual `strings.Contains(rawSQL, ";")` check
+	// was both too strict (rejected harmless `SELECT 'a;b'`) and
+	// too loose (missed `SELECT 1/**/;DROP TABLE x` once any
+	// comment-stripping normalisation was added). The AST gives a
+	// single source of truth for "exactly one statement, and that
+	// statement is read-only".
+	//
+	// `SET TRANSACTION READ ONLY` inside the per-tenant tx below
+	// is retained as defense-in-depth: if a future Postgres
+	// release adds a new statement node we don't yet classify,
+	// the read-only transaction surfaces it as a runtime error
+	// rather than letting it execute.
+	if err := validateRawSQL(rawSQL); err != nil {
+		return nil, err
 	}
 
 	if r.timeout > 0 {
