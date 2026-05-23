@@ -142,22 +142,31 @@ jobs:
       - run: npm run build -w @kapp/web
 
   rust-sdk:
-    name: rust-sdk (fmt + clippy + test)
+    name: rust-sdk (fmt + clippy + test, ${{ matrix.toolchain }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # MSRV-first matrix: we guarantee the crate builds on the
+        # declared `rust-version` so downstream consumers on 1.85
+        # are not broken by accident, AND that it builds on `stable`
+        # so we don't lag behind ecosystem changes (new lints,
+        # deprecations, etc.). Two cheap GitHub-hosted runners is a
+        # better trade-off than a single MSRV-only job that ignores
+        # newer Rust signals (Finding 7 in Devin Review PR #80).
+        toolchain: ["1.85", "stable"]
     defaults:
       run:
         working-directory: packages/sdk-rs
     steps:
       - uses: actions/checkout@v4
-      # Pin to the MSRV declared in packages/sdk-rs/Cargo.toml
-      # (rust-version = "1.81"). The build.rs uses protox (pure
-      # Rust) for proto compilation, so we don't need protoc on
-      # PATH — the rest of the toolchain is a stock stable Rust
-      # install with rustfmt + clippy components.
-      - name: install rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # The build.rs uses protox (pure Rust) for proto compilation,
+      # so we don't need protoc on PATH — the rest of the toolchain
+      # is a stock Rust install with rustfmt + clippy components.
+      - name: install rust toolchain (${{ matrix.toolchain }})
+        uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.81"
+          toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
       - name: cache cargo registry + build
         uses: actions/cache@v4
@@ -166,8 +175,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             packages/sdk-rs/target
-          key: ${{ runner.os }}-cargo-sdk-rs-${{ hashFiles('packages/sdk-rs/Cargo.toml', 'packages/sdk-rs/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-sdk-rs-${{ matrix.toolchain }}-${{ hashFiles('packages/sdk-rs/Cargo.toml', 'packages/sdk-rs/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-sdk-rs-${{ matrix.toolchain }}-
             ${{ runner.os }}-cargo-sdk-rs-
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings

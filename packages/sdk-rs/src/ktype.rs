@@ -3,18 +3,36 @@
 //!
 //! # Client-side schema validation
 //!
-//! The `Register` path validates the supplied JSON Schema document
-//! **client-side** before issuing the RPC. This serves two goals:
+//! The `Register` path validates the supplied schema document
+//! **client-side** before issuing the RPC. The validation is
+//! intentionally stricter than what the server does on Register:
 //!
-//! 1. Fast feedback. A malformed schema fails locally without a
-//!    network round trip; the caller gets a typed
-//!    [`crate::KappError::SchemaInvalid`] with a list of validation
-//!    errors instead of a server-side `InvalidArgument`.
-//! 2. Hard error contract. The server's [`gojsonschema`](https://github.com/xeipuuv/gojsonschema)
-//!    package validates against JSON Schema Draft-07 (the kapp-fab
-//!    KType registry standard). We use the [`jsonschema`] crate's
-//!    Draft-07 validator client-side so both sides agree on the
-//!    same draft semantics.
+//! - Server (`internal/ktype/store.go::PGRegistry::Register`): only
+//!   checks `json.Valid(kt.Schema)` — i.e. that the bytes parse as
+//!   JSON. There is NO JSON Schema metaschema validation on the
+//!   server today. Deeper structural validation lives in
+//!   `internal/ktype/validator.go` and is invoked by callers
+//!   (e.g. the HTTP/gRPC handlers) that opt in, not by the
+//!   registry itself.
+//! - SDK (this module): runs the supplied document through
+//!   [`jsonschema::options().with_draft(Draft::Draft7).build`] so
+//!   structurally-malformed JSON Schema constructs (e.g.
+//!   `{"type": 12345}`) are rejected without a network round trip.
+//!   The caller gets a typed [`crate::KappError::SchemaInvalid`]
+//!   with the list of structural errors.
+//!
+//! Note that the kapp-fab KType registry schemas are NOT pure JSON
+//! Schema documents — they use a kapp-specific shape
+//! (`{name, version, fields[]}` per `internal/ktype/validator.go`).
+//! JSON Schema Draft-07's "ignore unknown keywords" rule means our
+//! Draft-07 validator accepts these as well-formed: we're checking
+//! "is this a structurally sound JSON Schema document?" rather
+//! than "does this conform to the kapp field-spec shape?". The
+//! proto contract describes the schema as "Draft 2020-12 + kapp-fab
+//! extensions" (`proto/kapp/v1/ktype.proto:7`), but Draft-07 is a
+//! strict subset of 2020-12, so the SDK validation is conservative:
+//! a document that passes here will also pass a future 2020-12
+//! validator.
 
 use jsonschema::Draft;
 use prost::bytes::Bytes;
@@ -236,6 +254,18 @@ impl KTypeClient {
         match first {
             Ok(v) => Ok(v),
             Err(status) if status.code() == tonic::Code::Unauthenticated && self.auto_refresh => {
+                // If the store is empty, the 401 came from our own
+                // BearerInterceptor short-circuit (no Authorization
+                // header was sent). A refresh RPC cannot help here —
+                // there is no refresh token to present. Surface the
+                // typed `Auth(NoToken)` immediately instead of
+                // wrapping it in `RefreshFailed(...)`, which obscures
+                // the actual cause (caller forgot to run
+                // `auth().exchange(...)`).
+                if snap.tokens.is_none() {
+                    return Err(KappError::Auth(crate::error::AuthError::NoToken));
+                }
+
                 // Snapshot the version we observed when the call
                 // failed. The refresh singleflight ensures only one
                 // refresh runs even if many concurrent tasks 401.

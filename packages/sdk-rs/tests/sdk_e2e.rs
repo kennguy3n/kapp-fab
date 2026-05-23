@@ -8,7 +8,7 @@ mod common;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use kapp_sdk::{ClientConfig, KappClient, KappError};
+use kapp_sdk::{AuthError, ClientConfig, KappClient, KappError};
 use serde_json::json;
 
 #[tokio::test]
@@ -189,6 +189,31 @@ async fn unauthenticated_call_with_empty_store_short_circuits() {
     // The harness should not have observed the RPC because the
     // bearer interceptor short-circuits when require_token=true
     // and the store is empty.
+    assert_eq!(harness.counters.list.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn auto_refresh_with_empty_store_returns_typed_no_token() {
+    // Auto-refresh ON + empty store should NOT trigger a refresh RPC
+    // (there is nothing to refresh) — it should surface
+    // `Auth(NoToken)` directly so the caller knows to run
+    // `auth().exchange(...)` first.
+    let harness = common::Harness::start().await;
+    let cfg = ClientConfig::builder(harness.endpoint())
+        .auto_refresh(true)
+        .build()
+        .unwrap();
+    let client = KappClient::connect(cfg).await.unwrap();
+
+    let err = client.ktype().list().await.unwrap_err();
+    match &err {
+        KappError::Auth(AuthError::NoToken) => {}
+        other => panic!("expected Auth(NoToken), got {other:?}"),
+    }
+    // No refresh RPC was issued (nothing to refresh).
+    assert_eq!(harness.counters.refresh.load(Ordering::SeqCst), 0);
+    // No list RPC made it to the server either (bearer interceptor
+    // short-circuit on empty store).
     assert_eq!(harness.counters.list.load(Ordering::SeqCst), 0);
 }
 

@@ -64,9 +64,14 @@ async fn run(endpoint: &str, code: &str, redirect_uri: &str) -> Result<(), KappE
 
     println!("→ exchanging SSO code at {endpoint}");
     let result = client.auth().exchange(code, redirect_uri, None).await?;
+    // The proto contract allows `tenants` to be empty (e.g. when the
+    // SSO user has no membership rows). Fall back to "(none)" so the
+    // example never panics; production callers should check
+    // `result.tenants` explicitly and surface the empty case to UX.
+    let tenant_name = result.tenants.first().map_or("(none)", |t| t.name.as_str());
     println!(
         "  signed in as {} ({}) on tenant {} ({})",
-        result.user.display_name, result.user.email, result.tenants[0].name, result.tenant_id
+        result.user.display_name, result.user.email, tenant_name, result.tenant_id
     );
     println!("  access token expires in {}s", result.expires_in);
 

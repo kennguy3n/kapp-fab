@@ -2,7 +2,15 @@
 name = "kapp-sdk"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.81"
+# MSRV pinned to 1.85 (edition2024 stabilization). Our transitive
+# dep graph pulls `idna_adapter >= 1.2`, which declares
+# `edition = "2024"` in its manifest; Cargo only accepts that
+# directive starting at 1.85. We could pin idna_adapter older via
+# `[patch]` but the ecosystem has moved on, and pinning a top-level
+# Url/IDN dep through three indirections is brittle. Bumping the
+# MSRV is cleaner and consistent with the rest of kapp-fab's tooling
+# (Go 1.25, Node 20).
+rust-version = "1.85"
 description = "Official Rust SDK for the kapp-fab gRPC API."
 license = "Apache-2.0"
 repository = "https://github.com/kennguy3n/kapp-fab"

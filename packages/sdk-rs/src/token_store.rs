@@ -52,11 +52,9 @@ impl Tokens {
     /// mid-flight.
     #[must_use]
     pub fn is_expired(&self, skew: Duration) -> bool {
-        // `is_none_or` was stabilised in 1.82; we keep MSRV at 1.81
-        // so use the `map_or(true, ...)` equivalent.
         self.expires_at
             .checked_sub(skew)
-            .map_or(true, |cutoff| SystemTime::now() >= cutoff)
+            .is_none_or(|cutoff| SystemTime::now() >= cutoff)
     }
 
     /// Number of seconds-from-now until expiry. Returns 0 if the
