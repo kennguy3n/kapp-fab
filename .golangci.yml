@@ -6,14 +6,19 @@
 #
 # Verification when changing the pinned version or this enable list:
 #
+#     golangci-lint config verify                            # validates this file against v2 JSON schema
 #     golangci-lint help linters | grep -E '^(contextcheck|errname|...)'
 #     golangci-lint run --timeout=10m ./...
 #
 # We do not rely on the golangci-lint-action to error on an unknown
-# linter name -- some versions silently skip unknown linters, which
-# would erode the enforcement we depend on.  Running `help linters`
-# against the pinned version confirms every name in the enable list
-# below is still a valid linter in that release.
+# linter name or unknown config key -- some versions silently skip
+# them, which would erode the enforcement we depend on.  `config
+# verify` is the authoritative check: it validates every top-level
+# key (linters, run, issues, formatters, ...) and every nested key
+# against the embedded JSON schema for the pinned version, and exits
+# non-zero on any unknown key.  Running `help linters` confirms each
+# name in the enable list below is still a valid linter in that
+# release.
 #
 # Rationale: the v2 default linter set (errcheck, govet, ineffassign,
 # staticcheck, unused) catches the most common issues but is too lax
