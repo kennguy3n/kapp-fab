@@ -28,13 +28,15 @@ import (
 // surfaced to the renderer.
 type fakeKRecordSource struct {
 	rows []record.KRecord
-	// callbackErr is returned from the callback when non-nil so
-	// tests can exercise the error-propagation contract without
-	// needing a real database failure.
+	// callbackErr is returned from ForEach itself after a
+	// successful callback invocation. This simulates a store-level
+	// error landing between chunks in production — e.g. a
+	// chunk-boundary decrypt failure or a tx-recycle hiccup after
+	// at least one row has already been delivered to the caller.
 	callbackErr error
-	// surfaceErr is returned from ForEach itself (not the
-	// callback) so the test can exercise the upstream DB-error
-	// wrapping in ProcessKType.
+	// surfaceErr is returned from ForEach itself before any
+	// callback is invoked, exercising the upstream DB-error wrap
+	// path in ProcessKType (rendered as "stream <ktype>: <err>").
 	surfaceErr error
 }
 
@@ -53,6 +55,13 @@ func (f *fakeKRecordSource) ForEach(_ context.Context, _ uuid.UUID, filter recor
 			continue
 		}
 		if err := fn(r); err != nil {
+			// Mirror the production foreachKeyset sentinel
+			// contract: ErrStopForEach is non-error early
+			// termination and must not propagate to the caller.
+			// Any other error propagates unchanged.
+			if errors.Is(err, record.ErrStopForEach) {
+				return nil
+			}
 			return err
 		}
 		if f.callbackErr != nil {
@@ -270,6 +279,40 @@ func TestProcessKTypePropagatesMidStreamFailures(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "stream invoice") {
 		t.Errorf("expected error to mention 'stream invoice', got %q", err.Error())
+	}
+}
+
+// TestFakeKRecordSourceTrapsStopForEach pins the fake's sentinel
+// contract: ErrStopForEach returned from a callback must be
+// trapped and surfaced as nil, mirroring the production
+// foreachKeyset behaviour in `internal/record/store.go`. The
+// exporter itself never returns this sentinel from its renderer
+// callback today, but the fake is shared infrastructure — any
+// future caller that wires this same fake into a streaming test
+// (e.g. an early-out search) depends on the trap being present.
+func TestFakeKRecordSourceTrapsStopForEach(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	src := &fakeKRecordSource{
+		rows: []record.KRecord{
+			newSampleRow(t, "11111111-1111-1111-1111-111111111111", "first", 100, t0),
+			newSampleRow(t, "22222222-2222-2222-2222-222222222222", "second", 200, t0.Add(time.Minute)),
+		},
+	}
+
+	var seen int
+	err := src.ForEach(context.Background(),
+		uuid.MustParse("00000000-0000-0000-0000-00000000aaaa"),
+		record.ListFilter{KType: "invoice"},
+		func(record.KRecord) error {
+			seen++
+			return record.ErrStopForEach
+		})
+	if err != nil {
+		t.Fatalf("ErrStopForEach should surface as nil, got %v", err)
+	}
+	if seen != 1 {
+		t.Fatalf("expected exactly 1 callback before stop, got %d", seen)
 	}
 }
 
