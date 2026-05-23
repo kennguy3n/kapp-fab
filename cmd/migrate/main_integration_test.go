@@ -43,7 +43,18 @@ const testBaseEnv = "KAPP_TEST_DB_URL"
 
 // runCLI calls main.run() with the given argv and DB_URL.  It captures
 // stderr / stdout to a string so tests can assert on user-facing
-// output.  Side effect: temporarily mutates os.Stdout/os.Stderr.
+// output.
+//
+// Side effect: temporarily mutates os.Stdout/os.Stderr.  This is safe
+// only as long as the tests in this package do NOT call t.Parallel()
+// — global file descriptors are not goroutine-safe for swap-and-
+// restore.  If parallel execution is ever needed, the CLI must be
+// refactored to take an io.Writer (or *log.Logger) parameter so the
+// test can inject a per-test buffer instead.  We rejected that
+// refactor for the initial CLI because every cmdXxx writes to stderr
+// via fmt.Fprintf(os.Stderr, ...) in dozens of places; threading a
+// writer through is a meaningful API change that should land
+// alongside the parallelization need, not before it.
 func runCLI(t *testing.T, dbURL string, argv ...string) (string, error) {
 	t.Helper()
 	t.Setenv("DB_URL", dbURL)
