@@ -306,15 +306,20 @@ func (l *LegacySource) Validate() error {
 	return nil
 }
 
-// Highest returns the highest registered version.  Equivalent to the
-// last element of Versions(); kept as a convenience accessor that
-// avoids a copy of the version slice in hot paths.
+// Highest returns the highest registered version, or 0 if no
+// migrations are registered.  Implemented as a direct O(n) scan of
+// l.files so it does not allocate the sorted slice that Versions()
+// returns.  Although the CLI only calls this once at startup today,
+// keeping the no-allocation path means tests that exercise it in a
+// loop (or future hot-path callers) do not pay the sort cost.
 func (l *LegacySource) Highest() uint {
-	vs := l.Versions()
-	if len(vs) == 0 {
-		return 0
+	var highest uint
+	for v := range l.files {
+		if v > highest {
+			highest = v
+		}
 	}
-	return vs[len(vs)-1]
+	return highest
 }
 
 // String returns a human-readable summary used by the CLI's `version`

@@ -51,7 +51,17 @@ jobs:
     name: golangci-lint
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 gives us full history so --new-from-rev's
+      # merge-base resolution works regardless of how long-lived the
+      # PR branch is.  A previous draft used --depth=200, but a PR
+      # whose base is >200 commits behind origin/main would silently
+      # diff against the tip of main (not the merge base) and
+      # over-report lint issues.  Full history is a single curl-
+      # equivalent of bandwidth for this repo size; the trade is
+      # worth the correctness.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25.x"
@@ -80,15 +90,26 @@ jobs:
       # checkout IS that ref.
       - name: resolve lint base
         run: |
+          # fetch-depth: 0 on the checkout step above means we already
+          # have the full history locally.  For PR events we still
+          # need the base branch tip available as a ref name; fetch
+          # it explicitly so origin/$BASE_REF resolves.  --no-tags
+          # keeps the network payload minimal.
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE_REF="${{ github.base_ref }}"
-            git fetch --no-tags --depth=200 origin "$BASE_REF"
-            echo "LINT_BASE=origin/$BASE_REF" >> "$GITHUB_ENV"
+            git fetch --no-tags origin "$BASE_REF"
+            # Use the merge-base, not the tip of the base branch,
+            # so --new-from-rev diffs against the actual divergence
+            # point.  Otherwise a PR rebased onto an outdated main
+            # would surface pre-existing issues from main's recent
+            # commits as "new".
+            MERGE_BASE="$(git merge-base "HEAD" "origin/$BASE_REF")"
+            echo "LINT_BASE=${MERGE_BASE}" >> "$GITHUB_ENV"
           else
             # push event: lint the just-pushed commit(s) against
-            # their parent.  --deepen=1 is enough to expose HEAD~1
-            # in a shallow checkout.
-            git fetch --no-tags --deepen=1 origin "${{ github.sha }}" || true
+            # their parent.  Full history is already available from
+            # fetch-depth: 0, so HEAD~1 always resolves on any
+            # non-initial commit.
             if git rev-parse --verify --quiet HEAD~1 >/dev/null; then
               echo "LINT_BASE=HEAD~1" >> "$GITHUB_ENV"
             else
@@ -156,6 +177,19 @@ jobs:
           KAPP_TEST_DB_URL: postgres://kapp_app:kapp_app_dev@localhost:5432/kapp?sslmode=disable
           KAPP_TEST_ADMIN_DB_URL: postgres://kapp_admin:kapp_admin_dev@localhost:5432/kapp?sslmode=disable
         run: go test -tags=integration -v ./internal/integrationtest/...
+      # The migrate CLI's integration tests live in cmd/migrate and
+      # need CREATEDB to clone the kapp template into per-test scratch
+      # DBs (see freshDB() in main_integration_test.go).  kapp_app
+      # does NOT have CREATEDB, so we run this step with the
+      # superuser DSN — the same one used by the apply-migrations
+      # step above.  Without this step the migrate CLI's freshDB,
+      # bootstrap, down-refusal, etc. assertions would not run in
+      # CI and regressions would only surface when an operator hit
+      # them locally.
+      - name: go test -tags=integration (migrate CLI)
+        env:
+          KAPP_TEST_DB_URL: postgres://kapp:kapp_dev@localhost:5432/kapp?sslmode=disable
+        run: go test -tags=integration -count=1 -v ./cmd/migrate/...
 
   web:
     name: web build

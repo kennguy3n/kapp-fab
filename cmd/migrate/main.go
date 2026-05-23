@@ -388,7 +388,17 @@ func cmdUp(args []string) error {
 	if err != nil {
 		return fmt.Errorf("up: %w", err)
 	}
-	v, dirty, _ := m.Version()
+	// Best-effort Version() readback for the completion message.
+	// If Up() succeeded the schema_migrations row is committed, so
+	// Version() should always return cleanly; surface any error in
+	// the output rather than silently printing v=000000 dirty=false
+	// (which would look like a forced rollback).  We do not bubble
+	// the error up because the migration itself succeeded.
+	v, dirty, vErr := m.Version()
+	if vErr != nil {
+		fmt.Printf("applied; (could not read schema_migrations afterwards: %v)\n", vErr)
+		return nil
+	}
 	fmt.Printf("applied; current version=%06d dirty=%v\n", v, dirty)
 	return nil
 }
