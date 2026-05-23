@@ -184,10 +184,13 @@ func (e *PayrollEngine) GeneratePayslips(
 	}
 
 	// Pre-load existing payslips for this run so re-generation is
-	// idempotent.
-	existingSlips, err := e.records.ListAll(ctx, tenantID, record.ListFilter{
+	// idempotent. ListByField pushes the pay_run_id predicate into
+	// SQL — without it we would scan every payslip the tenant has
+	// ever produced just to find the small subset belonging to
+	// this run.
+	existingSlips, err := e.records.ListByField(ctx, tenantID, record.ListFilter{
 		KType: KTypePayslip,
-	})
+	}, "pay_run_id", payRunID.String())
 	if err != nil {
 		return nil, fmt.Errorf("hr: list payslips: %w", err)
 	}
@@ -215,12 +218,12 @@ func (e *PayrollEngine) GeneratePayslips(
 		}
 	}
 	period := taxpacks.PayPeriod{Start: periodStart, End: periodEnd}
+	// existingSlips is already narrowed to this pay_run via the
+	// ListByField filter above, so we no longer need the in-memory
+	// pay_run_id check that the old ListAll path required.
 	for _, s := range existingSlips {
 		var sd payslipData
 		if err := json.Unmarshal(s.Data, &sd); err != nil {
-			continue
-		}
-		if sd.PayRunID != payRunID.String() {
 			continue
 		}
 		coveredEmps[sd.EmployeeID] = true
@@ -423,27 +426,32 @@ func (e *PayrollEngine) PostPayRun(
 		return nil, fmt.Errorf("%w: already paid", ErrPayRunWrongStatus)
 	}
 
-	// ListAll (not List) — HTTP-facing List caps at 500 rows and
-	// silently defaults to 50. PostPayRun must see every approved
-	// slip for the batch journal entry.
-	slips, err := e.records.ListAll(ctx, tenantID, record.ListFilter{
+	// ListByField (not ListAll): push the pay_run_id filter down
+	// into SQL so we only scan slips for THIS pay_run, not every
+	// payslip the tenant has ever produced. On a fresh tenant the
+	// difference is small; on a multi-year payroll history it
+	// reduces the materialised set from O(all payslips) to
+	// O(slips for this run), bounded by employees-per-run.
+	// HTTP-facing List would silently cap at 500 rows; ListByField
+	// has the same ListAllMaxRows safety cap as ListAll, which is
+	// vastly larger than any realistic single pay_run population.
+	slips, err := e.records.ListByField(ctx, tenantID, record.ListFilter{
 		KType: KTypePayslip,
-	})
+	}, "pay_run_id", payRunID.String())
 	if err != nil {
 		return nil, fmt.Errorf("hr: list payslips: %w", err)
 	}
 	// On a fresh run only "approved" slips are in scope. On the
 	// retry path (JE already exists) previously-flipped "paid"
 	// slips also roll up into the totals — otherwise a partial
-	// success would under-report gross/net after retry.
+	// success would under-report gross/net after retry. The
+	// pay_run_id filter already happened in SQL above; here we
+	// only narrow by status.
 	var approved []record.KRecord
 	var gross, deductions, net decimal.Decimal
 	for _, s := range slips {
 		var sd payslipData
 		if err := json.Unmarshal(s.Data, &sd); err != nil {
-			continue
-		}
-		if sd.PayRunID != payRunID.String() {
 			continue
 		}
 		if sd.Status != "approved" && (existingJE == nil || sd.Status != "paid") {
@@ -566,14 +574,15 @@ func (e *PayrollEngine) PostPayRun(
 // ListPayslipsForRun returns every payslip KRecord whose data
 // pay_run_id matches the given run. Unlike the generic records
 // list route — which the HTTP layer caps at 500 rows and defaults
-// to 50 — this walks every row via PGStore.ListAll and filters
-// in-memory, so the frontend's "View slips" panel never silently
-// drops results on tenants with more than 50 payslips across all
-// pay_runs.
+// to 50 — this pushes the pay_run_id filter into SQL via
+// PGStore.ListByField, so the frontend's "View slips" panel never
+// silently drops results on tenants with more than 50 payslips
+// across all pay_runs.
 //
-// Returns slips in the same relative order as ListAll (most
-// recently updated first) so the UI gets a stable-enough ordering
-// without the store having to sort by pay_period.
+// Returns slips in the same relative order as ListAll /
+// ListByField (most recently updated first) so the UI gets a
+// stable-enough ordering without the store having to sort by
+// pay_period.
 func (e *PayrollEngine) ListPayslipsForRun(
 	ctx context.Context, tenantID, payRunID uuid.UUID,
 ) ([]record.KRecord, error) {
@@ -583,25 +592,13 @@ func (e *PayrollEngine) ListPayslipsForRun(
 	if tenantID == uuid.Nil || payRunID == uuid.Nil {
 		return nil, errors.New("hr: tenant_id and pay_run_id required")
 	}
-	all, err := e.records.ListAll(ctx, tenantID, record.ListFilter{
+	slips, err := e.records.ListByField(ctx, tenantID, record.ListFilter{
 		KType: KTypePayslip,
-	})
+	}, "pay_run_id", payRunID.String())
 	if err != nil {
 		return nil, fmt.Errorf("hr: list payslips: %w", err)
 	}
-	runIDStr := payRunID.String()
-	out := make([]record.KRecord, 0, len(all))
-	for i := range all {
-		var sd payslipData
-		if err := json.Unmarshal(all[i].Data, &sd); err != nil {
-			continue
-		}
-		if sd.PayRunID != runIDStr {
-			continue
-		}
-		out = append(out, all[i])
-	}
-	return out, nil
+	return slips, nil
 }
 
 // rollStructure expands a salary_structure's components into

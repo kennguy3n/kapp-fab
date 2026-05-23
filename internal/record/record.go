@@ -82,6 +82,29 @@ var ListAllMaxRows = 100_000
 // data sets should switch to the streaming PGStore.ForEach iterator.
 var ErrListAllExceedsCap = errors.New("record: ListAll exceeded max rows")
 
+// ErrStopForEach is the sentinel error a ForEach callback can
+// return to terminate the walk early without surfacing an error to
+// the outer caller. PGStore.ForEach (and PGStore.ForEachByField)
+// trap this sentinel and return nil. Any other non-nil error from
+// the callback propagates up unchanged. Modelled after the
+// filepath.SkipAll / filepath.SkipDir pattern: callers wanting
+// early termination on a non-error condition (e.g. "found the
+// match I needed, stop walking") use this sentinel; callers
+// surfacing a genuine error return their own error type.
+var ErrStopForEach = errors.New("record: stop ForEach walk")
+
+// ForEachFunc is the per-record callback invoked by PGStore.ForEach
+// and PGStore.ForEachByField. Implementations may keep a reference
+// to the KRecord for the duration of the callback; the slice
+// backing the KRecord's Data is owned by the store and may be
+// reused after the callback returns, so any data that must outlive
+// the callback should be copied out.
+//
+// Return ErrStopForEach to terminate the walk without surfacing an
+// error to the caller; return any other non-nil error to abort the
+// walk and propagate the error up.
+type ForEachFunc func(KRecord) error
+
 // EncodeCursor packs a (updated_at, id) pair into an opaque
 // base64 token. The wire format is `<unix_nanos>|<uuid>` so future
 // fields can be appended without breaking existing tokens — the

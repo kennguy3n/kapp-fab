@@ -587,6 +587,245 @@ func TestListAllExceedsCap(t *testing.T) {
 	}
 }
 
+// TestForEachWalksEveryRecordExactlyOnce verifies the base
+// contract: ForEach visits every record matching filter exactly
+// once, in (updated_at DESC, id DESC) order, with no duplicates and
+// no gaps. We use 1500 rows so the walk crosses three internal
+// chunks (chunk=500) and exercises the keyset advancement path.
+func TestForEachWalksEveryRecordExactlyOnce(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tn := newPaginationTenant(t, h)
+	kname := newPaginationKType(t, h)
+	actor := uuid.New()
+
+	const total = 1500
+	want := make(map[uuid.UUID]bool, total)
+	for i := 0; i < total; i++ {
+		rec := createPaginationRecord(t, h, tn.ID, kname, actor, i)
+		want[rec.ID] = true
+	}
+
+	seen := make(map[uuid.UUID]bool, total)
+	var (
+		prevUpdated time.Time
+		prevID      uuid.UUID
+		havePrev    bool
+		visits      int
+	)
+	if err := h.records.ForEach(ctx, tn.ID, record.ListFilter{KType: kname}, func(r record.KRecord) error {
+		visits++
+		if seen[r.ID] {
+			t.Fatalf("duplicate visit to %s", r.ID)
+		}
+		seen[r.ID] = true
+		if !want[r.ID] {
+			t.Fatalf("phantom row %s not in original insert set", r.ID)
+		}
+		if havePrev {
+			if r.UpdatedAt.After(prevUpdated) {
+				t.Fatalf("ForEach out of order: %s updated_at=%s came after %s updated_at=%s",
+					r.ID, r.UpdatedAt, prevID, prevUpdated)
+			}
+			if r.UpdatedAt.Equal(prevUpdated) && uuidGreaterOrEqual(r.ID, prevID) {
+				t.Fatalf("ForEach out of order on tie-break: %s came after %s at %s",
+					r.ID, prevID, r.UpdatedAt)
+			}
+		}
+		prevUpdated, prevID, havePrev = r.UpdatedAt, r.ID, true
+		return nil
+	}); err != nil {
+		t.Fatalf("ForEach: %v", err)
+	}
+	if visits != total {
+		t.Fatalf("ForEach visited %d rows, want %d", visits, total)
+	}
+	if len(seen) != total {
+		t.Fatalf("ForEach unique IDs %d, want %d", len(seen), total)
+	}
+}
+
+// TestForEachStopsEarlyOnSentinel verifies that returning
+// ErrStopForEach from the callback terminates the walk without
+// surfacing an error and without visiting subsequent rows.
+func TestForEachStopsEarlyOnSentinel(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tn := newPaginationTenant(t, h)
+	kname := newPaginationKType(t, h)
+	actor := uuid.New()
+
+	const total = 600
+	for i := 0; i < total; i++ {
+		createPaginationRecord(t, h, tn.ID, kname, actor, i)
+	}
+
+	const stopAfter = 7
+	visits := 0
+	err := h.records.ForEach(ctx, tn.ID, record.ListFilter{KType: kname}, func(r record.KRecord) error {
+		visits++
+		if visits == stopAfter {
+			return record.ErrStopForEach
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ForEach with ErrStopForEach should return nil, got: %v", err)
+	}
+	if visits != stopAfter {
+		t.Fatalf("ForEach visited %d rows, expected exactly %d before stop sentinel", visits, stopAfter)
+	}
+}
+
+// TestForEachPropagatesCallbackError verifies that any non-sentinel
+// error returned by the callback aborts the walk and propagates
+// upstream unchanged. This is the contract callers rely on for
+// "fail loud on real errors".
+func TestForEachPropagatesCallbackError(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tn := newPaginationTenant(t, h)
+	kname := newPaginationKType(t, h)
+	actor := uuid.New()
+
+	for i := 0; i < 20; i++ {
+		createPaginationRecord(t, h, tn.ID, kname, actor, i)
+	}
+
+	sentinel := errors.New("boom: per-row failure")
+	visits := 0
+	err := h.records.ForEach(ctx, tn.ID, record.ListFilter{KType: kname}, func(r record.KRecord) error {
+		visits++
+		if visits == 3 {
+			return sentinel
+		}
+		return nil
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("ForEach error: want %v, got %v", sentinel, err)
+	}
+	if visits != 3 {
+		t.Fatalf("ForEach kept visiting after error: visits=%d", visits)
+	}
+}
+
+// TestForEachBypassesListAllMaxRows verifies that ForEach is NOT
+// subject to the ListAllMaxRows safety cap that constrains ListAll
+// and ListByField. This is the primary motivation for the streaming
+// primitive: callers walking arbitrarily large KTypes (recurring
+// engine, summarize_pipeline) must be able to process every row
+// regardless of row count.
+//
+// We temporarily lower the cap so the test can hit it with a small
+// dataset, then verify ListAll fails with ErrListAllExceedsCap on
+// the same dataset where ForEach completes the full walk.
+func TestForEachBypassesListAllMaxRows(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tn := newPaginationTenant(t, h)
+	kname := newPaginationKType(t, h)
+	actor := uuid.New()
+
+	const total = 200
+	for i := 0; i < total; i++ {
+		createPaginationRecord(t, h, tn.ID, kname, actor, i)
+	}
+
+	origCap := record.ListAllMaxRows
+	record.ListAllMaxRows = 50
+	t.Cleanup(func() { record.ListAllMaxRows = origCap })
+
+	// ListAll under the lowered cap must refuse the dataset.
+	if _, err := h.records.ListAll(ctx, tn.ID, record.ListFilter{KType: kname}); !errors.Is(err, record.ErrListAllExceedsCap) {
+		t.Fatalf("ListAll under cap should return ErrListAllExceedsCap, got: %v", err)
+	}
+
+	// ForEach on the same dataset must walk every row.
+	visits := 0
+	if err := h.records.ForEach(ctx, tn.ID, record.ListFilter{KType: kname}, func(r record.KRecord) error {
+		visits++
+		return nil
+	}); err != nil {
+		t.Fatalf("ForEach under cap: %v", err)
+	}
+	if visits != total {
+		t.Fatalf("ForEach visited %d rows under cap, want %d", visits, total)
+	}
+}
+
+// TestForEachByFieldPushesFilterIntoSQL verifies that
+// ForEachByField only invokes the callback for rows whose JSONB
+// field matches the supplied value — i.e. the filter is pushed
+// into SQL rather than applied client-side. This is the property
+// that lets PayrollEngine.ListPayslipsForRun and PostPayRun avoid
+// scanning every payslip the tenant has ever produced.
+func TestForEachByFieldPushesFilterIntoSQL(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tn := newPaginationTenant(t, h)
+	kname := newPaginationKType(t, h)
+	actor := uuid.New()
+
+	// Insert 150 rows with field "tag" set to one of three values.
+	// ForEachByField on "tag=alpha" must visit exactly the 50 rows
+	// stamped alpha, and not the other 100.
+	type seedRow struct {
+		ID  uuid.UUID
+		Tag string
+	}
+	var alphaRows []seedRow
+	for i := 0; i < 150; i++ {
+		var tag string
+		switch i % 3 {
+		case 0:
+			tag = "alpha"
+		case 1:
+			tag = "beta"
+		case 2:
+			tag = "gamma"
+		}
+		rec, err := h.records.Create(ctx, record.KRecord{
+			TenantID:  tn.ID,
+			KType:     kname,
+			Data:      json.RawMessage(fmt.Sprintf(`{"seq":%d,"tag":%q}`, i, tag)),
+			CreatedBy: actor,
+		})
+		if err != nil {
+			t.Fatalf("create row %d: %v", i, err)
+		}
+		if tag == "alpha" {
+			alphaRows = append(alphaRows, seedRow{ID: rec.ID, Tag: tag})
+		}
+	}
+
+	want := make(map[uuid.UUID]bool, len(alphaRows))
+	for _, r := range alphaRows {
+		want[r.ID] = true
+	}
+
+	visited := make(map[uuid.UUID]bool, len(alphaRows))
+	if err := h.records.ForEachByField(ctx, tn.ID, record.ListFilter{KType: kname}, "tag", "alpha", func(r record.KRecord) error {
+		if !want[r.ID] {
+			t.Fatalf("ForEachByField visited non-alpha row %s — SQL filter not pushed down?", r.ID)
+		}
+		if visited[r.ID] {
+			t.Fatalf("ForEachByField visited %s twice", r.ID)
+		}
+		visited[r.ID] = true
+		return nil
+	}); err != nil {
+		t.Fatalf("ForEachByField: %v", err)
+	}
+	if len(visited) != len(alphaRows) {
+		t.Fatalf("ForEachByField visited %d alpha rows, want %d", len(visited), len(alphaRows))
+	}
+}
+
 // uuidGreaterOrEqual returns true if a >= b in lexicographic byte order.
 func uuidGreaterOrEqual(a, b uuid.UUID) bool {
 	for i := 0; i < 16; i++ {
