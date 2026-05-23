@@ -1,0 +1,8 @@
+# Rust build artifacts. Cargo.lock is intentionally tracked: this
+# crate is published from the monorepo, and tracking the lockfile
+# guarantees CI reproducibility between branch builds and the
+# eventual `cargo publish` step. The Rust guidelines that "libraries
+# should not commit Cargo.lock" assume the crate is the root of its
+# own repo with no CI; for a monorepo SDK we want the same lockfile
+# every developer sees locally and CI sees in `rust-sdk`.
+/target/

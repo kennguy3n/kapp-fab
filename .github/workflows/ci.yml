@@ -140,3 +140,38 @@ jobs:
           cache: "npm"
       - run: npm ci
       - run: npm run build -w @kapp/web
+
+  rust-sdk:
+    name: rust-sdk (fmt + clippy + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/sdk-rs
+    steps:
+      - uses: actions/checkout@v4
+      # Pin to the MSRV declared in packages/sdk-rs/Cargo.toml
+      # (rust-version = "1.81"). The build.rs uses protox (pure
+      # Rust) for proto compilation, so we don't need protoc on
+      # PATH — the rest of the toolchain is a stock stable Rust
+      # install with rustfmt + clippy components.
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.81"
+          components: rustfmt, clippy
+      - name: cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/sdk-rs/target
+          key: ${{ runner.os }}-cargo-sdk-rs-${{ hashFiles('packages/sdk-rs/Cargo.toml', 'packages/sdk-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-sdk-rs-
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-features
+      # Build the examples so we catch any drift between the
+      # public API and the documented usage in examples/.
+      - run: cargo build --examples
