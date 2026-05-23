@@ -1,0 +1,291 @@
+// finance.proto wires the Phase C finance surface: chart of
+// accounts, journal entries, invoice/bill/credit/debit posters,
+// payments, tax codes, fiscal-period lockout, and the four
+// canonical reports (trial balance, AR/AP aging, income
+// statement).
+//
+// Money amounts are encoded as `string` carrying the decimal
+// representation. The REST surface uses shopspring/decimal
+// which JSON-encodes as a string by default; the gRPC layer
+// follows the same convention so the wire format stays
+// byte-identical via grpc-gateway. Native int64 / google.type.
+// Money would lose precision for FX rates and per-tax-line
+// rounding so we keep the canonical decimal string.
+syntax = "proto3";
+
+package kapp.v1;
+
+message Account {
+  string tenant_id = 1;
+  string code = 2;
+  string name = 3;
+  // type is one of "asset" / "liability" / "equity" / "revenue"
+  // / "expense" — see internal/ledger/types.go for the canonical
+  // set.
+  string type = 4;
+  string parent_code = 5;
+  bool active = 6;
+}
+
+message JournalLine {
+  int64 id = 1;
+  string tenant_id = 2;
+  string entry_id = 3;
+  string account_code = 4;
+  // debit and credit are decimal strings. Exactly one is > 0
+  // on every valid line; the SQL CHECK enforces this.
+  string debit = 5;
+  string credit = 6;
+  string currency = 7;
+  string memo = 8;
+  // base_amount is the line's net (debit − credit) converted
+  // into the tenant's base currency at the posting-date rate.
+  // Empty means "not yet computed" (legacy rows). Decimal
+  // string when present.
+  string base_amount = 9;
+  bool has_base_amount = 10;
+}
+
+message JournalEntry {
+  string id = 1;
+  string tenant_id = 2;
+  string posted_at = 3;
+  string memo = 4;
+  string source_ktype = 5;
+  string source_id = 6;
+  string created_by = 7;
+  string created_at = 8;
+  repeated JournalLine lines = 9;
+}
+
+message FiscalPeriod {
+  string tenant_id = 1;
+  // period_start / period_end are YYYY-MM-DD strings (the REST
+  // surface accepts them as such for the lock endpoint).
+  string period_start = 2;
+  string period_end = 3;
+  bool locked = 4;
+  string locked_at = 5;
+  string locked_by = 6;
+}
+
+message TaxCode {
+  string tenant_id = 1;
+  string code = 2;
+  string name = 3;
+  // rate is a decimal string (percent as decimal — 0.07 == 7%).
+  string rate = 4;
+  // type is "inclusive" or "exclusive" — internal/ledger.TaxType*.
+  string type = 5;
+  bool active = 6;
+}
+
+message CreateAccountRequest {
+  string code = 1;
+  string name = 2;
+  string type = 3;
+  string parent_code = 4;
+  bool active = 5;
+  bool has_active = 6;
+}
+message CreateAccountResponse {
+  Account account = 1;
+}
+
+message ListAccountsRequest {
+  string type = 1;
+  bool active = 2;
+  bool has_active = 3;
+  int32 limit = 4;
+  int32 offset = 5;
+}
+message ListAccountsResponse {
+  repeated Account accounts = 1;
+}
+
+message GetAccountRequest {
+  string code = 1;
+}
+message GetAccountResponse {
+  Account account = 1;
+}
+
+message NewJournalLine {
+  string account_code = 1;
+  string debit = 2;
+  string credit = 3;
+  string currency = 4;
+  string memo = 5;
+}
+
+message PostJournalEntryRequest {
+  string posted_at = 1;
+  string memo = 2;
+  string source_ktype = 3;
+  string source_id = 4;
+  repeated NewJournalLine lines = 5;
+}
+message PostJournalEntryResponse {
+  JournalEntry entry = 1;
+}
+
+message ListJournalEntriesRequest {
+  string source_ktype = 1;
+  string source_id = 2;
+  string account_code = 3;
+  // from / to are RFC3339 strings on the REST side. Empty
+  // disables the bound.
+  string from = 4;
+  string to = 5;
+  int32 limit = 6;
+  int32 offset = 7;
+}
+message ListJournalEntriesResponse {
+  repeated JournalEntry entries = 1;
+}
+
+message GetJournalEntryRequest {
+  string id = 1;
+}
+message GetJournalEntryResponse {
+  JournalEntry entry = 1;
+}
+
+// The posters all take a target record id (invoice / bill /
+// credit-note / debit-note / payment) and return the resulting
+// JournalEntry. They are separate RPCs so each can carry its
+// own request shape if we evolve them independently (e.g. add
+// memo overrides, FX hints).
+message PostSalesInvoiceRequest {
+  string id = 1;
+}
+message PostSalesInvoiceResponse {
+  JournalEntry entry = 1;
+}
+
+message PostPurchaseBillRequest {
+  string id = 1;
+}
+message PostPurchaseBillResponse {
+  JournalEntry entry = 1;
+}
+
+message PostCreditNoteRequest {
+  string id = 1;
+}
+message PostCreditNoteResponse {
+  JournalEntry entry = 1;
+}
+
+message PostDebitNoteRequest {
+  string id = 1;
+}
+message PostDebitNoteResponse {
+  JournalEntry entry = 1;
+}
+
+message PostPaymentRequest {
+  string id = 1;
+}
+message PostPaymentResponse {
+  JournalEntry entry = 1;
+}
+
+message UpsertTaxCodeRequest {
+  string code = 1;
+  string name = 2;
+  string rate = 3;
+  string type = 4;
+  bool active = 5;
+  bool has_active = 6;
+}
+message UpsertTaxCodeResponse {
+  TaxCode tax_code = 1;
+}
+
+message ListTaxCodesRequest {}
+message ListTaxCodesResponse {
+  repeated TaxCode tax_codes = 1;
+}
+
+message GetTaxCodeRequest {
+  string code = 1;
+}
+message GetTaxCodeResponse {
+  TaxCode tax_code = 1;
+}
+
+message LockPeriodRequest {
+  // period_start and period_end are YYYY-MM-DD strings.
+  // period_end is optional; when empty the existing period
+  // row (if any) is locked in place.
+  string period_start = 1;
+  string period_end = 2;
+}
+message LockPeriodResponse {
+  FiscalPeriod period = 1;
+}
+
+// Reports return the same JSON the REST endpoints return today,
+// but as a typed bytes payload. The shape varies per report
+// (TrialBalance returns repeated AccountBalance rows;
+// AR/APAging returns aging-bucket rows; IncomeStatement
+// returns a nested revenue/expense tree). We keep them opaque
+// to avoid coupling the wire format to every internal report
+// struct — the SDK ships typed accessors that decode each
+// report's known shape.
+message TrialBalanceRequest {
+  string as_of = 1;
+}
+message TrialBalanceResponse {
+  bytes report = 1;
+}
+
+message ARAgingRequest {
+  string as_of = 1;
+}
+message ARAgingResponse {
+  bytes report = 1;
+}
+
+message APAgingRequest {
+  string as_of = 1;
+}
+message APAgingResponse {
+  bytes report = 1;
+}
+
+message IncomeStatementRequest {
+  string from = 1;
+  string to = 2;
+}
+message IncomeStatementResponse {
+  bytes report = 1;
+}
+
+service FinanceService {
+  rpc CreateAccount(CreateAccountRequest) returns (CreateAccountResponse);
+  rpc ListAccounts(ListAccountsRequest) returns (ListAccountsResponse);
+  rpc GetAccount(GetAccountRequest) returns (GetAccountResponse);
+
+  rpc PostJournalEntry(PostJournalEntryRequest) returns (PostJournalEntryResponse);
+  rpc ListJournalEntries(ListJournalEntriesRequest) returns (ListJournalEntriesResponse);
+  rpc GetJournalEntry(GetJournalEntryRequest) returns (GetJournalEntryResponse);
+
+  rpc PostSalesInvoice(PostSalesInvoiceRequest) returns (PostSalesInvoiceResponse);
+  rpc PostPurchaseBill(PostPurchaseBillRequest) returns (PostPurchaseBillResponse);
+  rpc PostCreditNote(PostCreditNoteRequest) returns (PostCreditNoteResponse);
+  rpc PostDebitNote(PostDebitNoteRequest) returns (PostDebitNoteResponse);
+  rpc PostPayment(PostPaymentRequest) returns (PostPaymentResponse);
+
+  rpc UpsertTaxCode(UpsertTaxCodeRequest) returns (UpsertTaxCodeResponse);
+  rpc ListTaxCodes(ListTaxCodesRequest) returns (ListTaxCodesResponse);
+  rpc GetTaxCode(GetTaxCodeRequest) returns (GetTaxCodeResponse);
+
+  rpc LockPeriod(LockPeriodRequest) returns (LockPeriodResponse);
+
+  rpc TrialBalance(TrialBalanceRequest) returns (TrialBalanceResponse);
+  rpc ARAging(ARAgingRequest) returns (ARAgingResponse);
+  rpc APAging(APAgingRequest) returns (APAgingResponse);
+  rpc IncomeStatement(IncomeStatementRequest) returns (IncomeStatementResponse);
+}

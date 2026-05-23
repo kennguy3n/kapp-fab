@@ -1,0 +1,53 @@
+// notification.proto wires the in-app notification surface
+// (bell / inbox). Webhook delivery lives in webhook.proto;
+// this module covers the per-user notification queue only.
+syntax = "proto3";
+
+package kapp.v1;
+
+message Notification {
+  string id = 1;
+  string tenant_id = 2;
+  // user_id is the target user. Empty means tenant-wide
+  // notice visible to every member.
+  string user_id = 3;
+  // kind is a short type code ("approval_requested",
+  // "record_assigned", "report_failed", etc.).
+  string kind = 4;
+  string title = 5;
+  string body = 6;
+  // payload is the structured body (action targets, deep
+  // links, etc.) JSON-encoded. Schema varies per kind.
+  bytes payload = 7;
+  bool read = 8;
+  string created_at = 9;
+  string read_at = 10;
+}
+
+message ListNotificationsRequest {
+  // unread_only filters to unread rows. When false, both
+  // read and unread are returned.
+  bool unread_only = 1;
+  int32 limit = 2;
+}
+message ListNotificationsResponse {
+  repeated Notification notifications = 1;
+}
+
+message MarkNotificationReadRequest {
+  string id = 1;
+}
+message MarkNotificationReadResponse {
+  bool ok = 1;
+}
+
+message MarkAllNotificationsReadRequest {}
+message MarkAllNotificationsReadResponse {
+  int32 updated = 1;
+}
+
+service NotificationService {
+  rpc ListNotifications(ListNotificationsRequest) returns (ListNotificationsResponse);
+  rpc MarkNotificationRead(MarkNotificationReadRequest) returns (MarkNotificationReadResponse);
+  rpc MarkAllNotificationsRead(MarkAllNotificationsReadRequest) returns (MarkAllNotificationsReadResponse);
+}

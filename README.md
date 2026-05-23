@@ -149,22 +149,28 @@ kapp/
    make compose-up
    ```
 
-2. Run all migrations:
+2. Generate the protobuf Go bindings (one-time after a fresh clone — the `gen/` tree is gitignored and reproduced from `proto/`):
+   ```
+   make proto-gen
+   ```
+   This installs the `protoc-gen-go` and `protoc-gen-go-grpc` plugins on first run, then drives `buf generate`. Re-run it whenever a `.proto` file changes.
+
+3. Run all migrations:
    ```
    make migrate
    ```
 
-3. Start the API server:
+4. Start the API server:
    ```
    make run-api
    ```
 
-4. Start the async worker:
+5. Start the async worker:
    ```
    make run-worker
    ```
 
-5. Start the KChat bridge:
+6. Start the KChat bridge:
    ```
    make run-kchat-bridge
    ```

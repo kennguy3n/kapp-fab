@@ -1,0 +1,95 @@
+// auth.proto wires the unauthenticated SSO + refresh surface.
+// Both RPCs are tenant-less by design — SSO trades a KChat code
+// for an access+refresh pair scoped to the tenant the user picks
+// (or the default tenant for the account); Refresh swaps a still-
+// valid refresh token for a fresh access token.
+//
+// SSO and Refresh both return the same shape (auth.ExchangeResult
+// in services/api), which is why both RPC responses share the
+// ExchangeResult message rather than each carrying a duplicate
+// flat-field response. This keeps the proto byte-for-byte aligned
+// with the existing REST surface — `expires_in` (seconds-from-now,
+// int64) NOT `expires_at` (RFC3339 string), nested `user` /
+// `tenants` / `session_id` NOT flat actor_email/actor_name/role.
+syntax = "proto3";
+
+package kapp.v1;
+
+message SSORequest {
+  // code is the one-time exchange token issued by the KChat
+  // OAuth provider. Single-use; consumed inside Exchange().
+  string code = 1;
+  // redirect_uri must match the redirect_uri registered with
+  // the KChat OAuth client. Mismatch -> 401 Unauthorized.
+  string redirect_uri = 2;
+  // preferred_tenant lets the client pin a specific tenant
+  // when the user has access to multiple. Empty means "use
+  // the account's default tenant".
+  string preferred_tenant = 3;
+}
+
+// ResolvedUser mirrors auth.ResolvedUser — the user-row projection
+// the SSO path produces after first login.
+message ResolvedUser {
+  string id = 1;
+  string kchat_user_id = 2;
+  string email = 3;
+  string display_name = 4;
+  bool is_platform_admin = 5;
+}
+
+// TenantRef mirrors auth.TenantRef — the membership summary
+// returned for the user's accessible tenants.
+message TenantRef {
+  string id = 1;
+  string slug = 2;
+  string name = 3;
+  // role is the user's role inside this tenant
+  // ("owner" / "admin" / "member" / etc.).
+  string role = 4;
+}
+
+// ExchangeResult mirrors auth.ExchangeResult — the shared payload
+// both SSO and Refresh return. expires_in is the access token's
+// TTL in SECONDS-FROM-NOW (int64), matching the REST surface; SDK
+// clients add it to the current wall-clock to compute the absolute
+// refresh deadline locally.
+message ExchangeResult {
+  string access_token = 1;
+  string refresh_token = 2;
+  ResolvedUser user = 3;
+  repeated TenantRef tenants = 4;
+  // tenant_id is the tenant the access token is scoped to (one of
+  // the entries in `tenants`, picked from preferred_tenant or the
+  // account default).
+  string tenant_id = 5;
+  // session_id is the refresh-session row id. The refresh path
+  // looks this up to rotate the refresh token.
+  string session_id = 6;
+  int64 expires_in = 7;
+}
+
+message SSOResponse {
+  ExchangeResult result = 1;
+}
+
+message RefreshRequest {
+  string refresh_token = 1;
+}
+
+// RefreshResponse returns a fresh access token. The refresh token
+// itself is rotated (new value returned) so a stolen refresh
+// token is single-use once a legitimate refresh happens.
+message RefreshResponse {
+  ExchangeResult result = 1;
+}
+
+service AuthService {
+  // SSO trades a KChat OAuth code for a kapp access+refresh
+  // pair. Unauthenticated (no JWT required); the KChat code is
+  // the trust anchor.
+  rpc SSO(SSORequest) returns (SSOResponse);
+  // Refresh swaps a refresh token for a fresh access token.
+  // Unauthenticated; the refresh token is the trust anchor.
+  rpc Refresh(RefreshRequest) returns (RefreshResponse);
+}

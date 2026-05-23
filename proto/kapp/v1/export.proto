@@ -1,0 +1,67 @@
+// export.proto wires the data-export queue. Create enqueues a
+// `pending` job; the worker picks it up, runs the export, and
+// stores the result back on the same row. Download is a
+// server-streaming RPC because the export payload can be
+// arbitrarily large.
+syntax = "proto3";
+
+package kapp.v1;
+
+message ExportJob {
+  string id = 1;
+  string tenant_id = 2;
+  // ktype is the source KType, or "*" for a tenant-wide dump.
+  string ktype = 3;
+  // format is "csv" or "json".
+  string format = 4;
+  // status is pending / running / completed / failed.
+  string status = 5;
+  int32 progress_pct = 6;
+  int64 row_count = 7;
+  string error = 8;
+  string file_name = 9;
+  string content_type = 10;
+  string created_by = 11;
+  string created_at = 12;
+  string started_at = 13;
+  string completed_at = 14;
+}
+
+message CreateExportRequest {
+  string ktype = 1;
+  string format = 2;
+}
+message CreateExportResponse {
+  ExportJob job = 1;
+}
+
+message ListExportsRequest {}
+message ListExportsResponse {
+  repeated ExportJob jobs = 1;
+}
+
+message GetExportRequest {
+  string id = 1;
+}
+message GetExportResponse {
+  ExportJob job = 1;
+}
+
+message DownloadExportRequest {
+  string id = 1;
+}
+// DownloadExportResponse is the server-streaming chunk
+// payload. The first message carries metadata; subsequent
+// messages carry only chunk bytes.
+message DownloadExportResponse {
+  string content_type = 1;
+  string file_name = 2;
+  bytes chunk = 3;
+}
+
+service ExportService {
+  rpc CreateExport(CreateExportRequest) returns (CreateExportResponse);
+  rpc ListExports(ListExportsRequest) returns (ListExportsResponse);
+  rpc GetExport(GetExportRequest) returns (GetExportResponse);
+  rpc DownloadExport(DownloadExportRequest) returns (stream DownloadExportResponse);
+}

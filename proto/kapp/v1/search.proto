@@ -1,0 +1,42 @@
+// search.proto wires the cross-KType full-text search surface
+// at /api/v1/search. The query string may be scoped to specific
+// KTypes via the `ktype` repeated parameter.
+syntax = "proto3";
+
+package kapp.v1;
+
+message SearchRequest {
+  string query = 1;
+  // ktypes scopes the search to specific KTypes (e.g.
+  // ["crm.lead", "crm.deal"]). Empty means "search all
+  // KTypes the actor has read permission on".
+  repeated string ktypes = 2;
+  // limit caps the result set. Server clamps to [1, 200];
+  // 0 falls back to a server default of 50.
+  int32 limit = 3;
+}
+
+message SearchHit {
+  string record_id = 1;
+  string ktype = 2;
+  // snippet is the highlighted excerpt from the matched
+  // field. Plain text — the frontend renders highlights via
+  // its own highlight logic.
+  string snippet = 3;
+  // score is the tsvector ranking score. Higher = better.
+  // Surface it so SDK clients can filter low-confidence hits.
+  float score = 4;
+  // matched_field tells the client which JSONB column path
+  // matched (e.g. "data.notes", "data.contact.email"). Used
+  // by the UI to render which row of the record matched.
+  string matched_field = 5;
+}
+
+message SearchResponse {
+  string query = 1;
+  repeated SearchHit results = 2;
+}
+
+service SearchService {
+  rpc Search(SearchRequest) returns (SearchResponse);
+}

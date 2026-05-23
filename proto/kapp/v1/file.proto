@@ -1,0 +1,67 @@
+// file.proto wires the Phase F attachment surface.
+//
+// Bytes-on-the-wire are NOT exposed via gRPC. The download side
+// uses a streaming Download RPC because file payloads can be up
+// to 32 MiB and unary serialisation would buffer the whole blob.
+// Upload accepts a raw upload via a streaming RPC for the same
+// reason; small uploads can still use a single message.
+syntax = "proto3";
+
+package kapp.v1;
+
+message File {
+  string id = 1;
+  string tenant_id = 2;
+  string content_type = 3;
+  int64 size_bytes = 4;
+  // sha256 is the upper-case hex digest of the stored blob.
+  // Used as the dedup key in the object store.
+  string sha256 = 5;
+  string uploaded_by = 6;
+  string created_at = 7;
+}
+
+// UploadFileRequest is a streaming request: the first message
+// carries metadata, subsequent messages carry chunks. The server
+// terminates the stream when the client sends a chunk with
+// final=true OR when client closes.
+message UploadFileRequest {
+  // content_type is set in the first message only. Subsequent
+  // messages should leave it empty.
+  string content_type = 1;
+  bytes chunk = 2;
+  bool final = 3;
+}
+message UploadFileResponse {
+  File file = 1;
+}
+
+message GetFileRequest {
+  string id = 1;
+}
+message GetFileResponse {
+  File file = 1;
+}
+
+message DownloadFileRequest {
+  string id = 1;
+}
+// DownloadFileResponse is the server-streaming chunk payload.
+// The first message carries content_type; later messages carry
+// only chunk bytes.
+message DownloadFileResponse {
+  string content_type = 1;
+  bytes chunk = 2;
+}
+
+service FileService {
+  // UploadFile is client-streaming so the client can upload
+  // large blobs without buffering. Returns the persisted
+  // metadata once the upload completes successfully.
+  rpc UploadFile(stream UploadFileRequest) returns (UploadFileResponse);
+  rpc GetFile(GetFileRequest) returns (GetFileResponse);
+  // DownloadFile is server-streaming for the same reason
+  // UploadFile is client-streaming — the blob can be up to
+  // 32 MiB and we want to stream rather than buffer.
+  rpc DownloadFile(DownloadFileRequest) returns (stream DownloadFileResponse);
+}

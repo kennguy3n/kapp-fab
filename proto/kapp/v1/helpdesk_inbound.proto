@@ -1,0 +1,59 @@
+// helpdesk_inbound.proto wires the inbound-email ingress that
+// turns an SMTP relay's parsed envelope into a helpdesk.ticket
+// record.
+//
+// Authentication: the static shared-secret travels OUT-OF-BAND of
+// the request message, not inside it. The REST surface accepts
+// `X-Helpdesk-Inbound-Token: <secret>` as an HTTP header
+// (services/api/helpdesk_inbound_handlers.go). The gRPC surface
+// accepts `x-helpdesk-inbound-token: <secret>` in
+// `grpc.Metadata`. When grpc-gateway lands in A5, it translates
+// the HTTP header into the gRPC metadata entry transparently, so
+// the relay's wire contract stays a single header on a single
+// HTTP/2 stream — no message-body changes required.
+//
+// Keeping the secret outside the body matters because any
+// generic request/response logging middleware (audit logger,
+// debug tracer, request recorder) will log the InboundEmail
+// envelope but never the metadata map. Embedding the secret in
+// the body would leak it through every such logger by default;
+// the metadata-based contract is fail-safe.
+syntax = "proto3";
+
+package kapp.v1;
+
+import "kapp/v1/record.proto";
+
+message InboundAttachment {
+  string filename = 1;
+  string content_type = 2;
+  // storage_key is the object-store key (already uploaded by
+  // the relay). The handler does not re-fetch the body.
+  string storage_key = 3;
+  int64 size = 4;
+}
+
+message InboundEmail {
+  string message_id = 1;
+  string to = 2;
+  string from = 3;
+  string subject = 4;
+  string body_text = 5;
+  string body_html = 6;
+  repeated InboundAttachment attachments = 7;
+  string received_at = 8;
+}
+
+// ProcessInboundEmailRequest carries only the email envelope.
+// Authentication is performed via grpc metadata (REST: header),
+// see the file-level docstring. No secrets in the body.
+message ProcessInboundEmailRequest {
+  InboundEmail email = 1;
+}
+message ProcessInboundEmailResponse {
+  Record record = 1;
+}
+
+service HelpdeskInboundService {
+  rpc ProcessInboundEmail(ProcessInboundEmailRequest) returns (ProcessInboundEmailResponse);
+}

@@ -1,0 +1,104 @@
+name: buf
+
+# Protobuf schema gate (Pillar A4 / A5).
+#
+# Two things this workflow guarantees on every PR:
+#
+#   1. `buf lint` — proto/ conforms to the STANDARD ruleset
+#      (package naming, message naming, no nested-message wire
+#      forms, no MapEntry types in service responses, etc.).
+#      Misshaped schemas never reach review.
+#
+#   2. `buf breaking` — no field numbers change, no service
+#      methods are removed, no enum values are deleted compared
+#      to main. This is the load-bearing guarantee that the
+#      Rust SDK (Pillars B1-B8) and any future generated TS
+#      SDK can pin a stable wire format.
+#
+# Generated code under gen/ is NOT tracked in git (see
+# .gitignore). The Go CI workflow (.github/workflows/ci.yml)
+# runs `make proto-gen` before every build/test step, so a
+# proto edit that doesn't compile after generation fails the
+# Go job — no need for a separate gen-up-to-date check here.
+# Both jobs are intentionally fast (sub-30s each) so the proto
+# editor's feedback loop stays tight.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: buf lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - run: buf lint
+
+  breaking:
+    name: buf breaking
+    runs-on: ubuntu-latest
+    # Skip on push to main itself — the base ref equals HEAD and
+    # there is nothing to compare. Only PRs need the check.
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # buf breaking needs the merge-base; fetch enough history
+          # for `--against '.git#branch=main,subdir=proto'` to
+          # resolve the parent commit. Shallow clones (default
+          # depth=1) would make the comparison silently empty.
+          fetch-depth: 0
+      # actions/checkout leaves the workspace on the PR merge commit
+      # but does NOT create a local `main` ref. buf breaking opens
+      # the workspace `.git` as a remote and resolves `branch=main`
+      # through that ref, so we have to fetch it explicitly.
+      - run: git fetch --no-tags origin main:main
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      # Skip the breaking check when main does not yet carry the
+      # proto tree (i.e. the very first PR that introduces it).
+      # Once any .proto file is on main the check runs every PR.
+      - name: detect proto baseline on main
+        id: baseline
+        run: |
+          if git ls-tree -r --name-only main -- proto/ | grep -q '\.proto$'; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::main does not yet contain a proto/ tree; skipping buf breaking. Subsequent PRs will run the full breaking check."
+          fi
+      # buf breaking is given `--against` (the baseline) and the
+      # current input as two separate args. The asymmetry between
+      # them is intentional and harmless:
+      #   - Baseline: `.git#branch=main,subdir=proto` — buf walks
+      #     the proto/ subdirectory of the main-branch tree and
+      #     infers a module from the .proto files it finds there.
+      #     There is no buf.yaml inside proto/ on main; buf v2
+      #     falls back to the default module config (matching the
+      #     STANDARD ruleset and FILE breaking-change category we
+      #     declare in buf.yaml at the workspace root).
+      #   - Current: `proto` — buf walks the proto/ directory of
+      #     the checkout, sees the workspace buf.yaml at the repo
+      #     root pointing modules: [{path: proto}], and resolves
+      #     the same module via the workspace config.
+      # Because the FILE breaking-change category only inspects
+      # proto file contents (field numbers, service signatures,
+      # enum values) — never workspace metadata — the asymmetry
+      # never affects the result. If buf v3 ever changes how
+      # module identity is computed for breaking checks, revisit
+      # this line and either copy buf.yaml into proto/ on main or
+      # use `--against '.git#branch=main'` against the repo root.
+      - if: steps.baseline.outputs.exists == 'true'
+        run: buf breaking --against '.git#branch=main,subdir=proto' proto
+
+

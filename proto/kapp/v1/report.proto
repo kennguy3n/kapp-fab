@@ -1,0 +1,100 @@
+// report.proto wires the saved-report surface (CRUD + run +
+// share). Reports own a Definition blob that is JSON-encoded
+// on the wire so the planner / runner are not coupled to the
+// proto. The runner's result envelope is also bytes because
+// the column shape is dynamic per report.
+syntax = "proto3";
+
+package kapp.v1;
+
+message ShareEntry {
+  string kind = 1; // "user" or "role"
+  string id = 2;
+}
+
+message SavedReport {
+  string id = 1;
+  string tenant_id = 2;
+  string name = 3;
+  string description = 4;
+  // definition is the report DSL body (datasource, columns,
+  // filters, sort, aggregates). Opaque on the wire.
+  bytes definition = 5;
+  string visibility = 6;
+  repeated ShareEntry shared_with = 7;
+  string created_by = 8;
+  string created_at = 9;
+  string updated_at = 10;
+}
+
+message CreateReportRequest {
+  string name = 1;
+  string description = 2;
+  bytes definition = 3;
+}
+message CreateReportResponse {
+  SavedReport report = 1;
+}
+
+message UpdateReportRequest {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  bytes definition = 4;
+}
+message UpdateReportResponse {
+  SavedReport report = 1;
+}
+
+message ListReportsRequest {}
+message ListReportsResponse {
+  repeated SavedReport reports = 1;
+}
+
+message GetReportRequest {
+  string id = 1;
+}
+message GetReportResponse {
+  SavedReport report = 1;
+}
+
+message DeleteReportRequest {
+  string id = 1;
+}
+message DeleteReportResponse {}
+
+message RunSavedReportRequest {
+  string id = 1;
+}
+message RunSavedReportResponse {
+  // result is the runner output JSON (rows + meta). Opaque
+  // on the wire — schema follows the saved Definition.
+  bytes result = 1;
+}
+
+message RunAdhocReportRequest {
+  bytes definition = 1;
+}
+message RunAdhocReportResponse {
+  bytes result = 1;
+}
+
+message ShareReportRequest {
+  string id = 1;
+  string visibility = 2;
+  repeated ShareEntry shared_with = 3;
+}
+message ShareReportResponse {
+  SavedReport report = 1;
+}
+
+service ReportService {
+  rpc CreateReport(CreateReportRequest) returns (CreateReportResponse);
+  rpc UpdateReport(UpdateReportRequest) returns (UpdateReportResponse);
+  rpc ListReports(ListReportsRequest) returns (ListReportsResponse);
+  rpc GetReport(GetReportRequest) returns (GetReportResponse);
+  rpc DeleteReport(DeleteReportRequest) returns (DeleteReportResponse);
+  rpc RunSavedReport(RunSavedReportRequest) returns (RunSavedReportResponse);
+  rpc RunAdhocReport(RunAdhocReportRequest) returns (RunAdhocReportResponse);
+  rpc ShareReport(ShareReportRequest) returns (ShareReportResponse);
+}

@@ -1,0 +1,346 @@
+// tenant.proto wires the control-plane tenant lifecycle —
+// CRUD, setup wizard, suspension/activation/archive/delete
+// transitions, feature flags, plans, usage metering, placement
+// policy, and consolidation groups. Control-plane endpoints are
+// not subject to per-request TenantMiddleware; the tenant id
+// always comes in via URL param or JWT.
+syntax = "proto3";
+
+package kapp.v1;
+
+import "kapp/v1/common.proto";
+
+// ---------------------------------------------------------------------------
+// Tenants
+// ---------------------------------------------------------------------------
+
+message Tenant {
+  string id = 1;
+  string slug = 2;
+  string name = 3;
+  string cell = 4;
+  string plan = 5;
+  // status is "active" / "suspended" / "archived" / "deleted".
+  string status = 6;
+  // quota is the plan's effective quota map at time of last
+  // write, JSON-encoded — the same shape stored in
+  // tenants.quota. Source of truth for billing pre-flight
+  // checks; canonical fields mirror PlanLimits.
+  bytes quota = 7;
+  string zk_bucket = 8;
+  string created_at = 9;
+  string updated_at = 10;
+}
+
+message CreateTenantRequest {
+  string slug = 1;
+  string name = 2;
+  string cell = 3;
+  string plan = 4;
+  bytes quota = 5;
+}
+message CreateTenantResponse {
+  Tenant tenant = 1;
+}
+
+message GetTenantRequest {
+  string id = 1;
+}
+message GetTenantResponse {
+  Tenant tenant = 1;
+}
+
+message ListTenantsRequest {}
+message ListTenantsResponse {
+  repeated Tenant tenants = 1;
+}
+
+// The four lifecycle transitions share a per-RPC pair (suspend
+// / activate / archive / delete) because buf STANDARD requires
+// unique request/response types per RPC. The body is just the
+// id; the engine resolves the transition target per RPC name.
+message SuspendTenantRequest { string id = 1; }
+message SuspendTenantResponse { Tenant tenant = 1; }
+message ActivateTenantRequest { string id = 1; }
+message ActivateTenantResponse { Tenant tenant = 1; }
+message ArchiveTenantRequest { string id = 1; }
+message ArchiveTenantResponse { Tenant tenant = 1; }
+message DeleteTenantRequest { string id = 1; }
+message DeleteTenantResponse { Tenant tenant = 1; }
+
+message SetupTenantRequest {
+  string id = 1;
+  // config is the setup-wizard payload (SetupWizardConfig),
+  // JSON-encoded — seed chart of accounts, default roles,
+  // optional initial users. Opaque to the gRPC layer; the
+  // wizard owns parsing.
+  bytes config = 2;
+}
+message SetupTenantResponse {
+  // result is the wizard's RunSetupWizard return value —
+  // counts of seeded entities, the tenant row's post-wizard
+  // shape, any soft warnings.
+  bytes result = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Feature flags
+// ---------------------------------------------------------------------------
+
+// FeaturesResponse mirrors featuresResponse. tenant_id is
+// included so /me/-style callers (no URL param) can know
+// which tenant the response is scoped to.
+message FeaturesResponse {
+  string tenant_id = 1;
+  map<string, bool> features = 2;
+}
+
+message ListFeaturesRequest {
+  string id = 1;
+}
+message ListFeaturesResponse {
+  FeaturesResponse response = 1;
+}
+
+message ListMyFeaturesRequest {}
+message ListMyFeaturesResponse {
+  FeaturesResponse response = 1;
+}
+
+message UpdateFeaturesRequest {
+  string id = 1;
+  map<string, bool> features = 2;
+}
+message UpdateFeaturesResponse {
+  FeaturesResponse response = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Plans
+// ---------------------------------------------------------------------------
+
+message PlanLimits {
+  int64 api_calls_per_month = 1;
+  int64 storage_bytes = 2;
+  int64 krecord_count = 3;
+  int64 user_seats = 4;
+}
+
+message Plan {
+  string name = 1;
+  string display_name = 2;
+  // price_cents is the monthly fee in the smallest currency
+  // unit. 0 means free.
+  int64 price_cents = 3;
+  string currency = 4;
+  PlanLimits limits = 5;
+  map<string, bool> features = 6;
+}
+
+message ListPlansRequest {}
+message ListPlansResponse {
+  repeated Plan plans = 1;
+}
+
+message ChangePlanRequest {
+  string id = 1;
+  string plan = 2;
+}
+message ChangePlanResponse {
+  // tenant_id + plan: tenant_id is the affected tenant,
+  // plan is the new plan as resolved server-side.
+  string tenant_id = 1;
+  Plan plan = 2;
+}
+
+message ChangeMyPlanRequest {
+  string plan = 1;
+}
+message ChangeMyPlanResponse {
+  string tenant_id = 1;
+  Plan plan = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Usage / metering
+// ---------------------------------------------------------------------------
+
+message UsageRow {
+  string metric = 1;
+  int64 value = 2;
+  string period_start = 3;
+}
+
+message UsageResponse {
+  string tenant_id = 1;
+  string plan = 2;
+  string period_start = 3;
+  map<string, int64> usage = 4;
+  PlanLimits limits = 5;
+  repeated UsageRow rows = 6;
+  map<string, bool> features = 7;
+}
+
+message GetUsageRequest {
+  string id = 1;
+}
+message GetUsageResponse {
+  UsageResponse response = 1;
+}
+
+message GetMyUsageRequest {}
+message GetMyUsageResponse {
+  UsageResponse response = 1;
+}
+
+message GetUsageHistoryRequest {
+  string id = 1;
+  // months is the history window in months. 0 falls back to
+  // the server default of 6.
+  int32 months = 2;
+}
+message GetUsageHistoryResponse {
+  string tenant_id = 1;
+  repeated UsageRow rows = 2;
+  int32 months = 3;
+}
+
+message GetMyUsageHistoryRequest {
+  int32 months = 1;
+}
+message GetMyUsageHistoryResponse {
+  string tenant_id = 1;
+  repeated UsageRow rows = 2;
+  int32 months = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Placement policy (data residency)
+// ---------------------------------------------------------------------------
+
+message PlacementPolicy {
+  // tenant is the tenant id this policy applies to (string
+  // form so the proto matches the JSON wire shape exactly).
+  string tenant = 1;
+  string bucket = 2;
+  // spec is the policy body (encryption mode, allowed
+  // providers, allowed countries, retention overrides, etc.)
+  // JSON-encoded — the gRPC layer doesn't parse it; the
+  // fabric-side validator owns the shape.
+  bytes spec = 3;
+}
+
+message GetPlacementPolicyRequest {
+  string id = 1;
+}
+message GetPlacementPolicyResponse {
+  PlacementPolicy policy = 1;
+}
+
+message PutPlacementPolicyRequest {
+  string id = 1;
+  PlacementPolicy policy = 2;
+}
+message PutPlacementPolicyResponse {
+  PlacementPolicy policy = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Retention overrides
+// ---------------------------------------------------------------------------
+
+message RetentionOverride {
+  string id = 1;
+  string tenant_id = 2;
+  string ktype = 3;
+  // retention_days is the per-KType retention window. 0
+  // means "use the tenant default".
+  int32 retention_days = 4;
+}
+
+message ListRetentionOverridesRequest {
+  string id = 1;
+}
+message ListRetentionOverridesResponse {
+  repeated RetentionOverride overrides = 1;
+}
+
+message UpsertRetentionOverrideRequest {
+  string id = 1;
+  string ktype = 2;
+  int32 retention_days = 3;
+}
+message UpsertRetentionOverrideResponse {
+  RetentionOverride override = 1;
+}
+
+message DeleteRetentionOverrideRequest {
+  string id = 1;
+  string ktype = 2;
+}
+message DeleteRetentionOverrideResponse {}
+
+// ---------------------------------------------------------------------------
+// Isolation audit
+// ---------------------------------------------------------------------------
+
+message IsolationAuditEntry {
+  string id = 1;
+  string tenant_id = 2;
+  string event = 3;
+  bytes details = 4;
+  string created_at = 5;
+}
+
+message ListIsolationAuditRequest {
+  string id = 1;
+  PaginationRequest pagination = 2;
+}
+message ListIsolationAuditResponse {
+  repeated IsolationAuditEntry entries = 1;
+  ListPageMeta page = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+service TenantService {
+  // Tenants
+  rpc CreateTenant(CreateTenantRequest) returns (CreateTenantResponse);
+  rpc GetTenant(GetTenantRequest) returns (GetTenantResponse);
+  rpc ListTenants(ListTenantsRequest) returns (ListTenantsResponse);
+  rpc SuspendTenant(SuspendTenantRequest) returns (SuspendTenantResponse);
+  rpc ActivateTenant(ActivateTenantRequest) returns (ActivateTenantResponse);
+  rpc ArchiveTenant(ArchiveTenantRequest) returns (ArchiveTenantResponse);
+  rpc DeleteTenant(DeleteTenantRequest) returns (DeleteTenantResponse);
+  rpc SetupTenant(SetupTenantRequest) returns (SetupTenantResponse);
+
+  // Features
+  rpc ListFeatures(ListFeaturesRequest) returns (ListFeaturesResponse);
+  rpc ListMyFeatures(ListMyFeaturesRequest) returns (ListMyFeaturesResponse);
+  rpc UpdateFeatures(UpdateFeaturesRequest) returns (UpdateFeaturesResponse);
+
+  // Plans
+  rpc ListPlans(ListPlansRequest) returns (ListPlansResponse);
+  rpc ChangePlan(ChangePlanRequest) returns (ChangePlanResponse);
+  rpc ChangeMyPlan(ChangeMyPlanRequest) returns (ChangeMyPlanResponse);
+
+  // Usage
+  rpc GetUsage(GetUsageRequest) returns (GetUsageResponse);
+  rpc GetMyUsage(GetMyUsageRequest) returns (GetMyUsageResponse);
+  rpc GetUsageHistory(GetUsageHistoryRequest) returns (GetUsageHistoryResponse);
+  rpc GetMyUsageHistory(GetMyUsageHistoryRequest) returns (GetMyUsageHistoryResponse);
+
+  // Placement
+  rpc GetPlacementPolicy(GetPlacementPolicyRequest) returns (GetPlacementPolicyResponse);
+  rpc PutPlacementPolicy(PutPlacementPolicyRequest) returns (PutPlacementPolicyResponse);
+
+  // Retention
+  rpc ListRetentionOverrides(ListRetentionOverridesRequest) returns (ListRetentionOverridesResponse);
+  rpc UpsertRetentionOverride(UpsertRetentionOverrideRequest) returns (UpsertRetentionOverrideResponse);
+  rpc DeleteRetentionOverride(DeleteRetentionOverrideRequest) returns (DeleteRetentionOverrideResponse);
+
+  // Isolation audit
+  rpc ListIsolationAudit(ListIsolationAuditRequest) returns (ListIsolationAuditResponse);
+}

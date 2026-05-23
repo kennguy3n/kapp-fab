@@ -1,0 +1,33 @@
+# buf code-generation pipeline for kapp-fab.
+#
+# Output goes to gen/go/ at the repo root so generated code is
+# co-located with the rest of the Go module tree without needing
+# a separate go.mod. The path inside gen/go/ follows the proto
+# package: `package kapp.v1` produces files under
+# gen/go/kapp/v1/.
+#
+# Both protoc-gen-go (message types) and protoc-gen-go-grpc
+# (service stubs) are wired here even though A4 only ships
+# message types — wiring both at once means A5 (gRPC server
+# implementation) doesn't have to touch buf config at all, it
+# just consumes the already-generated service interfaces.
+#
+# The `local` strategy is used (versus a remote/buf-managed
+# plugin) because we want to pin the exact tool versions in
+# go.mod / Makefile rather than depend on buf.build's plugin
+# catalog being reachable from CI runners.
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/kennguy3n/kapp-fab/gen/go
+plugins:
+  - local: protoc-gen-go
+    out: gen/go
+    opt:
+      - paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: gen/go
+    opt:
+      - paths=source_relative

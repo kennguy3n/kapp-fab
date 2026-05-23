@@ -1,0 +1,41 @@
+# buf workspace root for kapp-fab Protobuf definitions.
+#
+# Pillar A4 (this PR) lays down the .proto sources for the entire
+# kapp-fab REST API surface so that Pillar A5 can stand up a gRPC
+# server that speaks the same wire format. The buf toolchain is
+# chosen over plain protoc because:
+#
+#   1. `buf lint` catches naming/style drift before it ships
+#      (lowercase package, no nested messages on the wire, no
+#      MapEntry types in service responses, etc.). The set of
+#      rules below uses buf's `STANDARD` category — the modern
+#      baseline for new schemas. STANDARD is a strict subset of
+#      DEFAULT (DEFAULT adds `COMMENT_*` rules requiring doc
+#      comments on every field, which we apply by convention
+#      rather than by lint, since several long-form descriptions
+#      live in the file-level docstring instead of per-field).
+#      Move to DEFAULT once every message has per-field comments.
+#
+#   2. `buf breaking` runs on every PR (CI in
+#      .github/workflows/buf.yml) and rejects backwards-
+#      incompatible field-number or service signature changes
+#      against `main`. This is the load-bearing guarantee for
+#      the Rust SDK (Pillars B1-B8): once a field number is
+#      committed, it never moves, and the SDK ABI is stable.
+#
+#   3. `buf format` is the canonical formatter so .proto files
+#      look the same regardless of who edited them last.
+#
+# When this file moves to BSR (Buf Schema Registry) for the Rust
+# SDK to consume directly, update `name:` to the BSR module ID.
+# Until then it lives in the monorepo and is consumed via
+# relative file paths by `buf.gen.yaml`.
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

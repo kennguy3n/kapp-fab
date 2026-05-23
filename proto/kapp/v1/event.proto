@@ -1,0 +1,49 @@
+// event.proto wires the tenant event stream. The REST surface
+// exposes this as Server-Sent-Events with `id:` carrying an
+// RFC3339Nano cursor and Last-Event-ID for resume. The gRPC
+// equivalent is a server-streaming RPC where the request
+// carries a string cursor and an optional type filter.
+syntax = "proto3";
+
+package kapp.v1;
+
+message Event {
+  string id = 1;
+  string tenant_id = 2;
+  // type is the dotted event name (e.g.
+  // "record.crm.deal.created", "approval.decided",
+  // "report.finished").
+  string type = 3;
+  // payload is the event body, JSON-encoded. Schema varies
+  // per type; SDK consumers wrap each type with a typed
+  // helper.
+  bytes payload = 4;
+  string created_at = 5;
+}
+
+message StreamEventsRequest {
+  // since is the cursor to resume from. Format is
+  // rfc3339_nano (matches the SSE `id:` field). Empty means
+  // "from the next event the server emits".
+  string since = 1;
+  // type_filter restricts the stream to events whose type
+  // equals this string. Empty disables the filter.
+  string type_filter = 2;
+}
+
+// StreamEventsResponse wraps the streamed Event so the
+// service satisfies buf STANDARD's request/response naming
+// rule. The wrapper costs one extra proto layer on the wire
+// (a single field tag) and lets us evolve the streaming
+// envelope (heartbeats, batch acks, cursor watermarks) without
+// touching the Event message itself.
+message StreamEventsResponse {
+  Event event = 1;
+}
+
+service EventService {
+  // StreamEvents replaces the SSE endpoint. The server keeps
+  // the stream open and emits StreamEventsResponse messages
+  // as events appear. Cancellation is via the gRPC context.
+  rpc StreamEvents(StreamEventsRequest) returns (stream StreamEventsResponse);
+}

@@ -1,0 +1,123 @@
+// base.proto wires the Phase F Base KApp surface — ad-hoc
+// tenant-owned tables and the rows inside them. Different from
+// KRecord: Base tables are user-defined at runtime (the
+// "Airtable" experience); KRecords are application-defined via
+// the KType registry.
+syntax = "proto3";
+
+package kapp.v1;
+
+message BaseColumn {
+  string name = 1;
+  string label = 2;
+  // type is a simple string tag — "text" / "number" /
+  // "boolean" / "date" / "reference". Advisory: the store
+  // persists row data as JSONB and does not enforce shape.
+  string type = 3;
+  bool required = 4;
+}
+
+message BaseTable {
+  string id = 1;
+  string tenant_id = 2;
+  string slug = 3;
+  string name = 4;
+  string description = 5;
+  repeated BaseColumn columns = 6;
+  // shared_view is the JSON payload that drives the default
+  // grid layout shared across all tenant members (column
+  // order, default filters, etc.). Opaque to the gRPC layer.
+  bytes shared_view = 7;
+  string created_by = 8;
+  string created_at = 9;
+  string updated_at = 10;
+}
+
+message BaseRow {
+  string id = 1;
+  string tenant_id = 2;
+  string table_id = 3;
+  // data is the row body, JSON-encoded. Shape follows the
+  // table's Columns advisory; not enforced.
+  bytes data = 4;
+  string created_by = 5;
+  string created_at = 6;
+  string updated_at = 7;
+}
+
+message CreateBaseTableRequest {
+  string slug = 1;
+  string name = 2;
+  string description = 3;
+  repeated BaseColumn columns = 4;
+  bytes shared_view = 5;
+}
+message CreateBaseTableResponse {
+  BaseTable table = 1;
+}
+
+message ListBaseTablesRequest {}
+message ListBaseTablesResponse {
+  repeated BaseTable tables = 1;
+}
+
+message GetBaseTableRequest {
+  string id = 1;
+}
+message GetBaseTableResponse {
+  BaseTable table = 1;
+}
+
+message UpdateBaseTableRequest {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  repeated BaseColumn columns = 4;
+  bytes shared_view = 5;
+}
+message UpdateBaseTableResponse {
+  BaseTable table = 1;
+}
+
+message CreateBaseRowRequest {
+  string table_id = 1;
+  bytes data = 2;
+}
+message CreateBaseRowResponse {
+  BaseRow row = 1;
+}
+
+message ListBaseRowsRequest {
+  string table_id = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+}
+message ListBaseRowsResponse {
+  repeated BaseRow rows = 1;
+}
+
+message UpdateBaseRowRequest {
+  string table_id = 1;
+  string row_id = 2;
+  bytes data = 3;
+}
+message UpdateBaseRowResponse {
+  BaseRow row = 1;
+}
+
+message DeleteBaseRowRequest {
+  string table_id = 1;
+  string row_id = 2;
+}
+message DeleteBaseRowResponse {}
+
+service BaseService {
+  rpc CreateBaseTable(CreateBaseTableRequest) returns (CreateBaseTableResponse);
+  rpc ListBaseTables(ListBaseTablesRequest) returns (ListBaseTablesResponse);
+  rpc GetBaseTable(GetBaseTableRequest) returns (GetBaseTableResponse);
+  rpc UpdateBaseTable(UpdateBaseTableRequest) returns (UpdateBaseTableResponse);
+  rpc CreateBaseRow(CreateBaseRowRequest) returns (CreateBaseRowResponse);
+  rpc ListBaseRows(ListBaseRowsRequest) returns (ListBaseRowsResponse);
+  rpc UpdateBaseRow(UpdateBaseRowRequest) returns (UpdateBaseRowResponse);
+  rpc DeleteBaseRow(DeleteBaseRowRequest) returns (DeleteBaseRowResponse);
+}
