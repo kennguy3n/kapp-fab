@@ -123,10 +123,14 @@ func (e *RecurringEngine) Handle(ctx context.Context, tenantID uuid.UUID, _ sche
 		return errors.New("finance: recurring engine not wired")
 	}
 	today := e.now().UTC().Truncate(24 * time.Hour)
-	rows, err := e.records.List(ctx, tenantID, record.ListFilter{
+	// ListAll, not List(Limit:500): a tenant with >500 active recurring
+	// invoice templates would otherwise silently miss everything past
+	// the cap on every sweep. ListAll keysets internally in 500-row
+	// chunks so memory stays bounded even at hundreds of thousands of
+	// templates.
+	rows, err := e.records.ListAll(ctx, tenantID, record.ListFilter{
 		KType:  KTypeRecurringInvoice,
 		Status: "active",
-		Limit:  500,
 	})
 	if err != nil {
 		return fmt.Errorf("finance: list recurring invoices: %w", err)

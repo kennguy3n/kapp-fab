@@ -317,9 +317,11 @@ func TestCursorRoundTrip(t *testing.T) {
 	if gotID != rec.ID {
 		t.Fatalf("id mismatch: %s != %s", gotID, rec.ID)
 	}
-	// Postgres timestamps round-trip to nanosecond precision in
-	// Go because the driver returns time.Time with subsecond
-	// resolution; ensure UnixNano matches exactly.
+	// Postgres timestamps have microsecond precision; pgx scans them
+	// into a time.Time whose last 3 nanosecond digits are zero. As
+	// long as the cursor codec round-trips via UnixNano (a lossless
+	// int64) and we never compare against a sub-microsecond wall
+	// clock, the (updated_at, id) keyset comparison matches exactly.
 	if gotTS.UnixNano() != rec.UpdatedAt.UnixNano() {
 		t.Fatalf("ts mismatch: %d != %d", gotTS.UnixNano(), rec.UpdatedAt.UnixNano())
 	}
