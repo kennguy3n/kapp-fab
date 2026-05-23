@@ -60,7 +60,7 @@ func RequestIDMiddleware(base *slog.Logger) func(http.Handler) http.Handler {
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			id := sanitizeIncomingRequestID(r.Header.Get(RequestIDHeader))
+			id := SanitizeIncomingRequestID(r.Header.Get(RequestIDHeader))
 			if id == "" {
 				id = NewRequestID()
 			}
@@ -81,7 +81,7 @@ func RequestIDMiddleware(base *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// sanitizeIncomingRequestID rejects values that are too long or
+// SanitizeIncomingRequestID rejects values that are too long or
 // contain non-printable / non-ASCII characters. A clean rejection
 // (return "") triggers minting a fresh id; we do NOT silently
 // truncate or rewrite the incoming value because that would mask
@@ -90,7 +90,14 @@ func RequestIDMiddleware(base *slog.Logger) func(http.Handler) http.Handler {
 // Allowed character set: ASCII printable (0x20–0x7E) minus whitespace
 // boundary cases. Length cap MaxIncomingRequestIDLen. Empty input is
 // treated as absent (mint fresh).
-func sanitizeIncomingRequestID(raw string) string {
+//
+// Exported so the gRPC surface (internal/grpc/metadata.go) can apply
+// the identical validation to incoming x-request-id metadata.
+// Keeping the rules in this single function guarantees that a value
+// that survives sanitisation on one wire surface also survives on
+// the other — critical for cross-surface request correlation and to
+// keep the log-injection guard uniform.
+func SanitizeIncomingRequestID(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""

@@ -820,6 +820,8 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		hrh:                  hrh,
 		inboundHandler:       inboundHandler,
 		metrics:              metrics,
+		ktypeRegistry:        ktypeRegistry,
+		sessionStore:         sessionStore,
 	}
 
 	return d, func() { runCleanups(cleanups) }, nil

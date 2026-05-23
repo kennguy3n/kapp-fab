@@ -101,6 +101,14 @@ proto-lint:
 proto-gen:
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
 	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+	# protoc-gen-grpc-gateway@v2.28.0 matches
+	# `github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0` in go.mod.
+	# Unlike the grpc-go plugin, grpc-gateway's codegen IS tightly
+	# coupled to its runtime — the generated `.pb.gw.go` files
+	# call into runtime symbols (e.g. runtime.NewServeMux,
+	# runtime.AnnotateContext) whose API can shift between minor
+	# versions. Pin both to the same v2.28.x.
+	go install github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-grpc-gateway@v2.28.0
 	buf generate
 
 # `proto-breaking` rejects backwards-incompatible field/service

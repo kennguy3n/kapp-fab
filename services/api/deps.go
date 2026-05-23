@@ -9,6 +9,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/auth"
 	"github.com/kennguy3n/kapp-fab/internal/authz"
+	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
@@ -162,4 +163,16 @@ type apiDeps struct {
 	// main.go MetricsAddr). Nil when metrics are disabled
 	// (currently never — we always wire the registry).
 	metrics *platform.MetricsRegistry
+
+	// Phase A5 — gRPC + grpc-gateway. ktypeRegistry and
+	// sessionStore are exposed on apiDeps so the gRPC server
+	// (services/api/grpc.go) can reach them with the same
+	// pointers the HTTP gateway uses — single source of truth
+	// per dependency. The gRPC AuthService backend is reached
+	// indirectly through `authh.svc` rather than promoted to its
+	// own apiDeps field; authh is the canonical owner of the
+	// SSOService instance and there is no benefit to a duplicate
+	// pointer here.
+	ktypeRegistry *ktype.PGRegistry
+	sessionStore  auth.SessionStore
 }

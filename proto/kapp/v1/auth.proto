@@ -15,6 +15,8 @@ syntax = "proto3";
 
 package kapp.v1;
 
+import "google/api/annotations.proto";
+
 message SSORequest {
   // code is the one-time exchange token issued by the KChat
   // OAuth provider. Single-use; consumed inside Exchange().
@@ -87,9 +89,23 @@ message RefreshResponse {
 service AuthService {
   // SSO trades a KChat OAuth code for a kapp access+refresh
   // pair. Unauthenticated (no JWT required); the KChat code is
-  // the trust anchor.
-  rpc SSO(SSORequest) returns (SSOResponse);
+  // the trust anchor. The HTTP mapping mirrors the existing
+  // REST handler at POST /api/v1/auth/sso (see
+  // services/api/auth.go) so a client can switch to the gRPC
+  // gateway transparently.
+  rpc SSO(SSORequest) returns (SSOResponse) {
+    option (google.api.http) = {
+      post: "/api/v2/auth/sso"
+      body: "*"
+    };
+  }
   // Refresh swaps a refresh token for a fresh access token.
   // Unauthenticated; the refresh token is the trust anchor.
-  rpc Refresh(RefreshRequest) returns (RefreshResponse);
+  // Mirrors POST /api/v1/auth/refresh.
+  rpc Refresh(RefreshRequest) returns (RefreshResponse) {
+    option (google.api.http) = {
+      post: "/api/v2/auth/refresh"
+      body: "*"
+    };
+  }
 }

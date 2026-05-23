@@ -33,9 +33,27 @@
 version: v2
 modules:
   - path: proto
+# deps pulls in the well-known protos kapp-fab uses for grpc-gateway:
+#   - googleapis/google/api/annotations.proto provides
+#     `(google.api.http)` so each RPC can declare its REST mapping
+#     inline, which protoc-gen-grpc-gateway consumes to emit the
+#     HTTP→gRPC reverse proxy.
+#   - googleapis/google/api/http.proto is transitively required
+#     by annotations.proto.
+# `buf dep update` writes buf.lock with pinned commit shas so CI
+# resolves the exact same dep tree as a developer's machine.
+deps:
+  - buf.build/googleapis/googleapis
 lint:
   use:
     - STANDARD
+  # Imported googleapis files are out of our edit scope — buf's
+  # default ignore list already excludes them but we list explicitly
+  # so a contributor wondering why google.api.http violations don't
+  # show up locally sees the intentional skip.
+  ignore_only:
+    PACKAGE_VERSION_SUFFIX:
+      - google/api
 breaking:
   use:
     - FILE

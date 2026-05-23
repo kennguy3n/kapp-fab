@@ -136,6 +136,38 @@ type Config struct {
 	// main API does not carry the SSE-shaped WriteTimeout=0 surface
 	// across every other route.
 	SSEAddr string
+
+	// GRPCAddr is the host:port the gRPC server (Pillar A5) binds
+	// to. When empty, the api binary serves HTTP only — the gRPC
+	// surface stays dark. When set (e.g. ":9090") the api binary
+	// stands up an additional grpc.Server with the same dependency
+	// wiring as the HTTP gateway (signer, tenant resolver, session
+	// store, ktype registry) so a gRPC client and a REST client
+	// hitting the same deployment see byte-for-byte identical
+	// behaviour. Production deployments SHOULD set this to an
+	// internal-only port so the SDK can dial the typed surface
+	// without re-translating through REST. Sourced from
+	// KAPP_GRPC_ADDR.
+	GRPCAddr string
+
+	// GRPCReflection controls whether the gRPC server advertises
+	// the grpc.reflection.v1alpha service so off-the-shelf tooling
+	// (grpcurl, BloomRPC, Postman) can list and invoke RPCs without
+	// a copy of the .proto files. Defaults off — production should
+	// keep reflection disabled so the on-the-wire surface is not
+	// self-describing. Sourced from KAPP_GRPC_REFLECTION.
+	GRPCReflection bool
+
+	// GatewayMount, when non-empty, mounts the grpc-gateway HTTP
+	// reverse-proxy on the main API router at the supplied path
+	// prefix (e.g. "/api/v2"). The gateway translates JSON/HTTP
+	// requests under that prefix to gRPC calls against the local
+	// in-process gRPC server, so an SDK using REST still goes
+	// through the same handler chain as a typed gRPC client.
+	// Empty disables the mount and the main router serves only
+	// the legacy /api/v1 handlers. Sourced from
+	// KAPP_GRPC_GATEWAY_MOUNT.
+	GatewayMount string
 }
 
 // LoadConfig reads configuration from environment variables and returns a
@@ -165,6 +197,9 @@ func LoadConfig() (*Config, error) {
 		LogLevel:         os.Getenv("KAPP_LOG_LEVEL"),
 		MetricsAddr:      os.Getenv("KAPP_METRICS_ADDR"),
 		SSEAddr:          os.Getenv("KAPP_SSE_ADDR"),
+		GRPCAddr:         os.Getenv("KAPP_GRPC_ADDR"),
+		GRPCReflection:   getenvBool("KAPP_GRPC_REFLECTION", false),
+		GatewayMount:     os.Getenv("KAPP_GRPC_GATEWAY_MOUNT"),
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
