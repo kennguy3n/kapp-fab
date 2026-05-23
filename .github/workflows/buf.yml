@@ -77,6 +77,27 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "::notice::main does not yet contain a proto/ tree; skipping buf breaking. Subsequent PRs will run the full breaking check."
           fi
+      # buf breaking is given `--against` (the baseline) and the
+      # current input as two separate args. The asymmetry between
+      # them is intentional and harmless:
+      #   - Baseline: `.git#branch=main,subdir=proto` — buf walks
+      #     the proto/ subdirectory of the main-branch tree and
+      #     infers a module from the .proto files it finds there.
+      #     There is no buf.yaml inside proto/ on main; buf v2
+      #     falls back to the default module config (matching the
+      #     STANDARD ruleset and FILE breaking-change category we
+      #     declare in buf.yaml at the workspace root).
+      #   - Current: `proto` — buf walks the proto/ directory of
+      #     the checkout, sees the workspace buf.yaml at the repo
+      #     root pointing modules: [{path: proto}], and resolves
+      #     the same module via the workspace config.
+      # Because the FILE breaking-change category only inspects
+      # proto file contents (field numbers, service signatures,
+      # enum values) — never workspace metadata — the asymmetry
+      # never affects the result. If buf v3 ever changes how
+      # module identity is computed for breaking checks, revisit
+      # this line and either copy buf.yaml into proto/ on main or
+      # use `--against '.git#branch=main'` against the repo root.
       - if: steps.baseline.outputs.exists == 'true'
         run: buf breaking --against '.git#branch=main,subdir=proto' proto
 

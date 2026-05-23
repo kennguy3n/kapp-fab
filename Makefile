@@ -72,6 +72,32 @@ proto-lint:
 # is itself a no-op when the requested version is already in the
 # Go module cache, so the cost on subsequent runs is one go-cmd
 # invocation, not a re-download/re-compile.
+#
+# Version-compat policy (audit on every grpc-go / protobuf-go bump):
+#
+#   * protoc-gen-go@v1.36.11 is pinned to match
+#     `google.golang.org/protobuf v1.36.11` in go.mod. Both modules
+#     ship from the same repository and share a single version; the
+#     generated code's runtime API is determined by the runtime
+#     module on go.mod, and the codegen has to be identical or the
+#     generated `.pb.go` will refer to symbols that don't exist in
+#     the runtime.
+#
+#   * protoc-gen-go-grpc@v1.5.1 is intentionally NOT anchored to a
+#     go.mod entry. The plugin is versioned independently from the
+#     `google.golang.org/grpc v1.80.0` runtime in go.mod because
+#     the generated stubs only consume grpc-go's long-stable
+#     codegen surface (`grpc.ServiceDesc`, `grpc.ClientStream`,
+#     `grpc.ServerStream`, `grpc.ClientConn`, `grpc.ServiceRegistrar`).
+#     The plugin major-pinned at v1.x does not embed runtime-
+#     specific symbols, so the v1.5.1 codegen is safe against any
+#     `v1.6x` / `v1.7x` / `v1.8x` runtime. If grpc-go ever bumps
+#     the codegen contract (announced via a `protoc-gen-go-grpc`
+#     v2.x release or a release-note flag), audit this line and
+#     bump to the matching version. Until then v1.5.1 is the
+#     correct pin — the bot's "could silently produce
+#     incompatible stubs" concern is real for some plugin/runtime
+#     pairs but not for protoc-gen-go-grpc's stability contract.
 proto-gen:
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
 	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
