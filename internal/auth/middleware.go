@@ -145,6 +145,15 @@ func ClaimsFromContext(ctx context.Context) *Claims {
 	return nil
 }
 
+// WithClaims stamps claims onto ctx using the same private key
+// ClaimsFromContext reads from. Exported so the gRPC auth
+// interceptor (internal/grpc) can populate the context with the
+// identical contract the HTTP middleware uses — downstream business
+// logic should never need to know which surface a request arrived on.
+func WithClaims(ctx context.Context, claims *Claims) context.Context {
+	return context.WithValue(ctx, ctxKeyClaims, claims)
+}
+
 // IsRecoveryBypass reports whether the supplied request context was
 // admitted via the platform-admin recovery bypass in Middleware — i.e.
 // the home tenant was suspended/archived but the user is a platform

@@ -70,7 +70,19 @@ func run() error {
 	}
 	defer cleanup()
 
-	r := registerRoutes(d, logger)
+	// Phase A5 — gRPC + grpc-gateway. The gRPC server stands up
+	// BEFORE the chi router is built because the gateway needs the
+	// listener address up-front so it can dial the local loopback
+	// upstream. When KAPP_GRPC_ADDR is empty the runtime is a
+	// no-op handle and registerRoutes mounts only the legacy
+	// /api/v1 surface.
+	grpcRT, err := startGRPCServer(ctx, d, logger)
+	if err != nil {
+		return fmt.Errorf("api: start grpc: %w", err)
+	}
+	defer grpcRT.Stop()
+
+	r := registerRoutes(d, logger, grpcRT)
 
 	// HTTP timeout policy depends on whether SSE is being served on a
 	// dedicated port (KAPP_SSE_ADDR set) or co-mounted on the main

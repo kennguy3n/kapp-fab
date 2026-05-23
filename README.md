@@ -153,7 +153,7 @@ kapp/
    ```
    make proto-gen
    ```
-   This installs the `protoc-gen-go` and `protoc-gen-go-grpc` plugins on first run, then drives `buf generate`. Re-run it whenever a `.proto` file changes.
+   This installs `protoc-gen-go`, `protoc-gen-go-grpc`, and `protoc-gen-grpc-gateway` on first run, then drives `buf generate`. Re-run it whenever a `.proto` file changes. The gRPC server is opt-in: set `KAPP_GRPC_ADDR=:9090` to expose it, and `KAPP_GRPC_GATEWAY_MOUNT=/api/v2` to also serve REST clients through the HTTP↔gRPC reverse-proxy on the main router.
 
 3. Run all migrations:
    ```

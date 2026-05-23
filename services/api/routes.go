@@ -34,7 +34,7 @@ import (
 // apiDeps would either duplicate the nil-checks or instantiate
 // stores that the binary never serves. Leaving them inline keeps
 // the conditional shape close to the routes that use them.
-func registerRoutes(d *apiDeps, logger *slog.Logger) chi.Router {
+func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
@@ -864,6 +864,16 @@ func registerRoutes(d *apiDeps, logger *slog.Logger) chi.Router {
 		// OpenAPI machine-readable schema served for API consumers.
 		r.Get("/api/v1/openapi.json", d.oh.serve)
 	}) // end timeout-guarded group
+
+	// Phase A5 grpc-gateway. Mounted OUTSIDE the timeout-guarded
+	// group because gateway-translated streaming RPCs need a
+	// WriteTimeout of 0 the same way /api/v1/events/stream does.
+	// The standard request-id / tracing / metrics middleware at
+	// the top of registerRoutes still applies because chi mounts
+	// the gateway as a child route, NOT a separate router.
+	if grpcRT != nil {
+		grpcRT.MountGateway(r)
+	}
 
 	return r
 }

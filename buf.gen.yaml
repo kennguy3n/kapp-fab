@@ -19,6 +19,16 @@
 version: v2
 managed:
   enabled: true
+  # disable the go_package_prefix override for vendored googleapis
+  # files. Those .proto files ship with their own go_package option
+  # pointing at google.golang.org/genproto/googleapis/api/...; if we
+  # override them with our gen/go prefix the generated `.pb.go`
+  # imports a phantom path (gen/go/google/api) that doesn't exist
+  # on disk. The genproto module is already in go.mod via the
+  # grpc-gateway/v2 dep so leaving its go_package untouched
+  # resolves to the right symbols at compile time.
+  disable:
+    - module: buf.build/googleapis/googleapis
   override:
     - file_option: go_package_prefix
       value: github.com/kennguy3n/kapp-fab/gen/go
@@ -31,3 +41,16 @@ plugins:
     out: gen/go
     opt:
       - paths=source_relative
+  # protoc-gen-grpc-gateway emits the HTTP↔gRPC reverse proxy
+  # implied by each rpc's google.api.http annotation. The
+  # `generate_unbound_methods=false` flag intentionally OMITS
+  # gateway stubs for RPCs that don't declare a (google.api.http)
+  # mapping — the kapp-fab convention is that every gateway-
+  # accessible RPC must declare its REST shape explicitly, so an
+  # unmapped RPC is gRPC-only by design (e.g. streaming bulk
+  # operations that have no REST analogue).
+  - local: protoc-gen-grpc-gateway
+    out: gen/go
+    opt:
+      - paths=source_relative
+      - generate_unbound_methods=false

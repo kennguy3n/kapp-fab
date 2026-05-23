@@ -17,6 +17,8 @@ syntax = "proto3";
 
 package kapp.v1;
 
+import "google/api/annotations.proto";
+
 // KType is the wire form of a registered KType. `schema` is a
 // raw JSON Schema document; we keep it opaque on the wire for
 // the same reason `Record.data` is opaque — the inner shape is
@@ -62,7 +64,28 @@ message ListKTypesResponse {
 }
 
 service KTypeService {
-  rpc RegisterKType(RegisterKTypeRequest) returns (RegisterKTypeResponse);
-  rpc GetKType(GetKTypeRequest) returns (GetKTypeResponse);
-  rpc ListKTypes(ListKTypesRequest) returns (ListKTypesResponse);
+  // RegisterKType mirrors POST /api/v1/ktypes; the gRPC-gateway
+  // mount serves it at /api/v2/ktypes so clients can switch
+  // between the two surfaces without changing payload shape.
+  rpc RegisterKType(RegisterKTypeRequest) returns (RegisterKTypeResponse) {
+    option (google.api.http) = {
+      post: "/api/v2/ktypes"
+      body: "*"
+    };
+  }
+  // GetKType mirrors GET /api/v1/ktypes/{name}?version=N. The
+  // gateway routes URL-template variables into proto fields by
+  // name, so {name} populates GetKTypeRequest.name and the
+  // optional ?version=… query string populates .version.
+  rpc GetKType(GetKTypeRequest) returns (GetKTypeResponse) {
+    option (google.api.http) = {
+      get: "/api/v2/ktypes/{name}"
+    };
+  }
+  // ListKTypes mirrors GET /api/v1/ktypes.
+  rpc ListKTypes(ListKTypesRequest) returns (ListKTypesResponse) {
+    option (google.api.http) = {
+      get: "/api/v2/ktypes"
+    };
+  }
 }
