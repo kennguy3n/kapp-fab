@@ -330,21 +330,28 @@ func TestValidateRawSQLRejectsSelectInto(t *testing.T) {
 }
 
 // TestValidateRawSQLRejectsSetConfig pins the set_config leg of
-// the dangerous-extension denylist. set_config(name, value,
+// the dangerous-functions denylist. set_config(name, value,
 // is_local) can change `app.tenant_id` (which the RLS policy
 // reads), so it would break tenant isolation if allowed. RLS qual
 // evaluation order is plan-dependent; fail closed at the AST
-// layer regardless. The user-facing message uses the
-// "disallowed extension function" wording since set_config is
-// blocked by the dangerousExtensionFunctions denylist (it is
-// technically a system function, but classifying it as extension
-// keeps the denylist as the single source of truth).
+// layer regardless.
+//
+// set_config is a built-in PostgreSQL function (it lives in
+// pg_catalog, just without the `pg_` prefix), so the user-facing
+// message uses the "system function" wording. Both the bare
+// `set_config(…)` form (matched via the denylist) and the
+// `pg_catalog.set_config(…)` form (matched via the schema check)
+// produce the same classification, so callers see a consistent
+// error category regardless of how they qualified the call.
 func TestValidateRawSQLRejectsSetConfig(t *testing.T) {
 	cases := []string{
 		"SELECT set_config('app.tenant_id', '00000000-0000-0000-0000-000000000000', true)",
 		"SELECT set_config('app.tenant_id', 'victim', true), * FROM krecords",
 		"SELECT SET_CONFIG('app.tenant_id', 'x', true)",
 		"SELECT public.set_config('app.tenant_id', 'x', true)",
+		// pg_catalog-qualified form must produce the same
+		// system-function classification as the bare form.
+		"SELECT pg_catalog.set_config('app.tenant_id', 'x', true)",
 	}
 	for _, body := range cases {
 		err := validateRawSQL(body)
@@ -355,8 +362,8 @@ func TestValidateRawSQLRejectsSetConfig(t *testing.T) {
 		if !errors.Is(err, ErrUnsafeSQL) {
 			t.Errorf("validateRawSQL(%q) error = %q; want ErrUnsafeSQL", body, err)
 		}
-		if !strings.Contains(err.Error(), "disallowed extension function") {
-			t.Errorf("validateRawSQL(%q) error = %q; want disallowed-extension-function message", body, err)
+		if !strings.Contains(err.Error(), "system function") {
+			t.Errorf("validateRawSQL(%q) error = %q; want system-function message", body, err)
 		}
 	}
 }
@@ -394,18 +401,17 @@ func TestValidateRawSQLRejectsSchemaQualifiedPg(t *testing.T) {
 // TestValidateRawSQLRejectsDangerousExtensionFunction pins rule 5c
 // for the extension-function leg of the function denylist. dblink
 // opens a new connection that bypasses RLS / READ ONLY /
-// statement_timeout from the outer tx, and lo_import / lo_export do
-// server-side file I/O — neither has a `pg_` prefix that the system
-// rule would catch, so the explicit denylist must reject them. The
-// user-facing message says "disallowed extension function" so
-// operators can distinguish the cause from a system-function block.
+// statement_timeout from the outer tx — it requires CREATE
+// EXTENSION dblink to install, so it is genuinely an extension
+// function and the user-facing message says so ("disallowed
+// extension function"). Large-object I/O (lo_import / lo_export)
+// is covered by TestValidateRawSQLRejectsBuiltinDenylist below
+// since those are built-in functions, not extension functions.
 func TestValidateRawSQLRejectsDangerousExtensionFunction(t *testing.T) {
 	cases := []string{
 		"SELECT dblink('dbname=other', 'SELECT * FROM krecords')",
 		"SELECT dblink_exec('dbname=other', 'DELETE FROM krecords')",
 		"SELECT dblink_connect('dbname=other')",
-		"SELECT lo_import('/etc/passwd')",
-		"SELECT lo_export(1, '/tmp/leak')",
 		"SELECT 1 FROM (SELECT dblink('dbname=other', 'x') AS y) t",
 		"SELECT public.dblink('dbname=other', 'SELECT 1')",
 		"SELECT DBLINK('dbname=other', 'SELECT 1')",
@@ -421,6 +427,103 @@ func TestValidateRawSQLRejectsDangerousExtensionFunction(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "disallowed extension function") {
 			t.Errorf("validateRawSQL(%q) error = %q; want disallowed-extension-function message", body, err)
+		}
+	}
+}
+
+// TestValidateRawSQLRejectsBuiltinDenylist pins the built-in
+// (non-pg_-prefixed) leg of the function denylist. lo_import and
+// lo_export are large-object I/O functions that ship with the
+// PostgreSQL core distribution (they live in pg_catalog despite
+// the lo_ prefix). Their leaf names happen not to start with
+// `pg_`, so the prefix check doesn't catch them — the explicit
+// denylist must reject them, and the error message must use the
+// "system function" wording to accurately reflect that they are
+// built-ins rather than from an extension. Compare with
+// TestValidateRawSQLRejectsDangerousExtensionFunction (dblink) for
+// the extension-classification counterpart.
+func TestValidateRawSQLRejectsBuiltinDenylist(t *testing.T) {
+	cases := []string{
+		"SELECT lo_import('/etc/passwd')",
+		"SELECT lo_export(1, '/tmp/leak')",
+		"SELECT LO_IMPORT('/x')",          // case-insensitive
+		"SELECT public.lo_import('/x')",   // 2-part qualified leaf
+		"SELECT pg_catalog.lo_import('/x')", // pg_catalog-qualified
+	}
+	for _, body := range cases {
+		err := validateRawSQL(body)
+		if err == nil {
+			t.Errorf("validateRawSQL(%q) returned nil; want built-in denylist rejection", body)
+			continue
+		}
+		if !errors.Is(err, ErrUnsafeSQL) {
+			t.Errorf("validateRawSQL(%q) error = %q; want ErrUnsafeSQL", body, err)
+		}
+		if !strings.Contains(err.Error(), "system function") {
+			t.Errorf("validateRawSQL(%q) error = %q; want system-function message (lo_* are built-ins, not extensions)", body, err)
+		}
+	}
+}
+
+// TestValidateRawSQLRejectsSchemaQualifiedPgTable pins the
+// fail-closed defense-in-depth for 2-part `<schema>.pg_*` table
+// references. A DBA-created view `public.pg_authid` that wraps
+// `pg_catalog.pg_authid` would otherwise bypass the validator,
+// since `public` is not in the explicit system-schema list. Same
+// fail-closed posture as the function-call path's
+// pg_-prefixed-leaf check (TestValidateRawSQLRejectsSchemaQualifiedPg).
+func TestValidateRawSQLRejectsSchemaQualifiedPgTable(t *testing.T) {
+	cases := []string{
+		"SELECT * FROM public.pg_authid",
+		"SELECT * FROM public.pg_stat_activity",
+		"SELECT * FROM myschema.pg_stat_user_tables",
+		"SELECT * FROM PUBLIC.PG_AUTHID", // case-insensitive
+	}
+	for _, body := range cases {
+		err := validateRawSQL(body)
+		if err == nil {
+			t.Errorf("validateRawSQL(%q) returned nil; want schema-qualified-pg-table rejection", body)
+			continue
+		}
+		if !errors.Is(err, ErrUnsafeSQL) {
+			t.Errorf("validateRawSQL(%q) error = %q; want ErrUnsafeSQL", body, err)
+		}
+		if !strings.Contains(err.Error(), "system catalog") {
+			t.Errorf("validateRawSQL(%q) error = %q; want system-catalog message", body, err)
+		}
+	}
+}
+
+// TestValidateRawSQLRejectsForUpdate pins the row-locking-clause
+// rejection. SELECT … FOR UPDATE / SHARE / NO KEY UPDATE / KEY
+// SHARE all parse as SelectStmt with a non-nil LockingClause and
+// would otherwise reach the per-tenant tx, where Postgres would
+// surface a less-friendly "cannot execute SELECT FOR UPDATE in a
+// read-only transaction" runtime error. Surfacing the rejection at
+// the AST layer keeps the validator as the single source of truth
+// for the editor surface's accepted shapes, with READ ONLY tx as
+// defense in depth.
+func TestValidateRawSQLRejectsForUpdate(t *testing.T) {
+	cases := []string{
+		"SELECT * FROM krecords FOR UPDATE",
+		"SELECT * FROM krecords FOR SHARE",
+		"SELECT * FROM krecords FOR NO KEY UPDATE",
+		"SELECT * FROM krecords FOR KEY SHARE",
+		"SELECT * FROM krecords FOR UPDATE NOWAIT",
+		"SELECT * FROM krecords FOR UPDATE SKIP LOCKED",
+		"SELECT id FROM krecords WHERE tenant_id = $1 FOR UPDATE",
+	}
+	for _, body := range cases {
+		err := validateRawSQL(body)
+		if err == nil {
+			t.Errorf("validateRawSQL(%q) returned nil; want FOR UPDATE rejection", body)
+			continue
+		}
+		if !errors.Is(err, ErrUnsafeSQL) {
+			t.Errorf("validateRawSQL(%q) error = %q; want ErrUnsafeSQL", body, err)
+		}
+		if !strings.Contains(err.Error(), "FOR UPDATE") {
+			t.Errorf("validateRawSQL(%q) error = %q; want FOR-UPDATE message", body, err)
 		}
 	}
 }
@@ -468,27 +571,31 @@ func TestIsSystemFunctionPositive(t *testing.T) {
 		{[]string{"public", "pg_read_file"}, funcKindSystem},
 		{[]string{"PUBLIC", "PG_READ_FILE"}, funcKindSystem},
 		{[]string{"app", "pg_backend_pid"}, funcKindSystem},
-		// set_config in the dangerous-extension denylist must
-		// classify as funcKindExtension so the runner emits the
-		// matching message.
-		{[]string{"set_config"}, funcKindExtension},
-		{[]string{"SET_CONFIG"}, funcKindExtension},
-		{[]string{"public", "set_config"}, funcKindExtension},
-		// Dangerous extension functions: dblink and large-object I/O.
-		// Both bypass the editor sandbox's safety layers (new
-		// connection / server-side file I/O) and must be rejected as
-		// funcKindExtension so the runner produces the
+		// set_config is a built-in PostgreSQL function (lives in
+		// pg_catalog, just without the `pg_` prefix). Both the
+		// bare form and the public-schema form must produce
+		// funcKindSystem so the user-facing message is consistent
+		// regardless of qualification — same as how the
+		// pg_catalog.set_config form is classified via the schema
+		// check at the top of isSystemFunction.
+		{[]string{"set_config"}, funcKindSystem},
+		{[]string{"SET_CONFIG"}, funcKindSystem},
+		{[]string{"public", "set_config"}, funcKindSystem},
+		// Large-object I/O is also built-in (not from an extension)
+		// despite the lo_ prefix that suggests otherwise.
+		// Classification follows the dangerousFunctions map.
+		{[]string{"lo_import"}, funcKindSystem},
+		{[]string{"lo_export"}, funcKindSystem},
+		{[]string{"public", "lo_import"}, funcKindSystem},
+		// dblink_* genuinely is an extension (requires CREATE
+		// EXTENSION dblink to install), so funcKindExtension is
+		// the correct classification and the runner produces the
 		// "disallowed extension function" error message.
 		{[]string{"dblink"}, funcKindExtension},
 		{[]string{"DBLINK"}, funcKindExtension}, // case-insensitive leaf
 		{[]string{"dblink_exec"}, funcKindExtension},
 		{[]string{"dblink_send_query"}, funcKindExtension},
-		{[]string{"lo_import"}, funcKindExtension},
-		{[]string{"lo_export"}, funcKindExtension},
-		// Schema-qualified dangerous extension function: schema is
-		// irrelevant for safety, only the leaf name matters.
 		{[]string{"public", "dblink"}, funcKindExtension},
-		{[]string{"public", "lo_import"}, funcKindExtension},
 	}
 	for _, tc := range cases {
 		fc := makeFuncCall(tc.parts...)

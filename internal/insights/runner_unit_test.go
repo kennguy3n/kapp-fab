@@ -155,9 +155,13 @@ func TestRunRawSQLRejectsSystemFunction(t *testing.T) {
 
 // TestRunRawSQLRejectsDangerousExtensionFunction covers the
 // extension-function leg of rule 5c via the full RunRawSQL path.
-// dblink, lo_import, and lo_export bypass the sandbox's safety
-// layers and must be rejected with the "disallowed extension
-// function" message that the runner emits for funcKindExtension.
+// dblink_* requires CREATE EXTENSION dblink to install, so it is
+// classified as funcKindExtension and the runner emits the
+// "disallowed extension function" message. Large-object I/O
+// (lo_import / lo_export), despite the lo_ prefix that looks
+// extension-shaped, is actually built-in to the PostgreSQL core
+// distribution and is therefore classified as funcKindSystem —
+// covered by TestRunRawSQLRejectsBuiltinDenylist.
 func TestRunRawSQLRejectsDangerousExtensionFunction(t *testing.T) {
 	r := &Runner{}
 	cases := []struct {
@@ -168,8 +172,6 @@ func TestRunRawSQLRejectsDangerousExtensionFunction(t *testing.T) {
 		{"dblink_exec", "SELECT dblink_exec('dbname=other', 'DELETE FROM krecords')"},
 		{"qualified_public_dblink", "SELECT public.dblink('dbname=other', 'SELECT 1')"},
 		{"case_insensitive_dblink", "SELECT DBLINK('dbname=other', 'SELECT 1')"},
-		{"lo_import", "SELECT lo_import('/etc/passwd')"},
-		{"lo_export", "SELECT lo_export(1, '/tmp/leak')"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -182,6 +184,42 @@ func TestRunRawSQLRejectsDangerousExtensionFunction(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "disallowed extension function") {
 				t.Fatalf("RunRawSQL(%q) error = %q; want disallowed-extension-function message", tc.body, err.Error())
+			}
+		})
+	}
+}
+
+// TestRunRawSQLRejectsBuiltinDenylist covers the built-in
+// (non-pg_-prefixed) leg of rule 5c via the full RunRawSQL path.
+// lo_import and lo_export ship with PostgreSQL core (they live in
+// pg_catalog despite the lo_ prefix), so they are classified as
+// funcKindSystem and the runner emits the "system function"
+// message. The qualified `pg_catalog.lo_import` form takes the
+// schema-check path and also produces funcKindSystem — both forms
+// must agree on the user-facing error category.
+func TestRunRawSQLRejectsBuiltinDenylist(t *testing.T) {
+	r := &Runner{}
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"lo_import", "SELECT lo_import('/etc/passwd')"},
+		{"lo_export", "SELECT lo_export(1, '/tmp/leak')"},
+		{"qualified_public_lo_import", "SELECT public.lo_import('/etc/passwd')"},
+		{"qualified_pg_catalog_lo_import", "SELECT pg_catalog.lo_import('/etc/passwd')"},
+		{"case_insensitive_lo_import", "SELECT LO_IMPORT('/etc/passwd')"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := r.RunRawSQL(context.Background(), uuid.New(), tc.body, nil)
+			if err == nil {
+				t.Fatalf("RunRawSQL(%q) returned nil error; want built-in denylist rejection", tc.body)
+			}
+			if !errors.Is(err, ErrUnsafeSQL) {
+				t.Fatalf("RunRawSQL(%q) error = %q; want ErrUnsafeSQL", tc.body, err.Error())
+			}
+			if !strings.Contains(err.Error(), "system function") {
+				t.Fatalf("RunRawSQL(%q) error = %q; want system-function message (lo_* are built-ins, not extensions)", tc.body, err.Error())
 			}
 		})
 	}

@@ -160,6 +160,19 @@ func validateRawSQL(rawSQL string) error {
 	if sel.GetIntoClause() != nil {
 		return wrapUnsafe("SELECT INTO is not allowed (creates a table from the result set)")
 	}
+	// SELECT … FOR UPDATE/SHARE/NO KEY UPDATE/KEY SHARE parses as
+	// SelectStmt with a non-nil LockingClause. Postgres rejects
+	// these in a read-only transaction with a runtime error
+	// ("cannot execute SELECT FOR UPDATE in a read-only
+	// transaction"), but surfacing it at the AST layer keeps the
+	// validator as the single source of truth for what the editor
+	// surface accepts — readers don't suddenly see a different,
+	// less friendly error category for one specific shape of
+	// rejected SELECT. The READ ONLY tx remains as defense in
+	// depth.
+	if len(sel.GetLockingClause()) > 0 {
+		return wrapUnsafe("SELECT … FOR UPDATE/SHARE/NO KEY UPDATE/KEY SHARE is not allowed (row locking is not permitted in the read-only editor surface)")
+	}
 	// Walk the full tree and apply rules 5a/5b/5c. The walk
 	// terminates on the first violation found; the walker honours
 	// a `false` return from visit so all parent frames unwind
@@ -226,20 +239,27 @@ func validateRawSQL(rawSQL string) error {
 }
 
 // isSystemCatalog returns true when rv resolves to a Postgres system
-// catalog under the standard search_path. The check covers three
+// catalog under the standard search_path. The check covers four
 // shapes:
 //
-//   - Explicit schema = pg_catalog or information_schema (any
-//     relname).
-//   - No explicit schema, relname starts with `pg_` (matches the
-//     entire pg_catalog table family that Postgres resolves
-//     without qualification when search_path includes it — and it
-//     always does for the public user).
 //   - Catalog name set (cross-database reference, three-part name
 //     like `template1.pg_catalog.pg_authid`) — also rejected, since
 //     Postgres only supports same-database references in standard
 //     SQL. Cross-database is either a system catalog reference or
 //     a configuration error; either way, fail closed.
+//   - Explicit schema = pg_catalog or information_schema (any
+//     relname).
+//   - Any schema (including unset/empty) with a relname that
+//     starts with `pg_`. The unqualified case (`pg_authid`)
+//     catches the bare reference Postgres resolves via search_path.
+//     The schema-qualified case (`public.pg_authid`,
+//     `myschema.pg_stat_user_tables`) catches DBA-created wrappers
+//     or views that read from real system catalogs — a hostile
+//     `CREATE VIEW public.pg_authid AS SELECT * FROM
+//     pg_catalog.pg_authid` would otherwise bypass the validator,
+//     since `public` is not in the explicit system-schema list.
+//     Same fail-closed posture as isSystemFunction's
+//     pg_-prefixed-leaf check.
 //
 // Tenant tables in this repo all use lowercase non-`pg_` names
 // (krecords, krecord_versions, journal_entries, etc.), so the
@@ -260,30 +280,87 @@ func isSystemCatalog(rv *pg_query.RangeVar) bool {
 	case "pg_catalog", "information_schema":
 		return true
 	}
-	if schema == "" && strings.HasPrefix(strings.ToLower(rv.GetRelname()), "pg_") {
+	rel := strings.ToLower(rv.GetRelname())
+	// Defense in depth: the unqualified `pg_*` check covers
+	// `SELECT * FROM pg_authid`. The schema-qualified `pg_*`
+	// check below covers `SELECT * FROM public.pg_authid` — a
+	// DBA-created view in `public` that wraps `pg_catalog.pg_authid`
+	// (or any other system catalog) would otherwise bypass the
+	// validator, since `public` is not in the explicit system
+	// schema list. PostgreSQL allows user views in the public
+	// schema to read from pg_catalog freely; the validator's job
+	// is to fail closed at the AST layer rather than rely on the
+	// DBA never creating such a view. This mirrors the same
+	// pg_-prefixed-leaf check applied to function calls in
+	// isSystemFunction — same fail-closed posture for tables and
+	// functions.
+	if strings.HasPrefix(rel, "pg_") {
 		return true
 	}
 	return false
 }
 
-// dangerousExtensionFunctions enumerates non-`pg_`-prefixed function
-// names from PostgreSQL extensions that the validator must reject
-// because they bypass one or more of the editor sandbox's safety
-// layers:
+// dangerousFunctions enumerates non-`pg_`-prefixed function names
+// that the validator must reject because they bypass one or more
+// of the editor sandbox's safety layers, along with how each
+// function is classified for the user-facing error message.
+// Functions are split between two funcKind values:
 //
-//   - dblink_* (contrib/dblink): opens a NEW Postgres connection
-//     from inside the query. That new connection inherits neither
-//     the per-tenant `SET app.tenant_id` GUC (so RLS does not
-//     filter), nor the outer `SET TRANSACTION READ ONLY`, nor the
+//   - funcKindSystem: built-in PostgreSQL functions that ship with
+//     the core distribution and live in pg_catalog. Their leaf
+//     names happen not to start with `pg_` so the prefix check
+//     doesn't catch them, but they are genuinely system functions
+//     and the error message should say so. set_config, lo_import,
+//     and lo_export all fall in this bucket.
+//
+//   - funcKindExtension: functions provided by a contrib extension
+//     that requires CREATE EXTENSION to install. dblink_* is the
+//     canonical example. The error message identifies these as
+//     "extension functions" so a reader who knows the schema can
+//     reason about which extensions to lock down at the role
+//     grant layer.
+//
+// Per-function rationale (alphabetical by family):
+//
+//   - dblink_* (contrib/dblink, funcKindExtension): opens a NEW
+//     Postgres connection from inside the query. That new
+//     connection inherits neither the per-tenant
+//     `SET app.tenant_id` GUC (so RLS does not filter), nor the
+//     outer `SET TRANSACTION READ ONLY`, nor the
 //     `SET statement_timeout`. A single `SELECT dblink('…',
 //     'SELECT * FROM pg_authid')` would otherwise leak the entire
 //     pg_authid table to the editor user.
 //
-//   - lo_import / lo_export (large objects): read/write files on
-//     the server's filesystem. Require pg_read_server_files /
+//   - lo_import / lo_export (built-in large-object I/O,
+//     funcKindSystem): read/write files on the server's
+//     filesystem. Require pg_read_server_files /
 //     pg_write_server_files in modern Postgres, which the app role
-//     normally lacks — but the validator's job is to fail closed at
-//     the AST layer rather than rely on role grants downstream.
+//     normally lacks — but the validator's job is to fail closed
+//     at the AST layer rather than rely on role grants downstream.
+//     These are built-in, not from an extension, so they are
+//     classified as funcKindSystem.
+//
+//   - set_config (built-in session GUC mutator, funcKindSystem):
+//     `set_config(name, value, is_local)` can change
+//     `app.tenant_id` (the GUC RLS policies read) and any other
+//     session setting. As a SQL function it runs in the target
+//     list of an outer SELECT, so rule 5a (RangeVar) doesn't
+//     apply; the only safe move is an explicit denylist. A query
+//     like `SELECT set_config('app.tenant_id', 'victim-uuid',
+//     true), * FROM krecords` would otherwise attempt to swap the
+//     RLS tenant context mid-query. PostgreSQL's RLS qual
+//     evaluation is plan-dependent, so relying on "qual runs
+//     before target list" is unsafe — fail closed at the AST
+//     layer. set_config is a built-in pg_catalog function (just
+//     one whose name doesn't start with `pg_`), so the
+//     classification is funcKindSystem and the user-facing
+//     message says "system function" regardless of whether the
+//     caller wrote `set_config(...)` or `pg_catalog.set_config(...)`
+//     — same name, same classification.
+//
+//   - `current_setting(name, missing_ok)` is set_config's
+//     read-only cousin and is NOT blocked because reading
+//     `app.tenant_id` is benign and useful in queries.
 //
 // The list is a denylist (not exhaustive) because the universe of
 // extensions is open-ended; new extensions added to the production
@@ -294,48 +371,33 @@ func isSystemCatalog(rv *pg_query.RangeVar) bool {
 // before lookup. The map is small enough that linear scan vs.
 // map lookup doesn't matter, but a map keeps additions tidy and
 // makes the membership test obviously O(1).
-var dangerousExtensionFunctions = map[string]struct{}{
-	// Session GUC mutators — set_config(name, value, is_local)
-	// can change `app.tenant_id` (the GUC RLS policies read) and
-	// any other session setting. As a SQL function it runs in
-	// the target list of an outer SELECT, so rule 5a (RangeVar)
-	// doesn't apply; the only safe move is an explicit denylist.
-	// A query like `SELECT set_config('app.tenant_id',
-	// 'victim-uuid', true), * FROM krecords` would otherwise
-	// attempt to swap the RLS tenant context mid-query.
-	// PostgreSQL's RLS qual evaluation is plan-dependent, so
-	// relying on "qual runs before target list" is unsafe —
-	// fail closed at the AST layer.
-	//
-	// `current_setting(name, missing_ok)` is the read-only
-	// cousin; it is NOT blocked because reading
-	// app.tenant_id is benign and useful in queries.
-	"set_config": {},
-	// contrib/dblink — opens new connections, bypassing
-	// RLS / READ ONLY / statement_timeout from the outer tx.
-	"dblink":                  {},
-	"dblink_connect":          {},
-	"dblink_connect_u":        {},
-	"dblink_disconnect":       {},
-	"dblink_exec":             {},
-	"dblink_open":             {},
-	"dblink_fetch":            {},
-	"dblink_close":            {},
-	"dblink_cancel_query":     {},
-	"dblink_send_query":       {},
-	"dblink_get_result":       {},
-	"dblink_is_busy":          {},
-	"dblink_error_message":    {},
-	"dblink_current_query":    {},
-	"dblink_get_connections":  {},
-	"dblink_get_notify":       {},
-	"dblink_get_pkey":         {},
-	"dblink_build_sql_insert": {},
-	"dblink_build_sql_delete": {},
-	"dblink_build_sql_update": {},
-	// Large object I/O — read/write server-side files.
-	"lo_import": {},
-	"lo_export": {},
+var dangerousFunctions = map[string]funcKind{
+	// Session GUC mutator — built-in.
+	"set_config": funcKindSystem,
+	// Large object I/O — built-in.
+	"lo_import": funcKindSystem,
+	"lo_export": funcKindSystem,
+	// contrib/dblink — extension.
+	"dblink":                  funcKindExtension,
+	"dblink_connect":          funcKindExtension,
+	"dblink_connect_u":        funcKindExtension,
+	"dblink_disconnect":       funcKindExtension,
+	"dblink_exec":             funcKindExtension,
+	"dblink_open":             funcKindExtension,
+	"dblink_fetch":            funcKindExtension,
+	"dblink_close":            funcKindExtension,
+	"dblink_cancel_query":     funcKindExtension,
+	"dblink_send_query":       funcKindExtension,
+	"dblink_get_result":       funcKindExtension,
+	"dblink_is_busy":          funcKindExtension,
+	"dblink_error_message":    funcKindExtension,
+	"dblink_current_query":    funcKindExtension,
+	"dblink_get_connections":  funcKindExtension,
+	"dblink_get_notify":       funcKindExtension,
+	"dblink_get_pkey":         funcKindExtension,
+	"dblink_build_sql_insert": funcKindExtension,
+	"dblink_build_sql_delete": funcKindExtension,
+	"dblink_build_sql_update": funcKindExtension,
 }
 
 // funcKind distinguishes the two reasons isSystemFunction rejects a
@@ -374,9 +436,17 @@ const (
 //     as system.
 //  3. 1 part starting with `pg_` → reject as system.
 //  4. 1 part (or 2 parts with arbitrary schema) matches
-//     dangerousExtensionFunctions on its leaf name → reject as
-//     extension. The leaf is the last component, so `public.dblink(…)`
-//     and bare `dblink(…)` both match. Lookup is case-insensitive.
+//     dangerousFunctions on its leaf name → reject with the
+//     classification stored in the map (funcKindSystem for
+//     built-ins like set_config / lo_import, funcKindExtension
+//     for contrib functions like dblink). The leaf is the last
+//     component, so `public.dblink(…)` and bare `dblink(…)` both
+//     match. Lookup is case-insensitive. The map carries the
+//     classification so that bare `set_config(…)` and
+//     `pg_catalog.set_config(…)` produce the same user-facing
+//     error category instead of one saying "extension function"
+//     and the other "system function" for the same underlying
+//     built-in.
 //
 // In production the application DB user normally lacks
 // `pg_read_server_files` (so pg_read_file fails at runtime) and
@@ -422,8 +492,8 @@ func isSystemFunction(fc *pg_query.FuncCall) (string, funcKind, bool) {
 		if strings.HasPrefix(leaf, "pg_") {
 			return names[0] + "." + names[1], funcKindSystem, true
 		}
-		if _, bad := dangerousExtensionFunctions[leaf]; bad {
-			return names[0] + "." + names[1], funcKindExtension, true
+		if kind, bad := dangerousFunctions[leaf]; bad {
+			return names[0] + "." + names[1], kind, true
 		}
 		return "", funcKindNone, false
 	}
@@ -431,8 +501,8 @@ func isSystemFunction(fc *pg_query.FuncCall) (string, funcKind, bool) {
 	if strings.HasPrefix(name, "pg_") {
 		return names[0], funcKindSystem, true
 	}
-	if _, bad := dangerousExtensionFunctions[leaf]; bad {
-		return names[0], funcKindExtension, true
+	if kind, bad := dangerousFunctions[leaf]; bad {
+		return names[0], kind, true
 	}
 	return "", funcKindNone, false
 }
