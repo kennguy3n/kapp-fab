@@ -14,6 +14,17 @@ on:
   pull_request:
     branches: [main]
 
+# Workflow-level pins.  Single source of truth for tool versions
+# referenced by multiple steps.  Bumping a pin here propagates to
+# every step (config-verify install + lint-action invocations) at
+# once, so the schema-validation pass and the lint runs can NEVER
+# disagree on which golangci-lint version they target.  Devin
+# Review flagged the previous duplication as a real maintenance
+# hazard: four hard-coded copies of v2.5.0 would silently drift if
+# one site was updated and the others missed.
+env:
+  GOLANGCI_LINT_VERSION: v2.5.0
+
 jobs:
   go:
     name: go build + vet + test
@@ -85,7 +96,7 @@ jobs:
       # on any unknown key.
       - name: golangci-lint config verify
         run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
+          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"
           "$(go env GOPATH)/bin/golangci-lint" config verify
       # Two-stage lint: (1) strict ratchet on changes introduced by
       # this commit / PR — these MUST pass.  (2) full-codebase
@@ -163,13 +174,13 @@ jobs:
         if: env.LINT_BASE != ''
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.5.0
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
           args: --timeout=5m --new-from-rev=${{ env.LINT_BASE }}
       - name: "golangci-lint (strict, full codebase - first push only)"
         if: env.LINT_BASE == ''
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.5.0
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
           args: --timeout=10m
       # Advisory full-codebase pass: surfaces pre-existing issues for
       # visibility without blocking the ratchet job.  Skipped on the
@@ -182,7 +193,7 @@ jobs:
         continue-on-error: true
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.5.0
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
           args: --timeout=10m
 
   integration:

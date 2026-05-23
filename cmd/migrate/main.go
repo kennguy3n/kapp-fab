@@ -242,23 +242,37 @@ func openMigrate(src *migratesource.LegacySource, db *sql.DB) (*migrate.Migrate,
 }
 
 // schemaMigrationsStatus enumerates the three states schema_migrations
-// can be in.  The state controls whether `up` proceeds normally,
-// whether `bootstrap` is the correct next step, and whether
-// `bootstrap` can safely run.
+// can be in.  The state alone does NOT determine `up`'s behaviour —
+// cmdUp combines this with a sentinel-table probe to distinguish a
+// fresh DB from a legacy psql-loop DB (see cmdUp for the truth table).
+// The state controls:
+//
+//   - whether cmdBootstrap can safely run (Populated => refuse, anything
+//     else => allow);
+//   - the operator-facing wording in cmdUp's legacy-DB error message
+//     (Absent => "missing", Empty => "empty").
 type schemaMigrationsStatus int
 
 const (
-	// schemaMigrationsAbsent: table does not exist.  Fresh DB —
-	// `up` proceeds and WithInstance creates the table.
+	// schemaMigrationsAbsent: table does not exist.  Fresh DB by
+	// itself; legacy psql-loop DB if the sentinel table is also
+	// present.  cmdUp branches on the sentinel probe.
 	schemaMigrationsAbsent schemaMigrationsStatus = iota
-	// schemaMigrationsEmpty: table exists with zero rows.  Either a
-	// previous `up` attempt aborted after WithInstance's CREATE TABLE
-	// but before any migration committed, or a previous `bootstrap`
-	// invocation crashed.  `up` still proceeds; `bootstrap` is allowed.
+	// schemaMigrationsEmpty: table exists with zero rows.  This can
+	// happen if (a) a previous `up` aborted after WithInstance's
+	// CREATE TABLE but before any migration committed, or (b) a
+	// previous `bootstrap` crashed after WithInstance's CREATE TABLE
+	// but before Force() committed the version row.  In both cases,
+	// re-running `bootstrap` is the recovery path; cmdUp itself
+	// refuses to proceed when the sentinel is also present, because
+	// applying migrations on top of a legacy DB without first
+	// recording prior versions would re-run every 000001..N
+	// migration and fail.
 	schemaMigrationsEmpty
-	// schemaMigrationsPopulated: table has at least one row.  `up`
-	// proceeds normally; `bootstrap` is refused so it cannot clobber
-	// committed state.
+	// schemaMigrationsPopulated: table has at least one row.  cmdUp
+	// proceeds normally (golang-migrate will pick up where the
+	// existing rows leave off); cmdBootstrap is refused so it cannot
+	// clobber committed state.
 	schemaMigrationsPopulated
 )
 
