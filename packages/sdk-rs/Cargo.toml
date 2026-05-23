@@ -1,0 +1,182 @@
+[package]
+name = "kapp-sdk"
+version = "0.1.0"
+edition = "2021"
+# MSRV pinned to 1.86 (current floor of our transitive dep graph).
+#
+# What forces this floor: the modern ICU stack (`icu_collections`,
+# `icu_locale_core`, `icu_normalizer`, `icu_properties`,
+# `icu_provider`) plus `idna_adapter`, all pulled in via `jsonschema`
+# → `url` → `idna`. As of 2025-Q2, these crates declare
+# `rust-version = "1.86"` and use `edition = "2024"` constructs that
+# only Cargo 1.85+ parses, but actual compilation needs 1.86. We
+# follow the dep graph's floor rather than pinning older versions:
+#
+#   - The IDN/ICU ecosystem is on a rapid release cadence (Unicode
+#     16.0 support, BiDi changes) and pinning back creates a
+#     correctness gap, not just a build gap.
+#   - The SDK is not yet published to crates.io — we can adjust MSRV
+#     freely. Once we cut 1.0, MSRV bumps will follow a documented
+#     N-2 policy.
+#   - Other kapp-fab tooling already lives on current toolchains
+#     (Go 1.25, Node 20).
+rust-version = "1.86"
+description = "Official Rust SDK for the kapp-fab gRPC API."
+license = "Apache-2.0"
+repository = "https://github.com/kennguy3n/kapp-fab"
+readme = "README.md"
+keywords = ["kapp", "grpc", "sdk", "tonic"]
+categories = ["api-bindings", "asynchronous"]
+
+# The SDK is a standalone crate inside the kapp-fab monorepo — the rest
+# of the repo is Go + TypeScript. Keeping `package.publish = ["crates-io"]`
+# explicit makes the publish target intentional (the C-pillar release
+# workflow will run `cargo publish` against this manifest).
+publish = ["crates-io"]
+
+[lib]
+name = "kapp_sdk"
+path = "src/lib.rs"
+
+# Tonic 0.12.x is the last release before the 0.14 split (which moved
+# prost integration into a separate `tonic-prost` crate). The 0.12 line
+# is feature-stable, widely deployed, and avoids the transient crate
+# churn around 0.13/0.14 — the v2 wire surface of kapp-fab is what we
+# need to be stable on, not the build-time tonic API.
+[dependencies]
+tonic = { version = "0.12.3", default-features = false, features = [
+    "transport",
+    "codegen",
+    "prost",
+    "tls",
+    "tls-webpki-roots",
+    "tls-roots",
+] }
+prost = "0.13.5"
+prost-types = "0.13.5"
+tokio = { version = "1.40", features = ["sync", "rt", "rt-multi-thread", "time", "macros"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+http = "1.1"
+thiserror = "2.0"
+jsonschema = { version = "0.26", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+uuid = { version = "1.10", features = ["v7"] }
+arc-swap = "1.7"
+async-trait = "0.1"
+parking_lot = "0.12"
+# NOTE on what is NOT here:
+#   - `futures-util` is only needed by the e2e test harness (`join_all`
+#     for the concurrent-refresh assertion). It lives in `dev-dependencies`
+#     below so the published crate's transitive footprint stays minimal.
+#   - `once_cell` is intentionally absent: we use `tokio::sync::OnceCell`
+#     for the singleflight outcome cell (it's `Future`-aware in a way
+#     the synchronous `once_cell::sync::OnceCell` is not), so there is
+#     no need for the separate crate.
+
+[build-dependencies]
+# tonic-build 0.12 matches the runtime tonic version. We deliberately
+# pin both to the same minor so generated code and runtime types share
+# the same prost layout.
+tonic-build = { version = "0.12.3", default-features = false, features = ["prost", "transport"] }
+# protox compiles .proto files in pure Rust — no system protoc binary
+# required at build time. This matters for downstream consumers who
+# `cargo install kapp-sdk` and don't have protoc on PATH.
+protox = "0.7"
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["full", "test-util"] }
+# `futures-util` is a test-only dep: the only call site is
+# `tests/sdk_e2e.rs` (`futures_util::future::join_all` for the
+# concurrent-refresh assertion). Keeping it out of `[dependencies]`
+# means downstream consumers don't transitively pull it through the
+# published kapp-sdk crate.
+futures-util = { version = "0.3", default-features = false }
+tonic = { version = "0.12.3", default-features = false, features = [
+    "transport",
+    "codegen",
+    "prost",
+    "server",
+] }
+tower = { version = "0.5", features = ["util", "make"] }
+tempfile = "3.13"
+tokio-stream = { version = "0.1", features = ["net"] }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["client", "client-legacy"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1"
+serial_test = "3"
+
+[features]
+default = []
+# When enabled, integration tests under tests/integration_real_server.rs
+# will spawn the actual Go `services/api` binary and exercise the SDK
+# against it. Disabled by default because it requires a Postgres at
+# localhost:5432; the dedicated `rust-sdk-integration` CI job sets it.
+real-server-tests = []
+
+[[example]]
+name = "sso_then_list_ktypes"
+path = "examples/sso_then_list_ktypes.rs"
+
+[[example]]
+name = "register_ktype_with_validation"
+path = "examples/register_ktype_with_validation.rs"
+
+# Cargo.lock is tracked despite this being a library crate. The
+# monorepo's CI builds this crate from the same lockfile every
+# developer sees locally, which keeps the rust-sdk CI job
+# deterministic across runs. The Rust guideline of "libraries
+# don't commit Cargo.lock" assumes a crate is its own repo root
+# without CI; in a monorepo SDK that ships through a release
+# pipeline, lockfile reproducibility wins.
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "warn"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# We use `Result<T>` shorthand; explicit module path makes the public
+# API noisier without adding clarity.
+module_name_repetitions = "allow"
+# tonic's generated code triggers these; we can't fix them without
+# forking the codegen.
+default_trait_access = "allow"
+needless_pass_by_value = "allow"
+# Pedantic-level multiple_crate_versions trips on transitive deps we
+# don't control (e.g. hashbrown via multiple crates). Worth re-enabling
+# once the upstream ecosystem converges.
+multiple_crate_versions = "allow"
+# These are noise in async/Tonic code where the borrow checker forces
+# certain patterns.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+# nursery lint that fires on every doc string mentioning brand names
+# (KChat, UUIDv4, KType, etc.). We backtick where it's a code
+# identifier; product names are intentionally prose.
+doc_markdown = "allow"
+# We use `pub(crate)` inside private modules deliberately — it's how
+# we keep the public surface tight. Clippy nursery flags this as
+# redundant; we disagree.
+redundant_pub_crate = "allow"
+# Most of our `fn`s are async or borrow `self` in ways that make
+# `const fn` a no-op. Reviewing each call site individually for
+# const-eligibility is not worth the diff churn.
+missing_const_for_fn = "allow"
+# nursery: prefers `map_or` over `if let / else`. Both are fine;
+# we use whichever reads more naturally per call site.
+option_if_let_else = "allow"
+# nursery: prefers tightening Mutex guard scope. Our guards are
+# already scoped to a let-binding inside a block; further
+# tightening would hurt readability.
+significant_drop_tightening = "allow"
+# The `tonic::Status` type is 176 bytes (upstream); we don't control
+# its size. Boxing every internal Result<_, Status> would be diff
+# noise without runtime benefit.
+result_large_err = "allow"
