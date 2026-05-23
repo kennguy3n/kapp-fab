@@ -3,6 +3,14 @@
 // for an access+refresh pair scoped to the tenant the user picks
 // (or the default tenant for the account); Refresh swaps a still-
 // valid refresh token for a fresh access token.
+//
+// SSO and Refresh both return the same shape (auth.ExchangeResult
+// in services/api), which is why both RPC responses share the
+// ExchangeResult message rather than each carrying a duplicate
+// flat-field response. This keeps the proto byte-for-byte aligned
+// with the existing REST surface — `expires_in` (seconds-from-now,
+// int64) NOT `expires_at` (RFC3339 string), nested `user` /
+// `tenants` / `session_id` NOT flat actor_email/actor_name/role.
 syntax = "proto3";
 
 package kapp.v1;
@@ -20,21 +28,49 @@ message SSORequest {
   string preferred_tenant = 3;
 }
 
-// SSOResponse mirrors auth.SSOResult. access_token + refresh_token
-// are the canonical kapp JWT pair; expires_at is the access
-// token's exp claim formatted as rfc3339_nano so SDK clients
-// can pre-emptively refresh without parsing the token body.
-message SSOResponse {
+// ResolvedUser mirrors auth.ResolvedUser — the user-row projection
+// the SSO path produces after first login.
+message ResolvedUser {
+  string id = 1;
+  string kchat_user_id = 2;
+  string email = 3;
+  string display_name = 4;
+  bool is_platform_admin = 5;
+}
+
+// TenantRef mirrors auth.TenantRef — the membership summary
+// returned for the user's accessible tenants.
+message TenantRef {
+  string id = 1;
+  string slug = 2;
+  string name = 3;
+  // role is the user's role inside this tenant
+  // ("owner" / "admin" / "member" / etc.).
+  string role = 4;
+}
+
+// ExchangeResult mirrors auth.ExchangeResult — the shared payload
+// both SSO and Refresh return. expires_in is the access token's
+// TTL in SECONDS-FROM-NOW (int64), matching the REST surface; SDK
+// clients add it to the current wall-clock to compute the absolute
+// refresh deadline locally.
+message ExchangeResult {
   string access_token = 1;
   string refresh_token = 2;
-  string expires_at = 3;
-  string user_id = 4;
+  ResolvedUser user = 3;
+  repeated TenantRef tenants = 4;
+  // tenant_id is the tenant the access token is scoped to (one of
+  // the entries in `tenants`, picked from preferred_tenant or the
+  // account default).
   string tenant_id = 5;
-  string actor_email = 6;
-  string actor_name = 7;
-  // role is the calling user's role inside `tenant_id`
-  // ("owner" / "admin" / "member" / etc.).
-  string role = 8;
+  // session_id is the refresh-session row id. The refresh path
+  // looks this up to rotate the refresh token.
+  string session_id = 6;
+  int64 expires_in = 7;
+}
+
+message SSOResponse {
+  ExchangeResult result = 1;
 }
 
 message RefreshRequest {
@@ -45,9 +81,7 @@ message RefreshRequest {
 // itself is rotated (new value returned) so a stolen refresh
 // token is single-use once a legitimate refresh happens.
 message RefreshResponse {
-  string access_token = 1;
-  string refresh_token = 2;
-  string expires_at = 3;
+  ExchangeResult result = 1;
 }
 
 service AuthService {
