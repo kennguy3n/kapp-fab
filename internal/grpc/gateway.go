@@ -12,6 +12,32 @@ import (
 	kappv1 "github.com/kennguy3n/kapp-fab/gen/go/kapp/v1"
 )
 
+// GatewayMountPrefix is the canonical HTTP path prefix the
+// grpc-gateway is mounted on. Every `google.api.http` annotation in
+// proto/kapp/v1/*.proto starts with this prefix (auth.proto:98,107
+// /api/v2/auth/*; ktype.proto:77,87,93 /api/v2/ktypes*; …). The
+// constant is the single source of truth that the api binary uses
+// to validate KAPP_GRPC_GATEWAY_MOUNT at boot — see
+// services/api/grpc.go startGRPCServer().
+//
+// MAINTAINERS: when a new versioned proto contract (v3, v4, …) is
+// introduced, update this constant in lockstep with the new
+// `google.api.http` paths. A drift between this value and the
+// annotation prefix turns into a silent "every /api/vN request 404s"
+// failure at the gateway mount — the operator would see a
+// successful boot log but no route would match. The boot-time
+// validation refuses to start when the configured mount doesn't
+// share this prefix, surfacing the misconfig as an explicit error
+// instead.
+//
+// Validation is intentionally a string-equality check rather than a
+// proto-introspection check: grpc-gateway's runtime.ServeMux does
+// not expose its registered routes publicly, and parsing the
+// generated *_gw.pb.go to extract annotation paths at runtime would
+// couple us to codegen internals. A constant kept beside the proto
+// file is the practical single source of truth.
+const GatewayMountPrefix = "/api/v2"
+
 // GatewayConfig bundles the inputs NewGateway needs. The gateway
 // runs as a reverse proxy that translates HTTP/JSON requests
 // (matching each rpc's google.api.http annotation) into gRPC

@@ -144,6 +144,28 @@ func startGRPCServer(ctx context.Context, d *apiDeps, logger *slog.Logger) (*grp
 				cfg.GatewayMount,
 			)
 		}
+		// Pin the mount prefix to the value every proto
+		// google.api.http annotation shares (apigrpc.GatewayMountPrefix).
+		// Without this guard, an operator setting
+		// KAPP_GRPC_GATEWAY_MOUNT=/api/v3 (or any value that doesn't
+		// match the proto annotation prefix) would see a successful
+		// boot log but every /api/v3 request would 404 silently,
+		// because chi delivers the full URL.Path to the gateway and
+		// the gateway's runtime.ServeMux only matches the literal
+		// paths declared in each rpc's google.api.http option. The
+		// existing trim+empty+root validation catches the most
+		// common typos; this check catches the "wrong version" /
+		// "drifted from proto" class.
+		if mount != apigrpc.GatewayMountPrefix {
+			rt.Stop()
+			return nil, fmt.Errorf(
+				"grpc gateway: KAPP_GRPC_GATEWAY_MOUNT=%q does not match the proto annotation prefix %q; "+
+					"every google.api.http path in proto/kapp/v1/*.proto starts with %q, so any other mount value "+
+					"would 404 every gateway request -- update KAPP_GRPC_GATEWAY_MOUNT (or, if introducing a new "+
+					"proto version, update apigrpc.GatewayMountPrefix in internal/grpc/gateway.go to match)",
+				cfg.GatewayMount, apigrpc.GatewayMountPrefix, apigrpc.GatewayMountPrefix,
+			)
+		}
 		gw, err := apigrpc.NewGateway(ctx, apigrpc.GatewayConfig{
 			GRPCEndpoint: rt.addr,
 		})
