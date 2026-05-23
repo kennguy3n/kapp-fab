@@ -1,0 +1,67 @@
+// agent.proto wires the Phase B "agent tools" surface — a
+// registry of named tools (crm.summarize_pipeline,
+// finance.post_invoice, etc.) the assistant-side experience
+// invokes against the tenant's data.
+//
+// The executor (internal/agents.Executor) owns dispatch,
+// permission checks, confirmation gating, and audit emission;
+// the gRPC layer only translates wire types into Invocation
+// envelopes the executor consumes.
+syntax = "proto3";
+
+package kapp.v1;
+
+// ToolDescriptor is the registry entry for a single tool. The
+// fields mirror internal/agents.ToolDescriptor; the schema
+// field is opaque bytes (JSON Schema) for the same reason
+// KType.schema is opaque.
+message ToolDescriptor {
+  string name = 1;
+  string description = 2;
+  // schema is the JSON Schema of the tool's argument shape,
+  // serialized verbatim from the registry. Empty schema means
+  // the tool takes no arguments.
+  bytes schema = 3;
+  // requires_confirmation flags tools that should not execute
+  // until the caller explicitly confirms (used for destructive
+  // tools like finance.delete_invoice).
+  bool requires_confirmation = 4;
+  // mode is "read" / "write" / "destructive". Surfaced so
+  // assistant UIs can render the right risk affordance.
+  string mode = 5;
+}
+
+message ListToolsRequest {}
+message ListToolsResponse {
+  repeated ToolDescriptor tools = 1;
+}
+
+// InvokeToolRequest matches agents.Invocation. tenant_id and
+// actor_id are stamped server-side from the auth context — the
+// client-provided values are ignored — so external callers can
+// not forge identities.
+message InvokeToolRequest {
+  string tool_name = 1;
+  // arguments is the tool's argument payload, JSON-encoded.
+  bytes arguments = 2;
+  // confirmed lets a caller resubmit after seeing a
+  // ConfirmationRequired error. Resubmission must include
+  // confirmed=true AND the identical arguments bytes.
+  bool confirmed = 3;
+}
+
+message InvokeToolResponse {
+  // result is the tool's JSON output. Schema varies per tool;
+  // SDK helpers wrap each tool in a typed surface so callers
+  // don't unmarshal raw bytes themselves.
+  bytes result = 1;
+  // confirmation_required is true when the tool refused to
+  // run because the request lacked confirmed=true. Wraps the
+  // agents.ErrConfirmationRequired sentinel.
+  bool confirmation_required = 2;
+}
+
+service AgentService {
+  rpc ListTools(ListToolsRequest) returns (ListToolsResponse);
+  rpc InvokeTool(InvokeToolRequest) returns (InvokeToolResponse);
+}

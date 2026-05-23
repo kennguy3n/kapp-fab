@@ -1,0 +1,124 @@
+// webhook.proto wires the per-tenant outbound webhook surface
+// (notifications.WebhookStore). Webhooks subscribe to event
+// types and receive HTTP POSTs with HMAC signatures; deliveries
+// are tracked per attempt so the UI can render retry timelines.
+syntax = "proto3";
+
+package kapp.v1;
+
+message Webhook {
+  string id = 1;
+  string tenant_id = 2;
+  string url = 3;
+  // secret is the HMAC signing key. Returned in clear so admins
+  // can copy it into verification tooling. Rotation requires a
+  // PUT with `secret` explicitly set; the store never auto-
+  // regenerates it.
+  string secret = 4;
+  // event_filters is a JSON array of event-type globs the
+  // webhook subscribes to (e.g. ["record.crm.deal.*",
+  // "approval.decided"]). Opaque to the gRPC layer.
+  bytes event_filters = 5;
+  // conditions is an optional JSONB-expression filter applied
+  // to the event payload before delivery — see
+  // notifications.webhook_conditions for grammar.
+  bytes conditions = 6;
+  int32 max_retries = 7;
+  int32 backoff_base_seconds = 8;
+  bool active = 9;
+  string created_at = 10;
+  string updated_at = 11;
+}
+
+message WebhookDelivery {
+  string id = 1;
+  string tenant_id = 2;
+  string webhook_id = 3;
+  string event_id = 4;
+  string event_type = 5;
+  // status_code is the HTTP response status from the most
+  // recent attempt. 0 means "no response yet" (e.g. dial
+  // failed before the request was sent).
+  int32 status_code = 6;
+  string response_body = 7;
+  int32 attempt = 8;
+  bool delivered = 9;
+  string error = 10;
+  string next_retry_at = 11;
+  string created_at = 12;
+}
+
+message ListWebhooksRequest {}
+message ListWebhooksResponse {
+  repeated Webhook webhooks = 1;
+}
+
+message GetWebhookRequest {
+  string id = 1;
+}
+message GetWebhookResponse {
+  Webhook webhook = 1;
+}
+
+message CreateWebhookRequest {
+  string url = 1;
+  string secret = 2;
+  bytes event_filters = 3;
+  bytes conditions = 4;
+  int32 max_retries = 5;
+  int32 backoff_base_seconds = 6;
+  // has_active distinguishes "field omitted (default true)"
+  // from "explicit false". Wire mirror of *bool.
+  bool active = 7;
+  bool has_active = 8;
+}
+message CreateWebhookResponse {
+  Webhook webhook = 1;
+}
+
+// UpdateWebhookRequest mirrors UpdateWebhookInput: each field
+// pairs with a has_X boolean so the wire format can express
+// PATCH-style partial updates without losing the omit-vs-clear
+// semantics the REST API has via *string / *int / *bool.
+message UpdateWebhookRequest {
+  string id = 1;
+  string url = 2;
+  bool has_url = 3;
+  string secret = 4;
+  bool has_secret = 5;
+  bytes event_filters = 6;
+  bool has_event_filters = 7;
+  bytes conditions = 8;
+  bool has_conditions = 9;
+  int32 max_retries = 10;
+  bool has_max_retries = 11;
+  int32 backoff_base_seconds = 12;
+  bool has_backoff_base_seconds = 13;
+  bool active = 14;
+  bool has_active = 15;
+}
+message UpdateWebhookResponse {
+  Webhook webhook = 1;
+}
+
+message DeleteWebhookRequest {
+  string id = 1;
+}
+message DeleteWebhookResponse {}
+
+message ListWebhookDeliveriesRequest {
+  string id = 1;
+  int32 limit = 2;
+}
+message ListWebhookDeliveriesResponse {
+  repeated WebhookDelivery deliveries = 1;
+}
+
+service WebhookService {
+  rpc ListWebhooks(ListWebhooksRequest) returns (ListWebhooksResponse);
+  rpc GetWebhook(GetWebhookRequest) returns (GetWebhookResponse);
+  rpc CreateWebhook(CreateWebhookRequest) returns (CreateWebhookResponse);
+  rpc UpdateWebhook(UpdateWebhookRequest) returns (UpdateWebhookResponse);
+  rpc DeleteWebhook(DeleteWebhookRequest) returns (DeleteWebhookResponse);
+  rpc ListWebhookDeliveries(ListWebhookDeliveriesRequest) returns (ListWebhookDeliveriesResponse);
+}

@@ -57,6 +57,11 @@ jobs:
           # resolve the parent commit. Shallow clones (default
           # depth=1) would make the comparison silently empty.
           fetch-depth: 0
+      # actions/checkout leaves the workspace on the PR merge commit
+      # but does NOT create a local `main` ref. buf breaking opens
+      # the workspace `.git` as a remote and resolves `branch=main`
+      # through that ref, so we have to fetch it explicitly.
+      - run: git fetch --no-tags origin main:main
       - uses: bufbuild/buf-action@v1
         with:
           setup_only: true

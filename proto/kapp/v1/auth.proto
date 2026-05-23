@@ -1,0 +1,61 @@
+// auth.proto wires the unauthenticated SSO + refresh surface.
+// Both RPCs are tenant-less by design — SSO trades a KChat code
+// for an access+refresh pair scoped to the tenant the user picks
+// (or the default tenant for the account); Refresh swaps a still-
+// valid refresh token for a fresh access token.
+syntax = "proto3";
+
+package kapp.v1;
+
+message SSORequest {
+  // code is the one-time exchange token issued by the KChat
+  // OAuth provider. Single-use; consumed inside Exchange().
+  string code = 1;
+  // redirect_uri must match the redirect_uri registered with
+  // the KChat OAuth client. Mismatch -> 401 Unauthorized.
+  string redirect_uri = 2;
+  // preferred_tenant lets the client pin a specific tenant
+  // when the user has access to multiple. Empty means "use
+  // the account's default tenant".
+  string preferred_tenant = 3;
+}
+
+// SSOResponse mirrors auth.SSOResult. access_token + refresh_token
+// are the canonical kapp JWT pair; expires_at is the access
+// token's exp claim formatted as rfc3339_nano so SDK clients
+// can pre-emptively refresh without parsing the token body.
+message SSOResponse {
+  string access_token = 1;
+  string refresh_token = 2;
+  string expires_at = 3;
+  string user_id = 4;
+  string tenant_id = 5;
+  string actor_email = 6;
+  string actor_name = 7;
+  // role is the calling user's role inside `tenant_id`
+  // ("owner" / "admin" / "member" / etc.).
+  string role = 8;
+}
+
+message RefreshRequest {
+  string refresh_token = 1;
+}
+
+// RefreshResponse returns a fresh access token. The refresh token
+// itself is rotated (new value returned) so a stolen refresh
+// token is single-use once a legitimate refresh happens.
+message RefreshResponse {
+  string access_token = 1;
+  string refresh_token = 2;
+  string expires_at = 3;
+}
+
+service AuthService {
+  // SSO trades a KChat OAuth code for a kapp access+refresh
+  // pair. Unauthenticated (no JWT required); the KChat code is
+  // the trust anchor.
+  rpc SSO(SSORequest) returns (SSOResponse);
+  // Refresh swaps a refresh token for a fresh access token.
+  // Unauthenticated; the refresh token is the trust anchor.
+  rpc Refresh(RefreshRequest) returns (RefreshResponse);
+}

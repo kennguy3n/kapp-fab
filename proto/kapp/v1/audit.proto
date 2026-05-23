@@ -1,0 +1,66 @@
+// audit.proto wires the read-only audit-log surface. The
+// log is append-only (ARCHITECTURE.md §9) — entries are
+// produced as a side effect of every mutating call inside
+// the audit.LogTx transaction wrapper. The gRPC surface
+// exposes list + hash-chain verify only.
+syntax = "proto3";
+
+package kapp.v1;
+
+message AuditEntry {
+  int64 id = 1;
+  string tenant_id = 2;
+  // target_id is the row id of the audited entity (empty if
+  // the action does not point at a single row, e.g. tenant-
+  // wide config changes).
+  string target_id = 3;
+  // action is the verb-form audit code, e.g.
+  // "record.create" / "record.update" / "workflow.transition".
+  string action = 4;
+  // before / after are JSON snapshots of the row pre- and
+  // post-mutation. Opaque bytes for the same reason
+  // Record.data is opaque.
+  bytes before = 5;
+  bytes after = 6;
+  // context carries the request envelope (actor, request id,
+  // user agent, etc.) JSON-encoded.
+  bytes context = 7;
+  string created_at = 8;
+  // prev_hash + row_hash form the per-tenant Merkle-like
+  // hash chain. Verify() walks the chain in id order and
+  // refuses on the first mismatch.
+  bytes prev_hash = 9;
+  bytes row_hash = 10;
+}
+
+message ListAuditEntriesRequest {
+  // target_ktype filters to entries whose target lives in
+  // the named KType (e.g. "crm.deal"). Empty -> no filter.
+  string target_ktype = 1;
+  // target_id filters to entries whose target is the given
+  // record id. Empty -> no filter.
+  string target_id = 2;
+  int32 limit = 3;
+  int32 offset = 4;
+}
+
+message ListAuditEntriesResponse {
+  repeated AuditEntry entries = 1;
+}
+
+// VerifyAuditChainResponse mirrors auditVerifyResult. break_at
+// is empty on success; on failure it points at the first
+// chain-break row id and `reason` says which check failed
+// ("prev_hash mismatch" / "row_hash mismatch").
+message VerifyAuditChainRequest {}
+message VerifyAuditChainResponse {
+  bool ok = 1;
+  int32 checked = 2;
+  int64 break_at = 3;
+  string reason = 4;
+}
+
+service AuditService {
+  rpc ListAuditEntries(ListAuditEntriesRequest) returns (ListAuditEntriesResponse);
+  rpc VerifyAuditChain(VerifyAuditChainRequest) returns (VerifyAuditChainResponse);
+}

@@ -1,0 +1,88 @@
+// approval.proto wires the Phase B approvals surface. The engine
+// (internal/workflow.Engine) owns tenant isolation, audit
+// emission, and quorum/sequencing rules; the gRPC layer only
+// translates HTTP-equivalent request bodies into engine calls.
+syntax = "proto3";
+
+package kapp.v1;
+
+// ApprovalStep is a single step in an approval chain.
+message ApprovalStep {
+  // name is the step's display name (e.g. "Manager review",
+  // "Finance sign-off").
+  string name = 1;
+  // approvers lists the user ids eligible to act on this
+  // step. Resolved at decide-time, not at chain-creation time,
+  // so a role change is reflected immediately.
+  repeated string approvers = 2;
+  // required_count is how many approvers must approve for
+  // the step to advance. 0 / unset defaults to 1.
+  int32 required_count = 3;
+  // status is "pending" / "approved" / "rejected" / "skipped".
+  string status = 4;
+}
+
+// ApprovalChain is the full sequence of steps.
+message ApprovalChain {
+  repeated ApprovalStep steps = 1;
+  // current_step is the index of the active step. Server
+  // normalises this on Create so callers cannot skip steps
+  // by setting it manually.
+  int32 current_step = 2;
+}
+
+message Approval {
+  string id = 1;
+  string tenant_id = 2;
+  string record_ktype = 3;
+  string record_id = 4;
+  ApprovalChain chain = 5;
+  // status is "open" / "approved" / "rejected" / "cancelled".
+  string status = 6;
+  string opened_by = 7;
+  string opened_at = 8;
+  string closed_at = 9;
+}
+
+message ListApprovalsRequest {}
+message ListApprovalsResponse {
+  // approvals contains only the entries where the calling
+  // actor sits on the current step (the "my pending"
+  // semantics the UI's approvals panel renders).
+  repeated Approval approvals = 1;
+}
+
+message GetApprovalRequest {
+  string id = 1;
+}
+message GetApprovalResponse {
+  Approval approval = 1;
+}
+
+message CreateApprovalRequest {
+  string record_ktype = 1;
+  string record_id = 2;
+  ApprovalChain chain = 3;
+}
+message CreateApprovalResponse {
+  Approval approval = 1;
+}
+
+message DecideApprovalRequest {
+  string id = 1;
+  // decision is "approve" / "reject" / "abstain".
+  string decision = 2;
+  // comment is the optional reason text recorded against the
+  // step. Stored in the audit trail.
+  string comment = 3;
+}
+message DecideApprovalResponse {
+  Approval approval = 1;
+}
+
+service ApprovalService {
+  rpc ListApprovals(ListApprovalsRequest) returns (ListApprovalsResponse);
+  rpc GetApproval(GetApprovalRequest) returns (GetApprovalResponse);
+  rpc CreateApproval(CreateApprovalRequest) returns (CreateApprovalResponse);
+  rpc DecideApproval(DecideApprovalRequest) returns (DecideApprovalResponse);
+}
