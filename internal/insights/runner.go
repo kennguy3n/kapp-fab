@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -372,17 +371,21 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 	if rawSQL == "" {
 		return nil, validationErr("raw_sql body required")
 	}
-	// Multi-statement bodies fail closed with a 400. pgx already
-	// only executes the first statement on the wire so trailing
-	// statements in `SELECT 1; DROP TABLE x` would otherwise be
-	// silently dropped — surfacing a validation error gives the
-	// caller a chance to split the body or remove the trailing
-	// `;`. The check is intentionally textual rather than parsed
-	// because we'd otherwise need a real SQL parser to reject
-	// `;` inside a string literal, and that's overkill for the
-	// editor's first cut.
-	if strings.Contains(rawSQL, ";") {
-		return nil, validationErr("multi-statement SQL is not allowed; submit one statement at a time")
+	// Validate the SQL body against the parse tree (multi-statement
+	// rejection, SELECT-only, no system-catalog references). See
+	// validateRawSQL's docstring for the full contract. The previous
+	// textual `strings.Contains(rawSQL, ";")` check was both too
+	// strict (rejected harmless `SELECT 'a;b'`) and too loose
+	// (missed `SELECT 1/**/;DROP TABLE x` once we trimmed comments
+	// in normalisation). The AST gives a single source of truth for
+	// "exactly one statement, and that statement is read-only".
+	// `SET TRANSACTION READ ONLY` inside the per-tenant tx below is
+	// retained as defense-in-depth: if a future Postgres release
+	// adds a new statement node we don't yet classify, the read-only
+	// transaction surfaces it as a runtime error rather than letting
+	// it execute.
+	if err := validateRawSQL(rawSQL); err != nil {
+		return nil, err
 	}
 
 	if r.timeout > 0 {

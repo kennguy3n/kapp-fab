@@ -2,6 +2,7 @@ package insights
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -12,12 +13,18 @@ import (
 // against semicolon-separated SQL bodies. pgx.Query silently
 // executes only the first statement, so this guard turns a silent
 // drop into a 400 the caller can act on.
+//
+// The validator parses the body, so "SELECT 1;" (single statement
+// with trailing terminator) is NOT a multi-statement body — pg_query
+// recognises a single statement. That used to be rejected by the
+// textual `strings.Contains(rawSQL, ";")` check; the AST-based
+// validator is more precise. See TestValidateRawSQLAcceptsTrailingSemicolon
+// in sqlvalidate_test.go.
 func TestRunRawSQLRejectsMultiStatement(t *testing.T) {
 	r := &Runner{}
 	cases := []string{
-		"SELECT 1; DROP TABLE foo",                      // trailing extra
-		"SELECT 1;",                                     // trailing terminator
-		"BEGIN; SELECT 1; COMMIT",                       // multi-segment
+		"SELECT 1; SELECT 2",                            // two SELECTs
+		"SELECT 1; DROP TABLE foo",                      // SELECT then DDL
 		"SELECT * FROM employees; SELECT * FROM users;", // two real reads
 	}
 	for _, body := range cases {
@@ -26,9 +33,89 @@ func TestRunRawSQLRejectsMultiStatement(t *testing.T) {
 			t.Errorf("RunRawSQL(%q) returned nil error; want validation failure", body)
 			continue
 		}
-		if !strings.Contains(err.Error(), "multi-statement SQL") {
+		if !errors.Is(err, ErrUnsafeSQL) {
+			t.Errorf("RunRawSQL(%q) error = %q; want ErrUnsafeSQL", body, err.Error())
+			continue
+		}
+		if !strings.Contains(err.Error(), "multi-statement") {
 			t.Errorf("RunRawSQL(%q) error = %q; want multi-statement message", body, err.Error())
 		}
+	}
+}
+
+// TestRunRawSQLRejectsNonSelect verifies the validator's SELECT-only
+// rule fires before pgx ever sees the body. The
+// `SET TRANSACTION READ ONLY` guard inside the per-tx callback is
+// still in place as defense-in-depth, but we want a clean validator
+// error rather than a Postgres runtime error so the API surfaces a
+// 400 with a meaningful message.
+func TestRunRawSQLRejectsNonSelect(t *testing.T) {
+	r := &Runner{}
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"insert", "INSERT INTO employees(name) VALUES ('alice')"},
+		{"update", "UPDATE employees SET name = 'bob' WHERE id = 1"},
+		{"delete", "DELETE FROM employees WHERE id = 1"},
+		{"create_table", "CREATE TABLE x (id int)"},
+		{"drop_table", "DROP TABLE employees"},
+		{"alter_table", "ALTER TABLE employees ADD COLUMN salary numeric"},
+		{"begin", "BEGIN"},
+		{"set", "SET TIME ZONE 'UTC'"},
+		{"copy", "COPY employees TO STDOUT"},
+		{"truncate", "TRUNCATE employees"},
+		{"grant", "GRANT SELECT ON employees TO public"},
+		{"vacuum", "VACUUM employees"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := r.RunRawSQL(context.Background(), uuid.New(), tc.body, nil)
+			if err == nil {
+				t.Fatalf("RunRawSQL(%q) returned nil error; want non-SELECT rejection", tc.body)
+			}
+			if !errors.Is(err, ErrUnsafeSQL) {
+				t.Fatalf("RunRawSQL(%q) error = %q; want ErrUnsafeSQL", tc.body, err.Error())
+			}
+			if !strings.Contains(err.Error(), "only SELECT is permitted") {
+				t.Fatalf("RunRawSQL(%q) error = %q; want only-SELECT message", tc.body, err.Error())
+			}
+		})
+	}
+}
+
+// TestRunRawSQLRejectsSystemCatalog covers the third validator rule:
+// no references to pg_catalog / information_schema / pg_-prefixed
+// relations. The first two are explicitly scoped; the third covers
+// the search_path resolution Postgres applies when the schema is
+// omitted (so `pg_tables` is the same as `pg_catalog.pg_tables`).
+func TestRunRawSQLRejectsSystemCatalog(t *testing.T) {
+	r := &Runner{}
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"explicit_pg_catalog", "SELECT * FROM pg_catalog.pg_authid"},
+		{"explicit_info_schema", "SELECT * FROM information_schema.tables"},
+		{"unqualified_pg_tables", "SELECT * FROM pg_tables"},
+		{"unqualified_pg_stat", "SELECT * FROM pg_stat_activity"},
+		{"hidden_in_subquery", "SELECT 1 FROM (SELECT rolname FROM pg_authid) x"},
+		{"hidden_in_cte", "WITH a AS (SELECT * FROM pg_roles) SELECT * FROM a"},
+		{"hidden_in_union", "SELECT 1 FROM krecords UNION SELECT 1 FROM pg_authid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := r.RunRawSQL(context.Background(), uuid.New(), tc.body, nil)
+			if err == nil {
+				t.Fatalf("RunRawSQL(%q) returned nil error; want system-catalog rejection", tc.body)
+			}
+			if !errors.Is(err, ErrUnsafeSQL) {
+				t.Fatalf("RunRawSQL(%q) error = %q; want ErrUnsafeSQL", tc.body, err.Error())
+			}
+			if !strings.Contains(err.Error(), "system catalog") {
+				t.Fatalf("RunRawSQL(%q) error = %q; want system-catalog message", tc.body, err.Error())
+			}
+		})
 	}
 }
 
@@ -46,5 +133,20 @@ func TestRunRawSQLRejectsZeroTenant(t *testing.T) {
 	r := &Runner{}
 	if _, err := r.RunRawSQL(context.Background(), uuid.Nil, "SELECT 1", nil); err == nil {
 		t.Fatal("RunRawSQL(uuid.Nil) returned nil error; want validation failure")
+	}
+}
+
+// TestRunRawSQLRejectsUnparseable verifies that gibberish gets
+// surfaced as ErrUnsafeSQL rather than crashing into Postgres.
+// pg_query reports a syntax error which we wrap as ErrUnsafeSQL.
+func TestRunRawSQLRejectsUnparseable(t *testing.T) {
+	r := &Runner{}
+	body := "SELECT FROM WHERE BY"
+	_, err := r.RunRawSQL(context.Background(), uuid.New(), body, nil)
+	if err == nil {
+		t.Fatalf("RunRawSQL(%q) returned nil error; want parse failure", body)
+	}
+	if !errors.Is(err, ErrUnsafeSQL) {
+		t.Fatalf("RunRawSQL(%q) error = %q; want ErrUnsafeSQL", body, err.Error())
 	}
 }
