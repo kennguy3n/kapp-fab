@@ -835,8 +835,16 @@ func TestInsightsSQLEditorMode(t *testing.T) {
 //      skipped entirely; the active lock_timeout is whatever the
 //      role/db default is (usually "0" meaning "no timeout").
 //
-// PostgreSQL canonicalises lock_timeout values to a "<n>ms" or
-// "<n>s" string depending on magnitude; we accept both forms.
+// PostgreSQL canonicalises lock_timeout values according to magnitude:
+// round-second multiples (5000ms, 3000ms) format as "<n>s"; non-round
+// millisecond values (5500ms) format as "<n>ms"; zero formats as "0".
+// The test assertions are exact-match against the canonical form, so
+// every new case must declare the canonical-form expected value
+// explicitly (no substring matching).  The current cases use only
+// round-second multiples; if a future case adds e.g. 5500ms, its
+// `want` must be "5500ms", not "5500" or "5.5s".  pg_strfromd's
+// formatting rules have been stable since at least PG 10, so the
+// canonical form is a real contract, not a happy-path accident.
 //
 // Subtests are order-independent (each re-binds lockTimeout from a
 // known baseline at the top of its closure), but NOT parallel-safe:
