@@ -2,7 +2,7 @@ name: buf
 
 # Protobuf schema gate (Pillar A4 / A5).
 #
-# Three things this workflow guarantees on every PR:
+# Two things this workflow guarantees on every PR:
 #
 #   1. `buf lint` — proto/ conforms to the STANDARD ruleset
 #      (package naming, message naming, no nested-message wire
@@ -15,13 +15,13 @@ name: buf
 #      Rust SDK (Pillars B1-B8) and any future generated TS
 #      SDK can pin a stable wire format.
 #
-#   3. `buf generate` — gen/go/ is up-to-date relative to
-#      proto/. A diff after generation means the author forgot
-#      to commit regenerated Go; CI fails so the regeneration
-#      is never deferred to a follow-up PR.
-#
-# All three jobs are intentionally fast (sub-30s each) so the
-# proto editor's feedback loop stays tight.
+# Generated code under gen/ is NOT tracked in git (see
+# .gitignore). The Go CI workflow (.github/workflows/ci.yml)
+# runs `make proto-gen` before every build/test step, so a
+# proto edit that doesn't compile after generation fails the
+# Go job — no need for a separate gen-up-to-date check here.
+# Both jobs are intentionally fast (sub-30s each) so the proto
+# editor's feedback loop stays tight.
 
 on:
   push:
@@ -80,28 +80,4 @@ jobs:
       - if: steps.baseline.outputs.exists == 'true'
         run: buf breaking --against '.git#branch=main,subdir=proto' proto
 
-  generated-up-to-date:
-    name: gen/go/ matches proto/
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.25.x"
-          cache: true
-      - uses: bufbuild/buf-action@v1
-        with:
-          setup_only: true
-      - name: install codegen plugins
-        run: |
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
-      - name: regenerate
-        run: buf generate
-      - name: verify clean tree
-        run: |
-          if ! git diff --quiet -- gen/; then
-            echo "::error::gen/go/ is out of date — run 'make proto-gen' and commit the result."
-            git diff -- gen/
-            exit 1
-          fi
+

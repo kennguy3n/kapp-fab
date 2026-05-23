@@ -60,9 +60,14 @@ proto-lint:
 	buf lint
 
 # `proto-gen` regenerates everything under gen/go/. Generated code
-# is checked in (gen/ is NOT gitignored) so consumers do not need
-# buf to build the project — only proto authors do.
+# is NOT checked in (gen/ is gitignored); CI runs `make proto-gen`
+# before every Go build/test step. Run this once after a fresh
+# clone so `go build ./...` works locally. The two `go install`
+# guards are idempotent — Go caches the plugins under $GOPATH/bin
+# so subsequent runs are no-ops.
 proto-gen:
+	@command -v protoc-gen-go >/dev/null 2>&1 || go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+	@command -v protoc-gen-go-grpc >/dev/null 2>&1 || go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
 	buf generate
 
 # `proto-breaking` rejects backwards-incompatible field/service
