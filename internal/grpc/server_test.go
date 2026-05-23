@@ -845,3 +845,73 @@ func TestServices_NilBackend_ReturnsUnavailable(t *testing.T) {
 		t.Errorf("ListKTypes nil registry: code = %s, want Unavailable", st.Code())
 	}
 }
+
+// TestNewServer_RejectsMissingAuthDeps pins the construction-time
+// nil-checks for AuthConfig dependencies that the interceptor
+// invokes on every authenticated RPC. A nil Signer or
+// TenantResolve would otherwise NPE inside the interceptor — the
+// recovery interceptor would catch it, but the client would see
+// codes.Internal which is misleading for a misconfiguration. This
+// test asserts NewServer fails fast at construction with a clear
+// error message instead.
+//
+// Sessions and Logger are intentionally NOT tested here: Sessions
+// is documented as optional (nil disables session revalidation)
+// and Logger has a slog.Default() fallback. See the NewServer
+// docstring.
+func TestNewServer_RejectsMissingAuthDeps(t *testing.T) {
+	signer, err := auth.NewSigner(auth.SignerConfig{
+		Algorithm:  auth.AlgHS256,
+		HMACKey:    []byte("0123456789abcdef0123456789abcdef"),
+		Issuer:     "kapp-test",
+		Audience:   "kapp-test",
+		AccessTTL:  10 * time.Minute,
+		RefreshTTL: 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+	resolver := &fakeTenantResolver{tenant: &tenant.Tenant{ID: uuid.New(), Status: tenant.StatusActive}}
+
+	cases := []struct {
+		name       string
+		cfg        apigrpc.ServerConfig
+		wantSubstr string
+	}{
+		{
+			name: "nil Signer",
+			cfg: apigrpc.ServerConfig{
+				Auth: apigrpc.AuthConfig{
+					Signer:        nil,
+					TenantResolve: resolver,
+				},
+			},
+			wantSubstr: "Signer is required",
+		},
+		{
+			name: "nil TenantResolve",
+			cfg: apigrpc.ServerConfig{
+				Auth: apigrpc.AuthConfig{
+					Signer:        signer,
+					TenantResolve: nil,
+				},
+			},
+			wantSubstr: "TenantResolve is required",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, err := apigrpc.NewServer(tc.cfg)
+			if err == nil {
+				t.Fatalf("NewServer: want error, got nil (server=%v)", srv)
+			}
+			if !strings.Contains(err.Error(), tc.wantSubstr) {
+				t.Errorf("NewServer err = %q; want substring %q", err.Error(), tc.wantSubstr)
+			}
+			if srv != nil {
+				t.Errorf("NewServer returned non-nil server on error: %v", srv)
+			}
+		})
+	}
+}

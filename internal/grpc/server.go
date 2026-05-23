@@ -85,20 +85,36 @@ type ServerConfig struct {
 // not the auth/session lookups (which are themselves bounded by
 // the caller's context).
 //
-// Returns an error when cfg.Auth.Signer is nil: the auth interceptor
-// calls signer.Verify on every authenticated RPC, and a nil signer
-// would NPE in the interceptor. The recovery interceptor would catch
-// that panic, but the client would see codes.Internal — a confusing
-// error for what is fundamentally a server misconfiguration. Failing
-// at construction time turns the same condition into an explicit
-// boot failure, surfacing the missing config to the operator instead
-// of the caller. (services/api/grpc.go has the same guard inline so
+// Returns an error when any AuthConfig dependency that the
+// interceptor invokes unconditionally on every authenticated RPC
+// is nil:
+//
+//   - cfg.Auth.Signer        — signer.Verify is called on every bearer
+//   - cfg.Auth.TenantResolve — TenantResolve.Get is called after the
+//     signature check, before the active-tenant gate
+//
+// A nil receiver on either of these would NPE inside the
+// interceptor. The recovery interceptor would catch the panic, but
+// the client would see codes.Internal — a confusing error for what
+// is fundamentally a server misconfiguration. Failing at
+// construction time turns the same condition into an explicit boot
+// failure, surfacing the missing config to the operator instead of
+// the caller. (services/api/grpc.go has the same guard inline so
 // the api binary never reaches this path; this check is here for
 // the benefit of OTHER callers — e.g. integration-test harnesses,
 // future side-binaries — that construct the server directly.)
+//
+// AuthConfig.Sessions and AuthConfig.Logger are intentionally NOT
+// checked: Sessions is documented as optional (nil disables session
+// revalidation, which is a supported deployment mode for stateless
+// JWT clusters) and Logger falls back to slog.Default() inside the
+// interceptor (see authenticateContext).
 func NewServer(cfg ServerConfig) (*grpc.Server, error) {
 	if cfg.Auth.Signer == nil {
 		return nil, errors.New("grpc: ServerConfig.Auth.Signer is required (auth interceptor would NPE without it)")
+	}
+	if cfg.Auth.TenantResolve == nil {
+		return nil, errors.New("grpc: ServerConfig.Auth.TenantResolve is required (auth interceptor would NPE without it)")
 	}
 
 	logger := cfg.Logger
