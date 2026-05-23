@@ -27,8 +27,17 @@ managed:
   # on disk. The genproto module is already in go.mod via the
   # grpc-gateway/v2 dep so leaving its go_package untouched
   # resolves to the right symbols at compile time.
+  #
+  # `file_option: go_package_prefix` narrows the disable to the
+  # single managed option we want to opt out of, leaving the rest
+  # (java_package, csharp_namespace, …) at their managed-mode
+  # defaults. We don't generate non-Go code today, but scoping
+  # the disable precisely keeps the door open without surprising
+  # a future contributor who wires up Java/Python/etc. generation
+  # and finds googleapis silently un-managed for their language.
   disable:
-    - module: buf.build/googleapis/googleapis
+    - file_option: go_package_prefix
+      module: buf.build/googleapis/googleapis
   override:
     - file_option: go_package_prefix
       value: github.com/kennguy3n/kapp-fab/gen/go

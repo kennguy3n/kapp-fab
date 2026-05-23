@@ -158,6 +158,16 @@ func (g *grpcRuntime) Stop() {
 	if g == nil || g.srv == nil {
 		return
 	}
+	// Fall back to slog.Default() when the runtime was constructed
+	// without a logger. startGRPCServer always sets g.logger, but a
+	// future refactor that splits construction from startup could
+	// hit the timeout branch with a nil logger and panic; the cost
+	// of a defensive nil-check here is one line vs. a panic during
+	// SIGTERM handling, which is the worst time to hit one.
+	logger := g.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	done := make(chan struct{})
 	go func() {
 		g.srv.GracefulStop()
@@ -169,7 +179,7 @@ func (g *grpcRuntime) Stop() {
 		// Hard-stop after the grace window so a stuck stream
 		// doesn't keep the process alive past SIGTERM. Logged
 		// at WARN so operators see it.
-		g.logger.Warn("grpc: graceful shutdown timed out; forcing stop")
+		logger.Warn("grpc: graceful shutdown timed out; forcing stop")
 		g.srv.Stop()
 	}
 }
