@@ -173,9 +173,32 @@ func authenticateContext(ctx context.Context, cfg AuthConfig, logger *slog.Logge
 	return ctx, nil
 }
 
-// wrappedServerStream lets StreamAuthInterceptor swap the context
+// wrappedServerStream lets a stream interceptor swap the context
 // the service handler sees, mirroring how the HTTP middleware
 // chain replaces r.Context() on the request.
+//
+// Used by BOTH StreamLoggingInterceptor (logging_interceptor.go)
+// AND StreamAuthInterceptor (above). Because the chain order is
+// recovery -> logging -> auth, for streaming RPCs the wrappers
+// nest:
+//
+//	transport stream
+//	  └─ logging wrapper (ctx has request_id + logger)
+//	       └─ auth wrapper (ctx ALSO has tenant + user + claims)
+//
+// The handler is invoked with the outermost (auth) wrapper, and
+// SendMsg/RecvMsg delegate through the chain to the original
+// transport stream. The auth context is derived from the
+// logging-wrapped stream's Context() (see StreamAuthInterceptor
+// calling authenticateContext(ss.Context(), ...)), so it
+// inherits the request_id + logger that logging stamped on.
+//
+// A future contributor adding a third stream-wrapping interceptor
+// should follow the same pattern: read ss.Context() (which is
+// whatever the previous wrapper produced), enrich it, and wrap
+// again. Do NOT replace the wrapper struct — the nested-wrapper
+// shape is what makes the chain composable without each
+// interceptor having to know the chain order.
 type wrappedServerStream struct {
 	grpc.ServerStream
 	ctx context.Context
