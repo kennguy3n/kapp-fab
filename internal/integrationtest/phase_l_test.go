@@ -816,6 +816,77 @@ func TestInsightsSQLEditorMode(t *testing.T) {
 	}
 }
 
+// TestInsightsSQLEditorLockTimeoutApplied proves the PR-2 hardening
+// applies SET LOCAL lock_timeout inside the per-tenant tx.  The
+// runner reads back the active lock_timeout via
+// `current_setting('lock_timeout')` (read-only and allowed by the
+// validator's denylist) and we verify the round-trip value matches
+// what we configured via WithLockTimeout — proving the SET LOCAL
+// statement actually fired, not just that the field is stored on
+// the Runner struct.
+//
+// We test three cases:
+//
+//   1. Default (DefaultLockTimeout = 5s).  Default-configured
+//      runner from NewRunner.
+//   2. Caller override (3s via WithLockTimeout).  Builder method
+//      mutates the runner and the new value is what fires.
+//   3. Disabled (0 via WithLockTimeout(0)).  The SET LOCAL is
+//      skipped entirely; the active lock_timeout is whatever the
+//      role/db default is (usually "0" meaning "no timeout").
+//
+// PostgreSQL canonicalises lock_timeout values to a "<n>ms" or
+// "<n>s" string depending on magnitude; we accept both forms.
+func TestInsightsSQLEditorLockTimeoutApplied(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, _, _, _, runner := newTenantForInsights(t, h)
+
+	cases := []struct {
+		name string
+		// configure mutates `runner` to set the lock_timeout under
+		// test.  Returns the runner the test should use.
+		configure func(*insights.Runner) *insights.Runner
+		// wantContains is checked as a substring on the
+		// `current_setting('lock_timeout')` result so we don't
+		// have to encode PG's canonical-string rule
+		// (1ms→"1ms", 5000ms→"5s", etc) into the test.
+		wantContains string
+	}{
+		{
+			name:         "default-5s",
+			configure:    func(r *insights.Runner) *insights.Runner { return r },
+			wantContains: "5s",
+		},
+		{
+			name:         "override-3s",
+			configure:    func(r *insights.Runner) *insights.Runner { return r.WithLockTimeout(3 * time.Second) },
+			wantContains: "3s",
+		},
+		{
+			name:         "disabled-zero",
+			configure:    func(r *insights.Runner) *insights.Runner { return r.WithLockTimeout(0) },
+			wantContains: "0",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgRunner := tc.configure(runner)
+			out, err := cfgRunner.RunRawSQL(ctx, tn.ID, "SELECT current_setting('lock_timeout') AS lt", nil)
+			if err != nil {
+				t.Fatalf("run raw sql: %v", err)
+			}
+			if out == nil || out.Result == nil || len(out.Result.Rows) != 1 {
+				t.Fatalf("unexpected result shape: %#v", out)
+			}
+			lt, _ := out.Result.Rows[0]["lt"].(string)
+			if !strings.Contains(lt, tc.wantContains) {
+				t.Fatalf("lock_timeout = %q, want substring %q", lt, tc.wantContains)
+			}
+		})
+	}
+}
+
 // TestInsightsSQLEditorRunRawSQLRespectsTenantRLS proves the Phase M
 // raw-SQL surface honours the tenant_id GUC: a query like
 // `SELECT count(*) FROM insights_queries` returns the count of rows
