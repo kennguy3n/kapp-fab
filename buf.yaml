@@ -8,8 +8,13 @@
 #   1. `buf lint` catches naming/style drift before it ships
 #      (lowercase package, no nested messages on the wire, no
 #      MapEntry types in service responses, etc.). The set of
-#      rules below matches buf's `DEFAULT` category, which is
-#      buf's recommended baseline for new schemas.
+#      rules below uses buf's `STANDARD` category — the modern
+#      baseline for new schemas. STANDARD is a strict subset of
+#      DEFAULT (DEFAULT adds `COMMENT_*` rules requiring doc
+#      comments on every field, which we apply by convention
+#      rather than by lint, since several long-form descriptions
+#      live in the file-level docstring instead of per-field).
+#      Move to DEFAULT once every message has per-field comments.
 #
 #   2. `buf breaking` runs on every PR (CI in
 #      .github/workflows/buf.yml) and rejects backwards-
@@ -31,11 +36,6 @@ modules:
 lint:
   use:
     - STANDARD
-  except:
-    # Allow `Empty` request/response message names; the
-    # google.protobuf.Empty alternative pulls in well-known
-    # types we don't need elsewhere.
-    - PACKAGE_NO_IMPORT_CYCLE
 breaking:
   use:
     - FILE

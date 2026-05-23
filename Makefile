@@ -62,12 +62,19 @@ proto-lint:
 # `proto-gen` regenerates everything under gen/go/. Generated code
 # is NOT checked in (gen/ is gitignored); CI runs `make proto-gen`
 # before every Go build/test step. Run this once after a fresh
-# clone so `go build ./...` works locally. The two `go install`
-# guards are idempotent — Go caches the plugins under $GOPATH/bin
-# so subsequent runs are no-ops.
+# clone so `go build ./...` works locally.
+#
+# The two `go install` calls are unconditional rather than guarded
+# by `command -v` so that a stale or wrong-version protoc-gen
+# binary already on the developer's $PATH (e.g. from a previous
+# project, or installed via a system package manager) is always
+# replaced by the pinned version that matches go.mod. `go install`
+# is itself a no-op when the requested version is already in the
+# Go module cache, so the cost on subsequent runs is one go-cmd
+# invocation, not a re-download/re-compile.
 proto-gen:
-	@command -v protoc-gen-go >/dev/null 2>&1 || go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
-	@command -v protoc-gen-go-grpc >/dev/null 2>&1 || go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
 	buf generate
 
 # `proto-breaking` rejects backwards-incompatible field/service

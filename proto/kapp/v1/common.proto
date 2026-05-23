@@ -30,8 +30,25 @@ syntax = "proto3";
 package kapp.v1;
 
 // PaginationRequest is the shared cursor-based pagination request
-// shape. Embedded into every list-style request so the Rust SDK
-// can write a single helper that walks any list endpoint.
+// shape. Embedded by request messages whose REST counterpart
+// supports keyset (cursor) pagination — today that is
+// `ListRecordsRequest` (record.proto) and
+// `ListIsolationAuditRequest` (tenant.proto), both backed by
+// internal/record/store.go's keyset implementation (Pillar A1).
+//
+// List endpoints whose REST handler still serves plain
+// offset-only pagination (e.g. finance ListAccounts /
+// ListJournalEntries, inventory ListItems / ListMoves, base
+// ListBaseRows, audit ListAudit, currency ListFxRates,
+// notification ListNotifications, search Search, webhook
+// ListDeliveries) intentionally define inline `int32 limit` /
+// `int32 offset` instead of embedding this message. Embedding
+// PaginationRequest there would add a `cursor` field the server
+// has no way to honour, which is worse than a clean offset-only
+// shape. Each such endpoint is expected to migrate to embed
+// PaginationRequest in the same PR that upgrades its Go handler
+// to keyset pagination — the proto shape and the handler
+// capability should change atomically.
 //
 // The wire format intentionally matches the REST query-string
 // surface: when the gRPC server lands in A5, the same handler
@@ -56,10 +73,12 @@ message PaginationRequest {
   int32 offset = 3;
 }
 
-// ListPageMeta is the trailer carried on every list response.
-// Embedded by composition into every concrete <Resource>List
-// response so the SDK's pagination helper can read
-// `response.meta.next_cursor` regardless of the resource type.
+// ListPageMeta is the trailer carried on cursor-paginated list
+// responses (those whose request embeds `PaginationRequest`).
+// Offset-only list responses omit this message because their
+// REST counterpart does not emit a `next_cursor` field today;
+// see the PaginationRequest docstring above for the migration
+// criterion.
 //
 // `next_cursor` is empty when there are no more pages, exactly
 // matching the existing REST behaviour at
@@ -131,10 +150,3 @@ message ErrorDetail {
   string code = 2;
   string message = 3;
 }
-
-// Empty is the canonical request/response message for endpoints
-// that take no parameters or return no body. Defined here rather
-// than imported from google.protobuf.Empty so the kapp.v1
-// schema is fully self-contained — pulling in well-known types
-// would require a separate buf dependency.
-message Empty {}
