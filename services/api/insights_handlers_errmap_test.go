@@ -20,6 +20,18 @@ import (
 // Use to assert structured-log emissions without parsing global
 // stdio. The default handler restoration is important — leaking
 // the test handler into a later test would conflate output.
+//
+// NOT PARALLEL-SAFE: this mutates the process-wide slog.Default()
+// global, so any test using captureSlog must NOT call t.Parallel()
+// and the test file must not run subtests in parallel.  If a
+// future contributor adds t.Parallel() to a captureSlog caller,
+// two goroutines will race on slog.SetDefault and the captured
+// output will be non-deterministic.  The right fix in that case
+// is to inject a logger via the function signature or context
+// (see the matching reply on the slog.Default() usage thread)
+// rather than papering over the race here.  For now, sequential
+// execution is sufficient and the rest of the services/api
+// package already runs sequentially.
 func captureSlog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	prev := slog.Default()
