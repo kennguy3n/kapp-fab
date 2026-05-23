@@ -126,8 +126,11 @@ func (e *RecurringEngine) Handle(ctx context.Context, tenantID uuid.UUID, _ sche
 	// ListAll, not List(Limit:500): a tenant with >500 active recurring
 	// invoice templates would otherwise silently miss everything past
 	// the cap on every sweep. ListAll keysets internally in 500-row
-	// chunks so memory stays bounded even at hundreds of thousands of
-	// templates.
+	// chunks and is subject to a ListAllMaxRows safety cap; the proper
+	// streaming alternative (record.PGStore.ForEach, Pillar A2) will
+	// land alongside this so we never have to materialise the whole
+	// template set at once. Until then the cap protects the worker
+	// process from outlier tenants.
 	rows, err := e.records.ListAll(ctx, tenantID, record.ListFilter{
 		KType:  KTypeRecurringInvoice,
 		Status: "active",

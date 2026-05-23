@@ -6,6 +6,7 @@ package integrationtest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -378,6 +379,102 @@ func createPaginationRecord(t *testing.T, h *harness, tenantID uuid.UUID, kname 
 		t.Fatalf("create record %d: %v", seq, err)
 	}
 	return rec
+}
+
+// TestListPageLimitClamp verifies that a Limit above the documented
+// 500 cap is clamped DOWN to 500 (not silently dropped back to the
+// default of 50). Callers asking for ?limit=501 obviously want a
+// large page; falling back to 50 wastes a round trip.
+func TestListPageLimitClamp(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tn := newPaginationTenant(t, h)
+	kname := newPaginationKType(t, h)
+	actor := uuid.New()
+
+	const total = 520
+	for i := 0; i < total; i++ {
+		createPaginationRecord(t, h, tn.ID, kname, actor, i)
+	}
+
+	// Limit=600 (>cap): should clamp to 500, not 50.
+	page, err := h.records.ListPage(ctx, tn.ID, record.ListFilter{
+		KType: kname,
+		Limit: 600,
+	})
+	if err != nil {
+		t.Fatalf("list page: %v", err)
+	}
+	if len(page.Records) != 500 {
+		t.Fatalf("over-cap limit clamp: want 500 rows, got %d", len(page.Records))
+	}
+	if page.NextCursor == "" {
+		t.Fatalf("over-cap limit clamp: expected next_cursor when page is full")
+	}
+
+	// Limit=0 (unset): should default to 50.
+	page50, err := h.records.ListPage(ctx, tn.ID, record.ListFilter{
+		KType: kname,
+		Limit: 0,
+	})
+	if err != nil {
+		t.Fatalf("list page (default): %v", err)
+	}
+	if len(page50.Records) != 50 {
+		t.Fatalf("default limit: want 50 rows, got %d", len(page50.Records))
+	}
+}
+
+// TestListAllExceedsCap verifies that ListAll aborts with
+// ErrListAllExceedsCap once the accumulated row count crosses the
+// configured safety cap. We temporarily lower ListAllMaxRows so the
+// test can hit the cap with a few hundred rows instead of >100k.
+func TestListAllExceedsCap(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tn := newPaginationTenant(t, h)
+	kname := newPaginationKType(t, h)
+	actor := uuid.New()
+
+	const (
+		total      = 250
+		testCap    = 200
+		defaultCap = 100_000
+	)
+	origCap := record.ListAllMaxRows
+	record.ListAllMaxRows = testCap
+	t.Cleanup(func() { record.ListAllMaxRows = origCap })
+	if origCap != defaultCap {
+		t.Fatalf("unexpected default cap %d", origCap)
+	}
+
+	for i := 0; i < total; i++ {
+		createPaginationRecord(t, h, tn.ID, kname, actor, i)
+	}
+
+	rows, err := h.records.ListAll(ctx, tn.ID, record.ListFilter{KType: kname})
+	if err == nil {
+		t.Fatalf("expected ErrListAllExceedsCap, got %d rows", len(rows))
+	}
+	if !errors.Is(err, record.ErrListAllExceedsCap) {
+		t.Fatalf("expected ErrListAllExceedsCap, got: %v", err)
+	}
+	if rows != nil {
+		t.Fatalf("expected nil rows on cap error, got %d", len(rows))
+	}
+
+	// Sanity: with the cap restored to the default, the same call
+	// must succeed and return every row.
+	record.ListAllMaxRows = origCap
+	rows, err = h.records.ListAll(ctx, tn.ID, record.ListFilter{KType: kname})
+	if err != nil {
+		t.Fatalf("list_all after cap restore: %v", err)
+	}
+	if len(rows) != total {
+		t.Fatalf("list_all: want %d rows, got %d", total, len(rows))
+	}
 }
 
 // uuidGreaterOrEqual returns true if a >= b in lexicographic byte order.

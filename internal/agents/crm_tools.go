@@ -178,7 +178,11 @@ func (t *summarizePipelineTool) Invoke(ctx context.Context, inv Invocation) (*Re
 	// ListAll, not List(Limit:500): pipeline summaries must cover the
 	// whole deal book — capping at 500 would silently under-count
 	// tenants with larger pipelines. ListAll paginates internally via
-	// keyset chunks so memory stays bounded.
+	// keyset chunks and is subject to a ListAllMaxRows safety cap
+	// (returns ErrListAllExceedsCap above ~100k deals); the streaming
+	// alternative record.PGStore.ForEach (Pillar A2) is the long-term
+	// home for this aggregation and will let very-large pipelines
+	// summarise without materialising every deal.
 	rows, err := t.executor.records.ListAll(ctx, inv.TenantID, record.ListFilter{
 		KType: crm.KTypeDeal,
 	})

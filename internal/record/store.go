@@ -227,8 +227,14 @@ func (s *PGStore) ListPage(ctx context.Context, tenantID uuid.UUID, filter ListF
 	if filter.KType == "" {
 		return nil, errors.New("record: ktype filter required")
 	}
-	if filter.Limit <= 0 || filter.Limit > 500 {
+	// Default to 50 when unset; clamp at the documented cap of 500 instead
+	// of falling back to the default. Falling back to 50 on `?limit=501`
+	// was surprising — callers expect a hard cap, not a silent drop.
+	switch {
+	case filter.Limit <= 0:
 		filter.Limit = 50
+	case filter.Limit > 500:
+		filter.Limit = 500
 	}
 	status := filter.Status
 	if status == "" {
@@ -342,6 +348,14 @@ func (s *PGStore) ListPage(ctx context.Context, tenantID uuid.UUID, filter ListF
 // every match. To page over a subset, pair List with explicit offsets
 // or use the cursor-aware ListPage. filter.KType is required and behaves
 // identically to List; filter.Status defaults to "active".
+//
+// Safety cap: ListAll aborts with ErrListAllExceedsCap once it has
+// accumulated more than ListAllMaxRows rows. This is a defensive
+// guard against unbounded memory growth on huge tenants — the proper
+// streaming alternative (PGStore.ForEach) will land in Pillar A2 and
+// every batch caller in the tree should migrate to it. The cap fires
+// only on truly outlier tenants (>100k records of a single KType);
+// for everything else the slice cost is bounded by total dataset size.
 func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFilter) ([]KRecord, error) {
 	if filter.KType == "" {
 		return nil, errors.New("record: ktype filter required")
@@ -415,6 +429,10 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 			page[i].Data = decrypted
 		}
 		out = append(out, page...)
+		if len(out) > ListAllMaxRows {
+			return nil, fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
+				ErrListAllExceedsCap, filter.KType, len(out), ListAllMaxRows)
+		}
 		if len(page) < chunk {
 			break
 		}
@@ -439,8 +457,11 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 // not exposed to end users directly.
 //
 // Paginated internally via keyset (the same `(updated_at, id) < cursor`
-// pattern as ListAll) so large tenants still stream in bounded memory
-// and concurrent inserts cannot shift a row from one chunk to the next.
+// pattern as ListAll) so concurrent inserts cannot shift a row from
+// one chunk to the next. Subject to the same ListAllMaxRows safety
+// cap as ListAll — see PGStore.ForEach (Pillar A2) for the streaming
+// alternative when a single filter is expected to match more than
+// ListAllMaxRows rows.
 func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter ListFilter, field, value string) ([]KRecord, error) {
 	if filter.KType == "" {
 		return nil, errors.New("record: ktype filter required")
@@ -519,6 +540,10 @@ func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter Li
 			page[i].Data = decrypted
 		}
 		out = append(out, page...)
+		if len(out) > ListAllMaxRows {
+			return nil, fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
+				ErrListAllExceedsCap, filter.KType, len(out), ListAllMaxRows)
+		}
 		if len(page) < chunk {
 			break
 		}

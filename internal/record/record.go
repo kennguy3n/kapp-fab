@@ -60,6 +60,28 @@ type ListPage struct {
 // 400-class error.
 var ErrInvalidCursor = errors.New("record: invalid cursor")
 
+// ListAllMaxRows is the defensive safety cap on PGStore.ListAll /
+// ListByField in-memory accumulation. Callers that walk a KType with
+// more than this many rows must migrate to PGStore.ForEach (Pillar A2)
+// instead of materialising the whole result set. The cap is sized to
+// be comfortably above realistic SME tenants for any single KType
+// (hundreds of thousands of journal lines, recurring templates,
+// deals) while still firing well before a typical worker process
+// runs out of heap.
+//
+// Declared var rather than const so integration tests can temporarily
+// lower it to a value reachable from a few hundred test rows. Treat
+// as effectively immutable in production code paths — never write to
+// this from non-test code.
+var ListAllMaxRows = 100_000
+
+// ErrListAllExceedsCap is returned by ListAll / ListByField when the
+// accumulated row count crosses ListAllMaxRows mid-walk. The error
+// wraps additional context (ktype, rows, cap) via fmt.Errorf so
+// callers can log it directly. Callers that need to process larger
+// data sets should switch to the streaming PGStore.ForEach iterator.
+var ErrListAllExceedsCap = errors.New("record: ListAll exceeded max rows")
+
 // EncodeCursor packs a (updated_at, id) pair into an opaque
 // base64 token. The wire format is `<unix_nanos>|<uuid>` so future
 // fields can be appended without breaking existing tokens — the

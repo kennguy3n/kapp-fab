@@ -14,7 +14,7 @@ The `GET /api/v1/records/{ktype}` endpoint supports two pagination modes:
 
 | Param | Type | Required | Description |
 | --- | --- | --- | --- |
-| `limit` | int | no | Max records per page. Default 50, cap 500. |
+| `limit` | int | no | Max records per page. Default 50, hard cap 500 (values above 500 are clamped down to 500, not silently dropped to the default). |
 | `cursor` | string | no | Opaque token from a prior page's `next_cursor`. Selects keyset pagination *and* the envelope response shape. |
 | `paginate` | string | no | Set to `cursor` to opt into the envelope on the first page (no cursor token yet). |
 | `offset` | int | no | **Deprecated.** Legacy OFFSET-based pagination. |
