@@ -2,15 +2,25 @@
 name = "kapp-sdk"
 version = "0.1.0"
 edition = "2021"
-# MSRV pinned to 1.85 (edition2024 stabilization). Our transitive
-# dep graph pulls `idna_adapter >= 1.2`, which declares
-# `edition = "2024"` in its manifest; Cargo only accepts that
-# directive starting at 1.85. We could pin idna_adapter older via
-# `[patch]` but the ecosystem has moved on, and pinning a top-level
-# Url/IDN dep through three indirections is brittle. Bumping the
-# MSRV is cleaner and consistent with the rest of kapp-fab's tooling
-# (Go 1.25, Node 20).
-rust-version = "1.85"
+# MSRV pinned to 1.86 (current floor of our transitive dep graph).
+#
+# What forces this floor: the modern ICU stack (`icu_collections`,
+# `icu_locale_core`, `icu_normalizer`, `icu_properties`,
+# `icu_provider`) plus `idna_adapter`, all pulled in via `jsonschema`
+# → `url` → `idna`. As of 2025-Q2, these crates declare
+# `rust-version = "1.86"` and use `edition = "2024"` constructs that
+# only Cargo 1.85+ parses, but actual compilation needs 1.86. We
+# follow the dep graph's floor rather than pinning older versions:
+#
+#   - The IDN/ICU ecosystem is on a rapid release cadence (Unicode
+#     16.0 support, BiDi changes) and pinning back creates a
+#     correctness gap, not just a build gap.
+#   - The SDK is not yet published to crates.io — we can adjust MSRV
+#     freely. Once we cut 1.0, MSRV bumps will follow a documented
+#     N-2 policy.
+#   - Other kapp-fab tooling already lives on current toolchains
+#     (Go 1.25, Node 20).
+rust-version = "1.86"
 description = "Official Rust SDK for the kapp-fab gRPC API."
 license = "Apache-2.0"
 repository = "https://github.com/kennguy3n/kapp-fab"

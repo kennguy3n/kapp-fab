@@ -49,6 +49,7 @@ pub struct ClientConfig {
     pub(crate) timeout: Duration,
     pub(crate) connect_timeout: Duration,
     pub(crate) keep_alive: Option<Duration>,
+    pub(crate) keep_alive_timeout: Duration,
     pub(crate) user_agent: String,
 }
 
@@ -67,6 +68,12 @@ impl ClientConfig {
             timeout: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(10),
             keep_alive: Some(Duration::from_secs(30)),
+            // gRPC convention: timeout shorter than the ping interval
+            // so a stalled peer is declared dead before the next ping
+            // goes out. gRPC-Go uses 20s by default; grpc-c++ uses
+            // 20s. We match that. See:
+            //   https://github.com/grpc/grpc/blob/master/doc/keepalive.md
+            keep_alive_timeout: Duration::from_secs(20),
             user_agent: default_user_agent(),
         }
     }
@@ -103,6 +110,14 @@ impl ClientConfig {
         self.keep_alive
     }
 
+    /// HTTP/2 keep-alive ack timeout. If a keep-alive ping is not
+    /// acknowledged within this window, the channel is torn down.
+    /// Independent from [`Self::keep_alive`] (the interval).
+    #[must_use]
+    pub fn keep_alive_timeout(&self) -> Duration {
+        self.keep_alive_timeout
+    }
+
     /// User-Agent string the client will advertise.
     #[must_use]
     pub fn user_agent(&self) -> &str {
@@ -132,6 +147,7 @@ pub struct ClientConfigBuilder {
     timeout: Duration,
     connect_timeout: Duration,
     keep_alive: Option<Duration>,
+    keep_alive_timeout: Duration,
     user_agent: String,
 }
 
@@ -185,6 +201,21 @@ impl ClientConfigBuilder {
         self
     }
 
+    /// HTTP/2 keep-alive ack timeout (default: 20s, matching gRPC-Go
+    /// / grpc-c++). If a keep-alive PING goes unanswered for this
+    /// long the channel is torn down so the next RPC reconnects.
+    /// Should be strictly less than [`Self::keep_alive`] so a dead
+    /// peer is detected within `interval + timeout` rather than
+    /// `2 * interval`. The builder does not enforce that constraint
+    /// (some operators run pathologically high-latency networks
+    /// where `timeout >= interval` is intentional), but the default
+    /// of 20s vs 30s interval is the gRPC project's recommendation.
+    #[must_use]
+    pub fn keep_alive_timeout(mut self, timeout: Duration) -> Self {
+        self.keep_alive_timeout = timeout;
+        self
+    }
+
     /// Custom User-Agent string. Sent on every RPC as
     /// `user-agent: <ua>`. Default:
     /// `kapp-sdk-rust/<crate-version> grpc-go-tonic/<tonic-version>`.
@@ -206,7 +237,7 @@ impl ClientConfigBuilder {
         if let Some(interval) = self.keep_alive {
             endpoint = endpoint
                 .http2_keep_alive_interval(interval)
-                .keep_alive_timeout(interval)
+                .keep_alive_timeout(self.keep_alive_timeout)
                 .keep_alive_while_idle(true);
         }
 
@@ -261,6 +292,7 @@ impl ClientConfigBuilder {
             timeout: self.timeout,
             connect_timeout: self.connect_timeout,
             keep_alive: self.keep_alive,
+            keep_alive_timeout: self.keep_alive_timeout,
             user_agent: self.user_agent,
         })
     }

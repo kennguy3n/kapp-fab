@@ -148,13 +148,13 @@ jobs:
       fail-fast: false
       matrix:
         # MSRV-first matrix: we guarantee the crate builds on the
-        # declared `rust-version` so downstream consumers on 1.85
-        # are not broken by accident, AND that it builds on `stable`
-        # so we don't lag behind ecosystem changes (new lints,
-        # deprecations, etc.). Two cheap GitHub-hosted runners is a
-        # better trade-off than a single MSRV-only job that ignores
-        # newer Rust signals (Finding 7 in Devin Review PR #80).
-        toolchain: ["1.85", "stable"]
+        # declared `rust-version` (1.86) so downstream consumers on
+        # MSRV are not broken by accident, AND that it builds on
+        # `stable` so we don't lag behind ecosystem changes (new
+        # lints, deprecations, etc.). Two cheap GitHub-hosted runners
+        # is a better trade-off than a single MSRV-only job that
+        # ignores newer Rust signals (Finding 7 in Devin Review #80).
+        toolchain: ["1.86", "stable"]
     defaults:
       run:
         working-directory: packages/sdk-rs

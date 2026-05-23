@@ -235,7 +235,7 @@ impl RefreshSingleflight {
             })
             .await
             .map_err(|_| {
-                KappError::Auth(AuthError::RefreshFailed(Box::new(KappError::Config(
+                KappError::Auth(AuthError::RefreshFailed(Box::new(KappError::Internal(
                     format!(
                         "refresh singleflight timed out after {:?}",
                         self.wait_timeout
@@ -269,8 +269,18 @@ impl RefreshSingleflight {
 fn outcome_to_result(outcome: RefreshOutcome) -> Result<()> {
     match outcome {
         RefreshOutcome::Refreshed | RefreshOutcome::SkippedAlreadyRefreshed => Ok(()),
+        // `error_message` is the `Display` rendering of the underlying
+        // `KappError` from `do_refresh`. We can't preserve the original
+        // typed error here because `RefreshOutcome` must be `Clone`
+        // (shared via `OnceCell` across all waiters) and `KappError`
+        // contains non-`Clone` source types (`tonic::transport::Error`,
+        // `tonic::Status`). Wrap the flattened message in
+        // `KappError::Internal` so pattern-matching callers can tell
+        // “refresh RPC failed at runtime” apart from “client was
+        // misconfigured” (the latter would surface as
+        // `KappError::Config` at construction time, never here).
         RefreshOutcome::Failed { error_message } => Err(KappError::Auth(AuthError::RefreshFailed(
-            Box::new(KappError::Config(error_message)),
+            Box::new(KappError::Internal(error_message)),
         ))),
     }
 }

@@ -74,6 +74,23 @@ pub enum KappError {
     /// etc.).
     #[error("config error: {0}")]
     Config(String),
+
+    /// An internal SDK condition that needs to be surfaced as a
+    /// `String` because the original error type cannot be carried
+    /// (typically because the value crosses a `Clone` boundary, e.g.
+    /// shared between singleflight waiters). The string is the
+    /// `Display` rendering of the original error. Callers that need
+    /// programmatic access to the structured cause should inspect
+    /// the source chain via `std::error::Error::source()` on the
+    /// outer error before it was flattened.
+    ///
+    /// This variant is intentionally distinct from
+    /// [`Self::Config`] (which means “builder/config-time invariant
+    /// violation”) so callers pattern-matching on the cause can
+    /// distinguish a misconfigured client from a runtime-internal
+    /// fault.
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 impl KappError {
@@ -88,12 +105,14 @@ impl KappError {
                 code,
                 tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Aborted
             ),
-            // Schema, config, codec, invalid-argument: not transient.
+            // Schema, config, codec, invalid-argument, internal:
+            // none are transient.
             Self::Auth(_)
             | Self::SchemaInvalid { .. }
             | Self::Codec(_)
             | Self::InvalidArgument(_)
-            | Self::Config(_) => false,
+            | Self::Config(_)
+            | Self::Internal(_) => false,
         }
     }
 
