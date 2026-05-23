@@ -116,7 +116,16 @@ var ErrUnsafeSQL = errors.New("insights: unsafe sql")
 func validateRawSQL(rawSQL string) error {
 	rawSQL = strings.TrimSpace(rawSQL)
 	if rawSQL == "" {
-		return wrapUnsafe("raw_sql body required")
+		// Empty/whitespace-only body is "missing input", not
+		// "unsafe SQL" — returning ErrUnsafeSQL here would tag a
+		// validation typo as an attempted security boundary
+		// violation, which is semantically wrong and would skew any
+		// monitoring that branches on errors.Is(err, ErrUnsafeSQL).
+		// Use the plain ErrValidation surface so the HTTP layer
+		// still maps to 400 while keeping the sentinel meaning of
+		// ErrUnsafeSQL precise ("AST violation", not "any rejection
+		// from the validator").
+		return validationErr("raw_sql body required")
 	}
 	parsed, err := pg_query.Parse(rawSQL)
 	if err != nil {

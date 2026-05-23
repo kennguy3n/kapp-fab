@@ -149,12 +149,32 @@ func TestValidateRawSQLRejectsParseFailure(t *testing.T) {
 // TestValidateRawSQLRejectsBlank covers the leading-whitespace +
 // empty cases — the validator does TrimSpace before parsing and
 // returns the "raw_sql body required" message for all of them.
+//
+// The empty-body case is intentionally classified as "missing
+// input" (ErrValidation only), NOT "unsafe SQL" (ErrUnsafeSQL).
+// Tagging an empty body as ErrUnsafeSQL would conflate validation
+// typos with attempted security-boundary violations and skew any
+// monitoring that branches on errors.Is(err, ErrUnsafeSQL). The
+// HTTP layer maps both sentinels to 400, so this is a semantic
+// distinction with no behavioral impact on the API surface.
 func TestValidateRawSQLRejectsBlank(t *testing.T) {
 	cases := []string{"", "   ", "\n\n", "\t  \n\t"}
 	for _, body := range cases {
 		err := validateRawSQL(body)
 		if err == nil {
 			t.Errorf("validateRawSQL(%q) returned nil; want blank rejection", body)
+			continue
+		}
+		if !errors.Is(err, ErrValidation) {
+			t.Errorf("validateRawSQL(%q) error = %q; want ErrValidation", body, err)
+		}
+		// Empty body is missing input, not unsafe SQL — the
+		// ErrUnsafeSQL sentinel must NOT match.
+		if errors.Is(err, ErrUnsafeSQL) {
+			t.Errorf("validateRawSQL(%q) error = %q; should NOT match ErrUnsafeSQL (empty body is missing input, not unsafe SQL)", body, err)
+		}
+		if !strings.Contains(err.Error(), "raw_sql body required") {
+			t.Errorf("validateRawSQL(%q) error = %q; want 'raw_sql body required'", body, err)
 		}
 	}
 }
