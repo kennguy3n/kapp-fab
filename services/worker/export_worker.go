@@ -23,13 +23,13 @@ import (
 // guarantees each job is claimed exactly once.
 type ExportWorker struct {
 	store    *exporter.Store
-	records  exporter.KRecordLister
+	records  exporter.KRecordSource
 	interval time.Duration
 }
 
-// NewExportWorker wires an export worker. The records lister is
+// NewExportWorker wires an export worker. The records source is
 // usually *record.PGStore; tests can pass a fake.
-func NewExportWorker(store *exporter.Store, records exporter.KRecordLister, interval time.Duration) *ExportWorker {
+func NewExportWorker(store *exporter.Store, records exporter.KRecordSource, interval time.Duration) *ExportWorker {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
@@ -92,10 +92,12 @@ func (w *ExportWorker) process(ctx context.Context, job *exporter.ExportJob) {
 	log.Printf("export-worker: completed job %s rows=%d bytes=%d", job.ID, rowCount, len(payload))
 }
 
-// Compile-time assertion that *record.PGStore satisfies the lister
+// Compile-time assertion that *record.PGStore satisfies the source
 // interface ProcessKType expects. Keeps the wiring honest; if the
-// signature ever drifts the worker fails to build.
-var _ exporter.KRecordLister = (*record.PGStore)(nil)
+// signature ever drifts the worker fails to build. PGStore's ForEach
+// is the streaming iterator that lets the exporter walk all rows of
+// a KType without hitting the `ListAllMaxRows` safety cap.
+var _ exporter.KRecordSource = (*record.PGStore)(nil)
 
 // stringErrIs is a small helper for tests checking the loop never
 // surfaces a known-okay error like ErrJobNotFound from a race.

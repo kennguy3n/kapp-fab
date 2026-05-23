@@ -83,17 +83,28 @@ func (s *PGStore) WithEncryptor(e FieldEncryptor) *PGStore {
 }
 
 // dbNow returns Postgres's current timestamp. Used to capture the
-// keyset-walk snapshot ceiling in ListAll / ListByField in the same
-// clock domain that assigns `updated_at` values on commit, so
-// app-server clock skew (NTP jitter, container pause) cannot move
+// keyset-walk snapshot ceiling in ListAll / ListByField / ForEach in
+// the same clock domain that assigns `updated_at` values on commit,
+// so app-server clock skew (NTP jitter, container pause) cannot move
 // the ceiling backwards relative to row timestamps. clock_timestamp()
 // is preferred over now() / transaction_timestamp() because it is
 // not frozen at the start of the surrounding transaction — we want
 // the wall-clock instant this call is made, not the instant the
 // outer scheduler's transaction began.
+//
+// Returns timestamptz directly (no `AT TIME ZONE 'UTC'` cast) so the
+// result type carries its own UTC anchor rather than relying on
+// pgx's scan-default location for `timestamp without time zone`.
+// pgx v5 always normalises timestamptz to UTC on scan regardless of
+// the connection's TimeZone setting; the previous formulation only
+// produced UTC because pgx's plain-timestamp default *happens* to
+// be UTC. The explicit .UTC() below is kept as belt-and-suspenders
+// in case a future scan layer normalises timestamptz to the local
+// zone, but the SQL itself no longer depends on the driver's
+// timezone defaults.
 func (s *PGStore) dbNow(ctx context.Context) (time.Time, error) {
 	var t time.Time
-	if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp() AT TIME ZONE 'UTC'`).Scan(&t); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&t); err != nil {
 		return time.Time{}, fmt.Errorf("record: dbNow: %w", err)
 	}
 	return t.UTC(), nil
