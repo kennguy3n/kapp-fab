@@ -92,7 +92,11 @@ func startGRPCServer(ctx context.Context, d *apiDeps, logger *slog.Logger) (*grp
 		return nil, errors.New("grpc: signer not configured; set KAPP_JWT_SECRET to enable gRPC")
 	}
 
-	srv := apigrpc.NewServer(srvCfg)
+	srv, err := apigrpc.NewServer(srvCfg)
+	if err != nil {
+		_ = lis.Close()
+		return nil, fmt.Errorf("grpc: build server: %w", err)
+	}
 
 	go func() {
 		// Log the listener's bound address rather than the configured
@@ -121,6 +125,25 @@ func startGRPCServer(ctx context.Context, d *apiDeps, logger *slog.Logger) (*grp
 	// there is nothing to dial). Errors here are fatal — a broken
 	// gateway would route legitimate /api/v2 traffic to nowhere.
 	if cfg.GatewayMount != "" {
+		// Validate the trimmed mount before allocating the gateway
+		// handler. `strings.TrimRight("/", "/")` returns "", and an
+		// empty `rt.gatewayMount` would later cause `MountGateway` to
+		// silently no-op while `startGRPCServer` still logs
+		// "grpc gateway: mounted" — the operator would see a success
+		// log but every /api/v2 path would 404. Fail loudly at boot
+		// instead. (Mounting at literal "/" is also not what the
+		// operator wants here: chi.Router.Mount("/", ...) would
+		// capture EVERY HTTP path and shadow every other chi route.
+		// The gateway is meant to be a sub-router behind a versioned
+		// prefix like /api/v2.)
+		mount := strings.TrimRight(cfg.GatewayMount, "/")
+		if mount == "" {
+			rt.Stop()
+			return nil, fmt.Errorf(
+				"grpc gateway: KAPP_GRPC_GATEWAY_MOUNT=%q resolves to empty path after trimming trailing slashes; use a non-root prefix like /api/v2",
+				cfg.GatewayMount,
+			)
+		}
 		gw, err := apigrpc.NewGateway(ctx, apigrpc.GatewayConfig{
 			GRPCEndpoint: rt.addr,
 		})
@@ -129,7 +152,7 @@ func startGRPCServer(ctx context.Context, d *apiDeps, logger *slog.Logger) (*grp
 			return nil, fmt.Errorf("grpc gateway: %w", err)
 		}
 		rt.gateway = gw
-		rt.gatewayMount = strings.TrimRight(cfg.GatewayMount, "/")
+		rt.gatewayMount = mount
 		logger.Info("grpc gateway: mounted",
 			slog.String("mount", rt.gatewayMount),
 			slog.String("upstream", rt.addr),

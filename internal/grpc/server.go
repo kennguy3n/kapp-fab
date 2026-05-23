@@ -1,6 +1,7 @@
 package grpc
 
 import (
+	"errors"
 	"log/slog"
 	"time"
 
@@ -83,7 +84,23 @@ type ServerConfig struct {
 // in the unary chain so the deadline scopes only the handler body,
 // not the auth/session lookups (which are themselves bounded by
 // the caller's context).
-func NewServer(cfg ServerConfig) *grpc.Server {
+//
+// Returns an error when cfg.Auth.Signer is nil: the auth interceptor
+// calls signer.Verify on every authenticated RPC, and a nil signer
+// would NPE in the interceptor. The recovery interceptor would catch
+// that panic, but the client would see codes.Internal — a confusing
+// error for what is fundamentally a server misconfiguration. Failing
+// at construction time turns the same condition into an explicit
+// boot failure, surfacing the missing config to the operator instead
+// of the caller. (services/api/grpc.go has the same guard inline so
+// the api binary never reaches this path; this check is here for
+// the benefit of OTHER callers — e.g. integration-test harnesses,
+// future side-binaries — that construct the server directly.)
+func NewServer(cfg ServerConfig) (*grpc.Server, error) {
+	if cfg.Auth.Signer == nil {
+		return nil, errors.New("grpc: ServerConfig.Auth.Signer is required (auth interceptor would NPE without it)")
+	}
+
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -153,5 +170,5 @@ func NewServer(cfg ServerConfig) *grpc.Server {
 		reflection.Register(srv)
 	}
 
-	return srv
+	return srv, nil
 }

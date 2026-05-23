@@ -218,7 +218,11 @@ func startTestServer(t *testing.T) (*testServer, func()) {
 		KTypeRegistry: ktypeBackend,
 		Logger:        slog.Default(),
 	}
-	srv := apigrpc.NewServer(srvCfg)
+	srv, err := apigrpc.NewServer(srvCfg)
+	if err != nil {
+		cancel()
+		t.Fatalf("NewServer: %v", err)
+	}
 
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
@@ -743,7 +747,10 @@ func TestServices_NilBackend_ReturnsUnavailable(t *testing.T) {
 		KTypeRegistry: nil, // deliberately nil
 		Logger:        slog.Default(),
 	}
-	srv := apigrpc.NewServer(srvCfg)
+	srv, err := apigrpc.NewServer(srvCfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
