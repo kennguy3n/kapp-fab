@@ -158,7 +158,14 @@ jobs:
         with:
           version: v2.5.0
           args: --timeout=10m
+      # Advisory full-codebase pass: surfaces pre-existing issues for
+      # visibility without blocking the ratchet job.  Skipped on the
+      # first-push path because the strict step right above ALSO ran
+      # the full codebase (without --new-from-rev) -- running an
+      # identical advisory pass would just double the lint time for
+      # no extra information.
       - name: golangci-lint (full codebase, advisory)
+        if: env.LINT_BASE != ''
         continue-on-error: true
         uses: golangci/golangci-lint-action@v7
         with:
