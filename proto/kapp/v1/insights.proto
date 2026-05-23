@@ -414,6 +414,19 @@ message TestDataSourceResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Dashboard summary
+// ---------------------------------------------------------------------------
+
+message DashboardSummaryRequest {}
+message DashboardSummaryResponse {
+  // summary_json is the aggregate summary payload — counts,
+  // recent activity, etc. Opaque JSON because the shape is
+  // module-specific and consumed by the React dashboard
+  // home page only.
+  bytes summary_json = 1;
+}
+
+// ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
@@ -461,13 +474,4 @@ service InsightsService {
 
   // Dashboard summary (the /api/v1/dashboard/summary endpoint).
   rpc DashboardSummary(DashboardSummaryRequest) returns (DashboardSummaryResponse);
-}
-
-message DashboardSummaryRequest {}
-message DashboardSummaryResponse {
-  // summary_json is the aggregate summary payload — counts,
-  // recent activity, etc. Opaque JSON because the shape is
-  // module-specific and consumed by the React dashboard
-  // home page only.
-  bytes summary_json = 1;
 }
