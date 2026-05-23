@@ -281,6 +281,96 @@ func TestValidateRawSQLRejectsSystemFunction(t *testing.T) {
 	}
 }
 
+// TestValidateRawSQLRejectsSelectInto pins the SELECT INTO leg of
+// rule 4. `SELECT … INTO newtable FROM …` parses as a SelectStmt
+// with a non-nil IntoClause and is functionally DDL (creates a
+// table from the result set). The READ ONLY tx is the backstop,
+// but rule 4 must reject this at the AST layer so the validator's
+// docstring promise of "only SELECT" matches reality.
+func TestValidateRawSQLRejectsSelectInto(t *testing.T) {
+	cases := []string{
+		"SELECT * INTO newtable FROM krecords",
+		"SELECT id, name INTO TEMP scratch FROM krecords",
+		"SELECT id INTO UNLOGGED bulk FROM krecords WHERE status = 'active'",
+		"SELECT 1 INTO newtable",
+	}
+	for _, body := range cases {
+		err := validateRawSQL(body)
+		if err == nil {
+			t.Errorf("validateRawSQL(%q) returned nil; want SELECT-INTO rejection", body)
+			continue
+		}
+		if !errors.Is(err, ErrUnsafeSQL) {
+			t.Errorf("validateRawSQL(%q) error = %q; want ErrUnsafeSQL", body, err)
+		}
+		if !strings.Contains(err.Error(), "SELECT INTO is not allowed") {
+			t.Errorf("validateRawSQL(%q) error = %q; want SELECT-INTO message", body, err)
+		}
+	}
+}
+
+// TestValidateRawSQLRejectsSetConfig pins the set_config leg of
+// the dangerous-extension denylist. set_config(name, value,
+// is_local) can change `app.tenant_id` (which the RLS policy
+// reads), so it would break tenant isolation if allowed. RLS qual
+// evaluation order is plan-dependent; fail closed at the AST
+// layer regardless. The user-facing message uses the
+// "disallowed extension function" wording since set_config is
+// blocked by the dangerousExtensionFunctions denylist (it is
+// technically a system function, but classifying it as extension
+// keeps the denylist as the single source of truth).
+func TestValidateRawSQLRejectsSetConfig(t *testing.T) {
+	cases := []string{
+		"SELECT set_config('app.tenant_id', '00000000-0000-0000-0000-000000000000', true)",
+		"SELECT set_config('app.tenant_id', 'victim', true), * FROM krecords",
+		"SELECT SET_CONFIG('app.tenant_id', 'x', true)",
+		"SELECT public.set_config('app.tenant_id', 'x', true)",
+	}
+	for _, body := range cases {
+		err := validateRawSQL(body)
+		if err == nil {
+			t.Errorf("validateRawSQL(%q) returned nil; want set_config rejection", body)
+			continue
+		}
+		if !errors.Is(err, ErrUnsafeSQL) {
+			t.Errorf("validateRawSQL(%q) error = %q; want ErrUnsafeSQL", body, err)
+		}
+		if !strings.Contains(err.Error(), "disallowed extension function") {
+			t.Errorf("validateRawSQL(%q) error = %q; want disallowed-extension-function message", body, err)
+		}
+	}
+}
+
+// TestValidateRawSQLRejectsSchemaQualifiedPg pins the fail-closed
+// defense-in-depth for 2-part `<schema>.pg_*` function references.
+// A DBA-defined wrapper `public.pg_read_file(text)` (e.g. a
+// SECURITY DEFINER stub for admin tooling) would otherwise be
+// callable from the editor; treating any `pg_`-prefixed leaf as
+// system regardless of schema closes that gap with no false
+// positives on tenant code (the convention `pg_*` is reserved for
+// Postgres-built-ins by policy).
+func TestValidateRawSQLRejectsSchemaQualifiedPg(t *testing.T) {
+	cases := []string{
+		"SELECT public.pg_read_file('/etc/passwd')",
+		"SELECT public.pg_ls_dir('/')",
+		"SELECT app.pg_backend_pid()",
+		"SELECT PUBLIC.PG_READ_FILE('/x')", // case-insensitive
+	}
+	for _, body := range cases {
+		err := validateRawSQL(body)
+		if err == nil {
+			t.Errorf("validateRawSQL(%q) returned nil; want schema-qualified-pg rejection", body)
+			continue
+		}
+		if !errors.Is(err, ErrUnsafeSQL) {
+			t.Errorf("validateRawSQL(%q) error = %q; want ErrUnsafeSQL", body, err)
+		}
+		if !strings.Contains(err.Error(), "system function") {
+			t.Errorf("validateRawSQL(%q) error = %q; want system-function message", body, err)
+		}
+	}
+}
+
 // TestValidateRawSQLRejectsDangerousExtensionFunction pins rule 5c
 // for the extension-function leg of the function denylist. dblink
 // opens a new connection that bypasses RLS / READ ONLY /
@@ -353,6 +443,17 @@ func TestIsSystemFunctionPositive(t *testing.T) {
 		{[]string{"PG_CATALOG", "pg_read_file"}, funcKindSystem},
 		{[]string{"information_schema", "_pg_truetypid"}, funcKindSystem},
 		{[]string{"db1", "public", "fn"}, funcKindSystem}, // 3-part = cross-database, rejected outright
+		// 2-part with non-system schema but pg_-prefixed leaf:
+		// fail-closed against hostile `public.pg_read_file` wrapper.
+		{[]string{"public", "pg_read_file"}, funcKindSystem},
+		{[]string{"PUBLIC", "PG_READ_FILE"}, funcKindSystem},
+		{[]string{"app", "pg_backend_pid"}, funcKindSystem},
+		// set_config in the dangerous-extension denylist must
+		// classify as funcKindExtension so the runner emits the
+		// matching message.
+		{[]string{"set_config"}, funcKindExtension},
+		{[]string{"SET_CONFIG"}, funcKindExtension},
+		{[]string{"public", "set_config"}, funcKindExtension},
 		// Dangerous extension functions: dblink and large-object I/O.
 		// Both bypass the editor sandbox's safety layers (new
 		// connection / server-side file I/O) and must be rejected as

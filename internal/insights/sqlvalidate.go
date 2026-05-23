@@ -55,6 +55,13 @@ var ErrUnsafeSQL = errors.New("insights: unsafe sql")
 //     Postgres release adds a new statement node we don't yet
 //     classify.
 //
+//     Special case: `SELECT … INTO newtable FROM …` parses as a
+//     SelectStmt with a non-nil `IntoClause` and is functionally
+//     DDL (creates a table from the result set). Rule 4 rejects
+//     it explicitly so the parser-level contract matches the
+//     docstring's "only SELECT" promise; READ ONLY tx is the
+//     backstop, not the source of truth.
+//
 //  5. Walk the entire parse tree and reject any of:
 //
 //     a. RangeVar pointing at a system catalog (pg_catalog.*,
@@ -125,13 +132,24 @@ func validateRawSQL(rawSQL string) error {
 	if top == nil {
 		return wrapUnsafe("empty top-level statement node")
 	}
-	if top.GetSelectStmt() == nil {
+	sel := top.GetSelectStmt()
+	if sel == nil {
 		// Surface the concrete oneof name so the user can see
 		// what we parsed it as. The label is the AST node type
 		// ("InsertStmt", "UpdateStmt", "AlterTableStmt", etc.) —
 		// exactly the label a Postgres docs reader recognises.
 		kind := concreteNodeName(top)
 		return wrapUnsafe("only SELECT is permitted, got %s", kind)
+	}
+	// SELECT … INTO newtable FROM … is DDL masquerading as a
+	// SelectStmt. Postgres parses it as SelectStmt with a non-nil
+	// IntoClause and would, in a writable tx, create `newtable`
+	// from the result set. Reject at the AST layer so the
+	// validator's contract matches its docstring — the existing
+	// `SET TRANSACTION READ ONLY` in RunRawSQL remains as defense
+	// in depth, but is no longer load-bearing for this case.
+	if sel.GetIntoClause() != nil {
+		return wrapUnsafe("SELECT INTO is not allowed (creates a table from the result set)")
 	}
 	// Walk the full tree and apply rules 5a/5b/5c. The walk
 	// terminates on the first violation found; the walker honours
@@ -268,6 +286,22 @@ func isSystemCatalog(rv *pg_query.RangeVar) bool {
 // map lookup doesn't matter, but a map keeps additions tidy and
 // makes the membership test obviously O(1).
 var dangerousExtensionFunctions = map[string]struct{}{
+	// Session GUC mutators — set_config(name, value, is_local)
+	// can change `app.tenant_id` (the GUC RLS policies read) and
+	// any other session setting. As a SQL function it runs in
+	// the target list of an outer SELECT, so rule 5a (RangeVar)
+	// doesn't apply; the only safe move is an explicit denylist.
+	// A query like `SELECT set_config('app.tenant_id',
+	// 'victim-uuid', true), * FROM krecords` would otherwise
+	// attempt to swap the RLS tenant context mid-query.
+	// PostgreSQL's RLS qual evaluation is plan-dependent, so
+	// relying on "qual runs before target list" is unsafe —
+	// fail closed at the AST layer.
+	//
+	// `current_setting(name, missing_ok)` is the read-only
+	// cousin; it is NOT blocked because reading
+	// app.tenant_id is benign and useful in queries.
+	"set_config": {},
 	// contrib/dblink — opens new connections, bypassing
 	// RLS / READ ONLY / statement_timeout from the outer tx.
 	"dblink":                  {},
@@ -365,6 +399,18 @@ func isSystemFunction(fc *pg_query.FuncCall) (string, funcKind, bool) {
 	if len(names) == 2 {
 		schema := strings.ToLower(names[0])
 		if schema == "pg_catalog" || schema == "information_schema" {
+			return names[0] + "." + names[1], funcKindSystem, true
+		}
+		// Defense in depth: a 2-part name like `public.pg_read_file`
+		// would normally resolve to `public.pg_read_file` (which does
+		// not exist in a stock Postgres install — the real function
+		// lives in pg_catalog) and fail at runtime. But if a DBA
+		// ever creates a wrapper `public.pg_read_file(text)` (e.g. a
+		// SECURITY DEFINER stub for legitimate admin tooling), an
+		// editor user could call it. Treat any `pg_`-prefixed leaf
+		// the same regardless of schema — same fail-closed posture
+		// as the 1-part check below.
+		if strings.HasPrefix(leaf, "pg_") {
 			return names[0] + "." + names[1], funcKindSystem, true
 		}
 		if _, bad := dangerousExtensionFunctions[leaf]; bad {
