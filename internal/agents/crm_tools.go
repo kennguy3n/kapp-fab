@@ -42,8 +42,8 @@ type createDealInput struct {
 
 type createDealTool struct{ executor *Executor }
 
-func (t *createDealTool) Name() string                  { return "crm.create_deal" }
-func (t *createDealTool) RequiresConfirmation() bool    { return false }
+func (t *createDealTool) Name() string               { return "crm.create_deal" }
+func (t *createDealTool) RequiresConfirmation() bool { return false }
 func (t *createDealTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
 	var in createDealInput
 	if err := decodeInputs(inv, &in); err != nil {
@@ -175,9 +175,16 @@ type summarizePipelineTool struct{ executor *Executor }
 func (t *summarizePipelineTool) Name() string               { return "crm.summarize_pipeline" }
 func (t *summarizePipelineTool) RequiresConfirmation() bool { return false }
 func (t *summarizePipelineTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
-	rows, err := t.executor.records.List(ctx, inv.TenantID, record.ListFilter{
+	// ListAll, not List(Limit:500): pipeline summaries must cover the
+	// whole deal book — capping at 500 would silently under-count
+	// tenants with larger pipelines. ListAll paginates internally via
+	// keyset chunks and is subject to a ListAllMaxRows safety cap
+	// (returns ErrListAllExceedsCap above ~100k deals); the streaming
+	// alternative record.PGStore.ForEach (Pillar A2) is the long-term
+	// home for this aggregation and will let very-large pipelines
+	// summarise without materialising every deal.
+	rows, err := t.executor.records.ListAll(ctx, inv.TenantID, record.ListFilter{
 		KType: crm.KTypeDeal,
-		Limit: 500,
 	})
 	if err != nil {
 		return nil, err

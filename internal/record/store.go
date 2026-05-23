@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -79,6 +80,23 @@ func NewPGStore(
 func (s *PGStore) WithEncryptor(e FieldEncryptor) *PGStore {
 	s.encryptor = e
 	return s
+}
+
+// dbNow returns Postgres's current timestamp. Used to capture the
+// keyset-walk snapshot ceiling in ListAll / ListByField in the same
+// clock domain that assigns `updated_at` values on commit, so
+// app-server clock skew (NTP jitter, container pause) cannot move
+// the ceiling backwards relative to row timestamps. clock_timestamp()
+// is preferred over now() / transaction_timestamp() because it is
+// not frozen at the start of the surrounding transaction — we want
+// the wall-clock instant this call is made, not the instant the
+// outer scheduler's transaction began.
+func (s *PGStore) dbNow(ctx context.Context) (time.Time, error) {
+	var t time.Time
+	if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp() AT TIME ZONE 'UTC'`).Scan(&t); err != nil {
+		return time.Time{}, fmt.Errorf("record: dbNow: %w", err)
+	}
+	return t.UTC(), nil
 }
 
 // Create inserts a new KRecord. The KType is looked up at version 0 ("latest")
@@ -200,33 +218,98 @@ func (s *PGStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*KRecord, er
 // This is the HTTP-facing list method: Limit is capped at 500 and
 // defaults to 50 to protect the API from unbounded pulls. Server-side
 // batch callers that need to walk every row of a KType should use
-// ListAll instead — see payroll engine + scheduler sweepers.
+// ListAll / ForEach instead — see payroll engine + scheduler sweepers.
+//
+// Pagination strategy: when filter.Cursor is non-empty the query uses
+// keyset pagination (`WHERE (updated_at, id) < (cursor_ts, cursor_id)`)
+// which is stable under concurrent inserts. Otherwise, when filter.Offset
+// is > 0, the legacy `OFFSET` path runs (kept for backward compat).
+// When neither is set the query starts from the newest row.
 func (s *PGStore) List(ctx context.Context, tenantID uuid.UUID, filter ListFilter) ([]KRecord, error) {
+	page, err := s.ListPage(ctx, tenantID, filter)
+	if err != nil {
+		return nil, err
+	}
+	return page.Records, nil
+}
+
+// ListPage is the cursor-aware variant of List: in addition to the
+// page of records it returns the opaque NextCursor token for the
+// next page, or "" when the page is the last one. New callers (the
+// HTTP list handler, the Rust SDK, the agent tools that paginate
+// large KTypes) should use this method directly so the cursor is
+// not lost. The legacy List helper drops the cursor for callers
+// that only need the page slice.
+func (s *PGStore) ListPage(ctx context.Context, tenantID uuid.UUID, filter ListFilter) (*ListPage, error) {
 	if filter.KType == "" {
 		return nil, errors.New("record: ktype filter required")
 	}
-	if filter.Limit <= 0 || filter.Limit > 500 {
+	// Default to 50 when unset; clamp at the documented cap of 500 instead
+	// of falling back to the default. Falling back to 50 on `?limit=501`
+	// was surprising — callers expect a hard cap, not a silent drop.
+	switch {
+	case filter.Limit <= 0:
 		filter.Limit = 50
+	case filter.Limit > 500:
+		filter.Limit = 500
 	}
 	status := filter.Status
 	if status == "" {
 		status = "active"
 	}
+	cursorTS, cursorID, err := DecodeCursor(filter.Cursor)
+	if err != nil {
+		return nil, err
+	}
 
 	// Preallocate an empty (non-nil) slice so the JSON response is `[]`
 	// rather than `null` when no rows match — consistent with the OpenAPI
 	// list response contract.
-	out := make([]KRecord, 0)
-	err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		rows, err := tx.Query(ctx,
-			`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
-			        created_by, created_at, updated_by, updated_at, deleted_at
-			 FROM krecords
-			 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
-			 ORDER BY updated_at DESC, id DESC
-			 LIMIT $4 OFFSET $5`,
-			tenantID, filter.KType, status, filter.Limit, filter.Offset,
+	out := make([]KRecord, 0, filter.Limit)
+	err = platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var (
+			rows pgx.Rows
+			err  error
 		)
+		switch {
+		case filter.Cursor != "":
+			// Keyset pagination: row comparison handles ties on
+			// updated_at by using the id as the secondary sort key.
+			rows, err = tx.Query(ctx,
+				`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+				        created_by, created_at, updated_by, updated_at, deleted_at
+				 FROM krecords
+				 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+				   AND (updated_at, id) < ($4, $5)
+				 ORDER BY updated_at DESC, id DESC
+				 LIMIT $6`,
+				tenantID, filter.KType, status, cursorTS, cursorID, filter.Limit,
+			)
+		case filter.Offset > 0:
+			// Legacy OFFSET path. New callers should switch to
+			// cursor-based pagination — see the deprecation
+			// notice surfaced by the HTTP list handler.
+			rows, err = tx.Query(ctx,
+				`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+				        created_by, created_at, updated_by, updated_at, deleted_at
+				 FROM krecords
+				 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+				 ORDER BY updated_at DESC, id DESC
+				 LIMIT $4 OFFSET $5`,
+				tenantID, filter.KType, status, filter.Limit, filter.Offset,
+			)
+		default:
+			// First page, no cursor — keyset with no lower bound.
+			rows, err = tx.Query(ctx,
+				`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+				        created_by, created_at, updated_by, updated_at, deleted_at
+				 FROM krecords
+				 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+				 ORDER BY updated_at DESC, id DESC
+				 LIMIT $4`,
+				tenantID, filter.KType, status, filter.Limit,
+			)
+		}
 		if err != nil {
 			return fmt.Errorf("record: list: %w", err)
 		}
@@ -258,21 +341,38 @@ func (s *PGStore) List(ctx context.Context, tenantID uuid.UUID, filter ListFilte
 		}
 		out[i].Data = decrypted
 	}
-	return out, nil
+	page := &ListPage{Records: out}
+	// Only emit a next cursor when we filled the page — otherwise
+	// the caller has reached the end and an empty NextCursor lets
+	// them stop iterating without an extra round trip.
+	if len(out) == filter.Limit {
+		last := out[len(out)-1]
+		page.NextCursor = EncodeCursor(last.UpdatedAt, last.ID)
+	}
+	return page, nil
 }
 
 // ListAll is the server-side batch variant of List: it walks every row
 // matching filter.KType/Status for the tenant, without the 500-row
 // HTTP-facing cap. Callers like the payroll engine that need to process
 // every employee / structure / payslip for a pay_run use this to avoid
-// the silent clamp on List. Rows are paginated internally in 500-row
-// chunks so a single tenant with 50k rows still streams bounded memory
-// per tx.
+// the silent clamp on List. Rows are paginated internally via keyset
+// (the same `(updated_at, id) < cursor` pattern that the public List
+// uses) so concurrent inserts cannot shift a row from one chunk to the
+// next and we never re-scan rows we've already returned.
 //
 // filter.Limit and filter.Offset are ignored — ListAll always returns
-// every match. To page over a subset, pair List with explicit offsets.
-// filter.KType is required and behaves identically to List; filter.Status
-// defaults to "active".
+// every match. To page over a subset, pair List with explicit offsets
+// or use the cursor-aware ListPage. filter.KType is required and behaves
+// identically to List; filter.Status defaults to "active".
+//
+// Safety cap: ListAll aborts with ErrListAllExceedsCap once it has
+// accumulated more than ListAllMaxRows rows. This is a defensive
+// guard against unbounded memory growth on huge tenants — the proper
+// streaming alternative (PGStore.ForEach) will land in Pillar A2 and
+// every batch caller in the tree should migrate to it. The cap fires
+// only on truly outlier tenants (>100k records of a single KType);
+// for everything else the slice cost is bounded by total dataset size.
 func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFilter) ([]KRecord, error) {
 	if filter.KType == "" {
 		return nil, errors.New("record: ktype filter required")
@@ -282,20 +382,68 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 		status = "active"
 	}
 	const chunk = 500
+	// snapshot is the high-water-mark captured before the first chunk
+	// query runs. Every chunk filters `updated_at <= snapshot` so a
+	// row whose updated_at is bumped by a concurrent Update mid-walk
+	// is excluded from this walk entirely (its new updated_at exceeds
+	// the snapshot ceiling) rather than being missed-or-duplicated
+	// when its (updated_at, id) tuple shifts above the cursor. The
+	// excluded row is picked up by the next sweep — the contract is
+	// "every row whose state was committed before walk start, exactly
+	// once", not "every row that ever existed during the walk".
+	//
+	// Snapshot is read from Postgres via `clock_timestamp()` (see
+	// PGStore.dbNow) rather than Go's wall clock, so the comparison
+	// happens entirely in the database's clock domain. App-server
+	// clock skew (NTP jitter, container pause, VM migration) therefore
+	// cannot move the ceiling backwards relative to the `updated_at`
+	// timestamps the DB assigns on commit — a row committed at
+	// DB-time T would otherwise be silently excluded if Go-time
+	// briefly trailed T. clock_timestamp() (not now()) is used so the
+	// ceiling reflects the wall-clock instant of this call rather
+	// than the start of any outer transaction the caller may be
+	// running inside; see the dbNow docstring for the full rationale.
+	snapshot, err := s.dbNow(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]KRecord, 0)
-	offset := 0
+	var (
+		cursorTS  time.Time
+		cursorID  uuid.UUID
+		haveLower bool
+	)
 	for {
 		page := make([]KRecord, 0, chunk)
 		err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			rows, err := tx.Query(ctx,
-				`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
-				        created_by, created_at, updated_by, updated_at, deleted_at
-				 FROM krecords
-				 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
-				 ORDER BY updated_at DESC, id DESC
-				 LIMIT $4 OFFSET $5`,
-				tenantID, filter.KType, status, chunk, offset,
+			var (
+				rows pgx.Rows
+				err  error
 			)
+			if haveLower {
+				rows, err = tx.Query(ctx,
+					`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+					        created_by, created_at, updated_by, updated_at, deleted_at
+					 FROM krecords
+					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+					   AND updated_at <= $4
+					   AND (updated_at, id) < ($5, $6)
+					 ORDER BY updated_at DESC, id DESC
+					 LIMIT $7`,
+					tenantID, filter.KType, status, snapshot, cursorTS, cursorID, chunk,
+				)
+			} else {
+				rows, err = tx.Query(ctx,
+					`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+					        created_by, created_at, updated_by, updated_at, deleted_at
+					 FROM krecords
+					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+					   AND updated_at <= $4
+					 ORDER BY updated_at DESC, id DESC
+					 LIMIT $5`,
+					tenantID, filter.KType, status, snapshot, chunk,
+				)
+			}
 			if err != nil {
 				return fmt.Errorf("record: list_all: %w", err)
 			}
@@ -317,6 +465,13 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 		if err != nil {
 			return nil, err
 		}
+		// Tight cap: refuse to grow `out` past ListAllMaxRows even by a
+		// single chunk's worth. A loose post-append check would let a
+		// 100k cap balloon to 100,499 in the worst case.
+		if len(out)+len(page) > ListAllMaxRows {
+			return nil, fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
+				ErrListAllExceedsCap, filter.KType, len(out)+len(page), ListAllMaxRows)
+		}
 		for i := range page {
 			decrypted, err := s.decryptRecord(ctx, &page[i])
 			if err != nil {
@@ -328,7 +483,8 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 		if len(page) < chunk {
 			break
 		}
-		offset += chunk
+		last := page[len(page)-1]
+		cursorTS, cursorID, haveLower = last.UpdatedAt, last.ID, true
 	}
 	return out, nil
 }
@@ -347,8 +503,12 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 // public/indexable attribute before passing it in — this method is
 // not exposed to end users directly.
 //
-// Paginated internally in 500-row chunks like ListAll so large
-// tenants still stream in bounded memory.
+// Paginated internally via keyset (the same `(updated_at, id) < cursor`
+// pattern as ListAll) so concurrent inserts cannot shift a row from
+// one chunk to the next. Subject to the same ListAllMaxRows safety
+// cap as ListAll — see PGStore.ForEach (Pillar A2) for the streaming
+// alternative when a single filter is expected to match more than
+// ListAllMaxRows rows.
 func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter ListFilter, field, value string) ([]KRecord, error) {
 	if filter.KType == "" {
 		return nil, errors.New("record: ktype filter required")
@@ -361,21 +521,53 @@ func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter Li
 		status = "active"
 	}
 	const chunk = 500
+	// See ListAll for the snapshot rationale and the DB-clock
+	// vs app-clock motivation (including why clock_timestamp() is
+	// the right Postgres function to use, not now()). Same
+	// point-in-time consistency contract applies here.
+	snapshot, err := s.dbNow(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]KRecord, 0)
-	offset := 0
+	var (
+		cursorTS  time.Time
+		cursorID  uuid.UUID
+		haveLower bool
+	)
 	for {
 		page := make([]KRecord, 0, chunk)
 		err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			rows, err := tx.Query(ctx,
-				`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
-				        created_by, created_at, updated_by, updated_at, deleted_at
-				 FROM krecords
-				 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
-				   AND lower(data->>$4) = lower($5)
-				 ORDER BY updated_at DESC, id DESC
-				 LIMIT $6 OFFSET $7`,
-				tenantID, filter.KType, status, field, value, chunk, offset,
+			var (
+				rows pgx.Rows
+				err  error
 			)
+			if haveLower {
+				rows, err = tx.Query(ctx,
+					`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+					        created_by, created_at, updated_by, updated_at, deleted_at
+					 FROM krecords
+					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+					   AND lower(data->>$4) = lower($5)
+					   AND updated_at <= $6
+					   AND (updated_at, id) < ($7, $8)
+					 ORDER BY updated_at DESC, id DESC
+					 LIMIT $9`,
+					tenantID, filter.KType, status, field, value, snapshot, cursorTS, cursorID, chunk,
+				)
+			} else {
+				rows, err = tx.Query(ctx,
+					`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+					        created_by, created_at, updated_by, updated_at, deleted_at
+					 FROM krecords
+					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+					   AND lower(data->>$4) = lower($5)
+					   AND updated_at <= $6
+					 ORDER BY updated_at DESC, id DESC
+					 LIMIT $7`,
+					tenantID, filter.KType, status, field, value, snapshot, chunk,
+				)
+			}
 			if err != nil {
 				return fmt.Errorf("record: list_by_field: %w", err)
 			}
@@ -397,6 +589,10 @@ func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter Li
 		if err != nil {
 			return nil, err
 		}
+		if len(out)+len(page) > ListAllMaxRows {
+			return nil, fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
+				ErrListAllExceedsCap, filter.KType, len(out)+len(page), ListAllMaxRows)
+		}
 		for i := range page {
 			decrypted, err := s.decryptRecord(ctx, &page[i])
 			if err != nil {
@@ -408,7 +604,8 @@ func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter Li
 		if len(page) < chunk {
 			break
 		}
-		offset += chunk
+		last := page[len(page)-1]
+		cursorTS, cursorID, haveLower = last.UpdatedAt, last.ID, true
 	}
 	return out, nil
 }

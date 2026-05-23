@@ -56,25 +56,58 @@ func (h *recordHandlers) create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created)
 }
 
+// list handles GET /api/v1/records/{ktype}.
+//
+// Response shape is opt-in to preserve backward compatibility with
+// pre-cursor clients:
+//   - `?cursor=...` or `?paginate=cursor` → envelope
+//     {"records": [...], "next_cursor": "..."}; the new contract every
+//     fresh SDK (Rust, future generated TS) should use.
+//   - Otherwise → bare KRecord[] (legacy shape).
+//
+// Whenever `?offset=N` is supplied (cursor empty) we emit
+// `Deprecation: true` + a Sunset hint so dashboards can warn callers
+// to migrate before the legacy path is removed.
 func (h *recordHandlers) list(w http.ResponseWriter, r *http.Request) {
 	t := platform.TenantFromContext(r.Context())
 	if t == nil {
 		http.Error(w, "tenant context missing", http.StatusInternalServerError)
 		return
 	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	records, err := h.store.List(r.Context(), t.ID, record.ListFilter{
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	cursor := q.Get("cursor")
+	wantEnvelope := cursor != "" || q.Get("paginate") == "cursor"
+
+	if cursor == "" && offset > 0 {
+		// RFC 8594 sunset header pointing to the cursor migration
+		// guide. Loose date — operators decide when to flip on enforcement.
+		w.Header().Set("Deprecation", "true")
+		w.Header().Set("Sunset", "Wed, 31 Dec 2026 23:59:59 GMT")
+		w.Header().Set("Link", `</docs/API_PAGINATION.md>; rel="deprecation"; type="text/markdown"`)
+	}
+
+	page, err := h.store.ListPage(r.Context(), t.ID, record.ListFilter{
 		KType:  chi.URLParam(r, "ktype"),
-		Status: r.URL.Query().Get("status"),
+		Status: q.Get("status"),
 		Limit:  limit,
 		Offset: offset,
+		Cursor: cursor,
 	})
 	if err != nil {
+		if errors.Is(err, record.ErrInvalidCursor) {
+			http.Error(w, "invalid cursor", http.StatusBadRequest)
+			return
+		}
 		writeRecordError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, records)
+	if wantEnvelope {
+		writeJSON(w, http.StatusOK, page)
+		return
+	}
+	writeJSON(w, http.StatusOK, page.Records)
 }
 
 func (h *recordHandlers) get(w http.ResponseWriter, r *http.Request) {

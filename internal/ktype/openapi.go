@@ -46,8 +46,31 @@ func GenerateOpenAPISpec(ktypes []KType) ([]byte, error) {
 				},
 			},
 		}
+		// The list page envelope is generated per-KType so generated
+		// clients can attach the typed record schema as the item type
+		// of `records[]` rather than the generic KRecord.
+		pageRef := fmt.Sprintf("%s_page", kt.Name)
+		schemas[pageRef] = map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"records": map[string]any{
+					"type":  "array",
+					"items": map[string]string{"$ref": fmt.Sprintf("#/components/schemas/%s", recordRef)},
+				},
+				"next_cursor": map[string]any{
+					"type":        "string",
+					"description": "Opaque token; pass back as ?cursor= to fetch the next page. Empty/omitted when the page is the last one.",
+				},
+			},
+			"required": []string{"records"},
+		}
 		paths[base] = map[string]any{
-			"get":  operation(fmt.Sprintf("list_%s", kt.Name), fmt.Sprintf("List %s records", kt.Name), refResponseList(recordRef, 200)),
+			"get": withListParams(operationWithDescription(
+				fmt.Sprintf("list_%s", kt.Name),
+				fmt.Sprintf("List %s records", kt.Name),
+				"Default response shape is the legacy `KRecord[]`. Supply `?paginate=cursor` (or any non-empty `?cursor=` value) to opt into the cursor-paginated envelope `{records, next_cursor}`. `?offset=N` still works but emits a `Deprecation: true` response header.",
+				listResponseDual(recordRef, pageRef, 200),
+			)),
 			"post": operation(fmt.Sprintf("create_%s", kt.Name), fmt.Sprintf("Create a %s record", kt.Name), refResponse(recordRef, 201)),
 		}
 		paths[base+"/{id}"] = map[string]any{
@@ -87,6 +110,99 @@ func operation(id, summary string, resp map[string]any) map[string]any {
 		"operationId": id,
 		"summary":     summary,
 		"responses":   resp,
+	}
+}
+
+// operationWithDescription is operation with an extra `description`
+// field. Used by paths that need to document opt-in behaviour
+// (e.g. the cursor envelope for /records/{ktype}) so the generated
+// client surface explains itself.
+func operationWithDescription(id, summary, description string, resp map[string]any) map[string]any {
+	op := operation(id, summary, resp)
+	op["description"] = description
+	return op
+}
+
+// withListParams attaches the pagination query parameters that the
+// records list endpoint understands: limit, cursor, offset, status,
+// and the response-shape opt-in `paginate=cursor`.
+func withListParams(op map[string]any) map[string]any {
+	existing, _ := op["parameters"].([]any)
+	params := append(existing,
+		map[string]any{
+			"name":        "limit",
+			"in":          "query",
+			"required":    false,
+			"description": "Max records per page. Defaults to 50, capped at 500.",
+			"schema":      map[string]any{"type": "integer", "minimum": 1, "maximum": 500},
+		},
+		map[string]any{
+			"name":        "cursor",
+			"in":          "query",
+			"required":    false,
+			"description": "Opaque token from a prior page's `next_cursor`. Selects keyset pagination and triggers the envelope response shape.",
+			"schema":      map[string]any{"type": "string"},
+		},
+		map[string]any{
+			"name":        "paginate",
+			"in":          "query",
+			"required":    false,
+			"description": "Set to `cursor` to opt into the `{records, next_cursor}` envelope on the first page (no cursor required).",
+			"schema":      map[string]any{"type": "string", "enum": []string{"cursor"}},
+		},
+		map[string]any{
+			"name":        "offset",
+			"in":          "query",
+			"required":    false,
+			"description": "Deprecated. Legacy OFFSET-based pagination; responses include `Deprecation: true`. Migrate to `cursor`.",
+			"schema":      map[string]any{"type": "integer", "minimum": 0},
+			"deprecated":  true,
+		},
+		map[string]any{
+			"name":        "status",
+			"in":          "query",
+			"required":    false,
+			"description": "Filter by record status. Defaults to `active`.",
+			"schema":      map[string]any{"type": "string"},
+		},
+	)
+	op["parameters"] = params
+	return op
+}
+
+// listResponseDual documents both response shapes the records list
+// endpoint can return — bare array (legacy) and cursor envelope —
+// under one 200 response using oneOf. Generated clients should pick
+// the variant based on whether the request included `cursor` or
+// `paginate=cursor`.
+func listResponseDual(arrayItem, envelopeRef string, status int) map[string]any {
+	return map[string]any{
+		fmt.Sprint(status): map[string]any{
+			"description": "OK",
+			"headers": map[string]any{
+				"Deprecation": map[string]any{
+					"description": "Present (value `true`) when the request used the legacy `offset` query param.",
+					"schema":      map[string]any{"type": "string"},
+				},
+				"Sunset": map[string]any{
+					"description": "RFC 8594 sunset hint for the legacy offset path.",
+					"schema":      map[string]any{"type": "string"},
+				},
+			},
+			"content": map[string]any{
+				"application/json": map[string]any{
+					"schema": map[string]any{
+						"oneOf": []any{
+							map[string]any{
+								"type":  "array",
+								"items": map[string]string{"$ref": fmt.Sprintf("#/components/schemas/%s", arrayItem)},
+							},
+							map[string]any{"$ref": fmt.Sprintf("#/components/schemas/%s", envelopeRef)},
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
