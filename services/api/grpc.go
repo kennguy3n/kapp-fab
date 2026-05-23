@@ -170,30 +170,15 @@ func (g *grpcRuntime) MountGateway(r chi.Router) {
 	if g == nil || g.gateway == nil || g.gatewayMount == "" {
 		return
 	}
-	// chi.Mount strips the prefix before delegating, so the inner
-	// handler sees paths starting at "/" relative to its mount
-	// point. grpc-gateway's runtime.ServeMux matches against the
-	// rpc's full path declared in the proto annotation
-	// (/api/v2/auth/sso), so we need the prefix back on the path
-	// before delegation — restorePrefixHandler does exactly that.
-	prefix := g.gatewayMount
-	r.Mount(prefix, &restorePrefixHandler{prefix: prefix, next: g.gateway})
-}
-
-// restorePrefixHandler re-prepends the mount prefix to r.URL.Path
-// so grpc-gateway's runtime.ServeMux (which matches the full path
-// declared in the proto's google.api.http option) sees the
-// expected URL.
-type restorePrefixHandler struct {
-	prefix string
-	next   http.Handler
-}
-
-func (h *restorePrefixHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	r2 := r.Clone(r.Context())
-	r2.URL.Path = h.prefix + r.URL.Path
-	r2.URL.RawPath = h.prefix + r.URL.RawPath
-	h.next.ServeHTTP(w, r2)
+	// chi.Mount preserves r.URL.Path verbatim — it does NOT strip
+	// the mount prefix the way net/http.ServeMux does. Only chi's
+	// internal chi.RouteContext.RoutePath gets stripped, which is
+	// not what grpc-gateway looks at. grpc-gateway's runtime.ServeMux
+	// matches r.URL.Path against the full path declared in each
+	// rpc's google.api.http option (e.g. "/api/v2/auth/sso"), so
+	// mounting the gateway directly is correct: the inner handler
+	// sees the full original path and matches the rpc route.
+	r.Mount(g.gatewayMount, g.gateway)
 }
 
 // Ensure platform.Config is referenced so the build doesn't drop

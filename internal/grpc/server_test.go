@@ -35,6 +35,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -582,5 +583,130 @@ func TestGateway_RequestIDPropagation(t *testing.T) {
 	}
 	if got != "rid-fixture" {
 		t.Errorf("x-request-id echo = %q; want rid-fixture", got)
+	}
+}
+
+// TestGateway_ChiMount exercises the production code path where the
+// gateway is mounted on a chi router behind a prefix (e.g. /api/v2).
+//
+// Subtle invariant the test pins down: chi.Mount does NOT strip
+// r.URL.Path the way net/http.ServeMux does. It only updates chi's
+// own chi.RouteContext.RoutePath — which grpc-gateway does not look
+// at. The gateway's runtime.ServeMux matches r.URL.Path against the
+// full path declared in each rpc's google.api.http option (e.g.
+// "/api/v2/auth/sso"), so mounting the gateway directly on a chi
+// router under "/api/v2" is correct: the inner handler sees the
+// full original URL.Path and matches the rpc route without any
+// prefix-restore wrapper. A wrapper that prepended the mount
+// prefix would in fact DOUBLE it (chi delivered "/api/v2/auth/sso"
+// → wrapper produced "/api/v2/api/v2/auth/sso" → 404).
+//
+// This test guards that invariant: future contributors who add a
+// "prefix restore" wrapper "to fix" a misperceived chi-strips-path
+// problem will see this test fail.
+func TestGateway_ChiMount(t *testing.T) {
+	ts, closer := startTestServer(t)
+	defer closer()
+
+	ts.authBackend.exchangeResult = &auth.ExchangeResult{
+		AccessToken: "mounted-access",
+		User:        auth.ResolvedUser{ID: uuid.New(), Email: "carol@example.com"},
+		Tenants:     []auth.TenantRef{{ID: ts.tenantID}},
+		TenantID:    ts.tenantID,
+		SessionID:   uuid.New(),
+		ExpiresIn:   300,
+	}
+
+	// Inspector records the URL the gateway actually receives so
+	// the test pins down what chi.Mount passes through.
+	var observedPath, observedRawPath string
+	inspector := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observedPath = r.URL.Path
+		observedRawPath = r.URL.RawPath
+		ts.gateway.ServeHTTP(w, r)
+	})
+
+	r := chi.NewRouter()
+	r.Mount("/api/v2", inspector)
+
+	httpSrv := httptest.NewServer(r)
+	defer httpSrv.Close()
+
+	body := strings.NewReader(`{"code":"x","redirect_uri":"https://app.example.com/cb"}`)
+	resp, err := http.Post(httpSrv.URL+"/api/v2/auth/sso", "application/json", body)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d (want 200); body = %s", resp.StatusCode, string(raw))
+	}
+	if observedPath != "/api/v2/auth/sso" {
+		t.Errorf("inner-handler URL.Path = %q; want /api/v2/auth/sso (chi.Mount must NOT strip)", observedPath)
+	}
+	if observedRawPath != "" {
+		t.Errorf("inner-handler URL.RawPath should be empty for an unencoded URL; got %q", observedRawPath)
+	}
+}
+
+// TestUnaryTimeoutInterceptor_AppliesDeadline asserts that a unary
+// handler with no caller-supplied deadline picks up the server's
+// configured timeout. Uses a 50ms timeout and a handler that sleeps
+// 5s — the call must return well before the handler completes.
+func TestUnaryTimeoutInterceptor_AppliesDeadline(t *testing.T) {
+	interceptor := apigrpc.UnaryTimeoutInterceptor(50 * time.Millisecond)
+
+	start := time.Now()
+	_, err := interceptor(
+		context.Background(),
+		nil,
+		&grpc.UnaryServerInfo{FullMethod: "/test/Method"},
+		func(ctx context.Context, _ any) (any, error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(5 * time.Second):
+				return nil, nil
+			}
+		},
+	)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected context.DeadlineExceeded; got nil")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("handler exceeded timeout: elapsed = %v", elapsed)
+	}
+}
+
+// TestUnaryTimeoutInterceptor_RespectsCallerDeadline asserts that
+// when the caller already supplied a tighter deadline, the
+// interceptor does NOT extend it — context.WithTimeout honours the
+// existing deadline when it is sooner.
+func TestUnaryTimeoutInterceptor_RespectsCallerDeadline(t *testing.T) {
+	interceptor := apigrpc.UnaryTimeoutInterceptor(10 * time.Second)
+
+	callerCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := interceptor(
+		callerCtx,
+		nil,
+		&grpc.UnaryServerInfo{FullMethod: "/test/Method"},
+		func(ctx context.Context, _ any) (any, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected ctx.Err; got nil")
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Errorf("caller deadline was 25ms but call took %v", elapsed)
 	}
 }

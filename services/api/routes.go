@@ -866,11 +866,18 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 	}) // end timeout-guarded group
 
 	// Phase A5 grpc-gateway. Mounted OUTSIDE the timeout-guarded
-	// group because gateway-translated streaming RPCs need a
-	// WriteTimeout of 0 the same way /api/v1/events/stream does.
-	// The standard request-id / tracing / metrics middleware at
-	// the top of registerRoutes still applies because chi mounts
-	// the gateway as a child route, NOT a separate router.
+	// group because future gateway-translated streaming RPCs will
+	// need an unbounded WriteTimeout the same way /api/v1/events/
+	// stream does — wrapping the mount in middleware.Timeout would
+	// kill those streams at 30s. Non-streaming RPCs do NOT lose
+	// their deadline though: the gRPC server installs its own
+	// UnaryTimeoutInterceptor (apigrpc.DefaultUnaryTimeout = 30s)
+	// inside the interceptor chain, so a unary gateway request
+	// still gets a hard wall-clock bound — just enforced at the
+	// gRPC layer rather than the chi middleware layer. The
+	// standard request-id / tracing / metrics middleware at the
+	// top of registerRoutes still applies because chi mounts the
+	// gateway as a child route, NOT a separate router.
 	if grpcRT != nil {
 		grpcRT.MountGateway(r)
 	}

@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"log/slog"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -10,6 +11,15 @@ import (
 
 	kappv1 "github.com/kennguy3n/kapp-fab/gen/go/kapp/v1"
 )
+
+// DefaultUnaryTimeout bounds how long a unary RPC handler may run
+// when the caller did not supply its own context deadline. Mirrors
+// chi's middleware.Timeout(30 * time.Second) on the HTTP side so
+// the same wall-clock budget applies whether the call arrived as
+// native gRPC, gateway-translated HTTP, or REST. Streaming RPCs
+// are exempt — `events/stream` and friends rely on an unbounded
+// WriteTimeout, same as their HTTP counterparts.
+const DefaultUnaryTimeout = 30 * time.Second
 
 // ServerConfig bundles every dependency the gRPC server needs. The
 // api binary's apiDeps populates this from the same sources that
@@ -44,6 +54,14 @@ type ServerConfig struct {
 	// production deployments.
 	EnableReflection bool
 
+	// UnaryTimeout is the maximum wall-clock duration a unary RPC
+	// may run before its context is cancelled. Zero falls back to
+	// DefaultUnaryTimeout. Set to a negative value to disable the
+	// timeout entirely (only sensible for tests). The deadline is
+	// applied AFTER the auth interceptor so an unauthenticated
+	// caller cannot tie up an RPC handler indefinitely.
+	UnaryTimeout time.Duration
+
 	// AdditionalOptions lets the caller plug in extra grpc.ServerOption
 	// values (TLS credentials, custom keepalive policy, larger
 	// max-message-size for the file-upload streaming RPC, etc.)
@@ -52,17 +70,26 @@ type ServerConfig struct {
 }
 
 // NewServer constructs a *grpc.Server with the standard interceptor
-// chain (recovery -> logging -> auth) plus reflection / health and
-// every kapp.v1 service implementation we have a backend for.
+// chain (recovery -> logging -> auth -> timeout) plus reflection /
+// health and every kapp.v1 service implementation we have a backend
+// for.
 //
 // Interceptor ordering matters: recovery is OUTERMOST so it catches
 // panics from any later interceptor; logging runs BEFORE auth so
 // even unauthenticated calls (AuthService.SSO / Refresh) get a
-// request_id stamped on their log lines.
+// request_id stamped on their log lines; the timeout is INNERMOST
+// in the unary chain so the deadline scopes only the handler body,
+// not the auth/session lookups (which are themselves bounded by
+// the caller's context).
 func NewServer(cfg ServerConfig) *grpc.Server {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+
+	timeout := cfg.UnaryTimeout
+	if timeout == 0 {
+		timeout = DefaultUnaryTimeout
 	}
 
 	opts := []grpc.ServerOption{
@@ -70,6 +97,7 @@ func NewServer(cfg ServerConfig) *grpc.Server {
 			UnaryRecoveryInterceptor(logger),
 			UnaryLoggingInterceptor(logger),
 			UnaryAuthInterceptor(cfg.Auth),
+			UnaryTimeoutInterceptor(timeout),
 		),
 		grpc.ChainStreamInterceptor(
 			StreamRecoveryInterceptor(logger),

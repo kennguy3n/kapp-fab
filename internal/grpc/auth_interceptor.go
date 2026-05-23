@@ -56,11 +56,11 @@ type AuthConfig struct {
 // auth.ClaimsFromContext without knowing whether the request
 // arrived via HTTP or gRPC.
 //
-// The recovery-bypass path (platform admin entering via an inactive
-// home tenant) is intentionally NOT mirrored here — the recovery
-// flow is admin-UI only, served exclusively over HTTP. If a gRPC
-// admin surface ever lands, this interceptor will need the same
-// bypass logic with the same logging.
+// The HTTP recovery-bypass (platform admin entering via an inactive
+// home tenant for the admin UI) is intentionally NOT mirrored here.
+// gRPC has no admin UI surface and no per-RPC RequireActiveHomeTenant
+// equivalent, so the safe posture is a hard reject for any inactive
+// tenant — see the comment alongside the StatusActive check below.
 func UnaryAuthInterceptor(cfg AuthConfig) grpc.UnaryServerInterceptor {
 	logger := cfg.Logger
 	if logger == nil {
@@ -135,10 +135,19 @@ func authenticateContext(ctx context.Context, cfg AuthConfig, logger *slog.Logge
 		)
 		return nil, status.Error(codes.Internal, "tenant lookup failed")
 	}
-	if t.Status != tenant.StatusActive && !claims.IsPlatformAdmin {
-		// gRPC does NOT mirror the HTTP recovery-bypass: the admin
-		// UI runs over HTTP only. A non-admin user logging into a
-		// non-active tenant is a hard 403 here, same as HTTP.
+	if t.Status != tenant.StatusActive {
+		// gRPC blocks ALL traffic when the home tenant is inactive,
+		// including platform admins. The HTTP side has a parallel
+		// `recoveryBypass` path that lets a platform admin sign in
+		// through an inactive tenant to operate the admin UI — but
+		// every tenant-scoped HTTP route then mounts
+		// RequireActiveHomeTenant() (services/api/deps_build.go) to
+		// block real mutations. gRPC has no admin UI and no per-RPC
+		// re-check infrastructure, so the safer posture is to reject
+		// the whole surface for inactive tenants. If a gRPC admin
+		// surface ever lands, port the recovery-bypass logic AND the
+		// per-RPC RequireActiveHomeTenant guard from the HTTP side at
+		// that time — do NOT just relax this gate.
 		return nil, status.Error(codes.PermissionDenied, "tenant is not active")
 	}
 	ctx = platform.WithTenant(ctx, t)

@@ -73,31 +73,37 @@ func NewGateway(ctx context.Context, cfg GatewayConfig) (http.Handler, error) {
 }
 
 // defaultServeMuxOptions installs the kapp-fab header forwarding
-// policy: authorization + x-request-id always travel across the
-// HTTP→gRPC boundary as metadata. grpc-gateway's default already
-// translates `Authorization` (the gateway has a built-in case-
-// insensitive matcher) but the explicit IncomingHeaderMatcher
-// here ALSO forwards x-request-id so a request id minted by a
-// caller's HTTP middleware (or browser fetch interceptor) lands
-// in the gRPC server's logging interceptor too.
+// policy: authorization, x-request-id, x-helpdesk-inbound-token,
+// AND any header grpc-gateway's stock DefaultHeaderMatcher already
+// passes through (i.e. `Grpc-*` and `User-Agent`/`Authorization`)
+// travel across the HTTP→gRPC boundary as metadata. The custom
+// matcher must DELEGATE to DefaultHeaderMatcher on unknown headers
+// — gwruntime.WithIncomingHeaderMatcher REPLACES the default, it
+// does not augment it, so returning `("", false)` for unmatched
+// keys would drop every header the gateway normally forwards
+// (including grpc-timeout / grpc-encoding which downstream
+// observability stacks rely on).
+//
+// Header keys arrive in canonical (Title-Case) form because Go's
+// net/http server canonicalises them on receipt before grpc-gateway
+// sees them, so the matcher only needs to handle the canonical
+// variants.
 func defaultServeMuxOptions() []gwruntime.ServeMuxOption {
 	return []gwruntime.ServeMuxOption{
 		gwruntime.WithIncomingHeaderMatcher(func(h string) (string, bool) {
 			switch h {
-			case "Authorization", "authorization":
-				return "authorization", true
-			case "X-Request-Id", "x-request-id":
+			case "X-Request-Id":
 				return "x-request-id", true
-			case "X-Helpdesk-Inbound-Token", "x-helpdesk-inbound-token":
+			case "X-Helpdesk-Inbound-Token":
 				return "x-helpdesk-inbound-token", true
 			}
-			// Defer to the gateway default (which forwards
-			// grpc-prefixed headers verbatim). Returning
-			// false-with-empty drops everything else; matches
-			// the security posture of the HTTP gateway where
-			// only explicitly-allowlisted headers cross the
-			// auth boundary.
-			return "", false
+			// Delegate to grpc-gateway's stock matcher for every
+			// other header so Authorization, Grpc-*, and any other
+			// gateway-recognised header still reach the gRPC
+			// metadata. This is the documented composition pattern
+			// — see runtime.DefaultHeaderMatcher in
+			// github.com/grpc-ecosystem/grpc-gateway/v2/runtime.
+			return gwruntime.DefaultHeaderMatcher(h)
 		}),
 	}
 }
