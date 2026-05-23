@@ -72,11 +72,30 @@ func ProcessKType(ctx context.Context, source KRecordSource, tenantID uuid.UUID,
 	// here preserves the renderer signatures (renderCSV / renderJSON
 	// already take []KRecord) while letting the database side
 	// stream chunk-by-chunk without the 100k row safety cap.
+	//
+	// Defensive copy of r.Data: the documented ForEachFunc contract
+	// (`internal/record/record.go`) says "the slice backing the
+	// KRecord's Data is owned by the store and may be reused after
+	// the callback returns, so any data that must outlive the
+	// callback should be copied out." Today's foreachKeyset
+	// implementation allocates a fresh page slice per chunk and pgx
+	// v5 allocates fresh byte buffers per scan, so no reuse actually
+	// occurs — but the exporter retains every KRecord beyond the
+	// callback boundary to feed the renderers downstream, which
+	// would silently corrupt the export the moment the store layer
+	// switches to a buffer-pool scan (e.g. pgx.RowToStructByPos with
+	// a reusable buffer). Copying r.Data inside the callback honours
+	// the contract regardless of what the store does internally.
 	var rows []record.KRecord
 	if err := source.ForEach(ctx, tenantID, record.ListFilter{
 		KType:  ktype,
 		Status: "active",
 	}, func(r record.KRecord) error {
+		if r.Data != nil {
+			cp := make(json.RawMessage, len(r.Data))
+			copy(cp, r.Data)
+			r.Data = cp
+		}
 		rows = append(rows, r)
 		return nil
 	}); err != nil {
