@@ -14,26 +14,48 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/record"
 )
 
-// KRecordLister is the minimum surface ProcessKType needs from the
+// KRecordSource is the minimum surface ProcessKType needs from the
 // KRecord store. Defined here so the exporter does not pull in the
 // full *record.PGStore interface and so unit tests can supply a
 // lightweight fake.
-type KRecordLister interface {
-	ListAll(ctx context.Context, tenantID uuid.UUID, filter record.ListFilter) ([]record.KRecord, error)
+//
+// ForEach is the streaming iterator (Pillar A2) that walks every
+// matching row exactly once under a snapshot ceiling, without the
+// `ListAll` 100k row safety cap. The exporter is a *typed* caller
+// that knows it wants the full set for a single KType — unlike
+// anonymous callers the cap protects from accidental unbounded
+// reads — so consuming via ForEach is the architecturally correct
+// path: a tenant with >100k rows of one KType can still produce a
+// complete export without hitting `ErrListAllExceedsCap`.
+type KRecordSource interface {
+	ForEach(ctx context.Context, tenantID uuid.UUID, filter record.ListFilter, fn record.ForEachFunc) error
 }
 
-// ProcessKType runs a per-KType export by paging through ListAll and
-// rendering rows in the requested format. Returns the encoded
-// payload alongside the row count so the worker can persist both
-// in one Complete call.
+// ProcessKType runs a per-KType export by streaming rows through
+// ForEach and rendering them in the requested format. Returns the
+// encoded payload alongside the row count so the worker can
+// persist both in one Complete call.
 //
 // The caller is responsible for the surrounding job state machine
 // (claim → run → complete). This function is pure: same inputs
 // produce the same output, so a re-run after a transient worker
 // crash never duplicates data.
-func ProcessKType(ctx context.Context, lister KRecordLister, tenantID uuid.UUID, ktype, format string) ([]byte, int64, error) {
-	if lister == nil {
-		return nil, 0, fmt.Errorf("%w: krecord lister required", ErrInvalidInput)
+//
+// Memory note: the JSON and CSV renderers still build their output
+// in memory because they emit a single payload that the worker
+// writes back to the export_jobs row in one transaction. ForEach
+// streams *out of the database* (one chunk at a time, snapshot
+// ceiling, no 100k cap) while the in-process accumulation builds
+// the final payload. The end-state memory profile is the same as
+// the previous ListAll formulation — the win is that the cap that
+// could surface as `ErrListAllExceedsCap` on large tenants no
+// longer applies to this code path. Switching the worker to a
+// streaming chunk-write protocol (write CSV row-by-row to an
+// object-storage upload, finalise on the last chunk) is a future
+// improvement tracked in the export pipeline backlog.
+func ProcessKType(ctx context.Context, source KRecordSource, tenantID uuid.UUID, ktype, format string) ([]byte, int64, error) {
+	if source == nil {
+		return nil, 0, fmt.Errorf("%w: krecord source required", ErrInvalidInput)
 	}
 	if tenantID == uuid.Nil {
 		return nil, 0, fmt.Errorf("%w: tenant_id required", ErrInvalidInput)
@@ -41,19 +63,54 @@ func ProcessKType(ctx context.Context, lister KRecordLister, tenantID uuid.UUID,
 	if ktype == "" || ktype == KTypeAll {
 		return nil, 0, fmt.Errorf("%w: krecord exporter requires a concrete ktype", ErrInvalidInput)
 	}
-	rows, err := lister.ListAll(ctx, tenantID, record.ListFilter{
+	if format != FormatCSV && format != FormatJSON {
+		return nil, 0, fmt.Errorf("%w: format %q", ErrInvalidInput, format)
+	}
+
+	// Collect rows via ForEach. The previous ListAll formulation
+	// returned a []KRecord directly; collecting into the same slice
+	// here preserves the renderer signatures (renderCSV / renderJSON
+	// already take []KRecord) while letting the database side
+	// stream chunk-by-chunk without the 100k row safety cap.
+	//
+	// Defensive copy of r.Data: the documented ForEachFunc contract
+	// (`internal/record/record.go`) says "the slice backing the
+	// KRecord's Data is owned by the store and may be reused after
+	// the callback returns, so any data that must outlive the
+	// callback should be copied out." Today's foreachKeyset
+	// implementation allocates a fresh page slice per chunk and pgx
+	// v5 allocates fresh byte buffers per scan, so no reuse actually
+	// occurs — but the exporter retains every KRecord beyond the
+	// callback boundary to feed the renderers downstream, which
+	// would silently corrupt the export the moment the store layer
+	// switches to a buffer-pool scan (e.g. pgx.RowToStructByPos with
+	// a reusable buffer). Copying r.Data inside the callback honours
+	// the contract regardless of what the store does internally.
+	var rows []record.KRecord
+	if err := source.ForEach(ctx, tenantID, record.ListFilter{
 		KType:  ktype,
 		Status: "active",
-	})
-	if err != nil {
-		return nil, 0, fmt.Errorf("exporter: list %s: %w", ktype, err)
+	}, func(r record.KRecord) error {
+		if r.Data != nil {
+			cp := make(json.RawMessage, len(r.Data))
+			copy(cp, r.Data)
+			r.Data = cp
+		}
+		rows = append(rows, r)
+		return nil
+	}); err != nil {
+		return nil, 0, fmt.Errorf("exporter: stream %s: %w", ktype, err)
 	}
+
 	switch format {
 	case FormatCSV:
 		return renderCSV(rows)
 	case FormatJSON:
 		return renderJSON(rows)
 	default:
+		// Unreachable: format validated above. The explicit branch
+		// keeps the switch exhaustive for the linter and guards
+		// against silent renderer additions that skip validation.
 		return nil, 0, fmt.Errorf("%w: format %q", ErrInvalidInput, format)
 	}
 }

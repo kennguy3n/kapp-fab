@@ -83,17 +83,28 @@ func (s *PGStore) WithEncryptor(e FieldEncryptor) *PGStore {
 }
 
 // dbNow returns Postgres's current timestamp. Used to capture the
-// keyset-walk snapshot ceiling in ListAll / ListByField in the same
-// clock domain that assigns `updated_at` values on commit, so
-// app-server clock skew (NTP jitter, container pause) cannot move
+// keyset-walk snapshot ceiling in ListAll / ListByField / ForEach in
+// the same clock domain that assigns `updated_at` values on commit,
+// so app-server clock skew (NTP jitter, container pause) cannot move
 // the ceiling backwards relative to row timestamps. clock_timestamp()
 // is preferred over now() / transaction_timestamp() because it is
 // not frozen at the start of the surrounding transaction — we want
 // the wall-clock instant this call is made, not the instant the
 // outer scheduler's transaction began.
+//
+// Returns timestamptz directly (no `AT TIME ZONE 'UTC'` cast) so the
+// result type carries its own UTC anchor rather than relying on
+// pgx's scan-default location for `timestamp without time zone`.
+// pgx v5 always normalises timestamptz to UTC on scan regardless of
+// the connection's TimeZone setting; the previous formulation only
+// produced UTC because pgx's plain-timestamp default *happens* to
+// be UTC. The explicit .UTC() below is kept as belt-and-suspenders
+// in case a future scan layer normalises timestamptz to the local
+// zone, but the SQL itself no longer depends on the driver's
+// timezone defaults.
 func (s *PGStore) dbNow(ctx context.Context) (time.Time, error) {
 	var t time.Time
-	if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp() AT TIME ZONE 'UTC'`).Scan(&t); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&t); err != nil {
 		return time.Time{}, fmt.Errorf("record: dbNow: %w", err)
 	}
 	return t.UTC(), nil
@@ -391,6 +402,19 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 			return fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
 				ErrListAllExceedsCap, filter.KType, len(out)+1, ListAllMaxRows)
 		}
+		// Honour the ForEachFunc contract (record.go): the slice
+		// backing r.Data is owned by the store and may be reused
+		// after the callback returns. ListAll retains every row
+		// beyond the callback boundary, so copy r.Data before
+		// appending. Today's foreachKeyset allocates fresh buffers
+		// per scan so the copy is functionally a no-op, but this
+		// keeps ListAll safe under any future scan-buffer pooling
+		// optimisation in the store layer.
+		if r.Data != nil {
+			cp := make(json.RawMessage, len(r.Data))
+			copy(cp, r.Data)
+			r.Data = cp
+		}
 		out = append(out, r)
 		return nil
 	})
@@ -571,6 +595,16 @@ func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter Li
 		if len(out)+1 > ListAllMaxRows {
 			return fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
 				ErrListAllExceedsCap, filter.KType, len(out)+1, ListAllMaxRows)
+		}
+		// Honour the ForEachFunc contract — same defensive copy as
+		// ListAll above. ListByField retains every row beyond the
+		// callback boundary in `out`; the store-owned slice may be
+		// reused under future scan-buffer pooling, so copy r.Data
+		// before appending.
+		if r.Data != nil {
+			cp := make(json.RawMessage, len(r.Data))
+			copy(cp, r.Data)
+			r.Data = cp
 		}
 		out = append(out, r)
 		return nil
