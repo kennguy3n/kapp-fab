@@ -279,6 +279,17 @@ func (l *LegacySource) HasDown(version uint) bool {
 //
 // (Duplicates are already prevented at NewFromDir; we re-check here
 // because the rules contract is the source of truth.)
+//
+// Post-conditions for callers that observe a nil return:
+//
+//   - len(l.Versions()) >= 1
+//   - l.Versions()[0] == 1
+//   - l.Highest() == l.Versions()[len(l.Versions())-1]
+//
+// LegacySource is immutable after NewFromDir, so these post-conditions
+// continue to hold for the lifetime of the value.  Callers (e.g.
+// cmdValidate in cmd/migrate/main.go) rely on this to safely index
+// into Versions() without a separate length check.
 func (l *LegacySource) Validate() error {
 	versions := l.Versions()
 	if len(versions) == 0 {
