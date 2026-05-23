@@ -9,7 +9,11 @@
 // `kapp` template database so cases run in isolation and a flake in
 // one case can't corrupt another.  The test asserts:
 //
-//   - `up` on a fresh DB applies all 54 migrations and exits 0.
+//   - `up` on a fresh DB applies every on-disk migration and exits 0.
+//     The expected highest version is read from the migrations
+//     directory at runtime via expectedHighestVersion() so that
+//     adding a new migration does NOT also require updating the
+//     test assertions.
 //   - Re-running `up` is a no-op.
 //   - `validate` accepts the on-disk migration set.
 //   - `force` followed by `version` reports the forced version.
@@ -37,6 +41,8 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+
+	"github.com/kennguy3n/kapp-fab/internal/dbutil/migratesource"
 )
 
 const testBaseEnv = "KAPP_TEST_DB_URL"
@@ -200,6 +206,36 @@ func freshDB(t *testing.T) (string, func()) {
 	return rewriteDB(t, base, name), cleanup
 }
 
+// expectedHighestVersion reads the migrations directory and returns
+// the highest version number formatted as a six-digit string (e.g.
+// "000054").  Used by the integration tests to assert the migrate
+// CLI's output without hard-coding the count: when a new migration
+// is added, the assertion remains correct because the disk-resolved
+// value moves in lock-step with the CLI's reported version.
+//
+// We deliberately compute this once per test rather than caching at
+// package init: the test harness sets KAPP_MIGRATIONS_DIR via
+// t.Setenv (inside runCLI) and we want the helper to honor whatever
+// value the test currently has in scope.  Reading from disk is fast
+// (single dir scan) so the per-call cost is negligible compared to
+// the 54-migration DB apply each test triggers.
+func expectedHighestVersion(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	dir := filepath.Join(wd, "..", "..", "migrations")
+	src, err := migratesource.NewFromDir(dir)
+	if err != nil {
+		t.Fatalf("load migrations from %s: %v", dir, err)
+	}
+	if err := src.Validate(); err != nil {
+		t.Fatalf("migrations directory invalid: %v", err)
+	}
+	return fmt.Sprintf("%06d", src.Highest())
+}
+
 // rewriteDB substitutes the database name in a postgres DSN.  Naive
 // string manipulation is fine here because the input comes from CI /
 // developer env and is fully under our control.
@@ -229,8 +265,10 @@ func TestUp_FreshDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("up: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "applied; current version=000054") {
-		t.Fatalf("expected current version=000054 in output, got:\n%s", out)
+	wantVersion := expectedHighestVersion(t)
+	wantLine := "applied; current version=" + wantVersion
+	if !strings.Contains(out, wantLine) {
+		t.Fatalf("expected %q in output, got:\n%s", wantLine, out)
 	}
 
 	// Idempotency: second `up` should be a no-op.
@@ -351,8 +389,10 @@ func TestBootstrap_PrimesLegacyDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bootstrap: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "version=000054") {
-		t.Fatalf("expected version=000054 after bootstrap, got:\n%s", out)
+	wantVersion := expectedHighestVersion(t)
+	wantLine := "version=" + wantVersion
+	if !strings.Contains(out, wantLine) {
+		t.Fatalf("expected %q after bootstrap, got:\n%s", wantLine, out)
 	}
 
 	// Step 3: up should now be a no-op.
