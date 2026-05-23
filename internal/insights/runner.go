@@ -502,9 +502,23 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 		// is read-only and benign — the validator's denylist
 		// blocks set_config but allows current_setting precisely
 		// for cases like this.
+		//
+		// COALESCE on app.tenant_id is structural, not cosmetic:
+		// current_setting(name, missing_ok=true) returns SQL NULL
+		// when the GUC has NEVER been set on this session.  pgx
+		// cannot scan SQL NULL into a plain Go string and would
+		// surface the missing-GUC case as a generic
+		// "insights: probe rls/tenant context" Scan error
+		// instead of the specific "empty app.tenant_id GUC"
+		// rejection below — defeating the whole point of the
+		// diagnostic.  Mapping NULL -> '' inside the SELECT
+		// preserves the original intent: empty string means
+		// "the GUC was either never set or set to ''", and the
+		// tenantGUC == "" branch handles both uniformly with a
+		// clear operator-facing message.
 		var rowSecurity, tenantGUC string
 		if err := tx.QueryRow(ctx,
-			"SELECT current_setting('row_security'), current_setting('app.tenant_id', true)",
+			"SELECT current_setting('row_security'), COALESCE(current_setting('app.tenant_id', true), '')",
 		).Scan(&rowSecurity, &tenantGUC); err != nil {
 			return fmt.Errorf("insights: probe rls/tenant context: %w", err)
 		}

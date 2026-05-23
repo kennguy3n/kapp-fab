@@ -562,7 +562,10 @@ func TestValidateRawSQLAttackVectors(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
+		// Go 1.22+ scopes the range variable per-iteration, so
+		// the historical `tc := tc` shadow is no longer needed
+		// (go.mod pins go 1.25).  Dropping it keeps the
+		// closure body tighter.
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateRawSQL(tc.sql)
 			if tc.wantReject {
