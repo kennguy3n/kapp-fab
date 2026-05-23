@@ -65,7 +65,20 @@ jobs:
       - uses: bufbuild/buf-action@v1
         with:
           setup_only: true
-      - run: buf breaking --against '.git#branch=main,subdir=proto' proto
+      # Skip the breaking check when main does not yet carry the
+      # proto tree (i.e. the very first PR that introduces it).
+      # Once any .proto file is on main the check runs every PR.
+      - name: detect proto baseline on main
+        id: baseline
+        run: |
+          if git ls-tree -r --name-only main -- proto/ | grep -q '\.proto$'; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::main does not yet contain a proto/ tree; skipping buf breaking. Subsequent PRs will run the full breaking check."
+          fi
+      - if: steps.baseline.outputs.exists == 'true'
+        run: buf breaking --against '.git#branch=main,subdir=proto' proto
 
   generated-up-to-date:
     name: gen/go/ matches proto/
