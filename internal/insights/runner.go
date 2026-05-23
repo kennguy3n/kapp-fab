@@ -525,8 +525,34 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 		if rowSecurity != "on" {
 			return fmt.Errorf("insights: refusing to run raw SQL with row_security=%q (must be 'on')", rowSecurity)
 		}
-		if tenantGUC == "" {
-			return errors.New("insights: refusing to run raw SQL with empty app.tenant_id GUC")
+		// Strict equality, not just non-empty.  dbutil.WithTenantTx
+		// is the only call site that should set app.tenant_id
+		// today and always does so to the same tenantID that was
+		// passed in — but layering a value-match check here
+		// catches the hypothetical future bug where a refactor
+		// either:
+		//
+		//   (a) reuses a long-lived transaction across two
+		//       different tenant calls without re-binding
+		//       app.tenant_id, so the GUC carries a stale value
+		//       from the previous tenant's request, or
+		//
+		//   (b) introduces a separate SetTenantContext call
+		//       that takes a different uuid than the one passed
+		//       to RunRawSQL (e.g. a caller-supplied override
+		//       that should have been validated upstream).
+		//
+		// Both cases are mismatch-not-empty, so `tenantGUC == ""`
+		// alone wouldn't catch them.  Compare against the exact
+		// canonical string form (uuid.UUID.String() is RFC 4122
+		// lowercase hyphenated) — dbutil.SetTenantContext passes
+		// tenantID.String() through set_config, so the round-trip
+		// is byte-equal in the happy path.
+		if want := tenantID.String(); tenantGUC != want {
+			if tenantGUC == "" {
+				return errors.New("insights: refusing to run raw SQL with empty app.tenant_id GUC")
+			}
+			return fmt.Errorf("insights: refusing to run raw SQL with mismatched app.tenant_id (got %q, want %q)", tenantGUC, want)
 		}
 		pgxRows, err := tx.Query(ctx, rawSQL, params...)
 		if err != nil {
