@@ -467,6 +467,22 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 		// `cannot execute X in a read-only transaction` and surface
 		// it as a 400 rather than a silent commit. Visual runner
 		// has its own callback path and is unaffected.
+		//
+		// Ordering note: SET TRANSACTION READ ONLY is valid here
+		// even though dbutil.WithTenantTx has already run
+		// `SELECT set_config('app.tenant_id', $1, true)` first.
+		// PostgreSQL only requires SET TRANSACTION ISOLATION LEVEL
+		// to be the very first statement; READ ONLY / READ WRITE
+		// can be issued any time before the first statement that
+		// touches user-data tables (i.e. before the first snapshot
+		// acquisition).  set_config operates entirely in GUC
+		// memory — no snapshot, no xid, no row locks — so the
+		// "first data-touching statement" budget is still
+		// intact when we land here.  If WithTenantTx ever
+		// changes to issue actual table-touching SQL before its
+		// callback, this SET TRANSACTION must move earlier
+		// (or move into WithTenantTx itself) to preserve the
+		// invariant.
 		if _, err := tx.Exec(ctx, "SET TRANSACTION READ ONLY"); err != nil {
 			return fmt.Errorf("insights: set transaction read only: %w", err)
 		}
