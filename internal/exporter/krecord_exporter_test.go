@@ -241,6 +241,38 @@ func TestProcessKTypePropagatesSourceErrors(t *testing.T) {
 	}
 }
 
+// TestProcessKTypePropagatesMidStreamFailures covers the partial-
+// stream failure mode: the source delivers one or more rows
+// successfully and THEN errors out (simulating a chunk-boundary
+// decrypt failure or a tx-recycle hiccup in the production store).
+// ProcessKType must surface the error wrapped with the same
+// "stream <ktype>" context as the upfront-failure case so log
+// lines remain uniform across both failure modes.
+func TestProcessKTypePropagatesMidStreamFailures(t *testing.T) {
+	t.Parallel()
+	tenant := uuid.MustParse("00000000-0000-0000-0000-00000000aaaa")
+	t0 := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	mid := errors.New("simulated chunk-boundary failure")
+	src := &fakeKRecordSource{
+		rows: []record.KRecord{
+			newSampleRow(t, "00000000-0000-0000-0000-000000000001",
+				"first", 100.00, t0),
+		},
+		callbackErr: mid,
+	}
+
+	_, _, err := ProcessKType(context.Background(), src, tenant, "invoice", FormatJSON)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !errors.Is(err, mid) {
+		t.Fatalf("expected wrapped mid-stream error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "stream invoice") {
+		t.Errorf("expected error to mention 'stream invoice', got %q", err.Error())
+	}
+}
+
 // TestProcessKTypeBypassesListAllCap exercises the architectural
 // reason for the migration: a tenant with more rows than the old
 // ListAllMaxRows cap (100 000) must still produce a complete

@@ -402,6 +402,19 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 			return fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
 				ErrListAllExceedsCap, filter.KType, len(out)+1, ListAllMaxRows)
 		}
+		// Honour the ForEachFunc contract (record.go): the slice
+		// backing r.Data is owned by the store and may be reused
+		// after the callback returns. ListAll retains every row
+		// beyond the callback boundary, so copy r.Data before
+		// appending. Today's foreachKeyset allocates fresh buffers
+		// per scan so the copy is functionally a no-op, but this
+		// keeps ListAll safe under any future scan-buffer pooling
+		// optimisation in the store layer.
+		if r.Data != nil {
+			cp := make(json.RawMessage, len(r.Data))
+			copy(cp, r.Data)
+			r.Data = cp
+		}
 		out = append(out, r)
 		return nil
 	})
@@ -582,6 +595,16 @@ func (s *PGStore) ListByField(ctx context.Context, tenantID uuid.UUID, filter Li
 		if len(out)+1 > ListAllMaxRows {
 			return fmt.Errorf("%w: ktype=%s rows=%d cap=%d",
 				ErrListAllExceedsCap, filter.KType, len(out)+1, ListAllMaxRows)
+		}
+		// Honour the ForEachFunc contract — same defensive copy as
+		// ListAll above. ListByField retains every row beyond the
+		// callback boundary in `out`; the store-owned slice may be
+		// reused under future scan-buffer pooling, so copy r.Data
+		// before appending.
+		if r.Data != nil {
+			cp := make(json.RawMessage, len(r.Data))
+			copy(cp, r.Data)
+			r.Data = cp
 		}
 		out = append(out, r)
 		return nil
