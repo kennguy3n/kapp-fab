@@ -120,3 +120,35 @@ func TestWriteInsightsErrorSecurityAssertionDistinctFromDefault(t *testing.T) {
 		t.Fatalf("context.Canceled status = %d; want 504 (cancellation arm regressed)", rec.Code)
 	}
 }
+
+// TestWriteInsightsErrorJoinedSentinelHonoursSwitchOrder pins
+// the switch-ordering invariant: if a future refactor joins
+// ErrValidation and ErrSecurityAssertion into a single error
+// (errors.Join, or fmt.Errorf("%w: %w", a, b) — both produce a
+// multi-sentinel chain where errors.Is matches BOTH), the
+// HTTP layer must route to the EARLIER case in the switch.
+// ErrValidation appears above ErrSecurityAssertion, so the
+// joined error gets 400 (client-input contract wins).
+//
+// This documents the rule for runner-side code: do NOT join
+// these sentinels.  If a probe failure is also a validation
+// failure (hypothetically — the current code never produces
+// this shape), the caller must pick one sentinel based on the
+// dominant semantic, not bag-of-sentinels.  The validation
+// path takes precedence because a 400 is more actionable for
+// the client than an opaque 500.
+func TestWriteInsightsErrorJoinedSentinelHonoursSwitchOrder(t *testing.T) {
+	joined := errors.Join(insights.ErrValidation, insights.ErrSecurityAssertion)
+	if !errors.Is(joined, insights.ErrValidation) {
+		t.Fatalf("joined error lost ErrValidation; errors.Join semantics regressed")
+	}
+	if !errors.Is(joined, insights.ErrSecurityAssertion) {
+		t.Fatalf("joined error lost ErrSecurityAssertion; errors.Join semantics regressed")
+	}
+
+	rec := httptest.NewRecorder()
+	writeInsightsError(rec, joined)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("joined(ErrValidation, ErrSecurityAssertion) status = %d; want 400 — ErrValidation must take precedence over ErrSecurityAssertion in the switch", rec.Code)
+	}
+}
