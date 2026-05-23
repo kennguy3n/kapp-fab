@@ -35,7 +35,19 @@ import (
 // dial back; the api binary uses it both for the gateway mount on
 // the main router (cfg.GatewayMount) and for the integration test
 // helper that pokes the gateway over HTTP.
-func startGRPCServer(ctx context.Context, d *apiDeps, logger *slog.Logger) (*grpcRuntime, error) {
+//
+// The supplied ctx parameter is reserved for future use (e.g.
+// propagating cancellation into the Serve goroutine or threading
+// it through a deps refresh). It is intentionally NOT used for
+// the gateway dial context: grpc-gateway tears down its upstream
+// client connection the moment its dial-ctx fires Done, which on
+// SIGTERM would happen BEFORE the HTTP server has finished
+// draining in-flight gateway-translated requests. That produces
+// transient 5xx errors at the gateway surface during rolling
+// restarts. We avoid the race by giving the gateway its own
+// cancel function and only firing it AFTER http.Server.Shutdown
+// completes — see grpcRuntime.Stop and main.go's defer order.
+func startGRPCServer(_ context.Context, d *apiDeps, logger *slog.Logger) (*grpcRuntime, error) {
 	cfg := d.cfg
 	if cfg.GRPCAddr == "" {
 		// Refuse to silently no-op when the operator clearly *wanted*
@@ -166,15 +178,23 @@ func startGRPCServer(ctx context.Context, d *apiDeps, logger *slog.Logger) (*grp
 				cfg.GatewayMount, apigrpc.GatewayMountPrefix, apigrpc.GatewayMountPrefix,
 			)
 		}
-		gw, err := apigrpc.NewGateway(ctx, apigrpc.GatewayConfig{
+		// Decouple the gateway's dial-ctx from the SIGTERM ctx so
+		// http.Server.Shutdown can drain in-flight gateway-translated
+		// requests without the gateway's upstream gRPC connection being
+		// torn down mid-flight. See the doc comment on this function
+		// and grpcRuntime.Stop for the full lifecycle contract.
+		gatewayCtx, gatewayCancel := context.WithCancel(context.Background())
+		gw, err := apigrpc.NewGateway(gatewayCtx, apigrpc.GatewayConfig{
 			GRPCEndpoint: rt.addr,
 		})
 		if err != nil {
+			gatewayCancel()
 			rt.Stop()
 			return nil, fmt.Errorf("grpc gateway: %w", err)
 		}
 		rt.gateway = gw
 		rt.gatewayMount = mount
+		rt.gatewayCancel = gatewayCancel
 		logger.Info("grpc gateway: mounted",
 			slog.String("mount", rt.gatewayMount),
 			slog.String("upstream", rt.addr),
@@ -194,13 +214,41 @@ type grpcRuntime struct {
 	gateway      http.Handler
 	gatewayMount string
 	logger       *slog.Logger
+	// gatewayCancel cancels the context the grpc-gateway dial
+	// goroutine watches. It is intentionally separate from the
+	// SIGTERM ctx so the gateway's upstream gRPC connection stays
+	// up until AFTER http.Server.Shutdown drains in-flight
+	// gateway-translated requests. Nil when the gateway was not
+	// wired (KAPP_GRPC_GATEWAY_MOUNT empty or KAPP_GRPC_ADDR empty).
+	gatewayCancel context.CancelFunc
 }
 
-// Stop performs a graceful gRPC shutdown bounded by the supplied
-// deadline (defaults to 5s when called without context). Safe to
-// call on a nil receiver / zero-value runtime.
+// Stop performs a graceful gRPC shutdown bounded by a 5s deadline.
+// Safe to call on a nil receiver / zero-value runtime.
+//
+// The shutdown order is deliberate: (1) close the gateway's
+// upstream dial-ctx so the gateway stops accepting NEW upstream
+// calls, (2) GracefulStop the gRPC server which drains in-flight
+// RPCs (including any final gateway-translated calls already in
+// flight when http.Server.Shutdown returned). Caller (main.go)
+// MUST invoke this AFTER http.Server.Shutdown completes — doing
+// it earlier would tear down the upstream conn mid-request and
+// produce transient 5xx at the gateway surface during rolling
+// restarts. See startGRPCServer's doc comment for the rationale.
 func (g *grpcRuntime) Stop() {
-	if g == nil || g.srv == nil {
+	if g == nil {
+		return
+	}
+	// Always cancel the gateway dial context, even on the
+	// no-server / no-gateway zero-value paths — it's a no-op when
+	// the context wasn't constructed. Without this the
+	// context.WithCancel allocation would leak its goroutine if
+	// gateway construction succeeded but the caller hit an early
+	// shutdown path that bypasses gRPC drain (test cleanup, etc.).
+	if g.gatewayCancel != nil {
+		g.gatewayCancel()
+	}
+	if g.srv == nil {
 		return
 	}
 	// Fall back to slog.Default() when the runtime was constructed

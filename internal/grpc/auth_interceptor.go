@@ -170,6 +170,21 @@ func authenticateContext(ctx context.Context, cfg AuthConfig, logger *slog.Logge
 	ctx = platform.WithTenant(ctx, t)
 	ctx = platform.WithUserID(ctx, claims.UserID)
 	ctx = auth.WithClaims(ctx, claims)
+	// Report identity back UP the interceptor chain to the logging
+	// interceptor's pre-allocated shared-attrs struct. gRPC's unary
+	// interceptor model is strictly forward-flowing — the outer
+	// (logging) interceptor's ctx variable does NOT see the
+	// WithTenant/WithUserID enrichments after control unwinds (the
+	// auth interceptor produces a new ctx and passes IT to its
+	// handler call; the logging interceptor's local `ctx` stays
+	// pre-auth). The shared-pointer pattern is the canonical fix:
+	// logging_interceptor.go's rpcAttrs doc comment explains the
+	// constraint in full. A nil receiver here is safe and expected
+	// for unit tests that exercise authenticateContext directly
+	// without the interceptor chain.
+	if shared := rpcAttrsFromContext(ctx); shared != nil {
+		shared.setIdentity(t.ID, claims.UserID)
+	}
 	return ctx, nil
 }
 

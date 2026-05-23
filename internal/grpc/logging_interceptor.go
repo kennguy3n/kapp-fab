@@ -3,6 +3,7 @@ package grpc
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +14,70 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 )
+
+// rpcAttrs is the shared mutable struct that lets a downstream
+// interceptor (auth) report attributes back UP the chain to a
+// previously-run interceptor (logging) for inclusion in the
+// completion log line.
+//
+// gRPC's unary interceptor model is strictly forward-flowing: each
+// interceptor receives a ctx, optionally derives a new ctx, and
+// passes IT to its `handler` argument. Control unwinds back to the
+// outer interceptor with whatever ctx the outer one created — the
+// inner enrichments (e.g. auth's WithTenant/WithUserID) are never
+// visible to the outer interceptor's post-handler code. That is
+// why a naive TenantFromContext(ctx) inside emitRPCComplete
+// always returns nil even on authenticated RPCs.
+//
+// The fix is the shared-pointer pattern: logging allocates an
+// rpcAttrs, stores a POINTER to it on the ctx it passes forward,
+// and the auth interceptor writes to the SAME struct after a
+// successful authentication. context.WithValue chaining preserves
+// the pointer through every subsequent ctx derivation in the
+// chain, so rpcAttrsFromContext returns the same struct whether
+// it's called from auth (write) or from emitRPCComplete (read).
+//
+// The mutex guards against the race between auth (writing) and
+// emitRPCComplete (reading) when a server handler panics partway
+// through processing — recovery_interceptor.go would unwind
+// control back up to emitRPCComplete while the handler goroutine
+// could theoretically still be in the middle of an auth-driven
+// background goroutine. The lock is uncontended on the happy
+// path; the overhead is negligible.
+type rpcAttrs struct {
+	mu       sync.Mutex
+	tenantID uuid.UUID
+	userID   uuid.UUID
+}
+
+func (a *rpcAttrs) setIdentity(tenantID, userID uuid.UUID) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.tenantID = tenantID
+	a.userID = userID
+}
+
+func (a *rpcAttrs) snapshot() (uuid.UUID, uuid.UUID) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.tenantID, a.userID
+}
+
+type rpcAttrsKey struct{}
+
+func withRPCAttrs(ctx context.Context, a *rpcAttrs) context.Context {
+	return context.WithValue(ctx, rpcAttrsKey{}, a)
+}
+
+// rpcAttrsFromContext returns the per-RPC shared-attrs struct
+// allocated by the logging interceptor. Returns nil when the
+// caller is not running under the logging interceptor (e.g. unit
+// tests that drive a service handler directly without the
+// interceptor chain). Callers MUST nil-check before writing.
+func rpcAttrsFromContext(ctx context.Context) *rpcAttrs {
+	a, _ := ctx.Value(rpcAttrsKey{}).(*rpcAttrs)
+	return a
+}
 
 // UnaryLoggingInterceptor stamps a request_id + per-request logger
 // onto ctx (matching what platform.RequestIDMiddleware does on the
@@ -32,10 +97,12 @@ func UnaryLoggingInterceptor(base *slog.Logger) grpc.UnaryServerInterceptor {
 		base = slog.Default()
 	}
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		attrs := &rpcAttrs{}
+		ctx = withRPCAttrs(ctx, attrs)
 		ctx = injectRequestID(ctx, base, info.FullMethod, false)
 		start := time.Now()
 		resp, err := handler(ctx, req)
-		emitRPCComplete(ctx, info.FullMethod, start, err, false)
+		emitRPCComplete(ctx, attrs, info.FullMethod, start, err, false)
 		return resp, err
 	}
 }
@@ -49,10 +116,12 @@ func StreamLoggingInterceptor(base *slog.Logger) grpc.StreamServerInterceptor {
 		base = slog.Default()
 	}
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		ctx := injectRequestID(ss.Context(), base, info.FullMethod, true)
+		attrs := &rpcAttrs{}
+		ctx := withRPCAttrs(ss.Context(), attrs)
+		ctx = injectRequestID(ctx, base, info.FullMethod, true)
 		start := time.Now()
 		err := handler(srv, &wrappedServerStream{ServerStream: ss, ctx: ctx})
-		emitRPCComplete(ctx, info.FullMethod, start, err, true)
+		emitRPCComplete(ctx, attrs, info.FullMethod, start, err, true)
 		return err
 	}
 }
@@ -83,10 +152,14 @@ func injectRequestID(ctx context.Context, base *slog.Logger, method string, stre
 }
 
 // emitRPCComplete writes the single "rpc complete" log line. Pulls
-// tenant + user attributes off ctx if the auth interceptor stamped
-// them; absent attributes are simply omitted (e.g. unauthenticated
-// AuthService calls).
-func emitRPCComplete(ctx context.Context, method string, start time.Time, err error, streaming bool) {
+// tenant + user attributes off the shared rpcAttrs struct that the
+// auth interceptor populated (see rpcAttrs doc comment for why a
+// shared pointer is necessary instead of a TenantFromContext read).
+// Absent attributes are simply omitted, which is the expected
+// behaviour for unauthenticated AuthService calls AND for failed
+// authentication (auth interceptor returns early before writing
+// to the struct).
+func emitRPCComplete(ctx context.Context, sharedAttrs *rpcAttrs, method string, start time.Time, err error, streaming bool) {
 	logger := platform.LoggerFromContext(ctx)
 	code := codes.OK
 	if err != nil {
@@ -96,11 +169,14 @@ func emitRPCComplete(ctx context.Context, method string, start time.Time, err er
 		slog.String("code", code.String()),
 		slog.Duration("duration", time.Since(start)),
 	}
-	if t := platform.TenantFromContext(ctx); t != nil {
-		attrs = append(attrs, slog.String("tenant_id", t.ID.String()))
-	}
-	if uid := platform.UserIDFromContext(ctx); uid != uuid.Nil {
-		attrs = append(attrs, slog.String("user_id", uid.String()))
+	if sharedAttrs != nil {
+		tenantID, userID := sharedAttrs.snapshot()
+		if tenantID != uuid.Nil {
+			attrs = append(attrs, slog.String("tenant_id", tenantID.String()))
+		}
+		if userID != uuid.Nil {
+			attrs = append(attrs, slog.String("user_id", userID.String()))
+		}
 	}
 	if err != nil {
 		attrs = append(attrs, slog.String("err", err.Error()))

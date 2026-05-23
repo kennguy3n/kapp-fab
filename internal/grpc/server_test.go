@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -974,4 +975,186 @@ func TestRequestIDFromMetadata_Sanitisation(t *testing.T) {
 			t.Errorf("RequestIDFromMetadata(no md) = %q; want empty", got)
 		}
 	})
+}
+
+// recordingHandler is the shared backing store for the
+// sharedRecordingHandler chain. Every Record emitted through any
+// derived handler (from base.With(...) calls inside the logging
+// interceptor) lands in the same `records` slice so the test can
+// inspect what was written from the gRPC server goroutine. The
+// mutex makes the structure safe for the cross-goroutine read
+// the test performs after the RPC returns.
+type recordingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+// findRecord returns the first captured record whose message
+// matches `msg`, or nil if none was emitted.
+func (h *recordingHandler) findRecord(msg string) *slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := range h.records {
+		if h.records[i].Message == msg {
+			return &h.records[i]
+		}
+	}
+	return nil
+}
+
+// TestLoggingInterceptor_RPCComplete_IncludesTenantAndUser pins the
+// fix for the chain-of-interceptors context-propagation bug: the
+// auth interceptor enriches its OWN ctx with WithTenant/WithUserID
+// and passes that to its handler, but control unwinds back to the
+// outer logging interceptor with the pre-auth ctx — so a naive
+// platform.TenantFromContext(ctx) inside emitRPCComplete returns
+// nil even for authenticated RPCs. The fix is the shared-pointer
+// rpcAttrs struct on ctx that auth writes to and logging reads
+// from. This test wires up a real interceptor chain against a
+// real bearer JWT and asserts that the captured "rpc complete"
+// log record contains BOTH tenant_id and user_id attributes.
+//
+// A regression to the pre-fix behaviour (rpc complete missing
+// tenant_id/user_id) would fail this test, AND a chain-order
+// regression (auth running before logging, breaking unauthed
+// SSO/Refresh logging) would fail TestAuthService_SSO's existing
+// expectations. Together the two tests pin the contract.
+func TestLoggingInterceptor_RPCComplete_IncludesTenantAndUser(t *testing.T) {
+	// Custom logger that records every emitted slog.Record. The
+	// SAME shared backing slice is propagated through every
+	// base.With(...) derivative by capturing a shared pointer in
+	// the handler — we accomplish this by ALWAYS writing into the
+	// receiver's records slice via WithAttrs returning a clone that
+	// embeds the same recordingHandler.
+	rec := &recordingHandler{}
+	// Re-implement WithAttrs to share the records slice. We
+	// shadow the type's WithAttrs by using a wrapper handler
+	// instead.
+	logger := slog.New(&sharedRecordingHandler{base: rec})
+
+	signer, err := auth.NewSigner(auth.SignerConfig{
+		Algorithm:  auth.AlgHS256,
+		HMACKey:    []byte("0123456789abcdef0123456789abcdef"),
+		Issuer:     "kapp-test",
+		Audience:   "kapp-test",
+		AccessTTL:  10 * time.Minute,
+		RefreshTTL: 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+
+	tenantID := uuid.New()
+	userID := uuid.New()
+	tn := &tenant.Tenant{ID: tenantID, Status: tenant.StatusActive}
+
+	srvCfg := apigrpc.ServerConfig{
+		Auth: apigrpc.AuthConfig{
+			Signer:        signer,
+			TenantResolve: &fakeTenantResolver{tenant: tn},
+			Logger:        logger,
+		},
+		KTypeRegistry: newFakeKTypeBackend(),
+		Logger:        logger,
+	}
+	srv, err := apigrpc.NewServer(srvCfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = lis.Close() }()
+	go func() { _ = srv.Serve(lis) }()
+	defer srv.GracefulStop()
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	tok, err := signer.Issue(auth.Claims{
+		UserID:    userID,
+		TenantID:  tenantID,
+		SessionID: uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+tok)
+
+	ktClient := kappv1.NewKTypeServiceClient(conn)
+	if _, err := ktClient.ListKTypes(ctx, &kappv1.ListKTypesRequest{}); err != nil {
+		t.Fatalf("ListKTypes: %v", err)
+	}
+
+	rpcRec := rec.findRecord("rpc complete")
+	if rpcRec == nil {
+		t.Fatalf("did not see 'rpc complete' log record; got %d records", len(rec.records))
+	}
+
+	var sawTenant, sawUser bool
+	var gotTenant, gotUser string
+	rpcRec.Attrs(func(a slog.Attr) bool {
+		switch a.Key {
+		case "tenant_id":
+			sawTenant = true
+			gotTenant = a.Value.String()
+		case "user_id":
+			sawUser = true
+			gotUser = a.Value.String()
+		}
+		return true
+	})
+	if !sawTenant {
+		t.Errorf("rpc complete missing tenant_id attribute")
+	} else if gotTenant != tenantID.String() {
+		t.Errorf("rpc complete tenant_id = %s; want %s", gotTenant, tenantID.String())
+	}
+	if !sawUser {
+		t.Errorf("rpc complete missing user_id attribute")
+	} else if gotUser != userID.String() {
+		t.Errorf("rpc complete user_id = %s; want %s", gotUser, userID.String())
+	}
+}
+
+// sharedRecordingHandler wraps recordingHandler so every
+// base.With(...) derivative records into the SAME backing slice
+// (slog handlers normally return a clone on WithAttrs/WithGroup
+// which would lose the records the test wants to read). The
+// wrapper keeps the same `base` pointer through all derivatives.
+type sharedRecordingHandler struct {
+	base  *recordingHandler
+	attrs []slog.Attr
+	group string
+}
+
+func (h *sharedRecordingHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (h *sharedRecordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.base.mu.Lock()
+	defer h.base.mu.Unlock()
+	cloned := r.Clone()
+	if len(h.attrs) > 0 {
+		cloned.AddAttrs(h.attrs...)
+	}
+	h.base.records = append(h.base.records, cloned)
+	return nil
+}
+
+func (h *sharedRecordingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	merged := make([]slog.Attr, 0, len(h.attrs)+len(attrs))
+	merged = append(merged, h.attrs...)
+	merged = append(merged, attrs...)
+	return &sharedRecordingHandler{base: h.base, attrs: merged, group: h.group}
+}
+
+func (h *sharedRecordingHandler) WithGroup(name string) slog.Handler {
+	return &sharedRecordingHandler{base: h.base, attrs: h.attrs, group: name}
 }
