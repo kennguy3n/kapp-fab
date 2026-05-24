@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -20,6 +21,8 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/auth"
 	"github.com/kennguy3n/kapp-fab/internal/authz"
 	"github.com/kennguy3n/kapp-fab/internal/base"
+	"github.com/kennguy3n/kapp-fab/internal/captcha"
+	"github.com/kennguy3n/kapp-fab/internal/csrf"
 	"github.com/kennguy3n/kapp-fab/internal/dashboard"
 	"github.com/kennguy3n/kapp-fab/internal/docs"
 	"github.com/kennguy3n/kapp-fab/internal/events"
@@ -107,6 +110,12 @@ func runCleanups(cleanups []func()) {
 // must NOT re-panic; the defer here only fires when something
 // downstream of a successful step actually panicked.
 func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanup func(), err error) {
+	// We use slog.Default() for the boot-time warnings emitted by
+	// new infra (captcha, csrf) — the package logger is already
+	// configured by main.go's setupLogger(); reusing it keeps the
+	// boot transcript in one place without threading a Logger
+	// parameter through buildDeps's already-broad signature.
+	logger := slog.Default()
 	var cleanups []func()
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -334,6 +343,57 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// without overshooting before the per-tenant inbound-quota
 	// downstream cuts in.
 	publicInboundIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, "inbound", 30, 10)
+
+	// Build the captcha verifier from operator config. Boot fails
+	// loudly when the operator picks a provider but forgets the
+	// required secret — silent fall-through to a no-op verifier
+	// would be a security regression. When KAPP_CAPTCHA_PROVIDER
+	// is empty / "disabled" the factory returns a DisabledVerifier
+	// and the boot logger emits a WARN so the no-op state is
+	// auditable in operator logs.
+	captchaVerifier, err := captcha.NewFromConfig(captcha.Config{
+		Provider:         cfg.CaptchaProvider,
+		Secret:           cfg.CaptchaSecret,
+		MinScore:         cfg.CaptchaMinScore,
+		ExpectedHostname: cfg.CaptchaExpectedHostname,
+		PoWHMACKey:       []byte(cfg.PoWHMACKey),
+		PoWDifficulty:    clampPoWDifficulty(cfg.PoWDifficulty),
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("captcha: build verifier: %w", err)
+	}
+	switch captchaVerifier.Provider() {
+	case "disabled":
+		logger.Warn("captcha: provider disabled (no bot protection on public POST surface); set KAPP_CAPTCHA_PROVIDER to enable")
+	default:
+		logger.Info("captcha: provider enabled",
+			slog.String("provider", captchaVerifier.Provider()))
+	}
+	captchaMW := captchaMiddleware(captchaVerifier, logger)
+
+	// CSRF middleware: Origin / Referer allowlist + optional
+	// double-submit cookie. Mounted globally below the timeout
+	// group so bearer-authenticated traffic bypasses the check
+	// without ceremony (Authorization: Bearer presence is the
+	// gate). Empty AllowedOrigins disables the Origin check —
+	// safe for the current bearer-only deployment but a known
+	// no-op posture surfaced in the boot log.
+	csrfCfg := csrf.Config{
+		AllowedOrigins: cfg.CSRFAllowedOrigins,
+		CookieName:     cfg.CSRFCookieName,
+		CookieSecure:   cfg.CSRFCookieSecure,
+		SkipBearerAuth: true,
+	}
+	if len(cfg.CSRFAllowedOrigins) == 0 {
+		logger.Warn("csrf: no allowed origins configured (set KAPP_CSRF_ALLOWED_ORIGINS in production)")
+	}
+	csrfMW := csrf.Middleware(csrfCfg, func(r *http.Request, err error) {
+		logger.Info("csrf: deny",
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.String("error", err.Error()))
+	})
+
 	quotaEnforcer := platform.NewQuotaEnforcer(pool)
 
 	// Phase J — tenant feature flags, plan definitions, and usage
@@ -780,6 +840,9 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		publicFormIPLimit:    publicFormIPLimit,
 		publicEmbedIPLimit:   publicEmbedIPLimit,
 		publicInboundIPLimit: publicInboundIPLimit,
+		captchaMW:            captchaMW,
+		captchaVerifier:      captchaVerifier,
+		csrfMW:               csrfMW,
 		adminChain:           adminChain,
 		tenantChain:          tenantChain,
 		authh:                authh,
@@ -825,4 +888,21 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	}
 
 	return d, func() { runCleanups(cleanups) }, nil
+}
+
+// clampPoWDifficulty narrows the operator-supplied difficulty into
+// the uint8 range expected by captcha.PoWVerifier. Values below 1
+// are floored to the package default of 20 so a missing env var
+// doesn't silently disable the proof-of-work check; values above
+// 255 are capped at 255 (no client could solve that anyway, but
+// the cap keeps the cast well-defined). See gosec G115.
+func clampPoWDifficulty(d int) uint8 {
+	switch {
+	case d < 1:
+		return 20
+	case d > 255:
+		return 255
+	default:
+		return uint8(d) //nolint:gosec // G115 — bounds checked above
+	}
 }
