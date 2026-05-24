@@ -816,6 +816,128 @@ func TestInsightsSQLEditorMode(t *testing.T) {
 	}
 }
 
+// TestInsightsSQLEditorLockTimeoutApplied proves the PR-2 hardening
+// applies SET LOCAL lock_timeout inside the per-tenant tx.  The
+// runner reads back the active lock_timeout via
+// `current_setting('lock_timeout')` (read-only and allowed by the
+// validator's denylist) and we verify the round-trip value matches
+// what we configured via WithLockTimeout — proving the SET LOCAL
+// statement actually fired, not just that the field is stored on
+// the Runner struct.
+//
+// We test three cases:
+//
+//   1. Default (DefaultLockTimeout = 5s).  Default-configured
+//      runner from NewRunner.
+//   2. Caller override (3s via WithLockTimeout).  Builder method
+//      mutates the runner and the new value is what fires.
+//   3. Disabled (0 via WithLockTimeout(0)).  The SET LOCAL is
+//      skipped entirely; the active lock_timeout is whatever the
+//      role/db default is (usually "0" meaning "no timeout").
+//
+// PostgreSQL canonicalises lock_timeout values according to magnitude:
+// round-second multiples (5000ms, 3000ms) format as "<n>s"; non-round
+// millisecond values (5500ms) format as "<n>ms"; zero formats as "0".
+// The test assertions are exact-match against the canonical form, so
+// every new case must declare the canonical-form expected value
+// explicitly (no substring matching).  The current cases use only
+// round-second multiples; if a future case adds e.g. 5500ms, its
+// `want` must be "5500ms", not "5500" or "5.5s".  pg_strfromd's
+// formatting rules have been stable since at least PG 10, so the
+// canonical form is a real contract, not a happy-path accident.
+//
+// Subtests are order-independent (each re-binds lockTimeout from a
+// known baseline at the top of its closure), but NOT parallel-safe:
+// they share a single Runner pointer and WithLockTimeout mutates
+// the receiver in place (that's the documented builder contract).
+// If t.Parallel() were added to the subtest closures two goroutines
+// would race on Runner.lockTimeout.  Sequential subtest execution
+// is sufficient for this PR's coverage goal (verify the SET LOCAL
+// fires for each configuration); when the surface grows enough to
+// warrant parallelism, the fix is per-case NewRunner — not adding
+// t.Parallel() with the current shape.
+//
+// The disabled-zero case self-calibrates against the role/db default
+// rather than assuming it's literally '0', so a future ops change
+// like `ALTER ROLE kapp_app SET lock_timeout = '2s'` doesn't make
+// the test flaky.  We read the baseline via the admin pool (which
+// honours role/db defaults but doesn't have a `SET LOCAL` applied
+// to it from a prior test) and compare disabled-zero's readback to
+// that value.
+func TestInsightsSQLEditorLockTimeoutApplied(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, _, _, _, runner := newTenantForInsights(t, h)
+
+	// Self-calibrate the disabled-zero expected value against the
+	// role's effective lock_timeout default.  Pool acquired via
+	// h.pool (the kapp_app role) so it reflects the same role/db
+	// defaults that RunRawSQL's transaction would see when the
+	// SET LOCAL is skipped.  We open a one-off short-lived
+	// connection rather than a long-lived tx so we don't leak a
+	// SET LOCAL into the pool's session reset list.
+	var roleDefaultLockTimeout string
+	if err := h.pool.QueryRow(ctx, "SELECT current_setting('lock_timeout')").Scan(&roleDefaultLockTimeout); err != nil {
+		t.Fatalf("probe role default lock_timeout: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		// lockTimeout is the value to bind via WithLockTimeout
+		// at the start of each case.  Note this is the value
+		// the SET LOCAL would emit; we read it back from
+		// current_setting to prove the wire actually fired.
+		lockTimeout time.Duration
+		// want is the EXACT expected value of
+		// current_setting('lock_timeout') for this case.  For
+		// configured values we use PG's canonical
+		// duration-to-string form (5s/3s); for the disabled
+		// case we use whatever the role default is (probed at
+		// test start).
+		want string
+	}{
+		{
+			name:        "default-5s",
+			lockTimeout: insights.DefaultLockTimeout,
+			want:        "5s",
+		},
+		{
+			name:        "override-3s",
+			lockTimeout: 3 * time.Second,
+			want:        "3s",
+		},
+		{
+			name:        "disabled-zero",
+			lockTimeout: 0,
+			want:        roleDefaultLockTimeout,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Re-bind from a known baseline at the top of every
+			// case.  This makes the suite order-independent —
+			// the previous case's WithLockTimeout(0) doesn't
+			// poison the next case's expected "5s" reading.
+			runner.WithLockTimeout(tc.lockTimeout)
+			out, err := runner.RunRawSQL(ctx, tn.ID, "SELECT current_setting('lock_timeout') AS lt", nil)
+			if err != nil {
+				t.Fatalf("run raw sql: %v", err)
+			}
+			if out == nil || out.Result == nil || len(out.Result.Rows) != 1 {
+				t.Fatalf("unexpected result shape: %#v", out)
+			}
+			lt, _ := out.Result.Rows[0]["lt"].(string)
+			if lt != tc.want {
+				t.Fatalf("lock_timeout = %q, want %q", lt, tc.want)
+			}
+		})
+	}
+	// Restore the default so subsequent tests that reuse the
+	// runner (e.g. via newTenantForInsights returning the
+	// harness-scoped instance) start from a clean baseline.
+	runner.WithLockTimeout(insights.DefaultLockTimeout)
+}
+
 // TestInsightsSQLEditorRunRawSQLRespectsTenantRLS proves the Phase M
 // raw-SQL surface honours the tenant_id GUC: a query like
 // `SELECT count(*) FROM insights_queries` returns the count of rows

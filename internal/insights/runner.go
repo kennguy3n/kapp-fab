@@ -28,6 +28,21 @@ const MaxResultRows = 10000
 // kills the connection.
 const DefaultStatementTimeout = 20 * time.Second
 
+// DefaultLockTimeout caps how long any individual lock acquisition
+// can wait, independent of statement_timeout. statement_timeout
+// covers TOTAL query duration (lock wait + plan + execution); a
+// query stuck behind an ACCESS EXCLUSIVE lock on a hot tenant
+// table would otherwise burn the entire statement budget before
+// surfacing the wait, masking the contention as a generic
+// "statement timeout". lock_timeout fails fast with a distinct
+// SQLSTATE (55P03 lock_not_available) so the operator-facing error
+// names the actual blocker. Five seconds is well below the
+// statement budget (so a contention failure produces 55P03, not
+// 57014) and well above any realistic READ ONLY tx's natural lock
+// acquisition (ACCESS SHARE locks are cheap and never wait on
+// peers; only DDL on the same table would contend).
+const DefaultLockTimeout = 5 * time.Second
+
 // PlanLookup resolves a tenant's plan name. Implemented by
 // tenant.Service in production; tests inject a closure. Kept as an
 // interface so the insights package does not import internal/tenant
@@ -64,16 +79,17 @@ const FeatureKeyInsightsSQLEditor = "insights_sql_editor"
 // query grammar (sources, filters, aggregations, sort, limit) is the
 // same. Cache hits return without touching reporting at all.
 type Runner struct {
-	pool      *pgxpool.Pool
-	cache     *CacheStore
-	queries   *QueryStore
-	reporting *reporting.Runner
-	external  *ExternalRunner
-	plans     PlanLookup
-	joinLimit func(plan string) int
-	features  FeaturePolicy
-	timeout   time.Duration
-	maxRows   int
+	pool        *pgxpool.Pool
+	cache       *CacheStore
+	queries     *QueryStore
+	reporting   *reporting.Runner
+	external    *ExternalRunner
+	plans       PlanLookup
+	joinLimit   func(plan string) int
+	features    FeaturePolicy
+	timeout     time.Duration
+	lockTimeout time.Duration
+	maxRows     int
 }
 
 // NewRunner wires a Runner with the standard caching + timeout
@@ -84,12 +100,13 @@ func NewRunner(pool *pgxpool.Pool, cache *CacheStore, queries *QueryStore, repor
 		reportingRunner = reporting.NewRunner(pool)
 	}
 	return &Runner{
-		pool:      pool,
-		cache:     cache,
-		queries:   queries,
-		reporting: reportingRunner,
-		timeout:   DefaultStatementTimeout,
-		maxRows:   MaxResultRows,
+		pool:        pool,
+		cache:       cache,
+		queries:     queries,
+		reporting:   reportingRunner,
+		timeout:     DefaultStatementTimeout,
+		lockTimeout: DefaultLockTimeout,
+		maxRows:     MaxResultRows,
 	}
 }
 
@@ -97,6 +114,15 @@ func NewRunner(pool *pgxpool.Pool, cache *CacheStore, queries *QueryStore, repor
 // tests with a mocked database that doesn't honour SET LOCAL.
 func (r *Runner) WithTimeout(timeout time.Duration) *Runner {
 	r.timeout = timeout
+	return r
+}
+
+// WithLockTimeout overrides the per-query lock_timeout applied to
+// raw-SQL execution (RunRawSQL).  Setting <= 0 disables the
+// SET LOCAL lock_timeout statement entirely — useful in tests
+// against a mocked / non-Postgres backend.
+func (r *Runner) WithLockTimeout(d time.Duration) *Runner {
+	r.lockTimeout = d
 	return r
 }
 
@@ -412,6 +438,24 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 				return fmt.Errorf("insights: set statement_timeout: %w", err)
 			}
 		}
+		// Lock acquisition budget is independent of total query
+		// time.  Without this, a hostile or accidental query
+		// against a table currently held under ACCESS EXCLUSIVE
+		// (e.g. by a concurrent migration / CREATE INDEX) would
+		// block until statement_timeout expired and surface as a
+		// generic 57014 query_canceled instead of the actual
+		// blocker (55P03 lock_not_available).  ACCESS SHARE locks
+		// taken by a SELECT inside a READ ONLY tx never wait on
+		// peers in a healthy DB, so DefaultLockTimeout (5s) is
+		// effectively only ever hit when DDL contention is the
+		// underlying cause — failing fast with a distinct
+		// SQLSTATE makes that immediately recognisable in logs
+		// and pg_stat_activity.
+		if r.lockTimeout > 0 {
+			if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", r.lockTimeout.Milliseconds())); err != nil {
+				return fmt.Errorf("insights: set lock_timeout: %w", err)
+			}
+		}
 		// Pin the transaction read-only before running user SQL.
 		// dbutil.WithTenantTx opens a read-write transaction and
 		// commits on success — without this guard, an enterprise
@@ -423,8 +467,145 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 		// `cannot execute X in a read-only transaction` and surface
 		// it as a 400 rather than a silent commit. Visual runner
 		// has its own callback path and is unaffected.
+		//
+		// Ordering note: SET TRANSACTION READ ONLY is valid here
+		// even though dbutil.WithTenantTx has already run
+		// `SELECT set_config('app.tenant_id', $1, true)` first.
+		// PostgreSQL only requires SET TRANSACTION ISOLATION LEVEL
+		// to be the very first statement; READ ONLY / READ WRITE
+		// can be issued any time before the first statement that
+		// touches user-data tables (i.e. before the first snapshot
+		// acquisition).  set_config operates entirely in GUC
+		// memory — no snapshot, no xid, no row locks — so the
+		// "first data-touching statement" budget is still
+		// intact when we land here.  If WithTenantTx ever
+		// changes to issue actual table-touching SQL before its
+		// callback, this SET TRANSACTION must move earlier
+		// (or move into WithTenantTx itself) to preserve the
+		// invariant.
 		if _, err := tx.Exec(ctx, "SET TRANSACTION READ ONLY"); err != nil {
 			return fmt.Errorf("insights: set transaction read only: %w", err)
+		}
+		// Defense-in-depth assertion: confirm RLS will actually
+		// be enforced for this transaction before running the
+		// user-supplied query.  Two ways the guarantee could
+		// silently regress without this check:
+		//
+		//   1. A DBA sets `ALTER ROLE kapp_app SET row_security
+		//      = off` or `ALTER DATABASE kapp SET row_security
+		//      = off`.  Under the current role posture (kapp_app
+		//      created without BYPASSRLS in migration 000003),
+		//      Postgres itself fails closed for this case: the
+		//      query errors instead of silently bypassing RLS.
+		//      The assertion's real load-bearing coverage is the
+		//      narrow but real intersection where Postgres would
+		//      NOT fail closed:
+		//
+		//        (a) `BYPASSRLS` is granted to kapp_app (e.g. as
+		//            an incident-response debugging shortcut that
+		//            never got reverted) AND row_security=off —
+		//            in this exact combination, RLS policies
+		//            become permissive-mode-only and the query
+		//            returns cross-tenant rows silently;
+		//
+		//        (b) kapp_app ends up owning a tenant-scoped
+		//            table that lacks FORCE ROW LEVEL SECURITY
+		//            (shouldn't happen, but a migration that
+		//            runs CREATE TABLE under the wrong role
+		//            could) — table owners bypass RLS by
+		//            default, and with row_security=off the
+		//            bypass is silent;
+		//
+		//        (c) a future PR proposes "grant BYPASSRLS to
+		//            kapp_app for the SQL editor since it's
+		//            validator-guarded" — the assertion makes
+		//            that regression visible at every dispatch.
+		//
+		//      Outside that intersection (which is the default
+		//      production posture today) Postgres already fails
+		//      closed and this check is operationally redundant
+		//      but cheap (single GUC read in the same round
+		//      trip as the tenant probe).  The defense-in-depth
+		//      principle is "fail closed loudly when the
+		//      invariant might erode", not "duplicate Postgres's
+		//      own fail-closed guarantee under happy-path role
+		//      configuration".
+		//
+		//   2. dbutil.WithTenantTx returns successfully but
+		//      `app.tenant_id` is unset (e.g. if a future
+		//      refactor moves SetTenantContext to a different
+		//      call site and forgets it on this path).  RLS
+		//      policies on tenant-scoped tables would then
+		//      evaluate `current_setting('app.tenant_id',
+		//      true)` to the empty string and refuse all rows,
+		//      OR — if any policy has a permissive fallback —
+		//      return cross-tenant data.  Asserting the GUC is
+		//      non-empty makes the contract explicit and the
+		//      regression loud.
+		//
+		// We pull both values in one round-trip rather than two
+		// separate SHOWs so the assertion adds at most one
+		// query to the per-call latency budget.  current_setting
+		// is read-only and benign — the validator's denylist
+		// blocks set_config but allows current_setting precisely
+		// for cases like this.
+		//
+		// COALESCE on app.tenant_id is structural, not cosmetic:
+		// current_setting(name, missing_ok=true) returns SQL NULL
+		// when the GUC has NEVER been set on this session.  pgx
+		// cannot scan SQL NULL into a plain Go string and would
+		// surface the missing-GUC case as a generic
+		// "insights: probe rls/tenant context" Scan error
+		// instead of the specific "empty app.tenant_id GUC"
+		// rejection below — defeating the whole point of the
+		// diagnostic.  Mapping NULL -> '' inside the SELECT
+		// preserves the original intent: empty string means
+		// "the GUC was either never set or set to ''", and the
+		// tenantGUC == "" branch handles both uniformly with a
+		// clear operator-facing message.
+		var rowSecurity, tenantGUC string
+		if err := tx.QueryRow(ctx,
+			"SELECT current_setting('row_security'), COALESCE(current_setting('app.tenant_id', true), '')",
+		).Scan(&rowSecurity, &tenantGUC); err != nil {
+			return fmt.Errorf("insights: probe rls/tenant context: %w", err)
+		}
+		if rowSecurity != "on" {
+			// Tag with ErrSecurityAssertion so the HTTP layer
+			// can map this to a 500 with a distinguishable
+			// envelope (not folded into the generic 5xx bucket)
+			// and so future alerting / structured-log middleware
+			// can errors.Is on the sentinel without parsing the
+			// human-readable message.
+			return fmt.Errorf("%w: refusing to run raw SQL with row_security=%q (must be 'on')", ErrSecurityAssertion, rowSecurity)
+		}
+		// Strict equality, not just non-empty.  dbutil.WithTenantTx
+		// is the only call site that should set app.tenant_id
+		// today and always does so to the same tenantID that was
+		// passed in — but layering a value-match check here
+		// catches the hypothetical future bug where a refactor
+		// either:
+		//
+		//   (a) reuses a long-lived transaction across two
+		//       different tenant calls without re-binding
+		//       app.tenant_id, so the GUC carries a stale value
+		//       from the previous tenant's request, or
+		//
+		//   (b) introduces a separate SetTenantContext call
+		//       that takes a different uuid than the one passed
+		//       to RunRawSQL (e.g. a caller-supplied override
+		//       that should have been validated upstream).
+		//
+		// Both cases are mismatch-not-empty, so `tenantGUC == ""`
+		// alone wouldn't catch them.  Compare against the exact
+		// canonical string form (uuid.UUID.String() is RFC 4122
+		// lowercase hyphenated) — dbutil.SetTenantContext passes
+		// tenantID.String() through set_config, so the round-trip
+		// is byte-equal in the happy path.
+		if want := tenantID.String(); tenantGUC != want {
+			if tenantGUC == "" {
+				return fmt.Errorf("%w: refusing to run raw SQL with empty app.tenant_id GUC", ErrSecurityAssertion)
+			}
+			return fmt.Errorf("%w: refusing to run raw SQL with mismatched app.tenant_id (got %q, want %q)", ErrSecurityAssertion, tenantGUC, want)
 		}
 		pgxRows, err := tx.Query(ctx, rawSQL, params...)
 		if err != nil {

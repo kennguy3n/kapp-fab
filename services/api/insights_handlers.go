@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -652,6 +653,28 @@ func writeInsightsError(w http.ResponseWriter, err error) {
 		// budget exhausted, surface as 504 so a retry-with-tighter-
 		// filter UI can react distinctly from generic 5xx.
 		http.Error(w, err.Error(), http.StatusGatewayTimeout)
+	case errors.Is(err, insights.ErrSecurityAssertion):
+		// Defense-in-depth failure from Runner.RunRawSQL — RLS is
+		// disabled, app.tenant_id GUC is unset, or the GUC value
+		// doesn't match the request's tenant. Status is 500
+		// (server-side misconfiguration, not client input), but
+		// we MUST NOT leak the diagnostic body verbatim to the
+		// caller — the mismatched-tenant message contains the
+		// other tenant's UUID (`got %q, want %q`) and exposing
+		// that to the HTTP response would turn a hypothetical
+		// future internal bug into a cross-tenant information
+		// disclosure.  Instead, log the full diagnostic
+		// server-side (operators can grep slog output by
+		// kind=insights_security_assertion) and return a
+		// sanitized body that names the failure class without
+		// embedding any IDs.  This keeps the sentinel useful for
+		// alerting / errors.Is and keeps the operator forensics
+		// path intact while closing the leak surface.
+		slog.Default().Error("insights security assertion",
+			slog.String("kind", "insights_security_assertion"),
+			slog.String("err", err.Error()),
+		)
+		http.Error(w, "insights: internal security assertion failed (see server logs)", http.StatusInternalServerError)
 	default:
 		// Unknown error → 500. Validation / shape errors from the
 		// handlers themselves are returned via http.Error directly
