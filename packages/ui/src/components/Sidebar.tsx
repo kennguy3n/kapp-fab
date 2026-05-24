@@ -95,7 +95,15 @@ export const Sidebar = forwardRef<HTMLElement, SidebarProps>(
           ref={ref}
           data-collapsed={collapsed || undefined}
           className={cn(
-            "flex h-screen flex-col border-r border-border bg-bg-subtle text-fg",
+            // border-e is the inline-end logical border: it
+            // renders as border-right in LTR and border-left in
+            // RTL automatically when <html dir="rtl">. The flex
+            // row containing this aside also flips visually in
+            // RTL — the sidebar moves to the right edge of the
+            // viewport and the main content fills the left,
+            // mirroring the LTR layout. PR-6 adds a Playwright
+            // test that pins this exact flip.
+            "flex h-screen flex-col border-e border-border bg-bg-subtle text-fg",
             "transition-[width] duration-200",
             collapsed ? "w-14" : "w-60",
             className,

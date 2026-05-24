@@ -25,12 +25,17 @@ const selectVariants = cva(
     "transition-colors",
     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring) focus-visible:ring-offset-1 focus-visible:ring-offset-(--bg)",
     "disabled:cursor-not-allowed disabled:opacity-50 disabled:bg-bg-muted",
-    // Caret affordance — pad right and overlay a chevron via
-    // background-image so the dropdown indicator survives the
-    // appearance-none reset.  data: URL keeps it self-contained.
-    "bg-no-repeat bg-[length:1rem_1rem] bg-[position:right_0.5rem_center]",
+    // Caret affordance — pad on the inline-end and overlay a
+    // chevron via background-image so the dropdown indicator
+    // survives the appearance-none reset.  data: URL keeps it
+    // self-contained. RTL: background-position swaps from the
+    // physical "right" anchor to "left" so the chevron sits at
+    // the inline-end of the control in both writing directions,
+    // and the inline-end padding (pe-8) follows the chevron
+    // automatically.
+    "bg-no-repeat bg-[length:1rem_1rem] bg-[position:right_0.5rem_center] rtl:bg-[position:left_0.5rem_center]",
     "[background-image:url(\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='currentColor'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpolyline%20points='6%209%2012%2015%2018%209'%3E%3C/polyline%3E%3C/svg%3E\")]",
-    "pr-8",
+    "pe-8",
   ),
   {
     variants: {

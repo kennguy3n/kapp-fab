@@ -453,7 +453,7 @@ function ShellRouteFallback() {
         <div
           role="status"
           aria-live="polite"
-          className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-current border-r-transparent"
+          className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-current border-e-transparent"
         />
         <span className="text-sm">Loading…</span>
       </CardContent>
@@ -477,7 +477,7 @@ function PublicRouteFallback() {
       aria-live="polite"
       className="flex h-screen w-screen items-center justify-center bg-bg text-fg-muted"
     >
-      <div className="inline-flex h-6 w-6 animate-spin rounded-full border-2 border-current border-r-transparent" />
+      <div className="inline-flex h-6 w-6 animate-spin rounded-full border-2 border-current border-e-transparent" />
       <span className="sr-only">Loading…</span>
     </div>
   );
@@ -662,7 +662,7 @@ function AppShell() {
             </div>
             <span className="font-semibold tracking-tight">Kapp</span>
           </Link>
-          <div className="ml-auto">
+          <div className="ms-auto">
             <SidebarToggle />
           </div>
         </SidebarHeader>
@@ -690,7 +690,7 @@ function AppShell() {
       <main className="flex-1 flex flex-col min-w-0">
         <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-bg-elevated px-6">
           <GlobalSearchBox />
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ms-auto flex items-center gap-2">
             {activeLabel && (
               <Badge variant="outline" className="hidden md:inline-flex">
                 {activeLabel}

@@ -77,7 +77,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
     return (
       <div className="relative w-full">
         {leadingAddon && (
-          <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-2.5 text-fg-subtle">
+          <span className="pointer-events-none absolute inset-y-0 start-0 flex items-center ps-2.5 text-fg-subtle">
             {leadingAddon}
           </span>
         )}
@@ -85,15 +85,15 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
           ref={ref}
           className={cn(
             inputVariants({ size, invalid }),
-            leadingAddon && "pl-9",
-            trailingAddon && "pr-9",
+            leadingAddon && "ps-9",
+            trailingAddon && "pe-9",
             className,
           )}
           aria-invalid={invalid || undefined}
           {...props}
         />
         {trailingAddon && (
-          <span className="absolute inset-y-0 right-0 flex items-center pr-2.5 text-fg-subtle">
+          <span className="absolute inset-y-0 end-0 flex items-center pe-2.5 text-fg-subtle">
             {trailingAddon}
           </span>
         )}

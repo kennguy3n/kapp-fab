@@ -13,7 +13,8 @@
     "build": "npm run build --workspaces --if-present",
     "storybook": "npm run storybook --workspace=apps/storybook",
     "generate-client": "npm run generate --workspace=packages/client",
-    "screenshots": "VITE_DEMO_MODE=true playwright test"
+    "screenshots": "VITE_DEMO_MODE=true playwright test",
+    "test:e2e:rtl": "VITE_DEMO_MODE=true playwright test --config=playwright.rtl.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0"
