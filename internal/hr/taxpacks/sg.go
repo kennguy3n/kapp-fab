@@ -53,10 +53,14 @@ func (sgPack) Country() string { return "SG" }
 // flat rate has been 15% since 2009.
 func (sgPack) EffectiveYear() int { return 2025 }
 
-// sgCPFTier is one row of the CPF Contribution Rates table. UpperAge
-// is exclusive (so a 55-year-old falls in the 55-60 tier). Rates are
-// the *employee* share only — the employer share is not a payroll
-// deduction.
+// sgCPFTier is one row of the CPF Contribution Rates table.
+// UpperAge is exclusive against the lookup expression `age <
+// UpperAge`, so a row with UpperAge==56 matches every age in
+// [0, 55]. The CPF Board's published tier definitions use
+// inclusive lower bounds ("55 and below", "above 55 to 60",
+// etc.) so the UpperAge stored here is `inclusive_upper + 1`.
+// Rates are the *employee* share only — the employer share is
+// not a payroll deduction.
 type sgCPFTier struct {
 	UpperAge int             // exclusive upper bound. 0 = open-ended (oldest tier).
 	Rate     decimal.Decimal // employee CPF share (proportion of OW).
@@ -71,12 +75,19 @@ var (
 	// hook once introduced; for now the conservative-higher rate is
 	// applied, which is the IRAS / CPF Board expectation absent an
 	// explicit "graduated" payroll classification on the KRecord.
+	// UpperAge values are `inclusive_upper + 1` against the
+	// `age < UpperAge` test in resolveCPFEmployeeRate. The CPF
+	// Board defines the schedule with inclusive lower bounds
+	// ("55 and below" → 20%, "above 55 to 60" → 17%, etc.) so a
+	// 55-year-old must match the 20% tier, not 17%. See the
+	// boundary-age tests in apac_packs_test.go that pin every
+	// edge (55/56, 60/61, 65/66, 70/71) against this table.
 	sgCPFTiers = []sgCPFTier{
-		{UpperAge: 55, Rate: dec("0.20")},  // ≤55
-		{UpperAge: 60, Rate: dec("0.17")},  // 55-60
-		{UpperAge: 65, Rate: dec("0.115")}, // 60-65
-		{UpperAge: 70, Rate: dec("0.075")}, // 65-70
-		{UpperAge: 0, Rate: dec("0.05")},   // 70+
+		{UpperAge: 56, Rate: dec("0.20")},  // ≤55
+		{UpperAge: 61, Rate: dec("0.17")},  // 56-60
+		{UpperAge: 66, Rate: dec("0.115")}, // 61-65
+		{UpperAge: 71, Rate: dec("0.075")}, // 66-70
+		{UpperAge: 0, Rate: dec("0.05")},   // 71+
 	}
 
 	// 2025 Ordinary Wage ceiling per CPF Board. Beyond this, CPF

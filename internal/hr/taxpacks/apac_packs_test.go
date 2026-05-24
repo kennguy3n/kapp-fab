@@ -120,6 +120,57 @@ func TestSGPackUnknownAgeFallsToHighestRate(t *testing.T) {
 	}
 }
 
+// TestSGPackCPFBoundaryAges pins every CPF Board tier edge
+// against the published schedule:
+//
+//	≤55         → 20.0%
+//	above 55–60 → 17.0%
+//	above 60–65 → 11.5%
+//	above 65–70 →  7.5%
+//	above 70    →  5.0%
+//
+// The test sweeps ages 55/56, 60/61, 65/66, 70/71 — the
+// inclusive edges of each tier — and asserts the rate flips on
+// the *correct* side of each boundary. The historical
+// regression where UpperAge values were the inclusive bound
+// itself (55, 60, 65, 70) under-withheld at every exact
+// boundary age; this test would fail under that table.
+func TestSGPackCPFBoundaryAges(t *testing.T) {
+	pack, _ := Lookup("SG")
+	gross := decimal.NewFromInt(5000)
+	cases := []struct {
+		name string
+		age  int
+		rate string // expected employee CPF rate as a decimal string
+	}{
+		{"age 55 → 20%", 55, "0.20"},
+		{"age 56 → 17%", 56, "0.17"},
+		{"age 60 → 17%", 60, "0.17"},
+		{"age 61 → 11.5%", 61, "0.115"},
+		{"age 65 → 11.5%", 65, "0.115"},
+		{"age 66 → 7.5%", 66, "0.075"},
+		{"age 70 → 7.5%", 70, "0.075"},
+		{"age 71 → 5%", 71, "0.05"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+				Resident: true, Age: tc.age,
+			}, gross, monthPeriod())
+			if err != nil {
+				t.Fatalf("compute: %v", err)
+			}
+			if len(out) != 1 || out[0].Code != "SG_CPF_EMPLOYEE" {
+				t.Fatalf("unexpected deductions: %+v", out)
+			}
+			want := gross.Mul(dec(tc.rate)).Round(2)
+			if !out[0].Amount.Equal(want) {
+				t.Fatalf("CPF amount at age %d: got %s, want %s (rate %s)", tc.age, out[0].Amount, want, tc.rate)
+			}
+		})
+	}
+}
+
 // ----- Malaysia -----
 
 // TestMYPackBracketAndEPF: MYR 6,000 / month, age 30, 31-day
@@ -394,4 +445,57 @@ func indexByCode(in []Deduction) map[string]decimal.Decimal {
 		out[d.Code] = d.Amount
 	}
 	return out
+}
+
+// TestBracketTablesAreContiguous pins the bracket-table
+// invariant that every walk function relies on: adjacent rows
+// must satisfy `Top[i] == Floor[i+1]` and the final row must
+// be open-ended (`Top == 0`). The walk functions ignore `Top`
+// at runtime (they trigger on `Floor` ordering) so a typo in
+// `Top` cannot break a payroll run — but it does mean an
+// off-by-one in a copy-pasted bracket table can silently sit
+// in production. This test fails the build if any pack's
+// table drifts out of adjacency, catching the kind of
+// transcription mistake the AU/MY/TH/ID tables would otherwise
+// be vulnerable to.
+func TestBracketTablesAreContiguous(t *testing.T) {
+	checkMY := func(t *testing.T, brackets []myBracket) {
+		t.Helper()
+		for i := 0; i < len(brackets)-1; i++ {
+			if !brackets[i].Top.Equal(brackets[i+1].Floor) {
+				t.Fatalf("MY brackets[%d].Top (%s) != brackets[%d].Floor (%s)", i, brackets[i].Top, i+1, brackets[i+1].Floor)
+			}
+		}
+		last := brackets[len(brackets)-1]
+		if !last.Top.IsZero() {
+			t.Fatalf("MY last bracket Top should be 0 (open-ended), got %s", last.Top)
+		}
+	}
+	checkTH := func(t *testing.T, brackets []thBracket) {
+		t.Helper()
+		for i := 0; i < len(brackets)-1; i++ {
+			if !brackets[i].Top.Equal(brackets[i+1].Floor) {
+				t.Fatalf("TH brackets[%d].Top (%s) != brackets[%d].Floor (%s)", i, brackets[i].Top, i+1, brackets[i+1].Floor)
+			}
+		}
+		last := brackets[len(brackets)-1]
+		if !last.Top.IsZero() {
+			t.Fatalf("TH last bracket Top should be 0 (open-ended), got %s", last.Top)
+		}
+	}
+	checkID := func(t *testing.T, brackets []idBracket) {
+		t.Helper()
+		for i := 0; i < len(brackets)-1; i++ {
+			if !brackets[i].Top.Equal(brackets[i+1].Floor) {
+				t.Fatalf("ID brackets[%d].Top (%s) != brackets[%d].Floor (%s)", i, brackets[i].Top, i+1, brackets[i+1].Floor)
+			}
+		}
+		last := brackets[len(brackets)-1]
+		if !last.Top.IsZero() {
+			t.Fatalf("ID last bracket Top should be 0 (open-ended), got %s", last.Top)
+		}
+	}
+	t.Run("MY resident", func(t *testing.T) { checkMY(t, myBracketsResident) })
+	t.Run("TH resident", func(t *testing.T) { checkTH(t, thBracketsResident) })
+	t.Run("ID resident", func(t *testing.T) { checkID(t, idBracketsResident) })
 }
