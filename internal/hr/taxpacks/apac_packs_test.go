@@ -997,6 +997,46 @@ func TestINPackNonResidentNo87ARebate(t *testing.T) {
 	if diff.GreaterThan(decimal.NewFromFloat(0.02)) {
 		t.Errorf("non-resident IN_TDS = %s; want ≈ %s (±0.02)", nrTDS, expected)
 	}
+
+	// Pin the statutorily-correct carry-through: EPF (Para 26A)
+	// and ESI (s.2(9)) apply to all employees on Indian payroll
+	// regardless of residency status. The earlier IN pack
+	// implementation already gets this right because the
+	// EPF/ESI/PT branches are unguarded; this assertion locks
+	// the behaviour so a future refactor that adds a non-resident
+	// early-return (mirroring the VN/PH pattern) doesn't
+	// silently drop the social-security lines.
+	nrCodes := indexByCode(nr)
+	if epf := nrCodes["IN_EPF"]; !epf.IsPositive() {
+		t.Errorf("non-resident IN_EPF = %s; want positive (Para 26A applies regardless of residency)", epf)
+	}
+	// At gross ₹58,400 (> ₹21,000 ESI ceiling) ESI should NOT
+	// appear — the threshold is the gating factor, not residency.
+	if v, ok := nrCodes["IN_ESI"]; ok {
+		t.Errorf("non-resident IN_ESI = %s; want absent at gross > 21k (ESI threshold gates by wage, not residency)", v)
+	}
+}
+
+// TestINPackNonResidentBelowESIThresholdGetsESI complements
+// TestINPackNonResidentNo87ARebate by pinning the other half of
+// the EPF/ESI carry-through: a non-resident earning ≤ ₹21,000 /
+// month must still receive IN_ESI because s.2(9) of the ESI Act
+// gates on wages, not on residency status.
+func TestINPackNonResidentBelowESIThresholdGetsESI(t *testing.T) {
+	pack, _ := Lookup("IN")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: false,
+	}, decimal.NewFromInt(15000), monthPeriod())
+	codes := indexByCode(out)
+	// 15,000 × 0.75% = 112.50
+	if esi := codes["IN_ESI"]; !esi.Equal(decimal.NewFromFloat(112.50)) {
+		t.Errorf("non-resident IN_ESI at ₹15,000/month: got %s; want 112.50", esi)
+	}
+	// EPF at ₹15,000 → 15,000 × 12% = 1,800.00 (the cap is hit
+	// exactly at the ceiling).
+	if epf := codes["IN_EPF"]; !epf.Equal(decimal.NewFromInt(1800)) {
+		t.Errorf("non-resident IN_EPF at ₹15,000/month: got %s; want 1800.00", epf)
+	}
 }
 
 // ----- Registry assertions -----
