@@ -1,64 +1,262 @@
-import { useState } from "react";
-import { Route, Routes, Link, useNavigate } from "react-router-dom";
+import { lazy, Suspense, type ComponentType } from "react";
+import {
+  Link,
+  NavLink,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import {
+  Avatar,
+  AvatarFallback,
+  Badge,
+  Card,
+  CardContent,
+  Input,
+  Sidebar,
+  SidebarBody,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarHeader,
+  SidebarItem,
+  SidebarToggle,
+  TooltipProvider,
+  initials,
+} from "@kapp/ui";
 import { api } from "./lib/api";
-import { RecordListPage } from "./pages/RecordListPage";
-import { RecordFormPage } from "./pages/RecordFormPage";
-import { LoginPage } from "./pages/LoginPage";
-import { TenantListPage } from "./pages/TenantListPage";
-import { FormPage } from "./pages/FormPage";
-import { ApprovalsPage } from "./pages/ApprovalsPage";
-import { AuditLogPage } from "./pages/AuditLogPage";
-import { RoleManagementPage } from "./pages/RoleManagementPage";
-import { SubledgerPage } from "./pages/SubledgerPage";
-import { ChartOfAccountsPage } from "./pages/ChartOfAccountsPage";
-import { JournalEntriesPage } from "./pages/JournalEntriesPage";
-import { TrialBalancePage } from "./pages/TrialBalancePage";
-import { IncomeStatementPage } from "./pages/IncomeStatementPage";
-import { StockLevelsPage } from "./pages/StockLevelsPage";
-import { InventoryValuationPage } from "./pages/InventoryValuationPage";
-import { OrgChartPage } from "./pages/OrgChartPage";
-import { LearnerProgressPage } from "./pages/LearnerProgressPage";
-import { ImportPage } from "./pages/ImportPage";
-import { ImportMappingPage } from "./pages/ImportMappingPage";
-import { BankReconciliationPage } from "./pages/BankReconciliationPage";
-import { CostCentersPage } from "./pages/CostCentersPage";
-import { SalesOrdersPage } from "./pages/SalesOrdersPage";
-import { PurchaseOrdersPage } from "./pages/PurchaseOrdersPage";
-import { PriceListsPage } from "./pages/PriceListsPage";
-import { PayrollPage } from "./pages/PayrollPage";
-import { ShiftCalendarPage } from "./pages/ShiftCalendarPage";
-import { SetupWizardPage } from "./pages/SetupWizardPage";
-import { DashboardPage } from "./pages/DashboardPage";
-import { ExchangeRatesPage } from "./pages/ExchangeRatesPage";
-import { HelpdeskPage } from "./pages/HelpdeskPage";
-import { ReportBuilderPage } from "./pages/ReportBuilderPage";
-import { InsightsQueryBuilderPage } from "./pages/InsightsQueryBuilderPage";
-import { InsightsDashboardPage } from "./pages/InsightsDashboardPage";
-import { InsightsDataSourcesPage } from "./pages/InsightsDataSourcesPage";
-import { InsightsEmbedPage } from "./pages/InsightsEmbedPage";
-import { POSPage } from "./pages/POSPage";
-import { ProjectGanttPage } from "./pages/ProjectGanttPage";
-import { TenantFeaturesPage } from "./pages/TenantFeaturesPage";
-import { ConsolidationPage } from "./pages/ConsolidationPage";
-import { PlacementPolicyPage } from "./pages/PlacementPolicyPage";
-import { RetentionPoliciesPage } from "./pages/RetentionPoliciesPage";
-import { UsageDashboardPage } from "./pages/UsageDashboardPage";
-import { SearchPage } from "./pages/SearchPage";
-import { WebhooksPage } from "./pages/WebhooksPage";
-import { WebhookDeliveryLogPage } from "./pages/WebhookDeliveryLogPage";
-import { PortalLoginPage } from "./pages/portal/PortalLoginPage";
-import { PortalTicketListPage } from "./pages/portal/PortalTicketListPage";
-import { PortalTicketDetailPage } from "./pages/portal/PortalTicketDetailPage";
-import { PortalNewTicketPage } from "./pages/portal/PortalNewTicketPage";
 import { NotificationBell } from "./components/NotificationBell";
+
+/**
+ * Route-level code splitting.  Every page is loaded on first
+ * navigation via React.lazy().  Vite's Rollup config emits one
+ * chunk per dynamic import (see vite.config.ts `manualChunks` for
+ * the shared-vendor split) which keeps the initial bundle small
+ * — the dashboard route is the only page that loads at boot.
+ *
+ * `lazyNamed` is the helper for converting the project's
+ * named-export pages (`export function FooPage`) into the
+ * default-export shape React.lazy expects.  Using a helper instead
+ * of inline `then(m => ({ default: m.X }))` makes the route list
+ * scannable and prevents typos that would only surface when the
+ * specific route is visited.
+ */
+// We deliberately type the component slot as `ComponentType<any>`
+// because the lazy-route map covers pages with heterogeneous prop
+// shapes (e.g. `SubledgerPage({ variant })`, `RecordListPage({
+// defaultMode? })`, plus zero-prop pages).  React.lazy's return
+// type is `LazyExoticComponent<ComponentType<any>>` regardless,
+// so `any` here matches React's own typing — narrowing further
+// (e.g. `ComponentType<unknown>`) would force each lazy-page
+// callsite to assert its props, which doesn't add type safety
+// (the routes pass concrete prop literals already, type-checked
+// against the original page's signature).
+//
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyComponent = ComponentType<any>;
+
+function lazyNamed<TName extends string>(
+  loader: () => Promise<Record<TName, AnyComponent>>,
+  name: TName,
+) {
+  return lazy(async () => {
+    const mod = await loader();
+    return { default: mod[name] };
+  });
+}
+
+const RecordListPage = lazyNamed(
+  () => import("./pages/RecordListPage"),
+  "RecordListPage",
+);
+const RecordFormPage = lazyNamed(
+  () => import("./pages/RecordFormPage"),
+  "RecordFormPage",
+);
+const LoginPage = lazyNamed(() => import("./pages/LoginPage"), "LoginPage");
+const TenantListPage = lazyNamed(
+  () => import("./pages/TenantListPage"),
+  "TenantListPage",
+);
+const FormPage = lazyNamed(() => import("./pages/FormPage"), "FormPage");
+const ApprovalsPage = lazyNamed(
+  () => import("./pages/ApprovalsPage"),
+  "ApprovalsPage",
+);
+const AuditLogPage = lazyNamed(
+  () => import("./pages/AuditLogPage"),
+  "AuditLogPage",
+);
+const RoleManagementPage = lazyNamed(
+  () => import("./pages/RoleManagementPage"),
+  "RoleManagementPage",
+);
+const SubledgerPage = lazyNamed(
+  () => import("./pages/SubledgerPage"),
+  "SubledgerPage",
+);
+const ChartOfAccountsPage = lazyNamed(
+  () => import("./pages/ChartOfAccountsPage"),
+  "ChartOfAccountsPage",
+);
+const JournalEntriesPage = lazyNamed(
+  () => import("./pages/JournalEntriesPage"),
+  "JournalEntriesPage",
+);
+const TrialBalancePage = lazyNamed(
+  () => import("./pages/TrialBalancePage"),
+  "TrialBalancePage",
+);
+const IncomeStatementPage = lazyNamed(
+  () => import("./pages/IncomeStatementPage"),
+  "IncomeStatementPage",
+);
+const StockLevelsPage = lazyNamed(
+  () => import("./pages/StockLevelsPage"),
+  "StockLevelsPage",
+);
+const InventoryValuationPage = lazyNamed(
+  () => import("./pages/InventoryValuationPage"),
+  "InventoryValuationPage",
+);
+const OrgChartPage = lazyNamed(
+  () => import("./pages/OrgChartPage"),
+  "OrgChartPage",
+);
+const LearnerProgressPage = lazyNamed(
+  () => import("./pages/LearnerProgressPage"),
+  "LearnerProgressPage",
+);
+const ImportPage = lazyNamed(() => import("./pages/ImportPage"), "ImportPage");
+const ImportMappingPage = lazyNamed(
+  () => import("./pages/ImportMappingPage"),
+  "ImportMappingPage",
+);
+const BankReconciliationPage = lazyNamed(
+  () => import("./pages/BankReconciliationPage"),
+  "BankReconciliationPage",
+);
+const CostCentersPage = lazyNamed(
+  () => import("./pages/CostCentersPage"),
+  "CostCentersPage",
+);
+const SalesOrdersPage = lazyNamed(
+  () => import("./pages/SalesOrdersPage"),
+  "SalesOrdersPage",
+);
+const PurchaseOrdersPage = lazyNamed(
+  () => import("./pages/PurchaseOrdersPage"),
+  "PurchaseOrdersPage",
+);
+const PriceListsPage = lazyNamed(
+  () => import("./pages/PriceListsPage"),
+  "PriceListsPage",
+);
+const PayrollPage = lazyNamed(
+  () => import("./pages/PayrollPage"),
+  "PayrollPage",
+);
+const ShiftCalendarPage = lazyNamed(
+  () => import("./pages/ShiftCalendarPage"),
+  "ShiftCalendarPage",
+);
+const SetupWizardPage = lazyNamed(
+  () => import("./pages/SetupWizardPage"),
+  "SetupWizardPage",
+);
+const DashboardPage = lazyNamed(
+  () => import("./pages/DashboardPage"),
+  "DashboardPage",
+);
+const ExchangeRatesPage = lazyNamed(
+  () => import("./pages/ExchangeRatesPage"),
+  "ExchangeRatesPage",
+);
+const HelpdeskPage = lazyNamed(
+  () => import("./pages/HelpdeskPage"),
+  "HelpdeskPage",
+);
+const ReportBuilderPage = lazyNamed(
+  () => import("./pages/ReportBuilderPage"),
+  "ReportBuilderPage",
+);
+const InsightsQueryBuilderPage = lazyNamed(
+  () => import("./pages/InsightsQueryBuilderPage"),
+  "InsightsQueryBuilderPage",
+);
+const InsightsDashboardPage = lazyNamed(
+  () => import("./pages/InsightsDashboardPage"),
+  "InsightsDashboardPage",
+);
+const InsightsDataSourcesPage = lazyNamed(
+  () => import("./pages/InsightsDataSourcesPage"),
+  "InsightsDataSourcesPage",
+);
+const InsightsEmbedPage = lazyNamed(
+  () => import("./pages/InsightsEmbedPage"),
+  "InsightsEmbedPage",
+);
+const POSPage = lazyNamed(() => import("./pages/POSPage"), "POSPage");
+const ProjectGanttPage = lazyNamed(
+  () => import("./pages/ProjectGanttPage"),
+  "ProjectGanttPage",
+);
+const TenantFeaturesPage = lazyNamed(
+  () => import("./pages/TenantFeaturesPage"),
+  "TenantFeaturesPage",
+);
+const ConsolidationPage = lazyNamed(
+  () => import("./pages/ConsolidationPage"),
+  "ConsolidationPage",
+);
+const PlacementPolicyPage = lazyNamed(
+  () => import("./pages/PlacementPolicyPage"),
+  "PlacementPolicyPage",
+);
+const RetentionPoliciesPage = lazyNamed(
+  () => import("./pages/RetentionPoliciesPage"),
+  "RetentionPoliciesPage",
+);
+const UsageDashboardPage = lazyNamed(
+  () => import("./pages/UsageDashboardPage"),
+  "UsageDashboardPage",
+);
+const SearchPage = lazyNamed(() => import("./pages/SearchPage"), "SearchPage");
+const WebhooksPage = lazyNamed(
+  () => import("./pages/WebhooksPage"),
+  "WebhooksPage",
+);
+const WebhookDeliveryLogPage = lazyNamed(
+  () => import("./pages/WebhookDeliveryLogPage"),
+  "WebhookDeliveryLogPage",
+);
+const PortalLoginPage = lazyNamed(
+  () => import("./pages/portal/PortalLoginPage"),
+  "PortalLoginPage",
+);
+const PortalTicketListPage = lazyNamed(
+  () => import("./pages/portal/PortalTicketListPage"),
+  "PortalTicketListPage",
+);
+const PortalTicketDetailPage = lazyNamed(
+  () => import("./pages/portal/PortalTicketDetailPage"),
+  "PortalTicketDetailPage",
+);
+const PortalNewTicketPage = lazyNamed(
+  () => import("./pages/portal/PortalNewTicketPage"),
+  "PortalNewTicketPage",
+);
 
 const tenantKey = (): string =>
   localStorage.getItem("kapp.tenant") ?? "default";
 
-// featureFromSection maps a nav section title to the feature key it
-// gates on. Sections without an entry are always shown. Keep in
-// lock-step with internal/tenant/plans.go FeatureX constants.
+/**
+ * featureFromSection maps a nav-section title to the tenant
+ * feature flag that gates it.  Sections without an entry are
+ * always shown.  Kept in lock-step with
+ * internal/tenant/plans.go FeatureX constants.
+ */
 const featureFromSection: Record<string, string> = {
   CRM: "crm",
   Finance: "finance",
@@ -208,75 +406,158 @@ const navSections: NavSection[] = [
   },
 ];
 
-export function App() {
+/**
+ * RouteFallback is what users see in the gap between clicking a
+ * nav item and the route chunk finishing its network round-trip.
+ * We deliberately render an empty Card rather than a spinner —
+ * a spinner-at-the-top-of-the-page reads as "loading" which is
+ * accurate, but a perceptible flash for fast chunks (most are
+ * <50 KB / <100 ms on a warm connection) is worse UX than a
+ * silent gap.  The Card mirrors the page's eventual layout so
+ * the reflow when content arrives is minimal.
+ */
+function RouteFallback() {
   return (
-    <Routes>
-      {/* Public form route lives outside the app shell so anonymous
-          visitors don't see tenant navigation. */}
-      <Route path="/forms/:formId" element={<FormPage />} />
-      <Route path="/login" element={<LoginPage />} />
-      {/* Helpdesk customer portal. Runs outside the authenticated
-          AppShell — portal users never see the tenant's internal
-          nav/data; only their own tickets. */}
-      <Route path="/portal/:tenant_slug" element={<PortalLoginPage />} />
-      <Route
-        path="/portal/:tenant_slug/tickets"
-        element={<PortalTicketListPage />}
-      />
-      <Route
-        path="/portal/:tenant_slug/tickets/new"
-        element={<PortalNewTicketPage />}
-      />
-      <Route
-        path="/portal/:tenant_slug/tickets/:id"
-        element={<PortalTicketDetailPage />}
-      />
-      {/* Setup wizard is rendered outside the app shell because the
-          tenant has no nav-worthy data until the wizard completes. */}
-      <Route path="/setup/:id" element={<SetupWizardPage />} />
-      {/* Public dashboard embed. Rendered without app chrome or
-          auth so it can be iframed into any external surface. The
-          owning tenant's rate-limit bucket is enforced server-side. */}
-      <Route path="/embed/:token" element={<InsightsEmbedPage />} />
-      <Route path="/*" element={<AppShell />} />
-    </Routes>
+    <Card className="border-dashed">
+      <CardContent className="flex items-center gap-3 py-12 text-fg-muted">
+        <div
+          role="status"
+          aria-live="polite"
+          className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-current border-r-transparent"
+        />
+        <span className="text-sm">Loading…</span>
+      </CardContent>
+    </Card>
   );
 }
 
-// GlobalSearchBox is the shell-level search input. Submitting routes
-// to /search?q=... which SearchPage debounces and executes via the
-// /api/v1/search endpoint.
+export function App() {
+  return (
+    <TooltipProvider delayDuration={300}>
+      <Suspense fallback={<RouteFallback />}>
+        <Routes>
+          {/* Public form route lives outside the app shell so anonymous
+              visitors don't see tenant navigation. */}
+          <Route path="/forms/:formId" element={<FormPage />} />
+          <Route path="/login" element={<LoginPage />} />
+          {/* Helpdesk customer portal. Runs outside the authenticated
+              AppShell — portal users never see the tenant's internal
+              nav/data; only their own tickets. */}
+          <Route path="/portal/:tenant_slug" element={<PortalLoginPage />} />
+          <Route
+            path="/portal/:tenant_slug/tickets"
+            element={<PortalTicketListPage />}
+          />
+          <Route
+            path="/portal/:tenant_slug/tickets/new"
+            element={<PortalNewTicketPage />}
+          />
+          <Route
+            path="/portal/:tenant_slug/tickets/:id"
+            element={<PortalTicketDetailPage />}
+          />
+          {/* Setup wizard is rendered outside the app shell because the
+              tenant has no nav-worthy data until the wizard completes. */}
+          <Route path="/setup/:id" element={<SetupWizardPage />} />
+          {/* Public dashboard embed. Rendered without app chrome or
+              auth so it can be iframed into any external surface.  The
+              owning tenant's rate-limit bucket is enforced server-side. */}
+          <Route path="/embed/:token" element={<InsightsEmbedPage />} />
+          <Route path="/*" element={<AppShell />} />
+        </Routes>
+      </Suspense>
+    </TooltipProvider>
+  );
+}
+
+/**
+ * GlobalSearchBox — the shell-level search input.  Submitting routes
+ * to /search?q=... which SearchPage debounces and executes via the
+ * /api/v1/search endpoint.  The input is the @kapp/ui `Input`
+ * primitive so it inherits the same chrome and focus ring as every
+ * other form field.
+ */
 function GlobalSearchBox() {
   const nav = useNavigate();
-  const [q, setQ] = useState("");
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        const v = q.trim();
-        if (!v) return;
-        nav(`/search?q=${encodeURIComponent(v)}`);
+        const v = new FormData(e.currentTarget).get("q");
+        const trimmed = (typeof v === "string" ? v : "").trim();
+        if (!trimmed) return;
+        nav(`/search?q=${encodeURIComponent(trimmed)}`);
       }}
-      style={{ flex: 1, maxWidth: 420 }}
+      className="flex-1 max-w-md"
     >
-      <input
+      <Input
         type="search"
+        name="q"
         placeholder="Search records…"
-        value={q}
-        onChange={(e) => setQ(e.target.value)}
         aria-label="Global search"
-        style={{
-          width: "100%",
-          padding: "6px 10px",
-          border: "1px solid #d1d5db",
-          borderRadius: 6,
-        }}
+        leadingAddon={
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="h-4 w-4"
+          >
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+        }
       />
     </form>
   );
 }
 
+/**
+ * AppNavLink is the tenant-shell sidebar item.  We use the
+ * `renderAnchor` escape hatch on `<SidebarItem>` to inject a
+ * react-router `<NavLink>` so client-side navigation works AND
+ * the active state comes from the router's resolved match
+ * (not a manual location.pathname compare, which would miss
+ * params and nested routes).
+ *
+ * Defined as a top-level component instead of inline-in-the-map
+ * to keep its memoised `renderAnchor` identity stable across
+ * re-renders of `<AppShell>` and prevent SidebarItem from
+ * re-resolving the active state when only the parent's query
+ * cache updated.
+ */
+function AppNavLink({ to, label }: { to: string; label: string }) {
+  // Render-prop bridge so `<NavLink>` controls the href + active
+  // state but SidebarItem still owns the chrome (icon slot,
+  // collapsed-mode tooltip, badge).
+  return (
+    <SidebarItem
+      label={label}
+      renderAnchor={({ className, children }) => (
+        <NavLink
+          to={to}
+          className={({ isActive }) =>
+            // Recompute the active state class manually because
+            // SidebarItem's `className` argument here was computed
+            // with the active=false default — we re-apply the
+            // active variant when react-router reports the match.
+            isActive
+              ? `${className} bg-accent/15 text-accent font-medium`
+              : className
+          }
+          end={to === "/"}
+        >
+          {children}
+        </NavLink>
+      )}
+    />
+  );
+}
+
 function AppShell() {
+  const location = useLocation();
   const featuresQuery = useQuery({
     queryKey: ["tenant-features", tenantKey()],
     queryFn: () => api.listTenantFeatures(tenantKey()),
@@ -284,156 +565,215 @@ function AppShell() {
     staleTime: 60_000,
   });
   const features = featuresQuery.data?.features ?? {};
-  // When the features API is unreachable we fail open — better to
-  // show a nav item the backend subsequently 403s than to hide
-  // every section on a transient network blip.
+  // Fail-open: when the features API is unreachable we still show
+  // every nav item rather than hiding the entire app on a
+  // transient network blip.  The backend will 403 disabled
+  // sections if the user actually navigates to them.
   const visible = navSections.filter((s) => {
     const key = featureFromSection[s.title];
     if (!key) return true;
     if (!featuresQuery.data) return true;
     return features[key] !== false;
   });
+
+  // Heuristic label for the active route — shown in the header to
+  // confirm to the user which page they're on (especially valuable
+  // when the sidebar is collapsed).  Walks navSections looking for
+  // the link whose `to` is a prefix of the current path; the most
+  // specific (longest) match wins so `/records/crm.lead/new` picks
+  // "Leads" over "Dashboard".
+  let activeLabel = "";
+  let activePrefixLen = -1;
+  for (const section of navSections) {
+    for (const link of section.links) {
+      if (
+        location.pathname === link.to ||
+        (link.to !== "/" && location.pathname.startsWith(`${link.to}/`))
+      ) {
+        if (link.to.length > activePrefixLen) {
+          activeLabel = link.label;
+          activePrefixLen = link.to.length;
+        }
+      }
+    }
+  }
+
   return (
-    <div style={{ display: "flex", minHeight: "100vh" }}>
-      <aside
-        style={{ width: 220, borderRight: "1px solid #e5e7eb", padding: 16 }}
-      >
-        <h2>Kapp</h2>
-        <nav>
-          {visible.map((section) => (
-            <div key={section.title} style={{ marginBottom: 12 }}>
-              <div
-                style={{
-                  fontSize: 11,
-                  textTransform: "uppercase",
-                  color: "#6b7280",
-                  marginBottom: 4,
-                }}
-              >
-                {section.title}
-              </div>
-              <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-                {section.links.map((l) => (
-                  <li key={l.to} style={{ padding: "2px 0" }}>
-                    <Link to={l.to}>{l.label}</Link>
-                  </li>
-                ))}
-              </ul>
+    <div className="flex min-h-screen bg-bg">
+      <Sidebar defaultCollapsed={false}>
+        <SidebarHeader>
+          <Link to="/" className="flex items-center gap-2">
+            <div className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-accent-fg font-bold">
+              K
             </div>
+            <span className="font-semibold tracking-tight">Kapp</span>
+          </Link>
+          <div className="ml-auto">
+            <SidebarToggle />
+          </div>
+        </SidebarHeader>
+        <SidebarBody>
+          {visible.map((section) => (
+            <SidebarGroup key={section.title} title={section.title}>
+              {section.links.map((link) => (
+                <AppNavLink key={link.to} to={link.to} label={link.label} />
+              ))}
+            </SidebarGroup>
           ))}
-        </nav>
-      </aside>
-      <main style={{ flex: 1, padding: 24 }}>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: 12,
-            marginBottom: 12,
-          }}
-        >
+        </SidebarBody>
+        <SidebarFooter>
+          <Avatar size="sm">
+            <AvatarFallback>{initials(tenantKey())}</AvatarFallback>
+          </Avatar>
+          <div className="flex flex-col min-w-0 flex-1">
+            <span className="text-sm truncate">{tenantKey()}</span>
+            <span className="text-[10px] uppercase tracking-wider text-fg-subtle">
+              tenant
+            </span>
+          </div>
+        </SidebarFooter>
+      </Sidebar>
+      <main className="flex-1 flex flex-col min-w-0">
+        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-bg-elevated px-6">
           <GlobalSearchBox />
-          <NotificationBell />
+          <div className="ml-auto flex items-center gap-2">
+            {activeLabel && (
+              <Badge variant="outline" className="hidden md:inline-flex">
+                {activeLabel}
+              </Badge>
+            )}
+            <NotificationBell />
+          </div>
+        </header>
+        <div className="flex-1 p-6 overflow-auto">
+          <Suspense fallback={<RouteFallback />}>
+            <Routes>
+              <Route path="/" element={<DashboardPage />} />
+              <Route path="/admin/tenants" element={<TenantListPage />} />
+              <Route
+                path="/admin/consolidation"
+                element={<ConsolidationPage />}
+              />
+              <Route path="/admin/features" element={<TenantFeaturesPage />} />
+              <Route
+                path="/admin/placement"
+                element={<PlacementPolicyPage />}
+              />
+              <Route
+                path="/admin/retention"
+                element={<RetentionPoliciesPage />}
+              />
+              <Route path="/admin/usage" element={<UsageDashboardPage />} />
+              <Route path="/admin/audit" element={<AuditLogPage />} />
+              <Route path="/admin/roles" element={<RoleManagementPage />} />
+              <Route path="/approvals" element={<ApprovalsPage />} />
+              <Route
+                path="/finance/exchange-rates"
+                element={<ExchangeRatesPage />}
+              />
+              <Route path="/helpdesk" element={<HelpdeskPage />} />
+              <Route path="/reports" element={<ReportBuilderPage />} />
+              <Route
+                path="/insights/queries"
+                element={<InsightsQueryBuilderPage />}
+              />
+              <Route
+                path="/insights/dashboards"
+                element={<InsightsDashboardPage />}
+              />
+              <Route
+                path="/insights/data-sources"
+                element={<InsightsDataSourcesPage />}
+              />
+              <Route path="/search" element={<SearchPage />} />
+              <Route path="/admin/webhooks" element={<WebhooksPage />} />
+              <Route
+                path="/admin/webhooks/:id/deliveries"
+                element={<WebhookDeliveryLogPage />}
+              />
+              <Route
+                path="/finance/accounts"
+                element={<ChartOfAccountsPage />}
+              />
+              <Route path="/finance/journal" element={<JournalEntriesPage />} />
+              <Route
+                path="/finance/reports/trial-balance"
+                element={<TrialBalancePage />}
+              />
+              <Route
+                path="/finance/reports/income-statement"
+                element={<IncomeStatementPage />}
+              />
+              <Route
+                path="/finance/ar-subledger"
+                element={<SubledgerPage variant="ar" />}
+              />
+              <Route
+                path="/finance/ap-subledger"
+                element={<SubledgerPage variant="ap" />}
+              />
+              <Route
+                path="/inventory/stock-levels"
+                element={<StockLevelsPage />}
+              />
+              <Route
+                path="/inventory/reports/valuation"
+                element={<InventoryValuationPage />}
+              />
+              <Route path="/hr/org-chart" element={<OrgChartPage />} />
+              <Route path="/hr/payroll" element={<PayrollPage />} />
+              <Route path="/hr/shifts" element={<ShiftCalendarPage />} />
+              <Route path="/pos" element={<POSPage />} />
+              <Route path="/projects/gantt" element={<ProjectGanttPage />} />
+              <Route
+                path="/finance/cost-centers"
+                element={<CostCentersPage />}
+              />
+              <Route
+                path="/finance/bank-reconciliation"
+                element={<BankReconciliationPage />}
+              />
+              <Route path="/sales/orders" element={<SalesOrdersPage />} />
+              <Route
+                path="/sales/price-lists"
+                element={<PriceListsPage />}
+              />
+              <Route
+                path="/procurement/purchase-orders"
+                element={<PurchaseOrdersPage />}
+              />
+              <Route path="/imports" element={<ImportPage />} />
+              <Route path="/imports/new" element={<ImportPage />} />
+              <Route path="/imports/:id" element={<ImportPage />} />
+              <Route
+                path="/imports/:id/mapping"
+                element={<ImportMappingPage />}
+              />
+              <Route path="/lms/progress" element={<LearnerProgressPage />} />
+              <Route
+                path="/lms/progress/:enrollmentId"
+                element={<LearnerProgressPage />}
+              />
+              <Route path="/records/:ktype" element={<RecordListPage />} />
+              <Route
+                path="/records/:ktype/new"
+                element={<RecordFormPage />}
+              />
+              <Route
+                path="/records/:ktype/:id"
+                element={<RecordFormPage />}
+              />
+              {/* /kanban/:ktype is a deep-link alias that forces the
+                  kanban view via the defaultMode prop. RecordListPage
+                  still allows the user to toggle to the list view;
+                  defaultMode is only the initial mode, not a lock. */}
+              <Route
+                path="/kanban/:ktype"
+                element={<RecordListPage defaultMode="kanban" />}
+              />
+            </Routes>
+          </Suspense>
         </div>
-        <Routes>
-          <Route path="/" element={<DashboardPage />} />
-          <Route path="/admin/tenants" element={<TenantListPage />} />
-          <Route path="/admin/consolidation" element={<ConsolidationPage />} />
-          <Route path="/admin/features" element={<TenantFeaturesPage />} />
-          <Route path="/admin/placement" element={<PlacementPolicyPage />} />
-          <Route path="/admin/retention" element={<RetentionPoliciesPage />} />
-          <Route path="/admin/usage" element={<UsageDashboardPage />} />
-          <Route path="/admin/audit" element={<AuditLogPage />} />
-          <Route path="/admin/roles" element={<RoleManagementPage />} />
-          <Route path="/approvals" element={<ApprovalsPage />} />
-          <Route path="/finance/exchange-rates" element={<ExchangeRatesPage />} />
-          <Route path="/helpdesk" element={<HelpdeskPage />} />
-          <Route path="/reports" element={<ReportBuilderPage />} />
-          <Route
-            path="/insights/queries"
-            element={<InsightsQueryBuilderPage />}
-          />
-          <Route
-            path="/insights/dashboards"
-            element={<InsightsDashboardPage />}
-          />
-          <Route
-            path="/insights/data-sources"
-            element={<InsightsDataSourcesPage />}
-          />
-          <Route path="/search" element={<SearchPage />} />
-          <Route path="/admin/webhooks" element={<WebhooksPage />} />
-          <Route
-            path="/admin/webhooks/:id/deliveries"
-            element={<WebhookDeliveryLogPage />}
-          />
-          <Route
-            path="/finance/accounts"
-            element={<ChartOfAccountsPage />}
-          />
-          <Route path="/finance/journal" element={<JournalEntriesPage />} />
-          <Route
-            path="/finance/reports/trial-balance"
-            element={<TrialBalancePage />}
-          />
-          <Route
-            path="/finance/reports/income-statement"
-            element={<IncomeStatementPage />}
-          />
-          <Route
-            path="/finance/ar-subledger"
-            element={<SubledgerPage variant="ar" />}
-          />
-          <Route
-            path="/finance/ap-subledger"
-            element={<SubledgerPage variant="ap" />}
-          />
-          <Route
-            path="/inventory/stock-levels"
-            element={<StockLevelsPage />}
-          />
-          <Route
-            path="/inventory/reports/valuation"
-            element={<InventoryValuationPage />}
-          />
-          <Route path="/hr/org-chart" element={<OrgChartPage />} />
-          <Route path="/hr/payroll" element={<PayrollPage />} />
-          <Route path="/hr/shifts" element={<ShiftCalendarPage />} />
-          <Route path="/pos" element={<POSPage />} />
-          <Route path="/projects/gantt" element={<ProjectGanttPage />} />
-          <Route path="/finance/cost-centers" element={<CostCentersPage />} />
-          <Route
-            path="/finance/bank-reconciliation"
-            element={<BankReconciliationPage />}
-          />
-          <Route path="/sales/orders" element={<SalesOrdersPage />} />
-          <Route path="/sales/price-lists" element={<PriceListsPage />} />
-          <Route
-            path="/procurement/purchase-orders"
-            element={<PurchaseOrdersPage />}
-          />
-          <Route path="/imports" element={<ImportPage />} />
-          <Route path="/imports/new" element={<ImportPage />} />
-          <Route path="/imports/:id" element={<ImportPage />} />
-          <Route path="/imports/:id/mapping" element={<ImportMappingPage />} />
-          <Route path="/lms/progress" element={<LearnerProgressPage />} />
-          <Route
-            path="/lms/progress/:enrollmentId"
-            element={<LearnerProgressPage />}
-          />
-          <Route path="/records/:ktype" element={<RecordListPage />} />
-          <Route path="/records/:ktype/new" element={<RecordFormPage />} />
-          <Route path="/records/:ktype/:id" element={<RecordFormPage />} />
-          {/* /kanban/:ktype is a deep-link alias that forces the kanban
-              view via the defaultMode prop. RecordListPage still allows
-              the user to toggle to the list view; defaultMode is only
-              the initial mode, not a lock. */}
-          <Route
-            path="/kanban/:ktype"
-            element={<RecordListPage defaultMode="kanban" />}
-          />
-        </Routes>
       </main>
     </div>
   );
