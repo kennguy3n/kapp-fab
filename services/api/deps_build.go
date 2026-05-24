@@ -826,13 +826,12 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 			}
 		})
 	}
-	switch {
-	case secretsProvider == nil:
+	if secretsProvider == nil {
 		// Reached only when operator-chose-non-env-but-init-failed
 		// (above). Leaving authh.signer / authh.svc nil triggers
 		// the admin-chain 503 short-circuit further down.
 		log.Printf("api: JWT auth disabled — configured secrets provider unavailable")
-	default:
+	} else {
 		signer, err := newAuthSigner(ctx, secretsProvider, signerOpts)
 		if err == nil {
 			kchat := auth.NewHTTPKChatClient(os.Getenv("KCHAT_BASE_URL"), os.Getenv("KCHAT_API_KEY"))

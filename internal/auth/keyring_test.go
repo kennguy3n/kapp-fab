@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -92,6 +93,59 @@ func TestKeyRing_KIDsSorted(t *testing.T) {
 	want := []string{"a2", "m3", "z1"}
 	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
 		t.Fatalf("KIDs() = %v want %v", got, want)
+	}
+}
+
+// TestKeyRing_SwapPrimaryReplacesMaterialForExistingKID pins the
+// contract that SwapPrimary("kid", newKey) overwrites the ring's
+// stored material for "kid" when "kid" is already present, even
+// though the previous version-check shape (`if !ok { insert }`)
+// would have dropped newKey on the floor in that case. Required
+// for versionless-provider refresh: env / dev backends produce
+// the same KID on every tick (no version metadata) but the
+// underlying bytes can change when the operator rotates the
+// secret out-of-band. Without same-KID-overwrite, a versionless
+// rotation silently no-ops — KeyRingRefresher.checkOne calls
+// SwapPrimary with the new SecretValue but the ring's signing
+// material remains stale.
+func TestKeyRing_SwapPrimaryReplacesMaterialForExistingKID(t *testing.T) {
+	oldKey := make([]byte, 32)
+	for i := range oldKey {
+		oldKey[i] = 0x11
+	}
+	newKey := make([]byte, 32)
+	for i := range newKey {
+		newKey[i] = 0x22
+	}
+	ring, err := NewKeyRing(SigningKey{KID: "kid-1", Algorithm: AlgHS256, HMACKey: oldKey})
+	if err != nil {
+		t.Fatalf("NewKeyRing: %v", err)
+	}
+	// SwapPrimary("kid-1", newMaterial): KID already present,
+	// new material supplied — must replace.
+	if err := ring.SwapPrimary("kid-1", SigningKey{KID: "kid-1", Algorithm: AlgHS256, HMACKey: newKey}); err != nil {
+		t.Fatalf("SwapPrimary: %v", err)
+	}
+	got := ring.Primary()
+	if !bytes.Equal(got.HMACKey, newKey) {
+		t.Fatalf("SwapPrimary did not replace material: got=%x want=%x", got.HMACKey, newKey)
+	}
+}
+
+// TestKeyRing_SwapPrimaryRejectsMaterialKIDMismatch ensures
+// passing a SigningKey whose KID disagrees with the swap target
+// is still an error (no change to behaviour from the previous
+// shape, but worth pinning to prevent regressions in either
+// direction).
+func TestKeyRing_SwapPrimaryRejectsMaterialKIDMismatch(t *testing.T) {
+	k := make([]byte, 32)
+	for i := range k {
+		k[i] = 0x11
+	}
+	ring, _ := NewKeyRing(SigningKey{KID: "kid-a", Algorithm: AlgHS256, HMACKey: k})
+	err := ring.SwapPrimary("kid-a", SigningKey{KID: "kid-b", Algorithm: AlgHS256, HMACKey: k})
+	if err == nil {
+		t.Fatalf("expected kid mismatch error, got nil")
 	}
 }
 

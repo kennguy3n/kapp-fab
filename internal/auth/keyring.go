@@ -110,10 +110,24 @@ func (r *KeyRing) AddVerifier(key SigningKey) error {
 
 // SwapPrimary atomically promotes the key with the supplied
 // KID to primary (must be already present via AddVerifier or
-// passed verbatim if not yet in the ring). If the key is not
-// present and full material is supplied via the optional
-// SigningKey argument, it is added at the same time. Returns
-// an error if the supplied KID is not findable.
+// passed verbatim via the optional SigningKey argument).
+// Returns an error if the supplied KID is not findable.
+//
+// When optKey IS supplied, its material always replaces what
+// the ring is holding for that KID — whether the KID was
+// already present or not. This is required for versionless
+// providers (the env backend's empty Version): the refresher
+// produces the SAME KID on every tick (deriveKID(ref, "")
+// just flattens the ref) but may carry NEW key bytes because
+// the operator changed the underlying secret. Without this
+// replace-on-call semantics, a versionless rotation would
+// silently no-op — SwapPrimary would promote the stale KID
+// without picking up the new material — defeating the
+// refresher's intent.
+//
+// When optKey is omitted, the KID must already be present
+// (typically from a prior AddVerifier call). Use this shape
+// for operator-driven rotation through the admin API.
 //
 // The previous primary remains in the ring as a verifier so
 // in-flight tokens still validate. Operators should clear it
@@ -125,21 +139,29 @@ func (r *KeyRing) SwapPrimary(kid string, optKey ...SigningKey) error {
 	if len(optKey) > 1 {
 		return errors.New("auth: keyring SwapPrimary accepts at most one key arg")
 	}
+	// Validate optKey once outside the CAS loop — validateKey
+	// is pure with respect to the ring state, and validating
+	// inside the retry loop would burn an HMAC bound-check on
+	// every contention without changing the outcome.
+	if len(optKey) == 1 {
+		key := optKey[0]
+		if key.KID != kid {
+			return fmt.Errorf("auth: keyring SwapPrimary kid mismatch %q vs %q", kid, key.KID)
+		}
+		if err := validateKey(key); err != nil {
+			return fmt.Errorf("auth: keyring SwapPrimary: %w", err)
+		}
+	}
 	for {
 		cur := r.state.Load()
 		next := cloneState(cur)
-		if _, ok := next.byKID[kid]; !ok {
-			if len(optKey) == 0 {
-				return fmt.Errorf("auth: keyring SwapPrimary unknown kid %q", kid)
-			}
-			key := optKey[0]
-			if key.KID != kid {
-				return fmt.Errorf("auth: keyring SwapPrimary kid mismatch %q vs %q", kid, key.KID)
-			}
-			if err := validateKey(key); err != nil {
-				return fmt.Errorf("auth: keyring SwapPrimary: %w", err)
-			}
-			next.byKID[kid] = key
+		if len(optKey) == 1 {
+			// Always overwrite — versionless-provider refresh
+			// produces same-KID-new-bytes, and we must apply
+			// the new bytes for rotation to take effect.
+			next.byKID[kid] = optKey[0]
+		} else if _, ok := next.byKID[kid]; !ok {
+			return fmt.Errorf("auth: keyring SwapPrimary unknown kid %q", kid)
 		}
 		next.primaryKID = kid
 		if r.state.CompareAndSwap(cur, next) {
