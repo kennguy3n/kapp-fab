@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -274,6 +275,24 @@ func (e *PayrollEngine) GeneratePayslips(
 				HasTFN:     ed.HasTFN == nil || *ed.HasTFN,     // default has_tfn=true
 				YTDGross:   ed.YTDGross,
 				Currency:   slipCurrency,
+
+				// Phase-M2 fields. Each defaults to its zero
+				// value; the packs apply their own "most
+				// common" fallbacks so pre-Phase-M2
+				// KRecords still produce correct slips:
+				//   - CH pack: empty Canton → federal-only.
+				//   - GCC packs: empty Nationality → "expat"
+				//     (no employee SS withholding).
+				//   - IN pack: empty TaxRegime → "new".
+				//   - NZ pack: zero KiwiSaverRate → no KS line.
+				//   - SG pack: zero Age → treat as ≤55 tier.
+				Canton:        ed.Canton,
+				Nationality:   ed.Nationality,
+				TaxRegime:     ed.TaxRegime,
+				KiwiSaverRate: ed.KiwiSaverRate,
+				NumDependents: ed.NumDependents,
+				Age:           ed.Age,
+				PermitType:    ed.PermitType,
 			}
 			extraLines, err := pack.ComputeWithholding(ctx, info, gross, period)
 			if err != nil {
@@ -449,6 +468,15 @@ func (e *PayrollEngine) PostPayRun(
 	// only narrow by status.
 	var approved []record.KRecord
 	var gross, deductions, net decimal.Decimal
+	// perCodeDeductions sums each statutory deduction code
+	// across every approved slip in the run. PostPayRun consults
+	// DeductionAccountMap below to decide whether to credit the
+	// per-code total to a dedicated liability account or fall
+	// back to the catch-all salary_payable roll-up. Codes only
+	// appear in the map if at least one slip carried a positive
+	// deduction line for them, so the journal entry never emits
+	// zero-value lines.
+	perCodeDeductions := map[string]decimal.Decimal{}
 	for _, s := range slips {
 		var sd payslipData
 		if err := json.Unmarshal(s.Data, &sd); err != nil {
@@ -461,6 +489,12 @@ func (e *PayrollEngine) PostPayRun(
 		gross = gross.Add(sd.GrossPay)
 		deductions = deductions.Add(sd.TotalDeductions)
 		net = net.Add(sd.NetPay)
+		for _, d := range sd.Deductions {
+			if d.Code == "" || !d.Amount.IsPositive() {
+				continue
+			}
+			perCodeDeductions[d.Code] = perCodeDeductions[d.Code].Add(d.Amount)
+		}
 	}
 	if len(approved) == 0 && existingJE == nil {
 		return nil, ErrNoApprovedSlips
@@ -474,13 +508,39 @@ func (e *PayrollEngine) PostPayRun(
 			{AccountCode: run.SalaryPayableAccountCode, Debit: decimal.Zero, Credit: net, Currency: currency, Memo: "Net payable"},
 		}
 		if deductions.IsPositive() {
-			// Round into the salary_payable credit so the entry
-			// balances when deduction liability accounts are not
-			// individually tracked. Tenants with per-component
-			// liability accounts can upgrade this path later.
-			lines = append(lines, ledger.JournalLine{
-				AccountCode: run.SalaryPayableAccountCode, Debit: decimal.Zero, Credit: deductions, Currency: currency, Memo: "Deductions payable",
-			})
+			// Split deductions by code when run.DeductionAccountMap is
+			// configured: each mapped code credits its own liability
+			// account so finance can reconcile remittances per
+			// authority (EPF→KWSP, CPF→CPF Board, GOSI→GOSI, …).
+			// Unmapped codes roll up into the catch-all salary_payable
+			// line so the entry stays balanced regardless of which
+			// codes the tenant has explicitly configured.
+			//
+			// The sum across `mappedSplits + unmapped` must equal
+			// `deductions` (and therefore `gross - net`) exactly,
+			// otherwise the entry won't balance and ledger.Post will
+			// reject it. perCodeDeductions sums to the same total as
+			// `deductions` by construction (both are the sum of every
+			// positive deduction line on every approved slip), so the
+			// arithmetic is closed-form correct as long as we use
+			// `decimal.Decimal` (not float) for the splits.
+			mappedSplits := splitDeductionsByCode(perCodeDeductions, run.DeductionAccountMap)
+			unmapped := deductions
+			for _, ms := range mappedSplits {
+				unmapped = unmapped.Sub(ms.amount)
+				lines = append(lines, ledger.JournalLine{
+					AccountCode: ms.account,
+					Debit:       decimal.Zero,
+					Credit:      ms.amount,
+					Currency:    currency,
+					Memo:        fmt.Sprintf("Deductions payable: %s", ms.code),
+				})
+			}
+			if unmapped.IsPositive() {
+				lines = append(lines, ledger.JournalLine{
+					AccountCode: run.SalaryPayableAccountCode, Debit: decimal.Zero, Credit: unmapped, Currency: currency, Memo: "Deductions payable",
+				})
+			}
 		}
 		sourceID := payRunID
 		posted, postErr := e.ledger.PostJournalEntry(ctx, ledger.JournalEntry{
@@ -601,6 +661,50 @@ func (e *PayrollEngine) ListPayslipsForRun(
 	return slips, nil
 }
 
+// deductionSplit is one (code, account, amount) row emitted by
+// splitDeductionsByCode. Carried as a slice (not a map) so the
+// resulting journal lines have a deterministic order — codes are
+// sorted ASC by code before splitting so the same pay_run posted
+// twice produces the same line ordering regardless of map
+// iteration randomness, which keeps audit diffs stable.
+type deductionSplit struct {
+	code    string
+	account string
+	amount  decimal.Decimal
+}
+
+// splitDeductionsByCode resolves the (Deduction.Code → liability
+// account code) mapping for every code present in the slip
+// rollups. Codes absent from accountMap are excluded from the
+// returned slice — the caller's `unmapped` balance picks them up
+// and credits salary_payable so the journal entry stays balanced.
+// A nil / empty accountMap returns an empty slice, which makes
+// PostPayRun's deduction-split branch a no-op and the journal
+// entry shape identical to the pre-Phase-M2 catch-all behaviour.
+func splitDeductionsByCode(perCode map[string]decimal.Decimal, accountMap map[string]string) []deductionSplit {
+	if len(perCode) == 0 || len(accountMap) == 0 {
+		return nil
+	}
+	codes := make([]string, 0, len(perCode))
+	for c := range perCode {
+		codes = append(codes, c)
+	}
+	sort.Strings(codes)
+	out := make([]deductionSplit, 0, len(codes))
+	for _, c := range codes {
+		account, ok := accountMap[c]
+		if !ok || account == "" {
+			continue
+		}
+		amt := perCode[c]
+		if !amt.IsPositive() {
+			continue
+		}
+		out = append(out, deductionSplit{code: c, account: account, amount: amt})
+	}
+	return out
+}
+
 // rollStructure expands a salary_structure's components into
 // resolved earnings/deductions lines and returns gross/deductions/net.
 // Percentage components are resolved against base_salary; fixed
@@ -687,6 +791,29 @@ type payRunData struct {
 	SalaryPayableAccountCode string          `json:"salary_payable_account_code"`
 	JournalEntryID           string          `json:"journal_entry_id"`
 	Status                   string          `json:"status"`
+
+	// DeductionAccountMap optionally maps a statutory
+	// Deduction.Code (e.g. "MY_EPF", "SG_CPF_EMPLOYEE",
+	// "SA_GOSI_PENSION") to a distinct liability account on the
+	// chart so the journal entry splits employee withholdings by
+	// remittance authority instead of rolling everything into the
+	// catch-all `salary_payable` line. Required for real-world
+	// compliance: EPF goes to KWSP, CPF goes to CPF Board, GOSI
+	// goes to GOSI, etc., and finance teams need separate
+	// liability balances to reconcile each remittance run.
+	//
+	// Codes not present in the map fall back to
+	// SalaryPayableAccountCode — exactly the legacy roll-up
+	// behaviour, so a tenant that hasn't configured per-code
+	// accounts keeps producing the same journal entry shape it
+	// did before this field existed.
+	//
+	// JSON shape on the KRecord:
+	//   {"deduction_account_map": {"MY_EPF": "2305", ...}}
+	//
+	// Empty / nil means "roll up everything into salary_payable"
+	// for backward compatibility with pre-Phase-M2 pay_runs.
+	DeductionAccountMap map[string]string `json:"deduction_account_map,omitempty"`
 }
 
 type payslipData struct {
@@ -701,6 +828,25 @@ type payslipData struct {
 	NetPay          decimal.Decimal `json:"net_pay"`
 	JournalEntryID  string          `json:"journal_entry_id"`
 	Status          string          `json:"status"`
+	// Deductions mirrors the slip's `deductions` array as
+	// (code, amount) pairs so PostPayRun can split the journal
+	// entry by statutory deduction code instead of rolling
+	// every deduction into salary_payable. The lines are
+	// already persisted on the slip — this projection just
+	// surfaces them for the posting path. `omitempty` so
+	// legacy slips that came through before this projection
+	// existed still decode without errors.
+	Deductions []deductionLine `json:"deductions,omitempty"`
+}
+
+// deductionLine is the minimal projection of a slip deduction
+// row used by PostPayRun's per-code roll-up. Code matches the
+// canonical Deduction.Code emitted by the tax pack (e.g.
+// "MY_EPF", "SG_CPF_EMPLOYEE", "FICA_OASDI") so the
+// DeductionAccountMap lookup uses the same key the pack writes.
+type deductionLine struct {
+	Code   string          `json:"code"`
+	Amount decimal.Decimal `json:"amount"`
 }
 
 type employeeData struct {
@@ -713,6 +859,19 @@ type employeeData struct {
 	Resident   *bool           `json:"resident,omitempty"`
 	HasTFN     *bool           `json:"has_tfn,omitempty"`
 	YTDGross   decimal.Decimal `json:"ytd_gross,omitempty"`
+
+	// Phase-M2 jurisdiction-specific inputs. Every field is
+	// `omitempty` so a pre-Phase-M2 KRecord serialises back
+	// identically after a round-trip. Packs that don't care
+	// about a field simply ignore it (e.g. the US pack never
+	// reads Canton).
+	Canton        string          `json:"canton,omitempty"`
+	Nationality   string          `json:"nationality,omitempty"`
+	TaxRegime     string          `json:"tax_regime,omitempty"`
+	KiwiSaverRate decimal.Decimal `json:"kiwisaver_rate,omitempty"`
+	NumDependents int             `json:"num_dependents,omitempty"`
+	Age           int             `json:"age,omitempty"`
+	PermitType    string          `json:"permit_type,omitempty"`
 }
 
 type structureData struct {

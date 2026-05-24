@@ -35,12 +35,59 @@ type SetupWizardConfig struct {
 	Industry     string       `json:"industry,omitempty"`
 	Country      string       `json:"country,omitempty"`
 	CurrencyCode string       `json:"currency_code,omitempty"`
+	// Locale is the IETF BCP 47 tag the API resolves the i18n
+	// bundle from for this tenant. When empty the wizard derives
+	// a sensible default from Country (CH→de, SA→ar, …) so
+	// operators that don't tick a locale checkbox still land on
+	// a locale that matches their statutory jurisdiction. See
+	// DefaultLocaleForCountry below for the full mapping.
+	Locale       string       `json:"locale,omitempty"`
 	CoATemplate  string       `json:"coa_template,omitempty"`
 	Roles        []WizardRole `json:"roles,omitempty"`
 	Users        []WizardUser `json:"users,omitempty"`
 	SampleData   bool         `json:"sample_data,omitempty"`
 	Plan         string       `json:"plan,omitempty"`
 	CreatedBy    uuid.UUID    `json:"created_by,omitempty"`
+}
+
+// DefaultLocaleForCountry returns the canonical UI locale tag the
+// wizard should pre-fill for the given ISO 3166-1 alpha-2 country
+// code. The mapping is intentionally one default per country (not
+// "every official language") so the wizard never has to ask the
+// operator to disambiguate at first-run; the picked default is
+// always changeable from the admin surface afterwards.
+//
+// The defaults follow the country's most common business locale:
+//   - CH: German (Swiss-German is the largest business language).
+//   - SA / AE / QA / KW / BH / OM: Arabic.
+//   - SG / MY / PH: English (lingua franca for business).
+//   - TH: Thai. ID: Indonesian. VN: Vietnamese. IN: Hindi.
+//   - NZ: English. CN/HK/TW: zh-Hans / zh-Hant.
+//   - US / AU / GB / IE / CA: English.
+//
+// Returns "en" for any country code without an explicit mapping
+// so the i18n loader always has a concrete bundle to resolve.
+func DefaultLocaleForCountry(country string) string {
+	switch strings.ToUpper(strings.TrimSpace(country)) {
+	case "CH":
+		return "de"
+	case "SA", "AE", "QA", "KW", "BH", "OM":
+		return "ar"
+	case "TH":
+		return "th"
+	case "ID":
+		return "id"
+	case "VN":
+		return "vi"
+	case "IN":
+		return "hi"
+	case "CN":
+		return "zh-Hans"
+	case "TW", "HK":
+		return "zh-Hant"
+	default:
+		return "en"
+	}
 }
 
 // WizardRole captures a role definition the wizard should upsert into
@@ -291,6 +338,33 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 			); err != nil {
 				return fmt.Errorf("tenant: persist country: %w", err)
 			}
+		}
+
+		// Persist the tenant's UI locale. When the caller did not
+		// supply one we derive it from cfg.Country so a "Swiss
+		// company" lands on German, a "Saudi company" lands on
+		// Arabic, etc. — DefaultLocaleForCountry returns "en" for
+		// unmapped countries so the column never gets an empty
+		// string. The CHECK on migration 000059 enforces the format
+		// regardless of which API path writes the row.
+		locale := strings.TrimSpace(cfg.Locale)
+		if locale == "" {
+			locale = DefaultLocaleForCountry(cfg.Country)
+		}
+		// Run the format gate; the wizard does not yet have a
+		// runtime LocaleValidator wired in (i18n.Bundle is the
+		// production validator and ships in PR-4), so the
+		// bundle-whitelist check is intentionally skipped here.
+		// The CHECK constraint on migration 000059 catches any
+		// malformed value at the DB layer regardless.
+		if err := ValidateLocale(locale, nil); err != nil {
+			return fmt.Errorf("tenant: wizard: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE tenants SET locale = $1, updated_at = now() WHERE id = $2`,
+			locale, tenantID,
+		); err != nil {
+			return fmt.Errorf("tenant: persist locale: %w", err)
 		}
 
 		// Seed the default per-tenant scheduled_actions rows the
