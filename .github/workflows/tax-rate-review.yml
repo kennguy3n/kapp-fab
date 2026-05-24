@@ -41,7 +41,12 @@ jobs:
     name: open annual tax-rate review issue
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # No checkout step — the workflow only opens a GitHub issue
+      # via the REST API (github.rest.issues.create) and never reads
+      # repo files. Skipping the checkout shaves ~5s off each run
+      # and avoids the (irrelevant for this workflow) GITHUB_TOKEN
+      # contents:read permission grant that actions/checkout
+      # otherwise needs at the job level.
       - name: open issue
         uses: actions/github-script@v7
         env:
