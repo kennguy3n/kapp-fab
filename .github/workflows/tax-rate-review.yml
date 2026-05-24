@@ -51,8 +51,20 @@ jobs:
             // Determine the fiscal year being reviewed. If the
             // workflow was dispatched manually with a year input
             // use that; otherwise use the current calendar year.
-            const reviewYear = process.env.REVIEW_YEAR && process.env.REVIEW_YEAR.length > 0
-              ? process.env.REVIEW_YEAR
+            //
+            // The input is coerced through a strict 4-digit regex
+            // before use to neutralise any quote / search-query
+            // injection vector via the manual dispatch input. The
+            // input field is gated to repo-write-permission users by
+            // GitHub Actions, so the practical attack surface is
+            // already small — this just keeps the search query
+            // template clean and defends-in-depth against an
+            // attacker with write access who tries to escape into
+            // the GitHub Search query syntax via the issue-title
+            // interpolation at line 119-121 below.
+            const yearInput = process.env.REVIEW_YEAR ?? "";
+            const reviewYear = /^[0-9]{4}$/.test(yearInput)
+              ? yearInput
               : new Date().getUTCFullYear().toString();
 
             const title = `Annual tax-rate review — fiscal year ${reviewYear}`;
