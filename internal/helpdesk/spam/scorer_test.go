@@ -168,6 +168,70 @@ func TestScorer_ReplyToSameDomain(t *testing.T) {
 	}
 }
 
+// TestSenderHost_FallbackStripsTrailingAngleBracket pins the
+// non-RFC-5322-parseable display-name path: when net/mail rejects
+// the input (display-name + angle brackets without proper
+// quoting), the fallback substring-after-last-@ extraction must
+// NOT carry a trailing '>' into the host. Otherwise the whitelist
+// lookup misses (`"example.com>"` != `"example.com"`) and the
+// reply-to mismatch rule false-positives.
+func TestSenderHost_FallbackStripsTrailingAngleBracket(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		// net/mail.ParseAddress rejects unquoted-display +
+		// angle-bracketed addresses with no space between
+		// display and bracket. The fallback path runs.
+		{
+			name:  "display_no_space_angle",
+			input: `display<alice@example.com>`,
+			want:  "example.com",
+		},
+		{
+			name:  "display_no_space_angle_uppercase",
+			input: `Display<Alice@EXAMPLE.COM>`,
+			want:  "example.com",
+		},
+		// Well-formed inputs go through net/mail and the
+		// fallback path is never reached.
+		{
+			name:  "wellformed_bracketed",
+			input: `Alice <alice@example.com>`,
+			want:  "example.com",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := senderHost(tc.input)
+			if got != tc.want {
+				t.Errorf("senderHost(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestScorer_WhitelistedSenderViaFallback pins the user-visible
+// effect of TestSenderHost_FallbackStripsTrailingAngleBracket:
+// a whitelist entry for `example.com` actually matches an inbound
+// `From: "display<alice@example.com>"` even when net/mail can't
+// parse it.
+func TestScorer_WhitelistedSenderViaFallback(t *testing.T) {
+	s := NewScorer(WithWhitelist([]string{"example.com"}))
+	res := s.Score(Email{
+		From:     `display<alice@example.com>`,
+		BodyText: "long enough body content to avoid thin-body trigger",
+		Subject:  "billing question",
+	})
+	if res.Score != 0 {
+		t.Errorf("expected Score=0 (whitelist hit), got %d (reasons=%+v)", res.Score, res.Reasons)
+	}
+	if res.Decision != BucketOpen {
+		t.Errorf("expected BucketOpen, got %q", res.Decision)
+	}
+}
+
 // TestScorer_SuspiciousSubject pins the subject-pattern rule. The
 // regex is narrow — broad patterns FP too often on legit support
 // traffic.

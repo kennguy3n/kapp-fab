@@ -234,10 +234,22 @@ func (h *InboundEmailHandler) ProcessThreaded(ctx context.Context, email Inbound
 		// downstream from the per-message rows.
 		rec, err = h.records.Get(ctx, tenantID, parentTicket)
 		if err != nil {
-			// Stale email_messages row (ticket deleted but
-			// the row survived) — fall through to opening
-			// a new ticket. This is a recovery path, not
-			// the steady state.
+			// Only the "stale email_messages row → deleted
+			// ticket" case (record.ErrNotFound) is treated
+			// as a recoverable thread-broken-fall-through.
+			// Any OTHER error (transient DB outage, lock
+			// timeout, serialization failure) must be
+			// propagated — silently opening a new ticket on
+			// a transient failure would split the customer's
+			// conversation onto a different ticket id, and
+			// every subsequent reply on the chain would then
+			// land on the wrong ticket too. The relay's retry
+			// (we return the wrapped error → 5xx) brings us
+			// back through Resolve which will rediscover the
+			// real parent ticket.
+			if !errors.Is(err, record.ErrNotFound) {
+				return nil, fmt.Errorf("helpdesk: fetch parent ticket: %w", err)
+			}
 			rec, err = h.createTicket(ctx, tenantID, email)
 			if err != nil {
 				return nil, err

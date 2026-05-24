@@ -435,7 +435,16 @@ func senderHost(addr string) string {
 		if at == -1 || at == len(addr)-1 {
 			return ""
 		}
-		return strings.ToLower(strings.TrimSpace(addr[at+1:]))
+		// Strip the trailing angle bracket (if present) so
+		// `"display<a@example.com>"` falls back to
+		// `"example.com"` instead of `"example.com>"`. Without
+		// this, whitelist lookups and Reply-To-mismatch
+		// comparisons silently miss on every fallback-parsed
+		// sender.
+		host := strings.TrimSpace(addr[at+1:])
+		host = strings.TrimRight(host, ">")
+		host = strings.TrimSpace(host)
+		return strings.ToLower(host)
 	}
 	at := strings.LastIndex(parsed.Address, "@")
 	if at == -1 {
