@@ -445,12 +445,14 @@ type LocaleResolver interface {
 // localeRe is the syntactic gate for IETF BCP 47 language tags. The
 // regex deliberately allows up to three subtags after the primary
 // language so the wizard can accept the multi-subtag forms operators
-// actually use today (`zh-Hant-TW`, `sr-Latn-RS`, `es-419`, etc.) and
-// the forms the country-derived defaults already emit (`zh-Hans`,
-// `zh-Hant`). The previous single-subtag form (`^[a-z]{2,3}(-…)?$`)
-// rejected its own `DefaultLocaleForCountry("TW") == "zh-Hant"` on
-// the rare path where an operator round-tripped that value back
-// through the admin API.
+// actually use today (`zh-Hant-TW`, `sr-Latn-RS`, `es-419`,
+// `de-CH-1996`, etc.) — the previous single-subtag form
+// (`^[a-z]{2,3}(-[A-Za-z0-9]{2,4})?$`) accepted single-subtag tags
+// like `zh-Hant` and `zh-Hans` (which the country-derived defaults
+// already emit) but REJECTED everything with two or more
+// subtags after the language, including the script+region form
+// (`zh-Hant-TW`) operators round-trip through the admin API for
+// Taiwanese Traditional Chinese.
 //
 // Subtag length bounds follow the BCP 47 production rules:
 //   - language: 2 or 3 ASCII letters (primary language)
