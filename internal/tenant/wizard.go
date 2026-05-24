@@ -230,12 +230,23 @@ type WizardUser struct {
 
 // WizardResult summarises the side-effects the wizard applied. The HTTP
 // handler surfaces this so the UI can render a completion screen.
+//
+// LocaleUsed reports the resolved locale tag the wizard wrote to the
+// `tenants.locale` column. When the caller supplied an explicit locale
+// in cfg.Locale this is the same value; when the caller omitted it,
+// LocaleUsed reflects DefaultLocaleForCountry(cfg.Country) after the
+// resolver downgrade (so e.g. an IN tenant whose country-derived
+// default is `hi` lands on `en` if the bundle doesn't ship `hi.json`).
+// Surfacing this lets the wizard UI show the user which locale was
+// actually persisted vs. what they asked for, especially after a
+// resolver downgrade.
 type WizardResult struct {
 	TenantID            uuid.UUID `json:"tenant_id"`
 	AccountsInserted    int       `json:"accounts_inserted"`
 	RolesInserted       int       `json:"roles_inserted"`
 	UsersInserted       int       `json:"users_inserted"`
 	CoATemplateUsed     string    `json:"coa_template_used"`
+	LocaleUsed          string    `json:"locale_used"`
 	ZKFabricProvisioned bool      `json:"zk_fabric_provisioned,omitempty"`
 }
 
@@ -698,6 +709,18 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 		); err != nil {
 			return fmt.Errorf("tenant: persist locale: %w", err)
 		}
+		// Stamp the resolved locale on the result so the wizard UI
+		// can render "Locale used: <tag>" on the completion screen.
+		// The assignment lives inside the tx closure for consistency
+		// with the other out.* fields (AccountsInserted line 578,
+		// RolesInserted line 584). The struct mutation itself is
+		// NOT undone by a tx rollback — Go heap state is not
+		// transactional — but the WithTenantTx wrapper returns the
+		// closure's error to the outer function, which surfaces it
+		// via "return nil, fmt.Errorf(...)" at line 715. The caller
+		// therefore receives (nil, err) and never observes a
+		// partially-populated *WizardResult on a rollback path.
+		out.LocaleUsed = locale
 
 		// Seed the default per-tenant scheduled_actions rows the
 		// worker handlers expect (SLA breach sweeper +

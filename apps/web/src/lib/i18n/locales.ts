@@ -116,6 +116,103 @@ const REGION_SCRIPT_OVERRIDES: Record<string, string> = {
 };
 
 /**
+ * Country-to-locale mapping — the frontend mirror of
+ * `tenant.DefaultLocaleForCountry` in `internal/tenant/wizard.go`. The
+ * wizard uses this to pre-select a sensible UI language when the user
+ * picks a country in step 0, before they've explicitly chosen a
+ * locale from the dropdown. The backend uses its own copy of this
+ * mapping when callers omit `cfg.Locale` so a direct API caller that
+ * only supplies `Country` still lands on a country-appropriate UI
+ * language.
+ *
+ * Both copies of the table must stay in lockstep. The values follow
+ * the same convention as the backend:
+ *
+ *   - DE / AT / CH         → de  (German-speaking bloc)
+ *   - FR                   → fr
+ *   - IT                   → it
+ *   - ES                   → es
+ *   - JP                   → ja
+ *   - SA / AE / QA / KW / BH / OM → ar  (Arabic-speaking GCC bloc)
+ *   - TH / ID / VN         → th / id / vi (single-language jurisdictions)
+ *   - IN                   → hi   (Hindi; downgrades to en until hi.json ships)
+ *   - CN                   → zh-Hans (downgrades to zh)
+ *   - TW / HK              → zh-Hant
+ *   - SG / MY / PH         → en  (B2B lingua franca; the ms / tl catalogues
+ *                                 exist for ms but English is the conservative
+ *                                 business default)
+ *   - NZ / US / AU / GB / IE / CA / everything else → en
+ *
+ * Unlike `bestSupportedLocale`, this helper does NOT downgrade tags
+ * to the shipped catalogue set — it returns the canonical locale tag
+ * for the country, even if that tag has no shipped catalogue (e.g.
+ * `"hi"` for IN, `"zh-Hans"` for CN). Callers that need a tag the
+ * frontend can actually serve should pipe the return value through
+ * `bestSupportedLocale()`, which is what `bestSupportedLocaleForCountry`
+ * below does for the wizard's pre-select path.
+ */
+const COUNTRY_LOCALE_DEFAULTS: Record<string, string> = {
+  DE: "de",
+  AT: "de",
+  CH: "de",
+  FR: "fr",
+  IT: "it",
+  ES: "es",
+  JP: "ja",
+  SA: "ar",
+  AE: "ar",
+  QA: "ar",
+  KW: "ar",
+  BH: "ar",
+  OM: "ar",
+  TH: "th",
+  ID: "id",
+  VN: "vi",
+  IN: "hi",
+  CN: "zh-Hans",
+  TW: "zh-Hant",
+  HK: "zh-Hant",
+};
+
+/**
+ * Returns the canonical UI locale tag for the supplied ISO 3166-1
+ * alpha-2 country code, mirroring `tenant.DefaultLocaleForCountry`.
+ * Returns "en" for unmapped countries.
+ *
+ * The returned tag is the country's canonical locale (e.g. "hi" for
+ * IN, "zh-Hans" for CN) — it is NOT downgraded to the shipped
+ * catalogue set. The wizard pipes this through `bestSupportedLocale`
+ * to find the catalogue the frontend can actually serve, but the
+ * unfiltered value is what the backend persists to `tenants.locale`
+ * (where the database CHECK gates format, not catalogue presence).
+ */
+export function defaultLocaleForCountry(country: string): string {
+  if (!country) {
+    return DefaultLocale;
+  }
+  const code = country.trim().toUpperCase();
+  return COUNTRY_LOCALE_DEFAULTS[code] ?? DefaultLocale;
+}
+
+/**
+ * Returns the best UI locale the frontend can actually render for the
+ * supplied country code — `defaultLocaleForCountry()` piped through
+ * `bestSupportedLocale()`. Useful for the wizard's pre-select path
+ * where the goal is to show the user the catalogue that will actually
+ * render, not the canonical-but-unshipped tag the backend stores.
+ *
+ * Examples:
+ *   IN → "hi" canonical → null after bestSupportedLocale → "en"
+ *   CN → "zh-Hans" canonical → "zh" after progressive-subtag drop
+ *   TW → "zh-Hant" canonical → "zh-Hant" (exact match)
+ *   DE → "de" canonical → "de" (exact match)
+ */
+export function bestSupportedLocaleForCountry(country: string): string {
+  const canonical = defaultLocaleForCountry(country);
+  return bestSupportedLocale(canonical) ?? DefaultLocale;
+}
+
+/**
  * Returns the best supported locale tag for an arbitrary BCP 47
  * input — the frontend mirror of `golang.org/x/text/language.Matcher`
  * over the shipped catalogue set. Resolution order:
