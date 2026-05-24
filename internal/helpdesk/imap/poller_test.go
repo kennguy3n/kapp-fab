@@ -590,3 +590,89 @@ func TestManager_StopAllWaitsForExit(t *testing.T) {
 		t.Errorf("expected 0 active after StopAll, got %d", len(m.ActiveMailboxes()))
 	}
 }
+
+// TestManager_StartAfterStopAllReturnsErrStopped pins the
+// round-4 hardening: once StopAll() has been called, every
+// subsequent Start() refuses with ErrManagerStopped instead of
+// spawning a goroutine that StopAll can no longer track. Without
+// this guard, a late-arriving convergence tick could race the
+// shutdown and leave a wg.Add(1) outstanding after StopAll's
+// wg.Wait() has already returned (or worse, block StopAll from
+// ever returning if Start interleaved between the entries reset
+// and wg.Wait).
+func TestManager_StartAfterStopAllReturnsErrStopped(t *testing.T) {
+	m := NewManager(func(cfg Config) (*Poller, error) {
+		client := &fakeClient{connectErr: errors.New("never connects")}
+		return NewPoller(cfg, client, &fakeUIDState{}, &fakeProcessor{}, nil)
+	}, nil)
+	// Start one + Stop everything.
+	if err := m.Start(context.Background(), Config{
+		TenantID: uuid.New(), MailboxID: uuid.New(),
+		PollInterval: 5 * time.Millisecond,
+		MaxBackoff:   10 * time.Millisecond,
+	}); err != nil {
+		t.Fatalf("initial start: %v", err)
+	}
+	m.StopAll()
+	// Post-shutdown Start should refuse.
+	err := m.Start(context.Background(), Config{
+		TenantID: uuid.New(), MailboxID: uuid.New(),
+		PollInterval: 5 * time.Millisecond,
+	})
+	if !errors.Is(err, ErrManagerStopped) {
+		t.Fatalf("expected ErrManagerStopped after StopAll, got %v", err)
+	}
+	// And it must not have populated the entries map.
+	if active := m.ActiveMailboxes(); len(active) != 0 {
+		t.Fatalf("expected no active mailboxes after refused start, got %d", len(active))
+	}
+}
+
+// TestPollOnce_ProcessorErrorPersistsPartialProgress pins the
+// round-4 fix: if processor.Process fails on UID N+1 after UID N
+// succeeded, the checkpoint is persisted at UID N before the
+// error returns so the next poll doesn't re-fetch + re-process
+// UID N. The Processor's Message-ID dedup catches duplicates if
+// the next poll re-fetches UID N+1, so this strictly reduces
+// duplicate-processing load without changing correctness.
+func TestPollOnce_ProcessorErrorPersistsPartialProgress(t *testing.T) {
+	client := &fakeClient{
+		selectRes:   SelectResult{UIDValidity: 1},
+		fetchByCall: [][]FetchedMessage{{mkMessage(10, "a@x"), mkMessage(11, "b@x")}},
+	}
+	state := &fakeUIDState{uidValidity: 1}
+	// Processor succeeds on first call (UID 10), fails on
+	// second (UID 11).
+	processor := &fakeProcessorSeq{errAt: 2}
+	p, _ := NewPoller(Config{
+		TenantID: uuid.New(), MailboxID: uuid.New(),
+	}, client, state, processor, nil)
+	_, err := p.PollOnce(context.Background())
+	if err == nil {
+		t.Fatalf("expected processor error on UID 11")
+	}
+	// state.Set must have been called once on the error path
+	// (NOT zero like the all-fail batch case) with lastUID=10.
+	if state.setCalls != 1 {
+		t.Errorf("expected 1 Set on partial-progress error, got %d", state.setCalls)
+	}
+	if state.lastUID != 10 {
+		t.Errorf("expected lastUID=10 persisted, got %d", state.lastUID)
+	}
+}
+
+// fakeProcessorSeq returns nil on the first errAt-1 calls then
+// an error on call errAt. Used to exercise the
+// "succeed-then-fail" partial-batch path.
+type fakeProcessorSeq struct {
+	calls int
+	errAt int
+}
+
+func (f *fakeProcessorSeq) Process(_ context.Context, _, _ uuid.UUID, _ []byte, _ ParsedEmail) error {
+	f.calls++
+	if f.calls == f.errAt {
+		return errors.New("db outage")
+	}
+	return nil
+}

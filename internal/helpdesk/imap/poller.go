@@ -192,12 +192,28 @@ func (p *Poller) PollOnce(ctx context.Context) (int, error) {
 	// Set(.., 0) is idempotent under the helpdesk_imap_state
 	// UPSERT, and any new messages picked up below will write
 	// an updated lastUID anyway.
+	//
+	// The first-poll case (uidValid == 0, no prior state row)
+	// is logged at INFO ("initialising checkpoint"); a true
+	// validity *change* on an already-tracked mailbox is logged
+	// at WARN since it implies the server side reset the
+	// folder (rare; happens after a restore-from-backup or a
+	// Cyrus reconstruct). Splitting the two avoids alerting
+	// operators every time a new mailbox is attached.
 	if uidValid != sel.UIDValidity {
-		p.logger.Warn("imap: uidvalidity changed; resetting checkpoint",
-			slog.String("tenant_id", p.cfg.TenantID.String()),
-			slog.String("mailbox_id", p.cfg.MailboxID.String()),
-			slog.Any("old_validity", uidValid),
-			slog.Any("new_validity", sel.UIDValidity))
+		switch uidValid {
+		case 0:
+			p.logger.Info("imap: initialising uidvalidity checkpoint",
+				slog.String("tenant_id", p.cfg.TenantID.String()),
+				slog.String("mailbox_id", p.cfg.MailboxID.String()),
+				slog.Any("uidvalidity", sel.UIDValidity))
+		default:
+			p.logger.Warn("imap: uidvalidity changed; resetting checkpoint",
+				slog.String("tenant_id", p.cfg.TenantID.String()),
+				slog.String("mailbox_id", p.cfg.MailboxID.String()),
+				slog.Any("old_validity", uidValid),
+				slog.Any("new_validity", sel.UIDValidity))
+		}
 		lastUID = 0
 		if err := p.state.Set(ctx, p.cfg.TenantID, p.cfg.MailboxID, sel.UIDValidity, 0); err != nil {
 			return 0, fmt.Errorf("imap: persist uidvalidity reset: %w", err)
@@ -229,6 +245,26 @@ func (p *Poller) PollOnce(ctx context.Context) (int, error) {
 				continue
 			}
 			if err := p.processor.Process(ctx, p.cfg.TenantID, p.cfg.MailboxID, msg.Body, parsed); err != nil {
+				// Persist progress before returning the
+				// error so a persistently-failing UID
+				// doesn't force every preceding UID in
+				// the same batch to be re-fetched and
+				// re-processed on the next poll cycle.
+				// The Processor's Message-ID dedup
+				// catches duplicates if Set fails or
+				// the next poll re-fetches the bad UID,
+				// so this is a strict
+				// duplicate-suppression improvement, not
+				// a correctness change.
+				if lastUID > 0 {
+					if setErr := p.state.Set(ctx, p.cfg.TenantID, p.cfg.MailboxID, sel.UIDValidity, lastUID); setErr != nil {
+						p.logger.Warn("imap: state set on processor-error path failed",
+							slog.String("tenant_id", p.cfg.TenantID.String()),
+							slog.String("mailbox_id", p.cfg.MailboxID.String()),
+							slog.Any("state_error", setErr),
+							slog.Any("processor_error", err))
+					}
+				}
 				return processed, fmt.Errorf("imap: process uid=%d: %w", msg.UID, err)
 			}
 			if msg.UID > lastUID {
@@ -343,14 +379,32 @@ type managerEntry struct {
 // the goroutine lifecycle: Start launches a Poller; Stop cancels
 // it; ActiveMailboxes returns the current set of running pollers
 // for the operator dashboard.
+//
+// The `stopped` flag closes the StopAll race window: after the
+// worker calls StopAll() during shutdown, any concurrent Start
+// (e.g. a late-arriving convergence tick) refuses to spawn a
+// new goroutine. Without this flag, the sequence (StopAll grabs
+// + clears the map) -> (concurrent Start inserts new entry +
+// calls wg.Add(1)) -> (StopAll's wg.Wait blocks forever) would
+// deadlock. ErrManagerStopped surfaces the refusal so callers
+// (e.g. the worker's convergence loop) can distinguish "already
+// running" (current behaviour: no-op) from "manager has shut
+// down".
 type Manager struct {
 	mu        sync.Mutex
 	entries   map[uuid.UUID]managerEntry
 	nextGen   uint64
+	stopped   bool
 	wg        sync.WaitGroup
 	newPoller func(Config) (*Poller, error)
 	logger    *slog.Logger
 }
+
+// ErrManagerStopped is returned by Start when the Manager has
+// already been shut down via StopAll. The worker's convergence
+// loop uses this to short-circuit late-arriving start requests
+// without spawning a goroutine that StopAll can no longer track.
+var ErrManagerStopped = errors.New("imap: manager stopped")
 
 // NewManager wires a Manager. newPoller is the factory: in
 // production this captures the shared Client / UIDState /
@@ -369,10 +423,16 @@ func NewManager(newPoller func(Config) (*Poller, error), logger *slog.Logger) *M
 
 // Start launches a Poller for cfg.MailboxID. If a Poller is
 // already running for that mailbox, Start is a no-op + returns
-// nil.
+// nil. Returns ErrManagerStopped if the Manager has been shut
+// down via StopAll — the caller should treat this as a terminal
+// state for that Manager instance and stop submitting new
+// configs.
 func (m *Manager) Start(parent context.Context, cfg Config) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.stopped {
+		return ErrManagerStopped
+	}
 	if _, ok := m.entries[cfg.MailboxID]; ok {
 		return nil
 	}
@@ -425,8 +485,19 @@ func (m *Manager) Stop(mailboxID uuid.UUID) bool {
 
 // StopAll cancels every running Poller and waits for them all to
 // exit. Used at worker shutdown.
+//
+// Sets the `stopped` flag under the lock BEFORE releasing it so
+// any concurrent Start call (e.g. a convergence tick that fires
+// between the worker's signal handler and StopAll completing)
+// either ran fully before us (and is in the map we just
+// collected) or sees stopped=true and returns ErrManagerStopped
+// without calling wg.Add. This closes the race the bot flagged:
+// a Start interleaved between the m.entries reset and the
+// wg.Wait would otherwise leave its goroutine running while we
+// blocked on wg.Wait forever.
 func (m *Manager) StopAll() {
 	m.mu.Lock()
+	m.stopped = true
 	// Collect cancel funcs under the lock, then release the
 	// lock before invoking them so a goroutine's defer-cleanup
 	// (which also takes m.mu) doesn't deadlock against us.

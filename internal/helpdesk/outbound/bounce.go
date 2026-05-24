@@ -137,6 +137,26 @@ var recipientRe = regexp.MustCompile(`(?im)^(?:Final-Recipient|Original-Recipien
 // distinguishes complaints from bounces.
 var arfFeedbackTypeRe = regexp.MustCompile(`(?im)^Feedback-Type:\s*(abuse|fraud|virus|other)`)
 
+// diagnosticCodeRe extracts the per-recipient Diagnostic-Code
+// field (RFC 3464 §2.3.2). The regex is case-insensitive +
+// multi-line + non-greedy on the value so we capture only the
+// first physical line of the header. The 400-character cap is
+// enforced by the caller via len() on the resulting submatch
+// because a regex length cap would also force the matcher to
+// scan past Unicode boundaries we don't care about.
+//
+// Switched from the prior `strings.Index(strings.ToLower(body),
+// ..)` + manual byte-slice approach because Go's ToLower changes
+// the byte length of some Unicode code points (e.g. U+0130
+// LATIN CAPITAL LETTER I WITH DOT ABOVE → "i\u0307" = 3 bytes),
+// which means a byte offset computed on the lowered string does
+// not correspond to the same logical position in the original
+// string. Vanishingly rare for DSN bodies (they're ASCII-
+// dominated) but eliminating the variant entirely is simpler
+// than reasoning about which DSN-producing MTAs might emit
+// Turkish-locale prefixes.
+var diagnosticCodeRe = regexp.MustCompile(`(?im)^Diagnostic-Code:\s*(.*)$`)
+
 // ParseDSN extracts a Bounce from a DSN body. Exported so the
 // inbound webhook handler can call it directly when classifying
 // inbound messages (some classifiers route DSNs by Content-Type
@@ -189,14 +209,16 @@ func ParseDSN(headers map[string]string, body string) Bounce {
 	// Reason: typically a Diagnostic-Code line or the human-
 	// readable preamble. We surface the first 400 chars after
 	// "Diagnostic-Code:" so the agent UI can show "550 5.1.1
-	// User unknown".
-	if idx := strings.Index(strings.ToLower(body), "diagnostic-code:"); idx >= 0 {
-		end := idx + len("diagnostic-code:") + 400
-		if end > len(body) {
-			end = len(body)
+	// User unknown". The regex above captures the first physical
+	// line of the Diagnostic-Code header against the original
+	// (un-lowered) body, so the result preserves the source
+	// casing of the diagnostic message.
+	if m := diagnosticCodeRe.FindStringSubmatch(body); m != nil {
+		reason := strings.TrimSpace(m[1])
+		if len(reason) > 400 {
+			reason = reason[:400]
 		}
-		line := strings.SplitN(body[idx+len("diagnostic-code:"):end], "\n", 2)[0]
-		b.Reason = strings.TrimSpace(line)
+		b.Reason = reason
 	}
 
 	return b

@@ -181,6 +181,15 @@ func TestBuild_BodyEOLNormalised(t *testing.T) {
 		{"crlf_already", "line1\r\nline2", "line1\r\nline2"},
 		{"mixed", "line1\r\nline2\nline3\r\n", "line1\r\nline2\r\nline3\r\n"},
 		{"empty_lines", "a\n\nb", "a\r\n\r\nb"},
+		// Pins the round-4 sentinel fix: a literal NUL byte
+		// in the body must round-trip as a NUL, not be
+		// corrupted to "\r\n" by the placeholder restore. RFC
+		// 5321 §4.5.2 prohibits NUL in SMTP message data so
+		// production won't hit this, but the function is
+		// shared via the outbound package and the unique
+		// multi-byte sentinel removes the corruption vector
+		// for any non-SMTP reuse.
+		{"nul_preserved", "a\x00b\nc", "a\x00b\r\nc"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

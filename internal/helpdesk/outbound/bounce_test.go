@@ -3,6 +3,7 @@ package outbound
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -121,6 +122,48 @@ Original-Envelope-Id: env123@support.x.com
 	b := ParseDSN(nil, body)
 	if b.OriginalMessageID != "env123@support.x.com" {
 		t.Errorf("expected Original-Envelope-Id extraction, got %q", b.OriginalMessageID)
+	}
+}
+
+// TestParseDSN_DiagnosticCodeUnicodePrefix pins the round-4
+// fix: the regex-based extraction is robust to byte-length-
+// changing Unicode characters in the body before the
+// Diagnostic-Code header. The prior implementation searched for
+// "diagnostic-code:" in strings.ToLower(body) and used the byte
+// index to slice the original body — wrong for code points like
+// U+0130 (LATIN CAPITAL LETTER I WITH DOT ABOVE, 2 bytes UTF-8)
+// which lowercase to "i\u0307" (3 bytes UTF-8). DSN bodies are
+// ASCII-dominated in practice so the live impact was vanishing,
+// but the regex eliminates the variant entirely.
+func TestParseDSN_DiagnosticCodeUnicodePrefix(t *testing.T) {
+	// Prefix the body with a Turkish-locale-looking string
+	// whose ToLower changes byte length. "İ" (U+0130) is 2
+	// bytes; strings.ToLower yields "i\u0307" (3 bytes), so
+	// any byte offset computed on the lowered string is off
+	// by one for content that follows.
+	body := "İmportant DSN follows below. İİİ\n" +
+		`Final-Recipient: rfc822; bad@example.com
+Status: 5.1.1
+Diagnostic-Code: smtp; 550 5.1.1 User unknown
+`
+	b := ParseDSN(nil, body)
+	if b.Status != "5.1.1" {
+		t.Errorf("expected status 5.1.1, got %q", b.Status)
+	}
+	if b.Reason != "smtp; 550 5.1.1 User unknown" {
+		t.Errorf("expected Reason to be extracted cleanly with Unicode prefix, got %q", b.Reason)
+	}
+}
+
+// TestParseDSN_DiagnosticCodeCappedAt400 pins the 400-char cap on
+// the extracted Reason. A Diagnostic-Code with a >400-char value
+// is truncated; a <400-char value is returned in full.
+func TestParseDSN_DiagnosticCodeCappedAt400(t *testing.T) {
+	long := strings.Repeat("x", 500)
+	body := "Status: 5.1.1\nDiagnostic-Code: smtp; " + long + "\n"
+	b := ParseDSN(nil, body)
+	if len(b.Reason) != 400 {
+		t.Errorf("expected Reason capped at 400 chars, got %d", len(b.Reason))
 	}
 }
 
