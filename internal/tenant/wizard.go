@@ -58,20 +58,38 @@ type SetupWizardConfig struct {
 // operator to disambiguate at first-run; the picked default is
 // always changeable from the admin surface afterwards.
 //
-// The defaults follow the country's most common business locale:
-//   - CH: German (Swiss-German is the largest business language).
-//   - SA / AE / QA / KW / BH / OM: Arabic.
-//   - SG / MY / PH: English (lingua franca for business).
-//   - TH: Thai. ID: Indonesian. VN: Vietnamese. IN: Hindi.
-//   - NZ: English. CN/HK/TW: zh-Hans / zh-Hant.
-//   - US / AU / GB / IE / CA: English.
+// The defaults follow the country's most common business locale.
+// Every country listed here has a shipped translation catalogue
+// under internal/i18n/locales — a country lacking a catalogue
+// falls through to "en" so the loader always has a concrete
+// bundle to resolve, even though the script-defaulting matcher
+// could in principle take a few of them further (e.g. MX → es).
+// Adding a new mapping requires the catalogue to be present first;
+// PR-7 widens the table once additional locale bundles ship.
 //
-// Returns "en" for any country code without an explicit mapping
-// so the i18n loader always has a concrete bundle to resolve.
+//   - DE / AT / CH: German. CH stays German because Swiss-German
+//     is the largest business language; admins in the Romandie or
+//     Ticino reset to fr or it from the admin surface.
+//   - FR: French. IT: Italian. ES: Spanish. JP: Japanese.
+//   - SA / AE / QA / KW / BH / OM: Arabic.
+//   - SG / MY / PH: English (lingua franca for business — the
+//     local-language bundle exists for ms but English remains the
+//     conservative B2B default).
+//   - TH: Thai. ID: Indonesian. VN: Vietnamese. IN: Hindi.
+//   - NZ: English. CN: zh-Hans. HK / TW: zh-Hant.
+//   - US / AU / GB / IE / CA: English.
 func DefaultLocaleForCountry(country string) string {
 	switch strings.ToUpper(strings.TrimSpace(country)) {
-	case "CH":
+	case "DE", "AT", "CH":
 		return "de"
+	case "FR":
+		return "fr"
+	case "IT":
+		return "it"
+	case "ES":
+		return "es"
+	case "JP":
+		return "ja"
 	case "SA", "AE", "QA", "KW", "BH", "OM":
 		return "ar"
 	case "TH":

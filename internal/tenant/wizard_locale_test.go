@@ -15,11 +15,29 @@ func TestDefaultLocaleForCountry(t *testing.T) {
 		in   string
 		want string
 	}{
-		// Switzerland → German (largest business-language share;
-		// operators can switch to fr/it after first-run).
+		// German-speaking bloc — Germany, Austria, Switzerland all
+		// resolve to the de.json catalogue. CH stays German because
+		// Swiss-German is the largest business language; admins in
+		// the Romandie or Ticino reset to fr or it from the admin
+		// surface.
+		{"DE", "de"},
+		{"AT", "de"},
 		{"CH", "de"},
 		{"ch", "de"},
 		{" CH ", "de"},
+
+		// Other European catalogues that ship locale files —
+		// without these mappings a French, Italian, or Spanish
+		// tenant would see English at first-run despite the bundle
+		// having a perfectly good native catalogue.
+		{"FR", "fr"},
+		{"IT", "it"},
+		{"ES", "es"},
+
+		// Japan → ja.json. The catalogue ships, so a Japanese
+		// tenant should land on the native bundle rather than
+		// English.
+		{"JP", "ja"},
 
 		// Arabic GCC: all six gulf countries map to ar.
 		{"SA", "ar"},
