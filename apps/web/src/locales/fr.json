@@ -27,7 +27,6 @@
   "wizard.step.company": "Entreprise",
   "wizard.step.coa": "Plan comptable",
   "wizard.step.users": "Utilisateurs initiaux",
-  "wizard.step.review": "Vérifier",
   "wizard.step.done": "Terminé",
   "accounts.section.assets": "Actif",
   "accounts.section.liabilities": "Passif",

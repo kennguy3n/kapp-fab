@@ -27,7 +27,6 @@
   "wizard.step.company": "Company",
   "wizard.step.coa": "Chart of Accounts",
   "wizard.step.users": "Initial users",
-  "wizard.step.review": "Review",
   "wizard.step.done": "Done",
   "accounts.section.assets": "Assets",
   "accounts.section.liabilities": "Liabilities",

@@ -27,7 +27,6 @@
   "wizard.step.company": "公司",
   "wizard.step.coa": "會計科目表",
   "wizard.step.users": "初始使用者",
-  "wizard.step.review": "確認",
   "wizard.step.done": "完成",
   "accounts.section.assets": "資產",
   "accounts.section.liabilities": "負債",

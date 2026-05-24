@@ -27,7 +27,6 @@
   "wizard.step.company": "公司",
   "wizard.step.coa": "会计科目表",
   "wizard.step.users": "初始用户",
-  "wizard.step.review": "确认",
   "wizard.step.done": "完成",
   "accounts.section.assets": "资产",
   "accounts.section.liabilities": "负债",

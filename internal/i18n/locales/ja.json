@@ -27,7 +27,6 @@
   "wizard.step.company": "会社",
   "wizard.step.coa": "勘定科目表",
   "wizard.step.users": "初期ユーザー",
-  "wizard.step.review": "確認",
   "wizard.step.done": "完了",
   "accounts.section.assets": "資産",
   "accounts.section.liabilities": "負債",
