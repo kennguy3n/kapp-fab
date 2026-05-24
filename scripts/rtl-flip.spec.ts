@@ -92,10 +92,22 @@ test.describe("RTL flip", () => {
     expect(sidebarBox!.x).toBeGreaterThan(mainBox!.x);
   });
 
+  test.use({ locale: "en-US" });
+
   test("English locale keeps LTR baseline", async ({ page }) => {
-    // No cookie, no localStorage — LocaleProvider falls back
-    // to DefaultLocale "en" via navigator.language probe (test
-    // browser defaults to en-US).
+    // No cookie, no localStorage — LocaleProvider falls back to
+    // DefaultLocale "en" via the navigator.language probe.  The
+    // `test.use({ locale: "en-US" })` above sets the Playwright
+    // browser context's locale explicitly so the test is
+    // deterministic across browser engines (default Chromium
+    // ships with en-US, but the firefox/webkit projects in
+    // playwright.rtl.config.ts may default to the host's locale
+    // which on CI runners can vary).  Without the explicit pin,
+    // a runner whose OS locale was set to (say) de-DE would have
+    // navigator.language report "de-DE", which bestSupportedLocale
+    // would correctly resolve to "de" — and the LTR baseline
+    // assertion (`lang="en"`) would fail with a misleading "got
+    // de" error.
     await page.goto("/");
 
     await expect(page.locator("html")).toHaveAttribute("dir", "ltr");

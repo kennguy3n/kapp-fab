@@ -14,9 +14,20 @@ const inputVariants = cva(
   {
     variants: {
       size: {
-        sm: "h-7 px-2 text-xs",
-        md: "h-9 px-3 text-sm",
-        lg: "h-11 px-4 text-base",
+        // ps-* + pe-* paired rather than the shorthand px-*
+        // so the addon-aware overrides at the call site
+        // (`leadingAddon && "ps-9"`, `trailingAddon && "pe-9"`)
+        // resolve via tailwind-merge's pure-longhand conflict
+        // rules (ps-X vs ps-Y, pe-X vs pe-Y).  Using px-* in the
+        // base alongside the longhand overrides relies on the
+        // accident that tw-merge v2 doesn't treat ps/pe as
+        // conflicting with px — see packages/ui/src/components/
+        // Select.tsx for the fuller rationale and forward-
+        // compatibility argument (Tailwind v4 native logical-
+        // property plugin, tw-merge v3).
+        sm: "h-7 ps-2 pe-2 text-xs",
+        md: "h-9 ps-3 pe-3 text-sm",
+        lg: "h-11 ps-4 pe-4 text-base",
       },
       invalid: {
         true: "border-danger focus-visible:ring-(--danger)",

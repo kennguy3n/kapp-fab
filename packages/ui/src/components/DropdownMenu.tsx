@@ -41,7 +41,13 @@ export const DropdownMenuSubTrigger = forwardRef<
   <DropdownMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none",
+      // ps-2 + pe-2 paired rather than the shorthand px-2 so
+      // the inset override (`inset && "ps-8"`) resolves via
+      // tailwind-merge's pure-longhand rule (ps-2 vs ps-8) rather
+      // than relying on the px-vs-ps non-conflict accident in
+      // tw-merge v2.  See packages/ui/src/components/Select.tsx
+      // for the forward-compatibility argument.
+      "flex cursor-default select-none items-center gap-2 rounded-sm ps-2 pe-2 py-1.5 text-sm outline-none",
       "focus:bg-bg-subtle data-[state=open]:bg-bg-subtle",
       inset && "ps-8",
       className,
@@ -129,7 +135,9 @@ export const DropdownMenuItem = forwardRef<
   <DropdownMenuPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors",
+      // ps-2 + pe-2 paired rather than the shorthand px-2 —
+      // see DropdownMenuSubTrigger above for the rationale.
+      "relative flex cursor-default select-none items-center gap-2 rounded-sm ps-2 pe-2 py-1.5 text-sm outline-none transition-colors",
       "focus:bg-bg-subtle",
       "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       inset && "ps-8",
@@ -210,7 +218,9 @@ export const DropdownMenuLabel = forwardRef<
   <DropdownMenuPrimitive.Label
     ref={ref}
     className={cn(
-      "px-2 py-1.5 text-xs font-medium uppercase tracking-wider text-fg-muted",
+      // ps-2 + pe-2 paired rather than the shorthand px-2 —
+      // see DropdownMenuSubTrigger above for the rationale.
+      "ps-2 pe-2 py-1.5 text-xs font-medium uppercase tracking-wider text-fg-muted",
       inset && "ps-8",
       className,
     )}
