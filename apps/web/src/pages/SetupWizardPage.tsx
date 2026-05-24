@@ -246,19 +246,24 @@ export function SetupWizardPage() {
         }}
       >
         {[
-          { id: "company", label: t("wizard.step.company") },
-          { id: "coa", label: t("wizard.step.coa") },
-          { id: "users", label: t("wizard.step.users") },
-          { id: "done", label: t("wizard.step.done") },
-        ].map(({ id, label }, i) => (
+          { stepId: "company", label: t("wizard.step.company") },
+          { stepId: "coa", label: t("wizard.step.coa") },
+          { stepId: "users", label: t("wizard.step.users") },
+          { stepId: "done", label: t("wizard.step.done") },
+        ].map(({ stepId, label }, i) => (
           // The React key is the stable step identifier ("company"
           // / "coa" / "users" / "done") rather than the translated
           // label so a locale whose translations collide (e.g.
           // an abbreviation that maps two step names to the same
           // string) doesn't trigger a duplicate-key warning or
-          // reorder during reconciliation.
+          // reorder during reconciliation.  The field is named
+          // `stepId` (not `id`) to avoid shadowing the `id` from
+          // `useParams` higher up in the component — both are
+          // string-typed and a future contributor copy-pasting
+          // markup between the outer and inner scopes could miss
+          // that they refer to different values otherwise.
           <li
-            key={id}
+            key={stepId}
             style={{
               color: i === step ? "#111827" : "#9ca3af",
               fontWeight: i === step ? 600 : 400,
