@@ -61,6 +61,23 @@ type InboundEmail struct {
 	// ReceivedAt is when the relay accepted the message. Falls
 	// back to time.Now when zero.
 	ReceivedAt time.Time `json:"received_at,omitempty"`
+
+	// InReplyTo is the RFC-822 In-Reply-To header (the parent
+	// message-id, angle-bracketed). The threading resolver looks
+	// this up against the message store to decide whether to
+	// thread or open a new ticket.
+	InReplyTo string `json:"in_reply_to,omitempty"`
+
+	// References is the RFC-822 References header — the full
+	// thread chain, oldest first. Some MTAs split it across
+	// multiple header instances; the relay flattens them into
+	// this slice.
+	References []string `json:"references,omitempty"`
+
+	// Source records which channel ingested the email so the
+	// agent UI can render provenance (e.g. "received via Mailgun"
+	// vs "received via IMAP"). Defaults to "api" when unset.
+	Source string `json:"source,omitempty"`
 }
 
 // InboundAttachment names a single attachment that the relay has
@@ -96,10 +113,18 @@ var (
 // The handler does not own SMTP / IMAP plumbing — the relay or
 // upstream mail processor parses MIME and POSTs the structured
 // payload to the API which forwards to Process.
+//
+// PR-7 adds two optional fields — `messages` and `threading` — so
+// inbound mail can be threaded onto an existing ticket via
+// In-Reply-To / References. When either is nil the handler falls
+// back to the pre-PR-7 "always create a new ticket" behaviour for
+// backwards compatibility with existing webhook bridges.
 type InboundEmailHandler struct {
-	resolver TenantResolver
-	records  *record.PGStore
-	store    *Store
+	resolver  TenantResolver
+	records   *record.PGStore
+	store     *Store
+	messages  *MessageStore
+	threading *ThreadingResolver
 	// systemActor stamps CreatedBy on the synthetic ticket. The
 	// API and worker use the same constant the recurring-invoice
 	// handler does so audit attribution stays consistent across
@@ -109,7 +134,8 @@ type InboundEmailHandler struct {
 
 // NewInboundEmailHandler wires the dependencies. Resolver and records
 // are required; passing nil panics so misconfiguration is caught at
-// boot time rather than the first inbound email.
+// boot time rather than the first inbound email. messages and
+// threading are optional (pre-PR-7 callers can pass nil).
 func NewInboundEmailHandler(resolver TenantResolver, records *record.PGStore, store *Store, systemActor uuid.UUID) *InboundEmailHandler {
 	if resolver == nil || records == nil || store == nil {
 		panic("helpdesk: inbound email handler requires non-nil deps")
@@ -120,15 +146,25 @@ func NewInboundEmailHandler(resolver TenantResolver, records *record.PGStore, st
 	return &InboundEmailHandler{resolver: resolver, records: records, store: store, systemActor: systemActor}
 }
 
+// WithThreading attaches the message store + threading resolver so
+// inbound emails are threaded onto existing tickets via In-Reply-To
+// and References. Returns the handler for chaining at boot.
+func (h *InboundEmailHandler) WithThreading(messages *MessageStore, threading *ThreadingResolver) *InboundEmailHandler {
+	h.messages = messages
+	h.threading = threading
+	return h
+}
+
 // Process resolves the tenant, computes SLA targets via ResolvePolicy,
 // and creates the helpdesk.ticket KRecord. Returns the persisted
 // record so the API layer can echo the ticket id + SLA timestamps.
+//
+// Process is the pre-PR-7 behaviour — every call opens a new ticket.
+// Callers that want threading (parent-message lookup via
+// In-Reply-To / References) should use ProcessThreaded.
 func (h *InboundEmailHandler) Process(ctx context.Context, email InboundEmail) (*record.KRecord, error) {
-	if strings.TrimSpace(email.Subject) == "" {
-		return nil, fmt.Errorf("%w: subject required", ErrInvalidEmail)
-	}
-	if strings.TrimSpace(email.BodyText) == "" {
-		return nil, fmt.Errorf("%w: body required", ErrInvalidEmail)
+	if err := validateInbound(&email); err != nil {
+		return nil, err
 	}
 	if email.ReceivedAt.IsZero() {
 		email.ReceivedAt = time.Now().UTC()
@@ -141,7 +177,127 @@ func (h *InboundEmailHandler) Process(ctx context.Context, email InboundEmail) (
 		// to a 4xx terminal failure.
 		return nil, err
 	}
+	return h.createTicket(ctx, tenantID, email)
+}
 
+// ProcessThreaded resolves the tenant, asks the threading resolver
+// whether the inbound email attaches to an existing ticket, and
+// either threads onto the existing ticket (returning it without
+// re-creating) or opens a new one — using the same createTicket
+// path Process does so the KRecord shape is identical across both
+// entry points.
+//
+// When the handler is constructed without WithThreading,
+// ProcessThreaded falls back to Process — every email becomes a new
+// ticket. This keeps the API safe for callers wired against an
+// older deps_build that hasn't yet wired the MessageStore +
+// ThreadingResolver pair.
+//
+// On a successful thread-onto-existing path, the inbound message is
+// persisted to email_messages (direction='inbound') so subsequent
+// replies on the same chain resolve back to this ticket via the
+// resolver's In-Reply-To / References walk.
+//
+// Errors from the resolver are surfaced verbatim so a transient
+// database failure during lookup translates to a 5xx that the relay
+// retries. A successful lookup with a nil ticket (no parent) falls
+// through to createTicket without distinction — the "open a new
+// ticket" path is the right answer for first-message-in-a-thread
+// AND for "no usable parent in the lookback window".
+func (h *InboundEmailHandler) ProcessThreaded(ctx context.Context, email InboundEmail) (*record.KRecord, error) {
+	if h.threading == nil || h.messages == nil {
+		return h.Process(ctx, email)
+	}
+	if err := validateInbound(&email); err != nil {
+		return nil, err
+	}
+	if email.ReceivedAt.IsZero() {
+		email.ReceivedAt = time.Now().UTC()
+	}
+	tenantID, err := h.resolver.ResolveByRecipient(ctx, email.To)
+	if err != nil {
+		return nil, err
+	}
+	parentTicket, err := h.threading.Resolve(ctx, tenantID, email)
+	if err != nil {
+		return nil, fmt.Errorf("helpdesk: resolve thread: %w", err)
+	}
+	var rec *record.KRecord
+	if parentTicket != uuid.Nil {
+		// Thread hit — fetch the existing ticket to return it
+		// to the caller. We deliberately do NOT mutate the
+		// existing ticket here (no comment append, no status
+		// transition); that's the responsibility of the agent
+		// UI surface which renders the message thread against
+		// email_messages directly. The handler's contract is
+		// "open or attach a ticket"; the timeline is built
+		// downstream from the per-message rows.
+		rec, err = h.records.Get(ctx, tenantID, parentTicket)
+		if err != nil {
+			// Only the "stale email_messages row → deleted
+			// ticket" case (record.ErrNotFound) is treated
+			// as a recoverable thread-broken-fall-through.
+			// Any OTHER error (transient DB outage, lock
+			// timeout, serialization failure) must be
+			// propagated — silently opening a new ticket on
+			// a transient failure would split the customer's
+			// conversation onto a different ticket id, and
+			// every subsequent reply on the chain would then
+			// land on the wrong ticket too. The relay's retry
+			// (we return the wrapped error → 5xx) brings us
+			// back through Resolve which will rediscover the
+			// real parent ticket.
+			if !errors.Is(err, record.ErrNotFound) {
+				return nil, fmt.Errorf("helpdesk: fetch parent ticket: %w", err)
+			}
+			rec, err = h.createTicket(ctx, tenantID, email)
+			if err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		rec, err = h.createTicket(ctx, tenantID, email)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// Persist the inbound message so subsequent replies on the
+	// same thread resolve back to rec.ID. The MessageID may be
+	// empty (no Message-ID header) — skip persistence in that
+	// case; the threading path won't be useful for replies
+	// anyway since the customer's mail client will need a
+	// real Message-ID to reference.
+	if strings.TrimSpace(email.MessageID) != "" {
+		if _, perr := h.messages.Put(ctx, Message{
+			TenantID:   tenantID,
+			MessageID:  normalizeMessageID(email.MessageID),
+			TicketID:   rec.ID,
+			Direction:  DirectionInbound,
+			InReplyTo:  normalizeMessageID(email.InReplyTo),
+			References: email.References,
+			Subject:    email.Subject,
+			FromAddr:   email.From,
+			ToAddr:     email.To,
+			ReceivedAt: email.ReceivedAt,
+		}); perr != nil {
+			// Message persistence failure is logged but
+			// does NOT fail the request — the ticket has
+			// been created, the customer's email has been
+			// captured. Losing the thread linkage for
+			// downstream replies is a strictly lesser
+			// outcome than re-creating the whole ticket on
+			// retry. The HTTP layer renders the rec so the
+			// relay sees a 2xx.
+			return rec, nil //nolint:nilerr // see comment
+		}
+	}
+	return rec, nil
+}
+
+// createTicket builds the ticket KRecord shape that both the legacy
+// Process and the PR-7 ProcessThreaded paths share. Tenant has
+// already been resolved by the caller.
+func (h *InboundEmailHandler) createTicket(ctx context.Context, tenantID uuid.UUID, email InboundEmail) (*record.KRecord, error) {
 	// Default priority on email is "medium" — the SLA evaluator
 	// picks the policy registered for the (tenant, "medium") pair,
 	// or falls back to the platform default. Email channel records
@@ -164,6 +320,9 @@ func (h *InboundEmailHandler) Process(ctx context.Context, email InboundEmail) (
 			"received_at": email.ReceivedAt,
 			"body_html":   email.BodyHTML,
 			"attachments": email.Attachments,
+			"in_reply_to": email.InReplyTo,
+			"references":  email.References,
+			"source":      email.Source,
 		},
 	}
 	if policy != nil {
@@ -208,4 +367,23 @@ func trimTo(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// validateInbound performs structural validation on the inbound
+// payload that both the legacy Process and the PR-7 ProcessThreaded
+// path share. The helpdesk.ticket schema requires a non-empty
+// subject (max_length 200) and a body to seed the description; the
+// HTTP layer surfaces ErrInvalidEmail as 4xx so the relay treats
+// the rejection as terminal (no retries on a structurally bad
+// payload). trimTo on the subject happens later in createTicket —
+// we don't fail on length here so an upstream relay's >200-char
+// "Auto-reply: Out of Office..." subject still opens a ticket.
+func validateInbound(e *InboundEmail) error {
+	if strings.TrimSpace(e.Subject) == "" {
+		return fmt.Errorf("%w: subject required", ErrInvalidEmail)
+	}
+	if strings.TrimSpace(e.BodyText) == "" {
+		return fmt.Errorf("%w: body required", ErrInvalidEmail)
+	}
+	return nil
 }

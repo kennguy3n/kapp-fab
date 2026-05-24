@@ -1,0 +1,440 @@
+// Surface G (PR-7) — IMAP supervisor wiring for the worker. The
+// worker is the only service that owns IMAP polling: the API
+// continues to serve the existing /helpdesk/inbound webhook (Phase
+// 4 ingress) for relay-pushed mail, and the worker handles the pull
+// side (one Poller goroutine per enabled mailbox row, supervised by
+// the Manager).
+//
+// Wiring layout:
+//
+//   - helpdeskIMAPProcessor implements imap.Processor. It is the
+//     bridge between the IMAP package (which speaks ParsedEmail)
+//     and the helpdesk package (which speaks InboundEmail). One
+//     instance is built per worker boot; every Poller goroutine
+//     shares it.
+//   - helpdeskIMAPSupervisor owns the lifecycle of every Poller. On
+//     a ticker it calls mailboxes.Store.ListAllEnabled, asks the
+//     Manager to Start each row's Poller (idempotent), and Stops
+//     pollers whose mailbox row was disabled or deleted. The
+//     Supervisor is leader-gated (only the elected leader runs it)
+//     so two hot-standby workers do not double-poll the same
+//     mailbox and trip Gmail's "Too many simultaneous connections"
+//     cap.
+//   - resolveMailboxPassword maps the row's imap_password_ref
+//     scheme to a plaintext password at Start time. Today it
+//     supports env:NAME only; the other schemes that
+//     mailboxes.Validate accepts (vault://, aws://, gcp://,
+//     file://) are reserved for a follow-up PR that wires the
+//     worker's secrets.Provider as a per-ref dispatcher.
+//
+// The IMAP wire-protocol Client implementation is deliberately NOT
+// included here — go-imap/v1 sits behind the imap.Client interface
+// in a follow-up "imap client adapter" commit. Until that adapter
+// lands, the worker boots with the Supervisor disabled (logged
+// INFO) so a misconfigured production deployment does not crash on
+// the missing client factory; the entire helpdesk-IMAP path stays
+// dark until both surfaces are in.
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
+	"github.com/kennguy3n/kapp-fab/internal/helpdesk/imap"
+	"github.com/kennguy3n/kapp-fab/internal/helpdesk/mailboxes"
+	"github.com/kennguy3n/kapp-fab/internal/record"
+)
+
+// imapClientFactory builds a fresh imap.Client per (host, port,
+// useTLS) tuple. Each Poller owns one Client for its entire
+// lifetime; the Manager invokes the factory once per Start. The
+// factory is injected from outside so this file does not
+// transitively import go-imap/v1 — a deliberate decoupling so the
+// helpdesk-IMAP wire-up can compile + test in CI without the
+// go-imap dependency until the adapter PR lands.
+type imapClientFactory func(host string, port int, useTLS bool, logger *slog.Logger) imap.Client
+
+// helpdeskIMAPProcessor adapts the Poller's Processor interface to
+// the helpdesk.InboundEmailHandler.ProcessThreaded entry point. The
+// Poller speaks ParsedEmail; the handler speaks InboundEmail. This
+// adapter is the seam that lets the two packages stay decoupled (no
+// import cycle) while sharing the same threading + dedup +
+// ticket-creation logic.
+type helpdeskIMAPProcessor struct {
+	handler      *helpdesk.InboundEmailHandler
+	logger       *slog.Logger
+	recipientFor func(tenantID, mailboxID uuid.UUID) string
+}
+
+// Process translates one Poller-emitted ParsedEmail into an
+// InboundEmail and hands it to ProcessThreaded. All errors propagate
+// verbatim so the Poller's retry/backoff machinery treats them as
+// transient; the message stays un-acked + email_messages PK catches
+// duplicates if processing eventually succeeds after a re-fetch.
+func (p *helpdeskIMAPProcessor) Process(ctx context.Context, tenantID, mailboxID uuid.UUID, raw []byte, parsed imap.ParsedEmail) error {
+	var to string
+	if p.recipientFor != nil {
+		to = p.recipientFor(tenantID, mailboxID)
+	}
+	if strings.TrimSpace(to) == "" {
+		// No recipient lookup wired for this mailbox. Fall
+		// back to the parsed To: header — the resolver
+		// dispatches on host anyway, which is the part the
+		// mailbox name carries. Logged at DEBUG so the
+		// operator can see the fall-through in development.
+		to = parsed.To
+		p.logger.Debug("helpdesk: imap processor — no recipient mapping; using parsed To",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("mailbox_id", mailboxID.String()),
+			slog.String("parsed_to", parsed.To))
+	}
+	receivedAt := parsed.RawDate
+	if receivedAt.IsZero() {
+		receivedAt = time.Now().UTC()
+	}
+	email := helpdesk.InboundEmail{
+		MessageID:  parsed.MessageID,
+		To:         to,
+		From:       parsed.From,
+		Subject:    parsed.Subject,
+		BodyText:   parsed.Body,
+		InReplyTo:  parsed.InReplyTo,
+		References: parsed.References,
+		ReceivedAt: receivedAt,
+		Source:     "imap",
+	}
+	if _, err := p.handler.ProcessThreaded(ctx, email); err != nil {
+		return fmt.Errorf("imap: handler process: %w", err)
+	}
+	p.logger.Debug("imap: processed message",
+		slog.String("tenant_id", tenantID.String()),
+		slog.String("mailbox_id", mailboxID.String()),
+		slog.String("message_id", parsed.MessageID),
+		slog.Int("raw_bytes", len(raw)),
+	)
+	return nil
+}
+
+// recipientTable maps (tenantID, mailboxID) → recipient address used
+// by the helpdesk handler's TenantResolver. The Supervisor populates
+// this from the mailbox row's Name on every converge; the processor
+// adapter looks it up at Process time. The mailbox Name is the full
+// support address (e.g. "support@acme.kapp.io") — see
+// mailboxes.Validate.
+type recipientTable struct {
+	mu sync.RWMutex
+	m  map[uuid.UUID]map[uuid.UUID]string
+}
+
+func newRecipientTable() *recipientTable {
+	return &recipientTable{
+		m: make(map[uuid.UUID]map[uuid.UUID]string),
+	}
+}
+
+func (t *recipientTable) set(tenantID, mailboxID uuid.UUID, recipient string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, ok := t.m[tenantID]; !ok {
+		t.m[tenantID] = make(map[uuid.UUID]string)
+	}
+	t.m[tenantID][mailboxID] = recipient
+}
+
+func (t *recipientTable) get(tenantID, mailboxID uuid.UUID) string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if m, ok := t.m[tenantID]; ok {
+		return m[mailboxID]
+	}
+	return ""
+}
+
+func (t *recipientTable) deleteMailbox(mailboxID uuid.UUID) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, m := range t.m {
+		delete(m, mailboxID)
+	}
+}
+
+// clientRegistry holds per-mailbox pre-attached imap.Client
+// handles. The Supervisor's converge loop stashes the freshly-built
+// client here before calling Manager.Start; the Manager's
+// newPoller hook reads + removes it. Protected by a mutex because
+// converge() (run on a ticker) and newPoller (called from inside
+// Manager.Start while holding m.mu) can race when a tick fires
+// while a Poller is being constructed for the previous tick's row.
+type clientRegistry struct {
+	mu sync.Mutex
+	m  map[uuid.UUID]imap.Client
+}
+
+func newClientRegistry() *clientRegistry {
+	return &clientRegistry{m: make(map[uuid.UUID]imap.Client)}
+}
+
+func (r *clientRegistry) put(mailboxID uuid.UUID, client imap.Client) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.m[mailboxID] = client
+}
+
+// take consumes the client for mailboxID (removes it from the map).
+// Returns nil + false if no client was registered.
+func (r *clientRegistry) take(mailboxID uuid.UUID) (imap.Client, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c, ok := r.m[mailboxID]
+	if !ok {
+		return nil, false
+	}
+	delete(r.m, mailboxID)
+	return c, true
+}
+
+// helpdeskIMAPSupervisor owns the lifecycle of every per-mailbox
+// Poller goroutine across the entire worker. It periodically polls
+// mailboxes.Store.ListAllEnabled and converges the Manager's set of
+// running pollers to match the live enabled set — adding new
+// mailboxes, stopping disabled / deleted ones. Runs ONLY on the
+// elected leader.
+type helpdeskIMAPSupervisor struct {
+	store           mailboxes.Store
+	manager         *imap.Manager
+	clientFactory   imapClientFactory
+	clients         *clientRegistry
+	passwordResolve func(ctx context.Context, ref string) (string, error)
+	recipients      *recipientTable
+	convergeEvery   time.Duration
+	logger          *slog.Logger
+}
+
+// Run blocks until ctx is cancelled. It calls converge() once
+// immediately on entry so the worker has live pollers within
+// milliseconds of leader election, then on every tick until
+// shutdown. On cancellation it calls Manager.StopAll, which waits
+// for every Poller goroutine to unwind before returning so the
+// worker process exits with no dangling IMAP connections.
+func (s *helpdeskIMAPSupervisor) Run(ctx context.Context) error {
+	s.logger.Info("helpdesk: imap supervisor starting",
+		slog.Duration("converge_every", s.convergeEvery))
+	if err := s.converge(ctx); err != nil {
+		s.logger.Warn("helpdesk: imap supervisor initial converge failed",
+			slog.String("err", err.Error()))
+	}
+	tick := time.NewTicker(s.convergeEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			s.logger.Info("helpdesk: imap supervisor draining")
+			s.manager.StopAll()
+			s.logger.Info("helpdesk: imap supervisor drained")
+			return nil
+		case <-tick.C:
+			if err := s.converge(ctx); err != nil {
+				s.logger.Warn("helpdesk: imap supervisor converge failed",
+					slog.String("err", err.Error()))
+			}
+		}
+	}
+}
+
+// converge enumerates every enabled mailbox, builds an imap.Config
+// for each, attaches the client, and asks the Manager to Start it.
+// Already-running mailboxes are no-ops (Manager.Start short-circuits
+// on a duplicate key). Disabled or deleted mailboxes are stopped by
+// diffing the manager's active set against the live enabled set.
+// Idempotent — safe to call on every tick.
+func (s *helpdeskIMAPSupervisor) converge(ctx context.Context) error {
+	rows, err := s.store.ListAllEnabled(ctx)
+	if err != nil {
+		return fmt.Errorf("list enabled mailboxes: %w", err)
+	}
+	want := make(map[uuid.UUID]bool, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		want[row.MailboxID] = true
+		s.recipients.set(row.TenantID, row.MailboxID, row.Name)
+		// Skip Start if already running — avoids the work of
+		// resolving the password + building a client every
+		// tick. The Manager would no-op the Start anyway but
+		// the password resolve can be expensive (vault round
+		// trip in the future), and a freshly-built client
+		// would leak.
+		if s.manager.IsActive(row.MailboxID) {
+			continue
+		}
+		password, perr := s.passwordResolve(ctx, row.IMAPPasswordRef)
+		if perr != nil {
+			s.logger.Warn("helpdesk: resolve mailbox password failed; skipping",
+				slog.String("tenant_id", row.TenantID.String()),
+				slog.String("mailbox_id", row.MailboxID.String()),
+				slog.String("password_ref", row.IMAPPasswordRef),
+				slog.String("err", perr.Error()))
+			continue
+		}
+		client := s.clientFactory(row.IMAPHost, row.IMAPPort, row.IMAPUseTLS, s.logger)
+		s.clients.put(row.MailboxID, client)
+		cfg := imap.Config{
+			TenantID:       row.TenantID,
+			MailboxID:      row.MailboxID,
+			Folder:         imap.Folder(row.Folder),
+			Username:       row.IMAPUsername,
+			Password:       password,
+			PollInterval:   row.PollInterval(),
+			MaxBackoff:     row.MaxBackoff(),
+			FetchBatchSize: row.FetchBatchSizeOrDefault(),
+		}
+		if err := s.manager.Start(ctx, cfg); err != nil {
+			// Clean up the stashed client — newPoller never
+			// consumed it because Start short-circuited.
+			s.clients.take(row.MailboxID)
+			if errors.Is(err, imap.ErrManagerStopped) {
+				// Worker is shutting down; abort the
+				// converge — Run will exit on the next
+				// ctx.Done.
+				return nil
+			}
+			s.logger.Warn("helpdesk: manager start failed",
+				slog.String("tenant_id", row.TenantID.String()),
+				slog.String("mailbox_id", row.MailboxID.String()),
+				slog.String("err", err.Error()))
+		}
+	}
+	// Stop any mailbox that's running but no longer enabled.
+	for _, active := range s.manager.ActiveMailboxes() {
+		if !want[active] {
+			s.manager.Stop(active)
+			s.recipients.deleteMailbox(active)
+		}
+	}
+	return nil
+}
+
+// resolveMailboxPassword resolves an `imap_password_ref` to its
+// plaintext value. Supports `env:NAME` inline; the other schemes
+// (vault://, aws://, gcp://, file://) accepted by mailboxes.Validate
+// require the worker to be wired with a multi-scheme
+// secrets.Provider dispatcher. That wiring is reserved for a
+// follow-up PR because the secrets package today returns a single
+// Provider keyed by KAPP_SECRET_PROVIDER, not a per-ref dispatcher.
+//
+// Refusing the unsupported schemes here surfaces a clear log line at
+// converge time rather than silently passing an empty password to
+// IMAP LOGIN (which trips ErrAuth and burns the per-mailbox backoff
+// budget for no reason). The mailbox row is skipped + retried on the
+// next converge tick when the wiring lands.
+func resolveMailboxPassword(_ context.Context, ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", errors.New("password ref is empty")
+	}
+	switch {
+	case strings.HasPrefix(ref, "env:"):
+		key := strings.TrimPrefix(ref, "env:")
+		val := os.Getenv(key)
+		if val == "" {
+			return "", fmt.Errorf("env var %q is empty or unset", key)
+		}
+		return val, nil
+	default:
+		return "", fmt.Errorf("password ref scheme %q not wired in this worker; only env: is supported (vault://, aws://, gcp://, file:// reserved for follow-up)", schemeOf(ref))
+	}
+}
+
+// schemeOf extracts the scheme prefix for diagnostic logging.
+// Conservative: returns the substring up to (but not including) the
+// first ":" or "/" so the error message is short + safe.
+func schemeOf(ref string) string {
+	for i, r := range ref {
+		if r == ':' || r == '/' {
+			return ref[:i]
+		}
+	}
+	return ref
+}
+
+// helpdeskIMAPState bundles the supervisor + the processor adapter
+// + the helpdesk inbound handler so leaderState carries one field
+// instead of three. Built once at boot via newHelpdeskIMAPState;
+// nil when adminPool is unavailable (the supervisor needs it for
+// ListAllEnabled) or when no client factory is wired.
+type helpdeskIMAPState struct {
+	supervisor *helpdeskIMAPSupervisor
+}
+
+// newHelpdeskIMAPState wires the full helpdesk-IMAP stack against
+// the shared worker dependencies. Returns nil when:
+//
+//   - adminPool is nil (Supervisor's ListAllEnabled needs it to
+//     scan across tenants via the admin-bypass RLS policy).
+//   - clientFactory is nil (no IMAP wire-protocol adapter wired —
+//     the supervisor would have no way to actually connect).
+//
+// nil is the correct shape for both cases: leadWorker skips the
+// supervisor.Run goroutine, the rest of the worker continues
+// normally, and the helpdesk-IMAP path stays inert. The webhook
+// inbound path (api/helpdesk_inbound_handlers.go) is unaffected.
+func newHelpdeskIMAPState(
+	pool, adminPool *pgxpool.Pool,
+	recordStore *record.PGStore,
+	helpdeskStore *helpdesk.Store,
+	clientFactory imapClientFactory,
+	logger *slog.Logger,
+) *helpdeskIMAPState {
+	if adminPool == nil {
+		logger.Info("helpdesk: imap supervisor disabled — admin pool not configured")
+		return nil
+	}
+	if clientFactory == nil {
+		logger.Info("helpdesk: imap supervisor disabled — no client factory wired (go-imap adapter PR pending)")
+		return nil
+	}
+	resolver := helpdesk.NewPGTenantResolver(adminPool)
+	messages := helpdesk.NewMessageStore(pool)
+	// 30-day threading lookback matches the API path's default
+	// (services/api/deps_build.go's helpdesk wiring).
+	threading := helpdesk.NewThreadingResolver(messages, 30*24*time.Hour)
+	handler := helpdesk.NewInboundEmailHandler(resolver, recordStore, helpdeskStore, workerSystemActor).
+		WithThreading(messages, threading)
+
+	store := mailboxes.NewPGStore(pool, adminPool)
+	stateStore := imap.NewPGUIDState(pool)
+	clients := newClientRegistry()
+	recipients := newRecipientTable()
+	processor := &helpdeskIMAPProcessor{
+		handler:      handler,
+		logger:       logger,
+		recipientFor: recipients.get,
+	}
+	manager := imap.NewManager(func(cfg imap.Config) (*imap.Poller, error) {
+		client, ok := clients.take(cfg.MailboxID)
+		if !ok {
+			return nil, fmt.Errorf("no imap client attached for mailbox %s (converge ordering bug)", cfg.MailboxID)
+		}
+		return imap.NewPoller(cfg, client, stateStore, processor, logger)
+	}, logger)
+	supervisor := &helpdeskIMAPSupervisor{
+		store:           store,
+		manager:         manager,
+		clientFactory:   clientFactory,
+		clients:         clients,
+		passwordResolve: resolveMailboxPassword,
+		recipients:      recipients,
+		convergeEvery:   60 * time.Second,
+		logger:          logger,
+	}
+	return &helpdeskIMAPState{supervisor: supervisor}
+}
