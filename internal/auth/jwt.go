@@ -120,6 +120,14 @@ var (
 // both access-token and refresh-token expiry; ARCHITECTURE.md §9 calls
 // for short-lived access tokens plus a longer refresh window, so we
 // model them as two TTLs and the refresh path reuses the same signer.
+//
+// Single-key vs keyring: callers may populate either {Algorithm,
+// HMACKey | RSAPrivate | RSAPublic} (the pre-PR-6 form, preserved
+// for backwards compatibility with every existing test and call
+// site) OR KeyRing (the PR-6 rotation form). Both fields populated
+// is a configuration error and NewSigner refuses. The Algorithm
+// field is still required when KeyRing is set so the encoder knows
+// which JWS algorithm header to stamp.
 type SignerConfig struct {
 	Algorithm Algorithm
 	// HMACKey is consulted when Algorithm == AlgHS256.
@@ -135,6 +143,12 @@ type SignerConfig struct {
 	// Leeway absorbs clock skew between issuer and validator. Small
 	// (30s–60s) values are typical; 0 disables the grace window.
 	Leeway time.Duration
+	// KeyRing, when non-nil, supersedes the single-key fields:
+	// the encoder picks material from KeyRing.Primary() and stamps
+	// the kid header; the verifier picks material by kid header,
+	// falling back to the primary when the token carries no kid
+	// (legacy access tokens minted before rotation was enabled).
+	KeyRing *KeyRing
 }
 
 // Signer issues and validates JWTs under a single static config. A
@@ -143,6 +157,29 @@ type SignerConfig struct {
 type Signer struct {
 	cfg SignerConfig
 	now func() time.Time
+	// refresherDone, when non-nil, is closed by the keyring
+	// refresher goroutine started by SignerFromProvider once
+	// it has fully exited. Callers can wait on this channel
+	// during shutdown to join the goroutine before tearing
+	// down resources the refresher depends on (e.g. the
+	// secrets.Provider's gRPC connection), avoiding a race
+	// where the refresher is still mid-RPC when the provider
+	// is closed. Nil on signers built without a refresher
+	// (SignerFromEnv, NewSigner with no provider).
+	refresherDone <-chan struct{}
+}
+
+// RefresherDone returns a channel that is closed once the
+// background keyring refresher (if any) has fully exited. Use
+// during shutdown to wait for the refresher to drain in-flight
+// provider RPCs before closing the provider — without this
+// join, a provider Close() can race with an in-flight refresh
+// RPC and produce shutdown-time errors. Returns nil for signers
+// without a refresher (legacy single-key path, env path,
+// one-shot CLI use): callers should handle the nil case as
+// "no goroutine to wait on".
+func (s *Signer) RefresherDone() <-chan struct{} {
+	return s.refresherDone
 }
 
 // NewSigner validates the config and returns a Signer ready to issue
@@ -151,15 +188,58 @@ type Signer struct {
 func NewSigner(cfg SignerConfig) (*Signer, error) {
 	switch cfg.Algorithm {
 	case AlgHS256:
-		if len(cfg.HMACKey) < 32 {
+		if cfg.KeyRing == nil && len(cfg.HMACKey) < 32 {
 			return nil, errors.New("auth: HS256 requires >=32-byte key")
 		}
 	case AlgRS256:
-		if cfg.RSAPrivate == nil && cfg.RSAPublic == nil {
+		if cfg.KeyRing == nil && cfg.RSAPrivate == nil && cfg.RSAPublic == nil {
 			return nil, errors.New("auth: RS256 requires a key")
+		}
+		// Derive RSAPublic from RSAPrivate when only the private
+		// key is supplied. Without this, an operator who configures
+		// "RS256 with only a private key" (a reasonable shape —
+		// the public key IS the private key's PublicKey field) hits
+		// a silent-failure mode where every Verify call returns
+		// ErrTokenSignature because verifySignature skips
+		// candidates with nil RSAPublic. The pre-keyring code
+		// surfaced this as "auth: RS256 verifier missing public
+		// key" at construction time; deriving is strictly better
+		// because the deployment works correctly instead of
+		// failing loudly. Operators who want a verify-only signer
+		// (RSAPublic without RSAPrivate) are unaffected — that
+		// path was already valid and stays valid.
+		if cfg.KeyRing == nil && cfg.RSAPrivate != nil && cfg.RSAPublic == nil {
+			cfg.RSAPublic = &cfg.RSAPrivate.PublicKey
 		}
 	default:
 		return nil, fmt.Errorf("auth: unsupported algorithm %q", cfg.Algorithm)
+	}
+	if cfg.KeyRing != nil && (len(cfg.HMACKey) > 0 || cfg.RSAPrivate != nil || cfg.RSAPublic != nil) {
+		return nil, errors.New("auth: SignerConfig must use either KeyRing or single-key fields, not both")
+	}
+	if cfg.KeyRing != nil {
+		// Reject a ring whose primary or any verifier was
+		// declared with a different algorithm class than the
+		// signer. Without this guard, a misconfigured operator
+		// could ship an HS256 primary with an RS256 verifier in
+		// the ring — the verify path would call
+		// rsa.VerifyPKCS1v15 with a nil public key and the boot
+		// would succeed, only to fail every token at runtime.
+		// We re-check every member of the ring rather than
+		// trusting AddVerifier to have done it: KeyRing exposes
+		// SwapPrimary / Remove and could be mutated in tests
+		// to bypass that check.
+		primary := cfg.KeyRing.Primary()
+		if primary.Algorithm != "" && primary.Algorithm != cfg.Algorithm {
+			return nil, fmt.Errorf("auth: KeyRing primary algorithm %q does not match signer algorithm %q",
+				primary.Algorithm, cfg.Algorithm)
+		}
+		for _, k := range cfg.KeyRing.All() {
+			if k.Algorithm != "" && k.Algorithm != cfg.Algorithm {
+				return nil, fmt.Errorf("auth: KeyRing verifier %q algorithm %q does not match signer algorithm %q",
+					k.KID, k.Algorithm, cfg.Algorithm)
+			}
+		}
 	}
 	if cfg.AccessTTL <= 0 {
 		cfg.AccessTTL = 15 * time.Minute
@@ -168,6 +248,25 @@ func NewSigner(cfg SignerConfig) (*Signer, error) {
 		cfg.RefreshTTL = 24 * time.Hour
 	}
 	return &Signer{cfg: cfg, now: time.Now}, nil
+}
+
+// Algorithm reports the signature algorithm the signer was
+// constructed with — useful for boot diagnostics that want to log
+// the actual crypto posture rather than a configured-but-maybe-
+// ignored value. (SignerFromEnv unconditionally builds HS256
+// regardless of what KAPP_JWT_ALGORITHM is set to; callers that
+// log the configured algorithm without consulting this accessor
+// can mislead operators into thinking their tokens are
+// asymmetrically signed when they are not.)
+func (s *Signer) Algorithm() Algorithm {
+	return s.cfg.Algorithm
+}
+
+// Leeway reports the validation leeway the signer was constructed
+// with — analogous diagnostic to Algorithm() above. SignerFromEnv
+// hardcodes 30s regardless of cfg.JWTLeeway.
+func (s *Signer) Leeway() time.Duration {
+	return s.cfg.Leeway
 }
 
 // Issue mints an access token from the supplied claim set. The
@@ -265,23 +364,24 @@ func (s *Signer) verify(token, expectedAudience string) (*Claims, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrTokenSignature, err)
 	}
-	switch s.cfg.Algorithm {
-	case AlgHS256:
-		mac := hmac.New(sha256.New, s.cfg.HMACKey)
-		mac.Write([]byte(signingInput))
-		if !hmac.Equal(mac.Sum(nil), sig) {
-			return nil, ErrTokenSignature
-		}
-	case AlgRS256:
-		if s.cfg.RSAPublic == nil {
-			return nil, errors.New("auth: RS256 verifier missing public key")
-		}
-		hashed := sha256.Sum256([]byte(signingInput))
-		if err := rsa.VerifyPKCS1v15(s.cfg.RSAPublic, crypto.SHA256, hashed[:], sig); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrTokenSignature, err)
-		}
-	default:
-		return nil, fmt.Errorf("auth: unsupported algorithm %q", s.cfg.Algorithm)
+	hdrJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("%w: header decode: %w", ErrTokenInvalid, err)
+	}
+	var header struct {
+		Alg string `json:"alg"`
+		KID string `json:"kid"`
+		Typ string `json:"typ"`
+	}
+	if err := json.Unmarshal(hdrJSON, &header); err != nil {
+		return nil, fmt.Errorf("%w: header parse: %w", ErrTokenInvalid, err)
+	}
+	candidates, err := s.selectVerificationCandidates(header.Alg, header.KID)
+	if err != nil {
+		return nil, err
+	}
+	if !s.verifySignature(signingInput, sig, candidates) {
+		return nil, ErrTokenSignature
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
@@ -305,6 +405,10 @@ func (s *Signer) encode(c Claims) (string, error) {
 		"alg": string(s.cfg.Algorithm),
 		"typ": "JWT",
 	}
+	hmacKey, rsaPriv, kid := s.selectSigningKey()
+	if kid != "" {
+		header["kid"] = kid
+	}
 	hdrJSON, err := json.Marshal(header)
 	if err != nil {
 		return "", err
@@ -318,15 +422,15 @@ func (s *Signer) encode(c Claims) (string, error) {
 	var sig []byte
 	switch s.cfg.Algorithm {
 	case AlgHS256:
-		mac := hmac.New(sha256.New, s.cfg.HMACKey)
+		mac := hmac.New(sha256.New, hmacKey)
 		mac.Write([]byte(signingInput))
 		sig = mac.Sum(nil)
 	case AlgRS256:
-		if s.cfg.RSAPrivate == nil {
+		if rsaPriv == nil {
 			return "", errors.New("auth: RS256 signer missing private key")
 		}
 		hashed := sha256.Sum256([]byte(signingInput))
-		signed, err := rsa.SignPKCS1v15(rand.Reader, s.cfg.RSAPrivate, crypto.SHA256, hashed[:])
+		signed, err := rsa.SignPKCS1v15(rand.Reader, rsaPriv, crypto.SHA256, hashed[:])
 		if err != nil {
 			return "", fmt.Errorf("auth: rsa sign: %w", err)
 		}
@@ -335,6 +439,111 @@ func (s *Signer) encode(c Claims) (string, error) {
 		return "", fmt.Errorf("auth: unsupported algorithm %q", s.cfg.Algorithm)
 	}
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+// selectSigningKey returns the active signing material plus the
+// kid to stamp on the JWS header. When the signer is configured
+// via the legacy single-key fields, the kid is empty (header is
+// omitted) so existing tokens stay byte-for-byte identical.
+// When configured via KeyRing, the kid is the primary key's KID.
+func (s *Signer) selectSigningKey() (hmacKey []byte, rsaPriv *rsa.PrivateKey, kid string) {
+	if s.cfg.KeyRing != nil {
+		k := s.cfg.KeyRing.Primary()
+		return k.HMACKey, k.RSAPrivate, k.KID
+	}
+	return s.cfg.HMACKey, s.cfg.RSAPrivate, ""
+}
+
+// selectVerificationCandidates returns the candidate keys that
+// could validate a JWS with the supplied (alg, kid) header.
+//
+// Dispatch by case:
+//
+//   - alg mismatch → fail closed with ErrTokenSignature regardless
+//     of kid; we never verify a token claiming a different signature
+//     algorithm than the signer is configured for.
+//   - KeyRing not configured (legacy single-key signer) → single
+//     candidate from the cfg's HMACKey / RSAPublic field. Behaviour
+//     identical to pre-keyring builds.
+//   - KeyRing configured, kid present → exactly the key with that
+//     kid. Unknown kid is a fail-closed signature error.
+//   - KeyRing configured, kid empty → every key in the ring (primary
+//     first, then verifiers in stable order). This is the legacy-
+//     token-after-rotation case: a token minted before keyring was
+//     enabled (no `kid` header) must still validate after the operator
+//     rotates the primary, which moves the original signing key into
+//     the verifier set. Without this fanout, the legacy token would
+//     fail signature check the moment Primary() changes.
+//
+// Returning a slice keeps the API uniform across these branches —
+// the verify path iterates the slice and tries each, short-
+// circuiting on the first match.
+func (s *Signer) selectVerificationCandidates(alg, kid string) ([]SigningKey, error) {
+	if alg != "" && alg != string(s.cfg.Algorithm) {
+		return nil, fmt.Errorf("%w: algorithm mismatch", ErrTokenSignature)
+	}
+	if s.cfg.KeyRing == nil {
+		return []SigningKey{{
+			Algorithm:  s.cfg.Algorithm,
+			HMACKey:    s.cfg.HMACKey,
+			RSAPublic:  s.cfg.RSAPublic,
+			RSAPrivate: s.cfg.RSAPrivate,
+		}}, nil
+	}
+	if kid == "" {
+		return s.cfg.KeyRing.All(), nil
+	}
+	k, ok := s.cfg.KeyRing.Get(kid)
+	if !ok {
+		return nil, fmt.Errorf("%w: unknown kid %q", ErrTokenSignature, kid)
+	}
+	return []SigningKey{k}, nil
+}
+
+// verifySignature returns true when at least one of the candidate
+// keys produces a signature matching sig over signingInput. The
+// per-candidate check is constant-time (hmac.Equal /
+// rsa.VerifyPKCS1v15 both compare in O(n) without leaking timing
+// for valid-length inputs); iterating multiple candidates does
+// leak "which key matched" via wall-clock timing, but only at the
+// granularity of one HMAC / one RSA verify each. We accept that
+// timing surface in exchange for legacy-token compatibility — an
+// attacker who learns "key #2 matched" learns nothing useful
+// because all candidate keys are equally privileged.
+func (s *Signer) verifySignature(signingInput string, sig []byte, candidates []SigningKey) bool {
+	switch s.cfg.Algorithm {
+	case AlgHS256:
+		matched := false
+		for _, k := range candidates {
+			if len(k.HMACKey) == 0 {
+				continue
+			}
+			mac := hmac.New(sha256.New, k.HMACKey)
+			mac.Write([]byte(signingInput))
+			if hmac.Equal(mac.Sum(nil), sig) {
+				matched = true
+				// Do NOT break early: iterating every
+				// candidate keeps wall-clock timing
+				// proportional to (ring size) rather
+				// than (ring size up to the match).
+			}
+		}
+		return matched
+	case AlgRS256:
+		hashed := sha256.Sum256([]byte(signingInput))
+		matched := false
+		for _, k := range candidates {
+			if k.RSAPublic == nil {
+				continue
+			}
+			if err := rsa.VerifyPKCS1v15(k.RSAPublic, crypto.SHA256, hashed[:], sig); err == nil {
+				matched = true
+			}
+		}
+		return matched
+	default:
+		return false
+	}
 }
 
 // ParsePrivateKeyPEM parses a PEM-encoded RSA private key. Accepts

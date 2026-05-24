@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -41,6 +42,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/print"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/reporting"
+	"github.com/kennguy3n/kapp-fab/internal/secrets"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
@@ -752,13 +754,160 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 			return t.Quota, nil
 		})
 	}
-	if signer, err := newAuthSigner(); err == nil {
-		kchat := auth.NewHTTPKChatClient(os.Getenv("KCHAT_BASE_URL"), os.Getenv("KCHAT_API_KEY"))
-		authh.signer = signer
-		authh.svc = auth.NewSSOService(kchat, signer, sessionStore, pool, adminPool)
-		log.Printf("api: JWT auth enabled (HS256)")
+	// Build the secrets.Provider before constructing the signer
+	// so a non-env backend (file / aws / vault / gcp) can supply
+	// the JWT signing material. Errors here are non-fatal — they
+	// gate the JWT path off without taking the rest of the API
+	// down. The "env" backend has no setup cost and is the default
+	// so existing deployments keep using KAPP_JWT_SECRET unchanged.
+	//
+	// When the operator explicitly chose a non-env backend
+	// (cfg.SecretProvider is "file" / "aws" / "vault" / "gcp"),
+	// a provider-init failure does NOT silently fall through to
+	// the env provider. The previous shape did exactly that, which
+	// silently downgraded a configured RS256-via-Vault deployment to
+	// HS256-via-KAPP_JWT_SECRET (auth.SignerFromEnv ignores
+	// signerOpts.Algorithm entirely). Silent algorithm downgrade is
+	// a security regression. Instead, the JWT auth path is left
+	// disabled — the rest of the API still serves, the admin chain
+	// returns 503, and the operator can see the failure in boot
+	// logs.
+	secretsCfg := secretsConfigFromPlatform(cfg)
+	secretsProvider, secretsErr := secrets.NewFromConfig(ctx, secretsCfg)
+	// Mirror the normalisation that secrets.NewFromConfig applies
+	// (TrimSpace + ToLower at internal/secrets/factory.go:55) so
+	// operators who set KAPP_SECRET_PROVIDER=" env " or "ENV" don't
+	// get a spurious "operator chose non-env" classification on the
+	// init-failure branch below. EqualFold alone handles case but
+	// not whitespace, and the factory's normalisation means a
+	// trimmed-and-lowered value of "env" reliably means env-backend.
+	normalisedBackend := strings.ToLower(strings.TrimSpace(secretsCfg.Backend))
+	operatorChoseNonEnv := normalisedBackend != "" && normalisedBackend != "env"
+	signerOpts := auth.SignerProviderOptions{
+		PrimaryRef:      cfg.JWTPrimaryRef,
+		VerifyRefs:      cfg.JWTVerifyRefs,
+		Algorithm:       auth.Algorithm(cfg.JWTAlgorithm),
+		Issuer:          cfg.JWTIssuer,
+		Audience:        cfg.JWTAudience,
+		AccessTTL:       cfg.JWTAccessTTL,
+		RefreshTTL:      cfg.JWTRefreshTTL,
+		Leeway:          cfg.JWTLeeway,
+		RefreshInterval: cfg.JWTKeyringRefreshInterval,
+	}
+	switch {
+	case secretsErr != nil && operatorChoseNonEnv:
+		// Operator chose a non-env backend that failed to
+		// initialise. Do NOT fall back to env: SignerFromEnv
+		// silently ignores signerOpts.Algorithm and reverts to
+		// HS256, which would downgrade a configured RS256
+		// deployment without operator awareness. Leave JWT
+		// auth disabled and let the admin chain return 503
+		// until the operator fixes the provider.
+		log.Printf("api: secrets provider %q init failed (%v); JWT auth disabled — refusing to silently downgrade to env",
+			secretsCfg.Backend, secretsErr)
+		secretsProvider = nil
+	case secretsErr != nil:
+		// Operator chose env (or left the backend unset, which
+		// resolves to env). The init failure is recoverable via
+		// the env provider's zero-state behaviour.
+		log.Printf("api: secrets provider init failed (%v); falling back to env", secretsErr)
+		secretsProvider, _ = secrets.NewEnvProvider("")
+	}
+	// Wire provider Close() into the cleanup chain whenever the
+	// backend holds an external resource (gRPC connection, HTTP
+	// keep-alive pool). secrets.Provider doesn't expose Close on
+	// the interface — only concrete backends that need it do — so
+	// the type assertion is the right fit: a no-op for env / file,
+	// a real connection-drain for gcp / vault / aws.
+	if closer, ok := secretsProvider.(io.Closer); ok {
+		cleanups = append(cleanups, func() {
+			if err := closer.Close(); err != nil {
+				log.Printf("api: secrets provider close error: %v", err)
+			}
+		})
+	}
+	if secretsProvider == nil {
+		// Reached only when operator-chose-non-env-but-init-failed
+		// (above). Leaving authh.signer / authh.svc nil triggers
+		// the admin-chain 503 short-circuit further down.
+		log.Printf("api: JWT auth disabled — configured secrets provider unavailable")
 	} else {
-		log.Printf("api: JWT auth disabled (%v)", err)
+		signer, err := newAuthSigner(ctx, secretsProvider, signerOpts)
+		if err == nil {
+			kchat := auth.NewHTTPKChatClient(os.Getenv("KCHAT_BASE_URL"), os.Getenv("KCHAT_API_KEY"))
+			authh.signer = signer
+			authh.svc = auth.NewSSOService(kchat, signer, sessionStore, pool, adminPool)
+			// Wire the refresher-join into the cleanup chain so
+			// shutdown drains the refresher goroutine BEFORE the
+			// secrets provider's Close() runs. Without this join,
+			// a provider Close concurrent with an in-flight
+			// GetSecret RPC produces a benign-but-noisy error
+			// during shutdown — and worse, on gRPC backends like
+			// GCP a Close mid-Recv can race the codec finalizer.
+			// Cleanups run LIFO, so registering the join AFTER
+			// the closer-Close cleanup above means the join
+			// executes FIRST.
+			//
+			// The 5s timeout is the shutdown budget: the
+			// refresher's provider calls are context-aware and
+			// return promptly on cancellation (the parent build
+			// ctx is the same one the refresher uses), so the
+			// happy path completes in microseconds. The timeout
+			// guards against a wedged provider whose GetSecret
+			// hangs past ctx cancellation — we'd rather log a
+			// "refresher did not exit in time" and proceed than
+			// stall shutdown.
+			if done := signer.RefresherDone(); done != nil {
+				cleanups = append(cleanups, func() {
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						log.Printf("api: keyring refresher did not exit within 5s of shutdown; proceeding with provider close")
+					}
+				})
+			}
+			// Log the algorithm the signer ACTUALLY uses, not
+			// the operator-configured value — they diverge on
+			// the env path because auth.SignerFromEnv ignores
+			// signerOpts.Algorithm and unconditionally builds
+			// HS256. Logging the configured value there would
+			// mislead operators about their crypto posture
+			// (they'd see "algorithm=RS256" while tokens are
+			// actually HS256). signer.Algorithm() is the
+			// authoritative source post-construction.
+			actualAlg := signer.Algorithm()
+			log.Printf("api: JWT auth enabled (provider=%s, algorithm=%s)", secretsProvider.Name(), actualAlg)
+			// Surface env-path config drops as warnings so the
+			// operator knows their KAPP_JWT_* values were
+			// silently dropped on the floor. The env path is
+			// the legacy single-secret HS256-only path; an
+			// operator who reaches it with non-default JWT
+			// config almost certainly intended a non-env
+			// secrets backend that wasn't reachable.
+			if secretsProvider.Name() == "env" {
+				if signerOpts.Algorithm != "" && signerOpts.Algorithm != auth.AlgHS256 {
+					log.Printf("api: WARN — KAPP_JWT_ALGORITHM=%s is ignored when KAPP_SECRET_PROVIDER is env or empty (env path hardcodes HS256); set KAPP_SECRET_PROVIDER=file|aws|vault|gcp to use %s",
+						signerOpts.Algorithm, signerOpts.Algorithm)
+				}
+				// Compare against the signer's actual leeway rather
+				// than guarding on signerOpts.Leeway > 0. The whole
+				// point of getenvDurationAllowZero (config.go:551)
+				// is that 0s is a valid explicit operator choice
+				// (strict-clock-skew mode per SignerConfig.Leeway
+				// docs) — and that exact case is the one most worth
+				// warning about, because the env path silently
+				// upgrades it to the hardcoded 30s leeway in
+				// SignerFromEnv. A `> 0` guard would suppress the
+				// warning for the canonical "operator explicitly
+				// disabled leeway" misconfiguration.
+				if signerOpts.Leeway != signer.Leeway() {
+					log.Printf("api: WARN — KAPP_JWT_LEEWAY=%s is ignored when KAPP_SECRET_PROVIDER is env or empty (env path hardcodes %s); set KAPP_SECRET_PROVIDER=file|aws|vault|gcp to honour the override",
+						signerOpts.Leeway, signer.Leeway())
+				}
+			}
+		} else {
+			log.Printf("api: JWT auth disabled (%v)", err)
+		}
 	}
 
 	// adminChain wraps a chi router with the JWT + IsPlatformAdmin
@@ -912,6 +1061,39 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	}
 
 	return d, func() { runCleanups(cleanups) }, nil
+}
+
+// secretsConfigFromPlatform translates the operator-facing
+// platform.Config (which is sourced from KAPP_* env vars) into
+// the secrets.Config that the factory consumes. Kept here, in
+// the deps_build file, because this is the only call site and
+// the translation is mechanical — promoting it to the secrets
+// package would force secrets to import platform and create an
+// import cycle with the auth + secrets packages.
+func secretsConfigFromPlatform(cfg *platform.Config) secrets.Config {
+	return secrets.Config{
+		Backend:   cfg.SecretProvider,
+		EnvPrefix: cfg.SecretsEnvPrefix,
+		File: secrets.FileProviderConfig{
+			RootDir: cfg.SecretsFileRootDir,
+		},
+		AWS: secrets.AWSProviderConfig{
+			Region:   cfg.SecretsAWSRegion,
+			Prefix:   cfg.SecretsAWSPrefix,
+			Endpoint: cfg.SecretsAWSEndpoint,
+		},
+		Vault: secrets.VaultProviderConfig{
+			Addr:      cfg.SecretsVaultAddr,
+			Token:     cfg.SecretsVaultToken,
+			MountPath: cfg.SecretsVaultMountPath,
+			SecretKey: cfg.SecretsVaultSecretKey,
+		},
+		GCP: secrets.GCPProviderConfig{
+			ProjectID: cfg.SecretsGCPProjectID,
+			Prefix:    cfg.SecretsGCPPrefix,
+			Version:   cfg.SecretsGCPVersion,
+		},
+	}
 }
 
 // clampPoWDifficulty narrows the operator-supplied difficulty into

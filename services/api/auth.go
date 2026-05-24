@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/kapp-fab/internal/auth"
+	"github.com/kennguy3n/kapp-fab/internal/secrets"
 )
 
 // authHandlers owns the POST /api/v1/auth/sso and POST
@@ -76,15 +78,26 @@ func (h *authHandlers) refresh(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
-// newAuthSigner is the api gateway's thin wrapper around
-// auth.SignerFromEnv. It exists for source-grep stability (older
-// PRs reference newAuthSigner by name) and for any future api-
-// specific signer-construction behaviour (e.g. asymmetric keys
-// loaded from KMS) that wouldn't make sense to share with the
-// sidecar services. The dev-placeholder guard, TTL parsing, and
-// issuer / audience defaults all live in auth.SignerFromEnv so the
-// importer + agent-tools sidecars get the same contract without
-// copy-paste drift.
-func newAuthSigner() (*auth.Signer, error) {
-	return auth.SignerFromEnv()
+// newAuthSigner is the api gateway's thin wrapper around the
+// auth signer constructors. It exists for source-grep stability
+// (older PRs reference newAuthSigner by name) and for any future
+// api-specific signer-construction behaviour that wouldn't make
+// sense to share with the sidecar services.
+//
+// PR-6 added an opt-in code path: when KAPP_SECRET_PROVIDER is
+// set to a non-env backend (file / aws / vault / gcp) the signer
+// loads its key material via the secrets.Provider, supporting
+// rotation without restart. The default empty / "env" backend
+// preserves the pre-PR-6 contract bit-for-bit by delegating to
+// auth.SignerFromEnv.
+//
+// refreshCtx is the context whose cancellation stops the keyring
+// refresher goroutine; pass the build context so the refresher
+// dies with the application. Pass nil to disable auto-refresh
+// (useful for one-shot CLI invocations).
+func newAuthSigner(refreshCtx context.Context, secretsProvider secrets.Provider, opts auth.SignerProviderOptions) (*auth.Signer, error) {
+	if secretsProvider == nil || secretsProvider.Name() == "env" {
+		return auth.SignerFromEnv()
+	}
+	return auth.SignerFromProvider(refreshCtx, secretsProvider, opts)
 }
