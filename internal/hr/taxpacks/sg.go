@@ -119,13 +119,21 @@ func (sgPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 
 	// Non-resident path: flat 15% withholding on the gross. No
 	// CPF — CPF is restricted to citizens and PRs by statute.
+	// The IsPositive guard matches the MY/TH/ID/VN/PH non-resident
+	// branches as defense-in-depth — the early gross > 0 check
+	// already guarantees a positive product, but pinning the
+	// invariant locally means a future relaxation of the early
+	// guard can't accidentally emit a zero-amount slip line.
 	if !e.Resident {
-		out = append(out, Deduction{
+		nr := gross.Mul(sgNonResidentRate).Round(2)
+		if !nr.IsPositive() {
+			return nil, nil
+		}
+		return []Deduction{{
 			Code:   "SG_NONRESIDENT_TAX",
 			Name:   "Non-resident withholding tax (SG)",
-			Amount: gross.Mul(sgNonResidentRate).Round(2),
-		})
-		return out, nil
+			Amount: nr,
+		}}, nil
 	}
 
 	// Resident path: no PAYE, only CPF. Resolve the age tier; an

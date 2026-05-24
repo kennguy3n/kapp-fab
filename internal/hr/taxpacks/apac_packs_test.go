@@ -224,6 +224,29 @@ func TestMYPackEPFRateChangesAt60(t *testing.T) {
 	}
 }
 
+// TestMYPackEPFBoundaryAge59Vs60 pins the exact-age-60 boundary:
+// the EPF Act 1991 Third Schedule reduces the employee rate from
+// 11% to 5.5% the year the employee "attains the age of 60",
+// meaning a 60-year-old already pays the lower rate. The pack
+// uses `e.Age >= 60` so age 59 must still see 11% and age 60
+// must already see 5.5%. MYR 6,000 × 11% = 660, × 5.5% = 330.
+// Matches the SG CPF boundary-test precedent at every tier edge.
+func TestMYPackEPFBoundaryAge59Vs60(t *testing.T) {
+	pack, _ := Lookup("MY")
+	out59, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: true, Age: 59,
+	}, decimal.NewFromInt(6000), monthPeriod())
+	out60, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: true, Age: 60,
+	}, decimal.NewFromInt(6000), monthPeriod())
+	if epf := indexByCode(out59)["MY_EPF"]; !epf.Equal(decimal.NewFromInt(660)) {
+		t.Errorf("MY_EPF (age 59) = %s; want 660.00 (still 11%%)", epf)
+	}
+	if epf := indexByCode(out60)["MY_EPF"]; !epf.Equal(decimal.NewFromInt(330)) {
+		t.Errorf("MY_EPF (age 60) = %s; want 330.00 (already 5.5%%)", epf)
+	}
+}
+
 // TestMYPackBelowThresholdProducesNoPCB confirms the 0-5,000 / year
 // resident bracket yields no PCB. MYR 300 / month annualises to
 // ~3,535 which is below the threshold.
