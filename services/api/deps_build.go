@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -20,6 +21,8 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/auth"
 	"github.com/kennguy3n/kapp-fab/internal/authz"
 	"github.com/kennguy3n/kapp-fab/internal/base"
+	"github.com/kennguy3n/kapp-fab/internal/captcha"
+	"github.com/kennguy3n/kapp-fab/internal/csrf"
 	"github.com/kennguy3n/kapp-fab/internal/dashboard"
 	"github.com/kennguy3n/kapp-fab/internal/docs"
 	"github.com/kennguy3n/kapp-fab/internal/events"
@@ -107,6 +110,12 @@ func runCleanups(cleanups []func()) {
 // must NOT re-panic; the defer here only fires when something
 // downstream of a successful step actually panicked.
 func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanup func(), err error) {
+	// We use slog.Default() for the boot-time warnings emitted by
+	// new infra (captcha, csrf) — the package logger is already
+	// configured by main.go's setupLogger(); reusing it keeps the
+	// boot transcript in one place without threading a Logger
+	// parameter through buildDeps's already-broad signature.
+	logger := slog.Default()
 	var cleanups []func()
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -334,6 +343,80 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// without overshooting before the per-tenant inbound-quota
 	// downstream cuts in.
 	publicInboundIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, "inbound", 30, 10)
+	// /api/v1/captcha/challenge is the only unauthenticated GET on
+	// the captcha sub-router; the handler issues a fresh PoW
+	// envelope per call (HMAC-SHA256 + crypto/rand + replay-cache
+	// slot allocation). Without a rate limiter an attacker could
+	// spam the endpoint to burn CPU and fill the bounded replay
+	// cache with never-solved challenges. 30/min with a burst of 10
+	// covers a typical web client (fetch challenge → solve → retry
+	// once on stale-envelope) without firing on legitimate UI
+	// patterns.
+	publicChallengeIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, "captcha_challenge", 30, 10)
+
+	// Build the captcha verifier from operator config. Boot fails
+	// loudly when the operator picks a provider but forgets the
+	// required secret — silent fall-through to a no-op verifier
+	// would be a security regression. When KAPP_CAPTCHA_PROVIDER
+	// is empty / "disabled" the factory returns a DisabledVerifier
+	// and the boot logger emits a WARN so the no-op state is
+	// auditable in operator logs.
+	captchaVerifier, err := captcha.NewFromConfig(captcha.Config{
+		Provider:         cfg.CaptchaProvider,
+		Secret:           cfg.CaptchaSecret,
+		MinScore:         cfg.CaptchaMinScore,
+		ExpectedHostname: cfg.CaptchaExpectedHostname,
+		PoWHMACKey:       []byte(cfg.PoWHMACKey),
+		PoWDifficulty:    clampPoWDifficulty(cfg.PoWDifficulty),
+	})
+	if err != nil {
+		runCleanups(cleanups)
+		return nil, nil, fmt.Errorf("captcha: build verifier: %w", err)
+	}
+	switch captchaVerifier.Provider() {
+	case "disabled":
+		logger.Warn("captcha: provider disabled (no bot protection on public POST surface); set KAPP_CAPTCHA_PROVIDER to enable")
+	default:
+		logger.Info("captcha: provider enabled",
+			slog.String("provider", captchaVerifier.Provider()))
+	}
+	captchaMW := captchaMiddleware(captchaVerifier, logger)
+
+	// CSRF middleware: Origin / Referer allowlist + optional
+	// double-submit cookie. Mounted globally below the timeout
+	// group so bearer-authenticated traffic bypasses the check
+	// without ceremony (Authorization: Bearer presence is the
+	// gate). Empty AllowedOrigins disables the Origin check —
+	// safe for the current bearer-only deployment but a known
+	// no-op posture surfaced in the boot log.
+	//
+	// publicCSRFExemptPaths enumerates the routes that should
+	// bypass the CSRF middleware globally because they are
+	// designed to be invoked from third-party origins (embedded
+	// public forms, signed webhook receivers). Bearer-authenticated
+	// requests already bypass via SkipBearerAuth; the Skipper
+	// covers the public-anonymous case where Origin will be the
+	// embedding site, not in the operator's allowlist.
+	publicCSRFExemptPaths := publicCSRFExemptPathSet()
+	csrfCfg := csrf.Config{
+		AllowedOrigins: cfg.CSRFAllowedOrigins,
+		CookieName:     cfg.CSRFCookieName,
+		CookieSecure:   cfg.CSRFCookieSecure,
+		SkipBearerAuth: true,
+		Skipper: func(r *http.Request) bool {
+			return isPublicCSRFExempt(r, publicCSRFExemptPaths)
+		},
+	}
+	if len(cfg.CSRFAllowedOrigins) == 0 {
+		logger.Warn("csrf: no allowed origins configured (set KAPP_CSRF_ALLOWED_ORIGINS in production)")
+	}
+	csrfMW := csrf.Middleware(csrfCfg, func(r *http.Request, err error) {
+		logger.Info("csrf: deny",
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.String("error", err.Error()))
+	})
+
 	quotaEnforcer := platform.NewQuotaEnforcer(pool)
 
 	// Phase J — tenant feature flags, plan definitions, and usage
@@ -777,9 +860,13 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		featureMW:            featureMW,
 		authzGate:            authzGate,
 		authzMethodGate:      authzMethodGate,
-		publicFormIPLimit:    publicFormIPLimit,
-		publicEmbedIPLimit:   publicEmbedIPLimit,
-		publicInboundIPLimit: publicInboundIPLimit,
+		publicFormIPLimit:      publicFormIPLimit,
+		publicEmbedIPLimit:     publicEmbedIPLimit,
+		publicInboundIPLimit:   publicInboundIPLimit,
+		publicChallengeIPLimit: publicChallengeIPLimit,
+		captchaMW:            captchaMW,
+		captchaVerifier:      captchaVerifier,
+		csrfMW:               csrfMW,
 		adminChain:           adminChain,
 		tenantChain:          tenantChain,
 		authh:                authh,
@@ -825,4 +912,87 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	}
 
 	return d, func() { runCleanups(cleanups) }, nil
+}
+
+// clampPoWDifficulty narrows the operator-supplied difficulty into
+// the uint8 range expected by captcha.PoWVerifier. Values ≤ 0 are
+// returned as 0 so captcha.NewPoWVerifier applies its own
+// documented default of 16 bits (≈50 ms of JS work per solve) —
+// see internal/captcha/pow.go and internal/captcha/factory.go which
+// both document "0 → default 16". Values above 255 are capped at 255
+// so the uint8 cast stays well-defined; 255 bits of work is
+// unsolvable in practice, but the cap costs nothing and silences
+// the gosec G115 warning.
+func clampPoWDifficulty(d int) uint8 {
+	switch {
+	case d < 1:
+		return 0
+	case d > 255:
+		return 255
+	default:
+		return uint8(d) //nolint:gosec // G115 — bounds checked above
+	}
+}
+
+// publicCSRFExemptPathSet returns the path-suffix patterns that
+// bypass the global CSRF middleware. These routes are designed to
+// be invoked from third-party origins (e.g. embedded public forms
+// served from a tenant's marketing site, signed webhook receivers
+// invoked from a payment provider or email gateway), so requiring
+// the operator's Origin allowlist would block legitimate traffic.
+//
+// Bypassing CSRF on these paths is safe because:
+//
+//   - POST /api/v1/forms/{id}/submit is fronted by publicFormIPLimit
+//     + the captcha middleware + a per-form honeypot check inside
+//     the handler. The CSRF Origin check would only add a fourth
+//     layer that is by design defeated by the embedding scenario.
+//   - Webhook receivers (mounted by future PRs) carry a provider-
+//     signed payload that the receiver re-validates server-side
+//     via HMAC. CSRF cannot meaningfully add to that guarantee.
+//
+// The path patterns are matched with isPublicCSRFExempt, which
+// handles chi's {id} placeholders by checking literal prefix +
+// suffix against the request path.
+func publicCSRFExemptPathSet() [][2]string {
+	return [][2]string{
+		// {prefix, suffix}: POST /api/v1/forms/{id}/submit
+		{"/api/v1/forms/", "/submit"},
+	}
+}
+
+// isPublicCSRFExempt reports whether the request path matches any
+// of the exempt-pattern pairs returned by publicCSRFExemptPathSet.
+// A pattern is (prefix, suffix); the path must start with prefix,
+// end with suffix, and have at least one path segment between them
+// (so /api/v1/forms/{id}/submit matches but /api/v1/forms/submit
+// would not — there has to be a path segment for {id}).
+//
+// Only POST is exempt: other methods on the same path either don't
+// exist or aren't mutating from a third-party origin.
+func isPublicCSRFExempt(r *http.Request, patterns [][2]string) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	p := r.URL.Path
+	for _, pat := range patterns {
+		prefix, suffix := pat[0], pat[1]
+		if !strings.HasPrefix(p, prefix) || !strings.HasSuffix(p, suffix) {
+			continue
+		}
+		// Need room for a non-empty {id} segment between
+		// prefix and suffix. If the path's length is shorter
+		// than prefix+suffix the slice would panic, and even
+		// when equal the {id} would be empty — both shapes
+		// are invalid for this pattern.
+		if len(p) <= len(prefix)+len(suffix) {
+			continue
+		}
+		mid := p[len(prefix) : len(p)-len(suffix)]
+		if mid == "" || strings.Contains(mid, "/") {
+			continue
+		}
+		return true
+	}
+	return false
 }

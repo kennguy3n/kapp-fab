@@ -9,6 +9,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/auth"
 	"github.com/kennguy3n/kapp-fab/internal/authz"
+	"github.com/kennguy3n/kapp-fab/internal/captcha"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
@@ -79,9 +80,33 @@ type apiDeps struct {
 	featureMW            func(http.Handler) http.Handler
 	authzGate            func(action, resource string) func(http.Handler) http.Handler
 	authzMethodGate      func(readAction, writeAction, resource string) func(http.Handler) http.Handler
-	publicFormIPLimit    func(http.Handler) http.Handler
-	publicEmbedIPLimit   func(http.Handler) http.Handler
-	publicInboundIPLimit func(http.Handler) http.Handler
+	publicFormIPLimit      func(http.Handler) http.Handler
+	publicEmbedIPLimit     func(http.Handler) http.Handler
+	publicInboundIPLimit   func(http.Handler) http.Handler
+	publicChallengeIPLimit func(http.Handler) http.Handler
+
+	// captchaMW gates the unauthenticated public POST surface
+	// (form submit, portal magic-link request, SSO bootstrap)
+	// against the configured Verifier. When KAPP_CAPTCHA_PROVIDER
+	// is empty / "disabled" the middleware degrades to a pass-
+	// through and an info log line is emitted at boot so the no-
+	// op state is auditable.
+	captchaMW func(http.Handler) http.Handler
+
+	// captchaVerifier is the concrete verifier driving captchaMW.
+	// Exposed on apiDeps so the GET /captcha/challenge handler
+	// (only meaningful for the PoW provider) can issue fresh
+	// challenges; the third-party providers don't need this
+	// endpoint because their widgets fetch challenges directly
+	// from the provider CDN.
+	captchaVerifier captcha.Verifier
+
+	// csrfMW runs the Origin/Referer allowlist + optional
+	// double-submit cookie check on every mutating request. When
+	// KAPP_CSRF_ALLOWED_ORIGINS is empty the middleware accepts
+	// every origin (still safe for bearer-token requests but
+	// recommended only for local dev).
+	csrfMW func(http.Handler) http.Handler
 
 	// adminChain mounts the JWT + IsPlatformAdmin gate on a chi
 	// sub-router. Defined as a closure (not a middleware) because

@@ -49,6 +49,18 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 	if d.metrics != nil {
 		r.Use(platform.MetricsMiddleware(d.metrics))
 	}
+	// CSRF middleware: Origin/Referer allowlist + optional double-
+	// submit cookie. Mounted at the top of the chain so EVERY
+	// mutating request — across every route group registered
+	// below — passes through one consistent gate. Bearer-token
+	// requests bypass the check (SkipBearerAuth=true at
+	// construction); safe methods (GET/HEAD/OPTIONS/TRACE) bypass
+	// per RFC 7231. The check is a no-op when
+	// KAPP_CSRF_ALLOWED_ORIGINS is empty (logged at boot) so dev
+	// shells without a configured allowlist still serve.
+	if d.csrfMW != nil {
+		r.Use(d.csrfMW)
+	}
 
 	r.Get("/healthz", healthHandler(d.pool))
 	// When KAPP_METRICS_ADDR is unset (dev/single-port mode), mount
@@ -65,8 +77,41 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 	// migrated onto the Bearer-token middleware over subsequent PRs
 	// while the X-Tenant-ID header keeps working for local dev.
 	r.Route("/api/v1/auth", func(r chi.Router) {
-		r.Post("/sso", d.authh.sso)
+		// Captcha gate sits in front of /sso (the unauthenticated
+		// bootstrap endpoint that mints a Kapp JWT from a KChat
+		// code). /refresh consumes a refresh token issued by a
+		// prior /sso and therefore relies on possession of that
+		// token as the abuse signal — gating it with a captcha
+		// would add user-visible friction on every reconnect for
+		// no proportional security gain.
+		r.Group(func(r chi.Router) {
+			if d.captchaMW != nil {
+				r.Use(d.captchaMW)
+			}
+			r.Post("/sso", d.authh.sso)
+		})
 		r.Post("/refresh", d.authh.refresh)
+	})
+
+	// Captcha challenge endpoint for the PoW provider. The
+	// frontend calls GET /api/v1/captcha/challenge to obtain a
+	// fresh server-signed envelope, solves it locally, then
+	// submits the (challenge, answer) tuple back through the
+	// X-Captcha-Token header on whichever endpoint required the
+	// gate. For Turnstile / hCaptcha / reCAPTCHA v3 deployments
+	// the handler returns 404 (their widgets fetch challenges
+	// from the provider CDN directly) so the frontend can probe
+	// the endpoint to discover whether server-side issuance is
+	// required.
+	//
+	// IP-keyed rate limiter sits in front so a flood of challenge
+	// requests can't exhaust HMAC CPU or fill the bounded PoW
+	// replay cache with never-solved envelopes.
+	r.Group(func(r chi.Router) {
+		if d.publicChallengeIPLimit != nil {
+			r.Use(d.publicChallengeIPLimit)
+		}
+		r.Mount("/api/v1/captcha", captchaRouter(d.captchaVerifier))
 	})
 
 	// Phase F event stream. SSE tail of the tenant's outbox so the web
@@ -132,7 +177,21 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 					// /auth/* gate inline inside the handlers — they need
 					// the tenant lookup first and can't share the
 					// claims-based middleware below.
-					r.Post("/request", porh.requestMagicLink)
+					//
+					// Captcha gate on /request only.  /verify
+					// consumes a magic-link token that was
+					// delivered out-of-band via email, so the
+					// possession-of-token check already serves
+					// as the abuse signal; adding a captcha
+					// would force every legitimate user to clear
+					// a second challenge after clicking the link
+					// they received.
+					r.Group(func(r chi.Router) {
+						if d.captchaMW != nil {
+							r.Use(d.captchaMW)
+						}
+						r.Post("/request", porh.requestMagicLink)
+					})
 					r.Post("/verify", porh.verifyMagicLink)
 				})
 				r.Route("/tickets", func(r chi.Router) {
@@ -755,14 +814,28 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			})
 			r.Get("/{id}", d.fh.public)
 			// Public submit endpoint. There is no JWT or tenant
-			// header to key on, so abuse is bounded with two
-			// independent controls: an IP-keyed token bucket (10
-			// requests/minute, shared across replicas via Redis
-			// when available) and a honeypot check inside the
-			// handler. Together they cut the most common drive-by
-			// abuse vectors without breaking the public-form UX.
+			// header to key on, so abuse is bounded with three
+			// independent controls layered in order of cost:
+			//
+			//  1. IP-keyed token bucket (10 req/min, shared
+			//     across replicas via Redis when available).
+			//     Cheap; blunts high-volume scans.
+			//  2. Captcha verification on the X-Captcha-Token
+			//     header.  Costs the attacker per-solve (cents)
+			//     and produces a structured-log signal for the
+			//     audit trail.  Bypassed for bearer-authenticated
+			//     requests — the JWT already proves identity.
+			//  3. Honeypot check inside the handler — drops
+			//     drive-by scrapers that haven't bothered to
+			//     read the form HTML.
+			//
+			// Together they cut the most common drive-by abuse
+			// vectors without breaking the public-form UX.
 			r.Group(func(r chi.Router) {
 				r.Use(d.publicFormIPLimit)
+				if d.captchaMW != nil {
+					r.Use(d.captchaMW)
+				}
 				r.Post("/{id}/submit", d.fh.submit)
 			})
 		})

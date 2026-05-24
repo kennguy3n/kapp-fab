@@ -98,20 +98,32 @@ func IPRateLimitMiddleware(backend IPRateLimiterBackend, keyPrefix string, rpm, 
 	}
 }
 
-// clientIP extracts the canonical client IP from r.RemoteAddr. When
-// chi's RealIP middleware has run earlier it has already rewritten
-// RemoteAddr to the originating client's address; otherwise it is
-// whatever TCP saw, which is correct for a direct connection.
+// RemoteIPFromRequest extracts the canonical client IP from
+// r.RemoteAddr. When chi's RealIP middleware has run earlier it
+// has already rewritten RemoteAddr to the originating client's
+// address; otherwise it is whatever TCP saw, which is correct for
+// a direct connection.
 //
 // Port stripping is best-effort — a synthesised RemoteAddr that
 // lacks a port (some test harnesses) is returned verbatim so the
 // limiter still keys on something stable.
-func clientIP(r *http.Request) string {
+//
+// Exported so other middleware (captcha verifier, audit log) can
+// reuse the same convention. The internal clientIP alias preserves
+// existing call sites in this file.
+func RemoteIPFromRequest(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return strings.TrimSpace(r.RemoteAddr)
 	}
 	return host
+}
+
+// clientIP keeps the original lower-case alias for in-package call
+// sites. New code outside this package should use
+// RemoteIPFromRequest.
+func clientIP(r *http.Request) string {
+	return RemoteIPFromRequest(r)
 }
 
 // InProcIPRateLimiter is the in-process fallback used when no Redis
