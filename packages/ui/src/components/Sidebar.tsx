@@ -5,6 +5,7 @@ import {
   useContext,
   useState,
   type AnchorHTMLAttributes,
+  type ForwardedRef,
   type HTMLAttributes,
   type ReactNode,
 } from "react";
@@ -212,12 +213,37 @@ export interface SidebarItemProps
   href?: string;
   /**
    * Optional render prop to inject a router-aware anchor (e.g.
-   * react-router's `<NavLink>`).  Receives the resolved
-   * className and the icon+label children to render.  When set,
-   * `href` is ignored — the consumer's anchor owns navigation.
+   * react-router's `<NavLink>`).  When set, `href` is ignored —
+   * the consumer's anchor owns navigation.
+   *
+   * The callback receives:
+   *
+   *   - `getClassName(active)` — a function that returns the
+   *     correct merged class string for a given active state.
+   *     This is exposed (rather than a static `className` string)
+   *     so consumers wiring react-router's `<NavLink>` can defer
+   *     the active-state decision to NavLink's own
+   *     `isActive` callback, and so the resulting class string is
+   *     run through tailwind-merge (via `cn`) which resolves
+   *     conflicts between the inactive base classes (e.g.
+   *     `text-fg-muted hover:text-fg`) and the active overrides
+   *     (`text-accent`) deterministically.  String-concatenating
+   *     active classes onto an inactive base would leave the
+   *     `hover:text-fg` rule live and the foreground colour would
+   *     flip on hover — a regression the static `className`
+   *     contract makes very easy to write.
+   *
+   *   - `ref` — the forwarded ref passed to `<SidebarItem>`.  We
+   *     expose it so consumers can attach it to their anchor and
+   *     honour the `forwardRef` contract.  Refs passed via the
+   *     non-render-prop path go onto the internal `<a>` as
+   *     before.
+   *
+   *   - `children` — the resolved icon + label tree.
    */
   renderAnchor?: (args: {
-    className: string;
+    getClassName: (active?: boolean) => string;
+    ref: ForwardedRef<HTMLAnchorElement>;
     children: ReactNode;
   }) => ReactNode;
 }
@@ -228,14 +254,30 @@ export const SidebarItem = forwardRef<HTMLAnchorElement, SidebarItemProps>(
     ref,
   ) => {
     const { collapsed } = useSidebar();
-    const resolvedClass = cn(
-      "group flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm",
-      "transition-colors",
-      "hover:bg-bg-muted focus-visible:outline-none focus-visible:bg-bg-muted",
-      active && "bg-accent/15 text-accent font-medium",
-      !active && "text-fg-muted hover:text-fg",
-      collapsed && "justify-center px-0",
-      className,
+    /**
+     * Builds the resolved className for the item given an active
+     * state.  Pulled out into a function (rather than computed
+     * once at the top of the render) because the render-prop path
+     * needs to defer the active decision to react-router's
+     * `NavLink isActive` callback — the parent component can't
+     * know whether the route matches without consulting the
+     * router.  Defining it inline keeps SidebarItem the single
+     * owner of the class composition so callers can't drift the
+     * active styling away from the inactive base.
+     */
+    const getClassName = useCallback(
+      (isActive?: boolean): string =>
+        cn(
+          "group flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm",
+          "transition-colors",
+          "hover:bg-bg-muted focus-visible:outline-none focus-visible:bg-bg-muted",
+          isActive
+            ? "bg-accent/15 text-accent font-medium hover:text-accent"
+            : "text-fg-muted hover:text-fg",
+          collapsed && "justify-center px-0",
+          className,
+        ),
+      [collapsed, className],
     );
 
     const contentChildren = (
@@ -253,7 +295,21 @@ export const SidebarItem = forwardRef<HTMLAnchorElement, SidebarItemProps>(
     );
 
     if (renderAnchor) {
-      return <>{renderAnchor({ className: resolvedClass, children: contentChildren })}</>;
+      // Honour the forwardRef contract on the render-prop path:
+      // pass the ref through so consumers can attach it to their
+      // anchor (e.g. react-router NavLink ref) instead of
+      // discarding it.  Without this, parents calling
+      // `useRef<HTMLAnchorElement>()` on SidebarItem would see
+      // their ref silently stay null.
+      return (
+        <>
+          {renderAnchor({
+            getClassName,
+            ref,
+            children: contentChildren,
+          })}
+        </>
+      );
     }
 
     return (
@@ -262,7 +318,7 @@ export const SidebarItem = forwardRef<HTMLAnchorElement, SidebarItemProps>(
         href={href}
         title={collapsed ? label : undefined}
         aria-label={collapsed ? label : undefined}
-        className={resolvedClass}
+        className={getClassName(active)}
         {...props}
       >
         {contentChildren}

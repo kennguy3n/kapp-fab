@@ -407,16 +407,21 @@ const navSections: NavSection[] = [
 ];
 
 /**
- * RouteFallback is what users see in the gap between clicking a
- * nav item and the route chunk finishing its network round-trip.
- * We deliberately render an empty Card rather than a spinner —
- * a spinner-at-the-top-of-the-page reads as "loading" which is
- * accurate, but a perceptible flash for fast chunks (most are
- * <50 KB / <100 ms on a warm connection) is worse UX than a
- * silent gap.  The Card mirrors the page's eventual layout so
- * the reflow when content arrives is minimal.
+ * ShellRouteFallback is what users see in the gap between clicking
+ * a nav item INSIDE the authenticated app shell and the route
+ * chunk finishing its network round-trip.  The Card chrome
+ * mirrors the page's eventual layout so the reflow when content
+ * arrives is minimal — most pages render a top-level Card, so a
+ * Card-shaped placeholder is the most layout-stable thing to
+ * show.
+ *
+ * The Card is NOT appropriate for the public-route boundary
+ * (login / portal / embed) because there's no sidebar or padding
+ * context to anchor it — a stray bordered Card floating on a
+ * blank viewport reads like a broken layout.  See
+ * `PublicRouteFallback` for that path.
  */
-function RouteFallback() {
+function ShellRouteFallback() {
   return (
     <Card className="border-dashed">
       <CardContent className="flex items-center gap-3 py-12 text-fg-muted">
@@ -431,10 +436,32 @@ function RouteFallback() {
   );
 }
 
+/**
+ * PublicRouteFallback is the Suspense placeholder for the outer
+ * routing boundary, which serves anonymous surfaces (login,
+ * portal, the public form embed).  These routes have no app
+ * shell, so a Card with design-system chrome looks like a broken
+ * layout fragment.  We render a minimal centered spinner that
+ * fills the viewport instead — it reads as “loading” without
+ * leaking any tenant chrome onto a public surface.
+ */
+function PublicRouteFallback() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex h-screen w-screen items-center justify-center bg-bg text-fg-muted"
+    >
+      <div className="inline-flex h-6 w-6 animate-spin rounded-full border-2 border-current border-r-transparent" />
+      <span className="sr-only">Loading…</span>
+    </div>
+  );
+}
+
 export function App() {
   return (
     <TooltipProvider delayDuration={300}>
-      <Suspense fallback={<RouteFallback />}>
+      <Suspense fallback={<PublicRouteFallback />}>
         <Routes>
           {/* Public form route lives outside the app shell so anonymous
               visitors don't see tenant navigation. */}
@@ -531,22 +558,22 @@ function GlobalSearchBox() {
 function AppNavLink({ to, label }: { to: string; label: string }) {
   // Render-prop bridge so `<NavLink>` controls the href + active
   // state but SidebarItem still owns the chrome (icon slot,
-  // collapsed-mode tooltip, badge).
+  // collapsed-mode tooltip, badge) AND owns the class
+  // composition.  We delegate class generation to SidebarItem via
+  // `getClassName(isActive)` rather than string-concatenating
+  // active modifiers onto an inactive base; this routes through
+  // tailwind-merge inside SidebarItem so the conflicting
+  // `hover:text-fg` (inactive base) and `hover:text-accent`
+  // (active state) classes resolve deterministically instead of
+  // leaving the muted hover live on the active link.
   return (
     <SidebarItem
       label={label}
-      renderAnchor={({ className, children }) => (
+      renderAnchor={({ getClassName, ref, children }) => (
         <NavLink
+          ref={ref}
           to={to}
-          className={({ isActive }) =>
-            // Recompute the active state class manually because
-            // SidebarItem's `className` argument here was computed
-            // with the active=false default — we re-apply the
-            // active variant when react-router reports the match.
-            isActive
-              ? `${className} bg-accent/15 text-accent font-medium`
-              : className
-          }
+          className={({ isActive }) => getClassName(isActive)}
           end={to === "/"}
         >
           {children}
@@ -646,7 +673,7 @@ function AppShell() {
           </div>
         </header>
         <div className="flex-1 p-6 overflow-auto">
-          <Suspense fallback={<RouteFallback />}>
+          <Suspense fallback={<ShellRouteFallback />}>
             <Routes>
               <Route path="/" element={<DashboardPage />} />
               <Route path="/admin/tenants" element={<TenantListPage />} />

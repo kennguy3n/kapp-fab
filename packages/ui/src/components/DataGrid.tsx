@@ -129,7 +129,25 @@ export interface DataGridColumn<TRow> {
 export type DataGridSortState<TRow> = {
   columnKey: string;
   direction: "asc" | "desc";
-  compare?: (a: TRow, b: TRow) => number;
+  /**
+   * The directional-agnostic comparator.  For accessor-based
+   * columns this compares the raw scalars (no null awareness —
+   * see `accessor`).  For custom `compare` columns the caller
+   * owns null semantics.
+   */
+  compare: (a: TRow, b: TRow) => number;
+  /**
+   * When the column declared an `accessor`, we capture it here so
+   * the sort effect can apply null-last semantics OUTSIDE the
+   * asc/desc inversion.  If we instead handled null-last inside
+   * `compare`, flipping `(a, b)` to `(b, a)` in desc mode would
+   * also flip the null-vs-non-null ordering and nulls would
+   * cluster at the top in desc mode — the opposite of the
+   * documented contract.  Undefined for custom-compare columns
+   * because we can’t introspect the comparator to know which
+   * side should be treated as “null”.
+   */
+  accessor?: (row: TRow) => DataGridSortValue;
 } | null;
 
 export interface DataGridProps<TRow> {
@@ -162,16 +180,19 @@ export interface DataGridProps<TRow> {
 }
 
 /**
- * compareSortValues totally orders two `DataGridSortValue`s.  null
- * and undefined always sort last (the same way SQL `ORDER BY ...
- * NULLS LAST` works) regardless of asc/desc direction — this is
- * the conventional UX for data tables and matches Postgres'
- * default for descending sorts.  The asc-vs-desc inversion is
- * applied by the caller around this primitive comparator; the
- * null-handling stays unidirectional on purpose so empty cells
- * always cluster at the bottom of the view.
+ * compareNonNullSortValues totally orders two non-null/non-undefined
+ * `DataGridSortValue`s.  Null-last behaviour is intentionally NOT
+ * handled here — see [DataGridSortState.accessor] for why.  In short:
+ * the asc/desc direction is implemented by swapping the comparator
+ * arguments, which would also flip any null-vs-non-null result if
+ * the guard were inline; the caller therefore strips nulls BEFORE
+ * delegating to this function.  We keep a defensive `aNull`/`bNull`
+ * shortcut anyway so a buggy caller (or a custom comparator path
+ * that bypasses the accessor-aware sort effect) gets sensible
+ * behaviour rather than a `Number(null) - Number(5) = -5` surprise
+ * that would still sort but in the wrong direction.
  */
-function compareSortValues(
+function compareNonNullSortValues(
   a: DataGridSortValue,
   b: DataGridSortValue,
 ): number {
@@ -190,22 +211,44 @@ function compareSortValues(
 }
 
 /**
- * resolveCompare returns the comparator a sortable column will
- * use, or `null` if the column declared `sortable: true` without
- * an `accessor` or `compare`.  The caller is expected to skip
- * sort UI for that column (handleSort early-returns).  We chose a
- * runtime guard over a type-level constraint because forcing
- * `accessor` or `compare` into the discriminated union would
- * cost ergonomics for the common case (most columns are not
- * sortable) and would require a much larger generic surface.
+ * ResolvedSort packages the comparator and (when available) the
+ * raw accessor used to derive sortable scalars.  The accessor is
+ * carried separately so the sort effect can enforce null-last
+ * semantics OUTSIDE the asc/desc inversion (see
+ * [DataGridSortState.accessor]).
+ */
+interface ResolvedSort<TRow> {
+  compare: (a: TRow, b: TRow) => number;
+  accessor?: (row: TRow) => DataGridSortValue;
+}
+
+/**
+ * resolveCompare returns the resolved comparator + (optional)
+ * accessor for a sortable column, or `null` if the column
+ * declared `sortable: true` without an `accessor` or `compare`.
+ * The caller is expected to skip sort UI for that column
+ * (`handleSort` early-returns).  We chose a runtime guard over a
+ * type-level constraint because forcing `accessor` or `compare`
+ * into the discriminated union would cost ergonomics for the
+ * common case (most columns are not sortable) and would require a
+ * much larger generic surface.
+ *
+ * `col.compare` wins when both are supplied — the consumer asked
+ * for a fully custom comparator, and they own null semantics
+ * inside it.  We do NOT thread the accessor through in that case
+ * because doing so would let null-last fire even when the
+ * consumer’s comparator deliberately wanted a different placement.
  */
 function resolveCompare<TRow>(
   col: DataGridColumn<TRow>,
-): ((a: TRow, b: TRow) => number) | null {
-  if (col.compare) return col.compare;
+): ResolvedSort<TRow> | null {
+  if (col.compare) return { compare: col.compare };
   if (col.accessor) {
     const acc = col.accessor;
-    return (a, b) => compareSortValues(acc(a), acc(b));
+    return {
+      compare: (a, b) => compareNonNullSortValues(acc(a), acc(b)),
+      accessor: acc,
+    };
   }
   return null;
 }
@@ -258,18 +301,24 @@ export function DataGrid<TRow>({
   const handleSort = useCallback(
     (col: DataGridColumn<TRow>) => {
       if (!col.sortable) return;
-      const compare = resolveCompare(col);
-      if (!compare) return; // misconfigured — already warned above
+      const resolved = resolveCompare(col);
+      if (!resolved) return; // misconfigured — already warned above
       setSort((prev) => {
         if (!prev || prev.columnKey !== col.key) {
           return {
             columnKey: col.key,
             direction: "asc",
-            compare,
+            compare: resolved.compare,
+            accessor: resolved.accessor,
           };
         }
         if (prev.direction === "asc") {
-          return { ...prev, direction: "desc", compare };
+          return {
+            ...prev,
+            direction: "desc",
+            compare: resolved.compare,
+            accessor: resolved.accessor,
+          };
         }
         return null;
       });
@@ -279,11 +328,25 @@ export function DataGrid<TRow>({
 
   const sortedData = useMemo(() => {
     if (!sort) return data;
-    const compare = sort.compare!;
+    const { compare, accessor, direction } = sort;
     const copy = data.slice();
-    copy.sort((a, b) =>
-      sort.direction === "asc" ? compare(a, b) : compare(b, a),
-    );
+    copy.sort((a, b) => {
+      // Apply null-last semantics OUTSIDE the asc/desc inversion so
+      // empty cells always cluster at the bottom of the view
+      // regardless of direction — the documented contract.  Only
+      // runs for accessor-based columns; custom `compare` columns
+      // own their own null semantics.
+      if (accessor) {
+        const va = accessor(a);
+        const vb = accessor(b);
+        const aNull = va === null || va === undefined;
+        const bNull = vb === null || vb === undefined;
+        if (aNull && bNull) return 0;
+        if (aNull) return 1;
+        if (bNull) return -1;
+      }
+      return direction === "asc" ? compare(a, b) : compare(b, a);
+    });
     return copy;
   }, [data, sort]);
 
