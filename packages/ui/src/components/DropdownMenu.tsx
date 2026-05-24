@@ -41,17 +41,29 @@ export const DropdownMenuSubTrigger = forwardRef<
   <DropdownMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none",
+      // ps-2 + pe-2 paired rather than the shorthand px-2 so
+      // the inset override (`inset && "ps-8"`) resolves via
+      // tailwind-merge's pure-longhand rule (ps-2 vs ps-8) rather
+      // than relying on the px-vs-ps non-conflict accident in
+      // tw-merge v2.  See packages/ui/src/components/Select.tsx
+      // for the forward-compatibility argument.
+      "flex cursor-default select-none items-center gap-2 rounded-sm ps-2 pe-2 py-1.5 text-sm outline-none",
       "focus:bg-bg-subtle data-[state=open]:bg-bg-subtle",
-      inset && "pl-8",
+      inset && "ps-8",
       className,
     )}
     {...props}
   >
     {children}
+    {/* ms-auto pushes the chevron to the inline-end of the
+        sub-trigger; rtl:rotate-180 flips the chevron so it
+        points into the sub-menu's open direction (which Radix
+        mirrors automatically via the data-[side] attribute on
+        SubContent, but the indicator glyph needs an explicit
+        flip because it's a static SVG path). */}
     <svg
       aria-hidden="true"
-      className="ml-auto h-4 w-4"
+      className="ms-auto h-4 w-4 rtl:rotate-180"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -123,10 +135,12 @@ export const DropdownMenuItem = forwardRef<
   <DropdownMenuPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors",
+      // ps-2 + pe-2 paired rather than the shorthand px-2 —
+      // see DropdownMenuSubTrigger above for the rationale.
+      "relative flex cursor-default select-none items-center gap-2 rounded-sm ps-2 pe-2 py-1.5 text-sm outline-none transition-colors",
       "focus:bg-bg-subtle",
       "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
-      inset && "pl-8",
+      inset && "ps-8",
       className,
     )}
     {...props}
@@ -141,7 +155,7 @@ export const DropdownMenuCheckboxItem = forwardRef<
   <DropdownMenuPrimitive.CheckboxItem
     ref={ref}
     className={cn(
-      "relative flex cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none transition-colors",
+      "relative flex cursor-default select-none items-center rounded-sm py-1.5 ps-8 pe-2 text-sm outline-none transition-colors",
       "focus:bg-bg-subtle",
       "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       className,
@@ -149,7 +163,7 @@ export const DropdownMenuCheckboxItem = forwardRef<
     checked={checked}
     {...props}
   >
-    <span className="absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
+    <span className="absolute start-2 flex h-3.5 w-3.5 items-center justify-center">
       <DropdownMenuPrimitive.ItemIndicator>
         <svg
           aria-hidden="true"
@@ -178,14 +192,14 @@ export const DropdownMenuRadioItem = forwardRef<
   <DropdownMenuPrimitive.RadioItem
     ref={ref}
     className={cn(
-      "relative flex cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none transition-colors",
+      "relative flex cursor-default select-none items-center rounded-sm py-1.5 ps-8 pe-2 text-sm outline-none transition-colors",
       "focus:bg-bg-subtle",
       "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       className,
     )}
     {...props}
   >
-    <span className="absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
+    <span className="absolute start-2 flex h-3.5 w-3.5 items-center justify-center">
       <DropdownMenuPrimitive.ItemIndicator>
         <span className="h-2 w-2 rounded-full bg-fg" />
       </DropdownMenuPrimitive.ItemIndicator>
@@ -204,8 +218,10 @@ export const DropdownMenuLabel = forwardRef<
   <DropdownMenuPrimitive.Label
     ref={ref}
     className={cn(
-      "px-2 py-1.5 text-xs font-medium uppercase tracking-wider text-fg-muted",
-      inset && "pl-8",
+      // ps-2 + pe-2 paired rather than the shorthand px-2 —
+      // see DropdownMenuSubTrigger above for the rationale.
+      "ps-2 pe-2 py-1.5 text-xs font-medium uppercase tracking-wider text-fg-muted",
+      inset && "ps-8",
       className,
     )}
     {...props}
@@ -231,7 +247,7 @@ export const DropdownMenuShortcut = ({
 }: HTMLAttributes<HTMLSpanElement>) => (
   <span
     className={cn(
-      "ml-auto text-xs tracking-widest text-fg-subtle",
+      "ms-auto text-xs tracking-widest text-fg-subtle",
       className,
     )}
     {...props}

@@ -95,7 +95,15 @@ export const Sidebar = forwardRef<HTMLElement, SidebarProps>(
           ref={ref}
           data-collapsed={collapsed || undefined}
           className={cn(
-            "flex h-screen flex-col border-r border-border bg-bg-subtle text-fg",
+            // border-e is the inline-end logical border: it
+            // renders as border-right in LTR and border-left in
+            // RTL automatically when <html dir="rtl">. The flex
+            // row containing this aside also flips visually in
+            // RTL — the sidebar moves to the right edge of the
+            // viewport and the main content fills the left,
+            // mirroring the LTR layout. PR-6 adds a Playwright
+            // test that pins this exact flip.
+            "flex h-screen flex-col border-e border-border bg-bg-subtle text-fg",
             "transition-[width] duration-200",
             collapsed ? "w-14" : "w-60",
             className,
@@ -356,9 +364,37 @@ export const SidebarToggle = forwardRef<HTMLButtonElement, SidebarToggleProps>(
         )}
         {...props}
       >
+        {/*
+         * RTL flip — the chevron points "into" or "out of" the
+         * sidebar's inline-end edge. In LTR the sidebar sits at the
+         * inline-start (left) edge so the expand chevron (collapsed
+         * state) points right (`>`) and the collapse chevron points
+         * left (`<`). In RTL the sidebar flips to the inline-start =
+         * right edge, so the chevrons need the opposite physical
+         * direction — `rtl:rotate-180` mirrors them in-place without
+         * needing two SVG variants. The rotation is purely visual
+         * (the `aria-label` on the button still describes the
+         * semantic action), so screen readers see the correct
+         * "Expand sidebar" / "Collapse sidebar" copy regardless of
+         * writing direction.
+         *
+         * Four-quadrant verification matrix:
+         *
+         *   LTR collapsed:  `>`  expand toward the center of the
+         *                        viewport (sidebar on left edge).
+         *   LTR expanded:   `<`  collapse toward the left edge.
+         *   RTL collapsed:  `<`  expand toward the center of the
+         *                        viewport (sidebar on right edge).
+         *   RTL expanded:   `>`  collapse toward the right edge.
+         *
+         * The `polyline points` choice (collapsed vs expanded)
+         * picks the base shape; the RTL `rotate-180` flips the
+         * physical direction so all four quadrants render the
+         * correct affordance with a single SVG markup site.
+         */}
         <svg
           aria-hidden="true"
-          className="h-4 w-4"
+          className="h-4 w-4 rtl:rotate-180"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
