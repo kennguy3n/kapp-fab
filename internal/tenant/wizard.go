@@ -90,6 +90,59 @@ func DefaultLocaleForCountry(country string) string {
 	}
 }
 
+// DefaultCoATemplateForCountry returns the chart-of-accounts template
+// name the wizard should pre-fill for the given ISO 3166-1 alpha-2
+// country code. The mapping uses the country-specific "<cc>_basic"
+// template when one is registered for the country, otherwise falls
+// back to the generic IFRS chart ("ifrs_basic") for any registered
+// country lacking a specialised chart, and to "us_gaap_basic" for
+// US tenants.
+//
+// Returns "us_gaap_basic" for US, "ifrs_basic" for any country
+// without an explicit mapping, and the country-specific chart for
+// the 15 jurisdictions with a registered tax pack (SG/MY/TH/ID/VN/
+// PH/NZ/IN/CH/AE/SA/QA/KW/BH/OM). Keeping the default chooser inside
+// the tenant package means the wizard handler doesn't need to embed
+// the list — it just calls this helper.
+func DefaultCoATemplateForCountry(country string) string {
+	switch strings.ToUpper(strings.TrimSpace(country)) {
+	case "US":
+		return "us_gaap_basic"
+	case "SG":
+		return "sg_basic"
+	case "MY":
+		return "my_basic"
+	case "TH":
+		return "th_basic"
+	case "ID":
+		return "id_basic"
+	case "VN":
+		return "vn_basic"
+	case "PH":
+		return "ph_basic"
+	case "NZ":
+		return "nz_basic"
+	case "IN":
+		return "in_basic"
+	case "CH":
+		return "ch_basic"
+	case "AE":
+		return "ae_basic"
+	case "SA":
+		return "sa_basic"
+	case "QA":
+		return "qa_basic"
+	case "KW":
+		return "kw_basic"
+	case "BH":
+		return "bh_basic"
+	case "OM":
+		return "om_basic"
+	default:
+		return "ifrs_basic"
+	}
+}
+
 // WizardRole captures a role definition the wizard should upsert into
 // the tenant's `roles` table. Permissions are a JSON array of action
 // strings or action+resource objects; we pass them through verbatim.
@@ -144,12 +197,88 @@ var coaUSGAAPBasic []byte
 //go:embed coa_templates/ifrs_basic.json
 var coaIFRSBasic []byte
 
+// Country-specific CoA templates align with the tax packs registered
+// in internal/hr/taxpacks. Each template encodes the country's
+// statutory chart: local-currency cash, country-specific VAT/GST
+// receivable/payable, and payroll liability accounts that match the
+// Code field on every Deduction emitted by the country's TaxPack
+// (e.g. sg_basic includes CPF Payable to receive SG_CPF_EMPLOYEE
+// debits, ae_basic includes GPSSA Payable, ch_basic includes
+// AHV/ALV/BVG/Quellensteuer/Cantonal split, etc.). End-of-service
+// liability accounts are pre-seeded for jurisdictions where the
+// employer accrues gratuity / severance (UAE, SA, QA, KW, BH, OM,
+// VN, ID, IN, TH, PH).
+
+//go:embed coa_templates/sg_basic.json
+var coaSGBasic []byte
+
+//go:embed coa_templates/my_basic.json
+var coaMYBasic []byte
+
+//go:embed coa_templates/th_basic.json
+var coaTHBasic []byte
+
+//go:embed coa_templates/id_basic.json
+var coaIDBasic []byte
+
+//go:embed coa_templates/vn_basic.json
+var coaVNBasic []byte
+
+//go:embed coa_templates/ph_basic.json
+var coaPHBasic []byte
+
+//go:embed coa_templates/nz_basic.json
+var coaNZBasic []byte
+
+//go:embed coa_templates/in_basic.json
+var coaINBasic []byte
+
+//go:embed coa_templates/ch_basic.json
+var coaCHBasic []byte
+
+//go:embed coa_templates/ae_basic.json
+var coaAEBasic []byte
+
+//go:embed coa_templates/sa_basic.json
+var coaSABasic []byte
+
+//go:embed coa_templates/qa_basic.json
+var coaQABasic []byte
+
+//go:embed coa_templates/kw_basic.json
+var coaKWBasic []byte
+
+//go:embed coa_templates/bh_basic.json
+var coaBHBasic []byte
+
+//go:embed coa_templates/om_basic.json
+var coaOMBasic []byte
+
 // chartOfAccountsTemplates maps the wizard's template name to the
 // embedded JSON payload. Adding a new template is a matter of dropping
-// a JSON file in coa_templates/ and registering it here.
+// a JSON file in coa_templates/ and registering it here. Country-
+// specific templates use the naming convention
+// "<iso-3166-1-alpha-2>_basic" so the wizard / UI can map a tenant's
+// chosen Country to a sensible default chart in PR-7
+// (DefaultCoATemplateForCountry).
 var chartOfAccountsTemplates = map[string][]byte{
 	"us_gaap_basic": coaUSGAAPBasic,
 	"ifrs_basic":    coaIFRSBasic,
+	"sg_basic":      coaSGBasic,
+	"my_basic":      coaMYBasic,
+	"th_basic":      coaTHBasic,
+	"id_basic":      coaIDBasic,
+	"vn_basic":      coaVNBasic,
+	"ph_basic":      coaPHBasic,
+	"nz_basic":      coaNZBasic,
+	"in_basic":      coaINBasic,
+	"ch_basic":      coaCHBasic,
+	"ae_basic":      coaAEBasic,
+	"sa_basic":      coaSABasic,
+	"qa_basic":      coaQABasic,
+	"kw_basic":      coaKWBasic,
+	"bh_basic":      coaBHBasic,
+	"om_basic":      coaOMBasic,
 }
 
 // templateAccount is the shape each entry in a CoA template takes. The
@@ -272,6 +401,17 @@ func (w *Wizard) WithPlacementPolicySource(s PlacementPolicySource) *Wizard {
 // `users` (not RLS-gated) is independent of the `user_tenants` write
 // (RLS-gated), and we want the `user_tenants` INSERT under the tenant
 // GUC regardless.
+//
+// Default CoA resolution (PR-3 change): when cfg.CoATemplate is empty
+// the wizard now resolves a chart from cfg.Country via
+// DefaultCoATemplateForCountry. The previous behavior hardcoded
+// "us_gaap_basic" for empty inputs; callers that relied on US GAAP
+// being the implicit default now resolve to "ifrs_basic" when both
+// CoATemplate and Country are empty. Existing callers that pass an
+// explicit Country are unaffected — "US" still maps to
+// "us_gaap_basic", every country with a registered tax pack maps to
+// its country-specific chart, and unmapped countries fall back to
+// the generic IFRS chart.
 func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg SetupWizardConfig) (*WizardResult, error) {
 	if tenantID == uuid.Nil {
 		return nil, errors.New("tenant: wizard requires tenant id")
@@ -279,9 +419,16 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 	if cfg.CompanyName == "" {
 		return nil, errors.New("tenant: wizard requires company_name")
 	}
+	// When the caller didn't pre-pick a CoA template the wizard
+	// resolves one from the tenant's Country so a SG tenant gets
+	// sg_basic (CPF / GST liability accounts), an AE tenant gets
+	// ae_basic (GPSSA / Gratuity), etc. DefaultCoATemplateForCountry
+	// falls back to us_gaap_basic for US, ifrs_basic for any country
+	// without a country-specific chart, and is exhaustively pinned by
+	// TestDefaultCoATemplateForCountry.
 	templateName := cfg.CoATemplate
 	if templateName == "" {
-		templateName = "us_gaap_basic"
+		templateName = DefaultCoATemplateForCountry(cfg.Country)
 	}
 	accounts, err := loadTemplate(templateName)
 	if err != nil {

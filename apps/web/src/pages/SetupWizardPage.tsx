@@ -12,11 +12,70 @@ import { useNavigate, useParams } from "react-router-dom";
 // CoA template options match the files in
 // internal/tenant/coa_templates/. Adding a new template is a matter of
 // dropping a JSON file in that folder, registering it in
-// chartOfAccountsTemplates, and extending this list.
+// chartOfAccountsTemplates (wizard.go), and extending this list. The
+// country-specific charts encode the local statutory liability
+// accounts (e.g. CPF Payable for SG, GPSSA Payable for AE,
+// AHV/ALV/BVG split for CH) so the payroll engine's deduction lines
+// have a matching ledger destination on day one.
 const COA_TEMPLATES = [
   { value: "us_gaap_basic", label: "US GAAP Basic" },
-  { value: "ifrs_basic", label: "IFRS Basic" },
+  { value: "ifrs_basic", label: "IFRS Basic (Generic)" },
+  { value: "sg_basic", label: "Singapore — IFRS + CPF / GST" },
+  { value: "my_basic", label: "Malaysia — IFRS + EPF / SOCSO / EIS / SST" },
+  { value: "th_basic", label: "Thailand — TFRS + SSF / VAT" },
+  { value: "id_basic", label: "Indonesia — PSAK + BPJS / PPN" },
+  { value: "vn_basic", label: "Vietnam — Circular 200 + SI/HI/UI / VAT" },
+  { value: "ph_basic", label: "Philippines — PFRS + SSS / PhilHealth / Pag-IBIG / VAT" },
+  { value: "nz_basic", label: "New Zealand — NZ IFRS + PAYE / ACC / KiwiSaver / GST" },
+  { value: "in_basic", label: "India — Ind AS + EPF / ESI / TDS / GST" },
+  { value: "ch_basic", label: "Switzerland — Swiss GAAP + AHV / ALV / BVG / MwSt" },
+  { value: "ae_basic", label: "UAE — IFRS + GPSSA / VAT / Gratuity" },
+  { value: "sa_basic", label: "Saudi Arabia — IFRS + GOSI / Zakat / VAT" },
+  { value: "qa_basic", label: "Qatar — IFRS + GRSIA / Gratuity" },
+  { value: "kw_basic", label: "Kuwait — IFRS + PIFSS / NLST / Indemnity" },
+  { value: "bh_basic", label: "Bahrain — IFRS + SIO / VAT / Indemnity" },
+  { value: "om_basic", label: "Oman — IFRS + PASI / VAT / Gratuity" },
 ];
+
+// defaultCoATemplateForCountry mirrors
+// tenant.DefaultCoATemplateForCountry in internal/tenant/wizard.go so
+// the wizard's CoA radio pre-selects the country-specific chart when
+// the user picks a country in step 0. Keeping the table in lockstep
+// with the backend means a SG tenant sees sg_basic checked rather
+// than us_gaap_basic, and the payroll deduction lines have matching
+// liability accounts on day one.
+//
+// Drift safety: the backend applies the same country -> template
+// mapping when callers omit coa_template entirely (direct API / CLI
+// consumers go through that branch). The frontend always sends an
+// explicit value matching the user's on-screen selection, so a stale
+// frontend with this table out of date would persist its own choice
+// rather than triggering the backend re-resolve — keep this map in
+// sync with internal/tenant/wizard.go on every PR that adds a tax
+// pack.
+const COUNTRY_COA_DEFAULTS: Record<string, string> = {
+  US: "us_gaap_basic",
+  SG: "sg_basic",
+  MY: "my_basic",
+  TH: "th_basic",
+  ID: "id_basic",
+  VN: "vn_basic",
+  PH: "ph_basic",
+  NZ: "nz_basic",
+  IN: "in_basic",
+  CH: "ch_basic",
+  AE: "ae_basic",
+  SA: "sa_basic",
+  QA: "qa_basic",
+  KW: "kw_basic",
+  BH: "bh_basic",
+  OM: "om_basic",
+};
+
+function defaultCoATemplateForCountry(country: string): string {
+  const code = country.trim().toUpperCase();
+  return COUNTRY_COA_DEFAULTS[code] ?? "ifrs_basic";
+}
 
 interface InitialUser {
   email: string;
@@ -74,10 +133,19 @@ export function SetupWizardPage() {
   const [companyName, setCompanyName] = useState("");
   const [industry, setIndustry] = useState("");
   const [country, setCountry] = useState("");
-  const [coaTemplate, setCoaTemplate] = useState(COA_TEMPLATES[0].value);
+  // coaTemplate is empty until the user explicitly picks one from the
+  // step-1 radio list. While empty, the effective value is derived
+  // from the country field (see effectiveCoaTemplate below) so the UI
+  // pre-selects the country-specific chart without needing a useEffect
+  // sync between country and CoA. Once the user picks, the value
+  // becomes sticky regardless of subsequent country edits.
+  const [coaTemplate, setCoaTemplate] = useState("");
   const [users, setUsers] = useState<InitialUser[]>([
     { email: "", display_name: "", role: "tenant.admin", roles: ["tenant.admin"] },
   ]);
+
+  const effectiveCoaTemplate =
+    coaTemplate || defaultCoATemplateForCountry(country);
 
   const tenantId = id ?? "";
 
@@ -141,7 +209,7 @@ export function SetupWizardPage() {
       company_name: companyName.trim(),
       industry: industry.trim() || undefined,
       country: country.trim() || undefined,
-      coa_template: coaTemplate,
+      coa_template: effectiveCoaTemplate,
       users: validUsers,
     });
   };
@@ -241,7 +309,7 @@ export function SetupWizardPage() {
                   type="radio"
                   name="coa"
                   value={t.value}
-                  checked={coaTemplate === t.value}
+                  checked={effectiveCoaTemplate === t.value}
                   onChange={(e) => setCoaTemplate(e.target.value)}
                 />{" "}
                 {t.label}
