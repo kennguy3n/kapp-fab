@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -61,6 +62,37 @@ func TestVaultProvider_GetSecret_5xx_Transient(t *testing.T) {
 	_, err := p.GetSecret(context.Background(), "key")
 	if !errors.Is(err, ErrProviderUnavailable) {
 		t.Fatalf("expected ErrProviderUnavailable, got %v", err)
+	}
+}
+
+// TestVaultProvider_GetSecret_PermissionDenied pins the
+// 401/403 → ErrProviderUnavailable contract introduced to
+// align Vault's error classification with the GCP provider
+// (gcp.go:translateGCPError maps codes.PermissionDenied /
+// Unauthenticated the same way). Without this alignment,
+// future callers using errors.Is to distinguish "credential
+// is bad" from "everything is fine" would silently fail to
+// match on the Vault backend. The bot's round-7 finding
+// raised this as a cross-provider inconsistency — pinning it
+// in a test prevents the wrap from being silently removed in
+// a future refactor.
+func TestVaultProvider_GetSecret_PermissionDenied(t *testing.T) {
+	for _, sc := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(sc), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(sc)
+				_, _ = w.Write([]byte(`{"errors":["permission denied"]}`))
+			}))
+			defer srv.Close()
+			p, _ := NewVaultProvider(VaultProviderConfig{Addr: srv.URL, Token: "t"})
+			_, err := p.GetSecret(context.Background(), "jwt/primary")
+			if !errors.Is(err, ErrProviderUnavailable) {
+				t.Fatalf("expected ErrProviderUnavailable for %d, got %v", sc, err)
+			}
+			if !strings.Contains(err.Error(), "permission denied") {
+				t.Errorf("expected error to surface IAM hint, got %v", err)
+			}
+		})
 	}
 }
 

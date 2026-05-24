@@ -121,9 +121,21 @@ func NewVaultProvider(cfg VaultProviderConfig) (*VaultProvider, error) {
 func (*VaultProvider) Name() string { return "vault" }
 
 // GetSecret reads the named secret from the configured Vault
-// mount. Returns ErrSecretNotFound for the 404 response,
-// ErrProviderUnavailable for any 5xx, and a wrapped error
-// otherwise.
+// mount. Status-code → sentinel mapping mirrors the GCP
+// provider's gRPC-code mapping (gcp.go:translateGCPError) so
+// callers using errors.Is can branch uniformly across
+// backends:
+//
+//   - 404 → ErrSecretNotFound (missing secret, not retryable)
+//   - 401 / 403 → ErrProviderUnavailable + IAM hint, matching
+//     GCP's codes.PermissionDenied/Unauthenticated mapping.
+//     The keyring refresher logs these as WARN and continues;
+//     future callers (CLI tooling, health probes) gain a
+//     typed signal for "the credential is bad" without
+//     having to string-parse the response body.
+//   - other 4xx → wrapped generic error (operator-side mistake
+//     that retrying won't fix, e.g. bad mount path)
+//   - 5xx → ErrProviderUnavailable (transient, callers may retry)
 func (p *VaultProvider) GetSecret(ctx context.Context, key string) (SecretValue, error) {
 	endpoint := fmt.Sprintf("%s/v1/%s/data/%s", p.addr, p.mountPath, encodeVaultPath(key))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
@@ -140,6 +152,10 @@ func (p *VaultProvider) GetSecret(ctx context.Context, key string) (SecretValue,
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
 		return SecretValue{}, fmt.Errorf("%w: vault key %s missing", ErrSecretNotFound, key)
+	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return SecretValue{}, fmt.Errorf("%w: vault %s status %d: permission denied — check X-Vault-Token policy (read on %s/data/%s): %s",
+			ErrProviderUnavailable, key, resp.StatusCode, p.mountPath, key, strings.TrimSpace(string(body)))
 	case resp.StatusCode >= 500:
 		return SecretValue{}, fmt.Errorf("%w: vault status %d", ErrProviderUnavailable, resp.StatusCode)
 	case resp.StatusCode >= 400:
