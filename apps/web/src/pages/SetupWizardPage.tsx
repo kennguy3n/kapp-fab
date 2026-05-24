@@ -1,7 +1,13 @@
 import { useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
-import { useTranslation } from "../lib/i18n";
+import {
+  SupportedLocales,
+  bestSupportedLocaleForCountry,
+  defaultLocaleForCountry,
+  localeInfo,
+  useTranslation,
+} from "../lib/i18n";
 
 // SetupWizardPage drives the tenant setup wizard on the frontend. It
 // collects the first-run company profile, CoA template, and initial
@@ -115,6 +121,13 @@ interface SetupPayload {
   industry?: string;
   country?: string;
   coa_template: string;
+  // locale is the BCP 47 tag the wizard wants the backend to persist
+  // on tenants.locale. Omitting it (empty string → not sent) defers
+  // to the backend's DefaultLocaleForCountry mapping for the chosen
+  // country, mirroring the cfg.Locale-empty branch in
+  // internal/tenant/wizard.go. The frontend always sends an explicit
+  // tag the user can see in the step-0 picker.
+  locale?: string;
   users: InitialUser[];
 }
 
@@ -124,12 +137,18 @@ interface SetupResult {
   roles_inserted: number;
   users_inserted: number;
   coa_template_used: string;
+  // locale_used reflects the locale the backend actually persisted
+  // to tenants.locale after resolver downgrade. May differ from the
+  // tag the wizard sent when the requested tag has no shipped
+  // catalogue (e.g. "hi" → "en" today). The completion screen
+  // surfaces this so the user can see what was actually committed.
+  locale_used: string;
 }
 
 export function SetupWizardPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { t } = useTranslation();
+  const { t, setLocale } = useTranslation();
 
   const [step, setStep] = useState(0);
   const [companyName, setCompanyName] = useState("");
@@ -142,12 +161,30 @@ export function SetupWizardPage() {
   // sync between country and CoA. Once the user picks, the value
   // becomes sticky regardless of subsequent country edits.
   const [coaTemplate, setCoaTemplate] = useState("");
+  // locale follows the same sticky-once-picked pattern as coaTemplate.
+  // While empty, the effective UI locale is derived from country (via
+  // bestSupportedLocaleForCountry, which downgrades unshipped tags to
+  // the nearest shipped catalogue — so an IN tenant lands on en
+  // until hi.json ships). Once the user picks an explicit locale from
+  // the step-0 dropdown, the value becomes sticky and country edits
+  // no longer override it. This mirrors the explicit-vs-implicit
+  // resolution in internal/tenant/wizard.go where an operator-
+  // supplied cfg.Locale bypasses the resolver downgrade.
+  const [locale, setLocaleState] = useState("");
   const [users, setUsers] = useState<InitialUser[]>([
     { email: "", display_name: "", role: "tenant.admin", roles: ["tenant.admin"] },
   ]);
 
   const effectiveCoaTemplate =
     coaTemplate || defaultCoATemplateForCountry(country);
+  // effectiveLocale is the tag the wizard will both submit to the
+  // backend AND apply to the live UI. When the user hasn't picked
+  // explicitly, we use bestSupportedLocaleForCountry so the UI flips
+  // to a renderable catalogue immediately when they type a country
+  // (e.g. typing "DE" switches the UI to German on step 1+). The
+  // backend persistence path uses the same value, so the persisted
+  // tenants.locale matches what the wizard renders during setup.
+  const effectiveLocale = locale || bestSupportedLocaleForCountry(country);
 
   const tenantId = id ?? "";
 
@@ -185,6 +222,24 @@ export function SetupWizardPage() {
     },
   });
 
+  // Apply the locale switch when the user advances past step 0 so the
+  // wizard's remaining steps render in the chosen language. We do this
+  // here rather than in a useEffect on `country` change because the
+  // user might type a country code slowly (e.g. "S" → "SG") and we
+  // don't want the UI to flicker through partial-match locales. The
+  // step-0 Next button is the natural commit point.
+  //
+  // The LocaleSwitcher in the header writes to the same source of
+  // truth (LocaleProvider.setLocale), so a user who picks a locale
+  // via the global header instead of the wizard dropdown ends up
+  // with the same effective state when they reach step 1.
+  const advancePastCompany = () => {
+    if (effectiveLocale) {
+      setLocale(effectiveLocale);
+    }
+    setStep(1);
+  };
+
   const canAdvanceCompany = companyName.trim().length > 0;
   const validUsers = useMemo(
     () =>
@@ -212,6 +267,17 @@ export function SetupWizardPage() {
       industry: industry.trim() || undefined,
       country: country.trim() || undefined,
       coa_template: effectiveCoaTemplate,
+      // Submit the country-derived canonical locale ("hi" for IN,
+      // "zh-Hans" for CN) when the user hasn't picked explicitly so
+      // the backend persists the canonical-but-unshipped tag rather
+      // than the frontend's downgrade. This keeps tenants.locale
+      // forward-compatible with future catalogue shipments (e.g. when
+      // hi.json lands, IN tenants persisted today as "hi" will start
+      // resolving to the new catalogue automatically without a data
+      // migration). The frontend continues to render the downgraded
+      // effective catalogue (effectiveLocale) until the new file
+      // exists.
+      locale: locale || (country ? defaultLocaleForCountry(country) : undefined),
       users: validUsers,
     });
   };
@@ -300,11 +366,45 @@ export function SetupWizardPage() {
               placeholder="ISO country code or name"
             />
           </label>
+          <label style={{ display: "grid", gap: 4 }}>
+            {t("common.language")}
+            <select
+              value={effectiveLocale}
+              onChange={(e) => setLocaleState(e.target.value)}
+              aria-label={t("common.language")}
+            >
+              {SupportedLocales.map((info) => (
+                <option key={info.tag} value={info.tag}>
+                  {info.name}
+                </option>
+              ))}
+            </select>
+            <span style={{ color: "#6b7280", fontSize: 12 }}>
+              {locale
+                ? // The user has picked explicitly. Show which country
+                  // would have selected the same locale (or note that
+                  // they're overriding the country-derived default).
+                  country &&
+                  effectiveLocale !== bestSupportedLocaleForCountry(country)
+                  ? t("wizard.locale.override_hint", {
+                      country: country.trim().toUpperCase(),
+                      default: localeInfo(
+                        bestSupportedLocaleForCountry(country),
+                      ).name,
+                    })
+                  : t("wizard.locale.explicit_hint")
+                : country
+                  ? t("wizard.locale.country_hint", {
+                      country: country.trim().toUpperCase(),
+                    })
+                  : t("wizard.locale.browser_hint")}
+            </span>
+          </label>
           <div>
             <button
               type="button"
               disabled={!canAdvanceCompany}
-              onClick={() => setStep(1)}
+              onClick={advancePastCompany}
             >
               {t("common.next")}
             </button>
@@ -487,6 +587,19 @@ export function SetupWizardPage() {
           <ul style={{ fontSize: 13 }}>
             <li>
               CoA template: <code>{submit.data.coa_template_used}</code>
+            </li>
+            <li>
+              {/* locale_used reflects the locale the backend persisted
+                  after its resolver downgrade. May differ from the
+                  effectiveLocale the wizard rendered with (e.g. the
+                  user picked "hi" in step 0 but the backend
+                  downgraded to "en" because hi.json doesn't ship).
+                  Showing the persisted value is the source of truth
+                  for what subsequent sessions will render against. */}
+              {t("wizard.complete.locale_used", {
+                locale: localeInfo(submit.data.locale_used).name,
+                tag: submit.data.locale_used,
+              })}
             </li>
             <li>Accounts seeded: {submit.data.accounts_inserted}</li>
             <li>Roles seeded: {submit.data.roles_inserted}</li>

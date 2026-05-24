@@ -11,6 +11,9 @@
 export {
   DefaultLocale,
   SupportedLocales,
+  bestSupportedLocale,
+  bestSupportedLocaleForCountry,
+  defaultLocaleForCountry,
   isSupportedLocale,
   localeInfo,
   type LocaleDirection,
