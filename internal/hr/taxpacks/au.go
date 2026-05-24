@@ -22,6 +22,13 @@ func init() { Register(&auPack{}) }
 
 func (auPack) Country() string { return "AU" }
 
+// EffectiveYear returns the fiscal year the AU bracket table is
+// calibrated for: ATO Schedule 1 for the 2025-26 income year
+// (resident scale 2 + foreign-resident + no-TFN flat rate). The
+// constant moves with the brackets when the ATO publishes the
+// 2026-27 schedule.
+func (auPack) EffectiveYear() int { return 2025 }
+
 // auBracket mirrors the ATO Schedule 1 statutory rates table.
 // Floor / Top are annualised gross; Base is the cumulative tax at
 // the bracket floor; Rate applies to the marginal portion above

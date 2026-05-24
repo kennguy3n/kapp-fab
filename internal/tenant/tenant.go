@@ -30,10 +30,11 @@ const (
 // PlacementPolicy, or any future column — would corrupt the cached value for
 // every other in-flight request. The store's mutation methods (Suspend,
 // Activate, Archive, Delete, UpdatePlan, SetBaseCurrency, SetCountry,
-// SetZKCredentials, SetPlacementPolicy) explicitly invalidate the cache and
-// produce a fresh row on the next read; that is the only correct way to
-// reflect a change in tenant state. To "update" a tenant struct in handler
-// code, copy the value first (`copy := *t`) before modifying.
+// SetLocale, SetZKCredentials, SetPlacementPolicy) explicitly invalidate
+// the cache and produce a fresh row on the next read; that is the only
+// correct way to reflect a change in tenant state. To "update" a
+// tenant struct in handler code, copy the value first (`copy := *t`)
+// before modifying.
 type Tenant struct {
 	ID        uuid.UUID       `json:"id"`
 	Slug      string          `json:"slug"`
@@ -68,6 +69,19 @@ type Tenant struct {
 	// tenants keep their existing slip totals until their operator
 	// flips a country code.
 	Country string `json:"country,omitempty"`
+
+	// Locale is the IETF BCP 47 language tag the API resolves to
+	// when serving translated UI strings + Intl-formatted
+	// numbers/dates/currencies. Defaults to "en" on tenants
+	// created before migration 000059. The setup wizard derives a
+	// sensible default from Country (CH→"de", SA→"ar", etc.) and
+	// the tenant operator can flip it from the admin surface.
+	// IETF BCP 47 was picked over an ISO 639-1 + ISO 3166-1 split
+	// so script subtags like "zh-Hans" / "zh-Hant" round-trip
+	// without inventing a custom serialization. See
+	// internal/i18n for the bundle whitelist that PGStore.SetLocale
+	// enforces.
+	Locale string `json:"locale,omitempty"`
 }
 
 // HasZKFabric reports whether the tenant has been provisioned with

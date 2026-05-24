@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -44,7 +45,8 @@ var (
 // cache is keyed by both "tenant:id:<uuid>" and "tenant:slug:<slug>" with the
 // same *Tenant value behind each key so either lookup path warms the other.
 // Every mutation method on this store (Suspend, Activate, Archive, Delete,
-// UpdatePlan, SetBaseCurrency, SetCountry, SetZKCredentials, SetPlacementPolicy)
+// UpdatePlan, SetBaseCurrency, SetCountry, SetLocale, SetZKCredentials,
+// SetPlacementPolicy)
 // invalidates the affected tenant's cache entries before returning, so
 // subsequent reads see the new row. With no cache attached the store is a
 // plain pass-through with zero extra branches in the hot path beyond a single
@@ -149,10 +151,10 @@ func (s *PGStore) Create(ctx context.Context, input CreateInput) (*Tenant, error
 		 VALUES ($1, $2, $3, $4, 'active', $5, $6)
 		 RETURNING id, slug, name, cell, status, plan, quota, created_at, updated_at,
 		           zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD'),
-		           COALESCE(country, '')`,
+		           COALESCE(country, ''), COALESCE(locale, 'en')`,
 		id, input.Slug, input.Name, input.Cell, input.Plan, quota,
 	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country)
+		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country, &t.Locale)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
@@ -182,10 +184,10 @@ func (s *PGStore) Get(ctx context.Context, id uuid.UUID) (*Tenant, error) {
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at,
 		        zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD'),
-		        COALESCE(country, '')
+		        COALESCE(country, ''), COALESCE(locale, 'en')
 		 FROM tenants WHERE id = $1`, id,
 	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country)
+		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country, &t.Locale)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -235,10 +237,10 @@ func (s *PGStore) GetBySlug(ctx context.Context, slug string) (*Tenant, error) {
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at,
 		        zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD'),
-		        COALESCE(country, '')
+		        COALESCE(country, ''), COALESCE(locale, 'en')
 		 FROM tenants WHERE slug = $1`, slug,
 	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country)
+		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country, &t.Locale)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -256,7 +258,7 @@ func (s *PGStore) List(ctx context.Context) ([]Tenant, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at,
 		        zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD'),
-		        COALESCE(country, '')
+		        COALESCE(country, ''), COALESCE(locale, 'en')
 		 FROM tenants
 		 ORDER BY slug ASC`)
 	if err != nil {
@@ -273,7 +275,7 @@ func (s *PGStore) List(ctx context.Context) ([]Tenant, error) {
 		if err := rows.Scan(
 			&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status,
 			&t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-			&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country,
+			&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country, &t.Locale,
 		); err != nil {
 			return nil, fmt.Errorf("tenant: list scan: %w", err)
 		}
@@ -399,6 +401,80 @@ func (s *PGStore) SetBaseCurrency(ctx context.Context, id uuid.UUID, code string
 		return fmt.Errorf("tenant: set base currency: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	s.invalidateCache(id)
+	return nil
+}
+
+// LocaleValidator is the contract for the package that decides whether
+// a given IETF BCP 47 tag corresponds to a translation bundle the
+// runtime can actually serve. internal/i18n.Bundle satisfies this, but
+// the tenant package only takes a Validator so the lookup stays
+// dependency-free (i18n imports nothing here, and store.go does not
+// import i18n).
+//
+// Tag is passed through as-is; canonicalisation (case folding,
+// region/script normalisation) is the validator's responsibility so
+// the same logic governs SetLocale + Accept-Language resolution +
+// frontend bundle fetches without drift.
+type LocaleValidator interface {
+	IsSupported(tag string) bool
+}
+
+var localeRe = regexp.MustCompile(`^[a-z]{2,3}(-[A-Za-z0-9]{2,4})?$`)
+
+// ValidateLocale returns nil iff `tag` is a syntactically well-formed
+// IETF BCP 47 language tag (e.g. "en", "de", "fr-CH", "zh-Hans") that
+// the supplied `validator` recognises as a registered translation
+// bundle. The format gate runs first regardless of `validator` so an
+// obviously broken value ("../../etc/passwd", "en;DROP TABLE", "EN")
+// is rejected before any service consults the i18n loader — defence
+// in depth alongside the CHECK on migration 000059.
+//
+// Empty tags are accepted and return nil so callers (PGStore.SetLocale,
+// the wizard) can treat empty as "reset to the DB default 'en'"
+// without duplicating the empty-handling branch in every site.
+// A non-nil `validator` is required for the membership check to fire;
+// pass `nil` to skip the bundle-whitelist gate (e.g. unit tests or
+// boot-time paths that don't yet have the runtime loader wired in).
+func ValidateLocale(tag string, validator LocaleValidator) error {
+	if tag == "" {
+		return nil
+	}
+	if !localeRe.MatchString(tag) {
+		return fmt.Errorf("tenant: locale %q must match IETF BCP 47 (e.g. 'en', 'de', 'zh-Hans')", tag)
+	}
+	if validator != nil && !validator.IsSupported(tag) {
+		return fmt.Errorf("tenant: locale %q is not a registered translation bundle", tag)
+	}
+	return nil
+}
+
+// SetLocale updates the tenant's IETF BCP 47 locale tag. Called by
+// the setup wizard once at provisioning time (deriving a default
+// from the country selection) and by the admin tenant-edit form.
+// Empty strings are accepted (clears the locale → stored as the DB
+// default 'en').
+//
+// The validator is the same contract ValidateLocale uses; passing
+// nil skips the bundle-whitelist gate but keeps the format check.
+func (s *PGStore) SetLocale(ctx context.Context, id uuid.UUID, tag string, validator LocaleValidator) error {
+	if err := ValidateLocale(tag, validator); err != nil {
+		return err
+	}
+	stored := tag
+	if stored == "" {
+		stored = "en"
+	}
+	cmdTag, err := s.pool.Exec(ctx,
+		`UPDATE tenants SET locale = $1, updated_at = now() WHERE id = $2`,
+		stored, id,
+	)
+	if err != nil {
+		return fmt.Errorf("tenant: set locale: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
 	s.invalidateCache(id)

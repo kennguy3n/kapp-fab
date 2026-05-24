@@ -29,6 +29,14 @@ func init() { Register(&usPack{}) }
 
 func (usPack) Country() string { return "US" }
 
+// EffectiveYear returns the fiscal year the US bracket tables are
+// calibrated for: IRS Pub 15-T 2024 (single + MFJ), which the 2025
+// / 2026 refresh has not yet superseded for the percentage method.
+// 2024 keeps the "stale rates" warning quiet for slips dated 2024;
+// once we adopt the 2026 Pub 15-T schedule this constant moves to
+// 2026 in lock-step with the brackets above and the std deduction.
+func (usPack) EffectiveYear() int { return 2024 }
+
 // usBracket is one row of the IRS Pub 15-T percentage method table.
 // Floor + Top are annualised gross (pre-deduction); Rate is the
 // marginal rate applied to (gross - Floor) up to Top. The pack's

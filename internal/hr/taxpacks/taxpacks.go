@@ -48,6 +48,13 @@ func (p PayPeriod) Days() int {
 // needs to compute withholding. The payroll engine builds this
 // projection from the employee KRecord rather than passing the raw
 // JSONB so packs stay decoupled from the record schema.
+//
+// Every field is optional from a *pack's* perspective: a pack that
+// does not care about (e.g.) Canton just ignores it. The engine
+// populates whatever fields the employee KRecord supplies and
+// leaves the rest at their zero values — packs are responsible for
+// defaulting to the "most common" case when an input is missing so
+// legacy KRecords from pre-Phase-M2 don't break.
 type EmployeeInfo struct {
 	ID         string
 	FilingType string // US: "single", "married_filing_jointly". AU: "single" / "with_partner" (unused for PAYG).
@@ -56,6 +63,59 @@ type EmployeeInfo struct {
 	HasTFN     bool   // AU: tax file number declared. False forces the 47% no-TFN rate.
 	YTDGross   decimal.Decimal
 	Currency   string
+
+	// Canton is the 2-letter Swiss canton code (ZH, GE, VD, …)
+	// used by the CH pack to resolve cantonal tax on top of
+	// federal direct tax. Empty falls back to the federal-only
+	// rate; the CH pack documents this in its own comments.
+	Canton string
+
+	// Nationality drives the GCC packs' social-security branch
+	// selection. "local" (Saudi national in SA, Bahraini in BH,
+	// …) pays full GOSI/PIFSS/SIO/PASI/GPSSA contributions;
+	// "expat" pays nothing (or, for SA non-Saudis, only the
+	// employer-side GOSI which is not an employee deduction).
+	// Empty defaults to "expat" so a pre-Phase-M2 employee
+	// KRecord without the field gets the safer (smaller-
+	// deduction) treatment.
+	Nationality string
+
+	// TaxRegime is the IN pack's old-vs-new TDS schedule
+	// selector. Values: "old" (FY 2023-24 brackets + deductions)
+	// or "new" (FY 2024-25 default regime). Empty defaults to
+	// "new" to match the post-Budget-2024 default behaviour for
+	// every employee who hasn't explicitly opted out.
+	TaxRegime string
+
+	// KiwiSaverRate is the NZ employee KiwiSaver contribution
+	// rate (3 / 4 / 6 / 8 / 10%). decimal.Zero means "no
+	// KiwiSaver opt-in" (no deduction); positive values are
+	// applied verbatim. The NZ pack does not enrol an employee
+	// in KiwiSaver automatically — the rate must be set on the
+	// KRecord to opt in.
+	KiwiSaverRate decimal.Decimal
+
+	// NumDependents is the count of qualifying dependents used
+	// by VN PIT (4.4M VND/month per dependent on top of the 11M
+	// VND personal deduction) and TH PIT (60k THB/year per child).
+	// Zero means "no dependents claimed".
+	NumDependents int
+
+	// Age in years on the slip's pay-period end date. Drives the
+	// SG CPF tier ladder (rates step down at 55 / 60 / 65 / 70).
+	// Zero means "unknown"; the SG pack treats unknown as
+	// age ≤55 (the highest CPF rate, fail-safe for over-
+	// withholding which the IRAS year-end assessment can refund).
+	Age int
+
+	// PermitType drives jurisdiction-specific resident status
+	// flags that don't fit cleanly in Resident. For CH this is
+	// "C" (settlement permit → not Quellensteuer-liable) vs
+	// "B"/"L" (annual/short-term → Quellensteuer applies). For
+	// SG this is "EP"/"SP"/"WP" but SG branches off Resident
+	// (set by employer payroll classification) so PermitType is
+	// only consulted for the source-tax decision today.
+	PermitType string
 }
 
 // Deduction is one withholding line a pack appends to the slip's
@@ -74,8 +134,16 @@ type Deduction struct {
 // pay for the slip, and the pay period. It returns zero or more
 // Deduction lines; an empty slice means "no statutory withholding"
 // (a legitimate result for, say, an under-threshold AU PAYG slip).
+//
+// EffectiveYear returns the fiscal year the pack's rate tables are
+// calibrated for. The payroll engine compares this against the
+// slip's pay-period year and logs a warning (not an error) when
+// they diverge so operators know the rates may be stale. The
+// quarterly maintenance procedure documented in
+// docs/TAX_PACK_MAINTENANCE.md drives the bump.
 type TaxPack interface {
 	Country() string
+	EffectiveYear() int
 	ComputeWithholding(ctx context.Context, employee EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error)
 }
 
