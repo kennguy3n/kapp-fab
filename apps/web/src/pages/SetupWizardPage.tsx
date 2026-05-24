@@ -4,7 +4,6 @@ import { useNavigate, useParams } from "react-router-dom";
 import {
   SupportedLocales,
   bestSupportedLocaleForCountry,
-  defaultLocaleForCountry,
   localeInfo,
   useTranslation,
 } from "../lib/i18n";
@@ -267,17 +266,30 @@ export function SetupWizardPage() {
       industry: industry.trim() || undefined,
       country: country.trim() || undefined,
       coa_template: effectiveCoaTemplate,
-      // Submit the country-derived canonical locale ("hi" for IN,
-      // "zh-Hans" for CN) when the user hasn't picked explicitly so
-      // the backend persists the canonical-but-unshipped tag rather
-      // than the frontend's downgrade. This keeps tenants.locale
-      // forward-compatible with future catalogue shipments (e.g. when
-      // hi.json lands, IN tenants persisted today as "hi" will start
-      // resolving to the new catalogue automatically without a data
-      // migration). The frontend continues to render the downgraded
-      // effective catalogue (effectiveLocale) until the new file
-      // exists.
-      locale: locale || (country ? defaultLocaleForCountry(country) : undefined),
+      // Submit `undefined` when the user hasn't explicitly picked a
+      // locale from the dropdown so the backend takes the "not
+      // operator-supplied" branch in internal/tenant/wizard.go: it
+      // derives the locale from cfg.Country via its own
+      // DefaultLocaleForCountry (mirror of the frontend table) and
+      // runs the resolver to downgrade canonical-but-unshipped tags
+      // ("zh-Hans" -> "zh", "hi" -> "en") before the strict
+      // IsSupported gate. Sending the frontend's canonical tag
+      // directly would trip that gate — wizard.go intentionally
+      // skips the resolver downgrade on the operator-supplied path
+      // so explicit picks the runtime can't serve surface as a loud
+      // error rather than silent downgrade, and CN ("zh-Hans") / IN
+      // ("hi") provisioning would then fail with
+      //   tenant: locale "zh-Hans" is not a registered translation bundle
+      // even though those values are exactly what
+      // DefaultLocaleForCountry emits when called for CN / IN. An
+      // earlier revision of this code sent the canonical tag here
+      // hoping the persisted value would auto-promote when a future
+      // catalogue (hi.json, zh-Hans.json) ships, but the strict
+      // operator-supplied validation is incompatible with that
+      // intent and the same auto-promotion happens via the backend's
+      // resolver path anyway once the validator's IsSupported set
+      // grows to include the new tag.
+      locale: locale || undefined,
       users: validUsers,
     });
   };
