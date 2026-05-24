@@ -20,12 +20,15 @@
 //     so two hot-standby workers do not double-poll the same
 //     mailbox and trip Gmail's "Too many simultaneous connections"
 //     cap.
-//   - resolveMailboxPassword maps the row's imap_password_ref
-//     scheme to a plaintext password at Start time. Today it
-//     supports env:NAME only; the other schemes that
-//     mailboxes.Validate accepts (vault://, aws://, gcp://,
-//     file://) are reserved for a follow-up PR that wires the
-//     worker's secrets.Provider as a per-ref dispatcher.
+//   - the passwordResolver bridge maps the row's imap_password_ref
+//     scheme to a plaintext password at Start time. Production
+//     wiring is secrets.RefResolver + secrets.PasswordCache: the
+//     resolver dispatches env: / file:// / vault:// / aws:// /
+//     gcp:// refs to the corresponding per-scheme handler, and the
+//     cache amortises remote-backend reads across the converge
+//     loop's 60-second cadence (5-minute TTL per mailbox UUID).
+//     The legacy staticPasswordResolver (env:NAME only) is kept
+//     for tests that don't wire the secrets package.
 //
 // The IMAP wire-protocol Client implementation is deliberately NOT
 // included here — go-imap/v1 sits behind the imap.Client interface
@@ -52,7 +55,9 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk/imap"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk/mailboxes"
+	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
+	"github.com/kennguy3n/kapp-fab/internal/secrets"
 )
 
 // imapClientFactory builds a fresh imap.Client per (host, port,
@@ -210,14 +215,14 @@ func (r *clientRegistry) take(mailboxID uuid.UUID) (imap.Client, bool) {
 // mailboxes, stopping disabled / deleted ones. Runs ONLY on the
 // elected leader.
 type helpdeskIMAPSupervisor struct {
-	store           mailboxes.Store
-	manager         *imap.Manager
-	clientFactory   imapClientFactory
-	clients         *clientRegistry
-	passwordResolve func(ctx context.Context, ref string) (string, error)
-	recipients      *recipientTable
-	convergeEvery   time.Duration
-	logger          *slog.Logger
+	store         mailboxes.Store
+	manager       *imap.Manager
+	clientFactory imapClientFactory
+	clients       *clientRegistry
+	passwords     passwordResolver
+	recipients    *recipientTable
+	convergeEvery time.Duration
+	logger        *slog.Logger
 }
 
 // Run blocks until ctx is cancelled. It calls converge() once
@@ -276,7 +281,7 @@ func (s *helpdeskIMAPSupervisor) converge(ctx context.Context) error {
 		if s.manager.IsActive(row.MailboxID) {
 			continue
 		}
-		password, perr := s.passwordResolve(ctx, row.IMAPPasswordRef)
+		password, perr := s.passwords.Resolve(ctx, row.MailboxID.String(), row.IMAPPasswordRef)
 		if perr != nil {
 			s.logger.Warn("helpdesk: resolve mailbox password failed; skipping",
 				slog.String("tenant_id", row.TenantID.String()),
@@ -292,7 +297,7 @@ func (s *helpdeskIMAPSupervisor) converge(ctx context.Context) error {
 			MailboxID:      row.MailboxID,
 			Folder:         imap.Folder(row.Folder),
 			Username:       row.IMAPUsername,
-			Password:       password,
+			Password:       string(password),
 			PollInterval:   row.PollInterval(),
 			MaxBackoff:     row.MaxBackoff(),
 			FetchBatchSize: row.FetchBatchSizeOrDefault(),
@@ -330,41 +335,144 @@ func (s *helpdeskIMAPSupervisor) converge(ctx context.Context) error {
 		if !want[active] {
 			s.manager.Stop(active)
 			s.recipients.deleteMailbox(active)
+			// Drop the cached password so a re-enable
+			// against a different ref does not pick up
+			// stale credentials; also flushes the bytes
+			// from process memory rather than holding
+			// them for the full TTL.
+			s.passwords.InvalidateScope(active.String())
 		}
 	}
 	return nil
 }
 
-// resolveMailboxPassword resolves an `imap_password_ref` to its
-// plaintext value. Supports `env:NAME` inline; the other schemes
-// (vault://, aws://, gcp://, file://) accepted by mailboxes.Validate
-// require the worker to be wired with a multi-scheme
-// secrets.Provider dispatcher. That wiring is reserved for a
-// follow-up PR because the secrets package today returns a single
-// Provider keyed by KAPP_SECRET_PROVIDER, not a per-ref dispatcher.
+// passwordResolver bridges a (mailbox-scope, ref) tuple to a
+// resolved plaintext password. The supervisor calls Resolve on
+// every converge tick for every mailbox; the resolver's cache
+// absorbs repeat hits within the TTL so an IMAP fleet of N
+// mailboxes does not produce 60*N Vault / AWS SM reads per
+// hour. InvalidateScope is called when a mailbox row is
+// disabled / deleted so stale credentials do not linger in
+// memory longer than necessary.
 //
-// Refusing the unsupported schemes here surfaces a clear log line at
-// converge time rather than silently passing an empty password to
-// IMAP LOGIN (which trips ErrAuth and burns the per-mailbox backoff
-// budget for no reason). The mailbox row is skipped + retried on the
-// next converge tick when the wiring lands.
-func resolveMailboxPassword(_ context.Context, ref string) (string, error) {
+// The interface is narrow so unit tests for the supervisor can
+// inject a fake without dragging in the secrets package's
+// per-backend setup.
+type passwordResolver interface {
+	Resolve(ctx context.Context, scope string, ref string) ([]byte, error)
+	InvalidateScope(scope string)
+}
+
+// newPasswordResolver returns the production wiring: a
+// secrets.RefResolver dispatching env / file / vault / aws /
+// gcp by scheme prefix, wrapped in a secrets.PasswordCache
+// keyed on the mailbox UUID with the supplied TTL. ttl <= 0
+// disables the cache (useful for tests that need every Resolve
+// to fire the backend).
+func newPasswordResolver(opts secrets.RefResolverOptions, ttl time.Duration) passwordResolver {
+	return secrets.NewPasswordCache(secrets.NewRefResolver(opts), ttl)
+}
+
+// newWorkerPasswordResolver builds the production passwordResolver
+// from the worker's loaded platform.Config. Each remote backend
+// (Vault / AWS Secrets Manager / GCP Secret Manager) is wired in
+// only when its config is populated:
+//
+//   - Vault when KAPP_SECRETS_VAULT_ADDR + KAPP_SECRETS_VAULT_TOKEN
+//     are both set;
+//   - AWS when KAPP_SECRETS_AWS_REGION is set;
+//   - GCP when KAPP_SECRETS_GCP_PROJECT_ID is set.
+//
+// Unconfigured backends return ErrProviderNotConfigured at Resolve
+// time for refs pointing at them. env: and file:// refs work
+// unconditionally — they're stateless and never need a Provider.
+//
+// Errors during backend construction (e.g. an AWS region was set
+// but the SDK rejected the config) are logged at WARN and the
+// backend is left unwired. The worker boots either way; refs
+// pointing at the unconfigured backend will fail loudly at the
+// converge tick that needs them, which is the right surface for
+// an operator misconfiguration.
+//
+// ttl is the per-mailbox cache TTL; the worker passes 5 minutes
+// in the production wiring (matching the docstring on the
+// passwordResolver interface).
+func newWorkerPasswordResolver(ctx context.Context, cfg *platform.Config, ttl time.Duration, logger *slog.Logger) passwordResolver {
+	opts := secrets.RefResolverOptions{}
+	if cfg.SecretsVaultAddr != "" && cfg.SecretsVaultToken != "" {
+		vault, err := secrets.NewVaultProvider(secrets.VaultProviderConfig{
+			Addr:      cfg.SecretsVaultAddr,
+			Token:     cfg.SecretsVaultToken,
+			MountPath: cfg.SecretsVaultMountPath,
+			SecretKey: cfg.SecretsVaultSecretKey,
+		})
+		if err != nil {
+			logger.Warn("helpdesk: vault provider unavailable; vault:// refs will fail",
+				slog.String("err", err.Error()))
+		} else {
+			opts.Vault = vault
+		}
+	}
+	if cfg.SecretsAWSRegion != "" {
+		aws, err := secrets.NewAWSProvider(ctx, secrets.AWSProviderConfig{
+			Region:   cfg.SecretsAWSRegion,
+			Prefix:   cfg.SecretsAWSPrefix,
+			Endpoint: cfg.SecretsAWSEndpoint,
+		})
+		if err != nil {
+			logger.Warn("helpdesk: aws provider unavailable; aws:// refs will fail",
+				slog.String("err", err.Error()))
+		} else {
+			opts.AWS = aws
+		}
+	}
+	if cfg.SecretsGCPProjectID != "" {
+		gcp, err := secrets.NewGCPProvider(ctx, secrets.GCPProviderConfig{
+			ProjectID: cfg.SecretsGCPProjectID,
+			Prefix:    cfg.SecretsGCPPrefix,
+			Version:   cfg.SecretsGCPVersion,
+		})
+		if err != nil {
+			logger.Warn("helpdesk: gcp provider unavailable; gcp:// refs will fail",
+				slog.String("err", err.Error()))
+		} else {
+			opts.GCP = gcp
+		}
+	}
+	return newPasswordResolver(opts, ttl)
+}
+
+// staticPasswordResolver is the legacy env-only resolver. It
+// stays in place for the disabled-supervisor smoke tests where
+// the worker boot does not construct the secrets package's
+// per-backend wiring; the converge path never touches it when
+// the supervisor is wired with a real RefResolver.
+type staticPasswordResolver struct{}
+
+var _ passwordResolver = (*staticPasswordResolver)(nil)
+
+// Resolve handles env:NAME refs only; all other schemes return
+// an error so the operator sees a clear failure at converge
+// time. The full RefResolver is the production path.
+func (staticPasswordResolver) Resolve(_ context.Context, _, ref string) ([]byte, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return "", errors.New("password ref is empty")
+		return nil, errors.New("password ref is empty")
 	}
-	switch {
-	case strings.HasPrefix(ref, "env:"):
-		key := strings.TrimPrefix(ref, "env:")
-		val := os.Getenv(key)
-		if val == "" {
-			return "", fmt.Errorf("env var %q is empty or unset", key)
-		}
-		return val, nil
-	default:
-		return "", fmt.Errorf("password ref scheme %q not wired in this worker; only env: is supported (vault://, aws://, gcp://, file:// reserved for follow-up)", schemeOf(ref))
+	if !strings.HasPrefix(ref, "env:") {
+		return nil, fmt.Errorf("static resolver only supports env: refs; got scheme %q", schemeOf(ref))
 	}
+	key := strings.TrimPrefix(ref, "env:")
+	val := os.Getenv(key)
+	if val == "" {
+		return nil, fmt.Errorf("env var %q is empty or unset", key)
+	}
+	return []byte(val), nil
 }
+
+// InvalidateScope is a no-op on the static resolver — nothing
+// to drop.
+func (staticPasswordResolver) InvalidateScope(_ string) {}
 
 // schemeOf extracts the scheme prefix for diagnostic logging.
 // Conservative: returns the substring up to (but not including) the
@@ -404,6 +512,7 @@ func newHelpdeskIMAPState(
 	recordStore *record.PGStore,
 	helpdeskStore *helpdesk.Store,
 	clientFactory imapClientFactory,
+	passwords passwordResolver,
 	logger *slog.Logger,
 ) *helpdeskIMAPState {
 	if adminPool == nil {
@@ -412,6 +521,10 @@ func newHelpdeskIMAPState(
 	}
 	if clientFactory == nil {
 		logger.Info("helpdesk: imap supervisor disabled — no client factory wired (go-imap adapter PR pending)")
+		return nil
+	}
+	if passwords == nil {
+		logger.Info("helpdesk: imap supervisor disabled — no password resolver wired")
 		return nil
 	}
 	resolver := helpdesk.NewPGTenantResolver(adminPool)
@@ -443,7 +556,7 @@ func newHelpdeskIMAPState(
 		manager:         manager,
 		clientFactory:   clientFactory,
 		clients:         clients,
-		passwordResolve: resolveMailboxPassword,
+		passwords:     passwords,
 		recipients:      recipients,
 		convergeEvery:   60 * time.Second,
 		logger:          logger,

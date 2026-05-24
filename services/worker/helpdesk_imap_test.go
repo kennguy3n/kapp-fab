@@ -121,45 +121,55 @@ func TestClientRegistry_PutTake(t *testing.T) {
 	}
 }
 
-// TestResolveMailboxPassword_Env pins the env: scheme.
-func TestResolveMailboxPassword_Env(t *testing.T) {
+// TestStaticPasswordResolver_Env pins the legacy env:NAME path
+// used by tests that don't wire the production secrets package.
+// The static resolver is the fallback the supervisor never
+// reaches in production; this test exists to prevent regressions
+// in the test-double itself.
+func TestStaticPasswordResolver_Env(t *testing.T) {
 	const key = "KAPP_TEST_IMAP_PASSWORD"
 	t.Setenv(key, "s3kret")
-	val, err := resolveMailboxPassword(context.Background(), "env:"+key)
+	r := staticPasswordResolver{}
+	val, err := r.Resolve(context.Background(), "mailbox-A", "env:"+key)
 	if err != nil {
 		t.Fatalf("env: with value: %v", err)
 	}
-	if val != "s3kret" {
-		t.Errorf("env: want s3kret, got %q", val)
+	if string(val) != "s3kret" {
+		t.Errorf("env: want s3kret, got %q", string(val))
 	}
 
 	// Empty value
 	t.Setenv(key, "")
-	if _, err := resolveMailboxPassword(context.Background(), "env:"+key); err == nil {
+	if _, err := r.Resolve(context.Background(), "mailbox-A", "env:"+key); err == nil {
 		t.Errorf("env: with empty value: expected error, got nil")
 	}
 
 	// Unset key
-	if _, err := resolveMailboxPassword(context.Background(), "env:KAPP_TEST_DEFINITELY_NOT_SET_"+t.Name()); err == nil {
+	if _, err := r.Resolve(context.Background(), "mailbox-A", "env:KAPP_TEST_DEFINITELY_NOT_SET_"+t.Name()); err == nil {
 		t.Errorf("env: with unset var: expected error, got nil")
 	}
 }
 
-// TestResolveMailboxPassword_EmptyRef pins the early-return for
-// blank refs.
-func TestResolveMailboxPassword_EmptyRef(t *testing.T) {
-	if _, err := resolveMailboxPassword(context.Background(), ""); err == nil {
+// TestStaticPasswordResolver_EmptyRef pins the early-return for
+// blank refs in the test fallback.
+func TestStaticPasswordResolver_EmptyRef(t *testing.T) {
+	r := staticPasswordResolver{}
+	if _, err := r.Resolve(context.Background(), "mailbox-A", ""); err == nil {
 		t.Errorf("expected error for empty ref")
 	}
-	if _, err := resolveMailboxPassword(context.Background(), "   "); err == nil {
+	if _, err := r.Resolve(context.Background(), "mailbox-A", "   "); err == nil {
 		t.Errorf("expected error for whitespace-only ref")
 	}
 }
 
-// TestResolveMailboxPassword_UnsupportedScheme pins the
-// not-yet-wired schemes: each returns a clear error mentioning
-// the scheme so the supervisor's converge log line reads cleanly.
-func TestResolveMailboxPassword_UnsupportedScheme(t *testing.T) {
+// TestStaticPasswordResolver_UnsupportedScheme pins the static
+// resolver's narrow contract — env: only. The production
+// resolver dispatches every supported scheme (see
+// secrets.RefResolver tests); the static resolver intentionally
+// rejects anything else so accidentally-disabled secrets wiring
+// in tests fails loudly rather than masking config bugs.
+func TestStaticPasswordResolver_UnsupportedScheme(t *testing.T) {
+	r := staticPasswordResolver{}
 	cases := []string{
 		"vault://kv/data/foo",
 		"aws://arn:aws:secretsmanager:us-east-1:123456789012:secret:foo",
@@ -168,11 +178,20 @@ func TestResolveMailboxPassword_UnsupportedScheme(t *testing.T) {
 		"plaintext-leak",
 	}
 	for _, ref := range cases {
-		_, err := resolveMailboxPassword(context.Background(), ref)
+		_, err := r.Resolve(context.Background(), "mailbox-A", ref)
 		if err == nil {
 			t.Errorf("ref %q: expected error, got nil", ref)
 		}
 	}
+}
+
+// TestStaticPasswordResolver_InvalidateScope pins the no-op
+// contract so the supervisor's deleteMailbox path can call it
+// uniformly without branching on resolver type.
+func TestStaticPasswordResolver_InvalidateScope(_ *testing.T) {
+	r := staticPasswordResolver{}
+	r.InvalidateScope("mailbox-A")
+	r.InvalidateScope("")
 }
 
 // TestSchemeOf pins the diagnostic-logging helper.

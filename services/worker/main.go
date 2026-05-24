@@ -377,8 +377,16 @@ func run() error {
 	// certs, custom cipher pools) can override via env in a
 	// follow-up wire-up; today we ship with defaults and the
 	// IMAP fleet works against any RFC-compliant server.
+	//
+	// Password resolution wires the multi-scheme dispatcher: env: /
+	// file:// refs are stateless and always work; vault:// / aws:// /
+	// gcp:// refs are wired in only when the operator populated the
+	// corresponding KAPP_SECRETS_* config. The PasswordCache amortises
+	// remote-backend reads across the 60-second converge cadence
+	// (5-minute per-mailbox TTL).
 	imapFactory := goimap.NewFactory(goimap.FactoryOptions{})
-	helpdeskIMAP := newHelpdeskIMAPState(pool, adminPool, recordStore, helpdeskStore, imapFactory, slog.Default())
+	helpdeskPasswords := newWorkerPasswordResolver(ctx, cfg, 5*time.Minute, slog.Default())
+	helpdeskIMAP := newHelpdeskIMAPState(pool, adminPool, recordStore, helpdeskStore, imapFactory, helpdeskPasswords, slog.Default())
 
 	return election.Run(ctx, func(leaderCtx context.Context) error {
 		return leadWorker(leaderCtx, leaderState{
