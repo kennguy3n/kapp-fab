@@ -178,12 +178,19 @@ func IsSafeMethod(m string) bool {
 	return false
 }
 
-// IssueCookie writes a fresh CSRF cookie on the response. Call
-// this on response to a GET / HEAD that returns HTML or otherwise
-// initialises a frontend session. The middleware does NOT issue
-// cookies automatically because not every safe request is a
-// session bootstrap — issuing on every GET would mean cookie
-// churn on API calls that don't need it.
+// IssueCookie writes a fresh CSRF cookie on the response. The
+// Middleware below calls this automatically on safe-method
+// requests when cfg.CookieName is set AND the request doesn't
+// already carry the cookie, so a JS frontend can bootstrap its
+// double-submit token from any GET / HEAD / OPTIONS round-trip.
+// Cookie churn is avoided by the "already carries cookie" gate
+// — only the first safe-method response per session issues a
+// new token; subsequent safe-method calls pass through unchanged.
+//
+// Callers may still invoke this directly when they want to
+// force-rotate a token (e.g. after a privileged action) or
+// issue a cookie outside the Middleware path (testing, a
+// dedicated bootstrap endpoint).
 func IssueCookie(w http.ResponseWriter, _ *http.Request, cfg Config) (string, error) {
 	cfg = cfg.withDefaults()
 	if cfg.CookieName == "" {

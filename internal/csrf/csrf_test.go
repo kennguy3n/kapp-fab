@@ -243,7 +243,7 @@ func TestMiddleware_AutoIssuesCookieOnSafeMethod(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/foo", nil)
+	req := httptest.NewRequest("GET", "/foo", http.NoBody)
 	handler.ServeHTTP(w, req)
 	cookies := w.Result().Cookies()
 	var found *http.Cookie
@@ -278,7 +278,7 @@ func TestMiddleware_NoReissueWhenCookiePresent(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/foo", nil)
+	req := httptest.NewRequest("GET", "/foo", http.NoBody)
 	req.AddCookie(&http.Cookie{Name: "__Host-kapp-csrf", Value: "preexisting-tok"})
 	handler.ServeHTTP(w, req)
 	for _, c := range w.Result().Cookies() {
@@ -297,7 +297,7 @@ func TestMiddleware_DoesNotAutoIssueWhenCookieNameUnset(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/foo", nil)
+	req := httptest.NewRequest("GET", "/foo", http.NoBody)
 	handler.ServeHTTP(w, req)
 	if cookies := w.Result().Cookies(); len(cookies) > 0 {
 		t.Errorf("expected no auto-issued cookie when CookieName empty, got %+v", cookies)

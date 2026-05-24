@@ -36,11 +36,17 @@ type RecaptchaV3Verifier struct {
 
 // NewRecaptchaV3Verifier returns a verifier for reCAPTCHA v3. The
 // minimum score threshold is read from opts.MinScore (tri-state
-// sentinel: 0 → default 0.5, negative → threshold disabled, positive
-// → threshold floor). Earlier revisions of this constructor accepted
-// minScore as a separate argument; that shape duplicated the
-// configuration surface and made Options.MinScore look like dead
-// code. See PR-5 followup Devin Review finding
+// sentinel: negative → default 0.5 (Google's recommended floor),
+// zero → threshold disabled (every successful token accepted),
+// positive → used verbatim as the floor). See the Options.MinScore
+// field doc-comment and Options.minScoreEffective for the
+// authoritative description; this constructor godoc is a
+// pointer at the call-site.
+//
+// Earlier revisions of this constructor accepted minScore as a
+// separate argument; that shape duplicated the configuration
+// surface and made Options.MinScore look like dead code. See
+// PR-5 followup Devin Review finding
 // ANALYSIS_pr-review-job-d967d70cf92e4cc0b9ba19353db36214_0002.
 func NewRecaptchaV3Verifier(secret string, opts Options) *RecaptchaV3Verifier {
 	opts = opts.withDefaults()
