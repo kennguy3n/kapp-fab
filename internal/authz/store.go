@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/kennguy3n/kapp-fab/internal/authz/condition"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 )
 
@@ -75,6 +76,13 @@ func (e *PGEvaluator) Authorize(
 // describing the record. Conditional permissions only match when their
 // conditions JSONB is satisfied by the supplied attributes; unconditional
 // permissions behave exactly like Authorize.
+//
+// Condition evaluation delegates to the internal/authz/condition package
+// which implements the production ABAC AST (typed operators, whitelisted
+// actor refs, depth-bounded parser, fail-closed semantics). The legacy
+// owner_only / status_in payloads stored in existing permissions.conditions
+// rows are auto-translated into the canonical AST at parse time, so this
+// switch-over does not require a database migration.
 func (e *PGEvaluator) AuthorizeRecord(
 	ctx context.Context,
 	tenantID, userID uuid.UUID,
@@ -85,6 +93,10 @@ func (e *PGEvaluator) AuthorizeRecord(
 	if err != nil {
 		return err
 	}
+	actor := condition.Actor{
+		UserID:   userID,
+		TenantID: tenantID,
+	}
 	for _, p := range perms {
 		if !matchAction(p.Action, action) {
 			continue
@@ -92,7 +104,14 @@ func (e *PGEvaluator) AuthorizeRecord(
 		if !matchResource(p.Resource, resource) {
 			continue
 		}
-		if !matchesConditions(p.Conditions, userID, recordAttrs) {
+		ok, evalErr := condition.EvalRaw(p.Conditions, actor, recordAttrs)
+		if evalErr != nil || !ok {
+			// Eval errors mean the policy AST is malformed in a
+			// way the parser couldn't fully validate up front
+			// (e.g. a runtime regex panic) — treat as deny. We
+			// intentionally don't log here; the audit log layer
+			// captures the deny outcome with the failing
+			// permission row id.
 			continue
 		}
 		return nil
@@ -444,80 +463,17 @@ func isUnconditional(raw json.RawMessage) bool {
 	return false
 }
 
-// matchesConditions evaluates a permission's conditions JSONB against the
-// supplied record attributes. The grammar is intentionally small — extending
-// it requires bumping the case list and matching documentation in
-// docs/SECURITY_REVIEW.md.
-//
-// Supported keys:
-//
-//   - "owner_only": bool — when true, requires attrs["owner"] or
-//     attrs["created_by"] to equal the actor's user id.
-//   - "status_in": []string — requires attrs["status"] to appear in the
-//     list (string-compared).
-//
-// An empty/missing conditions blob always matches (unconditional grant).
-// Unrecognised keys make the rule fail closed: the platform should not
-// silently widen access when faced with conditions it cannot evaluate.
+// matchesConditions is a thin compatibility shim over the
+// internal/authz/condition package. Kept package-private (and with the
+// same signature) so existing call-sites — including store_test.go
+// — continue to work without churn while the real grammar, operator
+// set, fail-closed parser and legacy-shape translation live in the
+// dedicated package. New code should reach for condition.Compile /
+// condition.EvalRaw directly.
 func matchesConditions(raw json.RawMessage, userID uuid.UUID, attrs map[string]any) bool {
-	if isUnconditional(raw) {
-		return true
-	}
-	var cond map[string]any
-	if err := json.Unmarshal(raw, &cond); err != nil {
+	ok, err := condition.EvalRaw(raw, condition.Actor{UserID: userID}, attrs)
+	if err != nil {
 		return false
 	}
-	for key, val := range cond {
-		switch key {
-		case "owner_only":
-			b, ok := val.(bool)
-			if !ok || !b {
-				continue
-			}
-			if !attrMatchesUser(attrs["owner"], userID) && !attrMatchesUser(attrs["created_by"], userID) {
-				return false
-			}
-		case "status_in":
-			list, ok := val.([]any)
-			if !ok {
-				return false
-			}
-			cur, _ := attrs["status"].(string)
-			match := false
-			for _, item := range list {
-				if s, ok := item.(string); ok && s == cur {
-					match = true
-					break
-				}
-			}
-			if !match {
-				return false
-			}
-		default:
-			// Unknown condition key — fail closed.
-			return false
-		}
-	}
-	return true
-}
-
-func attrMatchesUser(attr any, userID uuid.UUID) bool {
-	switch v := attr.(type) {
-	case uuid.UUID:
-		return v == userID
-	case string:
-		id, err := uuid.Parse(v)
-		if err != nil {
-			return false
-		}
-		return id == userID
-	case fmt.Stringer:
-		id, err := uuid.Parse(v.String())
-		if err != nil {
-			return false
-		}
-		return id == userID
-	default:
-		return false
-	}
+	return ok
 }
