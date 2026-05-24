@@ -127,6 +127,12 @@ var TenantScopedTables = []string{
 	// target is the message_id, not an auto-generated id —
 	// declared in tableConflictKeys below.
 	"email_messages",
+	// Phase L (PR-7) — helpdesk email attachments. PK is
+	// (tenant_id, message_id, file_id) — declared in
+	// tableConflictKeys. Listed AFTER email_messages because
+	// the FK on (tenant_id, message_id) requires the parent
+	// to land first on restore.
+	"email_attachments",
 }
 
 // manifest is the first record in every dump file.
@@ -379,7 +385,8 @@ var tableConflictKeys = map[string][]string{
 	// Message-ID is the idempotency key (relay retry must not
 	// double-insert), so the restore ON CONFLICT honours the
 	// natural PK rather than synthesising a surrogate id.
-	"email_messages": {"tenant_id", "message_id"},
+	"email_messages":    {"tenant_id", "message_id"},
+	"email_attachments": {"tenant_id", "message_id", "file_id"},
 	// insights_query_cache PK is (tenant_id, query_hash, filter_hash) and
 	// insights_shares enforces a (tenant_id, resource_type, resource_id,
 	// grantee_type, grantee) UNIQUE on top of the (tenant_id, id) PK.

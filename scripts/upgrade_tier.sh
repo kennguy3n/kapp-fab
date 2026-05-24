@@ -76,7 +76,7 @@ TABLES=(
   insights_queries insights_dashboards insights_dashboard_widgets
   insights_query_cache insights_shares
   insights_data_sources insights_embeds
-  email_messages
+  email_messages email_attachments
 )
 
 # Build a Postgres TEXT[] literal: ARRAY['t1','t2',...]
