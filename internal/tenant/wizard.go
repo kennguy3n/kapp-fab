@@ -711,10 +711,15 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 		}
 		// Stamp the resolved locale on the result so the wizard UI
 		// can render "Locale used: <tag>" on the completion screen.
-		// Done inside the tx so a rollback also discards the result
-		// field assignment (out is the result pointer reused by the
-		// caller; setting it after the tx but before the return path
-		// would still surface a value that didn't commit).
+		// The assignment lives inside the tx closure for consistency
+		// with the other out.* fields (AccountsInserted line 578,
+		// RolesInserted line 584). The struct mutation itself is
+		// NOT undone by a tx rollback — Go heap state is not
+		// transactional — but the WithTenantTx wrapper returns the
+		// closure's error to the outer function, which surfaces it
+		// via "return nil, fmt.Errorf(...)" at line 715. The caller
+		// therefore receives (nil, err) and never observes a
+		// partially-populated *WizardResult on a rollback path.
 		out.LocaleUsed = locale
 
 		// Seed the default per-tenant scheduled_actions rows the
