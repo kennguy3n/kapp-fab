@@ -194,20 +194,28 @@ func TestAUPackBelowThresholdReturnsNoDeduction(t *testing.T) {
 	}
 }
 
-// TestRegisteredCountriesIsStable verifies both packs register and
-// the dropdown source reflects them.
+// TestRegisteredCountriesIsStable pins the full set of packs the
+// wizard surfaces in the country dropdown. Bumps must be
+// deliberate and land in the same PR as the new pack file.
 func TestRegisteredCountriesIsStable(t *testing.T) {
 	got := RegisteredCountries()
-	hasUS, hasAU := false, false
+	gotSet := make(map[string]bool, len(got))
 	for _, c := range got {
-		if c == "US" {
-			hasUS = true
-		}
-		if c == "AU" {
-			hasAU = true
-		}
+		gotSet[c] = true
 	}
-	if !hasUS || !hasAU {
-		t.Fatalf("RegisteredCountries() = %v; want US + AU registered", got)
+	want := []string{
+		// Foundation: US + AU.
+		"US", "AU",
+		// PR-2a: APAC batch 1.
+		"SG", "MY", "TH", "ID",
+		// PR-2b: APAC batch 2.
+		"VN", "PH", "NZ", "IN",
+		// PR-2c: Europe + MENA.
+		"CH", "AE", "SA", "QA", "KW", "BH", "OM",
+	}
+	for _, code := range want {
+		if !gotSet[code] {
+			t.Errorf("RegisteredCountries() missing %q; got %v", code, got)
+		}
 	}
 }
