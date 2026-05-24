@@ -350,7 +350,7 @@ func LoadConfig() (*Config, error) {
 		JWTAudience:               getenv("KAPP_JWT_AUDIENCE", "kapp"),
 		JWTAccessTTL:              getenvDuration("KAPP_JWT_ACCESS_TTL", 15*time.Minute),
 		JWTRefreshTTL:             getenvDuration("KAPP_JWT_REFRESH_TTL", 24*time.Hour),
-		JWTLeeway:                 getenvDuration("KAPP_JWT_LEEWAY", 30*time.Second),
+		JWTLeeway:                 getenvDurationAllowZero("KAPP_JWT_LEEWAY", 30*time.Second),
 		JWTKeyringRefreshInterval: getenvDuration("KAPP_JWT_KEYRING_REFRESH_INTERVAL", 60*time.Second),
 
 		CaptchaProvider:         os.Getenv("KAPP_CAPTCHA_PROVIDER"),
@@ -514,11 +514,14 @@ func getenv(key, fallback string) string {
 }
 
 // getenvDuration parses an env var with time.ParseDuration. An
-// unparseable or unset value returns the fallback. Zero values
-// are explicitly rejected so an operator who sets
+// unparseable, unset, or non-positive value returns the fallback.
+// Zero values are explicitly rejected so an operator who sets
 // KAPP_JWT_ACCESS_TTL="0s" gets the default (the auth.SignerConfig
 // uses zero as "use my baked-in default" and we don't want a
-// typo to subtly disable expiry).
+// typo to subtly disable expiry). Use getenvDurationAllowZero for
+// fields where zero has explicit operational meaning (e.g.
+// KAPP_JWT_LEEWAY=0s = disable the clock-skew grace window per
+// SignerConfig.Leeway docs).
 func getenvDuration(key string, fallback time.Duration) time.Duration {
 	raw := os.Getenv(key)
 	if raw == "" {
@@ -526,6 +529,32 @@ func getenvDuration(key string, fallback time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
+}
+
+// getenvDurationAllowZero is identical to getenvDuration except
+// that an explicit zero value (e.g. "0s") is honoured rather
+// than treated as "unset". Use for fields where zero has
+// explicit semantic meaning per the consumer's contract — the
+// canonical example is SignerConfig.Leeway, where 0 disables
+// the clock-skew grace window. Without this variant, an
+// operator who sets KAPP_JWT_LEEWAY=0s intending to disable
+// the grace window would be silently upgraded to the 30s
+// default (the strict-clock-skew use case is rare but real;
+// audit-bound deployments often turn it off entirely).
+//
+// Negative values are still rejected as malformed input — the
+// duration domain doesn't support them and an operator who
+// reaches that branch has fat-fingered the env var.
+func getenvDurationAllowZero(key string, fallback time.Duration) time.Duration {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
 		return fallback
 	}
 	return d

@@ -837,6 +837,35 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 			kchat := auth.NewHTTPKChatClient(os.Getenv("KCHAT_BASE_URL"), os.Getenv("KCHAT_API_KEY"))
 			authh.signer = signer
 			authh.svc = auth.NewSSOService(kchat, signer, sessionStore, pool, adminPool)
+			// Wire the refresher-join into the cleanup chain so
+			// shutdown drains the refresher goroutine BEFORE the
+			// secrets provider's Close() runs. Without this join,
+			// a provider Close concurrent with an in-flight
+			// GetSecret RPC produces a benign-but-noisy error
+			// during shutdown — and worse, on gRPC backends like
+			// GCP a Close mid-Recv can race the codec finalizer.
+			// Cleanups run LIFO, so registering the join AFTER
+			// the closer-Close cleanup above means the join
+			// executes FIRST.
+			//
+			// The 5s timeout is the shutdown budget: the
+			// refresher's provider calls are context-aware and
+			// return promptly on cancellation (the parent build
+			// ctx is the same one the refresher uses), so the
+			// happy path completes in microseconds. The timeout
+			// guards against a wedged provider whose GetSecret
+			// hangs past ctx cancellation — we'd rather log a
+			// "refresher did not exit in time" and proceed than
+			// stall shutdown.
+			if done := signer.RefresherDone(); done != nil {
+				cleanups = append(cleanups, func() {
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						log.Printf("api: keyring refresher did not exit within 5s of shutdown; proceeding with provider close")
+					}
+				})
+			}
 			// Log the algorithm the signer ACTUALLY uses, not
 			// the operator-configured value — they diverge on
 			// the env path because auth.SignerFromEnv ignores

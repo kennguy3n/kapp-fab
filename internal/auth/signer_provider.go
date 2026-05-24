@@ -146,7 +146,13 @@ func SignerFromProvider(refreshCtx context.Context, provider secrets.Provider, o
 		for ref, version := range verifyVersions {
 			refresher.current[ref] = version
 		}
+		// Wire the refresher's exit into the signer so callers
+		// can join it during shutdown (see Signer.RefresherDone).
+		// Buffer is zero — close is the signal, no value is sent.
+		done := make(chan struct{})
+		signer.refresherDone = done
 		go func() {
+			defer close(done)
 			if err := refresher.Run(refreshCtx); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Warn("auth: keyring refresher exited", slog.String("error", err.Error()))
 			}

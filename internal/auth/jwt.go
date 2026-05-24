@@ -157,6 +157,29 @@ type SignerConfig struct {
 type Signer struct {
 	cfg SignerConfig
 	now func() time.Time
+	// refresherDone, when non-nil, is closed by the keyring
+	// refresher goroutine started by SignerFromProvider once
+	// it has fully exited. Callers can wait on this channel
+	// during shutdown to join the goroutine before tearing
+	// down resources the refresher depends on (e.g. the
+	// secrets.Provider's gRPC connection), avoiding a race
+	// where the refresher is still mid-RPC when the provider
+	// is closed. Nil on signers built without a refresher
+	// (SignerFromEnv, NewSigner with no provider).
+	refresherDone <-chan struct{}
+}
+
+// RefresherDone returns a channel that is closed once the
+// background keyring refresher (if any) has fully exited. Use
+// during shutdown to wait for the refresher to drain in-flight
+// provider RPCs before closing the provider — without this
+// join, a provider Close() can race with an in-flight refresh
+// RPC and produce shutdown-time errors. Returns nil for signers
+// without a refresher (legacy single-key path, env path,
+// one-shot CLI use): callers should handle the nil case as
+// "no goroutine to wait on".
+func (s *Signer) RefresherDone() <-chan struct{} {
+	return s.refresherDone
 }
 
 // NewSigner validates the config and returns a Signer ready to issue

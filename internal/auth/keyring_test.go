@@ -423,6 +423,86 @@ func TestSignerFromProvider_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestSignerFromProvider_RefresherDoneClosesOnContextCancel
+// pins the shutdown-join contract: a signer constructed with
+// a refresher (non-nil refreshCtx + positive RefreshInterval)
+// exposes a non-nil RefresherDone() channel, and that channel
+// is closed once the refresher goroutine has fully exited
+// after the context is cancelled. Callers rely on this for
+// graceful shutdown — without the join, a provider Close()
+// can race in-flight refresh RPCs.
+func TestSignerFromProvider_RefresherDoneClosesOnContextCancel(t *testing.T) {
+	k := make([]byte, 32)
+	for i := range k {
+		k[i] = 0xAB
+	}
+	p := &fakeProvider{
+		store: map[string]secrets.SecretValue{
+			"jwt/primary": {Bytes: k, Version: "v1"},
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	signer, err := SignerFromProvider(ctx, p, SignerProviderOptions{
+		PrimaryRef:      "jwt/primary",
+		Algorithm:       AlgHS256,
+		Issuer:          "k",
+		Audience:        "k",
+		RefreshInterval: time.Hour, // long enough that we observe ctx-cancel exit, not a tick.
+	})
+	if err != nil {
+		cancel()
+		t.Fatalf("SignerFromProvider: %v", err)
+	}
+	done := signer.RefresherDone()
+	if done == nil {
+		cancel()
+		t.Fatalf("RefresherDone must be non-nil when refresher is started")
+	}
+	select {
+	case <-done:
+		cancel()
+		t.Fatalf("RefresherDone closed before context cancellation")
+	default:
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("RefresherDone did not close within 2s of context cancellation")
+	}
+}
+
+// TestSignerFromProvider_RefresherDoneNilWithoutRefresher pins
+// the contract that a signer constructed without an auto-
+// refresh loop (nil ctx OR zero RefreshInterval, as in one-
+// shot CLI invocations) returns nil from RefresherDone. The
+// caller's shutdown-join logic relies on the nil case meaning
+// "no goroutine to wait on".
+func TestSignerFromProvider_RefresherDoneNilWithoutRefresher(t *testing.T) {
+	k := make([]byte, 32)
+	for i := range k {
+		k[i] = 0xCD
+	}
+	p := &fakeProvider{
+		store: map[string]secrets.SecretValue{
+			"jwt/primary": {Bytes: k, Version: "v1"},
+		},
+	}
+	// Nil ctx — refresher loop intentionally not started.
+	signer, err := SignerFromProvider(nil, p, SignerProviderOptions{
+		PrimaryRef: "jwt/primary",
+		Algorithm:  AlgHS256,
+		Issuer:     "k",
+		Audience:   "k",
+	})
+	if err != nil {
+		t.Fatalf("SignerFromProvider: %v", err)
+	}
+	if signer.RefresherDone() != nil {
+		t.Fatalf("RefresherDone must be nil when no refresher is started")
+	}
+}
+
 func TestSignerFromProvider_RejectsDevPlaceholder(t *testing.T) {
 	p := &fakeProvider{
 		store: map[string]secrets.SecretValue{

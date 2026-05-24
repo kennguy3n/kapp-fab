@@ -380,3 +380,51 @@ func TestGetenvDuration(t *testing.T) {
 		t.Errorf("zero value should fall back to default, got %s", got)
 	}
 }
+
+// TestGetenvDurationAllowZero pins the contract that explicit
+// zero values are HONOURED rather than treated as "unset". The
+// canonical use case is KAPP_JWT_LEEWAY=0s, which per
+// SignerConfig.Leeway docs disables the clock-skew grace
+// window — strict-clock-skew is rare but real for audit-bound
+// deployments. Without this variant, operators who set
+// LEEWAY=0s would be silently upgraded to the 30s default.
+//
+// Negative values stay rejected (malformed input).
+func TestGetenvDurationAllowZero(t *testing.T) {
+	t.Setenv("KAPP_TEST_DUR_AZ_VALID", "5m")
+	if got := getenvDurationAllowZero("KAPP_TEST_DUR_AZ_VALID", time.Second); got.String() != "5m0s" {
+		t.Errorf("getenvDurationAllowZero = %s want 5m0s", got)
+	}
+	t.Setenv("KAPP_TEST_DUR_AZ_ZERO", "0s")
+	if got := getenvDurationAllowZero("KAPP_TEST_DUR_AZ_ZERO", 7*time.Second); got != 0 {
+		t.Errorf("explicit zero should be honoured, got %s", got)
+	}
+	t.Setenv("KAPP_TEST_DUR_AZ_BAD", "not-a-duration")
+	if got := getenvDurationAllowZero("KAPP_TEST_DUR_AZ_BAD", 7*time.Second); got != 7*time.Second {
+		t.Errorf("invalid value should fall back to default, got %s", got)
+	}
+	t.Setenv("KAPP_TEST_DUR_AZ_NEG", "-1s")
+	if got := getenvDurationAllowZero("KAPP_TEST_DUR_AZ_NEG", 7*time.Second); got != 7*time.Second {
+		t.Errorf("negative value should fall back to default, got %s", got)
+	}
+	// Unset → fallback (don't t.Setenv anything for this key).
+	if got := getenvDurationAllowZero("KAPP_TEST_DUR_AZ_UNSET", 7*time.Second); got != 7*time.Second {
+		t.Errorf("unset value should fall back to default, got %s", got)
+	}
+}
+
+// TestLoadConfig_JWTLeewayZeroHonoured pins the end-to-end
+// behaviour: KAPP_JWT_LEEWAY=0s makes it through LoadConfig
+// as zero (not the 30s default). Without the dedicated
+// allow-zero helper this would silently upgrade.
+func TestLoadConfig_JWTLeewayZeroHonoured(t *testing.T) {
+	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_JWT_LEEWAY", "0s")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.JWTLeeway != 0 {
+		t.Errorf("KAPP_JWT_LEEWAY=0s should resolve to 0, got %s", cfg.JWTLeeway)
+	}
+}
