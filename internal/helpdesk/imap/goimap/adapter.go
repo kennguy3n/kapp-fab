@@ -111,8 +111,11 @@ type FactoryOptions struct {
 	DialTimeout time.Duration
 	// CommandTimeout caps the time a single blocking command
 	// (Login, Select, Fetch, Logout) may spend waiting for the
-	// server. Default 30 seconds. A zero value disables the
-	// per-command deadline.
+	// server. The zero value picks the 30-second default so
+	// FactoryOptions{} is safe for production; set a NEGATIVE
+	// duration to disable the per-command deadline entirely
+	// (useful for integration tests that drive long-running
+	// IDLE-style commands through the same adapter).
 	CommandTimeout time.Duration
 	// DebugWriter, when non-nil, receives the raw IMAP wire
 	// bytes for both directions. Useful for local debugging
