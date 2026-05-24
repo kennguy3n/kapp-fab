@@ -51,12 +51,15 @@ type siteVerifyClient struct {
 	httpClient  *http.Client
 	replayCache *platform.LRUCache
 	provider    string
-	// freshnessWindow caps how stale a challenge_ts can be before
-	// we reject it client-side. 5 minutes covers slow-typing users
-	// without giving an attacker a long replay window. Set to 0 to
-	// disable the client-side check (e.g. for tests against a
-	// stubbed-clock provider).
+	// freshnessWindow is the resolved (post-sentinel) staleness
+	// cap. 0 means "client-side freshness check disabled" — see
+	// Options.freshnessWindowEffective for the input mapping.
 	freshnessWindow time.Duration
+	// minScore is the resolved (post-sentinel) score floor.
+	// 0 means score thresholding is disabled. Read by verify()
+	// for siteverify-style providers (reCAPTCHA v3); Turnstile
+	// and hCaptcha report Score=0 and so always pass this gate.
+	minScore float64
 }
 
 func newSiteVerifyClient(provider, verifyURL, secret string, opts Options) *siteVerifyClient {
@@ -67,7 +70,8 @@ func newSiteVerifyClient(provider, verifyURL, secret string, opts Options) *site
 		httpClient:      &http.Client{Timeout: opts.HTTPTimeout},
 		replayCache:     replayCache,
 		provider:        provider,
-		freshnessWindow: opts.FreshnessWindow,
+		freshnessWindow: opts.freshnessWindowEffective(),
+		minScore:        opts.minScoreEffective(),
 	}
 }
 
@@ -185,9 +189,31 @@ type Options struct {
 	// be >= FreshnessWindow so a token can't be replayed inside
 	// its own freshness window. Default 10 minutes.
 	ReplayCacheTTL time.Duration
-	// FreshnessWindow caps how stale a challenge_ts can be.
-	// Default 5 minutes; set to 0 to disable client-side
-	// freshness checks.
+	// FreshnessWindow caps how stale a challenge_ts can be
+	// before the verifier rejects it client-side.
+	//
+	// Tri-state sentinel:
+	//   - Zero (the Go default for time.Duration): the verifier
+	//     applies the 5-minute default. This is what every
+	//     in-code `Options{}` construction gets and what
+	//     production callers want — a defence-in-depth window
+	//     on top of the provider's own dedup.
+	//   - Negative: explicitly disables the client-side
+	//     freshness check. Use this when a test stubs the
+	//     provider clock to a far-future or far-past time, or
+	//     when an operator deliberately wants the provider's
+	//     own dedup window to be the sole authority.
+	//   - Positive: used verbatim as the staleness cap.
+	//
+	// Why the polarity is the inverse of MinScore: there is no
+	// KAPP_CAPTCHA_FRESHNESS_WINDOW env var — every caller
+	// constructs Options{} programmatically. Choosing zero as
+	// "default 5min" means the natural Go zero-value lands on
+	// the safe production behaviour. MinScore, by contrast,
+	// flows from getenvFloat which emits -1 for an unset env
+	// var — so negative is the "unset" sentinel for that field.
+	// Different input pipelines, different conventions; both
+	// documented at the field where they apply.
 	FreshnessWindow time.Duration
 	// ExpectedHostname, when non-empty, is checked against the
 	// provider-reported hostname; mismatch denies. Useful when
@@ -197,9 +223,58 @@ type Options struct {
 	// MinScore is the lower bound on score (reCAPTCHA v3 / PoW)
 	// for a token to be accepted. Tokens with Score below the
 	// threshold are denied even when the provider reports
-	// success=true. Default 0.5 for reCAPTCHA v3 (Google's
-	// recommended default); ignored by Turnstile and hCaptcha.
+	// success=true.
+	//
+	// Tri-state sentinel matching FreshnessWindow above:
+	//   - Negative: "unset" — minScoreEffective resolves to the
+	//     0.5 default (Google's recommended starting point).
+	//   - Zero: explicitly disables score thresholding (every
+	//     successful-from-provider token is accepted regardless
+	//     of score). Honouring this literally is the whole point
+	//     of the sentinel: an operator who sets KAPP_CAPTCHA_
+	//     MIN_SCORE=0 wants the threshold off, not the default.
+	//   - Positive: used verbatim as the score floor.
+	//
+	// Read by newSiteVerifyClient via minScoreEffective and
+	// applied in the reCAPTCHA v3 Verify path. Was previously
+	// read by per-provider constructors via a separate
+	// argument; consolidating here removes a misleading
+	// "unused dead-code" appearance and makes the configuration
+	// uniform across the siteverify providers. Turnstile and
+	// hCaptcha report Score=0 unconditionally so this field is
+	// a no-op for them.
 	MinScore float64
+}
+
+// freshnessWindowEffective resolves the tri-state FreshnessWindow
+// sentinel into the concrete duration the verifier should use, or
+// 0 when the client-side check is disabled. Pulled out as a method
+// so withDefaults() can keep the doc comments authoritative and
+// the verify path doesn't have to re-interpret the sentinel.
+func (o Options) freshnessWindowEffective() time.Duration {
+	switch {
+	case o.FreshnessWindow < 0:
+		return 0
+	case o.FreshnessWindow == 0:
+		return 5 * time.Minute
+	default:
+		return o.FreshnessWindow
+	}
+}
+
+// minScoreEffective resolves the tri-state MinScore sentinel into
+// the concrete threshold the verifier should apply, or 0 when
+// score thresholding is disabled. The 0.5 default matches
+// Google's recommended starting point for reCAPTCHA v3.
+func (o Options) minScoreEffective() float64 {
+	switch {
+	case o.MinScore < 0:
+		return 0.5
+	case o.MinScore == 0:
+		return 0
+	default:
+		return o.MinScore
+	}
 }
 
 func (o Options) withDefaults() Options {
@@ -212,8 +287,9 @@ func (o Options) withDefaults() Options {
 	if o.ReplayCacheTTL == 0 {
 		o.ReplayCacheTTL = 10 * time.Minute
 	}
-	if o.FreshnessWindow == 0 {
-		o.FreshnessWindow = 5 * time.Minute
-	}
+	// FreshnessWindow and MinScore intentionally not collapsed
+	// here — withDefaults pre-dates the tri-state sentinel and
+	// callers downstream consult freshnessWindowEffective /
+	// minScoreEffective directly so the sentinel survives.
 	return o
 }

@@ -139,14 +139,20 @@ type Config struct {
 	Skipper func(*http.Request) bool
 }
 
-// withDefaults fills in zero values with sensible defaults.
+// withDefaults fills in zero values with sensible defaults for
+// the fields where a zero value is unambiguously "use the
+// recommended value" (path, SameSite, header name).
 //
-// SkipBearerAuth and Skipper are intentionally not defaulted here:
-// both fields encode security-sensitive policy ("should bearer-auth
-// requests bypass CSRF", "which paths should bypass CSRF") and a
-// silent default flip from the zero value to true would be a
-// regression for cookie-auth deployments. Callers must set them
-// explicitly when the gateway needs the bypass.
+// SkipBearerAuth and Skipper are deliberately NOT touched here:
+// both encode security-sensitive policy and the zero value
+// (SkipBearerAuth=false, Skipper=nil) is the conservative posture
+// for cookie-auth deployments. Callers that want bearer-auth
+// requests to bypass the check must set SkipBearerAuth=true at
+// the call site so the choice is auditable in code; ditto for
+// path-based bypass via Skipper. The previous draft of this
+// comment referenced an "unconditionally false→true" default
+// that was never implemented; removing that note so future
+// readers don't go looking for the missing flip.
 func (c Config) withDefaults() Config {
 	if c.CookiePath == "" {
 		c.CookiePath = "/"
@@ -303,9 +309,41 @@ func checkOrigin(r *http.Request, allowed []string) error {
 // telling an attacker which check failed; the underlying error is
 // surfaced through the optional Logger hook so operators can see
 // it in structured logs.
+//
+// When the double-submit cookie is enabled (cfg.CookieName != ""),
+// the middleware self-bootstraps by issuing the cookie on every
+// safe-method response that lands at this handler without an
+// existing CSRF cookie. This closes the previously half-wired
+// gap where the gateway required a cookie on mutating requests
+// but exposed no endpoint that issued one — the JS frontend now
+// receives its token from any GET / HEAD / OPTIONS round-trip and
+// can echo it back in the next mutating call. Rotation on every
+// safe-method tick is intentionally avoided so a long-lived SPA
+// can cache the token in memory; the cookie is only re-issued
+// when the browser doesn't already carry one.
+//
+// The cookie is added as a response header before next.ServeHTTP
+// runs because http.SetCookie only appends to Header() and does
+// not commit the body — adding before the handler runs is safe.
+// If the handler writes its own headers via WriteHeader the
+// cookie remains attached because Go's http stack flushes the
+// full Header map at first write.
 func Middleware(cfg Config, logger func(r *http.Request, err error)) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if cfg.CookieName != "" && IsSafeMethod(r.Method) {
+				if _, err := r.Cookie(cfg.CookieName); err != nil {
+					// No cookie yet — issue one. Errors
+					// here are non-fatal (token gen
+					// failed, almost certainly a transient
+					// rand.Read shape); fall through so
+					// the safe-method response still
+					// reaches the handler.
+					if _, issueErr := IssueCookie(w, r, cfg); issueErr != nil && logger != nil {
+						logger(r, fmt.Errorf("csrf: auto-issue cookie: %w", issueErr))
+					}
+				}
+			}
 			if err := Verify(r, cfg); err != nil {
 				if logger != nil {
 					logger(r, err)
