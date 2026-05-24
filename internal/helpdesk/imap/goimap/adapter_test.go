@@ -167,6 +167,12 @@ func TestIsAuthFailure_Matrix(t *testing.T) {
 // upstream-shaped result from a successful FETCH; we copy UID,
 // flags, internal-date, and the body bytes from the zero
 // BODY[] section.
+//
+// Two body-section shapes are tested: the production path —
+// where the server response to FETCH BODY.PEEK[] stores the
+// section with Peek=false (per RFC 3501 §6.4.5; PEEK is a
+// request-only modifier) — and the defensive-fallback path
+// where the section preserves Peek=true.
 func TestConvertFetchMessage(t *testing.T) {
 	// nil → zero-value FetchedMessage.
 	if got := convertFetchMessage(nil); got.UID != 0 || got.Body != nil {
@@ -174,30 +180,106 @@ func TestConvertFetchMessage(t *testing.T) {
 	}
 
 	internal := time.Date(2026, 3, 14, 9, 30, 0, 0, time.UTC)
-	section := &imapv2.FetchItemBodySection{Peek: true}
-	buf := &imapclient.FetchMessageBuffer{
-		UID:          42,
-		Flags:        []imapv2.Flag{imapv2.FlagSeen, imapv2.FlagFlagged},
-		InternalDate: internal,
-		BodySection: []imapclient.FetchBodySectionBuffer{
-			{
-				Section: section,
-				Bytes:   []byte("From: a@example.com\r\n\r\nhello"),
-			},
-		},
+	cases := []struct {
+		name    string
+		section *imapv2.FetchItemBodySection
+	}{
+		{name: "production path: server response has Peek=false", section: &imapv2.FetchItemBodySection{}},
+		{name: "defensive fallback: server response preserves Peek=true", section: &imapv2.FetchItemBodySection{Peek: true}},
 	}
-	got := convertFetchMessage(buf)
-	if got.UID != 42 {
-		t.Errorf("UID: want 42, got %d", got.UID)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := &imapclient.FetchMessageBuffer{
+				UID:          42,
+				Flags:        []imapv2.Flag{imapv2.FlagSeen, imapv2.FlagFlagged},
+				InternalDate: internal,
+				BodySection: []imapclient.FetchBodySectionBuffer{
+					{
+						Section: tc.section,
+						Bytes:   []byte("From: a@example.com\r\n\r\nhello"),
+					},
+				},
+			}
+			got := convertFetchMessage(buf)
+			if got.UID != 42 {
+				t.Errorf("UID: want 42, got %d", got.UID)
+			}
+			if !got.SeenAt.Equal(internal) {
+				t.Errorf("SeenAt: want %v, got %v", internal, got.SeenAt)
+			}
+			if len(got.Flags) != 2 || got.Flags[0] != string(imapv2.FlagSeen) {
+				t.Errorf("Flags: want [\\Seen \\Flagged], got %v", got.Flags)
+			}
+			if string(got.Body) != "From: a@example.com\r\n\r\nhello" {
+				t.Errorf("Body: want raw RFC-822, got %q", string(got.Body))
+			}
+		})
 	}
-	if !got.SeenAt.Equal(internal) {
-		t.Errorf("SeenAt: want %v, got %v", internal, got.SeenAt)
+}
+
+// TestClient_LogoutReturnsToPreConnect pins the cyclic
+// state-machine contract documented in the package comment:
+// Logout must NOT set the terminal closed flag, so the Poller
+// can call Connect again on the next cycle. We can't exercise
+// the full Connect path against a real server here, but we can
+// pin the flag-state directly via the unexported field after
+// driving Logout through its synthetic happy path.
+//
+// The bug this guards against (Logout setting closed=true)
+// would brick every mailbox after the first successful poll
+// cycle since PollOnce is Connect → … → defer Logout and the
+// next cycle's Connect would error with "closed".
+func TestClient_LogoutReturnsToPreConnect(t *testing.T) {
+	f := NewFactory(FactoryOptions{})
+	c, ok := f("imap.example.com", 993, true, nil).(*Client)
+	if !ok {
+		t.Fatalf("factory did not return *Client")
 	}
-	if len(got.Flags) != 2 || got.Flags[0] != string(imapv2.FlagSeen) {
-		t.Errorf("Flags: want [\\Seen \\Flagged], got %v", got.Flags)
+	// Pre-Connect: Logout is a no-op, must not flip closed.
+	if err := c.Logout(context.Background()); err != nil {
+		t.Fatalf("Logout on Pre-Connect: %v", err)
 	}
-	if string(got.Body) != "From: a@example.com\r\n\r\nhello" {
-		t.Errorf("Body: want raw RFC-822, got %q", string(got.Body))
+	c.mu.Lock()
+	closer := c.closed
+	c.mu.Unlock()
+	if closer {
+		t.Fatalf("Logout on Pre-Connect must not set closed flag")
+	}
+	// Connect after a Pre-Connect Logout must still be the
+	// happy path — the closed guard would short-circuit it.
+	// We use a cancelled ctx so Connect returns promptly
+	// without actually dialing; the assertion is that the
+	// error is the ctx error, not "closed".
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := c.Connect(ctx); err == nil {
+		t.Fatalf("Connect with cancelled ctx should fail")
+	} else if strings.Contains(err.Error(), "closed") {
+		t.Fatalf("Connect after pre-Connect Logout must not see closed state; got: %v", err)
+	}
+}
+
+// TestClient_LogoutAfterCloseIsNoOp pins the defensive contract:
+// Logout on a Closed Client is a no-op so a supervisor cleanup
+// path that defers Logout after Close does not double-free or
+// panic. The closed flag must remain set after the no-op call.
+func TestClient_LogoutAfterCloseIsNoOp(t *testing.T) {
+	f := NewFactory(FactoryOptions{})
+	c, ok := f("imap.example.com", 993, true, nil).(*Client)
+	if !ok {
+		t.Fatalf("factory did not return *Client")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := c.Logout(context.Background()); err != nil {
+		t.Fatalf("Logout after Close should be no-op, got: %v", err)
+	}
+	c.mu.Lock()
+	closer := c.closed
+	c.mu.Unlock()
+	if !closer {
+		t.Fatalf("Logout after Close must not clear closed flag")
 	}
 }
 

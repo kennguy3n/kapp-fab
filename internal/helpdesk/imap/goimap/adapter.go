@@ -45,24 +45,34 @@
 //
 // # Lifecycle
 //
-// The adapter has three states:
+// The adapter has three live states plus one terminal state. The
+// live cycle matches what imap.Client documents — Connect / Login /
+// Select / FetchAfter / Logout is what the Poller runs every poll
+// interval, so a single Client must round-trip Pre-Connect →
+// Authenticated → Pre-Connect repeatedly over its lifetime, NOT
+// transition linearly to a terminal state. Close (and only Close)
+// moves the Client to the terminal state.
 //
-//  1. Pre-Connect: zero value; underlying *imapclient.Client is
-//     nil. Calling Close() in this state is a no-op (per the
-//     interface contract — the supervisor's cleanup path on
-//     Manager.Start failure may hit a never-Connect()'d Client).
+//  1. Pre-Connect: underlying *imapclient.Client is nil. Reachable
+//     as the zero value AND as the post-Logout state. Calling
+//     Close() in this state is a no-op (per the interface contract
+//     — the supervisor's cleanup path on Manager.Start failure may
+//     hit a never-Connect()'d Client). Calling Connect() advances
+//     to Connected.
 //  2. Connected: Connect() has dialed + handshaked. The underlying
 //     client is alive but unauthenticated. Calling Close() drops
-//     the socket without a LOGOUT.
+//     the socket without a LOGOUT (advances to Closed).
 //  3. Authenticated: Login() has succeeded. Select/FetchAfter/
-//     Logout are valid in this state. Calling Close() still works
-//     and skips the wire-protocol handshake; Logout() does both
-//     the IMAP-level LOGOUT and the transport-level close.
+//     Logout are valid in this state. Logout() returns to
+//     Pre-Connect (transport closed, no terminal flag set);
+//     Close() advances to Closed.
+//  4. Closed (terminal): set by Close() only. Connect/Login/Select/
+//     FetchAfter all return an error. Logout() is a no-op so the
+//     supervisor's defer-Logout-after-Close pattern never panics.
 //
-// State transitions are linear (no re-authenticate, no re-Connect
-// after Close) — the Manager builds a fresh Client per Start, so
-// any reconnect-after-failure path lives at the Manager level,
-// not in the adapter.
+// The Manager builds a fresh Client per Start, so reconnect after a
+// hard failure lives at the Manager level — but the per-poll-cycle
+// Connect→Logout→Connect rhythm lives here.
 package goimap
 
 import (
@@ -408,8 +418,18 @@ func (c *Client) FetchAfter(ctx context.Context, uidStart uint32, limit int) ([]
 // from either step are returned but the transport is closed
 // regardless so the caller's defer-Logout pattern leaves no
 // half-open socket on error.
+//
+// Crucially, Logout does NOT set the terminal closed flag — it
+// returns the Client to the Pre-Connect state so the Poller's
+// next cycle can Connect() again. Only Close() (the supervisor's
+// cleanup path) transitions to the terminal Closed state. If
+// Logout is called on a Closed Client the call is a no-op.
 func (c *Client) Logout(ctx context.Context) error {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
 	client := c.client
 	c.mu.Unlock()
 	if client == nil {
@@ -433,7 +453,6 @@ func (c *Client) Logout(ctx context.Context) error {
 	closeErr := client.Close()
 	c.mu.Lock()
 	c.client = nil
-	c.closed = true
 	c.mu.Unlock()
 	if logoutErr != nil {
 		return fmt.Errorf("imap: logout: %w", logoutErr)
@@ -546,13 +565,19 @@ func convertFetchMessage(m *imapclient.FetchMessageBuffer) imap.FetchedMessage {
 		}
 		fm.Flags = flags
 	}
-	// FindBodySection returns the bytes for the zero
+	// FindBodySection returns the bytes for the requested
 	// FetchItemBodySection (whole message body).
-	body := m.FindBodySection(&imapv2.FetchItemBodySection{Peek: true})
+	//
+	// Look up the non-Peek shape first. Per RFC 3501 §6.4.5, a
+	// FETCH BODY.PEEK[] command is answered with a BODY[]
+	// response (PEEK is a request-only modifier that suppresses
+	// the implicit \Seen flag), so go-imap/v2's response buffer
+	// stores the section with Peek=false. The Peek=true lookup
+	// is a defensive fallback for any implementation that
+	// preserves the request flag in the buffer key.
+	body := m.FindBodySection(&imapv2.FetchItemBodySection{})
 	if body == nil {
-		// Some servers ignore the Peek flag on the request
-		// side; try without it.
-		body = m.FindBodySection(&imapv2.FetchItemBodySection{})
+		body = m.FindBodySection(&imapv2.FetchItemBodySection{Peek: true})
 	}
 	fm.Body = body
 	return fm
