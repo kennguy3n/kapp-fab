@@ -47,6 +47,25 @@ func TestValidateLocale_FormatGate(t *testing.T) {
 		{"script-subtag", "zh-Hans", true},
 		{"hant", "zh-Hant", true},
 
+		// Multi-subtag forms — PR-8 widened the regex from a
+		// single optional subtag to up to three trailing subtags
+		// so the wizard's own `DefaultLocaleForCountry("TW") ==
+		// "zh-Hant"` can round-trip back through the admin API
+		// without being rejected by the format gate (the previous
+		// single-subtag regex would have rejected "zh-Hant-TW"
+		// and any other script+region BCP 47 form). The runtime
+		// source of truth for what the loader can actually serve
+		// is the bundle whitelist (the validator branch); the
+		// format gate's job is only to reject injection / path-
+		// traversal patterns before any service consults the i18n
+		// loader.
+		{"script-and-region", "zh-Hant-TW", true},
+		{"latin-serbian", "sr-Latn-RS", true},
+		{"latin-american-spanish", "es-419", true},
+		{"swiss-italian", "it-CH", true},
+		{"region-variant", "de-CH-1996", true},
+		{"three-subtags", "zh-Hant-TW-pinyin", true},
+
 		// Empty is permitted at the validator layer — callers
 		// handle "" as "reset to default".
 		{"empty", "", true},
@@ -67,10 +86,16 @@ func TestValidateLocale_FormatGate(t *testing.T) {
 		{"long-base", "engl", false},
 		{"empty-subtag", "en-", false},
 		{"too-short-subtag", "en-A", false},
-		{"too-long-subtag", "en-Hanssss", false},
+		{"too-long-subtag", "en-Hanssssss", false},
 		{"underscore", "en_US", false},
 		{"trailing-space", "en ", false},
 		{"leading-space", " en", false},
+
+		// Rejected: too many subtags. Four trailing subtags is
+		// past the BCP 47 forms the wizard supports; the upper
+		// bound prevents pathological inputs from blowing up the
+		// matcher.
+		{"four-subtags", "zh-Hant-TW-pinyin-extra", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

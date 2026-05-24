@@ -442,7 +442,37 @@ type LocaleResolver interface {
 	Resolve(candidate string) string
 }
 
-var localeRe = regexp.MustCompile(`^[a-z]{2,3}(-[A-Za-z0-9]{2,4})?$`)
+// localeRe is the syntactic gate for IETF BCP 47 language tags. The
+// regex deliberately allows up to three subtags after the primary
+// language so the wizard can accept the multi-subtag forms operators
+// actually use today (`zh-Hant-TW`, `sr-Latn-RS`, `es-419`, etc.) and
+// the forms the country-derived defaults already emit (`zh-Hans`,
+// `zh-Hant`). The previous single-subtag form (`^[a-z]{2,3}(-…)?$`)
+// rejected its own `DefaultLocaleForCountry("TW") == "zh-Hant"` on
+// the rare path where an operator round-tripped that value back
+// through the admin API.
+//
+// Subtag length bounds follow the BCP 47 production rules:
+//   - language: 2 or 3 ASCII letters (primary language)
+//   - script:   4 ASCII letters (e.g. "Hant", "Latn") — capitalised
+//     by convention but not required by the spec; the matcher
+//     canonicalises case anyway.
+//   - region:   2 ASCII letters (ISO 3166-1 alpha-2) OR 3 ASCII
+//     digits (UN M.49 numeric, e.g. "es-419" for Latin American
+//     Spanish).
+//   - variant:  5-8 alphanumerics OR 4 alphanumerics starting with a
+//     digit (e.g. "1996", "valencia").
+//
+// We allow up to three trailing subtags so a tag like
+// `zh-Hant-TW-pinyin` (theoretically valid BCP 47) is gated by the
+// bundle whitelist rather than the format gate — the validator is
+// the runtime source of truth for what the loader can actually
+// serve, and the format gate's job is only to reject injection /
+// path-traversal patterns ("../../etc/passwd", "en;DROP TABLE",
+// "EN" with shell metacharacters) before any service consults the
+// i18n loader. The 8-character cap on each subtag prevents
+// pathological inputs from blowing up the matcher.
+var localeRe = regexp.MustCompile(`^[a-z]{2,3}(-[A-Za-z0-9]{2,8}){0,3}$`)
 
 // ValidateLocale returns nil iff `tag` is a syntactically well-formed
 // IETF BCP 47 language tag (e.g. "en", "de", "fr-CH", "zh-Hans") that
