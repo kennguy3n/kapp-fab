@@ -401,6 +401,17 @@ func (w *Wizard) WithPlacementPolicySource(s PlacementPolicySource) *Wizard {
 // `users` (not RLS-gated) is independent of the `user_tenants` write
 // (RLS-gated), and we want the `user_tenants` INSERT under the tenant
 // GUC regardless.
+//
+// Default CoA resolution (PR-3 change): when cfg.CoATemplate is empty
+// the wizard now resolves a chart from cfg.Country via
+// DefaultCoATemplateForCountry. The previous behavior hardcoded
+// "us_gaap_basic" for empty inputs; callers that relied on US GAAP
+// being the implicit default now resolve to "ifrs_basic" when both
+// CoATemplate and Country are empty. Existing callers that pass an
+// explicit Country are unaffected — "US" still maps to
+// "us_gaap_basic", every country with a registered tax pack maps to
+// its country-specific chart, and unmapped countries fall back to
+// the generic IFRS chart.
 func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg SetupWizardConfig) (*WizardResult, error) {
 	if tenantID == uuid.Nil {
 		return nil, errors.New("tenant: wizard requires tenant id")

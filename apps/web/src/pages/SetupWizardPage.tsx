@@ -43,9 +43,16 @@ const COA_TEMPLATES = [
 // the user picks a country in step 0. Keeping the table in lockstep
 // with the backend means a SG tenant sees sg_basic checked rather
 // than us_gaap_basic, and the payroll deduction lines have matching
-// liability accounts on day one. The backend re-resolves this on the
-// server side too, so a stale frontend cannot wedge a tenant into
-// the wrong chart.
+// liability accounts on day one.
+//
+// Drift safety: the backend applies the same country -> template
+// mapping when callers omit coa_template entirely (direct API / CLI
+// consumers go through that branch). The frontend always sends an
+// explicit value matching the user's on-screen selection, so a stale
+// frontend with this table out of date would persist its own choice
+// rather than triggering the backend re-resolve — keep this map in
+// sync with internal/tenant/wizard.go on every PR that adds a tax
+// pack.
 const COUNTRY_COA_DEFAULTS: Record<string, string> = {
   US: "us_gaap_basic",
   SG: "sg_basic",
