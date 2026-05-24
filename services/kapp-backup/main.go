@@ -133,6 +133,11 @@ var TenantScopedTables = []string{
 	// the FK on (tenant_id, message_id) requires the parent
 	// to land first on restore.
 	"email_attachments",
+	// Phase L (PR-7) — IMAP poller checkpoint. PK is
+	// (tenant_id, mailbox_id) — declared in tableConflictKeys.
+	// No FK to any other tenant-scoped table; ordering is
+	// irrelevant for restore.
+	"helpdesk_imap_state",
 }
 
 // manifest is the first record in every dump file.
@@ -385,8 +390,9 @@ var tableConflictKeys = map[string][]string{
 	// Message-ID is the idempotency key (relay retry must not
 	// double-insert), so the restore ON CONFLICT honours the
 	// natural PK rather than synthesising a surrogate id.
-	"email_messages":    {"tenant_id", "message_id"},
-	"email_attachments": {"tenant_id", "message_id", "file_id"},
+	"email_messages":      {"tenant_id", "message_id"},
+	"email_attachments":   {"tenant_id", "message_id", "file_id"},
+	"helpdesk_imap_state": {"tenant_id", "mailbox_id"},
 	// insights_query_cache PK is (tenant_id, query_hash, filter_hash) and
 	// insights_shares enforces a (tenant_id, resource_type, resource_id,
 	// grantee_type, grantee) UNIQUE on top of the (tenant_id, id) PK.
