@@ -605,6 +605,27 @@ func TestVNPackBelowDeductionFloor(t *testing.T) {
 	}
 }
 
+// TestVNPackNonResidentFlat20: a non-resident foreign individual
+// (PIT Law art. 26) — present in Vietnam < 183 days in the tax
+// year — pays a flat 20% on VN-sourced employment income and
+// makes no SI / HI / UI contributions. 30,000,000 VND × 20% =
+// 6,000,000 should be the only deduction line emitted.
+func TestVNPackNonResidentFlat20(t *testing.T) {
+	pack, _ := Lookup("VN")
+	out, err := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: false,
+	}, decimal.NewFromInt(30000000), monthPeriod())
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	if len(out) != 1 || out[0].Code != "VN_NONRESIDENT_TAX" {
+		t.Fatalf("non-resident VN slip should emit only VN_NONRESIDENT_TAX; got %+v", out)
+	}
+	if !out[0].Amount.Equal(decimal.NewFromInt(6000000)) {
+		t.Errorf("VN_NONRESIDENT_TAX = %s; want 6,000,000 (30,000,000 × 20%%)", out[0].Amount)
+	}
+}
+
 // ----- Philippines -----
 
 // TestPHPackResidentWithholding: PHP 50,000 / month slip.
@@ -898,6 +919,39 @@ func TestINPackMaharashtraPTFebruary(t *testing.T) {
 	codes := indexByCode(out)
 	if pt := codes["IN_PT"]; !pt.Equal(decimal.NewFromInt(300)) {
 		t.Errorf("IN_PT (MH, Feb) = %s; want 300", pt)
+	}
+}
+
+// TestINPackUnknownRegimeDefaultsNew pins the defense-in-depth
+// fallback: any non-"old" TaxRegime value (typos, garbage,
+// future codes the wizard doesn't sanitise) must collapse to
+// the new regime so the pack never silently zero-outs TDS. The
+// resident-IN slip emits the same IN_TDS line whether
+// TaxRegime is "", "new", or junk like "nwe" / "auto".
+func TestINPackUnknownRegimeDefaultsNew(t *testing.T) {
+	pack, _ := Lookup("IN")
+	want, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: true, TaxRegime: "new",
+	}, decimal.NewFromInt(100000), monthPeriod())
+	wantTDS := indexByCode(want)["IN_TDS"]
+	if !wantTDS.IsPositive() {
+		t.Fatalf("baseline IN_TDS should be positive at 100k/month gross; got %s", wantTDS)
+	}
+	for _, regime := range []string{"", "nwe", "auto", "garbage", "NEW", " new "} {
+		got, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+			Resident: true, TaxRegime: regime,
+		}, decimal.NewFromInt(100000), monthPeriod())
+		gotTDS := indexByCode(got)["IN_TDS"]
+		if !gotTDS.Equal(wantTDS) {
+			t.Errorf("TaxRegime=%q: IN_TDS = %s; want %s (must fall back to new regime)", regime, gotTDS, wantTDS)
+		}
+	}
+	// "old" stays inert until PR-2c+ wires Form 10-IEA.
+	got, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: true, TaxRegime: "old",
+	}, decimal.NewFromInt(100000), monthPeriod())
+	if _, ok := indexByCode(got)["IN_TDS"]; ok {
+		t.Errorf("TaxRegime=old should remain inert (no IN_TDS) until 10-IEA wired; got %+v", got)
 	}
 }
 

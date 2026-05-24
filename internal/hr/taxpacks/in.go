@@ -23,11 +23,15 @@ import (
 //     calculator.
 //
 //     The Old Tax Regime is recognised via EmployeeInfo.TaxRegime
-//     == "old" but defaults to "new" when empty (matching the
-//     post-Budget-2023 statutory default). The pack documents the
-//     old-regime fallback as out of scope for this PR — employees
-//     opting out must declare via Form 10-IEA which the wizard
-//     does not yet capture; PR-2c+ will revisit.
+//     == "old" but defaults to "new" when empty *or unknown*
+//     (matching the post-Budget-2023 statutory default). Any
+//     non-"old" value falls back to "new" so a typo or
+//     unrecognised string cannot silently zero out TDS — the
+//     pack picks the conservative (revenue-protecting) default.
+//     The pack documents the old-regime fallback as out of scope
+//     for this PR — employees opting out must declare via Form
+//     10-IEA which the wizard does not yet capture; PR-2c+ will
+//     revisit.
 //
 //   - EPF (Employees' Provident Fund) employee share: 12% of
 //     basic salary, capped at the ₹15,000 / month statutory wage
@@ -129,8 +133,14 @@ func (inPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	out := []Deduction{}
 
 	// TDS — new regime by default (Budget-2023 default election).
+	// Defense-in-depth: any unrecognised string (typos, future
+	// regime codes, garbled wizard input) collapses to "new" so
+	// the pack cannot silently skip TDS by accident. Explicitly
+	// declaring "old" still bypasses the bracket walk — that
+	// path is intentionally inert until PR-2c+ wires Form
+	// 10-IEA + the 80C/80D/HRA deduction stack.
 	regime := strings.ToLower(strings.TrimSpace(e.TaxRegime))
-	if regime == "" {
+	if regime != "old" {
 		regime = "new"
 	}
 
@@ -156,9 +166,11 @@ func (inPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 			//     is capped at the *excess* over ₹7,00,000.
 			//     i.e. a taxpayer at ₹7,00,100 pays at most ₹100
 			//     of tax, not ~₹25,005. The cap applies while
-			//     it improves the taxpayer's position (the
-			//     break-even is around ₹7,27,777 where computed
-			//     tax equals the excess).
+			//     it improves the taxpayer's position (solving
+			//     20,000 + 0.10 × (x - 700000) = x - 700000
+			//     gives the break-even at x ≈ ₹7,22,222 — above
+			//     that the bracket-walk tax is already lower than
+			//     the excess, so the cap is a no-op).
 			//
 			// Threshold is compared against taxable income
 			// (post-standard-deduction) to match the ITD's own

@@ -21,9 +21,23 @@ import (
 //     applies them at the slip's effective monthly rate via
 //     period.Days() / 30.4375.
 //
+//     Non-resident individuals (foreign nationals present in
+//     Vietnam for less than 183 days in a tax year and lacking a
+//     permanent residence) are taxed at a flat 20% on VN-sourced
+//     employment income under PIT Law article 26 — the progressive
+//     schedule does not apply. The pack branches on
+//     EmployeeInfo.Resident: false → flat 20% on gross, no
+//     SI/HI/UI; true → progressive PIT + the three social
+//     contributions.
+//
 //   - SI / HI / UI: Social Insurance 8%, Health Insurance 1.5%,
 //     Unemployment Insurance 1% — employee shares per Law on
 //     Social Insurance 58/2014/QH13 and Decree 28/2015/ND-CP.
+//     Apply to residents only; foreign non-residents do not
+//     contribute (they have neither SI nor UI eligibility, and
+//     HI is granted via separate employer-side health-insurance
+//     for foreign workers under Decree 146/2018/ND-CP — the
+//     employee-deducted line is residents-only).
 //     SI/HI insurable wage is capped at 20× the base salary
 //     (lương cơ sở; 2,340,000 VND from 1 Jul 2024 → 46,800,000
 //     VND / month). UI is capped at 20× the regional minimum
@@ -85,11 +99,17 @@ var (
 	// Average month length used to scale off-cycle slips against
 	// the statutory monthly bracket table.
 	vnAvgMonthDays = decimal.NewFromFloat(30.4375)
+
+	// PIT Law art. 26: non-resident flat 20% on VN-sourced
+	// employment income.
+	vnNonResidentRate = dec("0.20")
 )
 
 // ComputeWithholding emits VN_PIT (after personal + dependent
-// deductions), VN_SI (8% capped), VN_HI (1.5% capped), VN_UI (1%
-// capped). Zero-amount lines are omitted.
+// deductions) plus VN_SI / VN_HI / VN_UI for residents.
+// Non-residents (per PIT Law art. 26) get VN_NONRESIDENT_TAX at
+// the flat 20% rate and no social contributions. Zero-amount
+// lines are omitted.
 func (vnPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
@@ -100,6 +120,20 @@ func (vnPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	out := []Deduction{}
+
+	// Non-resident foreign individual: flat 20% on VN-sourced
+	// employment income, no social contributions.
+	if !e.Resident {
+		nrTax := gross.Mul(vnNonResidentRate).Round(2)
+		if nrTax.IsPositive() {
+			out = append(out, Deduction{
+				Code:   "VN_NONRESIDENT_TAX",
+				Name:   "Non-resident PIT flat 20% (VN)",
+				Amount: nrTax,
+			})
+		}
+		return out, nil
+	}
 
 	// Bring the slip onto an average-month basis so off-cycle /
 	// non-monthly slips compare against the statute's monthly
