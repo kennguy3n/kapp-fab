@@ -80,9 +80,21 @@ ALTER TABLE helpdesk_mailboxes ENABLE ROW LEVEL SECURITY;
 -- Per-tenant RLS: operators within a tenant only see / mutate their
 -- own mailboxes. The admin-pool bypass (next policy) handles the
 -- worker's supervisor lookup which precedes any tenant context.
+--
+-- USING + WITH CHECK both reference the same predicate so the
+-- gate fires symmetrically on reads AND writes. The explicit
+-- WITH CHECK matters: without it PostgreSQL falls back to USING
+-- for the write check, which is functionally equivalent for the
+-- simple `tenant_id = $current` shape but loses the defense-in-
+-- depth signal that this table guards cross-tenant writes too
+-- (an UPDATE that tried to change tenant_id to a foreign tenant
+-- would still be blocked, but the policy now states that
+-- intent explicitly). Matches the shape established by the
+-- sibling helpdesk migrations 000055/000056/000057.
 DROP POLICY IF EXISTS helpdesk_mailboxes_isolation ON helpdesk_mailboxes;
 CREATE POLICY helpdesk_mailboxes_isolation ON helpdesk_mailboxes
-    USING (tenant_id::text = current_setting('app.tenant_id', true));
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
 -- Admin-pool bypass for the supervisor's enumerate-all-mailboxes
 -- query at worker boot / convergence. Same shape as the
@@ -92,6 +104,17 @@ DROP POLICY IF EXISTS helpdesk_mailboxes_admin_bypass ON helpdesk_mailboxes;
 CREATE POLICY helpdesk_mailboxes_admin_bypass ON helpdesk_mailboxes
     FOR SELECT
     USING (current_setting('app.tenant_id', true) = '00000000-0000-0000-0000-000000000000');
+
+-- Table-level GRANT for the application role. Without this the
+-- isolation + admin-bypass RLS policies are unreachable: RLS sits
+-- on TOP of GRANT, and the kapp_app role has zero default
+-- privileges on tables it didn't create. Matches the GRANT
+-- statements in the sibling helpdesk migrations
+-- 000055/000056/000057 — without it every Create / Get / List /
+-- Update / Delete through the mailboxes.PGStore would fail with
+-- a permission-denied error, and the admin-pool ListAllEnabled
+-- would also fail despite the admin-bypass policy.
+GRANT SELECT, INSERT, UPDATE, DELETE ON helpdesk_mailboxes TO kapp_app;
 
 COMMENT ON TABLE helpdesk_mailboxes IS
     'Per-tenant IMAP mailbox configuration consumed by the helpdesk worker. One row per (tenant, mailbox) — a tenant may attach multiple inboxes (e.g. support@ and billing@) by adding multiple rows. Credentials are referenced by SecretProvider key in imap_password_ref; the plaintext password never lands in this table.';
