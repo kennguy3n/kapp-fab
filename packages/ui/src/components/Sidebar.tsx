@@ -364,9 +364,23 @@ export const SidebarToggle = forwardRef<HTMLButtonElement, SidebarToggleProps>(
         )}
         {...props}
       >
+        {/*
+         * RTL flip — the chevron points "into" or "out of" the
+         * sidebar's inline-end edge. In LTR the sidebar sits at the
+         * inline-start (left) edge so the expand chevron (collapsed
+         * state) points right (`>`) and the collapse chevron points
+         * left (`<`). In RTL the sidebar flips to the inline-start =
+         * right edge, so the chevrons need the opposite physical
+         * direction — `rtl:rotate-180` mirrors them in-place without
+         * needing two SVG variants. The rotation is purely visual
+         * (the `aria-label` on the button still describes the
+         * semantic action), so screen readers see the correct
+         * "Expand sidebar" / "Collapse sidebar" copy regardless of
+         * writing direction.
+         */}
         <svg
           aria-hidden="true"
-          className="h-4 w-4"
+          className="h-4 w-4 rtl:rotate-180"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"

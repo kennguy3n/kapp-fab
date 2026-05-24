@@ -453,7 +453,7 @@ function ShellRouteFallback() {
         <div
           role="status"
           aria-live="polite"
-          className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-current border-e-transparent"
+          className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-current border-r-transparent"
         />
         <span className="text-sm">Loading…</span>
       </CardContent>
@@ -477,7 +477,7 @@ function PublicRouteFallback() {
       aria-live="polite"
       className="flex h-screen w-screen items-center justify-center bg-bg text-fg-muted"
     >
-      <div className="inline-flex h-6 w-6 animate-spin rounded-full border-2 border-current border-e-transparent" />
+      <div className="inline-flex h-6 w-6 animate-spin rounded-full border-2 border-current border-r-transparent" />
       <span className="sr-only">Loading…</span>
     </div>
   );
