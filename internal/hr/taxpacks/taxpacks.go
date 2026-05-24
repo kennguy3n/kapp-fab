@@ -190,3 +190,23 @@ func RegisteredCountries() []string {
 	sort.Strings(out)
 	return out
 }
+
+// isGCCNational normalises Nationality to the "local" branch for
+// every GCC pack (AE, SA, QA, KW, BH, OM). Empty defaults to
+// "expat" per EmployeeInfo.Nationality's documented convention.
+// "local" is the canonical KRecord value for a national of the
+// country whose pack is running; a tenant running GCC-reciprocal
+// payroll for, say, a Bahraini national employed in the UAE today
+// still records Nationality = "local" from the *UAE pack's*
+// perspective because the reciprocal scheme makes them eligible
+// for GPSSA contributions. Per-jurisdiction nationality gating
+// beyond this binary is out of scope for the current pack set
+// and tracked in docs/TAX_PACK_MAINTENANCE.md.
+//
+// Lives in taxpacks.go (not in ae.go) because it is a cross-pack
+// helper consumed by every GCC pack — the file location should
+// reflect the helper's ownership, not the order in which the GCC
+// packs happen to alphabetise.
+func isGCCNational(nat string) bool {
+	return strings.EqualFold(strings.TrimSpace(nat), "local")
+}

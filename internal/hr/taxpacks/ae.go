@@ -2,7 +2,6 @@ package taxpacks
 
 import (
 	"context"
-	"strings"
 
 	"github.com/shopspring/decimal"
 )
@@ -105,18 +104,4 @@ func (aePack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		Name:   "GPSSA pension (employee share, AE)",
 		Amount: gpssa,
 	}}, nil
-}
-
-// isGCCNational normalises Nationality to the "local" branch for
-// every GCC pack. Empty defaults to "expat" per EmployeeInfo's
-// documented convention. "local" is the canonical KRecord value
-// for a national of the country whose pack is running; a tenant
-// running GCC-reciprocal payroll for, say, a Bahraini national
-// employed in the UAE today still records Nationality = "local"
-// from the *UAE pack's* perspective because the reciprocal scheme
-// makes them eligible for GPSSA contributions. Per-jurisdiction
-// gating beyond this binary is out of scope for PR-2c and tracked
-// in docs/TAX_PACK_MAINTENANCE.md.
-func isGCCNational(nat string) bool {
-	return strings.EqualFold(strings.TrimSpace(nat), "local")
 }

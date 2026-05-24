@@ -102,6 +102,9 @@ func (bhPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 				Amount: u,
 			})
 		}
+		if len(out) == 0 {
+			return nil, nil
+		}
 		return out, nil
 	}
 
@@ -112,6 +115,9 @@ func (bhPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 			Name:   "SIO unemployment insurance (employee share, BH)",
 			Amount: u,
 		})
+	}
+	if len(out) == 0 {
+		return nil, nil
 	}
 	return out, nil
 }
