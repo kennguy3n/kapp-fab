@@ -27,6 +27,8 @@ import {
 } from "@kapp/ui";
 import { api } from "./lib/api";
 import { NotificationBell } from "./components/NotificationBell";
+import { LocaleSwitcher } from "./components/LocaleSwitcher";
+import { LocaleProvider } from "./lib/i18n";
 
 /**
  * Route-level code splitting.  Every page is loaded on first
@@ -483,8 +485,9 @@ function PublicRouteFallback() {
 
 export function App() {
   return (
-    <TooltipProvider delayDuration={300}>
-      <Suspense fallback={<PublicRouteFallback />}>
+    <LocaleProvider>
+      <TooltipProvider delayDuration={300}>
+        <Suspense fallback={<PublicRouteFallback />}>
         <Routes>
           {/* Public form route lives outside the app shell so anonymous
               visitors don't see tenant navigation. */}
@@ -515,8 +518,9 @@ export function App() {
           <Route path="/embed/:token" element={<InsightsEmbedPage />} />
           <Route path="/*" element={<AppShell />} />
         </Routes>
-      </Suspense>
-    </TooltipProvider>
+        </Suspense>
+      </TooltipProvider>
+    </LocaleProvider>
   );
 }
 
@@ -692,6 +696,7 @@ function AppShell() {
                 {activeLabel}
               </Badge>
             )}
+            <LocaleSwitcher className="hidden md:inline-flex w-auto" />
             <NotificationBell />
           </div>
         </header>
