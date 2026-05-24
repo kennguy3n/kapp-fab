@@ -208,7 +208,15 @@ func ParseRef(ref string) (scheme, value string, err error) {
 		scheme         string
 		preserveMarker string
 	}
-	// Order matters: longer/more-specific prefixes first.
+	// Order matters where prefixes overlap on the same input —
+	// the only such pair is "file://" vs "file:/", where the
+	// triple-slash form must be tested first so it does not get
+	// short-circuited by the single-slash form. The other
+	// nominal "long/short" pairs ("vault://" + bare "vault:",
+	// "aws://" + "aws:arn:", "gcp://" + "gcp:projects/") never
+	// match the same string because the disambiguating character
+	// at position len("scheme:")+1 differs ('/' for the URL
+	// shape, 'a'/'p' for the bare-scheme shape).
 	entries := []entry{
 		{prefix: "vault://", scheme: "vault"},
 		{prefix: "aws://", scheme: "aws"},

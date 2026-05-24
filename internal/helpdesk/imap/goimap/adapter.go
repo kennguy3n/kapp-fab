@@ -131,7 +131,7 @@ type FactoryOptions struct {
 //
 //	factory := goimap.NewFactory(goimap.FactoryOptions{})
 //	state := newHelpdeskIMAPState(pool, adminPool, recordStore,
-//	    helpdeskStore, factory, logger)
+//	    helpdeskStore, factory, passwords, logger)
 //
 // Each invocation produces a fresh, un-connected Client. The
 // Manager invokes the factory once per Start; the supervisor's
