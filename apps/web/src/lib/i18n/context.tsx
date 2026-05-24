@@ -200,6 +200,19 @@ export function LocaleProvider({ children }: { children: ReactNode }) {
   // microseconds the dynamic import takes, then re-render with
   // the resolved catalogue.
   //
+  // The "render with English fallback" claim holds for BOTH the
+  // initial mount path AND the runtime-switch path because
+  // setLocale below also calls setCatalogue(getCachedCatalogue(tag))
+  // synchronously: a previously-loaded catalogue becomes active
+  // immediately (zero-flash switch); a never-loaded catalogue
+  // resets state to `undefined`, which translate() handles by
+  // falling all the way through to the eager-en default. Without
+  // that synchronous reset the renderer would briefly show the
+  // PREVIOUSLY-active locale's text between setLocaleState and
+  // this effect firing — which is the wrong fallback (a Japanese
+  // user picking Arabic should not see Japanese text during the
+  // switch, they should see English then Arabic).
+  //
   // The .catch() arm is defence-in-depth: loadCatalogue's dynamic
   // import resolves to a Vite-bundled JSON chunk served from the
   // same origin, so rejection would require a corrupt chunk on
@@ -274,6 +287,16 @@ export function LocaleProvider({ children }: { children: ReactNode }) {
       // current session and for the backend's resolver.
     }
     writeCookie(tag);
+    // Synchronously swap the catalogue alongside the locale state so
+    // the render between this dispatch and the loadCatalogue effect
+    // firing doesn't briefly show the PREVIOUSLY-active locale's
+    // text (which is the wrong fallback — see the long comment on
+    // the loadCatalogue effect above for rationale). For previously-
+    // loaded catalogues this is zero-flash; for never-loaded ones we
+    // reset to `undefined` so translate() falls through to the
+    // eager-en default until the effect resolves with the real
+    // catalogue.
+    setCatalogue(getCachedCatalogue(tag));
     setLocaleState(tag);
   }, []);
 
