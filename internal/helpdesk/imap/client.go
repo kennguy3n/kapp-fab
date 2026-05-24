@@ -88,8 +88,34 @@ type Client interface {
 	// it returns an empty batch.
 	FetchAfter(ctx context.Context, uidStart uint32, limit int) ([]FetchedMessage, error)
 
-	// Logout closes the connection cleanly.
+	// Logout closes the connection cleanly. It sends the IMAP
+	// LOGOUT command and waits for the server's acknowledgement
+	// before returning, then closes the underlying transport.
+	// Errors are reported but the connection is closed regardless.
 	Logout(ctx context.Context) error
+
+	// Close forcibly tears down the underlying transport without
+	// attempting an IMAP-level handshake. It is the cleanup hook
+	// for any caller that stashed a freshly-built Client but
+	// could not hand it off to a Poller (e.g. Manager.Start failed
+	// because the worker is shutting down, the row was disabled
+	// between converge() and Start, or a transient lock raced the
+	// goroutine spawn).
+	//
+	// Close must be idempotent — callers may call it more than
+	// once and expect the second call to be a no-op. It must not
+	// panic on a Client that was never Connect()'d.
+	//
+	// Close exists in addition to Logout because Logout assumes
+	// an active IMAP session: it sends a wire-protocol command
+	// and reads the response. When the supervisor's converge loop
+	// builds a Client but Manager.Start short-circuits (because a
+	// previous Start race won the entry, or because the manager
+	// has been Stopped) the Client is in a half-open state — no
+	// session yet, but a TCP / TLS connection may still be open.
+	// Logout would block or error on that state; Close just
+	// drops the socket.
+	Close() error
 }
 
 // ErrAuth is returned by Login on permanent authentication
