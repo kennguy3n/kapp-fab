@@ -109,5 +109,8 @@ func (saPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 			Amount: s,
 		})
 	}
+	if len(out) == 0 {
+		return nil, nil
+	}
 	return out, nil
 }
