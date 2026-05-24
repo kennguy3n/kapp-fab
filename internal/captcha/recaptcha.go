@@ -29,36 +29,29 @@ const recaptchaVerifyURL = "https://www.google.com/recaptcha/api/siteverify"
 // RecaptchaV3Verifier verifies Google reCAPTCHA v3 tokens. Differs
 // from Turnstile / hCaptcha in that it returns a continuous score
 // (0.0 = bot, 1.0 = human) rather than a binary outcome; the
-// score threshold is configurable per deployment.
+// score threshold is configurable per deployment via Options.MinScore.
 type RecaptchaV3Verifier struct {
-	c        *siteVerifyClient
-	minScore float64
+	c *siteVerifyClient
 }
 
-// NewRecaptchaV3Verifier returns a verifier for reCAPTCHA v3.
-// minScore is the lower bound on Google's reported score below
-// which the verifier denies even if the upstream API reports
-// success=true. Google recommends 0.5 as a starting point; tune
-// upward (0.7+) for high-value endpoints and downward (0.3) only
-// after monitoring false-positive rates on real traffic.
+// NewRecaptchaV3Verifier returns a verifier for reCAPTCHA v3. The
+// minimum score threshold is read from opts.MinScore (tri-state
+// sentinel: negative → default 0.5 (Google's recommended floor),
+// zero → threshold disabled (every successful token accepted),
+// positive → used verbatim as the floor). See the Options.MinScore
+// field doc-comment and Options.minScoreEffective for the
+// authoritative description; this constructor godoc is a
+// pointer at the call-site.
 //
-// A negative minScore is treated as "unset" and replaced with the
-// 0.5 default; this lets operators distinguish "I want the
-// recommended default" (env var unset, parsed as -1 by
-// getenvFloat) from "I want every score accepted, including 0.0"
-// (KAPP_CAPTCHA_MIN_SCORE=0). Earlier revisions of this code used
-// minScore == 0 as the "unset" sentinel, which prevented operators
-// from explicitly opting into the lower bound — see Devin Review
-// finding ANALYSIS_pr-review-job-104ce38940214afeb0aedce5b15ff028
-// _0006.
-func NewRecaptchaV3Verifier(secret string, minScore float64, opts Options) *RecaptchaV3Verifier {
+// Earlier revisions of this constructor accepted minScore as a
+// separate argument; that shape duplicated the configuration
+// surface and made Options.MinScore look like dead code. See
+// PR-5 followup Devin Review finding
+// ANALYSIS_pr-review-job-d967d70cf92e4cc0b9ba19353db36214_0002.
+func NewRecaptchaV3Verifier(secret string, opts Options) *RecaptchaV3Verifier {
 	opts = opts.withDefaults()
-	if minScore < 0 {
-		minScore = 0.5
-	}
 	return &RecaptchaV3Verifier{
-		c:        newSiteVerifyClient("recaptcha_v3", recaptchaVerifyURL, secret, opts),
-		minScore: minScore,
+		c: newSiteVerifyClient("recaptcha_v3", recaptchaVerifyURL, secret, opts),
 	}
 }
 
@@ -66,10 +59,11 @@ func NewRecaptchaV3Verifier(secret string, minScore float64, opts Options) *Reca
 func (v *RecaptchaV3Verifier) Provider() string { return "recaptcha_v3" }
 
 // Verify implements the Verifier interface. In addition to the
-// shared siteverify checks, a score below MinScore is treated as a
-// soft deny (Outcome.Success=false, ErrorCode=score-below-threshold,
-// no error returned) so the caller can branch on the soft-deny
-// case without parsing the outcome's error chain.
+// shared siteverify checks, a score below the configured threshold
+// is treated as a soft deny (Outcome.Success=false, ErrorCode=
+// score-below-threshold, no error returned) so the caller can
+// branch on the soft-deny case without parsing the outcome's error
+// chain.
 func (v *RecaptchaV3Verifier) Verify(ctx context.Context, token, clientIP string) (Outcome, error) {
 	out, err := v.c.verify(ctx, token, clientIP)
 	if err != nil {
@@ -78,7 +72,7 @@ func (v *RecaptchaV3Verifier) Verify(ctx context.Context, token, clientIP string
 	if !out.Success {
 		return out, nil
 	}
-	if out.Score < v.minScore {
+	if v.c.minScore > 0 && out.Score < v.c.minScore {
 		// Below threshold — deny with a synthetic error code so
 		// the audit log can distinguish "score too low" from
 		// "upstream said no entirely". The score itself is

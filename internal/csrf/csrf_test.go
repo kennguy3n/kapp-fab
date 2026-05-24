@@ -227,6 +227,83 @@ func TestMiddleware_RejectsForbidden(t *testing.T) {
 	}
 }
 
+func TestMiddleware_AutoIssuesCookieOnSafeMethod(t *testing.T) {
+	// When double-submit is enabled, the middleware must self-
+	// bootstrap by issuing the cookie on a safe-method response.
+	// Closes the previously half-wired gap where IssueCookie was
+	// defined but never called from production code (Devin Review
+	// finding ANALYSIS_pr-review-job-d967d70cf92e4cc0b9ba19353db36214_0005).
+	cfg := Config{
+		AllowedOrigins: []string{"https://kapp.example"},
+		CookieName:     "__Host-kapp-csrf",
+		CookieSecure:   true,
+	}
+	mw := Middleware(cfg, nil)
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/foo", http.NoBody)
+	handler.ServeHTTP(w, req)
+	cookies := w.Result().Cookies()
+	var found *http.Cookie
+	for _, c := range cookies {
+		if c.Name == "__Host-kapp-csrf" {
+			found = c
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected auto-issued CSRF cookie on GET, got cookies: %+v", cookies)
+	}
+	if found.Value == "" {
+		t.Error("auto-issued cookie has empty value")
+	}
+	if !found.Secure {
+		t.Error("auto-issued cookie missing Secure flag (cfg.CookieSecure=true)")
+	}
+}
+
+func TestMiddleware_NoReissueWhenCookiePresent(t *testing.T) {
+	// Cookie rotation on every safe-method tick is intentionally
+	// avoided so a long-lived SPA can cache the token. Confirm
+	// that when the request already carries the cookie, the
+	// middleware does NOT overwrite it.
+	cfg := Config{
+		AllowedOrigins: []string{"https://kapp.example"},
+		CookieName:     "__Host-kapp-csrf",
+	}
+	mw := Middleware(cfg, nil)
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/foo", http.NoBody)
+	req.AddCookie(&http.Cookie{Name: "__Host-kapp-csrf", Value: "preexisting-tok"})
+	handler.ServeHTTP(w, req)
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "__Host-kapp-csrf" {
+			t.Errorf("expected no re-issued cookie when one already present, got %q", c.Value)
+		}
+	}
+}
+
+func TestMiddleware_DoesNotAutoIssueWhenCookieNameUnset(t *testing.T) {
+	// Default Config (CookieName empty) means double-submit is
+	// disabled — Middleware must not set ANY cookie in that mode.
+	cfg := Config{AllowedOrigins: []string{"https://kapp.example"}}
+	mw := Middleware(cfg, nil)
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/foo", http.NoBody)
+	handler.ServeHTTP(w, req)
+	if cookies := w.Result().Cookies(); len(cookies) > 0 {
+		t.Errorf("expected no auto-issued cookie when CookieName empty, got %+v", cookies)
+	}
+}
+
 func TestMiddleware_PassesAllowed(t *testing.T) {
 	cfg := Config{AllowedOrigins: []string{"https://kapp.example"}}
 	mw := Middleware(cfg, nil)

@@ -78,8 +78,9 @@ func NewFromConfig(cfg Config) (Verifier, error) {
 		if cfg.Secret == "" {
 			return nil, errors.New("captcha: recaptcha_v3 provider requires KAPP_CAPTCHA_SECRET")
 		}
-		return NewRecaptchaV3Verifier(cfg.Secret, cfg.MinScore, Options{
+		return NewRecaptchaV3Verifier(cfg.Secret, Options{
 			ExpectedHostname: cfg.ExpectedHostname,
+			MinScore:         cfg.MinScore,
 		}), nil
 	case "pow":
 		if len(cfg.PoWHMACKey) < 32 {
