@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/kennguy3n/kapp-fab/internal/authz"
+	"github.com/kennguy3n/kapp-fab/internal/i18n"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
@@ -61,6 +62,31 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 	if d.csrfMW != nil {
 		r.Use(d.csrfMW)
 	}
+	// i18n.Middleware stamps the resolved locale tag on the
+	// request context so every handler downstream can call
+	// i18n.FromContext(r.Context()) to discover which catalogue
+	// to translate against. Mounted at the top of the chain so
+	// the public surface (auth bootstrap, portal request-link,
+	// captcha challenge) and the authenticated surface share
+	// one resolver — there is no second pass that re-parses
+	// Accept-Language deeper in the chain.
+	//
+	// Why no TenantLocaleProvider here: tenant identity is
+	// stamped by auth.Middleware inside d.tenantChain, which
+	// runs later per-sub-route. A top-of-chain provider would
+	// always see an empty context and never fire. The
+	// tenant-persisted-locale override (so an authenticated
+	// SG-Arabic operator overrides a browser still defaulting
+	// to en-US) is a PR-5 concern that mounts a second
+	// i18n.Middleware *inside* each tenant-scoped sub-route, at
+	// which point the tenant provider becomes meaningful. PR-4
+	// ships the top-of-chain mount only; the cookie + query
+	// overrides already cover the explicit-user-override case.
+	r.Use(i18n.Middleware(
+		d.localeBundle,
+		i18n.WithQueryParam("lang"),
+		i18n.WithCookie("kapp_locale"),
+	))
 
 	r.Get("/healthz", healthHandler(d.pool))
 	// When KAPP_METRICS_ADDR is unset (dev/single-port mode), mount

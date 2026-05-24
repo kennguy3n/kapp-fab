@@ -342,6 +342,20 @@ type Wizard struct {
 	store           *PGStore
 	zkProvisioner   ZKFabricProvisioner
 	placementSource PlacementPolicySource
+	// localeValidator gates writes to tenants.locale through
+	// ValidateLocale. nil means "format gate only" (the boot path
+	// before the i18n bundle is wired in, and most unit tests).
+	// In production the wizard binds *i18n.Bundle here so an
+	// operator picking a tag the runtime can't serve fails fast
+	// at provisioning time rather than at first /api/v1/locales
+	// fetch.
+	localeValidator LocaleValidator
+	// localeResolver normalises a country-derived default to the
+	// best supported catalogue (DefaultLocaleForCountry can return
+	// "hi" for IN, but the shipped bundle whitelist may only know
+	// "en" — the resolver downgrades cleanly without rejecting
+	// the row). Nil leaves the wizard's derived tag unchanged.
+	localeResolver  LocaleResolver
 }
 
 // ZKFabricProvisioner mints a new tenant + HMAC credential pair on
@@ -391,6 +405,29 @@ func (w *Wizard) WithZKFabricProvisioner(p ZKFabricProvisioner) *Wizard {
 // (a single "wasabi" provider and no cache hint).
 func (w *Wizard) WithPlacementPolicySource(s PlacementPolicySource) *Wizard {
 	w.placementSource = s
+	return w
+}
+
+// WithLocaleValidator attaches the runtime locale-bundle whitelist
+// the wizard consults when persisting tenants.locale. Production
+// wires *i18n.Bundle here so an operator-supplied tag the runtime
+// can't serve is rejected at provisioning time. Passing nil is
+// equivalent to never calling the setter (format gate only).
+func (w *Wizard) WithLocaleValidator(v LocaleValidator) *Wizard {
+	w.localeValidator = v
+	return w
+}
+
+// WithLocaleResolver attaches the matcher used to normalise a
+// country-derived default locale tag. When the caller doesn't
+// supply cfg.Locale and DefaultLocaleForCountry returns a tag the
+// validator wouldn't accept (e.g. "hi" for IN with no hi.json
+// shipped), the resolver downgrades it to the nearest supported
+// catalogue before the bundle-whitelist gate runs. *i18n.Bundle
+// satisfies both this interface and LocaleValidator so callers
+// typically pass the same value to both setters.
+func (w *Wizard) WithLocaleResolver(r LocaleResolver) *Wizard {
+	w.localeResolver = r
 	return w
 }
 
@@ -512,16 +549,33 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 		// caches subscribe, which is out of scope for the i18n
 		// foundation and tracked separately.
 		locale := strings.TrimSpace(cfg.Locale)
-		if locale == "" {
+		operatorSupplied := locale != ""
+		if !operatorSupplied {
 			locale = DefaultLocaleForCountry(cfg.Country)
+			// Country-derived defaults are downgraded through
+			// the matcher when a resolver is wired (production
+			// path via *i18n.Bundle). This is what makes a tag
+			// DefaultLocaleForCountry returns but the bundle
+			// can't serve (e.g. "hi" for IN today) collapse to
+			// the best supported catalogue rather than being
+			// rejected by the whitelist gate below.
+			//
+			// Operator-supplied locales bypass this branch on
+			// purpose: an explicit user pick that the runtime
+			// can't serve must fail loudly so the operator is
+			// told which tag is available, not silently
+			// downgraded to a language they didn't choose.
+			if w.localeResolver != nil {
+				locale = w.localeResolver.Resolve(locale)
+			}
 		}
-		// Run the format gate; the wizard does not yet have a
-		// runtime LocaleValidator wired in (i18n.Bundle is the
-		// production validator and ships in PR-4), so the
-		// bundle-whitelist check is intentionally skipped here.
-		// The CHECK constraint on migration 000059 catches any
-		// malformed value at the DB layer regardless.
-		if err := ValidateLocale(locale, nil); err != nil {
+		// Format gate runs unconditionally; the bundle-whitelist
+		// gate (validator-driven) is the runtime check that
+		// matches the catalogues the API can actually serve. A
+		// nil validator preserves the boot-time behaviour for
+		// callers that build the wizard before the i18n bundle
+		// is available (CLI tools, integration tests).
+		if err := ValidateLocale(locale, w.localeValidator); err != nil {
 			return fmt.Errorf("tenant: wizard: %w", err)
 		}
 		if _, err := tx.Exec(ctx,
