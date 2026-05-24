@@ -37,6 +37,39 @@ const COA_TEMPLATES = [
   { value: "om_basic", label: "Oman — IFRS + PASI / VAT / Gratuity" },
 ];
 
+// defaultCoATemplateForCountry mirrors
+// tenant.DefaultCoATemplateForCountry in internal/tenant/wizard.go so
+// the wizard's CoA radio pre-selects the country-specific chart when
+// the user picks a country in step 0. Keeping the table in lockstep
+// with the backend means a SG tenant sees sg_basic checked rather
+// than us_gaap_basic, and the payroll deduction lines have matching
+// liability accounts on day one. The backend re-resolves this on the
+// server side too, so a stale frontend cannot wedge a tenant into
+// the wrong chart.
+const COUNTRY_COA_DEFAULTS: Record<string, string> = {
+  US: "us_gaap_basic",
+  SG: "sg_basic",
+  MY: "my_basic",
+  TH: "th_basic",
+  ID: "id_basic",
+  VN: "vn_basic",
+  PH: "ph_basic",
+  NZ: "nz_basic",
+  IN: "in_basic",
+  CH: "ch_basic",
+  AE: "ae_basic",
+  SA: "sa_basic",
+  QA: "qa_basic",
+  KW: "kw_basic",
+  BH: "bh_basic",
+  OM: "om_basic",
+};
+
+function defaultCoATemplateForCountry(country: string): string {
+  const code = country.trim().toUpperCase();
+  return COUNTRY_COA_DEFAULTS[code] ?? "ifrs_basic";
+}
+
 interface InitialUser {
   email: string;
   display_name: string;
@@ -93,10 +126,19 @@ export function SetupWizardPage() {
   const [companyName, setCompanyName] = useState("");
   const [industry, setIndustry] = useState("");
   const [country, setCountry] = useState("");
-  const [coaTemplate, setCoaTemplate] = useState(COA_TEMPLATES[0].value);
+  // coaTemplate is empty until the user explicitly picks one from the
+  // step-1 radio list. While empty, the effective value is derived
+  // from the country field (see effectiveCoaTemplate below) so the UI
+  // pre-selects the country-specific chart without needing a useEffect
+  // sync between country and CoA. Once the user picks, the value
+  // becomes sticky regardless of subsequent country edits.
+  const [coaTemplate, setCoaTemplate] = useState("");
   const [users, setUsers] = useState<InitialUser[]>([
     { email: "", display_name: "", role: "tenant.admin", roles: ["tenant.admin"] },
   ]);
+
+  const effectiveCoaTemplate =
+    coaTemplate || defaultCoATemplateForCountry(country);
 
   const tenantId = id ?? "";
 
@@ -160,7 +202,7 @@ export function SetupWizardPage() {
       company_name: companyName.trim(),
       industry: industry.trim() || undefined,
       country: country.trim() || undefined,
-      coa_template: coaTemplate,
+      coa_template: effectiveCoaTemplate,
       users: validUsers,
     });
   };
@@ -260,7 +302,7 @@ export function SetupWizardPage() {
                   type="radio"
                   name="coa"
                   value={t.value}
-                  checked={coaTemplate === t.value}
+                  checked={effectiveCoaTemplate === t.value}
                   onChange={(e) => setCoaTemplate(e.target.value)}
                 />{" "}
                 {t.label}

@@ -2,8 +2,10 @@ package tenant
 
 import (
 	"encoding/json"
-	"sort"
+	"strings"
 	"testing"
+
+	"github.com/kennguy3n/kapp-fab/internal/hr/taxpacks"
 )
 
 // TestChartOfAccountsTemplatesAreParseable round-trips every embedded
@@ -150,22 +152,21 @@ func TestDefaultCoATemplateForCountry(t *testing.T) {
 
 // TestEveryTaxPackCountryHasCoATemplate is the cross-package contract
 // that prevents a future PR from registering a tax pack without
-// shipping a matching CoA chart. The list of country codes mirrors
-// the registered packs in internal/hr/taxpacks; if a new country is
-// added there, this test catches the missing CoA before the wizard
-// silently falls back to the generic IFRS chart.
+// shipping a matching CoA chart. Sourced live from
+// taxpacks.RegisteredCountries() so adding a country to the tax pack
+// roster — even if the local literal in TestDefaultCoATemplateForCountry
+// stays untouched — surfaces here as a missing chart before the
+// wizard silently falls back to the generic IFRS template.
+//
+// taxpacks lives below tenant in the dependency graph
+// (internal/hr/taxpacks does not import internal/tenant), so this
+// import is acyclic.
 func TestEveryTaxPackCountryHasCoATemplate(t *testing.T) {
-	// Mirror of taxpacks.RegisteredCountries() — kept as a local
-	// literal so this test does not import the taxpacks package
-	// (which would create a hr/taxpacks → tenant test dependency
-	// graph that's not desirable). Drift between the two lists is
-	// caught by the i18n maintenance checklist in
-	// docs/TAX_PACK_MAINTENANCE.md.
-	registered := []string{
-		"AE", "AU", "BH", "CH", "ID", "IN", "KW", "MY",
-		"NZ", "OM", "PH", "QA", "SA", "SG", "TH", "US", "VN",
+	registered := taxpacks.RegisteredCountries()
+	if len(registered) == 0 {
+		t.Fatalf("taxpacks.RegisteredCountries() returned empty list — "+
+			"either the registry is missing or the helper drifted")
 	}
-	sort.Strings(registered)
 	for _, cc := range registered {
 		t.Run(cc, func(t *testing.T) {
 			templateName := DefaultCoATemplateForCountry(cc)
@@ -174,32 +175,19 @@ func TestEveryTaxPackCountryHasCoATemplate(t *testing.T) {
 					"in chartOfAccountsTemplates", cc, templateName)
 			}
 			// AU has no dedicated CoA today — it intentionally
-			// falls back to the IFRS chart. Every other registered
-			// country must resolve to a country-specific chart so
-			// the payroll engine's deduction lines have matching
+			// falls back to the IFRS chart. US uses us_gaap_basic
+			// (separate from IFRS). Every other registered country
+			// must resolve to a country-specific chart so the
+			// payroll engine's deduction lines have matching
 			// liability accounts.
 			if cc == "AU" || cc == "US" {
 				return
 			}
-			expected := toLower(cc) + "_basic"
+			expected := strings.ToLower(cc) + "_basic"
 			if templateName != expected {
 				t.Fatalf("country %s should map to %q, got %q",
 					cc, expected, templateName)
 			}
 		})
 	}
-}
-
-// toLower is a tiny local helper so the test file doesn't drag in
-// strings just for one call.
-func toLower(s string) string {
-	b := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		b[i] = c
-	}
-	return string(b)
 }

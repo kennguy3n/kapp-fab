@@ -408,9 +408,16 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 	if cfg.CompanyName == "" {
 		return nil, errors.New("tenant: wizard requires company_name")
 	}
+	// When the caller didn't pre-pick a CoA template the wizard
+	// resolves one from the tenant's Country so a SG tenant gets
+	// sg_basic (CPF / GST liability accounts), an AE tenant gets
+	// ae_basic (GPSSA / Gratuity), etc. DefaultCoATemplateForCountry
+	// falls back to us_gaap_basic for US, ifrs_basic for any country
+	// without a country-specific chart, and is exhaustively pinned by
+	// TestDefaultCoATemplateForCountry.
 	templateName := cfg.CoATemplate
 	if templateName == "" {
-		templateName = "us_gaap_basic"
+		templateName = DefaultCoATemplateForCountry(cfg.Country)
 	}
 	accounts, err := loadTemplate(templateName)
 	if err != nil {
