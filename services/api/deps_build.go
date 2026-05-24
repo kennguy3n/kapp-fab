@@ -875,5 +875,10 @@ func secretsConfigFromPlatform(cfg *platform.Config) secrets.Config {
 			MountPath: cfg.SecretsVaultMountPath,
 			SecretKey: cfg.SecretsVaultSecretKey,
 		},
+		GCP: secrets.GCPProviderConfig{
+			ProjectID: cfg.SecretsGCPProjectID,
+			Prefix:    cfg.SecretsGCPPrefix,
+			Version:   cfg.SecretsGCPVersion,
+		},
 	}
 }

@@ -194,6 +194,14 @@ type Config struct {
 	SecretsVaultToken     string
 	SecretsVaultMountPath string
 	SecretsVaultSecretKey string
+	// SecretsGCPProjectID / SecretsGCPPrefix / SecretsGCPVersion
+	// configure the Google Cloud Secret Manager backend.
+	// ProjectID is required when Backend=="gcp"; Prefix is an
+	// optional secret-name prefix and Version pins to a numeric
+	// version (default "latest").
+	SecretsGCPProjectID string
+	SecretsGCPPrefix    string
+	SecretsGCPVersion   string
 
 	// JWT keyring configuration. PrimaryRef is the secret-store
 	// reference for the signing key (e.g. "jwt/primary");
@@ -254,6 +262,9 @@ func LoadConfig() (*Config, error) {
 		SecretsVaultToken:     os.Getenv("KAPP_SECRETS_VAULT_TOKEN"),
 		SecretsVaultMountPath: os.Getenv("KAPP_SECRETS_VAULT_MOUNT_PATH"),
 		SecretsVaultSecretKey: os.Getenv("KAPP_SECRETS_VAULT_SECRET_KEY"),
+		SecretsGCPProjectID:   os.Getenv("KAPP_SECRETS_GCP_PROJECT_ID"),
+		SecretsGCPPrefix:      os.Getenv("KAPP_SECRETS_GCP_PREFIX"),
+		SecretsGCPVersion:     os.Getenv("KAPP_SECRETS_GCP_VERSION"),
 
 		JWTPrimaryRef:             getenv("KAPP_JWT_PRIMARY_REF", "jwt/primary"),
 		JWTVerifyRefs:             splitCSV(os.Getenv("KAPP_JWT_VERIFY_REFS")),

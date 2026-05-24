@@ -29,6 +29,8 @@ type Config struct {
 	AWS AWSProviderConfig
 	// Vault holds the HashiCorp Vault config.
 	Vault VaultProviderConfig
+	// GCP holds the Google Cloud Secret Manager config.
+	GCP GCPProviderConfig
 }
 
 // FileProviderConfig is the file-backend selector. It is its
@@ -64,7 +66,7 @@ func NewFromConfig(ctx context.Context, cfg Config) (Provider, error) {
 	case "vault":
 		return NewVaultProvider(cfg.Vault)
 	case "gcp":
-		return NewGCPProvider(ctx)
+		return NewGCPProvider(ctx, cfg.GCP)
 	default:
 		return nil, fmt.Errorf("%w: unknown backend %q", ErrProviderNotConfigured, cfg.Backend)
 	}

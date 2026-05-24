@@ -51,10 +51,10 @@ func TestNewFromConfig_UnknownBackend(t *testing.T) {
 	}
 }
 
-func TestNewFromConfig_GCP_StubReturnsNotConfigured(t *testing.T) {
+func TestNewFromConfig_GCP_RequiresProjectID(t *testing.T) {
 	_, err := NewFromConfig(context.Background(), Config{Backend: "gcp"})
 	if !errors.Is(err, ErrProviderNotConfigured) {
-		t.Fatalf("expected ErrProviderNotConfigured for gcp stub, got %v", err)
+		t.Fatalf("expected ErrProviderNotConfigured for gcp without ProjectID, got %v", err)
 	}
 }
 
