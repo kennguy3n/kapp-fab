@@ -425,9 +425,43 @@ func (w *Wizard) WithLocaleValidator(v LocaleValidator) *Wizard {
 // shipped), the resolver downgrades it to the nearest supported
 // catalogue before the bundle-whitelist gate runs. *i18n.Bundle
 // satisfies both this interface and LocaleValidator so callers
-// typically pass the same value to both setters.
+// typically pass the same value to both setters — prefer
+// WithLocaleBundle for that case.
 func (w *Wizard) WithLocaleResolver(r LocaleResolver) *Wizard {
 	w.localeResolver = r
+	return w
+}
+
+// LocaleBundle is the combined interface satisfied by *i18n.Bundle.
+// Production wiring always has a single value that gates both the
+// whitelist check and the matcher downgrade, so the wizard's primary
+// setter takes one argument rather than two — passing the same
+// bundle into WithLocaleValidator and WithLocaleResolver separately
+// is a latent footgun (forgetting the resolver call leaves the wizard
+// rejecting every IN/CN/TW/HK row even though it would have shipped
+// fine). The two single-interface setters remain available for
+// unit tests that want to exercise just one half of the contract
+// against a tiny in-memory stub.
+type LocaleBundle interface {
+	LocaleValidator
+	LocaleResolver
+}
+
+// WithLocaleBundle wires the runtime translation bundle as both the
+// whitelist gate and the matcher downgrade source. This is the
+// supported production wiring; the deps_build path wires
+// *i18n.Bundle here so a future contributor cannot accidentally
+// install a validator without the matching resolver. Passing nil
+// detaches both — useful for unit tests that want the format gate
+// alone.
+func (w *Wizard) WithLocaleBundle(b LocaleBundle) *Wizard {
+	if b == nil {
+		w.localeValidator = nil
+		w.localeResolver = nil
+		return w
+	}
+	w.localeValidator = b
+	w.localeResolver = b
 	return w
 }
 

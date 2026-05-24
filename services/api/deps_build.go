@@ -627,9 +627,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// resolution and provisioning-time locale validation share one
 	// source of truth.
 	localeBundle := i18n.MustDefault()
-	wizard := tenant.NewWizard(pool).
-		WithLocaleValidator(localeBundle).
-		WithLocaleResolver(localeBundle)
+	wizard := tenant.NewWizard(pool).WithLocaleBundle(localeBundle)
 	var zkFabricClient *tenant.ZKFabricClient
 	if zkClient := tenant.NewZKFabricClient(tenant.ZKFabricClientConfig{
 		Endpoint:       os.Getenv("ZK_FABRIC_CONSOLE_ENDPOINT"),

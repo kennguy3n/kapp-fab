@@ -122,7 +122,12 @@ func TestResolve_Matrix(t *testing.T) {
 		{"exact-de", "de", "de"},
 		{"exact-ar", "ar", "ar"},
 		{"zh-Hans", "zh-Hans", "zh"},
-		{"zh-Hant", "zh-Hant", "zh"},
+		// zh-Hant ships its own catalogue so the matcher must keep
+		// Traditional Chinese tenants on Traditional Chinese rather
+		// than downgrading them to Simplified.
+		{"zh-Hant", "zh-Hant", "zh-Hant"},
+		{"zh-Hant-TW", "zh-Hant-TW", "zh-Hant"},
+		{"zh-Hant-HK", "zh-Hant-HK", "zh-Hant"},
 		{"fr-CA", "fr-CA", "fr"},
 		{"hi-IN unrelated", "hi-IN", DefaultLocale},
 		{"weighted-AL", "fr-CA,fr;q=0.9,en;q=0.5", "fr"},
