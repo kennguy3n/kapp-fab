@@ -59,13 +59,46 @@ type SetupWizardConfig struct {
 // always changeable from the admin surface afterwards.
 //
 // The defaults follow the country's most common business locale.
-// Every country listed here has a shipped translation catalogue
-// under internal/i18n/locales — a country lacking a catalogue
-// falls through to "en" so the loader always has a concrete
-// bundle to resolve, even though the script-defaulting matcher
-// could in principle take a few of them further (e.g. MX → es).
-// Adding a new mapping requires the catalogue to be present first;
-// PR-7 widens the table once additional locale bundles ship.
+// Most mappings have a directly shipped translation catalogue
+// under internal/i18n/locales; two exceptions exist because the
+// most-common-business-locale rule is more useful than strict
+// catalogue presence for downstream consumers (e.g. the UI's
+// "default language" label):
+//
+//   - IN → "hi". No hi.json catalogue ships today. The matcher
+//     wired through WithLocaleBundle normalises "hi" to "en" at
+//     resolve time, so a tenant provisioned with this default
+//     still renders the English UI rather than a literal-key
+//     fallback. If a Hindi catalogue is added later, the
+//     normalisation collapses automatically.
+//
+//   - CN → "zh-Hans". Only the unscripted zh.json catalogue
+//     ships; the matcher normalises "zh-Hans" → "zh". Returning
+//     the scripted tag here (rather than bare "zh") is what
+//     lets TW / HK keep their separate "zh-Hant" mapping — the
+//     two values diverge on the script subtag so the wizard can
+//     distinguish them even if a single physical catalogue
+//     happens to serve both at runtime.
+//
+// All other mappings (de / fr / it / es / ja / ar / th / id /
+// vi / en / zh-Hant) DO have a shipped catalogue and resolve
+// without the normalisation step.
+//
+// IMPORTANT: this matters only when both resolver and validator
+// are wired (production path goes through WithLocaleBundle which
+// installs them atomically — see deps_build.go:629).  A caller
+// that builds the wizard with WithLocaleValidator(bundle) but
+// NOT WithLocaleResolver(bundle) would see CN/IN provisioning
+// fail the bundle-whitelist gate.  The WithLocaleBundle helper
+// is the canonical wiring path precisely to make that misuse
+// unreachable by convention.
+//
+// A country lacking ANY mapping falls through to "en", so the
+// loader always has a concrete bundle to resolve. Adding a new
+// mapping does NOT require the catalogue to be present first
+// — the resolver+validator atomically normalise any unsupported
+// tag to "en" — but adding a catalogue DOES make the mapping
+// honoured end-to-end without the resolver fallback.
 //
 //   - DE / AT / CH: German. CH stays German because Swiss-German
 //     is the largest business language; admins in the Romandie or
