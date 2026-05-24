@@ -362,6 +362,14 @@ func run() error {
 	}
 
 	election := platform.NewLeaderElection(cfg.DatabaseURL, "kapp-worker", identity).WithMetrics(metrics)
+	// Helpdesk-IMAP supervisor (Surface G). Wires the per-mailbox
+	// Poller fleet against the leader-elected goroutine set. nil
+	// when adminPool is unavailable or no IMAP client factory is
+	// wired (the go-imap adapter ships in a follow-up PR); the
+	// supervisor stays inert in that case and the helpdesk
+	// inbound path falls back to the webhook-only surface.
+	helpdeskIMAP := newHelpdeskIMAPState(pool, adminPool, recordStore, helpdeskStore, nil, slog.Default())
+
 	return election.Run(ctx, func(leaderCtx context.Context) error {
 		return leadWorker(leaderCtx, leaderState{
 			cfg:            cfg,
@@ -375,6 +383,7 @@ func run() error {
 			batcher:        batcher,
 			nc:             nc,
 			bridge:         bridge,
+			helpdeskIMAP:   helpdeskIMAP,
 			drainHistogram: drainDur,
 			drainCounter:   drainEvents,
 		})
@@ -432,6 +441,13 @@ type leaderState struct {
 	nc            *nats.Conn
 	bridge        *kchatBridgeNotifier
 
+	// helpdeskIMAP is the supervisor for the per-mailbox IMAP
+	// poller goroutines (Surface G). nil when adminPool is
+	// unavailable or no IMAP client factory is wired; in either
+	// case the leader skips the supervisor goroutine and the
+	// helpdesk inbound path stays on the webhook-only surface.
+	helpdeskIMAP *helpdeskIMAPState
+
 	// Prometheus-compatible drain metrics. Observed inside drainLoop
 	// after each DrainBatch completes — latency goes into the histogram,
 	// event count goes into the counter (split by result label so
@@ -457,6 +473,13 @@ func leadWorker(leaderCtx context.Context, s leaderState) error {
 	go scheduler.RunLoop(leaderCtx, s.schedStore, s.schedRegistry, 10*time.Second)
 	go s.exportWorker.Run(leaderCtx)
 	go s.autoscaleLoop.Run(leaderCtx)
+	if s.helpdeskIMAP != nil {
+		// Per-mailbox IMAP pollers. The supervisor handles
+		// Manager.StopAll on leaderCtx cancellation so a
+		// graceful leadership transfer drains every active
+		// connection cleanly. Logs its own start/drain lines.
+		go func() { _ = s.helpdeskIMAP.supervisor.Run(leaderCtx) }()
+	}
 
 	return drainLoop(leaderCtx, s)
 }

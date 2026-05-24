@@ -594,6 +594,14 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Get("/sla-policies", d.hdh.listPolicies)
 			r.Get("/sla-policies/resolve", d.hdh.resolvePolicy)
 			r.Get("/tickets/{id}/sla-log", d.hdh.ticketLog)
+			// Per-tenant mailbox attach/detach (Surface G).
+			// The worker's IMAP supervisor picks up changes
+			// to this table on its convergence tick (60s).
+			r.Get("/mailboxes", d.hdmbh.list)
+			r.Post("/mailboxes", d.hdmbh.create)
+			r.Get("/mailboxes/{id}", d.hdmbh.get)
+			r.Put("/mailboxes/{id}", d.hdmbh.update)
+			r.Delete("/mailboxes/{id}", d.hdmbh.delete)
 		})
 
 		// Inbound email → ticket. Sits OUTSIDE the JWT-tenant

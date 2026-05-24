@@ -31,6 +31,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/files"
 	"github.com/kennguy3n/kapp-fab/internal/forms"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
+	"github.com/kennguy3n/kapp-fab/internal/helpdesk/mailboxes"
 	"github.com/kennguy3n/kapp-fab/internal/hr"
 	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
@@ -683,6 +684,14 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// reports (saved + ad-hoc), and dashboard KPI aggregation.
 	curh := &currencyHandlers{store: exchangeRateStore}
 	hdh := &helpdeskHandlers{store: helpdeskStore}
+	// Mailbox CRUD handler — surfaces helpdesk_mailboxes via the
+	// admin API. The store carries both pool handles because the
+	// supervisor's ListAllEnabled needs adminPool for the
+	// cross-tenant scan; on the API side we only hit the CRUD
+	// methods (which use the tenant-scoped pool under WithTenantTx)
+	// but passing adminPool here keeps the single PGStore type
+	// reusable across the worker + api wiring.
+	hdmbh := &helpdeskMailboxHandlers{store: mailboxes.NewPGStore(pool, adminPool)}
 	reph := &reportsHandlers{store: reportStore, runner: reportRunner}
 	repsh := &reportScheduleHandlers{store: reporting.NewScheduleStore(pool)}
 	exph := &exportHandlers{store: exporter.NewStore(pool, adminPool)}
@@ -1046,6 +1055,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		roleh:                roleh,
 		curh:                 curh,
 		hdh:                  hdh,
+		hdmbh:                hdmbh,
 		reph:                 reph,
 		repsh:                repsh,
 		exph:                 exph,

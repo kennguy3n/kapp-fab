@@ -628,6 +628,43 @@ func TestManager_StartAfterStopAllReturnsErrStopped(t *testing.T) {
 	}
 }
 
+// TestManager_IsActiveReflectsRunningSet pins the supervisor's
+// "skip Start if already running" optimisation: IsActive must
+// return true between Start and Stop for a mailbox, false
+// before Start, and false after Stop.
+func TestManager_IsActiveReflectsRunningSet(t *testing.T) {
+	mailboxID := uuid.New()
+	m := NewManager(func(cfg Config) (*Poller, error) {
+		return NewPoller(cfg, &fakeClient{}, &fakeUIDState{}, &fakeProcessor{}, nil)
+	}, nil)
+	if m.IsActive(mailboxID) {
+		t.Fatalf("expected IsActive=false before Start")
+	}
+	if err := m.Start(context.Background(), Config{
+		TenantID: uuid.New(), MailboxID: mailboxID,
+		PollInterval: time.Hour, // never fires
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !m.IsActive(mailboxID) {
+		t.Fatalf("expected IsActive=true after Start")
+	}
+	if !m.Stop(mailboxID) {
+		t.Fatalf("Stop returned false for active mailbox")
+	}
+	// Stop signals the goroutine; the deferred entry-delete races
+	// the goroutine's exit. Poll a few ticks before declaring failure
+	// so the deferred cleanup has a chance to run on slow CI.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for m.IsActive(mailboxID) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if m.IsActive(mailboxID) {
+		t.Fatalf("expected IsActive=false after Stop within deadline")
+	}
+	m.StopAll()
+}
+
 // TestPollOnce_ProcessorErrorPersistsPartialProgress pins the
 // round-4 fix: if processor.Process fails on UID N+1 after UID N
 // succeeded, the checkpoint is persisted at UID N before the

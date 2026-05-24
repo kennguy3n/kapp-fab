@@ -172,6 +172,7 @@ type apiDeps struct {
 	roleh          *rolesHandlers
 	curh           *currencyHandlers
 	hdh            *helpdeskHandlers
+	hdmbh          *helpdeskMailboxHandlers
 	reph           *reportsHandlers
 	repsh          *reportScheduleHandlers
 	exph           *exportHandlers

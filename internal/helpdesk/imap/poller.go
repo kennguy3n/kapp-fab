@@ -524,3 +524,16 @@ func (m *Manager) ActiveMailboxes() []uuid.UUID {
 	}
 	return out
 }
+
+// IsActive reports whether a Poller for mailboxID is currently
+// running. Used by the worker's convergence loop to short-circuit
+// the expensive parts of a re-Start (password resolve + client
+// build) when the mailbox is already being polled — Manager.Start
+// itself is idempotent, but the supervisor can save the round trip
+// to the secret store by checking first.
+func (m *Manager) IsActive(mailboxID uuid.UUID) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.entries[mailboxID]
+	return ok
+}
