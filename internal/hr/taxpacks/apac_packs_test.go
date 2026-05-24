@@ -955,6 +955,50 @@ func TestINPackUnknownRegimeDefaultsNew(t *testing.T) {
 	}
 }
 
+// TestINPackNonResidentNo87ARebate pins the s.87A residency gate:
+// s.87A explicitly limits the rebate to "an individual resident
+// in India". A resident at the rebate envelope (≤ ₹7L taxable)
+// has IN_TDS zeroed out; an otherwise identical non-resident
+// pays the full bracket-walk tax (no rebate, no marginal-relief
+// proviso). Standard deduction stays — s.16(ia) has no residency
+// restriction.
+//
+// Test vector: monthly gross ₹58,400 on a 31-day period →
+// annual ₹58,400 × 365.25 / 31 ≈ ₹688,082.58 → minus ₹75,000
+// standard deduction = ₹613,082.58 taxable annual (under the
+// ₹7L rebate envelope). The bracket walk yields ₹15,654.13
+// (5% × ₹313,082.58), which is ≤ ₹25,000 so the resident gets
+// full rebate (IN_TDS = 0). The non-resident pays the full
+// ₹15,654.13 × 31 / 365.25 ≈ ₹1,328.62 for the period.
+func TestINPackNonResidentNo87ARebate(t *testing.T) {
+	pack, _ := Lookup("IN")
+	gross := decimal.NewFromInt(58400)
+
+	// Resident — 87A wipes IN_TDS.
+	res, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: true,
+	}, gross, monthPeriod())
+	if v, ok := indexByCode(res)["IN_TDS"]; ok {
+		t.Errorf("resident at sub-7L taxable: expected 87A to zero IN_TDS, got %s", v)
+	}
+
+	// Non-resident — same gross, no 87A, must pay positive TDS.
+	nr, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: false,
+	}, gross, monthPeriod())
+	nrTDS := indexByCode(nr)["IN_TDS"]
+	if !nrTDS.IsPositive() {
+		t.Fatalf("non-resident at 58,400/month gross: expected positive IN_TDS (87A doesn't apply), got %s", nrTDS)
+	}
+	// Sanity-check the figure against the hand-derived ₹1,328.62.
+	// Tolerance ±2 paise covers prorate rounding noise.
+	expected := decimal.NewFromFloat(1328.62)
+	diff := nrTDS.Sub(expected).Abs()
+	if diff.GreaterThan(decimal.NewFromFloat(0.02)) {
+		t.Errorf("non-resident IN_TDS = %s; want ≈ %s (±0.02)", nrTDS, expected)
+	}
+}
+
 // ----- Registry assertions -----
 
 // TestAPACPacksAreRegistered confirms all eight APAC packs self-

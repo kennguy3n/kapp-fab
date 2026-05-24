@@ -155,6 +155,18 @@ func (inPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 			annualTax := walkINBrackets(taxableAnnual, inBracketsNewRegime)
 			// Section 87A rebate (new regime, post-Finance-Act-2023):
 			//
+			//  Residency gate: s.87A explicitly limits the rebate
+			//  to "an individual resident in India". Non-residents
+			//  pay TDS at the same progressive bracket schedule
+			//  (and are entitled to the s.16(ia) standard deduction,
+			//  which has no residency restriction in the Act) but
+			//  do *not* get the 87A rebate or its marginal relief
+			//  proviso. The pack therefore gates the entire 87A
+			//  block on e.Resident — a non-resident with taxable
+			//  annual income at ₹7,00,000 owes the full ₹20,000 of
+			//  bracket-walk tax (5% × 4L), matching ITD calculator
+			//  behaviour for Resident Status = "Non-Resident".
+			//
 			//  1. If taxable income ≤ ₹7,00,000, the rebate
 			//     wipes out the entire computed tax (capped at
 			//     the ₹25,000 statutory maximum).
@@ -176,17 +188,19 @@ func (inPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 			// (post-standard-deduction) to match the ITD's own
 			// income-tax calculator; the ITD's worked examples
 			// use the same convention.
-			switch {
-			case taxableAnnual.LessThanOrEqual(inRebate87ALimit) && annualTax.LessThanOrEqual(inRebate87AMax):
-				// Within the rebate envelope — full waiver.
-				annualTax = decimal.Zero
-			case taxableAnnual.GreaterThan(inRebate87ALimit):
-				// Marginal relief: cap tax at (income - 7L)
-				// while that figure is lower than the
-				// bracket-walk result.
-				excess := taxableAnnual.Sub(inRebate87ALimit)
-				if excess.LessThan(annualTax) {
-					annualTax = excess
+			if e.Resident {
+				switch {
+				case taxableAnnual.LessThanOrEqual(inRebate87ALimit) && annualTax.LessThanOrEqual(inRebate87AMax):
+					// Within the rebate envelope — full waiver.
+					annualTax = decimal.Zero
+				case taxableAnnual.GreaterThan(inRebate87ALimit):
+					// Marginal relief: cap tax at (income - 7L)
+					// while that figure is lower than the
+					// bracket-walk result.
+					excess := taxableAnnual.Sub(inRebate87ALimit)
+					if excess.LessThan(annualTax) {
+						annualTax = excess
+					}
 				}
 			}
 			periodTax := annualTax.Mul(periodFraction).Round(2)
