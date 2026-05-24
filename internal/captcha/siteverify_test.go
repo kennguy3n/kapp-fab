@@ -155,6 +155,25 @@ func TestSiteVerify_FailedTokenDoesNotConsumeReplaySlot(t *testing.T) {
 	}
 }
 
+func TestRecaptchaV3_NegativeMinScoreResolvesToDefault(t *testing.T) {
+	// Operator left KAPP_CAPTCHA_MIN_SCORE unset → getenvFloat
+	// returns -1 → NewRecaptchaV3Verifier must replace with 0.5.
+	v := NewRecaptchaV3Verifier("shh", -1, Options{})
+	if v.minScore != 0.5 {
+		t.Errorf("expected negative minScore to resolve to default 0.5, got %v", v.minScore)
+	}
+}
+
+func TestRecaptchaV3_ZeroMinScoreIsLiteralNotDefault(t *testing.T) {
+	// Operator set KAPP_CAPTCHA_MIN_SCORE=0 → verifier accepts
+	// every non-negative score (no threshold), NOT the legacy
+	// 0→0.5 sentinel behaviour.
+	v := NewRecaptchaV3Verifier("shh", 0, Options{})
+	if v.minScore != 0 {
+		t.Errorf("expected explicit minScore=0 to be honoured, got %v", v.minScore)
+	}
+}
+
 func TestRecaptchaV3_BelowMinScoreDenied(t *testing.T) {
 	srv := newStubVerifyServer(t, func(_ url.Values) siteVerifyResponse {
 		return siteVerifyResponse{

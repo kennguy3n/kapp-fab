@@ -41,9 +41,19 @@ type RecaptchaV3Verifier struct {
 // success=true. Google recommends 0.5 as a starting point; tune
 // upward (0.7+) for high-value endpoints and downward (0.3) only
 // after monitoring false-positive rates on real traffic.
+//
+// A negative minScore is treated as "unset" and replaced with the
+// 0.5 default; this lets operators distinguish "I want the
+// recommended default" (env var unset, parsed as -1 by
+// getenvFloat) from "I want every score accepted, including 0.0"
+// (KAPP_CAPTCHA_MIN_SCORE=0). Earlier revisions of this code used
+// minScore == 0 as the "unset" sentinel, which prevented operators
+// from explicitly opting into the lower bound — see Devin Review
+// finding ANALYSIS_pr-review-job-104ce38940214afeb0aedce5b15ff028
+// _0006.
 func NewRecaptchaV3Verifier(secret string, minScore float64, opts Options) *RecaptchaV3Verifier {
 	opts = opts.withDefaults()
-	if minScore == 0 {
+	if minScore < 0 {
 		minScore = 0.5
 	}
 	return &RecaptchaV3Verifier{

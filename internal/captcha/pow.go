@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/kennguy3n/kapp-fab/internal/platform"
@@ -62,12 +63,18 @@ type PoWVerifier struct {
 	difficulty  uint8
 	expiry      time.Duration
 	replayCache *platform.LRUCache
-	// now is the clock source used for issuance and expiry
+	// nowFn is the clock source used for issuance and expiry
 	// checks.  Production wires time.Now via the default
-	// constructor; tests can swap in a stubbed clock to test
-	// expiry-driven branches deterministically.  Kept private —
-	// the test seam is SetClock.
-	now func() time.Time
+	// constructor; tests can swap in a stubbed clock via
+	// SetClock to exercise expiry-driven branches deterministically.
+	//
+	// Stored behind an atomic.Pointer so SetClock is safe to call
+	// concurrently with Verify / IssueChallenge — a plain function
+	// field would race because Verify reads the field from request
+	// goroutines while a test might rotate the clock from a
+	// different goroutine.  See Devin Review finding
+	// ANALYSIS_pr-review-job-104ce38940214afeb0aedce5b15ff028_0005.
+	nowFn atomic.Pointer[func() time.Time]
 }
 
 // NewPoWVerifier returns a PoWVerifier signed with hmacKey. Empty
@@ -99,24 +106,39 @@ func NewPoWVerifier(hmacKey []byte, difficulty uint8, expiry time.Duration) *PoW
 	// replayed. Bound matches typical anti-abuse needs without
 	// pinning much memory.
 	rc := platform.NewLRUCache(4096, expiry*2)
-	return &PoWVerifier{
+	v := &PoWVerifier{
 		hmacKey:     hmacKey,
 		difficulty:  difficulty,
 		expiry:      expiry,
 		replayCache: rc,
-		now:         time.Now,
 	}
+	defaultNow := time.Now
+	v.nowFn.Store(&defaultNow)
+	return v
+}
+
+// now returns the current time via the (possibly stubbed) clock
+// source. Safe for concurrent callers — the pointer load is atomic.
+func (v *PoWVerifier) now() time.Time {
+	if fn := v.nowFn.Load(); fn != nil {
+		return (*fn)()
+	}
+	return time.Now()
 }
 
 // SetClock swaps the verifier's clock source.  Test-only seam:
 // production callers should not change the clock after
-// construction.  Passing nil restores time.Now.
+// construction.  Passing nil restores time.Now. Safe to call
+// concurrently with Verify and IssueChallenge — the underlying
+// store is an atomic.Pointer so there is no data race on the
+// function value.
 func (v *PoWVerifier) SetClock(now func() time.Time) {
 	if now == nil {
-		v.now = time.Now
+		defaultNow := time.Now
+		v.nowFn.Store(&defaultNow)
 		return
 	}
-	v.now = now
+	v.nowFn.Store(&now)
 }
 
 // Provider returns the canonical provider name ("pow").

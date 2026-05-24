@@ -80,9 +80,10 @@ type apiDeps struct {
 	featureMW            func(http.Handler) http.Handler
 	authzGate            func(action, resource string) func(http.Handler) http.Handler
 	authzMethodGate      func(readAction, writeAction, resource string) func(http.Handler) http.Handler
-	publicFormIPLimit    func(http.Handler) http.Handler
-	publicEmbedIPLimit   func(http.Handler) http.Handler
-	publicInboundIPLimit func(http.Handler) http.Handler
+	publicFormIPLimit      func(http.Handler) http.Handler
+	publicEmbedIPLimit     func(http.Handler) http.Handler
+	publicInboundIPLimit   func(http.Handler) http.Handler
+	publicChallengeIPLimit func(http.Handler) http.Handler
 
 	// captchaMW gates the unauthenticated public POST surface
 	// (form submit, portal magic-link request, SSO bootstrap)

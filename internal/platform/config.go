@@ -194,9 +194,13 @@ type Config struct {
 
 	// CaptchaMinScore is the lower bound on reCAPTCHA v3's score
 	// (0.0 bot ... 1.0 human) below which the verifier denies.
-	// 0 falls back to 0.5 (Google's recommended default). Ignored
-	// by Turnstile and hCaptcha which return a binary outcome.
-	// Sourced from KAPP_CAPTCHA_MIN_SCORE.
+	// A negative value (— the unset sentinel from getenvFloat —)
+	// falls back to 0.5 (Google's recommended default). 0 means
+	// "deny scores below 0", which in practice still accepts every
+	// score Google can issue (≥ 0); this distinguishes "I want the
+	// default" from "I explicitly want to disable the threshold".
+	// Ignored by Turnstile and hCaptcha which return a binary
+	// outcome. Sourced from KAPP_CAPTCHA_MIN_SCORE.
 	CaptchaMinScore float64
 
 	// CaptchaExpectedHostname optionally pins the hostname the
@@ -276,7 +280,7 @@ func LoadConfig() (*Config, error) {
 
 		CaptchaProvider:         os.Getenv("KAPP_CAPTCHA_PROVIDER"),
 		CaptchaSecret:           os.Getenv("KAPP_CAPTCHA_SECRET"),
-		CaptchaMinScore:         getenvFloat("KAPP_CAPTCHA_MIN_SCORE", 0),
+		CaptchaMinScore:         getenvFloat("KAPP_CAPTCHA_MIN_SCORE", -1),
 		CaptchaExpectedHostname: os.Getenv("KAPP_CAPTCHA_EXPECTED_HOSTNAME"),
 		PoWHMACKey:              os.Getenv("KAPP_POW_HMAC_KEY"),
 		PoWDifficulty:           getenvInt("KAPP_POW_DIFFICULTY", 0),

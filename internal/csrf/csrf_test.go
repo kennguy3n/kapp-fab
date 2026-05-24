@@ -35,6 +35,48 @@ func TestVerify_BearerBypass(t *testing.T) {
 	}
 }
 
+func TestVerify_SkipperBypass(t *testing.T) {
+	called := 0
+	cfg := Config{
+		AllowedOrigins: []string{"https://kapp.example"},
+		Skipper: func(r *http.Request) bool {
+			called++
+			return strings.HasPrefix(r.URL.Path, "/public/")
+		},
+	}
+	// Skipper returns true → request passes despite missing Origin.
+	req := httptest.NewRequest("POST", "/public/forms/abc/submit", strings.NewReader("body"))
+	if err := Verify(req, cfg); err != nil {
+		t.Errorf("skipper-matched path should bypass CSRF, got %v", err)
+	}
+	if called != 1 {
+		t.Errorf("expected skipper to be called once, got %d", called)
+	}
+
+	// Skipper returns false → request goes through origin check.
+	req2 := httptest.NewRequest("POST", "/private/x", strings.NewReader("body"))
+	if err := Verify(req2, cfg); err == nil {
+		t.Error("non-matched path with missing origin should deny")
+	}
+	if called != 2 {
+		t.Errorf("expected skipper to be called twice, got %d", called)
+	}
+}
+
+func TestVerify_SkipperRunsBeforeBearerCheck(t *testing.T) {
+	// Skipper has priority over bearer bypass — a path-level
+	// exemption applies even if Authorization is set.
+	cfg := Config{
+		AllowedOrigins: []string{"https://kapp.example"},
+		SkipBearerAuth: false,
+		Skipper:        func(r *http.Request) bool { return r.URL.Path == "/exempt" },
+	}
+	req := httptest.NewRequest("POST", "/exempt", strings.NewReader("body"))
+	if err := Verify(req, cfg); err != nil {
+		t.Errorf("skipper match should bypass, got %v", err)
+	}
+}
+
 func TestVerify_OriginMissingDenies(t *testing.T) {
 	cfg := Config{
 		AllowedOrigins: []string{"https://kapp.example"},

@@ -202,6 +202,45 @@ func TestPoW_NewFromConfigRejectsShortKey(t *testing.T) {
 	}
 }
 
+func TestPoW_SetClockConcurrentWithVerify(_ *testing.T) {
+	// Regression test for Devin Review finding
+	// ANALYSIS_pr-review-job-104ce38940214afeb0aedce5b15ff028_0005:
+	// SetClock used to write v.now without synchronization,
+	// racing with Verify reads on request goroutines. The atomic.
+	// Pointer-backed nowFn must let SetClock and verifier reads
+	// run concurrently without -race triggering. The test
+	// completes in well under a second under -race because the
+	// LRU cache lookup is in-memory.
+	key := []byte("0123456789abcdef0123456789abcdef")
+	v := NewPoWVerifier(key, 8, time.Minute)
+	stop := make(chan struct{})
+
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				v.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0).UTC() })
+			}
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _ = v.IssueChallenge()
+			}
+		}
+	}()
+	// Let the two goroutines race for ~5 ms; with -race the
+	// runtime will flag any unsynchronized access.
+	time.Sleep(5 * time.Millisecond)
+	close(stop)
+}
+
 func TestFactory_UnknownProvider(t *testing.T) {
 	_, err := NewFromConfig(Config{Provider: "magic"})
 	if err == nil {

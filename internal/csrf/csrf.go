@@ -118,12 +118,35 @@ type Config struct {
 	// requests carrying an "Authorization: Bearer ..." header.
 	// This is safe because browsers do not auto-attach
 	// Authorization cross-origin (the threat model CSRF defends
-	// against does not apply to bearer-token requests). Default
-	// true.
+	// against does not apply to bearer-token requests).
+	//
+	// The zero value is false (CSRF runs for bearer-auth requests
+	// too). Construct csrf.Config{...SkipBearerAuth: true} when
+	// you want bearer requests to bypass the check — there is no
+	// implicit default set by withDefaults() because the safe
+	// posture depends on the deployment shape and a silent flip
+	// to true would be a security regression for cookie-auth
+	// surfaces.
 	SkipBearerAuth bool
+
+	// Skipper, when set, is consulted before every other check.
+	// Returning true causes the middleware to pass the request
+	// through unconditionally. Used by gateways that mount the
+	// CSRF middleware globally but need to exempt deliberately
+	// embeddable public endpoints (e.g. POST /forms/{id}/submit,
+	// signed webhook receivers) from the Origin allowlist. Nil
+	// disables the hook (no requests are skipped on this path).
+	Skipper func(*http.Request) bool
 }
 
 // withDefaults fills in zero values with sensible defaults.
+//
+// SkipBearerAuth and Skipper are intentionally not defaulted here:
+// both fields encode security-sensitive policy ("should bearer-auth
+// requests bypass CSRF", "which paths should bypass CSRF") and a
+// silent default flip from the zero value to true would be a
+// regression for cookie-auth deployments. Callers must set them
+// explicitly when the gateway needs the bypass.
 func (c Config) withDefaults() Config {
 	if c.CookiePath == "" {
 		c.CookiePath = "/"
@@ -134,15 +157,6 @@ func (c Config) withDefaults() Config {
 	if c.HeaderName == "" {
 		c.HeaderName = "X-CSRF-Token"
 	}
-	// SkipBearerAuth: cannot distinguish "explicitly false" from
-	// "zero value" with a plain bool, so document that the
-	// zero-value default IS true at construction time. Callers
-	// that want bearer-token requests to also be CSRF-checked
-	// should construct Config with SkipBearerAuth=false AFTER the
-	// withDefaults() call (i.e., reverse the field — which we do
-	// here by setting unconditionally false→true). Resolved by
-	// keeping the zero value as "skip" since that's the safe
-	// default for the Kapp deployment.
 	return c
 }
 
@@ -215,6 +229,9 @@ func generateToken() (string, error) {
 func Verify(r *http.Request, cfg Config) error {
 	cfg = cfg.withDefaults()
 	if IsSafeMethod(r.Method) {
+		return nil
+	}
+	if cfg.Skipper != nil && cfg.Skipper(r) {
 		return nil
 	}
 	if cfg.SkipBearerAuth {

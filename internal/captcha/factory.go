@@ -31,8 +31,12 @@ type Config struct {
 	// 0 → default 5 min.
 	PoWExpiry time.Duration
 	// MinScore is the reCAPTCHA v3 acceptance threshold (0.0
-	// rejects all, 1.0 accepts only perfect-confidence). Ignored
-	// by the other providers. 0 → default 0.5.
+	// accepts every non-negative score, 1.0 accepts only
+	// perfect-confidence). Ignored by the other providers.
+	// Negative values are treated as "unset" and resolve to
+	// the package default of 0.5; this lets operators
+	// explicitly opt into a low threshold (MinScore=0) without
+	// the previous "0 → 0.5" sentinel overriding their choice.
 	MinScore float64
 	// ExpectedHostname optionally pins the hostname the provider
 	// reports as the token's origin. Empty disables the check.

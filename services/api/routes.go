@@ -103,7 +103,16 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 	// from the provider CDN directly) so the frontend can probe
 	// the endpoint to discover whether server-side issuance is
 	// required.
-	r.Mount("/api/v1/captcha", captchaRouter(d.captchaVerifier))
+	//
+	// IP-keyed rate limiter sits in front so a flood of challenge
+	// requests can't exhaust HMAC CPU or fill the bounded PoW
+	// replay cache with never-solved envelopes.
+	r.Group(func(r chi.Router) {
+		if d.publicChallengeIPLimit != nil {
+			r.Use(d.publicChallengeIPLimit)
+		}
+		r.Mount("/api/v1/captcha", captchaRouter(d.captchaVerifier))
+	})
 
 	// Phase F event stream. SSE tail of the tenant's outbox so the web
 	// UI can react to state changes without polling. Mount delegated to

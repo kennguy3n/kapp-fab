@@ -134,10 +134,16 @@ func extractCaptchaToken(r *http.Request) string {
 	}
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
-		// ParseForm reads the body into r.PostForm — but it
-		// preserves the body for downstream consumers if the
-		// request was originally form-encoded, because
-		// http.Request stores the parsed form independently.
+		// ParseForm reads and drains r.Body, then stores the
+		// parsed key/value pairs on r.Form and r.PostForm. The
+		// raw body is not preserved — but downstream form
+		// handlers don't read r.Body directly, they call
+		// r.FormValue() / r.PostFormValue() / r.ParseForm()
+		// which all hit the cached r.PostForm map populated
+		// here. So this works only for handlers that follow
+		// the standard form-handling API. If a future handler
+		// needs the raw body of a form-encoded POST it should
+		// not rely on r.Body downstream of this middleware.
 		_ = r.ParseForm()
 		return r.PostForm.Get("captcha_token")
 	}
