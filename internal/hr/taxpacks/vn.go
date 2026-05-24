@@ -87,6 +87,23 @@ var (
 	vnPersonalDeduction  = dec("11000000")
 	vnDependentDeduction = dec("4400000")
 
+	// Defense-in-depth upper bound on declared dependents.
+	// Resolution 954/2020/UBTVQH14 does not impose a hard
+	// statutory cap on the dependent count (the Vietnamese
+	// PIT Law allows any qualifying dependent — children,
+	// parents, spouses lacking taxable income), but a wizard
+	// or payroll-import bug sending a runaway value (e.g.
+	// 10_000) would silently zero out the VN_PIT line via
+	// the dependent-deduction math (11M + 10_000 × 4.4M ≈
+	// 44 billion VND of synthetic deduction). Twenty
+	// dependents already covers any plausible real-world
+	// household and matches the conservative defense-in-depth
+	// pattern used by the TH pack (thMaxDependents). Operators
+	// with legitimately higher counts can land a future
+	// per-tenant override; the cap below trips well above the
+	// 99.99 %ile of real declarations.
+	vnMaxDependents = 20
+
 	vnSIRate = dec("0.08")
 	vnHIRate = dec("0.015")
 	vnUIRate = dec("0.01")
@@ -144,6 +161,9 @@ func (vnPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	deps := e.NumDependents
 	if deps < 0 {
 		deps = 0
+	}
+	if deps > vnMaxDependents {
+		deps = vnMaxDependents
 	}
 	deduction := vnPersonalDeduction.Add(
 		vnDependentDeduction.Mul(decimal.NewFromInt(int64(deps))),

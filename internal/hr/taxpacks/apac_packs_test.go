@@ -626,6 +626,41 @@ func TestVNPackNonResidentFlat20(t *testing.T) {
 	}
 }
 
+// TestVNPackDependentCountClampedAtCeiling pins the defense-in-depth
+// upper bound on NumDependents (vnMaxDependents = 20). A bug in the
+// wizard or a payroll-import error could send a runaway dependent
+// count; without the cap, an attacker / faulty integration could
+// silently zero out the VN_PIT line by inflating the dependent
+// deduction beyond gross. The cap ensures the dependent allowance
+// stays within plausible bounds (max 20 × 4.4M = 88M, plus 11M
+// personal = 99M VND total deduction at the cap).
+//
+// Slip: 200,000,000 VND / month, NumDependents = 10,000.
+//   With cap:   deduction = 11M + 20×4.4M = 99M VND → taxable
+//               monthly = 200M - 99M = 101M VND → progressive walk
+//               yields a positive VN_PIT line.
+//   Without:    deduction = 11M + 10000×4.4M = 44,011M VND → taxable
+//               clamped to zero → VN_PIT silently suppressed.
+func TestVNPackDependentCountClampedAtCeiling(t *testing.T) {
+	pack, _ := Lookup("VN")
+	out, err := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: true, NumDependents: 10000,
+	}, decimal.NewFromInt(200000000), monthPeriod())
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	codes := indexByCode(out)
+	pit, ok := codes["VN_PIT"]
+	if !ok {
+		t.Fatalf("VN_PIT line was silently suppressed by an uncapped "+
+			"dependent count — expected the cap at %d to keep VN_PIT "+
+			"positive; got %+v", vnMaxDependents, codes)
+	}
+	if !pit.IsPositive() {
+		t.Fatalf("VN_PIT = %s; expected positive after dependent cap", pit)
+	}
+}
+
 // ----- Philippines -----
 
 // TestPHPackResidentWithholding: PHP 50,000 / month slip.
@@ -755,6 +790,47 @@ func TestNZPackTopBracket(t *testing.T) {
 	codes := indexByCode(out)
 	if paye := codes["NZ_PAYE"]; paye.LessThan(decimal.NewFromInt(5800)) || paye.GreaterThan(decimal.NewFromInt(6300)) {
 		t.Errorf("NZ_PAYE = %s; expected ~6,025.61 (band 5,800-6,300)", paye)
+	}
+}
+
+// TestNZPackNonResidentSamePAYEAndACC pins the intentional NZ
+// design: PAYE rates do NOT vary by tax-residency for income
+// taxed via IRD payroll (Income Tax Act 2007 s.RD 5(1) — the
+// schedule rates apply uniformly to all employees subject to
+// PAYE, including non-resident workers on NZ payroll, casual
+// agricultural workers, election-day workers, NRCT, etc.). ACC
+// Earners' Levy similarly applies to all employees regardless
+// of residency (ACC Act 2001 s.219). KiwiSaver remains opt-in
+// via EmployeeInfo.KiwiSaverRate — non-residents (and any
+// employee not enrolled) naturally get no KS deduction since
+// the rate field is zero. This test pins the NZ pack's lack
+// of a Resident branch as a deliberate design choice: a
+// future regression that adds a non-resident flat-rate branch
+// (mistaking NZ for AU's foreign-resident schedule) would
+// break this test.
+func TestNZPackNonResidentSamePAYEAndACC(t *testing.T) {
+	pack, _ := Lookup("NZ")
+	resOut, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: true,
+	}, decimal.NewFromInt(6000), monthPeriod())
+	nrOut, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: false,
+	}, decimal.NewFromInt(6000), monthPeriod())
+	resCodes := indexByCode(resOut)
+	nrCodes := indexByCode(nrOut)
+	if !resCodes["NZ_PAYE"].Equal(nrCodes["NZ_PAYE"]) {
+		t.Errorf("NZ_PAYE differs by residency: resident=%s non-resident=%s; "+
+			"expected the same rate per Income Tax Act 2007 s.RD 5(1)",
+			resCodes["NZ_PAYE"], nrCodes["NZ_PAYE"])
+	}
+	if !resCodes["NZ_ACC"].Equal(nrCodes["NZ_ACC"]) {
+		t.Errorf("NZ_ACC differs by residency: resident=%s non-resident=%s; "+
+			"expected the same levy per ACC Act 2001 s.219",
+			resCodes["NZ_ACC"], nrCodes["NZ_ACC"])
+	}
+	if _, ok := nrCodes["NZ_KIWISAVER"]; ok {
+		t.Errorf("non-resident slip emitted NZ_KIWISAVER without an opt-in "+
+			"KiwiSaverRate; codes=%+v", nrCodes)
 	}
 }
 
