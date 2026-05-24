@@ -2,6 +2,7 @@ package platform
 
 import (
 	"testing"
+	"time"
 )
 
 func TestLoadConfig_CacheSizeDefaults(t *testing.T) {
@@ -246,5 +247,136 @@ func TestLoadConfig_ValidateCachePositive(t *testing.T) {
 	cfg.TenantCacheSize = 0
 	if err := cfg.Validate(); err == nil {
 		t.Error("Validate should reject zero TenantCacheSize")
+	}
+}
+
+func TestLoadConfig_SecretsAndJWTDefaults(t *testing.T) {
+	t.Setenv("DB_URL", "postgres://localhost/test")
+	for _, k := range []string{
+		"KAPP_SECRET_PROVIDER",
+		"KAPP_SECRETS_ENV_PREFIX",
+		"KAPP_SECRETS_FILE_ROOT_DIR",
+		"KAPP_SECRETS_AWS_REGION",
+		"KAPP_SECRETS_VAULT_ADDR",
+		"KAPP_JWT_PRIMARY_REF",
+		"KAPP_JWT_VERIFY_REFS",
+		"KAPP_JWT_ALGORITHM",
+		"KAPP_JWT_ISSUER",
+		"KAPP_JWT_AUDIENCE",
+		"KAPP_JWT_ACCESS_TTL",
+		"KAPP_JWT_REFRESH_TTL",
+		"KAPP_JWT_LEEWAY",
+		"KAPP_JWT_KEYRING_REFRESH_INTERVAL",
+	} {
+		t.Setenv(k, "")
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.SecretProvider != "" {
+		t.Errorf("SecretProvider default should be empty, got %q", cfg.SecretProvider)
+	}
+	if cfg.SecretsEnvPrefix != "KAPP_" {
+		t.Errorf("SecretsEnvPrefix = %q want KAPP_", cfg.SecretsEnvPrefix)
+	}
+	if cfg.JWTPrimaryRef != "jwt/primary" {
+		t.Errorf("JWTPrimaryRef = %q want jwt/primary", cfg.JWTPrimaryRef)
+	}
+	if cfg.JWTAlgorithm != "HS256" {
+		t.Errorf("JWTAlgorithm = %q want HS256", cfg.JWTAlgorithm)
+	}
+	if cfg.JWTIssuer != "kapp" {
+		t.Errorf("JWTIssuer = %q want kapp", cfg.JWTIssuer)
+	}
+	if cfg.JWTAccessTTL.String() != "15m0s" {
+		t.Errorf("JWTAccessTTL default = %s want 15m0s", cfg.JWTAccessTTL)
+	}
+	if cfg.JWTRefreshTTL.String() != "24h0m0s" {
+		t.Errorf("JWTRefreshTTL default = %s want 24h0m0s", cfg.JWTRefreshTTL)
+	}
+	if cfg.JWTLeeway.String() != "30s" {
+		t.Errorf("JWTLeeway default = %s want 30s", cfg.JWTLeeway)
+	}
+	if cfg.JWTKeyringRefreshInterval.String() != "1m0s" {
+		t.Errorf("JWTKeyringRefreshInterval default = %s want 1m0s", cfg.JWTKeyringRefreshInterval)
+	}
+	if len(cfg.JWTVerifyRefs) != 0 {
+		t.Errorf("JWTVerifyRefs default should be empty, got %v", cfg.JWTVerifyRefs)
+	}
+}
+
+func TestLoadConfig_SecretsAndJWTFromEnv(t *testing.T) {
+	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_SECRET_PROVIDER", "vault")
+	t.Setenv("KAPP_SECRETS_VAULT_ADDR", "https://vault.example.com")
+	t.Setenv("KAPP_SECRETS_VAULT_TOKEN", "test-token")
+	t.Setenv("KAPP_SECRETS_VAULT_MOUNT_PATH", "kv")
+	t.Setenv("KAPP_JWT_PRIMARY_REF", "secret/jwt/active")
+	t.Setenv("KAPP_JWT_VERIFY_REFS", "secret/jwt/prev , secret/jwt/older")
+	t.Setenv("KAPP_JWT_ALGORITHM", "RS256")
+	t.Setenv("KAPP_JWT_ACCESS_TTL", "5m")
+	t.Setenv("KAPP_JWT_REFRESH_TTL", "12h")
+	t.Setenv("KAPP_JWT_KEYRING_REFRESH_INTERVAL", "5s")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.SecretProvider != "vault" {
+		t.Errorf("SecretProvider = %q want vault", cfg.SecretProvider)
+	}
+	if cfg.SecretsVaultAddr != "https://vault.example.com" {
+		t.Errorf("SecretsVaultAddr = %q", cfg.SecretsVaultAddr)
+	}
+	if cfg.JWTAlgorithm != "RS256" {
+		t.Errorf("JWTAlgorithm = %q want RS256", cfg.JWTAlgorithm)
+	}
+	if cfg.JWTAccessTTL.String() != "5m0s" {
+		t.Errorf("JWTAccessTTL = %s want 5m0s", cfg.JWTAccessTTL)
+	}
+	if len(cfg.JWTVerifyRefs) != 2 || cfg.JWTVerifyRefs[0] != "secret/jwt/prev" || cfg.JWTVerifyRefs[1] != "secret/jwt/older" {
+		t.Errorf("JWTVerifyRefs trimmed split mismatch: %v", cfg.JWTVerifyRefs)
+	}
+}
+
+func TestSplitCSV(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"  ", nil},
+		{",,,", nil},
+		{"a", []string{"a"}},
+		{" a , b , c ", []string{"a", "b", "c"}},
+		{"a,,b", []string{"a", "b"}},
+	}
+	for _, tc := range cases {
+		got := splitCSV(tc.in)
+		if len(got) != len(tc.want) {
+			t.Errorf("splitCSV(%q) = %v want %v", tc.in, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("splitCSV(%q)[%d] = %q want %q", tc.in, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
+func TestGetenvDuration(t *testing.T) {
+	t.Setenv("KAPP_TEST_DUR", "5m")
+	if got := getenvDuration("KAPP_TEST_DUR", time.Second); got.String() != "5m0s" {
+		t.Errorf("getenvDuration = %s want 5m0s", got)
+	}
+	t.Setenv("KAPP_TEST_DUR_BAD", "not-a-duration")
+	if got := getenvDuration("KAPP_TEST_DUR_BAD", 7*time.Second); got != 7*time.Second {
+		t.Errorf("invalid value should fall back to default, got %s", got)
+	}
+	t.Setenv("KAPP_TEST_DUR_ZERO", "0s")
+	if got := getenvDuration("KAPP_TEST_DUR_ZERO", 7*time.Second); got != 7*time.Second {
+		t.Errorf("zero value should fall back to default, got %s", got)
 	}
 }

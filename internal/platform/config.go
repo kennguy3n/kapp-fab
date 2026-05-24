@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config holds runtime configuration values shared by the API and worker
@@ -168,6 +169,48 @@ type Config struct {
 	// the legacy /api/v1 handlers. Sourced from
 	// KAPP_GRPC_GATEWAY_MOUNT.
 	GatewayMount string
+
+	// Secret-provider selection. KAPP_SECRET_PROVIDER chooses
+	// the backend: "" / "env" (default), "file", "aws", "vault",
+	// or "gcp". The remaining fields are provider-specific.
+	// Existing deployments keep using KAPP_JWT_SECRET via the env
+	// backend unchanged; the new backends are opt-in.
+	SecretProvider string
+	// SecretsEnvPrefix is the env-var prefix used by the env
+	// backend's key-to-name translation. Default "KAPP_".
+	SecretsEnvPrefix string
+	// SecretsFileRootDir is the on-disk root for the file backend
+	// (e.g. "/var/run/kapp/secrets"). Mount K8s Secret objects or
+	// SSM Parameter Store volumes here.
+	SecretsFileRootDir string
+	// SecretsAWSRegion / SecretsAWSPrefix configure the AWS
+	// Secrets Manager backend.
+	SecretsAWSRegion   string
+	SecretsAWSPrefix   string
+	SecretsAWSEndpoint string
+	// SecretsVaultAddr / SecretsVaultToken / SecretsVaultMountPath /
+	// SecretsVaultSecretKey configure the Vault KV v2 backend.
+	SecretsVaultAddr      string
+	SecretsVaultToken     string
+	SecretsVaultMountPath string
+	SecretsVaultSecretKey string
+
+	// JWT keyring configuration. PrimaryRef is the secret-store
+	// reference for the signing key (e.g. "jwt/primary");
+	// VerifyRefs is the optional comma-separated list of verify-
+	// only references kept in the ring during rotation. Algorithm
+	// selects HS256 (default) or RS256. The TTL/issuer/audience
+	// fields override the SignerConfig defaults so an operator can
+	// tune them without code changes.
+	JWTPrimaryRef             string
+	JWTVerifyRefs             []string
+	JWTAlgorithm              string
+	JWTIssuer                 string
+	JWTAudience               string
+	JWTAccessTTL              time.Duration
+	JWTRefreshTTL             time.Duration
+	JWTLeeway                 time.Duration
+	JWTKeyringRefreshInterval time.Duration
 }
 
 // LoadConfig reads configuration from environment variables and returns a
@@ -200,6 +243,27 @@ func LoadConfig() (*Config, error) {
 		GRPCAddr:         os.Getenv("KAPP_GRPC_ADDR"),
 		GRPCReflection:   getenvBool("KAPP_GRPC_REFLECTION", false),
 		GatewayMount:     os.Getenv("KAPP_GRPC_GATEWAY_MOUNT"),
+
+		SecretProvider:        os.Getenv("KAPP_SECRET_PROVIDER"),
+		SecretsEnvPrefix:      getenv("KAPP_SECRETS_ENV_PREFIX", "KAPP_"),
+		SecretsFileRootDir:    os.Getenv("KAPP_SECRETS_FILE_ROOT_DIR"),
+		SecretsAWSRegion:      os.Getenv("KAPP_SECRETS_AWS_REGION"),
+		SecretsAWSPrefix:      os.Getenv("KAPP_SECRETS_AWS_PREFIX"),
+		SecretsAWSEndpoint:    os.Getenv("KAPP_SECRETS_AWS_ENDPOINT"),
+		SecretsVaultAddr:      os.Getenv("KAPP_SECRETS_VAULT_ADDR"),
+		SecretsVaultToken:     os.Getenv("KAPP_SECRETS_VAULT_TOKEN"),
+		SecretsVaultMountPath: os.Getenv("KAPP_SECRETS_VAULT_MOUNT_PATH"),
+		SecretsVaultSecretKey: os.Getenv("KAPP_SECRETS_VAULT_SECRET_KEY"),
+
+		JWTPrimaryRef:             getenv("KAPP_JWT_PRIMARY_REF", "jwt/primary"),
+		JWTVerifyRefs:             splitCSV(os.Getenv("KAPP_JWT_VERIFY_REFS")),
+		JWTAlgorithm:              getenv("KAPP_JWT_ALGORITHM", "HS256"),
+		JWTIssuer:                 getenv("KAPP_JWT_ISSUER", "kapp"),
+		JWTAudience:               getenv("KAPP_JWT_AUDIENCE", "kapp"),
+		JWTAccessTTL:              getenvDuration("KAPP_JWT_ACCESS_TTL", 15*time.Minute),
+		JWTRefreshTTL:             getenvDuration("KAPP_JWT_REFRESH_TTL", 24*time.Hour),
+		JWTLeeway:                 getenvDuration("KAPP_JWT_LEEWAY", 30*time.Second),
+		JWTKeyringRefreshInterval: getenvDuration("KAPP_JWT_KEYRING_REFRESH_INTERVAL", 60*time.Second),
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -303,4 +367,46 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// getenvDuration parses an env var with time.ParseDuration. An
+// unparseable or unset value returns the fallback. Zero values
+// are explicitly rejected so an operator who sets
+// KAPP_JWT_ACCESS_TTL="0s" gets the default (the auth.SignerConfig
+// uses zero as "use my baked-in default" and we don't want a
+// typo to subtly disable expiry).
+func getenvDuration(key string, fallback time.Duration) time.Duration {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
+}
+
+// splitCSV splits a comma-separated env var into trimmed,
+// non-empty fields. The empty string yields a nil slice (not an
+// empty slice with one zero-length element) so the JWT verify-
+// refs path can use len() to decide whether to register any
+// extras. Whitespace around each field is trimmed because env
+// vars passed through docker-compose YAML often end up with
+// stray spaces.
+func splitCSV(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if v := strings.TrimSpace(p); v != "" {
+			out = append(out, v)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

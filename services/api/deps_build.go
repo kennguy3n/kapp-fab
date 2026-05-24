@@ -38,6 +38,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/print"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/reporting"
+	"github.com/kennguy3n/kapp-fab/internal/secrets"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
@@ -669,11 +670,33 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 			return t.Quota, nil
 		})
 	}
-	if signer, err := newAuthSigner(); err == nil {
+	// Build the secrets.Provider before constructing the signer
+	// so a non-env backend (file / aws / vault / gcp) can supply
+	// the JWT signing material. Errors here are non-fatal — they
+	// gate the JWT path off without taking the rest of the API
+	// down. The "env" backend has no setup cost and is the default
+	// so existing deployments keep using KAPP_JWT_SECRET unchanged.
+	secretsProvider, secretsErr := secrets.NewFromConfig(ctx, secretsConfigFromPlatform(cfg))
+	if secretsErr != nil {
+		log.Printf("api: secrets provider init failed (%v); falling back to env", secretsErr)
+		secretsProvider, _ = secrets.NewEnvProvider("")
+	}
+	signerOpts := auth.SignerProviderOptions{
+		PrimaryRef:      cfg.JWTPrimaryRef,
+		VerifyRefs:      cfg.JWTVerifyRefs,
+		Algorithm:       auth.Algorithm(cfg.JWTAlgorithm),
+		Issuer:          cfg.JWTIssuer,
+		Audience:        cfg.JWTAudience,
+		AccessTTL:       cfg.JWTAccessTTL,
+		RefreshTTL:      cfg.JWTRefreshTTL,
+		Leeway:          cfg.JWTLeeway,
+		RefreshInterval: cfg.JWTKeyringRefreshInterval,
+	}
+	if signer, err := newAuthSigner(ctx, secretsProvider, signerOpts); err == nil {
 		kchat := auth.NewHTTPKChatClient(os.Getenv("KCHAT_BASE_URL"), os.Getenv("KCHAT_API_KEY"))
 		authh.signer = signer
 		authh.svc = auth.NewSSOService(kchat, signer, sessionStore, pool, adminPool)
-		log.Printf("api: JWT auth enabled (HS256)")
+		log.Printf("api: JWT auth enabled (provider=%s, algorithm=%s)", secretsProvider.Name(), signerOpts.Algorithm)
 	} else {
 		log.Printf("api: JWT auth disabled (%v)", err)
 	}
@@ -825,4 +848,32 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	}
 
 	return d, func() { runCleanups(cleanups) }, nil
+}
+
+// secretsConfigFromPlatform translates the operator-facing
+// platform.Config (which is sourced from KAPP_* env vars) into
+// the secrets.Config that the factory consumes. Kept here, in
+// the deps_build file, because this is the only call site and
+// the translation is mechanical — promoting it to the secrets
+// package would force secrets to import platform and create an
+// import cycle with the auth + secrets packages.
+func secretsConfigFromPlatform(cfg *platform.Config) secrets.Config {
+	return secrets.Config{
+		Backend:   cfg.SecretProvider,
+		EnvPrefix: cfg.SecretsEnvPrefix,
+		File: secrets.FileProviderConfig{
+			RootDir: cfg.SecretsFileRootDir,
+		},
+		AWS: secrets.AWSProviderConfig{
+			Region:   cfg.SecretsAWSRegion,
+			Prefix:   cfg.SecretsAWSPrefix,
+			Endpoint: cfg.SecretsAWSEndpoint,
+		},
+		Vault: secrets.VaultProviderConfig{
+			Addr:      cfg.SecretsVaultAddr,
+			Token:     cfg.SecretsVaultToken,
+			MountPath: cfg.SecretsVaultMountPath,
+			SecretKey: cfg.SecretsVaultSecretKey,
+		},
+	}
 }

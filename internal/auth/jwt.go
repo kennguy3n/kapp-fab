@@ -120,6 +120,14 @@ var (
 // both access-token and refresh-token expiry; ARCHITECTURE.md §9 calls
 // for short-lived access tokens plus a longer refresh window, so we
 // model them as two TTLs and the refresh path reuses the same signer.
+//
+// Single-key vs keyring: callers may populate either {Algorithm,
+// HMACKey | RSAPrivate | RSAPublic} (the pre-PR-6 form, preserved
+// for backwards compatibility with every existing test and call
+// site) OR KeyRing (the PR-6 rotation form). Both fields populated
+// is a configuration error and NewSigner refuses. The Algorithm
+// field is still required when KeyRing is set so the encoder knows
+// which JWS algorithm header to stamp.
 type SignerConfig struct {
 	Algorithm Algorithm
 	// HMACKey is consulted when Algorithm == AlgHS256.
@@ -135,6 +143,12 @@ type SignerConfig struct {
 	// Leeway absorbs clock skew between issuer and validator. Small
 	// (30s–60s) values are typical; 0 disables the grace window.
 	Leeway time.Duration
+	// KeyRing, when non-nil, supersedes the single-key fields:
+	// the encoder picks material from KeyRing.Primary() and stamps
+	// the kid header; the verifier picks material by kid header,
+	// falling back to the primary when the token carries no kid
+	// (legacy access tokens minted before rotation was enabled).
+	KeyRing *KeyRing
 }
 
 // Signer issues and validates JWTs under a single static config. A
@@ -151,15 +165,18 @@ type Signer struct {
 func NewSigner(cfg SignerConfig) (*Signer, error) {
 	switch cfg.Algorithm {
 	case AlgHS256:
-		if len(cfg.HMACKey) < 32 {
+		if cfg.KeyRing == nil && len(cfg.HMACKey) < 32 {
 			return nil, errors.New("auth: HS256 requires >=32-byte key")
 		}
 	case AlgRS256:
-		if cfg.RSAPrivate == nil && cfg.RSAPublic == nil {
+		if cfg.KeyRing == nil && cfg.RSAPrivate == nil && cfg.RSAPublic == nil {
 			return nil, errors.New("auth: RS256 requires a key")
 		}
 	default:
 		return nil, fmt.Errorf("auth: unsupported algorithm %q", cfg.Algorithm)
+	}
+	if cfg.KeyRing != nil && (len(cfg.HMACKey) > 0 || cfg.RSAPrivate != nil || cfg.RSAPublic != nil) {
+		return nil, errors.New("auth: SignerConfig must use either KeyRing or single-key fields, not both")
 	}
 	if cfg.AccessTTL <= 0 {
 		cfg.AccessTTL = 15 * time.Minute
@@ -265,19 +282,35 @@ func (s *Signer) verify(token, expectedAudience string) (*Claims, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrTokenSignature, err)
 	}
+	hdrJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("%w: header decode: %w", ErrTokenInvalid, err)
+	}
+	var header struct {
+		Alg string `json:"alg"`
+		KID string `json:"kid"`
+		Typ string `json:"typ"`
+	}
+	if err := json.Unmarshal(hdrJSON, &header); err != nil {
+		return nil, fmt.Errorf("%w: header parse: %w", ErrTokenInvalid, err)
+	}
+	hmacKey, rsaPub, err := s.selectVerificationKey(header.Alg, header.KID)
+	if err != nil {
+		return nil, err
+	}
 	switch s.cfg.Algorithm {
 	case AlgHS256:
-		mac := hmac.New(sha256.New, s.cfg.HMACKey)
+		mac := hmac.New(sha256.New, hmacKey)
 		mac.Write([]byte(signingInput))
 		if !hmac.Equal(mac.Sum(nil), sig) {
 			return nil, ErrTokenSignature
 		}
 	case AlgRS256:
-		if s.cfg.RSAPublic == nil {
+		if rsaPub == nil {
 			return nil, errors.New("auth: RS256 verifier missing public key")
 		}
 		hashed := sha256.Sum256([]byte(signingInput))
-		if err := rsa.VerifyPKCS1v15(s.cfg.RSAPublic, crypto.SHA256, hashed[:], sig); err != nil {
+		if err := rsa.VerifyPKCS1v15(rsaPub, crypto.SHA256, hashed[:], sig); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrTokenSignature, err)
 		}
 	default:
@@ -305,6 +338,10 @@ func (s *Signer) encode(c Claims) (string, error) {
 		"alg": string(s.cfg.Algorithm),
 		"typ": "JWT",
 	}
+	hmacKey, rsaPriv, kid := s.selectSigningKey()
+	if kid != "" {
+		header["kid"] = kid
+	}
 	hdrJSON, err := json.Marshal(header)
 	if err != nil {
 		return "", err
@@ -318,15 +355,15 @@ func (s *Signer) encode(c Claims) (string, error) {
 	var sig []byte
 	switch s.cfg.Algorithm {
 	case AlgHS256:
-		mac := hmac.New(sha256.New, s.cfg.HMACKey)
+		mac := hmac.New(sha256.New, hmacKey)
 		mac.Write([]byte(signingInput))
 		sig = mac.Sum(nil)
 	case AlgRS256:
-		if s.cfg.RSAPrivate == nil {
+		if rsaPriv == nil {
 			return "", errors.New("auth: RS256 signer missing private key")
 		}
 		hashed := sha256.Sum256([]byte(signingInput))
-		signed, err := rsa.SignPKCS1v15(rand.Reader, s.cfg.RSAPrivate, crypto.SHA256, hashed[:])
+		signed, err := rsa.SignPKCS1v15(rand.Reader, rsaPriv, crypto.SHA256, hashed[:])
 		if err != nil {
 			return "", fmt.Errorf("auth: rsa sign: %w", err)
 		}
@@ -335,6 +372,43 @@ func (s *Signer) encode(c Claims) (string, error) {
 		return "", fmt.Errorf("auth: unsupported algorithm %q", s.cfg.Algorithm)
 	}
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+// selectSigningKey returns the active signing material plus the
+// kid to stamp on the JWS header. When the signer is configured
+// via the legacy single-key fields, the kid is empty (header is
+// omitted) so existing tokens stay byte-for-byte identical.
+// When configured via KeyRing, the kid is the primary key's KID.
+func (s *Signer) selectSigningKey() (hmacKey []byte, rsaPriv *rsa.PrivateKey, kid string) {
+	if s.cfg.KeyRing != nil {
+		k := s.cfg.KeyRing.Primary()
+		return k.HMACKey, k.RSAPrivate, k.KID
+	}
+	return s.cfg.HMACKey, s.cfg.RSAPrivate, ""
+}
+
+// selectVerificationKey picks the verification material for an
+// inbound token, dispatching on the JWS header's kid claim when
+// a KeyRing is configured. Empty kid falls back to the legacy
+// single-key fields so tokens minted before rotation was enabled
+// still validate after the operator upgrades. Unknown kid is a
+// fail-closed signature error.
+func (s *Signer) selectVerificationKey(alg, kid string) (hmacKey []byte, rsaPub *rsa.PublicKey, err error) {
+	if alg != "" && alg != string(s.cfg.Algorithm) {
+		return nil, nil, fmt.Errorf("%w: algorithm mismatch", ErrTokenSignature)
+	}
+	if s.cfg.KeyRing == nil {
+		return s.cfg.HMACKey, s.cfg.RSAPublic, nil
+	}
+	if kid == "" {
+		k := s.cfg.KeyRing.Primary()
+		return k.HMACKey, k.RSAPublic, nil
+	}
+	k, ok := s.cfg.KeyRing.Get(kid)
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: unknown kid %q", ErrTokenSignature, kid)
+	}
+	return k.HMACKey, k.RSAPublic, nil
 }
 
 // ParsePrivateKeyPEM parses a PEM-encoded RSA private key. Accepts

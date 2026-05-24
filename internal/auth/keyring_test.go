@@ -1,0 +1,504 @@
+package auth
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/kennguy3n/kapp-fab/internal/secrets"
+)
+
+func TestKeyRing_PrimaryAndVerifierLookups(t *testing.T) {
+	primary := SigningKey{KID: "k1", Algorithm: AlgHS256, HMACKey: make([]byte, 32)}
+	for i := range primary.HMACKey {
+		primary.HMACKey[i] = 0x11
+	}
+	ring, err := NewKeyRing(primary)
+	if err != nil {
+		t.Fatalf("NewKeyRing: %v", err)
+	}
+	if ring.Primary().KID != "k1" {
+		t.Fatalf("Primary.KID = %s want k1", ring.Primary().KID)
+	}
+	got, ok := ring.Get("k1")
+	if !ok || got.KID != "k1" {
+		t.Fatalf("Get(k1): ok=%v key=%v", ok, got)
+	}
+	if _, ok := ring.Get("nope"); ok {
+		t.Fatalf("Get(nope) should be absent")
+	}
+}
+
+func TestKeyRing_SwapPrimaryAndAddVerifier(t *testing.T) {
+	k1 := SigningKey{KID: "k1", Algorithm: AlgHS256, HMACKey: make([]byte, 32)}
+	k2 := SigningKey{KID: "k2", Algorithm: AlgHS256, HMACKey: make([]byte, 32)}
+	for i := range k1.HMACKey {
+		k1.HMACKey[i] = 0x11
+	}
+	for i := range k2.HMACKey {
+		k2.HMACKey[i] = 0x22
+	}
+	ring, err := NewKeyRing(k1)
+	if err != nil {
+		t.Fatalf("NewKeyRing: %v", err)
+	}
+	if err := ring.AddVerifier(k2); err != nil {
+		t.Fatalf("AddVerifier: %v", err)
+	}
+	if ring.Primary().KID != "k1" {
+		t.Fatalf("Primary still k1 after AddVerifier")
+	}
+	if err := ring.SwapPrimary("k2"); err != nil {
+		t.Fatalf("SwapPrimary: %v", err)
+	}
+	if ring.Primary().KID != "k2" {
+		t.Fatalf("Primary should be k2 after swap")
+	}
+	// Old primary still present as verifier
+	if _, ok := ring.Get("k1"); !ok {
+		t.Fatalf("old primary k1 should still be present as verifier")
+	}
+}
+
+func TestKeyRing_RemoveRefusesPrimary(t *testing.T) {
+	k1 := SigningKey{KID: "k1", Algorithm: AlgHS256, HMACKey: make([]byte, 32)}
+	for i := range k1.HMACKey {
+		k1.HMACKey[i] = 0x11
+	}
+	ring, _ := NewKeyRing(k1)
+	if err := ring.Remove("k1"); err == nil {
+		t.Fatalf("Remove of primary should error")
+	}
+}
+
+func TestKeyRing_KIDsSorted(t *testing.T) {
+	k := SigningKey{Algorithm: AlgHS256, HMACKey: make([]byte, 32)}
+	for i := range k.HMACKey {
+		k.HMACKey[i] = 0x11
+	}
+	ring, _ := NewKeyRing(SigningKey{KID: "z1", Algorithm: AlgHS256, HMACKey: k.HMACKey})
+	if err := ring.AddVerifier(SigningKey{KID: "a2", Algorithm: AlgHS256, HMACKey: k.HMACKey}); err != nil {
+		t.Fatalf("AddVerifier: %v", err)
+	}
+	if err := ring.AddVerifier(SigningKey{KID: "m3", Algorithm: AlgHS256, HMACKey: k.HMACKey}); err != nil {
+		t.Fatalf("AddVerifier: %v", err)
+	}
+	got := ring.KIDs()
+	want := []string{"a2", "m3", "z1"}
+	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("KIDs() = %v want %v", got, want)
+	}
+}
+
+func TestKeyRing_RejectsShortHMACKey(t *testing.T) {
+	_, err := NewKeyRing(SigningKey{KID: "k", Algorithm: AlgHS256, HMACKey: []byte("short")})
+	if err == nil {
+		t.Fatalf("expected error for short HMAC key")
+	}
+}
+
+func TestSigner_KeyRing_RoundTrip_HS256(t *testing.T) {
+	k := make([]byte, 32)
+	for i := range k {
+		k[i] = 0xAA
+	}
+	ring, err := NewKeyRing(SigningKey{KID: "kid-1", Algorithm: AlgHS256, HMACKey: k})
+	if err != nil {
+		t.Fatalf("NewKeyRing: %v", err)
+	}
+	signer, err := NewSigner(SignerConfig{
+		Algorithm: AlgHS256,
+		KeyRing:   ring,
+		Issuer:    "kapp",
+		Audience:  "kapp",
+	})
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+	token, err := signer.Issue(Claims{
+		UserID:   uuid.New(),
+		TenantID: uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	claims, err := signer.Verify(token)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if claims.Issuer != "kapp" {
+		t.Fatalf("issuer not threaded: %s", claims.Issuer)
+	}
+}
+
+func TestSigner_KeyRing_RotationPreservesInFlightTokens(t *testing.T) {
+	k1 := make([]byte, 32)
+	for i := range k1 {
+		k1[i] = 0x11
+	}
+	k2 := make([]byte, 32)
+	for i := range k2 {
+		k2[i] = 0x22
+	}
+	ring, _ := NewKeyRing(SigningKey{KID: "kid-1", Algorithm: AlgHS256, HMACKey: k1})
+	signer, _ := NewSigner(SignerConfig{
+		Algorithm: AlgHS256,
+		KeyRing:   ring,
+		Issuer:    "k",
+		Audience:  "k",
+	})
+	oldToken, err := signer.Issue(Claims{UserID: uuid.New(), TenantID: uuid.New()})
+	if err != nil {
+		t.Fatalf("Issue old: %v", err)
+	}
+	// Rotate to k2 while keeping k1 as verifier
+	if err := ring.SwapPrimary("kid-2", SigningKey{KID: "kid-2", Algorithm: AlgHS256, HMACKey: k2}); err != nil {
+		t.Fatalf("SwapPrimary: %v", err)
+	}
+	// Old token must still verify (signed under k1, k1 is still in the ring)
+	if _, err := signer.Verify(oldToken); err != nil {
+		t.Fatalf("old token should still verify under rotated keyring: %v", err)
+	}
+	// New token uses k2
+	newToken, err := signer.Issue(Claims{UserID: uuid.New(), TenantID: uuid.New()})
+	if err != nil {
+		t.Fatalf("Issue new: %v", err)
+	}
+	if _, err := signer.Verify(newToken); err != nil {
+		t.Fatalf("new token should verify: %v", err)
+	}
+	// After old key is reaped, old token should fail with sig error
+	if err := ring.Remove("kid-1"); err != nil {
+		t.Fatalf("Remove kid-1: %v", err)
+	}
+	if _, err := signer.Verify(oldToken); !errors.Is(err, ErrTokenSignature) {
+		t.Fatalf("expected ErrTokenSignature after old key removed, got %v", err)
+	}
+}
+
+func TestSigner_KeyRing_UnknownKID_Rejected(t *testing.T) {
+	k1 := make([]byte, 32)
+	for i := range k1 {
+		k1[i] = 0x11
+	}
+	ringA, _ := NewKeyRing(SigningKey{KID: "kid-A", Algorithm: AlgHS256, HMACKey: k1})
+	signerA, _ := NewSigner(SignerConfig{
+		Algorithm: AlgHS256,
+		KeyRing:   ringA,
+		Issuer:    "k",
+		Audience:  "k",
+	})
+	token, _ := signerA.Issue(Claims{UserID: uuid.New(), TenantID: uuid.New()})
+
+	// Build a signer with a different ring that doesn't know kid-A
+	k2 := make([]byte, 32)
+	for i := range k2 {
+		k2[i] = 0x22
+	}
+	ringB, _ := NewKeyRing(SigningKey{KID: "kid-B", Algorithm: AlgHS256, HMACKey: k2})
+	signerB, _ := NewSigner(SignerConfig{
+		Algorithm: AlgHS256,
+		KeyRing:   ringB,
+		Issuer:    "k",
+		Audience:  "k",
+	})
+	_, err := signerB.Verify(token)
+	if !errors.Is(err, ErrTokenSignature) {
+		t.Fatalf("expected ErrTokenSignature for unknown kid, got %v", err)
+	}
+}
+
+func TestSigner_SingleKeyAndKeyRing_RejectsBoth(t *testing.T) {
+	k := make([]byte, 32)
+	for i := range k {
+		k[i] = 0xAA
+	}
+	ring, _ := NewKeyRing(SigningKey{KID: "k", Algorithm: AlgHS256, HMACKey: k})
+	_, err := NewSigner(SignerConfig{
+		Algorithm: AlgHS256,
+		HMACKey:   k,
+		KeyRing:   ring,
+	})
+	if err == nil || !strings.Contains(err.Error(), "either KeyRing or single-key fields") {
+		t.Fatalf("expected mutex error, got %v", err)
+	}
+}
+
+func TestSigner_BackwardsCompat_LegacyTokenWithoutKID(t *testing.T) {
+	k := make([]byte, 32)
+	for i := range k {
+		k[i] = 0xCC
+	}
+	// Mint a token with the legacy single-key path (no kid header)
+	legacySigner, err := NewSigner(SignerConfig{
+		Algorithm: AlgHS256,
+		HMACKey:   k,
+		Issuer:    "k",
+		Audience:  "k",
+	})
+	if err != nil {
+		t.Fatalf("legacy NewSigner: %v", err)
+	}
+	legacyToken, err := legacySigner.Issue(Claims{UserID: uuid.New(), TenantID: uuid.New()})
+	if err != nil {
+		t.Fatalf("legacy Issue: %v", err)
+	}
+	// Now upgrade to keyring; legacy token (no kid header) should
+	// still verify because the keyring verifier falls back to the
+	// primary key when the header has no kid.
+	ring, _ := NewKeyRing(SigningKey{KID: "kid-1", Algorithm: AlgHS256, HMACKey: k})
+	upgraded, _ := NewSigner(SignerConfig{
+		Algorithm: AlgHS256,
+		KeyRing:   ring,
+		Issuer:    "k",
+		Audience:  "k",
+	})
+	if _, err := upgraded.Verify(legacyToken); err != nil {
+		t.Fatalf("legacy token should still verify after keyring upgrade: %v", err)
+	}
+}
+
+func TestSigner_KeyRing_RS256_RoundTrip(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	ring, err := NewKeyRing(SigningKey{
+		KID:        "rsa-1",
+		Algorithm:  AlgRS256,
+		RSAPrivate: priv,
+		RSAPublic:  &priv.PublicKey,
+	})
+	if err != nil {
+		t.Fatalf("NewKeyRing RS256: %v", err)
+	}
+	signer, err := NewSigner(SignerConfig{
+		Algorithm: AlgRS256,
+		KeyRing:   ring,
+		Issuer:    "k",
+		Audience:  "k",
+	})
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+	token, err := signer.Issue(Claims{UserID: uuid.New(), TenantID: uuid.New()})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, err := signer.Verify(token); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+}
+
+type fakeProvider struct {
+	store map[string]secrets.SecretValue
+}
+
+func (*fakeProvider) Name() string { return "fake" }
+func (f *fakeProvider) GetSecret(_ context.Context, key string) (secrets.SecretValue, error) {
+	v, ok := f.store[key]
+	if !ok {
+		return secrets.SecretValue{}, secrets.ErrSecretNotFound
+	}
+	return v, nil
+}
+
+func TestSignerFromProvider_RoundTrip(t *testing.T) {
+	k := make([]byte, 32)
+	for i := range k {
+		k[i] = 0xCC
+	}
+	p := &fakeProvider{
+		store: map[string]secrets.SecretValue{
+			"jwt/primary": {Bytes: k, Version: "v1"},
+		},
+	}
+	signer, err := SignerFromProvider(context.TODO(), p, SignerProviderOptions{
+		PrimaryRef: "jwt/primary",
+		Algorithm:  AlgHS256,
+		Issuer:     "k",
+		Audience:   "k",
+	})
+	if err != nil {
+		t.Fatalf("SignerFromProvider: %v", err)
+	}
+	token, err := signer.Issue(Claims{UserID: uuid.New(), TenantID: uuid.New()})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, err := signer.Verify(token); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+}
+
+func TestSignerFromProvider_RejectsDevPlaceholder(t *testing.T) {
+	p := &fakeProvider{
+		store: map[string]secrets.SecretValue{
+			"jwt/primary": {Bytes: []byte(DevPlaceholderJWTSecret)},
+		},
+	}
+	_, err := SignerFromProvider(context.TODO(), p, SignerProviderOptions{PrimaryRef: "jwt/primary"})
+	if err == nil {
+		t.Fatalf("expected dev-placeholder refusal")
+	}
+	if !strings.Contains(err.Error(), "dev-only placeholder") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestSignerFromProvider_AllowsDevPlaceholderWithOptIn(t *testing.T) {
+	t.Setenv("KAPP_ALLOW_DEV_JWT_SECRET", "1")
+	p := &fakeProvider{
+		store: map[string]secrets.SecretValue{
+			"jwt/primary": {Bytes: []byte(DevPlaceholderJWTSecret)},
+		},
+	}
+	if _, err := SignerFromProvider(context.TODO(), p, SignerProviderOptions{PrimaryRef: "jwt/primary"}); err != nil {
+		t.Fatalf("opt-in should allow dev placeholder: %v", err)
+	}
+}
+
+func TestSignerFromProvider_VerifyRefs(t *testing.T) {
+	k1 := make([]byte, 32)
+	k2 := make([]byte, 32)
+	for i := range k1 {
+		k1[i] = 0x11
+	}
+	for i := range k2 {
+		k2[i] = 0x22
+	}
+	p := &fakeProvider{
+		store: map[string]secrets.SecretValue{
+			"jwt/primary":  {Bytes: k1, Version: "v1"},
+			"jwt/previous": {Bytes: k2, Version: "v0"},
+		},
+	}
+	signer, err := SignerFromProvider(context.TODO(), p, SignerProviderOptions{
+		PrimaryRef: "jwt/primary",
+		VerifyRefs: []string{"jwt/previous"},
+		Algorithm:  AlgHS256,
+		Issuer:     "k",
+		Audience:   "k",
+	})
+	if err != nil {
+		t.Fatalf("SignerFromProvider: %v", err)
+	}
+	// Primary token works.
+	token, _ := signer.Issue(Claims{UserID: uuid.New(), TenantID: uuid.New()})
+	if _, err := signer.Verify(token); err != nil {
+		t.Fatalf("primary token should verify: %v", err)
+	}
+	// Forge a token under "jwt/previous" (simulate a recently-rotated-out key)
+	prevKID := deriveKID("jwt/previous", "v0")
+	prevRing, _ := NewKeyRing(SigningKey{KID: prevKID, Algorithm: AlgHS256, HMACKey: k2})
+	prevSigner, _ := NewSigner(SignerConfig{
+		Algorithm: AlgHS256,
+		KeyRing:   prevRing,
+		Issuer:    "k",
+		Audience:  "k",
+	})
+	oldToken, _ := prevSigner.Issue(Claims{UserID: uuid.New(), TenantID: uuid.New()})
+	if _, err := signer.Verify(oldToken); err != nil {
+		t.Fatalf("token signed by previous key should verify under refreshed signer: %v", err)
+	}
+}
+
+func TestKeyRingRefresher_DetectsRotation(t *testing.T) {
+	k1 := make([]byte, 32)
+	k2 := make([]byte, 32)
+	for i := range k1 {
+		k1[i] = 0x11
+	}
+	for i := range k2 {
+		k2[i] = 0x22
+	}
+	p := &fakeProvider{
+		store: map[string]secrets.SecretValue{
+			"jwt/primary": {Bytes: k1, Version: "v1"},
+		},
+	}
+	signer, err := SignerFromProvider(context.TODO(), p, SignerProviderOptions{
+		PrimaryRef: "jwt/primary",
+		Algorithm:  AlgHS256,
+		Issuer:     "k",
+		Audience:   "k",
+	})
+	if err != nil {
+		t.Fatalf("SignerFromProvider: %v", err)
+	}
+	// Simulate the operator rotating the upstream secret.
+	p.store["jwt/primary"] = secrets.SecretValue{Bytes: k2, Version: "v2"}
+
+	refresher := &KeyRingRefresher{
+		Ring:       signer.cfg.KeyRing,
+		Provider:   p,
+		PrimaryRef: "jwt/primary",
+		Algorithm:  AlgHS256,
+		current:    map[string]string{"jwt/primary": "v1"},
+	}
+	if err := refresher.refreshOnce(context.Background()); err != nil {
+		t.Fatalf("refreshOnce: %v", err)
+	}
+	// Primary should now point to the v2 kid.
+	prim := signer.cfg.KeyRing.Primary()
+	if !strings.HasSuffix(prim.KID, ".v2") {
+		t.Fatalf("primary KID should end in .v2 after rotation; got %s", prim.KID)
+	}
+	// And the old v1 key should still be present as a verifier.
+	if _, ok := signer.cfg.KeyRing.Get(deriveKID("jwt/primary", "v1")); !ok {
+		t.Fatalf("previous primary should remain in ring as verifier")
+	}
+}
+
+func TestKeyRingRefresher_RefreshContextCancellation(t *testing.T) {
+	k := make([]byte, 32)
+	for i := range k {
+		k[i] = 0xAB
+	}
+	p := &fakeProvider{
+		store: map[string]secrets.SecretValue{
+			"jwt/primary": {Bytes: k, Version: "v1"},
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	signer, err := SignerFromProvider(ctx, p, SignerProviderOptions{
+		PrimaryRef:      "jwt/primary",
+		Algorithm:       AlgHS256,
+		Issuer:          "k",
+		Audience:        "k",
+		RefreshInterval: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("SignerFromProvider: %v", err)
+	}
+	cancel()
+	// Allow the refresher goroutine to observe the cancellation.
+	time.Sleep(30 * time.Millisecond)
+	// Should still be able to issue + verify after refresher exit.
+	token, _ := signer.Issue(Claims{UserID: uuid.New(), TenantID: uuid.New()})
+	if _, err := signer.Verify(token); err != nil {
+		t.Fatalf("Verify after cancel: %v", err)
+	}
+}
+
+func TestGenerateHMACKey_ProducesUniqueKeys(t *testing.T) {
+	k1, err := GenerateHMACKey()
+	if err != nil {
+		t.Fatalf("GenerateHMACKey: %v", err)
+	}
+	k2, err := GenerateHMACKey()
+	if err != nil {
+		t.Fatalf("GenerateHMACKey: %v", err)
+	}
+	if k1 == k2 {
+		t.Fatalf("two GenerateHMACKey calls collided")
+	}
+	if len(k1) < 32 {
+		t.Fatalf("generated key %q too short", k1)
+	}
+}

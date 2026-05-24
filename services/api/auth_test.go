@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -21,7 +22,7 @@ import (
 func TestNewAuthSigner_RejectsDevPlaceholderWithoutOptIn(t *testing.T) {
 	t.Setenv("KAPP_JWT_SECRET", auth.DevPlaceholderJWTSecret)
 	t.Setenv("KAPP_ALLOW_DEV_JWT_SECRET", "")
-	signer, err := newAuthSigner()
+	signer, err := newAuthSigner(context.TODO(), nil, auth.SignerProviderOptions{})
 	if err == nil {
 		t.Fatalf("newAuthSigner returned a signer with the dev placeholder + no opt-in; want refusal so misconfigured deployments fail loudly. got=%v", signer)
 	}
@@ -41,7 +42,7 @@ func TestNewAuthSigner_RejectsDevPlaceholderWithoutOptIn(t *testing.T) {
 func TestNewAuthSigner_AcceptsDevPlaceholderWithOptIn(t *testing.T) {
 	t.Setenv("KAPP_JWT_SECRET", auth.DevPlaceholderJWTSecret)
 	t.Setenv("KAPP_ALLOW_DEV_JWT_SECRET", "1")
-	signer, err := newAuthSigner()
+	signer, err := newAuthSigner(context.TODO(), nil, auth.SignerProviderOptions{})
 	if err != nil {
 		t.Fatalf("newAuthSigner refused the dev placeholder with opt-in set; want success so `make dev` boots. err=%v", err)
 	}
@@ -57,7 +58,7 @@ func TestNewAuthSigner_AcceptsDevPlaceholderWithOptIn(t *testing.T) {
 func TestNewAuthSigner_AcceptsRotatedSecret(t *testing.T) {
 	t.Setenv("KAPP_JWT_SECRET", "this-is-a-rotated-secret-not-the-placeholder-12345678")
 	t.Setenv("KAPP_ALLOW_DEV_JWT_SECRET", "")
-	signer, err := newAuthSigner()
+	signer, err := newAuthSigner(context.TODO(), nil, auth.SignerProviderOptions{})
 	if err != nil {
 		t.Fatalf("newAuthSigner rejected a rotated secret; the dev-placeholder check should only fire on string equality. err=%v", err)
 	}
