@@ -121,6 +121,17 @@ func WithCookie(name string) MiddlewareOption {
 // play during the rollout window. Setting it now means caches
 // shed Vary-incorrect entries the moment PR-4 ships, before any
 // translated body exists to be miskeyed.
+//
+// Downstream handlers must use Header().Add("Vary", token) rather
+// than Header().Set("Vary", token) when contributing their own
+// Vary signals — Set replaces every existing value and would drop
+// the middleware's Accept-Language / Cookie tokens, defeating the
+// CDN-safety guarantee for that response. Per RFC 9110 §12.5.5
+// every Vary token combines into a single effective set, so Add
+// is the correct primitive for every chain-mounted middleware and
+// handler; Set is reserved for the rare authoritative case where a
+// handler is the single source of truth for cache-keying signals
+// (none exist in this codebase today).
 func Middleware(b *Bundle, opts ...MiddlewareOption) func(http.Handler) http.Handler {
 	cfg := &middlewareConfig{
 		tenantProvider: noopTenantLocaleProvider{},

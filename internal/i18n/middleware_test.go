@@ -115,19 +115,47 @@ func TestMiddleware_QueryBeatsCookie(t *testing.T) {
 	}
 }
 
+// TestMiddleware_UnsupportedTenantLocaleDowngrades pins the
+// "explicit-user-intent terminates the precedence chain" semantic.
+// A tenant who set "hi" in the wizard (or admin surface) made a
+// deliberate, named preference. When that catalogue isn't shipped
+// yet, the middleware downgrades through Resolve to DefaultLocale
+// rather than falling through to Accept-Language and serving a
+// browser-inferred locale ("ja" via the hotel-laptop case in this
+// test). Three reasons the fallthrough alternative was rejected:
+//
+//  1. The wizard's whole purpose is to record a stable preference.
+//     Honouring it as "user wants this, downgrade to closest match"
+//     is closer to that intent than "user wants this but we'll
+//     guess from the browser anyway" — the latter makes a tenant's
+//     UI flip based on whichever device they happened to log in
+//     from, which is a confusing UX.
+//  2. The fallthrough alternative would make the precedence chain
+//     non-monotonic: adding a higher-precedence signal (the tenant
+//     preference) could produce a *less* consistent result than
+//     leaving it blank, because the addition could sometimes pull
+//     us back to en and sometimes through to ja-via-browser.
+//  3. The underlying concern (an unservable tenant locale ever
+//     getting persisted) is owned by PR-8's audit-trail + format-
+//     gate-via-language.Parse work, which prevents the bad write
+//     at the source rather than papering over it at request time.
+//
+// Future maintainer: do NOT "fix" this by checking IsSupported in
+// resolveCandidate and falling through to Accept-Language — that
+// breaks invariants (1) and (2) above. The right move when a
+// tenant has an unservable locale is to either ship the catalogue
+// or correct the stored preference, both of which are tenant-
+// surface workflows, not middleware concerns.
 func TestMiddleware_UnsupportedTenantLocaleDowngrades(t *testing.T) {
 	b := mustDefault(t)
 	captured := ""
-	// "hi" is not a shipped catalogue today; the middleware must
-	// downgrade through Resolve so downstream T() always sees a
-	// supported tag.
 	h := Middleware(b, WithTenantLocaleProvider(fakeTenantProvider{locale: "hi"}))(
 		http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 			captured = FromContext(r.Context())
 		}),
 	)
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	req.Header.Set("Accept-Language", "ja") // would beat tenant if used
+	req.Header.Set("Accept-Language", "ja") // would beat tenant if precedence fell through
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	if captured != DefaultLocale {
 		t.Fatalf("tenant 'hi' did not downgrade through Resolve: captured = %q, want %q",
