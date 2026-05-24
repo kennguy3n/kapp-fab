@@ -147,7 +147,7 @@ interface SetupResult {
 export function SetupWizardPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { t, setLocale } = useTranslation();
+  const { t, setLocale, locale: providerLocale } = useTranslation();
 
   const [step, setStep] = useState(0);
   const [companyName, setCompanyName] = useState("");
@@ -177,13 +177,25 @@ export function SetupWizardPage() {
   const effectiveCoaTemplate =
     coaTemplate || defaultCoATemplateForCountry(country);
   // effectiveLocale is the tag the wizard will both submit to the
-  // backend AND apply to the live UI. When the user hasn't picked
-  // explicitly, we use bestSupportedLocaleForCountry so the UI flips
-  // to a renderable catalogue immediately when they type a country
-  // (e.g. typing "DE" switches the UI to German on step 1+). The
-  // backend persistence path uses the same value, so the persisted
-  // tenants.locale matches what the wizard renders during setup.
-  const effectiveLocale = locale || bestSupportedLocaleForCountry(country);
+  // backend AND apply to the live UI. The three-stage fallback
+  // mirrors the precedence the user expects:
+  //
+  //   1. explicit pick from the step-0 dropdown wins outright
+  //   2. country-derived locale (downgraded to the shipped catalogue
+  //      set via bestSupportedLocaleForCountry) — so typing "DE"
+  //      flips the UI to German on step 1+ without an explicit pick
+  //   3. the LocaleProvider's current value (navigator / cookie /
+  //      localStorage resolution) — so a user with a French
+  //      browser who hasn't entered a country yet still sees the
+  //      dropdown reading "Français" instead of being forced to
+  //      "English" via DefaultLocale
+  //
+  // The dropdown reflects this value and the wizard submits it as-is
+  // so the persisted tenants.locale matches what the user picked
+  // (whether explicitly or via country derivation) without the
+  // backend silently re-deriving from a different source.
+  const effectiveLocale =
+    locale || (country ? bestSupportedLocaleForCountry(country) : providerLocale);
 
   const tenantId = id ?? "";
 
@@ -228,12 +240,22 @@ export function SetupWizardPage() {
   // don't want the UI to flicker through partial-match locales. The
   // step-0 Next button is the natural commit point.
   //
+  // We only persist via setLocale when the user has expressed locale
+  // intent — either an explicit dropdown pick (locale is set) or a
+  // country that derives one (country is set). When both are empty
+  // the LocaleProvider already holds the navigator/cookie-derived
+  // value (which is what effectiveLocale falls back to above), so
+  // calling setLocale would be a redundant write to the same value;
+  // skipping the call keeps the user's existing global locale
+  // preference intact rather than "freezing" the navigator-detected
+  // value into the cookie just because they advanced past step 0.
+  //
   // The LocaleSwitcher in the header writes to the same source of
   // truth (LocaleProvider.setLocale), so a user who picks a locale
   // via the global header instead of the wizard dropdown ends up
   // with the same effective state when they reach step 1.
   const advancePastCompany = () => {
-    if (effectiveLocale) {
+    if (locale || country) {
       setLocale(effectiveLocale);
     }
     setStep(1);
@@ -266,30 +288,37 @@ export function SetupWizardPage() {
       industry: industry.trim() || undefined,
       country: country.trim() || undefined,
       coa_template: effectiveCoaTemplate,
-      // Submit `undefined` when the user hasn't explicitly picked a
-      // locale from the dropdown so the backend takes the "not
-      // operator-supplied" branch in internal/tenant/wizard.go: it
-      // derives the locale from cfg.Country via its own
-      // DefaultLocaleForCountry (mirror of the frontend table) and
-      // runs the resolver to downgrade canonical-but-unshipped tags
-      // ("zh-Hans" -> "zh", "hi" -> "en") before the strict
-      // IsSupported gate. Sending the frontend's canonical tag
-      // directly would trip that gate — wizard.go intentionally
-      // skips the resolver downgrade on the operator-supplied path
-      // so explicit picks the runtime can't serve surface as a loud
-      // error rather than silent downgrade, and CN ("zh-Hans") / IN
-      // ("hi") provisioning would then fail with
-      //   tenant: locale "zh-Hans" is not a registered translation bundle
-      // even though those values are exactly what
-      // DefaultLocaleForCountry emits when called for CN / IN. An
-      // earlier revision of this code sent the canonical tag here
-      // hoping the persisted value would auto-promote when a future
-      // catalogue (hi.json, zh-Hans.json) ships, but the strict
-      // operator-supplied validation is incompatible with that
-      // intent and the same auto-promotion happens via the backend's
-      // resolver path anyway once the validator's IsSupported set
-      // grows to include the new tag.
-      locale: locale || undefined,
+      // Submit the same tag the dropdown displayed, after both the
+      // country-derived fallback and the LocaleProvider fallback have
+      // resolved. This guarantees the persisted tenants.locale equals
+      // what the user saw on the form — no silent re-derivation on the
+      // backend.
+      //
+      // The submitted value is always a shipped catalogue tag because
+      // bestSupportedLocaleForCountry pipes the canonical tag through
+      // bestSupportedLocale's progressive-subtag downgrade (so CN's
+      // canonical "zh-Hans" becomes "zh", IN's "hi" becomes "en")
+      // before it surfaces in the dropdown. The backend's strict
+      // operator-supplied validator (which skips the resolver and
+      // hits IsSupported directly) therefore accepts the value
+      // unconditionally — we can never send a canonical-but-unshipped
+      // tag like "zh-Hans" or "hi" because the dropdown never holds
+      // one.
+      //
+      // When `hi.json` or `zh-Hans.json` ship in a future PR,
+      // bestSupportedLocale will stop downgrading those tags and the
+      // wizard will start submitting them directly without any code
+      // change to this site — the auto-promotion happens via the
+      // dropdown's shipped-catalogue lookup, not via a backend
+      // re-derivation we'd have to coordinate.
+      //
+      // Sending `undefined` here would re-introduce the mismatch the
+      // bot flagged: the dropdown might show "Français" (from the
+      // LocaleProvider's navigator fallback) while the backend
+      // persists "en" because cfg.Country was empty and
+      // DefaultLocaleForCountry("") returns "en". Always submitting
+      // effectiveLocale closes that mismatch.
+      locale: effectiveLocale,
       users: validUsers,
     });
   };
@@ -409,7 +438,13 @@ export function SetupWizardPage() {
                   ? t("wizard.locale.country_hint", {
                       country: country.trim().toUpperCase(),
                     })
-                  : t("wizard.locale.browser_hint")}
+                  : // No explicit pick AND no country — the dropdown
+                    // shows the LocaleProvider's current value (the
+                    // navigator / cookie / localStorage resolution),
+                    // so the "browser's preferred language" hint copy
+                    // accurately describes what's about to be
+                    // persisted.
+                    t("wizard.locale.browser_hint")}
             </span>
           </label>
           <div>

@@ -148,7 +148,7 @@ const REGION_SCRIPT_OVERRIDES: Record<string, string> = {
  * for the country, even if that tag has no shipped catalogue (e.g.
  * `"hi"` for IN, `"zh-Hans"` for CN). Callers that need a tag the
  * frontend can actually serve should pipe the return value through
- * `bestSupportedLocale()`, which is what `defaultUILocaleForCountry`
+ * `bestSupportedLocale()`, which is what `bestSupportedLocaleForCountry`
  * below does for the wizard's pre-select path.
  */
 const COUNTRY_LOCALE_DEFAULTS: Record<string, string> = {
