@@ -84,6 +84,14 @@ func SignerFromProvider(refreshCtx context.Context, provider secrets.Provider, o
 	if err != nil {
 		return nil, fmt.Errorf("auth: build keyring: %w", err)
 	}
+	// Track each verify ref's boot-time version so the refresher
+	// can skip a redundant first-tick re-fetch for refs whose
+	// upstream version hasn't moved. Failed loads do NOT seed the
+	// map — leaving the entry unset means the refresher will
+	// retry the missing ref on its first tick (which is the
+	// recoverable-failure behaviour we want for a transient
+	// provider blip during boot).
+	verifyVersions := make(map[string]string, len(opts.VerifyRefs))
 	for _, ref := range opts.VerifyRefs {
 		v, err := loadKey(bootCtx, provider, ref, algorithm)
 		if err != nil {
@@ -99,7 +107,9 @@ func SignerFromProvider(refreshCtx context.Context, provider secrets.Provider, o
 			logger.Warn("auth: add verifier failed",
 				slog.String("ref", ref),
 				slog.String("error", err.Error()))
+			continue
 		}
+		verifyVersions[ref] = v.Version
 	}
 
 	signer, err := NewSigner(SignerConfig{
@@ -125,10 +135,17 @@ func SignerFromProvider(refreshCtx context.Context, provider secrets.Provider, o
 			Algorithm:  algorithm,
 			Logger:     logger,
 		}
-		// Seed the refresher's current-version map so it
-		// doesn't re-promote the boot-loaded key on the first
-		// tick.
-		refresher.current = map[string]string{opts.PrimaryRef: primary.Version}
+		// Seed the refresher's current-version map for the
+		// primary ref AND every successfully-loaded verify ref
+		// so the first tick doesn't burn one provider round-trip
+		// per ref re-fetching material that hasn't rotated yet.
+		// Unset entries (failed verify loads) intentionally fall
+		// through to the refresher's normal lookup path.
+		refresher.current = make(map[string]string, 1+len(verifyVersions))
+		refresher.current[opts.PrimaryRef] = primary.Version
+		for ref, version := range verifyVersions {
+			refresher.current[ref] = version
+		}
 		go func() {
 			if err := refresher.Run(refreshCtx); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Warn("auth: keyring refresher exited", slog.String("error", err.Error()))

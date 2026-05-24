@@ -178,6 +178,30 @@ func NewSigner(cfg SignerConfig) (*Signer, error) {
 	if cfg.KeyRing != nil && (len(cfg.HMACKey) > 0 || cfg.RSAPrivate != nil || cfg.RSAPublic != nil) {
 		return nil, errors.New("auth: SignerConfig must use either KeyRing or single-key fields, not both")
 	}
+	if cfg.KeyRing != nil {
+		// Reject a ring whose primary or any verifier was
+		// declared with a different algorithm class than the
+		// signer. Without this guard, a misconfigured operator
+		// could ship an HS256 primary with an RS256 verifier in
+		// the ring — the verify path would call
+		// rsa.VerifyPKCS1v15 with a nil public key and the boot
+		// would succeed, only to fail every token at runtime.
+		// We re-check every member of the ring rather than
+		// trusting AddVerifier to have done it: KeyRing exposes
+		// SwapPrimary / Remove and could be mutated in tests
+		// to bypass that check.
+		primary := cfg.KeyRing.Primary()
+		if primary.Algorithm != "" && primary.Algorithm != cfg.Algorithm {
+			return nil, fmt.Errorf("auth: KeyRing primary algorithm %q does not match signer algorithm %q",
+				primary.Algorithm, cfg.Algorithm)
+		}
+		for _, k := range cfg.KeyRing.All() {
+			if k.Algorithm != "" && k.Algorithm != cfg.Algorithm {
+				return nil, fmt.Errorf("auth: KeyRing verifier %q algorithm %q does not match signer algorithm %q",
+					k.KID, k.Algorithm, cfg.Algorithm)
+			}
+		}
+	}
 	if cfg.AccessTTL <= 0 {
 		cfg.AccessTTL = 15 * time.Minute
 	}
@@ -294,27 +318,12 @@ func (s *Signer) verify(token, expectedAudience string) (*Claims, error) {
 	if err := json.Unmarshal(hdrJSON, &header); err != nil {
 		return nil, fmt.Errorf("%w: header parse: %w", ErrTokenInvalid, err)
 	}
-	hmacKey, rsaPub, err := s.selectVerificationKey(header.Alg, header.KID)
+	candidates, err := s.selectVerificationCandidates(header.Alg, header.KID)
 	if err != nil {
 		return nil, err
 	}
-	switch s.cfg.Algorithm {
-	case AlgHS256:
-		mac := hmac.New(sha256.New, hmacKey)
-		mac.Write([]byte(signingInput))
-		if !hmac.Equal(mac.Sum(nil), sig) {
-			return nil, ErrTokenSignature
-		}
-	case AlgRS256:
-		if rsaPub == nil {
-			return nil, errors.New("auth: RS256 verifier missing public key")
-		}
-		hashed := sha256.Sum256([]byte(signingInput))
-		if err := rsa.VerifyPKCS1v15(rsaPub, crypto.SHA256, hashed[:], sig); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrTokenSignature, err)
-		}
-	default:
-		return nil, fmt.Errorf("auth: unsupported algorithm %q", s.cfg.Algorithm)
+	if !s.verifySignature(signingInput, sig, candidates) {
+		return nil, ErrTokenSignature
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
@@ -387,28 +396,96 @@ func (s *Signer) selectSigningKey() (hmacKey []byte, rsaPriv *rsa.PrivateKey, ki
 	return s.cfg.HMACKey, s.cfg.RSAPrivate, ""
 }
 
-// selectVerificationKey picks the verification material for an
-// inbound token, dispatching on the JWS header's kid claim when
-// a KeyRing is configured. Empty kid falls back to the legacy
-// single-key fields so tokens minted before rotation was enabled
-// still validate after the operator upgrades. Unknown kid is a
-// fail-closed signature error.
-func (s *Signer) selectVerificationKey(alg, kid string) (hmacKey []byte, rsaPub *rsa.PublicKey, err error) {
+// selectVerificationCandidates returns the candidate keys that
+// could validate a JWS with the supplied (alg, kid) header.
+//
+// Dispatch by case:
+//
+//   - alg mismatch → fail closed with ErrTokenSignature regardless
+//     of kid; we never verify a token claiming a different signature
+//     algorithm than the signer is configured for.
+//   - KeyRing not configured (legacy single-key signer) → single
+//     candidate from the cfg's HMACKey / RSAPublic field. Behaviour
+//     identical to pre-keyring builds.
+//   - KeyRing configured, kid present → exactly the key with that
+//     kid. Unknown kid is a fail-closed signature error.
+//   - KeyRing configured, kid empty → every key in the ring (primary
+//     first, then verifiers in stable order). This is the legacy-
+//     token-after-rotation case: a token minted before keyring was
+//     enabled (no `kid` header) must still validate after the operator
+//     rotates the primary, which moves the original signing key into
+//     the verifier set. Without this fanout, the legacy token would
+//     fail signature check the moment Primary() changes.
+//
+// Returning a slice keeps the API uniform across these branches —
+// the verify path iterates the slice and tries each, short-
+// circuiting on the first match.
+func (s *Signer) selectVerificationCandidates(alg, kid string) ([]SigningKey, error) {
 	if alg != "" && alg != string(s.cfg.Algorithm) {
-		return nil, nil, fmt.Errorf("%w: algorithm mismatch", ErrTokenSignature)
+		return nil, fmt.Errorf("%w: algorithm mismatch", ErrTokenSignature)
 	}
 	if s.cfg.KeyRing == nil {
-		return s.cfg.HMACKey, s.cfg.RSAPublic, nil
+		return []SigningKey{{
+			Algorithm:  s.cfg.Algorithm,
+			HMACKey:    s.cfg.HMACKey,
+			RSAPublic:  s.cfg.RSAPublic,
+			RSAPrivate: s.cfg.RSAPrivate,
+		}}, nil
 	}
 	if kid == "" {
-		k := s.cfg.KeyRing.Primary()
-		return k.HMACKey, k.RSAPublic, nil
+		return s.cfg.KeyRing.All(), nil
 	}
 	k, ok := s.cfg.KeyRing.Get(kid)
 	if !ok {
-		return nil, nil, fmt.Errorf("%w: unknown kid %q", ErrTokenSignature, kid)
+		return nil, fmt.Errorf("%w: unknown kid %q", ErrTokenSignature, kid)
 	}
-	return k.HMACKey, k.RSAPublic, nil
+	return []SigningKey{k}, nil
+}
+
+// verifySignature returns true when at least one of the candidate
+// keys produces a signature matching sig over signingInput. The
+// per-candidate check is constant-time (hmac.Equal /
+// rsa.VerifyPKCS1v15 both compare in O(n) without leaking timing
+// for valid-length inputs); iterating multiple candidates does
+// leak "which key matched" via wall-clock timing, but only at the
+// granularity of one HMAC / one RSA verify each. We accept that
+// timing surface in exchange for legacy-token compatibility — an
+// attacker who learns "key #2 matched" learns nothing useful
+// because all candidate keys are equally privileged.
+func (s *Signer) verifySignature(signingInput string, sig []byte, candidates []SigningKey) bool {
+	switch s.cfg.Algorithm {
+	case AlgHS256:
+		matched := false
+		for _, k := range candidates {
+			if len(k.HMACKey) == 0 {
+				continue
+			}
+			mac := hmac.New(sha256.New, k.HMACKey)
+			mac.Write([]byte(signingInput))
+			if hmac.Equal(mac.Sum(nil), sig) {
+				matched = true
+				// Do NOT break early: iterating every
+				// candidate keeps wall-clock timing
+				// proportional to (ring size) rather
+				// than (ring size up to the match).
+			}
+		}
+		return matched
+	case AlgRS256:
+		hashed := sha256.Sum256([]byte(signingInput))
+		matched := false
+		for _, k := range candidates {
+			if k.RSAPublic == nil {
+				continue
+			}
+			if err := rsa.VerifyPKCS1v15(k.RSAPublic, crypto.SHA256, hashed[:], sig); err == nil {
+				matched = true
+			}
+		}
+		return matched
+	default:
+		return false
+	}
 }
 
 // ParsePrivateKeyPEM parses a PEM-encoded RSA private key. Accepts

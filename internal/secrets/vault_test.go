@@ -112,3 +112,54 @@ func TestVaultProvider_RejectsEmptyToken(t *testing.T) {
 		t.Fatalf("expected ErrProviderNotConfigured, got %v", err)
 	}
 }
+
+// TestVaultProvider_EncodesPathSpecialChars verifies that
+// percent-special characters in the secret key are URL-encoded
+// before the GET so the request URL parses cleanly. Without the
+// per-segment escape, a key containing '%', '#', '?', or space
+// would be interpreted as URL syntax — the Vault server would
+// see a different path than the operator configured, and either
+// 404 or accidentally route to a different secret namespace.
+func TestVaultProvider_EncodesPathSpecialChars(t *testing.T) {
+	t.Parallel()
+	var observedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observedPath = r.URL.EscapedPath()
+		_, _ = w.Write([]byte(`{"data":{"data":{"value":"x"},"metadata":{"version":1}}}`))
+	}))
+	defer srv.Close()
+	p, _ := NewVaultProvider(VaultProviderConfig{Addr: srv.URL, Token: "t"})
+	if _, err := p.GetSecret(context.Background(), "secret/with space and?ampersand"); err != nil {
+		t.Fatalf("GetSecret: %v", err)
+	}
+	// Expect each segment escaped individually; the "/"
+	// between segments is preserved.
+	want := "/v1/secret/data/secret/with%20space%20and%3Fampersand"
+	if observedPath != want {
+		t.Fatalf("vault saw path %q, want %q", observedPath, want)
+	}
+}
+
+// TestVaultProvider_PreservesPathStructure verifies that the
+// nested-namespace path separator ("/") is preserved as a
+// structural delimiter; only special chars within each segment
+// are escaped. Vault KV v2 conventionally uses "/" to namespace
+// secrets ("jwt/primary", "platform/db/password") and that
+// hierarchy must survive encoding.
+func TestVaultProvider_PreservesPathStructure(t *testing.T) {
+	t.Parallel()
+	var observedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observedPath = r.URL.EscapedPath()
+		_, _ = w.Write([]byte(`{"data":{"data":{"value":"x"},"metadata":{"version":1}}}`))
+	}))
+	defer srv.Close()
+	p, _ := NewVaultProvider(VaultProviderConfig{Addr: srv.URL, Token: "t"})
+	if _, err := p.GetSecret(context.Background(), "platform/jwt/primary"); err != nil {
+		t.Fatalf("GetSecret: %v", err)
+	}
+	want := "/v1/secret/data/platform/jwt/primary"
+	if observedPath != want {
+		t.Fatalf("vault saw path %q, want %q (separators must survive encoding)", observedPath, want)
+	}
+}

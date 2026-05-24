@@ -125,7 +125,7 @@ func (*VaultProvider) Name() string { return "vault" }
 // ErrProviderUnavailable for any 5xx, and a wrapped error
 // otherwise.
 func (p *VaultProvider) GetSecret(ctx context.Context, key string) (SecretValue, error) {
-	endpoint := fmt.Sprintf("%s/v1/%s/data/%s", p.addr, p.mountPath, strings.TrimLeft(key, "/"))
+	endpoint := fmt.Sprintf("%s/v1/%s/data/%s", p.addr, p.mountPath, encodeVaultPath(key))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return SecretValue{}, fmt.Errorf("secrets: build vault request: %w", err)
@@ -185,3 +185,29 @@ type vaultResponse struct {
 
 // Compile-time guard: VaultProvider must satisfy Provider.
 var _ Provider = (*VaultProvider)(nil)
+
+// encodeVaultPath URL-encodes a Vault KV v2 secret key for safe
+// inclusion in the request URL. Vault paths are conventionally
+// "/"-separated namespaces (e.g. "jwt/primary"), so we preserve
+// "/" as a structural separator and percent-encode each segment
+// independently. This protects against malformed requests when an
+// operator stores a secret under a path containing URL-special
+// characters ('?', '#', '%', spaces) — without this, those
+// characters would be interpreted as URL syntax rather than path
+// segments and would produce a 404 or worse, leak the configured
+// path as a query parameter.
+//
+// The leading "/" is stripped (matching the pre-encode behaviour
+// of strings.TrimLeft(key, "/")) to keep the final URL well-formed
+// — "/v1/mount/data//foo" is invalid in Vault.
+func encodeVaultPath(key string) string {
+	trimmed := strings.TrimLeft(key, "/")
+	if trimmed == "" {
+		return ""
+	}
+	segments := strings.Split(trimmed, "/")
+	for i, seg := range segments {
+		segments[i] = url.PathEscape(seg)
+	}
+	return strings.Join(segments, "/")
+}

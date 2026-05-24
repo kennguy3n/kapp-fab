@@ -502,3 +502,138 @@ func TestGenerateHMACKey_ProducesUniqueKeys(t *testing.T) {
 		t.Fatalf("generated key %q too short", k1)
 	}
 }
+
+// TestSigner_BackwardsCompat_LegacyTokenAfterRotation verifies the
+// rotation-bridge case for ANALYSIS_pr-review-job-...-d967d70cf92e..._0002:
+// a token minted before the keyring was enabled (no kid header)
+// must continue to verify AFTER the operator rotates the primary
+// key. Before the fix, selectVerificationKey unconditionally
+// returned the current Primary() for empty kid, which meant the
+// moment SwapPrimary moved kid-1 into the verifier set, every
+// in-flight legacy token started failing signature verification.
+//
+// The fix made the empty-kid path enumerate every key in the ring
+// (primary + verifiers) and try each. This test exercises that:
+// mint a legacy-style token under kid-1, rotate primary to kid-2,
+// confirm the legacy token still verifies via the kid-1 verifier
+// slot.
+func TestSigner_BackwardsCompat_LegacyTokenAfterRotation(t *testing.T) {
+	k1 := make([]byte, 32)
+	for i := range k1 {
+		k1[i] = 0xCC
+	}
+	// Mint a legacy token (no kid header) before any keyring is in play.
+	legacySigner, err := NewSigner(SignerConfig{
+		Algorithm: AlgHS256,
+		HMACKey:   k1,
+		Issuer:    "k",
+		Audience:  "k",
+	})
+	if err != nil {
+		t.Fatalf("legacy NewSigner: %v", err)
+	}
+	legacyToken, err := legacySigner.Issue(Claims{UserID: uuid.New(), TenantID: uuid.New()})
+	if err != nil {
+		t.Fatalf("legacy Issue: %v", err)
+	}
+
+	// Operator enables keyring with k1 as the initial primary.
+	ring, err := NewKeyRing(SigningKey{KID: "kid-1", Algorithm: AlgHS256, HMACKey: k1})
+	if err != nil {
+		t.Fatalf("NewKeyRing: %v", err)
+	}
+	upgraded, err := NewSigner(SignerConfig{
+		Algorithm: AlgHS256,
+		KeyRing:   ring,
+		Issuer:    "k",
+		Audience:  "k",
+	})
+	if err != nil {
+		t.Fatalf("upgraded NewSigner: %v", err)
+	}
+	if _, err := upgraded.Verify(legacyToken); err != nil {
+		t.Fatalf("legacy token must verify before rotation: %v", err)
+	}
+
+	// Operator rotates: kid-2 becomes primary, kid-1 demoted to verifier.
+	k2 := make([]byte, 32)
+	for i := range k2 {
+		k2[i] = 0xDD
+	}
+	if err := ring.SwapPrimary("kid-2", SigningKey{KID: "kid-2", Algorithm: AlgHS256, HMACKey: k2}); err != nil {
+		t.Fatalf("SwapPrimary: %v", err)
+	}
+
+	// Legacy token (still no kid header) MUST still verify — it
+	// was signed with k1, and k1 is now in the verifier slot.
+	if _, err := upgraded.Verify(legacyToken); err != nil {
+		t.Fatalf("legacy token must verify after rotation: %v", err)
+	}
+}
+
+// TestNewSigner_RejectsKeyRingAlgMismatch verifies the defence
+// against the operator-misconfiguration case described in
+// ANALYSIS_pr-review-job-...-d967d70cf92e..._0004: a SignerConfig
+// declaring AlgHS256 with a KeyRing whose primary key was built
+// for AlgRS256. Without the guard, the boot would succeed and
+// the verify path would call rsa.VerifyPKCS1v15 with a nil RSA
+// pub key on every token, producing 500s rather than a clear
+// boot-time error.
+func TestNewSigner_RejectsKeyRingAlgMismatch(t *testing.T) {
+	k := make([]byte, 32)
+	for i := range k {
+		k[i] = 0xEE
+	}
+	// Build a ring whose primary is HS256 but ask the signer to
+	// declare itself RS256. The constructor must refuse.
+	ring, err := NewKeyRing(SigningKey{KID: "kid-hs", Algorithm: AlgHS256, HMACKey: k})
+	if err != nil {
+		t.Fatalf("NewKeyRing: %v", err)
+	}
+	_, err = NewSigner(SignerConfig{
+		Algorithm: AlgRS256,
+		KeyRing:   ring,
+	})
+	if err == nil {
+		t.Fatal("NewSigner accepted RS256 signer with HS256 ring primary; want refusal")
+	}
+	if !strings.Contains(err.Error(), "algorithm") {
+		t.Fatalf("error should name the algorithm mismatch; got %v", err)
+	}
+}
+
+// TestKeyRing_All_ReturnsPrimaryFirstThenSortedVerifiers verifies
+// the iteration contract of KeyRing.All — primary appears first,
+// verifiers follow in sorted-KID order. This guarantees the
+// legacy-token verifier path tries the most-recently-rotated key
+// first (the common case) without burning extra time on stale
+// verifiers when the common case wins.
+func TestKeyRing_All_ReturnsPrimaryFirstThenSortedVerifiers(t *testing.T) {
+	k := make([]byte, 32)
+	for i := range k {
+		k[i] = 0x77
+	}
+	ring, err := NewKeyRing(SigningKey{KID: "kid-primary", Algorithm: AlgHS256, HMACKey: k})
+	if err != nil {
+		t.Fatalf("NewKeyRing: %v", err)
+	}
+	for _, kid := range []string{"kid-c", "kid-a", "kid-b"} {
+		if err := ring.AddVerifier(SigningKey{KID: kid, Algorithm: AlgHS256, HMACKey: k}); err != nil {
+			t.Fatalf("AddVerifier %s: %v", kid, err)
+		}
+	}
+	all := ring.All()
+	if len(all) != 4 {
+		t.Fatalf("expected 4 keys, got %d", len(all))
+	}
+	got := make([]string, 0, len(all))
+	for _, k := range all {
+		got = append(got, k.KID)
+	}
+	want := []string{"kid-primary", "kid-a", "kid-b", "kid-c"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("All[%d]: got %q, want %q (full order: %v)", i, got[i], want[i], got)
+		}
+	}
+}

@@ -186,6 +186,35 @@ func (r *KeyRing) Get(kid string) (SigningKey, bool) {
 	return k, ok
 }
 
+// All returns every key currently registered in the ring (primary
+// + verifiers) in deterministic order. Used by the no-kid legacy-
+// token verification path: tokens minted before keyring rotation
+// was enabled carry no `kid` header, so the verifier has to try
+// each registered key in turn rather than dispatching by kid.
+// Order: primary first, then verifiers in sorted-KID order, so
+// the common case (most recently rotated token) hits the most
+// likely key first.
+func (r *KeyRing) All() []SigningKey {
+	s := r.state.Load()
+	out := make([]SigningKey, 0, len(s.byKID))
+	if primary, ok := s.byKID[s.primaryKID]; ok {
+		out = append(out, primary)
+	}
+	// Collect non-primary KIDs for stable iteration.
+	others := make([]string, 0, len(s.byKID))
+	for kid := range s.byKID {
+		if kid == s.primaryKID {
+			continue
+		}
+		others = append(others, kid)
+	}
+	sortStrings(others)
+	for _, kid := range others {
+		out = append(out, s.byKID[kid])
+	}
+	return out
+}
+
 // KIDs returns the set of currently-registered key identifiers
 // in deterministic order (sorted). Boot logging uses this so the
 // operator can see at a glance which keys are live.

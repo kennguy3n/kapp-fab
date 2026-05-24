@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -676,11 +677,22 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// gate the JWT path off without taking the rest of the API
 	// down. The "env" backend has no setup cost and is the default
 	// so existing deployments keep using KAPP_JWT_SECRET unchanged.
-	secretsProvider, secretsErr := secrets.NewFromConfig(ctx, secretsConfigFromPlatform(cfg))
-	if secretsErr != nil {
-		log.Printf("api: secrets provider init failed (%v); falling back to env", secretsErr)
-		secretsProvider, _ = secrets.NewEnvProvider("")
-	}
+	//
+	// When the operator explicitly chose a non-env backend
+	// (cfg.SecretProvider is "file" / "aws" / "vault" / "gcp"),
+	// a provider-init failure does NOT silently fall through to
+	// the env provider. The previous shape did exactly that, which
+	// silently downgraded a configured RS256-via-Vault deployment to
+	// HS256-via-KAPP_JWT_SECRET (auth.SignerFromEnv ignores
+	// signerOpts.Algorithm entirely). Silent algorithm downgrade is
+	// a security regression. Instead, the JWT auth path is left
+	// disabled — the rest of the API still serves, the admin chain
+	// returns 503, and the operator can see the failure in boot
+	// logs.
+	secretsCfg := secretsConfigFromPlatform(cfg)
+	secretsProvider, secretsErr := secrets.NewFromConfig(ctx, secretsCfg)
+	operatorChoseNonEnv := secretsCfg.Backend != "" &&
+		!strings.EqualFold(secretsCfg.Backend, "env")
 	signerOpts := auth.SignerProviderOptions{
 		PrimaryRef:      cfg.JWTPrimaryRef,
 		VerifyRefs:      cfg.JWTVerifyRefs,
@@ -692,13 +704,54 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		Leeway:          cfg.JWTLeeway,
 		RefreshInterval: cfg.JWTKeyringRefreshInterval,
 	}
-	if signer, err := newAuthSigner(ctx, secretsProvider, signerOpts); err == nil {
-		kchat := auth.NewHTTPKChatClient(os.Getenv("KCHAT_BASE_URL"), os.Getenv("KCHAT_API_KEY"))
-		authh.signer = signer
-		authh.svc = auth.NewSSOService(kchat, signer, sessionStore, pool, adminPool)
-		log.Printf("api: JWT auth enabled (provider=%s, algorithm=%s)", secretsProvider.Name(), signerOpts.Algorithm)
-	} else {
-		log.Printf("api: JWT auth disabled (%v)", err)
+	switch {
+	case secretsErr != nil && operatorChoseNonEnv:
+		// Operator chose a non-env backend that failed to
+		// initialise. Do NOT fall back to env: SignerFromEnv
+		// silently ignores signerOpts.Algorithm and reverts to
+		// HS256, which would downgrade a configured RS256
+		// deployment without operator awareness. Leave JWT
+		// auth disabled and let the admin chain return 503
+		// until the operator fixes the provider.
+		log.Printf("api: secrets provider %q init failed (%v); JWT auth disabled — refusing to silently downgrade to env",
+			secretsCfg.Backend, secretsErr)
+		secretsProvider = nil
+	case secretsErr != nil:
+		// Operator chose env (or left the backend unset, which
+		// resolves to env). The init failure is recoverable via
+		// the env provider's zero-state behaviour.
+		log.Printf("api: secrets provider init failed (%v); falling back to env", secretsErr)
+		secretsProvider, _ = secrets.NewEnvProvider("")
+	}
+	// Wire provider Close() into the cleanup chain whenever the
+	// backend holds an external resource (gRPC connection, HTTP
+	// keep-alive pool). secrets.Provider doesn't expose Close on
+	// the interface — only concrete backends that need it do — so
+	// the type assertion is the right fit: a no-op for env / file,
+	// a real connection-drain for gcp / vault / aws.
+	if closer, ok := secretsProvider.(io.Closer); ok {
+		cleanups = append(cleanups, func() {
+			if err := closer.Close(); err != nil {
+				log.Printf("api: secrets provider close error: %v", err)
+			}
+		})
+	}
+	switch {
+	case secretsProvider == nil:
+		// Reached only when operator-chose-non-env-but-init-failed
+		// (above). Leaving authh.signer / authh.svc nil triggers
+		// the admin-chain 503 short-circuit further down.
+		log.Printf("api: JWT auth disabled — configured secrets provider unavailable")
+	default:
+		signer, err := newAuthSigner(ctx, secretsProvider, signerOpts)
+		if err == nil {
+			kchat := auth.NewHTTPKChatClient(os.Getenv("KCHAT_BASE_URL"), os.Getenv("KCHAT_API_KEY"))
+			authh.signer = signer
+			authh.svc = auth.NewSSOService(kchat, signer, sessionStore, pool, adminPool)
+			log.Printf("api: JWT auth enabled (provider=%s, algorithm=%s)", secretsProvider.Name(), signerOpts.Algorithm)
+		} else {
+			log.Printf("api: JWT auth disabled (%v)", err)
+		}
 	}
 
 	// adminChain wraps a chi router with the JWT + IsPlatformAdmin

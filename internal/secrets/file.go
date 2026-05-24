@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -80,17 +81,35 @@ func (p *FileProvider) GetSecret(_ context.Context, key string) (SecretValue, er
 	if !strings.HasPrefix(clean+string(filepath.Separator), p.rootDir+string(filepath.Separator)) && clean != p.rootDir {
 		return SecretValue{}, fmt.Errorf("secrets: file key %q escapes root", key)
 	}
-	info, err := os.Stat(clean)
+	// Open + Stat against the same file descriptor so the
+	// version (mtime) corresponds to the bytes we actually read.
+	// The earlier shape stat'd then ReadFile'd via path, which
+	// left a microsecond window where a concurrent atomic-rename
+	// (e.g. K8s secret rotation via symlink swap) could produce
+	// a (content, version) tuple from two different file
+	// generations.
+	f, err := os.Open(clean) //nolint:gosec // G304 path is checked above against the configured root
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return SecretValue{}, fmt.Errorf("%w: file %s missing", ErrSecretNotFound, clean)
 		}
+		return SecretValue{}, fmt.Errorf("%w: open %s: %w", ErrProviderUnavailable, clean, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
 		return SecretValue{}, fmt.Errorf("%w: stat %s: %w", ErrProviderUnavailable, clean, err)
 	}
 	if info.IsDir() {
 		return SecretValue{}, fmt.Errorf("%w: file %s is a directory", ErrSecretNotFound, clean)
 	}
-	raw, err := os.ReadFile(clean) //nolint:gosec // G304 path is checked above against the configured root
+
+	// Bound the read to a generous 1 MiB. Secrets in this
+	// provider are JWT keys / tokens / passwords — never bigger
+	// than a few KiB — so a multi-megabyte file is almost
+	// certainly a misconfigured mount and not a legitimate value.
+	raw, err := io.ReadAll(io.LimitReader(f, 1<<20))
 	if err != nil {
 		return SecretValue{}, fmt.Errorf("%w: read %s: %w", ErrProviderUnavailable, clean, err)
 	}

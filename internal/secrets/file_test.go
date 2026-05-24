@@ -116,3 +116,75 @@ func TestFileProvider_RejectsEmptyRoot(t *testing.T) {
 		t.Fatalf("expected ErrProviderNotConfigured, got %v", err)
 	}
 }
+
+// TestFileProvider_VersionMatchesReadContent verifies that the
+// reported Version reflects the file generation actually returned
+// in Bytes — not a separate stat() that might race with a
+// concurrent rotation. The earlier shape called os.Stat THEN
+// os.ReadFile, leaving a window where the stat saw v1's mtime
+// but ReadFile picked up v2's content; the new shape opens once
+// and stats the FD so both come from the same inode generation.
+//
+// The test simulates the race by populating the file in two
+// generations and asserting the version-content tuple is
+// internally consistent on every read.
+func TestFileProvider_VersionMatchesReadContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rotating")
+	if err := os.WriteFile(path, []byte("gen1"), 0o600); err != nil {
+		t.Fatalf("write gen1: %v", err)
+	}
+	p, _ := NewFileProvider(dir)
+	v1, err := p.GetSecret(context.Background(), "rotating")
+	if err != nil {
+		t.Fatalf("get gen1: %v", err)
+	}
+	if string(v1.Bytes) != "gen1" {
+		t.Fatalf("gen1 bytes: got %q, want %q", string(v1.Bytes), "gen1")
+	}
+	time.Sleep(20 * time.Millisecond)
+	future := time.Now().Add(2 * time.Second)
+	if err := os.WriteFile(path, []byte("gen2-longer-content"), 0o600); err != nil {
+		t.Fatalf("write gen2: %v", err)
+	}
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	v2, err := p.GetSecret(context.Background(), "rotating")
+	if err != nil {
+		t.Fatalf("get gen2: %v", err)
+	}
+	if string(v2.Bytes) != "gen2-longer-content" {
+		t.Fatalf("gen2 bytes: got %q, want %q", string(v2.Bytes), "gen2-longer-content")
+	}
+	if v1.Version == v2.Version {
+		t.Fatalf("version did not change across generations")
+	}
+}
+
+// TestFileProvider_LimitsReadSize bounds the read to 1 MiB so a
+// misconfigured mount pointing at a multi-gigabyte file doesn't
+// exhaust memory before the application notices the wrong path.
+// Secrets are conventionally <a few KiB; legitimate JWT keys top
+// out around 4 KiB for an RS-4096 PEM. 1 MiB is well above the
+// envelope and well below an OOM risk.
+func TestFileProvider_LimitsReadSize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge")
+	// Write 2 MiB so the limiter must clip.
+	big := make([]byte, 2<<20)
+	for i := range big {
+		big[i] = 'A'
+	}
+	if err := os.WriteFile(path, big, 0o600); err != nil {
+		t.Fatalf("write huge: %v", err)
+	}
+	p, _ := NewFileProvider(dir)
+	v, err := p.GetSecret(context.Background(), "huge")
+	if err != nil {
+		t.Fatalf("get huge: %v", err)
+	}
+	if len(v.Bytes) > 1<<20 {
+		t.Fatalf("read returned %d bytes; limiter should cap at 1 MiB", len(v.Bytes))
+	}
+}
