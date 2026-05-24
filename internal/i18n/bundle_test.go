@@ -128,6 +128,20 @@ func TestResolve_Matrix(t *testing.T) {
 		{"zh-Hant", "zh-Hant", "zh-Hant"},
 		{"zh-Hant-TW", "zh-Hant-TW", "zh-Hant"},
 		{"zh-Hant-HK", "zh-Hant-HK", "zh-Hant"},
+		// Browsers in Taiwan / Hong Kong / Macau commonly report
+		// `navigator.language = "zh-TW"` / `"zh-HK"` / `"zh-MO"`
+		// (without the explicit `Hant` script subtag) — pin these
+		// to zh-Hant explicitly so a future golang.org/x/text
+		// update can't silently route Taiwanese / Hong Kong /
+		// Macau Accept-Language headers to Simplified Chinese.
+		// The frontend's REGION_SCRIPT_OVERRIDES table mirrors
+		// this resolution path (apps/web/src/lib/i18n/locales.ts);
+		// keeping the backend pinned here lets the two stay in
+		// lockstep via a single CI signal rather than a manual
+		// drift check.
+		{"zh-TW", "zh-TW", "zh-Hant"},
+		{"zh-HK", "zh-HK", "zh-Hant"},
+		{"zh-MO", "zh-MO", "zh-Hant"},
 		{"fr-CA", "fr-CA", "fr"},
 		{"hi-IN unrelated", "hi-IN", DefaultLocale},
 		{"weighted-AL", "fr-CA,fr;q=0.9,en;q=0.5", "fr"},

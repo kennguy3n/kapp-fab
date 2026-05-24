@@ -43,19 +43,31 @@ import { DefaultLocale } from "./locales";
 export type MessageCatalogue = Readonly<Record<string, string>>;
 
 /**
- * Vite's glob registry of all *.json files in src/locales.
+ * Vite's glob registry of all *.json files in src/locales EXCEPT
+ * the English baseline, which is statically imported above and
+ * pre-loaded into the cache below.
  *
  * `eager: false` means each catalogue becomes its own dynamic
  * import; `import: "default"` strips the module wrapper so the
  * loaded value is the parsed JSON object itself rather than
  * `{ default: ... }`.
  *
+ * The negative-pattern entry (`!../../locales/en.json`) deliberately
+ * excludes the English catalogue from the glob: without it, Vite
+ * would emit a separate lazy chunk for `en.json` that is never
+ * downloaded at runtime (because `loadCatalogue("en")` hits the
+ * pre-populated cache immediately). The exclusion removes the
+ * dead chunk from the production build output. Vite also emits a
+ * dynamic-vs-static-import build warning when the same module is
+ * both eagerly and lazily imported; excluding `en.json` from the
+ * glob clears that warning at the same time.
+ *
  * The registered keys look like "../../locales/de.json"; we slice
  * out the basename in `loadCatalogue` to map a locale tag to the
  * right loader.
  */
 const catalogueLoaders = import.meta.glob<MessageCatalogue>(
-  "../../locales/*.json",
+  ["../../locales/*.json", "!../../locales/en.json"],
   { import: "default" },
 );
 
