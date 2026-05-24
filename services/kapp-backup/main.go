@@ -122,6 +122,11 @@ var TenantScopedTables = []string{
 	// Phase L deferred — external data sources + dashboard embeds.
 	"insights_data_sources",
 	"insights_embeds",
+	// Phase L (PR-7) — helpdesk email threading. PK is
+	// (tenant_id, message_id) so the dump's natural ON CONFLICT
+	// target is the message_id, not an auto-generated id —
+	// declared in tableConflictKeys below.
+	"email_messages",
 }
 
 // manifest is the first record in every dump file.
@@ -370,6 +375,11 @@ var tableConflictKeys = map[string][]string{
 	// natural key. data_retention_policies's PK is (tenant_id, category).
 	"tenant_support_domains":  {"tenant_id", "domain"},
 	"data_retention_policies": {"tenant_id", "category"},
+	// email_messages PK is (tenant_id, message_id) — the
+	// Message-ID is the idempotency key (relay retry must not
+	// double-insert), so the restore ON CONFLICT honours the
+	// natural PK rather than synthesising a surrogate id.
+	"email_messages": {"tenant_id", "message_id"},
 	// insights_query_cache PK is (tenant_id, query_hash, filter_hash) and
 	// insights_shares enforces a (tenant_id, resource_type, resource_id,
 	// grantee_type, grantee) UNIQUE on top of the (tenant_id, id) PK.
