@@ -92,36 +92,48 @@ test.describe("RTL flip", () => {
     expect(sidebarBox!.x).toBeGreaterThan(mainBox!.x);
   });
 
-  test.use({ locale: "en-US" });
+  test.describe("LTR baseline (en-US locale pin)", () => {
+    // test.use() is processed at collection time and applies to
+    // every test in the enclosing describe block — NOT just the
+    // test that lexically follows it.  Wrapping the English test
+    // in its own nested describe is the only way to scope
+    // `locale: "en-US"` to that one test without also forcing it
+    // onto the Arabic test above (which doesn't need it because
+    // cookie + localStorage pre-empt navigator.language anyway,
+    // but scoping correctly avoids surprising future contributors
+    // who might add another test to the outer describe and not
+    // realise it would silently inherit en-US).
+    test.use({ locale: "en-US" });
 
-  test("English locale keeps LTR baseline", async ({ page }) => {
-    // No cookie, no localStorage — LocaleProvider falls back to
-    // DefaultLocale "en" via the navigator.language probe.  The
-    // `test.use({ locale: "en-US" })` above sets the Playwright
-    // browser context's locale explicitly so the test is
-    // deterministic across browser engines (default Chromium
-    // ships with en-US, but the firefox/webkit projects in
-    // playwright.rtl.config.ts may default to the host's locale
-    // which on CI runners can vary).  Without the explicit pin,
-    // a runner whose OS locale was set to (say) de-DE would have
-    // navigator.language report "de-DE", which bestSupportedLocale
-    // would correctly resolve to "de" — and the LTR baseline
-    // assertion (`lang="en"`) would fail with a misleading "got
-    // de" error.
-    await page.goto("/");
+    test("English locale keeps LTR baseline", async ({ page }) => {
+      // No cookie, no localStorage — LocaleProvider falls back to
+      // DefaultLocale "en" via the navigator.language probe.  The
+      // `test.use({ locale: "en-US" })` above sets the Playwright
+      // browser context's locale explicitly so the test is
+      // deterministic across browser engines (default Chromium
+      // ships with en-US, but the firefox/webkit projects in
+      // playwright.rtl.config.ts may default to the host's locale
+      // which on CI runners can vary).  Without the explicit pin,
+      // a runner whose OS locale was set to (say) de-DE would
+      // have navigator.language report "de-DE", which
+      // bestSupportedLocale would correctly resolve to "de" — and
+      // the LTR baseline assertion (`lang="en"`) would fail with
+      // a misleading "got de" error.
+      await page.goto("/");
 
-    await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
-    await expect(page.locator("html")).toHaveAttribute("lang", "en");
+      await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
+      await expect(page.locator("html")).toHaveAttribute("lang", "en");
 
-    // Sidebar on the left in LTR: its x ≈ 0, main content's x
-    // is greater because the sidebar is to its left.
-    const sidebar = page.locator("aside").first();
-    const main = page.locator("main").first();
-    const sidebarBox = await sidebar.boundingBox();
-    const mainBox = await main.boundingBox();
-    expect(sidebarBox).not.toBeNull();
-    expect(mainBox).not.toBeNull();
+      // Sidebar on the left in LTR: its x ≈ 0, main content's x
+      // is greater because the sidebar is to its left.
+      const sidebar = page.locator("aside").first();
+      const main = page.locator("main").first();
+      const sidebarBox = await sidebar.boundingBox();
+      const mainBox = await main.boundingBox();
+      expect(sidebarBox).not.toBeNull();
+      expect(mainBox).not.toBeNull();
 
-    expect(sidebarBox!.x).toBeLessThan(mainBox!.x);
+      expect(sidebarBox!.x).toBeLessThan(mainBox!.x);
+    });
   });
 });
