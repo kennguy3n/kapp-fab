@@ -377,6 +377,20 @@ export const SidebarToggle = forwardRef<HTMLButtonElement, SidebarToggleProps>(
          * semantic action), so screen readers see the correct
          * "Expand sidebar" / "Collapse sidebar" copy regardless of
          * writing direction.
+         *
+         * Four-quadrant verification matrix:
+         *
+         *   LTR collapsed:  `>`  expand toward the center of the
+         *                        viewport (sidebar on left edge).
+         *   LTR expanded:   `<`  collapse toward the left edge.
+         *   RTL collapsed:  `<`  expand toward the center of the
+         *                        viewport (sidebar on right edge).
+         *   RTL expanded:   `>`  collapse toward the right edge.
+         *
+         * The `polyline points` choice (collapsed vs expanded)
+         * picks the base shape; the RTL `rotate-180` flips the
+         * physical direction so all four quadrants render the
+         * correct affordance with a single SVG markup site.
          */}
         <svg
           aria-hidden="true"
