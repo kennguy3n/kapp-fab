@@ -12,10 +12,29 @@ import { useNavigate, useParams } from "react-router-dom";
 // CoA template options match the files in
 // internal/tenant/coa_templates/. Adding a new template is a matter of
 // dropping a JSON file in that folder, registering it in
-// chartOfAccountsTemplates, and extending this list.
+// chartOfAccountsTemplates (wizard.go), and extending this list. The
+// country-specific charts encode the local statutory liability
+// accounts (e.g. CPF Payable for SG, GPSSA Payable for AE,
+// AHV/ALV/BVG split for CH) so the payroll engine's deduction lines
+// have a matching ledger destination on day one.
 const COA_TEMPLATES = [
   { value: "us_gaap_basic", label: "US GAAP Basic" },
-  { value: "ifrs_basic", label: "IFRS Basic" },
+  { value: "ifrs_basic", label: "IFRS Basic (Generic)" },
+  { value: "sg_basic", label: "Singapore — IFRS + CPF / GST" },
+  { value: "my_basic", label: "Malaysia — IFRS + EPF / SOCSO / EIS / SST" },
+  { value: "th_basic", label: "Thailand — TFRS + SSF / VAT" },
+  { value: "id_basic", label: "Indonesia — PSAK + BPJS / PPN" },
+  { value: "vn_basic", label: "Vietnam — Circular 200 + SI/HI/UI / VAT" },
+  { value: "ph_basic", label: "Philippines — PFRS + SSS / PhilHealth / Pag-IBIG / VAT" },
+  { value: "nz_basic", label: "New Zealand — NZ IFRS + PAYE / ACC / KiwiSaver / GST" },
+  { value: "in_basic", label: "India — Ind AS + EPF / ESI / TDS / GST" },
+  { value: "ch_basic", label: "Switzerland — Swiss GAAP + AHV / ALV / BVG / MwSt" },
+  { value: "ae_basic", label: "UAE — IFRS + GPSSA / VAT / Gratuity" },
+  { value: "sa_basic", label: "Saudi Arabia — IFRS + GOSI / Zakat / VAT" },
+  { value: "qa_basic", label: "Qatar — IFRS + GRSIA / Gratuity" },
+  { value: "kw_basic", label: "Kuwait — IFRS + PIFSS / NLST / Indemnity" },
+  { value: "bh_basic", label: "Bahrain — IFRS + SIO / VAT / Indemnity" },
+  { value: "om_basic", label: "Oman — IFRS + PASI / VAT / Gratuity" },
 ];
 
 interface InitialUser {
