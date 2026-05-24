@@ -46,6 +46,7 @@ import {
   DefaultLocale,
   LocaleDirection,
   SupportedLocales,
+  bestSupportedLocale,
   isSupportedLocale,
   localeInfo,
 } from "./locales";
@@ -123,14 +124,17 @@ function resolveInitialLocale(): string {
     }
   }
   if (typeof navigator !== "undefined" && typeof navigator.language === "string") {
-    const nav = navigator.language;
-    if (isSupportedLocale(nav)) {
-      return nav;
-    }
-    // Try the primary subtag (e.g. "de-AT" → "de").
-    const primary = nav.split("-")[0];
-    if (primary && isSupportedLocale(primary)) {
-      return primary;
+    // bestSupportedLocale mirrors language.Matcher's resolution:
+    // exact match → region-script override (zh-TW → zh-Hant) →
+    // progressive-subtag drop (zh-Hant-TW → zh-Hant, de-AT → de).
+    // The previous implementation only checked exact + primary-
+    // subtag, which routed every Taiwanese / Hong Kong / Macau
+    // user (whose browser reports `zh-TW` / `zh-HK` / `zh-MO`) to
+    // the Simplified Chinese catalogue because `zh-TW`.split("-")[0]
+    // is `zh` and the script subtag was never consulted.
+    const matched = bestSupportedLocale(navigator.language);
+    if (matched) {
+      return matched;
     }
   }
   return DefaultLocale;

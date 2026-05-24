@@ -91,3 +91,79 @@ export function isSupportedLocale(tag: string): boolean {
 export function localeInfo(tag: string): LocaleInfo {
   return localeIndex[tag] ?? localeIndex[DefaultLocale];
 }
+
+/**
+ * Region-to-script overrides for ambiguous primary subtags. The
+ * shipped Chinese catalogues are `zh` (Simplified Chinese) and
+ * `zh-Hant` (Traditional Chinese), but `navigator.language` on
+ * Taiwanese / Hong Kong / Macau browsers reports `zh-TW` / `zh-HK` /
+ * `zh-MO` without an explicit script subtag. A naive
+ * `split("-")[0]` reduces those to `zh`, which is Simplified — the
+ * wrong catalogue for those regions. This table mirrors the
+ * golang.org/x/text/language.Matcher resolution the backend bundle
+ * does (pinned by `internal/i18n/bundle_test.go:129-130`).
+ *
+ * The table is intentionally narrow: only regions whose default
+ * script is unambiguous AND differs from the bare-primary-subtag
+ * catalogue. Simplified-Chinese regions (CN / SG / MY) resolve via
+ * the regular progressive-subtag fallback to `zh`, so they don't
+ * need an entry here.
+ */
+const REGION_SCRIPT_OVERRIDES: Record<string, string> = {
+  "zh-TW": "zh-Hant",
+  "zh-HK": "zh-Hant",
+  "zh-MO": "zh-Hant",
+};
+
+/**
+ * Returns the best supported locale tag for an arbitrary BCP 47
+ * input — the frontend mirror of `golang.org/x/text/language.Matcher`
+ * over the shipped catalogue set. Resolution order:
+ *
+ *   1. Exact match against SupportedLocales.
+ *   2. Region-to-script override (e.g. `zh-TW` → `zh-Hant`).
+ *   3. Progressive-subtag fallback: drop trailing subtags one at a
+ *      time and re-check (e.g. `zh-Hant-TW` → `zh-Hant`,
+ *      `de-AT` → `de`). This is what makes a browser reporting
+ *      `de-AT` correctly resolve to the German catalogue.
+ *   4. Returns `null` when nothing matches; callers decide whether
+ *      that means DefaultLocale or rejection.
+ *
+ * Tag comparison is case-sensitive against the canonical BCP 47
+ * casing the SupportedLocales table uses (lowercase primary,
+ * Titlecase script, UPPERCASE region). Callers that may receive
+ * a tag in non-canonical casing (e.g. an Accept-Language header
+ * with `ZH-HANT-tw`) should normalise before calling this, but the
+ * common-case inputs from `navigator.language` and the
+ * `kapp_locale` cookie are already in canonical form because both
+ * are written by code that respects BCP 47 casing.
+ */
+export function bestSupportedLocale(tag: string): string | null {
+  if (!tag) {
+    return null;
+  }
+  if (isSupportedLocale(tag)) {
+    return tag;
+  }
+  if (Object.prototype.hasOwnProperty.call(REGION_SCRIPT_OVERRIDES, tag)) {
+    const mapped = REGION_SCRIPT_OVERRIDES[tag];
+    if (isSupportedLocale(mapped)) {
+      return mapped;
+    }
+  }
+  const subtags = tag.split("-");
+  while (subtags.length > 1) {
+    subtags.pop();
+    const shorter = subtags.join("-");
+    if (isSupportedLocale(shorter)) {
+      return shorter;
+    }
+    if (Object.prototype.hasOwnProperty.call(REGION_SCRIPT_OVERRIDES, shorter)) {
+      const mapped = REGION_SCRIPT_OVERRIDES[shorter];
+      if (isSupportedLocale(mapped)) {
+        return mapped;
+      }
+    }
+  }
+  return null;
+}

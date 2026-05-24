@@ -246,13 +246,19 @@ export function SetupWizardPage() {
         }}
       >
         {[
-          t("wizard.step.company"),
-          t("wizard.step.coa"),
-          t("wizard.step.users"),
-          t("wizard.step.done"),
-        ].map((label, i) => (
+          { id: "company", label: t("wizard.step.company") },
+          { id: "coa", label: t("wizard.step.coa") },
+          { id: "users", label: t("wizard.step.users") },
+          { id: "done", label: t("wizard.step.done") },
+        ].map(({ id, label }, i) => (
+          // The React key is the stable step identifier ("company"
+          // / "coa" / "users" / "done") rather than the translated
+          // label so a locale whose translations collide (e.g.
+          // an abbreviation that maps two step names to the same
+          // string) doesn't trigger a duplicate-key warning or
+          // reorder during reconciliation.
           <li
-            key={label}
+            key={id}
             style={{
               color: i === step ? "#111827" : "#9ca3af",
               fontWeight: i === step ? 600 : 400,
