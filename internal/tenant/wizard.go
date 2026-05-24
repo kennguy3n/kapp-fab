@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -452,10 +453,16 @@ type LocaleBundle interface {
 // supported production wiring; the deps_build path wires
 // *i18n.Bundle here so a future contributor cannot accidentally
 // install a validator without the matching resolver. Passing nil
-// detaches both — useful for unit tests that want the format gate
-// alone.
+// — or, equivalently, a typed-nil interface wrapping a nil pointer
+// such as `(*i18n.Bundle)(nil)` — detaches both fields rather than
+// installing a non-nil interface that would panic at the first
+// Resolve / IsSupported call. The typed-nil detection uses reflect
+// (which costs one allocation at wizard construction time, off the
+// per-tenant hot path) so we close the classic Go interface-nil
+// footgun for every caller that might wire the bundle through a
+// variable that turned out to be nil at runtime.
 func (w *Wizard) WithLocaleBundle(b LocaleBundle) *Wizard {
-	if b == nil {
+	if isNilBundle(b) {
 		w.localeValidator = nil
 		w.localeResolver = nil
 		return w
@@ -463,6 +470,28 @@ func (w *Wizard) WithLocaleBundle(b LocaleBundle) *Wizard {
 	w.localeValidator = b
 	w.localeResolver = b
 	return w
+}
+
+// isNilBundle returns true for both the untyped nil interface and
+// the typed-nil case (interface non-nil, but wrapping a nil pointer
+// like `(*i18n.Bundle)(nil)`). Only reflect can distinguish the
+// latter from a valid bundle, because `b == nil` only matches the
+// fully untyped form. Kept package-private and minimal — the only
+// kinds we expect for LocaleBundle implementations are pointers
+// (i18n.Bundle is *Bundle) and interfaces; non-pointer
+// implementations sail past the check unchanged because reflect
+// cannot meaningfully test them for nil.
+func isNilBundle(b LocaleBundle) bool {
+	if b == nil {
+		return true
+	}
+	v := reflect.ValueOf(b)
+	switch v.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 // RunSetupWizard applies the supplied config to an existing tenant.

@@ -168,6 +168,115 @@ func TestMiddleware_NilTenantProviderTreatedAsNoop(t *testing.T) {
 	}
 }
 
+// TestMiddleware_VaryAcceptLanguageAlwaysSet pins the CDN-safety
+// contract: every response that flows through the middleware must
+// carry "Vary: Accept-Language" so a cache in front of the API
+// keys English and German responses separately. The contract holds
+// even when the handler itself never reads the locale — the cache
+// has no way to know in advance whether a downstream handler will
+// emit a translated body, so the middleware always declares the
+// variance.
+func TestMiddleware_VaryAcceptLanguageAlwaysSet(t *testing.T) {
+	b := mustDefault(t)
+	h := Middleware(b)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	h.ServeHTTP(rr, req)
+
+	vary := rr.Header().Values("Vary")
+	if !containsToken(vary, "Accept-Language") {
+		t.Fatalf("Vary header missing Accept-Language token, got %v", vary)
+	}
+}
+
+// TestMiddleware_VaryCookieAddedWhenCookieSourceEnabled covers the
+// second arm of the Vary contract: a cookie-based locale switcher
+// changes the response body per-browser, and CDNs that don't strip
+// the Cookie header before caching would serve the wrong locale to
+// a different cookie holder. The middleware must declare "Vary:
+// Cookie" whenever WithCookie is configured.
+func TestMiddleware_VaryCookieAddedWhenCookieSourceEnabled(t *testing.T) {
+	b := mustDefault(t)
+	h := Middleware(b, WithCookie("kapp_locale"))(
+		http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}),
+	)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	h.ServeHTTP(rr, req)
+
+	vary := rr.Header().Values("Vary")
+	if !containsToken(vary, "Accept-Language") {
+		t.Fatalf("Vary header missing Accept-Language token, got %v", vary)
+	}
+	if !containsToken(vary, "Cookie") {
+		t.Fatalf("Vary header missing Cookie token when WithCookie is configured, got %v", vary)
+	}
+}
+
+// TestMiddleware_VaryQueryParamDoesNotAddVary confirms the
+// query-param source does NOT contribute a Vary entry. CDNs already
+// bucket distinct query strings as distinct cache keys, so adding
+// Vary: query-param-name would be both wrong (Vary names HTTP
+// request headers, not query parameters) and redundant.
+func TestMiddleware_VaryQueryParamDoesNotAddVary(t *testing.T) {
+	b := mustDefault(t)
+	h := Middleware(b, WithQueryParam("lang"))(
+		http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}),
+	)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/?lang=de", http.NoBody)
+	h.ServeHTTP(rr, req)
+
+	vary := rr.Header().Values("Vary")
+	for _, v := range vary {
+		if v == "lang" || v == "query" {
+			t.Fatalf("query param should NOT contribute to Vary, got %v", vary)
+		}
+	}
+}
+
+// TestMiddleware_VaryAppendsPreserveExisting confirms the middleware
+// uses Header.Add semantics so an upstream handler that already set
+// e.g. "Vary: Cookie" for an auth-session response keeps that
+// signal, and we layer "Vary: Accept-Language" on top rather than
+// clobbering it.
+func TestMiddleware_VaryAppendsPreserveExisting(t *testing.T) {
+	b := mustDefault(t)
+	h := Middleware(b)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Add("Vary", "Authorization")
+	}))
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	h.ServeHTTP(rr, req)
+
+	vary := rr.Header().Values("Vary")
+	if !containsToken(vary, "Accept-Language") {
+		t.Fatalf("Vary header missing Accept-Language token, got %v", vary)
+	}
+	if !containsToken(vary, "Authorization") {
+		t.Fatalf("upstream Vary: Authorization was clobbered, got %v", vary)
+	}
+}
+
+// containsToken returns true if any of the supplied Vary header
+// values contains the given token. Vary may be emitted either as a
+// single combined header ("Vary: A, B") or as multiple separate
+// headers; net/http preserves separate-header form via
+// Header.Values, so for the middleware's Header.Add path each token
+// appears as its own value.
+func containsToken(values []string, token string) bool {
+	for _, v := range values {
+		if v == token {
+			return true
+		}
+	}
+	return false
+}
+
 func mustDefault(t *testing.T) *Bundle {
 	t.Helper()
 	b, err := Default()

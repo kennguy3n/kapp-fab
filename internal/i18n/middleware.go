@@ -106,11 +106,21 @@ func WithCookie(name string) MiddlewareOption {
 // locale from making downstream T() calls fall through to the key
 // literal.
 //
-// The middleware itself never writes to the response and never
-// returns 4xx — a missing or malformed locale source simply drops
-// down the precedence chain. That keeps the i18n layer transparent
-// for clients that do not care about locales (machine-to-machine
-// API consumers, SDK calls, integration tests).
+// The middleware never returns 4xx and never writes to the response
+// body — a missing or malformed locale source simply drops down the
+// precedence chain. The only response surface it touches is the
+// Vary header (appended, never replaced) so a CDN or HTTP cache sat
+// in front of the API keys on every signal we consulted. Without
+// Vary, a CDN that cached an English /api/v1/errors response would
+// serve it back to a German Accept-Language client — the canonical
+// i18n CDN-poisoning hazard. The Vary append is unconditional even
+// before any handler emits a translated body because (1) PR-5 wires
+// translated bodies in immediately after this PR lands, and (2) a
+// fresh Vary contract introduced atomically with handler changes
+// would leave stale cache entries from PR-4-only deployments in
+// play during the rollout window. Setting it now means caches
+// shed Vary-incorrect entries the moment PR-4 ships, before any
+// translated body exists to be miskeyed.
 func Middleware(b *Bundle, opts ...MiddlewareOption) func(http.Handler) http.Handler {
 	cfg := &middlewareConfig{
 		tenantProvider: noopTenantLocaleProvider{},
@@ -118,14 +128,48 @@ func Middleware(b *Bundle, opts ...MiddlewareOption) func(http.Handler) http.Han
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	varyValues := buildVaryHeader(cfg)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			candidate := resolveCandidate(r, cfg)
 			locale := b.Resolve(candidate)
+			// Append to any existing Vary the handler chain has
+			// already set (auth.Middleware adds "Cookie" for
+			// session-bearing responses, for example). Header.Add
+			// preserves the existing values, so an upstream
+			// "Vary: Cookie" stays intact and we layer
+			// "Vary: Accept-Language" on top.
+			for _, v := range varyValues {
+				w.Header().Add("Vary", v)
+			}
 			ctx := WithLocale(r.Context(), locale)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// buildVaryHeader returns the deduplicated list of Vary tokens this
+// middleware contributes for the configured precedence chain. The
+// list is computed once at Middleware() construction so the per-
+// request hot path is a single range loop with no allocations.
+//
+// Tokens are added only when the corresponding source is enabled:
+//
+//   - Accept-Language is always present (it's the floor of the
+//     resolution chain and PR-5 will translate bodies based on it).
+//   - Cookie is added when WithCookie is configured. CDNs that
+//     don't strip Cookie before caching (most don't) need this to
+//     avoid serving a German-cookie response back to an English
+//     cookie holder.
+//   - The query-param source does NOT need a Vary entry: URLs with
+//     different query strings are distinct cache keys by default,
+//     so a CDN already buckets ?lang=de and ?lang=fr separately.
+func buildVaryHeader(cfg *middlewareConfig) []string {
+	values := []string{"Accept-Language"}
+	if cfg.cookieName != "" {
+		values = append(values, "Cookie")
+	}
+	return values
 }
 
 // resolveCandidate walks the precedence chain and returns the first

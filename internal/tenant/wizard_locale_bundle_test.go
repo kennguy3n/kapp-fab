@@ -77,6 +77,31 @@ func TestWizard_WithLocaleBundle_NilDetachesBoth(t *testing.T) {
 	}
 }
 
+// TestWizard_WithLocaleBundle_TypedNilDetachesBoth pins the Go
+// interface-nil footgun: a caller that passes a nil pointer wrapped
+// in the LocaleBundle interface (e.g. `var b *fakeLocaleBundle;
+// w.WithLocaleBundle(b)` where b is the typed nil) must not install
+// a non-nil interface that would panic at the first IsSupported /
+// Resolve call. The reflect-based nil check in WithLocaleBundle
+// catches this and detaches both fields cleanly.
+func TestWizard_WithLocaleBundle_TypedNilDetachesBoth(t *testing.T) {
+	// Pre-wire a real bundle so we can prove the typed-nil call
+	// resets — without the pre-wire, both fields are already nil
+	// at NewWizard time and the test passes for the wrong reason.
+	wired := newFakeLocaleBundle("en", "de")
+	w := NewWizard(nil).WithLocaleBundle(wired)
+
+	var typedNil *fakeLocaleBundle
+	w = w.WithLocaleBundle(typedNil)
+
+	if w.localeValidator != nil {
+		t.Fatalf("WithLocaleBundle(typed nil): localeValidator should be nil, got %T", w.localeValidator)
+	}
+	if w.localeResolver != nil {
+		t.Fatalf("WithLocaleBundle(typed nil): localeResolver should be nil, got %T", w.localeResolver)
+	}
+}
+
 // TestWizard_WithLocaleBundle_FluentChainOrderInsensitive confirms
 // the new combined setter composes cleanly with the older
 // single-interface setters in either order. A caller that wires
