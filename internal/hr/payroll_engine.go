@@ -472,10 +472,21 @@ func (e *PayrollEngine) PostPayRun(
 	// across every approved slip in the run. PostPayRun consults
 	// DeductionAccountMap below to decide whether to credit the
 	// per-code total to a dedicated liability account or fall
-	// back to the catch-all salary_payable roll-up. Codes only
-	// appear in the map if at least one slip carried a positive
-	// deduction line for them, so the journal entry never emits
-	// zero-value lines.
+	// back to the catch-all salary_payable roll-up.
+	//
+	// Amounts are accumulated *with sign* so the invariant
+	//   Σ perCodeDeductions[c]  ==  Σ sd.TotalDeductions
+	// holds across every slip whose deduction lines all carry a
+	// non-empty Code. Empty-coded deduction lines (rare; usually
+	// ad-hoc adjustments) are not tracked per-code — they fall
+	// through into the `unmapped` rollover below, which then
+	// credits the catch-all salary_payable line for the
+	// difference. Negative deduction amounts (legitimate when a
+	// salary structure includes a credit-style component via
+	// rollStructure) are kept in the aggregate so the per-code
+	// total reflects the net effect; splitDeductionsByCode
+	// preserves the sign and PostPayRun emits a Cr line for
+	// positive aggregates and a Dr line for negative ones.
 	perCodeDeductions := map[string]decimal.Decimal{}
 	for _, s := range slips {
 		var sd payslipData
@@ -490,7 +501,7 @@ func (e *PayrollEngine) PostPayRun(
 		deductions = deductions.Add(sd.TotalDeductions)
 		net = net.Add(sd.NetPay)
 		for _, d := range sd.Deductions {
-			if d.Code == "" || !d.Amount.IsPositive() {
+			if d.Code == "" {
 				continue
 			}
 			perCodeDeductions[d.Code] = perCodeDeductions[d.Code].Add(d.Amount)
@@ -503,45 +514,16 @@ func (e *PayrollEngine) PostPayRun(
 	entry := existingJE
 	if entry == nil {
 		postedAt := e.now().UTC()
-		lines := []ledger.JournalLine{
-			{AccountCode: run.SalaryExpenseAccountCode, Debit: gross, Credit: decimal.Zero, Currency: currency, Memo: "Payroll expense"},
-			{AccountCode: run.SalaryPayableAccountCode, Debit: decimal.Zero, Credit: net, Currency: currency, Memo: "Net payable"},
-		}
-		if deductions.IsPositive() {
-			// Split deductions by code when run.DeductionAccountMap is
-			// configured: each mapped code credits its own liability
-			// account so finance can reconcile remittances per
-			// authority (EPF→KWSP, CPF→CPF Board, GOSI→GOSI, …).
-			// Unmapped codes roll up into the catch-all salary_payable
-			// line so the entry stays balanced regardless of which
-			// codes the tenant has explicitly configured.
-			//
-			// The sum across `mappedSplits + unmapped` must equal
-			// `deductions` (and therefore `gross - net`) exactly,
-			// otherwise the entry won't balance and ledger.Post will
-			// reject it. perCodeDeductions sums to the same total as
-			// `deductions` by construction (both are the sum of every
-			// positive deduction line on every approved slip), so the
-			// arithmetic is closed-form correct as long as we use
-			// `decimal.Decimal` (not float) for the splits.
-			mappedSplits := splitDeductionsByCode(perCodeDeductions, run.DeductionAccountMap)
-			unmapped := deductions
-			for _, ms := range mappedSplits {
-				unmapped = unmapped.Sub(ms.amount)
-				lines = append(lines, ledger.JournalLine{
-					AccountCode: ms.account,
-					Debit:       decimal.Zero,
-					Credit:      ms.amount,
-					Currency:    currency,
-					Memo:        fmt.Sprintf("Deductions payable: %s", ms.code),
-				})
-			}
-			if unmapped.IsPositive() {
-				lines = append(lines, ledger.JournalLine{
-					AccountCode: run.SalaryPayableAccountCode, Debit: decimal.Zero, Credit: unmapped, Currency: currency, Memo: "Deductions payable",
-				})
-			}
-		}
+		lines := buildPayrollJournalLines(payrollJournalInput{
+			Gross:                    gross,
+			Net:                      net,
+			Deductions:               deductions,
+			PerCodeDeductions:        perCodeDeductions,
+			DeductionAccountMap:      run.DeductionAccountMap,
+			SalaryExpenseAccountCode: run.SalaryExpenseAccountCode,
+			SalaryPayableAccountCode: run.SalaryPayableAccountCode,
+			Currency:                 currency,
+		})
 		sourceID := payRunID
 		posted, postErr := e.ledger.PostJournalEntry(ctx, ledger.JournalEntry{
 			TenantID:    tenantID,
@@ -673,14 +655,96 @@ type deductionSplit struct {
 	amount  decimal.Decimal
 }
 
+// payrollJournalInput bundles the inputs buildPayrollJournalLines
+// needs to assemble a balanced payroll journal entry. Keeping the
+// helper signature as a struct (rather than a long parameter list)
+// makes it easy to extend later — e.g. adding per-employee
+// employer-contribution lines for KiwiSaver or EPF without
+// disturbing the call site.
+type payrollJournalInput struct {
+	Gross                    decimal.Decimal
+	Net                      decimal.Decimal
+	Deductions               decimal.Decimal
+	PerCodeDeductions        map[string]decimal.Decimal
+	DeductionAccountMap      map[string]string
+	SalaryExpenseAccountCode string
+	SalaryPayableAccountCode string
+	Currency                 string
+}
+
+// buildPayrollJournalLines assembles a balanced double-entry
+// journal for a payroll run. The base shape is:
+//
+//	Dr SalaryExpense    gross
+//	  Cr SalaryPayable    net
+//	  Cr <per-code liability accounts>  (mapped codes, positive)
+//	  Cr SalaryPayable    unmapped remainder (if > 0)
+//	  Dr <per-code liability accounts>  (mapped codes, negative)
+//	  Dr SalaryPayable    |unmapped|    (if < 0)
+//
+// Balance invariant — proved by TestBuildPayrollJournalLines_*:
+//
+//	Σ Debit  ==  Σ Credit  ==  gross
+//
+// regardless of which codes are mapped, whether any aggregate is
+// negative, or how many empty-coded ad-hoc lines were present
+// (those don't appear in PerCodeDeductions but are absorbed into
+// the salary_payable catch-all via the signed `unmapped`).
+func buildPayrollJournalLines(in payrollJournalInput) []ledger.JournalLine {
+	lines := []ledger.JournalLine{
+		{AccountCode: in.SalaryExpenseAccountCode, Debit: in.Gross, Credit: decimal.Zero, Currency: in.Currency, Memo: "Payroll expense"},
+		{AccountCode: in.SalaryPayableAccountCode, Debit: decimal.Zero, Credit: in.Net, Currency: in.Currency, Memo: "Net payable"},
+	}
+	if in.Deductions.IsZero() {
+		return lines
+	}
+	mappedSplits := splitDeductionsByCode(in.PerCodeDeductions, in.DeductionAccountMap)
+	unmapped := in.Deductions
+	for _, ms := range mappedSplits {
+		unmapped = unmapped.Sub(ms.amount)
+		line := ledger.JournalLine{
+			AccountCode: ms.account,
+			Currency:    in.Currency,
+			Memo:        fmt.Sprintf("Deductions payable: %s", ms.code),
+		}
+		if ms.amount.IsNegative() {
+			line.Debit = ms.amount.Neg()
+			line.Credit = decimal.Zero
+		} else {
+			line.Debit = decimal.Zero
+			line.Credit = ms.amount
+		}
+		lines = append(lines, line)
+	}
+	if unmapped.IsPositive() {
+		lines = append(lines, ledger.JournalLine{
+			AccountCode: in.SalaryPayableAccountCode, Debit: decimal.Zero, Credit: unmapped, Currency: in.Currency, Memo: "Deductions payable",
+		})
+	} else if unmapped.IsNegative() {
+		lines = append(lines, ledger.JournalLine{
+			AccountCode: in.SalaryPayableAccountCode, Debit: unmapped.Neg(), Credit: decimal.Zero, Currency: in.Currency, Memo: "Deductions payable",
+		})
+	}
+	return lines
+}
+
 // splitDeductionsByCode resolves the (Deduction.Code → liability
 // account code) mapping for every code present in the slip
 // rollups. Codes absent from accountMap are excluded from the
 // returned slice — the caller's `unmapped` balance picks them up
-// and credits salary_payable so the journal entry stays balanced.
+// and posts to salary_payable so the journal entry stays balanced.
 // A nil / empty accountMap returns an empty slice, which makes
 // PostPayRun's deduction-split branch a no-op and the journal
 // entry shape identical to the pre-Phase-M2 catch-all behaviour.
+//
+// Amounts are returned *with sign* so PostPayRun can emit a Cr
+// line for positive aggregates and a Dr line for negative ones —
+// the latter is reached only when a slip carried a credit-style
+// (negative-amount) deduction component for the same code. Zero
+// aggregates are filtered out so the journal entry doesn't carry
+// cosmetic empty lines, and a blank `accountMap[code]` is treated
+// as "no mapping" so a misconfigured tenant doesn't end up
+// posting to account "".
 func splitDeductionsByCode(perCode map[string]decimal.Decimal, accountMap map[string]string) []deductionSplit {
 	if len(perCode) == 0 || len(accountMap) == 0 {
 		return nil
@@ -697,7 +761,7 @@ func splitDeductionsByCode(perCode map[string]decimal.Decimal, accountMap map[st
 			continue
 		}
 		amt := perCode[c]
-		if !amt.IsPositive() {
+		if amt.IsZero() {
 			continue
 		}
 		out = append(out, deductionSplit{code: c, account: account, amount: amt})
@@ -836,6 +900,22 @@ type payslipData struct {
 	// surfaces them for the posting path. `omitempty` so
 	// legacy slips that came through before this projection
 	// existed still decode without errors.
+	//
+	// Wire-format coupling: this field reads from the same
+	// `deductions` JSON array written by `linesToJSON` (see
+	// the slip generation path, search for `"deductions"`).
+	// `linesToJSON` emits a `map[string]any` per line with
+	// keys `code`, `name`, `amount` (and optionally
+	// `component_id`); `deductionLine` declares only `Code`
+	// and `Amount` so Go's json.Unmarshal silently drops the
+	// extra keys. Amounts round-trip cleanly because the
+	// writer uses `decimalFloat()` and decimal.Decimal parses
+	// both float64 and string JSON numbers. If either side of
+	// this contract ever drifts (e.g. linesToJSON renames a
+	// key, or deductionLine adds a tag that conflicts), the
+	// PostPayRun deduction-split path silently loses data, so
+	// the symmetric tests in payroll_engine_*_test.go pin the
+	// round-trip.
 	Deductions []deductionLine `json:"deductions,omitempty"`
 }
 

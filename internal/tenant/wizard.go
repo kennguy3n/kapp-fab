@@ -347,6 +347,23 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 		// unmapped countries so the column never gets an empty
 		// string. The CHECK on migration 000059 enforces the format
 		// regardless of which API path writes the row.
+		//
+		// Cache-invalidation note: like the base_currency and
+		// country writes above, this goes through tx.Exec rather
+		// than PGStore.SetLocale so all three columns commit
+		// atomically alongside the wizard's account / role
+		// seeding. The wizard's own w.store is uncached
+		// (NewPGStore, no WithCache), so its own re-read is
+		// always consistent. Any *other* PGStore instance that
+		// has cached this tenant and was created with WithCache
+		// will continue returning the pre-wizard Locale until
+		// its TTL (single-digit seconds in production) expires.
+		// That cross-instance staleness is consistent with how
+		// the SetCountry / SetBaseCurrency paths behave through
+		// the wizard today; a real fix would route every tenant
+		// mutation through a NOTIFY/LISTEN channel and have all
+		// caches subscribe, which is out of scope for the i18n
+		// foundation and tracked separately.
 		locale := strings.TrimSpace(cfg.Locale)
 		if locale == "" {
 			locale = DefaultLocaleForCountry(cfg.Country)
