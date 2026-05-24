@@ -94,6 +94,13 @@ export interface ButtonProps
    * support multiple children).  Type system can't enforce this
    * at compile time, but Radix surfaces a clear runtime error
    * if violated.
+   *
+   * **Mutually exclusive with `leadingIcon` / `trailingIcon`** —
+   * combining them would require wrapping the content in a
+   * Fragment, which Radix Slot cannot forward props onto.  Embed
+   * the icon inside your child element instead.  Violations
+   * throw at render time with a clear message rather than
+   * silently dropping styles.
    */
   asChild?: boolean;
   /**
@@ -124,14 +131,27 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
     },
     ref,
   ) => {
+    // `asChild` and `leadingIcon`/`trailingIcon` are mutually
+    // exclusive by design.  Radix Slot clones its single child
+    // element to merge styles, refs, and handlers in; a
+    // Fragment-wrapped child (which is what we'd need to render
+    // icons + a custom inner element) is NOT a single element and
+    // Slot silently drops the merged props on it.  Rather than
+    // hide that footgun behind a sometimes-broken render path,
+    // we surface the conflict at the API boundary and force the
+    // caller to embed the icon inside their `<Link>` / etc. when
+    // they want both behaviours.  This matches how shadcn/ui
+    // composes Button with NavLink in real apps.
+    if (asChild && (leadingIcon || trailingIcon)) {
+      throw new Error(
+        "<Button>: `asChild` cannot be combined with `leadingIcon` or " +
+          "`trailingIcon` — Radix Slot can only forward props onto a " +
+          "single child element. Embed the icon inside the child " +
+          "element (e.g. inside the <Link> you pass as children) " +
+          "instead, or remove `asChild`.",
+      );
+    }
     const Comp = asChild ? Slot : "button";
-    // When asChild is set the child becomes the button — but we
-    // still want the icons to render around the child's text.  Slot
-    // expects exactly one child, so wrap the icon-aware content in
-    // a Fragment when icons are present; the resulting "single
-    // child" is the icon-wrapping span (or just the text if no
-    // icons).  Without this branch, passing `asChild` plus
-    // `leadingIcon` would trigger Radix's multi-child warning.
     const content =
       leadingIcon || trailingIcon ? (
         <>

@@ -31,10 +31,18 @@ const preview: Preview = {
       ],
     },
   },
+  // Storybook 8 removed `globalTypes.<name>.defaultValue`; the
+  // replacement is the top-level `initialGlobals` map.  See
+  // https://storybook.js.org/docs/api/main-config-globals  We
+  // still rely on the decorator's `?? "light"` fallback as a
+  // belt-and-braces guard in case Storybook ever loads a global
+  // map with a missing key (e.g. on first run after upgrading).
+  initialGlobals: {
+    theme: "light",
+  },
   globalTypes: {
     theme: {
       description: "Light / dark colour scheme",
-      defaultValue: "light",
       toolbar: {
         title: "Theme",
         icon: "circlehollow",

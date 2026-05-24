@@ -26,18 +26,24 @@ const data: Invoice[] = [
   { id: "INV-012", customer: "Aperture Science", amount: 7200.0, status: "pending", due: "2025-06-15" },
 ];
 
+// Every sortable column declares an `accessor` returning the raw
+// scalar value used for ordering.  This is required because `cell`
+// returns ReactNode — sorting against `<span>INV-001</span>` would
+// fail (every row would compare equal as `[object Object]`).
 const columns: DataGridColumn<Invoice>[] = [
   {
     key: "id",
     header: "Invoice",
     cell: (row) => <span className="font-medium">{row.id}</span>,
     sortable: true,
+    accessor: (row) => row.id,
   },
   {
     key: "customer",
     header: "Customer",
     cell: (row) => row.customer,
     sortable: true,
+    accessor: (row) => row.customer,
   },
   {
     key: "amount",
@@ -46,7 +52,7 @@ const columns: DataGridColumn<Invoice>[] = [
     className: "text-right",
     cell: (row) => `$${row.amount.toFixed(2)}`,
     sortable: true,
-    compare: (a, b) => a.amount - b.amount,
+    accessor: (row) => row.amount,
   },
   {
     key: "status",
@@ -61,7 +67,13 @@ const columns: DataGridColumn<Invoice>[] = [
       return <Badge variant={variant}>{row.status}</Badge>;
     },
   },
-  { key: "due", header: "Due", cell: (row) => row.due, sortable: true },
+  {
+    key: "due",
+    header: "Due",
+    cell: (row) => row.due,
+    sortable: true,
+    accessor: (row) => row.due,
+  },
 ];
 
 const meta: Meta<typeof DataGrid<Invoice>> = {
