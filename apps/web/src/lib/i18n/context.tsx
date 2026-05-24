@@ -199,13 +199,37 @@ export function LocaleProvider({ children }: { children: ReactNode }) {
   // default locales render with the English fallback for the
   // microseconds the dynamic import takes, then re-render with
   // the resolved catalogue.
+  //
+  // The .catch() arm is defence-in-depth: loadCatalogue's dynamic
+  // import resolves to a Vite-bundled JSON chunk served from the
+  // same origin, so rejection would require a corrupt chunk on
+  // disk, a CDN 404, or an interrupted network fetch — none
+  // expected in a normal production deploy. If it does happen, we
+  // intentionally leave `catalogue` pointing at whatever was last
+  // loaded (the default-locale eager-load floor on first mount,
+  // or the previously-active catalogue thereafter) and rely on
+  // translate()'s three-stage fallback (active → English →
+  // literal key) to keep the UI rendering. The console.error
+  // surfaces the failure to operators without crashing the app.
   useEffect(() => {
     let cancelled = false;
-    loadCatalogue(locale).then((cat) => {
-      if (!cancelled) {
-        setCatalogue(cat);
-      }
-    });
+    loadCatalogue(locale)
+      .then((cat) => {
+        if (!cancelled) {
+          setCatalogue(cat);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          // eslint-disable-next-line no-console
+          console.error(
+            `[i18n] failed to load catalogue for locale "${locale}"; ` +
+              "falling back to the previously-active catalogue. " +
+              "Translations for unloaded keys will fall through to English via translate()'s fallback chain.",
+            err,
+          );
+        }
+      });
     return () => {
       cancelled = true;
     };
