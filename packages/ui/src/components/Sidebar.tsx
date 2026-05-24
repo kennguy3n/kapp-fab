@@ -5,6 +5,7 @@ import {
   useContext,
   useState,
   type AnchorHTMLAttributes,
+  type ButtonHTMLAttributes,
   type ForwardedRef,
   type HTMLAttributes,
   type ReactNode,
@@ -328,8 +329,15 @@ export const SidebarItem = forwardRef<HTMLAnchorElement, SidebarItemProps>(
 );
 SidebarItem.displayName = "SidebarItem";
 
+// SidebarToggle is a real <button>, so the prop bag must accept the
+// button-specific attributes a consumer is likely to pass (disabled,
+// form, formAction, name, value, etc.).  HTMLAttributes covers only the
+// generic-element set and would type-error on those.  We hard-code
+// type="button" inside the component so callers can't override it to
+// "submit" by accident and submit the parent form when expanding the
+// sidebar.
 export interface SidebarToggleProps
-  extends HTMLAttributes<HTMLButtonElement> {}
+  extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "type"> {}
 
 export const SidebarToggle = forwardRef<HTMLButtonElement, SidebarToggleProps>(
   ({ className, ...props }, ref) => {

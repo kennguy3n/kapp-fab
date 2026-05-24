@@ -298,6 +298,24 @@ export function DataGrid<TRow>({
     }
   }, [columns]);
 
+  // Drop the active sort if the column it points at is no longer
+  // present in the spec.  Without this, hiding the currently-sorted
+  // column (or swapping the column set entirely) would leave the data
+  // silently sorted by a comparator the user can no longer see a
+  // header indicator for — the sort persists with no visible affordance
+  // because `sort?.columnKey === col.key` won't match any rendered
+  // header.  Resetting to null surfaces the change as the documented
+  // "no active sort" state.  We do NOT try to migrate the sort to a
+  // column with the same key but a (possibly) different comparator —
+  // the comparator captured in sort state was bound at handleSort time
+  // and may now be stale; the safer behaviour is to require the user
+  // to re-click to re-bind.
+  useEffect(() => {
+    if (!sort) return;
+    const stillPresent = columns.some((c) => c.key === sort.columnKey);
+    if (!stillPresent) setSort(null);
+  }, [columns, sort]);
+
   const handleSort = useCallback(
     (col: DataGridColumn<TRow>) => {
       if (!col.sortable) return;

@@ -56,13 +56,36 @@ import { NotificationBell } from "./components/NotificationBell";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyComponent = ComponentType<any>;
 
-function lazyNamed<TName extends string>(
-  loader: () => Promise<Record<TName, AnyComponent>>,
-  name: TName,
+// `lazyNamed` converts a named-export page module into the
+// default-export shape React.lazy expects.  The TName/TMod two-tuple
+// constrains the name argument to `keyof TMod` at compile time:
+// `tsc` infers `TMod` from the `import()` call's return type (the
+// module's exported namespace), so a typo like
+//
+//   lazyNamed(() => import("./pages/RecordListPage"), "RecordListPge")
+//
+// fails type-checking — "RecordListPge" is not in
+// `keyof typeof import("./pages/RecordListPage")`.  The previous
+// signature (`Record<TName, AnyComponent>`) inferred TName solely from
+// the second argument with no anchor against the module, so any
+// string was accepted and the typo only surfaced at runtime when the
+// route was visited (the dynamic import succeeded but
+// `mod[name] === undefined`, which React.lazy then threw on).
+//
+// We do still need a runtime cast to AnyComponent inside the closure
+// because we can't simultaneously constrain (a) "name is a real key
+// of TMod" AND (b) "the value at that key is a ComponentType<TProps>"
+// without losing the inference path on the import() return type.
+// Compile-time typo safety is the load-bearing win — the runtime cast
+// only fires when name is a valid key, so it can't mask the bug class
+// the previous helper was vulnerable to.
+function lazyNamed<TMod extends Record<string, unknown>>(
+  loader: () => Promise<TMod>,
+  name: Extract<keyof TMod, string>,
 ) {
   return lazy(async () => {
     const mod = await loader();
-    return { default: mod[name] };
+    return { default: mod[name] as AnyComponent };
   });
 }
 

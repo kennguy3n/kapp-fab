@@ -219,6 +219,83 @@ type Config struct {
 	JWTRefreshTTL             time.Duration
 	JWTLeeway                 time.Duration
 	JWTKeyringRefreshInterval time.Duration
+
+	// CaptchaProvider selects the bot-resistance backend wired in
+	// front of unauthenticated public POST endpoints (form submit,
+	// portal magic-link request, SSO bootstrap). One of:
+	//
+	//   - ""           same as "disabled" — captcha is a no-op
+	//                  pass-through; used for local dev.
+	//   - "disabled"   explicit no-op; logged at boot.
+	//   - "turnstile"  Cloudflare Turnstile siteverify.
+	//   - "hcaptcha"   hCaptcha siteverify.
+	//   - "recaptcha_v3" Google reCAPTCHA v3 siteverify.
+	//   - "pow"        Internal Hashcash-style proof-of-work.
+	//
+	// Production deployments MUST set this to a non-disabled value.
+	// Sourced from KAPP_CAPTCHA_PROVIDER.
+	CaptchaProvider string
+
+	// CaptchaSecret is the server-side secret used by the
+	// siteverify-style providers (Turnstile, hCaptcha, reCAPTCHA
+	// v3). The client-side site key is rendered in the frontend
+	// independently and is NOT read by the API binary. Sourced
+	// from KAPP_CAPTCHA_SECRET.
+	CaptchaSecret string
+
+	// CaptchaMinScore is the lower bound on reCAPTCHA v3's score
+	// (0.0 bot ... 1.0 human) below which the verifier denies.
+	// A negative value (— the unset sentinel from getenvFloat —)
+	// falls back to 0.5 (Google's recommended default). 0 means
+	// "deny scores below 0", which in practice still accepts every
+	// score Google can issue (≥ 0); this distinguishes "I want the
+	// default" from "I explicitly want to disable the threshold".
+	// Ignored by Turnstile and hCaptcha which return a binary
+	// outcome. Sourced from KAPP_CAPTCHA_MIN_SCORE.
+	CaptchaMinScore float64
+
+	// CaptchaExpectedHostname optionally pins the hostname the
+	// provider reports as the token's origin. Empty disables
+	// the check; production deployments SHOULD set it to the
+	// site-facing hostname (e.g. "kapp.example.com") so a token
+	// minted on a different site key is rejected. Sourced from
+	// KAPP_CAPTCHA_EXPECTED_HOSTNAME.
+	CaptchaExpectedHostname string
+
+	// PoWHMACKey is the symmetric key used to sign Hashcash-style
+	// PoW challenge envelopes. Required when CaptchaProvider="pow"
+	// and ignored otherwise. MUST be at least 32 bytes (256 bits)
+	// — the factory rejects shorter keys at boot. Sourced from
+	// KAPP_POW_HMAC_KEY (raw bytes; not base64).
+	PoWHMACKey string
+
+	// PoWDifficulty is the number of leading zero bits required
+	// in a PoW solution hash. 0 → default 16 (~100ms of JS work
+	// per solve). Tune upward for high-value endpoints, downward
+	// for low-value endpoints where user friction matters more.
+	// Sourced from KAPP_POW_DIFFICULTY.
+	PoWDifficulty int
+
+	// CSRFAllowedOrigins is the allowlist of origins (scheme://
+	// host[:port]) the CSRF middleware accepts for mutating
+	// requests. Comma-separated in the env var. Production
+	// deployments MUST set at least one entry; empty disables
+	// the Origin-allowlist defence (still safe for bearer-token
+	// auth but unsafe for any future cookie-auth surface). Sourced
+	// from KAPP_CSRF_ALLOWED_ORIGINS.
+	CSRFAllowedOrigins []string
+
+	// CSRFCookieName names the double-submit cookie. Empty
+	// disables the double-submit check entirely (Origin allowlist
+	// still applies). Production deployments using cookie auth
+	// SHOULD set "__Host-kapp-csrf" so the cookie is bound to the
+	// exact origin. Sourced from KAPP_CSRF_COOKIE_NAME.
+	CSRFCookieName string
+
+	// CSRFCookieSecure controls the Secure flag on the issued
+	// CSRF cookie. SHOULD be true in production (HTTPS); false
+	// only for local-dev HTTP. Sourced from KAPP_CSRF_COOKIE_SECURE.
+	CSRFCookieSecure bool
 }
 
 // LoadConfig reads configuration from environment variables and returns a
@@ -275,6 +352,17 @@ func LoadConfig() (*Config, error) {
 		JWTRefreshTTL:             getenvDuration("KAPP_JWT_REFRESH_TTL", 24*time.Hour),
 		JWTLeeway:                 getenvDuration("KAPP_JWT_LEEWAY", 30*time.Second),
 		JWTKeyringRefreshInterval: getenvDuration("KAPP_JWT_KEYRING_REFRESH_INTERVAL", 60*time.Second),
+
+		CaptchaProvider:         os.Getenv("KAPP_CAPTCHA_PROVIDER"),
+		CaptchaSecret:           os.Getenv("KAPP_CAPTCHA_SECRET"),
+		CaptchaMinScore:         getenvFloat("KAPP_CAPTCHA_MIN_SCORE", -1),
+		CaptchaExpectedHostname: os.Getenv("KAPP_CAPTCHA_EXPECTED_HOSTNAME"),
+		PoWHMACKey:              os.Getenv("KAPP_POW_HMAC_KEY"),
+		PoWDifficulty:           getenvInt("KAPP_POW_DIFFICULTY", 0),
+
+		CSRFAllowedOrigins: splitCSV(os.Getenv("KAPP_CSRF_ALLOWED_ORIGINS")),
+		CSRFCookieName:     os.Getenv("KAPP_CSRF_COOKIE_NAME"),
+		CSRFCookieSecure:   getenvBool("KAPP_CSRF_COOKIE_SECURE", false),
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -373,6 +461,51 @@ func getenvInt(key string, fallback int) int {
 	return n
 }
 
+// getenvFloat returns the float64 value of the named environment
+// variable, or fallback if the variable is unset, empty, or not a
+// valid float. Used by KAPP_CAPTCHA_MIN_SCORE which expects a
+// decimal in [0.0, 1.0]; out-of-range values are accepted at this
+// layer and rejected by the captcha verifier's own bounds check.
+func getenvFloat(key string, fallback float64) float64 {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return fallback
+	}
+	return f
+}
+
+// splitCSV parses a comma-separated env var into a non-nil slice
+// of trimmed non-empty strings. Empty input returns nil so callers
+// can length-check the result without separate "is it set" logic.
+//
+// Whitespace around each field is trimmed because env vars passed
+// through docker-compose YAML often end up with stray spaces.
+//
+// Used by KAPP_CSRF_ALLOWED_ORIGINS (origins as scheme://host[:port])
+// and KAPP_JWT_VERIFY_REFS (secret-store references kept on the JWT
+// verifier ring during rotation).
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -398,26 +531,4 @@ func getenvDuration(key string, fallback time.Duration) time.Duration {
 	return d
 }
 
-// splitCSV splits a comma-separated env var into trimmed,
-// non-empty fields. The empty string yields a nil slice (not an
-// empty slice with one zero-length element) so the JWT verify-
-// refs path can use len() to decide whether to register any
-// extras. Whitespace around each field is trimmed because env
-// vars passed through docker-compose YAML often end up with
-// stray spaces.
-func splitCSV(raw string) []string {
-	if raw == "" {
-		return nil
-	}
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if v := strings.TrimSpace(p); v != "" {
-			out = append(out, v)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
+
