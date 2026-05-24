@@ -14,9 +14,19 @@ import (
 //     TRAIN law (RA 10963) second-tranche brackets effective
 //     1 January 2023 onwards. The pack annualises monthly gross
 //     and walks the 6-bracket progressive schedule
-//     (0/15/20/25/30/35%). The 250,000 PHP annual exempt
+//     (0/15/20/25/30/35%) for residents (citizens, resident
+//     aliens, and non-resident aliens engaged in trade or
+//     business — NRAETB). The 250,000 PHP annual exempt
 //     threshold is built into the first bracket (Floor = 0,
 //     Top = 250,000, Rate = 0).
+//
+//     Non-resident aliens *not* engaged in trade or business
+//     (NRANETB, NIRC s.25(B)) are taxed at a flat 25% on PH-
+//     sourced gross income with no exempt threshold and no
+//     SSS/PhilHealth/Pag-IBIG eligibility. The pack branches on
+//     EmployeeInfo.Resident: true → progressive schedule + the
+//     three social contributions; false → flat 25% only. This
+//     matches BIR Form 1604-CF and CAS s.25 / s.57(A).
 //
 //   - SSS employee contribution per the 2025 SSS Contribution
 //     Schedule (Social Security Act of 2018 + EO 717 c. 2023):
@@ -84,13 +94,21 @@ var (
 	phPagIBIGRate    = dec("0.02") // 2% EE post-2024
 	phPagIBIGCeiling = dec("10000")
 
+	// NIRC s.25(B): flat 25% on PH-sourced gross income for non-
+	// resident aliens not engaged in trade or business. No
+	// brackets, no exempt threshold, no social contributions.
+	phNRANETBRate = dec("0.25")
+
 	phPeriodsPerYear = decimal.NewFromFloat(365.25)
 )
 
 // ComputeWithholding emits PH_WITHHOLDING_TAX (BIR progressive
-// schedule), PH_SSS, PH_PHILHEALTH, PH_PAGIBIG. Zero-amount lines
-// are omitted.
-func (phPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+// schedule), PH_SSS, PH_PHILHEALTH, PH_PAGIBIG for residents and
+// resident aliens / NRAETB. Non-resident aliens not engaged in
+// trade or business (NRANETB) get PH_NRANETB_TAX at the flat
+// 25% rate per NIRC s.25(B) and no social contributions.
+// Zero-amount lines are omitted.
+func (phPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -100,6 +118,20 @@ func (phPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	}
 
 	out := []Deduction{}
+
+	// Non-resident alien not engaged in trade or business: flat
+	// 25% on PH-sourced gross income, no social contributions.
+	if !e.Resident {
+		nranetbTax := gross.Mul(phNRANETBRate).Round(2)
+		if nranetbTax.IsPositive() {
+			out = append(out, Deduction{
+				Code:   "PH_NRANETB_TAX",
+				Name:   "NRANETB flat withholding 25% (PH)",
+				Amount: nranetbTax,
+			})
+		}
+		return out, nil
+	}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(phPeriodsPerYear)
 	annualGross := gross.Div(periodFraction)

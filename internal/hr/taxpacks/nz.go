@@ -12,19 +12,23 @@ import (
 //   - PAYE: Inland Revenue Department (IRD) progressive schedule
 //     per the Income Tax Act 2007, effective 1 April 2024 (Budget
 //     2024 thresholds). The pack annualises monthly gross via
-//     period.Days() / 365 (NZ tax year is 1 April → 31 March, but
-//     for annualisation the integer 365 matches IR340/IR341 PAYE
-//     tables; 365.25 introduces a ~0.07% drift that the tables
-//     themselves don't carry). Brackets walked with the standard
-//     (Base + Rate × (income - Floor)) formulation.
+//     period.Days() / 365.25 so that leap and non-leap years round
+//     to the same monthly figure (the IR340 worked examples
+//     implicitly assume the same averaging — using a flat 365
+//     produces a ~0.07% drift across the leap-year boundary that
+//     the worked examples do not reproduce). Brackets walked with
+//     the standard (Base + Rate × (income - Floor)) formulation.
 //
 //   - ACC Earners' Levy: 1.60% (2024/25 rate, gazetted in the
 //     2024/25 Workforce Income Plan) on liable earnings, capped at
 //     the maximum liable earnings threshold of NZD 142,283 (the
-//     2024/25 ACC ceiling published by ACC on 1 April 2024).
-//     Levied per pay period directly on liable gross — no
-//     annualisation/proration needed because the cap is annual and
-//     this pack tracks YTD on the EmployeeInfo projection.
+//     2024/25 ACC ceiling published by ACC on 1 April 2024). The
+//     annual ceiling is pro-rated to the slip period (cap ×
+//     days/365.25) so a monthly slip caps the liable base at
+//     142,283/12 ≈ 11,857. YTD-aware capping is deferred to a
+//     future EmployeeInfo.YTDLiableEarnings projection; today's
+//     per-slip pro-ration is conservative for run-rate slips and
+//     within rounding of the IRD CS calculator for steady wages.
 //
 //   - KiwiSaver: employee share at 3% / 4% / 6% / 8% / 10% per
 //     KiwiSaver Act 2006 + Schedule 1 (post-2019 contribution

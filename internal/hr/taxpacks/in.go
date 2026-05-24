@@ -143,17 +143,39 @@ func (inPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 				taxableAnnual = decimal.Zero
 			}
 			annualTax := walkINBrackets(taxableAnnual, inBracketsNewRegime)
-			// Section 87A rebate: zeroes out tax up to ₹25,000
-			// for annual income ≤ ₹7,00,000. Per CBDT FAQ on
-			// Finance Act 2023, the threshold applies to total
-			// income (post-standard-deduction in the new regime
-			// the calculator uses post-deduction; ITD uses
-			// pre-deduction). We apply it to *post-deduction*
-			// to match the ITD's own income-tax calculator —
-			// any future divergence can be reconciled in PR-8
-			// when stale-rate warnings ship.
-			if taxableAnnual.LessThanOrEqual(inRebate87ALimit) && annualTax.LessThanOrEqual(inRebate87AMax) {
+			// Section 87A rebate (new regime, post-Finance-Act-2023):
+			//
+			//  1. If taxable income ≤ ₹7,00,000, the rebate
+			//     wipes out the entire computed tax (capped at
+			//     the ₹25,000 statutory maximum).
+			//
+			//  2. The proviso to s.87A (added by Finance Act
+			//     2023, retained by Finance Act 2024) prevents
+			//     the cliff at exactly ₹7,00,001: when income
+			//     marginally exceeds the limit, the tax payable
+			//     is capped at the *excess* over ₹7,00,000.
+			//     i.e. a taxpayer at ₹7,00,100 pays at most ₹100
+			//     of tax, not ~₹25,005. The cap applies while
+			//     it improves the taxpayer's position (the
+			//     break-even is around ₹7,27,777 where computed
+			//     tax equals the excess).
+			//
+			// Threshold is compared against taxable income
+			// (post-standard-deduction) to match the ITD's own
+			// income-tax calculator; the ITD's worked examples
+			// use the same convention.
+			switch {
+			case taxableAnnual.LessThanOrEqual(inRebate87ALimit) && annualTax.LessThanOrEqual(inRebate87AMax):
+				// Within the rebate envelope — full waiver.
 				annualTax = decimal.Zero
+			case taxableAnnual.GreaterThan(inRebate87ALimit):
+				// Marginal relief: cap tax at (income - 7L)
+				// while that figure is lower than the
+				// bracket-walk result.
+				excess := taxableAnnual.Sub(inRebate87ALimit)
+				if excess.LessThan(annualTax) {
+					annualTax = excess
+				}
 			}
 			periodTax := annualTax.Mul(periodFraction).Round(2)
 			if periodTax.IsPositive() {

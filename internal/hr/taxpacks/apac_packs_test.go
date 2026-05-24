@@ -659,6 +659,25 @@ func TestPHPackBelowExemptThreshold(t *testing.T) {
 	}
 }
 
+// TestPHPackNonResidentFlat25: NRANETB (non-resident alien not
+// engaged in trade or business, NIRC s.25(B)) gets a flat 25% on
+// gross PH-sourced income and *no* social contributions (SSS /
+// PhilHealth / Pag-IBIG are limited to citizens, resident aliens
+// employed in the Philippines, and NRAETBs). PHP 50,000 × 25% =
+// 12,500.00 is the only line emitted.
+func TestPHPackNonResidentFlat25(t *testing.T) {
+	pack, _ := Lookup("PH")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: false,
+	}, decimal.NewFromInt(50000), monthPeriod())
+	if len(out) != 1 || out[0].Code != "PH_NRANETB_TAX" {
+		t.Fatalf("non-resident PH slip should emit only PH_NRANETB_TAX; got %+v", out)
+	}
+	if !out[0].Amount.Equal(decimal.NewFromInt(12500)) {
+		t.Errorf("PH_NRANETB_TAX = %s; want 12,500 (50,000 × 25%%)", out[0].Amount)
+	}
+}
+
 // ----- New Zealand -----
 
 // TestNZPackResidentPAYEAndACC: NZD 6,000 / month slip, KiwiSaver
@@ -770,6 +789,66 @@ func TestINPackNewRegime87ARebate(t *testing.T) {
 	}
 	if epf := codes["IN_EPF"]; !epf.Equal(decimal.NewFromInt(1800)) {
 		t.Errorf("IN_EPF = %s; want 1,800", epf)
+	}
+}
+
+// TestINPackNewRegime87AMarginalRelief covers the proviso to
+// s.87A added by Finance Act 2023: when taxable income marginally
+// exceeds ₹7,00,000, the tax payable is capped at the excess over
+// the limit, preventing the historical cliff where ₹7,00,001
+// produced ~₹25,000 of tax. Slip used:
+//
+//	monthly        = 66,000
+//	periodFraction = 31 / 365.25 ≈ 0.084875
+//	annualGross    = 66,000 / 0.084875 ≈ 777,629
+//	taxableAnnual  = 777,629 - 75,000 = 702,629
+//	bracket        = 7L-10L (base 20,000, rate 10%)
+//	annualTax_pre  = 20,000 + 10% × (702,629 - 700,000) = 20,263
+//	excess         = 702,629 - 700,000 = 2,629
+//	annualTax_post = min(20,263, 2,629) = 2,629 — marginal relief active
+//	periodTax      = 2,629 × 0.084875 ≈ 223
+//
+// Without the proviso the slip would over-withhold by ~₹1,500 /
+// month, which is the cliff the proviso was enacted to prevent.
+func TestINPackNewRegime87AMarginalRelief(t *testing.T) {
+	pack, _ := Lookup("IN")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: true,
+	}, decimal.NewFromInt(66000), monthPeriod())
+	codes := indexByCode(out)
+	tds, ok := codes["IN_TDS"]
+	if !ok {
+		t.Fatalf("expected IN_TDS with marginal relief active; got %+v", codes)
+	}
+	// Marginal relief band: tax ≈ excess × periodFraction ≈ 223.
+	// The pre-relief amount would be ~1,720; assert we land in
+	// the marginal-relief band, not the pre-relief band.
+	if tds.LessThan(decimal.NewFromInt(150)) || tds.GreaterThan(decimal.NewFromInt(300)) {
+		t.Errorf("IN_TDS = %s; expected ~223 marginal relief (band 150-300, pre-relief would be ~1,720)", tds)
+	}
+}
+
+// TestINPackNewRegime87AAboveBreakeven: at high enough income the
+// marginal-relief cap is no longer the binding constraint and the
+// bracket-walk result is used. INR 100,000 / month resolves to
+// taxable ≈ ₹1,103,226 → tax ≈ ₹65,484. Excess = 403,226; since
+// 65,484 < 403,226 the marginal relief does not apply and the
+// pre-relief tax is preserved. This is the same slip as
+// TestINPackNewRegimeMidBracket, but the assertion here pins the
+// "relief does not over-relieve high earners" invariant explicitly.
+func TestINPackNewRegime87AAboveBreakeven(t *testing.T) {
+	pack, _ := Lookup("IN")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: true,
+	}, decimal.NewFromInt(100000), monthPeriod())
+	codes := indexByCode(out)
+	tds := codes["IN_TDS"]
+	// Pre-relief tax ≈ 5,558; if relief mistakenly clamped here
+	// we would see a number close to 100,000 - 775,000 × periodFraction
+	// ≈ 34,224 in periodTax, which is wildly off. Assert the
+	// bracket-walk result survives.
+	if tds.LessThan(decimal.NewFromInt(5300)) || tds.GreaterThan(decimal.NewFromInt(5800)) {
+		t.Errorf("IN_TDS = %s; expected ~5,558 (bracket walk, relief inactive)", tds)
 	}
 }
 
