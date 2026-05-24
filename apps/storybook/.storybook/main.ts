@@ -29,10 +29,29 @@ const config: StorybookConfig = {
     cfg.plugins = cfg.plugins ?? [];
     cfg.plugins.push(tailwindcss());
     cfg.resolve = cfg.resolve ?? {};
-    cfg.resolve.alias = {
-      ...(cfg.resolve.alias as Record<string, string> | undefined),
-      "@kapp/ui": path.resolve(__dirname, "../../../packages/ui/src"),
-    };
+    // Vite's resolve.alias is either a `Record<string, string>` or an
+    // `Array<{ find, replacement }>` (or one of a few more shapes).
+    // Spreading the array form into an object would produce numeric
+    // keys (`{ 0: ..., 1: ... }`) and silently drop every existing
+    // alias.  Detect the array form and prepend our entry as an
+    // array element so we coexist with whatever Storybook / its
+    // plugins have already configured.  When it's the object form
+    // (Storybook's current default) we still merge by spread, but
+    // through a structurally typed view of unknown values so the
+    // cast is honest about what we know.
+    const aliasKappUi = path.resolve(__dirname, "../../../packages/ui/src");
+    const existing = cfg.resolve.alias;
+    if (Array.isArray(existing)) {
+      cfg.resolve.alias = [
+        { find: "@kapp/ui", replacement: aliasKappUi },
+        ...existing,
+      ];
+    } else {
+      cfg.resolve.alias = {
+        ...(existing as Record<string, unknown> | undefined),
+        "@kapp/ui": aliasKappUi,
+      };
+    }
     return cfg;
   },
 };
