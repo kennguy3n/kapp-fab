@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
+import { useTranslation } from "../lib/i18n";
 
 // SetupWizardPage drives the tenant setup wizard on the frontend. It
 // collects the first-run company profile, CoA template, and initial
@@ -128,6 +129,7 @@ interface SetupResult {
 export function SetupWizardPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { t } = useTranslation();
 
   const [step, setStep] = useState(0);
   const [companyName, setCompanyName] = useState("");
@@ -243,19 +245,22 @@ export function SetupWizardPage() {
           fontSize: 13,
         }}
       >
-        {["Company", "Chart of Accounts", "Invite users", "Done"].map(
-          (label, i) => (
-            <li
-              key={label}
-              style={{
-                color: i === step ? "#111827" : "#9ca3af",
-                fontWeight: i === step ? 600 : 400,
-              }}
-            >
-              {i + 1}. {label}
-            </li>
-          ),
-        )}
+        {[
+          t("wizard.step.company"),
+          t("wizard.step.coa"),
+          t("wizard.step.users"),
+          t("wizard.step.done"),
+        ].map((label, i) => (
+          <li
+            key={label}
+            style={{
+              color: i === step ? "#111827" : "#9ca3af",
+              fontWeight: i === step ? 600 : 400,
+            }}
+          >
+            {i + 1}. {label}
+          </li>
+        ))}
       </ol>
 
       {step === 0 && (
@@ -290,7 +295,7 @@ export function SetupWizardPage() {
               disabled={!canAdvanceCompany}
               onClick={() => setStep(1)}
             >
-              Next
+              {t("common.next")}
             </button>
           </div>
         </div>
@@ -300,19 +305,19 @@ export function SetupWizardPage() {
         <div style={{ display: "grid", gap: 12 }}>
           <fieldset style={{ border: "1px solid #e5e7eb", padding: 12 }}>
             <legend>Chart of Accounts template</legend>
-            {COA_TEMPLATES.map((t) => (
+            {COA_TEMPLATES.map((tpl) => (
               <label
-                key={t.value}
+                key={tpl.value}
                 style={{ display: "block", padding: "4px 0" }}
               >
                 <input
                   type="radio"
                   name="coa"
-                  value={t.value}
-                  checked={effectiveCoaTemplate === t.value}
+                  value={tpl.value}
+                  checked={effectiveCoaTemplate === tpl.value}
                   onChange={(e) => setCoaTemplate(e.target.value)}
                 />{" "}
-                {t.label}
+                {tpl.label}
               </label>
             ))}
           </fieldset>
@@ -324,10 +329,10 @@ export function SetupWizardPage() {
           </p>
           <div style={{ display: "flex", gap: 8 }}>
             <button type="button" onClick={() => setStep(0)}>
-              Back
+              {t("common.back")}
             </button>
             <button type="button" onClick={() => setStep(2)}>
-              Next
+              {t("common.next")}
             </button>
           </div>
         </div>
@@ -447,7 +452,7 @@ export function SetupWizardPage() {
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button type="button" onClick={() => setStep(1)}>
-              Back
+              {t("common.back")}
             </button>
             <button
               type="button"
