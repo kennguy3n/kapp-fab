@@ -549,6 +549,77 @@ func TestCompileOnceEvalMany(t *testing.T) {
 	}
 }
 
+// TestEqualJSONNumber covers the regression where json.Number values
+// were silently being treated as strings (because json.Number satisfies
+// fmt.Stringer, and the old asString switch caught it before asNumber
+// could). The fix in asString rejects json.Number so equal() falls
+// through to the numeric branch.
+//
+// We exercise both halves of the bug:
+//
+//   - LHS = json.Number, RHS = float64 literal in DSL: must be equal
+//     numerically (not "42" vs 42 string-vs-number mismatch).
+//   - LHS = json.Number, RHS = json.Number: same.
+//   - LHS = json.Number, RHS = string "42": must NOT be equal — they
+//     are not the same type by the policy author's intent (the DSL
+//     value side carries explicit kind info).
+func TestEqualJSONNumber(t *testing.T) {
+	// json.Number arrives on the attrs side when the caller is using
+	// a json.NewDecoder with UseNumber() — the canonical way to defer
+	// numeric coercion. The eq operator should still see "42" == 42.
+	raw := `{"leaf":{"field":"amount","op":"eq","value":42}}`
+	attrs := map[string]any{"amount": json.Number("42")}
+	if !mustEval(t, raw, attrs) {
+		t.Error("json.Number(42) eq 42 should match numerically")
+	}
+
+	// json.Number floating-point also normalises through asNumber.
+	rawF := `{"leaf":{"field":"amount","op":"lt","value":100}}`
+	if !mustEval(t, rawF, map[string]any{"amount": json.Number("50.5")}) {
+		t.Error("json.Number(50.5) lt 100 should match")
+	}
+
+	// Regression guard: if asString ever falls back to fmt.Stringer
+	// on json.Number, the old code would compare "42" against the
+	// string form of 42 (which JSON-decodes to float64, asString to
+	// nothing) and equal would be false. We assert the correct
+	// numeric semantics for ne too:
+	rawNe := `{"leaf":{"field":"amount","op":"ne","value":42}}`
+	if mustEval(t, rawNe, map[string]any{"amount": json.Number("42")}) {
+		t.Error("json.Number(42) ne 42 should be false")
+	}
+}
+
+// TestEqualUUIDCaseInsensitive covers the regression where the legacy
+// owner_only path used uuid.Parse() on both sides before comparison,
+// but the AST equal() function compared raw strings. UUID-shaped
+// strings on either side should now normalise through uuid.Parse so
+// "ABC..." == "abc..." holds — both for the typed uuid.UUID value
+// (which String()s to lowercase) and for upper-case raw strings.
+func TestEqualUUIDCaseInsensitive(t *testing.T) {
+	a := actor()
+	raw := `{"leaf":{"field":"owner","op":"eq","ref":"actor.user_id"}}`
+	// Attrs side has the same UUID but in upper-case textual form.
+	// Without case-normalisation this would fail.
+	upper := strings.ToUpper(a.UserID.String())
+	if !mustEval(t, raw, map[string]any{"owner": upper}) {
+		t.Errorf("upper-case UUID %q should equal actor.user_id", upper)
+	}
+	// Mixed-case prefix; uuid.Parse should still recognise it.
+	mixed := "11111111-2222-3333-4444-" + strings.ToUpper("555555555555")
+	if !mustEval(t, raw, map[string]any{"owner": mixed}) {
+		t.Errorf("mixed-case UUID %q should equal actor.user_id", mixed)
+	}
+	// Non-UUID strings still fall back to byte-equal — the
+	// normalisation must not silently accept "ABC" == "abc" for
+	// arbitrary strings. We use the value form (no ref) so both
+	// sides are strings.
+	rawStr := `{"leaf":{"field":"label","op":"eq","value":"abc"}}`
+	if mustEval(t, rawStr, map[string]any{"label": "ABC"}) {
+		t.Error("non-UUID strings should still be case-sensitive")
+	}
+}
+
 func TestIsUnconditional(t *testing.T) {
 	cases := []struct {
 		raw  string

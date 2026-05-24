@@ -32,9 +32,34 @@ import (
 //  4. Conditions: the permissions table carries a JSONB conditions
 //     column that AuthorizeRecord evaluates against record attributes
 //     (e.g. {"owner_only": true}).
+//
+// To keep AuthorizeRecord cheap on the hot path the cache holds a
+// permissionSet, not a bare []Permission: each conditions blob is
+// compiled to a *condition.Compiled exactly once at load time and reused
+// across every subsequent Eval until the cache entry expires. The user's
+// roles are stashed in the same value so AuthorizeRecord can populate
+// actor.roles without a second DB round-trip.
 type PGEvaluator struct {
 	pool  *pgxpool.Pool
 	cache *platform.LRUCache
+}
+
+// permissionSet is the in-cache representation of an actor's
+// authorization context. It pairs each Permission with its
+// pre-compiled condition AST and records the actor's role list so
+// the condition evaluator can resolve actor.roles references at
+// Eval time without re-fetching from the DB.
+type permissionSet struct {
+	perms []compiledPermission
+	roles []string
+}
+
+// compiledPermission keeps the raw permission row alongside its
+// pre-compiled condition AST. compiled is nil when the conditions
+// blob is unconditional (a non-conditional grant — no AST needed).
+type compiledPermission struct {
+	perm     Permission
+	compiled *condition.Compiled
 }
 
 // NewPGEvaluator binds to the shared pool and cache. Supply a cache with a
@@ -83,34 +108,42 @@ func (e *PGEvaluator) Authorize(
 // owner_only / status_in payloads stored in existing permissions.conditions
 // rows are auto-translated into the canonical AST at parse time, so this
 // switch-over does not require a database migration.
+//
+// Hot-path note: the conditions AST is compiled once at permission-load
+// time and cached alongside the Permission. AuthorizeRecord invokes
+// (*condition.Compiled).Eval directly — no JSON re-parse, no regex
+// recompile per request — so the marginal cost of a conditional grant
+// over a non-conditional grant is one tree-walk.
 func (e *PGEvaluator) AuthorizeRecord(
 	ctx context.Context,
 	tenantID, userID uuid.UUID,
 	action, resource string,
 	recordAttrs map[string]any,
 ) error {
-	perms, err := e.loadPermissions(ctx, tenantID, userID)
+	set, err := e.loadPermissionSet(ctx, tenantID, userID)
 	if err != nil {
 		return err
 	}
 	actor := condition.Actor{
 		UserID:   userID,
 		TenantID: tenantID,
+		Roles:    set.roles,
 	}
-	for _, p := range perms {
-		if !matchAction(p.Action, action) {
+	for _, p := range set.perms {
+		if !matchAction(p.perm.Action, action) {
 			continue
 		}
-		if !matchResource(p.Resource, resource) {
+		if !matchResource(p.perm.Resource, resource) {
 			continue
 		}
-		ok, evalErr := condition.EvalRaw(p.Conditions, actor, recordAttrs)
+		ok, evalErr := evalCompiled(p.compiled, actor, recordAttrs)
 		if evalErr != nil || !ok {
-			// Eval errors mean the policy AST is malformed in a
-			// way the parser couldn't fully validate up front
-			// (e.g. a runtime regex panic) — treat as deny. We
-			// intentionally don't log here; the audit log layer
-			// captures the deny outcome with the failing
+			// Eval errors mean the policy AST encountered an
+			// edge case the compile-time validator couldn't
+			// fully rule out (e.g. a runtime regex panic via a
+			// pathological RE2-immune pattern) — treat as deny.
+			// We intentionally don't log here; the audit log
+			// layer captures the deny outcome with the failing
 			// permission row id.
 			continue
 		}
@@ -119,12 +152,32 @@ func (e *PGEvaluator) AuthorizeRecord(
 	return fmt.Errorf("%w: %s", ErrDenied, action)
 }
 
+// evalCompiled is a thin wrapper that treats a nil *Compiled as
+// "unconditional grant". Pre-compiled conditions live alongside each
+// Permission in the cached permissionSet; an unconditional permission
+// row carries a nil *Compiled so we don't pay for a tree-walk over an
+// empty allOf{}.
+func evalCompiled(c *condition.Compiled, actor condition.Actor, attrs map[string]any) (bool, error) {
+	if c == nil {
+		return true, nil
+	}
+	return c.Eval(actor, attrs)
+}
+
 // ListPermissions returns the permission set for the actor within the tenant.
 func (e *PGEvaluator) ListPermissions(
 	ctx context.Context,
 	tenantID, userID uuid.UUID,
 ) ([]Permission, error) {
-	return e.loadPermissions(ctx, tenantID, userID)
+	set, err := e.loadPermissionSet(ctx, tenantID, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Permission, len(set.perms))
+	for i, p := range set.perms {
+		out[i] = p.perm
+	}
+	return out, nil
 }
 
 // ListRoles returns the role names the actor holds in the tenant. Multi-role
@@ -171,18 +224,38 @@ func (e *PGEvaluator) loadPermissions(
 	ctx context.Context,
 	tenantID, userID uuid.UUID,
 ) ([]Permission, error) {
-	key := cacheKey(tenantID, userID)
-	if cached, ok := e.cache.Get(key); ok {
-		if perms, ok := cached.([]Permission); ok {
-			return perms, nil
-		}
-	}
-	perms, err := e.queryPermissions(ctx, tenantID, userID)
+	set, err := e.loadPermissionSet(ctx, tenantID, userID)
 	if err != nil {
 		return nil, err
 	}
-	e.cache.Set(key, perms)
-	return perms, nil
+	out := make([]Permission, len(set.perms))
+	for i, p := range set.perms {
+		out[i] = p.perm
+	}
+	return out, nil
+}
+
+// loadPermissionSet is the canonical cache-aware loader. It returns
+// the pre-compiled permission set (each condition AST built once) plus
+// the actor's role list. Callers wanting the raw []Permission shape
+// for back-compat should go through loadPermissions, which projects
+// this back to the simpler type.
+func (e *PGEvaluator) loadPermissionSet(
+	ctx context.Context,
+	tenantID, userID uuid.UUID,
+) (*permissionSet, error) {
+	key := cacheKey(tenantID, userID)
+	if cached, ok := e.cache.Get(key); ok {
+		if set, ok := cached.(*permissionSet); ok {
+			return set, nil
+		}
+	}
+	set, err := e.queryPermissionSet(ctx, tenantID, userID)
+	if err != nil {
+		return nil, err
+	}
+	e.cache.Set(key, set)
+	return set, nil
 }
 
 // maxRoleHierarchyDepth bounds the recursive role-chain walk so a
@@ -190,16 +263,17 @@ func (e *PGEvaluator) loadPermissions(
 // write time) cannot stall a request indefinitely.
 const maxRoleHierarchyDepth = 5
 
-func (e *PGEvaluator) queryPermissions(
+func (e *PGEvaluator) queryPermissionSet(
 	ctx context.Context,
 	tenantID, userID uuid.UUID,
-) ([]Permission, error) {
-	var out []Permission
+) (*permissionSet, error) {
+	set := &permissionSet{}
 	err := platform.WithTenantTx(ctx, e.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		roles, err := loadUserRoles(ctx, tx, tenantID, userID)
 		if err != nil {
 			return err
 		}
+		set.roles = roles
 		if len(roles) == 0 {
 			return nil
 		}
@@ -213,7 +287,7 @@ func (e *PGEvaluator) queryPermissions(
 			}
 		}
 		seen := make(map[string]struct{}, 16)
-		perms := make([]Permission, 0, 16)
+		perms := make([]compiledPermission, 0, 16)
 		for role := range expanded {
 			rolePerms, err := loadRolePermissions(ctx, tx, tenantID, role)
 			if err != nil {
@@ -225,16 +299,37 @@ func (e *PGEvaluator) queryPermissions(
 					continue
 				}
 				seen[k] = struct{}{}
-				perms = append(perms, p)
+				perms = append(perms, compilePermission(p))
 			}
 		}
-		out = perms
+		set.perms = perms
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	return set, nil
+}
+
+// compilePermission pre-builds the condition AST so AuthorizeRecord can
+// Eval without re-parsing JSON on every request. Unconditional grants
+// (empty / {} / null conditions blob) leave compiled=nil — the hot path
+// short-circuits on the nil pointer instead of walking an empty allOf{}
+// AST. Note that a parse error here still produces a non-nil compiled
+// (the condition package returns a fail-closed *Compiled, not an
+// error): a typo in stored conditions denies access rather than
+// preventing the evaluator from loading altogether.
+func compilePermission(p Permission) compiledPermission {
+	if condition.IsUnconditional(p.Conditions) {
+		return compiledPermission{perm: p}
+	}
+	// (*Compiled, error) — the error path is reserved for unrecoverable
+	// I/O and isn't reachable from a synchronous Compile; schema-level
+	// errors fold into a sticky-false Compiled. We pass the result
+	// through either way; AuthorizeRecord treats a fail-closed Compiled
+	// the same as a deny.
+	c, _ := condition.Compile(p.Conditions)
+	return compiledPermission{perm: p, compiled: c}
 }
 
 // loadUserRoles returns the set of role names held by the user in the
@@ -464,14 +559,21 @@ func isUnconditional(raw json.RawMessage) bool {
 }
 
 // matchesConditions is a thin compatibility shim over the
-// internal/authz/condition package. Kept package-private (and with the
-// same signature) so existing call-sites — including store_test.go
-// — continue to work without churn while the real grammar, operator
-// set, fail-closed parser and legacy-shape translation live in the
-// dedicated package. New code should reach for condition.Compile /
-// condition.EvalRaw directly.
-func matchesConditions(raw json.RawMessage, userID uuid.UUID, attrs map[string]any) bool {
-	ok, err := condition.EvalRaw(raw, condition.Actor{UserID: userID}, attrs)
+// internal/authz/condition package. It exists for store_test.go only;
+// production code goes through AuthorizeRecord which evaluates via the
+// pre-compiled *condition.Compiled stored in the permissionSet cache.
+// New code should reach for condition.Compile / condition.EvalRaw
+// directly.
+//
+// The signature carries tenantID alongside userID even though the
+// legacy two-key DSL only consulted userID, so policies that compare
+// against actor.tenant_id can be exercised from tests without the
+// helper silently denying on a uuid.Nil tenant. Roles are still nil
+// because the test helper has no transaction to consult
+// loadUserRoles against — tests that need actor.roles should call
+// condition.EvalRaw directly with a hand-built Actor.
+func matchesConditions(raw json.RawMessage, userID, tenantID uuid.UUID, attrs map[string]any) bool {
+	ok, err := condition.EvalRaw(raw, condition.Actor{UserID: userID, TenantID: tenantID}, attrs)
 	if err != nil {
 		return false
 	}

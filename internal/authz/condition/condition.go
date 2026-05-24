@@ -774,13 +774,27 @@ func applyOp(o op, lhs, rhs any, re *regexp.Regexp) (bool, error) {
 // Numeric comparisons normalise int/float64 (JSON decodes ints as
 // float64, but attribute bags written by Go code may carry native
 // ints). UUID comparisons normalise to lowercase string form so
-// "abc..." == "ABC..." holds. Bool comparisons require both sides to
-// be bool.
+// "abc..." == "ABC..." holds even when one side is a uuid.UUID and
+// the other an upper-case string — this preserves the legacy
+// matchesConditions behaviour (owner_only translated to attrs.owner
+// eq actor.user_id) where the old code parsed owner strings via
+// uuid.Parse and compared case-insensitively. Bool comparisons
+// require both sides to be bool.
 func equal(a, b any) bool {
 	if as, aok := asString(a); aok {
 		bs, bok := asString(b)
 		if !bok {
 			return false
+		}
+		// UUID-shaped strings normalise to lowercase before
+		// compare so the policy author doesn't have to think
+		// about casing in stored attribute bags. uuid.Parse is
+		// rejection-tolerant for non-UUID strings, so the fast
+		// path stays a plain byte compare for everything else.
+		if au, aerr := uuid.Parse(as); aerr == nil {
+			if bu, berr := uuid.Parse(bs); berr == nil {
+				return au == bu
+			}
 		}
 		return as == bs
 	}
@@ -849,6 +863,16 @@ func compareOrdered(a, b any) (int, bool) {
 
 func asString(v any) (string, bool) {
 	switch s := v.(type) {
+	case json.Number:
+		// json.Number is a string under the hood but carries
+		// numeric intent; let asNumber claim it via the type
+		// switch and refuse to treat it as a string here.
+		// Without this short-circuit the Stringer case below
+		// would catch json.Number first (it satisfies
+		// fmt.Stringer) and equal() would do a textual
+		// compare — so `{"op":"eq","value":42}` would fail
+		// against a json.Number("42") LHS.
+		return "", false
 	case string:
 		return s, true
 	case uuid.UUID:
