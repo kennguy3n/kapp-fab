@@ -255,6 +255,28 @@ func TestMYPackInsurableCeilingCaps(t *testing.T) {
 	}
 }
 
+// TestMYPackNonResidentFlat30: Income Tax Act 1967 s.45 +
+// LHDN public ruling — non-resident employees pay 30% flat on
+// MY-sourced employment income with no EPF / SOCSO / EIS
+// (each scheme is restricted to citizens / permanent
+// residents). MYR 8,000 × 30% = 2,400.00 is the only line
+// emitted.
+func TestMYPackNonResidentFlat30(t *testing.T) {
+	pack, _ := Lookup("MY")
+	out, err := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: false,
+	}, decimal.NewFromInt(8000), monthPeriod())
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	if len(out) != 1 || out[0].Code != "MY_NONRESIDENT_TAX" {
+		t.Fatalf("non-resident MY slip should emit only MY_NONRESIDENT_TAX; got %+v", out)
+	}
+	if !out[0].Amount.Equal(decimal.NewFromInt(2400)) {
+		t.Errorf("MY_NONRESIDENT_TAX = %s; want 2,400 (8,000 × 30%%)", out[0].Amount)
+	}
+}
+
 // ----- Thailand -----
 
 // TestTHPackPIT_NoDependents: THB 50,000 / month, 31-day period,
@@ -359,6 +381,28 @@ func TestTHPackBelowThresholdProducesNoPIT(t *testing.T) {
 	}
 }
 
+// TestTHPackNonResidentFlat15: Revenue Code s.50(1) + s.41 +
+// Ministerial Regulation 126 — non-residents whose Thai-sourced
+// employment income is taxed at source pay 15% flat with no
+// SSF (SSF eligibility under SSA s.33 is restricted to
+// permanent Thai employment). THB 80,000 × 15% = 12,000.00 is
+// the only line emitted.
+func TestTHPackNonResidentFlat15(t *testing.T) {
+	pack, _ := Lookup("TH")
+	out, err := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: false,
+	}, decimal.NewFromInt(80000), monthPeriod())
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	if len(out) != 1 || out[0].Code != "TH_NONRESIDENT_TAX" {
+		t.Fatalf("non-resident TH slip should emit only TH_NONRESIDENT_TAX; got %+v", out)
+	}
+	if !out[0].Amount.Equal(decimal.NewFromInt(12000)) {
+		t.Errorf("TH_NONRESIDENT_TAX = %s; want 12,000 (80,000 × 15%%)", out[0].Amount)
+	}
+}
+
 // ----- Indonesia -----
 
 // TestIDPackPPh21_TK0: IDR 15,000,000 / month, 31-day period, no
@@ -441,6 +485,28 @@ func TestIDPackBelowThreshold(t *testing.T) {
 	}
 }
 
+// TestIDPackNonResidentFlat20: UU PPh art. 26 — non-resident
+// individuals pay 20% flat on Indonesian-sourced employment
+// income with no BPJS Ketenagakerjaan / Kesehatan (each scheme
+// requires Indonesian citizenship or a KITAS-permitted long
+// stay). IDR 25,000,000 × 20% = 5,000,000 is the only line
+// emitted.
+func TestIDPackNonResidentFlat20(t *testing.T) {
+	pack, _ := Lookup("ID")
+	out, err := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: false,
+	}, decimal.NewFromInt(25000000), monthPeriod())
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	if len(out) != 1 || out[0].Code != "ID_NONRESIDENT_TAX" {
+		t.Fatalf("non-resident ID slip should emit only ID_NONRESIDENT_TAX; got %+v", out)
+	}
+	if !out[0].Amount.Equal(decimal.NewFromInt(5000000)) {
+		t.Errorf("ID_NONRESIDENT_TAX = %s; want 5,000,000 (25,000,000 × 20%%)", out[0].Amount)
+	}
+}
+
 // ----- Registry assertions -----
 
 // TestAPACPacksAreRegistered confirms all four new packs self-
@@ -484,55 +550,78 @@ func indexByCode(in []Deduction) map[string]decimal.Decimal {
 	return out
 }
 
-// TestBracketTablesAreContiguous pins the bracket-table
-// invariant that every walk function relies on: adjacent rows
-// must satisfy `Top[i] == Floor[i+1]` and the final row must
-// be open-ended (`Top == 0`). The walk functions ignore `Top`
-// at runtime (they trigger on `Floor` ordering) so a typo in
-// `Top` cannot break a payroll run — but it does mean an
-// off-by-one in a copy-pasted bracket table can silently sit
-// in production. This test fails the build if any pack's
-// table drifts out of adjacency, catching the kind of
-// transcription mistake the AU/MY/TH/ID tables would otherwise
-// be vulnerable to.
+// bracketRow is a typed projection of any per-pack bracket
+// struct used by TestBracketTablesAreContiguous. The per-pack
+// struct types (myBracket / thBracket / idBracket / ...) stay
+// distinct so a future schedule change to one pack cannot
+// cross-leak into another, but every walk function relies on
+// the same shape (Floor / Top / Base / Rate) so we project the
+// per-pack rows through this view and check the shared
+// invariants in one place.
+type bracketRow struct {
+	floor decimal.Decimal
+	top   decimal.Decimal
+	base  decimal.Decimal
+	rate  decimal.Decimal
+}
+
+// TestBracketTablesAreContiguous pins the two invariants every
+// walk function relies on:
+//
+//  1. Top-contiguity — adjacent rows satisfy
+//     `Top[i] == Floor[i+1]`, and the last row is open-ended
+//     (`Top == 0`). The walk functions ignore Top at runtime
+//     (they trigger on Floor ordering), so a typo in Top
+//     cannot break a payroll run — but it does mean an
+//     off-by-one in a copy-pasted table can silently sit in
+//     production.
+//
+//  2. Base-consistency — adjacent rows satisfy
+//     `Base[i+1] == Base[i] + (Floor[i+1] - Floor[i]) * Rate[i]`.
+//     This is the *real* correctness invariant: the walk
+//     resolves annual tax as `Base + (income - Floor) * Rate`
+//     for the matched bracket, so a wrong Base produces a
+//     wrong tax at every income in that bracket. The
+//     contiguity check on its own would not catch a `Base`
+//     transcription error.
+//
+// Together these fail the build if any pack's table drifts out
+// of adjacency *or* loses its cumulative-tax monotonicity.
 func TestBracketTablesAreContiguous(t *testing.T) {
-	checkMY := func(t *testing.T, brackets []myBracket) {
+	checkRows := func(t *testing.T, label string, rows []bracketRow) {
 		t.Helper()
-		for i := 0; i < len(brackets)-1; i++ {
-			if !brackets[i].Top.Equal(brackets[i+1].Floor) {
-				t.Fatalf("MY brackets[%d].Top (%s) != brackets[%d].Floor (%s)", i, brackets[i].Top, i+1, brackets[i+1].Floor)
+		for i := 0; i < len(rows)-1; i++ {
+			cur, next := rows[i], rows[i+1]
+			if !cur.top.Equal(next.floor) {
+				t.Fatalf("%s brackets[%d].Top (%s) != brackets[%d].Floor (%s)",
+					label, i, cur.top, i+1, next.floor)
+			}
+			want := cur.base.Add(next.floor.Sub(cur.floor).Mul(cur.rate))
+			if !next.base.Equal(want) {
+				t.Fatalf("%s brackets[%d].Base (%s) != Base[%d] + (Floor[%d]-Floor[%d])*Rate[%d] (= %s)",
+					label, i+1, next.base, i, i+1, i, i, want)
 			}
 		}
-		last := brackets[len(brackets)-1]
-		if !last.Top.IsZero() {
-			t.Fatalf("MY last bracket Top should be 0 (open-ended), got %s", last.Top)
+		last := rows[len(rows)-1]
+		if !last.top.IsZero() {
+			t.Fatalf("%s last bracket Top should be 0 (open-ended), got %s", label, last.top)
 		}
 	}
-	checkTH := func(t *testing.T, brackets []thBracket) {
-		t.Helper()
-		for i := 0; i < len(brackets)-1; i++ {
-			if !brackets[i].Top.Equal(brackets[i+1].Floor) {
-				t.Fatalf("TH brackets[%d].Top (%s) != brackets[%d].Floor (%s)", i, brackets[i].Top, i+1, brackets[i+1].Floor)
-			}
-		}
-		last := brackets[len(brackets)-1]
-		if !last.Top.IsZero() {
-			t.Fatalf("TH last bracket Top should be 0 (open-ended), got %s", last.Top)
-		}
+
+	myRows := make([]bracketRow, len(myBracketsResident))
+	for i, b := range myBracketsResident {
+		myRows[i] = bracketRow{floor: b.Floor, top: b.Top, base: b.Base, rate: b.Rate}
 	}
-	checkID := func(t *testing.T, brackets []idBracket) {
-		t.Helper()
-		for i := 0; i < len(brackets)-1; i++ {
-			if !brackets[i].Top.Equal(brackets[i+1].Floor) {
-				t.Fatalf("ID brackets[%d].Top (%s) != brackets[%d].Floor (%s)", i, brackets[i].Top, i+1, brackets[i+1].Floor)
-			}
-		}
-		last := brackets[len(brackets)-1]
-		if !last.Top.IsZero() {
-			t.Fatalf("ID last bracket Top should be 0 (open-ended), got %s", last.Top)
-		}
+	thRows := make([]bracketRow, len(thBracketsResident))
+	for i, b := range thBracketsResident {
+		thRows[i] = bracketRow{floor: b.Floor, top: b.Top, base: b.Base, rate: b.Rate}
 	}
-	t.Run("MY resident", func(t *testing.T) { checkMY(t, myBracketsResident) })
-	t.Run("TH resident", func(t *testing.T) { checkTH(t, thBracketsResident) })
-	t.Run("ID resident", func(t *testing.T) { checkID(t, idBracketsResident) })
+	idRows := make([]bracketRow, len(idBracketsResident))
+	for i, b := range idBracketsResident {
+		idRows[i] = bracketRow{floor: b.Floor, top: b.Top, base: b.Base, rate: b.Rate}
+	}
+
+	t.Run("MY resident", func(t *testing.T) { checkRows(t, "MY", myRows) })
+	t.Run("TH resident", func(t *testing.T) { checkRows(t, "TH", thRows) })
+	t.Run("ID resident", func(t *testing.T) { checkRows(t, "ID", idRows) })
 }

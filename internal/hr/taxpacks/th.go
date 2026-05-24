@@ -93,12 +93,24 @@ var (
 	thSSFCeiling      = dec("15000") // per-month insurable wage cap.
 
 	thPeriodsPerYear = decimal.NewFromFloat(365.25)
+
+	// Revenue Code s.50(1) + s.41 + Ministerial Reg. 126 on
+	// non-resident employment income: 15% flat withholding for
+	// non-residents whose Thai-sourced employment income is
+	// taxed at source. Applies when the employee is in Thailand
+	// < 180 days in the tax year and has no permanent
+	// establishment.
+	thNonResidentRate = dec("0.15")
 )
 
 // ComputeWithholding emits TH_PIT_WITHHOLDING (PND1 progressive
 // monthly tax after standard deduction and personal/dependent
 // allowances) and TH_SSF (5% capped at the THB 15,000 / month
-// insurable wage). Zero-amount lines are omitted.
+// insurable wage) for residents. Non-residents (Revenue Code
+// s.50(1) + s.41) get TH_NONRESIDENT_TAX at the flat 15% rate
+// and no SSF (SSF eligibility under SSA s.33 is restricted to
+// employees with permanent Thai employment). Zero-amount lines
+// are omitted.
 func (thPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
@@ -109,6 +121,19 @@ func (thPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	out := []Deduction{}
+
+	// Non-resident: flat 15% on gross, no SSF.
+	if !e.Resident {
+		nr := gross.Mul(thNonResidentRate).Round(2)
+		if nr.IsPositive() {
+			out = append(out, Deduction{
+				Code:   "TH_NONRESIDENT_TAX",
+				Name:   "Non-resident PIT flat 15% (TH)",
+				Amount: nr,
+			})
+		}
+		return out, nil
+	}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(thPeriodsPerYear)
 	annualGross := gross.Div(periodFraction)

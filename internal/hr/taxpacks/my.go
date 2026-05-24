@@ -113,6 +113,11 @@ var (
 	myEPFRateBelow60 = dec("0.11")
 	myEPFRate60Plus  = dec("0.055")
 
+	// Income Tax Act 1967 s.45 + LHDN public ruling on
+	// non-resident employees: flat 30% on Malaysian-sourced
+	// employment income (from YA 2020) with no reliefs.
+	myNonResidentRate = dec("0.30")
+
 	// SOCSO + EIS employee rates and the shared RM 5,000 / month
 	// insurable wage ceiling.
 	mySOCSOEmployeeRate = dec("0.005")
@@ -124,9 +129,12 @@ var (
 
 // ComputeWithholding emits MY_PCB (resident progressive PIT),
 // MY_EPF (employee KWSP share), MY_SOCSO and MY_EIS (capped at the
-// RM 5,000 / month insurable wage). Lines with a zero or negative
-// computed amount are omitted so the slip stays free of cosmetic
-// zero rows.
+// RM 5,000 / month insurable wage). Non-residents (per ITA 1967
+// s.45) instead get MY_NONRESIDENT_TAX at the flat 30% rate, no
+// reliefs, and no statutory contributions (EPF/SOCSO/EIS are
+// citizen-and-permanent-resident only). Lines with a zero or
+// negative computed amount are omitted so the slip stays free of
+// cosmetic zero rows.
 func (myPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
@@ -134,6 +142,22 @@ func (myPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	days := period.Days()
 	if days <= 0 {
 		return nil, nil
+	}
+
+	// Non-resident: flat 30% on gross. EPF / SOCSO / EIS
+	// eligibility is restricted to citizens and permanent
+	// residents under each respective scheme's enabling act,
+	// so non-resident slips emit only the income-tax line.
+	if !e.Resident {
+		nr := gross.Mul(myNonResidentRate).Round(2)
+		if !nr.IsPositive() {
+			return nil, nil
+		}
+		return []Deduction{{
+			Code:   "MY_NONRESIDENT_TAX",
+			Name:   "Non-resident PCB flat 30% (MY)",
+			Amount: nr,
+		}}, nil
 	}
 
 	// Annualise → walk brackets → prorate. Same period-fraction

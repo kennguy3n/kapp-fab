@@ -100,12 +100,24 @@ var (
 	idBPJSJP2024Ceiling   = dec("10547400")
 
 	idPeriodsPerYear = decimal.NewFromFloat(365.25)
+
+	// UU PPh art. 26 + PMK-141/PMK.03/2015: 20% flat
+	// withholding on Indonesian-sourced employment income for
+	// non-resident individuals (foreigners present < 183 days
+	// in any 12-month period). Tax-treaty overrides apply but
+	// are out of scope for this pack — treaty relief is filed
+	// via DGT-1/DGT-2 forms, not slip-level.
+	idNonResidentRate = dec("0.20")
 )
 
 // ComputeWithholding emits ID_PPH21 (annual-method progressive
 // tax after PTKP), ID_BPJS_KES (1% capped at IDR 12M / month),
 // ID_BPJS_JHT (2% uncapped) and ID_BPJS_JP (1% capped at the
-// 10,547,400 / month 2024 ceiling). Zero-amount lines are omitted.
+// 10,547,400 / month 2024 ceiling) for residents. Non-residents
+// (UU PPh art. 26) get ID_NONRESIDENT_TAX at the flat 20% rate;
+// BPJS Ketenagakerjaan / Kesehatan eligibility requires Indonesian
+// citizenship or KITAS-permitted residence, so non-resident slips
+// emit only the income-tax line. Zero-amount lines are omitted.
 func (idPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
@@ -116,6 +128,19 @@ func (idPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	out := []Deduction{}
+
+	// Non-resident: flat 20% on gross, no BPJS.
+	if !e.Resident {
+		nr := gross.Mul(idNonResidentRate).Round(2)
+		if nr.IsPositive() {
+			out = append(out, Deduction{
+				Code:   "ID_NONRESIDENT_TAX",
+				Name:   "Non-resident PPh 26 flat 20% (ID)",
+				Amount: nr,
+			})
+		}
+		return out, nil
+	}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(idPeriodsPerYear)
 	annualGross := gross.Div(periodFraction)
