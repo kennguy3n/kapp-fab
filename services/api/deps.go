@@ -10,6 +10,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/auth"
 	"github.com/kennguy3n/kapp-fab/internal/authz"
 	"github.com/kennguy3n/kapp-fab/internal/captcha"
+	"github.com/kennguy3n/kapp-fab/internal/i18n"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
@@ -201,4 +202,15 @@ type apiDeps struct {
 	// pointer here.
 	ktypeRegistry *ktype.PGRegistry
 	sessionStore  auth.SessionStore
+
+	// localeBundle is the i18n registry every translated response
+	// resolves against. Built once at boot from the embedded
+	// locales/*.json catalogues, shared between the wizard's
+	// LocaleValidator/LocaleResolver gates and the Accept-Language
+	// middleware so provisioning-time validation and request-time
+	// resolution agree on the supported tag set. Always non-nil
+	// after a successful buildDeps — i18n.MustDefault panics if
+	// the embedded data is malformed, which is the right boot
+	// behaviour for a hard configuration error.
+	localeBundle *i18n.Bundle
 }

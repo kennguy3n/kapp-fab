@@ -422,6 +422,26 @@ type LocaleValidator interface {
 	IsSupported(tag string) bool
 }
 
+// LocaleResolver is the optional partner to LocaleValidator. Where
+// LocaleValidator gates writes ("is this exact tag in the
+// runtime-serviceable set?"), LocaleResolver normalises an arbitrary
+// candidate ("hi", "zh-Hans", "fr-CA", an Accept-Language header
+// value) to the best supported tag. Callers that only know the
+// matcher contract (i18n.Bundle satisfies both interfaces) can pass
+// the same value for both roles; callers that want the format gate
+// without the matcher can pass nil for the resolver and stick to
+// LocaleValidator alone.
+//
+// The wizard uses Resolve on a *country-derived* default
+// (DefaultLocaleForCountry can legitimately return a tag like "hi"
+// for IN even when no hi.json catalogue is shipped); without the
+// normalisation step the bundle-whitelist gate would reject a value
+// the wizard generated itself. Operator-supplied locales bypass the
+// resolver and must pass the strict whitelist directly.
+type LocaleResolver interface {
+	Resolve(candidate string) string
+}
+
 var localeRe = regexp.MustCompile(`^[a-z]{2,3}(-[A-Za-z0-9]{2,4})?$`)
 
 // ValidateLocale returns nil iff `tag` is a syntactically well-formed

@@ -33,6 +33,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk/mailboxes"
 	"github.com/kennguy3n/kapp-fab/internal/hr"
+	"github.com/kennguy3n/kapp-fab/internal/i18n"
 	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
@@ -616,7 +617,17 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	featureMW := platform.DynamicFeatureMiddleware(featureStore)
 
 	fh := &formsHandlers{store: formStore, registry: ktypeRegistry}
-	wizard := tenant.NewWizard(pool)
+	// Build the i18n bundle once at boot. The same *i18n.Bundle is
+	// the LocaleValidator + LocaleResolver the wizard uses to gate
+	// tenants.locale writes (operator-supplied tags are validated
+	// strictly against the bundle whitelist; country-derived defaults
+	// are normalised through Resolve so "hi" → "en" until a hi.json
+	// catalogue ships). The same Bundle also feeds the
+	// Accept-Language middleware in routes.go so request-time locale
+	// resolution and provisioning-time locale validation share one
+	// source of truth.
+	localeBundle := i18n.MustDefault()
+	wizard := tenant.NewWizard(pool).WithLocaleBundle(localeBundle)
 	var zkFabricClient *tenant.ZKFabricClient
 	if zkClient := tenant.NewZKFabricClient(tenant.ZKFabricClientConfig{
 		Endpoint:       os.Getenv("ZK_FABRIC_CONSOLE_ENDPOINT"),
@@ -1068,6 +1079,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		metrics:              metrics,
 		ktypeRegistry:        ktypeRegistry,
 		sessionStore:         sessionStore,
+		localeBundle:         localeBundle,
 	}
 
 	return d, func() { runCleanups(cleanups) }, nil
