@@ -474,10 +474,21 @@ func TestSignerFromProvider_RefresherDoneClosesOnContextCancel(t *testing.T) {
 
 // TestSignerFromProvider_RefresherDoneNilWithoutRefresher pins
 // the contract that a signer constructed without an auto-
-// refresh loop (nil ctx OR zero RefreshInterval, as in one-
-// shot CLI invocations) returns nil from RefresherDone. The
-// caller's shutdown-join logic relies on the nil case meaning
-// "no goroutine to wait on".
+// refresh loop (zero RefreshInterval, as in one-shot CLI
+// invocations and unit tests that just want a static signer)
+// returns nil from RefresherDone. The caller's shutdown-join
+// logic relies on the nil case meaning "no goroutine to wait
+// on" — see services/api/deps_build.go where the cleanup
+// branch is gated on `if done := signer.RefresherDone(); done
+// != nil`.
+//
+// The nil-ctx branch is exercised separately via
+// SignerFromEnv (no provider, no refresher) and one-shot CLI
+// callers; here we exercise the zero-interval branch, which
+// passes the linter's nil-context check while still hitting
+// the same "skip the goroutine" code path in
+// signer_provider.go (the guard is
+// `refreshCtx != nil && opts.RefreshInterval > 0`).
 func TestSignerFromProvider_RefresherDoneNilWithoutRefresher(t *testing.T) {
 	k := make([]byte, 32)
 	for i := range k {
@@ -488,18 +499,24 @@ func TestSignerFromProvider_RefresherDoneNilWithoutRefresher(t *testing.T) {
 			"jwt/primary": {Bytes: k, Version: "v1"},
 		},
 	}
-	// Nil ctx — refresher loop intentionally not started.
-	signer, err := SignerFromProvider(nil, p, SignerProviderOptions{
-		PrimaryRef: "jwt/primary",
-		Algorithm:  AlgHS256,
-		Issuer:     "k",
-		Audience:   "k",
+	// Zero RefreshInterval — refresher loop intentionally not
+	// started. ctx is context.Background() rather than nil to
+	// satisfy staticcheck SA1012; the construction path's
+	// refresher-start guard checks BOTH "non-nil ctx AND
+	// non-zero interval", so this still exercises the no-
+	// goroutine branch.
+	signer, err := SignerFromProvider(context.Background(), p, SignerProviderOptions{
+		PrimaryRef:      "jwt/primary",
+		Algorithm:       AlgHS256,
+		Issuer:          "k",
+		Audience:        "k",
+		RefreshInterval: 0,
 	})
 	if err != nil {
 		t.Fatalf("SignerFromProvider: %v", err)
 	}
 	if signer.RefresherDone() != nil {
-		t.Fatalf("RefresherDone must be nil when no refresher is started")
+		t.Fatalf("RefresherDone must be nil when no refresher is started (zero RefreshInterval)")
 	}
 }
 

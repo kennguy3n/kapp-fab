@@ -889,7 +889,18 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 					log.Printf("api: WARN — KAPP_JWT_ALGORITHM=%s is ignored when KAPP_SECRET_PROVIDER is env or empty (env path hardcodes HS256); set KAPP_SECRET_PROVIDER=file|aws|vault|gcp to use %s",
 						signerOpts.Algorithm, signerOpts.Algorithm)
 				}
-				if signerOpts.Leeway > 0 && signerOpts.Leeway != signer.Leeway() {
+				// Compare against the signer's actual leeway rather
+				// than guarding on signerOpts.Leeway > 0. The whole
+				// point of getenvDurationAllowZero (config.go:551)
+				// is that 0s is a valid explicit operator choice
+				// (strict-clock-skew mode per SignerConfig.Leeway
+				// docs) — and that exact case is the one most worth
+				// warning about, because the env path silently
+				// upgrades it to the hardcoded 30s leeway in
+				// SignerFromEnv. A `> 0` guard would suppress the
+				// warning for the canonical "operator explicitly
+				// disabled leeway" misconfiguration.
+				if signerOpts.Leeway != signer.Leeway() {
 					log.Printf("api: WARN — KAPP_JWT_LEEWAY=%s is ignored when KAPP_SECRET_PROVIDER is env or empty (env path hardcodes %s); set KAPP_SECRET_PROVIDER=file|aws|vault|gcp to honour the override",
 						signerOpts.Leeway, signer.Leeway())
 				}
