@@ -493,12 +493,43 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 		//
 		//   1. A DBA sets `ALTER ROLE kapp_app SET row_security
 		//      = off` or `ALTER DATABASE kapp SET row_security
-		//      = off`.  PostgreSQL would then evaluate RLS
-		//      policies in permissive-mode-only and let any
-		//      query bypass tenant scoping if the role has
-		//      BYPASSRLS or owns the table.  We cap that risk
-		//      at "fail closed with a clear error" rather than
-		//      "fail open silently".
+		//      = off`.  Under the current role posture (kapp_app
+		//      created without BYPASSRLS in migration 000003),
+		//      Postgres itself fails closed for this case: the
+		//      query errors instead of silently bypassing RLS.
+		//      The assertion's real load-bearing coverage is the
+		//      narrow but real intersection where Postgres would
+		//      NOT fail closed:
+		//
+		//        (a) `BYPASSRLS` is granted to kapp_app (e.g. as
+		//            an incident-response debugging shortcut that
+		//            never got reverted) AND row_security=off —
+		//            in this exact combination, RLS policies
+		//            become permissive-mode-only and the query
+		//            returns cross-tenant rows silently;
+		//
+		//        (b) kapp_app ends up owning a tenant-scoped
+		//            table that lacks FORCE ROW LEVEL SECURITY
+		//            (shouldn't happen, but a migration that
+		//            runs CREATE TABLE under the wrong role
+		//            could) — table owners bypass RLS by
+		//            default, and with row_security=off the
+		//            bypass is silent;
+		//
+		//        (c) a future PR proposes "grant BYPASSRLS to
+		//            kapp_app for the SQL editor since it's
+		//            validator-guarded" — the assertion makes
+		//            that regression visible at every dispatch.
+		//
+		//      Outside that intersection (which is the default
+		//      production posture today) Postgres already fails
+		//      closed and this check is operationally redundant
+		//      but cheap (single GUC read in the same round
+		//      trip as the tenant probe).  The defense-in-depth
+		//      principle is "fail closed loudly when the
+		//      invariant might erode", not "duplicate Postgres's
+		//      own fail-closed guarantee under happy-path role
+		//      configuration".
 		//
 		//   2. dbutil.WithTenantTx returns successfully but
 		//      `app.tenant_id` is unset (e.g. if a future
