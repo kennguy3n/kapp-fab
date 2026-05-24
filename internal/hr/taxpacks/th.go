@@ -80,6 +80,14 @@ var (
 	thPersonalAllowance     = dec("60000")
 	thDependentAllowance    = dec("30000")
 
+	// Sanity cap on declared dependents. Not a Revenue Code
+	// figure — Thai law applies the per-dependent allowance to
+	// every qualifying dependent with no fixed numeric ceiling
+	// — but a defense-in-depth guard against a wizard /
+	// payroll-import bug sending an absurd NumDependents value
+	// that would otherwise drive taxable income to zero.
+	thMaxDependents = 20
+
 	// SSF parameters (Social Security Act).
 	thSSFEmployeeRate = dec("0.05")
 	thSSFCeiling      = dec("15000") // per-month insurable wage cap.
@@ -114,9 +122,22 @@ func (thPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// Personal + dependent allowances. Negative or unknown
 	// dependent counts are clamped to zero so a missing
 	// EmployeeInfo.NumDependents doesn't wrongly subtract.
+	// Upper-bounded at thMaxDependents (20) as defense in depth
+	// against a data-entry error driving taxable income to zero.
+	// The Thai Revenue Code does not impose a hard statutory cap
+	// the way Indonesia does (UU PPh art. 7(3) → max 3
+	// dependents) — Thai allowances cover an employee's children,
+	// supported parents, and (under TRD interpretation) some
+	// supported in-laws, with no published numeric ceiling — but
+	// 20 comfortably covers every reasonable household
+	// composition and bounds the blast radius of a wizard /
+	// payroll-import bug that sends NumDependents=10_000.
 	deps := e.NumDependents
 	if deps < 0 {
 		deps = 0
+	}
+	if deps > thMaxDependents {
+		deps = thMaxDependents
 	}
 	allowances := thPersonalAllowance.Add(
 		thDependentAllowance.Mul(decimal.NewFromInt(int64(deps))),

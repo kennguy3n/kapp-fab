@@ -304,6 +304,43 @@ func TestTHPackPIT_TwoDependents(t *testing.T) {
 	}
 }
 
+// TestTHPackDependentSanityCap pins the defense-in-depth cap on
+// EmployeeInfo.NumDependents in th.go. The Thai Revenue Code
+// imposes no statutory hard cap on declared dependents (unlike
+// Indonesia's 3-dependent ceiling), but the pack clamps the
+// declared count at thMaxDependents=20 so a wizard / payroll
+// import bug sending NumDependents=10_000 can't drive taxable
+// income to zero and silently skip an employee's PIT line.
+//
+// The assertion is *value equivalence at the cap*: a slip with
+// NumDependents = thMaxDependents must produce the same period
+// tax as a slip with NumDependents = thMaxDependents + 1,
+// thMaxDependents × 50, or any larger value. THB 200,000 /
+// month is chosen so that even 20 dependents leaves residual
+// taxable income (so a small mis-clamp would visibly change
+// the PIT line rather than zeroing it out by coincidence).
+func TestTHPackDependentSanityCap(t *testing.T) {
+	pack, _ := Lookup("TH")
+	monthly := decimal.NewFromInt(200000)
+	baseline, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		Resident: true, NumDependents: thMaxDependents,
+	}, monthly, monthPeriod())
+	baselinePIT := indexByCode(baseline)["TH_PIT_WITHHOLDING"]
+	if !baselinePIT.IsPositive() {
+		t.Fatalf("expected positive PIT at cap; got %s", baselinePIT)
+	}
+	for _, deps := range []int{thMaxDependents + 1, thMaxDependents * 2, thMaxDependents * 50} {
+		got, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+			Resident: true, NumDependents: deps,
+		}, monthly, monthPeriod())
+		gotPIT := indexByCode(got)["TH_PIT_WITHHOLDING"]
+		if !gotPIT.Equal(baselinePIT) {
+			t.Fatalf("NumDependents=%d: PIT=%s, want %s (clamp at %d not honored)",
+				deps, gotPIT, baselinePIT, thMaxDependents)
+		}
+	}
+}
+
 // TestTHPackBelowThresholdProducesNoPIT covers the 0-150k
 // bracket. THB 10,000 / month annualises to ~117,800, allowances
 // take it negative → no PIT.

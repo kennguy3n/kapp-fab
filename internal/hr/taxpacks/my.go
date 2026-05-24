@@ -19,9 +19,16 @@ import (
 //     reliefs that vary per employee; this pack ships the
 //     straight progressive bracket walk (no reliefs deducted)
 //     because the engine does not yet model TP1 / TP3 forms.
-//     Annual tax is divided by 12 for the slip amount. Operators
-//     who file MTD using a TP1 should set DeductionAccountMap and
-//     wire a per-employee relief override on a future PR.
+//     Annual tax is prorated to the slip period by
+//     period.Days() / 365.25 (matching the AU / TH / ID packs
+//     for off-cycle slip stability) rather than the strict
+//     LHDN CCM divide-by-12. For a standard 31-day month this
+//     yields period fraction 0.0849 vs 1/12 ≈ 0.0833, a ~2%
+//     uplift over the LHDN CCM calculator; operators who file
+//     MTD against the official calculator can either reconcile
+//     at the end-of-year EA / e-Filing step or set
+//     DeductionAccountMap to a TP1 relief override on a future
+//     PR.
 //
 //   - EPF (Employees Provident Fund / KWSP) employee contribution
 //     at 11% for employees under 60 and 5.5% for 60+, per the
@@ -32,14 +39,26 @@ import (
 //
 //   - SOCSO (PERKESO) employee 0.5% under the Employees Social
 //     Security Act 1969 First Schedule, capped at an insurable
-//     wage of RM 5,000 / month (so max RM 24.75 / month). SOCSO
-//     stops accruing for employees who first joined SOCSO at age
-//     60 or above; this pack does not branch on first-enrolment
-//     date — that's a KRecord migration concern.
+//     wage of RM 5,000 / month. This pack applies the rate as a
+//     flat 0.5% on the capped insurable wage, yielding RM 25.00
+//     / month at the cap. PERKESO's published First Schedule
+//     rounds the 4,900.01–5,000 band down to RM 24.75 / month
+//     EE (each 100-RM band has a discrete rounded amount); the
+//     RM 0.25 / month difference is within typical year-end
+//     reconciliation tolerance and is recovered by the engine's
+//     Form 2 / 8A reporting. Encoding the full First Schedule
+//     banded table is a future-PR refinement tracked in
+//     docs/TAX_PACK_MAINTENANCE.md. SOCSO stops accruing for
+//     employees who first joined SOCSO at age 60 or above; this
+//     pack does not branch on first-enrolment date — that's a
+//     KRecord migration concern.
 //
 //   - EIS (Employment Insurance System) employee 0.2% under
-//     Employment Insurance System Act 2017, same RM 5,000 / month
-//     insurable wage ceiling (max RM 9.90 / month).
+//     Employment Insurance System Act 2017, same RM 5,000 /
+//     month insurable wage ceiling. Flat-rate yields RM 10.00 /
+//     month at the cap; PERKESO's Second Schedule rounds to
+//     RM 9.90 / month EE at the 4,900.01–5,000 band. Same
+//     reconciliation note as SOCSO above.
 //
 // References:
 //
