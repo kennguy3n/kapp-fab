@@ -56,9 +56,16 @@ type siteVerifyClient struct {
 	// Options.freshnessWindowEffective for the input mapping.
 	freshnessWindow time.Duration
 	// minScore is the resolved (post-sentinel) score floor.
-	// 0 means score thresholding is disabled. Read by verify()
-	// for siteverify-style providers (reCAPTCHA v3); Turnstile
-	// and hCaptcha report Score=0 and so always pass this gate.
+	// 0 means score thresholding is disabled. Read by the
+	// per-provider Verify methods (currently only
+	// RecaptchaV3Verifier.Verify at recaptcha.go:69) — NOT by
+	// the shared siteVerifyClient.verify() helper, which has
+	// no score logic. Lives on the shared client so a future
+	// score-emitting provider (e.g. a PoW difficulty tier
+	// variant) can opt into the same threshold without
+	// duplicating the field. Turnstile and hCaptcha report
+	// Score=0 and don't consult this field, so the value is
+	// inert for them.
 	minScore float64
 }
 
