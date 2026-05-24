@@ -429,6 +429,80 @@ func TestSecurity_MissingLHSDenies(t *testing.T) {
 	}
 }
 
+// TestSecurity_NullLHSDenies is the regression test for the
+// present-but-null LHS edge case.  The pre-fix code only short-
+// circuited on missing keys: a record whose field decoded to
+// JSON-null would reach applyOp, where `equal(nil, rhs)` returns
+// false (no type-match), so `!equal` returned true and a policy
+// like {"op":"ne","value":"open"} would INCORRECTLY GRANT on a
+// record with status:null.  This test pins the "present-null is
+// the same as missing for non-existence operators" semantic so a
+// future refactor can't accidentally regress to the unsafe form.
+//
+// We deliberately exclude `exists` from this loop — exists answers
+// "is the key in the bag at all" and a present-null key satisfies
+// that contract (the bot's note correctly distinguished these two
+// shapes; we just want them to produce the same ACCESS decision
+// for everything that isn't a key-presence assertion).
+func TestSecurity_NullLHSDenies(t *testing.T) {
+	for _, op := range []string{"eq", "ne", "lt", "le", "gt", "ge", "in", "not_in", "prefix", "suffix", "contains", "matches"} {
+		val := `"foo"`
+		if op == "in" || op == "not_in" {
+			val = `["foo"]`
+		}
+		if op == "lt" || op == "le" || op == "gt" || op == "ge" {
+			val = `1`
+		}
+		raw := `{"leaf":{"field":"status","op":"` + op + `","value":` + val + `}}`
+		attrs := map[string]any{"status": nil}
+		if mustEval(t, raw, attrs) {
+			t.Errorf("op %q with present-null LHS should deny (got grant)", op)
+		}
+	}
+}
+
+// TestSecurity_NullLHSExistsBehaviour preserves the present-null
+// vs missing distinction inside the exists operator only: a key
+// present with a nil value satisfies exists:true, because the
+// operator's contract is "is the path resolvable in the bag" not
+// "is the value non-null".  Authors who need the latter compose
+// exists with a value-shape leaf.
+func TestSecurity_NullLHSExistsBehaviour(t *testing.T) {
+	cases := []struct {
+		name   string
+		raw    string
+		attrs  map[string]any
+		expect bool
+	}{
+		{
+			name:   "exists:true on present-null matches",
+			raw:    `{"leaf":{"field":"status","op":"exists","value":true}}`,
+			attrs:  map[string]any{"status": nil},
+			expect: true,
+		},
+		{
+			name:   "exists:false on present-null does NOT match",
+			raw:    `{"leaf":{"field":"status","op":"exists","value":false}}`,
+			attrs:  map[string]any{"status": nil},
+			expect: false,
+		},
+		{
+			name:   "exists:false on missing matches",
+			raw:    `{"leaf":{"field":"status","op":"exists","value":false}}`,
+			attrs:  map[string]any{},
+			expect: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mustEval(t, tc.raw, tc.attrs)
+			if got != tc.expect {
+				t.Errorf("got %v, want %v", got, tc.expect)
+			}
+		})
+	}
+}
+
 func TestSecurity_UnknownActorRefInGroup(t *testing.T) {
 	// A policy hides a bad ref inside an any_of so the parser must
 	// still fail closed (not partially compile and silently grant

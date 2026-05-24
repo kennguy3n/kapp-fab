@@ -285,11 +285,24 @@ func (n leaf) eval(env *evalEnv) (bool, error) {
 		}
 		return lhsExists == want, nil
 	}
-	if !lhsExists {
+	if !lhsExists || lhs == nil {
 		// Missing LHS denies all other operators. This is the
 		// "null-safe deny" behaviour security review insisted on:
 		// a typo in attribute name should NOT silently match a
 		// permissive rule.
+		//
+		// We treat an *explicitly-null* LHS the same as a missing
+		// key here.  Without that, `{"op":"ne","value":"open"}`
+		// would grant on a record whose status field is JSON-null:
+		// equal(nil, "open") returns false (no type-match), so
+		// `!equal` returns true and the policy would incorrectly
+		// pass.  By denying on lhs==nil before applyOp ever sees
+		// it, present-null and absent-key produce the same access
+		// decision — the only way to assert "this field is null"
+		// is `{"op":"exists","value":false}`, which preserves the
+		// exists-operator contract of "is the key in the bag at
+		// all" (independent of value), while all other operators
+		// reject nil consistently.
 		return false, nil
 	}
 	var rhs any

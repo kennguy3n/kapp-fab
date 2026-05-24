@@ -78,18 +78,33 @@ func (e *PGEvaluator) Authorize(
 	tenantID, userID uuid.UUID,
 	action, resource string,
 ) error {
-	perms, err := e.loadPermissions(ctx, tenantID, userID)
+	// We iterate the cached permissionSet directly rather than going
+	// through loadPermissions's projection helper.  loadPermissions
+	// allocates a fresh []Permission on every call to flatten the
+	// cached compiledPermission shape back to the external Permission
+	// type — that's unavoidable for ListPermissions (which exposes
+	// the slice to callers), but the hot Authorize path doesn't need
+	// the projection and shouldn't pay the per-request allocation.
+	// Reading compiled.perm.Action / compiled.perm.Resource off the
+	// cache value directly is zero-alloc on cache hit, matching the
+	// pre-conditions-AST baseline performance.
+	set, err := e.loadPermissionSet(ctx, tenantID, userID)
 	if err != nil {
 		return err
 	}
-	for _, p := range perms {
-		if !matchAction(p.Action, action) {
+	for _, p := range set.perms {
+		if !matchAction(p.perm.Action, action) {
 			continue
 		}
-		if !matchResource(p.Resource, resource) {
+		if !matchResource(p.perm.Resource, resource) {
 			continue
 		}
-		if !isUnconditional(p.Conditions) {
+		// A non-nil compiled means the permission row carries
+		// conditions; the non-record Authorize path cannot satisfy
+		// those without an attrs bag, so skip — same semantics as
+		// the previous isUnconditional check, just resolved off the
+		// pre-compiled AST presence rather than re-parsing the JSON.
+		if p.compiled != nil {
 			continue
 		}
 		return nil
@@ -220,26 +235,12 @@ func (e *PGEvaluator) InvalidateTenant(tenantID uuid.UUID) {
 	e.cache.DeletePrefix(tenantPrefix(tenantID))
 }
 
-func (e *PGEvaluator) loadPermissions(
-	ctx context.Context,
-	tenantID, userID uuid.UUID,
-) ([]Permission, error) {
-	set, err := e.loadPermissionSet(ctx, tenantID, userID)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Permission, len(set.perms))
-	for i, p := range set.perms {
-		out[i] = p.perm
-	}
-	return out, nil
-}
-
 // loadPermissionSet is the canonical cache-aware loader. It returns
 // the pre-compiled permission set (each condition AST built once) plus
-// the actor's role list. Callers wanting the raw []Permission shape
-// for back-compat should go through loadPermissions, which projects
-// this back to the simpler type.
+// the actor's role list. The hot Authorize / AuthorizeRecord paths
+// consume the set directly with zero per-call allocation on cache hit;
+// ListPermissions projects this back to the simpler []Permission shape
+// for external callers that need the raw rows.
 func (e *PGEvaluator) loadPermissionSet(
 	ctx context.Context,
 	tenantID, userID uuid.UUID,
