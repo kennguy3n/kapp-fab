@@ -82,8 +82,20 @@ func TestRecipientTable_ConcurrentAccess(t *testing.T) {
 }
 
 // fakeIMAPClient is an opaque stand-in imap.Client; the registry
-// treats clients as opaque handles so no methods need to fire.
-type fakeIMAPClient struct{ imap.Client }
+// treats clients as opaque handles so most methods are inherited
+// (and would panic if invoked) — only Close is explicitly
+// implemented so the supervisor's Start-failure cleanup path can
+// verify it fires.
+type fakeIMAPClient struct {
+	imap.Client
+	closeCalls int
+	closeErr   error
+}
+
+func (f *fakeIMAPClient) Close() error {
+	f.closeCalls++
+	return f.closeErr
+}
 
 // TestClientRegistry_PutTake pins take-is-pop semantics. The
 // manager hook calls take exactly once per Start so a leak is at

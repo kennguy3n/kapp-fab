@@ -299,8 +299,20 @@ func (s *helpdeskIMAPSupervisor) converge(ctx context.Context) error {
 		}
 		if err := s.manager.Start(ctx, cfg); err != nil {
 			// Clean up the stashed client — newPoller never
-			// consumed it because Start short-circuited.
-			s.clients.take(row.MailboxID)
+			// consumed it because Start short-circuited. The
+			// Client may hold an open TCP / TLS connection
+			// (the goimap adapter dials in Connect, which the
+			// Poller would have called on its first Run tick);
+			// Close() drops the socket without attempting a
+			// LOGOUT handshake that the half-open session
+			// can't answer cleanly.
+			if stashed, ok := s.clients.take(row.MailboxID); ok {
+				if cerr := stashed.Close(); cerr != nil {
+					s.logger.Warn("helpdesk: close orphan imap client",
+						slog.String("mailbox_id", row.MailboxID.String()),
+						slog.String("err", cerr.Error()))
+				}
+			}
 			if errors.Is(err, imap.ErrManagerStopped) {
 				// Worker is shutting down; abort the
 				// converge — Run will exit on the next

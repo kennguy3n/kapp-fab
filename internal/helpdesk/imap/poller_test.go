@@ -24,8 +24,9 @@ type fakeClient struct {
 	fetchByCall [][]FetchedMessage
 	fetchErr   error
 	logoutErr  error
+	closeErr   error
 
-	connects, logins, selects, fetches, logouts int
+	connects, logins, selects, fetches, logouts, closes int
 }
 
 func (f *fakeClient) Connect(_ context.Context) error {
@@ -65,6 +66,12 @@ func (f *fakeClient) Logout(_ context.Context) error {
 	defer f.mu.Unlock()
 	f.logouts++
 	return f.logoutErr
+}
+func (f *fakeClient) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closes++
+	return f.closeErr
 }
 
 // fakeUIDState is an in-memory UIDState for tests.

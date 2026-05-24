@@ -31,6 +31,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/exporter"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
+	"github.com/kennguy3n/kapp-fab/internal/helpdesk/imap/goimap"
 	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
@@ -363,12 +364,21 @@ func run() error {
 
 	election := platform.NewLeaderElection(cfg.DatabaseURL, "kapp-worker", identity).WithMetrics(metrics)
 	// Helpdesk-IMAP supervisor (Surface G). Wires the per-mailbox
-	// Poller fleet against the leader-elected goroutine set. nil
-	// when adminPool is unavailable or no IMAP client factory is
-	// wired (the go-imap adapter ships in a follow-up PR); the
-	// supervisor stays inert in that case and the helpdesk
-	// inbound path falls back to the webhook-only surface.
-	helpdeskIMAP := newHelpdeskIMAPState(pool, adminPool, recordStore, helpdeskStore, nil, slog.Default())
+	// Poller fleet against the leader-elected goroutine set. The
+	// factory builds a fresh go-imap/v2 client per mailbox at
+	// converge time; the supervisor short-circuits Start for
+	// already-active mailboxes so the factory's per-Start cost
+	// (one dial + TLS handshake) only fires on real lifecycle
+	// transitions.
+	//
+	// FactoryOptions defaults are appropriate for production:
+	// system root certs, 30 s dial timeout, 30 s per-command
+	// timeout. Operators with bespoke IMAP servers (self-signed
+	// certs, custom cipher pools) can override via env in a
+	// follow-up wire-up; today we ship with defaults and the
+	// IMAP fleet works against any RFC-compliant server.
+	imapFactory := goimap.NewFactory(goimap.FactoryOptions{})
+	helpdeskIMAP := newHelpdeskIMAPState(pool, adminPool, recordStore, helpdeskStore, imapFactory, slog.Default())
 
 	return election.Run(ctx, func(leaderCtx context.Context) error {
 		return leadWorker(leaderCtx, leaderState{
