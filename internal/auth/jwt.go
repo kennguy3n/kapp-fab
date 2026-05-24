@@ -172,6 +172,22 @@ func NewSigner(cfg SignerConfig) (*Signer, error) {
 		if cfg.KeyRing == nil && cfg.RSAPrivate == nil && cfg.RSAPublic == nil {
 			return nil, errors.New("auth: RS256 requires a key")
 		}
+		// Derive RSAPublic from RSAPrivate when only the private
+		// key is supplied. Without this, an operator who configures
+		// "RS256 with only a private key" (a reasonable shape —
+		// the public key IS the private key's PublicKey field) hits
+		// a silent-failure mode where every Verify call returns
+		// ErrTokenSignature because verifySignature skips
+		// candidates with nil RSAPublic. The pre-keyring code
+		// surfaced this as "auth: RS256 verifier missing public
+		// key" at construction time; deriving is strictly better
+		// because the deployment works correctly instead of
+		// failing loudly. Operators who want a verify-only signer
+		// (RSAPublic without RSAPrivate) are unaffected — that
+		// path was already valid and stays valid.
+		if cfg.KeyRing == nil && cfg.RSAPrivate != nil && cfg.RSAPublic == nil {
+			cfg.RSAPublic = &cfg.RSAPrivate.PublicKey
+		}
 	default:
 		return nil, fmt.Errorf("auth: unsupported algorithm %q", cfg.Algorithm)
 	}
@@ -209,6 +225,25 @@ func NewSigner(cfg SignerConfig) (*Signer, error) {
 		cfg.RefreshTTL = 24 * time.Hour
 	}
 	return &Signer{cfg: cfg, now: time.Now}, nil
+}
+
+// Algorithm reports the signature algorithm the signer was
+// constructed with — useful for boot diagnostics that want to log
+// the actual crypto posture rather than a configured-but-maybe-
+// ignored value. (SignerFromEnv unconditionally builds HS256
+// regardless of what KAPP_JWT_ALGORITHM is set to; callers that
+// log the configured algorithm without consulting this accessor
+// can mislead operators into thinking their tokens are
+// asymmetrically signed when they are not.)
+func (s *Signer) Algorithm() Algorithm {
+	return s.cfg.Algorithm
+}
+
+// Leeway reports the validation leeway the signer was constructed
+// with — analogous diagnostic to Algorithm() above. SignerFromEnv
+// hardcodes 30s regardless of cfg.JWTLeeway.
+func (s *Signer) Leeway() time.Duration {
+	return s.cfg.Leeway
 }
 
 // Issue mints an access token from the supplied claim set. The

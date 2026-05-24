@@ -774,8 +774,15 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// logs.
 	secretsCfg := secretsConfigFromPlatform(cfg)
 	secretsProvider, secretsErr := secrets.NewFromConfig(ctx, secretsCfg)
-	operatorChoseNonEnv := secretsCfg.Backend != "" &&
-		!strings.EqualFold(secretsCfg.Backend, "env")
+	// Mirror the normalisation that secrets.NewFromConfig applies
+	// (TrimSpace + ToLower at internal/secrets/factory.go:55) so
+	// operators who set KAPP_SECRET_PROVIDER=" env " or "ENV" don't
+	// get a spurious "operator chose non-env" classification on the
+	// init-failure branch below. EqualFold alone handles case but
+	// not whitespace, and the factory's normalisation means a
+	// trimmed-and-lowered value of "env" reliably means env-backend.
+	normalisedBackend := strings.ToLower(strings.TrimSpace(secretsCfg.Backend))
+	operatorChoseNonEnv := normalisedBackend != "" && normalisedBackend != "env"
 	signerOpts := auth.SignerProviderOptions{
 		PrimaryRef:      cfg.JWTPrimaryRef,
 		VerifyRefs:      cfg.JWTVerifyRefs,
@@ -831,7 +838,34 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 			kchat := auth.NewHTTPKChatClient(os.Getenv("KCHAT_BASE_URL"), os.Getenv("KCHAT_API_KEY"))
 			authh.signer = signer
 			authh.svc = auth.NewSSOService(kchat, signer, sessionStore, pool, adminPool)
-			log.Printf("api: JWT auth enabled (provider=%s, algorithm=%s)", secretsProvider.Name(), signerOpts.Algorithm)
+			// Log the algorithm the signer ACTUALLY uses, not
+			// the operator-configured value — they diverge on
+			// the env path because auth.SignerFromEnv ignores
+			// signerOpts.Algorithm and unconditionally builds
+			// HS256. Logging the configured value there would
+			// mislead operators about their crypto posture
+			// (they'd see "algorithm=RS256" while tokens are
+			// actually HS256). signer.Algorithm() is the
+			// authoritative source post-construction.
+			actualAlg := signer.Algorithm()
+			log.Printf("api: JWT auth enabled (provider=%s, algorithm=%s)", secretsProvider.Name(), actualAlg)
+			// Surface env-path config drops as warnings so the
+			// operator knows their KAPP_JWT_* values were
+			// silently dropped on the floor. The env path is
+			// the legacy single-secret HS256-only path; an
+			// operator who reaches it with non-default JWT
+			// config almost certainly intended a non-env
+			// secrets backend that wasn't reachable.
+			if secretsProvider.Name() == "env" {
+				if signerOpts.Algorithm != "" && signerOpts.Algorithm != auth.AlgHS256 {
+					log.Printf("api: WARN — KAPP_JWT_ALGORITHM=%s is ignored when KAPP_SECRET_PROVIDER is env or empty (env path hardcodes HS256); set KAPP_SECRET_PROVIDER=file|aws|vault|gcp to use %s",
+						signerOpts.Algorithm, signerOpts.Algorithm)
+				}
+				if signerOpts.Leeway > 0 && signerOpts.Leeway != signer.Leeway() {
+					log.Printf("api: WARN — KAPP_JWT_LEEWAY=%s is ignored when KAPP_SECRET_PROVIDER is env or empty (env path hardcodes %s); set KAPP_SECRET_PROVIDER=file|aws|vault|gcp to honour the override",
+						signerOpts.Leeway, signer.Leeway())
+				}
+			}
 		} else {
 			log.Printf("api: JWT auth disabled (%v)", err)
 		}

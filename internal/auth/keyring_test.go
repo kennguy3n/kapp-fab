@@ -263,6 +263,39 @@ func TestSigner_BackwardsCompat_LegacyTokenWithoutKID(t *testing.T) {
 	}
 }
 
+// TestSigner_RS256_SingleKey_DerivesPublicFromPrivate pins the
+// contract that a legacy single-key RS256 signer constructed with
+// only RSAPrivate (RSAPublic nil) verifies tokens correctly — the
+// public key is derived from the private key at NewSigner time.
+// Without the derivation, verifySignature would silently skip the
+// nil-RSAPublic candidate and return ErrTokenSignature on every
+// verification, a regression from the pre-keyring behaviour that
+// surfaced this as "auth: RS256 verifier missing public key".
+func TestSigner_RS256_SingleKey_DerivesPublicFromPrivate(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	signer, err := NewSigner(SignerConfig{
+		Algorithm:  AlgRS256,
+		RSAPrivate: priv,
+		// RSAPublic deliberately nil to exercise the
+		// derivation path.
+		Issuer:   "k",
+		Audience: "k",
+	})
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+	token, err := signer.Issue(Claims{UserID: uuid.New(), TenantID: uuid.New()})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, err := signer.Verify(token); err != nil {
+		t.Fatalf("Verify after derive-public: %v", err)
+	}
+}
+
 func TestSigner_KeyRing_RS256_RoundTrip(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
