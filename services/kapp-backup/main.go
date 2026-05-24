@@ -138,6 +138,12 @@ var TenantScopedTables = []string{
 	// No FK to any other tenant-scoped table; ordering is
 	// irrelevant for restore.
 	"helpdesk_imap_state",
+	// Phase L (PR-7 Surface F) — helpdesk mailbox config.
+	// PK is (tenant_id, mailbox_id) — declared in
+	// tableConflictKeys. Listed alongside helpdesk_imap_state;
+	// neither has a FK to the other (the matching imap_state
+	// row may or may not exist before the worker first polls).
+	"helpdesk_mailboxes",
 }
 
 // manifest is the first record in every dump file.
@@ -393,6 +399,7 @@ var tableConflictKeys = map[string][]string{
 	"email_messages":      {"tenant_id", "message_id"},
 	"email_attachments":   {"tenant_id", "message_id", "file_id"},
 	"helpdesk_imap_state": {"tenant_id", "mailbox_id"},
+	"helpdesk_mailboxes":  {"tenant_id", "mailbox_id"},
 	// insights_query_cache PK is (tenant_id, query_hash, filter_hash) and
 	// insights_shares enforces a (tenant_id, resource_type, resource_id,
 	// grantee_type, grantee) UNIQUE on top of the (tenant_id, id) PK.
