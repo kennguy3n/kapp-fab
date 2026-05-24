@@ -21,9 +21,10 @@ const config: StorybookConfig = {
     // Mirror apps/web's tailwind + path-alias setup so stories
     // resolve @kapp/ui to source (so HMR works on component
     // edits) and Tailwind utilities resolve via the same
-    // @tailwindcss/vite plugin pipeline.  This also imports
-    // the same globals.css so design tokens are available in
-    // every story without per-story setup.
+    // @tailwindcss/vite plugin pipeline.  The shared design-
+    // system globals.css is imported by preview.ts from
+    // @kapp/ui/styles/globals.css so design tokens are
+    // available in every story without per-story setup.
     const tailwindcss = (await import("@tailwindcss/vite")).default;
     cfg.plugins = cfg.plugins ?? [];
     cfg.plugins.push(tailwindcss());

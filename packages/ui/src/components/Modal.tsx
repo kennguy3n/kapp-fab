@@ -145,9 +145,22 @@ ModalDescription.displayName = DialogPrimitive.Description.displayName;
  * ControlledModal preserves the old open-prop API for callers that
  * haven't migrated.  Internally it wraps the composable API.  Do
  * not add new features here — extend ModalContent instead.
+ *
+ * The `...rest` is forwarded to ModalContent (which wraps
+ * DialogPrimitive.Content), so we type the extra props as
+ * `ComponentPropsWithoutRef<typeof DialogPrimitive.Content>` rather
+ * than the broader `HTMLAttributes<HTMLDivElement>`.  A previous
+ * version typed this as plain div attributes which compiled (Radix
+ * forwards unknown props to its underlying div, so runtime worked)
+ * but accepted some HTML attributes that ModalContent rejects and
+ * rejected Radix-specific ones (`forceMount`, `onEscapeKeyDown`,
+ * `onPointerDownOutside`, …) that ModalContent does accept.  The
+ * stricter type aligns the surface area with what's actually
+ * usable.  `title` is omitted from the inherited bag because
+ * ControlledModal repurposes it as a string convenience prop.
  */
 export interface ControlledModalProps
-  extends Omit<HTMLAttributes<HTMLDivElement>, "title"> {
+  extends Omit<ComponentPropsWithoutRef<typeof DialogPrimitive.Content>, "title"> {
   open: boolean;
   onClose: () => void;
   title?: string;

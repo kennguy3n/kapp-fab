@@ -1,10 +1,22 @@
-/* Tailwind v4 single-import entry-point — no separate base/components/
+/*
+ * @kapp/ui design-system entry stylesheet.
+ *
+ * This file lives inside packages/ui (the package that owns the
+ * design system) rather than apps/web so the tokens travel with
+ * the components.  apps/web and apps/storybook both import it via
+ * the package's `./styles/globals.css` exports entry — see
+ * packages/ui/package.json — so there's a single source of truth
+ * for the design language regardless of which consumer is
+ * building.
+ *
+ * Tailwind v4 single-import entry-point — no separate base/components/
  * utilities layers required.  The @theme block below extends Tailwind's
  * default token set with our design-system tokens, so e.g. `bg-bg`,
  * `text-fg`, `border-border` resolve via CSS variables.  The
  * variables themselves are defined in :root and overridden in
- * .dark for dark-mode support; we toggle the class on <html> via
- * the theme controller (apps/web/src/lib/theme.ts).
+ * .dark for dark-mode support; consumers toggle the class on <html>
+ * via their own theme controller (apps/web/src/lib/theme.ts in the
+ * production app).
  */
 @import "tailwindcss";
 @import "tw-animate-css";

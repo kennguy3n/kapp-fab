@@ -361,10 +361,35 @@ export function DataGrid<TRow>({
   // parent owns the page state via `controlledPage`, we still
   // surface the clamp via `onPageChange` so its model stays in
   // sync with what's rendered.
+  //
+  // Controlled-without-callback footgun: if a caller wires
+  // `controlledPage` to its own state but forgets to also supply
+  // `onPageChange`, a data shrink causes the rendered page to
+  // diverge from the parent's controlled value forever (the
+  // component clamps each render, but has no channel to push the
+  // clamp back to the parent).  We warn at dev time when that
+  // combination occurs AND a clamp actually fires so the bug
+  // surfaces at the moment it becomes user-visible, not on
+  // every mount of an idle grid.
   const requestedPage = controlledPage ?? uncontrolledPage;
   const page = Math.min(Math.max(0, requestedPage), totalPages - 1);
   useEffect(() => {
     if (page === requestedPage) return;
+    if (
+      isDevBuild &&
+      controlledPage !== undefined &&
+      onPageChange === undefined
+    ) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[DataGrid] `controlledPage` was supplied without `onPageChange`. " +
+          "Data shrank so the rendered page is being clamped from " +
+          `${requestedPage} to ${page}, but the parent has no way to learn ` +
+          "about the clamp — its controlled value will keep re-overriding " +
+          "the rendered page on every render. Provide `onPageChange` so the " +
+          "parent's state can stay in sync with what DataGrid actually shows.",
+      );
+    }
     if (onPageChange) onPageChange(page);
     if (controlledPage === undefined) setUncontrolledPage(page);
   }, [page, requestedPage, onPageChange, controlledPage]);
