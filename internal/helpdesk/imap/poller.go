@@ -154,8 +154,19 @@ func (p *Poller) PollOnce(ctx context.Context) (int, error) {
 	if err := p.client.Connect(ctx); err != nil {
 		return 0, fmt.Errorf("imap: connect: %w", err)
 	}
+	// Detach the deferred Logout from ctx so the LOGOUT command
+	// actually transmits even when ctx was cancelled mid-cycle
+	// (e.g. operator-initiated Stop). Without this, the deferred
+	// Logout receives an already-cancelled context and the SMTP
+	// server is left holding a stale IMAP session until the
+	// server-side idle timeout fires (minutes), eating one of the
+	// per-IP simultaneous-connection slots on shared inboxes
+	// (Gmail caps at 15). A 5s budget is plenty: LOGOUT is a
+	// single short command, and we don't care about its result.
 	defer func() {
-		_ = p.client.Logout(ctx)
+		logoutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = p.client.Logout(logoutCtx)
 	}()
 	if err := p.client.Login(ctx, p.cfg.Username, p.cfg.Password); err != nil {
 		// Wrap auth errors so the Manager can fast-fail on them.
@@ -173,7 +184,14 @@ func (p *Poller) PollOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("imap: state get: %w", err)
 	}
-	// UIDVALIDITY mismatch \u2192 reset checkpoint, full re-scan.
+	// UIDVALIDITY mismatch -> reset checkpoint, full re-scan.
+	// Persist the new validity immediately (before the
+	// FetchAfter loop) so an empty post-reset mailbox doesn't
+	// re-detect the mismatch on every subsequent poll cycle
+	// and spam the log with the same warning forever. The
+	// Set(.., 0) is idempotent under the helpdesk_imap_state
+	// UPSERT, and any new messages picked up below will write
+	// an updated lastUID anyway.
 	if uidValid != sel.UIDValidity {
 		p.logger.Warn("imap: uidvalidity changed; resetting checkpoint",
 			slog.String("tenant_id", p.cfg.TenantID.String()),
@@ -181,6 +199,9 @@ func (p *Poller) PollOnce(ctx context.Context) (int, error) {
 			slog.Any("old_validity", uidValid),
 			slog.Any("new_validity", sel.UIDValidity))
 		lastUID = 0
+		if err := p.state.Set(ctx, p.cfg.TenantID, p.cfg.MailboxID, sel.UIDValidity, 0); err != nil {
+			return 0, fmt.Errorf("imap: persist uidvalidity reset: %w", err)
+		}
 	}
 
 	processed := 0
@@ -290,16 +311,45 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// managerEntry pairs a per-Poller cancel func with a monotonic
+// generation token. The token disambiguates two goroutines that
+// share the same MailboxID across a Stop -> Start sequence: the
+// goroutine's own defer-delete only fires when the live map entry
+// still belongs to that goroutine's generation.
+//
+// Without this token the following sequence leaks G2:
+//
+//  1. Start(X) registers cancel1 + spawns G1.
+//  2. Stop(X) deletes the map entry + calls cancel1 -- G1
+//     begins to shut down.
+//  3. Start(X) sees the map entry is absent, registers cancel2
+//     + spawns G2.
+//  4. G1's deferred cleanup unconditionally
+//     delete(m.entries, X) -- wipes G2's entry.
+//  5. Later Stop(X) returns false (no entry); StopAll() ranges
+//     the empty map then waits on wg -- G2's Add(1) is still
+//     pending so the wait blocks forever.
+//
+// With the token, step 4's defer notices m.entries[X].gen no
+// longer equals its own gen and leaves the entry alone. Stop(X)
+// + StopAll() continue to see G2's entry and tear it down
+// correctly.
+type managerEntry struct {
+	cancel context.CancelFunc
+	gen    uint64
+}
+
 // Manager supervises one Poller per (tenant, mailbox). It owns
 // the goroutine lifecycle: Start launches a Poller; Stop cancels
-// it; ListActive returns the current set of running pollers for
-// the operator dashboard.
+// it; ActiveMailboxes returns the current set of running pollers
+// for the operator dashboard.
 type Manager struct {
-	mu       sync.Mutex
-	cancels  map[uuid.UUID]context.CancelFunc
-	wg       sync.WaitGroup
+	mu        sync.Mutex
+	entries   map[uuid.UUID]managerEntry
+	nextGen   uint64
+	wg        sync.WaitGroup
 	newPoller func(Config) (*Poller, error)
-	logger   *slog.Logger
+	logger    *slog.Logger
 }
 
 // NewManager wires a Manager. newPoller is the factory: in
@@ -311,7 +361,7 @@ func NewManager(newPoller func(Config) (*Poller, error), logger *slog.Logger) *M
 		logger = slog.Default()
 	}
 	return &Manager{
-		cancels:   make(map[uuid.UUID]context.CancelFunc),
+		entries:   make(map[uuid.UUID]managerEntry),
 		newPoller: newPoller,
 		logger:    logger,
 	}
@@ -323,7 +373,7 @@ func NewManager(newPoller func(Config) (*Poller, error), logger *slog.Logger) *M
 func (m *Manager) Start(parent context.Context, cfg Config) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.cancels[cfg.MailboxID]; ok {
+	if _, ok := m.entries[cfg.MailboxID]; ok {
 		return nil
 	}
 	p, err := m.newPoller(cfg)
@@ -331,13 +381,21 @@ func (m *Manager) Start(parent context.Context, cfg Config) error {
 		return err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	m.cancels[cfg.MailboxID] = cancel
+	m.nextGen++
+	myGen := m.nextGen
+	m.entries[cfg.MailboxID] = managerEntry{cancel: cancel, gen: myGen}
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		defer func() {
 			m.mu.Lock()
-			delete(m.cancels, cfg.MailboxID)
+			// Only remove the entry if it still belongs to
+			// THIS goroutine's generation. A later Start
+			// (after Stop) installs a fresh gen, and we
+			// must not wipe it.
+			if e, ok := m.entries[cfg.MailboxID]; ok && e.gen == myGen {
+				delete(m.entries, cfg.MailboxID)
+			}
 			m.mu.Unlock()
 		}()
 		if err := p.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -354,14 +412,14 @@ func (m *Manager) Start(parent context.Context, cfg Config) error {
 // Poller was running for that mailbox.
 func (m *Manager) Stop(mailboxID uuid.UUID) bool {
 	m.mu.Lock()
-	cancel, ok := m.cancels[mailboxID]
+	e, ok := m.entries[mailboxID]
 	if !ok {
 		m.mu.Unlock()
 		return false
 	}
-	delete(m.cancels, mailboxID)
+	delete(m.entries, mailboxID)
 	m.mu.Unlock()
-	cancel()
+	e.cancel()
 	return true
 }
 
@@ -369,11 +427,18 @@ func (m *Manager) Stop(mailboxID uuid.UUID) bool {
 // exit. Used at worker shutdown.
 func (m *Manager) StopAll() {
 	m.mu.Lock()
-	for _, c := range m.cancels {
+	// Collect cancel funcs under the lock, then release the
+	// lock before invoking them so a goroutine's defer-cleanup
+	// (which also takes m.mu) doesn't deadlock against us.
+	cancels := make([]context.CancelFunc, 0, len(m.entries))
+	for _, e := range m.entries {
+		cancels = append(cancels, e.cancel)
+	}
+	m.entries = make(map[uuid.UUID]managerEntry)
+	m.mu.Unlock()
+	for _, c := range cancels {
 		c()
 	}
-	m.cancels = make(map[uuid.UUID]context.CancelFunc)
-	m.mu.Unlock()
 	m.wg.Wait()
 }
 
@@ -382,8 +447,8 @@ func (m *Manager) StopAll() {
 func (m *Manager) ActiveMailboxes() []uuid.UUID {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]uuid.UUID, 0, len(m.cancels))
-	for id := range m.cancels {
+	out := make([]uuid.UUID, 0, len(m.entries))
+	for id := range m.entries {
 		out = append(out, id)
 	}
 	return out

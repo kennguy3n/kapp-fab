@@ -454,6 +454,119 @@ func TestManager_DuplicateStartIsNoop(t *testing.T) {
 	}
 }
 
+// TestPollOnce_UIDValidityResetOnEmptyMailboxPersists pins the
+// fix for the "UIDVALIDITY reset on empty mailbox spams the log
+// forever" regression: when validity changes and no messages
+// are present, the new validity MUST be persisted immediately
+// so the next poll doesn't re-detect the mismatch.
+func TestPollOnce_UIDValidityResetOnEmptyMailboxPersists(t *testing.T) {
+	client := &fakeClient{
+		selectRes: SelectResult{UIDValidity: 200, UIDNext: 1, Exists: 0},
+		// Empty mailbox: FetchAfter returns no messages.
+		fetchByCall: [][]FetchedMessage{},
+	}
+	state := &fakeUIDState{uidValidity: 100, lastUID: 99}
+	processor := &fakeProcessor{}
+	p, _ := NewPoller(Config{
+		TenantID: uuid.New(), MailboxID: uuid.New(),
+		PollInterval: time.Second,
+	}, client, state, processor, nil)
+
+	processed, err := p.PollOnce(context.Background())
+	if err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if processed != 0 {
+		t.Errorf("expected 0 processed, got %d", processed)
+	}
+	// The new validity MUST be persisted even though the
+	// mailbox was empty. Without the fix, state.uidValidity
+	// stays at 100 and every subsequent poll re-warns.
+	if state.uidValidity != 200 {
+		t.Errorf("expected uidValidity persisted as 200, got %d", state.uidValidity)
+	}
+	if state.lastUID != 0 {
+		t.Errorf("expected lastUID reset to 0, got %d", state.lastUID)
+	}
+	if state.setCalls < 1 {
+		t.Errorf("expected at least 1 Set call (persist new validity), got %d", state.setCalls)
+	}
+}
+
+// TestManager_RestartAfterStopPreservesNewGoroutine pins the
+// fix for the goroutine-leak race in Manager.Start: when a
+// Stop -> Start sequence runs on the same mailbox and the
+// first goroutine hasn't yet finished its deferred cleanup,
+// G1's defer-delete must NOT wipe G2's map entry.
+//
+// Repro: Start G1 with a poller that exits immediately after
+// ctx is cancelled. Stop the mailbox (causing G1 to start
+// shutting down). Immediately Start the same mailbox again
+// (registering G2 before G1's defer fires). Wait for G1 to
+// finish, then verify G2 is still tracked + StopAll terminates
+// cleanly.
+func TestManager_RestartAfterStopPreservesNewGoroutine(t *testing.T) {
+	mailboxID := uuid.New()
+	// Use a slow-Connect poller so we can sequence Stop +
+	// Start before the goroutine reaches Run's main loop.
+	makePoller := func(cfg Config) (*Poller, error) {
+		client := &fakeClient{
+			// Block in Connect until ctx is cancelled, then
+			// return ctx.Err(). This guarantees PollOnce
+			// exits as soon as Stop fires.
+			connectErr: errors.New("test: connect blocked"),
+		}
+		return NewPoller(cfg, client, &fakeUIDState{}, &fakeProcessor{}, nil)
+	}
+	m := NewManager(makePoller, nil)
+
+	cfg := Config{
+		TenantID: uuid.New(), MailboxID: mailboxID,
+		PollInterval: 5 * time.Millisecond,
+		MaxBackoff:   10 * time.Millisecond,
+	}
+	if err := m.Start(context.Background(), cfg); err != nil {
+		t.Fatalf("Start G1: %v", err)
+	}
+	// Let G1 enter Run + start backing off.
+	time.Sleep(20 * time.Millisecond)
+	if !m.Stop(mailboxID) {
+		t.Fatalf("Stop G1 returned false")
+	}
+	// IMMEDIATELY restart -- G1's defer-cleanup is racing
+	// against this Start. Without the gen-token fix, G1's
+	// defer would wipe G2's entry once G1's Run returns.
+	if err := m.Start(context.Background(), cfg); err != nil {
+		t.Fatalf("Start G2: %v", err)
+	}
+	// Give both goroutines time to settle: G1 to finish its
+	// defer, G2 to register + enter Run.
+	time.Sleep(50 * time.Millisecond)
+
+	active := m.ActiveMailboxes()
+	if len(active) != 1 || active[0] != mailboxID {
+		t.Fatalf("expected exactly G2 active for %s, got %v", mailboxID, active)
+	}
+
+	// StopAll MUST terminate cleanly. With the bug, G2's
+	// entry would be missing (deleted by G1's stale defer),
+	// so the cancel call would never reach G2 -- but G2's
+	// wg.Add(1) is still pending, so wg.Wait() would hang.
+	// We gate on a deadline to catch the hang as a test
+	// failure rather than a timeout.
+	done := make(chan struct{})
+	go func() {
+		m.StopAll()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// success
+	case <-time.After(2 * time.Second):
+		t.Fatalf("StopAll hung -- goroutine leak indicates the Manager race regressed")
+	}
+}
+
 // TestManager_StopAllWaitsForExit pins clean shutdown: StopAll
 // returns AFTER every Poller goroutine has finished.
 func TestManager_StopAllWaitsForExit(t *testing.T) {
