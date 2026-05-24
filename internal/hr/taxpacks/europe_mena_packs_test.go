@@ -3,6 +3,7 @@ package taxpacks
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
@@ -18,8 +19,9 @@ import (
 //   - CH_CANTONAL_TAX (canton average burden, Quellensteuer-liable
 //                       only — flat per-canton rate × gross)
 //   - CH_AHV       (5.3% AHV/IV/EO, every employee, no ceiling)
-//   - CH_ALV       (1.1% ALV, every employee, capped at CHF
-//                   12,350 / month)
+//   - CH_ALV       (1.1% ALV, every employee, capped via the
+//                   annual ceiling CHF 148,200 prorated by
+//                   period-days/365.25)
 //
 // Gating (chIsQuellensteuerLiable):
 //   - Non-resident                          → liable (cross-border)
@@ -119,10 +121,13 @@ func TestCHPackSwissCitizenEmptyPermit(t *testing.T) {
 	}
 }
 
-// TestCHPackALVMonthlyCap pins the CHF 12,350 / month ALV
-// ceiling. A high earner at CHF 20,000 / month gross:
+// TestCHPackALVMonthlyCap pins the ALV ceiling for a standard
+// calendar-month slip. The cap is held annually (CHF 148,200) and
+// prorated by the slip's period-days/365.25 — for Jan 1-31 (31
+// days) the cap is 148,200 × 31/365.25 ≈ 12,578.23, so a high
+// earner at CHF 20,000 / month gross:
 //   AHV: 20,000 × 5.3% = 1,060.00 (no cap)
-//   ALV: min(20000, 12350) × 1.1% = 12,350 × 0.011 = 135.85
+//   ALV: min(20000, 12578.23) × 1.1% = 12,578.23 × 0.011 ≈ 138.36
 func TestCHPackALVMonthlyCap(t *testing.T) {
 	pack, _ := Lookup("CH")
 	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
@@ -132,9 +137,60 @@ func TestCHPackALVMonthlyCap(t *testing.T) {
 	if ahv := codes["CH_AHV"]; !ahv.Equal(decimal.NewFromInt(1060)) {
 		t.Errorf("CH_AHV = %s; want 1,060.00 (20000 × 5.3%%, no cap)", ahv)
 	}
-	if alv := codes["CH_ALV"]; !alv.Equal(decimal.NewFromFloat(135.85)) {
-		t.Errorf("CH_ALV = %s; want 135.85 (capped at 12,350 × 1.1%%)", alv)
+	if alv := codes["CH_ALV"]; !alv.Equal(decimal.NewFromFloat(138.36)) {
+		t.Errorf("CH_ALV = %s; want 138.36 (capped at 12,578.23 × 1.1%% for a 31-day month)", alv)
 	}
+}
+
+// TestCHPackALVCapProratedAcrossPeriods pins the period-aware ALV
+// cap proration. The cap is held as an annual figure (CHF
+// 148,200) and scaled by days/365.25 so non-monthly slips enforce
+// the right ceiling. Without this proration the cap would either
+// over-restrict a quarterly slip (cap = 12,350 << real ceiling)
+// or under-restrict a fortnightly slip (cap = 12,350 >> real
+// ceiling). Demonstrated against two off-cycle periods:
+//
+//   Fortnightly slip (Jan 1-14 = 14 days), gross CHF 7,000:
+//     periodCap = 148,200 × 14/365.25 ≈ 5,680.49
+//     alvBase   = min(7000, 5680.49) = 5680.49 (cap triggers)
+//     ALV       = 5,680.49 × 0.011 ≈ 62.49
+//
+//   Quarterly slip (Jan 1-Apr 1 = 91 days), gross CHF 50,000:
+//     periodCap = 148,200 × 91/365.25 ≈ 36,923.20
+//     alvBase   = min(50000, 36923.20) = 36923.20 (cap triggers)
+//     ALV       = 36,923.20 × 0.011 ≈ 406.16
+func TestCHPackALVCapProratedAcrossPeriods(t *testing.T) {
+	pack, _ := Lookup("CH")
+
+	t.Run("fortnightly slip triggers prorated cap", func(t *testing.T) {
+		out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+			Resident: true, PermitType: "C", Canton: "ZH",
+		}, decimal.NewFromInt(7000), PayPeriod{
+			Start: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+			End:   time.Date(2026, 1, 14, 0, 0, 0, 0, time.UTC),
+		})
+		codes := indexByCode(out)
+		if alv := codes["CH_ALV"]; !alv.Equal(decimal.NewFromFloat(62.49)) {
+			t.Errorf("fortnightly CH_ALV = %s; want 62.49 (prorated cap 5680.49 × 1.1%%) "+
+				"— a monthly-only cap of 12,350 would let the full 7,000 through and "+
+				"yield 77.00, under-restricting the slip relative to BSV's annual ceiling", alv)
+		}
+	})
+
+	t.Run("quarterly slip triggers prorated cap", func(t *testing.T) {
+		out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+			Resident: true, PermitType: "C", Canton: "ZH",
+		}, decimal.NewFromInt(50000), PayPeriod{
+			Start: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+			End:   time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+		})
+		codes := indexByCode(out)
+		if alv := codes["CH_ALV"]; !alv.Equal(decimal.NewFromFloat(406.16)) {
+			t.Errorf("quarterly CH_ALV = %s; want 406.16 (prorated cap 36923.20 × 1.1%%) "+
+				"— a monthly-only cap of 12,350 would over-restrict at 135.85, "+
+				"under-collecting against BSV's annual ceiling", alv)
+		}
+	})
 }
 
 // TestCHPackNonResidentFallbackCanton pins the cantonal-lookup
@@ -180,7 +236,7 @@ func TestCHPackNonResidentFallbackCanton(t *testing.T) {
 //   periodTax    ≈ 135,470.64 × 0.084875 ≈ 11,497.85
 //   cantonal (GE) = 100,000 × 0.130 = 13,000.00
 //   AHV           = 100,000 × 0.053 = 5,300.00
-//   ALV (cap)     = 12,350 × 0.011 = 135.85
+//   ALV (cap)     = 12,578.23 × 0.011 ≈ 138.36 (31-day month cap)
 func TestCHPackTopBracketHighEarner(t *testing.T) {
 	pack, _ := Lookup("CH")
 	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
@@ -196,8 +252,8 @@ func TestCHPackTopBracketHighEarner(t *testing.T) {
 	if ahv := codes["CH_AHV"]; !ahv.Equal(decimal.NewFromInt(5300)) {
 		t.Errorf("CH_AHV = %s; want 5,300.00", ahv)
 	}
-	if alv := codes["CH_ALV"]; !alv.Equal(decimal.NewFromFloat(135.85)) {
-		t.Errorf("CH_ALV = %s; want 135.85 (ALV cap)", alv)
+	if alv := codes["CH_ALV"]; !alv.Equal(decimal.NewFromFloat(138.36)) {
+		t.Errorf("CH_ALV = %s; want 138.36 (31-day prorated cap × 1.1%%)", alv)
 	}
 }
 

@@ -179,15 +179,27 @@ var (
 	// Total employee share      : 5.30%
 	chAHVEmployeeRate = dec("0.053")
 
-	// ALV (unemployment) 2025 employee rate + monthly ceiling
+	// ALV (unemployment) 2025 employee rate + annual ceiling
 	// (CHF 148,200 / yr = CHF 12,350 / month). Above the
 	// ceiling, the employee's *additional* contribution drops to
 	// 0% (the employer Solidarity branch is not an employee
-	// deduction). This pack therefore caps the ALV base at the
-	// monthly ceiling; multi-month payouts above the cap should
-	// reconcile through the year-end adjustment.
+	// deduction).
+	//
+	// The cap is held as an annual figure (CHF 148,200) and
+	// prorated by the slip's period-fraction (days/365.25), so
+	// non-monthly cadences enforce the ceiling correctly. The
+	// alternative — caching only a monthly figure and applying it
+	// directly to period gross — over-restricts quarterly /
+	// year-end-bonus slips and fails to restrict fortnightly /
+	// weekly slips at the right point (a CHF 7,000/fortnight slip
+	// has a monthly-equivalent gross of ~CHF 15,000 which is over
+	// the CHF 12,350 monthly cap, but the period gross of 7,000
+	// is under that cap so the monthly-only ceiling never trips).
+	// Period-aware caps match BSV's own year-to-date reconciliation
+	// logic which is computed against the annual ceiling, not the
+	// monthly slice.
 	chALVEmployeeRate = dec("0.011")
-	chALVMonthlyCap   = dec("12350")
+	chALVAnnualCap    = dec("148200")
 
 	chAnnualDays = decimal.NewFromFloat(365.25)
 )
@@ -199,8 +211,9 @@ var (
 //   - CH_CANTONAL_TAX (cantonal + communal Quellensteuer portion) —
 //     same gating, rate from Canton lookup;
 //   - CH_AHV (uncapped 5.3% employee share);
-//   - CH_ALV (capped 1.1% employee share, CHF 12,350 / month
-//     ceiling).
+//   - CH_ALV (1.1% employee share with period-prorated cap derived
+//     from the annual ceiling of CHF 148,200 — ~CHF 12,350 for a
+//     calendar month, ~CHF 5,681 for a fortnight, etc.).
 //
 // Negative or zero gross / period return nil.
 func (chPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
@@ -253,10 +266,20 @@ func (chPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		})
 	}
 
-	// ALV — capped at CHF 12,350 / month.
+	// ALV — annual ceiling CHF 148,200 prorated to the slip's
+	// period length (days/365.25). For a standard ~30-day month
+	// this yields the familiar ~CHF 12,350 monthly cap; for a
+	// biweekly slip the cap is CHF 148,200 * 14/365.25 ≈ CHF
+	// 5,681; for a quarterly slip it is CHF 148,200 * 91/365.25
+	// ≈ CHF 36,915. This is the period-correct enforcement of
+	// BSV's annual ceiling and matches what the year-end ALV
+	// reconciliation expects.
+	alvPeriodCap := chALVAnnualCap.
+		Mul(decimal.NewFromInt(int64(days))).
+		Div(chAnnualDays)
 	alvBase := gross
-	if alvBase.GreaterThan(chALVMonthlyCap) {
-		alvBase = chALVMonthlyCap
+	if alvBase.GreaterThan(alvPeriodCap) {
+		alvBase = alvPeriodCap
 	}
 	if alv := alvBase.Mul(chALVEmployeeRate).Round(2); alv.IsPositive() {
 		out = append(out, Deduction{
