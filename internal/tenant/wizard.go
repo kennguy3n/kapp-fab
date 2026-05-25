@@ -141,6 +141,7 @@ func DefaultLocaleForCountry(country string) string {
 		return "pt-BR"
 	case "MX", "AR", "CO", "CL", "PE", "CR", "PA", "UY", "EC", "DO", "GT", "PY":
 		return "es"
+	// SCAFFOLD: cmd/new-tax-pack inserts new DefaultLocaleForCountry cases above this line.
 	default:
 		return "en"
 	}
@@ -206,6 +207,7 @@ func DefaultCoATemplateForCountry(country string) string {
 		return "cl_ifrs_basic"
 	case "CO", "PE", "CR", "PA", "UY", "EC", "DO", "GT", "PY", "TT":
 		return "latam_ifrs_basic"
+	// SCAFFOLD: cmd/new-tax-pack inserts new DefaultCoATemplateForCountry cases above this line.
 	default:
 		return "ifrs_basic"
 	}
@@ -351,6 +353,8 @@ var coaCLIFRSBasic []byte
 //go:embed coa_templates/latam_ifrs_basic.json
 var coaLATAMIFRSBasic []byte
 
+// SCAFFOLD: cmd/new-tax-pack inserts new //go:embed directives + var decls above this line.
+
 // chartOfAccountsTemplates maps the wizard's template name to the
 // embedded JSON payload. Adding a new template is a matter of dropping
 // a JSON file in coa_templates/ and registering it here. Country-
@@ -383,6 +387,7 @@ var chartOfAccountsTemplates = map[string][]byte{
 	"ar_rtfacpce_basic": coaARRTBasic,
 	"cl_ifrs_basic":     coaCLIFRSBasic,
 	"latam_ifrs_basic":  coaLATAMIFRSBasic,
+	// SCAFFOLD: cmd/new-tax-pack inserts new chartOfAccountsTemplates entries above this line.
 }
 
 // templateAccount is the shape each entry in a CoA template takes. The

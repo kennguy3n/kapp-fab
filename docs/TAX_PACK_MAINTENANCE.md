@@ -263,3 +263,29 @@ The maintainer should:
    province whose brackets shifted — at minimum ON, QC, BC, AB
    (the four largest by employee population) should always have a
    pinned case.
+
+## Community contribution model
+
+For contributors adding a brand-new country pack (rather than
+maintaining an existing one), the end-to-end walkthrough lives in
+[`docs/CONTRIBUTING_TAX_PACKS.md`](CONTRIBUTING_TAX_PACKS.md). The
+short version:
+
+1. Run the scaffold CLI: `go run ./cmd/new-tax-pack -cc XX -name "Country Name"`.
+   This generates a compileable skeleton across all the files this
+   document touches (pack, CoA, wizard maps, optional locale).
+2. Fill in the statutory rates, brackets, and caps in the generated
+   pack file with citations to the revenue authority's published
+   source.
+3. Author the regression test matrix for the regional test file.
+4. Open a PR; the `tax-pack-pr` workflow runs scoped tests + lint
+   on every push.
+
+The annual review workflow (`.github/workflows/tax-rate-review.yml`)
+now covers every registered pack. The January-1st auto-opened issue
+walks the full per-country checklist; mid-year rate changes get a
+manual `workflow_dispatch` trigger.
+
+For organisations interested in long-term ownership of a country
+pack, the partner-program section in `CONTRIBUTING_TAX_PACKS.md`
+documents the named-reviewer + scoped commit-access model.

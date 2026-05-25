@@ -1,0 +1,76 @@
+name: tax-pack-pr
+
+# Targeted CI for tax-pack contributions. Triggers on PRs touching
+# the country-pack surface (the pack Go file, the embedded CoA
+# template, the wizard mappings, or the locale catalogues) and runs
+# the per-country regression matrices + lint that the contributor
+# walkthrough in docs/CONTRIBUTING_TAX_PACKS.md says must pass before
+# the PR is mergeable.
+#
+# This workflow exists alongside (not instead of) the main ci.yml so
+# external contributors who run a fork-PR get fast, scoped feedback
+# without waiting for the full backend matrix on every commit. The
+# canonical CI in ci.yml still runs the same Go test set on main, so
+# this workflow is a fast-feedback companion, not a replacement.
+#
+# Why not just narrow paths in ci.yml: paths-filter would short-
+# circuit the OTHER jobs in ci.yml (golangci-lint, buf lint, web
+# build, etc.) which are also required for a clean merge. Splitting
+# the tax-pack feedback into its own workflow keeps the merge-gating
+# matrix intact while letting community contributors iterate on
+# their pack file without waiting for the unrelated 14 other jobs.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "internal/hr/taxpacks/**"
+      - "internal/tenant/coa_templates/**"
+      - "internal/tenant/wizard.go"
+      - "internal/i18n/locales/**"
+      - "apps/web/src/locales/**"
+      - "apps/web/src/lib/i18n/locales.ts"
+      - "apps/web/src/pages/SetupWizardPage.tsx"
+      - "cmd/new-tax-pack/**"
+      - "docs/TAX_PACK_MAINTENANCE.md"
+      - "docs/CONTRIBUTING_TAX_PACKS.md"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tax-pack tests (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go mod download
+        run: go mod download
+      - name: tax-pack registration + per-country regression
+        run: go test -race ./internal/hr/taxpacks/...
+      - name: CoA templates + wizard mappings
+        run: go test -race ./internal/tenant/...
+      - name: i18n catalogues (backend + parity with frontend)
+        run: go test -race ./internal/i18n/...
+      - name: scaffold CLI tests
+        run: go test -race ./cmd/new-tax-pack/...
+
+  lint:
+    name: tax-pack lint (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Run golangci-lint on only the tax-pack-touching packages so
+      # the run is fast (the full main-branch lint is in ci.yml).
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: ./internal/hr/taxpacks/... ./internal/tenant/... ./cmd/new-tax-pack/...

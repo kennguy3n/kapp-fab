@@ -47,6 +47,7 @@ const COA_TEMPLATES = [
   { value: "ar_rtfacpce_basic", label: "Argentina — RT-FACPCE + Ganancias / Jubilación / IVA" },
   { value: "cl_ifrs_basic", label: "Chile — IFRS + Impuesto Único / AFP / Salud / IVA" },
   { value: "latam_ifrs_basic", label: "LATAM — IFRS + Generic Payroll Withholding (CO/PE/CR/PA/UY/EC/DO/GT/PY/TT)" },
+  // SCAFFOLD: cmd/new-tax-pack inserts new COA_TEMPLATES entries above this line.
 ];
 
 // defaultCoATemplateForCountry mirrors
@@ -99,6 +100,7 @@ const COUNTRY_COA_DEFAULTS: Record<string, string> = {
   GT: "latam_ifrs_basic",
   PY: "latam_ifrs_basic",
   TT: "latam_ifrs_basic",
+  // SCAFFOLD: cmd/new-tax-pack inserts new COUNTRY_COA_DEFAULTS entries above this line.
 };
 
 function defaultCoATemplateForCountry(country: string): string {

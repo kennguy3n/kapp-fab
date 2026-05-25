@@ -59,6 +59,7 @@ export const SupportedLocales: readonly LocaleInfo[] = [
   { tag: "th", name: "ไทย", direction: "ltr" },
   { tag: "id", name: "Bahasa Indonesia", direction: "ltr" },
   { tag: "vi", name: "Tiếng Việt", direction: "ltr" },
+  // SCAFFOLD: cmd/new-tax-pack inserts new SupportedLocales entries above this line.
 ];
 
 /**
@@ -193,6 +194,7 @@ const COUNTRY_LOCALE_DEFAULTS: Record<string, string> = {
   DO: "es",
   GT: "es",
   PY: "es",
+  // SCAFFOLD: cmd/new-tax-pack inserts new COUNTRY_LOCALE_DEFAULTS entries above this line.
 };
 
 /**
