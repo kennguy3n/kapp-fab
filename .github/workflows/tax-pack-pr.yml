@@ -63,18 +63,36 @@ jobs:
     name: tax-pack lint (Go)
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 mirrors ci.yml so --new-from-rev's merge-base
+      # resolution works regardless of how long-lived the PR branch
+      # is. Without full history the merge-base resolves to HEAD and
+      # the ratchet degenerates to a full-codebase lint.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
+      # Resolve the merge base against origin/<base-ref> so the
+      # --new-from-rev ratchet diffs against the actual divergence
+      # point, not the tip of main (otherwise a PR rebased onto an
+      # outdated main would surface pre-existing issues from main's
+      # recent commits as "new" findings). Mirrors ci.yml's LINT_BASE
+      # computation.
+      - name: compute lint base
+        run: |
+          BASE_REF="${{ github.base_ref }}"
+          git fetch --no-tags origin "$BASE_REF"
+          MERGE_BASE="$(git merge-base "HEAD" "origin/$BASE_REF")"
+          echo "LINT_BASE=${MERGE_BASE}" >> "$GITHUB_ENV"
       # Run golangci-lint on only the tax-pack-touching packages so
       # the run is fast (the full main-branch lint is in ci.yml).
-      # Version is pinned to match ci.yml's GOLANGCI_LINT_VERSION so
-      # the linter binary is built with a Go toolchain >= the repo's
+      # Version pinned to match ci.yml's GOLANGCI_LINT_VERSION so the
+      # linter binary is built with a Go toolchain >= the repo's
       # go.mod target (the @v6 action ships a binary built against
       # go1.24 which can't load configs targeting go1.25+).
       - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.5.0
-          args: --timeout=5m ./internal/hr/taxpacks/... ./internal/tenant/... ./cmd/new-tax-pack/...
+          args: --timeout=5m --new-from-rev=${{ env.LINT_BASE }} ./internal/hr/taxpacks/... ./internal/tenant/... ./cmd/new-tax-pack/...
