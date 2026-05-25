@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/kennguy3n/kapp-fab/internal/crm"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
@@ -73,6 +75,11 @@ type CommandDispatcher struct {
 	insightsQueries    *insights.QueryStore
 	insightsDashboards *insights.DashboardStore
 	insightsRunner     *insights.Runner
+	// Phase N5 — budgets. Optional; when nil the /budget slash
+	// command answers with an informational message rather than
+	// crashing, so the bridge still runs on plans that don't
+	// include the finance feature.
+	budgets *finance.BudgetStore
 	// dashboardBase is the URL prefix the dashboard digest card links
 	// to (e.g. https://app.example.com). Empty disables the deep link.
 	dashboardBase string
@@ -184,9 +191,11 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 			return CommandResponse{Text: fmt.Sprintf("/shift: %v", err)}, nil
 		}
 		return d.createRecord(ctx, req, hr.KTypeShiftAssignment, data)
+	case "budget":
+		return d.budgetCommand(ctx, req)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /project, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /reverse-stock-move, /batch, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /shift, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /project, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /stock, /reverse-stock-move, /batch, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /shift, /budget, /help",
 		}, nil
 	default:
 		return CommandResponse{
@@ -1243,4 +1252,152 @@ func shiftAssignmentFromArgs(args []string) (map[string]any, error) {
 		data["notes"] = strings.Join(args[3:], " ")
 	}
 	return data, nil
+}
+
+// budgetCommand surfaces the budget module over slash commands.
+// Usage:
+//
+//	/budget list                 — list all budgets in the tenant
+//	/budget variance <name|id>   — render MTD variance for one
+//	/budget variance             — render variance for the most
+//	                                recent active budget (zero-arg
+//	                                shortcut for the common case)
+//
+// Creating budgets is intentionally NOT exposed here — defining
+// 12 monthly amounts per account is a multi-line spreadsheet edit
+// that belongs in the web UI, not a single-line slash argument
+// string. The agent tool finance.create_budget covers the LLM
+// channel where multi-line JSON is natural.
+func (d *CommandDispatcher) budgetCommand(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.budgets == nil {
+		return CommandResponse{Text: "/budget: budget surface not configured for this deployment"}, nil
+	}
+	if req.TenantID == uuid.Nil {
+		return CommandResponse{Text: "/budget: tenant context required"}, nil
+	}
+	sub := "variance"
+	args := req.Args
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+		args = args[1:]
+	}
+	switch sub {
+	case "list":
+		return d.budgetListCommand(ctx, req)
+	case "variance":
+		return d.budgetVarianceCommand(ctx, req, args)
+	case "help":
+		return CommandResponse{Text: "/budget usage: /budget list | /budget variance [name|id]"}, nil
+	default:
+		return CommandResponse{Text: fmt.Sprintf("/budget: unknown subcommand %q (try `list` or `variance`)", sub)}, nil
+	}
+}
+
+func (d *CommandDispatcher) budgetListCommand(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	budgets, err := d.budgets.ListBudgets(ctx, req.TenantID)
+	if err != nil {
+		return CommandResponse{}, err
+	}
+	if len(budgets) == 0 {
+		return CommandResponse{Text: "No budgets defined for this tenant yet."}, nil
+	}
+	card := Card{Title: "Budgets", Subtitle: fmt.Sprintf("%d budget(s)", len(budgets))}
+	for i := range budgets {
+		b := &budgets[i]
+		cc := b.CostCenter
+		if cc == "" {
+			cc = "—"
+		}
+		card.Fields = append(card.Fields, CardKV{
+			Label: fmt.Sprintf("%s (FY%d, %s)", b.Name, b.FiscalYear, b.Status),
+			Value: fmt.Sprintf("CC %s · id %s", cc, b.ID),
+		})
+	}
+	return CommandResponse{Card: &card}, nil
+}
+
+func (d *CommandDispatcher) budgetVarianceCommand(ctx context.Context, req CommandRequest, args []string) (CommandResponse, error) {
+	budget, err := d.resolveBudget(ctx, req.TenantID, args)
+	if err != nil {
+		return CommandResponse{Text: fmt.Sprintf("/budget variance: %v", err)}, nil
+	}
+	now := time.Now().UTC()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	report, err := d.budgets.BudgetVsActual(ctx, req.TenantID, finance.VarianceQuery{
+		BudgetID: budget.ID,
+		From:     monthStart,
+		To:       now,
+	})
+	if err != nil {
+		return CommandResponse{}, err
+	}
+	card := Card{
+		Title:    fmt.Sprintf("Variance — %s (MTD)", report.BudgetName),
+		Subtitle: fmt.Sprintf("FY%d · %s → %s", report.FiscalYear, monthStart.Format("2006-01-02"), now.Format("2006-01-02")),
+	}
+	card.Fields = append(card.Fields,
+		CardKV{Label: "Plan", Value: report.TotalBudgeted.String()},
+		CardKV{Label: "Actual", Value: report.TotalActual.String()},
+		CardKV{Label: "Variance", Value: report.TotalVariance.String()},
+	)
+	// Highlight the top 5 lines by absolute variance so users see
+	// the actionable signal first.
+	rows := append([]finance.VarianceRow(nil), report.Rows...)
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].Variance.Abs().GreaterThan(rows[j].Variance.Abs())
+	})
+	topN := 5
+	if len(rows) < topN {
+		topN = len(rows)
+	}
+	for i := 0; i < topN; i++ {
+		row := &rows[i]
+		card.Fields = append(card.Fields, CardKV{
+			Label: fmt.Sprintf("%s @ %s", row.AccountCode, row.Period),
+			Value: fmt.Sprintf("actual %s · plan %s · var %s (%s%%)",
+				row.Actual.String(), row.Budgeted.String(),
+				row.Variance.String(),
+				row.VariancePct.Mul(decimal.NewFromInt(100)).Round(1).String()),
+		})
+	}
+	return CommandResponse{Card: &card}, nil
+}
+
+// resolveBudget interprets the trailing /budget argument: a UUID, a
+// case-insensitive name match, or no argument at all (in which case
+// the most recently created active budget is returned). Returns an
+// error if no candidate matches.
+func (d *CommandDispatcher) resolveBudget(ctx context.Context, tenantID uuid.UUID, args []string) (*finance.Budget, error) {
+	budgets, err := d.budgets.ListBudgets(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if len(budgets) == 0 {
+		return nil, errors.New("no budgets defined for this tenant")
+	}
+	if len(args) == 0 {
+		// Default to the most-recent active budget; fall back
+		// to the most-recent non-closed budget if none are active.
+		for i := range budgets {
+			if budgets[i].Status == finance.BudgetStatusActive {
+				return &budgets[i], nil
+			}
+		}
+		return &budgets[0], nil
+	}
+	needle := strings.Join(args, " ")
+	if id, err := uuid.Parse(needle); err == nil {
+		for i := range budgets {
+			if budgets[i].ID == id {
+				return &budgets[i], nil
+			}
+		}
+		return nil, fmt.Errorf("no budget with id %s", id)
+	}
+	for i := range budgets {
+		if strings.EqualFold(budgets[i].Name, needle) {
+			return &budgets[i], nil
+		}
+	}
+	return nil, fmt.Errorf("no budget named %q", needle)
 }

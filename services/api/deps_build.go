@@ -29,6 +29,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/exporter"
 	"github.com/kennguy3n/kapp-fab/internal/files"
+	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/forms"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk/mailboxes"
@@ -588,6 +589,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	agents.RegisterCRMTools(executor)
 	agents.RegisterProjectTools(executor)
 	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster, paymentPoster)
+	agents.RegisterBudgetTools(executor, finance.NewBudgetStore(pool))
 	agents.RegisterInventoryTools(executor, inventoryStore)
 	agents.RegisterInventoryReorderTool(executor, inventory.NewReorderHandler(recordStore, inventoryStore))
 	agents.RegisterHRTools(executor, hrStore)
@@ -685,6 +687,12 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	aph := &approvalsHandlers{engine: workflowEngine, store: recordStore}
 	auh := &auditHandlers{pool: pool}
 	finh := &financeHandlers{store: ledgerStore, poster: invoicePoster, payments: paymentPoster}
+	// Phase N5 — budget HTTP surface. The BudgetStore here is the
+	// SAME instance wired into the agent tools above (a fresh
+	// construction would behave identically because the store
+	// holds only the pool + clock, but reusing it keeps the
+	// dependency graph honest in a single deps_build pass).
+	budh := &budgetHandlers{store: finance.NewBudgetStore(pool)}
 	invh := &inventoryHandlers{store: inventoryStore}
 	oh := &openAPIHandler{registry: ktypeRegistry}
 	fileh := &filesHandlers{store: filesStore, meter: meteringBuffer}
@@ -1060,6 +1068,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		aph:                  aph,
 		auh:                  auh,
 		finh:                 finh,
+		budh:                 budh,
 		invh:                 invh,
 		oh:                   oh,
 		fileh:                fileh,

@@ -601,6 +601,19 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Get("/exchange-rates", d.curh.listRates)
 			r.Get("/exchange-rates/convert", d.curh.convert)
 			r.Post("/exchange-rates/unrealized", d.curh.unrealizedGL)
+			// Phase N5 — budgets. Line CRUD is nested under the
+			// header so the FK relationship is explicit in the
+			// URL; the variance report is GET-only so it skips
+			// the idempotency middleware naturally (no body).
+			r.Post("/budgets", d.budh.create)
+			r.Get("/budgets", d.budh.list)
+			r.Get("/budgets/{id}", d.budh.get)
+			r.Put("/budgets/{id}", d.budh.update)
+			r.Delete("/budgets/{id}", d.budh.delete)
+			r.Get("/budgets/{id}/lines", d.budh.listLines)
+			r.Post("/budgets/{id}/lines", d.budh.upsertLine)
+			r.Delete("/budgets/{id}/lines/{lineID}", d.budh.deleteLine)
+			r.Get("/budgets/{id}/variance", d.budh.varianceReport)
 		})
 
 		// Phase M Task 6 — POS finalize. Reuses InvoicePoster +

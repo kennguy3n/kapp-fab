@@ -348,8 +348,10 @@ var paymentTermsSchema = []byte(`{
 }`)
 
 // All returns every Phase C finance KType as a freshly-constructed slice.
+// Includes the Phase N5 budget KTypes (finance.budget + finance.budget_line)
+// so a single registry-bootstrap call covers the full finance surface.
 func All() []ktype.KType {
-	return []ktype.KType{
+	base := []ktype.KType{
 		{Name: KTypeAccount, Version: 1, Schema: accountSchema},
 		{Name: KTypeJournalEntry, Version: 1, Schema: journalEntrySchema},
 		{Name: KTypeARInvoice, Version: 1, Schema: arInvoiceSchema},
@@ -360,6 +362,7 @@ func All() []ktype.KType {
 		{Name: KTypeRecurringInvoice, Version: 1, Schema: recurringInvoiceSchema},
 		{Name: KTypePaymentTerms, Version: 1, Schema: paymentTermsSchema},
 	}
+	return append(base, BudgetKTypes()...)
 }
 
 // init validates every embedded schema is well-formed JSON so a malformed

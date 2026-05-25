@@ -1446,6 +1446,78 @@ export class ApiClient {
       }
     );
   }
+
+  // --- Phase N5: budgets ------------------------------------------------
+
+  listBudgets(): Promise<Budget[]> {
+    return this.request(`/finance/budgets`);
+  }
+
+  getBudget(id: string): Promise<Budget> {
+    return this.request(`/finance/budgets/${encodeURIComponent(id)}`);
+  }
+
+  createBudget(input: CreateBudgetInput): Promise<Budget> {
+    return this.request(`/finance/budgets`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateBudget(id: string, input: UpdateBudgetInput): Promise<Budget> {
+    return this.request(`/finance/budgets/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteBudget(id: string): Promise<void> {
+    return this.request(`/finance/budgets/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  }
+
+  listBudgetLines(budgetId: string): Promise<BudgetLine[]> {
+    return this.request(
+      `/finance/budgets/${encodeURIComponent(budgetId)}/lines`
+    );
+  }
+
+  upsertBudgetLine(
+    budgetId: string,
+    input: BudgetLineInput
+  ): Promise<BudgetLine> {
+    return this.request(
+      `/finance/budgets/${encodeURIComponent(budgetId)}/lines`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(input),
+      }
+    );
+  }
+
+  deleteBudgetLine(budgetId: string, lineId: string): Promise<void> {
+    return this.request(
+      `/finance/budgets/${encodeURIComponent(budgetId)}/lines/${encodeURIComponent(lineId)}`,
+      { method: "DELETE" }
+    );
+  }
+
+  budgetVariance(
+    budgetId: string,
+    params?: { from?: string; to?: string }
+  ): Promise<BudgetVarianceReport> {
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set("from", params.from);
+    if (params?.to) qs.set("to", params.to);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return this.request(
+      `/finance/budgets/${encodeURIComponent(budgetId)}/variance${suffix}`
+    );
+  }
 }
 
 // --- Bulk actions -----------------------------------------------------
@@ -2211,4 +2283,82 @@ export interface InsightsEmbedInput {
   scoped_filters?: Record<string, unknown>;
   max_views?: number;
   expires_in_days?: number;
+}
+
+// --- Phase N5: budgets -----------------------------------------------
+
+export interface Budget {
+  tenant_id: string;
+  id: string;
+  name: string;
+  fiscal_year: number;
+  status: "draft" | "active" | "closed";
+  cost_center?: string;
+  notes?: string;
+  variance_threshold?: string | null;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateBudgetInput {
+  name: string;
+  fiscal_year: number;
+  status?: "draft" | "active" | "closed";
+  cost_center?: string;
+  notes?: string;
+  variance_threshold?: string;
+}
+
+export interface UpdateBudgetInput {
+  name: string;
+  status: "draft" | "active" | "closed";
+  cost_center?: string;
+  notes?: string;
+  variance_threshold?: string;
+}
+
+export interface BudgetLine {
+  tenant_id: string;
+  id: string;
+  budget_id: string;
+  account_code: string;
+  cost_center?: string;
+  // 12-element array, January..December in fiscal-month order.
+  months: string[];
+  annual_total: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BudgetLineInput {
+  id?: string;
+  account_code: string;
+  cost_center?: string;
+  // 12-element array, January..December in fiscal-month order.
+  months: string[];
+}
+
+export interface BudgetVarianceRow {
+  budget_id: string;
+  account_code: string;
+  cost_center?: string;
+  period: string;
+  budgeted: string;
+  actual: string;
+  variance: string;
+  variance_pct: string;
+}
+
+export interface BudgetVarianceReport {
+  tenant_id: string;
+  budget_id: string;
+  budget_name: string;
+  fiscal_year: number;
+  from: string;
+  to: string;
+  rows: BudgetVarianceRow[];
+  total_budgeted: string;
+  total_actual: string;
+  total_variance: string;
 }
