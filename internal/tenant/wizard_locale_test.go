@@ -58,6 +58,26 @@ func TestDefaultLocaleForCountry(t *testing.T) {
 		{"TW", "zh-Hant"},
 		{"HK", "zh-Hant"},
 
+		// PR-2d Americas. Brazil ships its own pt-BR catalogue
+		// (Brazilian Portuguese differs from European Portuguese
+		// in accounting / payroll terminology). Spanish-speaking
+		// LATAM jurisdictions share the existing es.json
+		// catalogue.  Canada defaults to English (operators in
+		// Québec / Acadia reset to fr-CA from the admin surface).
+		{"BR", "pt-BR"},
+		{"MX", "es"},
+		{"AR", "es"},
+		{"CO", "es"},
+		{"CL", "es"},
+		{"PE", "es"},
+		{"CR", "es"},
+		{"PA", "es"},
+		{"UY", "es"},
+		{"EC", "es"},
+		{"DO", "es"},
+		{"GT", "es"},
+		{"PY", "es"},
+
 		// Anglophone fallbacks — English everywhere we don't
 		// have a localised bundle, so the locale resolver never
 		// has to handle empty/NULL.
@@ -68,6 +88,8 @@ func TestDefaultLocaleForCountry(t *testing.T) {
 		{"MY", "en"},
 		{"PH", "en"},
 		{"GB", "en"},
+		{"CA", "en"}, // English-speaking majority; Québec admins reset to fr-CA.
+		{"TT", "en"}, // Trinidad & Tobago — English official language.
 		{"", "en"},   // empty / unset country.
 		{"ZZ", "en"}, // unknown ISO code.
 	}

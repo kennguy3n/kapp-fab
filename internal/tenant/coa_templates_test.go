@@ -122,6 +122,29 @@ func TestDefaultCoATemplateForCountry(t *testing.T) {
 		{"BH", "bh_basic"},
 		{"OM", "om_basic"},
 
+		// PR-2d: Americas. Each Western Hemisphere pack maps to
+		// either a standards-named country-specific chart
+		// (CA ASPE, BR CPC, MX NIF, AR RT-FACPCE, CL IFRS) or
+		// the shared LATAM IFRS chart for the remaining
+		// jurisdictions (CO/PE/CR/PA/UY/EC/DO/GT/PY/TT) where
+		// the local statutory chart is close enough to plain
+		// IFRS that splitting per country would be busywork.
+		{"CA", "ca_aspe_basic"},
+		{"BR", "br_cpc_basic"},
+		{"MX", "mx_nif_basic"},
+		{"AR", "ar_rtfacpce_basic"},
+		{"CL", "cl_ifrs_basic"},
+		{"CO", "latam_ifrs_basic"},
+		{"PE", "latam_ifrs_basic"},
+		{"CR", "latam_ifrs_basic"},
+		{"PA", "latam_ifrs_basic"},
+		{"UY", "latam_ifrs_basic"},
+		{"EC", "latam_ifrs_basic"},
+		{"DO", "latam_ifrs_basic"},
+		{"GT", "latam_ifrs_basic"},
+		{"PY", "latam_ifrs_basic"},
+		{"TT", "latam_ifrs_basic"},
+
 		// Unmapped countries fall back to generic IFRS so the
 		// wizard always resolves to a registered template.
 		{"AU", "ifrs_basic"},
@@ -164,8 +187,39 @@ func TestDefaultCoATemplateForCountry(t *testing.T) {
 func TestEveryTaxPackCountryHasCoATemplate(t *testing.T) {
 	registered := taxpacks.RegisteredCountries()
 	if len(registered) == 0 {
-		t.Fatalf("taxpacks.RegisteredCountries() returned empty list — "+
+		t.Fatalf("taxpacks.RegisteredCountries() returned empty list — " +
 			"either the registry is missing or the helper drifted")
+	}
+	// Country-specific allow-list for templates whose names do not
+	// follow the default "<cc>_basic" convention. Each entry pins
+	// the accounting standard the chart encodes — keeping the
+	// jurisdiction-to-template mapping legible in a single place.
+	// Countries not in this map MUST resolve to the default
+	// "<cc>_basic" chart so a typo in DefaultCoATemplateForCountry
+	// fails this test loudly.
+	//
+	// LATAM batch: 10 jurisdictions (CO/PE/CR/PA/UY/EC/DO/GT/PY/TT)
+	// share the generic LATAM IFRS chart — their local statutory
+	// charts are close enough to IFRS that splitting per-country
+	// would be busywork. The 5 LATAM countries with materially
+	// different local charts (BR CPC, MX NIF, AR RT-FACPCE, CL
+	// IFRS, plus CA ASPE for the north) get their own.
+	customTemplate := map[string]string{
+		"CA": "ca_aspe_basic",
+		"BR": "br_cpc_basic",
+		"MX": "mx_nif_basic",
+		"AR": "ar_rtfacpce_basic",
+		"CL": "cl_ifrs_basic",
+		"CO": "latam_ifrs_basic",
+		"PE": "latam_ifrs_basic",
+		"CR": "latam_ifrs_basic",
+		"PA": "latam_ifrs_basic",
+		"UY": "latam_ifrs_basic",
+		"EC": "latam_ifrs_basic",
+		"DO": "latam_ifrs_basic",
+		"GT": "latam_ifrs_basic",
+		"PY": "latam_ifrs_basic",
+		"TT": "latam_ifrs_basic",
 	}
 	for _, cc := range registered {
 		t.Run(cc, func(t *testing.T) {
@@ -177,10 +231,18 @@ func TestEveryTaxPackCountryHasCoATemplate(t *testing.T) {
 			// AU has no dedicated CoA today — it intentionally
 			// falls back to the IFRS chart. US uses us_gaap_basic
 			// (separate from IFRS). Every other registered country
-			// must resolve to a country-specific chart so the
-			// payroll engine's deduction lines have matching
-			// liability accounts.
+			// must resolve to a country-specific chart (either the
+			// default "<cc>_basic" or an allow-listed accounting-
+			// standard variant) so the payroll engine's deduction
+			// lines have matching liability accounts.
 			if cc == "AU" || cc == "US" {
+				return
+			}
+			if expected, ok := customTemplate[cc]; ok {
+				if templateName != expected {
+					t.Fatalf("country %s should map to allow-listed %q, got %q",
+						cc, expected, templateName)
+				}
 				return
 			}
 			expected := strings.ToLower(cc) + "_basic"

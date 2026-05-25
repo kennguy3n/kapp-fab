@@ -41,6 +41,12 @@ const COA_TEMPLATES = [
   { value: "kw_basic", label: "Kuwait — IFRS + PIFSS / NLST / Indemnity" },
   { value: "bh_basic", label: "Bahrain — IFRS + SIO / VAT / Indemnity" },
   { value: "om_basic", label: "Oman — IFRS + PASI / VAT / Gratuity" },
+  { value: "ca_aspe_basic", label: "Canada — ASPE + CPP / EI / GST·HST·QST" },
+  { value: "br_cpc_basic", label: "Brazil — CPC + IRRF / INSS / FGTS / ICMS·ISS·PIS·COFINS" },
+  { value: "mx_nif_basic", label: "Mexico — NIF + ISR / IMSS / INFONAVIT / IVA" },
+  { value: "ar_rtfacpce_basic", label: "Argentina — RT-FACPCE + Ganancias / Jubilación / IVA" },
+  { value: "cl_ifrs_basic", label: "Chile — IFRS + Impuesto Único / AFP / Salud / IVA" },
+  { value: "latam_ifrs_basic", label: "LATAM — IFRS + Generic Payroll Withholding (CO/PE/CR/PA/UY/EC/DO/GT/PY/TT)" },
 ];
 
 // defaultCoATemplateForCountry mirrors
@@ -76,6 +82,23 @@ const COUNTRY_COA_DEFAULTS: Record<string, string> = {
   KW: "kw_basic",
   BH: "bh_basic",
   OM: "om_basic",
+  // PR-2d: Americas — five standards-named charts plus a
+  // shared LATAM IFRS chart for the remaining ten jurisdictions.
+  CA: "ca_aspe_basic",
+  BR: "br_cpc_basic",
+  MX: "mx_nif_basic",
+  AR: "ar_rtfacpce_basic",
+  CL: "cl_ifrs_basic",
+  CO: "latam_ifrs_basic",
+  PE: "latam_ifrs_basic",
+  CR: "latam_ifrs_basic",
+  PA: "latam_ifrs_basic",
+  UY: "latam_ifrs_basic",
+  EC: "latam_ifrs_basic",
+  DO: "latam_ifrs_basic",
+  GT: "latam_ifrs_basic",
+  PY: "latam_ifrs_basic",
+  TT: "latam_ifrs_basic",
 };
 
 function defaultCoATemplateForCountry(country: string): string {

@@ -142,9 +142,15 @@ func TestResolve_Matrix(t *testing.T) {
 		{"zh-TW", "zh-TW", "zh-Hant"},
 		{"zh-HK", "zh-HK", "zh-Hant"},
 		{"zh-MO", "zh-MO", "zh-Hant"},
-		{"fr-CA", "fr-CA", "fr"},
+		// PR-2d ships fr-CA.json on both backend and frontend, so
+		// the matcher resolves a Canadian-French Accept-Language
+		// header to fr-CA verbatim rather than downgrading to the
+		// metropolitan-French catalogue. The weighted variant
+		// pins the same behaviour even when the header includes
+		// the lower-priority fr/en fallbacks.
+		{"fr-CA", "fr-CA", "fr-CA"},
 		{"hi-IN unrelated", "hi-IN", DefaultLocale},
-		{"weighted-AL", "fr-CA,fr;q=0.9,en;q=0.5", "fr"},
+		{"weighted-AL", "fr-CA,fr;q=0.9,en;q=0.5", "fr-CA"},
 		{"weighted-AL prefer-de", "de-CH,de;q=0.9,en;q=0.5", "de"},
 		{"junk", "###not a tag###", DefaultLocale},
 	}
