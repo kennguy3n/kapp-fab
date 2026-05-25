@@ -98,7 +98,7 @@ KType and KRecord are **original Kapp concepts**. KType defines *what a business
 | AR / AP subledgers | ✓ | |
 | Bank accounts and reconciliations | ✓ | |
 | Tax codes (simple VAT/GST) | ✓ | |
-| Multi-currency with FX rates | | ✓ |
+| Multi-currency with FX rates | ✓ | |
 | Period close and lockout | ✓ | |
 | Consolidation across tenants | | ✓ |
 | Country-specific tax packs | | ✓ |
