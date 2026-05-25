@@ -170,13 +170,13 @@ func TestIsCustomNameAndPattern(t *testing.T) {
 		"custom.invoice_v2",
 	}
 	bad := []string{
-		"crm.deal",                // not in custom.* namespace
-		"custom.",                 // empty slug
-		"custom.Asset",            // uppercase
-		"custom.a-b",              // dash not allowed
-		"custom.1asset",           // leading digit
-		"custom.nested.ktype",     // multi-dot
-		"",                        // empty
+		"crm.deal",            // not in custom.* namespace
+		"custom.",             // empty slug
+		"custom.Asset",        // uppercase
+		"custom.a-b",          // dash not allowed
+		"custom.1asset",       // leading digit
+		"custom.nested.ktype", // multi-dot
+		"",                    // empty
 	}
 	for _, n := range good {
 		if !IsCustomName(n) {

@@ -986,7 +986,6 @@ func (s *PGStore) encryptFields(tenantID uuid.UUID, schema, data json.RawMessage
 // encrypted fields decrypted transparently. r is not mutated — the
 // caller substitutes the returned payload into the outgoing record.
 func (s *PGStore) decryptRecord(ctx context.Context, r *KRecord) (json.RawMessage, error) {
-	_ = ctx
 	if s.encryptor == nil {
 		return r.Data, nil
 	}

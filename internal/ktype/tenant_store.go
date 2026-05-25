@@ -74,9 +74,9 @@ var SafeCustomFieldTypes = map[string]bool{
 	"url":      true,
 }
 
-// customNamePattern mirrors the CHECK constraint on
-// migrations/000063_tenant_ktypes.sql.tenant_ktypes_name_chk. Kept
-// in lock-step so the Go layer fails fast with a useful error
+// customNamePattern mirrors the CHECK constraint
+// `tenant_ktypes_name_chk` in migrations/000061_tenant_ktypes.sql.
+// Kept in lock-step so the Go layer fails fast with a useful error
 // before the DB does.
 var customNamePattern = regexp.MustCompile(`^custom\.[a-z][a-z0-9_]*$`)
 
@@ -156,18 +156,18 @@ func IsCustomName(name string) bool {
 // with a useful message instead of a generic DB error.
 func (s *TenantStore) validateCustomSchema(schema json.RawMessage) error {
 	var parsed struct {
-		Name    string          `json:"name"`
-		Version int             `json:"version"`
-		Fields  []FieldSpec     `json:"fields"`
+		Name    string      `json:"name"`
+		Version int         `json:"version"`
+		Fields  []FieldSpec `json:"fields"`
 		// Reject hostile sections explicitly — if a future schema
 		// version introduces them, the validator + this list must
 		// be updated together.
-		PostingHook   json.RawMessage `json:"posting_hook,omitempty"`
-		PostingHooks  json.RawMessage `json:"posting_hooks,omitempty"`
-		Computed      json.RawMessage `json:"computed,omitempty"`
-		Calculations  json.RawMessage `json:"calculations,omitempty"`
-		AgentTools    json.RawMessage `json:"agent_tools,omitempty"`
-		Triggers      json.RawMessage `json:"triggers,omitempty"`
+		PostingHook  json.RawMessage `json:"posting_hook,omitempty"`
+		PostingHooks json.RawMessage `json:"posting_hooks,omitempty"`
+		Computed     json.RawMessage `json:"computed,omitempty"`
+		Calculations json.RawMessage `json:"calculations,omitempty"`
+		AgentTools   json.RawMessage `json:"agent_tools,omitempty"`
+		Triggers     json.RawMessage `json:"triggers,omitempty"`
 	}
 	if err := json.Unmarshal(schema, &parsed); err != nil {
 		return fmt.Errorf("ktype: parse custom schema: %w", err)

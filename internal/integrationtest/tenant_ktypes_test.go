@@ -23,15 +23,15 @@ import (
 // object (Asset Register, Compliance Checklist, etc.) and then
 // creates records against it:
 //
-//   1. Tenant authors a draft custom.<slug> KType via TenantStore.Upsert.
-//   2. Promotes draft → active.
-//   3. Creates a KRecord via record.PGStore.Create — the record
-//      store consults the tenant_ktypes table (NOT the global
-//      ktypes registry) because the name starts with custom.,
-//      validates the payload against the safe-subset schema, and
-//      writes the record under RLS.
-//   4. Archives the KType. Subsequent creates are rejected with
-//      a clear "only active types back records" error.
+//  1. Tenant authors a draft custom.<slug> KType via TenantStore.Upsert.
+//  2. Promotes draft → active.
+//  3. Creates a KRecord via record.PGStore.Create — the record
+//     store consults the tenant_ktypes table (NOT the global
+//     ktypes registry) because the name starts with custom.,
+//     validates the payload against the safe-subset schema, and
+//     writes the record under RLS.
+//  4. Archives the KType. Subsequent creates are rejected with
+//     a clear "only active types back records" error.
 //
 // The test also pins the negative paths the API surface depends
 // on: invalid namespace (crm.x), unsafe field type (object),
@@ -89,9 +89,9 @@ func TestTenantKTypeBuilderEndToEnd(t *testing.T) {
 	// only active types back records. This is the rule
 	// resolveKType enforces.
 	_, err = records.Create(ctx, record.KRecord{
-		TenantID: tn.ID,
-		KType:    "custom.asset_register",
-		Data:     json.RawMessage(`{"asset_code":"A1","purchase_date":"2026-01-01","cost":100}`),
+		TenantID:  tn.ID,
+		KType:     "custom.asset_register",
+		Data:      json.RawMessage(`{"asset_code":"A1","purchase_date":"2026-01-01","cost":100}`),
 		CreatedBy: actor,
 	})
 	if err == nil || !strings.Contains(err.Error(), "draft") {
@@ -122,9 +122,9 @@ func TestTenantKTypeBuilderEndToEnd(t *testing.T) {
 	// running against the tenant-authored schema, not the global
 	// registry (which doesn't know about custom.asset_register).
 	_, err = records.Create(ctx, record.KRecord{
-		TenantID: tn.ID,
-		KType:    "custom.asset_register",
-		Data:     json.RawMessage(`{"asset_code":"A-002","purchase_date":"2026-03-01"}`),
+		TenantID:  tn.ID,
+		KType:     "custom.asset_register",
+		Data:      json.RawMessage(`{"asset_code":"A-002","purchase_date":"2026-03-01"}`),
 		CreatedBy: actor,
 	})
 	if err == nil || !strings.Contains(err.Error(), "is required") {
