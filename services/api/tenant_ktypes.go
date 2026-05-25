@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -18,7 +19,34 @@ import (
 // middleware chain — `store.Upsert`/`Get`/`List` then enforce RLS
 // at the DB layer.
 type tenantKTypeHandlers struct {
-	store *ktype.TenantStore
+	store  *ktype.TenantStore
+	logger *slog.Logger
+}
+
+// writeTenantKTypeError maps a store-level error to an HTTP status
+// + sanitised response body. The sentinel-error list is the public
+// contract — callers (the builder UI, scripted automation) rely on
+// the 400/404/500 split to distinguish "fix the request" from "this
+// is a server bug". Non-sentinel errors are treated as internal so
+// raw err.Error() text (which can include connection / table /
+// driver detail leaked from dbutil.WithTenantTx) never reaches the
+// HTTP body; the full error is logged for operators.
+func (h *tenantKTypeHandlers) writeError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, ktype.ErrNotFound):
+		http.Error(w, "custom ktype not found", http.StatusNotFound)
+	case errors.Is(err, ktype.ErrInvalidCustomName),
+		errors.Is(err, ktype.ErrTooManyFields),
+		errors.Is(err, ktype.ErrUnsupportedFieldType),
+		errors.Is(err, ktype.ErrInvalidSchema),
+		errors.Is(err, ktype.ErrInvalidStatus):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	default:
+		if h.logger != nil {
+			h.logger.ErrorContext(r.Context(), "tenant_ktypes: internal error", slog.String("err", err.Error()))
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
 }
 
 // upsertTenantKTypeRequest is the JSON shape the builder UI POSTs
@@ -64,14 +92,7 @@ func (h *tenantKTypeHandlers) upsert(w http.ResponseWriter, r *http.Request) {
 		CreatedBy:   actorID,
 	})
 	if err != nil {
-		switch {
-		case errors.Is(err, ktype.ErrInvalidCustomName),
-			errors.Is(err, ktype.ErrTooManyFields),
-			errors.Is(err, ktype.ErrUnsupportedFieldType):
-			http.Error(w, err.Error(), http.StatusBadRequest)
-		default:
-			http.Error(w, err.Error(), http.StatusBadRequest)
-		}
+		h.writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, saved)
@@ -89,7 +110,7 @@ func (h *tenantKTypeHandlers) list(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := h.store.List(r.Context(), t.ID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		h.writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -120,11 +141,7 @@ func (h *tenantKTypeHandlers) get(w http.ResponseWriter, r *http.Request) {
 	}
 	row, err := h.store.Get(r.Context(), tenantID, name, version)
 	if err != nil {
-		if errors.Is(err, ktype.ErrNotFound) {
-			http.Error(w, "custom ktype not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		h.writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, row)
@@ -167,11 +184,7 @@ func (h *tenantKTypeHandlers) setStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := h.store.SetStatus(r.Context(), tenantID, name, version, req.Status); err != nil {
-		if errors.Is(err, ktype.ErrNotFound) {
-			http.Error(w, "custom ktype not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		h.writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

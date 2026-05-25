@@ -145,6 +145,35 @@ func TestTenantKTypeBuilderEndToEnd(t *testing.T) {
 		t.Fatalf("create against archived must fail with 'archived', got %v", err)
 	}
 
+	// Existing records on an archived custom KType must remain
+	// editable — archiving freezes the schema, not the data. This
+	// is the data-correction path: a customer realises a record
+	// has the wrong purchase_date or cost months after the schema
+	// has been frozen and must be able to fix it without
+	// unarchiving the type. resolveForUpdate enforces this.
+	updated, err := records.Update(ctx, record.KRecord{
+		TenantID:  tn.ID,
+		ID:        rec.ID,
+		Data:      json.RawMessage(`{"description":"Server rack 42U (corrected)"}`),
+		UpdatedBy: &actor,
+	})
+	if err != nil {
+		t.Fatalf("update existing record on archived KType must succeed for data corrections, got %v", err)
+	}
+	if !strings.Contains(string(updated.Data), "corrected") {
+		t.Fatalf("update did not persist: %s", string(updated.Data))
+	}
+
+	// Reads of historical records on archived custom KTypes must
+	// continue to work (no status gate on Get).
+	got, err := records.Get(ctx, tn.ID, rec.ID)
+	if err != nil {
+		t.Fatalf("read existing record on archived KType: %v", err)
+	}
+	if got.ID != rec.ID {
+		t.Fatalf("read returned wrong record: got %s want %s", got.ID, rec.ID)
+	}
+
 	// --- Negative paths --------------------------------------------
 	// crm.* is NOT in the custom.* namespace — the store rejects
 	// before SQL gets a chance.

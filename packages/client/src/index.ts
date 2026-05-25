@@ -437,6 +437,7 @@ export class ApiClient {
   upsertTenantKType(input: UpsertTenantKTypeInput): Promise<TenantKType> {
     return this.request("/tenant-ktypes", {
       method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
       body: JSON.stringify(input),
     });
   }
@@ -450,6 +451,7 @@ export class ApiClient {
       `/tenant-ktypes/${encodeURIComponent(name)}/status?version=${version}`,
       {
         method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
         body: JSON.stringify({ status }),
       },
     );

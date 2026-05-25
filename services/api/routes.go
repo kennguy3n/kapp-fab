@@ -408,8 +408,25 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 		// the safe field-type subset, and the field-count cap
 		// before INSERT. Status transitions (draft → active →
 		// archived) are POSTed against the same name+version.
+		//
+		// Authoring a custom KType reshapes how every other tenant
+		// member's UI is generated (form fields, list views,
+		// permissions, auto-generated agent tools), so this group
+		// is gated to tenant.admin on both reads and writes —
+		// matching /roles, /users, /audit. The full mutation
+		// middleware stack (api-call meter + idempotency +
+		// rate-limit + quota) is applied so a runaway script can't
+		// blow through a tenant's quota or starve neighbours
+		// under shared RLS. The platform feature gate is not used
+		// here — low-code KType authoring is part of the baseline
+		// admin surface, not a plan-tiered feature.
 		r.Route("/api/v1/tenant-ktypes", func(r chi.Router) {
 			d.tenantChain(r)
+			r.Use(d.apiCallMW)
+			r.Use(d.authzGate("tenant.admin", ""))
+			r.Use(platform.IdempotencyMiddleware(d.pool))
+			r.Use(d.rateLimitMW)
+			r.Use(platform.QuotaMiddleware(d.quotaEnforcer))
 			r.Get("/", d.tkh.list)
 			r.Get("/{name}", d.tkh.get)
 			r.Post("/", d.tkh.upsert)

@@ -659,7 +659,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	}
 	meth := &meteringHandlers{metering: meteringStore, tenants: tenantSvc, plans: planStore, features: featureStore}
 	kh := &ktypeHandlers{registry: ktypeRegistry}
-	tkh := &tenantKTypeHandlers{store: tenantKTypeStore}
+	tkh := &tenantKTypeHandlers{store: tenantKTypeStore, logger: logger}
 	// recordHandlers calls AuthorizeRecord from update()/delete() to
 	// enforce per-record conditions like owner_only. The handler
 	// guards the call with `h.eval != nil`, so leave eval unset when

@@ -101,22 +101,50 @@ func (s *PGStore) WithTenantKTypes(store *ktype.TenantStore) *PGStore {
 	return s
 }
 
-// resolveKType is the single lookup helper every record-store
-// mutation path uses to fetch a KType's schema. For names in the
-// custom.* namespace it consults the tenant_ktypes table (Phase
-// N8b); for everything else it falls through to the global
-// `ktypes` registry. Active-status enforcement is applied here: a
-// draft or archived custom KType cannot back record creates or
-// updates, mirroring the semantics every other ERP would enforce
-// (you cannot post against an inactive metadata definition).
-func (s *PGStore) resolveKType(ctx context.Context, tenantID uuid.UUID, name string, version int) (*ktype.KType, error) {
+// ktypeResolveMode tells resolveKType which custom-KType statuses
+// are allowed for the calling operation. The status gate exists
+// because tenant-authored KTypes have a lifecycle (draft → active
+// → archived) and the operation that consults a KType must opt
+// into the right subset:
+//
+//   - resolveForCreate: only `active`. A KType in `draft` is still
+//     being authored in the builder and isn't promoted; an
+//     `archived` KType is frozen — no new records on either.
+//
+//   - resolveForUpdate: `active` OR `archived`. Existing records on
+//     an archived schema must remain editable (data-entry
+//     corrections, status workflow transitions, etc.) — the
+//     archival freezes the schema, not the rows that were already
+//     created against it. `draft` is still rejected because no
+//     records should exist there in the first place.
+//
+//   - resolveForRead: any status. Reads / decryptions of historical
+//     records work regardless of the current status of the schema
+//     they reference.
+type ktypeResolveMode int
+
+const (
+	resolveForCreate ktypeResolveMode = iota
+	resolveForUpdate
+	resolveForRead
+)
+
+// resolveKType is the single lookup helper every record-store path
+// uses to fetch a KType's schema. For names in the custom.*
+// namespace it consults the tenant_ktypes table (Phase N8b); for
+// everything else it falls through to the global `ktypes` registry.
+// Custom-KType status enforcement is applied per the supplied
+// `mode` (see ktypeResolveMode for the per-mode rules); platform
+// KTypes don't have the same lifecycle and bypass the status gate
+// entirely.
+func (s *PGStore) resolveKType(ctx context.Context, tenantID uuid.UUID, name string, version int, mode ktypeResolveMode) (*ktype.KType, error) {
 	if s.tenantKTypes != nil && ktype.IsCustomName(name) {
 		tkt, err := s.tenantKTypes.Get(ctx, tenantID, name, version)
 		if err != nil {
 			return nil, err
 		}
-		if tkt.Status != ktype.CustomStatusActive {
-			return nil, fmt.Errorf("record: custom ktype %q is %s, only active types back records", name, tkt.Status)
+		if err := checkCustomKTypeStatus(tkt, mode); err != nil {
+			return nil, err
 		}
 		return &ktype.KType{
 			Name:      tkt.Name,
@@ -126,6 +154,25 @@ func (s *PGStore) resolveKType(ctx context.Context, tenantID uuid.UUID, name str
 		}, nil
 	}
 	return s.registry.Get(ctx, name, version)
+}
+
+// checkCustomKTypeStatus enforces the per-mode rules for a custom
+// KType's status. Split out from resolveKType so the BulkPatch /
+// Delete paths can share the exact same matrix.
+func checkCustomKTypeStatus(tkt *ktype.TenantKType, mode ktypeResolveMode) error {
+	switch mode {
+	case resolveForCreate:
+		if tkt.Status != ktype.CustomStatusActive {
+			return fmt.Errorf("record: custom ktype %q is %s, only active types back record creates", tkt.Name, tkt.Status)
+		}
+	case resolveForUpdate:
+		if tkt.Status != ktype.CustomStatusActive && tkt.Status != ktype.CustomStatusArchived {
+			return fmt.Errorf("record: custom ktype %q is %s, only active or archived types accept updates", tkt.Name, tkt.Status)
+		}
+	case resolveForRead:
+		// every status is readable
+	}
+	return nil
 }
 
 // dbNow returns Postgres's current timestamp. Used to capture the
@@ -168,7 +215,7 @@ func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
 	if r.CreatedBy == uuid.Nil {
 		return nil, errors.New("record: created_by required")
 	}
-	kt, err := s.resolveKType(ctx, r.TenantID, r.KType, r.KTypeVersion)
+	kt, err := s.resolveKType(ctx, r.TenantID, r.KType, r.KTypeVersion, resolveForCreate)
 	if err != nil {
 		return nil, err
 	}
@@ -761,7 +808,7 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 			return fmt.Errorf("record: merge: %w", err)
 		}
 
-		kt, err := s.resolveKType(ctx, r.TenantID, existing.KType, existing.KTypeVersion)
+		kt, err := s.resolveKType(ctx, r.TenantID, existing.KType, existing.KTypeVersion, resolveForUpdate)
 		if err != nil {
 			return err
 		}
@@ -985,27 +1032,15 @@ func (s *PGStore) encryptFields(tenantID uuid.UUID, schema, data json.RawMessage
 // decryptRecord produces the caller-visible version of r.Data, with
 // encrypted fields decrypted transparently. r is not mutated — the
 // caller substitutes the returned payload into the outgoing record.
+// Runs in resolveForRead mode so historical records on draft /
+// archived custom KTypes remain decryptable for the caller.
 func (s *PGStore) decryptRecord(ctx context.Context, r *KRecord) (json.RawMessage, error) {
 	if s.encryptor == nil {
 		return r.Data, nil
 	}
-	// decryptRecord runs on reads; an archived custom KType is
-	// still readable (records remain accessible after the schema
-	// is frozen) so go directly to the underlying tenant_ktypes
-	// store rather than the active-only resolveKType.
-	var kt *ktype.KType
-	var err error
-	if s.tenantKTypes != nil && ktype.IsCustomName(r.KType) {
-		tkt, getErr := s.tenantKTypes.Get(ctx, r.TenantID, r.KType, r.KTypeVersion)
-		if getErr != nil {
-			return nil, getErr
-		}
-		kt = &ktype.KType{Name: tkt.Name, Version: tkt.Version, Schema: tkt.Schema, CreatedAt: tkt.CreatedAt}
-	} else {
-		kt, err = s.registry.Get(ctx, r.KType, r.KTypeVersion)
-		if err != nil {
-			return nil, err
-		}
+	kt, err := s.resolveKType(ctx, r.TenantID, r.KType, r.KTypeVersion, resolveForRead)
+	if err != nil {
+		return nil, err
 	}
 	fields, err := encryptedFieldNames(kt.Schema)
 	if err != nil {

@@ -50,6 +50,19 @@ var ErrTooManyFields = errors.New("ktype: custom KType exceeds field limit")
 // developer-only — they require shipping code in internal/<module>/.
 var ErrUnsupportedFieldType = errors.New("ktype: custom KType uses unsupported field type")
 
+// ErrInvalidSchema is returned when a custom KType schema fails the
+// safe-subset validator for reasons other than the typed ones above
+// (e.g. missing field name, enum without values, ref without target,
+// hostile sections like posting_hook). Surfaces as HTTP 400 from
+// the API so callers can distinguish client-side validation issues
+// from server-side infrastructure failures.
+var ErrInvalidSchema = errors.New("ktype: custom KType schema invalid")
+
+// ErrInvalidStatus is returned when a status value outside the
+// (draft, active, archived) set is requested on Upsert or SetStatus.
+// Surfaces as HTTP 400.
+var ErrInvalidStatus = errors.New("ktype: invalid status")
+
 // SafeCustomFieldTypes is the closed set of field types a custom
 // KType may use. Matches the validator/ValidateData type switch
 // (string/number/boolean/date/enum/ref/text), plus email/phone/url
@@ -173,7 +186,7 @@ func (s *TenantStore) validateCustomSchema(schema json.RawMessage) error {
 		return fmt.Errorf("ktype: parse custom schema: %w", err)
 	}
 	if len(parsed.Fields) == 0 {
-		return errors.New("ktype: custom KType requires at least one field")
+		return fmt.Errorf("%w: requires at least one field", ErrInvalidSchema)
 	}
 	if len(parsed.Fields) > s.fieldLimit {
 		return fmt.Errorf("%w: %d fields exceeds limit of %d", ErrTooManyFields, len(parsed.Fields), s.fieldLimit)
@@ -181,29 +194,29 @@ func (s *TenantStore) validateCustomSchema(schema json.RawMessage) error {
 	for i := range parsed.Fields {
 		f := &parsed.Fields[i]
 		if f.Name == "" {
-			return errors.New("ktype: custom field name required")
+			return fmt.Errorf("%w: field name required", ErrInvalidSchema)
 		}
 		if !SafeCustomFieldTypes[f.Type] {
 			return fmt.Errorf("%w: %q", ErrUnsupportedFieldType, f.Type)
 		}
 		if f.Type == "enum" && len(f.Values) == 0 {
-			return fmt.Errorf("ktype: enum field %q requires values", f.Name)
+			return fmt.Errorf("%w: enum field %q requires values", ErrInvalidSchema, f.Name)
 		}
 		if f.Type == "ref" && f.Ref == "" && f.KType == "" {
-			return fmt.Errorf("ktype: ref field %q requires ref ktype", f.Name)
+			return fmt.Errorf("%w: ref field %q requires ref ktype", ErrInvalidSchema, f.Name)
 		}
 	}
 	if len(parsed.PostingHook) > 0 || len(parsed.PostingHooks) > 0 {
-		return errors.New("ktype: custom KType may not declare posting_hook (developer-only)")
+		return fmt.Errorf("%w: posting_hook is developer-only", ErrInvalidSchema)
 	}
 	if len(parsed.Computed) > 0 || len(parsed.Calculations) > 0 {
-		return errors.New("ktype: custom KType may not declare computed/calculations (developer-only)")
+		return fmt.Errorf("%w: computed/calculations are developer-only", ErrInvalidSchema)
 	}
 	if len(parsed.AgentTools) > 0 {
-		return errors.New("ktype: custom KType may not declare agent_tools (auto-generated only)")
+		return fmt.Errorf("%w: agent_tools are auto-generated only", ErrInvalidSchema)
 	}
 	if len(parsed.Triggers) > 0 {
-		return errors.New("ktype: custom KType may not declare triggers (developer-only)")
+		return fmt.Errorf("%w: triggers are developer-only", ErrInvalidSchema)
 	}
 	return nil
 }
@@ -228,13 +241,13 @@ func (s *TenantStore) Upsert(ctx context.Context, kt TenantKType) (*TenantKType,
 		kt.Version = 1
 	}
 	if kt.Title == "" {
-		return nil, errors.New("ktype: title required")
+		return nil, fmt.Errorf("%w: title required", ErrInvalidSchema)
 	}
 	if kt.CreatedBy == uuid.Nil {
 		return nil, errors.New("ktype: created_by required")
 	}
 	if !json.Valid(kt.Schema) {
-		return nil, errors.New("ktype: schema is not valid JSON")
+		return nil, fmt.Errorf("%w: schema is not valid JSON", ErrInvalidSchema)
 	}
 	if err := s.validateCustomSchema(kt.Schema); err != nil {
 		return nil, err
@@ -245,7 +258,7 @@ func (s *TenantStore) Upsert(ctx context.Context, kt TenantKType) (*TenantKType,
 	switch kt.Status {
 	case CustomStatusDraft, CustomStatusActive, CustomStatusArchived:
 	default:
-		return nil, fmt.Errorf("ktype: invalid status %q", kt.Status)
+		return nil, fmt.Errorf("%w: %q", ErrInvalidStatus, kt.Status)
 	}
 
 	var out TenantKType
@@ -363,7 +376,7 @@ func (s *TenantStore) SetStatus(ctx context.Context, tenantID uuid.UUID, name st
 	switch status {
 	case CustomStatusDraft, CustomStatusActive, CustomStatusArchived:
 	default:
-		return fmt.Errorf("ktype: invalid status %q", status)
+		return fmt.Errorf("%w: %q", ErrInvalidStatus, status)
 	}
 	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
