@@ -1,0 +1,151 @@
+# MkDocs Material configuration for the Kapp documentation site.
+#
+# Build:   mkdocs build --strict
+# Preview: mkdocs serve -a 127.0.0.1:8001
+#
+# See docs/DOCS_SITE.md for the full build / deploy guide.
+
+site_name:        Kapp Documentation
+site_description: Operator, developer, and administrator documentation for the Kapp multi-tenant ERP platform.
+site_url:         https://kennguy3n.github.io/kapp-fab/
+repo_url:         https://github.com/kennguy3n/kapp-fab
+repo_name:        kennguy3n/kapp-fab
+edit_uri:         edit/main/docs/
+
+docs_dir: docs
+strict:   true
+
+theme:
+  name:    material
+  language: en
+  features:
+    - navigation.instant
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.action.edit
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent:  indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent:  indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name:    mermaid
+          class:   mermaid
+          format:  !!python/name:mermaid2.fence_mermaid
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.emoji
+
+plugins:
+  - search
+  - mermaid2
+  - redirects:
+      redirect_maps:
+        # Move-friendly placeholders for the few legacy paths that
+        # external links may point at. Extend as you rename pages.
+        index.md: README.md
+
+extra:
+  version:
+    provider: mike
+    default:  latest
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/kennguy3n/kapp-fab
+
+nav:
+  - Home: README.md
+
+  - Getting started:
+    - Developer guide: DEVELOPER_GUIDE.md
+    - Operator guide:  OPERATOR_GUIDE.md
+    - Admin guide:     ADMIN_GUIDE.md
+
+  - Architecture:
+    - Overview: '../ARCHITECTURE.md'
+    - Phases:   '../PHASES.md'
+    - KType authoring: KTYPE_AUTHORING_GUIDE.md
+    - Agent platform:  AGENT_PLATFORM_OVERVIEW.md
+
+  - Operations:
+    - Capacity planning:      CAPACITY_PLANNING.md
+    - Scaling runbook:         SCALING_RUNBOOK.md
+    - Database maintenance:    DATABASE_MAINTENANCE.md
+    - Multi-cell operations:   MULTI_CELL_OPERATIONS.md
+    - Upgrade & rollback:      UPGRADE_RUNBOOK.md
+    - Observability:            OBSERVABILITY_GUIDE.md
+    - Performance tuning:      PERFORMANCE_TUNING.md
+    - Troubleshooting:          TROUBLESHOOTING.md
+    - Load testing:             LOAD_TESTING.md
+    - Disaster recovery:        DR_RUNBOOK.md
+
+  - Incident response:
+    - Incident response:        INCIDENT_RESPONSE.md
+    - On-call playbook:         ONCALL_PLAYBOOK.md
+
+  - Security & compliance:
+    - Security review:          SECURITY_REVIEW.md
+    - Security hardening:       SECURITY_HARDENING.md
+    - Compliance:               COMPLIANCE.md
+
+  - Reference:
+    - API reference:            API_REFERENCE.md
+    - API versioning:           API_VERSIONING.md
+    - API pagination:           API_PAGINATION.md
+    - Infrastructure:           INFRASTRUCTURE.md
+    - Plugin developer guide:   PLUGIN_DEVELOPER_GUIDE.md
+    - Documentation site:       DOCS_SITE.md
+
+  - ADRs:
+    - Index:                    adr/README.md
+    - 001 Modular monolith:     adr/001-modular-monolith.md
+    - 002 PostgreSQL + RLS:     adr/002-postgresql-rls.md
+    - 003 KType metadata:       adr/003-ktype-metadata-engine.md
+    - 004 JSONB vs relational:  adr/004-jsonb-vs-relational.md
+    - 005 Outbox pattern:       adr/005-outbox-pattern.md
+    - 006 Cell architecture:    adr/006-cell-architecture.md
+    - 007 ZK object fabric:     adr/007-zk-object-fabric.md
+    - 008 gRPC plugin SDK:      adr/008-grpc-plugin-sdk.md
+    - 009 Append-only ledgers:  adr/009-append-only-ledgers.md
+    - 010 Leader election:      adr/010-leader-election.md
