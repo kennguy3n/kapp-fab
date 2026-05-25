@@ -65,6 +65,8 @@ type frPack struct{}
 
 func init() { Register(&frPack{}) }
 
+// Country returns the ISO 3166-1 alpha-2 country code this pack
+// services.
 func (frPack) Country() string { return "FR" }
 
 // EffectiveYear returns the fiscal year the FR tables are
@@ -115,16 +117,27 @@ var (
 		{Floor: dec("221418"), Top: decimal.Zero, Rate: dec("0.430")},
 	}
 
-	frCSGRate            = dec("0.092")
-	frCRDSRate           = dec("0.005")
-	frCSGCRDSAbatement   = dec("0.9825") // base = 98.25% of gross
-	frSSPlafondRate      = dec("0.069")  // employee pension plafonnée
-	frSSDeplafondRate    = dec("0.004")  // employee pension déplafonnée
-	frPMSS2025           = dec("3925")   // Plafond Mensuel de la Sécurité Sociale
-	frPeriodDays         = decimal.NewFromInt(30)
-	frAnnualDays         = decimal.NewFromFloat(365.25)
+	frCSGRate          = dec("0.092")
+	frCRDSRate         = dec("0.005")
+	frCSGCRDSAbatement = dec("0.9825") // base = 98.25% of gross
+	frSSPlafondRate    = dec("0.069")  // employee pension plafonnée
+	frSSDeplafondRate  = dec("0.004")  // employee pension déplafonnée
+	frPMSS2025         = dec("3925")   // Plafond Mensuel de la Sécurité Sociale
+	frPeriodDays       = decimal.NewFromInt(30)
 )
 
+// ComputeWithholding emits up to four lines:
+//
+//   - FR_PAS  (Prélèvement à la Source barème, monthly grille)
+//   - FR_CSG  (Contribution Sociale Généralisée at 9.2% on 98.25%
+//     of gross, combining the 6.8% déductible and 2.4% non-
+//     déductible components into a single ledger line)
+//   - FR_CRDS (Contribution au Remboursement de la Dette Sociale
+//     at 0.5% on the same 98.25%-of-gross base)
+//   - FR_SS   (Sécurité Sociale employee share — plafonnée at the
+//     PMSS plus déplafonnée on the rest)
+//
+// Negative or zero gross / period return nil.
 func (frPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil

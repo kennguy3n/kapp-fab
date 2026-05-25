@@ -17,10 +17,10 @@ import (
 //     of credits applied against gross tax.
 //
 //   - USC (Universal Social Charge). 2025 schedule:
-//       0       → 12,012   0.5%
-//       12,012  → 27,382   2.0%
-//       27,382  → 70,044   4.0%
-//       70,044  → open     8.0%
+//     0       → 12,012   0.5%
+//     12,012  → 27,382   2.0%
+//     27,382  → 70,044   4.0%
+//     70,044  → open     8.0%
 //     The first €13,000 of income is fully exempt — employees
 //     earning under that threshold pay no USC at all.
 //
@@ -44,6 +44,8 @@ type iePack struct{}
 
 func init() { Register(&iePack{}) }
 
+// Country returns the ISO 3166-1 alpha-2 country code this pack
+// services.
 func (iePack) Country() string { return "IE" }
 
 // EffectiveYear returns the fiscal year the IE tables are
@@ -81,6 +83,15 @@ var (
 	ieAnnualDays = decimal.NewFromFloat(365.25)
 )
 
+// ComputeWithholding emits up to three lines:
+//
+//   - IE_PAYE  (Income Tax at 20% under the SRCOP / 40% above)
+//   - IE_USC   (Universal Social Charge progressive bands, with
+//     full exemption under €13,000 of annual gross)
+//   - IE_PRSI  (Pay-Related Social Insurance Class A1, 4.1% employee
+//     share)
+//
+// Negative or zero gross / period return nil.
 func (iePack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil

@@ -85,16 +85,16 @@ var (
 	deZone4Top2025        = dec("277825") // 42% → 45% boundary
 
 	// Solidaritätszuschlag thresholds (Steuerklasse I).
-	deSoliFreigrenze        = dec("19950")
-	deSoliFullRate          = dec("0.055")
-	deSoliMilderungsRate    = dec("0.119")
+	deSoliFreigrenze     = dec("19950")
+	deSoliFullRate       = dec("0.055")
+	deSoliMilderungsRate = dec("0.119")
 
 	// Social security rates (employee share, 2025).
-	deRVRate    = dec("0.093")  // Rentenversicherung
-	deKVRate    = dec("0.0815") // Krankenversicherung (incl. ~0.85% Zusatzbeitrag)
-	dePVRate    = dec("0.017")  // Pflegeversicherung
-	dePVChildless = dec("0.006") // additional surcharge for childless ≥23
-	deALVRate   = dec("0.013")  // Arbeitslosenversicherung
+	deRVRate      = dec("0.093")  // Rentenversicherung
+	deKVRate      = dec("0.0815") // Krankenversicherung (incl. ~0.85% Zusatzbeitrag)
+	dePVRate      = dec("0.017")  // Pflegeversicherung
+	dePVChildless = dec("0.006")  // additional surcharge for childless ≥23
+	deALVRate     = dec("0.013")  // Arbeitslosenversicherung
 
 	// Beitragsbemessungsgrenzen 2025 (annual, EUR).
 	deBBGRV = dec("96600") // Rente + ALV
@@ -103,6 +103,17 @@ var (
 	deAnnualDays = decimal.NewFromFloat(365.25)
 )
 
+// ComputeWithholding emits up to seven lines:
+//
+//   - DE_LST   (Lohnsteuer per § 32a EStG, Grundtarif 2025)
+//   - DE_SOLI  (Solidaritätszuschlag with Milderungszone slide-in)
+//   - DE_KIST  (Kirchensteuer, 8% or 9% per EmployeeInfo.PermitType)
+//   - DE_RV    (Rentenversicherung at 9.3% under BBG-W)
+//   - DE_KV    (Krankenversicherung at 7.3% + 0.85% Zusatzbeitrag)
+//   - DE_PV    (Pflegeversicherung at 1.7% + 0.6% Kinderlosenzuschlag)
+//   - DE_AV    (Arbeitslosenversicherung at 1.3%)
+//
+// Negative or zero gross / period return nil.
 func (dePack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
@@ -206,27 +217,31 @@ func (dePack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 
 // deComputeLohnsteuer implements § 32a EStG (2025 Grundtarif).
 // The formula is piecewise:
-//   Zone 1 (≤ 12,096):       0
-//   Zone 2 (12,097-17,443):  (932.30 * y + 1400) * y         where y = (zvE - 12096) / 10000
-//   Zone 3 (17,444-68,480):  (176.64 * z + 2397) * z + 1015.13 where z = (zvE - 17443) / 10000
-//   Zone 4 (68,481-277,825): 0.42 * zvE - 10911.92
-//   Zone 5 (> 277,825):      0.45 * zvE - 19246.67
+//
+//	Zone 1 (≤ 12,096):       0
+//	Zone 2 (12,097-17,443):  (932.30 * y + 1400) * y         where y = (zvE - 12096) / 10000
+//	Zone 3 (17,444-68,480):  (176.64 * z + 2397) * z + 1015.13 where z = (zvE - 17443) / 10000
+//	Zone 4 (68,481-277,825): 0.42 * zvE - 10911.92
+//	Zone 5 (> 277,825):      0.45 * zvE - 19246.67
+//
 // Coefficients come from the 2025 BMF Programmablaufplan.
 func deComputeLohnsteuer(annual decimal.Decimal) decimal.Decimal {
 	if annual.LessThanOrEqual(deGrundfreibetrag2025) {
 		return decimal.Zero
 	}
 	if annual.LessThanOrEqual(deZone2Top2025) {
-		// y = (annual - 12096) / 10000
+		// Zone 2 progression key: scale the excess over the
+		// Grundfreibetrag into the BMF's 10k units before applying
+		// the quadratic coefficient.
 		y := annual.Sub(deGrundfreibetrag2025).Div(decimal.NewFromInt(10000))
-		// (932.30 * y + 1400) * y
 		coeff := dec("932.30").Mul(y).Add(dec("1400"))
 		return coeff.Mul(y).Round(2)
 	}
 	if annual.LessThanOrEqual(deZone3Top2025) {
-		// z = (annual - 17443) / 10000
+		// Zone 3 progression key: scale the excess over the Zone 2
+		// ceiling into the BMF's 10k units before applying the
+		// quadratic coefficient and Zone 2 closing value.
 		z := annual.Sub(deZone2Top2025).Div(decimal.NewFromInt(10000))
-		// (176.64 * z + 2397) * z + 1015.13
 		coeff := dec("176.64").Mul(z).Add(dec("2397"))
 		return coeff.Mul(z).Add(dec("1015.13")).Round(2)
 	}

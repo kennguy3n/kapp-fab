@@ -14,10 +14,10 @@ import (
 //     annual barèmes; for 2025 the standard schedule
 //     (résident, isolé sans personne à charge) is progressive
 //     in five bands:
-//       0      → 15,820     25%
-//       15,820 → 27,920     40%
-//       27,920 → 48,320     45%
-//       48,320 → open       50%
+//     0      → 15,820     25%
+//     15,820 → 27,920     40%
+//     27,920 → 48,320     45%
+//     48,320 → open       50%
 //     A €11,170 personal allowance (quotité exemptée 2025) is
 //     deducted before the bracket walk. The pack uses the
 //     income-tax barème — which the precompte professionnel
@@ -47,6 +47,8 @@ type bePack struct{}
 
 func init() { Register(&bePack{}) }
 
+// Country returns the ISO 3166-1 alpha-2 country code this pack
+// services.
 func (bePack) Country() string { return "BE" }
 
 // EffectiveYear returns the fiscal year the BE tables are
@@ -74,6 +76,12 @@ var (
 	beAnnualDays = decimal.NewFromFloat(365.25)
 )
 
+// ComputeWithholding emits up to two lines:
+//
+//   - BE_PP    (Précompte Professionnel, progressive barème)
+//   - BE_ONSS  (employee ONSS / RSZ contribution at 13.07%)
+//
+// Negative or zero gross / period return nil.
 func (bePack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil

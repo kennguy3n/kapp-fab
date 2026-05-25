@@ -17,15 +17,15 @@ import (
 //     post-2024 nine-band structure introduced in OE2024) and
 //     applies a personal credit equivalent to the dedução
 //     específica of €4,350 / yr. Marginal rates 2025 (single):
-//       0       → 8,059    13.00%
-//       8,059   → 12,160   16.50%
-//       12,160 → 17,233    22.00%
-//       17,233 → 22,306    25.00%
-//       22,306 → 28,400    32.00%
-//       28,400 → 41,629    35.50%
-//       41,629 → 44,987    43.50%
-//       44,987 → 83,696    45.00%
-//       > 83,696           48.00%
+//     0       → 8,059    13.00%
+//     8,059   → 12,160   16.50%
+//     12,160 → 17,233    22.00%
+//     17,233 → 22,306    25.00%
+//     22,306 → 28,400    32.00%
+//     28,400 → 41,629    35.50%
+//     41,629 → 44,987    43.50%
+//     44,987 → 83,696    45.00%
+//     > 83,696           48.00%
 //
 //   - Segurança Social employee share: 11.0% on the gross. No
 //     cap (Portugal does not apply an annual ceiling to the
@@ -45,6 +45,8 @@ type ptPack struct{}
 
 func init() { Register(&ptPack{}) }
 
+// Country returns the ISO 3166-1 alpha-2 country code this pack
+// services.
 func (ptPack) Country() string { return "PT" }
 
 // EffectiveYear returns the fiscal year the PT tables are
@@ -86,6 +88,15 @@ var (
 	ptAnnualDays = decimal.NewFromFloat(365.25)
 )
 
+// ComputeWithholding emits up to three lines:
+//
+//   - PT_IRS           (IRS retention per AT tabela mensal, monthly
+//     brackets with the base + marginal-rate-on-excess pattern)
+//   - PT_SOBRETAXA     (Sobretaxa de Solidariedade above the €80k
+//     annual threshold, at 2.5% / 5% per band)
+//   - PT_SEG_SOCIAL    (Segurança Social employee share at 11%)
+//
+// Negative or zero gross / period return nil.
 func (ptPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil

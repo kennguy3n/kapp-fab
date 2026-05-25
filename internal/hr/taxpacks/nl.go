@@ -16,9 +16,9 @@ import (
 //     monthly payroll. For 2025 the combined Box 1 schedule
 //     under age AOW (most working-age employees) has three
 //     bands:
-//       0      → 38,441     35.82% (income tax 8.17% + premie 27.65%)
-//       38,441 → 76,817     37.48% (income tax 37.48%; premie ceiling reached)
-//       76,817 → open       49.50% (top rate)
+//     0      → 38,441     35.82% (income tax 8.17% + premie 27.65%)
+//     38,441 → 76,817     37.48% (income tax 37.48%; premie ceiling reached)
+//     76,817 → open       49.50% (top rate)
 //     This pack uses these combined rates from the Belasting-
 //     dienst's 2025 "loonbelastingtabellen" published in
 //     Staatscourant 2024-37411.
@@ -56,6 +56,8 @@ type nlPack struct{}
 
 func init() { Register(&nlPack{}) }
 
+// Country returns the ISO 3166-1 alpha-2 country code this pack
+// services.
 func (nlPack) Country() string { return "NL" }
 
 // EffectiveYear returns the fiscal year the NL tables are
@@ -93,6 +95,15 @@ var (
 	nlAnnualDays = decimal.NewFromFloat(365.25)
 )
 
+// ComputeWithholding emits up to two lines:
+//
+//   - NL_LOONHEFFING  (Loonheffing per Belastingdienst witte tabel
+//     2025, two progressive bands, with the standard
+//     heffingskorting applied)
+//   - NL_ZVW          (ZVW-bijdrage at 5.32% employee share, capped
+//     at the annual maximumbijdrageloon)
+//
+// Negative or zero gross / period return nil.
 func (nlPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil

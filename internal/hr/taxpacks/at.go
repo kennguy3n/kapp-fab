@@ -11,24 +11,24 @@ import (
 //
 //   - Lohnsteuer (LSt): the federal income tax. Austria's 2025
 //     bracket schedule is progressive in seven bands:
-//       0       → 13,308     0%
-//       13,308  → 21,617     20%
-//       21,617  → 35,836     30%
-//       35,836  → 69,166     40%
-//       69,166  → 103,072    48%
-//       103,072 → 1,000,000  50%
-//       > 1,000,000          55%
+//     0       → 13,308     0%
+//     13,308  → 21,617     20%
+//     21,617  → 35,836     30%
+//     35,836  → 69,166     40%
+//     69,166  → 103,072    48%
+//     103,072 → 1,000,000  50%
+//     > 1,000,000          55%
 //     The first band is the Steuerfreibetrag (tax-free zone)
 //     which was indexed up from €12,816 in 2024 to €13,308 in
 //     2025 under the inflation indexation law (Teuerungs-
 //     Entlastungspaket III).
 //
 //   - SV-Beiträge (Sozialversicherung) employee shares — 2025:
-//       Pensionsversicherung (PV)  10.25%
-//       Krankenversicherung  (KV)  3.87%
-//       Arbeitslosenversicherung (AV) 2.95%
-//       Arbeiterkammer Umlage (AK) 0.50%
-//       Wohnbauförderungsbeitrag    0.50%
+//     Pensionsversicherung (PV)  10.25%
+//     Krankenversicherung  (KV)  3.87%
+//     Arbeitslosenversicherung (AV) 2.95%
+//     Arbeiterkammer Umlage (AK) 0.50%
+//     Wohnbauförderungsbeitrag    0.50%
 //     Total employee share ~18.07%. Capped at the monthly
 //     Höchstbemessungsgrundlage (HBGl) of €6,450 in 2025
 //     (€86,400 / yr; "annual" cap is the monthly × 14 because
@@ -47,6 +47,8 @@ type atPack struct{}
 
 func init() { Register(&atPack{}) }
 
+// Country returns the ISO 3166-1 alpha-2 country code this pack
+// services.
 func (atPack) Country() string { return "AT" }
 
 // EffectiveYear returns the fiscal year the AT tables are
@@ -74,17 +76,24 @@ var (
 
 	// Employee SV-Beiträge (each emitted as a separate ledger
 	// line for clarity).
-	atPVRate      = dec("0.1025") // Pensionsversicherung
-	atKVRate      = dec("0.0387") // Krankenversicherung
-	atAVRate      = dec("0.0295") // Arbeitslosenversicherung
-	atAKRate      = dec("0.0050") // Arbeiterkammer
-	atWBFRate     = dec("0.0050") // Wohnbauförderung
+	atPVRate  = dec("0.1025") // Pensionsversicherung
+	atKVRate  = dec("0.0387") // Krankenversicherung
+	atAVRate  = dec("0.0295") // Arbeitslosenversicherung
+	atAKRate  = dec("0.0050") // Arbeiterkammer
+	atWBFRate = dec("0.0050") // Wohnbauförderung
 
-	atHBGlMonthly = dec("6450")   // 2025 Höchstbemessungsgrundlage
+	atHBGlMonthly = dec("6450") // 2025 Höchstbemessungsgrundlage
 	atMonthDays   = decimal.NewFromInt(30)
 	atAnnualDays  = decimal.NewFromFloat(365.25)
 )
 
+// ComputeWithholding emits up to two lines:
+//
+//   - AT_LST  (Lohnsteuer per BMF § 33 EStG progressive table)
+//   - AT_SV   (Sozialversicherung-Beiträge: PV / KV / AV / AK / WBF
+//     capped at the Höchstbeitragsgrundlage)
+//
+// Negative or zero gross / period return nil.
 func (atPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil

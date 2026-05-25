@@ -34,10 +34,10 @@ import (
 //
 //   - Seguridad Social employee share: 6.47% total in 2025,
 //     composed of:
-//       Contingencias comunes  4.70%
-//       Desempleo             1.55% (1.60% for temporary contracts)
-//       Formación profesional 0.10%
-//       MEI (Mecanismo de Equidad Intergeneracional) 0.12%
+//     Contingencias comunes  4.70%
+//     Desempleo             1.55% (1.60% for temporary contracts)
+//     Formación profesional 0.10%
+//     MEI (Mecanismo de Equidad Intergeneracional) 0.12%
 //     Capped at the monthly base máxima (€4,909.50 in 2025).
 //
 // References:
@@ -50,6 +50,8 @@ type esPack struct{}
 
 func init() { Register(&esPack{}) }
 
+// Country returns the ISO 3166-1 alpha-2 country code this pack
+// services.
 func (esPack) Country() string { return "ES" }
 
 // EffectiveYear returns the fiscal year the ES tables are
@@ -77,22 +79,28 @@ var (
 		{Floor: dec("300000"), Top: decimal.Zero, Base: dec("125901.50"), Rate: dec("0.47")},
 	}
 
-	esPersonalMinimum  = dec("5550") // Mínimo personal del contribuyente
+	esPersonalMinimum = dec("5550") // Mínimo personal del contribuyente
 
-	esSSContingencias    = dec("0.047")
-	esSSDesempleo        = dec("0.0155") // permanent contract
-	esSSFormacion        = dec("0.001")
-	esSSMEI              = dec("0.0012")
-	esSSEmployeeRate     = esSSContingencias.
-				Add(esSSDesempleo).
-				Add(esSSFormacion).
-				Add(esSSMEI)
+	esSSContingencias   = dec("0.047")
+	esSSDesempleo       = dec("0.0155") // permanent contract
+	esSSFormacion       = dec("0.001")
+	esSSMEI             = dec("0.0012")
 	esSSBaseMaximaMonth = dec("4909.50") // 2025 base máxima mensual
 
 	esPeriodMonth = decimal.NewFromInt(30)
 	esAnnualDays  = decimal.NewFromFloat(365.25)
 )
 
+// ComputeWithholding emits up to five lines:
+//
+//   - ES_IRPF        (retención IRPF progresiva, AEAT baréme)
+//   - ES_SS_CC       (Contingencias Comunes employee share at 4.70%)
+//   - ES_SS_DESEMPLEO (Desempleo employee share at 1.55%)
+//   - ES_SS_FORMACION (Formación Profesional at 0.10%)
+//   - ES_SS_MEI      (Mecanismo de Equidad Intergeneracional at 0.12%)
+//
+// All Seguridad Social lines are capped at the monthly base
+// máxima. Negative or zero gross / period return nil.
 func (esPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil

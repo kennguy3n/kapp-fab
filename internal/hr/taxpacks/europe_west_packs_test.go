@@ -462,7 +462,10 @@ func TestITPackINPSCeiling(t *testing.T) {
 	})
 }
 
-// TestITPackEmptyInput.
+// TestITPackEmptyInput pins the no-statutory-deduction
+// behaviour: an empty / inverted PayPeriod (Start after End)
+// produces zero deductions rather than dividing by a negative
+// period fraction or emitting negative lines.
 func TestITPackEmptyInput(t *testing.T) {
 	pack, _ := Lookup("IT")
 	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
@@ -535,7 +538,10 @@ func TestNLPackZVWCap(t *testing.T) {
 	})
 }
 
-// TestNLPackEmptyInput.
+// TestNLPackEmptyInput pins the no-statutory-deduction
+// behaviour: an empty / inverted PayPeriod (Start after End)
+// produces zero deductions rather than dividing by a negative
+// period fraction or emitting negative lines.
 func TestNLPackEmptyInput(t *testing.T) {
 	pack, _ := Lookup("NL")
 	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
@@ -570,7 +576,10 @@ func TestBEPackNominalSalary(t *testing.T) {
 	}
 }
 
-// TestBEPackEmptyInput.
+// TestBEPackEmptyInput pins the no-statutory-deduction
+// behaviour: an empty / inverted PayPeriod (Start after End)
+// produces zero deductions rather than dividing by a negative
+// period fraction or emitting negative lines.
 func TestBEPackEmptyInput(t *testing.T) {
 	pack, _ := Lookup("BE")
 	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
@@ -624,7 +633,10 @@ func TestIEPackUSCExemption(t *testing.T) {
 	}
 }
 
-// TestIEPackEmptyInput.
+// TestIEPackEmptyInput pins the no-statutory-deduction
+// behaviour: an empty / inverted PayPeriod (Start after End)
+// produces zero deductions rather than dividing by a negative
+// period fraction or emitting negative lines.
 func TestIEPackEmptyInput(t *testing.T) {
 	pack, _ := Lookup("IE")
 	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
@@ -675,7 +687,10 @@ func TestATPackHBGlCap(t *testing.T) {
 	}
 }
 
-// TestATPackEmptyInput.
+// TestATPackEmptyInput pins the no-statutory-deduction
+// behaviour: an empty / inverted PayPeriod (Start after End)
+// produces zero deductions rather than dividing by a negative
+// period fraction or emitting negative lines.
 func TestATPackEmptyInput(t *testing.T) {
 	pack, _ := Lookup("AT")
 	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
@@ -730,7 +745,10 @@ func TestPTPackSobretaxa(t *testing.T) {
 	}
 }
 
-// TestPTPackEmptyInput.
+// TestPTPackEmptyInput pins the no-statutory-deduction
+// behaviour: an empty / inverted PayPeriod (Start after End)
+// produces zero deductions rather than dividing by a negative
+// period fraction or emitting negative lines.
 func TestPTPackEmptyInput(t *testing.T) {
 	pack, _ := Lookup("PT")
 	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},

@@ -58,6 +58,8 @@ type itPack struct{}
 
 func init() { Register(&itPack{}) }
 
+// Country returns the ISO 3166-1 alpha-2 country code this pack
+// services.
 func (itPack) Country() string { return "IT" }
 
 // EffectiveYear returns the fiscal year the IT tables are
@@ -82,26 +84,26 @@ var (
 
 	// Detrazione lavoro dipendente — published values (Allegato
 	// A art. 13 TUIR + 2024 amendments).
-	itDetrazioneFloor    = dec("8500")    // full detrazione if income ≤ this
-	itDetrazioneStep1Top = dec("28000")   // taper-1 ceiling
-	itDetrazioneStep2Top = dec("50000")   // taper-2 ceiling
-	itDetrazioneAtFloor  = dec("1955")    // detrazione at €8,500
-	itDetrazioneAt28k    = dec("1910")    // detrazione at €28,000
-	itDetrazioneAt50k    = dec("0")       // detrazione at €50,000
+	itDetrazioneFloor    = dec("8500")  // full detrazione if income ≤ this
+	itDetrazioneStep1Top = dec("28000") // taper-1 ceiling
+	itDetrazioneStep2Top = dec("50000") // taper-2 ceiling
+	itDetrazioneAtFloor  = dec("1955")  // detrazione at €8,500
+	itDetrazioneAt28k    = dec("1910")  // detrazione at €28,000
+	itDetrazioneAt50k    = dec("0")     // detrazione at €50,000
 
 	// Regional surcharges (selected). Empty / unknown
 	// PermitType falls back to the national average.
 	itAddizionaleRegionale = map[string]decimal.Decimal{
-		"LOMBARDIA":   dec("0.0173"),
-		"LAZIO":       dec("0.0333"), // top band; some bands lower
-		"VENETO":      dec("0.0123"),
-		"PIEMONTE":    dec("0.0333"),
-		"LIGURIA":     dec("0.0333"),
-		"CAMPANIA":    dec("0.0333"),
-		"SICILIA":     dec("0.0173"),
-		"SARDEGNA":    dec("0.0173"),
-		"TOSCANA":     dec("0.0173"),
-		"EMILIA":      dec("0.0193"),
+		"LOMBARDIA": dec("0.0173"),
+		"LAZIO":     dec("0.0333"), // top band; some bands lower
+		"VENETO":    dec("0.0123"),
+		"PIEMONTE":  dec("0.0333"),
+		"LIGURIA":   dec("0.0333"),
+		"CAMPANIA":  dec("0.0333"),
+		"SICILIA":   dec("0.0173"),
+		"SARDEGNA":  dec("0.0173"),
+		"TOSCANA":   dec("0.0173"),
+		"EMILIA":    dec("0.0193"),
 	}
 	itAddizionaleRegionaleAvg = dec("0.0173")
 	itAddizionaleComunaleAvg  = dec("0.0080")
@@ -115,6 +117,19 @@ var (
 	itAnnualDays = decimal.NewFromFloat(365.25)
 )
 
+// ComputeWithholding emits up to four lines:
+//
+//   - IT_IRPEF             (national progressive Income Tax with
+//     the lavoro-dipendente detrazione applied)
+//   - IT_ADD_REGIONALE     (regional IRPEF surcharge, resolved
+//     from EmployeeInfo.PermitType or the national average)
+//   - IT_ADD_COMUNALE      (municipal IRPEF surcharge, capped at
+//     the maximum statutory rate)
+//   - IT_INPS              (employee INPS contribution at 9.19%
+//     under the first ceiling, 10.19% in the maggiorazione band,
+//     and zero above the massimale)
+//
+// Negative or zero gross / period return nil.
 func (itPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
@@ -172,7 +187,7 @@ func (itPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 
 	// INPS — capped at the massimale, with the 1% MaggiorAzione
 	// applied between the first ceiling and the massimale.
-	if inps := itComputeINPS(gross, e.YTDGross, periodFraction); inps.IsPositive() {
+	if inps := itComputeINPS(gross, e.YTDGross); inps.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "IT_INPS",
 			Name:   "INPS (employee share, IT)",
@@ -226,7 +241,7 @@ func itResolveRegionRate(permitType string) decimal.Decimal {
 // the slip's gross. The 1% maggiorazione kicks in once cumulative
 // YTD gross exceeds the first ceiling; the contribution stops
 // accruing at the massimale.
-func itComputeINPS(gross, ytd, periodFraction decimal.Decimal) decimal.Decimal {
+func itComputeINPS(gross, ytd decimal.Decimal) decimal.Decimal {
 	if ytd.GreaterThanOrEqual(itINPSMassimale) {
 		return decimal.Zero
 	}
@@ -269,5 +284,3 @@ func walkITBrackets(annual decimal.Decimal, brackets []itBracket) decimal.Decima
 	}
 	return match.Base.Add(annual.Sub(match.Floor).Mul(match.Rate))
 }
-
-

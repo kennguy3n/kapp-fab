@@ -81,14 +81,14 @@ var (
 	// implemented here — the wizard does not yet capture
 	// residency for Scotland vs rUK.
 	gbPAYEBrackets = []gbBracket{
-		{Floor: dec("0"), Top: dec("37700"), Rate: dec("0.20")},        // basic rate
-		{Floor: dec("37700"), Top: dec("125140"), Rate: dec("0.40")},   // higher rate
-		{Floor: dec("125140"), Top: decimal.Zero, Rate: dec("0.45")},   // additional rate
+		{Floor: dec("0"), Top: dec("37700"), Rate: dec("0.20")},      // basic rate
+		{Floor: dec("37700"), Top: dec("125140"), Rate: dec("0.40")}, // higher rate
+		{Floor: dec("125140"), Top: decimal.Zero, Rate: dec("0.45")}, // additional rate
 	}
 
-	gbPersonalAllowance       = dec("12570")
-	gbPersonalAllowanceTaper  = dec("100000")
-	gbPersonalAllowanceFully  = dec("125140") // allowance fully withdrawn at this level
+	gbPersonalAllowance      = dec("12570")
+	gbPersonalAllowanceTaper = dec("100000")
+	gbPersonalAllowanceFully = dec("125140") // allowance fully withdrawn at this level
 
 	// NIC Class 1 employee primary thresholds (annualised).
 	gbNICPrimaryThreshold = dec("12570")
@@ -99,8 +99,8 @@ var (
 	// Student loan thresholds (annual). Plan 1 is the default
 	// when the EmployeeInfo flag is set without a specific
 	// plan code.
-	gbStudentLoanRate         = dec("0.09")
-	gbStudentLoanPlan1Annual  = dec("24990") // Plan 1 — pre-2012 starters
+	gbStudentLoanRate        = dec("0.09")
+	gbStudentLoanPlan1Annual = dec("24990") // Plan 1 — pre-2012 starters
 	// Plan 2/4/5/PGL retained as documentation; selection
 	// requires per-employee plan capture which the wizard
 	// adds in a later PR.
@@ -112,6 +112,16 @@ var (
 	gbPeriodsPerYear = decimal.NewFromFloat(365.25)
 )
 
+// ComputeWithholding emits up to three lines:
+//
+//   - GB_PAYE          (Income Tax per HMRC bands with Personal
+//     Allowance taper between £100k and £125,140)
+//   - GB_NIC           (Class 1 employee NIC, PT → UEL at the main
+//     rate, above UEL at the additional rate)
+//   - GB_STUDENT_LOAN  (Student Loan Plan 1/2/4/5 or Postgraduate
+//     Loan, resolved from EmployeeInfo.PermitType)
+//
+// Negative or zero gross / period return nil.
 func (gbPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
