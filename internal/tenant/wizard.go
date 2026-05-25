@@ -141,6 +141,37 @@ func DefaultLocaleForCountry(country string) string {
 		return "pt-BR"
 	case "MX", "AR", "CO", "CL", "PE", "CR", "PA", "UY", "EC", "DO", "GT", "PY":
 		return "es"
+	// Phase N1 — Europe Core. Dutch + Portuguese are new
+	// catalogues added in this PR; Belgium defaults to French
+	// (Wallonia / Brussels majority business locale, with NL
+	// admins resetting from the admin surface).
+	case "NL":
+		return "nl"
+	case "PT":
+		return "pt"
+	case "BE":
+		return "fr"
+	// Phase N2 — Europe Extended. Nine additional locales
+	// added in this PR (pl, sv, nb, da, fi, cs, hu, ro, el).
+	// Each country defaults to its national language.
+	case "PL":
+		return "pl"
+	case "SE":
+		return "sv"
+	case "NO":
+		return "nb"
+	case "DK":
+		return "da"
+	case "FI":
+		return "fi"
+	case "CZ":
+		return "cs"
+	case "HU":
+		return "hu"
+	case "RO":
+		return "ro"
+	case "GR":
+		return "el"
 	default:
 		return "en"
 	}
@@ -206,6 +237,60 @@ func DefaultCoATemplateForCountry(country string) string {
 		return "cl_ifrs_basic"
 	case "CO", "PE", "CR", "PA", "UY", "EC", "DO", "GT", "PY", "TT":
 		return "latam_ifrs_basic"
+	// Phase N1 — Europe Core + AU. Each country gets its own
+	// chart so payroll deduction lines land on country-specific
+	// liability accounts (HMRC PAYE, DRV / GKV, URSSAF,
+	// AEAT IRPF, Agenzia delle Entrate IRPEF, Belastingdienst
+	// Loonheffing, ONSS/RSZ Précompte, Revenue PAYE, FA / ÖGK
+	// Lohnsteuer / SV, AT IRS / Seg. Social, ATO PAYG /
+	// Superannuation).
+	case "GB":
+		return "gb_basic"
+	case "DE":
+		return "de_basic"
+	case "FR":
+		return "fr_basic"
+	case "ES":
+		return "es_basic"
+	case "IT":
+		return "it_basic"
+	case "NL":
+		return "nl_basic"
+	case "BE":
+		return "be_basic"
+	case "IE":
+		return "ie_basic"
+	case "AT":
+		return "at_basic"
+	case "PT":
+		return "pt_basic"
+	case "AU":
+		return "au_basic"
+	// Phase N2 — Europe Extended (PL/SE/NO/DK/FI/CZ/HU/RO/GR).
+	// Each country gets its own chart so payroll deduction
+	// lines land on country-specific liability accounts:
+	// ZUS / NFZ (PL), Skatteverket / Tjänstepension (SE),
+	// Skatteetaten / NAV (NO), Skattestyrelsen / ATP (DK),
+	// Verohallinto / TyEL (FI), ČSSZ / VZP (CZ), NAV (HU),
+	// ANAF / CAS / CASS (RO), AADE / EFKA (GR).
+	case "PL":
+		return "pl_basic"
+	case "SE":
+		return "se_basic"
+	case "NO":
+		return "no_basic"
+	case "DK":
+		return "dk_basic"
+	case "FI":
+		return "fi_basic"
+	case "CZ":
+		return "cz_basic"
+	case "HU":
+		return "hu_basic"
+	case "RO":
+		return "ro_basic"
+	case "GR":
+		return "gr_basic"
 	default:
 		return "ifrs_basic"
 	}
@@ -351,6 +436,79 @@ var coaCLIFRSBasic []byte
 //go:embed coa_templates/latam_ifrs_basic.json
 var coaLATAMIFRSBasic []byte
 
+// Phase N1 — Europe Core (GB / DE / FR / ES / IT / NL / BE / IE /
+// AT / PT) and the Australia chart that closes the previously-
+// documented fallback to ifrs_basic for AU tenants.
+
+//go:embed coa_templates/gb_basic.json
+var coaGBBasic []byte
+
+//go:embed coa_templates/de_basic.json
+var coaDEBasic []byte
+
+//go:embed coa_templates/fr_basic.json
+var coaFRBasic []byte
+
+//go:embed coa_templates/es_basic.json
+var coaESBasic []byte
+
+//go:embed coa_templates/it_basic.json
+var coaITBasic []byte
+
+//go:embed coa_templates/nl_basic.json
+var coaNLBasic []byte
+
+//go:embed coa_templates/be_basic.json
+var coaBEBasic []byte
+
+//go:embed coa_templates/ie_basic.json
+var coaIEBasic []byte
+
+//go:embed coa_templates/at_basic.json
+var coaATBasic []byte
+
+//go:embed coa_templates/pt_basic.json
+var coaPTBasic []byte
+
+//go:embed coa_templates/au_basic.json
+var coaAUBasic []byte
+
+// Phase N2 — Europe Extended (PL/SE/NO/DK/FI/CZ/HU/RO/GR).
+// Each chart carries the country's statutory payroll-liability
+// accounts so deductions emitted by the matching tax pack land
+// on the right ledger lines (ZUS/NFZ for PL, Skatteverket /
+// Tjänstepension for SE, Skatteetaten/NAV/OTP for NO,
+// Skattestyrelsen/ATP for DK, Verohallinto/TyEL/SAVA for FI,
+// ČSSZ/VZP for CZ, NAV/Szocho for HU, ANAF/CAS/CASS/CAM for RO,
+// AADE/EFKA for GR).
+
+//go:embed coa_templates/pl_basic.json
+var coaPLBasic []byte
+
+//go:embed coa_templates/se_basic.json
+var coaSEBasic []byte
+
+//go:embed coa_templates/no_basic.json
+var coaNOBasic []byte
+
+//go:embed coa_templates/dk_basic.json
+var coaDKBasic []byte
+
+//go:embed coa_templates/fi_basic.json
+var coaFIBasic []byte
+
+//go:embed coa_templates/cz_basic.json
+var coaCZBasic []byte
+
+//go:embed coa_templates/hu_basic.json
+var coaHUBasic []byte
+
+//go:embed coa_templates/ro_basic.json
+var coaROBasic []byte
+
+//go:embed coa_templates/gr_basic.json
+var coaGRBasic []byte
+
 // chartOfAccountsTemplates maps the wizard's template name to the
 // embedded JSON payload. Adding a new template is a matter of dropping
 // a JSON file in coa_templates/ and registering it here. Country-
@@ -383,6 +541,28 @@ var chartOfAccountsTemplates = map[string][]byte{
 	"ar_rtfacpce_basic": coaARRTBasic,
 	"cl_ifrs_basic":     coaCLIFRSBasic,
 	"latam_ifrs_basic":  coaLATAMIFRSBasic,
+	// Phase N1 — Europe Core + AU.
+	"gb_basic": coaGBBasic,
+	"de_basic": coaDEBasic,
+	"fr_basic": coaFRBasic,
+	"es_basic": coaESBasic,
+	"it_basic": coaITBasic,
+	"nl_basic": coaNLBasic,
+	"be_basic": coaBEBasic,
+	"ie_basic": coaIEBasic,
+	"at_basic": coaATBasic,
+	"pt_basic": coaPTBasic,
+	"au_basic": coaAUBasic,
+	// Phase N2 — Europe Extended.
+	"pl_basic": coaPLBasic,
+	"se_basic": coaSEBasic,
+	"no_basic": coaNOBasic,
+	"dk_basic": coaDKBasic,
+	"fi_basic": coaFIBasic,
+	"cz_basic": coaCZBasic,
+	"hu_basic": coaHUBasic,
+	"ro_basic": coaROBasic,
+	"gr_basic": coaGRBasic,
 }
 
 // templateAccount is the shape each entry in a CoA template takes. The

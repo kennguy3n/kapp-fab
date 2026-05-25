@@ -48,8 +48,10 @@ export const SupportedLocales: readonly LocaleInfo[] = [
   { tag: "de", name: "Deutsch", direction: "ltr" },
   { tag: "fr", name: "Français", direction: "ltr" },
   { tag: "fr-CA", name: "Français (Canada)", direction: "ltr" },
+  { tag: "nl", name: "Nederlands", direction: "ltr" },
   { tag: "it", name: "Italiano", direction: "ltr" },
   { tag: "es", name: "Español", direction: "ltr" },
+  { tag: "pt", name: "Português", direction: "ltr" },
   { tag: "pt-BR", name: "Português (Brasil)", direction: "ltr" },
   { tag: "ja", name: "日本語", direction: "ltr" },
   { tag: "zh", name: "中文（简体）", direction: "ltr" },
@@ -59,6 +61,16 @@ export const SupportedLocales: readonly LocaleInfo[] = [
   { tag: "th", name: "ไทย", direction: "ltr" },
   { tag: "id", name: "Bahasa Indonesia", direction: "ltr" },
   { tag: "vi", name: "Tiếng Việt", direction: "ltr" },
+  // Phase N2: Europe Extended catalogues.
+  { tag: "pl", name: "Polski", direction: "ltr" },
+  { tag: "sv", name: "Svenska", direction: "ltr" },
+  { tag: "nb", name: "Norsk bokmål", direction: "ltr" },
+  { tag: "da", name: "Dansk", direction: "ltr" },
+  { tag: "fi", name: "Suomi", direction: "ltr" },
+  { tag: "cs", name: "Čeština", direction: "ltr" },
+  { tag: "hu", name: "Magyar", direction: "ltr" },
+  { tag: "ro", name: "Română", direction: "ltr" },
+  { tag: "el", name: "Ελληνικά", direction: "ltr" },
 ];
 
 /**
@@ -193,6 +205,26 @@ const COUNTRY_LOCALE_DEFAULTS: Record<string, string> = {
   DO: "es",
   GT: "es",
   PY: "es",
+  // Phase N1: Europe Core. Dutch and (European) Portuguese
+  // get their own catalogues; Belgium defaults to French
+  // (Wallonia / Brussels business-majority), with NL admins
+  // resetting from the locale switcher.
+  NL: "nl",
+  PT: "pt",
+  BE: "fr",
+  // Phase N2: Europe Extended. Nine additional country defaults
+  // for the locale resolver. Each country pre-selects its own
+  // national-language catalogue; admins can override from the
+  // locale switcher.
+  PL: "pl",
+  SE: "sv",
+  NO: "nb",
+  DK: "da",
+  FI: "fi",
+  CZ: "cs",
+  HU: "hu",
+  RO: "ro",
+  GR: "el",
 };
 
 /**
