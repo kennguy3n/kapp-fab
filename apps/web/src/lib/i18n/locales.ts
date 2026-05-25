@@ -48,8 +48,10 @@ export const SupportedLocales: readonly LocaleInfo[] = [
   { tag: "de", name: "Deutsch", direction: "ltr" },
   { tag: "fr", name: "Français", direction: "ltr" },
   { tag: "fr-CA", name: "Français (Canada)", direction: "ltr" },
+  { tag: "nl", name: "Nederlands", direction: "ltr" },
   { tag: "it", name: "Italiano", direction: "ltr" },
   { tag: "es", name: "Español", direction: "ltr" },
+  { tag: "pt", name: "Português", direction: "ltr" },
   { tag: "pt-BR", name: "Português (Brasil)", direction: "ltr" },
   { tag: "ja", name: "日本語", direction: "ltr" },
   { tag: "zh", name: "中文（简体）", direction: "ltr" },
@@ -193,6 +195,13 @@ const COUNTRY_LOCALE_DEFAULTS: Record<string, string> = {
   DO: "es",
   GT: "es",
   PY: "es",
+  // Phase N1: Europe Core. Dutch and (European) Portuguese
+  // get their own catalogues; Belgium defaults to French
+  // (Wallonia / Brussels business-majority), with NL admins
+  // resetting from the locale switcher.
+  NL: "nl",
+  PT: "pt",
+  BE: "fr",
 };
 
 /**
