@@ -83,6 +83,10 @@ var TenantScopedTables = []string{
 	"inventory_items",
 	"inventory_batches",
 	"inventory_moves",
+	// Manufacturing (Phase N6)
+	"boms",
+	"bom_components",
+	"work_orders",
 	// HR / LMS
 	"leave_ledger",
 	"lesson_progress",

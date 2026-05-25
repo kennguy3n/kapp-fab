@@ -39,6 +39,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
+	"github.com/kennguy3n/kapp-fab/internal/manufacturing"
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/print"
@@ -457,6 +458,13 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		WithSalesInvoiceHook(inventoryHook.OnSalesInvoicePosted).
 		WithPurchaseBillHook(inventoryHook.OnPurchaseBillPosted)
 
+	// Phase N6 — Manufacturing Light. The manufacturing store
+	// owns BOM and work-order CRUD; completion of a work order
+	// emits inventory moves through the same inventoryStore so
+	// the existing inventory_moves_source_uniq partial unique
+	// index makes retries idempotent.
+	manufacturingStore := manufacturing.NewPGStore(pool, inventoryStore)
+
 	// Phase E leave-balance ledger + lesson-progress projections.
 	// Employee / leave-request / course / lesson records live in the
 	// generic KRecord store; the dedicated stores only cover the
@@ -589,6 +597,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster, paymentPoster)
 	agents.RegisterInventoryTools(executor, inventoryStore)
 	agents.RegisterInventoryReorderTool(executor, inventory.NewReorderHandler(recordStore, inventoryStore))
+	agents.RegisterManufacturingTools(executor, manufacturingStore)
 	agents.RegisterHRTools(executor, hrStore)
 	// Single payroll engine instance reused across the agent tool surface
 	// and the hrHandlers HTTP surface. The engine is stateless (it just
@@ -684,6 +693,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	auh := &auditHandlers{pool: pool}
 	finh := &financeHandlers{store: ledgerStore, poster: invoicePoster, payments: paymentPoster}
 	invh := &inventoryHandlers{store: inventoryStore}
+	mfgh := &manufacturingHandlers{store: manufacturingStore}
 	oh := &openAPIHandler{registry: ktypeRegistry}
 	fileh := &filesHandlers{store: filesStore, meter: meteringBuffer}
 	bh := &baseHandlers{store: baseStore}
@@ -1010,76 +1020,77 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	}
 
 	d := &apiDeps{
-		cfg:                  cfg,
-		pool:                 pool,
-		adminPool:            adminPool,
-		tenantSvc:            tenantSvc,
-		featureStore:         featureStore,
-		quotaEnforcer:        quotaEnforcer,
-		portalStore:          portalStore,
-		recordStore:          recordStore,
-		ledgerStore:          ledgerStore,
-		invoicePoster:        invoicePoster,
-		paymentPoster:        paymentPoster,
-		apiExchangeRates:     apiExchangeRates,
-		authzEval:            authzEval,
-		auditor:              auditor,
-		rateLimitMW:          rateLimitMW,
-		apiCallMW:            apiCallMW,
-		featureMW:            featureMW,
-		authzGate:            authzGate,
-		authzMethodGate:      authzMethodGate,
+		cfg:                    cfg,
+		pool:                   pool,
+		adminPool:              adminPool,
+		tenantSvc:              tenantSvc,
+		featureStore:           featureStore,
+		quotaEnforcer:          quotaEnforcer,
+		portalStore:            portalStore,
+		recordStore:            recordStore,
+		ledgerStore:            ledgerStore,
+		invoicePoster:          invoicePoster,
+		paymentPoster:          paymentPoster,
+		apiExchangeRates:       apiExchangeRates,
+		authzEval:              authzEval,
+		auditor:                auditor,
+		rateLimitMW:            rateLimitMW,
+		apiCallMW:              apiCallMW,
+		featureMW:              featureMW,
+		authzGate:              authzGate,
+		authzMethodGate:        authzMethodGate,
 		publicFormIPLimit:      publicFormIPLimit,
 		publicEmbedIPLimit:     publicEmbedIPLimit,
 		publicInboundIPLimit:   publicInboundIPLimit,
 		publicChallengeIPLimit: publicChallengeIPLimit,
-		captchaMW:            captchaMW,
-		captchaVerifier:      captchaVerifier,
-		csrfMW:               csrfMW,
-		adminChain:           adminChain,
-		tenantChain:          tenantChain,
-		authh:                authh,
-		eh:                   eh,
-		th:                   th,
-		feath:                feath,
-		plch:                 plch,
-		reth:                 reth,
-		iah:                  iah,
-		meth:                 meth,
-		kh:                   kh,
-		whh:                  whh,
-		sh:                   sh,
-		rh:                   rh,
-		ph:                   ph,
-		fh:                   fh,
-		wh:                   wh,
-		ah:                   ah,
-		aph:                  aph,
-		auh:                  auh,
-		finh:                 finh,
-		invh:                 invh,
-		oh:                   oh,
-		fileh:                fileh,
-		bh:                   bh,
-		dh:                   dh,
-		vh:                   vh,
-		roleh:                roleh,
-		curh:                 curh,
-		hdh:                  hdh,
-		hdmbh:                hdmbh,
-		reph:                 reph,
-		repsh:                repsh,
-		exph:                 exph,
-		dashh:                dashh,
-		insh:                 insh,
-		insdsh:               insdsh,
-		insembh:              insembh,
-		hrh:                  hrh,
-		inboundHandler:       inboundHandler,
-		metrics:              metrics,
-		ktypeRegistry:        ktypeRegistry,
-		sessionStore:         sessionStore,
-		localeBundle:         localeBundle,
+		captchaMW:              captchaMW,
+		captchaVerifier:        captchaVerifier,
+		csrfMW:                 csrfMW,
+		adminChain:             adminChain,
+		tenantChain:            tenantChain,
+		authh:                  authh,
+		eh:                     eh,
+		th:                     th,
+		feath:                  feath,
+		plch:                   plch,
+		reth:                   reth,
+		iah:                    iah,
+		meth:                   meth,
+		kh:                     kh,
+		whh:                    whh,
+		sh:                     sh,
+		rh:                     rh,
+		ph:                     ph,
+		fh:                     fh,
+		wh:                     wh,
+		ah:                     ah,
+		aph:                    aph,
+		auh:                    auh,
+		finh:                   finh,
+		invh:                   invh,
+		mfgh:                   mfgh,
+		oh:                     oh,
+		fileh:                  fileh,
+		bh:                     bh,
+		dh:                     dh,
+		vh:                     vh,
+		roleh:                  roleh,
+		curh:                   curh,
+		hdh:                    hdh,
+		hdmbh:                  hdmbh,
+		reph:                   reph,
+		repsh:                  repsh,
+		exph:                   exph,
+		dashh:                  dashh,
+		insh:                   insh,
+		insdsh:                 insdsh,
+		insembh:                insembh,
+		hrh:                    hrh,
+		inboundHandler:         inboundHandler,
+		metrics:                metrics,
+		ktypeRegistry:          ktypeRegistry,
+		sessionStore:           sessionStore,
+		localeBundle:           localeBundle,
 	}
 
 	return d, func() { runCleanups(cleanups) }, nil
@@ -1148,7 +1159,7 @@ func clampPoWDifficulty(d int) uint8 {
 // Bypassing CSRF on these paths is safe because:
 //
 //   - POST /api/v1/forms/{id}/submit is fronted by publicFormIPLimit
-//     + the captcha middleware + a per-form honeypot check inside
+//   - the captcha middleware + a per-form honeypot check inside
 //     the handler. The CSRF Origin check would only add a fourth
 //     layer that is by design defeated by the embedding scenario.
 //   - Webhook receivers (mounted by future PRs) carry a provider-

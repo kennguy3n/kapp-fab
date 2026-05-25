@@ -31,6 +31,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
+	"github.com/kennguy3n/kapp-fab/internal/manufacturing"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/reporting"
@@ -141,6 +142,7 @@ func run() error {
 		ledger:             ledgerStore,
 		poster:             invoicePoster,
 		inventory:          inventoryStore,
+		manufacturing:      manufacturing.NewPGStore(pool, inventoryStore),
 		lmsIssuer:          lms.NewCertificateIssuer(recordStore, pool),
 		cards:              cards,
 		formsBase:          os.Getenv("KAPP_FORMS_BASE_URL"),

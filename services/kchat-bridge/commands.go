@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/kennguy3n/kapp-fab/internal/crm"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
@@ -20,6 +21,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
+	"github.com/kennguy3n/kapp-fab/internal/manufacturing"
 	"github.com/kennguy3n/kapp-fab/internal/projects"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
@@ -67,6 +69,7 @@ type CommandDispatcher struct {
 	ledger             *ledger.PGStore
 	poster             *ledger.InvoicePoster
 	inventory          *inventory.PGStore
+	manufacturing      *manufacturing.PGStore
 	lmsIssuer          *lms.CertificateIssuer
 	cards              *CardRenderer
 	formsBase          string
@@ -150,6 +153,10 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.reverseStockMove(ctx, req)
 	case "batch":
 		return d.assignBatch(ctx, req)
+	case "work-order", "workorder", "wo":
+		return d.workOrder(ctx, req)
+	case "bom":
+		return d.bomList(ctx, req)
 	case "certificate":
 		return d.issueCertificate(ctx, req)
 	case "learn":
@@ -500,6 +507,149 @@ func (d *CommandDispatcher) assignBatch(ctx context.Context, req CommandRequest)
 	return CommandResponse{
 		Text: fmt.Sprintf("Batch %s created for %s (batch id %s)", out.BatchNo, sku, out.ID),
 	}, nil
+}
+
+// workOrder implements `/work-order <subcommand> ...`. Phase N6 surface:
+//
+//	/work-order list [status]              — list work orders for the tenant
+//	/work-order get  <id>                  — fetch a single work order
+//	/work-order release  <id>              — snapshot active BOM, flip status to released
+//	/work-order start    <id>              — flip status to in_progress
+//	/work-order complete <id> [actual_qty] — emit moves, flip to completed
+//	/work-order cancel   <id>              — flip status to cancelled
+//	/work-order close    <id>              — flip status to closed (terminal)
+func (d *CommandDispatcher) workOrder(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.manufacturing == nil {
+		return CommandResponse{Text: "manufacturing not configured"}, nil
+	}
+	if req.TenantID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id required"}, nil
+	}
+	sub := "list"
+	rest := req.Args
+	if len(req.Args) > 0 {
+		sub = strings.ToLower(req.Args[0])
+		rest = req.Args[1:]
+	}
+	switch sub {
+	case "list":
+		status := ""
+		if len(rest) > 0 {
+			status = rest[0]
+		}
+		wos, err := d.manufacturing.ListWorkOrders(ctx, req.TenantID, status)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/work-order list failed: %v", err)}, nil
+		}
+		if len(wos) == 0 {
+			return CommandResponse{Text: "No work orders match"}, nil
+		}
+		lines := make([]string, 0, len(wos))
+		for i := range wos {
+			wo := &wos[i]
+			actual := "—"
+			if wo.ActualQty != nil {
+				actual = wo.ActualQty.String()
+			}
+			lines = append(lines, fmt.Sprintf("%s | %s | item=%s | planned=%s | actual=%s",
+				wo.ID, wo.Status, wo.ItemID, wo.PlannedQty.String(), actual))
+		}
+		return CommandResponse{Text: "Work orders\n" + strings.Join(lines, "\n")}, nil
+	case "get":
+		if len(rest) < 1 {
+			return CommandResponse{Text: "Usage: /work-order get <work_order_id>"}, nil
+		}
+		id, err := uuid.Parse(rest[0])
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("invalid work order id: %v", err)}, nil
+		}
+		wo, err := d.manufacturing.GetWorkOrder(ctx, req.TenantID, id)
+		if err != nil {
+			if errors.Is(err, manufacturing.ErrWorkOrderNotFound) {
+				return CommandResponse{Text: fmt.Sprintf("work order %s not found", id)}, nil
+			}
+			return CommandResponse{Text: fmt.Sprintf("/work-order get failed: %v", err)}, nil
+		}
+		body, _ := json.MarshalIndent(wo, "", "  ")
+		return CommandResponse{Text: "```\n" + string(body) + "\n```"}, nil
+	case "release", "start", "cancel", "close":
+		if len(rest) < 1 {
+			return CommandResponse{Text: fmt.Sprintf("Usage: /work-order %s <work_order_id>", sub)}, nil
+		}
+		id, err := uuid.Parse(rest[0])
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("invalid work order id: %v", err)}, nil
+		}
+		var wo *manufacturing.WorkOrder
+		switch sub {
+		case "release":
+			wo, err = d.manufacturing.ReleaseWorkOrder(ctx, req.TenantID, id)
+		case "start":
+			wo, err = d.manufacturing.StartWorkOrder(ctx, req.TenantID, id)
+		case "cancel":
+			wo, err = d.manufacturing.CancelWorkOrder(ctx, req.TenantID, id)
+		case "close":
+			wo, err = d.manufacturing.CloseWorkOrder(ctx, req.TenantID, id)
+		}
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/work-order %s failed: %v", sub, err)}, nil
+		}
+		return CommandResponse{Text: fmt.Sprintf("Work order %s → %s", wo.ID, wo.Status)}, nil
+	case "complete":
+		if len(rest) < 1 {
+			return CommandResponse{Text: "Usage: /work-order complete <work_order_id> [actual_qty]"}, nil
+		}
+		id, err := uuid.Parse(rest[0])
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("invalid work order id: %v", err)}, nil
+		}
+		var actual decimal.Decimal
+		if len(rest) >= 2 {
+			actual, err = decimal.NewFromString(rest[1])
+			if err != nil {
+				return CommandResponse{Text: fmt.Sprintf("invalid actual_qty %q: %v", rest[1], err)}, nil
+			}
+		}
+		wo, err := d.manufacturing.CompleteWorkOrder(ctx, req.TenantID, id, req.UserID, manufacturing.CompleteWorkOrderInput{ActualQty: actual})
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/work-order complete failed: %v", err)}, nil
+		}
+		yieldStr := "<planned>"
+		if wo.ActualQty != nil {
+			yieldStr = wo.ActualQty.String()
+		}
+		return CommandResponse{Text: fmt.Sprintf("Work order %s completed (yield %s) — inventory moves emitted", wo.ID, yieldStr)}, nil
+	default:
+		return CommandResponse{Text: fmt.Sprintf("Unknown /work-order subcommand %q (list|get|release|start|complete|cancel|close)", sub)}, nil
+	}
+}
+
+// bomList implements `/bom [status]`. Lists BOM headers, optionally
+// filtered by status (draft / active / obsolete).
+func (d *CommandDispatcher) bomList(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.manufacturing == nil {
+		return CommandResponse{Text: "manufacturing not configured"}, nil
+	}
+	if req.TenantID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id required"}, nil
+	}
+	status := ""
+	if len(req.Args) > 0 {
+		status = req.Args[0]
+	}
+	boms, err := d.manufacturing.ListBOMs(ctx, req.TenantID, status)
+	if err != nil {
+		return CommandResponse{Text: fmt.Sprintf("/bom failed: %v", err)}, nil
+	}
+	if len(boms) == 0 {
+		return CommandResponse{Text: "No BOMs match"}, nil
+	}
+	lines := make([]string, 0, len(boms))
+	for i := range boms {
+		b := &boms[i]
+		lines = append(lines, fmt.Sprintf("%s | item=%s | v%s | %s | out=%s %s", b.ID, b.ItemID, b.Version, b.Status, b.OutputQty.String(), b.UOM))
+	}
+	return CommandResponse{Text: "BOMs\n" + strings.Join(lines, "\n")}, nil
 }
 
 // issueCertificate implements `/certificate <enrollment_id>`. Issues

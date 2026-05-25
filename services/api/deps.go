@@ -76,11 +76,11 @@ type apiDeps struct {
 	// so handler code is oblivious to which is live; the others
 	// wrap shared infrastructure (metering, feature flags, IP-keyed
 	// token bucket) in chi-friendly shape.
-	rateLimitMW          func(http.Handler) http.Handler
-	apiCallMW            func(http.Handler) http.Handler
-	featureMW            func(http.Handler) http.Handler
-	authzGate            func(action, resource string) func(http.Handler) http.Handler
-	authzMethodGate      func(readAction, writeAction, resource string) func(http.Handler) http.Handler
+	rateLimitMW            func(http.Handler) http.Handler
+	apiCallMW              func(http.Handler) http.Handler
+	featureMW              func(http.Handler) http.Handler
+	authzGate              func(action, resource string) func(http.Handler) http.Handler
+	authzMethodGate        func(readAction, writeAction, resource string) func(http.Handler) http.Handler
 	publicFormIPLimit      func(http.Handler) http.Handler
 	publicEmbedIPLimit     func(http.Handler) http.Handler
 	publicInboundIPLimit   func(http.Handler) http.Handler
@@ -165,6 +165,7 @@ type apiDeps struct {
 	auh            *auditHandlers
 	finh           *financeHandlers
 	invh           *inventoryHandlers
+	mfgh           *manufacturingHandlers
 	oh             *openAPIHandler
 	fileh          *filesHandlers
 	bh             *baseHandlers
