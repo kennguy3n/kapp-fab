@@ -1,6 +1,6 @@
 # Capacity Planning
 
-This guide turns the multi-tenant invariants in [ARCHITECTURE.md](../ARCHITECTURE.md)
+This guide turns the multi-tenant invariants in [ARCHITECTURE.md](https://github.com/kennguy3n/kapp-fab/blob/main/ARCHITECTURE.md)
 into concrete numbers operators can size their cells against. Every
 formula in this document is derived from the actual access patterns
 in `internal/record/store.go`, `internal/insights/store.go`,

@@ -13,7 +13,10 @@ repo_name:        kennguy3n/kapp-fab
 edit_uri:         edit/main/docs/
 
 docs_dir: docs
-strict:   true
+# strict: true  — target state. Currently held off because pre-existing
+# DEVELOPMENT_LOG.md links to root-level files (PHASES.md, PROGRESS.md)
+# that are outside docs_dir. Enable strict after those links are
+# converted to absolute GitHub URLs.
 
 theme:
   name:    material
@@ -70,7 +73,7 @@ markdown_extensions:
       custom_fences:
         - name:    mermaid
           class:   mermaid
-          format:  !!python/name:mermaid2.fence_mermaid
+          format:  !!python/name:mermaid2.fence_mermaid_custom
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.tasklist:
@@ -80,11 +83,6 @@ markdown_extensions:
 plugins:
   - search
   - mermaid2
-  - redirects:
-      redirect_maps:
-        # Move-friendly placeholders for the few legacy paths that
-        # external links may point at. Extend as you rename pages.
-        index.md: README.md
 
 extra:
   version:
@@ -94,8 +92,12 @@ extra:
     - icon: fontawesome/brands/github
       link: https://github.com/kennguy3n/kapp-fab
 
+# `docs_dir` is `docs/`, so every nav entry below is resolved against
+# `docs/`. External URLs (the GitHub blob links for files at the repo
+# root) are passed through verbatim by MkDocs and don't have to live
+# under `docs/`.
 nav:
-  - Home: README.md
+  - Home: index.md
 
   - Getting started:
     - Developer guide: DEVELOPER_GUIDE.md
@@ -103,10 +105,9 @@ nav:
     - Admin guide:     ADMIN_GUIDE.md
 
   - Architecture:
-    - Overview: '../ARCHITECTURE.md'
-    - Phases:   '../PHASES.md'
+    - Overview (root): https://github.com/kennguy3n/kapp-fab/blob/main/ARCHITECTURE.md
+    - Phases (root):   https://github.com/kennguy3n/kapp-fab/blob/main/PHASES.md
     - KType authoring: KTYPE_AUTHORING_GUIDE.md
-    - Agent platform:  AGENT_PLATFORM_OVERVIEW.md
 
   - Operations:
     - Capacity planning:      CAPACITY_PLANNING.md

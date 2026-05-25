@@ -83,7 +83,7 @@ opt in to a dedicated schema via the tier-upgrade path
 
 ## References
 
-- [ARCHITECTURE.md](../../ARCHITECTURE.md)
-- [migrations/000001_initial_schema.sql](../../migrations/000001_initial_schema.sql)
-- [migrations/000002_admin_role.sql](../../migrations/000002_admin_role.sql)
+- [`ARCHITECTURE.md`](https://github.com/kennguy3n/kapp-fab/blob/main/ARCHITECTURE.md)
+- [`migrations/000001_initial_schema.sql`](https://github.com/kennguy3n/kapp-fab/blob/main/migrations/000001_initial_schema.sql)
+- [`migrations/000002_admin_role.sql`](https://github.com/kennguy3n/kapp-fab/blob/main/migrations/000002_admin_role.sql)
 - ADR-006 (cell-based scale-out)

@@ -6,7 +6,7 @@ external driver is **k6** for repeatable end-to-end runs.
 
 Cross-references:
 
-- SLO definitions: [OBSERVABILITY_GUIDE.md §8.4](./OBSERVABILITY_GUIDE.md#84-sli--slo-implementation)
+- SLO definitions: [OBSERVABILITY_GUIDE.md §8.4](./OBSERVABILITY_GUIDE.md#84-sli-slo-implementation)
 - Capacity planning: [CAPACITY_PLANNING.md](./CAPACITY_PLANNING.md)
 - Performance tuning: [PERFORMANCE_TUNING.md](./PERFORMANCE_TUNING.md)
 
@@ -55,7 +55,7 @@ the load test runs against a warm session.
 
 The load test asserts the following thresholds; the run fails if any
 is breached. These match the production SLOs in
-[OBSERVABILITY_GUIDE.md §8.4](./OBSERVABILITY_GUIDE.md#84-sli--slo-implementation).
+[OBSERVABILITY_GUIDE.md §8.4](./OBSERVABILITY_GUIDE.md#84-sli-slo-implementation).
 
 | Metric                              | Threshold                       |
 | ----------------------------------- | ------------------------------- |

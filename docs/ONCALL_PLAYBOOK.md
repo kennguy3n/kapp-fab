@@ -89,7 +89,7 @@ Escalation:
 - **Locks** → identify blocker, capture evidence, terminate with
   `SELECT pg_terminate_backend(<pid>)`.
 - **CPU bound** (no locks, all queries fast) → scale API pods
-  ([SCALING_RUNBOOK.md §2.1](./SCALING_RUNBOOK.md#21-horizontal-scaling--api)).
+  ([SCALING_RUNBOOK.md §2.1](./SCALING_RUNBOOK.md#21-horizontal-scaling-api)).
 - **IO bound** (DB CPU OK, disk queue depth high) → check vacuum and
   WAL pressure
   ([DATABASE_MAINTENANCE.md §5.1](./DATABASE_MAINTENANCE.md#51-vacuum-strategy)).

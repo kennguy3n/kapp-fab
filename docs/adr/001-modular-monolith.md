@@ -76,6 +76,6 @@ cluster. Each domain (finance, CRM, …) is a Go package under
 
 ## References
 
-- [ARCHITECTURE.md](../../ARCHITECTURE.md)
-- [PHASES.md](../../PHASES.md)
+- [`ARCHITECTURE.md`](https://github.com/kennguy3n/kapp-fab/blob/main/ARCHITECTURE.md)
+- [`PHASES.md`](https://github.com/kennguy3n/kapp-fab/blob/main/PHASES.md)
 - [SCALING_RUNBOOK.md](../SCALING_RUNBOOK.md)

@@ -11,7 +11,7 @@ Cross-references:
 - Per-query tuning: [PERFORMANCE_TUNING.md](./PERFORMANCE_TUNING.md)
 - Capacity sizing: [CAPACITY_PLANNING.md §1.2](./CAPACITY_PLANNING.md#12-database-sizing)
 - Schema definitions:
-  [migrations/000001_initial_schema.sql](../migrations/000001_initial_schema.sql)
+  [`migrations/000001_initial_schema.sql`](https://github.com/kennguy3n/kapp-fab/blob/main/migrations/000001_initial_schema.sql)
   and later migrations.
 
 ---
@@ -193,7 +193,7 @@ psql -h pgbouncer -p 6432 pgbouncer -c 'SHOW CONFIG;' | grep -E 'pool|conn'
 
 Backups are taken by `services/kapp-backup` (per-tenant JSONL) and
 `pg_dump` on the replica (full-cell). See
-[DR_RUNBOOK.md §1](./DR_RUNBOOK.md#1-backup--restore) for the
+[DR_RUNBOOK.md §1](./DR_RUNBOOK.md#1-backup-restore) for the
 authoritative procedures.
 
 **Daily.** Verify backup existence and monotonic growth:

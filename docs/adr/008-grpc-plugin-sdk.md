@@ -71,4 +71,4 @@ interface:
 
 - `proto/kapp/v1/`
 - [PLUGIN_DEVELOPER_GUIDE.md](../PLUGIN_DEVELOPER_GUIDE.md)
-- [AGENT_PLATFORM_OVERVIEW.md](../AGENT_PLATFORM_OVERVIEW.md)
+- [`services/agent-tools/`](https://github.com/kennguy3n/kapp-fab/tree/main/services/agent-tools) and [`internal/agents/`](https://github.com/kennguy3n/kapp-fab/tree/main/internal/agents) — agent platform runtime (dedicated overview doc planned).

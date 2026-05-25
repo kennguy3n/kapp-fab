@@ -15,7 +15,7 @@ The runtime extension surface is realised by:
 Cross-references:
 
 - KType authoring: [KTYPE_AUTHORING_GUIDE.md](./KTYPE_AUTHORING_GUIDE.md)
-- Agent platform: [AGENT_PLATFORM_OVERVIEW.md](./AGENT_PLATFORM_OVERVIEW.md)
+- Agent platform: see [`services/agent-tools/`](https://github.com/kennguy3n/kapp-fab/tree/main/services/agent-tools) and [`internal/agents/`](https://github.com/kennguy3n/kapp-fab/tree/main/internal/agents) (dedicated overview doc planned).
 - API patterns: [API_REFERENCE.md](./API_REFERENCE.md)
 - Architectural rationale: [adr/008-grpc-plugin-sdk.md](./adr/008-grpc-plugin-sdk.md)
 
