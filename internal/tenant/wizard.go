@@ -123,6 +123,8 @@ func DefaultLocaleForCountry(country string) string {
 		return "es"
 	case "JP":
 		return "ja"
+	case "KR":
+		return "ko"
 	case "SA", "AE", "QA", "KW", "BH", "OM":
 		return "ar"
 	case "TH":
@@ -292,6 +294,24 @@ func DefaultCoATemplateForCountry(country string) string {
 		return "ro_basic"
 	case "GR":
 		return "gr_basic"
+	// Phase N3 — Africa + East Asia (ZA/NG/KE/EG/JP/KR). Each
+	// country gets its own chart so payroll deduction lines land
+	// on country-specific liability accounts: SARS PAYE / UIF (ZA),
+	// FIRS PAYE / PenCom (NG), KRA PAYE / NSSF / NHIF (KE),
+	// ETA / Social Insurance (EG), NTA gensenchōshū (JP),
+	// NTS / NPS / NHIS (KR).
+	case "ZA":
+		return "za_basic"
+	case "NG":
+		return "ng_basic"
+	case "KE":
+		return "ke_basic"
+	case "EG":
+		return "eg_basic"
+	case "JP":
+		return "jp_basic"
+	case "KR":
+		return "kr_basic"
 	// SCAFFOLD: cmd/new-tax-pack inserts new DefaultCoATemplateForCountry cases above this line.
 	default:
 		return "ifrs_basic"
@@ -511,8 +531,32 @@ var coaROBasic []byte
 //go:embed coa_templates/gr_basic.json
 var coaGRBasic []byte
 
-// SCAFFOLD: cmd/new-tax-pack inserts new //go:embed directives + var decls above this line.
+// Phase N3 — Africa + East Asia (ZA/NG/KE/EG/JP/KR). Each chart
+// carries the country's statutory payroll-liability accounts so
+// deductions emitted by the matching tax pack land on the right
+// ledger lines (SARS PAYE/UIF/SDL for ZA, FIRS PAYE/PenCom for NG,
+// KRA PAYE/NSSF/NHIF for KE, ETA/Social Insurance for EG,
+// NTA gensenchōshū for JP, NTS/NPS/NHIS for KR).
 
+//go:embed coa_templates/za_basic.json
+var coaZABasic []byte
+
+//go:embed coa_templates/ng_basic.json
+var coaNGBasic []byte
+
+//go:embed coa_templates/ke_basic.json
+var coaKEBasic []byte
+
+//go:embed coa_templates/eg_basic.json
+var coaEGBasic []byte
+
+//go:embed coa_templates/jp_basic.json
+var coaJPBasic []byte
+
+//go:embed coa_templates/kr_basic.json
+var coaKRBasic []byte
+
+// SCAFFOLD: cmd/new-tax-pack inserts new //go:embed directives + var decls above this line.
 
 // chartOfAccountsTemplates maps the wizard's template name to the
 // embedded JSON payload. Adding a new template is a matter of dropping
@@ -568,6 +612,13 @@ var chartOfAccountsTemplates = map[string][]byte{
 	"hu_basic": coaHUBasic,
 	"ro_basic": coaROBasic,
 	"gr_basic": coaGRBasic,
+	// Phase N3 — Africa + East Asia.
+	"za_basic": coaZABasic,
+	"ng_basic": coaNGBasic,
+	"ke_basic": coaKEBasic,
+	"eg_basic": coaEGBasic,
+	"jp_basic": coaJPBasic,
+	"kr_basic": coaKRBasic,
 	// SCAFFOLD: cmd/new-tax-pack inserts new chartOfAccountsTemplates entries above this line.
 }
 

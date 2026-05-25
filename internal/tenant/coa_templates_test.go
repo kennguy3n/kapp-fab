@@ -185,6 +185,20 @@ func TestDefaultCoATemplateForCountry(t *testing.T) {
 		{"RO", "ro_basic"},
 		{"GR", "gr_basic"},
 
+		// Phase N3 — Africa + East Asia. Each gets a
+		// jurisdiction-specific IFRS-aligned chart with the
+		// country's statutory payroll liability accounts pre-seeded
+		// (UIF / PAYE for ZA, PAYE / Pension / NHF for NG,
+		// NSSF / SHIF / Housing Levy for KE, Income Tax /
+		// Social Insurance for EG, Gensenchōshū / Shakai-hoken
+		// for JP, Geunrosodeukse / 4-major insurances for KR).
+		{"ZA", "za_basic"},
+		{"NG", "ng_basic"},
+		{"KE", "ke_basic"},
+		{"EG", "eg_basic"},
+		{"JP", "jp_basic"},
+		{"KR", "kr_basic"},
+
 		// Unmapped countries still fall back to generic IFRS so
 		// the wizard always resolves to a registered template.
 		{"", "ifrs_basic"},
