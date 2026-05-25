@@ -265,6 +265,25 @@ jobs:
       - run: npm ci
       - run: npm run build -w @kapp/web
 
+  # Phase N8a: Vitest + React Testing Library unit suite for
+  # apps/web/. Kept as a separate job from `web build` so a unit
+  # failure surfaces independently from a TypeScript compile error,
+  # and so the failure annotations land on the test file rather
+  # than on vite build's catch-all step. The job reuses the same
+  # actions/setup-node cache key the `web build` job populates, so
+  # the second `npm ci` runs against the warm cache.
+  web-tests:
+    name: web tests (vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run test -w @kapp/web
+
   rust-sdk:
     name: rust-sdk (fmt + clippy + test, ${{ matrix.toolchain }})
     runs-on: ubuntu-latest
