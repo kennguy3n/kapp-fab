@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import type { DashboardSummary } from "@kapp/client";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n";
 
 /**
  * DashboardPage renders a KPI grid backed by /api/v1/dashboard/summary.
@@ -13,6 +14,14 @@ export function DashboardPage() {
     queryKey: ["dashboard", "summary"],
     queryFn: () => api.getDashboardSummary(),
   });
+  // Locale-aware Intl formatter — picks up the active
+  // LocaleContext tag so a pt-BR / es / fr-CA tenant sees
+  // "R$ 1.234", "$ 1.234", "1 234 $" instead of the en-US
+  // "$1,234" the dashboard hardcoded prior to PR-2d. Currency
+  // placement, decimal separator, and digit grouping all follow
+  // the active locale's CLDR rules; the currency code itself is
+  // still the tenant's base currency reported by the API.
+  const fmt = useFormatter();
 
   if (q.isLoading) return <p>Loading…</p>;
   if (q.isError) {
@@ -23,6 +32,23 @@ export function DashboardPage() {
     );
   }
   const s = q.data!;
+  // Bind the formatter into a closure that mirrors the prior
+  // formatAmount(value, currency?) signature so the JSX below
+  // stays unchanged. When the API doesn't surface a currency
+  // code (older payloads) we fall back to a plain locale-aware
+  // number — Intl.NumberFormat without style:"currency" still
+  // honours grouping and decimal conventions.
+  const formatAmount = (value: number, currency?: string): string => {
+    if (currency) {
+      try {
+        return fmt.currency(value, currency, { maximumFractionDigits: 0 });
+      } catch {
+        // fall through to bare-number formatting (synthetic ISO
+        // codes the runtime rejects on construction)
+      }
+    }
+    return fmt.number(value, { maximumFractionDigits: 0 });
+  };
 
   return (
     <section>
@@ -123,24 +149,9 @@ function Widget({
   );
 }
 
-// formatAmount renders a monetary total in the tenant's base currency.
-// The server folds foreign-currency krecords through ExchangeRateStore
-// before responding, so the dashboard now gets a single converted total
-// per widget. Falls back to a bare number when the currency code is
-// missing or unknown to Intl (older browsers / synthetic ISO codes).
-function formatAmount(v: number, currency?: string): string {
-  if (currency) {
-    try {
-      return new Intl.NumberFormat("en-US", {
-        style: "currency",
-        currency,
-        maximumFractionDigits: 0,
-      }).format(v);
-    } catch {
-      // fall through to bare-number formatting
-    }
-  }
-  return new Intl.NumberFormat("en-US", {
-    maximumFractionDigits: 0,
-  }).format(v);
-}
+// formatAmount used to live here as a standalone helper hardcoded to
+// "en-US" digit grouping. PR-2d (Americas tax pack rollout) lifted it
+// into the DashboardPage component body so it can close over the
+// useFormatter() hook from ../lib/i18n — the formatter now resolves
+// against the active LocaleContext tag, so a pt-BR / es / fr-CA tenant
+// sees CLDR-correct currency placement and digit grouping.

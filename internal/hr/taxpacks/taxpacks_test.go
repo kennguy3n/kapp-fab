@@ -212,6 +212,10 @@ func TestRegisteredCountriesIsStable(t *testing.T) {
 		"VN", "PH", "NZ", "IN",
 		// PR-2c: Europe + MENA.
 		"CH", "AE", "SA", "QA", "KW", "BH", "OM",
+		// PR-2d: Americas (Canada + LATAM).
+		"CA",
+		"BR", "MX", "AR", "CO", "CL", "PE",
+		"CR", "PA", "UY", "EC", "DO", "GT", "PY", "TT",
 	}
 	for _, code := range want {
 		if !gotSet[code] {

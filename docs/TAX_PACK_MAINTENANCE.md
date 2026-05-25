@@ -184,3 +184,82 @@ is to reassess each note before deciding whether to act:
 Don't bulk-dismiss `📝 Info:` notes without reading them — the bot
 sometimes flags real bugs as info when the code change looked
 small.
+
+## PR-2d Americas pack details (CA + 14 LATAM)
+
+The Americas batch is unusually rate-sensitive — five of the
+LATAM jurisdictions republish their tax tables more than once a
+year (Argentina via ARCA/AFIP resolutions, Mexico via SAT Anexo 8
+when UMA shifts, Peru/Colombia/Chile via annual UIT/UVT/UTM
+revaluations indexed to the CPI). Maintainers should expect to
+review these packs at minimum once per calendar year and again
+mid-year for AR.
+
+| Country | Pack file                          | CoA template            | Locale | Key sources                                                                                                                                                                                                                                                                                                  | Review cadence                |
+| ------- | ---------------------------------- | ----------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------|
+| CA      | `internal/hr/taxpacks/ca.go`       | `ca_aspe_basic.json`    | en, fr-CA (QC) | CRA T4127 (federal payroll deductions formulas), Revenu Québec TP-1015.G (QC formulas), CRA T4032 (CPP / EI maximums published each November for the following year), Revenu Québec QPP rates, ESDC EI premium rate notice. | Annual (November / January)   |
+| BR      | `internal/hr/taxpacks/br.go`       | `br_cpc_basic.json`     | pt-BR  | Receita Federal IRRF tables (Tabela Progressiva Mensal — current version Lei 14.848/2024), Portaria Interministerial MTE/MPS for INSS thresholds, Caixa Econômica Federal for FGTS (8% rate is statutory).                                                                                                  | Annual + ad-hoc on indexation |
+| MX      | `internal/hr/taxpacks/mx.go`       | `mx_nif_basic.json`     | es     | SAT Anexo 8 Art. 96 ISR table, SAT Subsidio para el Empleo table, IMSS cuotas obrero-patronales, UMA value (INEGI annual revaluation each February).                                                                                                                                                       | Annual (February) + UMA shift |
+| AR      | `internal/hr/taxpacks/ar.go`       | `ar_rtfacpce_basic.json`| es     | ARCA / AFIP RG escalas Ganancias 4ta categoría (multi-year history: RG 5008/21, RG 5363/23, RG 5417/23, RG 5453/24, RG 5531/2024 inflation top-up); MTEYSS for jubilación / INSSJP / obra social rates. **Multi-update cadence**: AR revises mínimo no imponible and special deduction whenever cumulative monthly CPI exceeds the legal trigger (presently every 6 months). | Quarterly / on each ARCA RG   |
+| CO      | `internal/hr/taxpacks/co.go`       | `latam_ifrs_basic.json` | es     | DIAN Resolución UVT (annual, December for following year); Article 383 Estatuto Tributario (retención progresiva); Decreto Único Reglamentario for FSP thresholds; MinTrabajo for SMLMV.                                                                                                                  | Annual (January)              |
+| CL      | `internal/hr/taxpacks/cl.go`       | `cl_ifrs_basic.json`    | es     | SII Impuesto Único de Segunda Categoría monthly table (UTM-indexed), Superintendencia de Pensiones for AFP fund-administrator rates, Superintendencia de Salud for Fonasa/Isapre 7% rule, AFC for Seguro de Cesantía rates.                                                                                | Monthly UTM, annual rate review |
+| PE      | `internal/hr/taxpacks/pe.go`       | `latam_ifrs_basic.json` | es     | SUNAT Renta de Quinta Categoría tables (UIT-indexed annually), ONP for pension rate, EsSalud for employer health-insurance rate.                                                                                                                                                                          | Annual (January, UIT change)  |
+| CR      | `internal/hr/taxpacks/cr.go`       | `latam_ifrs_basic.json` | es     | Ministerio de Hacienda / Dirección General de Tributación Direct Resolution on Impuesto al Salario thresholds, CCSS for SEM/IVM/Banco Popular employee rates.                                                                                                                                              | Annual (January)              |
+| PA      | `internal/hr/taxpacks/pa.go`       | `latam_ifrs_basic.json` | es     | DGI Impuesto Sobre la Renta tables (Decreto Ejecutivo 170), CSS for cuota obrera (9.75%), Seguro Educativo statutory rate (1.25% employee).                                                                                                                                                                | Multi-year (rates very stable)|
+| UY      | `internal/hr/taxpacks/uy.go`       | `latam_ifrs_basic.json` | es     | DGI IRPF Categoría II tables (BPC-indexed annually), BPS for Jubilación / FONASA / FRL rates, Decreto del Poder Ejecutivo for BPC adjustment each January.                                                                                                                                                  | Annual (January, BPC change)  |
+| EC      | `internal/hr/taxpacks/ec.go`       | `latam_ifrs_basic.json` | es     | SRI Impuesto a la Renta de Personas Naturales tables (USD; thresholds revalued when CPI exceeds 5%), IESS for 9.45% employee rate.                                                                                                                                                                        | Annual (January) + CPI gate   |
+| DO      | `internal/hr/taxpacks/do.go`       | `latam_ifrs_basic.json` | es     | DGII Impuesto Sobre la Renta tables (Decreto 273-11; thresholds revalued annually), SIPEN / SISALRIL for AFP & SFS rates, IDOPPRIL for SRL (employer-only).                                                                                                                                              | Annual (January)              |
+| GT      | `internal/hr/taxpacks/gt.go`       | `latam_ifrs_basic.json` | es     | SAT Guatemala ISR Régimen Sobre Utilidades / Régimen Opcional Simplificado rates (Ley del ISR Decreto 10-2012), IGSS for 4.83% employee rate.                                                                                                                                                              | Multi-year (rates very stable)|
+| PY      | `internal/hr/taxpacks/py.go`       | `latam_ifrs_basic.json` | es     | DNIT (formerly SET) IRP tables (jornales mínimos-indexed; jornal mínimo set by Ministerio de Trabajo each March/April), IPS for 9% employee rate.                                                                                                                                                          | Annual (April, jornal change) |
+| TT      | `internal/hr/taxpacks/tt.go`       | `latam_ifrs_basic.json` | en     | Inland Revenue Division (IRD) Trinidad & Tobago PAYE rates (Income Tax Act Chap 75:01), NIBTT Class Earnings Schedule (16-class table), IRD Health Surcharge schedule.                                                                                                                                  | Annual (October budget read)  |
+
+### Argentina inflation-adjustment workflow
+
+AR is the most maintenance-intensive pack in the batch. Whenever
+ARCA / AFIP publishes a resolución general updating the mínimo no
+imponible, special deduction, or any bracket boundary, the
+maintainer should:
+
+1. Locate the published `escala` table in the Boletín Oficial.
+2. Update the named constants at the top of `internal/hr/taxpacks/ar.go`
+   (one constant per row, with the resolution number in the
+   `// Source:` comment).
+3. Update `EffectiveYear()` if the change crosses a fiscal year
+   boundary.
+4. Add a regression case to `americas_packs_test.go` pinning the
+   new bracket boundary against the gazetted table.
+5. Re-run `go test ./internal/hr/taxpacks/` and confirm the
+   bracket-contiguity invariant (`TestAmericasBracketTablesAreContiguous`)
+   still holds. AR is a strict-contiguity table (no published-
+   rounding tolerance) so any drift here is a real transcription
+   error.
+
+### Mexico SAT-rounded table tolerance
+
+MX ISR (Art. 96) is the exception to the strict bracket-contiguity
+invariant. SAT publishes the `cuota_fija` column rounded to 2
+decimal places, so the mathematically-derived contiguity check
+fails by a few centavos. `TestAmericasBracketTablesAreContiguous`
+accepts up to MXN 0.10 of drift per row for MX — anything larger
+is treated as a transcription error. The published SAT table
+remains the source of truth; do not "fix" the cuota_fija values
+to mathematical precision when refreshing the rates.
+
+### Canada CPP / EI annual update workflow
+
+CRA publishes the next-year CPP and EI maximums in November of
+the preceding year (T4032 / EI Premium Reduction Program notice).
+The maintainer should:
+
+1. Update `caCPPYMPE`, `caCPP2AdditionalCeiling`, `caCPPBasicExemption`,
+   `caEIMaximumInsurableEarnings`, and the rate constants in
+   `internal/hr/taxpacks/ca.go`.
+2. Update QC's QPP and QPIP equivalents from the matching Revenu
+   Québec notice.
+3. For each of the 13 provinces, check the provincial budget
+   address (March-May for most, late-Spring for QC) for indexation
+   of provincial bracket thresholds and Basic Personal Amount.
+4. Add a regression case to `americas_packs_test.go` for any
+   province whose brackets shifted — at minimum ON, QC, BC, AB
+   (the four largest by employee population) should always have a
+   pinned case.

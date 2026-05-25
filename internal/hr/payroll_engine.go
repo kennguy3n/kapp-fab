@@ -293,6 +293,16 @@ func (e *PayrollEngine) GeneratePayslips(
 				NumDependents: ed.NumDependents,
 				Age:           ed.Age,
 				PermitType:    ed.PermitType,
+
+				// Phase-M3 fields (CA + LATAM). The CA pack
+				// reads Province for the second bracket walk
+				// and CPPExempt / EIExempt for the per-employee
+				// CRA exemption letters; LATAM packs reuse
+				// Nationality / NumDependents / Age / TaxRegime
+				// from the Phase-M2 block above.
+				Province:  ed.Province,
+				CPPExempt: ed.CPPExempt,
+				EIExempt:  ed.EIExempt,
 			}
 			extraLines, err := pack.ComputeWithholding(ctx, info, gross, period)
 			if err != nil {
@@ -952,6 +962,15 @@ type employeeData struct {
 	NumDependents int             `json:"num_dependents,omitempty"`
 	Age           int             `json:"age,omitempty"`
 	PermitType    string          `json:"permit_type,omitempty"`
+
+	// Phase-M3 (CA + LATAM) inputs. Same `omitempty` contract
+	// as the Phase-M2 block above: packs that don't read these
+	// fields ignore them, pre-Phase-M3 KRecords serialise back
+	// identically, and the CA pack defaults missing Province
+	// to federal-only computation rather than crashing.
+	Province  string `json:"province,omitempty"`
+	CPPExempt bool   `json:"cpp_exempt,omitempty"`
+	EIExempt  bool   `json:"ei_exempt,omitempty"`
 }
 
 type structureData struct {

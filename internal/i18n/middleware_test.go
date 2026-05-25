@@ -24,8 +24,11 @@ func TestMiddleware_AcceptLanguageHeader(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req.Header.Set("Accept-Language", "fr-CA,fr;q=0.9,en;q=0.5")
 	h.ServeHTTP(httptest.NewRecorder(), req)
-	if captured != "fr" {
-		t.Fatalf("captured locale = %q, want %q", captured, "fr")
+	// PR-2d ships fr-CA.json so the matcher pins Canadian-French
+	// headers verbatim. Prior to PR-2d the catalogue didn't exist
+	// and the matcher downgraded to "fr".
+	if captured != "fr-CA" {
+		t.Fatalf("captured locale = %q, want %q", captured, "fr-CA")
 	}
 }
 

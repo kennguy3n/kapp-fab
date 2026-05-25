@@ -47,8 +47,10 @@ export const SupportedLocales: readonly LocaleInfo[] = [
   { tag: "en", name: "English", direction: "ltr" },
   { tag: "de", name: "Deutsch", direction: "ltr" },
   { tag: "fr", name: "Français", direction: "ltr" },
+  { tag: "fr-CA", name: "Français (Canada)", direction: "ltr" },
   { tag: "it", name: "Italiano", direction: "ltr" },
   { tag: "es", name: "Español", direction: "ltr" },
+  { tag: "pt-BR", name: "Português (Brasil)", direction: "ltr" },
   { tag: "ja", name: "日本語", direction: "ltr" },
   { tag: "zh", name: "中文（简体）", direction: "ltr" },
   { tag: "zh-Hant", name: "中文（繁體）", direction: "ltr" },
@@ -172,6 +174,25 @@ const COUNTRY_LOCALE_DEFAULTS: Record<string, string> = {
   CN: "zh-Hans",
   TW: "zh-Hant",
   HK: "zh-Hant",
+  // PR-2d: Americas. Brazil ships its own pt-BR catalogue
+  // (Brazilian Portuguese differs from European Portuguese in
+  // accounting / payroll terminology). Spanish-speaking LATAM
+  // jurisdictions share the existing es.json catalogue.
+  // Canada and Trinidad & Tobago default to English; Québec /
+  // Acadia admins reset to fr-CA from the locale switcher.
+  BR: "pt-BR",
+  MX: "es",
+  AR: "es",
+  CO: "es",
+  CL: "es",
+  PE: "es",
+  CR: "es",
+  PA: "es",
+  UY: "es",
+  EC: "es",
+  DO: "es",
+  GT: "es",
+  PY: "es",
 };
 
 /**

@@ -137,6 +137,10 @@ func DefaultLocaleForCountry(country string) string {
 		return "zh-Hans"
 	case "TW", "HK":
 		return "zh-Hant"
+	case "BR":
+		return "pt-BR"
+	case "MX", "AR", "CO", "CL", "PE", "CR", "PA", "UY", "EC", "DO", "GT", "PY":
+		return "es"
 	default:
 		return "en"
 	}
@@ -190,6 +194,18 @@ func DefaultCoATemplateForCountry(country string) string {
 		return "bh_basic"
 	case "OM":
 		return "om_basic"
+	case "CA":
+		return "ca_aspe_basic"
+	case "BR":
+		return "br_cpc_basic"
+	case "MX":
+		return "mx_nif_basic"
+	case "AR":
+		return "ar_rtfacpce_basic"
+	case "CL":
+		return "cl_ifrs_basic"
+	case "CO", "PE", "CR", "PA", "UY", "EC", "DO", "GT", "PY", "TT":
+		return "latam_ifrs_basic"
 	default:
 		return "ifrs_basic"
 	}
@@ -317,6 +333,24 @@ var coaBHBasic []byte
 //go:embed coa_templates/om_basic.json
 var coaOMBasic []byte
 
+//go:embed coa_templates/ca_aspe_basic.json
+var coaCAASPEBasic []byte
+
+//go:embed coa_templates/br_cpc_basic.json
+var coaBRCPCBasic []byte
+
+//go:embed coa_templates/mx_nif_basic.json
+var coaMXNIFBasic []byte
+
+//go:embed coa_templates/ar_rtfacpce_basic.json
+var coaARRTBasic []byte
+
+//go:embed coa_templates/cl_ifrs_basic.json
+var coaCLIFRSBasic []byte
+
+//go:embed coa_templates/latam_ifrs_basic.json
+var coaLATAMIFRSBasic []byte
+
 // chartOfAccountsTemplates maps the wizard's template name to the
 // embedded JSON payload. Adding a new template is a matter of dropping
 // a JSON file in coa_templates/ and registering it here. Country-
@@ -342,6 +376,13 @@ var chartOfAccountsTemplates = map[string][]byte{
 	"kw_basic":      coaKWBasic,
 	"bh_basic":      coaBHBasic,
 	"om_basic":      coaOMBasic,
+	// Americas: CA + LATAM (PR-2d).
+	"ca_aspe_basic":     coaCAASPEBasic,
+	"br_cpc_basic":      coaBRCPCBasic,
+	"mx_nif_basic":      coaMXNIFBasic,
+	"ar_rtfacpce_basic": coaARRTBasic,
+	"cl_ifrs_basic":     coaCLIFRSBasic,
+	"latam_ifrs_basic":  coaLATAMIFRSBasic,
 }
 
 // templateAccount is the shape each entry in a CoA template takes. The

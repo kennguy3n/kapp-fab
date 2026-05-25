@@ -116,6 +116,32 @@ type EmployeeInfo struct {
 	// (set by employer payroll classification) so PermitType is
 	// only consulted for the source-tax decision today.
 	PermitType string
+
+	// Province is the 2-letter Canadian province/territory code
+	// (ON, BC, AB, QC, MB, SK, NS, NB, NL, PE, NT, NU, YT). It
+	// drives the second bracket walk inside the CA pack
+	// (provincial tax on top of federal). QC is special — it
+	// uses Revenu Québec's own brackets and gates QPP / QPIP
+	// instead of CPP / federal EI. Empty falls back to the
+	// federal-only computation (and emits a no-province slip
+	// warning in the pack rather than crashing).
+	Province string
+
+	// CPPExempt is true when the employee is exempt from Canada
+	// Pension Plan contributions for the slip. Statutory CPP
+	// exemptions apply below age 18 and above 70 (and to QPP
+	// for QC residents under the same age rules). The pack
+	// honours this flag verbatim without re-deriving from Age
+	// so per-employee exemption letters (e.g. a CRA CPT30
+	// election) are respected.
+	CPPExempt bool
+
+	// EIExempt is true when the employee is exempt from
+	// Employment Insurance premiums for the slip. Typical
+	// triggers: a Canadian shareholder with >40% voting equity,
+	// or a non-arm's-length related person who isn't
+	// insurable employment under EI Act s.5(2).
+	EIExempt bool
 }
 
 // Deduction is one withholding line a pack appends to the slip's
