@@ -156,10 +156,37 @@ func NewTenantStore(pool *pgxpool.Pool, opts ...TenantStoreOption) *TenantStore 
 func (s *TenantStore) FieldLimit() int { return s.fieldLimit }
 
 // IsCustomName reports whether `name` is in the custom.<slug>
-// namespace. Used by callers (record store, agent tool surfaces)
-// to short-circuit the lookup path.
+// namespace. This is the prefix-only routing predicate — callers
+// that need to decide "should this name be resolved through the
+// tenant_ktypes store or the platform registry?" use this so any
+// `custom.*` name (even a malformed one) is routed to the tenant
+// path; the malformed name then surfaces a precise 400 from
+// `IsValidCustomName` at the input-validation boundary rather than
+// silently falling through to a 404 from the platform registry.
+//
+// IsCustomName must NOT be used as input validation — the prefix
+// check is intentionally loose. Use `IsValidCustomName` whenever
+// you need to reject names that don't match the full
+// `custom.<slug>` pattern (Upsert, Get, SetStatus, and any API
+// handler reading the name from a client).
 func IsCustomName(name string) bool {
 	return strings.HasPrefix(name, CustomNamePrefix)
+}
+
+// IsValidCustomName reports whether `name` matches the full
+// `custom.<slug>` pattern enforced by both the
+// `tenant_ktypes_name_chk` DB CHECK and the Upsert validator —
+// `^custom\.[a-z][a-z0-9_]*$`. Read paths (Get, SetStatus, and
+// every HTTP handler that accepts a name from the client) call this
+// so a malformed name is rejected with `ErrInvalidCustomName` /
+// HTTP 400 before any DB round-trip, matching Upsert's contract.
+// Without this, a name like `custom.UPPER` or `custom.with-dash`
+// would slip past the prefix-only `IsCustomName` check and surface
+// as `ErrNotFound` / HTTP 404 from the missing row — confusing both
+// the builder UI (which shows "not found" instead of "invalid
+// name") and scripted callers relying on the 400/404 split.
+func IsValidCustomName(name string) bool {
+	return customNamePattern.MatchString(name)
 }
 
 // validateCustomSchema rejects schemas that use unsupported field
@@ -293,7 +320,7 @@ func (s *TenantStore) Get(ctx context.Context, tenantID uuid.UUID, name string, 
 	if tenantID == uuid.Nil {
 		return nil, errors.New("ktype: tenant id required")
 	}
-	if !IsCustomName(name) {
+	if !IsValidCustomName(name) {
 		return nil, ErrInvalidCustomName
 	}
 	var out TenantKType
@@ -370,7 +397,7 @@ func (s *TenantStore) SetStatus(ctx context.Context, tenantID uuid.UUID, name st
 	if tenantID == uuid.Nil {
 		return errors.New("ktype: tenant id required")
 	}
-	if !IsCustomName(name) {
+	if !IsValidCustomName(name) {
 		return ErrInvalidCustomName
 	}
 	switch status {

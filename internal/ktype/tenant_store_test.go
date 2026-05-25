@@ -2,8 +2,11 @@ package ktype
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 // schema returns a json.RawMessage built from the supplied field
@@ -160,40 +163,102 @@ func TestValidateCustomSchemaEnforcesEnumAndRefShape(t *testing.T) {
 	})
 }
 
-// TestIsCustomNameAndPattern pins the namespace gate. The DB CHECK
-// and the Go regex must agree — any tightening here implies an
-// updated migration.
+// TestIsCustomNameAndPattern pins the namespace gate. IsCustomName
+// is the loose prefix-only routing check; IsValidCustomName is the
+// strict input-validation check that must agree with both the DB
+// CHECK constraint `tenant_ktypes_name_chk` and Upsert's regex.
+// Any tightening here implies an updated migration.
 func TestIsCustomNameAndPattern(t *testing.T) {
 	good := []string{
 		"custom.asset_register",
 		"custom.x",
 		"custom.invoice_v2",
 	}
-	bad := []string{
-		"crm.deal",            // not in custom.* namespace
+	// Malformed names that are in the custom.* namespace but
+	// don't satisfy the full pattern. IsCustomName MUST still
+	// return true for these (so resolveKType routes them to the
+	// tenant store, which then returns a precise 400 instead of
+	// a confused 404 from the platform registry). IsValidCustomName
+	// MUST return false so Get / SetStatus / Upsert reject them
+	// before any DB round-trip.
+	malformedCustom := []string{
 		"custom.",             // empty slug
 		"custom.Asset",        // uppercase
 		"custom.a-b",          // dash not allowed
 		"custom.1asset",       // leading digit
 		"custom.nested.ktype", // multi-dot
-		"",                    // empty
+	}
+	// Names outside the custom.* namespace entirely. Both
+	// predicates return false.
+	nonCustom := []string{
+		"crm.deal",
+		"",
 	}
 	for _, n := range good {
 		if !IsCustomName(n) {
 			t.Errorf("IsCustomName(%q) = false, want true", n)
 		}
+		if !IsValidCustomName(n) {
+			t.Errorf("IsValidCustomName(%q) = false, want true", n)
+		}
 		if !customNamePattern.MatchString(n) {
 			t.Errorf("customNamePattern.Match(%q) = false, want true", n)
 		}
 	}
-	for _, n := range bad {
-		if !strings.HasPrefix(n, "custom.") {
-			// IsCustomName returns false for these — that's the
-			// namespace short-circuit at the resolver layer.
-			continue
+	for _, n := range malformedCustom {
+		if !IsCustomName(n) {
+			t.Errorf("IsCustomName(%q) = false, want true (prefix-only routing must still match)", n)
+		}
+		if IsValidCustomName(n) {
+			t.Errorf("IsValidCustomName(%q) = true, want false (full pattern must reject malformed names)", n)
 		}
 		if customNamePattern.MatchString(n) {
 			t.Errorf("customNamePattern.Match(%q) = true, want false", n)
 		}
+	}
+	for _, n := range nonCustom {
+		if IsCustomName(n) {
+			t.Errorf("IsCustomName(%q) = true, want false", n)
+		}
+		if IsValidCustomName(n) {
+			t.Errorf("IsValidCustomName(%q) = true, want false", n)
+		}
+	}
+}
+
+// TestGetAndSetStatusRejectMalformedNames pins that the read-path
+// input validation matches Upsert's contract — a name like
+// `custom.UPPER` returns ErrInvalidCustomName (HTTP 400) before any
+// DB round-trip, NOT ErrNotFound (HTTP 404) from a missing row. The
+// distinction matters because the builder UI surfaces "invalid name"
+// vs "not found" differently, and scripted callers rely on the
+// 400/404 split to retry vs. abort.
+//
+// Both methods take a real *pgxpool.Pool in production but the
+// validation we're testing happens before any DB call, so a nil
+// pool is fine here.
+func TestGetAndSetStatusRejectMalformedNames(t *testing.T) {
+	s := NewTenantStore(nil)
+	tenantID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	malformed := []string{
+		"custom.",
+		"custom.UPPER",
+		"custom.a-b",
+		"custom.1asset",
+		"custom.nested.ktype",
+	}
+	for _, n := range malformed {
+		t.Run("Get/"+n, func(t *testing.T) {
+			_, err := s.Get(t.Context(), tenantID, n, 0)
+			if !errors.Is(err, ErrInvalidCustomName) {
+				t.Errorf("Get(%q) returned %v, want ErrInvalidCustomName", n, err)
+			}
+		})
+		t.Run("SetStatus/"+n, func(t *testing.T) {
+			err := s.SetStatus(t.Context(), tenantID, n, 1, CustomStatusActive)
+			if !errors.Is(err, ErrInvalidCustomName) {
+				t.Errorf("SetStatus(%q) returned %v, want ErrInvalidCustomName", n, err)
+			}
+		})
 	}
 }
