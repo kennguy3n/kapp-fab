@@ -402,6 +402,20 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			})
 		})
 
+		// Phase N8b — tenant-authored ("low-code") KTypes. The
+		// route group is tenant-scoped so the GUC is set on every
+		// call; the store enforces the custom.<slug> namespace,
+		// the safe field-type subset, and the field-count cap
+		// before INSERT. Status transitions (draft → active →
+		// archived) are POSTed against the same name+version.
+		r.Route("/api/v1/tenant-ktypes", func(r chi.Router) {
+			d.tenantChain(r)
+			r.Get("/", d.tkh.list)
+			r.Get("/{name}", d.tkh.get)
+			r.Post("/", d.tkh.upsert)
+			r.Post("/{name}/status", d.tkh.setStatus)
+		})
+
 		// Webhook management + delivery-log surface. Gated behind
 		// the per-tenant `webhook` feature flag (derived from the
 		// path via DynamicFeatureMiddleware). CRUD runs under the

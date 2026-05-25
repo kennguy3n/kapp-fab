@@ -210,6 +210,10 @@ const InsightsQueryBuilderPage = lazyNamed(
   () => import("./pages/InsightsQueryBuilderPage"),
   "InsightsQueryBuilderPage",
 );
+const KTypeBuilderPage = lazyNamed(
+  () => import("./pages/KTypeBuilderPage"),
+  "KTypeBuilderPage",
+);
 const InsightsDashboardPage = lazyNamed(
   () => import("./pages/InsightsDashboardPage"),
   "InsightsDashboardPage",
@@ -426,6 +430,7 @@ const navSections: NavSection[] = [
       { to: "/admin/roles", label: "Roles" },
       { to: "/admin/webhooks", label: "Webhooks" },
       { to: "/admin/consolidation", label: "Consolidation" },
+      { to: "/admin/ktypes/builder", label: "KType Builder" },
       { to: "/imports", label: "Imports" },
     ],
   },
@@ -721,6 +726,10 @@ function AppShell() {
               <Route path="/admin/usage" element={<UsageDashboardPage />} />
               <Route path="/admin/audit" element={<AuditLogPage />} />
               <Route path="/admin/roles" element={<RoleManagementPage />} />
+              <Route
+                path="/admin/ktypes/builder"
+                element={<KTypeBuilderPage />}
+              />
               <Route path="/approvals" element={<ApprovalsPage />} />
               <Route
                 path="/finance/exchange-rates"

@@ -144,6 +144,14 @@ var TenantScopedTables = []string{
 	// neither has a FK to the other (the matching imap_state
 	// row may or may not exist before the worker first polls).
 	"helpdesk_mailboxes",
+	// Phase N8b — tenant-authored ("low-code") KTypes. PK is
+	// (tenant_id, name, version) — declared in
+	// tableConflictKeys. No FK to krecords; the krecords rows
+	// reference the KType by name, so the natural restore order
+	// would be tenant_ktypes before krecords. Sorted later than
+	// most platform tables since custom KTypes are user-authored
+	// and therefore expected to be small per tenant.
+	"tenant_ktypes",
 }
 
 // manifest is the first record in every dump file.
@@ -400,6 +408,11 @@ var tableConflictKeys = map[string][]string{
 	"email_attachments":   {"tenant_id", "message_id", "file_id"},
 	"helpdesk_imap_state": {"tenant_id", "mailbox_id"},
 	"helpdesk_mailboxes":  {"tenant_id", "mailbox_id"},
+	// Phase N8b — tenant_ktypes PK is (tenant_id, name, version);
+	// the dump treats this composite as the conflict target so a
+	// restore re-applies edits a tenant made to an existing custom
+	// KType without duplicating the row.
+	"tenant_ktypes": {"tenant_id", "name", "version"},
 	// insights_query_cache PK is (tenant_id, query_hash, filter_hash) and
 	// insights_shares enforces a (tenant_id, resource_type, resource_id,
 	// grantee_type, grantee) UNIQUE on top of the (tenant_id, id) PK.

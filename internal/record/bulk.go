@@ -116,7 +116,7 @@ func (s *PGStore) bulkPatchOne(
 	if err != nil {
 		return fmt.Errorf("record: bulk merge: %w", err)
 	}
-	kt, err := s.registry.Get(ctx, existing.KType, existing.KTypeVersion)
+	kt, err := s.resolveKType(ctx, tenantID, existing.KType, existing.KTypeVersion)
 	if err != nil {
 		return err
 	}

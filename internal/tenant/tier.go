@@ -60,6 +60,7 @@ var TenantScopedTables = []string{
 	"insights_data_sources", "insights_embeds",
 	"email_messages", "email_attachments",
 	"helpdesk_imap_state", "helpdesk_mailboxes",
+	"tenant_ktypes",
 }
 
 // SchemaName returns the canonical dedicated-schema name for a
