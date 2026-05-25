@@ -61,6 +61,16 @@ export const SupportedLocales: readonly LocaleInfo[] = [
   { tag: "th", name: "ไทย", direction: "ltr" },
   { tag: "id", name: "Bahasa Indonesia", direction: "ltr" },
   { tag: "vi", name: "Tiếng Việt", direction: "ltr" },
+  // Phase N2: Europe Extended catalogues.
+  { tag: "pl", name: "Polski", direction: "ltr" },
+  { tag: "sv", name: "Svenska", direction: "ltr" },
+  { tag: "nb", name: "Norsk bokmål", direction: "ltr" },
+  { tag: "da", name: "Dansk", direction: "ltr" },
+  { tag: "fi", name: "Suomi", direction: "ltr" },
+  { tag: "cs", name: "Čeština", direction: "ltr" },
+  { tag: "hu", name: "Magyar", direction: "ltr" },
+  { tag: "ro", name: "Română", direction: "ltr" },
+  { tag: "el", name: "Ελληνικά", direction: "ltr" },
 ];
 
 /**
@@ -202,6 +212,19 @@ const COUNTRY_LOCALE_DEFAULTS: Record<string, string> = {
   NL: "nl",
   PT: "pt",
   BE: "fr",
+  // Phase N2: Europe Extended. Nine additional country defaults
+  // for the locale resolver. Each country pre-selects its own
+  // national-language catalogue; admins can override from the
+  // locale switcher.
+  PL: "pl",
+  SE: "sv",
+  NO: "nb",
+  DK: "da",
+  FI: "fi",
+  CZ: "cs",
+  HU: "hu",
+  RO: "ro",
+  GR: "el",
 };
 
 /**

@@ -151,6 +151,27 @@ func DefaultLocaleForCountry(country string) string {
 		return "pt"
 	case "BE":
 		return "fr"
+	// Phase N2 — Europe Extended. Nine additional locales
+	// added in this PR (pl, sv, nb, da, fi, cs, hu, ro, el).
+	// Each country defaults to its national language.
+	case "PL":
+		return "pl"
+	case "SE":
+		return "sv"
+	case "NO":
+		return "nb"
+	case "DK":
+		return "da"
+	case "FI":
+		return "fi"
+	case "CZ":
+		return "cs"
+	case "HU":
+		return "hu"
+	case "RO":
+		return "ro"
+	case "GR":
+		return "el"
 	default:
 		return "en"
 	}
@@ -245,6 +266,31 @@ func DefaultCoATemplateForCountry(country string) string {
 		return "pt_basic"
 	case "AU":
 		return "au_basic"
+	// Phase N2 — Europe Extended (PL/SE/NO/DK/FI/CZ/HU/RO/GR).
+	// Each country gets its own chart so payroll deduction
+	// lines land on country-specific liability accounts:
+	// ZUS / NFZ (PL), Skatteverket / Tjänstepension (SE),
+	// Skatteetaten / NAV (NO), Skattestyrelsen / ATP (DK),
+	// Verohallinto / TyEL (FI), ČSSZ / VZP (CZ), NAV (HU),
+	// ANAF / CAS / CASS (RO), AADE / EFKA (GR).
+	case "PL":
+		return "pl_basic"
+	case "SE":
+		return "se_basic"
+	case "NO":
+		return "no_basic"
+	case "DK":
+		return "dk_basic"
+	case "FI":
+		return "fi_basic"
+	case "CZ":
+		return "cz_basic"
+	case "HU":
+		return "hu_basic"
+	case "RO":
+		return "ro_basic"
+	case "GR":
+		return "gr_basic"
 	default:
 		return "ifrs_basic"
 	}
@@ -427,6 +473,42 @@ var coaPTBasic []byte
 //go:embed coa_templates/au_basic.json
 var coaAUBasic []byte
 
+// Phase N2 — Europe Extended (PL/SE/NO/DK/FI/CZ/HU/RO/GR).
+// Each chart carries the country's statutory payroll-liability
+// accounts so deductions emitted by the matching tax pack land
+// on the right ledger lines (ZUS/NFZ for PL, Skatteverket /
+// Tjänstepension for SE, Skatteetaten/NAV/OTP for NO,
+// Skattestyrelsen/ATP for DK, Verohallinto/TyEL/SAVA for FI,
+// ČSSZ/VZP for CZ, NAV/Szocho for HU, ANAF/CAS/CASS/CAM for RO,
+// AADE/EFKA for GR).
+
+//go:embed coa_templates/pl_basic.json
+var coaPLBasic []byte
+
+//go:embed coa_templates/se_basic.json
+var coaSEBasic []byte
+
+//go:embed coa_templates/no_basic.json
+var coaNOBasic []byte
+
+//go:embed coa_templates/dk_basic.json
+var coaDKBasic []byte
+
+//go:embed coa_templates/fi_basic.json
+var coaFIBasic []byte
+
+//go:embed coa_templates/cz_basic.json
+var coaCZBasic []byte
+
+//go:embed coa_templates/hu_basic.json
+var coaHUBasic []byte
+
+//go:embed coa_templates/ro_basic.json
+var coaROBasic []byte
+
+//go:embed coa_templates/gr_basic.json
+var coaGRBasic []byte
+
 // chartOfAccountsTemplates maps the wizard's template name to the
 // embedded JSON payload. Adding a new template is a matter of dropping
 // a JSON file in coa_templates/ and registering it here. Country-
@@ -471,6 +553,16 @@ var chartOfAccountsTemplates = map[string][]byte{
 	"at_basic": coaATBasic,
 	"pt_basic": coaPTBasic,
 	"au_basic": coaAUBasic,
+	// Phase N2 — Europe Extended.
+	"pl_basic": coaPLBasic,
+	"se_basic": coaSEBasic,
+	"no_basic": coaNOBasic,
+	"dk_basic": coaDKBasic,
+	"fi_basic": coaFIBasic,
+	"cz_basic": coaCZBasic,
+	"hu_basic": coaHUBasic,
+	"ro_basic": coaROBasic,
+	"gr_basic": coaGRBasic,
 }
 
 // templateAccount is the shape each entry in a CoA template takes. The
