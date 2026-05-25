@@ -9,8 +9,10 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
 
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/manufacturing"
@@ -170,8 +172,13 @@ func TestPhaseN6BOMLifecycle(t *testing.T) {
 		t.Fatalf("create v-empty: %v", err)
 	}
 	// Drop the component to fake a "components forgotten on
-	// upgrade" scenario.
-	if _, err := h.pool.Exec(ctx, `DELETE FROM bom_components WHERE tenant_id=$1 AND bom_id=$2`, tn.ID, empty.ID); err != nil {
+	// upgrade" scenario. RLS requires the tenant_id GUC, so we
+	// run inside dbutil.WithTenantTx rather than against the bare
+	// pool (which would silently match zero rows).
+	if err := dbutil.WithTenantTx(ctx, h.pool, tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `DELETE FROM bom_components WHERE tenant_id=$1 AND bom_id=$2`, tn.ID, empty.ID)
+		return err
+	}); err != nil {
 		t.Fatalf("drop components: %v", err)
 	}
 	if err := mfg.SetBOMStatus(ctx, tn.ID, empty.ID, manufacturing.BOMStatusActive); !errors.Is(err, manufacturing.ErrBOMHasNoComponents) {
@@ -238,16 +245,20 @@ func TestPhaseN6WorkOrderCompletionEmitsMoves(t *testing.T) {
 		t.Fatalf("expected completed_at to be stamped")
 	}
 
-	// Verify the three moves landed with the right qty + source labels.
+	// Verify the three moves landed with the right qty + source
+	// labels. RLS on inventory_moves requires the tenant_id GUC,
+	// so we run the SUM through dbutil.WithTenantTx rather than
+	// the bare pool.
 	expectMoveSum := func(t *testing.T, itemID uuid.UUID, sourceKType string, want string) {
 		t.Helper()
 		var sum decimal.Decimal
-		err := h.pool.QueryRow(ctx,
-			`SELECT COALESCE(SUM(qty), 0) FROM inventory_moves
-			  WHERE tenant_id = $1 AND item_id = $2 AND source_ktype = $3 AND source_id = $4`,
-			tn.ID, itemID, sourceKType, wo.ID,
-		).Scan(&sum)
-		if err != nil {
+		if err := dbutil.WithTenantTx(ctx, h.pool, tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT COALESCE(SUM(qty), 0) FROM inventory_moves
+				  WHERE tenant_id = $1 AND item_id = $2 AND source_ktype = $3 AND source_id = $4`,
+				tn.ID, itemID, sourceKType, wo.ID,
+			).Scan(&sum)
+		}); err != nil {
 			t.Fatalf("sum moves %s/%s: %v", itemID, sourceKType, err)
 		}
 		w, _ := decimal.NewFromString(want)
@@ -367,12 +378,13 @@ func TestPhaseN6CompletionIsIdempotent(t *testing.T) {
 		t.Fatalf("second complete work order: %v", err)
 	}
 	var n int
-	err = h.pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM inventory_moves
-		  WHERE tenant_id = $1 AND source_id = $2`,
-		tn.ID, wo.ID,
-	).Scan(&n)
-	if err != nil {
+	if err := dbutil.WithTenantTx(ctx, h.pool, tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM inventory_moves
+			  WHERE tenant_id = $1 AND source_id = $2`,
+			tn.ID, wo.ID,
+		).Scan(&n)
+	}); err != nil {
 		t.Fatalf("count moves: %v", err)
 	}
 	// 1 consumption + 1 receipt = 2 moves total. A retry would
