@@ -37,7 +37,13 @@ type gtPack struct{}
 
 func init() { Register(&gtPack{}) }
 
-func (gtPack) Country() string  { return "GT" }
+// Country returns the ISO 3166-1 alpha-2 code this pack services.
+func (gtPack) Country() string { return "GT" }
+
+// EffectiveYear pins the fiscal year the GT tables are calibrated
+// for: 2025 (Ley del ISR Decreto 10-2012, Régimen Sobre Utilidades
+// + IGSS 4.83% cuota laboral). Rates here are very stable; bumps
+// only happen if Congreso passes a reform.
 func (gtPack) EffectiveYear() int { return 2025 }
 
 var (
@@ -51,6 +57,13 @@ var (
 	gtAnnualDays = decimal.NewFromFloat(365.25)
 )
 
+// ComputeWithholding implements TaxPack for Guatemala. Order:
+// IGSS (4.83% on raw gross, no cap) → ISR Régimen Sobre
+// Utilidades on annualised (gross − IGSS − Q48,000 exempt),
+// applied as 5% on the first Q300,000 of renta imponible and 7%
+// above, then prorated back to the pay-period (365.25-day year).
+// The lower-tier 5% case is the default; the high-tier branch
+// reuses the Q15,000 pre-computed base (= Q300,000 × 5%).
 func (gtPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
@@ -77,10 +90,10 @@ func (gtPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	if rentaImponible.LessThanOrEqual(decimal.Zero) {
 		return out, nil
 	}
-	annualTax := decimal.Zero
-	if rentaImponible.LessThanOrEqual(gtISRThreshold1) {
-		annualTax = rentaImponible.Mul(gtISRRate1)
-	} else {
+	// First-tier 5% is the default; high-tier branch swaps in the
+	// pre-computed Q15,000 base + 7% on the excess above Q300,000.
+	annualTax := rentaImponible.Mul(gtISRRate1)
+	if rentaImponible.GreaterThan(gtISRThreshold1) {
 		annualTax = gtISRBaseTier2.Add(rentaImponible.Sub(gtISRThreshold1).Mul(gtISRRate2))
 	}
 	periodTax := annualTax.Mul(periodFraction).Round(2)

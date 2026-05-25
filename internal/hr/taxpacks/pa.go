@@ -37,7 +37,13 @@ type paPack struct{}
 
 func init() { Register(&paPack{}) }
 
-func (paPack) Country() string  { return "PA" }
+// Country returns the ISO 3166-1 alpha-2 code this pack services.
+func (paPack) Country() string { return "PA" }
+
+// EffectiveYear pins the fiscal year the PA tables are calibrated
+// for: 2025 (Decreto Ejecutivo 170 ISR escala + CSS 9.75% +
+// Seguro Educativo 1.25%). Panama's rates are exceptionally
+// stable; bumps only happen on a major fiscal reform.
 func (paPack) EffectiveYear() int { return 2025 }
 
 var (
@@ -52,6 +58,11 @@ var (
 	paAnnualDays         = decimal.NewFromFloat(365.25)
 )
 
+// ComputeWithholding implements TaxPack for Panama. Order: CSS
+// (9.75% on raw gross) → Seguro Educativo (1.25% on raw gross) →
+// ISR on annualised gross, applied as 15% on (annual − 11,000) up
+// to 50,000 and 25% on the excess above 50,000. Below USD 11,000
+// annual → social-security rows only; below period → nil.
 func (paPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil

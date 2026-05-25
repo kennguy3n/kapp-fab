@@ -41,7 +41,13 @@ type crPack struct{}
 
 func init() { Register(&crPack{}) }
 
-func (crPack) Country() string  { return "CR" }
+// Country returns the ISO 3166-1 alpha-2 code this pack services.
+func (crPack) Country() string { return "CR" }
+
+// EffectiveYear pins the fiscal year the CR tables are calibrated
+// for (Decreto 44.286-H Impuesto al Salario 2025 + CCSS 2025
+// employer/employee schedule). Bumps move in lock-step with the
+// annual indexation publication from Hacienda / CCSS.
 func (crPack) EffectiveYear() int { return 2025 }
 
 type crBracket struct {
@@ -65,6 +71,13 @@ var (
 	crCCSSEmployeeRate = dec("0.1067") // SEM 5.50 + IVM 4.17 + BP 1.00
 )
 
+// ComputeWithholding implements TaxPack for Costa Rica. The order
+// of operations is: CCSS (10.67% on raw monthly gross) → Impuesto
+// al Salario (5-row progressive table from Decreto 44.286-H). The
+// salary tax is computed against raw gross — CR does NOT subtract
+// social security before the bracket walk (unlike BR's IRRF-after-
+// INSS rule). Zero / negative gross or zero / negative period
+// return nil.
 func (crPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil

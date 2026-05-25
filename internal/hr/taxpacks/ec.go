@@ -44,7 +44,15 @@ type ecPack struct{}
 
 func init() { Register(&ecPack{}) }
 
-func (ecPack) Country() string  { return "EC" }
+// Country returns the ISO 3166-1 alpha-2 code this pack services.
+func (ecPack) Country() string { return "EC" }
+
+// EffectiveYear pins the fiscal year the EC table is calibrated
+// for: 2025 (SRI Resolución NAC-DGERCGC-2024 ISR annual scale +
+// IESS 9.45% aporte personal). Ecuador's CPI-gated revaluation
+// re-bases the scale whenever cumulative inflation passes 5%; the
+// effective year doesn't change unless the SRI publishes a new
+// resolución.
 func (ecPack) EffectiveYear() int { return 2025 }
 
 type ecBracket struct {
@@ -72,6 +80,12 @@ var (
 	ecAnnualDays = decimal.NewFromFloat(365.25)
 )
 
+// ComputeWithholding implements TaxPack for Ecuador. Order: IESS
+// (9.45% on raw gross, no cap — Ecuador's aporte personal applies
+// to the full sueldo) → ISR on (gross – IESS) annualised through
+// the 10-row scale in Resolución NAC-DGERCGC-2024, then prorated
+// back to the pay-period using a 365.25-day year. Below the
+// USD 11,902 personal exemption → IESS only; below period → nil.
 func (ecPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil

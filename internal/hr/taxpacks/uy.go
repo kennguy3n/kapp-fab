@@ -49,7 +49,13 @@ type uyPack struct{}
 
 func init() { Register(&uyPack{}) }
 
-func (uyPack) Country() string  { return "UY" }
+// Country returns the ISO 3166-1 alpha-2 code this pack services.
+func (uyPack) Country() string { return "UY" }
+
+// EffectiveYear pins the fiscal year the UY tables are calibrated
+// for: 2025 (DGI IRPF Categoría II scale BPC-indexed + BPS
+// Jubilación 15% + FONASA 4.5/6/6.5% tiers + FRL 0.125%). Bumps
+// move on the annual BPC publication every January.
 func (uyPack) EffectiveYear() int { return 2025 }
 
 type uyBracket struct {
@@ -78,6 +84,15 @@ var (
 	uyFRLRate        = dec("0.00125")
 )
 
+// ComputeWithholding implements TaxPack for Uruguay. Order:
+// Jubilación BPS (15% on raw gross) → FONASA (base 4.5%, +1.5%
+// when the employee has dependents, +2% when married — the
+// composite rate maxes at 8% per DGI tables) → FRL (0.125%) →
+// IRPF on annualised gross expressed in BPC, walked through the
+// 8-row scale, then prorated back to the pay-period using a
+// 365.25-day year. Dependents / marital status come from
+// EmployeeInfo (NumDependents / MaritalStatus); both default to
+// the lowest FONASA rate when unset.
 func (uyPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil

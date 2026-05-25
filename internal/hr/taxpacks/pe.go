@@ -45,7 +45,13 @@ type pePack struct{}
 
 func init() { Register(&pePack{}) }
 
-func (pePack) Country() string  { return "PE" }
+// Country returns the ISO 3166-1 alpha-2 code this pack services.
+func (pePack) Country() string { return "PE" }
+
+// EffectiveYear pins the fiscal year the PE tables are calibrated
+// for: 2025 (DS 260-2024-EF UIT = PEN 5,350 + SUNAT Renta 5ta
+// scale + ONP 13%). Bumps move in lock-step with the annual UIT
+// publication every December.
 func (pePack) EffectiveYear() int { return 2025 }
 
 type peBracket struct {
@@ -73,6 +79,13 @@ var (
 	peExemptUIT  = decimal.NewFromInt(7)
 )
 
+// ComputeWithholding implements TaxPack for Peru. Order: ONP
+// (13% on raw gross) → Renta de Quinta Categoría on annualised
+// gross expressed in UIT, less the 7-UIT exempt floor, walked
+// through the 5-row SUNAT scale, then prorated back to the
+// pay-period (365.25-day year). Renta is computed in UIT so a
+// future UIT bump only requires updating peUIT2025; the scale
+// itself is UIT-indexed. Below 7 UIT annual → ONP only.
 func (pePack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil

@@ -40,7 +40,13 @@ type ttPack struct{}
 
 func init() { Register(&ttPack{}) }
 
-func (ttPack) Country() string  { return "TT" }
+// Country returns the ISO 3166-1 alpha-2 code this pack services.
+func (ttPack) Country() string { return "TT" }
+
+// EffectiveYear pins the fiscal year the TT tables are calibrated
+// for: 2025 (Income Tax Act Chap 75:01 PAYE rates + NIBTT 2023
+// 16-class earnings schedule + Health Surcharge two-tier flat).
+// Bumps move on each annual budget reading (October).
 func (ttPack) EffectiveYear() int { return 2025 }
 
 // ttNISClass is one row of the NIBTT earnings-class table.
@@ -59,7 +65,6 @@ var (
 	ttPAYERate2               = dec("0.30")
 	ttPAYEBaseTier2           = dec("250000") // 1,000,000 × 25%
 	ttAnnualDays              = decimal.NewFromFloat(365.25)
-	ttWeeksPerMonth           = dec("4.333")
 	ttHealthSurchargeLowWeekly = dec("4.80")
 	ttHealthSurchargeHighWeekly = dec("8.25")
 	ttHealthThresholdWeekly    = dec("109.00")
@@ -87,6 +92,14 @@ var (
 	}
 )
 
+// ComputeWithholding implements TaxPack for Trinidad and Tobago.
+// Order: NIS (16-class NIBTT lookup on weekly AWE × weeks-in-
+// period) → Health Surcharge (TTD 4.80 or 8.25 per week step) →
+// PAYE on annualised gross less the TTD 90,000 personal
+// allowance, applied as 25% on the first TTD 1,000,000 of
+// chargeable income and 30% above, prorated back to the
+// pay-period (365.25-day year). Weekly figures use day-count/7
+// so a standard monthly payroll period collapses to 4.333 weeks.
 func (ttPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
@@ -132,10 +145,10 @@ func (ttPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	if chargeable.LessThanOrEqual(decimal.Zero) {
 		return out, nil
 	}
-	annualTax := decimal.Zero
-	if chargeable.LessThanOrEqual(ttPAYEThreshold) {
-		annualTax = chargeable.Mul(ttPAYERate1)
-	} else {
+	// Tier-1 (25% up to TTD 1,000,000) is the default; tier-2 swaps
+	// in the pre-computed TTD 250,000 base + 30% on the excess.
+	annualTax := chargeable.Mul(ttPAYERate1)
+	if chargeable.GreaterThan(ttPAYEThreshold) {
 		annualTax = ttPAYEBaseTier2.Add(chargeable.Sub(ttPAYEThreshold).Mul(ttPAYERate2))
 	}
 	periodTax := annualTax.Mul(periodFraction).Round(2)

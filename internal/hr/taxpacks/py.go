@@ -37,7 +37,13 @@ type pyPack struct{}
 
 func init() { Register(&pyPack{}) }
 
-func (pyPack) Country() string  { return "PY" }
+// Country returns the ISO 3166-1 alpha-2 code this pack services.
+func (pyPack) Country() string { return "PY" }
+
+// EffectiveYear pins the fiscal year the PY tables are calibrated
+// for: 2025 (DNIT IRP scale + jornal mínimo PYG 117,991 from
+// Ministerio de Trabajo + IPS 9% cuota laboral). Bumps move on
+// each jornal mínimo revision (typically April).
 func (pyPack) EffectiveYear() int { return 2025 }
 
 var (
@@ -52,6 +58,12 @@ var (
 	pyAnnualDays      = decimal.NewFromFloat(365.25)
 )
 
+// ComputeWithholding implements TaxPack for Paraguay. Order: IPS
+// (9% on raw gross) → IRP on annualised gross when it exceeds 80
+// jornales mínimos mensuales (8% on 80–120 jornales, 10% above
+// 120), prorated back to the pay-period (365.25-day year).
+// Below the 80-jornal threshold (most employees) only IPS is
+// withheld. Multi-tier is closed-form (no bracket walk).
 func (pyPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
@@ -79,10 +91,11 @@ func (pyPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	if annualGross.LessThanOrEqual(thr0) {
 		return out, nil
 	}
-	annualTax := decimal.Zero
-	if annualGross.LessThanOrEqual(thr1) {
-		annualTax = annualGross.Sub(thr0).Mul(pyIRPRate1)
-	} else {
+	// Tier-1 (80–120 jornales, 8%) is the default; tier-2 swaps in
+	// the closed-form sum of the saturated tier-1 segment plus 10%
+	// on the excess above 120 jornales.
+	annualTax := annualGross.Sub(thr0).Mul(pyIRPRate1)
+	if annualGross.GreaterThan(thr1) {
 		annualTax = thr1.Sub(thr0).Mul(pyIRPRate1).Add(annualGross.Sub(thr1).Mul(pyIRPRate2))
 	}
 	periodTax := annualTax.Mul(periodFraction).Round(2)

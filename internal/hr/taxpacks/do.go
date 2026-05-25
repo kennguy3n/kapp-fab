@@ -38,7 +38,13 @@ type doPack struct{}
 
 func init() { Register(&doPack{}) }
 
-func (doPack) Country() string  { return "DO" }
+// Country returns the ISO 3166-1 alpha-2 code this pack services.
+func (doPack) Country() string { return "DO" }
+
+// EffectiveYear pins the fiscal year the DO tables are calibrated
+// for: 2025 (DGII Aviso 89-24 ISR scale + SIPEN AFP / SISALRIL SFS
+// rates). Bumps move in lock-step with the DGII annual indexation
+// publication every December.
 func (doPack) EffectiveYear() int { return 2025 }
 
 var (
@@ -61,6 +67,13 @@ var (
 	doAnnualDays = decimal.NewFromFloat(365.25)
 )
 
+// ComputeWithholding implements TaxPack for the Dominican
+// Republic. Order: AFP (2.87% capped at 20× SMN) → SFS (3.04%
+// capped at 10× SMN) → ISR on (gross – AFP – SFS) annualised
+// through the 4-row scale in Aviso 89-24, then prorated back to
+// the pay-period using a 365.25-day year. Negative / zero gross
+// or period → nil; below-exempt annualised net → social-security
+// rows only.
 func (doPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
