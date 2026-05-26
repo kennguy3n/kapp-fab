@@ -24,17 +24,26 @@ func TestEndOfDayAdvancesToInclusiveEnd(t *testing.T) {
 		{
 			name: "utc midnight to end of day",
 			in:   time.Date(2025, time.July, 31, 0, 0, 0, 0, time.UTC),
-			want: time.Date(2025, time.July, 31, 23, 59, 59, 0, time.UTC),
+			want: time.Date(2025, time.July, 31, 23, 59, 59, int(time.Second-1), time.UTC),
 		},
 		{
 			name: "leap-day boundary",
 			in:   time.Date(2024, time.February, 29, 0, 0, 0, 0, time.UTC),
-			want: time.Date(2024, time.February, 29, 23, 59, 59, 0, time.UTC),
+			want: time.Date(2024, time.February, 29, 23, 59, 59, int(time.Second-1), time.UTC),
 		},
 		{
 			name: "preserves caller-supplied location",
 			in:   time.Date(2025, time.July, 31, 0, 0, 0, 0, time.FixedZone("ICT", 7*60*60)),
-			want: time.Date(2025, time.July, 31, 23, 59, 59, 0, time.FixedZone("ICT", 7*60*60)),
+			want: time.Date(2025, time.July, 31, 23, 59, 59, int(time.Second-1), time.FixedZone("ICT", 7*60*60)),
+		},
+		{
+			// Sub-second precision regression: an entry posted at
+			// 23:59:59.500 must compare <= endOfDay. With nsec=0,
+			// the filter excludes it; with nsec=999999999 it
+			// passes. This case pins the inclusive contract.
+			name: "final sub-second is inclusive",
+			in:   time.Date(2025, time.July, 31, 0, 0, 0, 0, time.UTC),
+			want: time.Date(2025, time.July, 31, 23, 59, 59, 999999999, time.UTC),
 		},
 	}
 	for _, tc := range cases {

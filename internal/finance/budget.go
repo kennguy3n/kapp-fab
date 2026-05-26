@@ -298,6 +298,68 @@ func (s *BudgetStore) WithClock(now func() time.Time) *BudgetStore {
 // in.ID is the zero UUID. Returns the inserted row with created_at /
 // updated_at populated by the database.
 func (s *BudgetStore) CreateBudget(ctx context.Context, in Budget) (*Budget, error) {
+	var out *Budget
+	err := dbutil.WithTenantTx(ctx, s.pool, in.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		b, err := createBudgetTx(ctx, tx, in)
+		if err != nil {
+			return err
+		}
+		out = b
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CreateBudgetWithLines inserts a budget header and its line items
+// in a single tenant transaction so a partial failure does not leave
+// an orphan header in the database. Callers that need atomic
+// create-with-lines semantics (e.g. the finance.create_budget agent
+// tool) should use this entrypoint rather than chaining
+// CreateBudget + UpsertBudgetLine, each of which spans its own
+// WithTenantTx and would otherwise commit the header before the
+// first line failure surfaces. Returns the inserted header with
+// created_at/updated_at populated, and the inserted line rows in
+// the same order they were supplied. Validation errors (e.g. empty
+// name, line[i].account_code missing) roll back the entire
+// transaction so an aborted create never partially commits.
+func (s *BudgetStore) CreateBudgetWithLines(ctx context.Context, header Budget, lines []BudgetLine) (*Budget, []BudgetLine, error) {
+	var (
+		outHeader *Budget
+		outLines  []BudgetLine
+	)
+	err := dbutil.WithTenantTx(ctx, s.pool, header.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		b, err := createBudgetTx(ctx, tx, header)
+		if err != nil {
+			return err
+		}
+		outHeader = b
+		outLines = make([]BudgetLine, 0, len(lines))
+		for i := range lines {
+			line := lines[i]
+			line.TenantID = b.TenantID
+			line.BudgetID = b.ID
+			inserted, err := upsertBudgetLineTx(ctx, tx, line)
+			if err != nil {
+				return fmt.Errorf("line[%d]: %w", i, err)
+			}
+			outLines = append(outLines, *inserted)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return outHeader, outLines, nil
+}
+
+// createBudgetTx is the transaction-bound budget insert used by
+// both the public CreateBudget and the atomic CreateBudgetWithLines
+// entrypoints. It performs the same validation as the public Create
+// path so the two surfaces produce identical error messages.
+func createBudgetTx(ctx context.Context, tx pgx.Tx, in Budget) (*Budget, error) {
 	if in.TenantID == uuid.Nil {
 		return nil, fmt.Errorf("%w: tenant_id required", ErrInvalidBudget)
 	}
@@ -318,20 +380,17 @@ func (s *BudgetStore) CreateBudget(ctx context.Context, in Budget) (*Budget, err
 	if in.ID == uuid.Nil {
 		in.ID = uuid.New()
 	}
-
 	out := in
-	err := dbutil.WithTenantTx(ctx, s.pool, in.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
-			`INSERT INTO budgets
-			    (tenant_id, id, name, fiscal_year, status, cost_center, notes,
-			     variance_threshold, created_by)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			 RETURNING created_at, updated_at`,
-			in.TenantID, in.ID, in.Name, in.FiscalYear, in.Status,
-			nullIfEmpty(in.CostCenter), nullIfEmpty(in.Notes),
-			in.VarianceThreshold, in.CreatedBy,
-		).Scan(&out.CreatedAt, &out.UpdatedAt)
-	})
+	err := tx.QueryRow(ctx,
+		`INSERT INTO budgets
+		    (tenant_id, id, name, fiscal_year, status, cost_center, notes,
+		     variance_threshold, created_by)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 RETURNING created_at, updated_at`,
+		in.TenantID, in.ID, in.Name, in.FiscalYear, in.Status,
+		nullIfEmpty(in.CostCenter), nullIfEmpty(in.Notes),
+		in.VarianceThreshold, in.CreatedBy,
+	).Scan(&out.CreatedAt, &out.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("finance: insert budget: %w", err)
 	}
@@ -510,6 +569,26 @@ func (s *BudgetStore) DeleteBudget(ctx context.Context, tenantID, id uuid.UUID) 
 // The unique key is (tenant, budget, account_code, COALESCE(cost_center, ''))
 // — supplying the same triple twice replaces the prior monthly grid.
 func (s *BudgetStore) UpsertBudgetLine(ctx context.Context, in BudgetLine) (*BudgetLine, error) {
+	var out *BudgetLine
+	err := dbutil.WithTenantTx(ctx, s.pool, in.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		l, err := upsertBudgetLineTx(ctx, tx, in)
+		if err != nil {
+			return err
+		}
+		out = l
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// upsertBudgetLineTx is the transaction-bound budget_line upsert
+// used by both the public UpsertBudgetLine and the atomic
+// CreateBudgetWithLines entrypoints. Same validation contract as
+// the public path.
+func upsertBudgetLineTx(ctx context.Context, tx pgx.Tx, in BudgetLine) (*BudgetLine, error) {
 	if in.TenantID == uuid.Nil || in.BudgetID == uuid.Nil {
 		return nil, fmt.Errorf("%w: tenant_id and budget_id required", ErrInvalidBudgetLine)
 	}
@@ -519,40 +598,37 @@ func (s *BudgetStore) UpsertBudgetLine(ctx context.Context, in BudgetLine) (*Bud
 	if in.ID == uuid.Nil {
 		in.ID = uuid.New()
 	}
-
 	out := in
-	err := dbutil.WithTenantTx(ctx, s.pool, in.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
-			`INSERT INTO budget_lines
-			    (tenant_id, id, budget_id, account_code, cost_center,
-			     amount_jan, amount_feb, amount_mar, amount_apr,
-			     amount_may, amount_jun, amount_jul, amount_aug,
-			     amount_sep, amount_oct, amount_nov, amount_dec)
-			 VALUES ($1, $2, $3, $4, $5,
-			         $6, $7, $8, $9,
-			         $10, $11, $12, $13,
-			         $14, $15, $16, $17)
-			 ON CONFLICT (tenant_id, budget_id, account_code, COALESCE(cost_center, ''))
-			 DO UPDATE SET
-			     amount_jan = EXCLUDED.amount_jan,
-			     amount_feb = EXCLUDED.amount_feb,
-			     amount_mar = EXCLUDED.amount_mar,
-			     amount_apr = EXCLUDED.amount_apr,
-			     amount_may = EXCLUDED.amount_may,
-			     amount_jun = EXCLUDED.amount_jun,
-			     amount_jul = EXCLUDED.amount_jul,
-			     amount_aug = EXCLUDED.amount_aug,
-			     amount_sep = EXCLUDED.amount_sep,
-			     amount_oct = EXCLUDED.amount_oct,
-			     amount_nov = EXCLUDED.amount_nov,
-			     amount_dec = EXCLUDED.amount_dec
-			 RETURNING id, annual_total, created_at, updated_at`,
-			in.TenantID, in.ID, in.BudgetID, in.AccountCode, nullIfEmpty(in.CostCenter),
-			in.Months[0], in.Months[1], in.Months[2], in.Months[3],
-			in.Months[4], in.Months[5], in.Months[6], in.Months[7],
-			in.Months[8], in.Months[9], in.Months[10], in.Months[11],
-		).Scan(&out.ID, &out.AnnualTotal, &out.CreatedAt, &out.UpdatedAt)
-	})
+	err := tx.QueryRow(ctx,
+		`INSERT INTO budget_lines
+		    (tenant_id, id, budget_id, account_code, cost_center,
+		     amount_jan, amount_feb, amount_mar, amount_apr,
+		     amount_may, amount_jun, amount_jul, amount_aug,
+		     amount_sep, amount_oct, amount_nov, amount_dec)
+		 VALUES ($1, $2, $3, $4, $5,
+		         $6, $7, $8, $9,
+		         $10, $11, $12, $13,
+		         $14, $15, $16, $17)
+		 ON CONFLICT (tenant_id, budget_id, account_code, COALESCE(cost_center, ''))
+		 DO UPDATE SET
+		     amount_jan = EXCLUDED.amount_jan,
+		     amount_feb = EXCLUDED.amount_feb,
+		     amount_mar = EXCLUDED.amount_mar,
+		     amount_apr = EXCLUDED.amount_apr,
+		     amount_may = EXCLUDED.amount_may,
+		     amount_jun = EXCLUDED.amount_jun,
+		     amount_jul = EXCLUDED.amount_jul,
+		     amount_aug = EXCLUDED.amount_aug,
+		     amount_sep = EXCLUDED.amount_sep,
+		     amount_oct = EXCLUDED.amount_oct,
+		     amount_nov = EXCLUDED.amount_nov,
+		     amount_dec = EXCLUDED.amount_dec
+		 RETURNING id, annual_total, created_at, updated_at`,
+		in.TenantID, in.ID, in.BudgetID, in.AccountCode, nullIfEmpty(in.CostCenter),
+		in.Months[0], in.Months[1], in.Months[2], in.Months[3],
+		in.Months[4], in.Months[5], in.Months[6], in.Months[7],
+		in.Months[8], in.Months[9], in.Months[10], in.Months[11],
+	).Scan(&out.ID, &out.AnnualTotal, &out.CreatedAt, &out.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("finance: upsert budget_line: %w", err)
 	}
@@ -706,7 +782,11 @@ func (s *BudgetStore) BudgetVsActual(ctx context.Context, tenantID uuid.UUID, q 
 			q.From = time.Date(budget.FiscalYear, time.January, 1, 0, 0, 0, 0, time.UTC)
 		}
 		if q.To.IsZero() {
-			q.To = time.Date(budget.FiscalYear, time.December, 31, 23, 59, 59, 0, time.UTC)
+			// End of fiscal year inclusive of the final nanosecond
+			// so the `je.posted_at <= $to` filter in loadActualsTx
+			// covers every entry posted on Dec 31 regardless of
+			// sub-second precision (see budget_handlers.endOfDay).
+			q.To = time.Date(budget.FiscalYear, time.December, 31, 23, 59, 59, int(time.Second-1), time.UTC)
 		}
 		lines, err = listBudgetLinesTx(ctx, tx, tenantID, q.BudgetID)
 		if err != nil {
@@ -751,10 +831,29 @@ func (s *BudgetStore) BudgetVsActual(ctx context.Context, tenantID uuid.UUID, q 
 
 	for i := range lines {
 		line := &lines[i]
-		// Resolve effective cost_center for this line: empty
-		// line.CostCenter falls back to the budget header default;
-		// both empty means "no CC scope" → match every actual
-		// regardless of CC (the wildcard bucket).
+		// Resolve effective cost_center for this line. The three
+		// cases here encode an intentional asymmetry that finance
+		// users sometimes ask about:
+		//
+		//   line.CostCenter == ""  AND  budget.CostCenter == ""
+		//     → no CC scope at all on either side. Lookup uses the
+		//       wildcard bucket which the SQL also writes into, so
+		//       this line aggregates actuals across EVERY cost
+		//       center — the "default unfiled budget" semantic.
+		//
+		//   line.CostCenter == ""  AND  budget.CostCenter != ""
+		//     → the budget header pins the whole budget to a single
+		//       CC (e.g. "MARKETING"). The line inherits that CC
+		//       and looks up actuals ONLY in the "MARKETING" bucket;
+		//       a journal entry posted with no cost_center goes to
+		//       the "" bucket and is deliberately NOT counted —
+		//       posting expense to a CC-scoped budget without
+		//       tagging the CC is treated as a data-entry error,
+		//       not a silent absorb.
+		//
+		//   line.CostCenter != ""
+		//     → the line's own CC overrides any header default and
+		//       the lookup queries that exact CC bucket.
 		ccLabel := line.CostCenter
 		if ccLabel == "" {
 			ccLabel = budget.CostCenter

@@ -195,4 +195,61 @@ func TestBudgetStoreLifecycle(t *testing.T) {
 	if len(remaining) != 0 {
 		t.Fatalf("expected 0 lines after CASCADE delete, got %d", len(remaining))
 	}
+
+	// --- (6) Atomic CreateBudgetWithLines: success path. --------------
+	// All-or-nothing semantics — the header and every line commit in
+	// a single tenant transaction so the agent tool's
+	// finance.create_budget cannot leave an orphan budget behind on
+	// a mid-batch line failure.
+	good := []finance.BudgetLine{
+		{AccountCode: "6000", Months: months},
+		{AccountCode: "6100", Months: months},
+	}
+	atomicHdr, atomicLines, err := budgetStore.CreateBudgetWithLines(ctx, finance.Budget{
+		TenantID:   tn.ID,
+		Name:       "Atomic FY",
+		FiscalYear: now.Year(),
+		Status:     finance.BudgetStatusActive,
+		CreatedBy:  &actor,
+	}, good)
+	if err != nil {
+		t.Fatalf("CreateBudgetWithLines(success): %v", err)
+	}
+	if len(atomicLines) != 2 {
+		t.Fatalf("CreateBudgetWithLines(success): got %d lines, want 2", len(atomicLines))
+	}
+	listed, err := budgetStore.ListBudgetLines(ctx, tn.ID, atomicHdr.ID)
+	if err != nil {
+		t.Fatalf("list lines after atomic create: %v", err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("ListBudgetLines after atomic create: got %d, want 2", len(listed))
+	}
+
+	// --- (7) Atomic CreateBudgetWithLines: rollback on bad line. ------
+	// First line is valid, second has an empty account_code which
+	// fails validation. The whole transaction must roll back —
+	// neither the header nor the first line may remain.
+	bad := []finance.BudgetLine{
+		{AccountCode: "6000", Months: months},
+		{AccountCode: "", Months: months},
+	}
+	if _, _, err := budgetStore.CreateBudgetWithLines(ctx, finance.Budget{
+		TenantID:   tn.ID,
+		Name:       "Rolled Back FY",
+		FiscalYear: now.Year(),
+		Status:     finance.BudgetStatusActive,
+		CreatedBy:  &actor,
+	}, bad); err == nil {
+		t.Fatalf("CreateBudgetWithLines accepted bad line[1].account_code=''")
+	}
+	allHeaders, err := budgetStore.ListBudgets(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("list budgets after rollback: %v", err)
+	}
+	for _, b := range allHeaders {
+		if b.Name == "Rolled Back FY" {
+			t.Fatalf("rollback failed: header %s persisted despite line failure", b.ID)
+		}
+	}
 }

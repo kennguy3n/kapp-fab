@@ -303,15 +303,21 @@ func (h *budgetHandlers) varianceReport(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, out)
 }
 
-// endOfDay returns the supplied date advanced to 23:59:59 in the
-// date's own location. The variance endpoint parses ?to=YYYY-MM-DD
-// as a UTC midnight, which would exclude every journal_line posted
-// later that day; advancing here keeps the API contract
-// ("include the supplied end date") aligned with the SQL filter
-// `je.posted_at <= $3` in loadActuals and with the default To
-// semantics in BudgetVsActual.
+// endOfDay returns the supplied date advanced to the last
+// representable instant on that calendar day (23:59:59.999999999 in
+// the date's own location). The variance endpoint parses
+// ?to=YYYY-MM-DD as a midnight in the caller's location, which
+// would exclude every journal_line posted later that day under the
+// SQL filter `je.posted_at <= $3`. Advancing to the final
+// nanosecond — not 23:59:59.0 — keeps the API contract ("include
+// the supplied end date") tight against pgx's `timestamp with time
+// zone` which preserves microsecond precision; any entry posted in
+// the final sub-second of the day is included rather than silently
+// dropped. The default To bound in BudgetVsActual and the agent
+// tool's parseAgentDateEnd mirror the same convention so all three
+// surfaces produce identical windows.
 func endOfDay(t time.Time) time.Time {
-	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, t.Location())
+	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, int(time.Second/time.Nanosecond)-1, t.Location())
 }
 
 // writeBudgetError translates BudgetStore sentinel errors into HTTP

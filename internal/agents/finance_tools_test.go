@@ -27,15 +27,22 @@ func TestParseAgentDateBounds(t *testing.T) {
 		}
 	})
 
-	t.Run("to is end of day UTC", func(t *testing.T) {
+	t.Run("to is end of day UTC inclusive of final nanosecond", func(t *testing.T) {
 		t.Parallel()
 		got, err := parseAgentDateEnd("2025-07-31")
 		if err != nil {
 			t.Fatalf("parseAgentDateEnd: %v", err)
 		}
-		want := time.Date(2025, time.July, 31, 23, 59, 59, 0, time.UTC)
+		want := time.Date(2025, time.July, 31, 23, 59, 59, int(time.Second-1), time.UTC)
 		if !got.Equal(want) {
 			t.Fatalf("parseAgentDateEnd = %s, want %s", got, want)
+		}
+		// Defence-in-depth: an entry posted at 23:59:59.999
+		// must be <= parseAgentDateEnd. With nsec=0 the prior
+		// implementation would silently drop it.
+		subSecond := time.Date(2025, time.July, 31, 23, 59, 59, 999_000_000, time.UTC)
+		if !subSecond.Before(got.Add(time.Nanosecond)) {
+			t.Fatalf("parseAgentDateEnd excludes sub-second entry: %s vs %s", subSecond, got)
 		}
 	})
 

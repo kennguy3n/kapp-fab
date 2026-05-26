@@ -755,23 +755,25 @@ func (t *createBudgetTool) Invoke(ctx context.Context, inv Invocation) (*Result,
 		VarianceThreshold: in.VarianceThreshold,
 		CreatedBy:         &inv.ActorID,
 	}
-	out, err := t.budgets.CreateBudget(ctx, header)
+	// CreateBudgetWithLines wraps the header insert and every line
+	// upsert in a single tenant transaction so a mid-batch validation
+	// or DB error rolls the whole budget back rather than leaving an
+	// orphan header behind. Previously this loop called CreateBudget
+	// then UpsertBudgetLine per line, each in its own tx — a failure
+	// on line[i>0] would commit the header (and any prior lines) and
+	// the LLM would receive an error referring to a budget that now
+	// exists in a partially-populated state.
+	out, lines, err := t.budgets.CreateBudgetWithLines(ctx, header, preparedLines)
 	if err != nil {
-		return nil, fmt.Errorf("finance.create_budget: create header: %w", err)
-	}
-	for i := range preparedLines {
-		preparedLines[i].BudgetID = out.ID
-		if _, err := t.budgets.UpsertBudgetLine(ctx, preparedLines[i]); err != nil {
-			return nil, fmt.Errorf("finance.create_budget: upsert line[%d]: %w", i, err)
-		}
+		return nil, fmt.Errorf("finance.create_budget: %w", err)
 	}
 	extra := map[string]any{
 		"budget_id":   out.ID,
 		"fiscal_year": out.FiscalYear,
-		"line_count":  len(preparedLines),
+		"line_count":  len(lines),
 	}
 	return &Result{
-		Summary: fmt.Sprintf("Created budget %s (FY%d) with %d lines", out.ID, out.FiscalYear, len(preparedLines)),
+		Summary: fmt.Sprintf("Created budget %s (FY%d) with %d lines", out.ID, out.FiscalYear, len(lines)),
 		Extra:   extra,
 	}, nil
 }
@@ -865,16 +867,20 @@ func parseAgentDate(s string) (time.Time, error) {
 }
 
 // parseAgentDateEnd parses an agent-supplied YYYY-MM-DD string as
-// the END of that calendar day in UTC (23:59:59). Use this for `to`
-// bounds where the SQL filter is `je.posted_at <= $end`; parsing
-// with parseAgentDate would silently exclude every entry posted
-// after midnight on the requested end date, producing the same
-// off-by-day variance the HTTP variance endpoint guards against
-// via endOfDay() in services/api/budget_handlers.go.
+// the END of that calendar day in UTC (23:59:59.999999999). Use
+// this for `to` bounds where the SQL filter is
+// `je.posted_at <= $end`; parsing with parseAgentDate would
+// silently exclude every entry posted after midnight on the
+// requested end date, producing the same off-by-day variance the
+// HTTP variance endpoint guards against via endOfDay() in
+// services/api/budget_handlers.go. The final-nanosecond offset
+// matches that endOfDay so the three surfaces (HTTP variance,
+// agent budget_vs_actual, BudgetVsActual default-To) produce
+// identical windows including any sub-second activity.
 func parseAgentDateEnd(s string) (time.Time, error) {
 	t, err := time.Parse("2006-01-02", s)
 	if err != nil {
 		return time.Time{}, err
 	}
-	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, t.Location()), nil
+	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, int(time.Second-1), t.Location()), nil
 }

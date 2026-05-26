@@ -65,6 +65,33 @@ const fmtNumber = (s: string | undefined): string => {
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 };
 
+// normalizeMoneyInput coerces a raw user-typed decimal string to a
+// wire-safe value. `<input type="number">` produces "" when the user
+// clears the field (a common editing operation), and shopspring's
+// decimal.Decimal cannot unmarshal an empty JSON string — it returns
+// `decimal: NewFromString: can't convert  to decimal: exponent is
+// not numeric` and the Go handler then surfaces a generic 400
+// "invalid JSON body" with no field-level context. Normalising at
+// the wire boundary (rather than mid-typing) keeps the on-screen
+// input cursor stable while the user is actively editing yet
+// guarantees every monthly amount the API receives is a valid
+// decimal literal.
+const normalizeMoneyInput = (raw: string): string => {
+  const trimmed = raw.trim();
+  return trimmed === "" ? "0" : trimmed;
+};
+
+// normalizeOptionalDecimal collapses an empty / whitespace-only
+// optional decimal string (e.g. a cleared variance_threshold input)
+// to `undefined` so the request body omits the field rather than
+// shipping "" — which is the same shopspring/decimal unmarshal
+// failure path as normalizeMoneyInput, but for nullable fields.
+const normalizeOptionalDecimal = (raw: string | undefined): string | undefined => {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  return trimmed === "" ? undefined : trimmed;
+};
+
 const statusBadge = (status: Budget["status"]) => {
   const colours: Record<Budget["status"], string> = {
     draft: "#9ca3af",
@@ -123,7 +150,16 @@ export function BudgetPage() {
   });
 
   const createBudget = useMutation({
-    mutationFn: (input: CreateBudgetInput) => api.createBudget(input),
+    // Normalize the optional `variance_threshold` at the wire
+    // boundary so a cleared input does not ship `""` to the Go
+    // backend (where `*decimal.Decimal` unmarshalling fails). The
+    // editor state keeps the raw string so the input cursor stays
+    // stable while the user is mid-typing.
+    mutationFn: (input: CreateBudgetInput) =>
+      api.createBudget({
+        ...input,
+        variance_threshold: normalizeOptionalDecimal(input.variance_threshold),
+      }),
     onSuccess: (b) => {
       setCreating(false);
       setNewBudget({
@@ -137,12 +173,18 @@ export function BudgetPage() {
   });
 
   const upsertLine = useMutation({
+    // Normalize cleared monthly inputs at the wire boundary. Each
+    // raw user keystroke is kept in `draft.months` for smooth UX
+    // (so the cursor doesn't snap when the user is mid-edit), but
+    // the API only ever sees valid decimal literals — cleared
+    // months ship as "0" rather than "" which would fail
+    // shopspring/decimal unmarshalling on the Go side.
     mutationFn: (line: LineDraft) =>
       api.upsertBudgetLine(selectedId as string, {
         id: line.id,
         account_code: line.account_code,
         cost_center: line.cost_center || undefined,
-        months: line.months,
+        months: line.months.map(normalizeMoneyInput),
       }),
     onSuccess: () => {
       setDraft(emptyDraft());
