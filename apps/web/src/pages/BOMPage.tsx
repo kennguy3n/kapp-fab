@@ -3,6 +3,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { BOM, BOMComponent, InventoryItem } from "@kapp/client";
 import { api } from "../lib/api";
 
+// BOMComponentDraft is the in-form shape used while the user is
+// authoring components, before any of them have been persisted.
+// Deliberately omits bom_id (assigned server-side on insert) AND
+// sort_order (the server derives it from array position — see
+// CreateBOMInput in @kapp/client). Mirroring the server contract
+// here means the UI never lets a user dial in a "sort_order" that
+// would be silently overridden on POST.
+type BOMComponentDraft = Omit<BOMComponent, "bom_id" | "sort_order">;
+
 /**
  * BOMPage renders the Phase N6 Bill of Materials builder. The model
  * is:
@@ -153,15 +162,8 @@ function BOMAuthoringForm({ items, itemLabel }: BOMAuthoringFormProps) {
   const [uom, setUOM] = useState("each");
   const [notes, setNotes] = useState("");
   const [activate, setActivate] = useState(false);
-  const [components, setComponents] = useState<
-    Array<Omit<BOMComponent, "bom_id">>
-  >([
-    {
-      component_item_id: "",
-      qty: "1",
-      uom: "each",
-      sort_order: 0,
-    } as Omit<BOMComponent, "bom_id">,
+  const [components, setComponents] = useState<BOMComponentDraft[]>([
+    { component_item_id: "", qty: "1", uom: "each" },
   ]);
 
   const createMut = useMutation({
@@ -173,14 +175,17 @@ function BOMAuthoringForm({ items, itemLabel }: BOMAuthoringFormProps) {
         uom,
         notes,
         activate,
+        // Server assigns sort_order from array position, so we
+        // forward the filtered draft array as-is; ordering is
+        // implicit in the JSON. See CreateBOMInput.components in
+        // @kapp/client.
         components: components
           .filter((c) => c.component_item_id)
-          .map((c, i) => ({
+          .map((c) => ({
             component_item_id: c.component_item_id,
             qty: c.qty,
             uom: c.uom,
             scrap_percent: c.scrap_percent ?? undefined,
-            sort_order: i,
           })),
       }),
     onSuccess: () => {
@@ -199,21 +204,11 @@ function BOMAuthoringForm({ items, itemLabel }: BOMAuthoringFormProps) {
       setUOM("each");
       setNotes("");
       setActivate(false);
-      setComponents([
-        {
-          component_item_id: "",
-          qty: "1",
-          uom: "each",
-          sort_order: 0,
-        } as Omit<BOMComponent, "bom_id">,
-      ]);
+      setComponents([{ component_item_id: "", qty: "1", uom: "each" }]);
     },
   });
 
-  const updateComponent = (
-    idx: number,
-    patch: Partial<Omit<BOMComponent, "bom_id">>,
-  ) => {
+  const updateComponent = (idx: number, patch: Partial<BOMComponentDraft>) => {
     setComponents((prev) =>
       prev.map((c, i) => (i === idx ? { ...c, ...patch } : c)),
     );
@@ -372,12 +367,7 @@ function BOMAuthoringForm({ items, itemLabel }: BOMAuthoringFormProps) {
         onClick={() =>
           setComponents((prev) => [
             ...prev,
-            {
-              component_item_id: "",
-              qty: "1",
-              uom: "each",
-              sort_order: prev.length,
-            } as Omit<BOMComponent, "bom_id">,
+            { component_item_id: "", qty: "1", uom: "each" },
           ])
         }
       >

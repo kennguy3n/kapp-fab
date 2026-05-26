@@ -27,12 +27,21 @@ type manufacturingHandlers struct {
 // BOMs
 // ---------------------------------------------------------------------------
 
+// bomComponentRequest is the HTTP shape for one component on a
+// createBOM call. Ordering is implicit in the JSON array position —
+// the store assigns sort_order = (index + 1) inside CreateBOM, so we
+// intentionally do not accept a `sort_order` field. Earlier drafts
+// had one, but the store always overrode it (see
+// internal/manufacturing/store.go's CreateBOM contract), which gave
+// HTTP clients the false impression they controlled ordering. The
+// canonical contract is now: "the components array's order IS the
+// BOM's display order". Clients reorder by re-sending the full
+// array; partial updates are not supported.
 type bomComponentRequest struct {
 	ComponentItemID uuid.UUID        `json:"component_item_id"`
 	Qty             decimal.Decimal  `json:"qty"`
 	UOM             string           `json:"uom"`
 	ScrapPercent    *decimal.Decimal `json:"scrap_percent,omitempty"`
-	SortOrder       int              `json:"sort_order"`
 }
 
 type createBOMRequest struct {
@@ -76,12 +85,14 @@ func (h *manufacturingHandlers) createBOM(w http.ResponseWriter, r *http.Request
 		Activate: req.Activate,
 	}
 	for _, c := range req.Components {
+		// SortOrder intentionally omitted — the store assigns it
+		// from the array index in CreateBOM. See the
+		// bomComponentRequest doc comment.
 		in.Components = append(in.Components, manufacturing.BOMComponent{
 			ComponentItemID: c.ComponentItemID,
 			Qty:             c.Qty,
 			UOM:             c.UOM,
 			ScrapPercent:    c.ScrapPercent,
-			SortOrder:       c.SortOrder,
 		})
 	}
 	bom, err := h.store.CreateBOM(r.Context(), t.ID, actor, in)

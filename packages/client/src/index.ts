@@ -2113,12 +2113,17 @@ export interface CreateBOMInput {
   output_qty: string;
   uom: string;
   notes?: string;
+  // Component ordering is implicit in array position — the server
+  // assigns sort_order = (index + 1) on insert, so this shape
+  // intentionally does NOT accept a sort_order field on the request
+  // (it would be silently ignored). The response shape `BOMComponent`
+  // still exposes sort_order for callers that need to render the
+  // server-assigned order.
   components: Array<{
     component_item_id: string;
     qty: string;
     uom: string;
     scrap_percent?: string;
-    sort_order: number;
   }>;
   activate?: boolean;
 }

@@ -204,42 +204,60 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON work_orders TO kapp_app;
 -- by suffix in Go (inventory/store.go) is fragile across PG versions
 -- and refactors.
 --
--- This migration renames both child indexes to stable, deterministic
--- names that match the parent name + the partition name. The Go
--- duplicate-source-move detection now matches the parent name OR
--- the stable child name with simple equality.
+-- This migration renames every auto-generated child index on every
+-- partition of inventory_moves to a deterministic name of the form
+-- `<partition_relname>_<short_suffix>` (e.g. inventory_moves_default
+-- yields `inventory_moves_default_source_uniq`). The matcher on the
+-- Go side uses a prefix+suffix pattern (see
+-- internal/inventory/store.go `isInventoryMovesSourceUniqViolation`),
+-- so any partition added in the future — yearly partitions, tenant-
+-- specific shards, archive partitions — also produces a match without
+-- a follow-up migration. The loop is the load-bearing piece: an
+-- earlier draft used `SELECT ... INTO` which only captures one row,
+-- so if more than one partition existed only the first child got
+-- renamed and the rest stayed on the auto-generated name (which the
+-- Go matcher would not recognise → ErrDuplicateSourceMove silently
+-- regresses to a generic insert error).
 --
--- The renames are idempotent: each block looks up the current child
--- name from pg_index/pg_inherits at runtime and renames it only if it
--- doesn't already match the target. Running the migration twice (or
--- against a freshly-built schema that already has the new names) is a
--- no-op.
+-- The renames are idempotent: each iteration checks the current child
+-- name against the target before issuing the ALTER. Running the
+-- migration twice (or against a freshly-built schema that already has
+-- the canonical names) is a no-op.
 DO $$
 DECLARE
-    child_name text;
+    rec record;
+    target_name text;
 BEGIN
-    -- inventory_moves_source_uniq → inventory_moves_default_source_uniq
-    SELECT c.relname INTO child_name
-    FROM pg_class c
-    JOIN pg_index i ON i.indexrelid = c.oid
-    JOIN pg_inherits h ON h.inhrelid = c.oid
-    JOIN pg_class parent_idx ON parent_idx.oid = h.inhparent
-    WHERE parent_idx.relname = 'inventory_moves_source_uniq'
-      AND c.relname <> 'inventory_moves_default_source_uniq';
-    IF child_name IS NOT NULL THEN
-        EXECUTE format('ALTER INDEX %I RENAME TO inventory_moves_default_source_uniq', child_name);
-    END IF;
+    -- inventory_moves_source_uniq → <partition>_source_uniq for every partition
+    FOR rec IN
+        SELECT c.relname AS child_name, partition_tbl.relname AS partition_relname
+        FROM pg_class c
+        JOIN pg_index i ON i.indexrelid = c.oid
+        JOIN pg_inherits h ON h.inhrelid = c.oid
+        JOIN pg_class parent_idx ON parent_idx.oid = h.inhparent
+        JOIN pg_class partition_tbl ON partition_tbl.oid = i.indrelid
+        WHERE parent_idx.relname = 'inventory_moves_source_uniq'
+    LOOP
+        target_name := rec.partition_relname || '_source_uniq';
+        IF rec.child_name <> target_name THEN
+            EXECUTE format('ALTER INDEX %I RENAME TO %I', rec.child_name, target_name);
+        END IF;
+    END LOOP;
 
-    -- inventory_moves_reversal_of_uniq → inventory_moves_default_reversal_of_uniq
-    SELECT c.relname INTO child_name
-    FROM pg_class c
-    JOIN pg_index i ON i.indexrelid = c.oid
-    JOIN pg_inherits h ON h.inhrelid = c.oid
-    JOIN pg_class parent_idx ON parent_idx.oid = h.inhparent
-    WHERE parent_idx.relname = 'inventory_moves_reversal_of_uniq'
-      AND c.relname <> 'inventory_moves_default_reversal_of_uniq';
-    IF child_name IS NOT NULL THEN
-        EXECUTE format('ALTER INDEX %I RENAME TO inventory_moves_default_reversal_of_uniq', child_name);
-    END IF;
+    -- inventory_moves_reversal_of_uniq → <partition>_reversal_of_uniq for every partition
+    FOR rec IN
+        SELECT c.relname AS child_name, partition_tbl.relname AS partition_relname
+        FROM pg_class c
+        JOIN pg_index i ON i.indexrelid = c.oid
+        JOIN pg_inherits h ON h.inhrelid = c.oid
+        JOIN pg_class parent_idx ON parent_idx.oid = h.inhparent
+        JOIN pg_class partition_tbl ON partition_tbl.oid = i.indrelid
+        WHERE parent_idx.relname = 'inventory_moves_reversal_of_uniq'
+    LOOP
+        target_name := rec.partition_relname || '_reversal_of_uniq';
+        IF rec.child_name <> target_name THEN
+            EXECUTE format('ALTER INDEX %I RENAME TO %I', rec.child_name, target_name);
+        END IF;
+    END LOOP;
 END
 $$;
