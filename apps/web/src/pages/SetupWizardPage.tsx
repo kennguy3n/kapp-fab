@@ -81,6 +81,18 @@ const COA_TEMPLATES = [
   { value: "hu_basic", label: "Hungary — IFRS + SZJA / TB / Szocho / ÁFA" },
   { value: "ro_basic", label: "Romania — IFRS + Impozit / CAS / CASS / TVA" },
   { value: "gr_basic", label: "Greece — IFRS + Income Tax / EFKA / ΦΠΑ" },
+  // Phase N3 — Africa + East Asia. Each chart carries the
+  // country's statutory payroll-liability accounts (SARS PAYE
+  // / UIF / SDL for ZA, FIRS PAYE / PenCom / NHF for NG, KRA
+  // PAYE / NSSF / SHIF / Housing Levy for KE, ETA PIT / Social
+  // Insurance for EG, NTA Gensenchōshū / Shakai Hoken for JP,
+  // NTS Geunrosodeukse / NPS / NHI / EI for KR).
+  { value: "za_basic", label: "South Africa — IFRS + PAYE / UIF / SDL / VAT" },
+  { value: "ng_basic", label: "Nigeria — IFRS + PAYE / Pension / NHF / WHT / VAT" },
+  { value: "ke_basic", label: "Kenya — IFRS + PAYE / NSSF / SHIF / Housing Levy / VAT" },
+  { value: "eg_basic", label: "Egypt — IFRS + PIT / Social Insurance / Stamp Duty / VAT" },
+  { value: "jp_basic", label: "Japan — IFRS + Gensenchōshū / Shakai Hoken / Consumption Tax" },
+  { value: "kr_basic", label: "South Korea — IFRS + Geunrosodeukse / NPS / NHI / EI / VAT" },
   // SCAFFOLD: cmd/new-tax-pack inserts new COA_TEMPLATES entries above this line.
 ];
 
@@ -156,6 +168,13 @@ const COUNTRY_COA_DEFAULTS: Record<string, string> = {
   HU: "hu_basic",
   RO: "ro_basic",
   GR: "gr_basic",
+  // Phase N3 — Africa + East Asia.
+  ZA: "za_basic",
+  NG: "ng_basic",
+  KE: "ke_basic",
+  EG: "eg_basic",
+  JP: "jp_basic",
+  KR: "kr_basic",
   // SCAFFOLD: cmd/new-tax-pack inserts new COUNTRY_COA_DEFAULTS entries above this line.
 };
 

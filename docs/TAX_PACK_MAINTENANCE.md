@@ -339,3 +339,100 @@ manual `workflow_dispatch` trigger.
 For organisations interested in long-term ownership of a country
 pack, the partner-program section in `CONTRIBUTING_TAX_PACKS.md`
 documents the named-reviewer + scoped commit-access model.
+
+
+## Phase N3 Africa + East Asia pack details (ZA / NG / KE / EG / JP / KR)
+
+The Phase N3 roster ships six packs spanning two regions. All
+follow the established `TaxPack` contract and `<cc>_basic` CoA
+convention, but each has a non-obvious algorithmic shape that
+maintainers should be aware of when refreshing rates.
+
+### South Africa (ZA)
+
+- **PAYE schedule:** SARS Schedule 1 / s.5 annual brackets for
+  tax year 2024/2025 (Mar 2024 – Feb 2025). The pack annualises
+  the slip's gross via `period_days / 365.25`, walks the seven
+  bands, applies the s.6(2) primary rebate (R17,235), and
+  proportions back. Secondary (65+) and tertiary (75+) rebates
+  are NOT applied — the pack uses the conservative primary
+  rebate; older cohorts settle at year-end via the IT12.
+- **UIF:** 1% employee share capped at the R17,712 monthly
+  remuneration ceiling per the UIF Contributions Act 2002. SDL
+  (1% employer) and OID are employer-only and not emitted.
+- **Annual refresh trigger:** SARS Budget Speech in February.
+  Update `zaBrackets`, `zaPrimaryRebateAnnual`, and
+  `zaUIFMonthlyCeiling` in `internal/hr/taxpacks/za.go`.
+
+### Nigeria (NG)
+
+- **PIT schedule:** PITA Sixth Schedule (CAP P8 LFN 2004 +
+  Finance Act 2020) progressive bands applied to annualised
+  taxable income. Consolidated Relief Allowance per s.33(2)
+  applied as the higher of ₦200,000 or 21% of gross (1% fixed
+  + 20% rate).
+- **Pension / NHF:** Pension Reform Act 2014 s.4(1) (8%) and
+  NHF Act 1992 s.4 (2.5%) applied to gross; both reduce the PIT
+  base before annualisation.
+- **Annual refresh trigger:** Finance Act enacted in
+  December/January. PFA contribution caps tracked separately
+  (none currently in pack).
+
+### Kenya (KE)
+
+- **PAYE schedule:** KRA Third Schedule + Finance Act 2023
+  five-band monthly schedule (10% / 25% / 30% / 32.5% / 35%).
+  Personal relief KES 2,400 monthly per s.30(1).
+- **NSSF:** Post-Feb-2025 Tier I + II merged schedule —
+  6% employee, UEL KES 72,000, max KES 4,320.
+- **SHIF:** 2.75% no ceiling, KES 300 floor (post-Oct-2024 NHIF
+  successor under Social Health Insurance Act 2023).
+- **Housing Levy:** 1.5% gross, no ceiling (Affordable Housing
+  Act 2024 s.5, effective 19 March 2024).
+- **Annual refresh trigger:** Kenya Finance Act (July) and NSSF
+  Tier ceiling adjustments (typically February).
+
+### Egypt (EG)
+
+- **PIT schedule:** Income Tax Law 91/2005 Article 8 bands as
+  amended by Law 175/2023 (effective 1 January 2024) — seven
+  progressive bands from 0% to 27.5%. Personal exemption raised
+  from EGP 15,000 to EGP 20,000 annually.
+- **Social Insurance:** Law 148/2019 — 11% employee share on
+  insured monthly wage between floor (EGP 2,000) and ceiling
+  (EGP 14,500 for 2025). Ceilings escalate 15% annually.
+- **Annual refresh trigger:** Egyptian Tax Authority circular
+  in January for SI ceilings; presidential Money Bill for PIT
+  bracket changes.
+
+### Japan (JP)
+
+- **Gensenchōshū schedule:** NTA Article 89 income tax brackets
+  (5% / 10% / 20% / 23% / 33% / 40% / 45%) annualised, plus
+  the 2.1% reconstruction surtax (Special Measures for
+  Reconstruction Funding Act 2011 s.13).
+- **Non-resident (Article 161):** flat 20.42% (20% + surtax on
+  20%). No social insurance for non-residents.
+- **Shakai Hoken (4 lines):** Tokyo Kyokai Kenpo branch rates
+  for 2024 — health 4.99%, pension 9.15%, LTC 0.80% (only for
+  ages 40–64), employment insurance 0.60%. The pack uses
+  monthly-equivalent gross as the standard remuneration proxy.
+- **Annual refresh trigger:** NTA publishes new tables in
+  December for the following calendar year; Kyokai Kenpo rates
+  change in March of each year.
+
+### South Korea (KR)
+
+- **Geunrosodeukse schedule:** Income Tax Act Article 55 post-
+  Law 19196 (2023) — eight bands from 6% to 45% applied to
+  annualised taxable income.
+- **Local Income Tax:** Local Tax Act s.103-3 — flat 10% of the
+  national income tax. Emitted as a separate line.
+- **4 대 보험 (4 social insurance):** NPS 4.5% (capped at KRW
+  6,170,000 monthly), NHI 3.545%, LTC 12.95% surcharge on NHI
+  contribution, EI 0.9%.
+- **Non-resident (Article 156):** progressive bracket walk +
+  local surtax, no social insurance.
+- **Annual refresh trigger:** NTS January announcement (income
+  tax brackets), NHIS October circular (health / LTC rates),
+  NPS July notification (NPS ceiling).

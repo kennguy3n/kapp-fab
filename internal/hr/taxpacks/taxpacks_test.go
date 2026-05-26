@@ -226,6 +226,8 @@ func TestRegisteredCountriesIsStable(t *testing.T) {
 		// Phase N2: Europe Extended.
 		"PL", "SE", "NO", "DK", "FI",
 		"CZ", "HU", "RO", "GR",
+		// Phase N3: Africa + East Asia.
+		"ZA", "NG", "KE", "EG", "JP", "KR",
 	}
 	for _, code := range want {
 		if !gotSet[code] {
