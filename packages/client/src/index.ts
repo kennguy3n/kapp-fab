@@ -1284,6 +1284,113 @@ export class ApiClient {
     });
   }
 
+  // --- Phase N9c: landed cost vouchers ----------------------------------
+
+  /** List landed cost vouchers, optionally filtered by status. */
+  listLandedCostVouchers(params?: {
+    status?: string;
+  }): Promise<LandedCostVoucher[]> {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set("status", params.status);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return this.request(`/finance/landed-costs${suffix}`);
+  }
+
+  createLandedCostVoucher(
+    input: UpsertLandedCostVoucherInput,
+  ): Promise<LandedCostVoucher> {
+    return this.request("/finance/landed-costs", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  getLandedCostVoucher(id: string): Promise<LandedCostVoucherWithLines> {
+    return this.request(`/finance/landed-costs/${encodeURIComponent(id)}`);
+  }
+
+  updateLandedCostVoucher(
+    id: string,
+    input: UpsertLandedCostVoucherInput,
+  ): Promise<LandedCostVoucher> {
+    return this.request(`/finance/landed-costs/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteLandedCostVoucher(id: string): Promise<void> {
+    return this.request(`/finance/landed-costs/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  }
+
+  upsertLandedCostCharge(
+    voucherId: string,
+    input: UpsertLandedCostChargeInput,
+  ): Promise<LandedCostCharge> {
+    return this.request(
+      `/finance/landed-costs/${encodeURIComponent(voucherId)}/charges`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(input),
+      },
+    );
+  }
+
+  deleteLandedCostCharge(voucherId: string, chargeId: string): Promise<void> {
+    return this.request(
+      `/finance/landed-costs/${encodeURIComponent(voucherId)}/charges/${encodeURIComponent(chargeId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  upsertLandedCostTarget(
+    voucherId: string,
+    input: UpsertLandedCostTargetInput,
+  ): Promise<LandedCostTarget> {
+    return this.request(
+      `/finance/landed-costs/${encodeURIComponent(voucherId)}/targets`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(input),
+      },
+    );
+  }
+
+  deleteLandedCostTarget(voucherId: string, targetId: string): Promise<void> {
+    return this.request(
+      `/finance/landed-costs/${encodeURIComponent(voucherId)}/targets/${encodeURIComponent(targetId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  allocateLandedCostVoucher(id: string): Promise<LandedCostTarget[]> {
+    return this.request(
+      `/finance/landed-costs/${encodeURIComponent(id)}/allocate`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({}),
+      },
+    );
+  }
+
+  postLandedCostVoucher(id: string): Promise<LandedCostPostResult> {
+    return this.request(
+      `/finance/landed-costs/${encodeURIComponent(id)}/post`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({}),
+      },
+    );
+  }
+
   // --- Phase I: helpdesk -------------------------------------------------
 
   listSLAPolicies(): Promise<{ policies: SLAPolicy[] }> {
@@ -2691,4 +2798,92 @@ export interface BudgetVarianceReport {
   /** Sum of |variance| across rows where favourable=false.
    *  Always non-negative. */
   total_unfavourable_variance: string;
+}
+
+// --- Phase N9c: landed cost vouchers ---------------------------------------
+
+/**
+ * LandedCostVoucher is the header row for a landed-cost voucher.
+ * Mirrors internal/finance.LandedCostVoucher; the lifecycle is
+ * draft → allocated → posted.
+ */
+export interface LandedCostVoucher {
+  tenant_id: string;
+  id: string;
+  voucher_number: string;
+  description?: string;
+  status: "draft" | "allocated" | "posted";
+  allocation_method: "by_qty" | "by_amount" | "by_weight";
+  posted_at?: string | null;
+  je_id?: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LandedCostCharge {
+  tenant_id: string;
+  id: string;
+  voucher_id: string;
+  description: string;
+  amount: string;
+  account_code?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LandedCostTarget {
+  tenant_id: string;
+  id: string;
+  voucher_id: string;
+  source_ktype: string;
+  source_id: string;
+  item_id: string;
+  warehouse_id: string;
+  qty: string;
+  unit_cost: string;
+  amount: string;
+  weight: string;
+  allocated_amount: string;
+  applied: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LandedCostVoucherWithLines {
+  voucher: LandedCostVoucher;
+  charges: LandedCostCharge[];
+  targets: LandedCostTarget[];
+}
+
+export interface UpsertLandedCostVoucherInput {
+  voucher_number: string;
+  description?: string;
+  allocation_method?: "by_qty" | "by_amount" | "by_weight";
+}
+
+export interface UpsertLandedCostChargeInput {
+  id?: string;
+  description: string;
+  amount: string | number;
+  account_code?: string;
+}
+
+export interface UpsertLandedCostTargetInput {
+  id?: string;
+  source_ktype?: string;
+  source_id: string;
+  item_id: string;
+  warehouse_id: string;
+  qty: string | number;
+  unit_cost: string | number;
+  weight?: string | number;
+}
+
+export interface LandedCostPostResult {
+  voucher: LandedCostVoucher;
+  journal_entry: {
+    id: string;
+    posted_at: string;
+  };
 }

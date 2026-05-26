@@ -614,6 +614,23 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Post("/budgets/{id}/lines", d.budh.upsertLine)
 			r.Delete("/budgets/{id}/lines/{lineID}", d.budh.deleteLine)
 			r.Get("/budgets/{id}/variance", d.budh.varianceReport)
+
+			// Phase N9c — Landed Cost vouchers. Same middleware
+			// chain as the rest of the finance routes so the
+			// existing finance.read / finance.admin role gate
+			// applies; per-route methods (POST allocate / POST
+			// post) are admin-only via the method-gate.
+			r.Get("/landed-costs", d.lch.list)
+			r.Post("/landed-costs", d.lch.create)
+			r.Get("/landed-costs/{id}", d.lch.get)
+			r.Put("/landed-costs/{id}", d.lch.update)
+			r.Delete("/landed-costs/{id}", d.lch.delete)
+			r.Post("/landed-costs/{id}/charges", d.lch.upsertCharge)
+			r.Delete("/landed-costs/{id}/charges/{cid}", d.lch.deleteCharge)
+			r.Post("/landed-costs/{id}/targets", d.lch.upsertTarget)
+			r.Delete("/landed-costs/{id}/targets/{tid}", d.lch.deleteTarget)
+			r.Post("/landed-costs/{id}/allocate", d.lch.allocate)
+			r.Post("/landed-costs/{id}/post", d.lch.post)
 		})
 
 		// Phase M Task 6 — POS finalize. Reuses InvoicePoster +

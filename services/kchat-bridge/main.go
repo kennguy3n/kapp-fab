@@ -27,6 +27,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
+	"github.com/kennguy3n/kapp-fab/internal/financeadapters"
 	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
@@ -136,6 +137,11 @@ func run() error {
 	featureStore := tenant.NewFeatureStore(pool)
 	insightsRunner := insights.NewRunner(pool, insightsCache, insightsQueries, reportingRunner).
 		WithFeaturePolicy(featureStore)
+	landedCostStore := finance.NewLandedCostStore(
+		pool,
+		financeadapters.NewLandedCostInventoryAdapter(inventoryStore),
+		financeadapters.NewLandedCostLedgerAdapter(ledgerStore),
+	)
 	commands := &CommandDispatcher{
 		registry:           registry,
 		records:            recordStore,
@@ -145,6 +151,7 @@ func run() error {
 		poster:             invoicePoster,
 		inventory:          inventoryStore,
 		manufacturing:      manufacturing.NewPGStore(pool, inventoryStore),
+		landedCost:         landedCostStore,
 		lmsIssuer:          lms.NewCertificateIssuer(recordStore, pool),
 		returns:            sales.NewReturnPoster(recordStore, invoicePoster, inventoryStore, ledgerStore),
 		requisitions:       sales.NewRequisitionPoster(recordStore),

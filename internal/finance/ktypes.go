@@ -31,7 +31,8 @@ const (
 	KTypeCreditNote       = "finance.credit_note"
 	KTypeDebitNote        = "finance.debit_note"
 	KTypeRecurringInvoice = "finance.recurring_invoice"
-	KTypePaymentTerms     = "finance.payment_terms"
+	KTypePaymentTerms      = "finance.payment_terms"
+	KTypeLandedCostVoucher = "finance.landed_cost_voucher"
 	// KTypePayment moved to payment.go — re-exported here via the
 	// payment.go file so the registry keeps finance.payment colocated
 	// with its schema.
@@ -347,6 +348,39 @@ var paymentTermsSchema = []byte(`{
   "permissions": {"read": ["tenant.member"], "write": ["finance.admin", "tenant.admin"]}
 }`)
 
+// landedCostVoucherSchema — Phase N9c landed cost voucher. The
+// header carries the allocation_method and lifecycle status; the
+// per-charge and per-target rows live in the typed
+// landed_cost_charges / landed_cost_targets tables (migration
+// 000062). The KRecord shape is read-only on the receipt
+// side — operators view voucher history via the dedicated
+// Landed Costs page rather than editing the JSON directly — so
+// the fields here are the minimal subset finance / agent /
+// KChat surfaces need for list rendering and references.
+var landedCostVoucherSchema = []byte(`{
+  "name": "finance.landed_cost_voucher",
+  "version": 1,
+  "fields": [
+    {"name": "voucher_number", "type": "string", "required": true, "max_length": 80},
+    {"name": "description", "type": "string", "max_length": 400},
+    {"name": "allocation_method", "type": "enum", "values": ["by_qty", "by_amount", "by_weight"], "default": "by_qty"},
+    {"name": "status", "type": "enum", "values": ["draft", "allocated", "posted"], "default": "draft"},
+    {"name": "posted_at", "type": "datetime"},
+    {"name": "journal_entry_id", "type": "string"}
+  ],
+  "views": {
+    "list": {"columns": ["voucher_number", "allocation_method", "status", "posted_at"]},
+    "form": {"sections": [
+      {"title": "Voucher", "fields": ["voucher_number", "description"]},
+      {"title": "Allocation", "fields": ["allocation_method"]},
+      {"title": "Posting", "fields": ["status", "posted_at", "journal_entry_id"]}
+    ]}
+  },
+  "cards": {"summary": "{{voucher_number}} — {{allocation_method}} ({{status}})"},
+  "permissions": {"read": ["tenant.member"], "write": ["finance.admin", "tenant.admin"]},
+  "agent_tools": ["finance.create_landed_cost_voucher", "finance.allocate_landed_cost", "finance.post_landed_cost"]
+}`)
+
 // All returns every Phase C finance KType as a freshly-constructed slice.
 // Includes the Phase N5 budget KTypes (finance.budget + finance.budget_line)
 // so a single registry-bootstrap call covers the full finance surface.
@@ -361,6 +395,7 @@ func All() []ktype.KType {
 		{Name: KTypePayment, Version: 1, Schema: paymentSchema},
 		{Name: KTypeRecurringInvoice, Version: 1, Schema: recurringInvoiceSchema},
 		{Name: KTypePaymentTerms, Version: 1, Schema: paymentTermsSchema},
+		{Name: KTypeLandedCostVoucher, Version: 1, Schema: landedCostVoucherSchema},
 	}
 	return append(base, BudgetKTypes()...)
 }

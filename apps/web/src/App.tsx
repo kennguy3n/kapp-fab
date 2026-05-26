@@ -150,6 +150,10 @@ const WorkOrdersPage = lazyNamed(
   () => import("./pages/WorkOrdersPage"),
   "WorkOrdersPage",
 );
+const LandedCostPage = lazyNamed(
+  () => import("./pages/LandedCostPage"),
+  "LandedCostPage",
+);
 const OrgChartPage = lazyNamed(
   () => import("./pages/OrgChartPage"),
   "OrgChartPage",
@@ -426,6 +430,7 @@ const navSections: NavSection[] = [
       { to: "/records/inventory.warehouse", label: "Warehouses" },
       { to: "/inventory/stock-levels", label: "Stock Levels" },
       { to: "/inventory/reports/valuation", label: "Valuation" },
+      { to: "/inventory/landed-costs", label: "Landed Costs" },
     ],
   },
   {
@@ -841,6 +846,11 @@ function AppShell() {
                 path="/manufacturing/work-orders"
                 element={<WorkOrdersPage />}
               />
+              <Route
+                path="/inventory/landed-costs"
+                element={<LandedCostPage />}
+              />
+
               <Route path="/hr/org-chart" element={<OrgChartPage />} />
               <Route path="/hr/payroll" element={<PayrollPage />} />
               <Route path="/hr/shifts" element={<ShiftCalendarPage />} />
