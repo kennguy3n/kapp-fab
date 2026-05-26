@@ -314,6 +314,21 @@ function SessionDetailPanel(props: {
     props.session.status === "reconciled";
   const status = props.session.status;
 
+  // Cross-mutation busy guard. Each action mutation already disables
+  // its own button via `mutation.isPending`, but when `reconciled`
+  // exposes both the Post and Reopen buttons simultaneously a
+  // fast-clicking operator could fire both before the first request
+  // returns. The backend serialises them via the session FOR UPDATE
+  // lock so the loser just receives ErrCycleCountAlreadyPosted /
+  // ErrCycleCountNotReconciled, but the operator then sees a
+  // confusing error banner for an action they thought they cancelled.
+  // Disabling every action button while *any* mutation is in flight
+  // makes the UI match the backend's single-in-flight semantics.
+  const anyActionPending =
+    seed.isPending ||
+    advance.isPending ||
+    post.isPending;
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -344,7 +359,7 @@ function SessionDetailPanel(props: {
       <div style={{ display: "flex", gap: 8, margin: "12px 0" }}>
         <button
           type="button"
-          disabled={isLocked || seed.isPending}
+          disabled={isLocked || anyActionPending}
           onClick={() => seed.mutate()}
         >
           {seed.isPending ? "Seeding…" : "Seed from stock"}
@@ -352,7 +367,7 @@ function SessionDetailPanel(props: {
         {status === "draft" && (
           <button
             type="button"
-            disabled={advance.isPending}
+            disabled={anyActionPending}
             onClick={() => advance.mutate("counting")}
           >
             {advance.isPending ? "Starting…" : "Start counting"}
@@ -361,7 +376,7 @@ function SessionDetailPanel(props: {
         {status === "counting" && (
           <button
             type="button"
-            disabled={advance.isPending}
+            disabled={anyActionPending}
             onClick={() => advance.mutate("reconciled")}
           >
             {advance.isPending ? "Reconciling…" : "Mark reconciled"}
@@ -371,7 +386,7 @@ function SessionDetailPanel(props: {
           <>
             <button
               type="button"
-              disabled={post.isPending}
+              disabled={anyActionPending}
               onClick={() => {
                 if (
                   window.confirm(
@@ -393,7 +408,7 @@ function SessionDetailPanel(props: {
                 button — a reopen is rare and worth pausing on. */}
             <button
               type="button"
-              disabled={advance.isPending}
+              disabled={anyActionPending}
               onClick={() => {
                 if (
                   window.confirm(
