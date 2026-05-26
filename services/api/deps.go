@@ -165,6 +165,7 @@ type apiDeps struct {
 	aph            *approvalsHandlers
 	auh            *auditHandlers
 	finh           *financeHandlers
+	budh           *budgetHandlers
 	invh           *inventoryHandlers
 	oh             *openAPIHandler
 	fileh          *filesHandlers

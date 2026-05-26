@@ -74,11 +74,24 @@ type nlBracket struct {
 
 var (
 	// Box 1 (loonheffing onder AOW-leeftijd) 2025 — combined IB
-	// + premie volksverzekeringen.
+	// + premie volksverzekeringen. Base values are the cumulative
+	// tax at the Floor so that f(Floor_n) = Base_n (the function
+	// is continuous at each boundary):
+	//
+	//   Band 2 Base = 38 441 × 0.3582 = 13 769.5662 ≈ 13 769.57
+	//   Band 3 Base = 13 769.57 + (76 817 − 38 441) × 0.3748
+	//              = 13 769.57 + 14 383.32 = 28 152.89
+	//
+	// The Belastingdienst witte-tabel may publish slightly
+	// different cumulative figures because IB (8.17%) and premie
+	// volksverzekeringen (27.65%) are rounded independently before
+	// combining. Since this pack applies the *combined* rate, the
+	// Base must be self-consistent with that rate to avoid a
+	// discontinuity at the bracket boundary.
 	nlLoonheffingBrackets = []nlBracket{
 		{Floor: dec("0"), Top: dec("38441"), Base: dec("0"), Rate: dec("0.3582")},
-		{Floor: dec("38441"), Top: dec("76817"), Base: dec("13770.36"), Rate: dec("0.3748")},
-		{Floor: dec("76817"), Top: decimal.Zero, Base: dec("28157.85"), Rate: dec("0.4950")},
+		{Floor: dec("38441"), Top: dec("76817"), Base: dec("13769.57"), Rate: dec("0.3748")},
+		{Floor: dec("76817"), Top: decimal.Zero, Base: dec("28152.89"), Rate: dec("0.4950")},
 	}
 
 	// Credit approximation (heffingskorting + arbeidskorting net

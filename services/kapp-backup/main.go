@@ -78,6 +78,11 @@ var TenantScopedTables = []string{
 	"cost_centers",
 	"bank_accounts",
 	"bank_transactions",
+	// Phase N5 — budget module. Listed AFTER accounts so the FK
+	// from budget_lines.account_code resolves on restore, and
+	// AFTER cost_centers for the same reason.
+	"budgets",
+	"budget_lines",
 	// Inventory
 	"inventory_warehouses",
 	"inventory_items",

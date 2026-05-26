@@ -29,6 +29,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/exporter"
 	"github.com/kennguy3n/kapp-fab/internal/files"
+	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/forms"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk/mailboxes"
@@ -588,6 +589,15 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	agents.RegisterCRMTools(executor)
 	agents.RegisterProjectTools(executor)
 	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster, paymentPoster)
+	// Phase N5 — single BudgetStore instance shared between the
+	// agent-tool surface and the HTTP handlers below. The store is
+	// stateless (it just composes the pool + a clock), so two
+	// instances would behave identically — but reusing the same
+	// pointer makes the dependency graph explicit and keeps both
+	// surfaces pinned to the same clock if a future override is
+	// introduced.
+	budgetStore := finance.NewBudgetStore(pool)
+	agents.RegisterBudgetTools(executor, budgetStore)
 	agents.RegisterInventoryTools(executor, inventoryStore)
 	agents.RegisterInventoryReorderTool(executor, inventory.NewReorderHandler(recordStore, inventoryStore))
 	agents.RegisterHRTools(executor, hrStore)
@@ -685,6 +695,9 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	aph := &approvalsHandlers{engine: workflowEngine, store: recordStore}
 	auh := &auditHandlers{pool: pool}
 	finh := &financeHandlers{store: ledgerStore, poster: invoicePoster, payments: paymentPoster}
+	// Phase N5 — budget HTTP surface; reuses the same BudgetStore
+	// instance allocated above for the agent-tool registry.
+	budh := &budgetHandlers{store: budgetStore}
 	invh := &inventoryHandlers{store: inventoryStore}
 	oh := &openAPIHandler{registry: ktypeRegistry}
 	fileh := &filesHandlers{store: filesStore, meter: meteringBuffer}
@@ -1060,6 +1073,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		aph:                  aph,
 		auh:                  auh,
 		finh:                 finh,
+		budh:                 budh,
 		invh:                 invh,
 		oh:                   oh,
 		fileh:                fileh,

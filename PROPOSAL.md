@@ -103,7 +103,7 @@ KType and KRecord are **original Kapp concepts**. KType defines *what a business
 | Consolidation across tenants | | ✓ |
 | Country-specific tax packs | | ✓ |
 | Cost centers / dimensions | ✓ | |
-| Budgets | | ✓ |
+| Budgets | ✓ | |
 
 #### Sales and Procurement
 

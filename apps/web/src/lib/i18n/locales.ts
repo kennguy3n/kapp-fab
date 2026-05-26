@@ -65,8 +65,10 @@ export const SupportedLocales: readonly LocaleInfo[] = [
 
 /**
  * Lookup of `tag → LocaleInfo` for the resolver path. Built once
- * at module load — supporting 13 locales today, scaling to a few
- * dozen, an object index out-performs Array.find().
+ * at module load. Count is derived from `SupportedLocales.length`,
+ * not hard-coded — at any given snapshot it is whatever the list
+ * above declares, and scaling to a few dozen an object index
+ * out-performs Array.find().
  */
 const localeIndex: Record<string, LocaleInfo> = SupportedLocales.reduce(
   (acc, info) => {
