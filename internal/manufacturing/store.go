@@ -52,12 +52,27 @@ type CreateBOMInput struct {
 	UOM        string
 	Notes      string
 	Components []BOMComponent
+	// Activate, when true, transitions the freshly-inserted BOM
+	// from draft to active inside the same transaction as the
+	// insert. Atomicity matters: if the HTTP handler ran the
+	// activation as a second top-level call (CreateBOM commits →
+	// SetBOMStatus runs) any failure of the second step (advisory-
+	// lock contention, transient DB error, panic) would strand the
+	// BOM in draft, and the client's natural retry would fail the
+	// (tenant_id, item_id, version) unique constraint on re-insert
+	// and surface a raw 500. Folding the activation into this same
+	// tx makes the whole "create-and-activate" step a single
+	// commit, so retries are idempotent (either both succeed or
+	// neither commits).
+	Activate bool
 }
 
-// CreateBOM inserts a new BOM (status='draft') plus its component
-// rows in a single transaction. The single-active-row invariant is
-// not exercised here — callers must call SetBOMStatus to activate
-// the BOM after CreateBOM returns successfully.
+// CreateBOM inserts a new BOM plus its component rows in a single
+// transaction. If in.Activate is true, the activation is performed
+// in the same transaction so create-and-activate is atomic (see
+// CreateBOMInput.Activate for the rationale). The single-active-
+// row invariant is enforced via the same advisory-lock-then-demote
+// dance as SetBOMStatus.
 func (s *PGStore) CreateBOM(ctx context.Context, tenantID, actorID uuid.UUID, in CreateBOMInput) (*BOM, error) {
 	if tenantID == uuid.Nil {
 		return nil, errors.New("manufacturing: tenant id required")
@@ -159,12 +174,68 @@ func (s *PGStore) CreateBOM(ctx context.Context, tenantID, actorID uuid.UUID, in
 			c.SortOrder = sort
 			bom.Components = append(bom.Components, c)
 		}
+		if in.Activate {
+			// Atomically flip to active in the same tx as the
+			// insert. activateBOMInTx takes the advisory lock
+			// keyed on (tenant_id, item_id) and demotes any
+			// other active row for the item before flipping
+			// this BOM — same invariant SetBOMStatus enforces.
+			if err := activateBOMInTx(ctx, tx, tenantID, bom.ID, bom.ItemID, s.now); err != nil {
+				return err
+			}
+			bom.Status = BOMStatusActive
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return bom, nil
+}
+
+// activateBOMInTx serialises BOM activations against the
+// (tenant_id, item_id) partial-unique-index invariant inside an
+// existing transaction. Shared between CreateBOM(Activate=true)
+// and SetBOMStatus so both code paths use the same advisory lock
+// + demote sequence — mismatch between the two would re-introduce
+// the race that prompted the lock in the first place.
+//
+// Caller is responsible for verifying that the BOM has at least
+// one component before invoking this helper (CreateBOM trivially
+// satisfies this via the ErrBOMHasNoComponents check up front;
+// SetBOMStatus does an explicit count).
+func activateBOMInTx(ctx context.Context, tx pgx.Tx, tenantID, bomID, itemID uuid.UUID, now func() time.Time) error {
+	// Serialise concurrent activations for the same item via an
+	// advisory xact lock keyed on hashtextextended(tenant_id ||
+	// ':' || item_id, 0). See the SetBOMStatus comment for the
+	// full rationale; the short version is that the partial unique
+	// index alone is necessary but not sufficient — two threads
+	// can each demote the (single) currently-active row and race
+	// on the final promote, surfacing a raw 23505 to the loser.
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(
+		            hashtextextended($1::text || ':' || $2::text, 0))`,
+		tenantID, itemID,
+	); err != nil {
+		return fmt.Errorf("manufacturing: acquire activation lock: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE boms
+		    SET status = 'obsolete', updated_at = $3
+		  WHERE tenant_id = $1 AND item_id = $2
+		    AND status = 'active' AND id <> $4`,
+		tenantID, itemID, now(), bomID,
+	); err != nil {
+		return fmt.Errorf("manufacturing: demote previous active bom: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE boms SET status = 'active', updated_at = $3
+		  WHERE tenant_id = $1 AND id = $2`,
+		tenantID, bomID, now(),
+	); err != nil {
+		return fmt.Errorf("manufacturing: update bom status: %w", err)
+	}
+	return nil
 }
 
 // GetBOM fetches a BOM and its components.
@@ -293,38 +364,6 @@ func (s *PGStore) SetBOMStatus(ctx context.Context, tenantID, bomID uuid.UUID, s
 		}
 
 		if status == BOMStatusActive {
-			// Serialise concurrent activations for the same
-			// item via an advisory xact lock. The partial
-			// unique index boms_active_per_item_uniq enforces
-			// "at most one active per item", but without
-			// serialisation two threads can each demote the
-			// (single) currently-active row, then race on the
-			// final promote — and the loser surfaces a raw
-			// 23505 that wraps as a 500 to the HTTP caller.
-			//
-			// FOR UPDATE on the target row alone does NOT
-			// solve this: thread A locks BOM-X, thread B locks
-			// BOM-Y, both pass the row-level lock and only
-			// collide on the partial-unique-index commit.
-			// Locking by (tenant_id, item_id) — the actual
-			// invariant scope — is the correct grain.
-			//
-			// pg_advisory_xact_lock takes a single bigint
-			// key; we synthesise it from hashtextextended on
-			// the canonical "<tenant>:<item>" string. Hash
-			// collisions are harmless (they just cause
-			// unrelated activations to serialise on the same
-			// lock), and the xact-scoped variant is auto-
-			// released at transaction end so a panic /
-			// rollback / OOM can't strand it.
-			if _, err := tx.Exec(ctx,
-				`SELECT pg_advisory_xact_lock(
-				            hashtextextended($1::text || ':' || $2::text, 0))`,
-				tenantID, itemID,
-			); err != nil {
-				return fmt.Errorf("manufacturing: acquire activation lock: %w", err)
-			}
-
 			var n int
 			if err := tx.QueryRow(ctx,
 				`SELECT count(*) FROM bom_components WHERE tenant_id = $1 AND bom_id = $2`,
@@ -335,19 +374,7 @@ func (s *PGStore) SetBOMStatus(ctx context.Context, tenantID, bomID uuid.UUID, s
 			if n == 0 {
 				return ErrBOMHasNoComponents
 			}
-			// Demote any other active row for the same
-			// item so the partial unique index can land
-			// the new activation without a 23505. Safe
-			// under the advisory lock above.
-			if _, err := tx.Exec(ctx,
-				`UPDATE boms
-				    SET status = 'obsolete', updated_at = now()
-				  WHERE tenant_id = $1 AND item_id = $2
-				    AND status = 'active' AND id <> $3`,
-				tenantID, itemID, bomID,
-			); err != nil {
-				return fmt.Errorf("manufacturing: demote previous active bom: %w", err)
-			}
+			return activateBOMInTx(ctx, tx, tenantID, bomID, itemID, s.now)
 		}
 
 		if _, err := tx.Exec(ctx,

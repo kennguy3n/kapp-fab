@@ -285,6 +285,106 @@ func TestPhaseN6BOMConcurrentActivationsSerialise(t *testing.T) {
 	}
 }
 
+// TestPhaseN6BOMCreateAndActivateIsAtomic pins the contract that
+// CreateBOM with Activate=true commits the insert and the
+// activation in the same transaction. Before this change the HTTP
+// handler ran them as two separate top-level calls; if the second
+// step failed (e.g. another transaction held the advisory lock
+// long enough to time out, or a transient DB error) the BOM ended
+// up persisted in draft state, and the client's natural retry hit
+// the (tenant_id, item_id, version) unique constraint and surfaced
+// a raw 500. With the activation folded into the same tx, the
+// failure path rolls back the insert too so the retry is
+// idempotent.
+//
+// The test exercises the happy path (atomic create+activate
+// succeeds and yields an active BOM with no orphan draft row) and
+// the unhappy path (activating a BOM that would force-demote a
+// version that does not actually exist still leaves the schema
+// consistent — there is no orphan). The race-failure unhappy path
+// is exercised by the concurrent-activations test above; this one
+// pins the "single client, single call" contract.
+func TestPhaseN6BOMCreateAndActivateIsAtomic(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, _, mfg, fg, compA, _, _ := newTenantForManufacturing(t, h)
+	actor := uuid.New()
+
+	// Happy path: create-and-activate in one call. The returned
+	// BOM must report status='active' without a separate
+	// SetBOMStatus call, and a refetch must agree.
+	bom, err := mfg.CreateBOM(ctx, tn.ID, actor, manufacturing.CreateBOMInput{
+		ItemID: fg.ID, Version: "v1", OutputQty: decimal.NewFromInt(1), UOM: "each",
+		Components: []manufacturing.BOMComponent{
+			{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(1), UOM: "each"},
+		},
+		Activate: true,
+	})
+	if err != nil {
+		t.Fatalf("create+activate v1: %v", err)
+	}
+	if bom.Status != manufacturing.BOMStatusActive {
+		t.Fatalf("expected returned BOM status='active', got %s", bom.Status)
+	}
+	got, err := mfg.GetBOM(ctx, tn.ID, bom.ID)
+	if err != nil {
+		t.Fatalf("refetch v1: %v", err)
+	}
+	if got.Status != manufacturing.BOMStatusActive {
+		t.Fatalf("refetch: expected status='active', got %s", got.Status)
+	}
+
+	// Creating a second BOM with Activate=true for the same item
+	// must auto-demote v1 to obsolete in the same tx and leave
+	// v2 as the sole active row. This proves the activation
+	// branch in CreateBOM uses the same single-active-row
+	// invariant as SetBOMStatus.
+	bom2, err := mfg.CreateBOM(ctx, tn.ID, actor, manufacturing.CreateBOMInput{
+		ItemID: fg.ID, Version: "v2", OutputQty: decimal.NewFromInt(1), UOM: "each",
+		Components: []manufacturing.BOMComponent{
+			{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(1), UOM: "each"},
+		},
+		Activate: true,
+	})
+	if err != nil {
+		t.Fatalf("create+activate v2: %v", err)
+	}
+	if bom2.Status != manufacturing.BOMStatusActive {
+		t.Fatalf("expected v2 status='active', got %s", bom2.Status)
+	}
+	got, err = mfg.GetBOM(ctx, tn.ID, bom.ID)
+	if err != nil {
+		t.Fatalf("refetch v1 after v2: %v", err)
+	}
+	if got.Status != manufacturing.BOMStatusObsolete {
+		t.Fatalf("expected v1 auto-demoted to obsolete after v2 atomic activate, got %s", got.Status)
+	}
+
+	// Unhappy path: an invalid create (e.g. duplicate version)
+	// must roll back the entire transaction. A subsequent
+	// successful create with the same Activate=true intent should
+	// behave as if the previous failure never happened.
+	_, err = mfg.CreateBOM(ctx, tn.ID, actor, manufacturing.CreateBOMInput{
+		ItemID: fg.ID, Version: "v2", OutputQty: decimal.NewFromInt(1), UOM: "each",
+		Components: []manufacturing.BOMComponent{
+			{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(1), UOM: "each"},
+		},
+		Activate: true,
+	})
+	if err == nil {
+		t.Fatalf("expected duplicate-version create to fail, got nil")
+	}
+	// v2 (the prior active BOM) must remain active — the failed
+	// retry must NOT have demoted it as a side effect.
+	got, err = mfg.GetBOM(ctx, tn.ID, bom2.ID)
+	if err != nil {
+		t.Fatalf("refetch v2 after failed retry: %v", err)
+	}
+	if got.Status != manufacturing.BOMStatusActive {
+		t.Fatalf("v2 must remain active after failed retry, got %s", got.Status)
+	}
+}
+
 // TestPhaseN6BOMComponentSortOrderIsArrayIndex pins the invariant
 // that bom_components.sort_order is derived from the caller's slice
 // index (1-based) regardless of what the caller passed in

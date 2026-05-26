@@ -67,6 +67,13 @@ func (h *manufacturingHandlers) createBOM(w http.ResponseWriter, r *http.Request
 		OutputQty: req.OutputQty,
 		UOM:       req.UOM,
 		Notes:     req.Notes,
+		// Pushing activation into the store layer makes create-
+		// and-activate a single transaction; if the activation
+		// step fails the insert rolls back too, so the client's
+		// retry doesn't have to navigate a half-finished BOM
+		// already occupying the (tenant_id, item_id, version)
+		// unique slot. See CreateBOMInput.Activate.
+		Activate: req.Activate,
 	}
 	for _, c := range req.Components {
 		in.Components = append(in.Components, manufacturing.BOMComponent{
@@ -81,17 +88,6 @@ func (h *manufacturingHandlers) createBOM(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		writeManufacturingError(w, err)
 		return
-	}
-	if req.Activate {
-		if err := h.store.SetBOMStatus(r.Context(), t.ID, bom.ID, manufacturing.BOMStatusActive); err != nil {
-			writeManufacturingError(w, err)
-			return
-		}
-		bom, err = h.store.GetBOM(r.Context(), t.ID, bom.ID)
-		if err != nil {
-			writeManufacturingError(w, err)
-			return
-		}
 	}
 	writeJSON(w, http.StatusCreated, bom)
 }
