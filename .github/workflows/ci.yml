@@ -269,9 +269,21 @@ jobs:
   # apps/web/. Kept as a separate job from `web build` so a unit
   # failure surfaces independently from a TypeScript compile error,
   # and so the failure annotations land on the test file rather
-  # than on vite build's catch-all step. The job reuses the same
-  # actions/setup-node cache key the `web build` job populates, so
-  # the second `npm ci` runs against the warm cache.
+  # than on vite build's catch-all step.
+  #
+  # `web-tests` deliberately has no `needs: web` — the two jobs run
+  # in parallel so a unit-test failure shows up at the same wall-
+  # clock time as a build failure (and so a green test job is not
+  # blocked by a longer vite build). Each job's `actions/setup-node`
+  # with `cache: "npm"` resolves the same npm cache key from the
+  # GitHub Actions cache backend (keyed on `package-lock.json`).
+  # That cache is populated by whichever job — in any prior or the
+  # current run — first does `npm ci` against that lockfile, so the
+  # warmth depends on prior-run history rather than ordering inside
+  # this run. On a fresh branch or after any lockfile change BOTH
+  # jobs cold-install independently the first time they run; on
+  # every subsequent run both hit a warm cache. `npm ci` is correct
+  # either way.
   web-tests:
     name: web tests (vitest)
     runs-on: ubuntu-latest
