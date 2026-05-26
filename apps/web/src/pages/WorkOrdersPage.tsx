@@ -7,6 +7,14 @@ import type {
 } from "@kapp/client";
 import { api } from "../lib/api";
 
+// COLUMNS lists the always-visible kanban lanes. `closed` is
+// deliberately NOT here: closed work orders are archival and
+// would crowd the active board if shown by default. They are
+// surfaced via a `Show closed (N)` toggle that appends a sixth
+// lane on demand (see CLOSED_COLUMN + showClosed below). Keeping
+// it as a toggleable column rather than a separate page preserves
+// the kanban metaphor and lets operators retrieve a closed order
+// without leaving the work-orders surface.
 const COLUMNS: Array<{
   status: WorkOrder["status"];
   label: string;
@@ -19,6 +27,16 @@ const COLUMNS: Array<{
   { status: "cancelled", label: "Cancelled", accent: "#fecaca" },
 ];
 
+// CLOSED_COLUMN is the on-demand sixth lane, conditionally
+// appended to the rendered set when the user toggles
+// `Show closed`. Pulling its shape out keeps the rendering loop
+// uniform and avoids special-casing the closed bucket downstream.
+const CLOSED_COLUMN: (typeof COLUMNS)[number] = {
+  status: "closed",
+  label: "Closed",
+  accent: "#e0e7ff",
+};
+
 /**
  * WorkOrdersPage renders a kanban view of work orders bucketed by
  * status. Each card exposes the legal state-machine transitions:
@@ -28,6 +46,11 @@ const COLUMNS: Array<{
  */
 export function WorkOrdersPage() {
   const qc = useQueryClient();
+  // showClosed defaults to false so the active board stays
+  // uncluttered. The count in the toggle label is sourced from
+  // the same `grouped` map the columns render against, so it's
+  // always live with the latest server snapshot.
+  const [showClosed, setShowClosed] = useState(false);
   const wosQ = useQuery({
     queryKey: ["mfg", "work-orders"],
     queryFn: () => api.listWorkOrders(),
@@ -85,7 +108,10 @@ export function WorkOrdersPage() {
   const grouped = useMemo(() => {
     const m = new Map<WorkOrder["status"], WorkOrder[]>();
     COLUMNS.forEach((c) => m.set(c.status, []));
-    m.set("closed", []);
+    // Pre-allocate the closed bucket so the count is correct
+    // even when no closed orders exist yet (Map.get returns
+    // undefined for missing keys, which would render "NaN").
+    m.set(CLOSED_COLUMN.status, []);
     (wosQ.data ?? []).forEach((wo: WorkOrder) => {
       const arr = m.get(wo.status) ?? [];
       arr.push(wo);
@@ -93,6 +119,12 @@ export function WorkOrdersPage() {
     });
     return m;
   }, [wosQ.data]);
+
+  // visibleColumns is COLUMNS plus the closed lane iff the user
+  // toggled it on. Computing once per render is fine; the array
+  // is at most 6 entries.
+  const visibleColumns = showClosed ? [...COLUMNS, CLOSED_COLUMN] : COLUMNS;
+  const closedCount = (grouped.get(CLOSED_COLUMN.status) ?? []).length;
 
   return (
     <section>
@@ -111,15 +143,32 @@ export function WorkOrdersPage() {
       {wosQ.isError && (
         <p style={{ color: "#dc2626" }}>{String(wosQ.error)}</p>
       )}
+      <div style={{ marginTop: 12 }}>
+        <button
+          type="button"
+          onClick={() => setShowClosed((v) => !v)}
+          aria-pressed={showClosed}
+          style={{
+            fontSize: 12,
+            padding: "4px 10px",
+            background: showClosed ? "#e0e7ff" : "#f3f4f6",
+            border: "1px solid #d1d5db",
+            borderRadius: 4,
+            cursor: "pointer",
+          }}
+        >
+          {showClosed ? "Hide" : "Show"} closed ({closedCount})
+        </button>
+      </div>
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: `repeat(${COLUMNS.length}, 1fr)`,
+          gridTemplateColumns: `repeat(${visibleColumns.length}, 1fr)`,
           gap: 12,
           marginTop: 16,
         }}
       >
-        {COLUMNS.map((col) => (
+        {visibleColumns.map((col) => (
           <div
             key={col.status}
             style={{
