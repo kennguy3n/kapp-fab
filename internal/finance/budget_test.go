@@ -66,6 +66,41 @@ func TestIsCreditNormal(t *testing.T) {
 	}
 }
 
+// TestIsFavourableVariance pins the per-account-type favourability
+// rule used to bucket TotalFavourableVariance / TotalUnfavourable
+// Variance on the variance report footer. Revenue over-perform and
+// expense under-spend are favourable; expense over-spend and
+// revenue under-perform are unfavourable. Zero variance falls into
+// the favourable bucket so a perfectly-on-plan period doesn't get
+// rendered as a regression in the dashboard.
+func TestIsFavourableVariance(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		accountType string
+		variance    decimal.Decimal
+		want        bool
+	}{
+		{"revenue over plan = favourable", "revenue", decimal.NewFromInt(500), true},
+		{"revenue under plan = unfavourable", "revenue", decimal.NewFromInt(-500), false},
+		{"revenue on plan = favourable", "revenue", decimal.Zero, true},
+		{"expense over plan = unfavourable", "expense", decimal.NewFromInt(500), false},
+		{"expense under plan = favourable", "expense", decimal.NewFromInt(-500), true},
+		{"expense on plan = favourable", "expense", decimal.Zero, true},
+		{"asset over plan = favourable", "asset", decimal.NewFromInt(100), true},
+		{"asset under plan = unfavourable", "asset", decimal.NewFromInt(-100), false},
+		{"liability over plan = favourable", "liability", decimal.NewFromInt(100), true},
+		{"equity zero = favourable", "equity", decimal.Zero, true},
+		{"unknown type follows as-recorded sign", "", decimal.NewFromInt(-1), false},
+	}
+	for _, tc := range cases {
+		if got := isFavourableVariance(tc.accountType, tc.variance); got != tc.want {
+			t.Fatalf("%s: isFavourableVariance(%q, %s) = %v, want %v",
+				tc.name, tc.accountType, tc.variance.String(), got, tc.want)
+		}
+	}
+}
+
 // TestRowMatchesCurrentMonth verifies the in-progress month filter
 // used by the variance alert handler. Only the current calendar month
 // raises notifications; past + future rows are excluded.
@@ -94,7 +129,7 @@ func TestRowMatchesCurrentMonth(t *testing.T) {
 
 // TestDistinctAccountCodes asserts the helper returns each account
 // code exactly once and preserves first-seen order so the
-// loadAccountTypes() SQL `IN (...)` clause stays deterministic in
+// loadAccountMeta() SQL `IN (...)` clause stays deterministic in
 // tests that snapshot the generated query.
 func TestDistinctAccountCodes(t *testing.T) {
 	t.Parallel()

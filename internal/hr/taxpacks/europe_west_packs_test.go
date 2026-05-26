@@ -513,12 +513,18 @@ func TestITPackEmptyInput(t *testing.T) {
 
 // ----- Netherlands -----
 
-// TestNLPackNominalSalary: €3,500 / month → annual ≈ 42,266
-// (in band 2, 38,441→76,817 @ 37.48%). Gross tax = 13,770.36 +
-// (42266 - 38441) × 0.3748 = 13,770.36 + 1,433.61 = 15,203.97.
-// Credit at this income (≤ 76,817) = 3,000. Net = 12,203.97 /
-// yr → period ≈ 1,035.78.
-// ZVW = 3500 × 5.32% = 186.20.
+// TestNLPackNominalSalary: €3,500 / month → annualised by the
+// pack via the 365.25/days-in-period factor lands at ≈ 41,238 EUR
+// (not the naive 42,000 a 12× multiplier would yield). That puts
+// the taxpayer in band 2 (€38,441 → €76,817 @ 37.48%). Base at
+// the band floor = 13,769.57 (cumulative tax through band 1 — see
+// nl.go nlLoonheffingBrackets at the 38,441 row); the band-2
+// Base / Top pair is the one the test asserts against to guard
+// against a regression that would re-introduce the slightly
+// higher 13,770.36 value from a draft of the Belastingdienst
+// witte tabel.
+// Credit at this income (≤ 76,817) = 3,000.
+// ZVW = 3,500 × 5.32% = 186.20.
 func TestNLPackNominalSalary(t *testing.T) {
 	pack, _ := Lookup("NL")
 	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},

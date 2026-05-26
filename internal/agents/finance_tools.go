@@ -838,13 +838,15 @@ func (t *budgetVsActualTool) Invoke(ctx context.Context, inv Invocation) (*Resul
 		return nil, fmt.Errorf("finance.budget_vs_actual: compute: %w", err)
 	}
 	extra := map[string]any{
-		"budget_id":      report.BudgetID,
-		"budget_name":    report.BudgetName,
-		"fiscal_year":    report.FiscalYear,
-		"total_budgeted": report.TotalBudgeted,
-		"total_actual":   report.TotalActual,
-		"total_variance": report.TotalVariance,
-		"rows":           report.Rows,
+		"budget_id":                   report.BudgetID,
+		"budget_name":                 report.BudgetName,
+		"fiscal_year":                 report.FiscalYear,
+		"total_budgeted":              report.TotalBudgeted,
+		"total_actual":                report.TotalActual,
+		"total_variance":              report.TotalVariance,
+		"total_favourable_variance":   report.TotalFavourableVariance,
+		"total_unfavourable_variance": report.TotalUnfavourableVariance,
+		"rows":                        report.Rows,
 	}
 	return &Result{
 		Summary: fmt.Sprintf("Budget %q FY%d: actual %s vs plan %s (var %s)",

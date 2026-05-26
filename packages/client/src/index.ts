@@ -2369,6 +2369,10 @@ export type BudgetVarianceAccountType =
 export interface BudgetVarianceRow {
   budget_id: string;
   account_code: string;
+  /** Optional — the backend joins the chart of accounts so the
+   * row can render "4000 — Sales Revenue" instead of an opaque
+   * code. Empty when the account_code is unknown. */
+  account_name?: string;
   /** Optional — only emitted by the backend when the account
    * resolves to a known account_type at report time. */
   account_type?: BudgetVarianceAccountType;
@@ -2378,6 +2382,13 @@ export interface BudgetVarianceRow {
   actual: string;
   variance: string;
   variance_pct: string;
+  /** Better-than-plan flag the backend stamps per row.
+   *  Revenue over-perform and expense under-spend are
+   *  favourable; expense over-spend and revenue under-perform
+   *  are unfavourable. The footer rollups
+   *  total_favourable_variance / total_unfavourable_variance
+   *  bucket the gross variance using this flag. */
+  favourable: boolean;
 }
 
 export interface BudgetVarianceReport {
@@ -2391,4 +2402,11 @@ export interface BudgetVarianceReport {
   total_budgeted: string;
   total_actual: string;
   total_variance: string;
+  /** Sum of |variance| across rows where favourable=true.
+   *  Always non-negative. Surface this on the footer instead of
+   *  total_variance for at-a-glance red/green colouring. */
+  total_favourable_variance: string;
+  /** Sum of |variance| across rows where favourable=false.
+   *  Always non-negative. */
+  total_unfavourable_variance: string;
 }

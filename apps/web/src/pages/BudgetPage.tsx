@@ -497,6 +497,26 @@ function VarianceTable({ report }: { report: BudgetVarianceReport }) {
           <td />
           <td />
         </tr>
+        <tr style={{ fontSize: 11, color: COLOUR_FAVOURABLE }}>
+          <td colSpan={5} style={{ textAlign: "right", paddingTop: 4 }}>
+            Favourable variance (better than plan)
+          </td>
+          <td style={{ textAlign: "right", paddingTop: 4 }}>
+            +{fmtNumber(report.total_favourable_variance)}
+          </td>
+          <td />
+          <td />
+        </tr>
+        <tr style={{ fontSize: 11, color: COLOUR_UNFAVOURABLE }}>
+          <td colSpan={5} style={{ textAlign: "right" }}>
+            Unfavourable variance (worse than plan)
+          </td>
+          <td style={{ textAlign: "right" }}>
+            −{fmtNumber(report.total_unfavourable_variance)}
+          </td>
+          <td />
+          <td />
+        </tr>
       </tbody>
     </table>
   );
@@ -578,9 +598,16 @@ function VarianceRowRender({
     qs.set("to", range.to);
   }
   const periodHref = `/finance/journal?${qs.toString()}`;
+  // Render "4000 — Sales Revenue" when the backend resolved the
+  // account name; fall back to the bare code when the chart of
+  // accounts has no entry for this code (the variance still has to
+  // surface so the operator notices the orphan posting).
+  const accountLabel = row.account_name
+    ? `${row.account_code} — ${row.account_name}`
+    : row.account_code;
   return (
     <tr style={{ textAlign: "right" }}>
-      <td style={{ textAlign: "left" }}>{row.account_code}</td>
+      <td style={{ textAlign: "left" }}>{accountLabel}</td>
       <td style={{ textAlign: "left" }}>{row.cost_center ?? ""}</td>
       <td style={{ textAlign: "left" }}>
         <Link to={periodHref}>{row.period}</Link>

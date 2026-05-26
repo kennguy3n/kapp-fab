@@ -132,20 +132,52 @@ type VarianceRow struct {
 	Actual      decimal.Decimal `json:"actual"`
 	Variance    decimal.Decimal `json:"variance"`
 	VariancePct decimal.Decimal `json:"variance_pct"`
+	// Favourable is true when the row's variance represents a
+	// better-than-plan outcome (revenue over-perform or expense
+	// under-spend). False covers the worse-than-plan side
+	// (expense over-spend, revenue under-perform). For
+	// asset / liability / equity account types — which are not
+	// natural planning targets — Favourable is true iff variance
+	// >= 0, matching the as-recorded sign convention. The footer
+	// rollups use this flag to bucket TotalFavourableVariance vs
+	// TotalUnfavourableVariance so finance dashboards can colour
+	// the period summary without re-deriving account-type
+	// semantics from the row level.
+	Favourable bool `json:"favourable"`
 }
 
 // VarianceReport is the budget-vs-actual rollup over a period.
+//
+// Total accounting:
+//
+//   - TotalBudgeted / TotalActual / TotalVariance are gross sums
+//     across every account type AFTER the credit-normal sign flip,
+//     so positive variance always means "exceeded plan". These are
+//     useful as a single-number rollup but obscure favourability
+//     because they conflate over-earning revenue (good) with
+//     over-spending an expense (bad).
+//
+//   - TotalFavourableVariance / TotalUnfavourableVariance split the
+//     gross variance into "better than plan" / "worse than plan"
+//     buckets using each row's Favourable flag. A revenue line
+//     where actual exceeds plan contributes to favourable; an
+//     expense line where actual exceeds plan contributes to
+//     unfavourable. Finance dashboards should prefer these two
+//     numbers over the gross TotalVariance for at-a-glance
+//     red/green colouring at the footer.
 type VarianceReport struct {
-	TenantID     uuid.UUID     `json:"tenant_id"`
-	BudgetID     uuid.UUID     `json:"budget_id"`
-	BudgetName   string        `json:"budget_name"`
-	FiscalYear   int           `json:"fiscal_year"`
-	From         time.Time     `json:"from"`
-	To           time.Time     `json:"to"`
-	Rows         []VarianceRow `json:"rows"`
-	TotalBudgeted decimal.Decimal `json:"total_budgeted"`
-	TotalActual   decimal.Decimal `json:"total_actual"`
-	TotalVariance decimal.Decimal `json:"total_variance"`
+	TenantID                  uuid.UUID       `json:"tenant_id"`
+	BudgetID                  uuid.UUID       `json:"budget_id"`
+	BudgetName                string          `json:"budget_name"`
+	FiscalYear                int             `json:"fiscal_year"`
+	From                      time.Time       `json:"from"`
+	To                        time.Time       `json:"to"`
+	Rows                      []VarianceRow   `json:"rows"`
+	TotalBudgeted             decimal.Decimal `json:"total_budgeted"`
+	TotalActual               decimal.Decimal `json:"total_actual"`
+	TotalVariance             decimal.Decimal `json:"total_variance"`
+	TotalFavourableVariance   decimal.Decimal `json:"total_favourable_variance"`
+	TotalUnfavourableVariance decimal.Decimal `json:"total_unfavourable_variance"`
 }
 
 // budgetSchema — the KType mirror of the typed budgets table.
@@ -314,6 +346,15 @@ func (s *BudgetStore) CreateBudget(ctx context.Context, in Budget) (*Budget, err
 func (s *BudgetStore) UpdateBudget(ctx context.Context, in Budget) (*Budget, error) {
 	if in.TenantID == uuid.Nil || in.ID == uuid.Nil {
 		return nil, fmt.Errorf("%w: tenant_id and id required", ErrInvalidBudget)
+	}
+	// Mirror the CreateBudget contract: name is required and may
+	// not be all-whitespace. The DB column is TEXT NOT NULL so a
+	// raw NULL is impossible, but the empty string would still
+	// satisfy the constraint and render an unnameable row in the
+	// list view, so we reject it at the Go layer the same way
+	// Create does.
+	if strings.TrimSpace(in.Name) == "" {
+		return nil, fmt.Errorf("%w: name required", ErrInvalidBudget)
 	}
 	switch in.Status {
 	case BudgetStatusDraft, BudgetStatusActive, BudgetStatusClosed:
@@ -632,9 +673,10 @@ func (s *BudgetStore) BudgetVsActual(ctx context.Context, tenantID uuid.UUID, q 
 		return report, nil
 	}
 
-	// Resolve account_type per code in a single round-trip so the
-	// signed-variance logic doesn't issue per-line lookups.
-	accountTypes, err := s.loadAccountTypes(ctx, tenantID, distinctAccountCodes(lines))
+	// Resolve account metadata (name + type) per code in a single
+	// round-trip so the signed-variance logic and the renderer
+	// don't issue per-line lookups.
+	accountMeta, err := s.loadAccountMeta(ctx, tenantID, distinctAccountCodes(lines))
 	if err != nil {
 		return nil, err
 	}
@@ -643,7 +685,7 @@ func (s *BudgetStore) BudgetVsActual(ctx context.Context, tenantID uuid.UUID, q 
 	// fiscal_month is 1..12 in calendar order; the caller's date
 	// range may exclude some months so we left-outer-join from the
 	// budget side, not the actuals side.
-	actuals, err := s.loadActuals(ctx, tenantID, q.From, q.To, lines)
+	actuals, err := s.loadActuals(ctx, tenantID, q.From, q.To, budget.FiscalYear, lines)
 	if err != nil {
 		return nil, err
 	}
@@ -662,7 +704,8 @@ func (s *BudgetStore) BudgetVsActual(ctx context.Context, tenantID uuid.UUID, q 
 		if lookupCC == "" {
 			lookupCC = wildcardCostCenter
 		}
-		accountType := accountTypes[line.AccountCode]
+		meta := accountMeta[line.AccountCode]
+		accountType := meta.Type
 		for monthIdx := 0; monthIdx < 12; monthIdx++ {
 			month := time.Month(monthIdx + 1)
 			periodLabel := fmt.Sprintf("%04d-%02d", budget.FiscalYear, monthIdx+1)
@@ -684,9 +727,11 @@ func (s *BudgetStore) BudgetVsActual(ctx context.Context, tenantID uuid.UUID, q 
 			if !budgeted.IsZero() {
 				variancePct = variance.Div(budgeted).Round(4)
 			}
+			fav := isFavourableVariance(accountType, variance)
 			report.Rows = append(report.Rows, VarianceRow{
 				BudgetID:    q.BudgetID,
 				AccountCode: line.AccountCode,
+				AccountName: meta.Name,
 				AccountType: accountType,
 				CostCenter:  ccLabel,
 				Period:      periodLabel,
@@ -694,10 +739,16 @@ func (s *BudgetStore) BudgetVsActual(ctx context.Context, tenantID uuid.UUID, q 
 				Actual:      actual,
 				Variance:    variance,
 				VariancePct: variancePct,
+				Favourable:  fav,
 			})
 			report.TotalBudgeted = report.TotalBudgeted.Add(budgeted)
 			report.TotalActual = report.TotalActual.Add(actual)
 			report.TotalVariance = report.TotalVariance.Add(variance)
+			if fav {
+				report.TotalFavourableVariance = report.TotalFavourableVariance.Add(variance.Abs())
+			} else {
+				report.TotalUnfavourableVariance = report.TotalUnfavourableVariance.Add(variance.Abs())
+			}
 		}
 	}
 	return report, nil
@@ -714,13 +765,24 @@ type actualKey struct {
 	Month       int
 }
 
-func (s *BudgetStore) loadActuals(ctx context.Context, tenantID uuid.UUID, from, to time.Time, lines []BudgetLine) (map[actualKey]decimal.Decimal, error) {
+func (s *BudgetStore) loadActuals(ctx context.Context, tenantID uuid.UUID, from, to time.Time, fiscalYear int, lines []BudgetLine) (map[actualKey]decimal.Decimal, error) {
 	codes := distinctAccountCodes(lines)
 	if len(codes) == 0 {
 		return map[actualKey]decimal.Decimal{}, nil
 	}
 	out := make(map[actualKey]decimal.Decimal, len(lines)*4)
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// The fiscal_year filter guards against cross-year date
+		// ranges (e.g. From=2024-11 .. To=2025-02 for a FY2025
+		// budget) misattributing November-2024 entries to the
+		// FY2025 November budget line: EXTRACT(MONTH FROM
+		// posted_at) alone loses the year component. By
+		// constraining EXTRACT(YEAR ...) to the budget's fiscal
+		// year, any actuals outside the budget's plan window are
+		// excluded regardless of how generous the caller's From
+		// / To range is. (The budget itself is calendar-FY today
+		// — see the BudgetLine doc comment for the non-calendar
+		// FY extension point.)
 		rows, err := tx.Query(ctx,
 			`SELECT jl.account_code,
 			        COALESCE(jl.cost_center, ''),
@@ -734,8 +796,9 @@ func (s *BudgetStore) loadActuals(ctx context.Context, tenantID uuid.UUID, from,
 			    AND je.posted_at >= $2
 			    AND je.posted_at <= $3
 			    AND jl.account_code = ANY($4)
+			    AND EXTRACT(YEAR FROM je.posted_at)::int = $5
 			  GROUP BY jl.account_code, COALESCE(jl.cost_center, ''), month`,
-			tenantID, from, to, codes,
+			tenantID, from, to, codes, fiscalYear,
 		)
 		if err != nil {
 			return err
@@ -776,14 +839,24 @@ func (s *BudgetStore) loadActuals(ctx context.Context, tenantID uuid.UUID, from,
 // never collide with a real CC value coming back from the DB.
 const wildcardCostCenter = "*"
 
-func (s *BudgetStore) loadAccountTypes(ctx context.Context, tenantID uuid.UUID, codes []string) (map[string]string, error) {
-	out := make(map[string]string, len(codes))
+// accountMeta carries the per-account chart-of-accounts attributes
+// needed by the variance renderer: type drives the credit-normal
+// sign flip and the favourability rule, name surfaces on each
+// VarianceRow so the frontend can render "4000 — Sales Revenue"
+// instead of an opaque account code.
+type accountMeta struct {
+	Name string
+	Type string
+}
+
+func (s *BudgetStore) loadAccountMeta(ctx context.Context, tenantID uuid.UUID, codes []string) (map[string]accountMeta, error) {
+	out := make(map[string]accountMeta, len(codes))
 	if len(codes) == 0 {
 		return out, nil
 	}
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
-			`SELECT code, type FROM accounts
+			`SELECT code, name, type FROM accounts
 			 WHERE tenant_id = $1 AND code = ANY($2)`,
 			tenantID, codes,
 		)
@@ -792,16 +865,16 @@ func (s *BudgetStore) loadAccountTypes(ctx context.Context, tenantID uuid.UUID, 
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var code, typ string
-			if err := rows.Scan(&code, &typ); err != nil {
+			var code, name, typ string
+			if err := rows.Scan(&code, &name, &typ); err != nil {
 				return err
 			}
-			out[code] = typ
+			out[code] = accountMeta{Name: name, Type: typ}
 		}
 		return rows.Err()
 	})
 	if err != nil {
-		return nil, fmt.Errorf("finance: load account types: %w", err)
+		return nil, fmt.Errorf("finance: load account meta: %w", err)
 	}
 	return out, nil
 }
@@ -830,6 +903,25 @@ func isCreditNormal(accountType string) bool {
 		return true
 	}
 	return false
+}
+
+// isFavourableVariance reports whether a sign-normalised variance
+// (positive = exceeded plan) represents a better-than-plan outcome
+// for the given account type. Revenue: exceeding plan is favourable
+// (good). Expense: exceeding plan is unfavourable (bad). Asset /
+// liability / equity: variance is treated favourably when >= 0,
+// matching the as-recorded sign convention used by the row's
+// Variance field. A zero variance is reported as favourable so it
+// rolls into the optimistic bucket rather than appearing as a
+// regression.
+func isFavourableVariance(accountType string, variance decimal.Decimal) bool {
+	switch accountType {
+	case "revenue":
+		return !variance.IsNegative()
+	case "expense":
+		return !variance.IsPositive()
+	}
+	return !variance.IsNegative()
 }
 
 // ---------------------------------------------------------------------------
