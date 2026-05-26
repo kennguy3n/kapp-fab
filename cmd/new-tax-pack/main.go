@@ -414,8 +414,14 @@ func (p *plan) planWizardPatches(path string) error {
 	mapEntry := fmt.Sprintf("\t%q: coa%sBasic,\n", p.CCLower+"_basic", p.CC)
 	caseEntry := fmt.Sprintf("\tcase %q:\n\t\treturn %q\n", p.CC, p.CCLower+"_basic")
 
-	p.Patches[path] = []patchOp{
-		{
+	// Append rather than overwrite so future planners that target the
+	// same path accumulate instead of clobbering. There is no current
+	// caller that patches wizard.go from outside this function, but
+	// keeping the append form costs nothing and prevents the silent-
+	// drop foot-gun if a sibling planner is ever added (e.g. a
+	// localisation registry that also lives in wizard.go).
+	p.Patches[path] = append(p.Patches[path],
+		patchOp{
 			// Anchor is the SCAFFOLD marker line added one-time to
 			// wizard.go just before the chartOfAccountsTemplates map.
 			// New embed directives + var decls land immediately
@@ -425,7 +431,7 @@ func (p *plan) planWizardPatches(path string) error {
 			Insertion:     embedBlock,
 			SkipIfPresent: fmt.Sprintf("//go:embed coa_templates/%s_basic.json", p.CCLower),
 		},
-		{
+		patchOp{
 			// Anchor is the SCAFFOLD marker line inside the
 			// chartOfAccountsTemplates map. The new entry lands
 			// immediately before the marker.
@@ -433,7 +439,7 @@ func (p *plan) planWizardPatches(path string) error {
 			Insertion:     mapEntry,
 			SkipIfPresent: fmt.Sprintf("%q: coa%sBasic,", p.CCLower+"_basic", p.CC),
 		},
-		{
+		patchOp{
 			// Anchor is the SCAFFOLD marker line inside
 			// DefaultCoATemplateForCountry's switch, immediately
 			// before the `default:` branch.
@@ -441,7 +447,7 @@ func (p *plan) planWizardPatches(path string) error {
 			Insertion:     caseEntry,
 			SkipIfPresent: fmt.Sprintf("case %q:\n\t\treturn %q", p.CC, p.CCLower+"_basic"),
 		},
-	}
+	)
 	if p.Locale != "" {
 		localeCase := fmt.Sprintf("\tcase %q:\n\t\treturn %q\n", p.CC, p.Locale)
 		p.Patches[path] = append(p.Patches[path], patchOp{
@@ -473,18 +479,20 @@ func (p *plan) planFrontendWizardPatches(path string) {
 		fmt.Sprintf("%s — IFRS + (TODO statutory components)", p.Name))
 	defaultEntry := fmt.Sprintf("  %s: %q,\n", p.CC, p.CCLower+"_basic")
 
-	p.Patches[path] = []patchOp{
-		{
+	// Append rather than overwrite — see the comment on the
+	// equivalent block in planWizardPatches.
+	p.Patches[path] = append(p.Patches[path],
+		patchOp{
 			Anchor:        "  // SCAFFOLD: cmd/new-tax-pack inserts new COA_TEMPLATES entries above this line.",
 			Insertion:     templateEntry,
 			SkipIfPresent: fmt.Sprintf("{ value: %q,", p.CCLower+"_basic"),
 		},
-		{
+		patchOp{
 			Anchor:        "  // SCAFFOLD: cmd/new-tax-pack inserts new COUNTRY_COA_DEFAULTS entries above this line.",
 			Insertion:     defaultEntry,
 			SkipIfPresent: fmt.Sprintf("%s: %q,", p.CC, p.CCLower+"_basic"),
 		},
-	}
+	)
 }
 
 // planFrontendLocalesPatches updates locales.ts when -locale is
@@ -537,7 +545,9 @@ func (p *plan) planFrontendLocalesPatches(path string) error {
 			SkipIfPresent: fmt.Sprintf("tag: %q", p.Locale),
 		})
 	}
-	p.Patches[path] = patches
+	// Append rather than overwrite — see the comment on the
+	// equivalent block in planWizardPatches.
+	p.Patches[path] = append(p.Patches[path], patches...)
 	return nil
 }
 
