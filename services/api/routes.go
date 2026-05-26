@@ -631,6 +631,28 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Post("/invoices/{id}/finalize", posh.finalize)
 		})
 
+		// Phase N9a — sales return state machine. CRUD on the
+		// return KRecord itself rides the generic
+		// /api/v1/records/sales.return surface; this group exposes
+		// the four non-CRUD lifecycle transitions that emit
+		// inventory moves and credit-note JEs. Gated on the
+		// finance.* + sales.* authz scopes that any returns
+		// operator already needs to author the source AR invoice.
+		retH := &salesReturnsHandlers{poster: d.salesReturnPoster}
+		r.Route("/api/v1/sales/returns", func(r chi.Router) {
+			d.tenantChain(r)
+			r.Use(d.apiCallMW)
+			r.Use(d.featureMW)
+			r.Use(d.authzGate("sales.admin", ""))
+			r.Use(platform.IdempotencyMiddleware(d.pool))
+			r.Use(d.rateLimitMW)
+			r.Use(platform.QuotaMiddleware(d.quotaEnforcer))
+			r.Post("/{id}/approve", retH.approve)
+			r.Post("/{id}/receive", retH.receive)
+			r.Post("/{id}/refund", retH.refund)
+			r.Post("/{id}/cancel", retH.cancel)
+		})
+
 		// Phase J payroll surface — generate draft payslips for a
 		// pay_run and post the approved batch as a single journal
 		// entry. The pay_run / payslip KRecords themselves ride the

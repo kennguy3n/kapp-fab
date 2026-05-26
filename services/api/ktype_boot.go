@@ -66,6 +66,14 @@ func registerBootKTypes(ctx context.Context, registry *ktype.PGRegistry) error {
 			return fmt.Errorf("register pos ktype %s: %w", kt.Name, err)
 		}
 	}
+	// Phase N9a — sales.return KType. Wired separately from
+	// sales.RegisterKTypes so a deployment can opt out by
+	// dropping a single loop while keeping orders / POs intact.
+	for _, kt := range sales.ReturnKTypes() {
+		if err := registry.RegisterIfChanged(ctx, kt); err != nil {
+			return fmt.Errorf("register sales return ktype %s: %w", kt.Name, err)
+		}
+	}
 	for _, kt := range ledger.BankKTypes() {
 		if err := registry.RegisterIfChanged(ctx, kt); err != nil {
 			return fmt.Errorf("register bank ktype %s: %w", kt.Name, err)

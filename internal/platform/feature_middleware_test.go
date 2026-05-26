@@ -48,6 +48,15 @@ func TestFeatureFromPathRecordsKType(t *testing.T) {
 		// Top-level domains map directly.
 		{"/api/v1/finance/accounts", tenant.FeatureFinance},
 		{"/api/v1/inventory/stock-levels", tenant.FeatureInventory},
+		// /api/v1/sales/returns/{id}/{verb} — the sales sub-domain
+		// rides the inventory feature gate to match the
+		// sales.* KType prefix in featureFromKType. A tenant
+		// without inventory in their plan must not be able to
+		// invoke the return-lifecycle transitions.
+		{"/api/v1/sales/returns/abc/approve", tenant.FeatureInventory},
+		{"/api/v1/sales/returns/abc/receive", tenant.FeatureInventory},
+		{"/api/v1/sales/returns/abc/refund", tenant.FeatureInventory},
+		{"/api/v1/sales/returns/abc/cancel", tenant.FeatureInventory},
 		{"/api/v1/imports/run", tenant.FeatureImporter},
 		{"/api/v1/report-builder/queries", tenant.FeatureReportBuilder},
 		// Manufacturing is gated on its own feature key so a

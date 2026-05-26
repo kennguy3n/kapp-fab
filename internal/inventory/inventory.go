@@ -36,6 +36,11 @@ const (
 	MoveSourcePurchaseBill = "finance.ap_bill"
 	MoveSourceAdjustment   = "inventory.adjustment"
 	MoveSourceTransfer     = "inventory.transfer"
+	// MoveSourceSalesReturn labels the positive-qty receipt moves
+	// the Phase N9a ReturnPoster appends when a customer return
+	// hits the "received" lifecycle state. Kept here so the source
+	// label is stable across the inventory/sales packages.
+	MoveSourceSalesReturn = "sales.return"
 )
 
 // Item is a stock-keeping unit. One row per (tenant_id, sku).

@@ -120,7 +120,7 @@ KType and KRecord are **original Kapp concepts**. KType defines *what a business
 | Debit notes | ✓ | |
 | Price lists / discounts | ✓ | |
 | Sales commissions | | ✓ |
-| Returns and RMAs | | ✓ |
+| Returns and RMAs | ✓ | |
 
 #### Inventory
 
@@ -553,6 +553,13 @@ hardening / cross-cutting / Phase M work in [PROGRESS.md](./PROGRESS.md):
    compliance checklists, approval forms, etc.) without writing Go. Restricted
    to the safe field-type subset; posting hooks and custom agent tool handlers
    remain developer-only (Phase N8b, PR #118).
+7. **Sales returns / RMAs** — `sales.return` KType with a four-step
+   state machine (requested → approved → received → refunded), an
+   idempotent receive step that posts the inventory move back into
+   the source warehouse, a refund step that allocates a
+   `finance.credit_note` and posts the contra-JE off the original
+   invoice's AR + revenue codes, KChat `/return` command, agent
+   tools, kanban UI (Phase N9a)
 
 ### Defer (6)
 
