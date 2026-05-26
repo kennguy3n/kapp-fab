@@ -264,6 +264,7 @@ The maintainer should:
    (the four largest by employee population) should always have a
    pinned case.
 
+
 ## Phase N1 Europe Core pack details (GB + 9 EU + AU CoA)
 
 The Europe Core batch closes the explicitly-requested GB/DE gap
@@ -285,6 +286,7 @@ gazetted budget / Finance Act publication.
 | AT      | `internal/hr/taxpacks/at.go`       | `at_basic.json`   | de     | BMF Lohnsteuertabellen (Lohnsteuergesetz §66/§77), ÖGK Höchstbeitragsgrundlage (annual SV-Beitragsgrenze), AK / WBF Umlage (Land-level rate), Kommunalsteuergesetz (3% municipal rate).                                                                                                                                                       | Annual (December / January)   |
 | PT      | `internal/hr/taxpacks/pt.go`       | `pt_basic.json`   | pt     | Autoridade Tributária e Aduaneira tabelas de retenção mensal (Despacho do Secretário de Estado dos Assuntos Fiscais — TWO updates per year, one in January and one in July, plus a separate Açores / Madeira table set), Segurança Social Código Contributivo (employee 11% / employer 23.75% rates), Sobretaxa de Solidariedade (€80k threshold). | Bi-annual (January / July)    |
 | AU      | `internal/hr/taxpacks/au.go`       | `au_basic.json`   | en     | ATO Schedule 1 (Statement of formulas for calculating amounts to be withheld), ATO Superannuation Guarantee rate notice (11.5% in 2024-25), state SROs for Payroll Tax thresholds (NSW OSR, SRO Victoria, RevenueSA, etc.).                                                                                                                  | Annual (June / July)          |
+
 
 ## Phase N2 Europe Extended pack details (PL / SE / NO / DK / FI / CZ / HU / RO / GR)
 
@@ -311,3 +313,29 @@ Phase N2 adds nine more European packs, taking the European coverage to 19 juris
 - **Age-banded rates**: FI TyEL employee rate jumps from 7.15% (under 53) to 8.65% (53–62). Pack reads `EmployeeInfo.Age` and selects the correct rate per slip; tested by the `TestFIPackMidlifeTyEL` regression case.
 
 - **Bracket walks**: NO trinnskatt (5 brackets), DK topskat composite, FI valtion tulovero (5 brackets), CZ PIT (15% / 23% step), GR εισόδημα (5 brackets) each use a typed-slice + linear walk pattern (`walkNOBrackets` / `walkFIBrackets` / `walkGRBrackets`). Same shape as Phase-N1 packs so adding a future country pack with a bracketed system follows the established convention.
+
+## Community contribution model
+
+For contributors adding a brand-new country pack (rather than
+maintaining an existing one), the end-to-end walkthrough lives in
+[`docs/CONTRIBUTING_TAX_PACKS.md`](CONTRIBUTING_TAX_PACKS.md). The
+short version:
+
+1. Run the scaffold CLI: `go run ./cmd/new-tax-pack -cc XX -name "Country Name"`.
+   This generates a compileable skeleton across all the files this
+   document touches (pack, CoA, wizard maps, optional locale).
+2. Fill in the statutory rates, brackets, and caps in the generated
+   pack file with citations to the revenue authority's published
+   source.
+3. Author the regression test matrix for the regional test file.
+4. Open a PR; the `tax-pack-pr` workflow runs scoped tests + lint
+   on every push.
+
+The annual review workflow (`.github/workflows/tax-rate-review.yml`)
+now covers every registered pack. The January-1st auto-opened issue
+walks the full per-country checklist; mid-year rate changes get a
+manual `workflow_dispatch` trigger.
+
+For organisations interested in long-term ownership of a country
+pack, the partner-program section in `CONTRIBUTING_TAX_PACKS.md`
+documents the named-reviewer + scoped commit-access model.

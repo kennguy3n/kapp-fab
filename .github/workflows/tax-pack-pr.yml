@@ -1,0 +1,153 @@
+name: tax-pack-pr
+
+# Targeted CI for tax-pack contributions. Triggers on PRs touching
+# the country-pack surface (the pack Go file, the embedded CoA
+# template, the wizard mappings, or the locale catalogues) and runs
+# the per-country regression matrices + lint that the contributor
+# walkthrough in docs/CONTRIBUTING_TAX_PACKS.md says must pass before
+# the PR is mergeable.
+#
+# This workflow exists alongside (not instead of) the main ci.yml so
+# external contributors who run a fork-PR get fast, scoped feedback
+# without waiting for the full backend matrix on every commit. The
+# canonical CI in ci.yml still runs the same Go test set on main, so
+# this workflow is a fast-feedback companion, not a replacement.
+#
+# Why not just narrow paths in ci.yml: paths-filter would short-
+# circuit the OTHER jobs in ci.yml (golangci-lint, buf lint, web
+# build, etc.) which are also required for a clean merge. Splitting
+# the tax-pack feedback into its own workflow keeps the merge-gating
+# matrix intact while letting community contributors iterate on
+# their pack file without waiting for the unrelated 14 other jobs.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "internal/hr/taxpacks/**"
+      - "internal/tenant/coa_templates/**"
+      - "internal/tenant/wizard.go"
+      - "internal/i18n/locales/**"
+      - "apps/web/src/locales/**"
+      - "apps/web/src/lib/i18n/locales.ts"
+      - "apps/web/src/pages/SetupWizardPage.tsx"
+      - "cmd/new-tax-pack/**"
+      - "docs/TAX_PACK_MAINTENANCE.md"
+      - "docs/CONTRIBUTING_TAX_PACKS.md"
+
+permissions:
+  contents: read
+
+# Single source of truth for the linter version, mirroring ci.yml's
+# GOLANGCI_LINT_VERSION env. Defined at workflow level so both jobs
+# (only `lint` uses it today, but future jobs that bind the binary
+# can reference the same value) resolve to the same pinned release.
+# Update this value AND ci.yml's GOLANGCI_LINT_VERSION together; the
+# scoped lint here must agree with the canonical merge-gate so a PR
+# that's green on tax-pack-pr.yml stays green on the main lint job.
+env:
+  GOLANGCI_LINT_VERSION: v2.5.0
+
+jobs:
+  test:
+    name: tax-pack tests (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go mod download
+        run: go mod download
+      # The main ci.yml runs `make proto-gen` before every Go step
+      # because parts of the kernel (services/api, internal/grpc)
+      # import the generated `kapp.v1` bindings. We deliberately
+      # SKIP that step here because the four tax-pack packages
+      # (internal/hr/taxpacks, internal/tenant, internal/i18n,
+      # cmd/new-tax-pack) don't transitively import kapp-fab/gen/*,
+      # which makes the scoped CI 30-60s faster on a cold cache.
+      # The assumption is pinned by TestTaxPackPackagesDoNotImportGen
+      # in cmd/new-tax-pack/main_test.go — if a future refactor adds
+      # a gen/ import to any tax-pack package, that test fails
+      # locally (where contributors run `go test`) BEFORE the CI red
+      # surfaces with a cryptic "package not found" error.
+      - name: tax-pack registration + per-country regression
+        run: go test -race ./internal/hr/taxpacks/...
+      - name: CoA templates + wizard mappings
+        run: go test -race ./internal/tenant/...
+      - name: i18n catalogues (backend + parity with frontend)
+        run: go test -race ./internal/i18n/...
+      - name: scaffold CLI tests
+        run: go test -race ./cmd/new-tax-pack/...
+
+  lint:
+    name: tax-pack lint (Go)
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 mirrors ci.yml so --new-from-rev's merge-base
+      # resolution works regardless of how long-lived the PR branch
+      # is. Without full history the merge-base resolves to HEAD and
+      # the ratchet degenerates to a full-codebase lint.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Resolve the merge base against origin/<base-ref> so the
+      # --new-from-rev ratchet diffs against the actual divergence
+      # point, not the tip of main (otherwise a PR rebased onto an
+      # outdated main would surface pre-existing issues from main's
+      # recent commits as "new" findings). Mirrors ci.yml's LINT_BASE
+      # computation.
+      - name: compute lint base
+        run: |
+          BASE_REF="${{ github.base_ref }}"
+          git fetch --no-tags origin "$BASE_REF"
+          MERGE_BASE="$(git merge-base "HEAD" "origin/$BASE_REF")"
+          echo "LINT_BASE=${MERGE_BASE}" >> "$GITHUB_ENV"
+      # Run golangci-lint on only the tax-pack-touching packages so
+      # the run is fast (the full main-branch lint is in ci.yml).
+      # Version pinned via the workflow-level env so a future bump
+      # only has to change two places (here + ci.yml). The linter
+      # binary is built with a Go toolchain >= the repo's go.mod
+      # target (the @v6 action ships a binary built against go1.24
+      # which can't load configs targeting go1.25+).
+      # The four lint targets MUST mirror the four `go test` package
+      # globs in the test job above so the scope of `tax-pack tests`
+      # and `tax-pack lint` stays in sync. A contributor adding a
+      # locale catalogue with a lint issue under internal/i18n needs
+      # the same fast feedback the test job already gives them.
+      - uses: golangci/golangci-lint-action@v7
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          args: --timeout=5m --new-from-rev=${{ env.LINT_BASE }} ./internal/hr/taxpacks/... ./internal/tenant/... ./internal/i18n/... ./cmd/new-tax-pack/...
+
+  # Pin-drift guard. The comment block at lines 41-47 promises that
+  # the GOLANGCI_LINT_VERSION env var here stays in sync with the
+  # same name in ci.yml. This job mechanically enforces that promise
+  # so a future bump in only one file is caught at PR time rather
+  # than discovered later when a PR is green on the scoped lint but
+  # red on the canonical merge-gate (or vice versa). Cheap to run
+  # (~5s); guards both directions of drift.
+  verify-pinned-versions:
+    name: tax-pack pin sync (lint version vs ci.yml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: assert tax-pack-pr.yml and ci.yml share GOLANGCI_LINT_VERSION
+        run: |
+          THIS=$(awk '/^env:/{f=1; next} f && /^[^ ]/{f=0} f && /GOLANGCI_LINT_VERSION:/ {print $2; exit}' .github/workflows/tax-pack-pr.yml)
+          THAT=$(awk '/^env:/{f=1; next} f && /^[^ ]/{f=0} f && /GOLANGCI_LINT_VERSION:/ {print $2; exit}' .github/workflows/ci.yml)
+          if [ -z "$THIS" ] || [ -z "$THAT" ]; then
+            echo "could not extract GOLANGCI_LINT_VERSION (this=$THIS, that=$THAT) — has the env-var name been renamed?" >&2
+            exit 2
+          fi
+          if [ "$THIS" != "$THAT" ]; then
+            echo "GOLANGCI_LINT_VERSION drift: tax-pack-pr.yml has $THIS, ci.yml has $THAT" >&2
+            echo "Update both files together — see the comment block in tax-pack-pr.yml at lines 41-47." >&2
+            exit 1
+          fi
+          echo "OK: both workflows pin golangci-lint to $THIS"

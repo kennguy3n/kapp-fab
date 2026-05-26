@@ -81,6 +81,7 @@ const COA_TEMPLATES = [
   { value: "hu_basic", label: "Hungary — IFRS + SZJA / TB / Szocho / ÁFA" },
   { value: "ro_basic", label: "Romania — IFRS + Impozit / CAS / CASS / TVA" },
   { value: "gr_basic", label: "Greece — IFRS + Income Tax / EFKA / ΦΠΑ" },
+  // SCAFFOLD: cmd/new-tax-pack inserts new COA_TEMPLATES entries above this line.
 ];
 
 // defaultCoATemplateForCountry mirrors
@@ -155,6 +156,7 @@ const COUNTRY_COA_DEFAULTS: Record<string, string> = {
   HU: "hu_basic",
   RO: "ro_basic",
   GR: "gr_basic",
+  // SCAFFOLD: cmd/new-tax-pack inserts new COUNTRY_COA_DEFAULTS entries above this line.
 };
 
 function defaultCoATemplateForCountry(country: string): string {

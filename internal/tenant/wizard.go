@@ -152,7 +152,7 @@ func DefaultLocaleForCountry(country string) string {
 	case "BE":
 		return "fr"
 	// Phase N2 — Europe Extended. Nine additional locales
-	// added in this PR (pl, sv, nb, da, fi, cs, hu, ro, el).
+	// added in N2 (pl, sv, nb, da, fi, cs, hu, ro, el).
 	// Each country defaults to its national language.
 	case "PL":
 		return "pl"
@@ -172,6 +172,7 @@ func DefaultLocaleForCountry(country string) string {
 		return "ro"
 	case "GR":
 		return "el"
+	// SCAFFOLD: cmd/new-tax-pack inserts new DefaultLocaleForCountry cases above this line.
 	default:
 		return "en"
 	}
@@ -291,6 +292,7 @@ func DefaultCoATemplateForCountry(country string) string {
 		return "ro_basic"
 	case "GR":
 		return "gr_basic"
+	// SCAFFOLD: cmd/new-tax-pack inserts new DefaultCoATemplateForCountry cases above this line.
 	default:
 		return "ifrs_basic"
 	}
@@ -509,6 +511,9 @@ var coaROBasic []byte
 //go:embed coa_templates/gr_basic.json
 var coaGRBasic []byte
 
+// SCAFFOLD: cmd/new-tax-pack inserts new //go:embed directives + var decls above this line.
+
+
 // chartOfAccountsTemplates maps the wizard's template name to the
 // embedded JSON payload. Adding a new template is a matter of dropping
 // a JSON file in coa_templates/ and registering it here. Country-
@@ -563,6 +568,7 @@ var chartOfAccountsTemplates = map[string][]byte{
 	"hu_basic": coaHUBasic,
 	"ro_basic": coaROBasic,
 	"gr_basic": coaGRBasic,
+	// SCAFFOLD: cmd/new-tax-pack inserts new chartOfAccountsTemplates entries above this line.
 }
 
 // templateAccount is the shape each entry in a CoA template takes. The

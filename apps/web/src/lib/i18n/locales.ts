@@ -71,6 +71,7 @@ export const SupportedLocales: readonly LocaleInfo[] = [
   { tag: "hu", name: "Magyar", direction: "ltr" },
   { tag: "ro", name: "Română", direction: "ltr" },
   { tag: "el", name: "Ελληνικά", direction: "ltr" },
+  // SCAFFOLD: cmd/new-tax-pack inserts new SupportedLocales entries above this line.
 ];
 
 /**
@@ -245,6 +246,7 @@ const COUNTRY_LOCALE_DEFAULTS: Record<string, string> = {
   HU: "hu",
   RO: "ro",
   GR: "el",
+  // SCAFFOLD: cmd/new-tax-pack inserts new COUNTRY_LOCALE_DEFAULTS entries above this line.
 };
 
 /**
