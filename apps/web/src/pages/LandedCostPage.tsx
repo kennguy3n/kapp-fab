@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   LandedCostCharge,
@@ -60,6 +60,21 @@ export function LandedCostPage() {
     mutationFn: (id: string) => api.postLandedCostVoucher(id),
     onSuccess: invalidate,
   });
+
+  // Reset both allocate + post mutation state whenever the operator
+  // selects a different voucher.  Without this, a 409 / 422 from a
+  // previous voucher's allocate or post bleeds into the detail panel
+  // of the next voucher (the mutations are declared at page scope so
+  // they survive across selections).  The detail panel reads
+  // `*Mut.error` to render the inline error message, so leaving stale
+  // error state attached would falsely flag the new voucher.
+  useEffect(() => {
+    allocateMut.reset();
+    postMut.reset();
+    // Mutation handles are stable across renders; resetting only when
+    // the selected voucher changes is the intended behaviour.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
 
   return (
     <section>

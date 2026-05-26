@@ -225,8 +225,8 @@ type LandedCostMoveInput struct {
 // the poster needs back from LedgerBackend. Kept narrow so the
 // finance package doesn't depend on ledger directly.
 type LandedCostJournalEntry struct {
-	ID       uuid.UUID
-	PostedAt time.Time
+	ID       uuid.UUID `json:"id"`
+	PostedAt time.Time `json:"posted_at"`
 }
 
 // LandedCostJELine is one balanced line in the landed-cost booking
@@ -612,9 +612,14 @@ func (s *LandedCostStore) UpsertTarget(ctx context.Context, t LandedCostTarget) 
 	if t.Weight.IsNegative() {
 		return nil, errors.New("landed_cost: target weight must be non-negative")
 	}
-	if t.Weight.IsZero() {
-		t.Weight = decimal.NewFromInt(1)
-	}
+	// Weight is persisted as-given. A zero value is meaningful on a
+	// by_weight voucher (the target is excluded from the share split)
+	// and irrelevant on by_qty / by_amount (the allocator keys off
+	// Qty / Amount instead). Silently rewriting Weight=0 → 1 would
+	// override operator intent on by_weight surfaces; if every target
+	// ends up with Weight=0 on a by_weight voucher, Allocate fails
+	// with ErrLandedCostZeroWeightTotal — a clearer signal than a
+	// silent even-split via accidental default-1.
 	t.Amount = t.Qty.Mul(t.UnitCost)
 	if t.ID == uuid.Nil {
 		t.ID = uuid.New()

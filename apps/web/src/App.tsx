@@ -340,9 +340,25 @@ const featureFromSection: Record<string, string> = {
   Manufacturing: "manufacturing",
 };
 
+interface NavLink {
+  to: string;
+  label: string;
+  // Optional additional feature gates that must ALL be enabled
+  // for this link to render, beyond the section-level gate.  Used
+  // when a single surface depends on more than one tenant plan
+  // flag — e.g. /inventory/landed-costs writes inventory_moves AND
+  // posts a ledger JE, so the route is gated on FeatureInventory
+  // AND FeatureFinance in services/api/routes.go.  The section
+  // ('Inventory' → 'inventory') covers one of the two; declaring
+  // `requires: ['finance']` here keeps the nav link in lock-step
+  // with the backend so a tenant on inventory-only plan doesn't
+  // see a link that 403s on click.
+  requires?: string[];
+}
+
 interface NavSection {
   title: string;
-  links: { to: string; label: string }[];
+  links: NavLink[];
 }
 
 const navSections: NavSection[] = [
@@ -430,7 +446,14 @@ const navSections: NavSection[] = [
       { to: "/records/inventory.warehouse", label: "Warehouses" },
       { to: "/inventory/stock-levels", label: "Stock Levels" },
       { to: "/inventory/reports/valuation", label: "Valuation" },
-      { to: "/inventory/landed-costs", label: "Landed Costs" },
+      // Landed costs writes inventory_moves AND posts a ledger
+      // JE so the backend route is gated on FeatureInventory
+      // (section gate) AND FeatureFinance (per-link gate).
+      {
+        to: "/inventory/landed-costs",
+        label: "Landed Costs",
+        requires: ["finance"],
+      },
     ],
   },
   {
@@ -681,12 +704,36 @@ function AppShell() {
   // every nav item rather than hiding the entire app on a
   // transient network blip.  The backend will 403 disabled
   // sections if the user actually navigates to them.
-  const visible = navSections.filter((s) => {
-    const key = featureFromSection[s.title];
-    if (!key) return true;
+  // Returns true if every key in `keys` is enabled in the tenant's
+  // features map.  Fail-open when features data hasn't loaded yet
+  // — the backend will still 403 if the user actually clicks the
+  // link, so this only governs visibility, not authorization.
+  const allEnabled = (keys: string[]): boolean => {
     if (!featuresQuery.data) return true;
-    return features[key] !== false;
-  });
+    return keys.every((k) => features[k] !== false);
+  };
+  const visible = navSections
+    .filter((s) => {
+      const key = featureFromSection[s.title];
+      if (!key) return true;
+      if (!featuresQuery.data) return true;
+      return features[key] !== false;
+    })
+    .map((s) => ({
+      ...s,
+      // Per-link filter so a section can stay visible while a
+      // single link inside it is gated on additional features
+      // (e.g. Landed Costs requires `finance` on top of the
+      // section's `inventory` gate).
+      links: s.links.filter((link) =>
+        link.requires && link.requires.length > 0
+          ? allEnabled(link.requires)
+          : true,
+      ),
+    }))
+    // Drop sections whose every link was filtered out so the
+    // sidebar doesn't render an empty group header.
+    .filter((s) => s.links.length > 0);
 
   // Heuristic label for the active route — shown in the header to
   // confirm to the user which page they're on (especially valuable
