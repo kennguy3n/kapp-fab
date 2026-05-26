@@ -38,6 +38,16 @@ on:
 permissions:
   contents: read
 
+# Single source of truth for the linter version, mirroring ci.yml's
+# GOLANGCI_LINT_VERSION env. Defined at workflow level so both jobs
+# (only `lint` uses it today, but future jobs that bind the binary
+# can reference the same value) resolve to the same pinned release.
+# Update this value AND ci.yml's GOLANGCI_LINT_VERSION together; the
+# scoped lint here must agree with the canonical merge-gate so a PR
+# that's green on tax-pack-pr.yml stays green on the main lint job.
+env:
+  GOLANGCI_LINT_VERSION: v2.5.0
+
 jobs:
   test:
     name: tax-pack tests (Go)
@@ -88,11 +98,12 @@ jobs:
           echo "LINT_BASE=${MERGE_BASE}" >> "$GITHUB_ENV"
       # Run golangci-lint on only the tax-pack-touching packages so
       # the run is fast (the full main-branch lint is in ci.yml).
-      # Version pinned to match ci.yml's GOLANGCI_LINT_VERSION so the
-      # linter binary is built with a Go toolchain >= the repo's
-      # go.mod target (the @v6 action ships a binary built against
-      # go1.24 which can't load configs targeting go1.25+).
+      # Version pinned via the workflow-level env so a future bump
+      # only has to change two places (here + ci.yml). The linter
+      # binary is built with a Go toolchain >= the repo's go.mod
+      # target (the @v6 action ships a binary built against go1.24
+      # which can't load configs targeting go1.25+).
       - uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.5.0
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
           args: --timeout=5m --new-from-rev=${{ env.LINT_BASE }} ./internal/hr/taxpacks/... ./internal/tenant/... ./cmd/new-tax-pack/...

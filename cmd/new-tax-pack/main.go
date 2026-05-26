@@ -556,6 +556,16 @@ func (p *plan) planFrontendLocalesPatches(path string) error {
 // contents are en.json verbatim so the catalogues compile and pass
 // the baseline-keyset test; the contributor is expected to translate
 // the values in a follow-up commit before opening the PR.
+//
+// Interaction with -force: unlike the pack file and the CoA template
+// (which -force will overwrite via buildPlan's existence checks),
+// locale catalogues are deliberately NOT clobbered when they already
+// exist on disk. That asymmetry is intentional — a contributor who
+// has hand-translated cs.json should not lose their work to a
+// re-scaffold; the catalogue's keyset will be re-verified by the
+// i18n parity test on the next CI run regardless. Document the
+// asymmetry rather than honour -force here, so a re-scaffold over a
+// partially-populated tree is always safe to run.
 func (p *plan) planLocaleCatalogues() error {
 	backendEn := filepath.Join(p.RepoRoot, "internal", "i18n", "locales", "en.json")
 	frontendEn := filepath.Join(p.RepoRoot, "apps", "web", "src", "locales", "en.json")
