@@ -102,6 +102,13 @@ func FeatureFromPath(p string) string {
 		return tenant.FeaturePOS
 	case "projects":
 		return tenant.FeatureProjects
+	case "manufacturing":
+		// /api/v1/manufacturing/* — BOMs and work orders.
+		// Gated on its own feature key so a tenant can run
+		// inventory without manufacturing (e.g. a pure
+		// distribution shop) without the manufacturing
+		// surface leaking into their UI or API.
+		return tenant.FeatureManufacturing
 	default:
 		return ""
 	}
@@ -141,6 +148,14 @@ func featureFromKType(ktype string) string {
 		return tenant.FeatureHelpdesk
 	case "projects":
 		return tenant.FeatureProjects
+	case "manufacturing":
+		// manufacturing.bom, manufacturing.bom_component,
+		// manufacturing.work_order. Gated on the same key as
+		// the top-level /api/v1/manufacturing/* routes so a
+		// tenant whose plan disables manufacturing can't reach
+		// the KTypes via either the dedicated handlers OR the
+		// generic /api/v1/records/{ktype} surface.
+		return tenant.FeatureManufacturing
 	default:
 		return ""
 	}

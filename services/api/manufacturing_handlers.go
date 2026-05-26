@@ -1,0 +1,397 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
+
+	"github.com/kennguy3n/kapp-fab/internal/manufacturing"
+	"github.com/kennguy3n/kapp-fab/internal/platform"
+)
+
+// manufacturingHandlers exposes the Phase N6 BOM + work-order HTTP
+// surface. Tenant scope is enforced by the middleware stack; these
+// handlers translate HTTP into manufacturing.PGStore calls and map
+// sentinel errors to the status codes the web client expects.
+type manufacturingHandlers struct {
+	store *manufacturing.PGStore
+}
+
+// ---------------------------------------------------------------------------
+// BOMs
+// ---------------------------------------------------------------------------
+
+// bomComponentRequest is the HTTP shape for one component on a
+// createBOM call. Ordering is implicit in the JSON array position —
+// the store assigns sort_order = (index + 1) inside CreateBOM, so we
+// intentionally do not accept a `sort_order` field. Earlier drafts
+// had one, but the store always overrode it (see
+// internal/manufacturing/store.go's CreateBOM contract), which gave
+// HTTP clients the false impression they controlled ordering. The
+// canonical contract is now: "the components array's order IS the
+// BOM's display order". Clients reorder by re-sending the full
+// array; partial updates are not supported.
+type bomComponentRequest struct {
+	ComponentItemID uuid.UUID        `json:"component_item_id"`
+	Qty             decimal.Decimal  `json:"qty"`
+	UOM             string           `json:"uom"`
+	ScrapPercent    *decimal.Decimal `json:"scrap_percent,omitempty"`
+}
+
+type createBOMRequest struct {
+	ItemID     uuid.UUID             `json:"item_id"`
+	Version    string                `json:"version"`
+	OutputQty  decimal.Decimal       `json:"output_qty"`
+	UOM        string                `json:"uom"`
+	Notes      string                `json:"notes,omitempty"`
+	Components []bomComponentRequest `json:"components"`
+	// Activate, when true, transitions the freshly-created BOM
+	// from draft to active immediately after insert. Convenient
+	// for the common SME case where a single BOM per item is
+	// authored end-to-end in one HTTP call.
+	Activate bool `json:"activate,omitempty"`
+}
+
+func (h *manufacturingHandlers) createBOM(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	actor := actorOrDefault(r.Context())
+	var req createBOMRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	in := manufacturing.CreateBOMInput{
+		ItemID:    req.ItemID,
+		Version:   req.Version,
+		OutputQty: req.OutputQty,
+		UOM:       req.UOM,
+		Notes:     req.Notes,
+		// Pushing activation into the store layer makes create-
+		// and-activate a single transaction; if the activation
+		// step fails the insert rolls back too, so the client's
+		// retry doesn't have to navigate a half-finished BOM
+		// already occupying the (tenant_id, item_id, version)
+		// unique slot. See CreateBOMInput.Activate.
+		Activate: req.Activate,
+	}
+	for _, c := range req.Components {
+		// SortOrder intentionally omitted — the store assigns it
+		// from the array index in CreateBOM. See the
+		// bomComponentRequest doc comment.
+		in.Components = append(in.Components, manufacturing.BOMComponent{
+			ComponentItemID: c.ComponentItemID,
+			Qty:             c.Qty,
+			UOM:             c.UOM,
+			ScrapPercent:    c.ScrapPercent,
+		})
+	}
+	bom, err := h.store.CreateBOM(r.Context(), t.ID, actor, in)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, bom)
+}
+
+func (h *manufacturingHandlers) listBOMs(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	status := r.URL.Query().Get("status")
+	out, err := h.store.ListBOMs(r.Context(), t.ID, status)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *manufacturingHandlers) getBOM(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid bom id", http.StatusBadRequest)
+		return
+	}
+	bom, err := h.store.GetBOM(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, bom)
+}
+
+type setBOMStatusRequest struct {
+	Status string `json:"status"`
+}
+
+func (h *manufacturingHandlers) setBOMStatus(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid bom id", http.StatusBadRequest)
+		return
+	}
+	var req setBOMStatusRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if err := h.store.SetBOMStatus(r.Context(), t.ID, id, req.Status); err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	bom, err := h.store.GetBOM(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, bom)
+}
+
+// ---------------------------------------------------------------------------
+// Work orders
+// ---------------------------------------------------------------------------
+
+type createWorkOrderRequest struct {
+	ItemID         uuid.UUID       `json:"item_id"`
+	WarehouseID    uuid.UUID       `json:"warehouse_id"`
+	PlannedQty     decimal.Decimal `json:"planned_qty"`
+	ScheduledStart *time.Time      `json:"scheduled_start,omitempty"`
+	ScheduledEnd   *time.Time      `json:"scheduled_end,omitempty"`
+	Notes          string          `json:"notes,omitempty"`
+}
+
+func (h *manufacturingHandlers) createWorkOrder(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	actor := actorOrDefault(r.Context())
+	var req createWorkOrderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	wo, err := h.store.CreateWorkOrder(r.Context(), t.ID, actor, manufacturing.CreateWorkOrderInput{
+		ItemID:         req.ItemID,
+		WarehouseID:    req.WarehouseID,
+		PlannedQty:     req.PlannedQty,
+		ScheduledStart: req.ScheduledStart,
+		ScheduledEnd:   req.ScheduledEnd,
+		Notes:          req.Notes,
+	})
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, wo)
+}
+
+func (h *manufacturingHandlers) listWorkOrders(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	status := r.URL.Query().Get("status")
+	out, err := h.store.ListWorkOrders(r.Context(), t.ID, status)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *manufacturingHandlers) getWorkOrder(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid work order id", http.StatusBadRequest)
+		return
+	}
+	wo, err := h.store.GetWorkOrder(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, wo)
+}
+
+// workOrderActionRequest is the JSON envelope for the status-change
+// endpoints. ActualQty is only consulted by /complete.
+type workOrderActionRequest struct {
+	ActualQty decimal.Decimal `json:"actual_qty,omitempty"`
+}
+
+func (h *manufacturingHandlers) releaseWorkOrder(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid work order id", http.StatusBadRequest)
+		return
+	}
+	wo, err := h.store.ReleaseWorkOrder(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, wo)
+}
+
+func (h *manufacturingHandlers) startWorkOrder(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid work order id", http.StatusBadRequest)
+		return
+	}
+	wo, err := h.store.StartWorkOrder(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, wo)
+}
+
+func (h *manufacturingHandlers) completeWorkOrder(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	actor := actorOrDefault(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid work order id", http.StatusBadRequest)
+		return
+	}
+	var req workOrderActionRequest
+	// Body is optional — empty body means "complete with actual =
+	// planned" which is the most common path for a small shop.
+	//
+	// Guard on `r.Body != nil && r.ContentLength != 0` rather than
+	// `r.ContentLength > 0`. For chunked-transfer-encoded requests
+	// (which any HTTP/1.1 client may use, and which curl emits when
+	// you pipe stdin into -d @-), net/http sets ContentLength to -1
+	// to signal "unknown until EOF". The old `> 0` check silently
+	// dropped the body on those requests, so the server completed
+	// with actualQty defaulted to planned even when the operator
+	// explicitly supplied a different yield. io.EOF is treated as
+	// "body was empty after all" rather than a 400, matching the
+	// pattern fixed in services/api/consolidation_handlers.go.
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+	}
+	wo, err := h.store.CompleteWorkOrder(r.Context(), t.ID, id, actor, manufacturing.CompleteWorkOrderInput{
+		ActualQty: req.ActualQty,
+	})
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, wo)
+}
+
+func (h *manufacturingHandlers) cancelWorkOrder(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid work order id", http.StatusBadRequest)
+		return
+	}
+	wo, err := h.store.CancelWorkOrder(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, wo)
+}
+
+func (h *manufacturingHandlers) closeWorkOrder(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid work order id", http.StatusBadRequest)
+		return
+	}
+	wo, err := h.store.CloseWorkOrder(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, wo)
+}
+
+// writeManufacturingError maps the package's sentinel errors to HTTP
+// status codes consistent with the rest of the API surface.
+func writeManufacturingError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, manufacturing.ErrBOMNotFound),
+		errors.Is(err, manufacturing.ErrWorkOrderNotFound):
+		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, manufacturing.ErrBOMNotActive),
+		errors.Is(err, manufacturing.ErrBOMHasNoComponents),
+		errors.Is(err, manufacturing.ErrBOMSelfReference),
+		errors.Is(err, manufacturing.ErrBOMDuplicateComponent),
+		errors.Is(err, manufacturing.ErrBOMInvalidTransition),
+		errors.Is(err, manufacturing.ErrWorkOrderInvalidTransition),
+		errors.Is(err, manufacturing.ErrWorkOrderInsufficientStock),
+		// ErrInvalidInput is the umbrella sentinel for client-supplied
+		// validation failures (empty / zero / out-of-range fields on
+		// the create/update endpoints — invalid bom status, negative
+		// actual_qty, over-yield actual_qty, missing item_id /
+		// warehouse_id / version, etc.). The store wraps it with %w
+		// so errors.Is matches every wrapped variant, and we
+		// short-circuit them all to 422 here in a single arm rather
+		// than minting a sentinel per field.
+		errors.Is(err, manufacturing.ErrInvalidInput):
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}

@@ -27,13 +27,47 @@ const (
 	// installed in migrations/000005_inventory.sql. A 23505 on this
 	// specific constraint translates into ErrDuplicateSourceMove so
 	// retries of the ledger hook are idempotent.
+	//
+	// `inventory_moves` is a partitioned parent table (see
+	// migrations/000001_initial_schema.sql:272 — `inventory_moves_default
+	// PARTITION OF inventory_moves DEFAULT`). When the parent-level
+	// partial unique index is created, PostgreSQL also creates one
+	// child index per partition. INSERTs go through the partition, so a
+	// unique violation reports the child name — not the parent.
+	// Originally PostgreSQL auto-generated those child names from the
+	// column tuple and truncated them at the 63-character identifier
+	// limit, which made suffix-matching them in Go fragile across PG
+	// versions and refactors. Migration 000063_manufacturing.sql now
+	// renames every partition's child index to the deterministic shape
+	// `<partition_relname>_<short_suffix>` (e.g.
+	// `inventory_moves_default_source_uniq`). The matchers below
+	// recognise the parent name with equality and any partition's
+	// child by combining the shared "inventory_moves_" prefix with the
+	// short suffix; that makes future partitions (yearly partitions,
+	// tenant-specific shards, archive partitions) work without a
+	// follow-up Go change.
 	inventoryMovesSourceUniqIndex = "inventory_moves_source_uniq"
+	// inventoryMovesSourceUniqSuffix is the trailing part of every
+	// renamed child index for the source-uniq constraint. The
+	// invariant is: any name with prefix "inventory_moves_" AND suffix
+	// "_source_uniq" is either the partitioned parent or one of its
+	// child indexes installed by 000063_manufacturing.sql.
+	inventoryMovesSourceUniqSuffix = "_source_uniq"
 
 	// inventoryMovesReversalOfUniqIndex is the partial unique index
 	// installed in migrations/000035_stock_reversal.sql that prevents
 	// the same move from being reversed twice. A 23505 on this
-	// constraint translates into ErrAlreadyReversed.
-	inventoryMovesReversalOfUniqIndex = "inventory_moves_reversal_of_uniq"
+	// constraint translates into ErrAlreadyReversed. Same partition
+	// caveat as above — the child indexes are renamed by 000063 to
+	// the canonical `<partition>_reversal_of_uniq` shape.
+	inventoryMovesReversalOfUniqIndex  = "inventory_moves_reversal_of_uniq"
+	inventoryMovesReversalOfUniqSuffix = "_reversal_of_uniq"
+
+	// inventoryMovesPartitionPrefix is the table-name prefix shared by
+	// the parent (`inventory_moves`) and every partition
+	// (`inventory_moves_default`, hypothetical `inventory_moves_2026`,
+	// etc.). It anchors the prefix half of the prefix+suffix matcher.
+	inventoryMovesPartitionPrefix = "inventory_moves_"
 )
 
 // PGStore persists items, warehouses, and stock moves against
@@ -46,6 +80,68 @@ type PGStore struct {
 	publisher events.Publisher
 	auditor   audit.Logger
 	now       func() time.Time
+}
+
+// isInventoryMovesSourceUniqViolation returns true when the given
+// PostgreSQL error is a unique violation on the
+// `inventory_moves_source_uniq` partial index — either the parent-level
+// name (rare, only fires if the insert was somehow routed to the
+// partitioned parent), or any partition's child index whose name was
+// stabilised by migration 000063_manufacturing.sql to the
+// `<partition_relname>_source_uniq` shape (always starts with the
+// shared `inventory_moves_` prefix). The prefix+suffix match lets a
+// future partition (yearly, tenant-sharded, archive) work without a
+// follow-up Go change — provided the migration's loop renames its
+// child too.
+func isInventoryMovesSourceUniqViolation(pgErr *pgconn.PgError) bool {
+	return isPartitionedInventoryMovesViolation(pgErr,
+		inventoryMovesSourceUniqIndex, inventoryMovesSourceUniqSuffix)
+}
+
+// isInventoryMovesReversalOfUniqViolation does the same as
+// isInventoryMovesSourceUniqViolation for the reversal-of partial
+// unique index that prevents the same move from being reversed twice.
+func isInventoryMovesReversalOfUniqViolation(pgErr *pgconn.PgError) bool {
+	return isPartitionedInventoryMovesViolation(pgErr,
+		inventoryMovesReversalOfUniqIndex, inventoryMovesReversalOfUniqSuffix)
+}
+
+// isPartitionedInventoryMovesViolation is the shared matcher used by
+// both isInventoryMovesSourceUniqViolation and
+// isInventoryMovesReversalOfUniqViolation. It returns true when the
+// 23505's constraint name is either:
+//
+//   - the parent-level index name (exact match), or
+//   - a child index name of the form
+//     `inventory_moves_<partition_relname>_<suffix>`
+//
+// The prefix half is the `inventory_moves_` table-name prefix shared
+// by every partition; the suffix half is the short identifier set by
+// 000063_manufacturing.sql. A `len(name) > len(prefix)+len(suffix)`
+// guard ensures we don't false-match on a hypothetical name where the
+// partition portion is empty (which would only happen if the parent
+// itself were ever renamed — at which point both this matcher and
+// every other call site would need an update anyway).
+func isPartitionedInventoryMovesViolation(pgErr *pgconn.PgError, parentName, suffix string) bool {
+	if pgErr == nil || pgErr.Code != pgUniqueViolation {
+		return false
+	}
+	name := pgErr.ConstraintName
+	if name == parentName {
+		return true
+	}
+	if !strings.HasPrefix(name, inventoryMovesPartitionPrefix) {
+		return false
+	}
+	if !strings.HasSuffix(name, suffix) {
+		return false
+	}
+	// Reject `inventory_moves_<suffix>` (no partition relname between
+	// prefix and suffix) — that's the parent name, already handled
+	// above, and a separate index in a future migration that
+	// accidentally collided with this pattern but had no partition
+	// component should NOT be matched.
+	return len(name) > len(inventoryMovesPartitionPrefix)+len(suffix)
 }
 
 // NewPGStore wires a PGStore from the shared pool and its collaborators.
@@ -363,9 +459,7 @@ func (s *PGStore) RecordMove(ctx context.Context, m Move) (*Move, error) {
 		).Scan(&out.ID)
 		if err != nil {
 			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) &&
-				pgErr.Code == pgUniqueViolation &&
-				pgErr.ConstraintName == inventoryMovesSourceUniqIndex {
+			if errors.As(err, &pgErr) && isInventoryMovesSourceUniqViolation(pgErr) {
 				return ErrDuplicateSourceMove
 			}
 			return fmt.Errorf("inventory: insert move: %w", err)
@@ -547,7 +641,7 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
-				if pgErr.ConstraintName == inventoryMovesReversalOfUniqIndex {
+				if isInventoryMovesReversalOfUniqViolation(pgErr) {
 					return ErrAlreadyReversed
 				}
 				// Any other unique-violation is a programmer bug

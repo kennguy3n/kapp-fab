@@ -70,6 +70,17 @@ const (
 	// the dynamic feature middleware on /api/v1/projects/* and
 	// /api/v1/records/projects.* and by the agent tool registry.
 	FeatureProjects = "projects"
+	// FeatureManufacturing gates the Phase N6 Manufacturing Light
+	// surface (boms, bom_components, work_orders) and the
+	// /api/v1/manufacturing/* HTTP routes. The middleware also
+	// gates the frontend nav section via the featureFromSection
+	// lock-step in apps/web/src/App.tsx. Off on free, on for
+	// starter / business / enterprise — the module is designed
+	// for SME shop floors which the starter plan already
+	// targets, so gating manufacturing strictly above inventory
+	// would orphan small-discrete-manufacturer tenants on the
+	// starter tier.
+	FeatureManufacturing = "manufacturing"
 )
 
 // AllFeatures is the canonical list of feature keys. Handlers that
@@ -95,6 +106,7 @@ var AllFeatures = []string{
 	FeatureInsightsSQLEditor,
 	FeaturePOS,
 	FeatureProjects,
+	FeatureManufacturing,
 }
 
 // PlanLimits is the numeric ceiling each plan enforces per billing
@@ -260,6 +272,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureInsightsSQLEditor: false,
 			FeaturePOS:               false,
 			FeatureProjects:          true,
+			FeatureManufacturing:     true,
 		}
 	case PlanBusiness:
 		return map[string]bool{
@@ -281,6 +294,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureInsightsSQLEditor: false,
 			FeaturePOS:               true,
 			FeatureProjects:          true,
+			FeatureManufacturing:     true,
 		}
 	case PlanEnterprise:
 		return map[string]bool{
@@ -302,6 +316,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureInsightsSQLEditor: true,
 			FeaturePOS:               true,
 			FeatureProjects:          true,
+			FeatureManufacturing:     true,
 		}
 	default:
 		// Free plan — CRM only. Also the fallback when the plan
@@ -326,6 +341,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureInsightsSQLEditor: false,
 			FeaturePOS:               false,
 			FeatureProjects:          false,
+			FeatureManufacturing:     false,
 		}
 	}
 }

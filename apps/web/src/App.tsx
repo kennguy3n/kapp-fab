@@ -145,6 +145,11 @@ const InventoryValuationPage = lazyNamed(
   () => import("./pages/InventoryValuationPage"),
   "InventoryValuationPage",
 );
+const BOMPage = lazyNamed(() => import("./pages/BOMPage"), "BOMPage");
+const WorkOrdersPage = lazyNamed(
+  () => import("./pages/WorkOrdersPage"),
+  "WorkOrdersPage",
+);
 const OrgChartPage = lazyNamed(
   () => import("./pages/OrgChartPage"),
   "OrgChartPage",
@@ -300,6 +305,7 @@ const featureFromSection: Record<string, string> = {
   Insights: "insights",
   POS: "pos",
   Projects: "projects",
+  Manufacturing: "manufacturing",
 };
 
 interface NavSection {
@@ -390,6 +396,13 @@ const navSections: NavSection[] = [
       { to: "/records/inventory.warehouse", label: "Warehouses" },
       { to: "/inventory/stock-levels", label: "Stock Levels" },
       { to: "/inventory/reports/valuation", label: "Valuation" },
+    ],
+  },
+  {
+    title: "Manufacturing",
+    links: [
+      { to: "/manufacturing/boms", label: "Bills of Materials" },
+      { to: "/manufacturing/work-orders", label: "Work Orders" },
     ],
   },
   {
@@ -792,6 +805,11 @@ function AppShell() {
               <Route
                 path="/inventory/reports/valuation"
                 element={<InventoryValuationPage />}
+              />
+              <Route path="/manufacturing/boms" element={<BOMPage />} />
+              <Route
+                path="/manufacturing/work-orders"
+                element={<WorkOrdersPage />}
               />
               <Route path="/hr/org-chart" element={<OrgChartPage />} />
               <Route path="/hr/payroll" element={<PayrollPage />} />

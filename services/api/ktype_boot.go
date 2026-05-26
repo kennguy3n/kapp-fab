@@ -12,6 +12,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
+	"github.com/kennguy3n/kapp-fab/internal/manufacturing"
 	"github.com/kennguy3n/kapp-fab/internal/projects"
 	"github.com/kennguy3n/kapp-fab/internal/sales"
 )
@@ -105,6 +106,13 @@ func registerBootKTypes(ctx context.Context, registry *ktype.PGRegistry) error {
 	// registry + records surface alongside other finance masters.
 	if err := registry.RegisterIfChanged(ctx, ledger.ExchangeRateKType()); err != nil {
 		return fmt.Errorf("register exchange_rate ktype: %w", err)
+	}
+	// Phase N6 — manufacturing BOM + work-order KTypes. Registered
+	// after the inventory catalog so the bom_components FK to
+	// inventory_items lines up with KType surfaces any tenant
+	// tooling can read.
+	if err := manufacturing.RegisterKTypes(ctx, registry); err != nil {
+		return err
 	}
 	return nil
 }

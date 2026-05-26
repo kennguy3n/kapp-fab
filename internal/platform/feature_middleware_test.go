@@ -34,6 +34,15 @@ func TestFeatureFromPathRecordsKType(t *testing.T) {
 		{"/api/v1/records/payroll.run", tenant.FeatureHR},
 		{"/api/v1/records/lms.course", tenant.FeatureLMS},
 		{"/api/v1/records/helpdesk.ticket", tenant.FeatureHelpdesk},
+		// Manufacturing KTypes — BOMs and work orders ride the
+		// FeatureManufacturing gate on both the dedicated
+		// /api/v1/manufacturing/* surface and the generic
+		// /api/v1/records/{ktype} surface, so a Starter tenant
+		// without manufacturing on their plan cannot reach
+		// either path.
+		{"/api/v1/records/manufacturing.bom", tenant.FeatureManufacturing},
+		{"/api/v1/records/manufacturing.bom_component/abc-123", tenant.FeatureManufacturing},
+		{"/api/v1/records/manufacturing.work_order", tenant.FeatureManufacturing},
 		// Core platform KTypes are not plan-gated.
 		{"/api/v1/records/platform.audit", ""},
 		// Top-level domains map directly.
@@ -41,6 +50,11 @@ func TestFeatureFromPathRecordsKType(t *testing.T) {
 		{"/api/v1/inventory/stock-levels", tenant.FeatureInventory},
 		{"/api/v1/imports/run", tenant.FeatureImporter},
 		{"/api/v1/report-builder/queries", tenant.FeatureReportBuilder},
+		// Manufacturing is gated on its own feature key so a
+		// tenant with inventory but no manufacturing on their
+		// plan can't reach /api/v1/manufacturing/*.
+		{"/api/v1/manufacturing/boms", tenant.FeatureManufacturing},
+		{"/api/v1/manufacturing/work-orders/abc/release", tenant.FeatureManufacturing},
 		// Out-of-scope paths are permissive.
 		{"/api/v1/tenants/me/features", ""},
 		{"/api/v1/auth/login", ""},

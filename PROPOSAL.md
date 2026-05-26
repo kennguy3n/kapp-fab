@@ -139,7 +139,19 @@ KType and KRecord are **original Kapp concepts**. KType defines *what a business
 
 #### Manufacturing
 
-All manufacturing features are **Later**. Manufacturing introduces domain complexity (BOMs, routings, work orders, capacity planning, shop-floor control) disproportionate to MVP value for general SME customers. It is deferred until a concrete customer demand is proven and financial/inventory primitives are stable enough to build on.
+| Feature | MVP | Later |
+| --- | --- | --- |
+| Bills of materials (versioned, per-item active row) | ✓ | |
+| Work orders (draft → released → in_progress → completed → closed) | ✓ | |
+| Auto consumption + receipt inventory moves on completion | ✓ | |
+| Scrap percentage per component | ✓ | |
+| Routings & operations | | ✓ |
+| Capacity planning / finite scheduling | | ✓ |
+| Shop-floor control / job cards | | ✓ |
+| Subcontracting | | ✓ |
+| Quality inspection plans | | ✓ |
+
+Light manufacturing (BOMs + work orders with automatic inventory posting on completion) ships in MVP per Phase N6. The lightweight scope closes the biggest module gap vs ERPNext for SMEs that assemble or kit goods, without committing to the operational depth (routings, capacity, shop-floor) that only matters once a tenant has more than a handful of work orders per day. Those remain **Later** until concrete demand surfaces.
 
 ### 3.3 CRM Module
 

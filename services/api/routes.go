@@ -878,6 +878,39 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Get("/reports/valuation", d.invh.valuation)
 		})
 
+		// Phase N6 — Manufacturing Light. BOM + work-order CRUD
+		// and the state-machine endpoints (release, start, complete,
+		// cancel, close). The complete endpoint emits inventory
+		// moves through the inventory store, so it joins the same
+		// authz scope as inventory (manufacturing operators are
+		// effectively a subset of inventory admins for a small
+		// SME). authzMethodGate carries inventory.admin so an
+		// operator role inherited from the inventory namespace
+		// can release / complete without a new permission grant;
+		// repos that want finer-grained gating can split this out
+		// later.
+		r.Route("/api/v1/manufacturing", func(r chi.Router) {
+			d.tenantChain(r)
+			r.Use(d.apiCallMW)
+			r.Use(d.featureMW)
+			r.Use(d.authzMethodGate("inventory.read", "inventory.admin", ""))
+			r.Use(platform.IdempotencyMiddleware(d.pool))
+			r.Use(d.rateLimitMW)
+			r.Use(platform.QuotaMiddleware(d.quotaEnforcer))
+			r.Post("/boms", d.mfgh.createBOM)
+			r.Get("/boms", d.mfgh.listBOMs)
+			r.Get("/boms/{id}", d.mfgh.getBOM)
+			r.Post("/boms/{id}/status", d.mfgh.setBOMStatus)
+			r.Post("/work-orders", d.mfgh.createWorkOrder)
+			r.Get("/work-orders", d.mfgh.listWorkOrders)
+			r.Get("/work-orders/{id}", d.mfgh.getWorkOrder)
+			r.Post("/work-orders/{id}/release", d.mfgh.releaseWorkOrder)
+			r.Post("/work-orders/{id}/start", d.mfgh.startWorkOrder)
+			r.Post("/work-orders/{id}/complete", d.mfgh.completeWorkOrder)
+			r.Post("/work-orders/{id}/cancel", d.mfgh.cancelWorkOrder)
+			r.Post("/work-orders/{id}/close", d.mfgh.closeWorkOrder)
+		})
+
 		// Forms KApp. Creation and tenant-scoped lookups go through the
 		// tenant middleware; public read + submit explicitly do NOT so
 		// anonymous submissions work. The public submit route mounts

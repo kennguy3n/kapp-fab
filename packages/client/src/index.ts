@@ -993,6 +993,86 @@ export class ApiClient {
     return this.request(`/inventory/items/${encodeURIComponent(itemId)}/batches`);
   }
 
+  // --- Manufacturing (Phase N6) ----------------------------------------
+
+  listBOMs(status?: string): Promise<BOM[]> {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+    return this.request(`/manufacturing/boms${qs}`);
+  }
+
+  getBOM(id: string): Promise<BOM> {
+    return this.request(`/manufacturing/boms/${encodeURIComponent(id)}`);
+  }
+
+  createBOM(input: CreateBOMInput): Promise<BOM> {
+    return this.request("/manufacturing/boms", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  setBOMStatus(id: string, status: string): Promise<BOM> {
+    return this.request(`/manufacturing/boms/${encodeURIComponent(id)}/status`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ status }),
+    });
+  }
+
+  listWorkOrders(status?: string): Promise<WorkOrder[]> {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+    return this.request(`/manufacturing/work-orders${qs}`);
+  }
+
+  getWorkOrder(id: string): Promise<WorkOrder> {
+    return this.request(`/manufacturing/work-orders/${encodeURIComponent(id)}`);
+  }
+
+  createWorkOrder(input: CreateWorkOrderInput): Promise<WorkOrder> {
+    return this.request("/manufacturing/work-orders", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  releaseWorkOrder(id: string): Promise<WorkOrder> {
+    return this.request(`/manufacturing/work-orders/${encodeURIComponent(id)}/release`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  }
+
+  startWorkOrder(id: string): Promise<WorkOrder> {
+    return this.request(`/manufacturing/work-orders/${encodeURIComponent(id)}/start`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  }
+
+  completeWorkOrder(id: string, actualQty?: string): Promise<WorkOrder> {
+    return this.request(`/manufacturing/work-orders/${encodeURIComponent(id)}/complete`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: actualQty ? JSON.stringify({ actual_qty: actualQty }) : undefined,
+    });
+  }
+
+  cancelWorkOrder(id: string): Promise<WorkOrder> {
+    return this.request(`/manufacturing/work-orders/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  }
+
+  closeWorkOrder(id: string): Promise<WorkOrder> {
+    return this.request(`/manufacturing/work-orders/${encodeURIComponent(id)}/close`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  }
+
   // --- Saved views (Phase G) -------------------------------------------
 
   /** List saved views for the caller, scoped to a KType. Returns the
@@ -2001,6 +2081,79 @@ export interface InventoryBatch {
   created_by: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface BOM {
+  tenant_id: string;
+  id: string;
+  item_id: string;
+  version: string;
+  status: "draft" | "active" | "obsolete";
+  output_qty: string;
+  uom: string;
+  notes?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+  components?: BOMComponent[];
+}
+
+export interface BOMComponent {
+  bom_id: string;
+  component_item_id: string;
+  qty: string;
+  uom: string;
+  scrap_percent?: string | null;
+  sort_order: number;
+}
+
+export interface CreateBOMInput {
+  item_id: string;
+  version: string;
+  output_qty: string;
+  uom: string;
+  notes?: string;
+  // Component ordering is implicit in array position — the server
+  // assigns sort_order = (index + 1) on insert, so this shape
+  // intentionally does NOT accept a sort_order field on the request
+  // (it would be silently ignored). The response shape `BOMComponent`
+  // still exposes sort_order for callers that need to render the
+  // server-assigned order.
+  components: Array<{
+    component_item_id: string;
+    qty: string;
+    uom: string;
+    scrap_percent?: string;
+  }>;
+  activate?: boolean;
+}
+
+export interface WorkOrder {
+  tenant_id: string;
+  id: string;
+  item_id: string;
+  bom_id?: string | null;
+  warehouse_id: string;
+  planned_qty: string;
+  actual_qty?: string | null;
+  status: "draft" | "released" | "in_progress" | "completed" | "closed" | "cancelled";
+  scheduled_start?: string | null;
+  scheduled_end?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  notes?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateWorkOrderInput {
+  item_id: string;
+  warehouse_id: string;
+  planned_qty: string;
+  scheduled_start?: string;
+  scheduled_end?: string;
+  notes?: string;
 }
 
 export interface InventoryValuationRow {

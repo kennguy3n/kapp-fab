@@ -30,6 +30,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
+	"github.com/kennguy3n/kapp-fab/internal/manufacturing"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
@@ -123,6 +124,7 @@ func run() error {
 	agents.RegisterCRMTools(executor)
 	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster, paymentPoster)
 	agents.RegisterInventoryTools(executor, inventoryStore)
+	agents.RegisterManufacturingTools(executor, manufacturing.NewPGStore(pool, inventoryStore))
 	agents.RegisterHRTools(executor, hrStore)
 	agents.RegisterLMSTools(executor, lmsStore)
 
