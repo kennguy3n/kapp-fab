@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -196,11 +197,37 @@ func TestPlanIsIdempotent(t *testing.T) {
 		t.Fatalf("execute #2: %v", err)
 	}
 	got := buf.String()
-	if !strings.Contains(got, "3 already-present skip(s)") {
-		t.Errorf("execute #2 output: expected wizard.go to skip all 3 patches the second time;\ngot:\n%s", got)
-	}
-	if !strings.Contains(got, "2 already-present skip(s)") {
-		t.Errorf("execute #2 output: expected SetupWizardPage.tsx to skip all 2 patches the second time;\ngot:\n%s", got)
+	// Assert the actual idempotence invariant — every PATCH line
+	// for each touched file reports zero insertions — rather than
+	// pinning the absolute skip count. Pinning the count breaks
+	// every time a new SCAFFOLD marker is added to wizard.go /
+	// SetupWizardPage.tsx (e.g. a future mapping table the scaffold
+	// learns to patch), even though those changes are correct. The
+	// invariant we actually care about is "the second run inserts
+	// nothing"; whether that's 2 skips, 3 skips, or 7 doesn't
+	// matter.
+	for _, file := range []string{
+		"internal/tenant/wizard.go",
+		"apps/web/src/pages/SetupWizardPage.tsx",
+	} {
+		re := regexp.MustCompile(`PATCH\s+` + regexp.QuoteMeta(file) + `\s+\((\d+) insertion\(s\), (\d+) already-present skip\(s\)\)`)
+		match := re.FindStringSubmatch(got)
+		if match == nil {
+			t.Errorf("execute #2 output: no PATCH line for %s;\ngot:\n%s", file, got)
+			continue
+		}
+		insertions := match[1]
+		if insertions != "0" {
+			t.Errorf("execute #2 output: %s reported %s insertions on the second run — idempotence violation;\ngot:\n%s", file, insertions, got)
+		}
+		// Also assert at least one skip — if the second run
+		// reports both zero insertions AND zero skips, that
+		// means the patch loop didn't see any patches at all,
+		// which is the failure mode pinned-count assertions
+		// would have caught.
+		if match[2] == "0" {
+			t.Errorf("execute #2 output: %s reported zero skips — patches not actually applied on the first run?\ngot:\n%s", file, got)
+		}
 	}
 }
 

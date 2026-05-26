@@ -67,6 +67,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -122,9 +123,17 @@ type planInput struct {
 
 // plan captures every filesystem change a single scaffold run would
 // apply. It is built up front (without writing anything) so -dry-run
-// can render the whole plan and so Execute can fail atomically — if
-// any planned change conflicts with the current state, none of them
-// are applied.
+// can render the whole plan and so Execute can validate every patch
+// anchor against the live filesystem BEFORE any write happens — if
+// any planned anchor is missing from its target file, validate()
+// returns an error and Execute aborts before the first CREATE, so a
+// failed run never leaves a partially-scaffolded tree on disk.
+//
+// Per-file writes are themselves atomic (writeAtomic uses a .tmp +
+// rename), so a process kill mid-write cannot leave a half-written
+// file either. The combination — pre-flight anchor validation +
+// per-file rename-atomicity — is what makes "rerun the scaffold from
+// scratch" safe at any failure boundary.
 type plan struct {
 	RepoRoot   string
 	CC         string // upper-cased ISO code
@@ -604,16 +613,78 @@ func (p *plan) planLocaleCatalogues() error {
 	return nil
 }
 
+// validate reads every patched file once and verifies that every
+// patch op either (a) has its anchor present in the file, OR (b) has
+// already had its SkipIfPresent marker land in the file (so the patch
+// is a no-op anyway). Anything else — a typo'd or missing anchor on
+// a patch that hasn't been applied yet — is a planning error and
+// surfaces here BEFORE Execute has touched the filesystem.
+//
+// Defense-in-depth: Execute's per-patch loop still does its own
+// anchor lookup as a final safety net, but in normal operation
+// validate's pass catches the same condition first so a half-written
+// tree (new files dropped, then a patch fails) is impossible.
+//
+// Errors are deterministic — files are processed in sorted-path
+// order so the same invalid plan always reports the same file first.
+func (p *plan) validate() error {
+	paths := make([]string, 0, len(p.Patches))
+	for path := range p.Patches {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		body, err := os.ReadFile(path) //nolint:gosec // path derived from the validated repo-root flag
+		if err != nil {
+			return fmt.Errorf("validate read %s: %w", path, err)
+		}
+		s := string(body)
+		for _, op := range p.Patches[path] {
+			if op.SkipIfPresent != "" && strings.Contains(s, op.SkipIfPresent) {
+				continue
+			}
+			if !strings.Contains(s, op.Anchor) {
+				rel, _ := filepath.Rel(p.RepoRoot, path)
+				return fmt.Errorf("validate %s: anchor not found: %q", rel, op.Anchor)
+			}
+		}
+	}
+	return nil
+}
+
 // Execute applies the plan to the filesystem. In -dry-run mode it
-// only prints the actions. Execution is atomic at the per-file level
-// (each file is written via a .tmp + rename) and the order of
-// operations is "new files first, then patches" so a partial run
-// always leaves the source tree in a state that compiles.
+// only prints the actions; no validate() pass runs because dry-run
+// is for previewing what the scaffold would do (the contributor may
+// be iterating on an in-progress branch where some anchors haven't
+// been added yet). Non-dry-run runs validate() first so any anchor
+// mismatch aborts before a single byte is written.
+//
+// Iteration order over NewFiles and Patches is stabilised by
+// sorting the path keys so the "CREATE …" / "PATCH …" log lines
+// come out in the same order across runs — useful for diffing
+// scaffold output across PRs and for snapshot tests.
+//
+// File contents are read for both dry-run and real runs so the
+// "(N insertion(s), M already-present skip(s))" counts accurately
+// reflect what Execute WOULD do — a dry-run against an
+// already-patched repo correctly reports zero insertions and
+// surfaces all skips, instead of pretending every patch would apply.
 func (p *plan) Execute(out io.Writer, dryRun bool) error {
+	if !dryRun {
+		if err := p.validate(); err != nil {
+			return err
+		}
+	}
 	buf := &strings.Builder{}
 	fmt.Fprintf(buf, "Scaffolding %s (%s) tax pack:\n\n", p.CC, p.Name)
 
-	for path, body := range p.NewFiles {
+	newPaths := make([]string, 0, len(p.NewFiles))
+	for path := range p.NewFiles {
+		newPaths = append(newPaths, path)
+	}
+	sort.Strings(newPaths)
+	for _, path := range newPaths {
+		body := p.NewFiles[path]
 		rel, _ := filepath.Rel(p.RepoRoot, path)
 		fmt.Fprintf(buf, "  CREATE  %s (%d bytes)\n", rel, len(body))
 		if dryRun {
@@ -624,34 +695,46 @@ func (p *plan) Execute(out io.Writer, dryRun bool) error {
 		}
 	}
 
-	for path, patches := range p.Patches {
+	patchPaths := make([]string, 0, len(p.Patches))
+	for path := range p.Patches {
+		patchPaths = append(patchPaths, path)
+	}
+	sort.Strings(patchPaths)
+	for _, path := range patchPaths {
+		patches := p.Patches[path]
 		rel, _ := filepath.Rel(p.RepoRoot, path)
 		applied := 0
 		skipped := 0
-		var body []byte
-		if !dryRun {
-			b, err := os.ReadFile(path) //nolint:gosec // path derived from the validated repo-root flag
-			if err != nil {
-				return fmt.Errorf("read %s: %w", path, err)
-			}
-			body = b
+		// Read the file body in BOTH dry-run and real mode so the
+		// SkipIfPresent check fires consistently — the count line
+		// must match between a dry-run preview and the real run for
+		// the preview to be useful (see the patchOp doc above).
+		body, err := os.ReadFile(path) //nolint:gosec // path derived from the validated repo-root flag
+		if err != nil {
+			return fmt.Errorf("read %s: %w", path, err)
 		}
 		for _, op := range patches {
-			if op.SkipIfPresent != "" && body != nil && strings.Contains(string(body), op.SkipIfPresent) {
+			if op.SkipIfPresent != "" && strings.Contains(string(body), op.SkipIfPresent) {
 				skipped++
 				continue
 			}
-			if body != nil {
-				before, after, ok := strings.Cut(string(body), op.Anchor)
-				if !ok {
-					return fmt.Errorf("patch %s: anchor not found: %q", rel, op.Anchor)
-				}
-				body = []byte(before + op.Insertion + op.Anchor + after)
+			before, after, ok := strings.Cut(string(body), op.Anchor)
+			if !ok {
+				return fmt.Errorf("patch %s: anchor not found: %q", rel, op.Anchor)
 			}
+			body = []byte(before + op.Insertion + op.Anchor + after)
 			applied++
 		}
 		fmt.Fprintf(buf, "  PATCH   %s (%d insertion(s), %d already-present skip(s))\n", rel, applied, skipped)
 		if dryRun {
+			continue
+		}
+		// Skip the write entirely when every patch was a no-op so
+		// re-running the scaffold against an already-patched tree
+		// doesn't touch mtimes — downstream tools (make, file
+		// watchers, ETag-based caches) treat unchanged-mtime files
+		// as untouched and don't re-process them.
+		if applied == 0 {
 			continue
 		}
 		if err := writeAtomic(path, body); err != nil {
