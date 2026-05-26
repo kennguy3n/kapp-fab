@@ -63,6 +63,26 @@ var ErrInvalidSchema = errors.New("ktype: custom KType schema invalid")
 // Surfaces as HTTP 400.
 var ErrInvalidStatus = errors.New("ktype: invalid status")
 
+// ErrInvalidTransition is returned when a SetStatus / Upsert call
+// attempts a backward status transition (active → draft, archived →
+// active, archived → draft). The status lifecycle is forward-only:
+// draft → active → archived. Allowing a backward transition would
+// strand existing records (a draft KType cannot back records, so
+// flipping an `active` KType back to `draft` makes every record on
+// that schema fail `resolveForUpdate`). Surfaces as HTTP 409 from
+// the API so the UI can show "transition not allowed" without
+// retrying. Same-status transitions (active → active, etc.) are
+// allowed and are no-ops at the store level.
+var ErrInvalidTransition = errors.New("ktype: status transition not allowed (lifecycle is draft → active → archived)")
+
+// ErrDuplicateField is returned when a custom KType schema declares
+// two fields with the same name. The JSONB payload for a record can
+// only hold one key per name, so two specs with the same name would
+// cause non-deterministic validation (the second spec's type check
+// fires against the first spec's value). Surfaces as HTTP 400 with
+// a precise message naming the duplicate field.
+var ErrDuplicateField = errors.New("ktype: duplicate field name in custom KType")
+
 // SafeCustomFieldTypes is the closed set of field types a custom
 // KType may use. Matches the validator/ValidateData type switch
 // (string/number/boolean/date/enum/ref/text), plus email/phone/url
@@ -96,12 +116,51 @@ var customNamePattern = regexp.MustCompile(`^custom\.[a-z][a-z0-9_]*$`)
 // CustomStatus values: only 'active' rows back record creates, but
 // the row may live in 'draft' (editable in the builder, can't back
 // records) or 'archived' (frozen, existing records still readable
-// but no new ones).
+// but no new ones). The lifecycle is forward-only — see statusRank
+// and isForwardTransition for the enforcement of `draft → active →
+// archived`.
 const (
 	CustomStatusDraft    = "draft"
 	CustomStatusActive   = "active"
 	CustomStatusArchived = "archived"
 )
+
+// statusRank gives each lifecycle state a monotonic position so the
+// forward-only transition gate (draft → active → archived) can be
+// expressed as a simple `rank(new) >= rank(old)` check. Returns
+// (-1, false) for unknown values so callers can distinguish a typo
+// from a legitimate same-rank no-op.
+func statusRank(s string) (int, bool) {
+	switch s {
+	case CustomStatusDraft:
+		return 0, true
+	case CustomStatusActive:
+		return 1, true
+	case CustomStatusArchived:
+		return 2, true
+	default:
+		return -1, false
+	}
+}
+
+// isForwardTransition reports whether moving from `from` to `to` is
+// allowed by the lifecycle. Same-status transitions are allowed
+// (idempotent no-op at the store layer). Unknown source / target
+// status values are rejected as not-forward so callers surface
+// ErrInvalidStatus rather than silently accepting them.
+func isForwardTransition(from, to string) bool {
+	if from == "" {
+		// First write of a row — any valid status is acceptable.
+		_, ok := statusRank(to)
+		return ok
+	}
+	rFrom, okFrom := statusRank(from)
+	rTo, okTo := statusRank(to)
+	if !okFrom || !okTo {
+		return false
+	}
+	return rTo >= rFrom
+}
 
 // TenantKType is the persisted row for a tenant-authored KType.
 // Mirrors the tenant_ktypes table columns.
@@ -218,11 +277,23 @@ func (s *TenantStore) validateCustomSchema(schema json.RawMessage) error {
 	if len(parsed.Fields) > s.fieldLimit {
 		return fmt.Errorf("%w: %d fields exceeds limit of %d", ErrTooManyFields, len(parsed.Fields), s.fieldLimit)
 	}
+	// Duplicate field-name detection — the JSONB payload can only
+	// hold one key per name, so two specs with the same name would
+	// cause the second spec's type check to fire against the first
+	// spec's value (e.g. spec 1 says `foo: string`, spec 2 says
+	// `foo: number` → validator emits `foo: must be number` even
+	// when the user types a valid string). Reject up-front so the
+	// failure mode is the precise ErrDuplicateField message.
+	seenNames := make(map[string]bool, len(parsed.Fields))
 	for i := range parsed.Fields {
 		f := &parsed.Fields[i]
 		if f.Name == "" {
 			return fmt.Errorf("%w: field name required", ErrInvalidSchema)
 		}
+		if seenNames[f.Name] {
+			return fmt.Errorf("%w: %q", ErrDuplicateField, f.Name)
+		}
+		seenNames[f.Name] = true
 		if !SafeCustomFieldTypes[f.Type] {
 			return fmt.Errorf("%w: %q", ErrUnsupportedFieldType, f.Type)
 		}
@@ -290,6 +361,23 @@ func (s *TenantStore) Upsert(ctx context.Context, kt TenantKType) (*TenantKType,
 
 	var out TenantKType
 	err := dbutil.WithTenantTx(ctx, s.pool, kt.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// Read-then-write inside the same tx so the forward-only
+		// transition check sees the row's current status without a
+		// race against a concurrent SetStatus. SELECT FOR UPDATE
+		// holds a row-level lock for the rest of the tx.
+		var existingStatus string
+		err := tx.QueryRow(ctx,
+			`SELECT status FROM tenant_ktypes
+			  WHERE tenant_id = $1 AND name = $2 AND version = $3
+			  FOR UPDATE`,
+			kt.TenantID, kt.Name, kt.Version,
+		).Scan(&existingStatus)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("ktype: lock for upsert: %w", err)
+		}
+		if !isForwardTransition(existingStatus, kt.Status) {
+			return fmt.Errorf("%w: %s → %s on %s", ErrInvalidTransition, existingStatus, kt.Status, kt.Name)
+		}
 		return tx.QueryRow(ctx,
 			`INSERT INTO tenant_ktypes
 			    (tenant_id, name, version, title, description, schema, status, created_by)
@@ -307,6 +395,9 @@ func (s *TenantStore) Upsert(ctx context.Context, kt TenantKType) (*TenantKType,
 			&out.Schema, &out.Status, &out.CreatedAt, &out.UpdatedAt, &out.CreatedBy)
 	})
 	if err != nil {
+		if errors.Is(err, ErrInvalidTransition) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("ktype: upsert custom: %w", err)
 	}
 	return &out, nil
@@ -316,6 +407,13 @@ func (s *TenantStore) Upsert(ctx context.Context, kt TenantKType) (*TenantKType,
 // the tenant. Version 0 means "latest" — matches PGRegistry.Get
 // semantics so the record store can swap the lookup path
 // transparently for custom.* names.
+//
+// Get opens its own short-lived transaction via dbutil.WithTenantTx.
+// Use GetInTx when the caller already holds a tenant-scoped tx (for
+// example inside record.Update / record.Delete) so the lookup runs
+// on the existing connection instead of acquiring a second pooled
+// connection — important under high concurrency to avoid connection
+// pool pressure.
 func (s *TenantStore) Get(ctx context.Context, tenantID uuid.UUID, name string, version int) (*TenantKType, error) {
 	if tenantID == uuid.Nil {
 		return nil, errors.New("ktype: tenant id required")
@@ -325,24 +423,7 @@ func (s *TenantStore) Get(ctx context.Context, tenantID uuid.UUID, name string, 
 	}
 	var out TenantKType
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if version > 0 {
-			return tx.QueryRow(ctx,
-				`SELECT tenant_id, name, version, title, description, schema, status, created_at, updated_at, created_by
-				   FROM tenant_ktypes
-				  WHERE tenant_id = $1 AND name = $2 AND version = $3`,
-				tenantID, name, version,
-			).Scan(&out.TenantID, &out.Name, &out.Version, &out.Title, &out.Description,
-				&out.Schema, &out.Status, &out.CreatedAt, &out.UpdatedAt, &out.CreatedBy)
-		}
-		return tx.QueryRow(ctx,
-			`SELECT tenant_id, name, version, title, description, schema, status, created_at, updated_at, created_by
-			   FROM tenant_ktypes
-			  WHERE tenant_id = $1 AND name = $2
-			  ORDER BY version DESC
-			  LIMIT 1`,
-			tenantID, name,
-		).Scan(&out.TenantID, &out.Name, &out.Version, &out.Title, &out.Description,
-			&out.Schema, &out.Status, &out.CreatedAt, &out.UpdatedAt, &out.CreatedBy)
+		return s.scanGet(ctx, tx, tenantID, name, version, &out)
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -351,6 +432,64 @@ func (s *TenantStore) Get(ctx context.Context, tenantID uuid.UUID, name string, 
 		return nil, fmt.Errorf("ktype: get custom: %w", err)
 	}
 	return &out, nil
+}
+
+// GetInTx is the tx-aware variant of Get. It reuses the caller's
+// pgx.Tx (which must already have the tenant GUC set via
+// dbutil.SetTenantContext / WithTenantTx) so the lookup happens on
+// the same pooled connection as the outer transaction. This avoids
+// the nested-transaction footprint that would otherwise burn a
+// second pool connection per record.Update / record.Delete on a
+// custom KType.
+//
+// Callers must ensure the tx is bound to the same tenant as
+// tenantID — GetInTx does NOT re-set the tenant GUC because doing so
+// inside an existing transaction can interact badly with PostgreSQL's
+// SET LOCAL semantics under savepoints. RLS still enforces isolation
+// at the row level, so a mismatched tenantID can only ever return
+// ErrNotFound, never another tenant's data.
+func (s *TenantStore) GetInTx(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, name string, version int) (*TenantKType, error) {
+	if tx == nil {
+		return nil, errors.New("ktype: nil tx")
+	}
+	if tenantID == uuid.Nil {
+		return nil, errors.New("ktype: tenant id required")
+	}
+	if !IsValidCustomName(name) {
+		return nil, ErrInvalidCustomName
+	}
+	var out TenantKType
+	if err := s.scanGet(ctx, tx, tenantID, name, version, &out); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("ktype: get custom (in tx): %w", err)
+	}
+	return &out, nil
+}
+
+// scanGet is the shared SQL surface used by both Get and GetInTx so
+// the projection and ordering stay in lock-step across the two
+// entry points.
+func (s *TenantStore) scanGet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, name string, version int, out *TenantKType) error {
+	if version > 0 {
+		return tx.QueryRow(ctx,
+			`SELECT tenant_id, name, version, title, description, schema, status, created_at, updated_at, created_by
+			   FROM tenant_ktypes
+			  WHERE tenant_id = $1 AND name = $2 AND version = $3`,
+			tenantID, name, version,
+		).Scan(&out.TenantID, &out.Name, &out.Version, &out.Title, &out.Description,
+			&out.Schema, &out.Status, &out.CreatedAt, &out.UpdatedAt, &out.CreatedBy)
+	}
+	return tx.QueryRow(ctx,
+		`SELECT tenant_id, name, version, title, description, schema, status, created_at, updated_at, created_by
+		   FROM tenant_ktypes
+		  WHERE tenant_id = $1 AND name = $2
+		  ORDER BY version DESC
+		  LIMIT 1`,
+		tenantID, name,
+	).Scan(&out.TenantID, &out.Name, &out.Version, &out.Title, &out.Description,
+		&out.Schema, &out.Status, &out.CreatedAt, &out.UpdatedAt, &out.CreatedBy)
 }
 
 // List returns every custom KType for the tenant, ordered by name.
@@ -389,10 +528,19 @@ func (s *TenantStore) List(ctx context.Context, tenantID uuid.UUID) ([]TenantKTy
 	return out, nil
 }
 
-// SetStatus transitions the custom KType to the supplied status.
-// The DB CHECK constraint enforces the value set; this method only
-// validates that the transition target is one of the known
-// constants so a typo in the API doesn't reach SQL.
+// SetStatus transitions the custom KType to the supplied status,
+// enforcing the forward-only lifecycle (draft → active → archived).
+// Backward transitions (active → draft, archived → active, archived
+// → draft) are rejected with ErrInvalidTransition because they
+// would strand existing records: a `draft` KType fails
+// `resolveForUpdate` in the record store, so flipping an `active`
+// KType back to `draft` would make every record on that schema
+// immediately uneditable. Same-status transitions are allowed and
+// are idempotent no-ops (the row's updated_at still bumps).
+//
+// The read-then-write happens inside a single tx with SELECT FOR
+// UPDATE so a concurrent SetStatus / Upsert cannot race between the
+// transition check and the UPDATE.
 func (s *TenantStore) SetStatus(ctx context.Context, tenantID uuid.UUID, name string, version int, status string) error {
 	if tenantID == uuid.Nil {
 		return errors.New("ktype: tenant id required")
@@ -406,6 +554,22 @@ func (s *TenantStore) SetStatus(ctx context.Context, tenantID uuid.UUID, name st
 		return fmt.Errorf("%w: %q", ErrInvalidStatus, status)
 	}
 	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var existingStatus string
+		err := tx.QueryRow(ctx,
+			`SELECT status FROM tenant_ktypes
+			  WHERE tenant_id = $1 AND name = $2 AND version = $3
+			  FOR UPDATE`,
+			tenantID, name, version,
+		).Scan(&existingStatus)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("ktype: lock for set status: %w", err)
+		}
+		if !isForwardTransition(existingStatus, status) {
+			return fmt.Errorf("%w: %s → %s on %s", ErrInvalidTransition, existingStatus, status, name)
+		}
 		tag, err := tx.Exec(ctx,
 			`UPDATE tenant_ktypes
 			    SET status = $4, updated_at = NOW()
@@ -416,6 +580,12 @@ func (s *TenantStore) SetStatus(ctx context.Context, tenantID uuid.UUID, name st
 			return fmt.Errorf("ktype: set custom status: %w", err)
 		}
 		if tag.RowsAffected() == 0 {
+			// The FOR UPDATE above already confirmed the row
+			// exists, so a 0-row UPDATE here would indicate the
+			// row was deleted in the same tx — not possible
+			// without an explicit DELETE that we don't ship.
+			// Surface as ErrNotFound for symmetry with the
+			// pre-check.
 			return ErrNotFound
 		}
 		return nil

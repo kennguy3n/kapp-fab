@@ -120,9 +120,14 @@ func TestValidateCustomSchemaAcceptsSafeFieldTypes(t *testing.T) {
 // WithFieldLimit so the assertion is fast and obvious.
 func TestValidateCustomSchemaEnforcesFieldLimit(t *testing.T) {
 	s := NewTenantStore(nil, WithFieldLimit(3))
-	fields := make([]map[string]any, 0, 4)
-	for i := 0; i < 4; i++ {
-		fields = append(fields, map[string]any{"name": "f", "type": "string"})
+	// Use unique names so the field-limit check fires before the
+	// duplicate-name check; otherwise the 4-field schema would be
+	// rejected by ErrDuplicateField before reaching the cap.
+	fields := []map[string]any{
+		{"name": "f0", "type": "string"},
+		{"name": "f1", "type": "string"},
+		{"name": "f2", "type": "string"},
+		{"name": "f3", "type": "string"},
 	}
 	err := s.validateCustomSchema(schemaWith(fields))
 	if err == nil {
@@ -258,6 +263,116 @@ func TestGetAndSetStatusRejectMalformedNames(t *testing.T) {
 			err := s.SetStatus(t.Context(), tenantID, n, 1, CustomStatusActive)
 			if !errors.Is(err, ErrInvalidCustomName) {
 				t.Errorf("SetStatus(%q) returned %v, want ErrInvalidCustomName", n, err)
+			}
+		})
+	}
+}
+
+// TestValidateCustomSchemaRejectsDuplicateFieldNames pins the
+// duplicate-name guard. The JSONB record payload can only hold one
+// value per key, so two field specs that share a name would let the
+// second spec's type check fire against the first spec's value
+// (e.g. spec 1: foo as string, spec 2: foo as number → validator
+// emits "foo must be number" even when the user types "abc"). The
+// store rejects the schema up-front with ErrDuplicateField so the
+// builder UI shows a precise inline error pointing at the dup.
+func TestValidateCustomSchemaRejectsDuplicateFieldNames(t *testing.T) {
+	s := NewTenantStore(nil)
+	err := s.validateCustomSchema(schemaWith([]map[string]any{
+		{"name": "foo", "type": "string"},
+		{"name": "bar", "type": "number"},
+		{"name": "foo", "type": "number"}, // duplicate
+	}))
+	if !errors.Is(err, ErrDuplicateField) {
+		t.Fatalf("want ErrDuplicateField, got %v", err)
+	}
+	if !strings.Contains(err.Error(), `"foo"`) {
+		t.Fatalf("want error to name the duplicate field 'foo', got %v", err)
+	}
+
+	// Unique names still pass.
+	if err := s.validateCustomSchema(schemaWith([]map[string]any{
+		{"name": "foo", "type": "string"},
+		{"name": "bar", "type": "number"},
+	})); err != nil {
+		t.Fatalf("unique-names schema must pass, got %v", err)
+	}
+}
+
+// TestStatusRank pins the lifecycle ordering used by
+// isForwardTransition. draft < active < archived. Unknown values
+// return ok=false so callers can distinguish "typo" from a
+// legitimate same-rank no-op.
+func TestStatusRank(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+		ok   bool
+	}{
+		{CustomStatusDraft, 0, true},
+		{CustomStatusActive, 1, true},
+		{CustomStatusArchived, 2, true},
+		{"", -1, false},
+		{"deleted", -1, false},
+		{"DRAFT", -1, false},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			got, ok := statusRank(c.in)
+			if got != c.want || ok != c.ok {
+				t.Errorf("statusRank(%q) = (%d,%v), want (%d,%v)", c.in, got, ok, c.want, c.ok)
+			}
+		})
+	}
+}
+
+// TestIsForwardTransition pins the forward-only lifecycle gate. The
+// matrix below is the SOURCE OF TRUTH for what SetStatus / Upsert
+// will accept — any change here implies a UI change too (the
+// builder hides transitions that would be rejected by this gate).
+//
+// Particularly important rows:
+//   - active → active and archived → archived are ALLOWED so a
+//     re-save through the builder UI is idempotent.
+//   - active → draft is REJECTED because it would strand all
+//     existing records (resolveForUpdate refuses drafts).
+//   - archived → active is REJECTED so the "archive" UI action is
+//     irreversible from the user's perspective — un-archive
+//     intentionally requires a developer with DB access.
+//   - "" (empty / no current row) → any valid status is ALLOWED so
+//     a brand-new Upsert can land in draft/active/archived.
+//   - Unknown source or target rejects so a typo never silently
+//     succeeds.
+func TestIsForwardTransition(t *testing.T) {
+	cases := []struct {
+		from string
+		to   string
+		want bool
+	}{
+		{"", CustomStatusDraft, true},
+		{"", CustomStatusActive, true},
+		{"", CustomStatusArchived, true},
+		{"", "nonsense", false},
+
+		{CustomStatusDraft, CustomStatusDraft, true},
+		{CustomStatusDraft, CustomStatusActive, true},
+		{CustomStatusDraft, CustomStatusArchived, true},
+
+		{CustomStatusActive, CustomStatusDraft, false},
+		{CustomStatusActive, CustomStatusActive, true},
+		{CustomStatusActive, CustomStatusArchived, true},
+
+		{CustomStatusArchived, CustomStatusDraft, false},
+		{CustomStatusArchived, CustomStatusActive, false},
+		{CustomStatusArchived, CustomStatusArchived, true},
+
+		{"deleted", CustomStatusActive, false},
+		{CustomStatusActive, "deleted", false},
+	}
+	for _, c := range cases {
+		t.Run(c.from+"->"+c.to, func(t *testing.T) {
+			if got := isForwardTransition(c.from, c.to); got != c.want {
+				t.Errorf("isForwardTransition(%q,%q) = %v, want %v", c.from, c.to, got, c.want)
 			}
 		})
 	}

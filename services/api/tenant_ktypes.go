@@ -39,8 +39,15 @@ func (h *tenantKTypeHandlers) writeError(w http.ResponseWriter, r *http.Request,
 		errors.Is(err, ktype.ErrTooManyFields),
 		errors.Is(err, ktype.ErrUnsupportedFieldType),
 		errors.Is(err, ktype.ErrInvalidSchema),
-		errors.Is(err, ktype.ErrInvalidStatus):
+		errors.Is(err, ktype.ErrInvalidStatus),
+		errors.Is(err, ktype.ErrDuplicateField):
 		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, ktype.ErrInvalidTransition):
+		// 409 Conflict — the request is well-formed but the
+		// requested transition violates the row's current state.
+		// Matches the convention used by services/api/tenants.go
+		// for tenant.ErrInvalidTransition.
+		http.Error(w, err.Error(), http.StatusConflict)
 	default:
 		if h.logger != nil {
 			h.logger.ErrorContext(r.Context(), "tenant_ktypes: internal error", slog.String("err", err.Error()))

@@ -137,23 +137,54 @@ const (
 // `mode` (see ktypeResolveMode for the per-mode rules); platform
 // KTypes don't have the same lifecycle and bypass the status gate
 // entirely.
+//
+// This pool-based entry point opens its own tenant transaction for
+// the custom-KType branch. Call sites that already hold an outer
+// tx (record.Update, record.Delete) must use resolveKTypeInTx
+// instead so the lookup reuses the existing connection rather than
+// acquiring a second one from the pool — the nested form is the
+// performance hot path under load.
 func (s *PGStore) resolveKType(ctx context.Context, tenantID uuid.UUID, name string, version int, mode ktypeResolveMode) (*ktype.KType, error) {
 	if s.tenantKTypes != nil && ktype.IsCustomName(name) {
 		tkt, err := s.tenantKTypes.Get(ctx, tenantID, name, version)
 		if err != nil {
 			return nil, err
 		}
-		if err := checkCustomKTypeStatus(tkt, mode); err != nil {
-			return nil, err
-		}
-		return &ktype.KType{
-			Name:      tkt.Name,
-			Version:   tkt.Version,
-			Schema:    tkt.Schema,
-			CreatedAt: tkt.CreatedAt,
-		}, nil
+		return materializeCustomKType(tkt, mode)
 	}
 	return s.registry.Get(ctx, name, version)
+}
+
+// resolveKTypeInTx is the tx-aware variant of resolveKType. When
+// called inside an outer dbutil.WithTenantTx (Update / Delete) it
+// reuses the existing connection so the per-record overhead is one
+// pool connection regardless of whether the KType is platform-
+// supplied or tenant-authored. Platform-KType lookups bypass the tx
+// entirely because PGRegistry is an in-memory map — no DB I/O.
+func (s *PGStore) resolveKTypeInTx(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, name string, version int, mode ktypeResolveMode) (*ktype.KType, error) {
+	if s.tenantKTypes != nil && ktype.IsCustomName(name) {
+		tkt, err := s.tenantKTypes.GetInTx(ctx, tx, tenantID, name, version)
+		if err != nil {
+			return nil, err
+		}
+		return materializeCustomKType(tkt, mode)
+	}
+	return s.registry.Get(ctx, name, version)
+}
+
+// materializeCustomKType is the shared post-fetch step used by both
+// resolveKType and resolveKTypeInTx so the status gate and KType
+// projection stay in lock-step across the two entry points.
+func materializeCustomKType(tkt *ktype.TenantKType, mode ktypeResolveMode) (*ktype.KType, error) {
+	if err := checkCustomKTypeStatus(tkt, mode); err != nil {
+		return nil, err
+	}
+	return &ktype.KType{
+		Name:      tkt.Name,
+		Version:   tkt.Version,
+		Schema:    tkt.Schema,
+		CreatedAt: tkt.CreatedAt,
+	}, nil
 }
 
 // checkCustomKTypeStatus enforces the per-mode rules for a custom
@@ -794,11 +825,27 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 			return ErrVersionConflict
 		}
 
+		// Resolve the KType once, on the outer transaction's
+		// connection, and reuse it for decrypt + validate + encrypt.
+		// Doing both of the following — using resolveKTypeInTx (not
+		// the pool-based resolveKType) and decryptRecordWith (not
+		// the pool-based decryptRecord) — guarantees that the
+		// entire Update touches a single pooled connection even when
+		// the KType is tenant-authored. Without this, a custom-KType
+		// Update would acquire the outer tx's connection plus a
+		// nested one for the decrypt-time KType lookup AND a third
+		// nested one for the validate-time KType lookup, exhausting
+		// the connection pool under modest write concurrency.
+		kt, err := s.resolveKTypeInTx(ctx, tx, r.TenantID, existing.KType, existing.KTypeVersion, resolveForUpdate)
+		if err != nil {
+			return err
+		}
+
 		// Decrypt existing.Data before merging so the plaintext patch
 		// in r.Data is shallow-merged onto plaintext, not onto ciphertext.
 		// Without this the encrypted fields would be overwritten with
 		// whatever ciphertext survives the merge and become unreadable.
-		existingPlain, err := s.decryptRecord(ctx, &existing)
+		existingPlain, err := s.decryptRecordWith(&existing, kt)
 		if err != nil {
 			return fmt.Errorf("record: decrypt existing: %w", err)
 		}
@@ -808,10 +855,6 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 			return fmt.Errorf("record: merge: %w", err)
 		}
 
-		kt, err := s.resolveKType(ctx, r.TenantID, existing.KType, existing.KTypeVersion, resolveForUpdate)
-		if err != nil {
-			return err
-		}
 		if err := ktype.ValidateData(kt.Schema, merged); err != nil {
 			return err
 		}
@@ -922,7 +965,15 @@ func (s *PGStore) Delete(ctx context.Context, tenantID, id, actorID uuid.UUID) e
 		// Soft delete does not touch the data column, so existing and
 		// deleted carry the same ciphertext; decrypt once and reuse for
 		// both the audit envelope and the event payload.
-		existingPlain, err := s.decryptRecord(ctx, &existing)
+		//
+		// resolveKTypeInTx + decryptRecordWith keep the entire Delete
+		// on the outer transaction's pool connection — see the
+		// matching note in Update for the rationale.
+		kt, err := s.resolveKTypeInTx(ctx, tx, tenantID, existing.KType, existing.KTypeVersion, resolveForRead)
+		if err != nil {
+			return fmt.Errorf("record: resolve ktype for delete: %w", err)
+		}
+		existingPlain, err := s.decryptRecordWith(&existing, kt)
 		if err != nil {
 			return fmt.Errorf("record: decrypt existing: %w", err)
 		}
@@ -1034,6 +1085,13 @@ func (s *PGStore) encryptFields(tenantID uuid.UUID, schema, data json.RawMessage
 // caller substitutes the returned payload into the outgoing record.
 // Runs in resolveForRead mode so historical records on draft /
 // archived custom KTypes remain decryptable for the caller.
+//
+// This pool-based entry point opens its own tenant transaction for
+// the custom-KType lookup. Call sites that already hold an outer
+// tx (record.Update, record.Delete) AND have already resolved the
+// KType for their own validation work must call decryptRecordWith
+// instead so the per-record overhead is one pool connection rather
+// than three (outer tx + KType lookup + decryption KType re-lookup).
 func (s *PGStore) decryptRecord(ctx context.Context, r *KRecord) (json.RawMessage, error) {
 	if s.encryptor == nil {
 		return r.Data, nil
@@ -1041,6 +1099,20 @@ func (s *PGStore) decryptRecord(ctx context.Context, r *KRecord) (json.RawMessag
 	kt, err := s.resolveKType(ctx, r.TenantID, r.KType, r.KTypeVersion, resolveForRead)
 	if err != nil {
 		return nil, err
+	}
+	return s.decryptRecordWith(r, kt)
+}
+
+// decryptRecordWith is the pre-resolved variant of decryptRecord. The
+// caller supplies the kt for r's (kind, version) — typically because
+// they already needed it for ValidateData or encryptFields and want
+// to avoid a second tenant_ktypes lookup. Beyond eliminating the
+// lookup, this also lets the outer transaction's connection do all
+// the work, removing the nested WithTenantTx footprint observed on
+// the Update / Delete paths under load.
+func (s *PGStore) decryptRecordWith(r *KRecord, kt *ktype.KType) (json.RawMessage, error) {
+	if s.encryptor == nil {
+		return r.Data, nil
 	}
 	fields, err := encryptedFieldNames(kt.Schema)
 	if err != nil {

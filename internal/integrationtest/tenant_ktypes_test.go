@@ -231,4 +231,79 @@ func TestTenantKTypeBuilderEndToEnd(t *testing.T) {
 	if !errors.Is(err, ktype.ErrTooManyFields) {
 		t.Fatalf("expected ErrTooManyFields, got %v", err)
 	}
+
+	// Forward-only lifecycle: archived → active is rejected so a
+	// previously-archived schema cannot be silently un-archived
+	// from the builder UI. The KType used in steps 1–4 is now
+	// `archived`; both SetStatus and Upsert must refuse to move
+	// it backward.
+	if err := store.SetStatus(ctx, tn.ID, "custom.asset_register", 1, ktype.CustomStatusActive); !errors.Is(err, ktype.ErrInvalidTransition) {
+		t.Fatalf("archived → active must return ErrInvalidTransition, got %v", err)
+	}
+	if err := store.SetStatus(ctx, tn.ID, "custom.asset_register", 1, ktype.CustomStatusDraft); !errors.Is(err, ktype.ErrInvalidTransition) {
+		t.Fatalf("archived → draft must return ErrInvalidTransition, got %v", err)
+	}
+	_, err = store.Upsert(ctx, ktype.TenantKType{
+		TenantID:  tn.ID,
+		Name:      "custom.asset_register",
+		Version:   1,
+		Title:     "Asset Register (sneak-active)",
+		Schema:    schema,
+		Status:    ktype.CustomStatusActive,
+		CreatedBy: actor,
+	})
+	if !errors.Is(err, ktype.ErrInvalidTransition) {
+		t.Fatalf("archived → active via Upsert must return ErrInvalidTransition, got %v", err)
+	}
+
+	// active → draft is rejected on a fresh KType too, so a
+	// builder user who toggles an active KType "back to draft"
+	// hits a precise error instead of stranding their records.
+	if _, err := store.Upsert(ctx, ktype.TenantKType{
+		TenantID: tn.ID, Name: "custom.lifecycle_probe", Version: 1,
+		Title: "Lifecycle probe", Schema: schemaWithOneField(),
+		CreatedBy: actor,
+	}); err != nil {
+		t.Fatalf("seed lifecycle_probe: %v", err)
+	}
+	if err := store.SetStatus(ctx, tn.ID, "custom.lifecycle_probe", 1, ktype.CustomStatusActive); err != nil {
+		t.Fatalf("promote lifecycle_probe to active: %v", err)
+	}
+	if err := store.SetStatus(ctx, tn.ID, "custom.lifecycle_probe", 1, ktype.CustomStatusDraft); !errors.Is(err, ktype.ErrInvalidTransition) {
+		t.Fatalf("active → draft must return ErrInvalidTransition, got %v", err)
+	}
+
+	// Same-status no-ops are allowed (idempotent re-save).
+	if err := store.SetStatus(ctx, tn.ID, "custom.lifecycle_probe", 1, ktype.CustomStatusActive); err != nil {
+		t.Fatalf("active → active must be a no-op, got %v", err)
+	}
+
+	// Duplicate field names are rejected with ErrDuplicateField
+	// before the row is written.
+	dupSchema, _ := json.Marshal(map[string]any{
+		"name": "custom.dups", "version": 1,
+		"fields": []map[string]any{
+			{"name": "foo", "type": "string"},
+			{"name": "foo", "type": "number"},
+		},
+	})
+	_, err = store.Upsert(ctx, ktype.TenantKType{
+		TenantID: tn.ID, Name: "custom.dups", Version: 1,
+		Title: "Has duplicates", Schema: dupSchema, CreatedBy: actor,
+	})
+	if !errors.Is(err, ktype.ErrDuplicateField) {
+		t.Fatalf("duplicate field names must return ErrDuplicateField, got %v", err)
+	}
+}
+
+// schemaWithOneField is a tiny helper used by the lifecycle-probe
+// assertion below — a valid one-field schema in custom.<slug>
+// shape, marshalled to bytes the way the builder UI would send it.
+func schemaWithOneField() json.RawMessage {
+	body := map[string]any{
+		"name": "custom.lifecycle_probe", "version": 1,
+		"fields": []map[string]any{{"name": "f", "type": "string"}},
+	}
+	b, _ := json.Marshal(body)
+	return b
 }

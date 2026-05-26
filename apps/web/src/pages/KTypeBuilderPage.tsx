@@ -43,12 +43,56 @@ const SAFE_TYPES: { value: string; label: string; help?: string }[] = [
   { value: "url", label: "URL" },
 ];
 
-function emptyField(): FieldSpec {
-  return { name: "", type: "string" };
+// FieldRow couples a FieldSpec with a row-local React identity so
+// the field list can stay reorderable without using the array
+// index as a key. React keys must be stable across renders for
+// each conceptual row; using `i` would force every row above the
+// move to remount, dropping focus inside <input> and tearing any
+// transient component state (e.g. a half-typed enum value). The
+// rowID is allocated when the row is created (Add field, loadInto,
+// reset) and survives reorders.
+type FieldRow = { spec: FieldSpec; rowID: string };
+
+function emptyFieldRow(): FieldRow {
+  return { spec: { name: "", type: "string" }, rowID: newRowID() };
+}
+
+function toFieldRows(fields: FieldSpec[]): FieldRow[] {
+  return fields.map((f) => ({ spec: f, rowID: newRowID() }));
+}
+
+function newRowID(): string {
+  // crypto.randomUUID is available in every modern evergreen
+  // browser the rest of the app targets (we already use it
+  // elsewhere in apps/web). The fallback is a defence-in-depth
+  // measure for non-secure contexts (e.g. some test environments)
+  // — collisions across a single editing session are astronomically
+  // unlikely with 26+ random digits.
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `row-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function isCustomName(name: string): boolean {
   return /^custom\.[a-z][a-z0-9_]*$/.test(name);
+}
+
+// canTransitionStatus pins the same forward-only lifecycle gate the
+// backend ktype.SetStatus / Upsert enforce. Keeping it in lock-step
+// here is what lets the builder UI hide buttons that would surface
+// a 409 instead of disabling them after the click. See
+// internal/ktype/tenant_store.go#isForwardTransition.
+function canTransitionStatus(
+  from: TenantKTypeStatus,
+  to: TenantKTypeStatus,
+): boolean {
+  const rank: Record<TenantKTypeStatus, number> = {
+    draft: 0,
+    active: 1,
+    archived: 2,
+  };
+  return rank[to] >= rank[from];
 }
 
 export function KTypeBuilderPage() {
@@ -77,8 +121,28 @@ export function KTypeBuilderPage() {
   const [name, setName] = useState("custom.");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [fields, setFields] = useState<FieldSpec[]>([emptyField()]);
+  // The KType version of the row currently loaded in the editor. A
+  // freshly-reset editor defaults to 1; loadInto pulls the loaded
+  // row's version so re-saving from an existing record updates the
+  // correct version in tenant_ktypes rather than silently writing
+  // back into v1 and stranding any v2+ rows that may have been
+  // shipped by a developer-authored migration.
+  const [version, setVersion] = useState<number>(1);
+  const [rows, setRows] = useState<FieldRow[]>(() => [emptyFieldRow()]);
   const [status, setLocalStatus] = useState<TenantKTypeStatus>("draft");
+  // The loaded row's status, used to gate which lifecycle
+  // transition buttons the sidebar offers. "" means "no row
+  // loaded yet" (i.e. we're authoring a brand-new KType) so the
+  // "Status on save" picker shows every option.
+  const [loadedStatus, setLoadedStatus] = useState<TenantKTypeStatus | "">("");
+
+  // FieldSpec[] is the wire-shape the API expects; rows hold extra
+  // React identity. Derive once per render so downstream readers
+  // (preview memo, validation memo) don't re-pull rowIDs out.
+  const fields = useMemo<FieldSpec[]>(
+    () => rows.map((r) => r.spec),
+    [rows],
+  );
 
   const items = list.data?.items ?? [];
   const fieldLimit = list.data?.field_limit ?? 50;
@@ -87,14 +151,19 @@ export function KTypeBuilderPage() {
   // the API expects, so the user sees exactly what they're about
   // to POST. The mock store / openapi-typescript can validate
   // against this shape without an extra schema layer.
+  //
+  // Both the schema's `version` and the top-level `version` track
+  // the editor-state `version` so re-saving an existing custom
+  // KType writes back into the row the user loaded instead of
+  // silently targeting v1.
   const preview = useMemo<UpsertTenantKTypeInput>(() => {
     const schema: KTypeSchema = {
       name,
-      version: 1,
+      version,
       fields,
     };
-    return { name, title, description, schema, status };
-  }, [name, title, description, fields, status]);
+    return { name, title, description, schema, status, version };
+  }, [name, title, description, fields, status, version]);
 
   const validationErrors = useMemo(() => {
     const errs: string[] = [];
@@ -106,8 +175,16 @@ export function KTypeBuilderPage() {
     if (fields.length === 0) errs.push("Add at least one field");
     if (fields.length > fieldLimit)
       errs.push(`Maximum ${fieldLimit} fields per custom KType`);
+    // Duplicate field-name guard — mirrors the backend
+    // ErrDuplicateField check in validateCustomSchema. Surfacing
+    // here turns a confusing 400-with-server-error into a precise
+    // inline error pointing at the duplicated slot.
+    const seen = new Set<string>();
     fields.forEach((f, i) => {
       if (!f.name.trim()) errs.push(`Field #${i + 1}: name required`);
+      else if (seen.has(f.name))
+        errs.push(`Field "${f.name}" is duplicated`);
+      else seen.add(f.name);
       if (
         f.type === "enum" &&
         (!f.values || f.values.filter((v) => v.trim()).length === 0)
@@ -116,41 +193,52 @@ export function KTypeBuilderPage() {
       if (f.type === "ref" && !(f.ref || f.ktype))
         errs.push(`Field "${f.name || `#${i + 1}`}": ref needs target KType`);
     });
+    // Forward-only lifecycle guard — mirrors the backend
+    // ErrInvalidTransition check. Surfaced inline so the user
+    // sees the rejection before clicking Save.
+    if (loadedStatus && !canTransitionStatus(loadedStatus, status))
+      errs.push(
+        `Cannot move ${loadedStatus} → ${status}: status lifecycle is forward-only (draft → active → archived)`,
+      );
     return errs;
-  }, [name, title, fields, fieldLimit]);
+  }, [name, title, fields, fieldLimit, loadedStatus, status]);
 
   const canSave = validationErrors.length === 0 && !upsert.isPending;
 
   function moveField(i: number, dir: -1 | 1) {
     const j = i + dir;
-    if (j < 0 || j >= fields.length) return;
-    const next = [...fields];
+    if (j < 0 || j >= rows.length) return;
+    const next = [...rows];
     const tmp = next[i];
     next[i] = next[j];
     next[j] = tmp;
-    setFields(next);
+    setRows(next);
   }
 
   function updateField(i: number, patch: Partial<FieldSpec>) {
-    const next = [...fields];
-    next[i] = { ...next[i], ...patch };
-    setFields(next);
+    const next = [...rows];
+    next[i] = { ...next[i], spec: { ...next[i].spec, ...patch } };
+    setRows(next);
   }
 
   function loadInto(kt: TenantKType) {
     setName(kt.name);
     setTitle(kt.title);
     setDescription(kt.description);
-    setFields(kt.schema.fields ?? []);
+    setVersion(kt.version);
+    setRows(toFieldRows(kt.schema.fields ?? []));
     setLocalStatus(kt.status);
+    setLoadedStatus(kt.status);
   }
 
   function reset() {
     setName("custom.");
     setTitle("");
     setDescription("");
-    setFields([emptyField()]);
+    setVersion(1);
+    setRows([emptyFieldRow()]);
     setLocalStatus("draft");
+    setLoadedStatus("");
   }
 
   function submit(e: React.FormEvent) {
@@ -232,7 +320,19 @@ export function KTypeBuilderPage() {
                 </div>
                 <div style={{ marginTop: 4, display: "flex", gap: 4, flexWrap: "wrap" }}>
                   {(["draft", "active", "archived"] as TenantKTypeStatus[])
-                    .filter((s) => s !== it.status)
+                    .filter(
+                      (s) =>
+                        s !== it.status &&
+                        // Only offer forward transitions — see
+                        // canTransitionStatus for the matrix that
+                        // matches the backend’s ErrInvalidTransition
+                        // gate. Hiding the buttons (rather than
+                        // disabling them) keeps the sidebar quiet
+                        // for archived rows, which otherwise advertise
+                        // “→ draft” and “→ active” only to surface 409
+                        // on click.
+                        canTransitionStatus(it.status, s),
+                    )
                     .map((s) => (
                       <button
                         key={s}
@@ -296,20 +396,22 @@ export function KTypeBuilderPage() {
             <legend style={{ fontSize: 13 }}>
               Fields ({fields.length} / {fieldLimit})
             </legend>
-            {fields.map((f, i) => (
+            {rows.map((r, i) => (
               <FieldEditor
-                key={i}
-                field={f}
+                key={r.rowID}
+                field={r.spec}
                 onChange={(patch) => updateField(i, patch)}
                 onMoveUp={() => moveField(i, -1)}
                 onMoveDown={() => moveField(i, 1)}
-                onRemove={() => setFields(fields.filter((_, j) => j !== i))}
+                onRemove={() =>
+                  setRows(rows.filter((_, j) => j !== i))
+                }
               />
             ))}
             <button
               type="button"
-              onClick={() => setFields([...fields, emptyField()])}
-              disabled={fields.length >= fieldLimit}
+              onClick={() => setRows([...rows, emptyFieldRow()])}
+              disabled={rows.length >= fieldLimit}
               style={{ marginTop: 8 }}
             >
               + Add field
@@ -325,9 +427,23 @@ export function KTypeBuilderPage() {
               }
               style={{ padding: 6 }}
             >
-              <option value="draft">draft (editable, no records yet)</option>
-              <option value="active">active (back record creates)</option>
-              <option value="archived">archived (frozen)</option>
+              {/* Only show statuses the loaded row can transition
+                  to (or every status when authoring a brand-new
+                  KType). Mirrors the backend lifecycle gate. */}
+              {(["draft", "active", "archived"] as TenantKTypeStatus[])
+                .filter(
+                  (s) =>
+                    !loadedStatus || canTransitionStatus(loadedStatus, s),
+                )
+                .map((s) => (
+                  <option key={s} value={s}>
+                    {s === "draft"
+                      ? "draft (editable, no records yet)"
+                      : s === "active"
+                        ? "active (back record creates)"
+                        : "archived (frozen)"}
+                  </option>
+                ))}
             </select>
           </label>
 
