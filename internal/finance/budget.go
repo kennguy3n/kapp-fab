@@ -110,17 +110,26 @@ type BudgetLine struct {
 
 // VarianceRow is one row of the budget-vs-actual report. AccountCode
 // + CostCenter identify the budget line; Period is the calendar
-// month label ("2025-01") or "YTD" for the period total.
+// month label ("2025-01") or "YTD" for the period total. AccountType
+// carries the chart-of-accounts classification ("asset" / "liability"
+// / "equity" / "revenue" / "expense") so renderers can pick colour
+// and "exceeded plan = good/bad" semantics without re-deriving the
+// debit-vs-credit normal — the backend has already sign-normalised
+// the Actual / Variance amounts so that positive = exceeded plan
+// for every account type, but whether exceeding plan is desirable
+// only the account type can answer (over-earning revenue is good;
+// over-spending an expense is bad).
 type VarianceRow struct {
-	BudgetID     uuid.UUID       `json:"budget_id"`
-	AccountCode  string          `json:"account_code"`
-	AccountName  string          `json:"account_name,omitempty"`
-	CostCenter   string          `json:"cost_center,omitempty"`
-	Period       string          `json:"period"`
-	Budgeted     decimal.Decimal `json:"budgeted"`
-	Actual       decimal.Decimal `json:"actual"`
-	Variance     decimal.Decimal `json:"variance"`
-	VariancePct  decimal.Decimal `json:"variance_pct"`
+	BudgetID    uuid.UUID       `json:"budget_id"`
+	AccountCode string          `json:"account_code"`
+	AccountName string          `json:"account_name,omitempty"`
+	AccountType string          `json:"account_type,omitempty"`
+	CostCenter  string          `json:"cost_center,omitempty"`
+	Period      string          `json:"period"`
+	Budgeted    decimal.Decimal `json:"budgeted"`
+	Actual      decimal.Decimal `json:"actual"`
+	Variance    decimal.Decimal `json:"variance"`
+	VariancePct decimal.Decimal `json:"variance_pct"`
 }
 
 // VarianceReport is the budget-vs-actual rollup over a period.
@@ -676,6 +685,7 @@ func (s *BudgetStore) BudgetVsActual(ctx context.Context, tenantID uuid.UUID, q 
 			report.Rows = append(report.Rows, VarianceRow{
 				BudgetID:    q.BudgetID,
 				AccountCode: line.AccountCode,
+				AccountType: accountType,
 				CostCenter:  ccLabel,
 				Period:      periodLabel,
 				Budgeted:    budgeted,

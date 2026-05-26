@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   Budget,
   BudgetLine,
+  BudgetVarianceAccountType,
   BudgetVarianceReport,
   BudgetVarianceRow,
   CreateBudgetInput,
@@ -500,6 +501,57 @@ function VarianceTable({ report }: { report: BudgetVarianceReport }) {
   );
 }
 
+// Account types whose "exceeded plan" reading is *favourable* (the
+// backend has already sign-flipped the variance so positive = actual
+// exceeded plan for every account type — but whether exceeding plan
+// is a good or bad outcome depends on whether the account is
+// credit-normal). Revenue, liability, and equity all sit on the
+// credit side and over-shooting plan on those is favourable
+// (over-earning revenue, building reserves). Asset/expense are
+// debit-normal, so positive variance means overspend / overdraw and
+// is unfavourable.
+const FAVOURABLE_ON_POSITIVE = new Set([
+  "revenue",
+  "liability",
+  "equity",
+]);
+
+const COLOUR_UNFAVOURABLE = "#dc2626";
+const COLOUR_FAVOURABLE = "#16a34a";
+const COLOUR_NEUTRAL = "#6b7280";
+
+function varianceColour(
+  variance: number,
+  accountType: BudgetVarianceAccountType | undefined,
+): string {
+  if (variance === 0) return COLOUR_NEUTRAL;
+  const favourableOnPositive =
+    accountType !== undefined && FAVOURABLE_ON_POSITIVE.has(accountType);
+  const positive = variance > 0;
+  const favourable = positive ? favourableOnPositive : !favourableOnPositive;
+  return favourable ? COLOUR_FAVOURABLE : COLOUR_UNFAVOURABLE;
+}
+
+// monthRange translates a "YYYY-MM" period label into the
+// inclusive UTC start/end of that calendar month, formatted as
+// RFC3339 strings the JournalEntriesPage filter expects. Returns
+// nulls if the period label is not a recognised YYYY-MM shape — in
+// that case the drill-down link omits the date filter rather than
+// emitting malformed query parameters.
+function monthRange(period: string): { from: string; to: string } | null {
+  const m = /^(\d{4})-(\d{2})$/.exec(period);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]); // 1-based
+  if (!Number.isFinite(year) || !Number.isFinite(month)) return null;
+  if (month < 1 || month > 12) return null;
+  const from = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
+  // Last day of month at 23:59:59 UTC: day=0 of the next month
+  // rolls back to the previous month's final day.
+  const to = new Date(Date.UTC(year, month, 0, 23, 59, 59));
+  return { from: from.toISOString(), to: to.toISOString() };
+}
+
 function VarianceRowRender({
   row,
   maxAbs,
@@ -509,15 +561,22 @@ function VarianceRowRender({
 }) {
   const variance = Number(row.variance) || 0;
   const pct = Number(row.variance_pct) || 0;
-  const positive = variance >= 0;
   const widthPct = Math.min(100, (Math.abs(variance) / maxAbs) * 100);
-  const colour = positive ? "#dc2626" : "#16a34a";
+  const colour = varianceColour(variance, row.account_type);
   // Drill-down link: opens the journal entries page filtered to the
-  // account_code and period of this row so the user can see the
-  // underlying postings without leaving the budget context.
-  const periodHref = `/finance/journal-entries?account=${encodeURIComponent(
-    row.account_code,
-  )}&period=${encodeURIComponent(row.period)}`;
+  // account_code and the calendar-month window of this variance row
+  // so the user can see the underlying postings without leaving the
+  // budget context. The JournalEntriesPage reads `account_code`,
+  // `from`, and `to` from the query string and forwards them to
+  // GET /finance/journal-entries.
+  const range = monthRange(row.period);
+  const qs = new URLSearchParams();
+  qs.set("account_code", row.account_code);
+  if (range) {
+    qs.set("from", range.from);
+    qs.set("to", range.to);
+  }
+  const periodHref = `/finance/journal?${qs.toString()}`;
   return (
     <tr style={{ textAlign: "right" }}>
       <td style={{ textAlign: "left" }}>{row.account_code}</td>

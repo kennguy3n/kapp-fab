@@ -589,7 +589,15 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	agents.RegisterCRMTools(executor)
 	agents.RegisterProjectTools(executor)
 	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster, paymentPoster)
-	agents.RegisterBudgetTools(executor, finance.NewBudgetStore(pool))
+	// Phase N5 — single BudgetStore instance shared between the
+	// agent-tool surface and the HTTP handlers below. The store is
+	// stateless (it just composes the pool + a clock), so two
+	// instances would behave identically — but reusing the same
+	// pointer makes the dependency graph explicit and keeps both
+	// surfaces pinned to the same clock if a future override is
+	// introduced.
+	budgetStore := finance.NewBudgetStore(pool)
+	agents.RegisterBudgetTools(executor, budgetStore)
 	agents.RegisterInventoryTools(executor, inventoryStore)
 	agents.RegisterInventoryReorderTool(executor, inventory.NewReorderHandler(recordStore, inventoryStore))
 	agents.RegisterHRTools(executor, hrStore)
@@ -687,12 +695,9 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	aph := &approvalsHandlers{engine: workflowEngine, store: recordStore}
 	auh := &auditHandlers{pool: pool}
 	finh := &financeHandlers{store: ledgerStore, poster: invoicePoster, payments: paymentPoster}
-	// Phase N5 — budget HTTP surface. The BudgetStore here is the
-	// SAME instance wired into the agent tools above (a fresh
-	// construction would behave identically because the store
-	// holds only the pool + clock, but reusing it keeps the
-	// dependency graph honest in a single deps_build pass).
-	budh := &budgetHandlers{store: finance.NewBudgetStore(pool)}
+	// Phase N5 — budget HTTP surface; reuses the same BudgetStore
+	// instance allocated above for the agent-tool registry.
+	budh := &budgetHandlers{store: budgetStore}
 	invh := &inventoryHandlers{store: inventoryStore}
 	oh := &openAPIHandler{registry: ktypeRegistry}
 	fileh := &filesHandlers{store: filesStore, meter: meteringBuffer}

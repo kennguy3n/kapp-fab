@@ -808,12 +808,14 @@ export class ApiClient {
     to?: string;
     source_ktype?: string;
     source_id?: string;
+    account_code?: string;
   }): Promise<JournalEntry[]> {
     const qs = new URLSearchParams();
     if (params?.from) qs.set("from", params.from);
     if (params?.to) qs.set("to", params.to);
     if (params?.source_ktype) qs.set("source_ktype", params.source_ktype);
     if (params?.source_id) qs.set("source_id", params.source_id);
+    if (params?.account_code) qs.set("account_code", params.account_code);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     return this.request(`/finance/journal-entries${suffix}`);
   }
@@ -2339,9 +2341,37 @@ export interface BudgetLineInput {
   months: string[];
 }
 
+/**
+ * Chart-of-accounts classification of the variance row's account.
+ * Mirrors the `account_type` column on `accounts` and the backend's
+ * `VarianceRow.account_type` JSON field. Renderers use this to pick
+ * "exceeded plan = good / bad" colour semantics:
+ *
+ *   - debit-normal (asset / expense): positive variance means
+ *     actual exceeded plan, which is typically *bad* (overspend).
+ *   - credit-normal (liability / equity / revenue): positive
+ *     variance means actual exceeded plan, which is typically *good*
+ *     (over-earning revenue, over-collecting AP/equity).
+ *
+ * The backend has already sign-normalised the Actual / Variance
+ * amounts so that positive = exceeded plan for every account type;
+ * the client uses `account_type` only to decide colour, not to
+ * re-derive the sign.
+ */
+export type BudgetVarianceAccountType =
+  | "asset"
+  | "liability"
+  | "equity"
+  | "revenue"
+  | "expense"
+  | "";
+
 export interface BudgetVarianceRow {
   budget_id: string;
   account_code: string;
+  /** Optional — only emitted by the backend when the account
+   * resolves to a known account_type at report time. */
+  account_type?: BudgetVarianceAccountType;
   cost_center?: string;
   period: string;
   budgeted: string;
