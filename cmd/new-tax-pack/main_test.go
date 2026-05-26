@@ -447,3 +447,107 @@ func redirectStdout(t *testing.T, buf *bytes.Buffer) *bytes.Buffer {
 	t.Helper()
 	return buf
 }
+
+// TestValidateRejectsNonUniqueAnchor pins the load-bearing patchOp
+// uniqueness claim. strings.Cut inserts at the FIRST occurrence, so a
+// duplicate anchor would silently misplace the insertion; the
+// patchOp doc says this is forbidden and validate() enforces it.
+func TestValidateRejectsNonUniqueAnchor(t *testing.T) {
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "dup.txt")
+	// Two occurrences of the anchor in the file.
+	if err := os.WriteFile(target, []byte("ANCHOR\n...\nANCHOR\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &plan{
+		RepoRoot: tmp,
+		Patches: map[string][]patchOp{
+			target: {{Anchor: "ANCHOR", Insertion: "X\n"}},
+		},
+	}
+	err := p.validate()
+	if err == nil {
+		t.Fatal("validate(): want error for non-unique anchor, got nil")
+	}
+	if !strings.Contains(err.Error(), "non-unique") {
+		t.Fatalf("validate() error = %q; want 'non-unique' marker", err.Error())
+	}
+}
+
+// TestValidateRejectsMissingFile pins the planner-invariant guard:
+// validate must surface a clear "planner queued patch for non-existent
+// file" diagnostic when a future planner forgets its own os.Stat
+// check, instead of leaking ENOENT through os.ReadFile.
+func TestValidateRejectsMissingFile(t *testing.T) {
+	tmp := t.TempDir()
+	missing := filepath.Join(tmp, "does-not-exist.txt")
+	p := &plan{
+		RepoRoot: tmp,
+		Patches: map[string][]patchOp{
+			missing: {{Anchor: "ANCHOR", Insertion: "X\n"}},
+		},
+	}
+	err := p.validate()
+	if err == nil {
+		t.Fatal("validate(): want error for missing file, got nil")
+	}
+	if !strings.Contains(err.Error(), "non-existent file") {
+		t.Fatalf("validate() error = %q; want 'non-existent file' marker (got ENOENT leak instead?)", err.Error())
+	}
+}
+
+// TestTaxPackPackagesDoNotImportGen pins the load-bearing assumption
+// that tax-pack-pr.yml's "skip make proto-gen" optimisation is safe:
+// the scoped test job runs `go test` directly on the tax-pack
+// packages without first regenerating proto bindings, which is
+// correct ONLY if none of those packages transitively import
+// kapp-fab/gen/* (the bindings are gitignored and absent from a
+// fresh checkout).
+//
+// If a future refactor adds a gen/ import to any tax-pack package,
+// this test fails LOCALLY (where developers run go test) instead of
+// the tax-pack-pr workflow failing on CI with a cryptic
+// "package not found" — and the failure message points at the
+// workflow that needs a proto-gen step prepended, not at the
+// package that started importing gen/.
+//
+// Scope mirrors tax-pack-pr.yml's `paths:` filter: internal/hr/
+// taxpacks, internal/tenant, internal/i18n, cmd/new-tax-pack.
+func TestTaxPackPackagesDoNotImportGen(t *testing.T) {
+	root := repoRoot(t)
+	roots := []string{
+		filepath.Join(root, "internal", "hr", "taxpacks"),
+		filepath.Join(root, "internal", "tenant"),
+		filepath.Join(root, "internal", "i18n"),
+		filepath.Join(root, "cmd", "new-tax-pack"),
+	}
+	importRe := regexp.MustCompile(`"(github\.com/kennguy3n/kapp-fab/gen/[^"]+)"`)
+	var offenders []string
+	for _, dir := range roots {
+		if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") {
+				return nil
+			}
+			body, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			for _, m := range importRe.FindAllStringSubmatch(string(body), -1) {
+				rel, _ := filepath.Rel(root, path)
+				offenders = append(offenders, rel+" imports "+m[1])
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("walk %s: %v", dir, err)
+		}
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("tax-pack-pr.yml skips `make proto-gen` because the scoped packages don't import kapp-fab/gen/*, but the following imports break that assumption:\n  %s\nFix: either remove the gen/ imports from the tax-pack scope, or add a `make proto-gen` step to .github/workflows/tax-pack-pr.yml (mirroring ci.yml) so the bindings are on disk before `go test` runs.", strings.Join(offenders, "\n  "))
+	}
+}

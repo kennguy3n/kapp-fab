@@ -613,12 +613,23 @@ func (p *plan) planLocaleCatalogues() error {
 	return nil
 }
 
-// validate reads every patched file once and verifies that every
-// patch op either (a) has its anchor present in the file, OR (b) has
-// already had its SkipIfPresent marker land in the file (so the patch
-// is a no-op anyway). Anything else — a typo'd or missing anchor on
-// a patch that hasn't been applied yet — is a planning error and
-// surfaces here BEFORE Execute has touched the filesystem.
+// validate reads every patched file once and verifies three
+// invariants every patch op must hold BEFORE Execute writes a single
+// byte:
+//
+//  1. The target file exists. A planner that queued patches for a
+//     non-existent file is a bug — the per-plan stat-check in
+//     planWizardPatches / planFrontend*Patches normally prevents this,
+//     but validate surfaces it with a clearer "planner queued patch
+//     for non-existent file" diagnostic than the bare ENOENT from
+//     os.ReadFile.
+//  2. Each patch's anchor is PRESENT in the file (unless
+//     SkipIfPresent already landed, in which case the patch is a
+//     no-op and the anchor is irrelevant).
+//  3. Each patch's anchor is UNIQUE in the file. strings.Cut inserts
+//     before the FIRST occurrence, so a duplicate anchor would land
+//     the insertion in a place the contributor didn't expect. The
+//     patchOp doc promises this; validate enforces it.
 //
 // Defense-in-depth: Execute's per-patch loop still does its own
 // anchor lookup as a final safety net, but in normal operation
@@ -634,18 +645,28 @@ func (p *plan) validate() error {
 	}
 	sort.Strings(paths)
 	for _, path := range paths {
+		rel, _ := filepath.Rel(p.RepoRoot, path)
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("validate %s: planner queued patch for non-existent file (planner missing its os.Stat guard?)", rel)
+			}
+			return fmt.Errorf("validate stat %s: %w", rel, err)
+		}
 		body, err := os.ReadFile(path) //nolint:gosec // path derived from the validated repo-root flag
 		if err != nil {
-			return fmt.Errorf("validate read %s: %w", path, err)
+			return fmt.Errorf("validate read %s: %w", rel, err)
 		}
 		s := string(body)
 		for _, op := range p.Patches[path] {
 			if op.SkipIfPresent != "" && strings.Contains(s, op.SkipIfPresent) {
 				continue
 			}
-			if !strings.Contains(s, op.Anchor) {
-				rel, _ := filepath.Rel(p.RepoRoot, path)
+			count := strings.Count(s, op.Anchor)
+			if count == 0 {
 				return fmt.Errorf("validate %s: anchor not found: %q", rel, op.Anchor)
+			}
+			if count > 1 {
+				return fmt.Errorf("validate %s: anchor %q is non-unique (appears %d times) — strings.Cut would insert at the FIRST occurrence, which is likely not what the planner intended; pick a more specific anchor", rel, op.Anchor, count)
 			}
 		}
 	}
@@ -669,6 +690,11 @@ func (p *plan) validate() error {
 // reflect what Execute WOULD do — a dry-run against an
 // already-patched repo correctly reports zero insertions and
 // surfaces all skips, instead of pretending every patch would apply.
+// When a patch is queued for a non-existent file (only reachable if
+// a future planner forgets its own stat-check), dry-run logs
+// "MISSING" and continues instead of aborting — the contributor's
+// real run hits the same condition through validate() and gets a
+// proper error there.
 func (p *plan) Execute(out io.Writer, dryRun bool) error {
 	if !dryRun {
 		if err := p.validate(); err != nil {
@@ -711,6 +737,15 @@ func (p *plan) Execute(out io.Writer, dryRun bool) error {
 		// the preview to be useful (see the patchOp doc above).
 		body, err := os.ReadFile(path) //nolint:gosec // path derived from the validated repo-root flag
 		if err != nil {
+			// Dry-run tolerates a missing file so the contributor
+			// can preview a scaffold against an in-progress branch
+			// where the target file doesn't exist yet. validate()
+			// in non-dry-run mode already catches the same
+			// condition with a clearer message.
+			if dryRun && os.IsNotExist(err) {
+				fmt.Fprintf(buf, "  PATCH   %s (MISSING — skipped)\n", rel)
+				continue
+			}
 			return fmt.Errorf("read %s: %w", path, err)
 		}
 		for _, op := range patches {

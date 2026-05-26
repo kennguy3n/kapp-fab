@@ -60,6 +60,18 @@ jobs:
           cache: true
       - name: go mod download
         run: go mod download
+      # The main ci.yml runs `make proto-gen` before every Go step
+      # because parts of the kernel (services/api, internal/grpc)
+      # import the generated `kapp.v1` bindings. We deliberately
+      # SKIP that step here because the four tax-pack packages
+      # (internal/hr/taxpacks, internal/tenant, internal/i18n,
+      # cmd/new-tax-pack) don't transitively import kapp-fab/gen/*,
+      # which makes the scoped CI 30-60s faster on a cold cache.
+      # The assumption is pinned by TestTaxPackPackagesDoNotImportGen
+      # in cmd/new-tax-pack/main_test.go — if a future refactor adds
+      # a gen/ import to any tax-pack package, that test fails
+      # locally (where contributors run `go test`) BEFORE the CI red
+      # surfaces with a cryptic "package not found" error.
       - name: tax-pack registration + per-country regression
         run: go test -race ./internal/hr/taxpacks/...
       - name: CoA templates + wizard mappings
