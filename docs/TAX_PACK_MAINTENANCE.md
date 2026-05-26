@@ -174,9 +174,9 @@ The repo's `Devin Review` integration posts notes flagged
 is to reassess each note before deciding whether to act:
 
 - If the observation matches existing intent (Swiss equity code 28
-  outside the liability tree, AU IFRS-fallback for CoA, sticky
-  user-chosen CoA template across country edits), reply on the
-  thread documenting why no change is being made.
+  outside the liability tree, sticky user-chosen CoA template
+  across country edits), reply on the thread documenting why no
+  change is being made.
 - If the observation surfaces a real gap the bot mis-labelled, fix
   it on a follow-up commit and reference the thread in the commit
   message.
@@ -263,6 +263,29 @@ The maintainer should:
    province whose brackets shifted — at minimum ON, QC, BC, AB
    (the four largest by employee population) should always have a
    pinned case.
+
+
+## Phase N1 Europe Core pack details (GB + 9 EU + AU CoA)
+
+The Europe Core batch closes the explicitly-requested GB/DE gap
+and ships a country-specific chart for AU at the same time (AU
+previously fell back to the generic IFRS chart). All ten European
+packs run on the same annual cycle anchored to each country's
+gazetted budget / Finance Act publication.
+
+| Country | Pack file                          | CoA template      | Locale | Key sources                                                                                                                                                                                                                                                                                                                                  | Review cadence                |
+| ------- | ---------------------------------- | ----------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------|
+| GB      | `internal/hr/taxpacks/gb.go`       | `gb_basic.json`   | en     | HMRC Income Tax rates and Personal Allowance (Finance Act, gov.uk/income-tax-rates), HMRC NIM01015 (Class 1 NIC bands and rates), HMRC SL3 (Student Loan thresholds & rates Plan 1/2/4/5 and Postgraduate Loan).                                                                                                                              | Annual (March / April)        |
+| DE      | `internal/hr/taxpacks/de.go`       | `de_basic.json`   | de     | BMF Programmablaufplan Lohnsteuer (annual ELStAM-aligned formula tables), Deutsche Rentenversicherung Beitragsbemessungsgrenze (West / Ost), GKV Beitragssatzdatei (additional contribution rate), Solidaritätszuschlaggesetz §3, Kirchensteuergesetz (Land-level 8/9% rate).                                                                  | Annual (November / December)  |
+| FR      | `internal/hr/taxpacks/fr.go`       | `fr_basic.json`   | fr     | DGFiP Bulletin Officiel des Finances Publiques (PAS barème), Loi de financement de la sécurité sociale (LFSS) for CSG/CRDS rates, URSSAF Plafond Annuel de la Sécurité Sociale (PASS / PMSS), AGIRC-ARRCO accord (complémentaire rates).                                                                                                       | Annual (December / January)   |
+| ES      | `internal/hr/taxpacks/es.go`       | `es_basic.json`   | es     | AEAT Reglamento del IRPF (retenciones table), TGSS Boletín de noticias RED (bases máximas y mínimas, tipos de cotización), Ley de Presupuestos Generales del Estado, MEI accord (Mecanismo de Equidad Intergeneracional 2025+).                                                                                                                | Annual (January)              |
+| IT      | `internal/hr/taxpacks/it.go`       | `it_basic.json`   | it     | Agenzia delle Entrate IRPEF brackets (Legge di Bilancio), Regioni / Comuni addizionali rates (consultable via Agenzia delle Entrate ricerca), INPS Circolare Aliquote Contributive (massimale & minimale), TFR coefficient (ISTAT).                                                                                                            | Annual (January / February)   |
+| NL      | `internal/hr/taxpacks/nl.go`       | `nl_basic.json`   | nl     | Belastingdienst Loonheffingen Witte Tabel (loonheffingstabellen.belastingdienst.nl), CAK / Belastingdienst ZVW maximumbijdrageloon en bijdragepercentage, UWV werknemersverzekeringen premies (WW, WIA), Algemene Heffingskorting & Arbeidskorting tables.                                                                                       | Annual (January / July)       |
+| BE      | `internal/hr/taxpacks/be.go`       | `be_basic.json`   | fr     | SPF Finances barème du précompte professionnel (AR du 10 décembre, two updates per year for indexation), ONSS / RSZ Instructions administratives (employee 13.07% rate), AGORIA / ACERTA bulletins for sectoral overlays.                                                                                                                   | Bi-annual (January / July)    |
+| IE      | `internal/hr/taxpacks/ie.go`       | `ie_basic.json`   | en     | Revenue.ie PAYE / USC / PRSI tables (Finance Act publication), Department of Social Protection PRSI class & rate notice, USC Standard Rate Cut-Off Point (SRCOP) per civil status.                                                                                                                                                            | Annual (October budget)       |
+| AT      | `internal/hr/taxpacks/at.go`       | `at_basic.json`   | de     | BMF Lohnsteuertabellen (Lohnsteuergesetz §66/§77), ÖGK Höchstbeitragsgrundlage (annual SV-Beitragsgrenze), AK / WBF Umlage (Land-level rate), Kommunalsteuergesetz (3% municipal rate).                                                                                                                                                       | Annual (December / January)   |
+| PT      | `internal/hr/taxpacks/pt.go`       | `pt_basic.json`   | pt     | Autoridade Tributária e Aduaneira tabelas de retenção mensal (Despacho do Secretário de Estado dos Assuntos Fiscais — TWO updates per year, one in January and one in July, plus a separate Açores / Madeira table set), Segurança Social Código Contributivo (employee 11% / employer 23.75% rates), Sobretaxa de Solidariedade (€80k threshold). | Bi-annual (January / July)    |
+| AU      | `internal/hr/taxpacks/au.go`       | `au_basic.json`   | en     | ATO Schedule 1 (Statement of formulas for calculating amounts to be withheld), ATO Superannuation Guarantee rate notice (11.5% in 2024-25), state SROs for Payroll Tax thresholds (NSW OSR, SRO Victoria, RevenueSA, etc.).                                                                                                                  | Annual (June / July)          |
 
 ## Community contribution model
 

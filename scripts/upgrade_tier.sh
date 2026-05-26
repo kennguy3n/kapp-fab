@@ -64,6 +64,7 @@ TABLES=(
   krecords workflows workflow_runs approvals audit_log events
   accounts journal_entries journal_lines fiscal_periods tax_codes
   cost_centers bank_accounts bank_transactions
+  budgets budget_lines
   inventory_warehouses inventory_items inventory_batches inventory_moves
   leave_ledger lesson_progress
   files base_tables base_rows docs_documents docs_document_versions
@@ -78,6 +79,7 @@ TABLES=(
   insights_data_sources insights_embeds
   email_messages email_attachments
   helpdesk_imap_state helpdesk_mailboxes
+  tenant_ktypes
 )
 
 # Build a Postgres TEXT[] literal: ARRAY['t1','t2',...]

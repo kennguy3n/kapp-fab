@@ -105,7 +105,7 @@ export function ExchangeRatesPage() {
           Failed to load rates: {(q.error as Error).message}
         </p>
       )}
-      {!q.isLoading && rates.length === 0 && (
+      {!q.isLoading && !q.isError && rates.length === 0 && (
         <p style={{ color: "#9ca3af", fontStyle: "italic" }}>
           No exchange rates yet.
         </p>

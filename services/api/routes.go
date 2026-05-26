@@ -402,6 +402,37 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			})
 		})
 
+		// Phase N8b — tenant-authored ("low-code") KTypes. The
+		// route group is tenant-scoped so the GUC is set on every
+		// call; the store enforces the custom.<slug> namespace,
+		// the safe field-type subset, and the field-count cap
+		// before INSERT. Status transitions (draft → active →
+		// archived) are POSTed against the same name+version.
+		//
+		// Authoring a custom KType reshapes how every other tenant
+		// member's UI is generated (form fields, list views,
+		// permissions, auto-generated agent tools), so this group
+		// is gated to tenant.admin on both reads and writes —
+		// matching /roles, /users, /audit. The full mutation
+		// middleware stack (api-call meter + idempotency +
+		// rate-limit + quota) is applied so a runaway script can't
+		// blow through a tenant's quota or starve neighbours
+		// under shared RLS. The platform feature gate is not used
+		// here — low-code KType authoring is part of the baseline
+		// admin surface, not a plan-tiered feature.
+		r.Route("/api/v1/tenant-ktypes", func(r chi.Router) {
+			d.tenantChain(r)
+			r.Use(d.apiCallMW)
+			r.Use(d.authzGate("tenant.admin", ""))
+			r.Use(platform.IdempotencyMiddleware(d.pool))
+			r.Use(d.rateLimitMW)
+			r.Use(platform.QuotaMiddleware(d.quotaEnforcer))
+			r.Get("/", d.tkh.list)
+			r.Get("/{name}", d.tkh.get)
+			r.Post("/", d.tkh.upsert)
+			r.Post("/{name}/status", d.tkh.setStatus)
+		})
+
 		// Webhook management + delivery-log surface. Gated behind
 		// the per-tenant `webhook` feature flag (derived from the
 		// path via DynamicFeatureMiddleware). CRUD runs under the
@@ -570,6 +601,19 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Get("/exchange-rates", d.curh.listRates)
 			r.Get("/exchange-rates/convert", d.curh.convert)
 			r.Post("/exchange-rates/unrealized", d.curh.unrealizedGL)
+			// Phase N5 — budgets. Line CRUD is nested under the
+			// header so the FK relationship is explicit in the
+			// URL; the variance report is GET-only so it skips
+			// the idempotency middleware naturally (no body).
+			r.Post("/budgets", d.budh.create)
+			r.Get("/budgets", d.budh.list)
+			r.Get("/budgets/{id}", d.budh.get)
+			r.Put("/budgets/{id}", d.budh.update)
+			r.Delete("/budgets/{id}", d.budh.delete)
+			r.Get("/budgets/{id}/lines", d.budh.listLines)
+			r.Post("/budgets/{id}/lines", d.budh.upsertLine)
+			r.Delete("/budgets/{id}/lines/{lineID}", d.budh.deleteLine)
+			r.Get("/budgets/{id}/variance", d.budh.varianceReport)
 		})
 
 		// Phase M Task 6 — POS finalize. Reuses InvoicePoster +

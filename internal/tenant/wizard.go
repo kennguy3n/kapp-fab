@@ -141,6 +141,16 @@ func DefaultLocaleForCountry(country string) string {
 		return "pt-BR"
 	case "MX", "AR", "CO", "CL", "PE", "CR", "PA", "UY", "EC", "DO", "GT", "PY":
 		return "es"
+	// Phase N1 — Europe Core. Dutch + Portuguese are new
+	// catalogues added in this PR; Belgium defaults to French
+	// (Wallonia / Brussels majority business locale, with NL
+	// admins resetting from the admin surface).
+	case "NL":
+		return "nl"
+	case "PT":
+		return "pt"
+	case "BE":
+		return "fr"
 	// SCAFFOLD: cmd/new-tax-pack inserts new DefaultLocaleForCountry cases above this line.
 	default:
 		return "en"
@@ -207,6 +217,35 @@ func DefaultCoATemplateForCountry(country string) string {
 		return "cl_ifrs_basic"
 	case "CO", "PE", "CR", "PA", "UY", "EC", "DO", "GT", "PY", "TT":
 		return "latam_ifrs_basic"
+	// Phase N1 — Europe Core + AU. Each country gets its own
+	// chart so payroll deduction lines land on country-specific
+	// liability accounts (HMRC PAYE, DRV / GKV, URSSAF,
+	// AEAT IRPF, Agenzia delle Entrate IRPEF, Belastingdienst
+	// Loonheffing, ONSS/RSZ Précompte, Revenue PAYE, FA / ÖGK
+	// Lohnsteuer / SV, AT IRS / Seg. Social, ATO PAYG /
+	// Superannuation).
+	case "GB":
+		return "gb_basic"
+	case "DE":
+		return "de_basic"
+	case "FR":
+		return "fr_basic"
+	case "ES":
+		return "es_basic"
+	case "IT":
+		return "it_basic"
+	case "NL":
+		return "nl_basic"
+	case "BE":
+		return "be_basic"
+	case "IE":
+		return "ie_basic"
+	case "AT":
+		return "at_basic"
+	case "PT":
+		return "pt_basic"
+	case "AU":
+		return "au_basic"
 	// SCAFFOLD: cmd/new-tax-pack inserts new DefaultCoATemplateForCountry cases above this line.
 	default:
 		return "ifrs_basic"
@@ -353,6 +392,43 @@ var coaCLIFRSBasic []byte
 //go:embed coa_templates/latam_ifrs_basic.json
 var coaLATAMIFRSBasic []byte
 
+// Phase N1 — Europe Core (GB / DE / FR / ES / IT / NL / BE / IE /
+// AT / PT) and the Australia chart that closes the previously-
+// documented fallback to ifrs_basic for AU tenants.
+
+//go:embed coa_templates/gb_basic.json
+var coaGBBasic []byte
+
+//go:embed coa_templates/de_basic.json
+var coaDEBasic []byte
+
+//go:embed coa_templates/fr_basic.json
+var coaFRBasic []byte
+
+//go:embed coa_templates/es_basic.json
+var coaESBasic []byte
+
+//go:embed coa_templates/it_basic.json
+var coaITBasic []byte
+
+//go:embed coa_templates/nl_basic.json
+var coaNLBasic []byte
+
+//go:embed coa_templates/be_basic.json
+var coaBEBasic []byte
+
+//go:embed coa_templates/ie_basic.json
+var coaIEBasic []byte
+
+//go:embed coa_templates/at_basic.json
+var coaATBasic []byte
+
+//go:embed coa_templates/pt_basic.json
+var coaPTBasic []byte
+
+//go:embed coa_templates/au_basic.json
+var coaAUBasic []byte
+
 // SCAFFOLD: cmd/new-tax-pack inserts new //go:embed directives + var decls above this line.
 
 // chartOfAccountsTemplates maps the wizard's template name to the
@@ -387,6 +463,18 @@ var chartOfAccountsTemplates = map[string][]byte{
 	"ar_rtfacpce_basic": coaARRTBasic,
 	"cl_ifrs_basic":     coaCLIFRSBasic,
 	"latam_ifrs_basic":  coaLATAMIFRSBasic,
+	// Phase N1 — Europe Core + AU.
+	"gb_basic": coaGBBasic,
+	"de_basic": coaDEBasic,
+	"fr_basic": coaFRBasic,
+	"es_basic": coaESBasic,
+	"it_basic": coaITBasic,
+	"nl_basic": coaNLBasic,
+	"be_basic": coaBEBasic,
+	"ie_basic": coaIEBasic,
+	"at_basic": coaATBasic,
+	"pt_basic": coaPTBasic,
+	"au_basic": coaAUBasic,
 	// SCAFFOLD: cmd/new-tax-pack inserts new chartOfAccountsTemplates entries above this line.
 }
 
@@ -1034,6 +1122,20 @@ const (
 	defaultUnrealizedFXIntervalSeconds = 30 * 86400
 )
 
+// defaultBudgetVarianceActionType / defaultBudgetVarianceIntervalSeconds
+// drive the daily budget vs actual variance sweeper. The handler
+// reads every active budget for the tenant, computes MTD variance
+// against the current calendar month, and raises a notification when
+// the variance fraction crosses the per-budget or platform-default
+// threshold. Mirrors finance.ActionTypeBudgetVariance /
+// finance.DefaultBudgetVarianceIntervalSeconds; duplicated here for
+// the same package-cycle reason as the other action-type constants
+// above. Only seeded for plans that include the finance feature.
+const (
+	defaultBudgetVarianceActionType      = "budget_variance"
+	defaultBudgetVarianceIntervalSeconds = 86400
+)
+
 // defaultDataRetentionActionType / defaultDataRetentionIntervalSeconds
 // drive the daily retention sweeper that deletes rows older than the
 // per-tenant retention_days threshold (migration 000032).
@@ -1098,6 +1200,10 @@ func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 			actionType      string
 			intervalSeconds int
 		}{defaultUnrealizedFXActionType, defaultUnrealizedFXIntervalSeconds})
+		defaults = append(defaults, struct {
+			actionType      string
+			intervalSeconds int
+		}{defaultBudgetVarianceActionType, defaultBudgetVarianceIntervalSeconds})
 	}
 	if DefaultFeaturesForPlan(plan)[FeatureInsights] {
 		defaults = append(defaults, struct {

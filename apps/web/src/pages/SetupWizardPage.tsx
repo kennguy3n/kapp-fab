@@ -47,6 +47,25 @@ const COA_TEMPLATES = [
   { value: "ar_rtfacpce_basic", label: "Argentina — RT-FACPCE + Ganancias / Jubilación / IVA" },
   { value: "cl_ifrs_basic", label: "Chile — IFRS + Impuesto Único / AFP / Salud / IVA" },
   { value: "latam_ifrs_basic", label: "LATAM — IFRS + Generic Payroll Withholding (CO/PE/CR/PA/UY/EC/DO/GT/PY/TT)" },
+  // Phase N1 — Europe Core + AU. Each chart carries the
+  // country's statutory payroll-liability accounts (HMRC
+  // PAYE / NIC, DRV / GKV / SPV / BA for DE, URSSAF + DGFiP
+  // for FR, AEAT + Seguridad Social for ES, Agenzia delle
+  // Entrate + INPS for IT, Belastingdienst + ZVW for NL,
+  // ONSS/RSZ + SPF Finances for BE, Revenue PAYE / USC /
+  // PRSI for IE, FA / ÖGK / Gemeinde for AT, AT + Segurança
+  // Social for PT, ATO PAYG / Super for AU).
+  { value: "gb_basic", label: "United Kingdom — IFRS + PAYE / NIC / Student Loan / VAT" },
+  { value: "de_basic", label: "Germany — IFRS + Lohnsteuer / Soli / RV-KV-PV-ALV / USt" },
+  { value: "fr_basic", label: "France — IFRS + PAS / CSG / CRDS / Sécu / TVA" },
+  { value: "es_basic", label: "Spain — IFRS + IRPF / Seg. Social / IVA" },
+  { value: "it_basic", label: "Italy — IFRS + IRPEF / Addizionali / INPS / IVA" },
+  { value: "nl_basic", label: "Netherlands — IFRS + Loonheffing / ZVW / BTW" },
+  { value: "be_basic", label: "Belgium — IFRS + Précompte / ONSS-RSZ / BTW-TVA" },
+  { value: "ie_basic", label: "Ireland — IFRS + PAYE / USC / PRSI / VAT" },
+  { value: "at_basic", label: "Austria — IFRS + Lohnsteuer / SV-Beiträge / Kommunalsteuer / USt" },
+  { value: "pt_basic", label: "Portugal — IFRS + IRS / Segurança Social / IVA" },
+  { value: "au_basic", label: "Australia — AASB + PAYG / Superannuation / FBT / Payroll Tax / GST" },
   // SCAFFOLD: cmd/new-tax-pack inserts new COA_TEMPLATES entries above this line.
 ];
 
@@ -100,6 +119,18 @@ const COUNTRY_COA_DEFAULTS: Record<string, string> = {
   GT: "latam_ifrs_basic",
   PY: "latam_ifrs_basic",
   TT: "latam_ifrs_basic",
+  // Phase N1 — Europe Core + AU.
+  GB: "gb_basic",
+  DE: "de_basic",
+  FR: "fr_basic",
+  ES: "es_basic",
+  IT: "it_basic",
+  NL: "nl_basic",
+  BE: "be_basic",
+  IE: "ie_basic",
+  AT: "at_basic",
+  PT: "pt_basic",
+  AU: "au_basic",
   // SCAFFOLD: cmd/new-tax-pack inserts new COUNTRY_COA_DEFAULTS entries above this line.
 };
 
