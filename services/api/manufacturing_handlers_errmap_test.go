@@ -113,6 +113,7 @@ func TestWriteManufacturingErrorPreservesExistingMappings(t *testing.T) {
 		{"ErrBOMHasNoComponents", manufacturing.ErrBOMHasNoComponents, http.StatusUnprocessableEntity},
 		{"ErrBOMSelfReference", manufacturing.ErrBOMSelfReference, http.StatusUnprocessableEntity},
 		{"ErrBOMDuplicateComponent", manufacturing.ErrBOMDuplicateComponent, http.StatusUnprocessableEntity},
+		{"ErrBOMInvalidTransition", manufacturing.ErrBOMInvalidTransition, http.StatusUnprocessableEntity},
 		{"ErrWorkOrderInvalidTransition", manufacturing.ErrWorkOrderInvalidTransition, http.StatusUnprocessableEntity},
 		{"ErrWorkOrderInsufficientStock", manufacturing.ErrWorkOrderInsufficientStock, http.StatusUnprocessableEntity},
 		{"unrelated error", errors.New("manufacturing: database connection lost"), http.StatusInternalServerError},

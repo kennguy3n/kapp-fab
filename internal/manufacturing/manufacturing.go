@@ -110,6 +110,15 @@ var (
 	// ErrWorkOrderNotFound mirrors ErrBOMNotFound for work_orders.
 	ErrWorkOrderNotFound = errors.New("manufacturing: work order not found")
 
+	// ErrBOMInvalidTransition is returned when callers attempt
+	// an illegal BOM status transition (e.g. obsolete → active
+	// or active → draft). See BOM.CanTransitionTo for the matrix.
+	// Modelled on ErrWorkOrderInvalidTransition so the error
+	// mapping in writeManufacturingError stays uniform: both
+	// surface as 422, both name the source and target statuses
+	// in the wrapped message.
+	ErrBOMInvalidTransition = errors.New("manufacturing: invalid bom status transition")
+
 	// ErrWorkOrderInvalidTransition is returned when callers
 	// attempt an illegal status transition (e.g. completed →
 	// in_progress). The state machine is enforced in Go rather
@@ -165,6 +174,51 @@ type BOM struct {
 	// ListBOMs without component expansion) so the slice's
 	// length is not a reliable existence check on its own.
 	Components []BOMComponent `json:"components,omitempty"`
+}
+
+// CanTransitionTo reports whether the BOM may move to the supplied
+// target status. The matrix is enforced by SetBOMStatus and
+// CreateBOM(Activate=true); it is exposed as a method so the UI can
+// grey out illegal status buttons. Legal transitions:
+//
+//	draft     → active           (publish the recipe)
+//	draft     → obsolete         (abandon a draft that will never ship)
+//	active    → obsolete         (retire — replaced by a new version,
+//	                               or the item is being discontinued)
+//	obsolete  → (terminal)       (no further transitions; resurrecting
+//	                               an old recipe means creating a new
+//	                               version, never re-activating a row
+//	                               that operators saw retired)
+//	X         → X                (idempotent re-assertion is allowed
+//	                               so HTTP retries don't fail)
+//
+// Notes:
+//   - active → draft is rejected on purpose. A published BOM is a
+//     stable identifier for any work order that snapshotted it via
+//     bom_id at release time (see migration 000063 immutability
+//     comment); demoting it back to draft would surface a confusing
+//     "this recipe is incomplete" state in the UI for an artefact
+//     that already shipped product.
+//   - obsolete is terminal, mirroring work_orders' closed /
+//     cancelled. The "I retired this BOM by mistake" recovery path
+//     is to author a new version (e.g. v2.1) and activate it, not
+//     to un-retire the original row — which preserves the audit
+//     trail (the obsolete row is still queryable and its status
+//     history is monotone).
+func (b BOM) CanTransitionTo(target string) bool {
+	if b.Status == target {
+		return true
+	}
+	switch b.Status {
+	case BOMStatusDraft:
+		return target == BOMStatusActive || target == BOMStatusObsolete
+	case BOMStatusActive:
+		return target == BOMStatusObsolete
+	case BOMStatusObsolete:
+		return false
+	default:
+		return false
+	}
 }
 
 // BOMComponent is one consumed item in a BOM. Quantities are

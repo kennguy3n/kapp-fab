@@ -357,7 +357,9 @@ func (s *PGStore) ListBOMs(ctx context.Context, tenantID uuid.UUID, status strin
 // same item (transitioning that row to obsolete) so the
 // boms_active_per_item_uniq partial unique index never collides.
 // Activation of a BOM with no components returns
-// ErrBOMHasNoComponents.
+// ErrBOMHasNoComponents. Illegal transitions (e.g. obsolete → active,
+// active → draft) return ErrBOMInvalidTransition — see
+// BOM.CanTransitionTo for the matrix and rationale.
 func (s *PGStore) SetBOMStatus(ctx context.Context, tenantID, bomID uuid.UUID, status string) error {
 	switch status {
 	case BOMStatusDraft, BOMStatusActive, BOMStatusObsolete:
@@ -369,16 +371,34 @@ func (s *PGStore) SetBOMStatus(ctx context.Context, tenantID, bomID uuid.UUID, s
 	}
 
 	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var itemID uuid.UUID
+		// Lock the row so a concurrent SetBOMStatus call can't
+		// race the state-machine guard below — without FOR UPDATE
+		// two callers could both read status='draft', both pass
+		// CanTransitionTo, and one of them would land an illegal
+		// double transition. The lock is the same scope as the
+		// row whose status we're about to flip, so it never
+		// escalates to a wider serialisation contention.
+		var current BOM
 		err := tx.QueryRow(ctx,
-			`SELECT item_id FROM boms WHERE tenant_id = $1 AND id = $2`,
+			`SELECT item_id, status FROM boms WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
 			tenantID, bomID,
-		).Scan(&itemID)
+		).Scan(&current.ItemID, &current.Status)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrBOMNotFound
 			}
 			return fmt.Errorf("manufacturing: lookup bom: %w", err)
+		}
+
+		if !current.CanTransitionTo(status) {
+			return fmt.Errorf("%w: %s → %s", ErrBOMInvalidTransition, current.Status, status)
+		}
+		if current.Status == status {
+			// Idempotent no-op. Return early so a retry of
+			// SetBOMStatus(active) doesn't acquire the
+			// advisory lock + re-run the demote/promote
+			// dance for no reason.
+			return nil
 		}
 
 		if status == BOMStatusActive {
@@ -392,7 +412,7 @@ func (s *PGStore) SetBOMStatus(ctx context.Context, tenantID, bomID uuid.UUID, s
 			if n == 0 {
 				return ErrBOMHasNoComponents
 			}
-			return activateBOMInTx(ctx, tx, tenantID, bomID, itemID, s.now)
+			return activateBOMInTx(ctx, tx, tenantID, bomID, current.ItemID, s.now)
 		}
 
 		if _, err := tx.Exec(ctx,

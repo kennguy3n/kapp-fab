@@ -367,6 +367,7 @@ func writeManufacturingError(w http.ResponseWriter, err error) {
 		errors.Is(err, manufacturing.ErrBOMHasNoComponents),
 		errors.Is(err, manufacturing.ErrBOMSelfReference),
 		errors.Is(err, manufacturing.ErrBOMDuplicateComponent),
+		errors.Is(err, manufacturing.ErrBOMInvalidTransition),
 		errors.Is(err, manufacturing.ErrWorkOrderInvalidTransition),
 		errors.Is(err, manufacturing.ErrWorkOrderInsufficientStock),
 		// ErrInvalidInput is the umbrella sentinel for client-supplied

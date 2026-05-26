@@ -63,14 +63,20 @@ func (s *PGStore) ReleaseWorkOrder(ctx context.Context, tenantID, woID uuid.UUID
 		); err != nil {
 			return fmt.Errorf("manufacturing: release work order: %w", err)
 		}
-		out.Status = WorkOrderStatusReleased
-		out.BOMID = &bom.ID
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &out, nil
+	// Re-fetch so the returned struct carries the freshly-stamped
+	// updated_at (the UPDATE above sets it to now() inside Postgres,
+	// not in Go). Every other transition method — transitionStatus
+	// for Start/Cancel/Close, CompleteWorkOrder for the completion
+	// path — refetches for the same reason; without this the HTTP
+	// handler would surface an updated_at that doesn't match what
+	// the database persisted, breaking any client that uses it for
+	// optimistic concurrency or ETag-like caching.
+	return s.GetWorkOrder(ctx, tenantID, woID)
 }
 
 // StartWorkOrder transitions a released work order to in_progress

@@ -88,6 +88,50 @@ func TestCanTransitionTo(t *testing.T) {
 	}
 }
 
+// TestBOMCanTransitionTo pins the BOM state machine. Mirrors the
+// work-order matrix above: legal transitions are exhaustively
+// listed and every other (from, to) pair must be rejected. A
+// regression here would silently allow illegal transitions like
+// obsolete → active, defeating the audit-trail monotonicity rule
+// the matrix exists to enforce.
+func TestBOMCanTransitionTo(t *testing.T) {
+	type tc struct {
+		from, to string
+		want     bool
+	}
+	cases := []tc{
+		// Idempotent re-assertion is always allowed.
+		{from: BOMStatusDraft, to: BOMStatusDraft, want: true},
+		{from: BOMStatusActive, to: BOMStatusActive, want: true},
+		{from: BOMStatusObsolete, to: BOMStatusObsolete, want: true},
+
+		// Legal forward transitions.
+		{from: BOMStatusDraft, to: BOMStatusActive, want: true},
+		{from: BOMStatusDraft, to: BOMStatusObsolete, want: true},
+		{from: BOMStatusActive, to: BOMStatusObsolete, want: true},
+
+		// Backwards transitions: active should not regress to
+		// draft (the BOM is already a published recipe; any
+		// work order may have snapshotted it). Use obsolete to
+		// take it out of service instead.
+		{from: BOMStatusActive, to: BOMStatusDraft, want: false},
+
+		// Obsolete is terminal. Resurrecting a retired recipe is
+		// done by authoring a new version, never by un-retiring
+		// the original row (audit-trail monotonicity).
+		{from: BOMStatusObsolete, to: BOMStatusDraft, want: false},
+		{from: BOMStatusObsolete, to: BOMStatusActive, want: false},
+	}
+	for _, c := range cases {
+		t.Run(c.from+"_to_"+c.to, func(t *testing.T) {
+			b := BOM{Status: c.from}
+			if got := b.CanTransitionTo(c.to); got != c.want {
+				t.Fatalf("CanTransitionTo(%s→%s)=%v, want %v", c.from, c.to, got, c.want)
+			}
+		})
+	}
+}
+
 // TestRegisterKTypesPureLogic verifies the schemas the ktypes.go
 // init() block hard-codes are well-formed JSON. The runtime
 // registration path needs a registry, so this test exercises only
