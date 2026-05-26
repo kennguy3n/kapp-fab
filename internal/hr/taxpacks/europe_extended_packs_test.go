@@ -546,3 +546,74 @@ func TestExtendedPacksNegativeGrossNoDeductions(t *testing.T) {
 		})
 	}
 }
+
+// europeBracketRow is a typed projection of any Phase-N2 bracket
+// struct used by TestEuropeExtendedBracketTablesAreContiguous.
+// The per-pack types (noBracket / fiBracket / grBracket) stay
+// distinct so a future schedule change to one pack cannot
+// cross-leak into another — but every walk function relies on
+// the same shape (Floor / Top / Base / Rate) so we project the
+// per-pack rows through this view and check the shared
+// invariants in one place. Mirrors the bracketRow / checkRows
+// pattern from apac_packs_test.go and americas_packs_test.go.
+type europeBracketRow struct {
+	floor decimal.Decimal
+	top   decimal.Decimal
+	base  decimal.Decimal
+	rate  decimal.Decimal
+}
+
+// TestEuropeExtendedBracketTablesAreContiguous pins the two
+// invariants every Phase-N2 walk function relies on:
+//
+//  1. Top-contiguity — adjacent rows satisfy
+//     `Top[i] == Floor[i+1]`, and the last row is open-ended
+//     (`Top == 0`).
+//
+//  2. Base-consistency — adjacent rows satisfy
+//     `Base[i+1] == Base[i] + (Floor[i+1] - Floor[i]) * Rate[i]`.
+//     This is the real correctness invariant: the walk resolves
+//     annual tax as `Base + (income - Floor) * Rate` for the
+//     matched bracket, so a wrong Base produces a wrong tax at
+//     every income in that bracket. A bracket-row Base
+//     transcription error in NO trinnskatt (the original bug
+//     this test was added in response to) would have failed
+//     this test at construction time.
+func TestEuropeExtendedBracketTablesAreContiguous(t *testing.T) {
+	checkRows := func(t *testing.T, label string, rows []europeBracketRow) {
+		t.Helper()
+		for i := 0; i < len(rows)-1; i++ {
+			cur, next := rows[i], rows[i+1]
+			if !cur.top.Equal(next.floor) {
+				t.Fatalf("%s brackets[%d].Top (%s) != brackets[%d].Floor (%s)",
+					label, i, cur.top, i+1, next.floor)
+			}
+			want := cur.base.Add(next.floor.Sub(cur.floor).Mul(cur.rate))
+			if !next.base.Equal(want) {
+				t.Fatalf("%s brackets[%d].Base (%s) != Base[%d] + (Floor[%d]-Floor[%d])*Rate[%d] (= %s)",
+					label, i+1, next.base, i, i+1, i, i, want)
+			}
+		}
+		last := rows[len(rows)-1]
+		if !last.top.IsZero() {
+			t.Fatalf("%s last bracket Top should be 0 (open-ended), got %s", label, last.top)
+		}
+	}
+
+	noRows := make([]europeBracketRow, len(noTrinnskattBrackets))
+	for i, b := range noTrinnskattBrackets {
+		noRows[i] = europeBracketRow{floor: b.Floor, top: b.Top, base: b.Base, rate: b.Rate}
+	}
+	fiRows := make([]europeBracketRow, len(fiStateTaxBrackets))
+	for i, b := range fiStateTaxBrackets {
+		fiRows[i] = europeBracketRow{floor: b.Floor, top: b.Top, base: b.Base, rate: b.Rate}
+	}
+	grRows := make([]europeBracketRow, len(grPITBrackets))
+	for i, b := range grPITBrackets {
+		grRows[i] = europeBracketRow{floor: b.Floor, top: b.Top, base: b.Base, rate: b.Rate}
+	}
+
+	t.Run("NO trinnskatt", func(t *testing.T) { checkRows(t, "NO trinnskatt", noRows) })
+	t.Run("FI valtion tulovero", func(t *testing.T) { checkRows(t, "FI valtion tulovero", fiRows) })
+	t.Run("GR PIT", func(t *testing.T) { checkRows(t, "GR PIT", grRows) })
+}

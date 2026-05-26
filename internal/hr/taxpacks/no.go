@@ -64,12 +64,23 @@ var (
 	noMinstefradragRate = dec("0.46")
 	noMinstefradragCap  = dec("104450")
 
+	// Cumulative tax at each Floor — verified arithmetically:
+	//
+	//   B1 → 0 (no tax below 217,400)
+	//   B2 → 0       + (306,050   - 217,400) × 0.017 = 1,507.05
+	//   B3 → 1507.05 + (697,150   - 306,050) × 0.040 = 17,151.05
+	//   B4 → 17151.05 + (942,400  - 697,150) × 0.136 = 50,505.05
+	//   B5 → 50505.05 + (1,410,750 - 942,400) × 0.166 = 128,251.15
+	//
+	// TestBracketTablesAreContiguousNO pins these in
+	// europe_extended_packs_test.go so a future rate update can't
+	// reintroduce a transcription bug.
 	noTrinnskattBrackets = []noBracket{
 		{Floor: dec("217400"), Top: dec("306050"), Base: decimal.Zero, Rate: dec("0.017")},
 		{Floor: dec("306050"), Top: dec("697150"), Base: dec("1507.05"), Rate: dec("0.040")},
 		{Floor: dec("697150"), Top: dec("942400"), Base: dec("17151.05"), Rate: dec("0.136")},
-		{Floor: dec("942400"), Top: dec("1410750"), Base: dec("50505.45"), Rate: dec("0.166")},
-		{Floor: dec("1410750"), Top: decimal.Zero, Base: dec("128231.55"), Rate: dec("0.176")},
+		{Floor: dec("942400"), Top: dec("1410750"), Base: dec("50505.05"), Rate: dec("0.166")},
+		{Floor: dec("1410750"), Top: decimal.Zero, Base: dec("128251.15"), Rate: dec("0.176")},
 	}
 
 	noTrygdeavgiftRate  = dec("0.077")
