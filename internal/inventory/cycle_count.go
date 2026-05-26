@@ -627,6 +627,20 @@ func (s *CycleCountStore) SeedExpectedFromStock(ctx context.Context, tenantID, s
 // line.id) so the inventory_moves_source_uniq partial index folds
 // retries into no-ops. After the moves are written the session
 // status is set to `posted` and `posted_at` is stamped.
+//
+// All three steps — locking the session header, reading lines,
+// writing variance moves, and flipping the status — run inside a
+// single tenant-scoped transaction. The session row is held
+// `FOR UPDATE` for the duration of the post, which serialises against
+// every line-mutating path (UpsertLine, DeleteLine,
+// SeedExpectedFromStock all take the same lock) and against
+// UpdateSession's status transitions. That eliminates the previous
+// race window where moves committed in their own transactions before
+// the status flip — a concurrent reconciled→counting transition could
+// leave the ledger with a stale move keyed on
+// (MoveSourceCycleCount, line.id) which would later be skipped as a
+// duplicate when the operator re-counted and re-posted, leaving
+// stock_levels diverged from the persisted counted_qty.
 func (s *CycleCountStore) PostSession(ctx context.Context, tenantID, sessionID, actorID uuid.UUID) (*CycleCountSession, error) {
 	if tenantID == uuid.Nil || sessionID == uuid.Nil {
 		return nil, errors.New("cycle_count: tenant id + session id required")
@@ -635,92 +649,120 @@ func (s *CycleCountStore) PostSession(ctx context.Context, tenantID, sessionID, 
 		return nil, errors.New("cycle_count: actor required")
 	}
 
-	session, err := s.GetSession(ctx, tenantID, sessionID)
-	if err != nil {
+	// Fast path: an already-posted session is idempotent — return
+	// the snapshot without re-opening the tx. The single-tx path
+	// below handles the genuine reconciled→posted transition.
+	if existing, err := s.GetSession(ctx, tenantID, sessionID); err != nil {
 		return nil, err
-	}
-	if session.Status == CycleCountStatusPosted {
-		// Idempotent retry: already posted, return as-is.
-		return session, nil
-	}
-	if session.Status != CycleCountStatusReconciled {
-		return nil, ErrCycleCountNotReconciled
-	}
-
-	lines, err := s.ListLines(ctx, tenantID, sessionID)
-	if err != nil {
-		return nil, err
+	} else if existing.Status == CycleCountStatusPosted {
+		return existing, nil
 	}
 
 	now := s.now()
-	for i := range lines {
-		ln := &lines[i]
-		if ln.Variance.IsZero() {
-			continue
-		}
-		lineID := ln.ID
-		move := Move{
-			TenantID:    tenantID,
-			ItemID:      ln.ItemID,
-			WarehouseID: session.WarehouseID,
-			Qty:         ln.Variance,
-			SourceKType: MoveSourceCycleCount,
-			SourceID:    &lineID,
-			MovedAt:     now,
-			CreatedBy:   actorID,
-		}
-		if _, err := s.inv.RecordMove(ctx, move); err != nil {
-			if errors.Is(err, ErrDuplicateSourceMove) {
-				// Idempotent retry path — move already recorded
-				// from a previous post attempt.
-				continue
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var status string
+		var warehouseID uuid.UUID
+		if err := tx.QueryRow(ctx,
+			`SELECT status, warehouse_id FROM cycle_count_sessions
+			  WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+			tenantID, sessionID,
+		).Scan(&status, &warehouseID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrCycleCountNotFound
 			}
-			return nil, fmt.Errorf("cycle_count: record variance move for line %s: %w", ln.ID, err)
-		}
-	}
-
-	// Optimistic lock: only flip to `posted` when the session is
-	// still `reconciled`. Between the GetSession check at line 524
-	// and this point a concurrent UpdateSession could have rolled
-	// the session back to `counting` (a legal transition from
-	// `reconciled`). Without the WHERE-clause guard we would
-	// silently overwrite that with `posted`, locking the session
-	// against further edits even though the operator explicitly
-	// re-opened it. Zero rows affected here means the state changed
-	// under us; the variance moves we just wrote are idempotent
-	// (folded on next retry) so reporting NotReconciled is safe.
-	var rowsAffected int64
-	err = dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx,
-			`UPDATE cycle_count_sessions
-			    SET status = $1, posted_at = $2, updated_at = $2
-			  WHERE tenant_id = $3 AND id = $4 AND status = $5`,
-			CycleCountStatusPosted, now, tenantID, sessionID,
-			CycleCountStatusReconciled,
-		)
-		if err != nil {
 			return err
 		}
-		rowsAffected = tag.RowsAffected()
+		if status == CycleCountStatusPosted {
+			// Lost the race to a concurrent post that completed
+			// between our fast-path GetSession and the FOR UPDATE
+			// lock. Treat as success; the caller will re-fetch.
+			return nil
+		}
+		if status != CycleCountStatusReconciled {
+			return ErrCycleCountNotReconciled
+		}
+
+		// Read lines inside the same tx — they cannot change under
+		// us because every line-mutating method takes the session
+		// FOR UPDATE lock we now hold. Only the columns the
+		// variance-move writer needs are selected; the full
+		// CycleCountLine projection lives in ListLines for read
+		// surfaces.
+		rows, err := tx.Query(ctx,
+			`SELECT id, item_id, variance
+			   FROM cycle_count_lines
+			  WHERE tenant_id = $1 AND session_id = $2
+			  ORDER BY created_at ASC`,
+			tenantID, sessionID,
+		)
+		if err != nil {
+			return fmt.Errorf("cycle_count: read lines for post: %w", err)
+		}
+		type postLine struct {
+			ID       uuid.UUID
+			ItemID   uuid.UUID
+			Variance decimal.Decimal
+		}
+		var lines []postLine
+		for rows.Next() {
+			var ln postLine
+			if err := rows.Scan(&ln.ID, &ln.ItemID, &ln.Variance); err != nil {
+				rows.Close()
+				return fmt.Errorf("cycle_count: scan line for post: %w", err)
+			}
+			lines = append(lines, ln)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("cycle_count: iterate lines for post: %w", err)
+		}
+
+		for i := range lines {
+			ln := &lines[i]
+			if ln.Variance.IsZero() {
+				continue
+			}
+			lineID := ln.ID
+			move := Move{
+				TenantID:    tenantID,
+				ItemID:      ln.ItemID,
+				WarehouseID: warehouseID,
+				Qty:         ln.Variance,
+				SourceKType: MoveSourceCycleCount,
+				SourceID:    &lineID,
+				MovedAt:     now,
+				CreatedBy:   actorID,
+			}
+			if _, err := s.inv.RecordMoveTx(ctx, tx, move); err != nil {
+				if errors.Is(err, ErrDuplicateSourceMove) {
+					// A previous post wrote this line's move and
+					// committed before failing later. The session
+					// is still in `reconciled` (otherwise we
+					// would have bailed earlier on the status
+					// check), so the stale move's qty must
+					// match the line we just read — line edits
+					// are blocked by the FOR UPDATE lock we now
+					// hold and the reconciled-frozen guard in
+					// UpsertLine. Treat as already-recorded and
+					// continue.
+					continue
+				}
+				return fmt.Errorf("cycle_count: record variance move for line %s: %w", ln.ID, err)
+			}
+		}
+
+		if _, err := tx.Exec(ctx,
+			`UPDATE cycle_count_sessions
+			    SET status = $1, posted_at = $2, updated_at = $2
+			  WHERE tenant_id = $3 AND id = $4`,
+			CycleCountStatusPosted, now, tenantID, sessionID,
+		); err != nil {
+			return fmt.Errorf("cycle_count: mark session posted: %w", err)
+		}
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("cycle_count: mark session posted: %w", err)
-	}
-	if rowsAffected == 0 {
-		// State changed mid-post. Re-fetch and let the caller
-		// decide: if it's now `posted` the variance moves are
-		// already on the ledger and the retry path treats this as
-		// success; if it slid back to `counting` the caller gets a
-		// clear NotReconciled signal.
-		current, err := s.GetSession(ctx, tenantID, sessionID)
-		if err != nil {
-			return nil, err
-		}
-		if current.Status == CycleCountStatusPosted {
-			return current, nil
-		}
-		return nil, ErrCycleCountNotReconciled
+		return nil, err
 	}
 	return s.GetSession(ctx, tenantID, sessionID)
 }

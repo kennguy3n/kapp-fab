@@ -395,18 +395,68 @@ func (s *PGStore) ListWarehouses(ctx context.Context, tenantID uuid.UUID) ([]War
 // (source_ktype, source_id, item_id, warehouse_id). A retry therefore
 // surfaces ErrDuplicateSourceMove rather than double-posting.
 func (s *PGStore) RecordMove(ctx context.Context, m Move) (*Move, error) {
-	if m.TenantID == uuid.Nil {
-		return nil, errors.New("inventory: tenant id required")
-	}
-	if m.ItemID == uuid.Nil || m.WarehouseID == uuid.Nil {
-		return nil, fmt.Errorf("%w: item_id and warehouse_id required", ErrMoveInvalid)
-	}
-	if m.Qty.IsZero() {
-		return nil, fmt.Errorf("%w: qty must be non-zero", ErrMoveInvalid)
+	if err := validateRecordMoveInputs(m); err != nil {
+		return nil, err
 	}
 	if m.MovedAt.IsZero() {
 		m.MovedAt = s.now()
 	}
+	var out *Move
+	err := dbutil.WithTenantTx(ctx, s.pool, m.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var rmErr error
+		out, rmErr = s.recordMoveInTx(ctx, tx, m)
+		return rmErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RecordMoveTx is RecordMove using a caller-supplied transaction. The
+// caller is responsible for opening the tx via dbutil.WithTenantTx so
+// the `app.tenant_id` GUC is set and RLS policies on inventory_moves
+// can fire.
+//
+// Use this when the move write must be atomic with surrounding work
+// the caller is doing in the same transaction. The motivating case is
+// CycleCountStore.PostSession: variance-move writes must commit
+// together with the session status flip so a concurrent
+// reconciled→counting transition cannot leave the ledger with a stale
+// move keyed on (MoveSourceCycleCount, line.id). With a single tx the
+// optimistic state machine on cycle_count_sessions and the partial
+// unique index on inventory_moves agree on the same commit boundary.
+func (s *PGStore) RecordMoveTx(ctx context.Context, tx pgx.Tx, m Move) (*Move, error) {
+	if tx == nil {
+		return nil, errors.New("inventory: nil tx")
+	}
+	if err := validateRecordMoveInputs(m); err != nil {
+		return nil, err
+	}
+	if m.MovedAt.IsZero() {
+		m.MovedAt = s.now()
+	}
+	return s.recordMoveInTx(ctx, tx, m)
+}
+
+func validateRecordMoveInputs(m Move) error {
+	if m.TenantID == uuid.Nil {
+		return errors.New("inventory: tenant id required")
+	}
+	if m.ItemID == uuid.Nil || m.WarehouseID == uuid.Nil {
+		return fmt.Errorf("%w: item_id and warehouse_id required", ErrMoveInvalid)
+	}
+	if m.Qty.IsZero() {
+		return fmt.Errorf("%w: qty must be non-zero", ErrMoveInvalid)
+	}
+	return nil
+}
+
+// recordMoveInTx contains the per-tx work of writing a single
+// inventory_move row, optionally rolling the batch qty_on_hand, and
+// emitting the outbox event. Shared between RecordMove (which opens
+// its own tx) and RecordMoveTx (which reuses the caller's tx).
+func (s *PGStore) recordMoveInTx(ctx context.Context, tx pgx.Tx, m Move) (*Move, error) {
 	var srcKType any
 	var srcID any
 	if m.SourceKType != "" {
@@ -419,69 +469,63 @@ func (s *PGStore) RecordMove(ctx context.Context, m Move) (*Move, error) {
 	if m.UnitCost.IsPositive() || m.UnitCost.IsNegative() {
 		unitCost = m.UnitCost
 	}
-
 	var batchID any
 	if m.BatchID != nil {
 		batchID = *m.BatchID
 	}
-
 	out := m
-	err := dbutil.WithTenantTx(ctx, s.pool, m.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-		// Pre-validate batch ↔ item linkage so a mismatched batch
-		// surfaces ErrBatchItemMismatch / ErrBatchNotFound rather
-		// than a generic FK violation on the INSERT below. The
-		// composite (tenant_id, batch_id) FK on inventory_moves
-		// already prevents cross-tenant linkage; this check adds
-		// the per-item invariant the schema cannot express.
-		if m.BatchID != nil {
-			var batchItemID uuid.UUID
-			err := tx.QueryRow(ctx,
-				`SELECT item_id FROM inventory_batches
-				 WHERE tenant_id = $1 AND id = $2`,
-				m.TenantID, *m.BatchID,
-			).Scan(&batchItemID)
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return ErrBatchNotFound
-				}
-				return fmt.Errorf("inventory: lookup batch: %w", err)
-			}
-			if batchItemID != m.ItemID {
-				return ErrBatchItemMismatch
-			}
-		}
+	// Pre-validate batch ↔ item linkage so a mismatched batch
+	// surfaces ErrBatchItemMismatch / ErrBatchNotFound rather
+	// than a generic FK violation on the INSERT below. The
+	// composite (tenant_id, batch_id) FK on inventory_moves
+	// already prevents cross-tenant linkage; this check adds
+	// the per-item invariant the schema cannot express.
+	if m.BatchID != nil {
+		var batchItemID uuid.UUID
 		err := tx.QueryRow(ctx,
-			`INSERT INTO inventory_moves
-			     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, batch_id, moved_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			 RETURNING id`,
-			m.TenantID, m.ItemID, m.WarehouseID, m.Qty, unitCost, srcKType, srcID, batchID, m.MovedAt,
-		).Scan(&out.ID)
+			`SELECT item_id FROM inventory_batches
+			 WHERE tenant_id = $1 AND id = $2`,
+			m.TenantID, *m.BatchID,
+		).Scan(&batchItemID)
 		if err != nil {
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && isInventoryMovesSourceUniqViolation(pgErr) {
-				return ErrDuplicateSourceMove
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, ErrBatchNotFound
 			}
-			return fmt.Errorf("inventory: insert move: %w", err)
+			return nil, fmt.Errorf("inventory: lookup batch: %w", err)
 		}
-		// Best-effort qty_on_hand maintenance for the batch when
-		// the move references one. Mismatches between the batch
-		// running total and SUM(qty) on inventory_moves are
-		// surfaced by integration tests; production reconciliation
-		// is a separate scheduled job.
-		if m.BatchID != nil {
-			if _, err := tx.Exec(ctx,
-				`UPDATE inventory_batches
-				    SET qty_on_hand = qty_on_hand + $1, updated_at = now()
-				  WHERE tenant_id = $2 AND id = $3`,
-				m.Qty, m.TenantID, *m.BatchID,
-			); err != nil {
-				return fmt.Errorf("inventory: roll batch qty: %w", err)
-			}
+		if batchItemID != m.ItemID {
+			return nil, ErrBatchItemMismatch
 		}
-		return s.emitMove(ctx, tx, out, "inventory.move.recorded")
-	})
-	if err != nil {
+	}
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO inventory_moves
+		     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, batch_id, moved_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 RETURNING id`,
+		m.TenantID, m.ItemID, m.WarehouseID, m.Qty, unitCost, srcKType, srcID, batchID, m.MovedAt,
+	).Scan(&out.ID); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && isInventoryMovesSourceUniqViolation(pgErr) {
+			return nil, ErrDuplicateSourceMove
+		}
+		return nil, fmt.Errorf("inventory: insert move: %w", err)
+	}
+	// Best-effort qty_on_hand maintenance for the batch when
+	// the move references one. Mismatches between the batch
+	// running total and SUM(qty) on inventory_moves are
+	// surfaced by integration tests; production reconciliation
+	// is a separate scheduled job.
+	if m.BatchID != nil {
+		if _, err := tx.Exec(ctx,
+			`UPDATE inventory_batches
+			    SET qty_on_hand = qty_on_hand + $1, updated_at = now()
+			  WHERE tenant_id = $2 AND id = $3`,
+			m.Qty, m.TenantID, *m.BatchID,
+		); err != nil {
+			return nil, fmt.Errorf("inventory: roll batch qty: %w", err)
+		}
+	}
+	if err := s.emitMove(ctx, tx, out, "inventory.move.recorded"); err != nil {
 		return nil, err
 	}
 	return &out, nil

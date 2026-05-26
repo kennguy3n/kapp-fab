@@ -350,13 +350,21 @@ function SessionDetailPanel(props: {
           {seed.isPending ? "Seeding…" : "Seed from stock"}
         </button>
         {status === "draft" && (
-          <button type="button" onClick={() => advance.mutate("counting")}>
-            Start counting
+          <button
+            type="button"
+            disabled={advance.isPending}
+            onClick={() => advance.mutate("counting")}
+          >
+            {advance.isPending ? "Starting…" : "Start counting"}
           </button>
         )}
         {status === "counting" && (
-          <button type="button" onClick={() => advance.mutate("reconciled")}>
-            Mark reconciled
+          <button
+            type="button"
+            disabled={advance.isPending}
+            onClick={() => advance.mutate("reconciled")}
+          >
+            {advance.isPending ? "Reconciling…" : "Mark reconciled"}
           </button>
         )}
         {status === "reconciled" && (
