@@ -372,7 +372,16 @@ func writeManufacturingError(w http.ResponseWriter, err error) {
 		errors.Is(err, manufacturing.ErrBOMSelfReference),
 		errors.Is(err, manufacturing.ErrBOMDuplicateComponent),
 		errors.Is(err, manufacturing.ErrWorkOrderInvalidTransition),
-		errors.Is(err, manufacturing.ErrWorkOrderInsufficientStock):
+		errors.Is(err, manufacturing.ErrWorkOrderInsufficientStock),
+		// ErrInvalidInput is the umbrella sentinel for client-supplied
+		// validation failures (empty / zero / out-of-range fields on
+		// the create/update endpoints — invalid bom status, negative
+		// actual_qty, over-yield actual_qty, missing item_id /
+		// warehouse_id / version, etc.). The store wraps it with %w
+		// so errors.Is matches every wrapped variant, and we
+		// short-circuit them all to 422 here in a single arm rather
+		// than minting a sentinel per field.
+		errors.Is(err, manufacturing.ErrInvalidInput):
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)

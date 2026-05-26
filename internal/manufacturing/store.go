@@ -63,10 +63,10 @@ func (s *PGStore) CreateBOM(ctx context.Context, tenantID, actorID uuid.UUID, in
 		return nil, errors.New("manufacturing: tenant id required")
 	}
 	if in.ItemID == uuid.Nil {
-		return nil, errors.New("manufacturing: item_id required")
+		return nil, fmt.Errorf("%w: item_id required", ErrInvalidInput)
 	}
 	if in.Version == "" {
-		return nil, errors.New("manufacturing: version required")
+		return nil, fmt.Errorf("%w: version required", ErrInvalidInput)
 	}
 	if in.OutputQty.IsZero() || in.OutputQty.IsNegative() {
 		in.OutputQty = decimal.NewFromInt(1)
@@ -83,7 +83,7 @@ func (s *PGStore) CreateBOM(ctx context.Context, tenantID, actorID uuid.UUID, in
 			return nil, ErrBOMSelfReference
 		}
 		if c.Qty.IsZero() || c.Qty.IsNegative() {
-			return nil, fmt.Errorf("manufacturing: component %s qty must be > 0", c.ComponentItemID)
+			return nil, fmt.Errorf("%w: component %s qty must be > 0", ErrInvalidInput, c.ComponentItemID)
 		}
 		// Detect duplicates in Go rather than letting the
 		// (tenant_id, bom_id, component_item_id) PK fire a
@@ -273,7 +273,7 @@ func (s *PGStore) SetBOMStatus(ctx context.Context, tenantID, bomID uuid.UUID, s
 	switch status {
 	case BOMStatusDraft, BOMStatusActive, BOMStatusObsolete:
 	default:
-		return fmt.Errorf("manufacturing: invalid bom status %q", status)
+		return fmt.Errorf("%w: invalid bom status %q", ErrInvalidInput, status)
 	}
 	if tenantID == uuid.Nil || bomID == uuid.Nil {
 		return errors.New("manufacturing: tenant id and bom id required")
@@ -401,10 +401,10 @@ func (s *PGStore) CreateWorkOrder(ctx context.Context, tenantID, actorID uuid.UU
 		return nil, errors.New("manufacturing: tenant id required")
 	}
 	if in.ItemID == uuid.Nil || in.WarehouseID == uuid.Nil {
-		return nil, errors.New("manufacturing: item_id and warehouse_id required")
+		return nil, fmt.Errorf("%w: item_id and warehouse_id required", ErrInvalidInput)
 	}
 	if in.PlannedQty.IsZero() || in.PlannedQty.IsNegative() {
-		return nil, errors.New("manufacturing: planned_qty must be > 0")
+		return nil, fmt.Errorf("%w: planned_qty must be > 0", ErrInvalidInput)
 	}
 
 	now := s.now()

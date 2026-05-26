@@ -127,6 +127,19 @@ var (
 	// for SME use; tenants that want negative-stock tolerance can
 	// pre-receipt components into a "WIP" warehouse first.
 	ErrWorkOrderInsufficientStock = errors.New("manufacturing: insufficient component stock to complete work order")
+
+	// ErrInvalidInput is the umbrella sentinel for client-input
+	// validation failures (empty / zero / out-of-range fields on
+	// CreateBOM / CreateWorkOrder / SetBOMStatus / CompleteWorkOrder).
+	// Each call site wraps it with %w plus a human-readable message
+	// naming the offending field, so the HTTP layer can map every
+	// such error to 422 Unprocessable Entity in one switch arm via
+	// errors.Is(err, ErrInvalidInput) rather than needing a dedicated
+	// sentinel per field. Programmer-error paths (e.g. tenant id
+	// required, which is set by middleware and never by the client)
+	// deliberately do NOT wrap this sentinel so they still surface as
+	// a 500 — they indicate a server-side bug, not bad user input.
+	ErrInvalidInput = errors.New("manufacturing: invalid input")
 )
 
 // BOM is a Bill of Materials master record. One row per

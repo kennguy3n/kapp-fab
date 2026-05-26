@@ -259,7 +259,7 @@ func (s *PGStore) CompleteWorkOrder(ctx context.Context, tenantID, woID, actorID
 				actualQty = wo.PlannedQty
 			}
 			if actualQty.IsNegative() {
-				return errors.New("manufacturing: actual_qty must be >= 0")
+				return fmt.Errorf("%w: actual_qty must be >= 0", ErrInvalidInput)
 			}
 			// Cap upside at planned * (1 + tolerance). Anything
 			// further almost always indicates a data-entry slip
@@ -267,7 +267,7 @@ func (s *PGStore) CompleteWorkOrder(ctx context.Context, tenantID, woID, actorID
 			// reserved.
 			maxQty := wo.PlannedQty.Mul(decimal.NewFromFloat(1 + yieldToleranceFactor))
 			if actualQty.GreaterThan(maxQty) {
-				return fmt.Errorf("manufacturing: actual_qty %s exceeds 110%% of planned %s", actualQty.String(), wo.PlannedQty.String())
+				return fmt.Errorf("%w: actual_qty %s exceeds 110%% of planned %s", ErrInvalidInput, actualQty.String(), wo.PlannedQty.String())
 			}
 		}
 
