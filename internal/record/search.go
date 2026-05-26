@@ -103,12 +103,14 @@ func (s *PGStore) Search(
 	// Decrypt any encrypted fields on the result rows so the UI
 	// surface matches what the list page renders — otherwise
 	// search would expose ciphertext the operator can't read.
+	// Resolve each distinct (kind, version) at most once across
+	// the result set, even though search is multi-KType.
+	ptrs := make([]*KRecord, len(out))
 	for i := range out {
-		decrypted, err := s.decryptRecord(ctx, &out[i].KRecord)
-		if err != nil {
-			return nil, err
-		}
-		out[i].Data = decrypted
+		ptrs[i] = &out[i].KRecord
+	}
+	if err := s.decryptRecordPtrsBatch(ctx, ptrs); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

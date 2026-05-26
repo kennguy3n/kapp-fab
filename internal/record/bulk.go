@@ -108,17 +108,22 @@ func (s *PGStore) bulkPatchOne(
 		return fmt.Errorf("record: bulk select: %w", err)
 	}
 
-	existingPlain, err := s.decryptRecord(ctx, &existing)
+	// Resolve the KType once on the bulk tx's connection so we don't
+	// nest a new tenant_ktypes lookup tx per row. For a 1000-row bulk
+	// patch on a custom KType, the pool-based path would have burned
+	// 1000 short-lived connections beyond the outer tx; the tx-aware
+	// path stays at one.
+	kt, err := s.resolveKTypeInTx(ctx, tx, tenantID, existing.KType, existing.KTypeVersion, resolveForUpdate)
+	if err != nil {
+		return err
+	}
+	existingPlain, err := s.decryptRecordWith(&existing, kt)
 	if err != nil {
 		return fmt.Errorf("record: bulk decrypt: %w", err)
 	}
 	merged, err := mergeJSON(existingPlain, patch)
 	if err != nil {
 		return fmt.Errorf("record: bulk merge: %w", err)
-	}
-	kt, err := s.registry.Get(ctx, existing.KType, existing.KTypeVersion)
-	if err != nil {
-		return err
 	}
 	if err := ktype.ValidateData(kt.Schema, merged); err != nil {
 		result.Failed = append(result.Failed, BulkError{ID: id, Error: err.Error()})
@@ -259,7 +264,14 @@ func (s *PGStore) bulkDeleteOne(
 		return fmt.Errorf("record: bulk delete: %w", err)
 	}
 
-	existingPlain, err := s.decryptRecord(ctx, &existing)
+	// Reuse the outer bulk-delete tx's connection for the KType lookup
+	// so a 1000-row bulk delete stays at one pool connection instead
+	// of acquiring N nested ones for the per-row decrypt step.
+	kt, err := s.resolveKTypeInTx(ctx, tx, tenantID, existing.KType, existing.KTypeVersion, resolveForRead)
+	if err != nil {
+		return fmt.Errorf("record: bulk resolve ktype: %w", err)
+	}
+	existingPlain, err := s.decryptRecordWith(&existing, kt)
 	if err != nil {
 		return fmt.Errorf("record: bulk decrypt: %w", err)
 	}
@@ -329,12 +341,13 @@ func (s *PGStore) BulkFetch(
 	if err != nil {
 		return nil, err
 	}
-	for i := range out {
-		decrypted, err := s.decryptRecord(ctx, &out[i])
-		if err != nil {
-			return nil, err
-		}
-		out[i].Data = decrypted
+	// BulkFetch is bounded to a single KType per call (the `kind`
+	// parameter), so the batch decryptor resolves the KType exactly
+	// once regardless of how many IDs are passed in. This collapses
+	// what was previously N tenant_ktypes round-trips for a custom
+	// KType into one.
+	if err := s.decryptRecordsBatch(ctx, out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

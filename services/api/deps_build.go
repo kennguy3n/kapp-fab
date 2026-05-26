@@ -210,7 +210,8 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	}
 	eventPublisher := events.NewPGPublisher(pool)
 	auditor := audit.NewPGLogger(pool)
-	recordStore := record.NewPGStore(pool, ktypeRegistry, eventPublisher, auditor)
+	tenantKTypeStore := ktype.NewTenantStore(pool)
+	recordStore := record.NewPGStore(pool, ktypeRegistry, eventPublisher, auditor).WithTenantKTypes(tenantKTypeStore)
 	// Per-tenant field-level encryption is opt-in: when KAPP_MASTER_KEY
 	// is set, derive per-tenant keys and plug the KeyManager into the
 	// record store so schema fields marked {"encrypted": true} round-trip
@@ -658,6 +659,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	}
 	meth := &meteringHandlers{metering: meteringStore, tenants: tenantSvc, plans: planStore, features: featureStore}
 	kh := &ktypeHandlers{registry: ktypeRegistry}
+	tkh := &tenantKTypeHandlers{store: tenantKTypeStore, logger: logger}
 	// recordHandlers calls AuthorizeRecord from update()/delete() to
 	// enforce per-record conditions like owner_only. The handler
 	// guards the call with `h.eval != nil`, so leave eval unset when
@@ -1047,6 +1049,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		iah:                  iah,
 		meth:                 meth,
 		kh:                   kh,
+		tkh:                  tkh,
 		whh:                  whh,
 		sh:                   sh,
 		rh:                   rh,

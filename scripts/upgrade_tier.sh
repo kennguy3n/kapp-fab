@@ -78,6 +78,7 @@ TABLES=(
   insights_data_sources insights_embeds
   email_messages email_attachments
   helpdesk_imap_state helpdesk_mailboxes
+  tenant_ktypes
 )
 
 # Build a Postgres TEXT[] literal: ARRAY['t1','t2',...]

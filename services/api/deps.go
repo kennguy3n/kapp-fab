@@ -154,6 +154,7 @@ type apiDeps struct {
 	iah            *isolationAuditHandlers
 	meth           *meteringHandlers
 	kh             *ktypeHandlers
+	tkh            *tenantKTypeHandlers
 	whh            *webhookHandlers
 	sh             *searchHandlers
 	rh             *recordHandlers

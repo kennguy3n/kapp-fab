@@ -56,6 +56,35 @@ export interface KType {
   schema: KTypeSchema;
 }
 
+// Phase N8b — tenant-authored (low-code) KType. Mirrors
+// internal/ktype.TenantKType. `schema` is the same KTypeSchema
+// shape the platform uses, but restricted at the API layer to
+// the safe field-type subset (no posting hooks, no computed
+// fields, no custom agent tools).
+export type TenantKTypeStatus = "draft" | "active" | "archived";
+
+export interface TenantKType {
+  tenant_id: string;
+  name: string;
+  version: number;
+  title: string;
+  description: string;
+  schema: KTypeSchema;
+  status: TenantKTypeStatus;
+  created_at: string;
+  updated_at: string;
+  created_by: string;
+}
+
+export interface UpsertTenantKTypeInput {
+  name: string;
+  version?: number;
+  title: string;
+  description?: string;
+  schema: KTypeSchema;
+  status?: TenantKTypeStatus;
+}
+
 export interface KRecord {
   id: string;
   tenant_id: string;
@@ -389,6 +418,43 @@ export class ApiClient {
       headers: { "Idempotency-Key": crypto.randomUUID() },
       body: JSON.stringify(kt),
     });
+  }
+
+  // --- Phase N8b: tenant-authored (low-code) KTypes ---------------------
+
+  listTenantKTypes(): Promise<{
+    items: TenantKType[];
+    field_limit: number;
+  }> {
+    return this.request("/tenant-ktypes");
+  }
+
+  getTenantKType(name: string, version?: number): Promise<TenantKType> {
+    const qs = version ? `?version=${version}` : "";
+    return this.request(`/tenant-ktypes/${encodeURIComponent(name)}${qs}`);
+  }
+
+  upsertTenantKType(input: UpsertTenantKTypeInput): Promise<TenantKType> {
+    return this.request("/tenant-ktypes", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  setTenantKTypeStatus(
+    name: string,
+    version: number,
+    status: TenantKTypeStatus,
+  ): Promise<{ name: string; version: number; status: TenantKTypeStatus }> {
+    return this.request(
+      `/tenant-ktypes/${encodeURIComponent(name)}/status?version=${version}`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ status }),
+      },
+    );
   }
 
   // --- KRecord CRUD ------------------------------------------------------
