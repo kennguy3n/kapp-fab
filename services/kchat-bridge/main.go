@@ -36,6 +36,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/reporting"
+	"github.com/kennguy3n/kapp-fab/internal/sales"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
@@ -145,6 +146,7 @@ func run() error {
 		inventory:          inventoryStore,
 		manufacturing:      manufacturing.NewPGStore(pool, inventoryStore),
 		lmsIssuer:          lms.NewCertificateIssuer(recordStore, pool),
+		returns:            sales.NewReturnPoster(recordStore, invoicePoster, inventoryStore, ledgerStore),
 		cards:              cards,
 		formsBase:          os.Getenv("KAPP_FORMS_BASE_URL"),
 		insightsQueries:    insightsQueries,

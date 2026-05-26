@@ -473,6 +473,33 @@ export class ApiClient {
     });
   }
 
+  /** Drive a sales.return through its state machine. Mirrors the
+   *  POS finalize idempotency contract: every transition rides the
+   *  Idempotency-Key middleware so a flaky-network retry collapses
+   *  to the same server-side outcome. The four supported verbs
+   *  match the workflow declared in internal/sales/returns.go:
+   *  - approve: requested → approved (no posting side-effects)
+   *  - receive: approved → received (posts inventory receipt moves)
+   *  - refund:  received → refunded (posts credit-note JE)
+   *  - cancel:  pre-refund → cancelled. Pure status flip when
+   *    cancelling from "requested" or "approved"; when cancelling
+   *    from "received" the backend ReturnPoster.Cancel additionally
+   *    posts contra inventory moves to reverse the earlier receipt
+   *    (see internal/sales/returns_poster.go Cancel for details). */
+  runSalesReturnTransition(
+    id: string,
+    verb: "approve" | "receive" | "refund" | "cancel",
+    idempotencyKey?: string,
+  ): Promise<KRecord> {
+    return this.request(
+      `/sales/returns/${encodeURIComponent(id)}/${encodeURIComponent(verb)}`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey ?? crypto.randomUUID() },
+      },
+    );
+  }
+
   getRecord(ktype: string, id: string): Promise<KRecord> {
     return this.request(
       `/records/${encodeURIComponent(ktype)}/${encodeURIComponent(id)}`

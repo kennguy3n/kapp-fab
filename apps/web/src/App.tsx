@@ -179,6 +179,10 @@ const PurchaseOrdersPage = lazyNamed(
   () => import("./pages/PurchaseOrdersPage"),
   "PurchaseOrdersPage",
 );
+const SalesReturnsPage = lazyNamed(
+  () => import("./pages/SalesReturnsPage"),
+  "SalesReturnsPage",
+);
 const PriceListsPage = lazyNamed(
   () => import("./pages/PriceListsPage"),
   "PriceListsPage",
@@ -300,6 +304,24 @@ const featureFromSection: Record<string, string> = {
   Finance: "finance",
   Helpdesk: "helpdesk",
   Inventory: "inventory",
+  // Sales (Sales Orders / Returns / Price Lists / Purchase Orders)
+  // rides the same inventory feature key as Inventory because the
+  // backend gates these surfaces through TWO complementary paths in
+  // internal/platform/feature_middleware.go, both ultimately mapping
+  // to tenant.FeatureInventory:
+  //   • Direct sub-domain routes (e.g. /api/v1/sales/returns/{id}/
+  //     {verb}) — handled by FeatureFromPath's `case "inventory",
+  //     "sales":` switch, which is the only domain prefix gate for
+  //     /api/v1/sales/* in this branch.
+  //   • Generic KRecord CRUD (/api/v1/records/{ktype}/...) — handled
+  //     by featureFromKType, whose `case "inventory", "procurement",
+  //     "warehouse", "sales":` arm pins every domain KType under
+  //     the same inventory plan flag (so sales.*, procurement.*,
+  //     and warehouse.* KRecords all 403 without inventory).
+  // Without this `Sales: "inventory"` entry the Sales nav block
+  // would render for tenants without inventory in their plan and
+  // clicking any link would 403 from the backend gate.
+  Sales: "inventory",
   HR: "hr",
   LMS: "lms",
   Insights: "insights",
@@ -377,6 +399,7 @@ const navSections: NavSection[] = [
     title: "Sales",
     links: [
       { to: "/sales/orders", label: "Sales Orders" },
+      { to: "/sales/returns", label: "Returns" },
       { to: "/sales/price-lists", label: "Price Lists" },
       { to: "/procurement/purchase-orders", label: "Purchase Orders" },
     ],
@@ -825,6 +848,7 @@ function AppShell() {
                 element={<BankReconciliationPage />}
               />
               <Route path="/sales/orders" element={<SalesOrdersPage />} />
+              <Route path="/sales/returns" element={<SalesReturnsPage />} />
               <Route
                 path="/sales/price-lists"
                 element={<PriceListsPage />}

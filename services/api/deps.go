@@ -15,6 +15,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/record"
+	"github.com/kennguy3n/kapp-fab/internal/sales"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
 
@@ -58,11 +59,17 @@ type apiDeps struct {
 	portalStore   *auth.PortalStore
 
 	// Domain stores shared across multiple route groups.
-	recordStore      *record.PGStore
-	ledgerStore      *ledger.PGStore
-	invoicePoster    *ledger.InvoicePoster
-	paymentPoster    *ledger.PaymentPoster
-	apiExchangeRates *ledger.ExchangeRateStore
+	recordStore       *record.PGStore
+	ledgerStore       *ledger.PGStore
+	invoicePoster     *ledger.InvoicePoster
+	paymentPoster     *ledger.PaymentPoster
+	apiExchangeRates  *ledger.ExchangeRateStore
+	// salesReturnPoster drives the Phase N9a sales.return state
+	// machine. Shared between the HTTP transition handlers and the
+	// agent-tool registry so an HTTP-driven approve / refund and a
+	// tool-driven approve / refund post against the same
+	// state machine + idempotency guards.
+	salesReturnPoster *sales.ReturnPoster
 
 	// Authz + audit. `authzEval` is the live PGEvaluator; the gate
 	// closures below wrap it with the `authzEnforced` flag so

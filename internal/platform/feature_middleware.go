@@ -76,7 +76,13 @@ func FeatureFromPath(p string) string {
 	switch domain {
 	case "finance":
 		return tenant.FeatureFinance
-	case "inventory":
+	case "inventory", "sales":
+		// "sales" is the URL prefix for sub-domain route groups
+		// like /api/v1/sales/returns/{id}/approve. It rides the
+		// same FeatureInventory gate the sales.* KType prefix
+		// uses in featureFromKType, so the inventory plan flag
+		// governs both the KRecord CRUD path and these direct
+		// state-machine endpoints.
 		return tenant.FeatureInventory
 	case "hr":
 		return tenant.FeatureHR

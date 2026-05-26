@@ -46,6 +46,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/print"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 	"github.com/kennguy3n/kapp-fab/internal/reporting"
+	"github.com/kennguy3n/kapp-fab/internal/sales"
 	"github.com/kennguy3n/kapp-fab/internal/secrets"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
@@ -622,6 +623,13 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	agents.RegisterCertificateTool(executor, lms.NewCertificateIssuer(recordStore, pool))
 	agents.RegisterHelpdeskTools(executor, helpdeskStore)
 	agents.RegisterInsightsTools(executor, insightsQueryStore, insightsDashboardStore, insightsRunner)
+	// Phase N9a — sales return state machine surfaced through the
+	// agent tool layer. The poster is shared with the HTTP handler
+	// so a tool-driven approve/refund and an HTTP-driven
+	// approve/refund post against the same state machine and
+	// idempotency guards.
+	salesReturnPoster := sales.NewReturnPoster(recordStore, invoicePoster, inventoryStore, ledgerStore)
+	agents.RegisterSalesReturnsTools(executor, recordStore, salesReturnPoster)
 
 	// rateLimitMW picks the Redis-backed limiter when wired, otherwise
 	// falls back to the in-process limiter. Both implement the same
@@ -1047,6 +1055,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		invoicePoster:          invoicePoster,
 		paymentPoster:          paymentPoster,
 		apiExchangeRates:       apiExchangeRates,
+		salesReturnPoster:      salesReturnPoster,
 		authzEval:              authzEval,
 		auditor:                auditor,
 		rateLimitMW:            rateLimitMW,
