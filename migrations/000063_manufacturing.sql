@@ -187,3 +187,59 @@ CREATE POLICY tenant_isolation ON work_orders
     WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON work_orders TO kapp_app;
+
+-- ---------------------------------------------------------------------------
+-- Stabilise the auto-generated partition child index names on
+-- inventory_moves_default.
+--
+-- inventory_moves is a partitioned parent (see migrations/
+-- 000001_initial_schema.sql:272). When the parent-level partial unique
+-- indexes inventory_moves_source_uniq (000005_inventory.sql) and
+-- inventory_moves_reversal_of_uniq (000035_stock_reversal.sql) were
+-- created, PostgreSQL also created child indexes on the default
+-- partition with names auto-derived from the column tuple and
+-- truncated at the 63-character identifier limit. The exact truncation
+-- point depends on the partition table name AND the column list, and
+-- changes if any column tuple is altered — so matching the child name
+-- by suffix in Go (inventory/store.go) is fragile across PG versions
+-- and refactors.
+--
+-- This migration renames both child indexes to stable, deterministic
+-- names that match the parent name + the partition name. The Go
+-- duplicate-source-move detection now matches the parent name OR
+-- the stable child name with simple equality.
+--
+-- The renames are idempotent: each block looks up the current child
+-- name from pg_index/pg_inherits at runtime and renames it only if it
+-- doesn't already match the target. Running the migration twice (or
+-- against a freshly-built schema that already has the new names) is a
+-- no-op.
+DO $$
+DECLARE
+    child_name text;
+BEGIN
+    -- inventory_moves_source_uniq → inventory_moves_default_source_uniq
+    SELECT c.relname INTO child_name
+    FROM pg_class c
+    JOIN pg_index i ON i.indexrelid = c.oid
+    JOIN pg_inherits h ON h.inhrelid = c.oid
+    JOIN pg_class parent_idx ON parent_idx.oid = h.inhparent
+    WHERE parent_idx.relname = 'inventory_moves_source_uniq'
+      AND c.relname <> 'inventory_moves_default_source_uniq';
+    IF child_name IS NOT NULL THEN
+        EXECUTE format('ALTER INDEX %I RENAME TO inventory_moves_default_source_uniq', child_name);
+    END IF;
+
+    -- inventory_moves_reversal_of_uniq → inventory_moves_default_reversal_of_uniq
+    SELECT c.relname INTO child_name
+    FROM pg_class c
+    JOIN pg_index i ON i.indexrelid = c.oid
+    JOIN pg_inherits h ON h.inhrelid = c.oid
+    JOIN pg_class parent_idx ON parent_idx.oid = h.inhparent
+    WHERE parent_idx.relname = 'inventory_moves_reversal_of_uniq'
+      AND c.relname <> 'inventory_moves_default_reversal_of_uniq';
+    IF child_name IS NOT NULL THEN
+        EXECUTE format('ALTER INDEX %I RENAME TO inventory_moves_default_reversal_of_uniq', child_name);
+    END IF;
+END
+$$;

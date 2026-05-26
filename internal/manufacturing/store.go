@@ -230,7 +230,12 @@ func (s *PGStore) ListBOMs(ctx context.Context, tenantID uuid.UUID, status strin
 	if tenantID == uuid.Nil {
 		return nil, errors.New("manufacturing: tenant id required")
 	}
-	var out []BOM
+	// Initialise with len==0 instead of `var out []BOM` so JSON encoding
+	// produces `[]` rather than `null` when there are no rows — keeps the
+	// HTTP response shape consistent with the inventory.ListItems pattern
+	// and avoids tripping up downstream consumers that don't guard for
+	// null.
+	out := make([]BOM, 0)
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		q := `SELECT tenant_id, id, item_id, version, status, output_qty, uom, COALESCE(notes, ''), COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid), created_at, updated_at
 		        FROM boms
@@ -466,7 +471,9 @@ func (s *PGStore) ListWorkOrders(ctx context.Context, tenantID uuid.UUID, status
 	if tenantID == uuid.Nil {
 		return nil, errors.New("manufacturing: tenant id required")
 	}
-	var out []WorkOrder
+	// Same rationale as ListBOMs above — produce `[]` instead of `null`
+	// when there are no rows.
+	out := make([]WorkOrder, 0)
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		q := `SELECT tenant_id, id, item_id, bom_id, warehouse_id, planned_qty, actual_qty, status,
 		             scheduled_start, scheduled_end, started_at, completed_at,

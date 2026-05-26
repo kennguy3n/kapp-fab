@@ -32,24 +32,26 @@ const (
 	// migrations/000001_initial_schema.sql:272 — `inventory_moves_default
 	// PARTITION OF inventory_moves DEFAULT`). When the parent-level
 	// partial unique index is created, PostgreSQL also creates one
-	// auto-named child index per partition. INSERTs go through the
-	// partition, so a unique violation reports the child name (e.g.
-	// `inventory_moves_default_tenant_id_source_ktype_source_id_it_idx`),
-	// not the parent. We need to recognise both. The suffix below is
-	// the deterministic part PostgreSQL appends for partition child
-	// indexes derived from the same column tuple — see
-	// isInventoryMovesSourceUniqViolation.
-	inventoryMovesSourceUniqIndex     = "inventory_moves_source_uniq"
-	inventoryMovesSourceUniqChildSuf  = "_tenant_id_source_ktype_source_id_it_idx"
+	// child index per partition. INSERTs go through the partition, so a
+	// unique violation reports the child name — not the parent.
+	// Originally PostgreSQL auto-generated those child names from the
+	// column tuple and truncated them at the 63-character identifier
+	// limit, which made suffix-matching them in Go fragile across PG
+	// versions and refactors. Migration 000063_manufacturing.sql renames
+	// both child indexes to deterministic names (the parent name
+	// prefixed with the partition name), so the matchers below can use
+	// simple equality on both the parent and the renamed child.
+	inventoryMovesSourceUniqIndex      = "inventory_moves_source_uniq"
+	inventoryMovesSourceUniqDefaultIdx = "inventory_moves_default_source_uniq"
 
 	// inventoryMovesReversalOfUniqIndex is the partial unique index
 	// installed in migrations/000035_stock_reversal.sql that prevents
 	// the same move from being reversed twice. A 23505 on this
 	// constraint translates into ErrAlreadyReversed. Same partition
-	// caveat as above — the child index uses the
-	// `_tenant_id_reversal_of_idx` suffix instead.
-	inventoryMovesReversalOfUniqIndex    = "inventory_moves_reversal_of_uniq"
-	inventoryMovesReversalOfUniqChildSuf = "_tenant_id_reversal_of_idx"
+	// caveat as above — the child index is renamed by 000063 to the
+	// stable name below.
+	inventoryMovesReversalOfUniqIndex      = "inventory_moves_reversal_of_uniq"
+	inventoryMovesReversalOfUniqDefaultIdx = "inventory_moves_default_reversal_of_uniq"
 )
 
 // PGStore persists items, warehouses, and stock moves against
@@ -65,27 +67,30 @@ type PGStore struct {
 }
 
 // isInventoryMovesSourceUniqViolation returns true when the given
-// PostgreSQL error is a unique violation on the `inventory_moves_source_uniq`
-// partial index — either as the parent-level name (rare, only fires if
-// the row was somehow routed to the partitioned parent), or as the
-// auto-generated child index name on any partition.
+// PostgreSQL error is a unique violation on the
+// `inventory_moves_source_uniq` partial index — either the parent-level
+// name (rare, only fires if the insert was somehow routed to the
+// partitioned parent), or the stable child index name on the default
+// partition. Migration 000063_manufacturing.sql renames the
+// auto-generated child name to this stable form so the check is
+// deterministic across PG versions and future column-tuple refactors.
 func isInventoryMovesSourceUniqViolation(pgErr *pgconn.PgError) bool {
 	if pgErr == nil || pgErr.Code != pgUniqueViolation {
 		return false
 	}
 	return pgErr.ConstraintName == inventoryMovesSourceUniqIndex ||
-		strings.HasSuffix(pgErr.ConstraintName, inventoryMovesSourceUniqChildSuf)
+		pgErr.ConstraintName == inventoryMovesSourceUniqDefaultIdx
 }
 
 // isInventoryMovesReversalOfUniqViolation does the same as
-// isInventoryMovesSourceUniqViolation for the reversal-of partial unique
-// index that prevents the same move from being reversed twice.
+// isInventoryMovesSourceUniqViolation for the reversal-of partial
+// unique index that prevents the same move from being reversed twice.
 func isInventoryMovesReversalOfUniqViolation(pgErr *pgconn.PgError) bool {
 	if pgErr == nil || pgErr.Code != pgUniqueViolation {
 		return false
 	}
 	return pgErr.ConstraintName == inventoryMovesReversalOfUniqIndex ||
-		strings.HasSuffix(pgErr.ConstraintName, inventoryMovesReversalOfUniqChildSuf)
+		pgErr.ConstraintName == inventoryMovesReversalOfUniqDefaultIdx
 }
 
 // NewPGStore wires a PGStore from the shared pool and its collaborators.
