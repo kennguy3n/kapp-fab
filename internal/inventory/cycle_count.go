@@ -229,6 +229,14 @@ func (s *CycleCountStore) UpdateSession(ctx context.Context, in CycleCountSessio
 	if in.TenantID == uuid.Nil || in.ID == uuid.Nil {
 		return nil, errors.New("cycle_count: tenant id + id required")
 	}
+	// Mirror CreateSession's upfront Code validation so the operator
+	// sees the canonical sentinel error rather than a raw Postgres
+	// constraint violation from cycle_count_sessions_code_not_blank_chk.
+	// The DB CHECK stays in place as defence-in-depth for direct
+	// SQL writes, but the user-facing surface should never reach it.
+	if strings.TrimSpace(in.Code) == "" {
+		return nil, ErrCycleCountCodeEmpty
+	}
 	now := s.now()
 	err := dbutil.WithTenantTx(ctx, s.pool, in.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var current CycleCountSession
@@ -628,7 +636,7 @@ func (s *CycleCountStore) SeedExpectedFromStock(ctx context.Context, tenantID, s
 // retries into no-ops. After the moves are written the session
 // status is set to `posted` and `posted_at` is stamped.
 //
-// All three steps — locking the session header, reading lines,
+// All four steps — locking the session header, reading lines,
 // writing variance moves, and flipping the status — run inside a
 // single tenant-scoped transaction. The session row is held
 // `FOR UPDATE` for the duration of the post, which serialises against
@@ -735,16 +743,19 @@ func (s *CycleCountStore) PostSession(ctx context.Context, tenantID, sessionID, 
 			}
 			if _, err := s.inv.RecordMoveTx(ctx, tx, move); err != nil {
 				if errors.Is(err, ErrDuplicateSourceMove) {
-					// A previous post wrote this line's move and
-					// committed before failing later. The session
-					// is still in `reconciled` (otherwise we
-					// would have bailed earlier on the status
-					// check), so the stale move's qty must
-					// match the line we just read — line edits
-					// are blocked by the FOR UPDATE lock we now
-					// hold and the reconciled-frozen guard in
-					// UpsertLine. Treat as already-recorded and
-					// continue.
+					// In the single-tx design a partial commit
+					// (moves landed, status flip didn't) cannot
+					// happen — either every write in the tx
+					// reaches the WAL together or none of them
+					// do. The remaining way to hit this branch
+					// is an out-of-band writer that recorded an
+					// inventory_move with the same
+					// (source_ktype, source_id) tuple as one of
+					// our cycle-count lines, e.g. a manual SQL
+					// repair script. The defensive `continue`
+					// preserves idempotence in that case: the
+					// downstream ledger already has the variance
+					// recorded so we should not abort the post.
 					continue
 				}
 				return fmt.Errorf("cycle_count: record variance move for line %s: %w", ln.ID, err)
