@@ -24,16 +24,16 @@ import (
 //   - EFKA employee insurance contributions — Common-class
 //     employee covered by the Ενιαίος Φορέας Κοινωνικής
 //     Ασφάλισης (e-EFKA). Total employee share for the standard
-//     non-arduous private-sector contract is 13.87% on gross,
-//     composed of:
-//
-//       Pension (κύρια σύνταξη)               6.67%
-//       Health insurance — benefits-in-kind   2.55%
-//       Health insurance — cash benefits      0.40%
-//       Unemployment                          1.20%
-//       Supplementary pension (επικουρικό)    3.00%
-//       OEK / housing                         0.05% (now 0 — abolished)
-//       ----------------------------------- 13.87%
+//     non-arduous private-sector contract is 13.87% on gross.
+//     The total is the load-bearing figure here; the per-branch
+//     composition (pension / health-in-kind / health-cash /
+//     unemployment / supplementary / OAED-LAEK) is published by
+//     e-EFKA but has shifted year-to-year as the OEK housing
+//     contribution was absorbed and other sub-branches were
+//     re-rated. Citing a frozen breakdown invites a maintainer
+//     to "rebalance" the lines into a different total — so this
+//     pack only encodes the aggregate; see the e-EFKA reference
+//     below for the current line-item view.
 //
 //     The pension contribution is capped at gross annual earnings
 //     of EUR 86,946.80 / yr (the EFKA 2025 ceiling); the other

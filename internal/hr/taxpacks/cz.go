@@ -11,15 +11,21 @@ import (
 //
 //   - Daň z příjmů fyzických osob (personal income tax): two
 //     brackets in 2025. 15% on annual taxable income up to
-//     CZK 1,582,812 (48 × průměrná mzda 32,975); 23% on the
-//     excess. The pack applies the standard sleva na poplatníka
-//     (taxpayer credit) of CZK 30,840 / yr against the gross
-//     liability before producing the deduction line.
+//     CZK 1,582,812 (48 × průměrná mzda 32,975.25 — the 2025
+//     reference wage published by ČSSZ has sub-CZK precision,
+//     so 48 × 32,975 alone would round to 1,582,800; the
+//     authoritative 1,582,812 is the value the social-insurance
+//     cap and income-tax bracket cutoff actually share);
+//     23% on the excess. The pack applies the standard sleva
+//     na poplatníka (taxpayer credit) of CZK 30,840 / yr
+//     against the gross liability before producing the
+//     deduction line.
 //
 //   - Sociální pojištění (social insurance, employee share):
 //     6.5% flat on gross. 2025 annual cap = 48 × průměrná
-//     mzda = CZK 1,582,812 (same as the income-tax bracket
-//     cutoff); the pack enforces the cap via YTD-aware
+//     mzda = CZK 1,582,812 (same number as the income-tax
+//     bracket cutoff because both rules reference the same
+//     reference wage); the pack enforces the cap via YTD-aware
 //     accumulation against EmployeeInfo.YTDGross.
 //
 //   - Zdravotní pojištění (health insurance, employee share):
