@@ -84,7 +84,17 @@ func (s *PGStore) CreateBOM(ctx context.Context, tenantID, actorID uuid.UUID, in
 		return nil, fmt.Errorf("%w: version required", ErrInvalidInput)
 	}
 	if in.OutputQty.IsZero() || in.OutputQty.IsNegative() {
-		in.OutputQty = decimal.NewFromInt(1)
+		// Mirror PlannedQty's validation contract (see
+		// CreateWorkOrder below): surface client-supplied
+		// invalid quantities as a 422 via ErrInvalidInput
+		// instead of silently coercing to 1. Silent coercion
+		// would let a `output_qty: -5` typo land as a BOM with
+		// output_qty=1, producing wildly wrong consumption
+		// math at completion time (qty per finished unit is
+		// computed as planned_qty / output_qty) — exactly the
+		// kind of unit-economics bug the user would never
+		// detect from the response payload.
+		return nil, fmt.Errorf("%w: output_qty must be > 0", ErrInvalidInput)
 	}
 	if in.UOM == "" {
 		in.UOM = "ea"
@@ -219,19 +229,27 @@ func activateBOMInTx(ctx context.Context, tx pgx.Tx, tenantID, bomID, itemID uui
 	); err != nil {
 		return fmt.Errorf("manufacturing: acquire activation lock: %w", err)
 	}
+	// Single timestamp shared across the demote + promote UPDATEs.
+	// Calling now() twice would yield two microsecond-different
+	// updated_at values on rows that are flipped inside the same
+	// advisory-locked transaction; reusing one stamp keeps the
+	// before/after pair temporally identical, which matters for any
+	// audit query that joins on updated_at to attribute a status
+	// flip to a single activation event.
+	ts := now()
 	if _, err := tx.Exec(ctx,
 		`UPDATE boms
 		    SET status = 'obsolete', updated_at = $3
 		  WHERE tenant_id = $1 AND item_id = $2
 		    AND status = 'active' AND id <> $4`,
-		tenantID, itemID, now(), bomID,
+		tenantID, itemID, ts, bomID,
 	); err != nil {
 		return fmt.Errorf("manufacturing: demote previous active bom: %w", err)
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE boms SET status = 'active', updated_at = $3
 		  WHERE tenant_id = $1 AND id = $2`,
-		tenantID, bomID, now(),
+		tenantID, bomID, ts,
 	); err != nil {
 		return fmt.Errorf("manufacturing: update bom status: %w", err)
 	}

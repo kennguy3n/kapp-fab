@@ -61,6 +61,17 @@ func TestWriteManufacturingErrorMapsInvalidInputTo422(t *testing.T) {
 			err:  fmt.Errorf("%w: planned_qty must be > 0", manufacturing.ErrInvalidInput),
 		},
 		{
+			// CreateBOM previously coerced a non-positive
+			// output_qty to 1 silently. It now returns
+			// ErrInvalidInput so the caller gets a 422 with
+			// a self-describing body rather than a BOM whose
+			// consumption math (planned_qty / output_qty) is
+			// silently wrong. Pin the mapping arm here so
+			// nobody re-introduces the silent-coerce branch.
+			name: "wrapped: zero output_qty",
+			err:  fmt.Errorf("%w: output_qty must be > 0", manufacturing.ErrInvalidInput),
+		},
+		{
 			name: "double-wrapped through fmt.Errorf chain",
 			err:  fmt.Errorf("outer: %w", fmt.Errorf("%w: zero qty", manufacturing.ErrInvalidInput)),
 		},
