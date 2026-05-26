@@ -223,6 +223,9 @@ func TestRegisteredCountriesIsStable(t *testing.T) {
 		// Phase N1: Europe Core.
 		"GB", "DE", "FR", "ES", "IT",
 		"NL", "BE", "IE", "AT", "PT",
+		// Phase N2: Europe Extended.
+		"PL", "SE", "NO", "DK", "FI",
+		"CZ", "HU", "RO", "GR",
 	}
 	for _, code := range want {
 		if !gotSet[code] {

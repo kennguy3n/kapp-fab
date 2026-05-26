@@ -166,6 +166,25 @@ func TestDefaultCoATemplateForCountry(t *testing.T) {
 		{"PT", "pt_basic"},
 		{"AU", "au_basic"},
 
+		// Phase N2 — Europe Extended. Nine additional charts,
+		// each carrying the country's statutory payroll-liability
+		// accounts matching its tax pack's deduction codes
+		// (PIT / ZUS / NFZ for PL, Kommunalskatt / Statlig /
+		// Pensionsavgift for SE, Inntektsskatt / Trinnskatt /
+		// Trygdeavgift for NO, A-skat / AM-bidrag / ATP for DK,
+		// Valtio / Kunnallisvero / TyEL / SAVA for FI, Daň /
+		// SP / ZP for CZ, SZJA / TB / Szocho for HU, Impozit /
+		// CAS / CASS / CAM for RO, PIT / EFKA for GR).
+		{"PL", "pl_basic"},
+		{"SE", "se_basic"},
+		{"NO", "no_basic"},
+		{"DK", "dk_basic"},
+		{"FI", "fi_basic"},
+		{"CZ", "cz_basic"},
+		{"HU", "hu_basic"},
+		{"RO", "ro_basic"},
+		{"GR", "gr_basic"},
+
 		// Unmapped countries still fall back to generic IFRS so
 		// the wizard always resolves to a registered template.
 		{"", "ifrs_basic"},
