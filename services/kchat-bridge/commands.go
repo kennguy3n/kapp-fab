@@ -74,6 +74,7 @@ type CommandDispatcher struct {
 	manufacturing      *manufacturing.PGStore
 	lmsIssuer          *lms.CertificateIssuer
 	returns            *sales.ReturnPoster
+	requisitions       *sales.RequisitionPoster
 	cards              *CardRenderer
 	formsBase          string
 	insightsQueries    *insights.QueryStore
@@ -183,6 +184,8 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.postBill(ctx, req)
 	case "return":
 		return d.salesReturn(ctx, req)
+	case "requisition":
+		return d.requisition(ctx, req)
 	case "stock":
 		return d.stockLevels(ctx, req)
 	case "reverse-stock-move":
@@ -231,7 +234,7 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.budgetCommand(ctx, req)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /project, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /return, /stock, /reverse-stock-move, /batch, /work-order (also /wo, /workorder), /bom, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /shift, /budget, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /project, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /return, /requisition, /stock, /reverse-stock-move, /batch, /work-order (also /wo, /workorder), /bom, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /shift, /budget, /help",
 		}, nil
 	default:
 		return CommandResponse{
@@ -447,6 +450,57 @@ func (d *CommandDispatcher) postBill(ctx context.Context, req CommandRequest) (C
 	}
 	return CommandResponse{
 		Text: fmt.Sprintf("Posted bill %s → journal entry %s", billID, entry.ID),
+	}, nil
+}
+
+// requisition implements `/requisition <verb> <requisition_id>` for
+// the Phase N9b procurement.purchase_requisition state machine.
+// Verbs: approve, convert, cancel. CRUD on the requisition KRecord
+// itself rides the generic KRecord create flow; this command covers
+// the three non-CRUD lifecycle transitions (approve → status flip,
+// convert → allocate procurement.purchase_order, cancel → status
+// flip).
+func (d *CommandDispatcher) requisition(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.requisitions == nil {
+		return CommandResponse{Text: "requisitions not configured"}, nil
+	}
+	if req.TenantID == uuid.Nil || req.UserID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id and user_id required"}, nil
+	}
+	if len(req.Args) < 2 {
+		return CommandResponse{Text: "Usage: /requisition <approve|convert|cancel> <requisition_id>"}, nil
+	}
+	verb := strings.ToLower(req.Args[0])
+	// uuid.Parse returns (uuid.Nil, err) on a malformed input so a
+	// zero-value check captures every failure mode without leaving
+	// the parse error in scope (which the nilerr linter rightly
+	// objects to when we still report user-friendly text instead
+	// of surfacing the raw error). KChat surfaces Text as the
+	// operator feedback so the error itself never needs to escape.
+	requisitionID, _ := uuid.Parse(req.Args[1])
+	if requisitionID == uuid.Nil {
+		return CommandResponse{Text: "invalid requisition id"}, nil
+	}
+	var rec *record.KRecord
+	var verr error
+	switch verb {
+	case "approve":
+		rec, verr = d.requisitions.Approve(ctx, req.TenantID, requisitionID, req.UserID)
+	case "convert":
+		rec, verr = d.requisitions.Convert(ctx, req.TenantID, requisitionID, req.UserID)
+	case "cancel":
+		rec, verr = d.requisitions.Cancel(ctx, req.TenantID, requisitionID, req.UserID)
+	default:
+		return CommandResponse{Text: fmt.Sprintf("unknown verb %q (want approve|convert|cancel)", verb)}, nil
+	}
+	if verr != nil {
+		return CommandResponse{Text: fmt.Sprintf("/requisition %s failed: %v", verb, verr)}, nil
+	}
+	var body map[string]any
+	_ = json.Unmarshal(rec.Data, &body)
+	status, _ := body["status"].(string)
+	return CommandResponse{
+		Text: fmt.Sprintf("Requisition %s → %s", requisitionID, status),
 	}, nil
 }
 

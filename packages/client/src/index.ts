@@ -252,6 +252,79 @@ interface ClientConfig {
   headers: () => Record<string, string>;
 }
 
+// ApiError wraps a non-2xx response with the parsed body so callers
+// can render the backend's diagnostic message verbatim. It extends
+// Error so existing `err instanceof Error` / `err.message` consumers
+// (every error display site in the web app today) keep working —
+// they just see a richer `.message` than "409 Conflict".
+export class ApiError extends Error {
+  readonly status: number;
+  readonly statusText: string;
+  readonly body: unknown;
+
+  constructor(status: number, statusText: string, body: unknown, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.statusText = statusText;
+    this.body = body;
+  }
+}
+
+// extractErrorMessage pulls a human-readable message out of a parsed
+// response body. The kapp-fab backend uses two error shapes:
+//
+//   * http.Error() → text/plain body containing the error string
+//     (used by inventory, finance, requisition, manufacturing
+//     handlers — most of the API).
+//   * writeJSONError() / json.NewEncoder().Encode() → application/json
+//     bodies with an "error" or "message" field (used by a few
+//     newer handlers).
+//
+// We try JSON first (covers both shapes since text bodies fail to
+// parse), then fall back to the raw text. Caller layered on top of
+// `${status} ${statusText}` so the UI never sees an empty message.
+function extractErrorMessage(body: unknown, raw: string): string {
+  if (typeof body === "object" && body !== null) {
+    const obj = body as Record<string, unknown>;
+    for (const key of ["error", "message", "detail"]) {
+      const v = obj[key];
+      if (typeof v === "string" && v.trim() !== "") return v.trim();
+    }
+  }
+  if (typeof body === "string" && body.trim() !== "") return body.trim();
+  if (raw.trim() !== "") return raw.trim();
+  return "";
+}
+
+// buildApiError reads a non-OK Response once, attempts JSON parsing
+// when the Content-Type indicates JSON, and falls back to the raw
+// text body. Used by every fetch site in ApiClient so the entire
+// SDK surface throws ApiError consistently — including the bulk
+// export and blob (PDF/HTML) helpers that bypass `request<T>()`.
+// The backend writes "ordered requisitions cannot be cancelled
+// (cancel the PO instead)" and similar actionable diagnostics; those
+// must reach the UI instead of being swallowed into a generic
+// "409 Conflict" string.
+async function buildApiError(res: Response): Promise<ApiError> {
+  const raw = await res.text().catch(() => "");
+  let parsed: unknown = raw;
+  const contentType = res.headers.get("content-type") ?? "";
+  if (raw !== "" && contentType.includes("application/json")) {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      // Leave parsed as the raw text — extractErrorMessage
+      // handles either shape.
+    }
+  }
+  const detail = extractErrorMessage(parsed, raw);
+  const message = detail
+    ? `${res.status} ${res.statusText}: ${detail}`
+    : `${res.status} ${res.statusText}`;
+  return new ApiError(res.status, res.statusText, parsed, message);
+}
+
 export class ApiClient {
   constructor(private readonly cfg: ClientConfig) {}
 
@@ -268,7 +341,7 @@ export class ApiClient {
       },
     });
     if (!res.ok) {
-      throw new Error(`${res.status} ${res.statusText}`);
+      throw await buildApiError(res);
     }
     if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
@@ -500,6 +573,26 @@ export class ApiClient {
     );
   }
 
+  /** Run a lifecycle transition on a procurement.purchase_requisition.
+   *  Verbs match the RequisitionPoster state machine (approve →
+   *  status flip; convert → allocates procurement.purchase_order;
+   *  cancel → status flip with no side-effects). Each call reuses
+   *  the standard Idempotency-Key middleware so a retried convert
+   *  reuses the prior PO instead of spawning a duplicate. */
+  runRequisitionTransition(
+    id: string,
+    verb: "approve" | "convert" | "cancel",
+    idempotencyKey?: string,
+  ): Promise<KRecord> {
+    return this.request(
+      `/procurement/requisitions/${encodeURIComponent(id)}/${encodeURIComponent(verb)}`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey ?? crypto.randomUUID() },
+      },
+    );
+  }
+
   getRecord(ktype: string, id: string): Promise<KRecord> {
     return this.request(
       `/records/${encodeURIComponent(ktype)}/${encodeURIComponent(id)}`
@@ -579,7 +672,7 @@ export class ApiClient {
       }
     );
     if (!res.ok) {
-      throw new Error(`${res.status} ${res.statusText}`);
+      throw await buildApiError(res);
     }
     return await res.text();
   }
@@ -611,7 +704,7 @@ export class ApiClient {
       headers: { ...this.cfg.headers() },
     });
     if (!res.ok) {
-      throw new Error(`${res.status} ${res.statusText}`);
+      throw await buildApiError(res);
     }
     return await res.blob();
   }

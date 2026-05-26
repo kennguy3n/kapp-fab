@@ -183,6 +183,10 @@ const SalesReturnsPage = lazyNamed(
   () => import("./pages/SalesReturnsPage"),
   "SalesReturnsPage",
 );
+const PurchaseRequisitionsPage = lazyNamed(
+  () => import("./pages/PurchaseRequisitionsPage"),
+  "PurchaseRequisitionsPage",
+);
 const PriceListsPage = lazyNamed(
   () => import("./pages/PriceListsPage"),
   "PriceListsPage",
@@ -304,15 +308,17 @@ const featureFromSection: Record<string, string> = {
   Finance: "finance",
   Helpdesk: "helpdesk",
   Inventory: "inventory",
-  // Sales (Sales Orders / Returns / Price Lists / Purchase Orders)
-  // rides the same inventory feature key as Inventory because the
-  // backend gates these surfaces through TWO complementary paths in
-  // internal/platform/feature_middleware.go, both ultimately mapping
-  // to tenant.FeatureInventory:
+  // Sales (Sales Orders / Returns / Price Lists / Purchase Orders /
+  // Requisitions) rides the same inventory feature key as Inventory
+  // because the backend gates these surfaces through TWO
+  // complementary paths in internal/platform/feature_middleware.go,
+  // both ultimately mapping to tenant.FeatureInventory:
   //   • Direct sub-domain routes (e.g. /api/v1/sales/returns/{id}/
-  //     {verb}) — handled by FeatureFromPath's `case "inventory",
-  //     "sales":` switch, which is the only domain prefix gate for
-  //     /api/v1/sales/* in this branch.
+  //     {verb}, /api/v1/procurement/requisitions/{id}/{verb}) —
+  //     handled by FeatureFromPath's `case "inventory",
+  //     "procurement", "sales":` switch, the only domain prefix
+  //     gate for /api/v1/sales/* and /api/v1/procurement/* in this
+  //     branch.
   //   • Generic KRecord CRUD (/api/v1/records/{ktype}/...) — handled
   //     by featureFromKType, whose `case "inventory", "procurement",
   //     "warehouse", "sales":` arm pins every domain KType under
@@ -402,6 +408,7 @@ const navSections: NavSection[] = [
       { to: "/sales/returns", label: "Returns" },
       { to: "/sales/price-lists", label: "Price Lists" },
       { to: "/procurement/purchase-orders", label: "Purchase Orders" },
+      { to: "/procurement/requisitions", label: "Requisitions" },
     ],
   },
   {
@@ -856,6 +863,10 @@ function AppShell() {
               <Route
                 path="/procurement/purchase-orders"
                 element={<PurchaseOrdersPage />}
+              />
+              <Route
+                path="/procurement/requisitions"
+                element={<PurchaseRequisitionsPage />}
               />
               <Route path="/imports" element={<ImportPage />} />
               <Route path="/imports/new" element={<ImportPage />} />
