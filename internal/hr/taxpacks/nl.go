@@ -75,6 +75,29 @@ type nlBracket struct {
 var (
 	// Box 1 (loonheffing onder AOW-leeftijd) 2025 — combined IB
 	// + premie volksverzekeringen.
+	//
+	// IMPORTANT: the Base values here intentionally DO NOT
+	// satisfy the strict marginal-rate arithmetic
+	//   Base[i+1] == Base[i] + (Floor[i+1] - Floor[i]) * Rate[i]
+	// that NO / FI / GR / DE / GB / etc. use. The Belastingdienst's
+	// loonbelastingtabellen 2025 (witte tabel) publish cumulative
+	// gross-tax amounts at the bracket boundaries which account
+	// for the fact that the 35.82% "combined rate" is *not* a
+	// single flat marginal rate but income tax (8.17%) plus
+	// premie volksverzekeringen (27.65%) computed on slightly
+	// different bases (premie has its own ceiling tied to the
+	// AOW-grens at €38,441). This pack mirrors those published
+	// cumulative amounts directly:
+	//
+	//   B2.Base = 13,770.36   (witte tabel, not 13,769.5662 = 38441 × 0.3582)
+	//   B3.Base = 28,157.85   (witte tabel, not 28,153.65   = 13770.36 + 38376 × 0.3748)
+	//
+	// Therefore NL is deliberately excluded from
+	// TestEuropeExtendedBracketTablesAreContiguous —
+	// the contiguity check is only valid for packs whose Base
+	// values are derived from the marginal rate, not for packs
+	// whose values come straight from an authoritative published
+	// table whose construction we cannot reproduce.
 	nlLoonheffingBrackets = []nlBracket{
 		{Floor: dec("0"), Top: dec("38441"), Base: dec("0"), Rate: dec("0.3582")},
 		{Floor: dec("38441"), Top: dec("76817"), Base: dec("13770.36"), Rate: dec("0.3748")},
