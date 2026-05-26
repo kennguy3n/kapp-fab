@@ -142,6 +142,10 @@ func run() error {
 		financeadapters.NewLandedCostInventoryAdapter(inventoryStore),
 		financeadapters.NewLandedCostLedgerAdapter(ledgerStore),
 	)
+	// Phase N9d — cycle-count store shares the inventory PGStore at
+	// post time so variance moves go through the canonical
+	// RecordMove path (audit + outbox events fire).
+	cycleCountStore := inventory.NewCycleCountStore(pool, inventoryStore)
 	commands := &CommandDispatcher{
 		registry:           registry,
 		records:            recordStore,
@@ -152,6 +156,7 @@ func run() error {
 		inventory:          inventoryStore,
 		manufacturing:      manufacturing.NewPGStore(pool, inventoryStore),
 		landedCost:         landedCostStore,
+		cycleCounts:        cycleCountStore,
 		lmsIssuer:          lms.NewCertificateIssuer(recordStore, pool),
 		returns:            sales.NewReturnPoster(recordStore, invoicePoster, inventoryStore, ledgerStore),
 		requisitions:       sales.NewRequisitionPoster(recordStore),

@@ -183,6 +183,7 @@ type apiDeps struct {
 	lch            *landedCostHandlers
 	invh           *inventoryHandlers
 	mfgh           *manufacturingHandlers
+	cch            *cycleCountHandlers
 	oh             *openAPIHandler
 	fileh          *filesHandlers
 	bh             *baseHandlers

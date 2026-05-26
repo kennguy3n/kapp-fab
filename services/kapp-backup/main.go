@@ -170,6 +170,11 @@ var TenantScopedTables = []string{
 	"landed_cost_vouchers",
 	"landed_cost_charges",
 	"landed_cost_targets",
+	// Phase N9d — cycle-count sessions and their lines. Lines FK
+	// to (tenant_id, session_id) so sessions must be restored
+	// first; the order in this slice already satisfies that.
+	"cycle_count_sessions",
+	"cycle_count_lines",
 }
 
 // manifest is the first record in every dump file.
@@ -431,6 +436,10 @@ var tableConflictKeys = map[string][]string{
 	// restore re-applies edits a tenant made to an existing custom
 	// KType without duplicating the row.
 	"tenant_ktypes": {"tenant_id", "name", "version"},
+	// Phase N9d — cycle-count sessions and lines use the standard
+	// (tenant_id, id) PK; conflict_keys defaults to that pair so
+	// no explicit entry is needed, but documenting here for
+	// review-time clarity alongside the table definitions.
 	// insights_query_cache PK is (tenant_id, query_hash, filter_hash) and
 	// insights_shares enforces a (tenant_id, resource_type, resource_id,
 	// grantee_type, grantee) UNIQUE on top of the (tenant_id, id) PK.

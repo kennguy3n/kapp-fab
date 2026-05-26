@@ -154,6 +154,10 @@ const LandedCostPage = lazyNamed(
   () => import("./pages/LandedCostPage"),
   "LandedCostPage",
 );
+const CycleCountPage = lazyNamed(
+  () => import("./pages/CycleCountPage"),
+  "CycleCountPage",
+);
 const OrgChartPage = lazyNamed(
   () => import("./pages/OrgChartPage"),
   "OrgChartPage",
@@ -454,6 +458,7 @@ const navSections: NavSection[] = [
         label: "Landed Costs",
         requires: ["finance"],
       },
+      { to: "/inventory/cycle-counts", label: "Cycle Counts" },
     ],
   },
   {
@@ -897,7 +902,10 @@ function AppShell() {
                 path="/inventory/landed-costs"
                 element={<LandedCostPage />}
               />
-
+              <Route
+                path="/inventory/cycle-counts"
+                element={<CycleCountPage />}
+              />
               <Route path="/hr/org-chart" element={<OrgChartPage />} />
               <Route path="/hr/payroll" element={<PayrollPage />} />
               <Route path="/hr/shifts" element={<ShiftCalendarPage />} />
