@@ -496,6 +496,47 @@ func TestValidateRejectsMissingFile(t *testing.T) {
 	}
 }
 
+// TestDryRunTolerantOfMissingAnchor pins the dry-run tolerance the
+// Execute doc-block promises: an absent anchor in an existing file
+// surfaces in the preview log as "anchor missing: …" and the run
+// continues to the next file (so the contributor sees every anchor
+// problem in one pass), instead of aborting on the first defect.
+// Real (non-dry-run) execution against the same condition is caught
+// by validate() and aborts — that path is exercised by
+// TestValidateRejectsMissingFile and TestValidateRejectsNonUniqueAnchor.
+func TestDryRunTolerantOfMissingAnchor(t *testing.T) {
+	tmp := t.TempDir()
+	// File exists, but the anchor the patchOp expects is NOT in it.
+	target := filepath.Join(tmp, "no-anchor.txt")
+	if err := os.WriteFile(target, []byte("hello world\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := &plan{
+		RepoRoot: tmp,
+		CC:       "ZZ",
+		Name:     "Zedland",
+		Patches: map[string][]patchOp{
+			target: {{Anchor: "MISSING_ANCHOR", Insertion: "X\n"}},
+		},
+	}
+	var buf bytes.Buffer
+	if err := p.Execute(redirectStdout(t, &buf), true /*dryRun*/); err != nil {
+		t.Fatalf("Execute(dry-run): want nil (tolerant), got %v", err)
+	}
+	if !strings.Contains(buf.String(), "anchor missing") {
+		t.Fatalf("dry-run output should surface 'anchor missing' marker; got:\n%s", buf.String())
+	}
+	// Real run against the same plan must abort via validate().
+	buf.Reset()
+	err := p.Execute(redirectStdout(t, &buf), false /*dryRun*/)
+	if err == nil {
+		t.Fatal("Execute(real): want error from validate() on missing anchor, got nil")
+	}
+	if !strings.Contains(err.Error(), "anchor not found") {
+		t.Fatalf("Execute(real) error = %q; want 'anchor not found' diagnostic", err.Error())
+	}
+}
+
 // TestTaxPackPackagesDoNotImportGen pins the load-bearing assumption
 // that tax-pack-pr.yml's "skip make proto-gen" optimisation is safe:
 // the scoped test job runs `go test` directly on the tax-pack

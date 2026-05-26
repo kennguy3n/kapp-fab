@@ -690,11 +690,23 @@ func (p *plan) validate() error {
 // reflect what Execute WOULD do — a dry-run against an
 // already-patched repo correctly reports zero insertions and
 // surfaces all skips, instead of pretending every patch would apply.
-// When a patch is queued for a non-existent file (only reachable if
-// a future planner forgets its own stat-check), dry-run logs
-// "MISSING" and continues instead of aborting — the contributor's
-// real run hits the same condition through validate() and gets a
-// proper error there.
+//
+// Dry-run also tolerates two conditions that would abort a real run,
+// so the preview can survey an in-progress branch without stopping
+// at the first defect:
+//
+//  1. Missing target file — logged as "MISSING — skipped".
+//  2. Missing anchor inside an existing file — logged as
+//     "anchor missing: …; rest of patches in this file skipped".
+//     Subsequent patches for the SAME file are skipped because
+//     strings.Cut on a missing anchor can't return a useful
+//     post-anchor body to keep patching against, but patches for
+//     OTHER files still run so the contributor sees every anchor
+//     problem in one preview pass.
+//
+// Both tolerances are dry-run-only — the non-dry-run path runs
+// validate() first, which converts either condition into a hard
+// error before a single byte is written.
 func (p *plan) Execute(out io.Writer, dryRun bool) error {
 	if !dryRun {
 		if err := p.validate(); err != nil {
@@ -755,10 +767,29 @@ func (p *plan) Execute(out io.Writer, dryRun bool) error {
 			}
 			before, after, ok := strings.Cut(string(body), op.Anchor)
 			if !ok {
+				if dryRun {
+					// Surface the missing anchor in the dry-run
+					// log and move on to the next file. The
+					// doc-block above explains why subsequent
+					// patches to the SAME file are skipped
+					// (no post-anchor body to keep cutting
+					// against). validate() catches the same
+					// condition in non-dry-run mode before
+					// any write happens.
+					fmt.Fprintf(buf, "  PATCH   %s (anchor missing: %q; rest of patches in this file skipped)\n", rel, op.Anchor)
+					applied = -1 // sentinel: don't print the trailing summary line for this file
+					break
+				}
 				return fmt.Errorf("patch %s: anchor not found: %q", rel, op.Anchor)
 			}
 			body = []byte(before + op.Insertion + op.Anchor + after)
 			applied++
+		}
+		if applied < 0 {
+			// Sentinel from the dry-run anchor-missing branch above —
+			// the per-file diagnostic was already printed; suppress
+			// the summary line so the output isn't doubled.
+			continue
 		}
 		fmt.Fprintf(buf, "  PATCH   %s (%d insertion(s), %d already-present skip(s))\n", rel, applied, skipped)
 		if dryRun {
