@@ -61,6 +61,36 @@ func TestParseJournalFilterTo(t *testing.T) {
 			ok:   true,
 		},
 		{
+			// IST end-of-day (23:59:59 +05:30) is the final second
+			// of July 31 in Asia/Kolkata. After promoting the
+			// nanosecond in the input's original timezone the
+			// result is `2025-07-31T23:59:59.999999999+05:30`,
+			// which normalises to `2025-07-31T18:29:59.999999999Z`.
+			// The promotion is detected pre-normalisation so direct
+			// API consumers sending offset-bearing boundary
+			// instants receive the same day-inclusivity contract
+			// as the dashboard's UTC drill-down.
+			name: "rfc3339 IST end-of-day promotes in original tz then normalises",
+			raw:  "2025-07-31T23:59:59+05:30",
+			want: time.Date(2025, time.July, 31, 18, 29, 59, int(time.Second-1), time.UTC),
+			ok:   true,
+		},
+		{
+			// Tokyo end-of-day (23:59:59 +09:00) → 14:59:59.999999999Z.
+			name: "rfc3339 JST end-of-day promotes in original tz then normalises",
+			raw:  "2025-12-31T23:59:59+09:00",
+			want: time.Date(2025, time.December, 31, 14, 59, 59, int(time.Second-1), time.UTC),
+			ok:   true,
+		},
+		{
+			// Negative offset: New York end-of-day (23:59:59 -05:00)
+			// → 04:59:59.999999999Z the next calendar day.
+			name: "rfc3339 EST end-of-day promotes across UTC date boundary",
+			raw:  "2025-07-31T23:59:59-05:00",
+			want: time.Date(2025, time.August, 1, 4, 59, 59, int(time.Second-1), time.UTC),
+			ok:   true,
+		},
+		{
 			name: "leap-day boundary",
 			raw:  "2024-02-29",
 			want: time.Date(2024, time.February, 29, 23, 59, 59, int(time.Second-1), time.UTC),

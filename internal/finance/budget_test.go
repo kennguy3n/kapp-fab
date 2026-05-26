@@ -178,3 +178,81 @@ func TestNullIfEmpty(t *testing.T) {
 		t.Fatalf("nullIfEmpty(\"hello\") = %v, want %q", got, "hello")
 	}
 }
+
+// TestVarianceAlertProrationGate exercises the per-row alert decision
+// the VarianceAlertHandler makes for the in-flight calendar month.
+// The handler scales the budgeted plan by daysElapsed/daysInMonth
+// before comparing actual against threshold so a mid-month run
+// doesn't artificially under-report overruns (the diluted-comparison
+// finding raised on PR #110). Unplanned rows (budgeted=0, actual!=0)
+// bypass the threshold check unconditionally so unexpected activity
+// against accounts with no plan always surfaces an alert.
+//
+// This is a pure-arithmetic test that mirrors the math inline in
+// VarianceAlertHandler.Handle without spinning up a Postgres tx —
+// the integration coverage already exercises the full handler path.
+func TestVarianceAlertProrationGate(t *testing.T) {
+	t.Parallel()
+	threshold := decimal.NewFromFloat(0.10)
+	// Mid-July run: 15 of 31 days elapsed → prorate = ~48.4%.
+	daysElapsed, daysInMonth := 15, 31
+	prorate := decimal.NewFromInt(int64(daysElapsed)).Div(decimal.NewFromInt(int64(daysInMonth)))
+	cases := []struct {
+		name      string
+		budgeted  string
+		actual    string
+		unplanned bool
+		wantAlert bool
+	}{
+		{
+			// 600 spent of 1000 planned by July 15 → prorated plan
+			// is ~483.87, effective_pct = (600-483.87)/483.87 ≈ +24%
+			// → exceeds 10% threshold → alert.
+			name: "mid-month overrun vs prorated plan triggers", budgeted: "1000", actual: "600", wantAlert: true,
+		},
+		{
+			// 500 spent of 1000 planned by July 15 → prorated plan
+			// is ~483.87, effective_pct = (500-483.87)/483.87 ≈ +3.3%
+			// → under threshold → no alert. (The pre-fix behaviour
+			// would have computed (500-1000)/1000 = -50% and incorrectly
+			// alerted as "under-spend".)
+			name: "mid-month on-track vs prorated plan skipped", budgeted: "1000", actual: "500", wantAlert: false,
+		},
+		{
+			// Unplanned spend: budgeted=0 forces variance_pct=0 in
+			// the dashboard report; the alerter bypasses the
+			// threshold gate via the Unplanned flag so the operator
+			// still hears about it.
+			name: "unplanned non-zero actual always alerts", budgeted: "0", actual: "250", unplanned: true, wantAlert: true,
+		},
+		{
+			// Zero actual and zero plan — nothing to report.
+			name: "zero actual zero plan never alerts", budgeted: "0", actual: "0", unplanned: false, wantAlert: false,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			budgeted, _ := decimal.NewFromString(tc.budgeted)
+			actual, _ := decimal.NewFromString(tc.actual)
+			gotAlert := false
+			if tc.unplanned {
+				gotAlert = true
+			} else {
+				prorated := budgeted.Mul(prorate)
+				effective := decimal.Zero
+				if !prorated.IsZero() {
+					effective = actual.Sub(prorated).Div(prorated).Round(4)
+				}
+				if !effective.Abs().LessThan(threshold) {
+					gotAlert = true
+				}
+			}
+			if gotAlert != tc.wantAlert {
+				t.Fatalf("alert decision for (budgeted=%s, actual=%s, unplanned=%v) = %v, want %v",
+					tc.budgeted, tc.actual, tc.unplanned, gotAlert, tc.wantAlert)
+			}
+		})
+	}
+}

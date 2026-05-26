@@ -655,7 +655,9 @@ function VarianceRowRender({
       <td>{fmtNumber(row.actual)}</td>
       <td style={{ color: colour }}>{fmtNumber(row.variance)}</td>
       <td style={{ color: colour }}>
-        {(pct * 100).toLocaleString(undefined, { maximumFractionDigits: 1 })}%
+        {row.unplanned
+          ? "—"
+          : `${(pct * 100).toLocaleString(undefined, { maximumFractionDigits: 1 })}%`}
       </td>
       <td style={{ width: 200 }}>
         <div

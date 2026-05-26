@@ -637,23 +637,29 @@ func parseJournalFilterFrom(raw string) (time.Time, bool) {
 // final nanosecond of the supplied day via endOfDayUTC, mirroring
 // the income-statement and budget-variance contracts) or a full
 // RFC3339 timestamp. RFC3339 values pointing at the last second of
-// a day (HH=23, MM=59, SS=59) with sub-nanosecond precision below
-// 999_999_999 are promoted to the final nanosecond so dashboard
+// a calendar day (HH=23, MM=59, SS=59) with sub-nanosecond precision
+// below 999_999_999 are promoted to the final nanosecond so dashboard
 // drill-downs — whose `to` is built via JavaScript `Date` and
 // therefore caps at millisecond precision (.999) — still match the
 // full set of journal entries the variance computation aggregated
 // (which advances its own `to` bound to nanosecond 999_999_999).
+//
+// The end-of-day check is performed in the input's ORIGINAL timezone
+// (before UTC normalisation) so a caller sending an offset-bearing
+// boundary instant such as `2025-07-31T23:59:59+05:30` — i.e. "the
+// final second of July 31 in IST" — is treated the same way as the
+// UTC-normalised dashboard input. After promotion the value is
+// converted to UTC for the downstream `posted_at <= ...` comparison.
 // Returns ok=false on any other input.
 func parseJournalFilterTo(raw string) (time.Time, bool) {
 	if t, err := time.Parse("2006-01-02", raw); err == nil {
 		return endOfDayUTC(t), true
 	}
 	if t, err := time.Parse(time.RFC3339, raw); err == nil {
-		t = t.UTC()
 		if t.Hour() == 23 && t.Minute() == 59 && t.Second() == 59 && t.Nanosecond() < int(time.Second-1) {
-			t = time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, int(time.Second-1), time.UTC)
+			t = time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, int(time.Second-1), t.Location())
 		}
-		return t, true
+		return t.UTC(), true
 	}
 	return time.Time{}, false
 }

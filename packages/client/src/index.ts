@@ -2389,6 +2389,15 @@ export interface BudgetVarianceRow {
    *  total_favourable_variance / total_unfavourable_variance
    *  bucket the gross variance using this flag. */
   favourable: boolean;
+  /** Unplanned activity: budgeted is zero but actual is not.
+   *  The backend forces variance_pct=0 for these rows to avoid
+   *  div-by-zero, so renderers should display "—" (rather than
+   *  "0%") and the variance alerter ALWAYS notifies on these
+   *  rows regardless of the configured threshold. Common cause:
+   *  spend booked against an account that has no plan in this
+   *  budget, or revenue recognised on a previously-unplanned
+   *  line. */
+  unplanned: boolean;
 }
 
 export interface BudgetVarianceReport {

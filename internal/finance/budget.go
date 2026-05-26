@@ -144,6 +144,17 @@ type VarianceRow struct {
 	// the period summary without re-deriving account-type
 	// semantics from the row level.
 	Favourable bool `json:"favourable"`
+	// Unplanned is true when Budgeted is zero and Actual is non-
+	// zero. The variance_pct field is forced to zero for these
+	// rows (avoiding div-by-zero), but "plan = 0, actual ≠ 0" is
+	// the most operationally meaningful signal a budget surface
+	// can emit — an expense booked against an account with no
+	// plan, or revenue recognised on an unplanned line. Without
+	// the explicit flag the variance alerter (which thresholds on
+	// variance_pct) would silently skip every such row; renderers
+	// can also use this flag to display "—" for the percent column
+	// rather than a misleading "0%".
+	Unplanned bool `json:"unplanned"`
 }
 
 // VarianceReport is the budget-vs-actual rollup over a period.
@@ -876,8 +887,16 @@ func (s *BudgetStore) BudgetVsActual(ctx context.Context, tenantID uuid.UUID, q 
 			budgeted := line.Months[monthIdx]
 			actual := actuals[actualKey{line.AccountCode, lookupCC, monthIdx + 1}]
 			if isCreditNormal(accountType) {
-				// Revenue accounts: actuals are credit-positive,
-				// so the variance is sign-flipped to "vs plan".
+				// Credit-normal accounts (revenue / liability /
+				// equity): SUM(debit - credit) is credit-positive
+				// → negative under the as-recorded convention. We
+				// flip the sign so "positive = exceeded plan" holds
+				// for every account type and downstream consumers
+				// can read variance > 0 as "more activity than
+				// planned" without re-deriving the debit-vs-credit
+				// normal. (Whether more activity is favourable is a
+				// separate question — see Favourable below and
+				// isFavourableVariance.)
 				actual = actual.Neg()
 			}
 			variance := actual.Sub(budgeted)
@@ -886,6 +905,7 @@ func (s *BudgetStore) BudgetVsActual(ctx context.Context, tenantID uuid.UUID, q 
 				variancePct = variance.Div(budgeted).Round(4)
 			}
 			fav := isFavourableVariance(accountType, variance)
+			unplanned := budgeted.IsZero() && !actual.IsZero()
 			report.Rows = append(report.Rows, VarianceRow{
 				BudgetID:    q.BudgetID,
 				AccountCode: line.AccountCode,
@@ -898,6 +918,7 @@ func (s *BudgetStore) BudgetVsActual(ctx context.Context, tenantID uuid.UUID, q 
 				Variance:    variance,
 				VariancePct: variancePct,
 				Favourable:  fav,
+				Unplanned:   unplanned,
 			})
 			report.TotalBudgeted = report.TotalBudgeted.Add(budgeted)
 			report.TotalActual = report.TotalActual.Add(actual)
@@ -1168,32 +1189,67 @@ func (h *VarianceAlertHandler) Handle(ctx context.Context, tenantID uuid.UUID, _
 			log.Printf("finance: variance alert: budget %s: %v", b.ID, err)
 			continue
 		}
+		// Proration factor for the in-flight calendar month so the
+		// threshold check compares like-for-like windows. The
+		// dashboard variance report shows full-month plan vs MTD
+		// actuals — fine for at-a-glance reading — but the alerter
+		// thresholds on the *percentage* gap, and on (say) July 15
+		// the unprorated comparison dilutes the percentage by half
+		// (you've only had 15/31 of the month to spend). Without
+		// proration a 10% threshold catches an overrun only once
+		// it's already 20%+ of plan by mid-month — too late for an
+		// "early warning" alerter. Scaling the budget by
+		// daysElapsed/daysInMonth keeps the threshold semantically
+		// consistent regardless of when in the month the run lands.
+		daysInMonth := time.Date(now.Year(), now.Month()+1, 0, 0, 0, 0, 0, time.UTC).Day()
+		daysElapsed := now.Day()
+		prorate := decimal.NewFromInt(int64(daysElapsed)).Div(decimal.NewFromInt(int64(daysInMonth)))
 		for j := range report.Rows {
 			row := &report.Rows[j]
 			if !rowMatchesCurrentMonth(*row, now) {
 				continue
 			}
-			if row.VariancePct.Abs().LessThan(threshold) {
-				continue
+			// Unplanned spend (budgeted=0, actual!=0) ALWAYS
+			// alerts. Without this gate every such row would be
+			// silently skipped because variance_pct is forced to
+			// zero (no divisor) and so always fails the
+			// `Abs().LessThan(threshold)` test.
+			if !row.Unplanned {
+				proratedBudgeted := row.Budgeted.Mul(prorate)
+				effectivePct := decimal.Zero
+				if !proratedBudgeted.IsZero() {
+					effectivePct = row.Actual.Sub(proratedBudgeted).Div(proratedBudgeted).Round(4)
+				}
+				if effectivePct.Abs().LessThan(threshold) {
+					continue
+				}
 			}
 			if h.notify != nil {
 				payload, _ := json.Marshal(map[string]any{
-					"budget_id":     b.ID,
-					"budget_name":   b.Name,
-					"account_code":  row.AccountCode,
-					"cost_center":   row.CostCenter,
-					"period":        row.Period,
-					"budgeted":      row.Budgeted.String(),
-					"actual":        row.Actual.String(),
-					"variance":      row.Variance.String(),
-					"variance_pct":  row.VariancePct.String(),
-					"threshold":     threshold.String(),
+					"budget_id":         b.ID,
+					"budget_name":       b.Name,
+					"account_code":      row.AccountCode,
+					"cost_center":       row.CostCenter,
+					"period":            row.Period,
+					"budgeted":          row.Budgeted.String(),
+					"actual":            row.Actual.String(),
+					"variance":          row.Variance.String(),
+					"variance_pct":      row.VariancePct.String(),
+					"threshold":         threshold.String(),
+					"unplanned":         row.Unplanned,
+					"prorated_budgeted": row.Budgeted.Mul(prorate).Round(2).String(),
+					"days_elapsed":      daysElapsed,
+					"days_in_month":     daysInMonth,
 				})
+				body := fmt.Sprintf("MTD variance %s on %s (%s vs plan %s).", row.VariancePct.Mul(decimal.NewFromInt(100)).Round(1).String()+"%", row.AccountCode, row.Actual.String(), row.Budgeted.String())
+				if row.Unplanned {
+					body = fmt.Sprintf("Unplanned activity on %s: actual %s with no budgeted plan.", row.AccountCode, row.Actual.String())
+				}
 				_, _ = h.notify.Create(ctx, notifications.CreateInput{
 					TenantID: tenantID,
 					Type:     "budget_variance",
 					Title:    fmt.Sprintf("Budget variance: %s / %s", b.Name, row.AccountCode),
-					Body:     fmt.Sprintf("MTD variance %s on %s (%s vs plan %s).", row.VariancePct.Mul(decimal.NewFromInt(100)).Round(1).String()+"%", row.AccountCode, row.Actual.String(), row.Budgeted.String()),
+					Body:     body,
 					Payload:  payload,
 				})
 			}
