@@ -34,6 +34,15 @@ func TestFeatureFromPathRecordsKType(t *testing.T) {
 		{"/api/v1/records/payroll.run", tenant.FeatureHR},
 		{"/api/v1/records/lms.course", tenant.FeatureLMS},
 		{"/api/v1/records/helpdesk.ticket", tenant.FeatureHelpdesk},
+		// Manufacturing KTypes — BOMs and work orders ride the
+		// FeatureManufacturing gate on both the dedicated
+		// /api/v1/manufacturing/* surface and the generic
+		// /api/v1/records/{ktype} surface, so a Starter tenant
+		// without manufacturing on their plan cannot reach
+		// either path.
+		{"/api/v1/records/manufacturing.bom", tenant.FeatureManufacturing},
+		{"/api/v1/records/manufacturing.bom_component/abc-123", tenant.FeatureManufacturing},
+		{"/api/v1/records/manufacturing.work_order", tenant.FeatureManufacturing},
 		// Core platform KTypes are not plan-gated.
 		{"/api/v1/records/platform.audit", ""},
 		// Top-level domains map directly.

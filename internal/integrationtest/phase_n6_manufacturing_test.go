@@ -6,6 +6,7 @@ package integrationtest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -118,9 +119,11 @@ func TestPhaseN6BOMLifecycle(t *testing.T) {
 		Version:   "v1",
 		OutputQty: decimal.NewFromInt(1),
 		UOM:       "each",
+		// sort_order is derived server-side from the slice index;
+		// any explicit value the caller sets here is ignored.
 		Components: []manufacturing.BOMComponent{
-			{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(2), UOM: "each", SortOrder: 0},
-			{ComponentItemID: compB.ID, Qty: decimal.NewFromInt(3), UOM: "each", SortOrder: 1},
+			{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(2), UOM: "each"},
+			{ComponentItemID: compB.ID, Qty: decimal.NewFromInt(3), UOM: "each"},
 		},
 	})
 	if err != nil {
@@ -144,7 +147,7 @@ func TestPhaseN6BOMLifecycle(t *testing.T) {
 		OutputQty: decimal.NewFromInt(1),
 		UOM:       "each",
 		Components: []manufacturing.BOMComponent{
-			{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(1), UOM: "each", SortOrder: 0},
+			{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(1), UOM: "each"},
 		},
 	})
 	if err != nil {
@@ -186,6 +189,75 @@ func TestPhaseN6BOMLifecycle(t *testing.T) {
 	}
 }
 
+// TestPhaseN6BOMComponentSortOrderIsArrayIndex pins the invariant
+// that bom_components.sort_order is derived from the caller's slice
+// index (1-based) regardless of what the caller passed in
+// BOMComponent.SortOrder. Earlier code treated SortOrder == 0 as
+// "unset" and rewrote it to i+1, which silently collided the first
+// component (received 0 → rewrote to 1) with the second (kept its
+// explicit 1) and produced non-deterministic ordering after the
+// `ORDER BY sort_order, component_item_id` tiebreaker. The frontend
+// (BOMPage.tsx) sends `sort_order: i` (0-indexed) and triggered the
+// collision on every BOM with two or more components.
+func TestPhaseN6BOMComponentSortOrderIsArrayIndex(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, _, mfg, fg, compA, compB, _ := newTenantForManufacturing(t, h)
+	actor := uuid.New()
+
+	// All three combinations exercise the collision: 0+1
+	// (what the frontend actually sends), 5+9 (out-of-range
+	// values the caller might supply by mistake), and the
+	// zero-value default. Whatever the caller passes must be
+	// ignored — only the slice position is authoritative.
+	cases := []struct {
+		name    string
+		sortIn0 int
+		sortIn1 int
+	}{
+		{"frontend_zero_indexed", 0, 1},
+		{"caller_supplied_high", 5, 9},
+		{"both_zero", 0, 0},
+	}
+	for i, tc := range cases {
+		bom, err := mfg.CreateBOM(ctx, tn.ID, actor, manufacturing.CreateBOMInput{
+			ItemID:    fg.ID,
+			Version:   fmt.Sprintf("sort-%d", i),
+			OutputQty: decimal.NewFromInt(1),
+			UOM:       "each",
+			Components: []manufacturing.BOMComponent{
+				{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(1), UOM: "each", SortOrder: tc.sortIn0},
+				{ComponentItemID: compB.ID, Qty: decimal.NewFromInt(1), UOM: "each", SortOrder: tc.sortIn1},
+			},
+		})
+		if err != nil {
+			t.Fatalf("%s: create bom: %v", tc.name, err)
+		}
+		got, err := mfg.GetBOM(ctx, tn.ID, bom.ID)
+		if err != nil {
+			t.Fatalf("%s: get bom: %v", tc.name, err)
+		}
+		if len(got.Components) != 2 {
+			t.Fatalf("%s: expected 2 components, got %d", tc.name, len(got.Components))
+		}
+		// First component must land at sort_order=1, second at
+		// sort_order=2 — and they must NOT collide.
+		if got.Components[0].SortOrder == got.Components[1].SortOrder {
+			t.Fatalf("%s: sort_order collision: both = %d", tc.name, got.Components[0].SortOrder)
+		}
+		if got.Components[0].SortOrder != 1 || got.Components[1].SortOrder != 2 {
+			t.Fatalf("%s: expected sort_order 1,2; got %d,%d",
+				tc.name, got.Components[0].SortOrder, got.Components[1].SortOrder)
+		}
+		// And the result must come back in the caller's slice
+		// order (compA first, compB second).
+		if got.Components[0].ComponentItemID != compA.ID || got.Components[1].ComponentItemID != compB.ID {
+			t.Fatalf("%s: expected compA then compB; got %s then %s",
+				tc.name, got.Components[0].ComponentItemID, got.Components[1].ComponentItemID)
+		}
+	}
+}
+
 // TestPhaseN6WorkOrderCompletionEmitsMoves is the headline test for
 // Phase N6: a completed work order must consume each BOM component
 // (scaled by yield + scrap) and receipt the finished good in the
@@ -211,8 +283,8 @@ func TestPhaseN6WorkOrderCompletionEmitsMoves(t *testing.T) {
 		OutputQty: decimal.NewFromInt(1),
 		UOM:       "each",
 		Components: []manufacturing.BOMComponent{
-			{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(2), UOM: "each", ScrapPercent: &scrap, SortOrder: 0},
-			{ComponentItemID: compB.ID, Qty: decimal.NewFromInt(3), UOM: "each", SortOrder: 1},
+			{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(2), UOM: "each", ScrapPercent: &scrap},
+			{ComponentItemID: compB.ID, Qty: decimal.NewFromInt(3), UOM: "each"},
 		},
 	})
 	if err != nil {
@@ -269,6 +341,44 @@ func TestPhaseN6WorkOrderCompletionEmitsMoves(t *testing.T) {
 	expectMoveSum(t, compA.ID, manufacturing.MoveSourceWorkOrderConsume, "-11")
 	expectMoveSum(t, compB.ID, manufacturing.MoveSourceWorkOrderConsume, "-15")
 	expectMoveSum(t, fg.ID, manufacturing.MoveSourceWorkOrderReceipt, "5")
+
+	// Replay scenario: Phase 2 commits one inventory move per
+	// row OUTSIDE the Phase 1 transaction, so a crash partway
+	// through (e.g. between move 2 of 3 and move 3 of 3) leaves
+	// the work order stamped `completed` while one or more
+	// inventory_moves rows never land. Calling CompleteWorkOrder
+	// again must replay just the missing moves — without re-
+	// emitting the ones that did land (idempotent via the
+	// inventory_moves_source_uniq partial unique index).
+	//
+	// Simulate the crash by hand-deleting one of the moves and
+	// re-running CompleteWorkOrder.
+	if err := dbutil.WithTenantTx(ctx, h.pool, tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`DELETE FROM inventory_moves
+			  WHERE tenant_id=$1 AND item_id=$2 AND source_ktype=$3 AND source_id=$4`,
+			tn.ID, compB.ID, manufacturing.MoveSourceWorkOrderConsume, wo.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("simulate partial phase-2 failure: %v", err)
+	}
+	expectMoveSum(t, compB.ID, manufacturing.MoveSourceWorkOrderConsume, "0")
+
+	// Re-completion of a status=completed work order used to
+	// be an early-return no-op, silently leaving the missing
+	// move on the floor. The fix recomputes the moves on the
+	// replay path and lets Phase 2 re-emit only the ones
+	// missing from inventory_moves.
+	if _, err := mfg.CompleteWorkOrder(ctx, tn.ID, wo.ID, actor, manufacturing.CompleteWorkOrderInput{}); err != nil {
+		t.Fatalf("replay completion: %v", err)
+	}
+	// The missing component move is back.
+	expectMoveSum(t, compB.ID, manufacturing.MoveSourceWorkOrderConsume, "-15")
+	// And the moves that originally landed are NOT double-
+	// counted — Phase 2 hit ErrDuplicateSourceMove for them
+	// and skipped.
+	expectMoveSum(t, compA.ID, manufacturing.MoveSourceWorkOrderConsume, "-11")
+	expectMoveSum(t, fg.ID, manufacturing.MoveSourceWorkOrderReceipt, "5")
 }
 
 // TestPhaseN6WorkOrderInsufficientStock guards the strict-mode
@@ -293,7 +403,7 @@ func TestPhaseN6WorkOrderInsufficientStock(t *testing.T) {
 		OutputQty: decimal.NewFromInt(1),
 		UOM:       "each",
 		Components: []manufacturing.BOMComponent{
-			{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(2), UOM: "each", SortOrder: 0},
+			{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(2), UOM: "each"},
 		},
 	})
 	if err != nil {
@@ -348,7 +458,7 @@ func TestPhaseN6CompletionIsIdempotent(t *testing.T) {
 		OutputQty: decimal.NewFromInt(1),
 		UOM:       "each",
 		Components: []manufacturing.BOMComponent{
-			{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(1), UOM: "each", SortOrder: 0},
+			{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(1), UOM: "each"},
 		},
 	})
 	if err != nil {

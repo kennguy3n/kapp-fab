@@ -148,6 +148,14 @@ func featureFromKType(ktype string) string {
 		return tenant.FeatureHelpdesk
 	case "projects":
 		return tenant.FeatureProjects
+	case "manufacturing":
+		// manufacturing.bom, manufacturing.bom_component,
+		// manufacturing.work_order. Gated on the same key as
+		// the top-level /api/v1/manufacturing/* routes so a
+		// tenant whose plan disables manufacturing can't reach
+		// the KTypes via either the dedicated handlers OR the
+		// generic /api/v1/records/{ktype} surface.
+		return tenant.FeatureManufacturing
 	default:
 		return ""
 	}

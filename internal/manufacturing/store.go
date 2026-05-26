@@ -122,10 +122,18 @@ func (s *PGStore) CreateBOM(ctx context.Context, tenantID, actorID uuid.UUID, in
 			if uom == "" {
 				uom = "ea"
 			}
-			sort := c.SortOrder
-			if sort == 0 {
-				sort = i + 1
-			}
+			// sort_order is derived from the position the caller
+			// placed this component in the input slice. We used
+			// to honour a client-supplied SortOrder and fall back
+			// to `i + 1` when it was zero — but Go has no way to
+			// tell an "explicit zero" from a "default zero", so
+			// any input that started with SortOrder=0 (the very
+			// natural 0-indexed convention the frontend used) had
+			// its first component silently re-keyed to 1, colli-
+			// ding with the second component's explicit 1 and
+			// breaking the deterministic ordering. The array IS
+			// the ordering — anything else is a foot-gun.
+			sort := i + 1
 			if _, err := tx.Exec(ctx,
 				`INSERT INTO bom_components
 				     (tenant_id, bom_id, component_item_id, qty, uom, scrap_percent, sort_order)
