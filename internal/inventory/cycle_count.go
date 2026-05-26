@@ -271,6 +271,24 @@ func (s *CycleCountStore) UpdateSession(ctx context.Context, in CycleCountSessio
 		if warehouseID == uuid.Nil {
 			warehouseID = current.WarehouseID
 		}
+		// Re-pointing the warehouse on a reconciled session is
+		// invalid: the expected_qty on every line was seeded from
+		// the previous warehouse, but UpsertLine /
+		// SeedExpectedFromStock both reject while reconciled, so
+		// the operator cannot bring the line set into agreement
+		// with the new warehouse without first reopening to
+		// `counting`. Allowing the change would let an API caller
+		// freeze a session pointing at warehouse A's seeded
+		// expected_qty, swap the pointer to warehouse B, then post
+		// — emitting variance moves against B from quantities that
+		// describe A. The frontend already always sends the
+		// existing warehouse_id; this guard closes the direct-API
+		// path. Re-pointing remains free while the session is in
+		// `draft` or `counting` (callers are expected to re-seed
+		// afterwards; that's now documented on the function).
+		if current.Status == CycleCountStatusReconciled && warehouseID != current.WarehouseID {
+			return ErrCycleCountBadStatus
+		}
 		_, err := tx.Exec(ctx,
 			`UPDATE cycle_count_sessions
 			    SET code = $1, description = $2, warehouse_id = $3,
@@ -378,13 +396,17 @@ func (s *CycleCountStore) UpsertLine(ctx context.Context, in CycleCountLine) (*C
 			return ErrCycleCountAlreadyPosted
 		}
 		// Once a session has advanced to `reconciled` its lines are
-		// frozen relative to a posting attempt: PostSession reads the
-		// lines outside the optimistic-lock tx, so a concurrent line
-		// edit while reconciled could let PostSession write moves
-		// computed from pre-edit quantities while the line table
-		// records post-edit quantities. The state machine already
-		// allows `reconciled -> counting`, so an operator who needs to
-		// amend a count must explicitly reopen the session first.
+		// frozen relative to a posting attempt. PostSession now reads
+		// the lines inside the same FOR UPDATE tx as the status flip,
+		// so a concurrent line edit cannot interleave with an
+		// in-flight post. The freeze is still load-bearing for the
+		// "counted vs posted" invariant the auditor relies on: the
+		// `reconciled` status declares "the line set the operator
+		// signed off on", and silently mutating a line under that
+		// status would let the audit trail show a different value
+		// than the move that posts to the ledger. The state machine
+		// allows `reconciled -> counting`, so an operator who needs
+		// to amend a count must explicitly reopen the session first.
 		if status == CycleCountStatusReconciled {
 			return ErrCycleCountLineFrozen
 		}
