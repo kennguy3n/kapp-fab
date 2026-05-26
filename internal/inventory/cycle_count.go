@@ -621,7 +621,7 @@ func (s *CycleCountStore) SeedExpectedFromStock(ctx context.Context, tenantID, s
 		now := s.now()
 		for _, r := range stock {
 			// Conflict on (tenant_id, session_id, item_id) — the
-			// unique index added in migration 000064. We must NOT
+			// unique index added in migration 000065. We must NOT
 			// conflict on (tenant_id, id) because the candidate id
 			// is freshly generated on every call and would never
 			// collide, so re-seeding would insert one extra row per

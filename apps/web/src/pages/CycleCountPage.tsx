@@ -368,21 +368,45 @@ function SessionDetailPanel(props: {
           </button>
         )}
         {status === "reconciled" && (
-          <button
-            type="button"
-            disabled={post.isPending}
-            onClick={() => {
-              if (
-                window.confirm(
-                  "Posting will write variance inventory moves and lock the session. Continue?"
-                )
-              ) {
-                post.mutate();
-              }
-            }}
-          >
-            {post.isPending ? "Posting…" : "Post variance moves"}
-          </button>
+          <>
+            <button
+              type="button"
+              disabled={post.isPending}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "Posting will write variance inventory moves and lock the session. Continue?"
+                  )
+                ) {
+                  post.mutate();
+                }
+              }}
+            >
+              {post.isPending ? "Posting…" : "Post variance moves"}
+            </button>
+            {/* Reopen path: the backend state machine allows
+                reconciled → counting (canTransitionCycleCount in
+                internal/inventory/cycle_count.go), so an operator
+                who reconciled a session prematurely needs a UI
+                affordance to unlock its lines without dropping to
+                the API directly. Confirmation matches the post
+                button — a reopen is rare and worth pausing on. */}
+            <button
+              type="button"
+              disabled={advance.isPending}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "Reopening will unlock lines for editing and require re-marking reconciled before post. Continue?"
+                  )
+                ) {
+                  advance.mutate("counting");
+                }
+              }}
+            >
+              {advance.isPending ? "Reopening…" : "Reopen to counting"}
+            </button>
+          </>
         )}
       </div>
 
