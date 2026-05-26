@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
@@ -32,6 +33,15 @@ func RegisterFinanceTools(x *Executor, ledgerStore *ledger.PGStore, poster *ledg
 	x.Register(&postDebitNoteTool{executor: x, poster: poster})
 	x.Register(&recordPaymentTool{executor: x, poster: paymentPoster})
 	x.Register(&createRecurringInvoiceTool{executor: x})
+}
+
+// RegisterBudgetTools wires the Phase N5 budget tools against the
+// supplied BudgetStore. Split from RegisterFinanceTools so callers
+// who don't run a budget store (older tests, the dry-run agent
+// sandbox) still get the rest of the finance surface.
+func RegisterBudgetTools(x *Executor, budgets *finance.BudgetStore) {
+	x.Register(&createBudgetTool{executor: x, budgets: budgets})
+	x.Register(&budgetVsActualTool{executor: x, budgets: budgets})
 }
 
 // ----- finance.create_recurring_invoice -----
@@ -635,4 +645,242 @@ func assignIfSet(data map[string]any, key, value string) {
 	if value != "" {
 		data[key] = value
 	}
+}
+
+// ----- finance.create_budget -----
+//
+// Authors a finance.budget header row plus its line items in a
+// single agent call. Lines is the natural shape the LLM gets back
+// from a CFO prompt ("$80k for marketing in Jan, $100k from Feb
+// on, $50k for travel each month, etc.") — one entry per
+// (account_code, cost_center) with the 12 monthly amounts.
+//
+// Use Mode=dry_run to get a JSON preview of every line that would
+// be written without touching the database; Mode=commit performs
+// the insert atomically per tenant transaction.
+
+type createBudgetLineInput struct {
+	AccountCode string            `json:"account_code"`
+	CostCenter  string            `json:"cost_center,omitempty"`
+	Months      []decimal.Decimal `json:"months"`
+}
+
+type createBudgetInput struct {
+	Name              string                  `json:"name"`
+	FiscalYear        int                     `json:"fiscal_year"`
+	Status            string                  `json:"status,omitempty"`
+	CostCenter        string                  `json:"cost_center,omitempty"`
+	Notes             string                  `json:"notes,omitempty"`
+	VarianceThreshold *decimal.Decimal        `json:"variance_threshold,omitempty"`
+	Lines             []createBudgetLineInput `json:"lines"`
+}
+
+type createBudgetTool struct {
+	executor *Executor
+	budgets  *finance.BudgetStore
+}
+
+// Name implements Tool. The tool registers under the
+// finance.create_budget agent surface and authors a budget header
+// + line set in a single call.
+func (t *createBudgetTool) Name() string { return "finance.create_budget" }
+
+// RequiresConfirmation implements Tool. Creating a budget mutates
+// tenant data so the executor must obtain user confirmation before
+// running the commit pass.
+func (t *createBudgetTool) RequiresConfirmation() bool { return true }
+
+// Invoke implements Tool. Validates the input, then either returns
+// a dry-run preview (Mode == ModeDryRun) or creates the budget +
+// line rows on commit.
+func (t *createBudgetTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	if t.budgets == nil {
+		return nil, errors.New("finance.create_budget: budget store not wired")
+	}
+	var in createBudgetInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.Name == "" {
+		return nil, errors.New("finance.create_budget: name required")
+	}
+	if in.FiscalYear == 0 {
+		return nil, errors.New("finance.create_budget: fiscal_year required")
+	}
+	if len(in.Lines) == 0 {
+		return nil, errors.New("finance.create_budget: at least one line required")
+	}
+	// Validate every line shape up-front so dry_run / commit
+	// produce identical errors — the LLM can correct its plan
+	// without a database round-trip.
+	preparedLines := make([]finance.BudgetLine, 0, len(in.Lines))
+	for i, line := range in.Lines {
+		if line.AccountCode == "" {
+			return nil, fmt.Errorf("finance.create_budget: line[%d].account_code required", i)
+		}
+		if len(line.Months) != 12 {
+			return nil, fmt.Errorf("finance.create_budget: line[%d].months must have 12 entries (got %d)", i, len(line.Months))
+		}
+		var months [12]decimal.Decimal
+		copy(months[:], line.Months)
+		preparedLines = append(preparedLines, finance.BudgetLine{
+			TenantID:    inv.TenantID,
+			AccountCode: line.AccountCode,
+			CostCenter:  line.CostCenter,
+			Months:      months,
+		})
+	}
+
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(map[string]any{
+			"name":        in.Name,
+			"fiscal_year": in.FiscalYear,
+			"status":      in.Status,
+			"cost_center": in.CostCenter,
+			"lines":       in.Lines,
+		})
+		return &Result{
+			Summary: fmt.Sprintf("Would create budget %q for FY%d with %d lines", in.Name, in.FiscalYear, len(in.Lines)),
+			Preview: preview,
+		}, nil
+	}
+
+	header := finance.Budget{
+		TenantID:          inv.TenantID,
+		Name:              in.Name,
+		FiscalYear:        in.FiscalYear,
+		Status:            in.Status,
+		CostCenter:        in.CostCenter,
+		Notes:             in.Notes,
+		VarianceThreshold: in.VarianceThreshold,
+		CreatedBy:         &inv.ActorID,
+	}
+	// CreateBudgetWithLines wraps the header insert and every line
+	// upsert in a single tenant transaction so a mid-batch validation
+	// or DB error rolls the whole budget back rather than leaving an
+	// orphan header behind. Previously this loop called CreateBudget
+	// then UpsertBudgetLine per line, each in its own tx — a failure
+	// on line[i>0] would commit the header (and any prior lines) and
+	// the LLM would receive an error referring to a budget that now
+	// exists in a partially-populated state.
+	out, lines, err := t.budgets.CreateBudgetWithLines(ctx, header, preparedLines)
+	if err != nil {
+		return nil, fmt.Errorf("finance.create_budget: %w", err)
+	}
+	extra := map[string]any{
+		"budget_id":   out.ID,
+		"fiscal_year": out.FiscalYear,
+		"line_count":  len(lines),
+	}
+	return &Result{
+		Summary: fmt.Sprintf("Created budget %s (FY%d) with %d lines", out.ID, out.FiscalYear, len(lines)),
+		Extra:   extra,
+	}, nil
+}
+
+// ----- finance.budget_vs_actual -----
+//
+// Read-only variance report. RequiresConfirmation = false because
+// the tool never writes to the database; it just runs a SELECT and
+// returns the per-line variance summary in the Result.Extra map.
+
+type budgetVsActualInput struct {
+	BudgetID string `json:"budget_id"`
+	From     string `json:"from,omitempty"`
+	To       string `json:"to,omitempty"`
+}
+
+type budgetVsActualTool struct {
+	executor *Executor
+	budgets  *finance.BudgetStore
+}
+
+// Name implements Tool. The tool registers under the
+// finance.budget_vs_actual agent surface and returns the variance
+// report for the supplied budget.
+func (t *budgetVsActualTool) Name() string { return "finance.budget_vs_actual" }
+
+// RequiresConfirmation implements Tool. The variance report is
+// read-only so no user confirmation is required before the report
+// runs.
+func (t *budgetVsActualTool) RequiresConfirmation() bool { return false }
+
+// Invoke implements Tool. Parses optional from/to bounds and
+// returns the BudgetVsActual report on the Result.Extra payload.
+func (t *budgetVsActualTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	if t.budgets == nil {
+		return nil, errors.New("finance.budget_vs_actual: budget store not wired")
+	}
+	var in budgetVsActualInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.BudgetID == "" {
+		return nil, errors.New("finance.budget_vs_actual: budget_id required")
+	}
+	budgetID, err := uuid.Parse(in.BudgetID)
+	if err != nil {
+		return nil, fmt.Errorf("finance.budget_vs_actual: invalid budget_id: %w", err)
+	}
+	q := finance.VarianceQuery{BudgetID: budgetID}
+	if in.From != "" {
+		q.From, err = parseAgentDate(in.From)
+		if err != nil {
+			return nil, fmt.Errorf("finance.budget_vs_actual: invalid from: %w", err)
+		}
+	}
+	if in.To != "" {
+		q.To, err = parseAgentDateEnd(in.To)
+		if err != nil {
+			return nil, fmt.Errorf("finance.budget_vs_actual: invalid to: %w", err)
+		}
+	}
+	report, err := t.budgets.BudgetVsActual(ctx, inv.TenantID, q)
+	if err != nil {
+		return nil, fmt.Errorf("finance.budget_vs_actual: compute: %w", err)
+	}
+	extra := map[string]any{
+		"budget_id":                   report.BudgetID,
+		"budget_name":                 report.BudgetName,
+		"fiscal_year":                 report.FiscalYear,
+		"total_budgeted":              report.TotalBudgeted,
+		"total_actual":                report.TotalActual,
+		"total_variance":              report.TotalVariance,
+		"total_favourable_variance":   report.TotalFavourableVariance,
+		"total_unfavourable_variance": report.TotalUnfavourableVariance,
+		"rows":                        report.Rows,
+	}
+	return &Result{
+		Summary: fmt.Sprintf("Budget %q FY%d: actual %s vs plan %s (var %s)",
+			report.BudgetName, report.FiscalYear,
+			report.TotalActual.String(), report.TotalBudgeted.String(),
+			report.TotalVariance.String()),
+		Extra: extra,
+	}, nil
+}
+
+// parseAgentDate parses an agent-supplied YYYY-MM-DD string as the
+// start of that calendar day in UTC (00:00:00). Use this for `from`
+// bounds where the SQL filter is `je.posted_at >= $start`.
+func parseAgentDate(s string) (time.Time, error) {
+	return time.Parse("2006-01-02", s)
+}
+
+// parseAgentDateEnd parses an agent-supplied YYYY-MM-DD string as
+// the END of that calendar day in UTC (23:59:59.999999999). Use
+// this for `to` bounds where the SQL filter is
+// `je.posted_at <= $end`; parsing with parseAgentDate would
+// silently exclude every entry posted after midnight on the
+// requested end date, producing the same off-by-day variance the
+// HTTP variance endpoint guards against via endOfDay() in
+// services/api/budget_handlers.go. The final-nanosecond offset
+// matches that endOfDay so the three surfaces (HTTP variance,
+// agent budget_vs_actual, BudgetVsActual default-To) produce
+// identical windows including any sub-second activity.
+func parseAgentDateEnd(s string) (time.Time, error) {
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, int(time.Second-1), t.Location()), nil
 }

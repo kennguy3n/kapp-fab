@@ -198,6 +198,10 @@ const ExchangeRatesPage = lazyNamed(
   () => import("./pages/ExchangeRatesPage"),
   "ExchangeRatesPage",
 );
+const BudgetPage = lazyNamed(
+  () => import("./pages/BudgetPage"),
+  "BudgetPage",
+);
 const HelpdeskPage = lazyNamed(
   () => import("./pages/HelpdeskPage"),
   "HelpdeskPage",
@@ -209,6 +213,10 @@ const ReportBuilderPage = lazyNamed(
 const InsightsQueryBuilderPage = lazyNamed(
   () => import("./pages/InsightsQueryBuilderPage"),
   "InsightsQueryBuilderPage",
+);
+const KTypeBuilderPage = lazyNamed(
+  () => import("./pages/KTypeBuilderPage"),
+  "KTypeBuilderPage",
 );
 const InsightsDashboardPage = lazyNamed(
   () => import("./pages/InsightsDashboardPage"),
@@ -348,6 +356,7 @@ const navSections: NavSection[] = [
       { to: "/finance/cost-centers", label: "Cost Centers" },
       { to: "/finance/bank-reconciliation", label: "Bank Reconciliation" },
       { to: "/finance/exchange-rates", label: "Exchange Rates" },
+      { to: "/finance/budgets", label: "Budgets" },
       { to: "/reports", label: "Report Builder" },
     ],
   },
@@ -426,6 +435,7 @@ const navSections: NavSection[] = [
       { to: "/admin/roles", label: "Roles" },
       { to: "/admin/webhooks", label: "Webhooks" },
       { to: "/admin/consolidation", label: "Consolidation" },
+      { to: "/admin/ktypes/builder", label: "KType Builder" },
       { to: "/imports", label: "Imports" },
     ],
   },
@@ -721,10 +731,18 @@ function AppShell() {
               <Route path="/admin/usage" element={<UsageDashboardPage />} />
               <Route path="/admin/audit" element={<AuditLogPage />} />
               <Route path="/admin/roles" element={<RoleManagementPage />} />
+              <Route
+                path="/admin/ktypes/builder"
+                element={<KTypeBuilderPage />}
+              />
               <Route path="/approvals" element={<ApprovalsPage />} />
               <Route
                 path="/finance/exchange-rates"
                 element={<ExchangeRatesPage />}
+              />
+              <Route
+                path="/finance/budgets"
+                element={<BudgetPage />}
               />
               <Route path="/helpdesk" element={<HelpdeskPage />} />
               <Route path="/reports" element={<ReportBuilderPage />} />

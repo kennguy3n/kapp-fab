@@ -56,6 +56,35 @@ export interface KType {
   schema: KTypeSchema;
 }
 
+// Phase N8b — tenant-authored (low-code) KType. Mirrors
+// internal/ktype.TenantKType. `schema` is the same KTypeSchema
+// shape the platform uses, but restricted at the API layer to
+// the safe field-type subset (no posting hooks, no computed
+// fields, no custom agent tools).
+export type TenantKTypeStatus = "draft" | "active" | "archived";
+
+export interface TenantKType {
+  tenant_id: string;
+  name: string;
+  version: number;
+  title: string;
+  description: string;
+  schema: KTypeSchema;
+  status: TenantKTypeStatus;
+  created_at: string;
+  updated_at: string;
+  created_by: string;
+}
+
+export interface UpsertTenantKTypeInput {
+  name: string;
+  version?: number;
+  title: string;
+  description?: string;
+  schema: KTypeSchema;
+  status?: TenantKTypeStatus;
+}
+
 export interface KRecord {
   id: string;
   tenant_id: string;
@@ -389,6 +418,43 @@ export class ApiClient {
       headers: { "Idempotency-Key": crypto.randomUUID() },
       body: JSON.stringify(kt),
     });
+  }
+
+  // --- Phase N8b: tenant-authored (low-code) KTypes ---------------------
+
+  listTenantKTypes(): Promise<{
+    items: TenantKType[];
+    field_limit: number;
+  }> {
+    return this.request("/tenant-ktypes");
+  }
+
+  getTenantKType(name: string, version?: number): Promise<TenantKType> {
+    const qs = version ? `?version=${version}` : "";
+    return this.request(`/tenant-ktypes/${encodeURIComponent(name)}${qs}`);
+  }
+
+  upsertTenantKType(input: UpsertTenantKTypeInput): Promise<TenantKType> {
+    return this.request("/tenant-ktypes", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  setTenantKTypeStatus(
+    name: string,
+    version: number,
+    status: TenantKTypeStatus,
+  ): Promise<{ name: string; version: number; status: TenantKTypeStatus }> {
+    return this.request(
+      `/tenant-ktypes/${encodeURIComponent(name)}/status?version=${version}`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ status }),
+      },
+    );
   }
 
   // --- KRecord CRUD ------------------------------------------------------
@@ -742,12 +808,14 @@ export class ApiClient {
     to?: string;
     source_ktype?: string;
     source_id?: string;
+    account_code?: string;
   }): Promise<JournalEntry[]> {
     const qs = new URLSearchParams();
     if (params?.from) qs.set("from", params.from);
     if (params?.to) qs.set("to", params.to);
     if (params?.source_ktype) qs.set("source_ktype", params.source_ktype);
     if (params?.source_id) qs.set("source_id", params.source_id);
+    if (params?.account_code) qs.set("account_code", params.account_code);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     return this.request(`/finance/journal-entries${suffix}`);
   }
@@ -1378,6 +1446,78 @@ export class ApiClient {
         headers: { "Idempotency-Key": crypto.randomUUID() },
         body: JSON.stringify(input),
       }
+    );
+  }
+
+  // --- Phase N5: budgets ------------------------------------------------
+
+  listBudgets(): Promise<Budget[]> {
+    return this.request(`/finance/budgets`);
+  }
+
+  getBudget(id: string): Promise<Budget> {
+    return this.request(`/finance/budgets/${encodeURIComponent(id)}`);
+  }
+
+  createBudget(input: CreateBudgetInput): Promise<Budget> {
+    return this.request(`/finance/budgets`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateBudget(id: string, input: UpdateBudgetInput): Promise<Budget> {
+    return this.request(`/finance/budgets/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteBudget(id: string): Promise<void> {
+    return this.request(`/finance/budgets/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  }
+
+  listBudgetLines(budgetId: string): Promise<BudgetLine[]> {
+    return this.request(
+      `/finance/budgets/${encodeURIComponent(budgetId)}/lines`
+    );
+  }
+
+  upsertBudgetLine(
+    budgetId: string,
+    input: BudgetLineInput
+  ): Promise<BudgetLine> {
+    return this.request(
+      `/finance/budgets/${encodeURIComponent(budgetId)}/lines`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(input),
+      }
+    );
+  }
+
+  deleteBudgetLine(budgetId: string, lineId: string): Promise<void> {
+    return this.request(
+      `/finance/budgets/${encodeURIComponent(budgetId)}/lines/${encodeURIComponent(lineId)}`,
+      { method: "DELETE" }
+    );
+  }
+
+  budgetVariance(
+    budgetId: string,
+    params?: { from?: string; to?: string }
+  ): Promise<BudgetVarianceReport> {
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set("from", params.from);
+    if (params?.to) qs.set("to", params.to);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return this.request(
+      `/finance/budgets/${encodeURIComponent(budgetId)}/variance${suffix}`
     );
   }
 }
@@ -2145,4 +2285,137 @@ export interface InsightsEmbedInput {
   scoped_filters?: Record<string, unknown>;
   max_views?: number;
   expires_in_days?: number;
+}
+
+// --- Phase N5: budgets -----------------------------------------------
+
+export interface Budget {
+  tenant_id: string;
+  id: string;
+  name: string;
+  fiscal_year: number;
+  status: "draft" | "active" | "closed";
+  cost_center?: string;
+  notes?: string;
+  variance_threshold?: string | null;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateBudgetInput {
+  name: string;
+  fiscal_year: number;
+  status?: "draft" | "active" | "closed";
+  cost_center?: string;
+  notes?: string;
+  variance_threshold?: string;
+}
+
+export interface UpdateBudgetInput {
+  name: string;
+  status: "draft" | "active" | "closed";
+  cost_center?: string;
+  notes?: string;
+  variance_threshold?: string;
+}
+
+export interface BudgetLine {
+  tenant_id: string;
+  id: string;
+  budget_id: string;
+  account_code: string;
+  cost_center?: string;
+  // 12-element array, January..December in fiscal-month order.
+  months: string[];
+  annual_total: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BudgetLineInput {
+  id?: string;
+  account_code: string;
+  cost_center?: string;
+  // 12-element array, January..December in fiscal-month order.
+  months: string[];
+}
+
+/**
+ * Chart-of-accounts classification of the variance row's account.
+ * Mirrors the `account_type` column on `accounts` and the backend's
+ * `VarianceRow.account_type` JSON field. Renderers use this to pick
+ * "exceeded plan = good / bad" colour semantics:
+ *
+ *   - debit-normal (asset / expense): positive variance means
+ *     actual exceeded plan, which is typically *bad* (overspend).
+ *   - credit-normal (liability / equity / revenue): positive
+ *     variance means actual exceeded plan, which is typically *good*
+ *     (over-earning revenue, over-collecting AP/equity).
+ *
+ * The backend has already sign-normalised the Actual / Variance
+ * amounts so that positive = exceeded plan for every account type;
+ * the client uses `account_type` only to decide colour, not to
+ * re-derive the sign.
+ */
+export type BudgetVarianceAccountType =
+  | "asset"
+  | "liability"
+  | "equity"
+  | "revenue"
+  | "expense"
+  | "";
+
+export interface BudgetVarianceRow {
+  budget_id: string;
+  account_code: string;
+  /** Optional — the backend joins the chart of accounts so the
+   * row can render "4000 — Sales Revenue" instead of an opaque
+   * code. Empty when the account_code is unknown. */
+  account_name?: string;
+  /** Optional — only emitted by the backend when the account
+   * resolves to a known account_type at report time. */
+  account_type?: BudgetVarianceAccountType;
+  cost_center?: string;
+  period: string;
+  budgeted: string;
+  actual: string;
+  variance: string;
+  variance_pct: string;
+  /** Better-than-plan flag the backend stamps per row.
+   *  Revenue over-perform and expense under-spend are
+   *  favourable; expense over-spend and revenue under-perform
+   *  are unfavourable. The footer rollups
+   *  total_favourable_variance / total_unfavourable_variance
+   *  bucket the gross variance using this flag. */
+  favourable: boolean;
+  /** Unplanned activity: budgeted is zero but actual is not.
+   *  The backend forces variance_pct=0 for these rows to avoid
+   *  div-by-zero, so renderers should display "—" (rather than
+   *  "0%") and the variance alerter ALWAYS notifies on these
+   *  rows regardless of the configured threshold. Common cause:
+   *  spend booked against an account that has no plan in this
+   *  budget, or revenue recognised on a previously-unplanned
+   *  line. */
+  unplanned: boolean;
+}
+
+export interface BudgetVarianceReport {
+  tenant_id: string;
+  budget_id: string;
+  budget_name: string;
+  fiscal_year: number;
+  from: string;
+  to: string;
+  rows: BudgetVarianceRow[];
+  total_budgeted: string;
+  total_actual: string;
+  total_variance: string;
+  /** Sum of |variance| across rows where favourable=true.
+   *  Always non-negative. Surface this on the footer instead of
+   *  total_variance for at-a-glance red/green colouring. */
+  total_favourable_variance: string;
+  /** Sum of |variance| across rows where favourable=false.
+   *  Always non-negative. */
+  total_unfavourable_variance: string;
 }

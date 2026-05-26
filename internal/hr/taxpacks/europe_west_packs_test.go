@@ -343,6 +343,42 @@ func TestFRPackPlafondCeiling(t *testing.T) {
 	}
 }
 
+// TestFRPackBracketBoundary: exact monthly-equivalent values at a
+// bracket Top must land in the lower band, not the next band up
+// (DGFiP "(Floor, Top]" convention — "Jusqu'à 1 620 €" means
+// ≤ 1620, so monthlyEq==1620 → 0% PAS, not 0.5%). We probe
+// frResolvePASRate directly with exact decimal values so the test
+// isn't sensitive to division-precision artifacts in the
+// gross→monthlyEq projection.
+func TestFRPackBracketBoundary(t *testing.T) {
+	cases := []struct {
+		monthlyEq decimal.Decimal
+		wantRate  decimal.Decimal
+		desc      string
+	}{
+		// Top of band 0 (0% band) — exactly at 1 620 must still
+		// resolve to 0%, not 0.5%.
+		{decimal.NewFromInt(1620), dec("0"), "band 0 Top (1620)"},
+		// Inside band 1.
+		{decimal.NewFromInt(1650), dec("0.005"), "inside band 1 (1650)"},
+		// Top of band 1 — exactly at 1 683 → 0.5%, not 1.3%.
+		{decimal.NewFromInt(1683), dec("0.005"), "band 1 Top (1683)"},
+		// Top of band 7 — exactly at 3 107 → 7.5%, not 9.9%.
+		{decimal.NewFromInt(3107), dec("0.075"), "band 7 Top (3107)"},
+		// Just past 3 107 → next band's 9.9%.
+		{decimal.NewFromInt(3108), dec("0.099"), "just past band 7 Top"},
+		// Open-ended top band — any value past 221 418 → 43%.
+		{decimal.NewFromInt(500000), dec("0.430"), "open-ended top band"},
+	}
+	for _, c := range cases {
+		got := frResolvePASRate(c.monthlyEq)
+		if got.Cmp(c.wantRate) != 0 {
+			t.Errorf("%s: frResolvePASRate(%s) = %s; want %s",
+				c.desc, c.monthlyEq, got, c.wantRate)
+		}
+	}
+}
+
 // TestFRPackEmptyInput: zero gross → no lines.
 func TestFRPackEmptyInput(t *testing.T) {
 	pack, _ := Lookup("FR")
@@ -477,12 +513,18 @@ func TestITPackEmptyInput(t *testing.T) {
 
 // ----- Netherlands -----
 
-// TestNLPackNominalSalary: €3,500 / month → annual ≈ 42,266
-// (in band 2, 38,441→76,817 @ 37.48%). Gross tax = 13,770.36 +
-// (42266 - 38441) × 0.3748 = 13,770.36 + 1,433.61 = 15,203.97.
-// Credit at this income (≤ 76,817) = 3,000. Net = 12,203.97 /
-// yr → period ≈ 1,035.78.
-// ZVW = 3500 × 5.32% = 186.20.
+// TestNLPackNominalSalary: €3,500 / month → annualised by the
+// pack via the 365.25/days-in-period factor lands at ≈ 41,238 EUR
+// (not the naive 42,000 a 12× multiplier would yield). That puts
+// the taxpayer in band 2 (€38,441 → €76,817 @ 37.48%). Base at
+// the band floor = 13,769.57 (cumulative tax through band 1 — see
+// nl.go nlLoonheffingBrackets at the 38,441 row); the band-2
+// Base / Top pair is the one the test asserts against to guard
+// against a regression that would re-introduce the slightly
+// higher 13,770.36 value from a draft of the Belastingdienst
+// witte tabel.
+// Credit at this income (≤ 76,817) = 3,000.
+// ZVW = 3,500 × 5.32% = 186.20.
 func TestNLPackNominalSalary(t *testing.T) {
 	pack, _ := Lookup("NL")
 	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},

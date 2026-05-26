@@ -217,12 +217,27 @@ func (frPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 // frResolvePASRate looks up the PAS rate for the given monthly-
 // equivalent gross. Returns the matching band's flat rate, or 0
 // for income below the first band's floor.
+//
+// The DGFiP publishes the grille de taux par défaut in the form
+// "Jusqu'à 1 620 €" (≤ €1,620, rate 0%), "De 1 620 à 1 683 €" (rate
+// 0.5%), etc. The conventional interpretation is `(Floor, Top]`:
+// the previous band's Top is the new band's Floor, and a value at
+// exactly the boundary belongs to the LOWER band (the one whose
+// Top equals that value). So at gross = 1 620 € the applicable
+// rate is 0% (band ending at 1 620), not 0.5% (band starting at
+// 1 620). Implemented as: enter a band when monthlyEq is strictly
+// > Floor or equals 0 (the first band's Floor); leave a band only
+// when monthlyEq is strictly > Top.
 func frResolvePASRate(monthlyEq decimal.Decimal) decimal.Decimal {
 	for _, b := range frPASBrackets {
 		if monthlyEq.LessThan(b.Floor) {
 			continue
 		}
-		if !b.Top.IsZero() && monthlyEq.GreaterThanOrEqual(b.Top) {
+		// Top inclusive: a value equal to Top still lives in this
+		// band. Only skip ahead if monthlyEq has strictly crossed
+		// past the upper bound. Open-ended (Top == 0) bands catch
+		// everything that reached them.
+		if !b.Top.IsZero() && monthlyEq.GreaterThan(b.Top) {
 			continue
 		}
 		return b.Rate

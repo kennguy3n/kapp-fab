@@ -103,7 +103,7 @@ KType and KRecord are **original Kapp concepts**. KType defines *what a business
 | Consolidation across tenants | | ✓ |
 | Country-specific tax packs | | ✓ |
 | Cost centers / dimensions | ✓ | |
-| Budgets | | ✓ |
+| Budgets | ✓ | |
 
 #### Sales and Procurement
 
@@ -536,12 +536,17 @@ hardening / cross-cutting / Phase M work in [PROGRESS.md](./PROGRESS.md):
    cross-tenant rollup (PR #56)
 5. **Insights: external data source connections** — non-Kapp PostgreSQL +
    CSV upload (PR #48)
+6. **Low-code KType builder** — visual editor + HTTP API + `tenant_ktypes`
+   table so power users can author custom business objects (asset registers,
+   compliance checklists, approval forms, etc.) without writing Go. Restricted
+   to the safe field-type subset; posting hooks and custom agent tool handlers
+   remain developer-only (Phase N8b, PR #118).
 
 ### Defer (6)
 
 1. Manufacturing
 2. Advanced LMS certificates
 3. Website/CMS
-4. Unrestricted low-code scripting
+4. Unrestricted low-code scripting (Go posting hooks + custom agent tool handlers; **visual low-code KType builder** for the safe field-type subset ships in MVP — see "Shipped post-MVP")
 5. Generic marketplace
 6. Insights: notebook / exploratory analysis interface

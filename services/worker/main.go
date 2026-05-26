@@ -269,6 +269,19 @@ func run() error {
 		ledger.ActionTypeUnrealizedGainLoss,
 		ledger.NewUnrealizedGainLossJob(ledgerStore, exchangeRates, workerSystemActor),
 	)
+	// Phase N5 — daily budget variance sweeper. Walks every active
+	// finance.budget for the tenant, recomputes MTD actuals against
+	// budget_lines for the current calendar month, and emits an
+	// in-app notification per (account, cost_center) line whose
+	// |variance| crosses the budget's (or the platform default)
+	// threshold. Notifications fan out through the same router that
+	// handles low-stock alerts so KChat DM / webhook / email
+	// transports work out of the box.
+	budgetStore := finance.NewBudgetStore(pool)
+	schedRegistry.Register(
+		finance.ActionTypeBudgetVariance,
+		finance.NewVarianceAlertHandler(budgetStore, router.store),
+	)
 	// Daily tenant usage snapshot — re-samples storage_bytes and
 	// krecord_count per tenant so the dashboard's absolute
 	// counters are accurate even on quiet days. API-call deltas

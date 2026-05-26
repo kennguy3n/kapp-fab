@@ -197,12 +197,12 @@ func (h *financeHandlers) listJournalEntries(w http.ResponseWriter, r *http.Requ
 		Offset:      offset,
 	}
 	if raw := r.URL.Query().Get("from"); raw != "" {
-		if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		if t, ok := parseJournalFilterFrom(raw); ok {
 			filter.From = &t
 		}
 	}
 	if raw := r.URL.Query().Get("to"); raw != "" {
-		if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		if t, ok := parseJournalFilterTo(raw); ok {
 			filter.To = &t
 		}
 	}
@@ -606,9 +606,62 @@ func parseEndOfDayParam(raw string, fallback time.Time) time.Time {
 // endOfDayUTC returns the last representable instant of the supplied
 // day in UTC (23:59:59.999999999). Used for inclusive date ranges in
 // reports.
+//
+// int(time.Second-1) = 999_999_999 nanoseconds — the final
+// representable instant of the day. Three other surfaces (the budget
+// HTTP endpoint, the agent date parser, and the budget store default
+// `To`) use the identical constant so every `posted_at <= ...` bound
+// across the finance API observes the same day-inclusivity semantics.
 func endOfDayUTC(t time.Time) time.Time {
 	t = t.UTC()
-	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, int(time.Second-time.Nanosecond), time.UTC)
+	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, int(time.Second-1), time.UTC)
+}
+
+// parseJournalFilterFrom accepts either YYYY-MM-DD (parses as
+// midnight UTC, the correct inclusive lower bound for a calendar-day
+// window) or a full RFC3339 timestamp (used verbatim, normalised to
+// UTC). Returns ok=false on any other input so callers fall through
+// to "no lower bound" rather than emitting a 400 — matching the
+// long-standing forgiving-parser contract on this endpoint.
+func parseJournalFilterFrom(raw string) (time.Time, bool) {
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		return t.UTC(), true
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t.UTC(), true
+	}
+	return time.Time{}, false
+}
+
+// parseJournalFilterTo accepts either YYYY-MM-DD (advanced to the
+// final nanosecond of the supplied day via endOfDayUTC, mirroring
+// the income-statement and budget-variance contracts) or a full
+// RFC3339 timestamp. RFC3339 values pointing at the last second of
+// a calendar day (HH=23, MM=59, SS=59) with sub-nanosecond precision
+// below 999_999_999 are promoted to the final nanosecond so dashboard
+// drill-downs — whose `to` is built via JavaScript `Date` and
+// therefore caps at millisecond precision (.999) — still match the
+// full set of journal entries the variance computation aggregated
+// (which advances its own `to` bound to nanosecond 999_999_999).
+//
+// The end-of-day check is performed in the input's ORIGINAL timezone
+// (before UTC normalisation) so a caller sending an offset-bearing
+// boundary instant such as `2025-07-31T23:59:59+05:30` — i.e. "the
+// final second of July 31 in IST" — is treated the same way as the
+// UTC-normalised dashboard input. After promotion the value is
+// converted to UTC for the downstream `posted_at <= ...` comparison.
+// Returns ok=false on any other input.
+func parseJournalFilterTo(raw string) (time.Time, bool) {
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		return endOfDayUTC(t), true
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		if t.Hour() == 23 && t.Minute() == 59 && t.Second() == 59 && t.Nanosecond() < int(time.Second-1) {
+			t = time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, int(time.Second-1), t.Location())
+		}
+		return t.UTC(), true
+	}
+	return time.Time{}, false
 }
 
 // writeFinanceError translates ledger sentinel errors into the HTTP
