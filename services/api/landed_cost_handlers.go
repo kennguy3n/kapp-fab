@@ -387,7 +387,8 @@ func writeLandedCostError(w http.ResponseWriter, err error) {
 		errors.Is(err, finance.ErrLandedCostNoCharges),
 		errors.Is(err, finance.ErrLandedCostNoTargets),
 		errors.Is(err, finance.ErrLandedCostBadMethod),
-		errors.Is(err, finance.ErrLandedCostZeroWeightTotal):
+		errors.Is(err, finance.ErrLandedCostZeroWeightTotal),
+		errors.Is(err, finance.ErrLandedCostPostedJEMissing):
 		http.Error(w, err.Error(), http.StatusConflict)
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)

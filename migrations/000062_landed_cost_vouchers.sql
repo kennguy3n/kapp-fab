@@ -127,7 +127,16 @@ CREATE TABLE IF NOT EXISTS landed_cost_targets (
     qty                NUMERIC(20,4) NOT NULL,
     unit_cost          NUMERIC(20,4) NOT NULL,
     amount             NUMERIC(20,4) NOT NULL,
-    weight             NUMERIC(20,4) NOT NULL DEFAULT 1.0,
+    -- weight defaults to 0 to match the Go zero value. The
+    -- allocator treats Weight=0 as "exclude this target from the
+    -- by_weight share split"; with a DEFAULT of 1.0 a row created
+    -- by ad-hoc SQL would silently participate in the share split
+    -- with weight 1, while the Go-created row for the same shape
+    -- would be excluded. Keeping the column NOT NULL preserves the
+    -- "always set explicitly" contract on the Go path; the new
+    -- default only fires for direct-SQL paths where the operator
+    -- omitted the column on purpose.
+    weight             NUMERIC(20,4) NOT NULL DEFAULT 0,
     allocated_amount   NUMERIC(20,4) NOT NULL DEFAULT 0,
     applied            BOOLEAN NOT NULL DEFAULT FALSE,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),

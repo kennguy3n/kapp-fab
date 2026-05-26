@@ -236,6 +236,11 @@ function CreateVoucherForm(props: {
           Create
         </button>
       </div>
+      {createMut.isError ? (
+        <p style={{ color: "#b91c1c", fontSize: 12, marginTop: 6 }}>
+          Create failed: {(createMut.error as Error).message}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -513,6 +518,16 @@ function ChargesSection(props: {
           </button>
         </div>
       )}
+      {upsertMut.isError ? (
+        <p style={{ color: "#b91c1c", fontSize: 12, marginTop: 6 }}>
+          Add charge failed: {(upsertMut.error as Error).message}
+        </p>
+      ) : null}
+      {deleteMut.isError ? (
+        <p style={{ color: "#b91c1c", fontSize: 12, marginTop: 6 }}>
+          Delete charge failed: {(deleteMut.error as Error).message}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -555,7 +570,14 @@ function TargetsSection(props: {
     onSuccess: props.onMutated,
   });
 
+  // JS float accumulation across independent reduce() passes can leave
+  // a sub-cent residual even when shopspring/decimal on the backend has
+  // them exactly equal (classic 0.1 + 0.2 === 0.30000000000000004 case).
+  // The display rounds to two decimals, so anything under half a cent is
+  // visual zero; gate the red Δ indicator on the same threshold so we
+  // don't paint a "Δ 0.00" mismatch for a balanced voucher.
   const reconcile = props.totalCharges - props.totalAllocated;
+  const reconcileMismatch = Math.abs(reconcile) >= 0.005;
 
   return (
     <div style={{ marginTop: 16 }}>
@@ -617,7 +639,7 @@ function TargetsSection(props: {
               <strong>{props.totalAllocated.toFixed(2)}</strong>
             </td>
             <td colSpan={2} style={{ padding: "6px 8px" }}>
-              {reconcile !== 0 && props.totalAllocated > 0 && (
+              {reconcileMismatch && props.totalAllocated > 0 && (
                 <span style={{ color: "#b91c1c" }}>
                   Δ {reconcile.toFixed(2)}
                 </span>
@@ -708,6 +730,16 @@ function TargetsSection(props: {
           </button>
         </div>
       )}
+      {upsertMut.isError ? (
+        <p style={{ color: "#b91c1c", fontSize: 12, marginTop: 6 }}>
+          Add target failed: {(upsertMut.error as Error).message}
+        </p>
+      ) : null}
+      {deleteMut.isError ? (
+        <p style={{ color: "#b91c1c", fontSize: 12, marginTop: 6 }}>
+          Delete target failed: {(deleteMut.error as Error).message}
+        </p>
+      ) : null}
     </div>
   );
 }

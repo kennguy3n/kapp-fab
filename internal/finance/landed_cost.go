@@ -108,6 +108,18 @@ var (
 	ErrLandedCostNoTargets       = errors.New("voucher has no targets to allocate to")
 	ErrLandedCostBadMethod       = errors.New("unknown allocation method")
 	ErrLandedCostZeroWeightTotal = errors.New("by_weight allocation requires at least one target with weight > 0")
+	// ErrLandedCostPostedJEMissing covers the operational anomaly
+	// where a voucher row is in 'posted' status with a non-nil
+	// je_id but the referenced journal_entries row has been hard-
+	// deleted out of band (e.g. a manual SQL repair script). The
+	// state is unrecoverable from inside the poster — re-running
+	// PostVoucher would either double-book (if the unique source-
+	// tuple index also got cleared) or return ErrLandedCostNoCharges
+	// (the empty Phase 1 snapshot collapses into Phase 3's
+	// no-charges branch with a misleading message). Surfacing a
+	// dedicated sentinel lets the HTTP / agent / KChat layers map
+	// it to a 409 with a clear operator-action message instead.
+	ErrLandedCostPostedJEMissing = errors.New("posted voucher references a journal entry that no longer exists")
 )
 
 // LandedCostVoucher is the header row.
@@ -1021,6 +1033,20 @@ func (s *LandedCostStore) PostVoucher(ctx context.Context, tenantID, voucherID, 
 			je, gerr := s.ledger.GetJournalEntry(ctx, tenantID, *v.JEID)
 			if gerr != nil {
 				return fmt.Errorf("landed_cost: load existing JE: %w", gerr)
+			}
+			if je == nil {
+				// The voucher claims to be posted with a
+				// concrete je_id but the JE row is gone
+				// (LedgerBackend.GetJournalEntry translates
+				// ledger.ErrEntryNotFound into (nil, nil) so
+				// the import cycle stays broken — see
+				// internal/financeadapters/landed_cost.go).
+				// Surface a typed sentinel rather than
+				// silently falling through into Phase 2/3,
+				// where the empty snapshot would collapse
+				// into ErrLandedCostNoCharges and give the
+				// operator a misleading recovery hint.
+				return ErrLandedCostPostedJEMissing
 			}
 			existingJE = je
 			return nil
