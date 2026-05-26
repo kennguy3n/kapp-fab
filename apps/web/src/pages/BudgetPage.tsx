@@ -587,6 +587,14 @@ function varianceColour(variance: number, favourable: boolean): string {
 // nulls if the period label is not a recognised YYYY-MM shape — in
 // that case the drill-down link omits the date filter rather than
 // emitting malformed query parameters.
+//
+// The `to` instant carries 999 milliseconds (the highest precision a
+// JS Date supports). The backend handler at
+// services/api/finance_handlers.go::listJournalEntries notices a
+// 23:59:59.<sub-second> RFC3339 input and promotes it to nanosecond
+// 999_999_999, matching the variance computation's end-of-day
+// contract so the drill-down window covers the exact same set of
+// journal entries the variance row aggregated.
 function monthRange(period: string): { from: string; to: string } | null {
   const m = /^(\d{4})-(\d{2})$/.exec(period);
   if (!m) return null;
@@ -594,10 +602,13 @@ function monthRange(period: string): { from: string; to: string } | null {
   const month = Number(m[2]); // 1-based
   if (!Number.isFinite(year) || !Number.isFinite(month)) return null;
   if (month < 1 || month > 12) return null;
-  const from = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
-  // Last day of month at 23:59:59 UTC: day=0 of the next month
-  // rolls back to the previous month's final day.
-  const to = new Date(Date.UTC(year, month, 0, 23, 59, 59));
+  const from = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
+  // Last day of month at 23:59:59.999 UTC: day=0 of the next month
+  // rolls back to the previous month's final day. Millisecond=999
+  // is the highest precision a JS Date supports; the backend
+  // promotes the value to the final nanosecond of the day so the
+  // drill-down window exactly matches the variance window.
+  const to = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
   return { from: from.toISOString(), to: to.toISOString() };
 }
 

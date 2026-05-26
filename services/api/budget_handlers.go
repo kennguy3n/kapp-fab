@@ -313,11 +313,19 @@ func (h *budgetHandlers) varianceReport(w http.ResponseWriter, r *http.Request) 
 // the supplied end date") tight against pgx's `timestamp with time
 // zone` which preserves microsecond precision; any entry posted in
 // the final sub-second of the day is included rather than silently
-// dropped. The default To bound in BudgetVsActual and the agent
-// tool's parseAgentDateEnd mirror the same convention so all three
-// surfaces produce identical windows.
+// dropped.
+//
+// int(time.Second-1) = 999_999_999 nanoseconds. Three other surfaces
+// (services/api/finance_handlers.go::endOfDayUTC,
+// internal/agents/finance_tools.go::parseAgentDateEnd,
+// internal/finance/budget.go::BudgetVsActual default `To`) use the
+// identical constant so every <= bound across the finance API
+// observes the same day-inclusivity semantics. The expression is
+// kept as `int(time.Second-1)` rather than the equivalent
+// `int(time.Second/time.Nanosecond)-1` so all four call-sites
+// read identically.
 func endOfDay(t time.Time) time.Time {
-	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, int(time.Second/time.Nanosecond)-1, t.Location())
+	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, int(time.Second-1), t.Location())
 }
 
 // writeBudgetError translates BudgetStore sentinel errors into HTTP
