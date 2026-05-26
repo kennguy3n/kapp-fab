@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -186,6 +187,101 @@ func TestPhaseN6BOMLifecycle(t *testing.T) {
 	}
 	if err := mfg.SetBOMStatus(ctx, tn.ID, empty.ID, manufacturing.BOMStatusActive); !errors.Is(err, manufacturing.ErrBOMHasNoComponents) {
 		t.Fatalf("expected ErrBOMHasNoComponents, got %v", err)
+	}
+}
+
+// TestPhaseN6BOMConcurrentActivationsSerialise pins the contract
+// that two goroutines racing to activate different BOMs for the
+// same item never surface a raw 23505 / 500. The partial unique
+// index boms_active_per_item_uniq enforces "at most one active per
+// item"; without serialisation in SetBOMStatus the losing thread
+// hits the index after the winner commits and the wrapped 23505
+// falls through writeManufacturingError's default arm as a 500.
+// The fix is an advisory xact lock keyed on (tenant_id, item_id)
+// in store.go's SetBOMStatus; this test exercises that lock.
+//
+// Expectations under the fix:
+//   - Both activations succeed (no error) because the lock
+//     serialises them: whichever runs second sees the first as
+//     active and correctly demotes it.
+//   - Exactly one BOM ends up active for the item; the other is
+//     auto-demoted to obsolete.
+//   - Neither caller ever sees a raw "unique constraint" / 23505
+//     message; if the lock were missing the loser would surface
+//     `manufacturing: update bom status: …unique violation…`.
+func TestPhaseN6BOMConcurrentActivationsSerialise(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, _, mfg, fg, compA, _, _ := newTenantForManufacturing(t, h)
+	actor := uuid.New()
+
+	bom1, err := mfg.CreateBOM(ctx, tn.ID, actor, manufacturing.CreateBOMInput{
+		ItemID: fg.ID, Version: "v1", OutputQty: decimal.NewFromInt(1), UOM: "each",
+		Components: []manufacturing.BOMComponent{{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(1), UOM: "each"}},
+	})
+	if err != nil {
+		t.Fatalf("create bom1: %v", err)
+	}
+	bom2, err := mfg.CreateBOM(ctx, tn.ID, actor, manufacturing.CreateBOMInput{
+		ItemID: fg.ID, Version: "v2", OutputQty: decimal.NewFromInt(1), UOM: "each",
+		Components: []manufacturing.BOMComponent{{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(1), UOM: "each"}},
+	})
+	if err != nil {
+		t.Fatalf("create bom2: %v", err)
+	}
+
+	// Activate one BOM up front so there's a real "previously
+	// active" row both goroutines will try to demote. This
+	// reproduces the original race more reliably than a cold
+	// start where no BOM is yet active.
+	bom0, err := mfg.CreateBOM(ctx, tn.ID, actor, manufacturing.CreateBOMInput{
+		ItemID: fg.ID, Version: "v0", OutputQty: decimal.NewFromInt(1), UOM: "each",
+		Components: []manufacturing.BOMComponent{{ComponentItemID: compA.ID, Qty: decimal.NewFromInt(1), UOM: "each"}},
+	})
+	if err != nil {
+		t.Fatalf("create bom0: %v", err)
+	}
+	if err := mfg.SetBOMStatus(ctx, tn.ID, bom0.ID, manufacturing.BOMStatusActive); err != nil {
+		t.Fatalf("prime active bom0: %v", err)
+	}
+
+	// Race two activations. Start a barrier so both goroutines
+	// hit SetBOMStatus as close to simultaneously as possible.
+	var start sync.WaitGroup
+	start.Add(1)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	errs := make([]error, 2)
+	for i, id := range []uuid.UUID{bom1.ID, bom2.ID} {
+		i, id := i, id
+		go func() {
+			defer wg.Done()
+			start.Wait()
+			errs[i] = mfg.SetBOMStatus(ctx, tn.ID, id, manufacturing.BOMStatusActive)
+		}()
+	}
+	start.Done()
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("activation %d failed (advisory-lock regression?): %v", i, err)
+		}
+	}
+
+	// Exactly one BOM among {bom0, bom1, bom2} should be active.
+	var activeCount int
+	for _, id := range []uuid.UUID{bom0.ID, bom1.ID, bom2.ID} {
+		got, err := mfg.GetBOM(ctx, tn.ID, id)
+		if err != nil {
+			t.Fatalf("refetch %v: %v", id, err)
+		}
+		if got.Status == manufacturing.BOMStatusActive {
+			activeCount++
+		}
+	}
+	if activeCount != 1 {
+		t.Fatalf("expected exactly one active BOM after race, got %d", activeCount)
 	}
 }
 

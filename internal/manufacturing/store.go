@@ -293,6 +293,38 @@ func (s *PGStore) SetBOMStatus(ctx context.Context, tenantID, bomID uuid.UUID, s
 		}
 
 		if status == BOMStatusActive {
+			// Serialise concurrent activations for the same
+			// item via an advisory xact lock. The partial
+			// unique index boms_active_per_item_uniq enforces
+			// "at most one active per item", but without
+			// serialisation two threads can each demote the
+			// (single) currently-active row, then race on the
+			// final promote — and the loser surfaces a raw
+			// 23505 that wraps as a 500 to the HTTP caller.
+			//
+			// FOR UPDATE on the target row alone does NOT
+			// solve this: thread A locks BOM-X, thread B locks
+			// BOM-Y, both pass the row-level lock and only
+			// collide on the partial-unique-index commit.
+			// Locking by (tenant_id, item_id) — the actual
+			// invariant scope — is the correct grain.
+			//
+			// pg_advisory_xact_lock takes a single bigint
+			// key; we synthesise it from hashtextextended on
+			// the canonical "<tenant>:<item>" string. Hash
+			// collisions are harmless (they just cause
+			// unrelated activations to serialise on the same
+			// lock), and the xact-scoped variant is auto-
+			// released at transaction end so a panic /
+			// rollback / OOM can't strand it.
+			if _, err := tx.Exec(ctx,
+				`SELECT pg_advisory_xact_lock(
+				            hashtextextended($1::text || ':' || $2::text, 0))`,
+				tenantID, itemID,
+			); err != nil {
+				return fmt.Errorf("manufacturing: acquire activation lock: %w", err)
+			}
+
 			var n int
 			if err := tx.QueryRow(ctx,
 				`SELECT count(*) FROM bom_components WHERE tenant_id = $1 AND bom_id = $2`,
@@ -305,7 +337,8 @@ func (s *PGStore) SetBOMStatus(ctx context.Context, tenantID, bomID uuid.UUID, s
 			}
 			// Demote any other active row for the same
 			// item so the partial unique index can land
-			// the new activation without a 23505.
+			// the new activation without a 23505. Safe
+			// under the advisory lock above.
 			if _, err := tx.Exec(ctx,
 				`UPDATE boms
 				    SET status = 'obsolete', updated_at = now()
