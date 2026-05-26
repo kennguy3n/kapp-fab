@@ -343,6 +343,42 @@ func TestFRPackPlafondCeiling(t *testing.T) {
 	}
 }
 
+// TestFRPackBracketBoundary: exact monthly-equivalent values at a
+// bracket Top must land in the lower band, not the next band up
+// (DGFiP "(Floor, Top]" convention — "Jusqu'à 1 620 €" means
+// ≤ 1620, so monthlyEq==1620 → 0% PAS, not 0.5%). We probe
+// frResolvePASRate directly with exact decimal values so the test
+// isn't sensitive to division-precision artifacts in the
+// gross→monthlyEq projection.
+func TestFRPackBracketBoundary(t *testing.T) {
+	cases := []struct {
+		monthlyEq decimal.Decimal
+		wantRate  decimal.Decimal
+		desc      string
+	}{
+		// Top of band 0 (0% band) — exactly at 1 620 must still
+		// resolve to 0%, not 0.5%.
+		{decimal.NewFromInt(1620), dec("0"), "band 0 Top (1620)"},
+		// Inside band 1.
+		{decimal.NewFromInt(1650), dec("0.005"), "inside band 1 (1650)"},
+		// Top of band 1 — exactly at 1 683 → 0.5%, not 1.3%.
+		{decimal.NewFromInt(1683), dec("0.005"), "band 1 Top (1683)"},
+		// Top of band 7 — exactly at 3 107 → 7.5%, not 9.9%.
+		{decimal.NewFromInt(3107), dec("0.075"), "band 7 Top (3107)"},
+		// Just past 3 107 → next band's 9.9%.
+		{decimal.NewFromInt(3108), dec("0.099"), "just past band 7 Top"},
+		// Open-ended top band — any value past 221 418 → 43%.
+		{decimal.NewFromInt(500000), dec("0.430"), "open-ended top band"},
+	}
+	for _, c := range cases {
+		got := frResolvePASRate(c.monthlyEq)
+		if got.Cmp(c.wantRate) != 0 {
+			t.Errorf("%s: frResolvePASRate(%s) = %s; want %s",
+				c.desc, c.monthlyEq, got, c.wantRate)
+		}
+	}
+}
+
 // TestFRPackEmptyInput: zero gross → no lines.
 func TestFRPackEmptyInput(t *testing.T) {
 	pack, _ := Lookup("FR")

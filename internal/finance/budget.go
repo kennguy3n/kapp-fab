@@ -91,11 +91,13 @@ type Budget struct {
 }
 
 // BudgetLine is a per-account × per-cost-centre × monthly grid row.
-// Months are the Jan-Dec slice in fiscal-month order — a tenant
-// running an April-start FY (e.g. India) fills Months[0] with the
-// April plan, Months[1] with May, etc. The mapping back to a
-// calendar month happens at variance-report time against the
-// fiscal_periods table.
+// Months[i] is the planned amount for calendar month i+1
+// (Months[0] = January, Months[11] = December). The MVP scope is
+// calendar-year fiscal years: a tenant on a non-January FY start
+// (e.g. India's April-March) is supported by ledger fiscal_periods
+// (lockout) but the budget grid is still calendar-aligned today.
+// Adding non-calendar fiscal-year support is the natural extension
+// point at budgetFiscalWindow / VarianceQuery.
 type BudgetLine struct {
 	TenantID    uuid.UUID         `json:"tenant_id"`
 	ID          uuid.UUID         `json:"id"`
@@ -890,7 +892,14 @@ func (h *VarianceAlertHandler) Handle(ctx context.Context, tenantID uuid.UUID, _
 		if b.Status != BudgetStatusActive {
 			continue
 		}
-		if b.FiscalYear != now.Year() {
+		// Only emit alerts for the budget whose fiscal window
+		// currently contains `now`. The fiscal window is computed
+		// via budgetFiscalWindow so the same definition is used
+		// everywhere — when non-calendar fiscal years are added
+		// later (April-March, July-June, etc.), the gate updates
+		// automatically.
+		windowStart, windowEnd := budgetFiscalWindow(b)
+		if now.Before(windowStart) || !now.Before(windowEnd) {
 			continue
 		}
 		threshold := h.threshold
@@ -947,6 +956,21 @@ func (h *VarianceAlertHandler) Handle(ctx context.Context, tenantID uuid.UUID, _
 func rowMatchesCurrentMonth(row VarianceRow, now time.Time) bool {
 	want := fmt.Sprintf("%04d-%02d", now.Year(), int(now.Month()))
 	return row.Period == want
+}
+
+// budgetFiscalWindow returns the half-open `[start, end)` window
+// during which a budget is considered "in flight" — i.e. the
+// interval over which the variance alerter should still emit
+// notifications. The MVP treats every budget as a calendar-year
+// budget (Jan 1 → Jan 1 next year). When non-calendar fiscal
+// years are wired through (first-fiscal-month per budget or per
+// tenant), this helper is the single place that needs to learn
+// about the new start month — the alerter, the dashboard, and
+// any future scheduled-period reports all go through this.
+func budgetFiscalWindow(b *Budget) (start, end time.Time) {
+	start = time.Date(b.FiscalYear, time.January, 1, 0, 0, 0, 0, time.UTC)
+	end = start.AddDate(1, 0, 0)
+	return start, end
 }
 
 // ---------------------------------------------------------------------------

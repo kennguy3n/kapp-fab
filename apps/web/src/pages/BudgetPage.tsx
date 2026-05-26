@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   Budget,
@@ -582,7 +583,7 @@ function VarianceRowRender({
       <td style={{ textAlign: "left" }}>{row.account_code}</td>
       <td style={{ textAlign: "left" }}>{row.cost_center ?? ""}</td>
       <td style={{ textAlign: "left" }}>
-        <a href={periodHref}>{row.period}</a>
+        <Link to={periodHref}>{row.period}</Link>
       </td>
       <td>{fmtNumber(row.budgeted)}</td>
       <td>{fmtNumber(row.actual)}</td>
