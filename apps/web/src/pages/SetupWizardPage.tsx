@@ -66,6 +66,21 @@ const COA_TEMPLATES = [
   { value: "at_basic", label: "Austria — IFRS + Lohnsteuer / SV-Beiträge / Kommunalsteuer / USt" },
   { value: "pt_basic", label: "Portugal — IFRS + IRS / Segurança Social / IVA" },
   { value: "au_basic", label: "Australia — AASB + PAYG / Superannuation / FBT / Payroll Tax / GST" },
+  // Phase N2 — Europe Extended. Each chart carries the country's
+  // statutory payroll-liability accounts (ZUS / NFZ for PL,
+  // Skatteverket / Tjänstepension for SE, Skatteetaten / NAV /
+  // OTP for NO, Skattestyrelsen / ATP for DK, Verohallinto /
+  // TyEL / SAVA for FI, ČSSZ / VZP for CZ, NAV / Szocho for HU,
+  // ANAF / CAS / CASS for RO, AADE / EFKA for GR).
+  { value: "pl_basic", label: "Poland — IFRS + PIT / ZUS / NFZ / VAT" },
+  { value: "se_basic", label: "Sweden — IFRS + Kommunalskatt / Statlig / Pensionsavgift / Moms" },
+  { value: "no_basic", label: "Norway — IFRS + Skatt / Trinnskatt / Trygdeavgift / OTP / MVA" },
+  { value: "dk_basic", label: "Denmark — IFRS + A-skat / AM-bidrag / ATP / Moms" },
+  { value: "fi_basic", label: "Finland — IFRS + Valtio / Kunnallisvero / TyEL / SAVA / ALV" },
+  { value: "cz_basic", label: "Czech Republic — IFRS + Daň / SP / ZP / DPH" },
+  { value: "hu_basic", label: "Hungary — IFRS + SZJA / TB / Szocho / ÁFA" },
+  { value: "ro_basic", label: "Romania — IFRS + Impozit / CAS / CASS / TVA" },
+  { value: "gr_basic", label: "Greece — IFRS + Income Tax / EFKA / ΦΠΑ" },
 ];
 
 // defaultCoATemplateForCountry mirrors
@@ -130,6 +145,16 @@ const COUNTRY_COA_DEFAULTS: Record<string, string> = {
   AT: "at_basic",
   PT: "pt_basic",
   AU: "au_basic",
+  // Phase N2 — Europe Extended.
+  PL: "pl_basic",
+  SE: "se_basic",
+  NO: "no_basic",
+  DK: "dk_basic",
+  FI: "fi_basic",
+  CZ: "cz_basic",
+  HU: "hu_basic",
+  RO: "ro_basic",
+  GR: "gr_basic",
 };
 
 function defaultCoATemplateForCountry(country: string): string {

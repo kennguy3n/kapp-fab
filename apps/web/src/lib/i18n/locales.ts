@@ -61,14 +61,24 @@ export const SupportedLocales: readonly LocaleInfo[] = [
   { tag: "th", name: "ไทย", direction: "ltr" },
   { tag: "id", name: "Bahasa Indonesia", direction: "ltr" },
   { tag: "vi", name: "Tiếng Việt", direction: "ltr" },
+  // Phase N2: Europe Extended catalogues.
+  { tag: "pl", name: "Polski", direction: "ltr" },
+  { tag: "sv", name: "Svenska", direction: "ltr" },
+  { tag: "nb", name: "Norsk bokmål", direction: "ltr" },
+  { tag: "da", name: "Dansk", direction: "ltr" },
+  { tag: "fi", name: "Suomi", direction: "ltr" },
+  { tag: "cs", name: "Čeština", direction: "ltr" },
+  { tag: "hu", name: "Magyar", direction: "ltr" },
+  { tag: "ro", name: "Română", direction: "ltr" },
+  { tag: "el", name: "Ελληνικά", direction: "ltr" },
 ];
 
 /**
  * Lookup of `tag → LocaleInfo` for the resolver path. Built once
- * at module load. Count is derived from `SupportedLocales.length`,
- * not hard-coded — at any given snapshot it is whatever the list
- * above declares, and scaling to a few dozen an object index
- * out-performs Array.find().
+ * at module load. The count is derived from `SupportedLocales.length`
+ * (not hard-coded) so it stays accurate as packs are added in
+ * subsequent phases. At any list size up to a few dozen, an
+ * object index outperforms Array.find() on the hot resolver path.
  */
 const localeIndex: Record<string, LocaleInfo> = SupportedLocales.reduce(
   (acc, info) => {
@@ -119,6 +129,24 @@ const REGION_SCRIPT_OVERRIDES: Record<string, string> = {
   "zh-TW": "zh-Hant",
   "zh-HK": "zh-Hant",
   "zh-MO": "zh-Hant",
+  // BCP 47 deprecated the ISO 639-1 macrolanguage tag `no` in
+  // favour of `nb` (Bokmål) and `nn` (Nynorsk). Modern browsers
+  // report `nb` / `nn` directly, but a small number of legacy
+  // OS / browser combinations still emit the bare `no` tag. The
+  // progressive-subtag walker can't help here because `no` has
+  // no subtags to drop — so we explicitly funnel `no` to the
+  // Bokmål catalogue (the variant Phase-N2 actually ships) to
+  // avoid silently falling through to English for those users.
+  //
+  // `nn` (Nynorsk) is in the same boat: it has no subtags to
+  // drop, and Phase-N2 only ships a Bokmål catalogue. Without
+  // an explicit override, Nynorsk-configured browsers would
+  // fall through to English rather than the closely-related
+  // Bokmål — a worse fallback than nb itself, since Norwegian
+  // readers handle both written standards. Funnel nn → nb on
+  // the same justification.
+  no: "nb",
+  nn: "nb",
 };
 
 /**
@@ -204,6 +232,19 @@ const COUNTRY_LOCALE_DEFAULTS: Record<string, string> = {
   NL: "nl",
   PT: "pt",
   BE: "fr",
+  // Phase N2: Europe Extended. Nine additional country defaults
+  // for the locale resolver. Each country pre-selects its own
+  // national-language catalogue; admins can override from the
+  // locale switcher.
+  PL: "pl",
+  SE: "sv",
+  NO: "nb",
+  DK: "da",
+  FI: "fi",
+  CZ: "cs",
+  HU: "hu",
+  RO: "ro",
+  GR: "el",
 };
 
 /**
