@@ -30,6 +30,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/exporter"
 	"github.com/kennguy3n/kapp-fab/internal/files"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
+	"github.com/kennguy3n/kapp-fab/internal/financeadapters"
 	"github.com/kennguy3n/kapp-fab/internal/forms"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk/mailboxes"
@@ -468,6 +469,17 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// index makes retries idempotent.
 	manufacturingStore := manufacturing.NewPGStore(pool, inventoryStore)
 
+	// Phase N9c — Landed Cost voucher store. Uses narrow
+	// adapters defined in internal/financeadapters/landed_cost.go
+	// so the finance package does not pull in inventory or
+	// ledger (which would close the import cycle).
+	landedCostStore := finance.NewLandedCostStore(
+		pool,
+		financeadapters.NewLandedCostInventoryAdapter(inventoryStore),
+		financeadapters.NewLandedCostLedgerAdapter(ledgerStore),
+	)
+
+
 	// Phase E leave-balance ledger + lesson-progress projections.
 	// Employee / leave-request / course / lesson records live in the
 	// generic KRecord store; the dedicated stores only cover the
@@ -608,6 +620,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	budgetStore := finance.NewBudgetStore(pool)
 	agents.RegisterBudgetTools(executor, budgetStore)
 	agents.RegisterInventoryTools(executor, inventoryStore)
+	agents.RegisterLandedCostTools(executor, landedCostStore)
 	agents.RegisterInventoryReorderTool(executor, inventory.NewReorderHandler(recordStore, inventoryStore))
 	agents.RegisterManufacturingTools(executor, manufacturingStore)
 	agents.RegisterHRTools(executor, hrStore)
@@ -722,6 +735,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// Phase N5 — budget HTTP surface; reuses the same BudgetStore
 	// instance allocated above for the agent-tool registry.
 	budh := &budgetHandlers{store: budgetStore}
+	lch := &landedCostHandlers{store: landedCostStore}
 	invh := &inventoryHandlers{store: inventoryStore}
 	mfgh := &manufacturingHandlers{store: manufacturingStore}
 	oh := &openAPIHandler{registry: ktypeRegistry}
@@ -1101,6 +1115,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		auh:                    auh,
 		finh:                   finh,
 		budh:                   budh,
+		lch:                    lch,
 		invh:                   invh,
 		mfgh:                   mfgh,
 		oh:                     oh,

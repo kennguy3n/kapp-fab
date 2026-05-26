@@ -161,6 +161,15 @@ var TenantScopedTables = []string{
 	// most platform tables since custom KTypes are user-authored
 	// and therefore expected to be small per tenant.
 	"tenant_ktypes",
+	// Phase N9c — landed cost vouchers. Header + charges +
+	// targets. PKs are (tenant_id, id) so the default upsert path
+	// applies; no tableConflictKeys entry required. Listed after
+	// inventory_moves / accounts because targets reference
+	// inventory_moves rows (the originating receipt) and the
+	// posting JE references accounts.
+	"landed_cost_vouchers",
+	"landed_cost_charges",
+	"landed_cost_targets",
 }
 
 // manifest is the first record in every dump file.

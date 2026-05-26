@@ -180,6 +180,7 @@ type apiDeps struct {
 	auh            *auditHandlers
 	finh           *financeHandlers
 	budh           *budgetHandlers
+	lch            *landedCostHandlers
 	invh           *inventoryHandlers
 	mfgh           *manufacturingHandlers
 	oh             *openAPIHandler

@@ -614,6 +614,39 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Post("/budgets/{id}/lines", d.budh.upsertLine)
 			r.Delete("/budgets/{id}/lines/{lineID}", d.budh.deleteLine)
 			r.Get("/budgets/{id}/variance", d.budh.varianceReport)
+
+			// Phase N9c — Landed Cost vouchers. Same middleware
+			// chain as the rest of the finance routes so the
+			// existing finance.read / finance.admin role gate
+			// applies; per-route methods (POST allocate / POST
+			// post) are admin-only via the method-gate.
+			//
+			// Dual feature gate: the outer DynamicFeatureMiddleware
+			// already gates /api/v1/finance/* on FeatureFinance.
+			// Landed costs additionally touches inventory_moves
+			// (re-bases item costs) so the operation requires the
+			// inventory plan flag as well. Wrapping the subtree
+			// with an explicit FeatureMiddleware(FeatureInventory)
+			// composes the two checks — a tenant without inventory
+			// gets the same canonical 403 envelope as any other
+			// disabled-feature surface, and the frontend can hide
+			// the nav link symmetrically (App.tsx Landed Costs
+			// link declares `requires: ["finance"]` on top of the
+			// section's own "inventory" gate).
+			r.Group(func(lcr chi.Router) {
+				lcr.Use(platform.FeatureMiddleware(d.featureStore, tenant.FeatureInventory))
+				lcr.Get("/landed-costs", d.lch.list)
+				lcr.Post("/landed-costs", d.lch.create)
+				lcr.Get("/landed-costs/{id}", d.lch.get)
+				lcr.Put("/landed-costs/{id}", d.lch.update)
+				lcr.Delete("/landed-costs/{id}", d.lch.delete)
+				lcr.Post("/landed-costs/{id}/charges", d.lch.upsertCharge)
+				lcr.Delete("/landed-costs/{id}/charges/{cid}", d.lch.deleteCharge)
+				lcr.Post("/landed-costs/{id}/targets", d.lch.upsertTarget)
+				lcr.Delete("/landed-costs/{id}/targets/{tid}", d.lch.deleteTarget)
+				lcr.Post("/landed-costs/{id}/allocate", d.lch.allocate)
+				lcr.Post("/landed-costs/{id}/post", d.lch.post)
+			})
 		})
 
 		// Phase M Task 6 — POS finalize. Reuses InvoicePoster +

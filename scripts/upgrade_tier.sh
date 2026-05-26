@@ -81,6 +81,7 @@ TABLES=(
   email_messages email_attachments
   helpdesk_imap_state helpdesk_mailboxes
   tenant_ktypes
+  landed_cost_vouchers landed_cost_charges landed_cost_targets
 )
 
 # Build a Postgres TEXT[] literal: ARRAY['t1','t2',...]
