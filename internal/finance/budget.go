@@ -6,7 +6,7 @@
 // any sub-period and raises notifications when MTD variance
 // crosses a configurable threshold.
 //
-// Storage shape (migration 000061):
+// Storage shape (migration 000062):
 //
 //   - `budgets`        — header per (tenant, budget). Carries the
 //     fiscal year, status, optional default cost_center, and the
