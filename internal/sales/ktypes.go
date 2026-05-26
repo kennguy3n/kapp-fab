@@ -101,6 +101,7 @@ var purchaseOrderSchema = []byte(`{
     {"name": "total", "type": "number", "min": 0},
     {"name": "currency", "type": "string", "pattern": "^[A-Z]{3}$", "default": "USD"},
     {"name": "status", "type": "enum", "values": ["draft", "confirmed", "received", "cancelled"], "default": "draft"},
+    {"name": "requisition_id", "type": "ref", "ktype": "procurement.purchase_requisition"},
     {"name": "owner", "type": "ref", "ktype": "user"}
   ],
   "views": {
@@ -108,7 +109,7 @@ var purchaseOrderSchema = []byte(`{
     "form": {"sections": [
       {"title": "Purchase Order", "fields": ["po_number", "supplier_id", "order_date", "expected_date", "currency", "owner"]},
       {"title": "Pricing", "fields": ["lines", "subtotal", "tax_code", "tax_amount", "total"]},
-      {"title": "Lifecycle", "fields": ["status"]}
+      {"title": "Lifecycle", "fields": ["status", "requisition_id"]}
     ]},
     "kanban": {"group_by": "status", "card_title": "po_number", "card_subtitle": "total"}
   },
@@ -158,11 +159,13 @@ var priceListSchema = []byte(`{
 // slice so callers can register them alongside the rest of the Phase C
 // catalog.
 func All() []ktype.KType {
-	return []ktype.KType{
+	out := []ktype.KType{
 		{Name: KTypeSalesOrder, Version: 1, Schema: salesOrderSchema},
 		{Name: KTypePurchaseOrder, Version: 1, Schema: purchaseOrderSchema},
 		{Name: KTypePriceList, Version: 1, Schema: priceListSchema},
 	}
+	out = append(out, PurchaseRequisitionKTypes()...)
+	return out
 }
 
 func init() {

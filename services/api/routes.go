@@ -653,6 +653,27 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Post("/{id}/cancel", retH.cancel)
 		})
 
+		// Phase N9b — procurement.purchase_requisition state
+		// machine. CRUD on the requisition KRecord itself rides
+		// the generic /api/v1/records/procurement.purchase_requisition
+		// surface; this group exposes the three non-CRUD lifecycle
+		// transitions (approve / convert / cancel) that mutate the
+		// requisition status and, in the conversion case, allocate
+		// a procurement.purchase_order KRecord.
+		reqH := &requisitionHandlers{poster: d.requisitionPoster}
+		r.Route("/api/v1/procurement/requisitions", func(r chi.Router) {
+			d.tenantChain(r)
+			r.Use(d.apiCallMW)
+			r.Use(d.featureMW)
+			r.Use(d.authzGate("procurement.admin", ""))
+			r.Use(platform.IdempotencyMiddleware(d.pool))
+			r.Use(d.rateLimitMW)
+			r.Use(platform.QuotaMiddleware(d.quotaEnforcer))
+			r.Post("/{id}/approve", reqH.approve)
+			r.Post("/{id}/convert", reqH.convert)
+			r.Post("/{id}/cancel", reqH.cancel)
+		})
+
 		// Phase J payroll surface — generate draft payslips for a
 		// pay_run and post the approved batch as a single journal
 		// entry. The pay_run / payslip KRecords themselves ride the

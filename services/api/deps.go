@@ -59,17 +59,24 @@ type apiDeps struct {
 	portalStore   *auth.PortalStore
 
 	// Domain stores shared across multiple route groups.
-	recordStore       *record.PGStore
-	ledgerStore       *ledger.PGStore
-	invoicePoster     *ledger.InvoicePoster
-	paymentPoster     *ledger.PaymentPoster
-	apiExchangeRates  *ledger.ExchangeRateStore
+	recordStore      *record.PGStore
+	ledgerStore      *ledger.PGStore
+	invoicePoster    *ledger.InvoicePoster
+	paymentPoster    *ledger.PaymentPoster
+	apiExchangeRates *ledger.ExchangeRateStore
 	// salesReturnPoster drives the Phase N9a sales.return state
 	// machine. Shared between the HTTP transition handlers and the
 	// agent-tool registry so an HTTP-driven approve / refund and a
 	// tool-driven approve / refund post against the same
 	// state machine + idempotency guards.
 	salesReturnPoster *sales.ReturnPoster
+	// requisitionPoster drives the Phase N9b
+	// procurement.purchase_requisition state machine. Shared
+	// between the HTTP transition handlers and the agent-tool
+	// registry so an HTTP-driven approve/convert and a tool-driven
+	// approve/convert post against the same state machine +
+	// idempotency guards.
+	requisitionPoster *sales.RequisitionPoster
 
 	// Authz + audit. `authzEval` is the live PGEvaluator; the gate
 	// closures below wrap it with the `authzEnforced` flag so

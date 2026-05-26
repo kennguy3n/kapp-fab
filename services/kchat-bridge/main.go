@@ -147,6 +147,7 @@ func run() error {
 		manufacturing:      manufacturing.NewPGStore(pool, inventoryStore),
 		lmsIssuer:          lms.NewCertificateIssuer(recordStore, pool),
 		returns:            sales.NewReturnPoster(recordStore, invoicePoster, inventoryStore, ledgerStore),
+		requisitions:       sales.NewRequisitionPoster(recordStore),
 		cards:              cards,
 		formsBase:          os.Getenv("KAPP_FORMS_BASE_URL"),
 		insightsQueries:    insightsQueries,
