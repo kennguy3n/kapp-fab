@@ -137,7 +137,16 @@ const REGION_SCRIPT_OVERRIDES: Record<string, string> = {
   // no subtags to drop — so we explicitly funnel `no` to the
   // Bokmål catalogue (the variant Phase-N2 actually ships) to
   // avoid silently falling through to English for those users.
+  //
+  // `nn` (Nynorsk) is in the same boat: it has no subtags to
+  // drop, and Phase-N2 only ships a Bokmål catalogue. Without
+  // an explicit override, Nynorsk-configured browsers would
+  // fall through to English rather than the closely-related
+  // Bokmål — a worse fallback than nb itself, since Norwegian
+  // readers handle both written standards. Funnel nn → nb on
+  // the same justification.
   no: "nb",
+  nn: "nb",
 };
 
 /**
