@@ -27,11 +27,23 @@ import (
 //       Kommuneskat (average)              ~25%
 //
 //     The composite trækprocent is 37% (bundskat 12.01% +
-//     average kommuneskat 25% rounded) below the topskat
-//     threshold, and 52% above (composite + topskat). Real
-//     payroll engines read skatte­kortet via eIndkomst; this
-//     pack uses the composite for ledger-correctness without
-//     requiring the skattekortregister integration.
+//     average kommuneskat 25% rounded) on the post-personfradrag
+//     taxable base, plus a 15% topskat surcharge on the slice
+//     of personlig indkomst (PI = gross − AM-bidrag) above
+//     DKK 588,900 / yr. Real payroll engines read skatte­
+//     kortet via eIndkomst; this pack uses the composite for
+//     ledger-correctness without requiring the skattekort-
+//     register integration.
+//
+//     Per Personskatteloven §§ 6–7 and Skatteministeriets
+//     skattesatser 2025, the topskattegrænse is measured
+//     against personlig indkomst (gross − AM-bidrag) — NOT
+//     against the post-personfradrag base. The bundskat /
+//     kommune slice and the topskat slice therefore use
+//     different bases: bundskat + kommune apply to
+//     PI − personfradrag (this pack's composite simplification
+//     of personfradrag-as-tax-credit), topskat applies to PI
+//     above the threshold directly.
 //
 // References:
 //
@@ -65,9 +77,10 @@ var (
 // ComputeWithholding emits two lines:
 //
 //   - DK_AM_BIDRAG (8% labour-market contribution on raw gross)
-//   - DK_A_SKAT (composite income tax: bundskat + kommune-
-//     average + topskat above DKK 588,900 / yr, applied to
-//     gross net of AM-bidrag and personfradrag)
+//   - DK_A_SKAT   (composite income tax: bundskat + kommune‐
+//     average on PI − personfradrag, plus a 15% topskat
+//     surcharge on the slice of PI above DKK 588,900 / yr;
+//     PI = gross − AM-bidrag, annualised)
 //
 // Negative or zero gross returns nil.
 func (dkPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
@@ -95,24 +108,33 @@ func (dkPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 		})
 	}
 
-	// Base for A-skat = gross − AM-bidrag.
+	// Personlig indkomst (PI) = gross − AM-bidrag. This is the
+	// base both the topskat threshold and the bottom-bracket
+	// allowance are measured against — the personfradrag is
+	// applied later as a composite base reduction for the bundskat
+	// + kommune slice only, while topskat tests PI directly.
 	aSkatBase := gross.Sub(amBidrag)
-	annualBase := aSkatBase.Div(periodFraction)
-	taxableAnnual := annualBase.Sub(dkPersonfradrag)
+	annualPI := aSkatBase.Div(periodFraction)
+	taxableAnnual := annualPI.Sub(dkPersonfradrag)
 	if taxableAnnual.LessThan(decimal.Zero) {
 		taxableAnnual = decimal.Zero
 	}
 
 	// Composite bottom-bracket rate = bundskat + kommune average.
+	// Bundskat + kommune apply to taxableAnnual on the full slice
+	// (the topskat surcharge does not displace the bottom rate —
+	// it stacks on top of it for income above the threshold).
 	bottomRate := dkBundskatRate.Add(dkKommuneRate)
-	var annualAskat decimal.Decimal
-	if taxableAnnual.LessThanOrEqual(dkTopskatThreshold) {
-		annualAskat = taxableAnnual.Mul(bottomRate)
-	} else {
-		annualAskat = dkTopskatThreshold.Mul(bottomRate).Add(
-			taxableAnnual.Sub(dkTopskatThreshold).Mul(bottomRate.Add(dkTopskatRate)),
-		)
+	annualAskat := taxableAnnual.Mul(bottomRate)
+
+	// Topskat — 15% on the slice of personlig indkomst above the
+	// topskattegrænse. Measured against PI directly per
+	// Personskatteloven § 7, NOT against PI − personfradrag.
+	if annualPI.GreaterThan(dkTopskatThreshold) {
+		topskat := annualPI.Sub(dkTopskatThreshold).Mul(dkTopskatRate)
+		annualAskat = annualAskat.Add(topskat)
 	}
+
 	periodAskat := annualAskat.Mul(periodFraction).Round(2)
 	if periodAskat.IsPositive() {
 		out = append(out, Deduction{

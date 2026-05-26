@@ -266,19 +266,77 @@ func TestDKPackNominalSalary(t *testing.T) {
 	}
 }
 
-// TestDKPackTopskatThreshold: DKK 80,000 / month → annualBase
+// TestDKPackTopskatThreshold: DKK 80,000 / month → annualPI
 // crosses topskat threshold (588,900). A-skat must reflect the
-// extra 15% on the slice above the threshold.
+// extra 15% on the slice of PI above the threshold.
+//
+// Per Personskatteloven § 7 the topskat threshold is measured
+// against personlig indkomst (PI = gross − AM-bidrag), NOT
+// against PI − personfradrag. With PI = 867,096 the topskat
+// slice is (867,096 − 588,900) = 278,196 rather than the
+// post-personfradrag slice (815,496 − 588,900 = 226,596) the
+// earlier formulation used.
+//
+//	annualPI       ≈ 867,096
+//	taxableAnnual  = 867,096 − 51,600 = 815,496
+//	bundskat+kom   = 815,496 × 37.01% ≈ 301,815
+//	topskat        = (867,096 − 588,900) × 15% ≈ 41,729
+//	annualAskat    ≈ 343,544
+//	periodAskat    ≈ 343,544 × 0.0848734 ≈ 29,157
 func TestDKPackTopskatThreshold(t *testing.T) {
 	pack, _ := Lookup("DK")
 	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{}, decimal.NewFromInt(80000), monthPeriod())
 	codes := indexByCode(out)
-	// annualBase ≈ 867,096, taxable ≈ 815,496
-	// belowTopskat = 588,900 × 37.01% ≈ 217,973
-	// aboveTopskat = (815,496 - 588,900) × 52.01% ≈ 117,855
-	// annualAskat ≈ 335,829, periodAskat ≈ 28,503
-	if a := codes["DK_A_SKAT"]; a.LessThan(dec("28200")) || a.GreaterThan(dec("28900")) {
-		t.Errorf("DK_A_SKAT topskat = %s; want band 28200-28900", a)
+	if a := codes["DK_A_SKAT"]; a.LessThan(dec("28800")) || a.GreaterThan(dec("29500")) {
+		t.Errorf("DK_A_SKAT topskat = %s; want band 28800-29500 (≈29157)", a)
+	}
+}
+
+// TestDKPackTopskatBaseIsPersonalIncome pins the
+// Personskatteloven § 7 invariant that the topskat threshold
+// is measured against personlig indkomst (PI = gross − AM-bidrag)
+// rather than PI − personfradrag. An earner whose PI sits in
+// the previously-undertaxed band — above the topskattegrænse
+// (DKK 588,900) but with PI − personfradrag below the threshold —
+// must now see topskat applied. The earlier formulation tested
+// the threshold against (PI − personfradrag) and silently
+// undertaxed this 51,600-DKK-wide band.
+//
+//	gross = 54,000 / month, 31-day period:
+//	  AM-bidrag      = 54,000 × 0.08 = 4,320
+//	  aSkatBase      = 49,680
+//	  periodFraction = 31 / 365.25 ≈ 0.0848734
+//	  annualPI       = 49,680 / 0.0848734 ≈ 585,265
+//
+//	This is just below 588,900 so the old + new agree. Push to
+//	gross = 56,000 / mo:
+//	  AM-bidrag      = 4,480
+//	  aSkatBase      = 51,520
+//	  annualPI       ≈ 606,943
+//	  Old: taxable = 606,943 − 51,600 = 555,343 < 588,900 → NO topskat
+//	  New: annualPI = 606,943 > 588,900 → topskat = (606,943 − 588,900) × 15%
+//	                                             ≈ 2,706
+//	  Period topskat ≈ 2,706 × 0.0848734 ≈ 230
+//
+// Comparing the corrected A-skat to a hypothetical no-topskat
+// computation at the same gross would give a difference of ~230
+// DKK/month — the band we want to pin. Concretely:
+//
+//	taxableAnnual  = 555,343
+//	bundskat+kom   = 555,343 × 37.01% ≈ 205,532
+//	annualAskat    = 205,532 + 2,706 = 208,238
+//	periodAskat    ≈ 208,238 × 0.0848734 ≈ 17,673
+//
+// Without the fix this would have been ≈ 17,443 (no topskat
+// component). The band [17,500, 17,850] catches the corrected
+// value and would fail if the pack regressed to the buggy
+// post-personfradrag threshold test.
+func TestDKPackTopskatBaseIsPersonalIncome(t *testing.T) {
+	pack, _ := Lookup("DK")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{}, decimal.NewFromInt(56000), monthPeriod())
+	codes := indexByCode(out)
+	if a := codes["DK_A_SKAT"]; a.LessThan(dec("17500")) || a.GreaterThan(dec("17850")) {
+		t.Errorf("DK_A_SKAT mid-band = %s; want band 17500-17850 (≈17673 with topskat on PI > 588,900)", a)
 	}
 }
 
