@@ -407,3 +407,77 @@ func TestKRPackNonResidentBracketOnly(t *testing.T) {
 		t.Fatalf("non-resident must not get KR_EMPLOYMENT_INSURANCE, got %s", e.String())
 	}
 }
+
+// TestAfricaEastAsiaBracketTablesAreContiguous mirrors the
+// TestAmericasBracketTablesAreContiguous structural-invariant
+// guard for the Phase N3 packs. Every bracket table that
+// participates in a walk function must satisfy:
+//
+//  1. Top[i] == Floor[i+1] (top-contiguity).
+//  2. Base[i+1] == Base[i] + (Floor[i+1] - Floor[i]) × Rate[i]
+//     (cumulative-tax monotonicity).
+//
+// Plus the open-ended-top invariant: the last row's Top is 0.
+//
+// This guards against transcription errors when the annually-
+// updated tables are refreshed (SARS Budget Speech for ZA,
+// Finance Act for NG / KE, ETA circular for EG, NTA tables for
+// JP, NTS announcement for KR). All six N3 packs use the same
+// Floor / Top / Base / Rate bracket shape so a single helper
+// covers the whole roster.
+func TestAfricaEastAsiaBracketTablesAreContiguous(t *testing.T) {
+	check := func(t *testing.T, label string, rows []bracketRow) {
+		t.Helper()
+		for i := 0; i < len(rows)-1; i++ {
+			cur, next := rows[i], rows[i+1]
+			if !cur.top.Equal(next.floor) {
+				t.Fatalf("%s row[%d].Top (%s) != row[%d].Floor (%s)", label, i, cur.top, i+1, next.floor)
+			}
+			want := cur.base.Add(next.floor.Sub(cur.floor).Mul(cur.rate))
+			if !next.base.Equal(want) {
+				t.Fatalf("%s row[%d].Base (%s) != Base[%d] + (Floor[%d]-Floor[%d])*Rate[%d] (= %s)",
+					label, i+1, next.base, i, i+1, i, i, want)
+			}
+		}
+		last := rows[len(rows)-1]
+		if !last.top.IsZero() {
+			t.Fatalf("%s last bracket Top should be 0 (open-ended), got %s", label, last.top)
+		}
+	}
+
+	zaRows := make([]bracketRow, len(zaBrackets))
+	for i, b := range zaBrackets {
+		zaRows[i] = bracketRow{floor: b.Floor, top: b.Top, base: b.Base, rate: b.Rate}
+	}
+	t.Run("ZA PAYE", func(t *testing.T) { check(t, "ZA PAYE", zaRows) })
+
+	ngRows := make([]bracketRow, len(ngBrackets))
+	for i, b := range ngBrackets {
+		ngRows[i] = bracketRow{floor: b.Floor, top: b.Top, base: b.Base, rate: b.Rate}
+	}
+	t.Run("NG PIT", func(t *testing.T) { check(t, "NG PIT", ngRows) })
+
+	keRows := make([]bracketRow, len(keBrackets))
+	for i, b := range keBrackets {
+		keRows[i] = bracketRow{floor: b.Floor, top: b.Top, base: b.Base, rate: b.Rate}
+	}
+	t.Run("KE PAYE", func(t *testing.T) { check(t, "KE PAYE", keRows) })
+
+	egRows := make([]bracketRow, len(egBrackets))
+	for i, b := range egBrackets {
+		egRows[i] = bracketRow{floor: b.Floor, top: b.Top, base: b.Base, rate: b.Rate}
+	}
+	t.Run("EG PIT", func(t *testing.T) { check(t, "EG PIT", egRows) })
+
+	jpRows := make([]bracketRow, len(jpBrackets))
+	for i, b := range jpBrackets {
+		jpRows[i] = bracketRow{floor: b.Floor, top: b.Top, base: b.Base, rate: b.Rate}
+	}
+	t.Run("JP Gensenchoshu", func(t *testing.T) { check(t, "JP Gensenchoshu", jpRows) })
+
+	krRows := make([]bracketRow, len(krBrackets))
+	for i, b := range krBrackets {
+		krRows[i] = bracketRow{floor: b.Floor, top: b.Top, base: b.Base, rate: b.Rate}
+	}
+	t.Run("KR Geunrosodeukse", func(t *testing.T) { check(t, "KR Geunrosodeukse", krRows) })
+}
