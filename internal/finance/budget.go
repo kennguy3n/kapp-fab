@@ -397,20 +397,38 @@ func (s *BudgetStore) GetBudget(ctx context.Context, tenantID, id uuid.UUID) (*B
 	if tenantID == uuid.Nil || id == uuid.Nil {
 		return nil, fmt.Errorf("%w: tenant_id and id required", ErrInvalidBudget)
 	}
-	var out Budget
+	var out *Budget
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
-			`SELECT tenant_id, id, name, fiscal_year, status,
-			        COALESCE(cost_center, ''), COALESCE(notes, ''),
-			        variance_threshold, created_by, created_at, updated_at
-			 FROM budgets WHERE tenant_id = $1 AND id = $2`,
-			tenantID, id,
-		).Scan(
-			&out.TenantID, &out.ID, &out.Name, &out.FiscalYear, &out.Status,
-			&out.CostCenter, &out.Notes, &out.VarianceThreshold,
-			&out.CreatedBy, &out.CreatedAt, &out.UpdatedAt,
-		)
+		b, err := getBudgetTx(ctx, tx, tenantID, id)
+		if err != nil {
+			return err
+		}
+		out = b
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// getBudgetTx is the transaction-bound budget loader used by both
+// the public GetBudget and the single-tx BudgetVsActual path so the
+// variance report observes a consistent snapshot of the header +
+// lines + actuals at one point in time.
+func getBudgetTx(ctx context.Context, tx pgx.Tx, tenantID, id uuid.UUID) (*Budget, error) {
+	var out Budget
+	err := tx.QueryRow(ctx,
+		`SELECT tenant_id, id, name, fiscal_year, status,
+		        COALESCE(cost_center, ''), COALESCE(notes, ''),
+		        variance_threshold, created_by, created_at, updated_at
+		 FROM budgets WHERE tenant_id = $1 AND id = $2`,
+		tenantID, id,
+	).Scan(
+		&out.TenantID, &out.ID, &out.Name, &out.FiscalYear, &out.Status,
+		&out.CostCenter, &out.Notes, &out.VarianceThreshold,
+		&out.CreatedBy, &out.CreatedAt, &out.UpdatedAt,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrBudgetNotFound
 	}
@@ -547,55 +565,76 @@ func (s *BudgetStore) ListBudgetLines(ctx context.Context, tenantID, budgetID uu
 	if tenantID == uuid.Nil || budgetID == uuid.Nil {
 		return nil, fmt.Errorf("%w: tenant_id and budget_id required", ErrInvalidBudgetLine)
 	}
-	out := make([]BudgetLine, 0)
+	var out []BudgetLine
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		rows, err := tx.Query(ctx,
-			`SELECT tenant_id, id, budget_id, account_code, COALESCE(cost_center, ''),
-			        amount_jan, amount_feb, amount_mar, amount_apr,
-			        amount_may, amount_jun, amount_jul, amount_aug,
-			        amount_sep, amount_oct, amount_nov, amount_dec,
-			        annual_total, created_at, updated_at
-			 FROM budget_lines
-			 WHERE tenant_id = $1 AND budget_id = $2
-			 ORDER BY account_code ASC, COALESCE(cost_center, '') ASC`,
-			tenantID, budgetID,
-		)
+		lines, err := listBudgetLinesTx(ctx, tx, tenantID, budgetID)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var b BudgetLine
-			if err := rows.Scan(
-				&b.TenantID, &b.ID, &b.BudgetID, &b.AccountCode, &b.CostCenter,
-				&b.Months[0], &b.Months[1], &b.Months[2], &b.Months[3],
-				&b.Months[4], &b.Months[5], &b.Months[6], &b.Months[7],
-				&b.Months[8], &b.Months[9], &b.Months[10], &b.Months[11],
-				&b.AnnualTotal, &b.CreatedAt, &b.UpdatedAt,
-			); err != nil {
-				return err
-			}
-			out = append(out, b)
-		}
-		return rows.Err()
+		out = lines
+		return nil
 	})
 	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// listBudgetLinesTx is the transaction-bound list used by both the
+// public ListBudgetLines and the single-tx BudgetVsActual path.
+func listBudgetLinesTx(ctx context.Context, tx pgx.Tx, tenantID, budgetID uuid.UUID) ([]BudgetLine, error) {
+	out := make([]BudgetLine, 0)
+	rows, err := tx.Query(ctx,
+		`SELECT tenant_id, id, budget_id, account_code, COALESCE(cost_center, ''),
+		        amount_jan, amount_feb, amount_mar, amount_apr,
+		        amount_may, amount_jun, amount_jul, amount_aug,
+		        amount_sep, amount_oct, amount_nov, amount_dec,
+		        annual_total, created_at, updated_at
+		 FROM budget_lines
+		 WHERE tenant_id = $1 AND budget_id = $2
+		 ORDER BY account_code ASC, COALESCE(cost_center, '') ASC`,
+		tenantID, budgetID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("finance: list budget_lines: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var b BudgetLine
+		if err := rows.Scan(
+			&b.TenantID, &b.ID, &b.BudgetID, &b.AccountCode, &b.CostCenter,
+			&b.Months[0], &b.Months[1], &b.Months[2], &b.Months[3],
+			&b.Months[4], &b.Months[5], &b.Months[6], &b.Months[7],
+			&b.Months[8], &b.Months[9], &b.Months[10], &b.Months[11],
+			&b.AnnualTotal, &b.CreatedAt, &b.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("finance: list budget_lines: %w", err)
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("finance: list budget_lines: %w", err)
 	}
 	return out, nil
 }
 
-// DeleteBudgetLine removes a single line. Returns
-// ErrBudgetLineNotFound when the row is absent.
-func (s *BudgetStore) DeleteBudgetLine(ctx context.Context, tenantID, id uuid.UUID) error {
-	if tenantID == uuid.Nil || id == uuid.Nil {
-		return fmt.Errorf("%w: tenant_id and id required", ErrInvalidBudgetLine)
+// DeleteBudgetLine removes a single line, scoped to the supplied
+// budget parent. The budgetID is part of the call signature so the
+// REST URL `/budgets/{budgetID}/lines/{lineID}` semantics are
+// enforced at the store boundary: deleting a line via the URL of
+// a different budget returns ErrBudgetLineNotFound rather than
+// silently succeeding. Returns ErrBudgetLineNotFound when no row
+// matches the (tenant, budget, id) triple.
+func (s *BudgetStore) DeleteBudgetLine(ctx context.Context, tenantID, budgetID, id uuid.UUID) error {
+	if tenantID == uuid.Nil || budgetID == uuid.Nil || id == uuid.Nil {
+		return fmt.Errorf("%w: tenant_id, budget_id, and id required", ErrInvalidBudgetLine)
 	}
 	var rowCount int64
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		ct, err := tx.Exec(ctx,
-			`DELETE FROM budget_lines WHERE tenant_id = $1 AND id = $2`,
-			tenantID, id,
+			`DELETE FROM budget_lines
+			 WHERE tenant_id = $1 AND budget_id = $2 AND id = $3`,
+			tenantID, budgetID, id,
 		)
 		if err != nil {
 			return err
@@ -644,18 +683,55 @@ func (s *BudgetStore) BudgetVsActual(ctx context.Context, tenantID uuid.UUID, q 
 	if tenantID == uuid.Nil || q.BudgetID == uuid.Nil {
 		return nil, fmt.Errorf("%w: tenant_id and budget_id required", ErrInvalidBudget)
 	}
-	budget, err := s.GetBudget(ctx, tenantID, q.BudgetID)
-	if err != nil {
-		return nil, err
-	}
-	if q.From.IsZero() {
-		q.From = time.Date(budget.FiscalYear, time.January, 1, 0, 0, 0, 0, time.UTC)
-	}
-	if q.To.IsZero() {
-		q.To = time.Date(budget.FiscalYear, time.December, 31, 23, 59, 59, 0, time.UTC)
-	}
 
-	lines, err := s.ListBudgetLines(ctx, tenantID, q.BudgetID)
+	var (
+		budget      *Budget
+		lines       []BudgetLine
+		accountMeta map[string]accountMeta
+		actuals     map[actualKey]decimal.Decimal
+	)
+	// Wrap the four reads in a single tenant tx so the report
+	// observes a consistent snapshot. Without this a concurrent
+	// budget line upsert (or a journal post landing mid-report)
+	// could surface as a header-vs-lines or lines-vs-actuals
+	// mismatch. The four helpers are pure functions of (tx,
+	// tenant, ...) so the wrap is mechanical.
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		b, err := getBudgetTx(ctx, tx, tenantID, q.BudgetID)
+		if err != nil {
+			return err
+		}
+		budget = b
+		if q.From.IsZero() {
+			q.From = time.Date(budget.FiscalYear, time.January, 1, 0, 0, 0, 0, time.UTC)
+		}
+		if q.To.IsZero() {
+			q.To = time.Date(budget.FiscalYear, time.December, 31, 23, 59, 59, 0, time.UTC)
+		}
+		lines, err = listBudgetLinesTx(ctx, tx, tenantID, q.BudgetID)
+		if err != nil {
+			return err
+		}
+		if len(lines) == 0 {
+			// No lines to load metadata or actuals for; leave the
+			// maps nil so the loop below short-circuits naturally.
+			return nil
+		}
+		// Resolve account metadata (name + type) per code in a
+		// single round-trip so the signed-variance logic and the
+		// renderer don't issue per-line lookups.
+		accountMeta, err = loadAccountMetaTx(ctx, tx, tenantID, distinctAccountCodes(lines))
+		if err != nil {
+			return err
+		}
+		// Aggregate actuals by (account_code, cost_center,
+		// fiscal_month). fiscal_month is 1..12 in calendar order;
+		// the caller's date range may exclude some months so we
+		// left-outer-join from the budget side, not the actuals
+		// side.
+		actuals, err = loadActualsTx(ctx, tx, tenantID, q.From, q.To, budget.FiscalYear, lines)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -671,23 +747,6 @@ func (s *BudgetStore) BudgetVsActual(ctx context.Context, tenantID uuid.UUID, q 
 	}
 	if len(lines) == 0 {
 		return report, nil
-	}
-
-	// Resolve account metadata (name + type) per code in a single
-	// round-trip so the signed-variance logic and the renderer
-	// don't issue per-line lookups.
-	accountMeta, err := s.loadAccountMeta(ctx, tenantID, distinctAccountCodes(lines))
-	if err != nil {
-		return nil, err
-	}
-
-	// Aggregate actuals by (account_code, cost_center, fiscal_month).
-	// fiscal_month is 1..12 in calendar order; the caller's date
-	// range may exclude some months so we left-outer-join from the
-	// budget side, not the actuals side.
-	actuals, err := s.loadActuals(ctx, tenantID, q.From, q.To, budget.FiscalYear, lines)
-	if err != nil {
-		return nil, err
 	}
 
 	for i := range lines {
@@ -765,69 +824,71 @@ type actualKey struct {
 	Month       int
 }
 
-func (s *BudgetStore) loadActuals(ctx context.Context, tenantID uuid.UUID, from, to time.Time, fiscalYear int, lines []BudgetLine) (map[actualKey]decimal.Decimal, error) {
+// loadActualsTx is the transaction-bound helper invoked by
+// BudgetVsActual so the actuals aggregation observes the same
+// snapshot as the budget header / lines reads above. It is unused
+// outside the variance report path; if a caller ever needs the
+// public-method form it can wrap this in dbutil.WithTenantTx the
+// way the other store methods do.
+func loadActualsTx(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, from, to time.Time, fiscalYear int, lines []BudgetLine) (map[actualKey]decimal.Decimal, error) {
 	codes := distinctAccountCodes(lines)
 	if len(codes) == 0 {
 		return map[actualKey]decimal.Decimal{}, nil
 	}
 	out := make(map[actualKey]decimal.Decimal, len(lines)*4)
-	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		// The fiscal_year filter guards against cross-year date
-		// ranges (e.g. From=2024-11 .. To=2025-02 for a FY2025
-		// budget) misattributing November-2024 entries to the
-		// FY2025 November budget line: EXTRACT(MONTH FROM
-		// posted_at) alone loses the year component. By
-		// constraining EXTRACT(YEAR ...) to the budget's fiscal
-		// year, any actuals outside the budget's plan window are
-		// excluded regardless of how generous the caller's From
-		// / To range is. (The budget itself is calendar-FY today
-		// — see the BudgetLine doc comment for the non-calendar
-		// FY extension point.)
-		rows, err := tx.Query(ctx,
-			`SELECT jl.account_code,
-			        COALESCE(jl.cost_center, ''),
-			        EXTRACT(MONTH FROM je.posted_at)::int AS month,
-			        SUM(jl.debit - jl.credit)
-			   FROM journal_lines jl
-			   JOIN journal_entries je
-			     ON je.tenant_id = jl.tenant_id
-			    AND je.id = jl.entry_id
-			  WHERE jl.tenant_id = $1
-			    AND je.posted_at >= $2
-			    AND je.posted_at <= $3
-			    AND jl.account_code = ANY($4)
-			    AND EXTRACT(YEAR FROM je.posted_at)::int = $5
-			  GROUP BY jl.account_code, COALESCE(jl.cost_center, ''), month`,
-			tenantID, from, to, codes, fiscalYear,
-		)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var (
-				code  string
-				cc    string
-				month int
-				sum   decimal.Decimal
-			)
-			if err := rows.Scan(&code, &cc, &month, &sum); err != nil {
-				return err
-			}
-			out[actualKey{code, cc, month}] = sum
-			// Also accumulate into the wildcard bucket so a
-			// budget line with no cost_center scope still
-			// matches actuals posted with explicit CCs. The
-			// wildcardCostCenter sentinel is reserved and cannot
-			// appear on a real journal line (the SQL groups by
-			// COALESCE(cost_center,'') which produces "" never
-			// the sentinel).
-			wild := actualKey{code, wildcardCostCenter, month}
-			out[wild] = out[wild].Add(sum)
-		}
-		return rows.Err()
-	})
+	// The fiscal_year filter guards against cross-year date ranges
+	// (e.g. From=2024-11 .. To=2025-02 for a FY2025 budget)
+	// misattributing November-2024 entries to the FY2025 November
+	// budget line: EXTRACT(MONTH FROM posted_at) alone loses the
+	// year component. By constraining EXTRACT(YEAR ...) to the
+	// budget's fiscal year, any actuals outside the budget's plan
+	// window are excluded regardless of how generous the caller's
+	// From / To range is. (The budget itself is calendar-FY today
+	// — see the BudgetLine doc comment for the non-calendar FY
+	// extension point.)
+	rows, err := tx.Query(ctx,
+		`SELECT jl.account_code,
+		        COALESCE(jl.cost_center, ''),
+		        EXTRACT(MONTH FROM je.posted_at)::int AS month,
+		        SUM(jl.debit - jl.credit)
+		   FROM journal_lines jl
+		   JOIN journal_entries je
+		     ON je.tenant_id = jl.tenant_id
+		    AND je.id = jl.entry_id
+		  WHERE jl.tenant_id = $1
+		    AND je.posted_at >= $2
+		    AND je.posted_at <= $3
+		    AND jl.account_code = ANY($4)
+		    AND EXTRACT(YEAR FROM je.posted_at)::int = $5
+		  GROUP BY jl.account_code, COALESCE(jl.cost_center, ''), month`,
+		tenantID, from, to, codes, fiscalYear,
+	)
 	if err != nil {
+		return nil, fmt.Errorf("finance: load actuals: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			code  string
+			cc    string
+			month int
+			sum   decimal.Decimal
+		)
+		if err := rows.Scan(&code, &cc, &month, &sum); err != nil {
+			return nil, fmt.Errorf("finance: load actuals: %w", err)
+		}
+		out[actualKey{code, cc, month}] = sum
+		// Also accumulate into the wildcard bucket so a budget
+		// line with no cost_center scope still matches actuals
+		// posted with explicit CCs. The wildcardCostCenter
+		// sentinel is reserved and cannot appear on a real
+		// journal line (the SQL groups by
+		// COALESCE(cost_center,'') which produces "" not the
+		// sentinel).
+		wild := actualKey{code, wildcardCostCenter, month}
+		out[wild] = out[wild].Add(sum)
+	}
+	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("finance: load actuals: %w", err)
 	}
 	return out, nil
@@ -849,31 +910,32 @@ type accountMeta struct {
 	Type string
 }
 
-func (s *BudgetStore) loadAccountMeta(ctx context.Context, tenantID uuid.UUID, codes []string) (map[string]accountMeta, error) {
+// loadAccountMetaTx is the transaction-bound helper invoked by
+// BudgetVsActual. Like loadActualsTx it has no public-method
+// counterpart today because no other call site needs to look up
+// account metadata in isolation.
+func loadAccountMetaTx(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, codes []string) (map[string]accountMeta, error) {
 	out := make(map[string]accountMeta, len(codes))
 	if len(codes) == 0 {
 		return out, nil
 	}
-	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		rows, err := tx.Query(ctx,
-			`SELECT code, name, type FROM accounts
-			 WHERE tenant_id = $1 AND code = ANY($2)`,
-			tenantID, codes,
-		)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var code, name, typ string
-			if err := rows.Scan(&code, &name, &typ); err != nil {
-				return err
-			}
-			out[code] = accountMeta{Name: name, Type: typ}
-		}
-		return rows.Err()
-	})
+	rows, err := tx.Query(ctx,
+		`SELECT code, name, type FROM accounts
+		 WHERE tenant_id = $1 AND code = ANY($2)`,
+		tenantID, codes,
+	)
 	if err != nil {
+		return nil, fmt.Errorf("finance: load account meta: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var code, name, typ string
+		if err := rows.Scan(&code, &name, &typ); err != nil {
+			return nil, fmt.Errorf("finance: load account meta: %w", err)
+		}
+		out[code] = accountMeta{Name: name, Type: typ}
+	}
+	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("finance: load account meta: %w", err)
 	}
 	return out, nil

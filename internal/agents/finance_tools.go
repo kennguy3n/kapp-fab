@@ -828,7 +828,7 @@ func (t *budgetVsActualTool) Invoke(ctx context.Context, inv Invocation) (*Resul
 		}
 	}
 	if in.To != "" {
-		q.To, err = parseAgentDate(in.To)
+		q.To, err = parseAgentDateEnd(in.To)
 		if err != nil {
 			return nil, fmt.Errorf("finance.budget_vs_actual: invalid to: %w", err)
 		}
@@ -857,9 +857,24 @@ func (t *budgetVsActualTool) Invoke(ctx context.Context, inv Invocation) (*Resul
 	}, nil
 }
 
-// parseAgentDate parses an agent-supplied YYYY-MM-DD string. Returns
-// a UTC midnight time.Time so report ranges align with journal_entries
-// posted_at semantics.
+// parseAgentDate parses an agent-supplied YYYY-MM-DD string as the
+// start of that calendar day in UTC (00:00:00). Use this for `from`
+// bounds where the SQL filter is `je.posted_at >= $start`.
 func parseAgentDate(s string) (time.Time, error) {
 	return time.Parse("2006-01-02", s)
+}
+
+// parseAgentDateEnd parses an agent-supplied YYYY-MM-DD string as
+// the END of that calendar day in UTC (23:59:59). Use this for `to`
+// bounds where the SQL filter is `je.posted_at <= $end`; parsing
+// with parseAgentDate would silently exclude every entry posted
+// after midnight on the requested end date, producing the same
+// off-by-day variance the HTTP variance endpoint guards against
+// via endOfDay() in services/api/budget_handlers.go.
+func parseAgentDateEnd(s string) (time.Time, error) {
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, t.Location()), nil
 }

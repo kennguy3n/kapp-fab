@@ -80,9 +80,35 @@ type CommandDispatcher struct {
 	// crashing, so the bridge still runs on plans that don't
 	// include the finance feature.
 	budgets *finance.BudgetStore
+	// now returns the dispatcher's notion of the current time. It is
+	// injectable so command handlers that depend on "today" (e.g. the
+	// MTD window used by /budget variance) can be exercised against
+	// fixed timestamps in tests. Nil falls back to time.Now().UTC().
+	now func() time.Time
 	// dashboardBase is the URL prefix the dashboard digest card links
 	// to (e.g. https://app.example.com). Empty disables the deep link.
 	dashboardBase string
+}
+
+// clock returns the dispatcher's now-fn, defaulting to UTC wall
+// clock when no override has been wired. Centralising this read
+// keeps the rest of the dispatcher from sprinkling `if d.now ==
+// nil` checks at every call site.
+func (d *CommandDispatcher) clock() time.Time {
+	if d == nil || d.now == nil {
+		return time.Now().UTC()
+	}
+	return d.now().UTC()
+}
+
+// WithClock substitutes the dispatcher's time source. Useful in
+// tests that need a deterministic "today" for MTD-window commands
+// (e.g. /budget variance, dashboard digest).
+func (d *CommandDispatcher) WithClock(now func() time.Time) *CommandDispatcher {
+	if now != nil {
+		d.now = now
+	}
+	return d
 }
 
 // Dispatch runs the command and returns a response. Unknown commands
@@ -1321,7 +1347,7 @@ func (d *CommandDispatcher) budgetVarianceCommand(ctx context.Context, req Comma
 	if err != nil {
 		return CommandResponse{Text: fmt.Sprintf("/budget variance: %v", err)}, nil
 	}
-	now := time.Now().UTC()
+	now := d.clock()
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	report, err := d.budgets.BudgetVsActual(ctx, req.TenantID, finance.VarianceQuery{
 		BudgetID: budget.ID,

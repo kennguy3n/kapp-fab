@@ -239,12 +239,20 @@ func (h *budgetHandlers) deleteLine(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tenant context missing", http.StatusInternalServerError)
 		return
 	}
+	// REST URL: /budgets/{id}/lines/{lineID} — pass both IDs through
+	// to the store so deleting a line whose parent is a different
+	// budget produces a 404 rather than silently succeeding.
+	budgetID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid budget id", http.StatusBadRequest)
+		return
+	}
 	lineID, err := uuid.Parse(chi.URLParam(r, "lineID"))
 	if err != nil {
 		http.Error(w, "invalid line id", http.StatusBadRequest)
 		return
 	}
-	if err := h.store.DeleteBudgetLine(r.Context(), t.ID, lineID); err != nil {
+	if err := h.store.DeleteBudgetLine(r.Context(), t.ID, budgetID, lineID); err != nil {
 		writeBudgetError(w, err)
 		return
 	}
@@ -281,7 +289,11 @@ func (h *budgetHandlers) varianceReport(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "invalid to date (want YYYY-MM-DD)", http.StatusBadRequest)
 			return
 		}
-		q.To = to
+		// Advance to end-of-day so journal entries posted any time
+		// during the supplied calendar day are included. Matches the
+		// default To semantics in BudgetVsActual (Dec 31 23:59:59)
+		// and the agent tool's parseAgentDateEnd path.
+		q.To = endOfDay(to)
 	}
 	out, err := h.store.BudgetVsActual(r.Context(), t.ID, q)
 	if err != nil {
@@ -289,6 +301,17 @@ func (h *budgetHandlers) varianceReport(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// endOfDay returns the supplied date advanced to 23:59:59 in the
+// date's own location. The variance endpoint parses ?to=YYYY-MM-DD
+// as a UTC midnight, which would exclude every journal_line posted
+// later that day; advancing here keeps the API contract
+// ("include the supplied end date") aligned with the SQL filter
+// `je.posted_at <= $3` in loadActuals and with the default To
+// semantics in BudgetVsActual.
+func endOfDay(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, t.Location())
 }
 
 // writeBudgetError translates BudgetStore sentinel errors into HTTP

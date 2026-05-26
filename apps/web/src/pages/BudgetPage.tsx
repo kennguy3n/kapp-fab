@@ -4,7 +4,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   Budget,
   BudgetLine,
-  BudgetVarianceAccountType,
   BudgetVarianceReport,
   BudgetVarianceRow,
   CreateBudgetInput,
@@ -522,34 +521,21 @@ function VarianceTable({ report }: { report: BudgetVarianceReport }) {
   );
 }
 
-// Account types whose "exceeded plan" reading is *favourable* (the
-// backend has already sign-flipped the variance so positive = actual
-// exceeded plan for every account type — but whether exceeding plan
-// is a good or bad outcome depends on whether the account is
-// credit-normal). Revenue, liability, and equity all sit on the
-// credit side and over-shooting plan on those is favourable
-// (over-earning revenue, building reserves). Asset/expense are
-// debit-normal, so positive variance means overspend / overdraw and
-// is unfavourable.
-const FAVOURABLE_ON_POSITIVE = new Set([
-  "revenue",
-  "liability",
-  "equity",
-]);
-
 const COLOUR_UNFAVOURABLE = "#dc2626";
 const COLOUR_FAVOURABLE = "#16a34a";
 const COLOUR_NEUTRAL = "#6b7280";
 
-function varianceColour(
-  variance: number,
-  accountType: BudgetVarianceAccountType | undefined,
-): string {
+// varianceColour picks the row's red/green colour from the
+// backend-stamped `favourable` flag rather than re-deriving the
+// good/bad reading client-side from account_type. The backend
+// (isFavourableVariance in internal/finance/budget.go) is the
+// single source of truth for which (account_type, variance sign)
+// combinations are favourable, so the rollups in the footer
+// (total_favourable_variance / total_unfavourable_variance) and
+// the per-row colouring stay consistent even when the favourability
+// rules for asset / liability / equity accounts evolve.
+function varianceColour(variance: number, favourable: boolean): string {
   if (variance === 0) return COLOUR_NEUTRAL;
-  const favourableOnPositive =
-    accountType !== undefined && FAVOURABLE_ON_POSITIVE.has(accountType);
-  const positive = variance > 0;
-  const favourable = positive ? favourableOnPositive : !favourableOnPositive;
   return favourable ? COLOUR_FAVOURABLE : COLOUR_UNFAVOURABLE;
 }
 
@@ -583,7 +569,7 @@ function VarianceRowRender({
   const variance = Number(row.variance) || 0;
   const pct = Number(row.variance_pct) || 0;
   const widthPct = Math.min(100, (Math.abs(variance) / maxAbs) * 100);
-  const colour = varianceColour(variance, row.account_type);
+  const colour = varianceColour(variance, row.favourable);
   // Drill-down link: opens the journal entries page filtered to the
   // account_code and the calendar-month window of this variance row
   // so the user can see the underlying postings without leaving the
