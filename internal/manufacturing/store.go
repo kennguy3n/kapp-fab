@@ -77,6 +77,7 @@ func (s *PGStore) CreateBOM(ctx context.Context, tenantID, actorID uuid.UUID, in
 	if len(in.Components) == 0 {
 		return nil, ErrBOMHasNoComponents
 	}
+	seen := make(map[uuid.UUID]struct{}, len(in.Components))
 	for _, c := range in.Components {
 		if c.ComponentItemID == in.ItemID {
 			return nil, ErrBOMSelfReference
@@ -84,6 +85,17 @@ func (s *PGStore) CreateBOM(ctx context.Context, tenantID, actorID uuid.UUID, in
 		if c.Qty.IsZero() || c.Qty.IsNegative() {
 			return nil, fmt.Errorf("manufacturing: component %s qty must be > 0", c.ComponentItemID)
 		}
+		// Detect duplicates in Go rather than letting the
+		// (tenant_id, bom_id, component_item_id) PK fire a
+		// raw 23505 — that would surface as a 500 with a
+		// cryptic constraint name to the HTTP caller. A
+		// duplicate is always an authoring mistake (the qty
+		// of the same raw material should be summed, not
+		// listed twice).
+		if _, dup := seen[c.ComponentItemID]; dup {
+			return nil, fmt.Errorf("%w: %s", ErrBOMDuplicateComponent, c.ComponentItemID)
+		}
+		seen[c.ComponentItemID] = struct{}{}
 	}
 
 	now := s.now()

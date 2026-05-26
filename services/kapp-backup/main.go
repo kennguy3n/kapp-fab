@@ -426,6 +426,15 @@ var tableConflictKeys = map[string][]string{
 	// insights_shares enforces a (tenant_id, resource_type, resource_id,
 	// grantee_type, grantee) UNIQUE on top of the (tenant_id, id) PK.
 	"insights_query_cache": {"tenant_id", "query_hash", "filter_hash"},
+	// Phase N6 — bom_components has no surrogate `id`; its PK is the
+	// natural composite (tenant_id, bom_id, component_item_id), so the
+	// (tenant_id, id) fallback would silently degrade to `ON CONFLICT
+	// DO NOTHING` and a corrective re-restore would not update the
+	// component qty/scrap/sort_order on existing rows. Declaring the
+	// composite here turns the restore into an upsert on the natural
+	// PK. boms and work_orders use the standard (tenant_id, id) PK and
+	// fall through to the default path.
+	"bom_components": {"tenant_id", "bom_id", "component_item_id"},
 }
 
 // insertRow issues a parameterised INSERT that lists the columns from

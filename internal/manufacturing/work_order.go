@@ -458,5 +458,10 @@ func (s *PGStore) CompleteWorkOrder(ctx context.Context, tenantID, woID, actorID
 			return nil, fmt.Errorf("manufacturing: emit move for %s: %w", m.itemID, err)
 		}
 	}
-	return &wo, nil
+	// Re-fetch to surface the fresh updated_at (and pick up the
+	// completed_at / actual_qty that Phase 1 stamped under now()) so
+	// callers using updated_at for optimistic-concurrency checks get
+	// the value the database actually persisted, not the in-memory
+	// struct read at the start of Phase 1.
+	return s.GetWorkOrder(ctx, tenantID, woID)
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -294,8 +295,19 @@ func (h *manufacturingHandlers) completeWorkOrder(w http.ResponseWriter, r *http
 	var req workOrderActionRequest
 	// Body is optional — empty body means "complete with actual =
 	// planned" which is the most common path for a small shop.
-	if r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	//
+	// Guard on `r.Body != nil && r.ContentLength != 0` rather than
+	// `r.ContentLength > 0`. For chunked-transfer-encoded requests
+	// (which any HTTP/1.1 client may use, and which curl emits when
+	// you pipe stdin into -d @-), net/http sets ContentLength to -1
+	// to signal "unknown until EOF". The old `> 0` check silently
+	// dropped the body on those requests, so the server completed
+	// with actualQty defaulted to planned even when the operator
+	// explicitly supplied a different yield. io.EOF is treated as
+	// "body was empty after all" rather than a 400, matching the
+	// pattern fixed in services/api/consolidation_handlers.go.
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 			http.Error(w, "invalid JSON body", http.StatusBadRequest)
 			return
 		}
@@ -358,6 +370,7 @@ func writeManufacturingError(w http.ResponseWriter, err error) {
 	case errors.Is(err, manufacturing.ErrBOMNotActive),
 		errors.Is(err, manufacturing.ErrBOMHasNoComponents),
 		errors.Is(err, manufacturing.ErrBOMSelfReference),
+		errors.Is(err, manufacturing.ErrBOMDuplicateComponent),
 		errors.Is(err, manufacturing.ErrWorkOrderInvalidTransition),
 		errors.Is(err, manufacturing.ErrWorkOrderInsufficientStock):
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)

@@ -98,6 +98,15 @@ var (
 	// recipe that consumes itself is always a typo).
 	ErrBOMSelfReference = errors.New("manufacturing: bom cannot reference its own output item as a component")
 
+	// ErrBOMDuplicateComponent is returned by CreateBOM when the
+	// input slice lists the same component_item_id twice. The
+	// `bom_components` table has PK (tenant_id, bom_id,
+	// component_item_id) so the database would reject the second
+	// insert with a 23505 — surfacing that as a clear typed error
+	// at validation time avoids returning a cryptic 500 to the
+	// HTTP caller.
+	ErrBOMDuplicateComponent = errors.New("manufacturing: bom lists the same component_item_id more than once")
+
 	// ErrWorkOrderNotFound mirrors ErrBOMNotFound for work_orders.
 	ErrWorkOrderNotFound = errors.New("manufacturing: work order not found")
 
