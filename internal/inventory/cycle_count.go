@@ -304,8 +304,14 @@ func (s *CycleCountStore) UpdateSession(ctx context.Context, in CycleCountSessio
 	return s.GetSession(ctx, in.TenantID, in.ID)
 }
 
-// DeleteSession removes a draft session and its lines. Posted /
-// reconciled sessions are not removable.
+// DeleteSession removes a draft session and its lines. Only `draft`
+// sessions are removable: `counting` sessions may already hold
+// operator-entered counted_qty values that we don't want to lose to
+// a misclick, and `reconciled` / `posted` sessions are part of the
+// audit trail. An operator who started counting and wants to back
+// out must `PATCH {status:"draft"}` first (the state machine allows
+// counting → draft); reconciled sessions must round-trip through
+// counting → draft the same way.
 func (s *CycleCountStore) DeleteSession(ctx context.Context, tenantID, id uuid.UUID) error {
 	if tenantID == uuid.Nil || id == uuid.Nil {
 		return errors.New("cycle_count: tenant id + id required")

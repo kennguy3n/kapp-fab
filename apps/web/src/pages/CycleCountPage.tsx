@@ -575,10 +575,15 @@ function LineRow(props: {
   // re-render after a query invalidation (e.g. another tab posts a
   // line, or `Seed from stock` refreshes expected_qty via the new
   // (tenant_id, session_id, item_id) upsert path) would leave the
-  // input out of sync with the persisted row. Keying on updated_at
-  // — not on counted_qty/notes directly — keeps the operator's
-  // in-progress typing safe while still picking up genuine server
-  // mutations on the same line.
+  // input out of sync with the persisted row. The operator's
+  // in-progress typing is held in the local `counted` / `notes`
+  // useState slots, which are independent of the corresponding
+  // `props.line.*` server values; this effect only fires when the
+  // server-side props change. `updated_at` is the primary signal
+  // (every server-side mutation bumps it) and the explicit
+  // `counted_qty` + `notes` deps are defensive — if a future schema
+  // change ever allowed a server-side mutation without bumping
+  // `updated_at`, the row would still re-sync.
   useEffect(() => {
     setCounted(props.line.counted_qty);
     setNotes(props.line.notes ?? "");
