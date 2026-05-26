@@ -311,6 +311,50 @@ func TestPlanLocaleFlagSeedsCatalogues(t *testing.T) {
 	}
 }
 
+// TestPlanLocaleFallsBackToBackendOnlyWhenFrontendMissing pins the
+// monorepo-split contract: when apps/web/src/locales/en.json is
+// absent (because the frontend lives in a separate checkout), the
+// scaffold must still seed the backend locale catalogue. The bug
+// it locks against: an early `return nil` after the frontend read
+// error that silently skipped the backend catalogue write.
+func TestPlanLocaleFallsBackToBackendOnlyWhenFrontendMissing(t *testing.T) {
+	tmp := setupTempRepo(t)
+
+	// Simulate a monorepo split — remove the frontend en.json so
+	// planLocaleCatalogues' frontend read fails. The backend
+	// en.json + locales.ts + SetupWizardPage stay (the scaffold
+	// best-efforts the frontend patches too; only the catalogue
+	// file seeding is gated on the en.json read).
+	frontendEn := filepath.Join(tmp, "apps", "web", "src", "locales", "en.json")
+	if err := os.Remove(frontendEn); err != nil {
+		t.Fatalf("remove frontend en.json: %v", err)
+	}
+
+	in := planInput{
+		CC: "XK", Name: "Kosovo", Locale: "sq", LocaleName: "Shqip", RepoRoot: tmp,
+	}
+	p, err := buildPlan(in)
+	if err != nil {
+		t.Fatalf("buildPlan: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := p.Execute(redirectStdout(t, &buf), false); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	// Backend catalogue MUST be seeded.
+	backendOut := filepath.Join(tmp, "internal", "i18n", "locales", "sq.json")
+	if _, err := os.Stat(backendOut); err != nil {
+		t.Errorf("backend locale catalogue %s was not created despite the backend en.json being readable: %v", backendOut, err)
+	}
+	// Frontend catalogue MUST NOT be seeded (the frontend en.json
+	// was absent, so there's nothing to seed from).
+	frontendOut := filepath.Join(tmp, "apps", "web", "src", "locales", "sq.json")
+	if _, err := os.Stat(frontendOut); err == nil {
+		t.Errorf("frontend locale catalogue %s was unexpectedly created despite the source en.json being absent", frontendOut)
+	}
+}
+
 // repoRoot resolves the project root from the test's working
 // directory (tests run inside cmd/new-tax-pack/ which is two levels
 // down from the repo root).

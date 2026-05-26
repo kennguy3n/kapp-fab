@@ -560,30 +560,35 @@ func (p *plan) planLocaleCatalogues() error {
 	backendEn := filepath.Join(p.RepoRoot, "internal", "i18n", "locales", "en.json")
 	frontendEn := filepath.Join(p.RepoRoot, "apps", "web", "src", "locales", "en.json")
 
+	// Seed the backend catalogue first and independently: it lives
+	// in this repo and must always succeed. A read failure here is
+	// a real problem (missing en.json in a checkout that claims to
+	// be the kapp-fab repo) and must surface as an error.
 	backendBody, err := os.ReadFile(backendEn) //nolint:gosec // path derived from the validated repo-root flag
 	if err != nil {
 		return fmt.Errorf("read backend en.json: %w", err)
 	}
-	frontendBody, err := os.ReadFile(frontendEn) //nolint:gosec // path derived from the validated repo-root flag
-	if err != nil {
-		// Frontend may not be checked out — skip in that case.
-		// Permission / IO errors are surfaced as the same
-		// graceful no-op because the next CI build will catch
-		// the underlying issue with a clearer message.
-		return nil //nolint:nilerr // intentional graceful-degrade
-	}
-
 	backendOut := filepath.Join(p.RepoRoot, "internal", "i18n", "locales", p.Locale+".json")
-	frontendOut := filepath.Join(p.RepoRoot, "apps", "web", "src", "locales", p.Locale+".json")
-
-	if _, err := os.Stat(backendOut); err == nil {
-		// Already present — skip.
-	} else {
+	if _, err := os.Stat(backendOut); err != nil {
+		// Either the file doesn't exist (the expected case for a
+		// new locale) or it's unreadable (e.g. permission denied).
+		// In both cases we still want the scaffold to attempt the
+		// write; Execute will surface the underlying write error
+		// with a clearer message if the path is truly broken.
 		p.NewFiles[backendOut] = string(backendBody)
 	}
-	if _, err := os.Stat(frontendOut); err == nil {
-		// Already present — skip.
-	} else {
+
+	// The frontend catalogue is best-effort: in a monorepo split
+	// where apps/web is checked out separately, the frontend
+	// en.json is genuinely absent and we still want the backend
+	// side to be seeded. Skip silently when the frontend read
+	// fails; the contributor's CI build catches a real misconfig.
+	frontendBody, err := os.ReadFile(frontendEn) //nolint:gosec // path derived from the validated repo-root flag
+	if err != nil {
+		return nil //nolint:nilerr // intentional graceful-degrade
+	}
+	frontendOut := filepath.Join(p.RepoRoot, "apps", "web", "src", "locales", p.Locale+".json")
+	if _, err := os.Stat(frontendOut); err != nil {
 		p.NewFiles[frontendOut] = string(frontendBody)
 	}
 	return nil
