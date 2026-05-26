@@ -129,6 +129,15 @@ const REGION_SCRIPT_OVERRIDES: Record<string, string> = {
   "zh-TW": "zh-Hant",
   "zh-HK": "zh-Hant",
   "zh-MO": "zh-Hant",
+  // BCP 47 deprecated the ISO 639-1 macrolanguage tag `no` in
+  // favour of `nb` (Bokmål) and `nn` (Nynorsk). Modern browsers
+  // report `nb` / `nn` directly, but a small number of legacy
+  // OS / browser combinations still emit the bare `no` tag. The
+  // progressive-subtag walker can't help here because `no` has
+  // no subtags to drop — so we explicitly funnel `no` to the
+  // Bokmål catalogue (the variant Phase-N2 actually ships) to
+  // avoid silently falling through to English for those users.
+  no: "nb",
 };
 
 /**

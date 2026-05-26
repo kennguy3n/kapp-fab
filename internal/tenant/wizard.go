@@ -1209,6 +1209,20 @@ const (
 	defaultUnrealizedFXIntervalSeconds = 30 * 86400
 )
 
+// defaultBudgetVarianceActionType / defaultBudgetVarianceIntervalSeconds
+// drive the daily budget vs actual variance sweeper. The handler
+// reads every active budget for the tenant, computes MTD variance
+// against the current calendar month, and raises a notification when
+// the variance fraction crosses the per-budget or platform-default
+// threshold. Mirrors finance.ActionTypeBudgetVariance /
+// finance.DefaultBudgetVarianceIntervalSeconds; duplicated here for
+// the same package-cycle reason as the other action-type constants
+// above. Only seeded for plans that include the finance feature.
+const (
+	defaultBudgetVarianceActionType      = "budget_variance"
+	defaultBudgetVarianceIntervalSeconds = 86400
+)
+
 // defaultDataRetentionActionType / defaultDataRetentionIntervalSeconds
 // drive the daily retention sweeper that deletes rows older than the
 // per-tenant retention_days threshold (migration 000032).
@@ -1273,6 +1287,10 @@ func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 			actionType      string
 			intervalSeconds int
 		}{defaultUnrealizedFXActionType, defaultUnrealizedFXIntervalSeconds})
+		defaults = append(defaults, struct {
+			actionType      string
+			intervalSeconds int
+		}{defaultBudgetVarianceActionType, defaultBudgetVarianceIntervalSeconds})
 	}
 	if DefaultFeaturesForPlan(plan)[FeatureInsights] {
 		defaults = append(defaults, struct {

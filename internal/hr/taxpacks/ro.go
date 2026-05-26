@@ -26,6 +26,20 @@ import (
 //     baseline. Real payroll uses scaling tables keyed by
 //     income band + dependants count.
 //
+// Period-fraction handling: CAS and CASS are flat percentages of
+// the period gross, so they're emitted period-local with no
+// annualization. The personal deduction, however, is defined as a
+// *monthly* amount and must scale with the actual pay-period length
+// — otherwise a 14-day slip over-deducts the deduction (full 600
+// RON applied to a half-month base) and under-withholds impozit
+// versus a monthly slip at the same daily rate. We therefore
+// annualize the impozit base (gross / period-fraction), apply the
+// annual deduction (600 × 12 = 7,200 RON/yr), then prorate the
+// resulting annual tax back by the same period-fraction. This
+// matches the annualize→compute→prorate pattern used by every
+// other Phase-N2 pack with a fixed deduction or credit (PL, CZ,
+// DK, SE, NO, FI).
+//
 // References:
 //
 //	ANAF — venituri din salarii 2025:
@@ -48,7 +62,12 @@ var (
 	roCASSRate          = dec("0.10")
 	roImpozitRate       = dec("0.10")
 	roDeducerePersonala = dec("600") // monthly, single, no dependants
+	roAnnualDays        = decimal.NewFromFloat(365.25)
 )
+
+// roAnnualDeducerePersonala is the annual equivalent of the monthly
+// 600 RON personal deduction used by the annualize/prorate path.
+var roAnnualDeducerePersonala = roDeducerePersonala.Mul(decimal.NewFromInt(12))
 
 // ComputeWithholding emits up to three lines:
 //
@@ -61,7 +80,12 @@ func (roPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
-	if period.Days() <= 0 {
+	days := period.Days()
+	if days <= 0 {
+		return nil, nil
+	}
+	periodFraction := decimal.NewFromInt(int64(days)).Div(roAnnualDays)
+	if !periodFraction.IsPositive() {
 		return nil, nil
 	}
 
@@ -85,11 +109,20 @@ func (roPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 		})
 	}
 
-	taxBase := gross.Sub(cas).Sub(cass).Sub(roDeducerePersonala)
-	if taxBase.LessThan(decimal.Zero) {
-		taxBase = decimal.Zero
+	// Annualize gross + the per-period CAS/CASS to compute an
+	// annual tax base, then prorate the resulting annual impozit
+	// back by periodFraction. The annual personal deduction
+	// (7,200 RON/yr) is applied at the annual layer so a 14-day
+	// slip only gets ~276 RON of the deduction, not the full 600.
+	annualGross := gross.Div(periodFraction)
+	annualCAS := cas.Div(periodFraction)
+	annualCASS := cass.Div(periodFraction)
+	annualTaxBase := annualGross.Sub(annualCAS).Sub(annualCASS).Sub(roAnnualDeducerePersonala)
+	if annualTaxBase.LessThan(decimal.Zero) {
+		annualTaxBase = decimal.Zero
 	}
-	impozit := taxBase.Mul(roImpozitRate).Round(2)
+	annualImpozit := annualTaxBase.Mul(roImpozitRate)
+	impozit := annualImpozit.Mul(periodFraction).Round(2)
 	if impozit.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "RO_IMPOZIT",

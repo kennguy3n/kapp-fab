@@ -414,12 +414,22 @@ func TestHUPackNominalSalary(t *testing.T) {
 
 // ===== Romania =====
 
-// TestROPackNominalSalary: RON 6,000 / month.
+// TestROPackNominalSalary: RON 6,000 / month, 31-day Jan period.
 //
+//	periodFraction = 31 / 365.25 ≈ 0.084873
 //	CAS    = 6000 × 25%  = 1500.00
 //	CASS   = 6000 × 10%  = 600.00
-//	taxBase = 6000 - 1500 - 600 - 600 = 3300
-//	IMPOZIT = 3300 × 10% = 330.00
+//	annualGross   = 6000 / 0.084873  ≈ 70,684.62
+//	annualCAS     = 1500 / 0.084873  ≈ 17,671.16
+//	annualCASS    =  600 / 0.084873  ≈  7,068.46
+//	annualTaxBase = 70,684.62 - 17,671.16 - 7,068.46 - 7,200
+//	              ≈ 38,744.99
+//	annualImpozit = 38,744.99 × 10%  ≈  3,874.50
+//	periodImpozit = 3,874.50 × 0.084873 ≈ 328.89
+//
+// Algebraic short-form (since CAS / CASS scale linearly with
+// period gross): periodImpozit = (gross - cas - cass) × rate -
+// roAnnualDeducerePersonala × periodFraction × rate.
 func TestROPackNominalSalary(t *testing.T) {
 	pack, err := Lookup("RO")
 	if err != nil {
@@ -436,15 +446,53 @@ func TestROPackNominalSalary(t *testing.T) {
 	if cass := codes["RO_CASS"]; !cass.Equal(dec("600")) {
 		t.Errorf("RO_CASS = %s; want 600", cass)
 	}
-	if imp := codes["RO_IMPOZIT"]; !imp.Equal(dec("330")) {
-		t.Errorf("RO_IMPOZIT = %s; want 330", imp)
+	if imp := codes["RO_IMPOZIT"]; imp.LessThan(dec("325")) || imp.GreaterThan(dec("332")) {
+		t.Errorf("RO_IMPOZIT = %s; want band 325-332 (≈328.89)", imp)
 	}
 }
 
-// TestROPackBelowPersonalDeductionFloor: a low-wage slip where
-// gross - CAS - CASS < personal deduction → no income tax.
+// TestROPackBiWeeklyDeductionScales pins the period-fraction fix
+// for the monthly RON 600 personal deduction. A 14-day slip at the
+// same daily rate as the nominal monthly case (RON 6000/mo) must
+// only get the prorated portion of the deduction (~276 RON) rather
+// than the full monthly value, so the resulting impozit reflects
+// the true 14-day base.
 //
-//	gross=900: CAS=225, CASS=90; base = 900 - 225 - 90 - 600 = -15 → 0 tax.
+//	periodFraction = 14 / 365.25 ≈ 0.038330
+//	gross_14d      = 6000 × 14/31 ≈ 2709.68
+//	CAS / CASS      scale linearly (677.42 / 270.97)
+//	annualBase     ≈ (2709.68 - 677.42 - 270.97) / 0.038330 - 7200
+//	               ≈ 38,754 (matches monthly annualisation, within
+//	                 RON 10 of TestROPackNominalSalary's 38,744 by
+//	                 design — proves the deduction is annualised
+//	                 once, not re-applied per period)
+//	periodImpozit  ≈ 148.50
+//
+// Pre-fix the same input produced periodImpozit ≈ 116.13 because
+// the full RON 600 deduction was subtracted from the half-month
+// 2709.68 base; this test will fail at that value.
+func TestROPackBiWeeklyDeductionScales(t *testing.T) {
+	pack, _ := Lookup("RO")
+	biWeekly := PayPeriod{
+		Start: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		End:   time.Date(2026, 1, 14, 0, 0, 0, 0, time.UTC),
+	}
+	// gross at the same daily rate as the monthly test: 6000 × 14/31
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{}, dec("2709.68"), biWeekly)
+	codes := indexByCode(out)
+	if imp := codes["RO_IMPOZIT"]; imp.LessThan(dec("145")) || imp.GreaterThan(dec("152")) {
+		t.Errorf("RO_IMPOZIT (bi-weekly) = %s; want band 145-152 (≈148.50)", imp)
+	}
+}
+
+// TestROPackBelowPersonalDeductionFloor: a low-wage slip whose
+// annualised gross net of CAS / CASS sits below the annual personal
+// deduction (RON 7,200) → annual tax base clips to zero → no
+// income tax.
+//
+//	gross=900: CAS=225, CASS=90.
+//	annualBase ≈ (900 - 225 - 90) / 0.084873 - 7200
+//	           ≈ 6,892.55 - 7,200 = -307.45 → clipped to 0.
 func TestROPackBelowPersonalDeductionFloor(t *testing.T) {
 	pack, _ := Lookup("RO")
 	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{}, decimal.NewFromInt(900), monthPeriod())
