@@ -585,7 +585,7 @@ export class ApiClient {
     idempotencyKey?: string,
   ): Promise<KRecord> {
     return this.request(
-      `/procurement/requisitions/${encodeURIComponent(id)}/${verb}`,
+      `/procurement/requisitions/${encodeURIComponent(id)}/${encodeURIComponent(verb)}`,
       {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey ?? crypto.randomUUID() },
