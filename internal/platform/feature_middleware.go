@@ -102,6 +102,13 @@ func FeatureFromPath(p string) string {
 		return tenant.FeaturePOS
 	case "projects":
 		return tenant.FeatureProjects
+	case "manufacturing":
+		// /api/v1/manufacturing/* — BOMs and work orders.
+		// Gated on its own feature key so a tenant can run
+		// inventory without manufacturing (e.g. a pure
+		// distribution shop) without the manufacturing
+		// surface leaking into their UI or API.
+		return tenant.FeatureManufacturing
 	default:
 		return ""
 	}

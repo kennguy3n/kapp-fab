@@ -305,6 +305,7 @@ const featureFromSection: Record<string, string> = {
   Insights: "insights",
   POS: "pos",
   Projects: "projects",
+  Manufacturing: "manufacturing",
 };
 
 interface NavSection {

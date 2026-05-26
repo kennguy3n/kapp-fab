@@ -185,8 +185,20 @@ function BOMAuthoringForm({ items, itemLabel }: BOMAuthoringFormProps) {
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["mfg", "boms"] });
+      // Reset every field the form owns so a follow-up authoring
+      // session starts from a clean slate. The `activate` checkbox
+      // is the load-bearing one — leaving it checked silently
+      // promotes the next BOM to active on creation, which then
+      // auto-demotes any currently-active BOM for that item to
+      // obsolete. Losing the previously-active BOM without an
+      // explicit user action is unsafe; the user must opt in each
+      // time.
       setItemID("");
       setVersion("v1");
+      setOutputQty("1");
+      setUOM("each");
+      setNotes("");
+      setActivate(false);
       setComponents([
         {
           component_item_id: "",
