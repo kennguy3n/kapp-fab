@@ -583,12 +583,13 @@ func (s *CycleCountStore) SeedExpectedFromStock(ctx context.Context, tenantID, s
 		if session.Status == CycleCountStatusPosted {
 			return ErrCycleCountAlreadyPosted
 		}
-		// Reconciled sessions are line-frozen relative to PostSession,
-		// which reads the line set outside the optimistic-lock tx.
+		// Reconciled sessions are line-frozen: PostSession reads the
+		// lines inside the same FOR UPDATE tx as the status flip, so
+		// the freeze is load-bearing for audit-trail integrity (the
+		// reconciled line set is exactly what posts to the ledger).
 		// Mirror the UpsertLine guard so a seed cannot bump a
-		// reconciled session's expected_qty out from under a
-		// concurrent posting attempt — the operator must reopen the
-		// session to counting first.
+		// reconciled session's expected_qty — the operator must
+		// reopen the session to counting first.
 		if session.Status == CycleCountStatusReconciled {
 			return ErrCycleCountLineFrozen
 		}
@@ -620,7 +621,7 @@ func (s *CycleCountStore) SeedExpectedFromStock(ctx context.Context, tenantID, s
 		now := s.now()
 		for _, r := range stock {
 			// Conflict on (tenant_id, session_id, item_id) — the
-			// unique index added in migration 000063. We must NOT
+			// unique index added in migration 000064. We must NOT
 			// conflict on (tenant_id, id) because the candidate id
 			// is freshly generated on every call and would never
 			// collide, so re-seeding would insert one extra row per
