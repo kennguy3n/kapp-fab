@@ -649,7 +649,7 @@ func (p *plan) Execute(out io.Writer, dryRun bool) error {
 	fmt.Fprintln(buf, "  1. Read docs/CONTRIBUTING_TAX_PACKS.md for the per-country checklist.")
 	fmt.Fprintln(buf, "  2. Replace the scaffold body in internal/hr/taxpacks/"+p.CCLower+".go")
 	fmt.Fprintln(buf, "     with the real statutory bracket walk + cap enforcement.")
-	fmt.Fprintln(buf, "  3. Rename the 2131 line in internal/tenant/coa_templates/"+p.CCLower+"_basic.json")
+	fmt.Fprintln(buf, "  3. Rename the 2140 line in internal/tenant/coa_templates/"+p.CCLower+"_basic.json")
 	fmt.Fprintln(buf, "     to the actual payroll-liability account(s) the pack emits.")
 	fmt.Fprintln(buf, "  4. Add a regression matrix to the regional test file.")
 	fmt.Fprintln(buf, "  5. Run: go test ./internal/{hr/taxpacks,tenant,i18n}/...")

@@ -204,6 +204,61 @@ func TestPlanIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestPlanNextStepsReferencesActualPayrollLiabilityCode pins the
+// invariant that the "Next steps" output points at the CoA account
+// code that renderCoATemplate actually emits as the TODO placeholder
+// line. The two used to be out of sync (the prose said "2131" while
+// the JSON wrote "2140"), which would send a contributor hunting for
+// a line that doesn't exist. The test extracts the placeholder code
+// from the rendered template at runtime so a future re-numbering of
+// the CoA hierarchy can't regress this — both halves move together
+// or the test fails.
+func TestPlanNextStepsReferencesActualPayrollLiabilityCode(t *testing.T) {
+	tmp := setupTempRepo(t)
+
+	in := planInput{CC: "ZZ", Name: "Zedland", RepoRoot: tmp}
+	p, err := buildPlan(in)
+	if err != nil {
+		t.Fatalf("buildPlan: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := p.Execute(redirectStdout(t, &buf), false); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	// Pull the CoA template the scaffold wrote and find the code on
+	// the line tagged with TODO(community). That's the line the
+	// "Next steps" output is asking the contributor to rename.
+	coaBody, err := os.ReadFile(filepath.Join(tmp, "internal", "tenant", "coa_templates", "zz_basic.json"))
+	if err != nil {
+		t.Fatalf("read scaffolded CoA: %v", err)
+	}
+	var rows []struct {
+		Code string `json:"code"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(coaBody, &rows); err != nil {
+		t.Fatalf("parse scaffolded CoA: %v", err)
+	}
+	var todoCode string
+	for _, r := range rows {
+		if strings.Contains(r.Name, "TODO(community)") {
+			todoCode = r.Code
+			break
+		}
+	}
+	if todoCode == "" {
+		t.Fatalf("scaffolded CoA has no TODO(community) line; rows: %+v", rows)
+	}
+
+	got := buf.String()
+	want := "Rename the " + todoCode + " line"
+	if !strings.Contains(got, want) {
+		t.Errorf("Next-steps output references the wrong CoA code.\n  got    %q\n  want substring %q\n  output:\n%s",
+			got, want, got)
+	}
+}
+
 // TestPlanLocaleFlagSeedsCatalogues exercises the -locale branch end-
 // to-end against a temp repo copy: the scaffold should emit two
 // locale catalogue files seeded from en.json AND patch
