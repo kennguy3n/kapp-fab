@@ -6,6 +6,7 @@ package integrationtest
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,8 +253,8 @@ func TestMultiCurrencyEndToEnd(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing FX revaluation entry for open account %s", openAcct)
 		}
-		dr := findLine(entry.Lines, want.debitAcct).Debit
-		cr := findLine(entry.Lines, want.credAcct).Credit
+		dr := findLine(t, &entry, want.debitAcct).Debit
+		cr := findLine(t, &entry, want.credAcct).Credit
 		if !dr.Equal(want.amount) {
 			t.Fatalf("reval %s: Dr %s = %s, want %s",
 				openAcct, want.debitAcct, dr, want.amount)
@@ -319,10 +320,16 @@ func TestMultiCurrencyEndToEnd(t *testing.T) {
 // --- Helpers ---------------------------------------------------------------
 
 // dashboardConverter narrows ExchangeRateStore to the dashboard.Converter
-// interface. Mirrors the production wiring in
-// services/api/dashboard_handlers.go (dashboardRateAdapter) so the
-// integration test exercises the same conversion path the HTTP API
-// would.
+// interface. It exercises the same ExchangeRateStore.Convert path the
+// production dashboardRateAdapter at services/api/dashboard_handlers.go
+// drives, so a successful assertion here also verifies the rate-store
+// wiring the HTTP API depends on. The from==to short-circuit and the
+// nil-rates guard are convenience guards local to this helper: the
+// production adapter omits them because ExchangeRateStore.Convert
+// itself handles same-currency pairs and the adapter's rate-store
+// field is always populated by deps.go at startup — neither shortcut
+// is structurally necessary, and adding them to production would just
+// duplicate work already done by the rate store.
 type dashboardConverter struct {
 	rates *ledger.ExchangeRateStore
 }
@@ -449,7 +456,7 @@ func createARInvoiceRecordWithDate(t *testing.T, h *harness, tenantID, actorID u
 // compact without losing readability of the expected math.
 func mustBaseAmountEquals(t *testing.T, entry *ledger.JournalEntry, account string, signedNet, rate decimal.Decimal) {
 	t.Helper()
-	line := findLine(entry.Lines, account)
+	line := findLine(t, entry, account)
 	if line.BaseAmount == nil {
 		t.Fatalf("line %s: base_amount is nil (rates store likely not wired)", account)
 	}
@@ -460,15 +467,41 @@ func mustBaseAmountEquals(t *testing.T, entry *ledger.JournalEntry, account stri
 	}
 }
 
-// findLine returns the first journal_line on `account`, or zero if
-// none. Used by mustBaseAmountEquals and the revaluation assertion.
-func findLine(lines []ledger.JournalLine, account string) ledger.JournalLine {
-	for _, l := range lines {
+// findLine returns the first journal_line on `account` in `entry`,
+// failing the test with a contextual message if no such line exists.
+// Returning a zero-value JournalLine on miss would cascade into
+// misleading downstream assertions (e.g. mustBaseAmountEquals would
+// surface `base_amount is nil (rates store likely not wired)` for
+// what is really a missing-account problem; the revaluation block
+// would compare `decimal.Zero` against the expected debit/credit
+// figure and report a wrong-amount failure when the line simply isn't
+// there). Fail-fast turns those red herrings into the actual root
+// cause.
+func findLine(t *testing.T, entry *ledger.JournalEntry, account string) ledger.JournalLine {
+	t.Helper()
+	for _, l := range entry.Lines {
 		if l.AccountCode == account {
 			return l
 		}
 	}
+	t.Fatalf("journal entry %s: no line for account %s (have %s)",
+		entry.ID, account, summariseAccounts(entry.Lines))
 	return ledger.JournalLine{}
+}
+
+// summariseAccounts returns a comma-separated list of the account
+// codes present on the given lines, used only for findLine's failure
+// diagnostic so the assertion error tells the reader exactly which
+// accounts WERE posted on the entry.
+func summariseAccounts(lines []ledger.JournalLine) string {
+	if len(lines) == 0 {
+		return "(no lines)"
+	}
+	accounts := make([]string, 0, len(lines))
+	for _, l := range lines {
+		accounts = append(accounts, l.AccountCode)
+	}
+	return strings.Join(accounts, ", ")
 }
 
 // listEntriesBySource reloads every journal entry that posted under
@@ -528,7 +561,16 @@ func listEntriesBySource(t *testing.T, h *harness, tenantID uuid.UUID, sourceKTy
 				l.BaseAmount = base
 				headers[i].Lines = append(headers[i].Lines, l)
 			}
+			// Mirror the outer-loop pattern at line 536: a transient
+			// DB error mid-iteration would otherwise be silently
+			// swallowed by lineRows.Close(), surfacing as a misleading
+			// "missing line" assertion downstream instead of the
+			// actual driver error.
+			lineErr := lineRows.Err()
 			lineRows.Close()
+			if lineErr != nil {
+				return lineErr
+			}
 		}
 		out = headers
 		return nil
