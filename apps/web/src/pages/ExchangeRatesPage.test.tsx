@@ -138,5 +138,11 @@ describe("ExchangeRatesPage", () => {
     expect(
       await screen.findByText(/Failed to load rates: network down/i),
     ).toBeInTheDocument();
+    // The error and the empty-state placeholder are mutually
+    // exclusive: when the list query fails we should not also tell
+    // the user "no rates yet" (which would imply the API said zero
+    // rather than that it crashed). Locks the fix that gates the
+    // empty-state behind !q.isError.
+    expect(screen.queryByText(/No exchange rates yet/i)).toBeNull();
   });
 });

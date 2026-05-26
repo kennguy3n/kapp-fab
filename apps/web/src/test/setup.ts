@@ -41,23 +41,26 @@ if (typeof window !== "undefined") {
     window.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
   }
   // recharts uses getBoundingClientRect on its container; jsdom
-  // returns zeros for every dimension which makes the chart render
-  // 0×0 px. Stub a non-zero size so the SVG nodes are created.
-  if (!HTMLElement.prototype.getBoundingClientRect) {
-    HTMLElement.prototype.getBoundingClientRect = function (): DOMRect {
-      return {
-        x: 0,
-        y: 0,
-        width: 600,
-        height: 400,
-        top: 0,
-        left: 0,
-        right: 600,
-        bottom: 400,
-        toJSON() {
-          return this;
-        },
-      } as DOMRect;
-    };
-  }
+  // *does* define Element.prototype.getBoundingClientRect (inherited
+  // by HTMLElement) but returns all-zero dimensions, which makes the
+  // chart render 0×0 px and emit no SVG nodes. Unconditionally
+  // override with a fixed non-zero size so any future recharts test
+  // that doesn't mock the Charts component still gets a usable
+  // surface. A guarded `if (!proto.method)` shape would never fire
+  // here because the method is already inherited.
+  HTMLElement.prototype.getBoundingClientRect = function (): DOMRect {
+    return {
+      x: 0,
+      y: 0,
+      width: 600,
+      height: 400,
+      top: 0,
+      left: 0,
+      right: 600,
+      bottom: 400,
+      toJSON() {
+        return this;
+      },
+    } as DOMRect;
+  };
 }
