@@ -296,6 +296,98 @@ func TestTenantKTypeBuilderEndToEnd(t *testing.T) {
 	}
 }
 
+// TestRecordCreatePrefersLatestActiveCustomVersion pins the
+// multi-version resolution rule for record.Create against a
+// tenant-authored KType: when v1 is active and v2 is a brand-new
+// draft (the iteration-in-progress case), `KTypeVersion=0`
+// (the default "latest") must resolve to v1 active, NOT v2 draft.
+//
+// Pre-fix, the resolver returned `ORDER BY version DESC LIMIT 1`
+// unconditionally — so v2 draft shadowed v1 active and creates
+// were rejected with "only active types back record creates"
+// even though v1 was perfectly usable. After the fix, the
+// version=0 + resolveForCreate path queries
+// `status='active' ORDER BY version DESC LIMIT 1`, returning v1.
+// The new record's KTypeVersion is recorded as 1 so historical
+// records always pin the active version they were validated
+// against, not the draft that happened to be the row's latest
+// version at the time of creation.
+func TestRecordCreatePrefersLatestActiveCustomVersion(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("multiver"), Name: "Multi Version Co", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	actor := uuid.New()
+	store := ktype.NewTenantStore(h.pool)
+	records := record.NewPGStore(h.pool, h.ktypes, h.publisher, h.auditor).WithTenantKTypes(store)
+
+	v1Schema, _ := json.Marshal(map[string]any{
+		"name": "custom.work_order", "version": 1,
+		"fields": []map[string]any{
+			{"name": "code", "type": "string", "required": true},
+			{"name": "qty", "type": "number"},
+		},
+	})
+	v2Schema, _ := json.Marshal(map[string]any{
+		"name": "custom.work_order", "version": 2,
+		"fields": []map[string]any{
+			{"name": "code", "type": "string", "required": true},
+			{"name": "qty", "type": "number"},
+			// New field still being iterated on — the tenant
+			// hasn't decided to promote v2 to active yet.
+			{"name": "notes", "type": "text"},
+		},
+	})
+	if _, err := store.Upsert(ctx, ktype.TenantKType{
+		TenantID: tn.ID, Name: "custom.work_order", Version: 1,
+		Title: "Work Order", Schema: v1Schema, CreatedBy: actor,
+		Status: ktype.CustomStatusActive,
+	}); err != nil {
+		t.Fatalf("upsert v1 active: %v", err)
+	}
+	if _, err := store.Upsert(ctx, ktype.TenantKType{
+		TenantID: tn.ID, Name: "custom.work_order", Version: 2,
+		Title: "Work Order", Schema: v2Schema, CreatedBy: actor,
+		Status: ktype.CustomStatusDraft,
+	}); err != nil {
+		t.Fatalf("upsert v2 draft: %v", err)
+	}
+
+	// version=0 (default) must resolve to v1 active, NOT v2 draft.
+	rec, err := records.Create(ctx, record.KRecord{
+		TenantID:  tn.ID,
+		KType:     "custom.work_order",
+		Data:      json.RawMessage(`{"code":"WO-1","qty":3}`),
+		CreatedBy: actor,
+	})
+	if err != nil {
+		t.Fatalf("create with version=0 must resolve to v1 active, got error %v", err)
+	}
+	if rec.KTypeVersion != 1 {
+		t.Fatalf("expected v1 active (the latest active), got v%d", rec.KTypeVersion)
+	}
+
+	// And if the tenant later archives v1, the next create with
+	// version=0 falls through to the actionable error naming v2's
+	// lifecycle state ("draft") — not a bare "not found".
+	if err := store.SetStatus(ctx, tn.ID, "custom.work_order", 1, ktype.CustomStatusArchived); err != nil {
+		t.Fatalf("archive v1: %v", err)
+	}
+	_, err = records.Create(ctx, record.KRecord{
+		TenantID:  tn.ID,
+		KType:     "custom.work_order",
+		Data:      json.RawMessage(`{"code":"WO-2"}`),
+		CreatedBy: actor,
+	})
+	if err == nil || !strings.Contains(err.Error(), "draft") {
+		t.Fatalf("with no active version, error must name the latest version's lifecycle state, got %v", err)
+	}
+}
+
 // schemaWithOneField is a tiny helper used by the lifecycle-probe
 // assertion below — a valid one-field schema in custom.<slug>
 // shape, marshalled to bytes the way the builder UI would send it.

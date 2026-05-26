@@ -105,7 +105,20 @@ export function KTypeBuilderPage() {
   const upsert = useMutation({
     mutationFn: (input: UpsertTenantKTypeInput) =>
       api.upsertTenantKType(input),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["tenant-ktypes"] }),
+    // The save just persisted `status`, so the editor's notion of the
+    // loaded row's status is now stale. Bring it back in lock-step
+    // before the next render so the forward-only transition gate
+    // (canTransitionStatus / validationErrors) keeps reading the
+    // correct from-state — otherwise the user could pick a value
+    // that round-trips through canTransitionStatus(loadedStatus,
+    // requestedStatus) but is rejected by the backend with 409.
+    // input.status is typed optional on UpsertTenantKTypeInput, but
+    // the builder's `preview` memo always sets it from the editor's
+    // status state — fall back to that state for type-safety.
+    onSuccess: (_saved, input) => {
+      setLoadedStatus(input.status ?? status);
+      qc.invalidateQueries({ queryKey: ["tenant-ktypes"] });
+    },
   });
   const setStatus = useMutation({
     mutationFn: (args: {
@@ -113,7 +126,20 @@ export function KTypeBuilderPage() {
       version: number;
       status: TenantKTypeStatus;
     }) => api.setTenantKTypeStatus(args.name, args.version, args.status),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["tenant-ktypes"] }),
+    // The sidebar status buttons operate on rows in the list, not the
+    // editor — but if the affected row is the one currently loaded
+    // in the editor, loadedStatus would otherwise stay stale and
+    // open the same backward-transition desync as the upsert path.
+    onSuccess: (_data, args) => {
+      if (args.name === name && args.version === version) {
+        setLoadedStatus(args.status);
+        // Keep the editor's "Status on save" picker pointed at the
+        // newly-persisted status by default so the next Save isn't
+        // a backward transition.
+        setLocalStatus(args.status);
+      }
+      qc.invalidateQueries({ queryKey: ["tenant-ktypes"] });
+    },
   });
 
   // Editor state — separate from the read-side cache so unsaved

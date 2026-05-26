@@ -423,13 +423,41 @@ func (s *TenantStore) Get(ctx context.Context, tenantID uuid.UUID, name string, 
 	}
 	var out TenantKType
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return s.scanGet(ctx, tx, tenantID, name, version, &out)
+		return s.scanGet(ctx, tx, tenantID, name, version, "", &out)
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("ktype: get custom: %w", err)
+	}
+	return &out, nil
+}
+
+// GetLatestActive returns the highest-numbered active version of the
+// named custom KType. record.Create uses this so a tenant that has
+// already shipped v1 as active and is still iterating on v2 in draft
+// keeps creating records against v1 — without it, version=0 (latest)
+// would land on v2 and fail the resolveForCreate status gate with a
+// "only active types back record creates" error even though v1 is
+// usable. Returns ErrNotFound when no active version exists (i.e.
+// the KType is brand-new and still draft, or fully archived).
+func (s *TenantStore) GetLatestActive(ctx context.Context, tenantID uuid.UUID, name string) (*TenantKType, error) {
+	if tenantID == uuid.Nil {
+		return nil, errors.New("ktype: tenant id required")
+	}
+	if !IsValidCustomName(name) {
+		return nil, ErrInvalidCustomName
+	}
+	var out TenantKType
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return s.scanGet(ctx, tx, tenantID, name, 0, CustomStatusActive, &out)
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("ktype: get custom latest active: %w", err)
 	}
 	return &out, nil
 }
@@ -459,7 +487,7 @@ func (s *TenantStore) GetInTx(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID
 		return nil, ErrInvalidCustomName
 	}
 	var out TenantKType
-	if err := s.scanGet(ctx, tx, tenantID, name, version, &out); err != nil {
+	if err := s.scanGet(ctx, tx, tenantID, name, version, "", &out); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -468,16 +496,68 @@ func (s *TenantStore) GetInTx(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID
 	return &out, nil
 }
 
+// GetLatestActiveInTx is the tx-aware variant of GetLatestActive,
+// used by the record.bulkCreate path (and any future create path
+// that already holds an outer dbutil.WithTenantTx) so the lookup
+// reuses the existing pooled connection instead of acquiring a
+// nested one for every batch.
+func (s *TenantStore) GetLatestActiveInTx(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, name string) (*TenantKType, error) {
+	if tx == nil {
+		return nil, errors.New("ktype: nil tx")
+	}
+	if tenantID == uuid.Nil {
+		return nil, errors.New("ktype: tenant id required")
+	}
+	if !IsValidCustomName(name) {
+		return nil, ErrInvalidCustomName
+	}
+	var out TenantKType
+	if err := s.scanGet(ctx, tx, tenantID, name, 0, CustomStatusActive, &out); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("ktype: get custom latest active (in tx): %w", err)
+	}
+	return &out, nil
+}
+
 // scanGet is the shared SQL surface used by both Get and GetInTx so
 // the projection and ordering stay in lock-step across the two
-// entry points.
-func (s *TenantStore) scanGet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, name string, version int, out *TenantKType) error {
+// entry points. When version > 0 the row is fully addressed and
+// statusFilter is ignored; when version == 0 the projection becomes
+// "latest version, optionally restricted to a given status".
+//
+// statusFilter == "" means "latest of any status" — historical
+// callers such as Update / Delete / Read who reference a specific
+// record's KTypeVersion (which is always > 0) don't go through this
+// branch, but tooling that loads "the latest of this name" without
+// caring about lifecycle (e.g. the builder UI's sidebar) still
+// expects it.
+//
+// statusFilter set to a CustomStatus* value (typically
+// CustomStatusActive) is the status-aware "latest" used by record
+// creation: with v1=active and v2=draft, version=0 + active gives
+// v1, matching the lifecycle gate at checkCustomKTypeStatus that
+// otherwise rejects the resolved-but-draft v2 with a confusing
+// "only active types back record creates" error.
+func (s *TenantStore) scanGet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, name string, version int, statusFilter string, out *TenantKType) error {
 	if version > 0 {
 		return tx.QueryRow(ctx,
 			`SELECT tenant_id, name, version, title, description, schema, status, created_at, updated_at, created_by
 			   FROM tenant_ktypes
 			  WHERE tenant_id = $1 AND name = $2 AND version = $3`,
 			tenantID, name, version,
+		).Scan(&out.TenantID, &out.Name, &out.Version, &out.Title, &out.Description,
+			&out.Schema, &out.Status, &out.CreatedAt, &out.UpdatedAt, &out.CreatedBy)
+	}
+	if statusFilter != "" {
+		return tx.QueryRow(ctx,
+			`SELECT tenant_id, name, version, title, description, schema, status, created_at, updated_at, created_by
+			   FROM tenant_ktypes
+			  WHERE tenant_id = $1 AND name = $2 AND status = $3
+			  ORDER BY version DESC
+			  LIMIT 1`,
+			tenantID, name, statusFilter,
 		).Scan(&out.TenantID, &out.Name, &out.Version, &out.Title, &out.Description,
 			&out.Schema, &out.Status, &out.CreatedAt, &out.UpdatedAt, &out.CreatedBy)
 	}

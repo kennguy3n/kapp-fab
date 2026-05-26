@@ -146,7 +146,7 @@ const (
 // performance hot path under load.
 func (s *PGStore) resolveKType(ctx context.Context, tenantID uuid.UUID, name string, version int, mode ktypeResolveMode) (*ktype.KType, error) {
 	if s.tenantKTypes != nil && ktype.IsCustomName(name) {
-		tkt, err := s.tenantKTypes.Get(ctx, tenantID, name, version)
+		tkt, err := s.lookupCustomKType(ctx, nil, tenantID, name, version, mode)
 		if err != nil {
 			return nil, err
 		}
@@ -163,13 +163,63 @@ func (s *PGStore) resolveKType(ctx context.Context, tenantID uuid.UUID, name str
 // entirely because PGRegistry is an in-memory map — no DB I/O.
 func (s *PGStore) resolveKTypeInTx(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, name string, version int, mode ktypeResolveMode) (*ktype.KType, error) {
 	if s.tenantKTypes != nil && ktype.IsCustomName(name) {
-		tkt, err := s.tenantKTypes.GetInTx(ctx, tx, tenantID, name, version)
+		tkt, err := s.lookupCustomKType(ctx, tx, tenantID, name, version, mode)
 		if err != nil {
 			return nil, err
 		}
 		return materializeCustomKType(tkt, mode)
 	}
 	return s.registry.Get(ctx, name, version)
+}
+
+// lookupCustomKType is the shared TenantStore lookup driver for
+// resolveKType / resolveKTypeInTx. It exists so the "version=0 +
+// resolveForCreate" rule — prefer the latest *active* version
+// rather than just the latest version — is implemented in one
+// place and observed identically from both the pool-based and
+// tx-aware resolvers. tx may be nil for the pool path.
+//
+// Pre-Phase-N8b, version=0 always resolved to ORDER BY version DESC
+// LIMIT 1; with multi-version custom KTypes that meant a draft v2
+// would shadow an active v1 and reject creates with "only active
+// types back record creates" even though v1 was perfectly usable.
+// For resolveForCreate the active-only filter is pushed into the
+// SQL so the resolver returns v1 directly. Other modes still
+// resolve "latest of any status" — for resolveForRead historical
+// records on an archived schema must remain readable; for
+// resolveForUpdate the caller always passes an explicit
+// KTypeVersion (existing rows record their own version) so the
+// version=0 branch is unreachable in practice but kept consistent
+// with the legacy behavior for safety.
+func (s *PGStore) lookupCustomKType(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, name string, version int, mode ktypeResolveMode) (*ktype.TenantKType, error) {
+	if mode == resolveForCreate && version == 0 {
+		var (
+			active *ktype.TenantKType
+			err    error
+		)
+		if tx != nil {
+			active, err = s.tenantKTypes.GetLatestActiveInTx(ctx, tx, tenantID, name)
+		} else {
+			active, err = s.tenantKTypes.GetLatestActive(ctx, tenantID, name)
+		}
+		if err == nil {
+			return active, nil
+		}
+		if !errors.Is(err, ktype.ErrNotFound) {
+			return nil, err
+		}
+		// No active version at all. Fall through to the latest-of-any
+		// lookup so checkCustomKTypeStatus can render a precise error
+		// naming the lifecycle state of whatever IS there ("custom.X
+		// is draft, only active types back record creates") instead
+		// of a bare "ktype: not found" that suggests the KType
+		// doesn't exist when in fact it does — just not in a state
+		// that admits new records.
+	}
+	if tx != nil {
+		return s.tenantKTypes.GetInTx(ctx, tx, tenantID, name, version)
+	}
+	return s.tenantKTypes.Get(ctx, tenantID, name, version)
 }
 
 // materializeCustomKType is the shared post-fetch step used by both
@@ -467,14 +517,12 @@ func (s *PGStore) ListPage(ctx context.Context, tenantID uuid.UUID, filter ListF
 		return nil, err
 	}
 	// Decrypt encrypted fields on the way out so list responses carry
-	// plaintext to callers. decryptRecord is a no-op when the store
-	// has no encryptor or the KType schema has no encrypted fields.
-	for i := range out {
-		decrypted, err := s.decryptRecord(ctx, &out[i])
-		if err != nil {
-			return nil, err
-		}
-		out[i].Data = decrypted
+	// plaintext to callers. decryptRecordsBatch is a no-op when the
+	// store has no encryptor or the KType schema has no encrypted
+	// fields; for custom KTypes it folds N tenant_ktypes lookups
+	// into one per distinct (kind, version) in the page.
+	if err := s.decryptRecordsBatch(ctx, out); err != nil {
+		return nil, err
 	}
 	page := &ListPage{Records: out}
 	// Only emit a next cursor when we filled the page — otherwise
@@ -673,12 +721,15 @@ func (s *PGStore) foreachKeyset(
 		if err != nil {
 			return err
 		}
+		// Fold N tenant_ktypes lookups into one per distinct
+		// (kind, version) in the chunk before invoking the caller's
+		// fn. ForEach typically streams a single KType, so this
+		// drops the worst case from `chunk` short-lived transactions
+		// to one per chunk for custom KTypes.
+		if err := s.decryptRecordsBatch(ctx, page); err != nil {
+			return err
+		}
 		for i := range page {
-			decrypted, err := s.decryptRecord(ctx, &page[i])
-			if err != nil {
-				return err
-			}
-			page[i].Data = decrypted
 			if err := fn(page[i]); err != nil {
 				if errors.Is(err, ErrStopForEach) {
 					return nil
@@ -1101,6 +1152,65 @@ func (s *PGStore) decryptRecord(ctx context.Context, r *KRecord) (json.RawMessag
 		return nil, err
 	}
 	return s.decryptRecordWith(r, kt)
+}
+
+// decryptRecordsBatch decrypts a slice of records in-place, reusing a
+// single KType resolution per distinct (kind, version) seen in the
+// batch. List / ForEach / Search / BulkFetch of a tenant-authored
+// KType used to hit decryptRecord row-by-row — each call opening a
+// fresh dbutil.WithTenantTx to look up the same custom KType for
+// every row in the page. For a 500-row list filtered by
+// `ktype=custom.foo`, that was 500 short-lived transactions per
+// page. The batch path collapses those into one lookup per distinct
+// KType (typically one, since the read APIs filter by ktype). Errors
+// short-circuit so the caller sees the first decryption failure with
+// its row already partially mutated — this matches the per-row
+// decryptRecord call sites we replaced.
+func (s *PGStore) decryptRecordsBatch(ctx context.Context, records []KRecord) error {
+	if s.encryptor == nil || len(records) == 0 {
+		return nil
+	}
+	ptrs := make([]*KRecord, len(records))
+	for i := range records {
+		ptrs[i] = &records[i]
+	}
+	return s.decryptRecordPtrsBatch(ctx, ptrs)
+}
+
+// decryptRecordPtrsBatch is the pointer-slice variant of
+// decryptRecordsBatch. It exists so callers whose row containers
+// embed KRecord (e.g. SearchResult) can build a []*KRecord without
+// having to copy/restore the embedded struct.
+func (s *PGStore) decryptRecordPtrsBatch(ctx context.Context, records []*KRecord) error {
+	if s.encryptor == nil || len(records) == 0 {
+		return nil
+	}
+	type ktKey struct {
+		name    string
+		version int
+	}
+	cache := make(map[ktKey]*ktype.KType, 1)
+	for _, r := range records {
+		if r == nil {
+			continue
+		}
+		k := ktKey{r.KType, r.KTypeVersion}
+		kt, ok := cache[k]
+		if !ok {
+			resolved, err := s.resolveKType(ctx, r.TenantID, r.KType, r.KTypeVersion, resolveForRead)
+			if err != nil {
+				return err
+			}
+			cache[k] = resolved
+			kt = resolved
+		}
+		decrypted, err := s.decryptRecordWith(r, kt)
+		if err != nil {
+			return err
+		}
+		r.Data = decrypted
+	}
+	return nil
 }
 
 // decryptRecordWith is the pre-resolved variant of decryptRecord. The

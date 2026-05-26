@@ -341,12 +341,13 @@ func (s *PGStore) BulkFetch(
 	if err != nil {
 		return nil, err
 	}
-	for i := range out {
-		decrypted, err := s.decryptRecord(ctx, &out[i])
-		if err != nil {
-			return nil, err
-		}
-		out[i].Data = decrypted
+	// BulkFetch is bounded to a single KType per call (the `kind`
+	// parameter), so the batch decryptor resolves the KType exactly
+	// once regardless of how many IDs are passed in. This collapses
+	// what was previously N tenant_ktypes round-trips for a custom
+	// KType into one.
+	if err := s.decryptRecordsBatch(ctx, out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
