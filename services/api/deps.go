@@ -154,6 +154,7 @@ type apiDeps struct {
 	iah            *isolationAuditHandlers
 	meth           *meteringHandlers
 	kh             *ktypeHandlers
+	tkh            *tenantKTypeHandlers
 	whh            *webhookHandlers
 	sh             *searchHandlers
 	rh             *recordHandlers
@@ -164,6 +165,7 @@ type apiDeps struct {
 	aph            *approvalsHandlers
 	auh            *auditHandlers
 	finh           *financeHandlers
+	budh           *budgetHandlers
 	invh           *inventoryHandlers
 	mfgh           *manufacturingHandlers
 	oh             *openAPIHandler

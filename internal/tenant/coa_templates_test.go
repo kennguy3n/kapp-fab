@@ -145,12 +145,29 @@ func TestDefaultCoATemplateForCountry(t *testing.T) {
 		{"PY", "latam_ifrs_basic"},
 		{"TT", "latam_ifrs_basic"},
 
-		// Unmapped countries fall back to generic IFRS so the
-		// wizard always resolves to a registered template.
-		{"AU", "ifrs_basic"},
-		{"GB", "ifrs_basic"},
-		{"DE", "ifrs_basic"},
-		{"FR", "ifrs_basic"},
+		// Phase N1 — Europe Core + AU. Each gets a
+		// country-specific chart with payroll-liability accounts
+		// matching its tax pack's deduction codes (PAYE / NIC for
+		// GB, Lohnsteuer / Soli / RV-KV-PV-ALV for DE, PAS /
+		// CSG / CRDS / SS for FR, IRPF / SS for ES, IRPEF /
+		// Addizionali / INPS for IT, Loonheffing / ZVW for NL,
+		// Précompte / ONSS for BE, PAYE / USC / PRSI for IE,
+		// Lohnsteuer / SV-Beiträge for AT, IRS / Seg. Social for
+		// PT, PAYG / Superannuation / FBT / Payroll Tax for AU).
+		{"GB", "gb_basic"},
+		{"DE", "de_basic"},
+		{"FR", "fr_basic"},
+		{"ES", "es_basic"},
+		{"IT", "it_basic"},
+		{"NL", "nl_basic"},
+		{"BE", "be_basic"},
+		{"IE", "ie_basic"},
+		{"AT", "at_basic"},
+		{"PT", "pt_basic"},
+		{"AU", "au_basic"},
+
+		// Unmapped countries still fall back to generic IFRS so
+		// the wizard always resolves to a registered template.
 		{"", "ifrs_basic"},
 		{"ZZ", "ifrs_basic"},
 	}
@@ -228,14 +245,14 @@ func TestEveryTaxPackCountryHasCoATemplate(t *testing.T) {
 				t.Fatalf("country %s maps to template %q which is not "+
 					"in chartOfAccountsTemplates", cc, templateName)
 			}
-			// AU has no dedicated CoA today — it intentionally
-			// falls back to the IFRS chart. US uses us_gaap_basic
-			// (separate from IFRS). Every other registered country
-			// must resolve to a country-specific chart (either the
-			// default "<cc>_basic" or an allow-listed accounting-
-			// standard variant) so the payroll engine's deduction
-			// lines have matching liability accounts.
-			if cc == "AU" || cc == "US" {
+			// US uses us_gaap_basic (separate from IFRS) by
+			// convention; every other registered country (including
+			// AU since Phase N1) must resolve to a country-specific
+			// chart (either the default "<cc>_basic" or an
+			// allow-listed accounting-standard variant) so the
+			// payroll engine's deduction lines have matching
+			// liability accounts.
+			if cc == "US" {
 				return
 			}
 			if expected, ok := customTemplate[cc]; ok {

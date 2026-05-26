@@ -34,7 +34,11 @@ func TestLookupReturnsRegisteredPack(t *testing.T) {
 // + unregistered codes both surface ErrNoPack so the engine falls
 // back to no-statutory-deduction behaviour.
 func TestLookupReturnsErrNoPack(t *testing.T) {
-	for _, country := range []string{"", "  ", "ZZ", "GB"} {
+	// "GB" used to live in this list as an example of an
+	// unregistered country before Phase N1 shipped the UK PAYE
+	// pack. Pick another never-registered code so the test
+	// still exercises the negative path.
+	for _, country := range []string{"", "  ", "ZZ", "XX"} {
 		if _, err := Lookup(country); err == nil {
 			t.Fatalf("Lookup(%q) returned nil error; want ErrNoPack", country)
 		}
@@ -216,6 +220,9 @@ func TestRegisteredCountriesIsStable(t *testing.T) {
 		"CA",
 		"BR", "MX", "AR", "CO", "CL", "PE",
 		"CR", "PA", "UY", "EC", "DO", "GT", "PY", "TT",
+		// Phase N1: Europe Core.
+		"GB", "DE", "FR", "ES", "IT",
+		"NL", "BE", "IE", "AT", "PT",
 	}
 	for _, code := range want {
 		if !gotSet[code] {

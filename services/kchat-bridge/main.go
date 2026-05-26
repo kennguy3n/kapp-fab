@@ -26,6 +26,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/events"
+	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
@@ -149,6 +150,7 @@ func run() error {
 		insightsQueries:    insightsQueries,
 		insightsDashboards: insightsDashboards,
 		insightsRunner:     insightsRunner,
+		budgets:            finance.NewBudgetStore(pool),
 		dashboardBase:      os.Getenv("KAPP_DASHBOARD_BASE_URL"),
 	}
 
