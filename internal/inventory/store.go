@@ -413,10 +413,30 @@ func (s *PGStore) RecordMove(ctx context.Context, m Move) (*Move, error) {
 	return out, nil
 }
 
-// RecordMoveTx is RecordMove using a caller-supplied transaction. The
-// caller is responsible for opening the tx via dbutil.WithTenantTx so
-// the `app.tenant_id` GUC is set and RLS policies on inventory_moves
-// can fire.
+// RecordMoveTx is RecordMove using a caller-supplied transaction.
+//
+// IMPORTANT — tenant GUC contract: the caller MUST open `tx` via
+// dbutil.WithTenantTx (or another path that has already executed
+// `SET LOCAL app.tenant_id = '<uuid>'` inside the same tx).
+// RecordMoveTx does NOT set the GUC itself — verifying it on every
+// call would add a per-line round-trip on the PostSession hot path,
+// which is too costly for a defensive check. Instead the contract is
+// enforced two ways:
+//
+//   1. Compile-time / code-review: RecordMoveTx takes pgx.Tx directly,
+//      so the only callers are those who already opened a tx through
+//      WithTenantTx (the GUC setup is visible at the call site).
+//   2. RLS at the database: if a future caller forgets the GUC, the
+//      inventory_moves RLS policy reads
+//      `current_setting('app.tenant_id', true)`, which returns the
+//      empty string, the policy fails, and the INSERT is rejected
+//      with a clear 42501 row-level-security violation — not a
+//      silent failure.
+//
+// The architecturally cleaner fix is a typed dbutil.TenantTx wrapper
+// the compiler requires (so this signature would take dbutil.TenantTx
+// not raw pgx.Tx). That's queued as a cross-cutting refactor — it
+// touches every place that uses pgx.Tx inside a WithTenantTx callback.
 //
 // Use this when the move write must be atomic with surrounding work
 // the caller is doing in the same transaction. The motivating case is
