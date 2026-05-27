@@ -132,7 +132,7 @@ KType and KRecord are **original Kapp concepts**. KType defines *what a business
 | Stock levels and valuations | ✓ | |
 | Goods receipts / deliveries | ✓ | |
 | Lot / batch / serial tracking | | ✓ |
-| Cycle counts | | ✓ |
+| Cycle counts | ✓ | |
 | Landed costs | | ✓ |
 | Multi-warehouse transfers | ✓ | |
 | Reorder points and suggestions | | ✓ |

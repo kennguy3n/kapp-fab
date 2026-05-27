@@ -952,6 +952,21 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Post("/batches", d.invh.createBatch)
 			r.Get("/items/{id}/batches", d.invh.listBatchesByItem)
 			r.Get("/reports/valuation", d.invh.valuation)
+
+			// Phase N9d — cycle counts. Mounted under
+			// /api/v1/inventory/cycle-counts so they inherit
+			// the same authz gate, idempotency-key, rate-limit,
+			// and quota middleware that every other inventory
+			// route enforces.
+			r.Get("/cycle-counts", d.cch.list)
+			r.Post("/cycle-counts", d.cch.create)
+			r.Get("/cycle-counts/{id}", d.cch.get)
+			r.Put("/cycle-counts/{id}", d.cch.update)
+			r.Delete("/cycle-counts/{id}", d.cch.delete)
+			r.Post("/cycle-counts/{id}/seed", d.cch.seed)
+			r.Post("/cycle-counts/{id}/lines", d.cch.upsertLine)
+			r.Delete("/cycle-counts/{id}/lines/{lid}", d.cch.deleteLine)
+			r.Post("/cycle-counts/{id}/post", d.cch.post)
 		})
 
 		// Phase N6 — Manufacturing Light. BOM + work-order CRUD

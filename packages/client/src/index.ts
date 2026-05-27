@@ -1827,6 +1827,156 @@ export class ApiClient {
       `/finance/budgets/${encodeURIComponent(budgetId)}/variance${suffix}`
     );
   }
+
+  // --- Phase N9d: cycle counts ------------------------------------------
+
+  /** List cycle-count sessions, optionally filtered by status. */
+  listCycleCountSessions(filter?: {
+    status?: string;
+    warehouse_id?: string;
+  }): Promise<CycleCountSession[]> {
+    const qs = new URLSearchParams();
+    if (filter?.status) qs.set("status", filter.status);
+    if (filter?.warehouse_id) qs.set("warehouse_id", filter.warehouse_id);
+    const query = qs.toString();
+    return this.request(
+      `/inventory/cycle-counts${query ? `?${query}` : ""}`
+    );
+  }
+
+  /** Open a new draft cycle-count session. */
+  createCycleCountSession(input: {
+    code: string;
+    description?: string;
+    warehouse_id: string;
+  }): Promise<CycleCountSession> {
+    return this.request("/inventory/cycle-counts", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** Fetch a session with its lines. */
+  getCycleCountSession(id: string): Promise<CycleCountSessionWithLines> {
+    return this.request(
+      `/inventory/cycle-counts/${encodeURIComponent(id)}`
+    );
+  }
+
+  /** Patch metadata + advance status. */
+  updateCycleCountSession(
+    id: string,
+    input: {
+      code: string;
+      description?: string;
+      warehouse_id: string;
+      status?: string;
+    }
+  ): Promise<CycleCountSession> {
+    return this.request(
+      `/inventory/cycle-counts/${encodeURIComponent(id)}`,
+      {
+        method: "PUT",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(input),
+      }
+    );
+  }
+
+  /** Delete a draft cycle-count session. */
+  deleteCycleCountSession(id: string): Promise<void> {
+    return this.request(
+      `/inventory/cycle-counts/${encodeURIComponent(id)}`,
+      { method: "DELETE" }
+    );
+  }
+
+  /** Seed (or refresh) expected_qty from the stock_levels view. */
+  seedCycleCountSession(id: string): Promise<CycleCountLine[]> {
+    return this.request(
+      `/inventory/cycle-counts/${encodeURIComponent(id)}/seed`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+
+  /** Insert or update a count line. */
+  upsertCycleCountLine(
+    sessionId: string,
+    input: {
+      id?: string;
+      item_id: string;
+      expected_qty: string;
+      counted_qty: string;
+      notes?: string;
+    }
+  ): Promise<CycleCountLine> {
+    return this.request(
+      `/inventory/cycle-counts/${encodeURIComponent(sessionId)}/lines`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(input),
+      }
+    );
+  }
+
+  /** Remove a count line. */
+  deleteCycleCountLine(sessionId: string, lineId: string): Promise<void> {
+    return this.request(
+      `/inventory/cycle-counts/${encodeURIComponent(
+        sessionId
+      )}/lines/${encodeURIComponent(lineId)}`,
+      { method: "DELETE" }
+    );
+  }
+
+  /** Post the session: writes variance inventory_moves. Idempotent. */
+  postCycleCountSession(id: string): Promise<CycleCountSession> {
+    return this.request(
+      `/inventory/cycle-counts/${encodeURIComponent(id)}/post`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+}
+
+// --- Phase N9d: cycle counts -----------------------------------------
+
+export interface CycleCountSession {
+  tenant_id: string;
+  id: string;
+  code: string;
+  description?: string;
+  warehouse_id: string;
+  status: "draft" | "counting" | "reconciled" | "posted";
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  posted_at?: string | null;
+}
+
+export interface CycleCountLine {
+  tenant_id: string;
+  id: string;
+  session_id: string;
+  item_id: string;
+  expected_qty: string;
+  counted_qty: string;
+  variance: string;
+  notes?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CycleCountSessionWithLines {
+  session: CycleCountSession;
+  lines: CycleCountLine[];
 }
 
 // --- Bulk actions -----------------------------------------------------

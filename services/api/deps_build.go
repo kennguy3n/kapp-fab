@@ -623,6 +623,14 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	agents.RegisterLandedCostTools(executor, landedCostStore)
 	agents.RegisterInventoryReorderTool(executor, inventory.NewReorderHandler(recordStore, inventoryStore))
 	agents.RegisterManufacturingTools(executor, manufacturingStore)
+	// Phase N9d — cycle counts share the inventory PGStore at
+	// post time (variance moves are written through the canonical
+	// RecordMove path so the audit log + outbox events fire). The
+	// store is constructed here so both the agent tool registry
+	// and the cycleCountHandlers below can take a reference to the
+	// same instance.
+	cycleCountStore := inventory.NewCycleCountStore(pool, inventoryStore)
+	agents.RegisterCycleCountTools(executor, cycleCountStore)
 	agents.RegisterHRTools(executor, hrStore)
 	// Single payroll engine instance reused across the agent tool surface
 	// and the hrHandlers HTTP surface. The engine is stateless (it just
@@ -738,6 +746,9 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	lch := &landedCostHandlers{store: landedCostStore}
 	invh := &inventoryHandlers{store: inventoryStore}
 	mfgh := &manufacturingHandlers{store: manufacturingStore}
+	// cycleCountStore was constructed above so the agent tool
+	// registry and the HTTP handler share a single instance.
+	cch := &cycleCountHandlers{store: cycleCountStore}
 	oh := &openAPIHandler{registry: ktypeRegistry}
 	fileh := &filesHandlers{store: filesStore, meter: meteringBuffer}
 	bh := &baseHandlers{store: baseStore}
@@ -1118,6 +1129,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		lch:                    lch,
 		invh:                   invh,
 		mfgh:                   mfgh,
+		cch:                    cch,
 		oh:                     oh,
 		fileh:                  fileh,
 		bh:                     bh,

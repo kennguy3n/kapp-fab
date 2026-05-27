@@ -73,6 +73,7 @@ type CommandDispatcher struct {
 	inventory          *inventory.PGStore
 	manufacturing      *manufacturing.PGStore
 	landedCost         *finance.LandedCostStore
+	cycleCounts        *inventory.CycleCountStore
 	lmsIssuer          *lms.CertificateIssuer
 	returns            *sales.ReturnPoster
 	requisitions       *sales.RequisitionPoster
@@ -231,13 +232,15 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 			return CommandResponse{Text: fmt.Sprintf("/shift: %v", err)}, nil
 		}
 		return d.createRecord(ctx, req, hr.KTypeShiftAssignment, data)
+	case "cycle-count":
+		return d.cycleCountCommand(ctx, req)
 	case "budget":
 		return d.budgetCommand(ctx, req)
 	case "landed-cost":
 		return d.landedCostCmd(ctx, req)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /project, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /return, /requisition, /stock, /reverse-stock-move, /batch, /work-order (also /wo, /workorder), /bom, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /shift, /budget, /landed-cost, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /project, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /return, /requisition, /stock, /reverse-stock-move, /batch, /work-order (also /wo, /workorder), /bom, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /shift, /cycle-count, /budget, /landed-cost, /help",
 		}, nil
 	default:
 		return CommandResponse{

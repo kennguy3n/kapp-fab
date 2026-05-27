@@ -395,18 +395,88 @@ func (s *PGStore) ListWarehouses(ctx context.Context, tenantID uuid.UUID) ([]War
 // (source_ktype, source_id, item_id, warehouse_id). A retry therefore
 // surfaces ErrDuplicateSourceMove rather than double-posting.
 func (s *PGStore) RecordMove(ctx context.Context, m Move) (*Move, error) {
-	if m.TenantID == uuid.Nil {
-		return nil, errors.New("inventory: tenant id required")
-	}
-	if m.ItemID == uuid.Nil || m.WarehouseID == uuid.Nil {
-		return nil, fmt.Errorf("%w: item_id and warehouse_id required", ErrMoveInvalid)
-	}
-	if m.Qty.IsZero() {
-		return nil, fmt.Errorf("%w: qty must be non-zero", ErrMoveInvalid)
+	if err := validateRecordMoveInputs(m); err != nil {
+		return nil, err
 	}
 	if m.MovedAt.IsZero() {
 		m.MovedAt = s.now()
 	}
+	var out *Move
+	err := dbutil.WithTenantTx(ctx, s.pool, m.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var rmErr error
+		out, rmErr = s.recordMoveInTx(ctx, tx, m)
+		return rmErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RecordMoveTx is RecordMove using a caller-supplied transaction.
+//
+// IMPORTANT — tenant GUC contract: the caller MUST open `tx` via
+// dbutil.WithTenantTx (or another path that has already executed
+// `SET LOCAL app.tenant_id = '<uuid>'` inside the same tx).
+// RecordMoveTx does NOT set the GUC itself — verifying it on every
+// call would add a per-line round-trip on the PostSession hot path,
+// which is too costly for a defensive check. Instead the contract is
+// enforced two ways:
+//
+//   1. Compile-time / code-review: RecordMoveTx takes pgx.Tx directly,
+//      so the only callers are those who already opened a tx through
+//      WithTenantTx (the GUC setup is visible at the call site).
+//   2. RLS at the database: if a future caller forgets the GUC, the
+//      inventory_moves RLS policy reads
+//      `current_setting('app.tenant_id', true)`, which returns the
+//      empty string, the policy fails, and the INSERT is rejected
+//      with a clear 42501 row-level-security violation — not a
+//      silent failure.
+//
+// The architecturally cleaner fix is a typed dbutil.TenantTx wrapper
+// the compiler requires (so this signature would take dbutil.TenantTx
+// not raw pgx.Tx). That's queued as a cross-cutting refactor — it
+// touches every place that uses pgx.Tx inside a WithTenantTx callback.
+//
+// Use this when the move write must be atomic with surrounding work
+// the caller is doing in the same transaction. The motivating case is
+// CycleCountStore.PostSession: variance-move writes must commit
+// together with the session status flip so a concurrent
+// reconciled→counting transition cannot leave the ledger with a stale
+// move keyed on (MoveSourceCycleCount, line.id). With a single tx the
+// optimistic state machine on cycle_count_sessions and the partial
+// unique index on inventory_moves agree on the same commit boundary.
+func (s *PGStore) RecordMoveTx(ctx context.Context, tx pgx.Tx, m Move) (*Move, error) {
+	if tx == nil {
+		return nil, errors.New("inventory: nil tx")
+	}
+	if err := validateRecordMoveInputs(m); err != nil {
+		return nil, err
+	}
+	if m.MovedAt.IsZero() {
+		m.MovedAt = s.now()
+	}
+	return s.recordMoveInTx(ctx, tx, m)
+}
+
+func validateRecordMoveInputs(m Move) error {
+	if m.TenantID == uuid.Nil {
+		return errors.New("inventory: tenant id required")
+	}
+	if m.ItemID == uuid.Nil || m.WarehouseID == uuid.Nil {
+		return fmt.Errorf("%w: item_id and warehouse_id required", ErrMoveInvalid)
+	}
+	if m.Qty.IsZero() {
+		return fmt.Errorf("%w: qty must be non-zero", ErrMoveInvalid)
+	}
+	return nil
+}
+
+// recordMoveInTx contains the per-tx work of writing a single
+// inventory_move row, optionally rolling the batch qty_on_hand, and
+// emitting the outbox event. Shared between RecordMove (which opens
+// its own tx) and RecordMoveTx (which reuses the caller's tx).
+func (s *PGStore) recordMoveInTx(ctx context.Context, tx pgx.Tx, m Move) (*Move, error) {
 	var srcKType any
 	var srcID any
 	if m.SourceKType != "" {
@@ -419,69 +489,64 @@ func (s *PGStore) RecordMove(ctx context.Context, m Move) (*Move, error) {
 	if m.UnitCost.IsPositive() || m.UnitCost.IsNegative() {
 		unitCost = m.UnitCost
 	}
-
 	var batchID any
 	if m.BatchID != nil {
 		batchID = *m.BatchID
 	}
-
 	out := m
-	err := dbutil.WithTenantTx(ctx, s.pool, m.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-		// Pre-validate batch ↔ item linkage so a mismatched batch
-		// surfaces ErrBatchItemMismatch / ErrBatchNotFound rather
-		// than a generic FK violation on the INSERT below. The
-		// composite (tenant_id, batch_id) FK on inventory_moves
-		// already prevents cross-tenant linkage; this check adds
-		// the per-item invariant the schema cannot express.
-		if m.BatchID != nil {
-			var batchItemID uuid.UUID
-			err := tx.QueryRow(ctx,
-				`SELECT item_id FROM inventory_batches
-				 WHERE tenant_id = $1 AND id = $2`,
-				m.TenantID, *m.BatchID,
-			).Scan(&batchItemID)
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return ErrBatchNotFound
-				}
-				return fmt.Errorf("inventory: lookup batch: %w", err)
-			}
-			if batchItemID != m.ItemID {
-				return ErrBatchItemMismatch
-			}
-		}
+	// Pre-validate batch ↔ item linkage so a mismatched batch
+	// surfaces ErrBatchItemMismatch / ErrBatchNotFound rather
+	// than a generic FK violation on the INSERT below. The
+	// composite (tenant_id, batch_id) FK on inventory_moves
+	// already prevents cross-tenant linkage; this check adds
+	// the per-item invariant the schema cannot express.
+	if m.BatchID != nil {
+		var batchItemID uuid.UUID
 		err := tx.QueryRow(ctx,
-			`INSERT INTO inventory_moves
-			     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, batch_id, moved_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			 RETURNING id`,
-			m.TenantID, m.ItemID, m.WarehouseID, m.Qty, unitCost, srcKType, srcID, batchID, m.MovedAt,
-		).Scan(&out.ID)
+			`SELECT item_id FROM inventory_batches
+			 WHERE tenant_id = $1 AND id = $2`,
+			m.TenantID, *m.BatchID,
+		).Scan(&batchItemID)
 		if err != nil {
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && isInventoryMovesSourceUniqViolation(pgErr) {
-				return ErrDuplicateSourceMove
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, ErrBatchNotFound
 			}
-			return fmt.Errorf("inventory: insert move: %w", err)
+			return nil, fmt.Errorf("inventory: lookup batch: %w", err)
 		}
-		// Best-effort qty_on_hand maintenance for the batch when
-		// the move references one. Mismatches between the batch
-		// running total and SUM(qty) on inventory_moves are
-		// surfaced by integration tests; production reconciliation
-		// is a separate scheduled job.
-		if m.BatchID != nil {
-			if _, err := tx.Exec(ctx,
-				`UPDATE inventory_batches
-				    SET qty_on_hand = qty_on_hand + $1, updated_at = now()
-				  WHERE tenant_id = $2 AND id = $3`,
-				m.Qty, m.TenantID, *m.BatchID,
-			); err != nil {
-				return fmt.Errorf("inventory: roll batch qty: %w", err)
-			}
+		if batchItemID != m.ItemID {
+			return nil, ErrBatchItemMismatch
 		}
-		return s.emitMove(ctx, tx, out, "inventory.move.recorded")
-	})
-	if err != nil {
+	}
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO inventory_moves
+		     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, batch_id, moved_at, created_by)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		 RETURNING id`,
+		m.TenantID, m.ItemID, m.WarehouseID, m.Qty, unitCost, srcKType, srcID, batchID, m.MovedAt,
+		nullableUUIDValue(m.CreatedBy),
+	).Scan(&out.ID); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && isInventoryMovesSourceUniqViolation(pgErr) {
+			return nil, ErrDuplicateSourceMove
+		}
+		return nil, fmt.Errorf("inventory: insert move: %w", err)
+	}
+	// Best-effort qty_on_hand maintenance for the batch when
+	// the move references one. Mismatches between the batch
+	// running total and SUM(qty) on inventory_moves are
+	// surfaced by integration tests; production reconciliation
+	// is a separate scheduled job.
+	if m.BatchID != nil {
+		if _, err := tx.Exec(ctx,
+			`UPDATE inventory_batches
+			    SET qty_on_hand = qty_on_hand + $1, updated_at = now()
+			  WHERE tenant_id = $2 AND id = $3`,
+			m.Qty, m.TenantID, *m.BatchID,
+		); err != nil {
+			return nil, fmt.Errorf("inventory: roll batch qty: %w", err)
+		}
+	}
+	if err := s.emitMove(ctx, tx, out, "inventory.move.recorded"); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -537,10 +602,11 @@ func (s *PGStore) RecordTransfer(ctx context.Context, t Transfer) ([]Move, error
 			row := m
 			err := tx.QueryRow(ctx,
 				`INSERT INTO inventory_moves
-				     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, moved_at)
-				 VALUES ($1, $2, $3, $4, $5, $6, NULL, $7)
+				     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, moved_at, created_by)
+				 VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8)
 				 RETURNING id`,
 				row.TenantID, row.ItemID, row.WarehouseID, row.Qty, unitCost, row.SourceKType, row.MovedAt,
+				nullableUUIDValue(row.CreatedBy),
 			).Scan(&row.ID)
 			if err != nil {
 				return fmt.Errorf("inventory: insert transfer move: %w", err)
@@ -633,10 +699,10 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 		}
 		err = tx.QueryRow(ctx,
 			`INSERT INTO inventory_moves
-			     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, batch_id, moved_at, reversal_of)
-			 VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7, $8)
+			     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, batch_id, moved_at, reversal_of, created_by)
+			 VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7, $8, $9)
 			 RETURNING id`,
-			tenantID, origItem, origWh, newQty, unitCostArg, batchArg, now, moveID,
+			tenantID, origItem, origWh, newQty, unitCostArg, batchArg, now, moveID, nullableUUIDValue(actor),
 		).Scan(&out.ID)
 		if err != nil {
 			var pgErr *pgconn.PgError
@@ -742,9 +808,15 @@ func (s *PGStore) ListMoves(ctx context.Context, tenantID uuid.UUID, filter Move
 		// ReverseMove sets it on the returned Move and emitMove
 		// includes it in the event payload, but before this fix
 		// GET /inventory/moves always returned null.
+		// COALESCE created_by to the nil UUID so the Scan into a
+		// non-pointer uuid.UUID field always lands on a value. NULL on
+		// the column represents "unknown actor" (rows pre-dating
+		// migration 000066 or background-job writes); the nil UUID
+		// renders as omitempty in JSON so the API surface stays clean.
 		q := fmt.Sprintf(
 			`SELECT id, tenant_id, item_id, warehouse_id, qty, unit_cost,
-			        source_ktype, source_id, moved_at, reversal_of, batch_id
+			        source_ktype, source_id, moved_at, reversal_of, batch_id,
+			        COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid)
 			 FROM inventory_moves
 			 WHERE %s
 			 ORDER BY moved_at DESC, id DESC
@@ -768,6 +840,7 @@ func (s *PGStore) ListMoves(ctx context.Context, tenantID uuid.UUID, filter Move
 			if err := rows.Scan(
 				&m.ID, &m.TenantID, &m.ItemID, &m.WarehouseID, &m.Qty,
 				&unitCost, &srcKType, &srcID, &m.MovedAt, &reversalOf, &batchID,
+				&m.CreatedBy,
 			); err != nil {
 				return fmt.Errorf("inventory: scan move: %w", err)
 			}
@@ -811,7 +884,8 @@ func (s *PGStore) GetMoveBySource(
 		)
 		err := tx.QueryRow(ctx,
 			`SELECT id, tenant_id, item_id, warehouse_id, qty, unit_cost,
-			        source_ktype, source_id, moved_at
+			        source_ktype, source_id, moved_at,
+			        COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid)
 			 FROM inventory_moves
 			 WHERE tenant_id = $1 AND source_ktype = $2 AND source_id = $3
 			   AND item_id = $4 AND warehouse_id = $5
@@ -819,7 +893,7 @@ func (s *PGStore) GetMoveBySource(
 			tenantID, sourceKType, sourceID, itemID, warehouseID,
 		).Scan(
 			&m.ID, &m.TenantID, &m.ItemID, &m.WarehouseID, &m.Qty,
-			&unitCost, &srcKType, &srcID, &m.MovedAt,
+			&unitCost, &srcKType, &srcID, &m.MovedAt, &m.CreatedBy,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrItemNotFound
