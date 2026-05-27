@@ -820,22 +820,32 @@ func (s *CycleCountStore) PostSession(ctx context.Context, tenantID, sessionID, 
 				CreatedBy:   actorID,
 			}
 			if _, err := s.inv.RecordMoveTx(ctx, tx, move); err != nil {
-				if errors.Is(err, ErrDuplicateSourceMove) {
-					// In the single-tx design a partial commit
-					// (moves landed, status flip didn't) cannot
-					// happen — either every write in the tx
-					// reaches the WAL together or none of them
-					// do. The remaining way to hit this branch
-					// is an out-of-band writer that recorded an
-					// inventory_move with the same
-					// (source_ktype, source_id) tuple as one of
-					// our cycle-count lines, e.g. a manual SQL
-					// repair script. The defensive `continue`
-					// preserves idempotence in that case: the
-					// downstream ledger already has the variance
-					// recorded so we should not abort the post.
-					continue
-				}
+				// ErrDuplicateSourceMove is surfaced here in the
+				// pathological scenario where an out-of-band
+				// writer recorded an inventory_move with the
+				// same (source_ktype, source_id) tuple as one of
+				// our cycle-count lines (e.g. a manual SQL
+				// repair script). Under PostgreSQL's single-tx
+				// semantics a 23505 puts the transaction into
+				// the "aborted" state and every subsequent SQL
+				// statement on the same tx fails with
+				// "current transaction is aborted, commands
+				// ignored until end of transaction block",
+				// including the final status flip. A defensive
+				// `continue` here would therefore be dead code:
+				// the next RecordMoveTx (or the status UPDATE)
+				// would fail immediately on the aborted tx.
+				// Making the silent-skip behaviour actually work
+				// would require either SAVEPOINTs around every
+				// RecordMoveTx call or an
+				// `INSERT ... ON CONFLICT DO NOTHING` variant in
+				// recordMoveInTx; both are heavier than the
+				// out-of-band-writer scenario warrants. We
+				// instead let the error propagate: the operator
+				// sees a clear failure and reconciles manually,
+				// which is the right product semantics for
+				// "something pre-recorded a move for this line"
+				// anyway (silent skip would mask the anomaly).
 				return fmt.Errorf("cycle_count: record variance move for line %s: %w", ln.ID, err)
 			}
 		}
