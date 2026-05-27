@@ -499,10 +499,11 @@ func (s *PGStore) recordMoveInTx(ctx context.Context, tx pgx.Tx, m Move) (*Move,
 	}
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO inventory_moves
-		     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, batch_id, moved_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, batch_id, moved_at, created_by)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 RETURNING id`,
 		m.TenantID, m.ItemID, m.WarehouseID, m.Qty, unitCost, srcKType, srcID, batchID, m.MovedAt,
+		nullableUUIDValue(m.CreatedBy),
 	).Scan(&out.ID); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && isInventoryMovesSourceUniqViolation(pgErr) {
@@ -581,10 +582,11 @@ func (s *PGStore) RecordTransfer(ctx context.Context, t Transfer) ([]Move, error
 			row := m
 			err := tx.QueryRow(ctx,
 				`INSERT INTO inventory_moves
-				     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, moved_at)
-				 VALUES ($1, $2, $3, $4, $5, $6, NULL, $7)
+				     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, moved_at, created_by)
+				 VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8)
 				 RETURNING id`,
 				row.TenantID, row.ItemID, row.WarehouseID, row.Qty, unitCost, row.SourceKType, row.MovedAt,
+				nullableUUIDValue(row.CreatedBy),
 			).Scan(&row.ID)
 			if err != nil {
 				return fmt.Errorf("inventory: insert transfer move: %w", err)
@@ -677,10 +679,10 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 		}
 		err = tx.QueryRow(ctx,
 			`INSERT INTO inventory_moves
-			     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, batch_id, moved_at, reversal_of)
-			 VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7, $8)
+			     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, batch_id, moved_at, reversal_of, created_by)
+			 VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7, $8, $9)
 			 RETURNING id`,
-			tenantID, origItem, origWh, newQty, unitCostArg, batchArg, now, moveID,
+			tenantID, origItem, origWh, newQty, unitCostArg, batchArg, now, moveID, nullableUUIDValue(actor),
 		).Scan(&out.ID)
 		if err != nil {
 			var pgErr *pgconn.PgError
@@ -786,9 +788,15 @@ func (s *PGStore) ListMoves(ctx context.Context, tenantID uuid.UUID, filter Move
 		// ReverseMove sets it on the returned Move and emitMove
 		// includes it in the event payload, but before this fix
 		// GET /inventory/moves always returned null.
+		// COALESCE created_by to the nil UUID so the Scan into a
+		// non-pointer uuid.UUID field always lands on a value. NULL on
+		// the column represents "unknown actor" (rows pre-dating
+		// migration 000066 or background-job writes); the nil UUID
+		// renders as omitempty in JSON so the API surface stays clean.
 		q := fmt.Sprintf(
 			`SELECT id, tenant_id, item_id, warehouse_id, qty, unit_cost,
-			        source_ktype, source_id, moved_at, reversal_of, batch_id
+			        source_ktype, source_id, moved_at, reversal_of, batch_id,
+			        COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid)
 			 FROM inventory_moves
 			 WHERE %s
 			 ORDER BY moved_at DESC, id DESC
@@ -812,6 +820,7 @@ func (s *PGStore) ListMoves(ctx context.Context, tenantID uuid.UUID, filter Move
 			if err := rows.Scan(
 				&m.ID, &m.TenantID, &m.ItemID, &m.WarehouseID, &m.Qty,
 				&unitCost, &srcKType, &srcID, &m.MovedAt, &reversalOf, &batchID,
+				&m.CreatedBy,
 			); err != nil {
 				return fmt.Errorf("inventory: scan move: %w", err)
 			}
@@ -855,7 +864,8 @@ func (s *PGStore) GetMoveBySource(
 		)
 		err := tx.QueryRow(ctx,
 			`SELECT id, tenant_id, item_id, warehouse_id, qty, unit_cost,
-			        source_ktype, source_id, moved_at
+			        source_ktype, source_id, moved_at,
+			        COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid)
 			 FROM inventory_moves
 			 WHERE tenant_id = $1 AND source_ktype = $2 AND source_id = $3
 			   AND item_id = $4 AND warehouse_id = $5
@@ -863,7 +873,7 @@ func (s *PGStore) GetMoveBySource(
 			tenantID, sourceKType, sourceID, itemID, warehouseID,
 		).Scan(
 			&m.ID, &m.TenantID, &m.ItemID, &m.WarehouseID, &m.Qty,
-			&unitCost, &srcKType, &srcID, &m.MovedAt,
+			&unitCost, &srcKType, &srcID, &m.MovedAt, &m.CreatedBy,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrItemNotFound

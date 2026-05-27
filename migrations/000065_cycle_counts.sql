@@ -27,12 +27,18 @@
 --
 --   * On post, each line with a non-zero variance produces ONE
 --     inventory_move with source_ktype = 'inventory.cycle_count' and
---     source_id = line.id. Keying on line.id (not session.id) keeps
---     the inventory_moves_source_uniq tuple unique even when a
---     session has multiple lines for the same item+warehouse pair
---     (e.g. counting two separate bins). The poster is idempotent:
---     ON CONFLICT on the source-uniq partial index folds a retry
---     into a no-op.
+--     source_id = line.id. Keying on line.id (not session.id) means
+--     each line — not each session — owns one slot in the
+--     inventory_moves_source_uniq partial index, so the poster is
+--     idempotent: a retry of the same line folds into a no-op via
+--     ErrDuplicateSourceMove. The current schema enforces ONE line
+--     per (tenant_id, session_id, item_id) (see
+--     cycle_count_lines_session_item_uniq below), which deliberately
+--     forbids the multiple-lines-per-item case (e.g. counting two
+--     separate bins of the same SKU) until a `location` /
+--     `bin_code` column is added to both the line table and the
+--     uniq index. Until then, multi-bin counts must be merged into
+--     a single line per item per session at data-entry time.
 --
 --   * RLS is enforced via app.tenant_id GUC, same scheme as every
 --     other tenant-scoped table.
