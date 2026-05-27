@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import type {
@@ -657,23 +657,52 @@ function LineRow(props: {
   const [counted, setCounted] = useState(props.line.counted_qty);
   const [notes, setNotes] = useState(props.line.notes ?? "");
 
+  // Per-field "is this input the operator's source of truth right
+  // now?" refs. An input is the source of truth from the moment it
+  // gains focus until blur. While focused we MUST NOT overwrite it
+  // from the server-side props, even if a sibling action (most
+  // notably "Seed from stock") bumps `updated_at` on every line as
+  // a side effect of refreshing `expected_qty`. Without these refs,
+  // an operator typing in counted_qty who simultaneously clicks Seed
+  // would lose their keystrokes — the seed's query-invalidation
+  // re-renders every LineRow, the useEffect below fires because
+  // updated_at changed, and `setCounted(props.line.counted_qty)`
+  // overwrites whatever the operator had typed back to the server's
+  // stored value (typically 0).
+  //
+  // Refs (not state) on purpose: the effect reads the *current*
+  // focus state at the moment a server update arrives; we don't
+  // want to re-trigger the effect just because focus changed.
+  const countedFocusedRef = useRef(false);
+  const notesFocusedRef = useRef(false);
+
   // Re-sync local state when the server-side row changes. Without
   // this, useState only captures the initial values and a parent
   // re-render after a query invalidation (e.g. another tab posts a
   // line, or `Seed from stock` refreshes expected_qty via the new
   // (tenant_id, session_id, item_id) upsert path) would leave the
-  // input out of sync with the persisted row. The operator's
-  // in-progress typing is held in the local `counted` / `notes`
-  // useState slots, which are independent of the corresponding
-  // `props.line.*` server values; this effect only fires when the
-  // server-side props change. `updated_at` is the primary signal
-  // (every server-side mutation bumps it) and the explicit
-  // `counted_qty` + `notes` deps are defensive — if a future schema
-  // change ever allowed a server-side mutation without bumping
-  // `updated_at`, the row would still re-sync.
+  // input out of sync with the persisted row.
+  //
+  // The per-field focus guard above bounds the overwrite window to
+  // "blurred inputs only": the input the operator is actively
+  // editing keeps its in-progress value; the others sync to the
+  // server. This is the right shape because Seed bumps updated_at
+  // on every line as a side effect of writing expected_qty, even
+  // though counted_qty / notes are untouched — so a focused
+  // counted_qty input must survive a Seed click on the same row.
+  //
+  // `updated_at` is the primary trigger (every server-side mutation
+  // bumps it) and the explicit `counted_qty` + `notes` deps are
+  // defensive — if a future schema change ever allowed a
+  // server-side mutation without bumping `updated_at`, the row
+  // would still re-sync the blurred inputs.
   useEffect(() => {
-    setCounted(props.line.counted_qty);
-    setNotes(props.line.notes ?? "");
+    if (!countedFocusedRef.current) {
+      setCounted(props.line.counted_qty);
+    }
+    if (!notesFocusedRef.current) {
+      setNotes(props.line.notes ?? "");
+    }
   }, [props.line.updated_at, props.line.counted_qty, props.line.notes]);
 
   const variance = props.line.variance;
@@ -699,7 +728,15 @@ function LineRow(props: {
             step="0.0001"
             value={counted}
             onChange={(e) => setCounted(e.target.value)}
+            onFocus={() => {
+              countedFocusedRef.current = true;
+            }}
             onBlur={() => {
+              // Clear the focus guard BEFORE firing onUpsert so the
+              // upsert's invalidation, which triggers the re-sync
+              // useEffect with the just-persisted server value, no
+              // longer suppresses the field. Order matters here.
+              countedFocusedRef.current = false;
               if (counted !== props.line.counted_qty) {
                 props.onUpsert({
                   id: props.line.id,
@@ -732,7 +769,11 @@ function LineRow(props: {
             type="text"
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
+            onFocus={() => {
+              notesFocusedRef.current = true;
+            }}
             onBlur={() => {
+              notesFocusedRef.current = false;
               if (notes !== (props.line.notes ?? "")) {
                 props.onUpsert({
                   id: props.line.id,
