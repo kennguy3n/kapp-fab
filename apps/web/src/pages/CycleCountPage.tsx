@@ -361,6 +361,18 @@ function SessionDetailPanel(props: {
     advance.isPending ||
     post.isPending;
 
+  // Per-target pending guard. The `advance` mutation drives multiple
+  // sibling buttons (e.g. counting state exposes both "Mark
+  // reconciled" and "Back to draft", both calling advance.mutate with
+  // a different `status`). Without distinguishing which transition is
+  // in-flight, clicking one would also flip the sibling's label to
+  // its pending text ("Reverting…" / "Reconciling…") because both
+  // observe `advance.isPending`. `advance.variables` is the last
+  // argument passed to `mutate`, so a strict equality check pins the
+  // pending label to the clicked button only — the sibling keeps its
+  // resting label while still being disabled by `anyActionPending`.
+  const advancingTo = advance.isPending ? advance.variables : null;
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -402,7 +414,7 @@ function SessionDetailPanel(props: {
             disabled={anyActionPending}
             onClick={() => advance.mutate("counting")}
           >
-            {advance.isPending ? "Starting…" : "Start counting"}
+            {advancingTo === "counting" ? "Starting…" : "Start counting"}
           </button>
         )}
         {status === "counting" && (
@@ -412,7 +424,7 @@ function SessionDetailPanel(props: {
               disabled={anyActionPending}
               onClick={() => advance.mutate("reconciled")}
             >
-              {advance.isPending ? "Reconciling…" : "Mark reconciled"}
+              {advancingTo === "reconciled" ? "Reconciling…" : "Mark reconciled"}
             </button>
             {/* Back-to-draft path: the backend state machine allows
                 counting → draft (canTransitionCycleCount in
@@ -438,7 +450,7 @@ function SessionDetailPanel(props: {
                 }
               }}
             >
-              {advance.isPending ? "Reverting…" : "Back to draft"}
+              {advancingTo === "draft" ? "Reverting…" : "Back to draft"}
             </button>
           </>
         )}
@@ -479,7 +491,7 @@ function SessionDetailPanel(props: {
                 }
               }}
             >
-              {advance.isPending ? "Reopening…" : "Reopen to counting"}
+              {advancingTo === "counting" ? "Reopening…" : "Reopen to counting"}
             </button>
           </>
         )}

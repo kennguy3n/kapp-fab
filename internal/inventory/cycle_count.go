@@ -333,7 +333,22 @@ func (s *CycleCountStore) UpdateSession(ctx context.Context, in CycleCountSessio
 		return err
 	})
 	if err != nil {
-		return nil, err
+		// Mirror CreateSession's wrap-or-passthrough policy: sentinel
+		// errors keep their typed form so the HTTP layer can map them
+		// to 4xx (writeCycleCountError matches on errors.Is), while
+		// non-sentinel errors (raw pgx / pgconn / dbutil failures) get
+		// the `cycle_count: update session:` prefix so log lines stay
+		// symmetric with the create path. Without the prefix, the only
+		// thing distinguishing a failed update from a failed create
+		// in the audit log is the surrounding handler name — adding
+		// the prefix keeps the error string self-describing.
+		if errors.Is(err, ErrCycleCountNotFound) ||
+			errors.Is(err, ErrCycleCountAlreadyPosted) ||
+			errors.Is(err, ErrCycleCountBadStatus) ||
+			errors.Is(err, ErrCycleCountDuplicateCode) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("cycle_count: update session: %w", err)
 	}
 	return s.GetSession(ctx, in.TenantID, in.ID)
 }
