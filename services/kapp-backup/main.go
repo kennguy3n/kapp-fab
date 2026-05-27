@@ -285,6 +285,20 @@ func cmdRestore(args []string) error {
 // JSONB content round-trip as raw JSON because pgx decodes JSONB into
 // `[]byte`/`map[string]any` and json.Encoder handles both.
 func extractTenant(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID, w io.Writer) error {
+	// GENERATED ALWAYS STORED columns (`krecords.search_vector`,
+	// `budget_lines.annual_total`, `cycle_count_lines.variance`, …)
+	// cannot accept a non-DEFAULT value on INSERT or UPDATE. The
+	// `row_to_json` extract used by `exportTable` would otherwise
+	// include them, and a downstream `insertRow` would emit
+	// `INSERT ... (variance, ...) VALUES ($N, ...)` which PostgreSQL
+	// rejects with `ERROR: cannot insert a non-DEFAULT value into
+	// column "variance"`. Strip them on extract so dumps never carry
+	// generated values in the first place — a defence-in-depth strip
+	// on the restore side covers older dumps produced before this fix.
+	generated, err := loadGeneratedColumns(ctx, pool)
+	if err != nil {
+		return err
+	}
 	enc := json.NewEncoder(w)
 	if err := enc.Encode(manifest{
 		Type:      "manifest",
@@ -296,7 +310,7 @@ func extractTenant(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID, 
 		return err
 	}
 	for _, table := range TenantScopedTables {
-		count, err := exportTable(ctx, pool, tenantID, table, enc)
+		count, err := exportTable(ctx, pool, tenantID, table, enc, generated[table])
 		if err != nil {
 			return fmt.Errorf("export %s: %w", table, err)
 		}
@@ -305,7 +319,14 @@ func extractTenant(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID, 
 	return nil
 }
 
-func exportTable(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID, table string, enc *json.Encoder) (int, error) {
+func exportTable(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	tenantID uuid.UUID,
+	table string,
+	enc *json.Encoder,
+	generatedCols map[string]struct{},
+) (int, error) {
 	// We rely on row_to_json on the server so column lists don't need
 	// to be hardcoded on the client — adding a column to the schema
 	// surfaces automatically in the dump.
@@ -326,6 +347,10 @@ func exportTable(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID, ta
 		var obj map[string]any
 		if err := json.Unmarshal(raw, &obj); err != nil {
 			return count, err
+		}
+		// Drop GENERATED ALWAYS columns before the dump sees them.
+		for col := range generatedCols {
+			delete(obj, col)
 		}
 		obj["_table"] = table
 		if err := enc.Encode(obj); err != nil {
@@ -355,13 +380,29 @@ func restoreTenant(ctx context.Context, pool *pgxpool.Pool, r io.Reader, remap m
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := restoreRows(ctx, tx, dec, remap); err != nil {
+	// Defensive strip on restore: dumps produced by older binaries
+	// (before the extract-side strip was added) still carry generated
+	// columns, and PostgreSQL would reject the INSERT with `cannot
+	// insert a non-DEFAULT value into column "<name>"`. We re-query
+	// the live schema so the strip stays in sync with whatever columns
+	// the target DB currently treats as GENERATED ALWAYS.
+	generated, err := loadGeneratedColumns(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if err := restoreRows(ctx, tx, dec, remap, generated); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
-func restoreRows(ctx context.Context, tx pgx.Tx, dec *json.Decoder, remap map[uuid.UUID]uuid.UUID) error {
+func restoreRows(
+	ctx context.Context,
+	tx pgx.Tx,
+	dec *json.Decoder,
+	remap map[uuid.UUID]uuid.UUID,
+	generated map[string]map[string]struct{},
+) error {
 	for {
 		obj := map[string]any{}
 		err := dec.Decode(&obj)
@@ -380,6 +421,10 @@ func restoreRows(ctx context.Context, tx pgx.Tx, dec *json.Decoder, remap map[uu
 			return fmt.Errorf("unknown _table %v", tableRaw)
 		}
 		delete(obj, "_table")
+		// Strip generated columns the source dump may have carried.
+		for col := range generated[table] {
+			delete(obj, col)
+		}
 		// Apply remap before insert so the INSERT enforces RLS.
 		if tenantRaw, ok := obj["tenant_id"].(string); ok {
 			src, err := uuid.Parse(tenantRaw)
@@ -394,6 +439,55 @@ func restoreRows(ctx context.Context, tx pgx.Tx, dec *json.Decoder, remap map[uu
 			return fmt.Errorf("insert into %s: %w", table, err)
 		}
 	}
+}
+
+// queryer is the minimal interface used by loadGeneratedColumns so
+// the same helper can be called against the connection pool during
+// extract and against the in-progress restore transaction. Both
+// `*pgxpool.Pool` and `pgx.Tx` satisfy this surface.
+type queryer interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// loadGeneratedColumns returns the set of GENERATED ALWAYS columns
+// in the `public` schema, keyed by table name. STORED generated
+// columns can never accept a non-DEFAULT value on INSERT or UPDATE
+// — PostgreSQL rejects them with `ERROR: cannot insert a non-DEFAULT
+// value into column "<name>"` — so both the extract and the restore
+// paths strip them. Tables currently affected:
+//
+//   - krecords.search_vector           (migration 000023)
+//   - budget_lines.annual_total        (migration 000062)
+//   - cycle_count_lines.variance       (migration 000065)
+//
+// Querying the live schema (instead of maintaining a hand-written
+// allowlist) means future generated columns are picked up
+// automatically. We rely on the search_path including `public`,
+// which is the default and is set by our migration tooling.
+func loadGeneratedColumns(ctx context.Context, db queryer) (map[string]map[string]struct{}, error) {
+	rows, err := db.Query(ctx,
+		`SELECT table_name, column_name
+		   FROM information_schema.columns
+		  WHERE table_schema = 'public'
+		    AND is_generated = 'ALWAYS'`)
+	if err != nil {
+		return nil, fmt.Errorf("loadGeneratedColumns: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]map[string]struct{}{}
+	for rows.Next() {
+		var t, c string
+		if err := rows.Scan(&t, &c); err != nil {
+			return nil, fmt.Errorf("loadGeneratedColumns scan: %w", err)
+		}
+		cols, ok := out[t]
+		if !ok {
+			cols = map[string]struct{}{}
+			out[t] = cols
+		}
+		cols[c] = struct{}{}
+	}
+	return out, rows.Err()
 }
 
 // tableConflictKeys maps tenant-scoped tables whose primary key is

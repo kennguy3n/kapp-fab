@@ -71,6 +71,38 @@ export function CycleCountPage() {
               onCreated={(s) => setSelectedId(s.id)}
             />
           )}
+          {/* When a session is selected the right panel can be in
+              one of four states: still loading, the fetch errored,
+              the session was deleted under us (`isError` false but
+              `data` undefined after `enabled:true`), or data is
+              ready. Without the loading + error rendering below the
+              panel briefly goes blank on every detail switch, and
+              a network failure silently swallows the click. */}
+          {selectedId && detail.isLoading && (
+            <p style={{ color: "#6b7280" }}>Loading session…</p>
+          )}
+          {selectedId && detail.error && (
+            <div
+              role="alert"
+              style={{
+                background: "#fee2e2",
+                color: "#991b1b",
+                border: "1px solid #fecaca",
+                padding: "8px 12px",
+                borderRadius: 4,
+                fontSize: 13,
+              }}
+            >
+              Failed to load session: {(detail.error as Error).message}{" "}
+              <button
+                type="button"
+                onClick={() => setSelectedId(null)}
+                style={{ marginLeft: 8 }}
+              >
+                Back to list
+              </button>
+            </div>
+          )}
           {selectedId && detail.data && (
             <SessionDetailPanel
               session={detail.data.session}
@@ -374,13 +406,41 @@ function SessionDetailPanel(props: {
           </button>
         )}
         {status === "counting" && (
-          <button
-            type="button"
-            disabled={anyActionPending}
-            onClick={() => advance.mutate("reconciled")}
-          >
-            {advance.isPending ? "Reconciling…" : "Mark reconciled"}
-          </button>
+          <>
+            <button
+              type="button"
+              disabled={anyActionPending}
+              onClick={() => advance.mutate("reconciled")}
+            >
+              {advance.isPending ? "Reconciling…" : "Mark reconciled"}
+            </button>
+            {/* Back-to-draft path: the backend state machine allows
+                counting → draft (canTransitionCycleCount in
+                internal/inventory/cycle_count.go), and DeleteSession
+                only accepts draft sessions. Without this button an
+                operator who created a session by mistake (wrong
+                warehouse, typo in code, etc.) has to drop to the
+                API to back out before they can delete it. The
+                window.confirm matches the Reopen / Post buttons —
+                this transition is reversible (operator can always
+                advance back to counting) but worth a quick pause so
+                a misclick doesn't undo work already entered. */}
+            <button
+              type="button"
+              disabled={anyActionPending}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "Back to draft will undo the counting transition and re-allow warehouse/code edits. Counted quantities are preserved. Continue?"
+                  )
+                ) {
+                  advance.mutate("draft");
+                }
+              }}
+            >
+              {advance.isPending ? "Reverting…" : "Back to draft"}
+            </button>
+          </>
         )}
         {status === "reconciled" && (
           <>

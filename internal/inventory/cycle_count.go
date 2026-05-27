@@ -9,11 +9,19 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 )
+
+// cycleCountSessionsCodeUniqIndex is the unique index installed in
+// migration 000065_cycle_counts.sql on (tenant_id, code). A 23505 on
+// this constraint is translated into ErrCycleCountDuplicateCode so
+// the HTTP layer can emit a friendly 409 instead of falling through
+// to writeInventoryError's generic 500.
+const cycleCountSessionsCodeUniqIndex = "cycle_count_sessions_code_uniq"
 
 // CycleCountStatusDraft and friends are the lifecycle states of a
 // cycle-count session. Posting is gated on `reconciled`, and `posted`
@@ -34,15 +42,32 @@ const MoveSourceCycleCount = "inventory.cycle_count"
 // Sentinel errors surfaced by the cycle-count store. They map to
 // 4xx HTTP responses at the handler layer.
 var (
-	ErrCycleCountBadStatus      = errors.New("cycle_count: invalid status transition")
-	ErrCycleCountNotFound       = errors.New("cycle_count: session not found")
-	ErrCycleCountAlreadyPosted  = errors.New("cycle_count: session already posted")
-	ErrCycleCountNotReconciled  = errors.New("cycle_count: session must be reconciled before post")
-	ErrCycleCountLineFrozen     = errors.New("cycle_count: reopen session before editing lines")
-	ErrCycleCountLineNotFound   = errors.New("cycle_count: line not found")
-	ErrCycleCountWarehouseEmpty = errors.New("cycle_count: warehouse_id required")
-	ErrCycleCountCodeEmpty      = errors.New("cycle_count: code required")
+	ErrCycleCountBadStatus       = errors.New("cycle_count: invalid status transition")
+	ErrCycleCountNotFound        = errors.New("cycle_count: session not found")
+	ErrCycleCountAlreadyPosted   = errors.New("cycle_count: session already posted")
+	ErrCycleCountNotReconciled   = errors.New("cycle_count: session must be reconciled before post")
+	ErrCycleCountLineFrozen      = errors.New("cycle_count: reopen session before editing lines")
+	ErrCycleCountLineNotFound    = errors.New("cycle_count: line not found")
+	ErrCycleCountWarehouseEmpty  = errors.New("cycle_count: warehouse_id required")
+	ErrCycleCountCodeEmpty       = errors.New("cycle_count: code required")
+	ErrCycleCountDuplicateCode   = errors.New("cycle_count: session code already in use")
 )
+
+// isCycleCountSessionsCodeUniqViolation returns true when the error
+// is a Postgres unique-violation (23505) on the (tenant_id, code)
+// unique index. CreateSession + UpdateSession both translate this
+// into ErrCycleCountDuplicateCode — the same pattern
+// internal/inventory/store.go uses for the inventory_moves source
+// uniq + reversal-of uniq indexes — so that a duplicate session code
+// surfaces as a typed 409 at the HTTP layer instead of falling
+// through to writeInventoryError's generic 500.
+func isCycleCountSessionsCodeUniqViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == cycleCountSessionsCodeUniqIndex
+}
 
 // CycleCountSession is the header row.
 type CycleCountSession struct {
@@ -137,9 +162,15 @@ func (s *CycleCountStore) CreateSession(ctx context.Context, in CycleCountSessio
 			in.TenantID, in.ID, in.Code, in.Description, in.WarehouseID,
 			in.Status, in.CreatedBy, in.CreatedAt, in.UpdatedAt,
 		)
+		if isCycleCountSessionsCodeUniqViolation(err) {
+			return ErrCycleCountDuplicateCode
+		}
 		return err
 	})
 	if err != nil {
+		if errors.Is(err, ErrCycleCountDuplicateCode) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("cycle_count: create session: %w", err)
 	}
 	return &in, nil
@@ -296,6 +327,9 @@ func (s *CycleCountStore) UpdateSession(ctx context.Context, in CycleCountSessio
 			  WHERE tenant_id = $6 AND id = $7`,
 			in.Code, in.Description, warehouseID, status, now, in.TenantID, in.ID,
 		)
+		if isCycleCountSessionsCodeUniqViolation(err) {
+			return ErrCycleCountDuplicateCode
+		}
 		return err
 	})
 	if err != nil {

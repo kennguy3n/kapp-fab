@@ -305,7 +305,8 @@ func writeCycleCountError(w http.ResponseWriter, err error) {
 		errors.Is(err, inventory.ErrCycleCountLineNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, inventory.ErrCycleCountAlreadyPosted),
-		errors.Is(err, inventory.ErrCycleCountLineFrozen):
+		errors.Is(err, inventory.ErrCycleCountLineFrozen),
+		errors.Is(err, inventory.ErrCycleCountDuplicateCode):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, inventory.ErrCycleCountBadStatus),
 		errors.Is(err, inventory.ErrCycleCountNotReconciled),
