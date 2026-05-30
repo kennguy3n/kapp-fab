@@ -430,6 +430,29 @@ func TestParseManifestRejections(t *testing.T) {
 			field:    "description",
 			fragment: "bytes exceeds 4096-byte",
 		},
+		{
+			// An HTTPS URL that embeds the EXTENSION_WEBHOOK_BASE
+			// placeholder somewhere other than the prefix is a
+			// manifest bug — after substitution it would yield a
+			// malformed URL like `https://publisher.com/
+			// https://tenant.example/hooks/...`. Reject at upload
+			// time with the explicit "prefix not embedded" error.
+			name: "agent_tool endpoint with embedded placeholder rejected",
+			mutate: replaceLine("    endpoint: ${EXTENSION_WEBHOOK_BASE}/print",
+				"    endpoint: https://publisher.example/${EXTENSION_WEBHOOK_BASE}/print"),
+			field:    "agent_tools[0].endpoint",
+			fragment: "must be the URL prefix",
+		},
+		{
+			// Same shape on a webhook subscription — the dispatcher
+			// would post the literal placeholder text or, after
+			// substitution, a doubly-prefixed broken URL.
+			name: "webhook endpoint with embedded placeholder rejected",
+			mutate: replaceLine("    endpoint: ${EXTENSION_WEBHOOK_BASE}/order_created",
+				"    endpoint: https://publisher.example/${EXTENSION_WEBHOOK_BASE}/order_created"),
+			field:    "webhooks_consumed[0].endpoint",
+			fragment: "must be the URL prefix",
+		},
 	}
 	for _, tc := range cases {
 		tc := tc
