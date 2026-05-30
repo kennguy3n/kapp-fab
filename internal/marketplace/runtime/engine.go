@@ -539,6 +539,24 @@ func (e *Engine) Uninstall(ctx context.Context, req *UninstallRequest) (*Uninsta
 	}
 
 	install.Status = marketplace.InstallStatusUninstalled
+	// Clear the in-memory FailureReason to match the DB UPDATE
+	// above (failure_reason = NULL). The `install` pointer was
+	// loaded via e.store.GetInstallation at engine.go:384, which
+	// scans COALESCE(failure_reason,'') into install.FailureReason
+	// (store.go:1009,1017) — so for an install that was in
+	// `failed` state at load time, install.FailureReason holds the
+	// pre-uninstall reason string. Without this assignment the
+	// UninstallResult.Installation returned at line ~575-576 would
+	// carry Status='uninstalled' alongside a non-empty
+	// FailureReason — an impossible combination per the DB CHECK
+	// constraint marketplace_installations_failure_reason_only_when_failed
+	// at migration 000068:261-265, and stale-from-the-perspective
+	// of any caller that serialises the struct (e.g. the B6 API
+	// handler returning JSON to the operator). Pairs with the
+	// BUG_0001 UPDATE fix above to keep the returned Go object
+	// in lock-step with what readers see in the DB. Devin Review
+	// round-9 BUG_0001-followup on PR #127.
+	install.FailureReason = ""
 
 	// post_uninstall (BEST-EFFORT, skipped if SkipHooks). The
 	// uninstall tx has already committed; like post_install above

@@ -1271,6 +1271,20 @@ func TestMarketplaceRuntime_Uninstall_FromFailedClearsFailureReason(t *testing.T
 	if uninstallRes.Installation.Status != marketplace.InstallStatusUninstalled {
 		t.Fatalf("status %q, want uninstalled", uninstallRes.Installation.Status)
 	}
+	// Returned struct MUST also have FailureReason cleared so the
+	// (status, failure_reason) pair is internally consistent with
+	// the DB CHECK constraint
+	// marketplace_installations_failure_reason_only_when_failed.
+	// Without the round-9 in-memory clear (engine.go:559), the
+	// install pointer carried the pre-uninstall failure_reason
+	// loaded by GetInstallation at engine.go:384 — JSON-serialising
+	// the result (B6 API handler) would surface
+	// status='uninstalled' alongside a non-empty failure_reason,
+	// contradicting both the DB row and the schema invariant.
+	// Devin Review round-9 BUG_0001-followup on PR #127.
+	if uninstallRes.Installation.FailureReason != "" {
+		t.Fatalf("post-uninstall in-memory FailureReason %q, want empty (round-9 BUG_0001-followup regression: in-memory struct stale relative to DB UPDATE that cleared failure_reason)", uninstallRes.Installation.FailureReason)
+	}
 
 	// Read back the row directly to confirm BOTH columns:
 	// status='uninstalled' AND failure_reason IS NULL. The
