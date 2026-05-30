@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -368,6 +369,78 @@ func TestTransportHooks_PreInstall_TransportErrThen5xxExhausted_AbortReasonRefle
 	}
 	if res.Err != nil {
 		t.Fatalf("result.Err = %v, want nil (final attempt got an http round-trip; stale transport err leaked)", res.Err)
+	}
+}
+
+// TestTransportHooks_PreInstall_3xx_TerminalNotRetried locks in
+// Devin Review round-3 on PR #127: the hooks classifier MUST treat
+// 3xx responses as terminal (mirrors the agent-tool Dispatcher
+// catch-all at dispatcher.go:209-210). Previously, a 3xx response
+// (e.g. the extension's webhook server replying 301/302 — the
+// HTTPTransport refuses to follow redirects via CheckRedirect=
+// http.ErrUseLastResponse so the raw status bubbles up) fell
+// through every if-block and silently retried until MaxAttempts,
+// reporting "transport: <stale>" as the AbortReason. The
+// unconditional break in the catch-all guarantees a single attempt
+// + correct "http 302 after 1 attempts" AbortReason.
+func TestTransportHooks_PreInstall_3xx_TerminalNotRetried(t *testing.T) {
+	for _, status := range []int{301, 302, 307, 308, 399} {
+		t.Run("status_"+fmt.Sprint(status), func(t *testing.T) {
+			tr := &InMemoryTransport{Handler: StaticResponseHandler(status, nil)}
+			hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+
+			in := validLifecycleDispatch(t)
+			in.Phase = PhasePreInstall
+			// Lifecycle retry policy is hard-coded at
+			// lifecycleRetry = MaxAttempts=3, so a buggy fall-
+			// through would visibly retry up to 3 times; the
+			// fix guarantees attempt=1 and audit-len=1.
+
+			res, err := hooks.Dispatch(context.Background(), in)
+			if !errors.Is(err, ErrPreInstallRejected) {
+				t.Fatalf("err = %v, want ErrPreInstallRejected", err)
+			}
+			if !res.Aborted || res.Status != status || res.Attempt != 1 {
+				t.Fatalf("res = %+v, want aborted=true status=%d attempt=1", res, status)
+			}
+			wantReason := fmt.Sprintf("http %d after 1 attempts", status)
+			if res.AbortReason != wantReason {
+				t.Fatalf("AbortReason = %q, want %q", res.AbortReason, wantReason)
+			}
+			if res.Err != nil {
+				t.Fatalf("result.Err = %v, want nil (final attempt got an http round-trip)", res.Err)
+			}
+			if got := len(tr.Audit); got != 1 {
+				t.Fatalf("audit len = %d, want 1 (3xx must NOT be retried)", got)
+			}
+		})
+	}
+}
+
+// TestTransportHooks_PostInstall_3xx_BestEffortNotAborted asserts
+// the symmetric post-phase behaviour: 3xx (or any other non-2xx)
+// on a post-phase hook is logged but NOT an abort, since post-
+// install / post-uninstall are best-effort. The catch-all break
+// still applies, so the audit log records a single attempt.
+func TestTransportHooks_PostInstall_3xx_BestEffortNotAborted(t *testing.T) {
+	tr := &InMemoryTransport{Handler: StaticResponseHandler(302, nil)}
+	hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+
+	in := validLifecycleDispatch(t)
+	in.Phase = PhasePostInstall
+
+	res, err := hooks.Dispatch(context.Background(), in)
+	if err != nil {
+		t.Fatalf("post-phase 3xx should NOT error: %v", err)
+	}
+	if res.Aborted {
+		t.Fatalf("post-phase 3xx should NOT abort: %+v", res)
+	}
+	if res.Status != 302 || res.Attempt != 1 {
+		t.Fatalf("res = %+v, want status=302 attempt=1", res)
+	}
+	if got := len(tr.Audit); got != 1 {
+		t.Fatalf("audit len = %d, want 1 (3xx must NOT be retried even on post-phase)", got)
 	}
 }
 

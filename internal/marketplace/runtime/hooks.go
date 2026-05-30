@@ -285,11 +285,25 @@ func (h *transportHooks) Dispatch(ctx context.Context, in *LifecycleDispatch) (*
 			// 5xx + 408 = retryable. Continue the loop.
 			continue
 		}
-		// 4xx (except 404 / 408) = terminal extension-side
-		// rejection. Pre-phases abort; post-phases just log.
-		if resp.Status >= 400 && resp.Status < 500 {
-			break
-		}
+		// Catch-all terminal: anything else (3xx, 4xx non-
+		// 404/408, 1xx, or any other unexpected non-2xx code)
+		// is treated as a terminal extension-side response.
+		// Mirrors the agent-tool Dispatcher catch-all at
+		// dispatcher.go:209-210 (`return result, nil` for any
+		// status not already classified) so the two retry
+		// classifiers stay in lock-step. Devin Review round-3
+		// on PR #127 caught the previous drift: a 3xx response
+		// (e.g. 301/302 — the transport refuses to follow
+		// redirects via CheckRedirect=http.ErrUseLastResponse
+		// so they bubble up as a raw status) fell through every
+		// if-block and silently retried until MaxAttempts, then
+		// reported "transport: <stale-err>" as the AbortReason
+		// because result.Err / lastErr were nil after the
+		// successful HTTP round-trip — completely the wrong
+		// signal to operators. Unconditional break here means
+		// the post-loop pre-phase block reports the correct
+		// `http <status> after 1 attempts`.
+		break
 	}
 
 	// Exhausted retries OR terminal 4xx. Classify based on phase.
