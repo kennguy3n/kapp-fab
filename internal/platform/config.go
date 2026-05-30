@@ -440,7 +440,7 @@ func LoadConfig() (*Config, error) {
 
 		ReadReplicaURL:               os.Getenv("KAPP_READ_REPLICA_URL"),
 		ReadReplicaLagTolerance:      getenvDurationAllowZero("KAPP_READ_REPLICA_LAG_TOLERANCE", 1*time.Second),
-		ReadReplicaLagSampleInterval: getenvDuration("KAPP_READ_REPLICA_LAG_SAMPLE_INTERVAL", 5*time.Second),
+		ReadReplicaLagSampleInterval: getenvDurationAllowZero("KAPP_READ_REPLICA_LAG_SAMPLE_INTERVAL", 5*time.Second),
 		ReadReplicaMaxConns:          int32(getenvInt("KAPP_READ_REPLICA_MAX_CONNS", 0)),
 		ReadReplicaMinConns:          int32(getenvInt("KAPP_READ_REPLICA_MIN_CONNS", 0)),
 	}
