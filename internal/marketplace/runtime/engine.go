@@ -289,8 +289,16 @@ func (e *Engine) Install(ctx context.Context, req *InstallRequest, bundle *Resol
 		return nil, txErr
 	}
 
-	// Step 6: post_install (BEST-EFFORT).
-	postBody, err := MarshalLifecyclePayload(map[string]any{
+	// Step 6: post_install (BEST-EFFORT). The install transaction
+	// has already committed at this point, so EVERY error path
+	// below must still return the InstallResult — otherwise the
+	// caller has no way to discover the installation ID and a
+	// retry would hit ErrConflict on the unique constraint. The
+	// marshal-then-dispatch pair is captured into postResult so
+	// the operator can surface a warning if the webhook side
+	// didn't see the notification. Devin Review BUG_0002.
+	var postResult *LifecycleResult
+	postBody, marshalErr := MarshalLifecyclePayload(map[string]any{
 		"phase":           string(PhasePostInstall),
 		"tenant_id":       req.TenantID.String(),
 		"installation_id": installation.ID.String(),
@@ -299,25 +307,23 @@ func (e *Engine) Install(ctx context.Context, req *InstallRequest, bundle *Resol
 		"webhook_base":    webhookBase,
 		"installed_at":    installation.InstalledAt.UTC().Format(time.RFC3339Nano),
 	})
-	if err != nil {
-		return nil, err
-	}
-	postResult, postErr := e.hooks.Dispatch(ctx, &LifecycleDispatch{
-		TenantID:           req.TenantID,
-		InstallationID:     installation.ID,
-		ExtensionID:        req.ExtensionID,
-		ExtensionVersionID: req.VersionID,
-		Phase:              PhasePostInstall,
-		WebhookBase:        webhookBase,
-		SigningSecret:      secret,
-		Body:               postBody,
-	})
-	// post_install errors are NOT propagated — best-effort. The
-	// dispatch_log captures the attempt. We do return the
-	// LifecycleResult so the caller can surface a warning to
-	// the operator.
-	if postErr != nil && postResult == nil {
-		postResult = &LifecycleResult{Err: postErr}
+	if marshalErr != nil {
+		postResult = &LifecycleResult{Err: fmt.Errorf("runtime: engine: post_install marshal: %w", marshalErr)}
+	} else {
+		res, postErr := e.hooks.Dispatch(ctx, &LifecycleDispatch{
+			TenantID:           req.TenantID,
+			InstallationID:     installation.ID,
+			ExtensionID:        req.ExtensionID,
+			ExtensionVersionID: req.VersionID,
+			Phase:              PhasePostInstall,
+			WebhookBase:        webhookBase,
+			SigningSecret:      secret,
+			Body:               postBody,
+		})
+		if postErr != nil && res == nil {
+			res = &LifecycleResult{Err: postErr}
+		}
+		postResult = res
 	}
 
 	return &InstallResult{
@@ -420,33 +426,36 @@ func (e *Engine) Uninstall(ctx context.Context, req *UninstallRequest) (*Uninsta
 
 	install.Status = marketplace.InstallStatusUninstalled
 
-	// post_uninstall (BEST-EFFORT, skipped if SkipHooks).
+	// post_uninstall (BEST-EFFORT, skipped if SkipHooks). The
+	// uninstall tx has already committed; like post_install above
+	// (Devin Review BUG_0002), every error path must still return
+	// the UninstallResult so the caller sees the committed state.
 	if !req.SkipHooks {
-		body, err := MarshalLifecyclePayload(map[string]any{
+		body, marshalErr := MarshalLifecyclePayload(map[string]any{
 			"phase":           string(PhasePostUninstall),
 			"tenant_id":       req.TenantID.String(),
 			"installation_id": req.InstallationID.String(),
 			"extension_id":    install.ExtensionID.String(),
 			"version_id":      install.ExtensionVersionID.String(),
 		})
-		if err != nil {
-			return nil, err
+		if marshalErr != nil {
+			postResult = &LifecycleResult{Err: fmt.Errorf("runtime: engine: post_uninstall marshal: %w", marshalErr)}
+		} else {
+			res, postErr := e.hooks.Dispatch(ctx, &LifecycleDispatch{
+				TenantID:           req.TenantID,
+				InstallationID:     req.InstallationID,
+				ExtensionID:        install.ExtensionID,
+				ExtensionVersionID: install.ExtensionVersionID,
+				Phase:              PhasePostUninstall,
+				WebhookBase:        install.WebhookBase,
+				SigningSecret:      secret,
+				Body:               body,
+			})
+			if postErr != nil && res == nil {
+				res = &LifecycleResult{Err: postErr}
+			}
+			postResult = res
 		}
-		res, postErr := e.hooks.Dispatch(ctx, &LifecycleDispatch{
-			TenantID:           req.TenantID,
-			InstallationID:     req.InstallationID,
-			ExtensionID:        install.ExtensionID,
-			ExtensionVersionID: install.ExtensionVersionID,
-			Phase:              PhasePostUninstall,
-			WebhookBase:        install.WebhookBase,
-			SigningSecret:      secret,
-			Body:               body,
-		})
-		// Best-effort; an error here is captured but not propagated.
-		if postErr != nil && res == nil {
-			res = &LifecycleResult{Err: postErr}
-		}
-		postResult = res
 	}
 
 	return &UninstallResult{

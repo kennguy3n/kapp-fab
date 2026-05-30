@@ -188,24 +188,36 @@ func StaticResponseHandler(status int, body []byte) func(ctx context.Context, ta
 // the sequence is repeated for any call beyond len(responses).
 // Used by retry tests to simulate "first attempt fails, second
 // succeeds" sequences.
+//
+// If both responses and errors are empty the handler returns
+// (nil, nil) on every call — the dispatcher treats this as a
+// transport-level failure with no response body. Devin Review
+// ANALYSIS_0001 flagged a latent -1 index when responses was
+// empty; the explicit guard below removes the foot-gun for any
+// future caller that constructs a SequenceHandler from a
+// dynamically-built slice.
 func SequenceHandler(responses []*DispatchResponse, errors []error) func(ctx context.Context, target string, body []byte, headers map[string]string) (*DispatchResponse, error) {
 	idx := 0
 	return func(ctx context.Context, _ string, _ []byte, _ map[string]string) (*DispatchResponse, error) {
-		i := idx
-		if i >= len(responses) {
-			i = len(responses) - 1
-		}
-		idx++
 		var (
 			resp *DispatchResponse
 			err  error
 		)
-		if i < len(responses) {
+		if len(responses) > 0 {
+			i := idx
+			if i >= len(responses) {
+				i = len(responses) - 1
+			}
 			resp = responses[i]
 		}
-		if i < len(errors) {
+		if len(errors) > 0 {
+			i := idx
+			if i >= len(errors) {
+				i = len(errors) - 1
+			}
 			err = errors[i]
 		}
+		idx++
 		return resp, err
 	}
 }

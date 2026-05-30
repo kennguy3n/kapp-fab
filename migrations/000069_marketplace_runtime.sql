@@ -109,12 +109,23 @@ CREATE TABLE IF NOT EXISTS marketplace_extension_ktypes (
     PRIMARY KEY (tenant_id, installation_id, ktype_name),
 
     -- Extension KType names live in the ext.<publisher>.<slug>
-    -- namespace per EXTENSION_SPEC §4. The DB CHECK mirrors the
-    -- Go-side regex in internal/marketplace/manifest.go so
-    -- malformed names cannot reach the table via a direct INSERT
-    -- (e.g. from a future ops script that bypasses the engine).
+    -- namespace per EXTENSION_SPEC §4. The DB CHECK mirrors
+    -- extKTypeNameRegex in internal/marketplace/manifest.go EXACTLY
+    -- so malformed names cannot reach the table via a direct INSERT
+    -- (e.g. from a future ops script that bypasses the engine). The
+    -- two regexes must stay in lock-step — drift caused Devin Review
+    -- BUG_0001 on B3 (DB allowed publishers with hyphens and 1-char
+    -- segments that the Go validator rejected).
+    --
+    -- Go regex shape (must equal this):
+    --   ^ext\.[a-z][a-z0-9_]{2,31}\.[a-z][a-z0-9_]*$
+    --        ^^^^^^^^^^^^^^^^^^^^   publisher: lowercase letter +
+    --                               2..31 of [a-z0-9_]  → 3..32 chars
+    --                               total. NO hyphens.
+    --                               Slug: starts with [a-z], then
+    --                               any of [a-z0-9_].
     CONSTRAINT marketplace_ext_ktypes_name_chk
-        CHECK (ktype_name ~ '^ext\.[a-z][a-z0-9_-]*\.[a-z][a-z0-9_]*$'),
+        CHECK (ktype_name ~ '^ext\.[a-z][a-z0-9_]{2,31}\.[a-z][a-z0-9_]*$'),
     CONSTRAINT marketplace_ext_ktypes_version_positive_chk
         CHECK (ktype_version >= 1)
 );
