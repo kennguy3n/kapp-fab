@@ -284,13 +284,29 @@ func (e *Engine) Install(ctx context.Context, req *InstallRequest, bundle *Resol
 			return err
 		}
 
-		// Promote to 'active'.
-		_, err := tx.Exec(ctx,
+		// Promote to 'active'. RETURNING updated_at so the
+		// InstallResult.Installation reflects the post-promote
+		// timestamp instead of the timestamp captured by the
+		// INSERT ... RETURNING above (those two values are
+		// equal today because PostgreSQL's now() is the
+		// transaction-start time and the entire registration
+		// runs in one tx, but that equivalence is a fragile
+		// invariant: any future trigger / migration that
+		// rewrites updated_at on UPDATE — or an isolation
+		// change that splits the registration into multiple
+		// statements — would silently break the install ↔
+		// uninstall symmetry below (line 490-496) where
+		// Uninstall already scans RETURNING updated_at into
+		// install.UpdatedAt). Devin Review round-7
+		// ANALYSIS_0001 on PR #127. Defensive against future
+		// trigger/schema changes; same shape as Uninstall.
+		if err := tx.QueryRow(ctx,
 			`UPDATE marketplace_extension_installations
 			   SET status = 'active', updated_at = now()
-			 WHERE tenant_id = $1 AND id = $2`,
-			req.TenantID, installation.ID)
-		if err != nil {
+			 WHERE tenant_id = $1 AND id = $2
+			 RETURNING updated_at`,
+			req.TenantID, installation.ID,
+		).Scan(&installation.UpdatedAt); err != nil {
 			return fmt.Errorf("runtime: engine: promote to active: %w", err)
 		}
 		installation.Status = marketplace.InstallStatusActive

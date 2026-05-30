@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // LifecycleHooks is the abstraction the Engine uses to invoke
@@ -162,18 +163,32 @@ func (noopHooks) Dispatch(ctx context.Context, in *LifecycleDispatch) (*Lifecycl
 // via SignRequest and POSTs it via the Transport with a fixed retry
 // budget. Same backoff as agent-tool dispatch: 1 initial attempt + up
 // to 2 retries on 5xx / transport error, exponential backoff (1s, 2s).
+//
+// pool is used to write per-attempt rows into marketplace_dispatch_log
+// — symmetric with Dispatcher.Invoke (Devin Review round-7
+// ANALYSIS_0003 on PR #127). When pool is nil (NewTransportHooks
+// called without a DB pool), audit-row writes are skipped silently
+// and the hook returns its LifecycleResult unchanged. The latter
+// path exists for tests that exercise the retry/classification
+// logic without booting a Postgres harness.
 type transportHooks struct {
 	transport Transport
+	pool      *pgxpool.Pool
 	now       func() time.Time
 }
 
 // NewTransportHooks wraps a Transport with lifecycle-hook semantics.
-// If now is nil, time.Now is used.
-func NewTransportHooks(t Transport, now func() time.Time) LifecycleHooks {
+// If now is nil, time.Now is used. If pool is non-nil, every
+// lifecycle dispatch attempt also writes a marketplace_dispatch_log
+// row (symmetric with Dispatcher.Invoke). Engine.Install /
+// Engine.Uninstall always pass a non-nil pool; tests that exercise
+// only the HTTP-classification path may pass nil to skip audit
+// writes.
+func NewTransportHooks(t Transport, pool *pgxpool.Pool, now func() time.Time) LifecycleHooks {
 	if now == nil {
 		now = time.Now
 	}
-	return &transportHooks{transport: t, now: now}
+	return &transportHooks{transport: t, pool: pool, now: now}
 }
 
 // lifecycleRetryAttempts / lifecycleRetryBackoff are the immutable
@@ -270,16 +285,68 @@ func (h *transportHooks) Dispatch(ctx context.Context, in *LifecycleDispatch) (*
 		if err != nil {
 			return nil, fmt.Errorf("runtime: lifecycle sign: %w", err)
 		}
-		result.Signature = headers[SignatureHeaderName]
+		signature := headers[SignatureHeaderName]
+		result.Signature = signature
+
+		// Open the in-flight audit row BEFORE the HTTP send.
+		// Mirrors Dispatcher.Invoke's pattern: if the process
+		// dies mid-attempt, the row's NULL completed_at flags
+		// "in flight at crash time". Devin Review round-7
+		// ANALYSIS_0003 on PR #127 added this write — previously
+		// lifecycle hooks were dispatched without any audit
+		// trail, asymmetric with tool invokes. installation_id
+		// is uuid.Nil for pre_install (the install row doesn't
+		// exist yet at that phase); writeDispatchLogStart
+		// translates uuid.Nil → SQL NULL.
+		var logRowID uuid.UUID
+		if h.pool != nil {
+			startedID, startErr := writeDispatchLogStart(ctx, h.pool, dispatchLogStart{
+				TenantID:           in.TenantID,
+				InstallationID:     in.InstallationID,
+				ExtensionID:        in.ExtensionID,
+				ExtensionVersionID: in.ExtensionVersionID,
+				Kind:               dispatchReq.Kind,
+				Endpoint:           endpoint,
+				RequestID:          requestID,
+				Attempt:            attempt,
+				BodySHA256:         bodyHash,
+				Signature:          signature,
+				StartedAt:          ts,
+			})
+			if startErr != nil {
+				// Audit-row INSERT failure does NOT abort the
+				// dispatch — the lifecycle outcome is the
+				// operator-visible truth and a missing audit
+				// row is a degraded-mode concern, not a fatal
+				// one. Surface via slog so operators can
+				// correlate gaps with cause.
+				logAuditWriteFailure(ctx, string(in.Phase), requestID, attempt, startErr)
+			} else {
+				logRowID = startedID
+			}
+		}
+
+		started := time.Now()
 		resp, sendErr := h.transport.Send(ctx, endpoint, in.Body, headers, timeout)
+		latency := time.Since(started)
 		result.Attempt = attempt
 		if sendErr != nil {
 			lastErr = sendErr
 			result.Err = sendErr
+			if h.pool != nil {
+				if logErr := writeDispatchLogComplete(ctx, h.pool, in.TenantID, logRowID, 0, latency, sendErr); logErr != nil {
+					logAuditWriteFailure(ctx, string(in.Phase), requestID, attempt, logErr)
+				}
+			}
 			if !isRetryableTransportError(sendErr) {
 				break
 			}
 			continue
+		}
+		if h.pool != nil {
+			if logErr := writeDispatchLogComplete(ctx, h.pool, in.TenantID, logRowID, resp.Status, latency, nil); logErr != nil {
+				logAuditWriteFailure(ctx, string(in.Phase), requestID, attempt, logErr)
+			}
 		}
 		// Clear any transport-error state captured by a prior
 		// attempt — this attempt got an HTTP round-trip, so

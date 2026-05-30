@@ -112,7 +112,7 @@ func TestMarketplaceRuntime_EndToEnd(t *testing.T) {
 	rejectTransport := &runtime.InMemoryTransport{
 		Handler: runtime.StaticResponseHandler(403, []byte(`{"error":"policy denied"}`)),
 	}
-	rejectHooks := runtime.NewTransportHooks(rejectTransport, nil)
+	rejectHooks := runtime.NewTransportHooks(rejectTransport, h.pool, nil)
 	rejectEngine, err := runtime.NewEngine(runtime.EngineOptions{
 		Pool:  h.pool,
 		Store: store,
@@ -147,7 +147,7 @@ func TestMarketplaceRuntime_EndToEnd(t *testing.T) {
 
 	// --- (1)/(3) happy-path install on tenant A ---
 	okTransport := &runtime.InMemoryTransport{Handler: runtime.StaticResponseHandler(200, []byte(`{"ok":true}`))}
-	okHooks := runtime.NewTransportHooks(okTransport, nil)
+	okHooks := runtime.NewTransportHooks(okTransport, h.pool, nil)
 	engine, err := runtime.NewEngine(runtime.EngineOptions{
 		Pool:  h.pool,
 		Store: store,
@@ -471,7 +471,7 @@ func TestMarketplaceRuntime_Uninstall_ConcurrentRace(t *testing.T) {
 	}
 
 	okTransport := &runtime.InMemoryTransport{Handler: runtime.StaticResponseHandler(200, []byte(`{"ok":true}`))}
-	okHooks := runtime.NewTransportHooks(okTransport, nil)
+	okHooks := runtime.NewTransportHooks(okTransport, h.pool, nil)
 	engine, err := runtime.NewEngine(runtime.EngineOptions{
 		Pool: h.pool, Store: store, Hooks: okHooks,
 	})
@@ -652,7 +652,7 @@ func TestMarketplaceRuntime_Uninstall_SkipHooksWithEmptySecret(t *testing.T) {
 	}
 
 	okTransport := &runtime.InMemoryTransport{Handler: runtime.StaticResponseHandler(200, []byte(`{"ok":true}`))}
-	okHooks := runtime.NewTransportHooks(okTransport, nil)
+	okHooks := runtime.NewTransportHooks(okTransport, h.pool, nil)
 	engine, err := runtime.NewEngine(runtime.EngineOptions{
 		Pool: h.pool, Store: store, Hooks: okHooks,
 	})
@@ -844,7 +844,7 @@ func TestMarketplaceRuntime_Registrar_RetryFloor(t *testing.T) {
 	}
 
 	okTransport := &runtime.InMemoryTransport{Handler: runtime.StaticResponseHandler(200, []byte(`{"ok":true}`))}
-	okHooks := runtime.NewTransportHooks(okTransport, nil)
+	okHooks := runtime.NewTransportHooks(okTransport, h.pool, nil)
 	engine, err := runtime.NewEngine(runtime.EngineOptions{
 		Pool: h.pool, Store: store, Hooks: okHooks,
 	})
@@ -880,4 +880,242 @@ func TestMarketplaceRuntime_Registrar_RetryFloor(t *testing.T) {
 	if retryMaxAttempts != 1 {
 		t.Fatalf("retry_max_attempts = %d, want 1 (floor) — round-6 INFO_0003 regression", retryMaxAttempts)
 	}
+}
+
+// TestMarketplaceRuntime_LifecycleHooksWriteDispatchLog locks in
+// the round-7 Devin Review ANALYSIS_0003 fix on PR #127: lifecycle
+// hook dispatches (pre_install / post_install / pre_uninstall /
+// post_uninstall) MUST write rows to marketplace_dispatch_log so
+// the audit trail is symmetric with Dispatcher.Invoke.
+//
+// Pre-fix: Engine.Install and Engine.Uninstall called
+// hooks.Dispatch but did NOT write the returned LifecycleResult
+// into marketplace_dispatch_log. Forensics on a failed pre_install
+// (the most operationally important phase — extensions reject
+// installs here for policy / version / capacity reasons) had no
+// queryable record. Post-fix: every lifecycle attempt produces an
+// audit row, scoped by tenant, with phase encoded in the `kind`
+// column (lifecycle_pre_install / lifecycle_post_install /
+// lifecycle_pre_uninstall / lifecycle_post_uninstall) so an
+// operator can SELECT ... WHERE kind LIKE 'lifecycle_%'.
+//
+// Test setup: install + uninstall with a transport that returns
+// 200 for every phase, then read marketplace_dispatch_log filtered
+// by request_id to confirm 4 rows exist (one per phase). The
+// pre_install row has installation_id=NULL because the install
+// row doesn't exist when pre_install fires.
+func TestMarketplaceRuntime_LifecycleHooksWriteDispatchLog(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	pub := strings.ReplaceAll(uniqueSlug("rt-lcaudit"), "-", "_")
+	ext, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pub, Slug: "shipping",
+		DisplayName: "Shipping", Description: "Lifecycle dispatch-log audit regression",
+		Author: "ACME", License: "MIT",
+		Homepage: "https://acme.example/shipping",
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension: %v", err)
+	}
+	manifest := minimalRuntimeManifest(ext)
+	ver, err := store.PublishVersion(ctx, marketplace.PublishVersionInput{
+		ExtensionID: ext.ID, Manifest: manifest,
+		BundleHash: strings.Repeat("e", 64),
+		BundleSize: 4096,
+		BundleURL:  "https://cdn.example/bundles/rt-lcaudit.tgz",
+	})
+	if err != nil {
+		t.Fatalf("PublishVersion: %v", err)
+	}
+	rs := store.Reviews()
+	reviewer := uuid.New().String()
+	for _, step := range []marketplace.ReviewStatus{
+		marketplace.ReviewStatusAutomatedPassed,
+		marketplace.ReviewStatusManualReview,
+		marketplace.ReviewStatusApproved,
+	} {
+		if _, err := rs.UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
+			VersionID: ver.ID, Status: step, Reviewer: reviewer,
+		}); err != nil {
+			t.Fatalf("review transition to %s: %v", step, err)
+		}
+	}
+	if err := store.SetListedVersion(ctx, ext.ID, ver.Version); err != nil {
+		t.Fatalf("SetListedVersion: %v", err)
+	}
+	if err := store.UpdateExtensionStatus(ctx, ext.ID, marketplace.ExtensionStatusListed); err != nil {
+		t.Fatalf("UpdateExtensionStatus listed: %v", err)
+	}
+
+	tn, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("rt-lcaudit-a"), Name: "RT-LCAudit", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("tenant: %v", err)
+	}
+
+	okTransport := &runtime.InMemoryTransport{Handler: runtime.StaticResponseHandler(200, []byte(`{"ok":true}`))}
+	okHooks := runtime.NewTransportHooks(okTransport, h.pool, nil)
+	engine, err := runtime.NewEngine(runtime.EngineOptions{
+		Pool: h.pool, Store: store, Hooks: okHooks,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	bundle := minimalResolvedBundle(manifest)
+
+	beforeInstallCount := readLifecycleLogCount(ctx, t, h, tn.ID)
+
+	installRes, err := engine.Install(ctx, &runtime.InstallRequest{
+		TenantID:    tn.ID,
+		ExtensionID: ext.ID,
+		VersionID:   ver.ID,
+		WebhookBase: "https://tenant-lcaudit.example/hooks",
+	}, bundle)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	afterInstallCount := readLifecycleLogCount(ctx, t, h, tn.ID)
+	installAdded := afterInstallCount - beforeInstallCount
+	// pre_install + post_install = 2 rows. A single attempt each
+	// (transport returns 200 → no retries).
+	if installAdded != 2 {
+		t.Fatalf("install added %d lifecycle dispatch_log rows, want 2 (pre+post)", installAdded)
+	}
+
+	// Check the pre_install row: it MUST have installation_id=NULL
+	// because the install row doesn't exist yet at pre_install
+	// dispatch time. The migration's `ON DELETE SET NULL` clause
+	// on the FK (000069:284) is what allows the column to hold
+	// NULL.
+	preInstallNullRows := readLifecycleLogNullInstallRows(ctx, t, h, tn.ID, "lifecycle_pre_install")
+	if preInstallNullRows != 1 {
+		t.Fatalf("pre_install rows with installation_id IS NULL = %d, want 1", preInstallNullRows)
+	}
+
+	// Check that post_install rows DO carry the install ID.
+	postInstallRows := readLifecycleLogRowsForInstall(ctx, t, h, tn.ID, installRes.Installation.ID, "lifecycle_post_install")
+	if postInstallRows != 1 {
+		t.Fatalf("post_install rows for install %s = %d, want 1", installRes.Installation.ID, postInstallRows)
+	}
+
+	// Every lifecycle row must have completed_at populated (the
+	// in-flight UPDATE happened after the transport.Send returned
+	// 200).
+	incomplete := readLifecycleLogIncompleteRows(ctx, t, h, tn.ID)
+	if incomplete != 0 {
+		t.Fatalf("lifecycle dispatch_log rows with NULL completed_at = %d, want 0", incomplete)
+	}
+
+	// Uninstall adds 2 more rows.
+	beforeUninstall := afterInstallCount
+	if _, err := engine.Uninstall(ctx, &runtime.UninstallRequest{
+		TenantID:       tn.ID,
+		InstallationID: installRes.Installation.ID,
+	}); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	afterUninstall := readLifecycleLogCount(ctx, t, h, tn.ID)
+	uninstallAdded := afterUninstall - beforeUninstall
+	if uninstallAdded != 2 {
+		t.Fatalf("uninstall added %d lifecycle dispatch_log rows, want 2 (pre+post)", uninstallAdded)
+	}
+
+	// Bonus: round-7 ANALYSIS_0001 (Engine.Install promote
+	// RETURNING updated_at). InstallResult.Installation.UpdatedAt
+	// MUST reflect the post-promotion timestamp. With a single-
+	// statement tx PostgreSQL's now() = transaction-start, so
+	// pre-fix this assertion was non-distinguishing (the INSERT
+	// updated_at == the UPDATE updated_at). The fix is defensive
+	// against future trigger/schema changes: a future BEFORE
+	// UPDATE trigger that sets updated_at = clock_timestamp() or
+	// a migration that splits the registration into multiple
+	// statements would only be caught if the Install path scans
+	// the RETURNING value. Here we just assert UpdatedAt is not
+	// zero — full freshness is verified by the Uninstall
+	// counterpart (round-6 BUG_0002 test, already in this file).
+	if installRes.Installation.UpdatedAt.IsZero() {
+		t.Fatalf("Installation.UpdatedAt is zero — RETURNING updated_at did not Scan")
+	}
+	if installRes.Installation.UpdatedAt.Before(installRes.Installation.InstalledAt) {
+		t.Fatalf("Installation.UpdatedAt %v < InstalledAt %v — RETURNING value not captured from UPDATE",
+			installRes.Installation.UpdatedAt, installRes.Installation.InstalledAt)
+	}
+}
+
+// readLifecycleLogCount returns the number of dispatch_log rows
+// for the tenant whose kind starts with 'lifecycle_'. Used by
+// TestMarketplaceRuntime_LifecycleHooksWriteDispatchLog above.
+func readLifecycleLogCount(ctx context.Context, t *testing.T, h *harness, tenantID uuid.UUID) int {
+	t.Helper()
+	var n int
+	if err := dbutil.WithTenantTx(ctx, h.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM marketplace_dispatch_log
+			  WHERE tenant_id = $1
+			    AND kind LIKE 'lifecycle_%'`,
+			tenantID).Scan(&n)
+	}); err != nil {
+		t.Fatalf("readLifecycleLogCount: %v", err)
+	}
+	return n
+}
+
+// readLifecycleLogNullInstallRows returns the count of dispatch_log
+// rows for the given tenant and kind whose installation_id IS NULL
+// (the pre_install case — install row doesn't exist yet).
+func readLifecycleLogNullInstallRows(ctx context.Context, t *testing.T, h *harness, tenantID uuid.UUID, kind string) int {
+	t.Helper()
+	var n int
+	if err := dbutil.WithTenantTx(ctx, h.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM marketplace_dispatch_log
+			  WHERE tenant_id = $1
+			    AND kind = $2
+			    AND installation_id IS NULL`,
+			tenantID, kind).Scan(&n)
+	}); err != nil {
+		t.Fatalf("readLifecycleLogNullInstallRows: %v", err)
+	}
+	return n
+}
+
+// readLifecycleLogRowsForInstall returns the count of dispatch_log
+// rows for the given tenant + install + kind.
+func readLifecycleLogRowsForInstall(ctx context.Context, t *testing.T, h *harness, tenantID, installID uuid.UUID, kind string) int {
+	t.Helper()
+	var n int
+	if err := dbutil.WithTenantTx(ctx, h.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM marketplace_dispatch_log
+			  WHERE tenant_id = $1
+			    AND installation_id = $2
+			    AND kind = $3`,
+			tenantID, installID, kind).Scan(&n)
+	}); err != nil {
+		t.Fatalf("readLifecycleLogRowsForInstall: %v", err)
+	}
+	return n
+}
+
+// readLifecycleLogIncompleteRows returns the count of lifecycle
+// dispatch_log rows where completed_at IS NULL — used to assert
+// the writeDispatchLogComplete UPDATE actually fired.
+func readLifecycleLogIncompleteRows(ctx context.Context, t *testing.T, h *harness, tenantID uuid.UUID) int {
+	t.Helper()
+	var n int
+	if err := dbutil.WithTenantTx(ctx, h.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM marketplace_dispatch_log
+			  WHERE tenant_id = $1
+			    AND kind LIKE 'lifecycle_%'
+			    AND completed_at IS NULL`,
+			tenantID).Scan(&n)
+	}); err != nil {
+		t.Fatalf("readLifecycleLogIncompleteRows: %v", err)
+	}
+	return n
 }

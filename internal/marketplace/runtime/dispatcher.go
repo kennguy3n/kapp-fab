@@ -184,7 +184,19 @@ func (d *Dispatcher) Invoke(ctx context.Context, in *InvokeRequest) (*InvokeResu
 		// dispatch (response_status NULL, error NULL means "in
 		// flight at crash time"). Completion is a subsequent
 		// UPDATE in the same logical attempt.
-		logRowID, err := d.writeDispatchLogStart(ctx, in.TenantID, in.InstallationID, desc, requestID, attempt, dispatchReq.Kind, bodyHash, signature, ts)
+		logRowID, err := writeDispatchLogStart(ctx, d.pool, dispatchLogStart{
+			TenantID:           in.TenantID,
+			InstallationID:     in.InstallationID,
+			ExtensionID:        desc.ExtensionID,
+			ExtensionVersionID: desc.ExtensionVersionID,
+			Kind:               dispatchReq.Kind,
+			Endpoint:           desc.Endpoint,
+			RequestID:          requestID,
+			Attempt:            attempt,
+			BodySHA256:         bodyHash,
+			Signature:          signature,
+			StartedAt:          ts,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("runtime: invoke: open log: %w", err)
 		}
@@ -195,12 +207,18 @@ func (d *Dispatcher) Invoke(ctx context.Context, in *InvokeRequest) (*InvokeResu
 
 		if sendErr != nil {
 			lastSendErr = sendErr
-			if logErr := d.writeDispatchLogComplete(ctx, in.TenantID, logRowID, 0, latency, sendErr); logErr != nil {
-				// Audit log write failure is logged but does not
-				// abort the dispatch — the response is still
-				// surfaced to the caller. Operators see the gap
-				// via the row's NULL completed_at.
-				_ = logErr
+			if logErr := writeDispatchLogComplete(ctx, d.pool, in.TenantID, logRowID, 0, latency, sendErr); logErr != nil {
+				// Audit-log write failure does NOT abort the dispatch
+				// (the tool response is the operator-visible outcome),
+				// but it IS surfaced via slog.Warn so operators can
+				// correlate dispatch_log gaps with underlying causes
+				// (DB outage, pool exhaustion, RLS misconfig). Devin
+				// Review round-7 ANALYSIS_0002 on PR #127 caught the
+				// previous silent `_ = logErr` discard: the comment
+				// claimed the failure was "logged" but no actual
+				// logging happened, leaving operators blind to gaps
+				// in the audit trail.
+				logAuditWriteFailure(ctx, "tool_invoke", requestID, attempt, logErr)
 			}
 			if !isRetryableTransportError(sendErr) || attempt == retry.MaxAttempts {
 				if errors.Is(sendErr, ErrDispatchTimeout) {
@@ -210,8 +228,8 @@ func (d *Dispatcher) Invoke(ctx context.Context, in *InvokeRequest) (*InvokeResu
 			}
 			continue
 		}
-		if logErr := d.writeDispatchLogComplete(ctx, in.TenantID, logRowID, resp.Status, latency, nil); logErr != nil {
-			_ = logErr
+		if logErr := writeDispatchLogComplete(ctx, d.pool, in.TenantID, logRowID, resp.Status, latency, nil); logErr != nil {
+			logAuditWriteFailure(ctx, "tool_invoke", requestID, attempt, logErr)
 		}
 		result.Status = resp.Status
 		result.Body = resp.Body
@@ -339,60 +357,12 @@ func (d *Dispatcher) lookupDescriptor(ctx context.Context, in *InvokeRequest) (*
 	return desc, nil
 }
 
-// writeDispatchLogStart inserts the per-attempt row before the HTTP
-// round-trip. Returns the row's UUID so writeDispatchLogComplete
-// can update it.
-func (d *Dispatcher) writeDispatchLogStart(ctx context.Context, tenantID, installID uuid.UUID, desc *agentToolDescriptor, requestID uuid.UUID, attempt int, kind DispatchKind, bodyHash, signature string, startedAt time.Time) (uuid.UUID, error) {
-	var id uuid.UUID
-	err := dbutil.WithTenantTx(ctx, d.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		row := tx.QueryRow(ctx, `
-			INSERT INTO marketplace_dispatch_log
-				(tenant_id, installation_id, extension_id, extension_version_id,
-				 kind, endpoint, request_id, attempt,
-				 request_body_sha256, signature, started_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-			RETURNING id`,
-			tenantID, installID, desc.ExtensionID, desc.ExtensionVersionID,
-			string(kind), desc.Endpoint, requestID, attempt,
-			bodyHash, signature, startedAt)
-		return row.Scan(&id)
-	})
-	if err != nil {
-		return uuid.Nil, err
-	}
-	return id, nil
-}
-
-// writeDispatchLogComplete updates the row inserted by
-// writeDispatchLogStart with the response status, latency, and any
-// transport-level error.
-func (d *Dispatcher) writeDispatchLogComplete(ctx context.Context, tenantID, rowID uuid.UUID, status int, latency time.Duration, sendErr error) error {
-	var (
-		statusPtr  *int
-		latencyPtr *int
-		errorPtr   *string
-	)
-	if status > 0 {
-		statusPtr = &status
-	}
-	if latency > 0 {
-		ms := int(latency / time.Millisecond)
-		latencyPtr = &ms
-	}
-	if sendErr != nil {
-		s := sendErr.Error()
-		errorPtr = &s
-	}
-	return dbutil.WithTenantTx(ctx, d.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `
-			UPDATE marketplace_dispatch_log
-			   SET response_status = $2,
-			       response_latency_ms = $3,
-			       error = $4,
-			       completed_at = now()
-			 WHERE tenant_id = $1
-			   AND id = $5`,
-			tenantID, statusPtr, latencyPtr, errorPtr, rowID)
-		return err
-	})
-}
+// writeDispatchLogStart / writeDispatchLogComplete previously
+// lived on *Dispatcher as methods. They were extracted to module-
+// level helpers in dispatch_log.go (Devin Review round-7
+// ANALYSIS_0003 on PR #127) so transportHooks.Dispatch can reuse
+// the same audit-row INSERT/UPDATE path. See dispatch_log.go for
+// the implementation. The Dispatcher's previous comment block on
+// the in-flight semantics (row inserted before HTTP attempt;
+// completed_at left NULL on process crash) is preserved at the
+// call site above (line 182-186).

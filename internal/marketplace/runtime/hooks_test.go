@@ -59,7 +59,7 @@ func TestNoopHooks_RejectsBadDispatch(t *testing.T) {
 
 func TestTransportHooks_PreInstall_2xx_NotAborted(t *testing.T) {
 	tr := &InMemoryTransport{Handler: StaticResponseHandler(200, []byte(`{"ok":true}`))}
-	hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+	hooks := NewTransportHooks(tr, nil, fixedClock(time.Unix(1700000000, 0).UTC()))
 
 	in := validLifecycleDispatch(t)
 	in.Phase = PhasePreInstall
@@ -87,7 +87,7 @@ func TestTransportHooks_PreInstall_2xx_NotAborted(t *testing.T) {
 
 func TestTransportHooks_PreInstall_404_NotAborted(t *testing.T) {
 	tr := &InMemoryTransport{Handler: StaticResponseHandler(404, nil)}
-	hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+	hooks := NewTransportHooks(tr, nil, fixedClock(time.Unix(1700000000, 0).UTC()))
 
 	in := validLifecycleDispatch(t)
 	in.Phase = PhasePreInstall
@@ -109,7 +109,7 @@ func TestTransportHooks_PreInstall_404_NotAborted(t *testing.T) {
 
 func TestTransportHooks_PreInstall_4xxOther_Aborts(t *testing.T) {
 	tr := &InMemoryTransport{Handler: StaticResponseHandler(403, []byte(`{"error":"denied"}`))}
-	hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+	hooks := NewTransportHooks(tr, nil, fixedClock(time.Unix(1700000000, 0).UTC()))
 
 	in := validLifecycleDispatch(t)
 	in.Phase = PhasePreInstall
@@ -139,7 +139,7 @@ func TestTransportHooks_PreInstall_5xxRetried_Aborts(t *testing.T) {
 	}
 	tr := &InMemoryTransport{Handler: SequenceHandler(responses, nil)}
 	// Use a zero-Now so backoff stays cheap in test wall-clock.
-	hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+	hooks := NewTransportHooks(tr, nil, fixedClock(time.Unix(1700000000, 0).UTC()))
 
 	in := validLifecycleDispatch(t)
 	in.Phase = PhasePreInstall
@@ -168,7 +168,7 @@ func TestTransportHooks_PreInstall_5xxThen2xx_Succeeds(t *testing.T) {
 		{Status: 200, Header: map[string]string{}},
 	}
 	tr := &InMemoryTransport{Handler: SequenceHandler(responses, nil)}
-	hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+	hooks := NewTransportHooks(tr, nil, fixedClock(time.Unix(1700000000, 0).UTC()))
 
 	in := validLifecycleDispatch(t)
 
@@ -194,7 +194,7 @@ func TestTransportHooks_PostInstall_5xxExhausted_NotAborted(t *testing.T) {
 		{Status: 503, Header: map[string]string{}},
 	}
 	tr := &InMemoryTransport{Handler: SequenceHandler(responses, nil)}
-	hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+	hooks := NewTransportHooks(tr, nil, fixedClock(time.Unix(1700000000, 0).UTC()))
 
 	in := validLifecycleDispatch(t)
 	in.Phase = PhasePostInstall
@@ -215,7 +215,7 @@ func TestTransportHooks_PreInstall_TransportError_Aborts(t *testing.T) {
 	tr := &InMemoryTransport{Handler: func(ctx context.Context, _ string, _ []byte, _ map[string]string) (*DispatchResponse, error) {
 		return nil, errors.New("simulated dns failure")
 	}}
-	hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+	hooks := NewTransportHooks(tr, nil, fixedClock(time.Unix(1700000000, 0).UTC()))
 
 	in := validLifecycleDispatch(t)
 	in.Phase = PhasePreInstall
@@ -278,7 +278,7 @@ func TestTransportHooks_PreInstall_408Retried_ThenSucceeds(t *testing.T) {
 		{Status: 200, Header: map[string]string{}},
 	}
 	tr := &InMemoryTransport{Handler: SequenceHandler(responses, nil)}
-	hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+	hooks := NewTransportHooks(tr, nil, fixedClock(time.Unix(1700000000, 0).UTC()))
 
 	in := validLifecycleDispatch(t)
 	in.Phase = PhasePreInstall
@@ -310,7 +310,7 @@ func TestTransportHooks_PreInstall_408Exhausted_AbortsWithHttpReason(t *testing.
 		{Status: 408, Header: map[string]string{}},
 	}
 	tr := &InMemoryTransport{Handler: SequenceHandler(responses, nil)}
-	hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+	hooks := NewTransportHooks(tr, nil, fixedClock(time.Unix(1700000000, 0).UTC()))
 
 	in := validLifecycleDispatch(t)
 	in.Phase = PhasePreInstall
@@ -351,7 +351,7 @@ func TestTransportHooks_PreInstall_TransportErrThen5xxExhausted_AbortReasonRefle
 		nil,
 	}
 	tr := &InMemoryTransport{Handler: SequenceHandler(responses, errs)}
-	hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+	hooks := NewTransportHooks(tr, nil, fixedClock(time.Unix(1700000000, 0).UTC()))
 
 	in := validLifecycleDispatch(t)
 	in.Phase = PhasePreInstall
@@ -387,7 +387,7 @@ func TestTransportHooks_PreInstall_3xx_TerminalNotRetried(t *testing.T) {
 	for _, status := range []int{301, 302, 307, 308, 399} {
 		t.Run("status_"+fmt.Sprint(status), func(t *testing.T) {
 			tr := &InMemoryTransport{Handler: StaticResponseHandler(status, nil)}
-			hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+			hooks := NewTransportHooks(tr, nil, fixedClock(time.Unix(1700000000, 0).UTC()))
 
 			in := validLifecycleDispatch(t)
 			in.Phase = PhasePreInstall
@@ -424,7 +424,7 @@ func TestTransportHooks_PreInstall_3xx_TerminalNotRetried(t *testing.T) {
 // still applies, so the audit log records a single attempt.
 func TestTransportHooks_PostInstall_3xx_BestEffortNotAborted(t *testing.T) {
 	tr := &InMemoryTransport{Handler: StaticResponseHandler(302, nil)}
-	hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+	hooks := NewTransportHooks(tr, nil, fixedClock(time.Unix(1700000000, 0).UTC()))
 
 	in := validLifecycleDispatch(t)
 	in.Phase = PhasePostInstall
