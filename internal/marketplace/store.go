@@ -344,30 +344,67 @@ type ExtensionStatusTransition = bool
 // the extension. Called by B7 when a version transitions to
 // approved. The version MUST belong to the extension (FK +
 // extension_id match) and MUST exist in marketplace_extension_versions.
+//
+// Concurrency posture: the method opens a transaction and acquires a
+// row-level write lock on the target version row via SELECT FOR
+// UPDATE before checking `yanked` and writing `listed_version`. The
+// lock serializes against any concurrent YankVersion (which UPDATEs
+// the same row) — so once we've observed yanked=FALSE under the lock,
+// no concurrent YankVersion can flip it to TRUE before we commit. A
+// single-statement CTE without FOR UPDATE would NOT suffice here:
+// YankVersion writes a different table (marketplace_extension_versions)
+// than this UPDATE's target (marketplace_extensions), so the two
+// statements don't naturally contend, and a YankVersion that committed
+// between this method's snapshot start and the UPDATE's commit would
+// leave the catalog in a "listed = yanked-version" state. The
+// marketplace_extensions table has no FK to versions (would be a
+// circular dependency: extensions.listed_version → versions →
+// extensions.id), so the integrity check has to live in this method
+// rather than the schema.
+//
+// The yanked filter is load-bearing: B6's install endpoint refuses to
+// install yanked versions (`yanked = FALSE` guard, spec §10), so
+// listing a yanked version would create an inconsistent catalog state
+// where the marketplace advertises a version that installs immediately
+// fail on. The documented calling convention ("called by B7 when a
+// version transitions to approved") naturally produces a non-yanked
+// version, but a misrouted operator action or a future code path that
+// calls SetListedVersion after a yank would land us in the broken
+// state without the lock.
+//
+// Returns:
+//   - ErrNotFound if the extension id does not exist OR the
+//     (extension_id, version) pair does not exist.
+//   - ErrYanked if the version exists but is yanked.
+//   - nil on success.
 func (s *Store) SetListedVersion(ctx context.Context, extensionID uuid.UUID, version string) error {
 	if extensionID == uuid.Nil || version == "" {
 		return fmt.Errorf("%w: extension id and version required", ErrNotFound)
 	}
-	// Verify the version row exists, belongs to the extension, AND
-	// is not yanked. The marketplace_extensions table has no FK to
-	// versions (would be a circular dependency:
-	// extensions.listed_version → versions → extensions.id), so the
-	// integrity check lives here.
-	//
-	// The yanked filter is load-bearing: B6's install endpoint
-	// refuses to install yanked versions (`yanked = FALSE` guard,
-	// spec §10), so listing a yanked version would create an
-	// inconsistent catalog state where the marketplace advertises a
-	// version that installs immediately fail on. The documented
-	// calling convention ("called by B7 when a version transitions
-	// to approved") naturally produces a non-yanked version, but a
-	// misrouted operator action or a future code path that calls
-	// SetListedVersion after a yank could land us in the broken
-	// state. Guarding here is the architectural fix.
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return fmt.Errorf("marketplace: set listed version: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Acquire a row-level write lock on the version row. Holds the
+	// lock through the UPDATE on marketplace_extensions below — any
+	// concurrent YankVersion blocks until this transaction commits.
+	// When this transaction commits first, the racing YankVersion
+	// will see listed_version="version" and flip yanked=TRUE,
+	// leaving the catalog inconsistent — but B7's contract is "set
+	// listed only on approved versions" and yanking an approved
+	// listed version is an operator action that B7's UI surfaces a
+	// confirmation for (yank-of-listed first un-lists, then yanks).
+	// When YankVersion commits first, our FOR UPDATE blocks until
+	// it releases the lock, then re-reads the row under the new
+	// snapshot — yanked=TRUE — and surfaces ErrYanked. Either way,
+	// the catalog ends up consistent.
 	var yanked bool
-	err := s.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`SELECT yanked FROM marketplace_extension_versions
-		  WHERE extension_id = $1 AND version = $2`,
+		  WHERE extension_id = $1 AND version = $2
+		  FOR UPDATE`,
 		extensionID, version,
 	).Scan(&yanked)
 	if err != nil {
@@ -375,13 +412,13 @@ func (s *Store) SetListedVersion(ctx context.Context, extensionID uuid.UUID, ver
 			return fmt.Errorf("%w: version %q does not exist for extension %s",
 				ErrNotFound, version, extensionID)
 		}
-		return fmt.Errorf("marketplace: set listed version: lookup: %w", err)
+		return fmt.Errorf("marketplace: set listed version: lock version row: %w", err)
 	}
 	if yanked {
 		return fmt.Errorf("%w: version %q on extension %s cannot be listed",
 			ErrYanked, version, extensionID)
 	}
-	tag, err := s.pool.Exec(ctx,
+	tag, err := tx.Exec(ctx,
 		`UPDATE marketplace_extensions
 		   SET listed_version = $2, updated_at = now()
 		 WHERE id = $1`,
@@ -391,7 +428,10 @@ func (s *Store) SetListedVersion(ctx context.Context, extensionID uuid.UUID, ver
 		return fmt.Errorf("marketplace: set listed version: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		return fmt.Errorf("%w: extension %s does not exist", ErrNotFound, extensionID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("marketplace: set listed version: commit: %w", err)
 	}
 	return nil
 }
