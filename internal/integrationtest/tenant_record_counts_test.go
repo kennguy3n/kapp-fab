@@ -137,10 +137,20 @@ func TestTenantRecordCounts_BumpAndReconcile(t *testing.T) {
 }
 
 // readCount returns tenant_record_counts.record_count for the tenant
-// or -1 when no row exists. We bypass WithTenantTx and use a plain
-// admin-style query so the test can distinguish "row absent" from
-// "row present with value 0", which the production code path
-// conflates (both mean "allow the insert").
+// or -1 when no row exists. The query runs through WithTenantTx
+// because tenant_record_counts has RLS enabled — a plain admin pool
+// query would either be filtered out or require a separate BYPASSRLS
+// connection just for the test. WithTenantTx sets app.tenant_id so the
+// RLS USING clause passes; the value we read is still the same single
+// row keyed by tenant_id.
+//
+// The reason this helper exists at all (instead of calling
+// QuotaEnforcer.CheckRecordCount) is that the production read path
+// conflates "row absent" with "row present with value 0" — both yield
+// count=0 and "allow the insert". The test needs to assert the
+// stronger property that the fresh-tenant code path never created a
+// counter row, which only a raw SELECT distinguishing pgx.ErrNoRows
+// from a zero scan can express.
 func readCount(t *testing.T, pool *pgxpool.Pool, tenantID uuid.UUID) int64 {
 	t.Helper()
 	var n int64
