@@ -270,6 +270,23 @@ func (s *PGStore) bulkDeleteOne(
 	// subset of the input ids fail the "already deleted" guard above —
 	// only rows that reach this point actually transitioned krecords
 	// out of the active set, so only this point may shrink the counter.
+	//
+	// MAINTENANCE: every new krecords mutation that changes the
+	// active-record count MUST mirror this pattern — call
+	// platform.BumpTenantRecordCount inside the same WithTenantTx as
+	// the row mutation so a rollback (audit emit failure, FK violation,
+	// etc.) un-does the counter change atomically with the krecords
+	// row. The three current call sites are:
+	//
+	//   - record.PGStore.Create        (+1) — see store.go::Create
+	//   - record.PGStore.Delete        (-1) — see store.go::Delete
+	//   - record.PGStore.bulkDeleteOne (-1) — this function
+	//
+	// If a BulkCreate is added, do per-row +1 bumps inside the inner
+	// loop (mirroring bulkDeleteOne) so partial-success bulk inserts
+	// stay correct — do NOT batch a +N at the end. Update / BulkPatch
+	// only touch data/updated_by/version (never status), so they
+	// correctly omit the bump.
 	if err := platform.BumpTenantRecordCount(ctx, tx, tenantID, -1); err != nil {
 		return err
 	}
