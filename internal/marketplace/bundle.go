@@ -6,7 +6,31 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 )
+
+// bundleHashRegex pins the hex-string shape callers must pass to
+// Store.PublishVersion / Store.GetVersion and that VerifyBundleHash
+// expects from external input. Matches the DB CHECK constraint on
+// marketplace_extension_versions.bundle_hash exactly (lower-case hex,
+// 64 chars = 256 bits / 4 bits-per-nibble). HashBundle / HashBundleBytes
+// always produce a string in this shape, but an external caller that
+// constructs PublishVersionInput manually (e.g. an admin CLI passing
+// a header value) could pass an upper-case hash or a non-hex string —
+// without this guard the row would fail the DB CHECK and surface as
+// an opaque SQLSTATE 23514 instead of the targeted ErrInvalidManifest.
+// Validating in Go gives the publisher a clear field-level error and
+// avoids a wasted round-trip.
+var bundleHashRegex = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
+// IsValidBundleHash reports whether s is in the canonical form the
+// marketplace stores in marketplace_extension_versions.bundle_hash —
+// lower-case hex, exactly 64 chars. The DB CHECK enforces the same
+// shape, so a true response here is also a guarantee the value will
+// be accepted by the constraint.
+func IsValidBundleHash(s string) bool {
+	return bundleHashRegex.MatchString(s)
+}
 
 // MaxBundleSizeBytes is the hard cap on a single .tar.gz upload. Spec
 // §2 ("Total bundle size (post-extract) 10 MiB"). We reuse the same
