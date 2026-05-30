@@ -424,6 +424,51 @@ func TestMarketplaceRegistry_EndToEnd(t *testing.T) {
 		t.Error("approved→rejected should be rejected (terminal)")
 	}
 
+	// --- (8a) Terminal self-loop audit-trail guards ---
+	// approved → approved with a DIFFERENT reviewer must be
+	// rejected loudly. Without the guard the UPDATE would silently
+	// overwrite the alice@example.com audit record with bob's.
+	if _, err := rs.UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
+		VersionID: ver1.ID, Status: marketplace.ReviewStatusApproved,
+		Reviewer: "bob@example.com",
+	}); err == nil {
+		t.Error("approved→approved with different reviewer should be rejected (audit-trail-overwrite)")
+	} else if !strings.Contains(err.Error(), "audit trail is write-once") {
+		t.Errorf("approved→approved different-reviewer: want audit-trail-write-once message, got %v", err)
+	}
+	// Verify the row is unchanged: reviewer still alice, the
+	// original reviewed_at timestamp preserved bit-for-bit.
+	preserved, err := rs.GetReviewState(ctx, ver1.ID)
+	if err != nil {
+		t.Fatalf("post-reject GetReviewState: %v", err)
+	}
+	if preserved.Reviewer != "alice@example.com" {
+		t.Errorf("alice's reviewer must survive a rejected bob attempt; got %q", preserved.Reviewer)
+	}
+	// approved → approved with the SAME reviewer is an idempotent
+	// no-op: returns the existing row unchanged (no UPDATE fires).
+	beforeSL, err := rs.GetReviewState(ctx, ver1.ID)
+	if err != nil {
+		t.Fatalf("pre-self-loop GetReviewState: %v", err)
+	}
+	afterSL, err := rs.UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
+		VersionID: ver1.ID, Status: marketplace.ReviewStatusApproved,
+		Reviewer: "alice@example.com",
+	})
+	if err != nil {
+		t.Fatalf("approved→approved same-reviewer should be idempotent: %v", err)
+	}
+	if afterSL.Reviewer != "alice@example.com" {
+		t.Errorf("approved self-loop must preserve reviewer; got %q", afterSL.Reviewer)
+	}
+	if beforeSL.ReviewedAt == nil || afterSL.ReviewedAt == nil {
+		t.Fatalf("reviewed_at unexpectedly nil before=%v after=%v", beforeSL.ReviewedAt, afterSL.ReviewedAt)
+	}
+	if !afterSL.ReviewedAt.Equal(*beforeSL.ReviewedAt) {
+		t.Errorf("approved self-loop must preserve reviewed_at: before=%v after=%v",
+			*beforeSL.ReviewedAt, *afterSL.ReviewedAt)
+	}
+
 	// --- (9) ListExtensions filter ---
 	listed, err := store.ListExtensions(ctx, marketplace.ListExtensionsFilter{
 		Status: marketplace.ExtensionStatusListed,
@@ -651,11 +696,36 @@ func TestMarketplaceRegistry_UpdateReviewState_Concurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if errA != nil {
-		t.Errorf("caller A: %v", errA)
+	// Under contention there are two valid outcomes for each caller:
+	//
+	//   1. nil error: the caller either won the race (its UPDATE
+	//      committed first) or lost and hit the idempotent
+	//      convergence path inside the retry loop (its GetReviewState
+	//      ran BEFORE the winner committed, so its `current` was
+	//      `submitted`; the UPDATE failed with RowsAffected=0; the
+	//      re-read saw `rejected`, returned the winner's row).
+	//
+	//   2. audit-trail-write-once error: the caller's GetReviewState
+	//      ran AFTER the winner committed, so its `current` was
+	//      already `rejected` (terminal) AND the caller's reviewer
+	//      differs from the winner's. The new terminal-self-loop
+	//      guard (Finding 6) rejects this explicitly rather than
+	//      silently overwriting the audit trail.
+	//
+	// EXACTLY ONE caller must observe nil (the winner whose UPDATE
+	// committed). The other observes EITHER nil (loser-converged)
+	// OR the audit-trail error. Either way, the winner's reviewer
+	// and notes survive — the invariant the test really asserts.
+	const auditTrailFragment = "audit trail is write-once"
+	if errA != nil && !strings.Contains(errA.Error(), auditTrailFragment) {
+		t.Errorf("caller A: unexpected non-audit-trail error: %v", errA)
 	}
-	if errB != nil {
-		t.Errorf("caller B: %v", errB)
+	if errB != nil && !strings.Contains(errB.Error(), auditTrailFragment) {
+		t.Errorf("caller B: unexpected non-audit-trail error: %v", errB)
+	}
+	if errA != nil && errB != nil {
+		t.Errorf("both callers reported errors — at least one UPDATE must have committed; errA=%v errB=%v",
+			errA, errB)
 	}
 	// Final row MUST be rejected with reviewer matching exactly one
 	// of the two callers — proving the loser's UPDATE did not fire

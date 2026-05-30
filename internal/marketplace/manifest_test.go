@@ -353,6 +353,83 @@ func TestParseManifestRejections(t *testing.T) {
 			field:    "schema_version",
 			fragment: "must be 1",
 		},
+		{
+			// Two agent_tools entries with the same definition path
+			// would resolve to the same tool name at extract time
+			// and crash on the install-time UNIQUE(tenant_id,
+			// installation_id, tool_name) constraint. Reject at
+			// upload time with a clearer error message.
+			name: "duplicate agent_tools definition path rejected",
+			mutate: func(in string) string {
+				return strings.Replace(in,
+					"agent_tools:\n  - definition: ./tools/print_label.json\n    handler: webhook\n    endpoint: ${EXTENSION_WEBHOOK_BASE}/print\n    timeout: 5s\n    retry:\n      max_attempts: 2\n      backoff: exponential\n",
+					"agent_tools:\n  - definition: ./tools/print_label.json\n    handler: webhook\n    endpoint: ${EXTENSION_WEBHOOK_BASE}/print\n    timeout: 5s\n  - definition: ./tools/print_label.json\n    handler: webhook\n    endpoint: ${EXTENSION_WEBHOOK_BASE}/print2\n    timeout: 5s\n",
+					1)
+			},
+			field:    "agent_tools[1].definition",
+			fragment: "duplicate path",
+		},
+		{
+			// Two webhooks_consumed entries with identical (event,
+			// endpoint) tuple would deliver the same payload to the
+			// same URL twice. Duplicate tuples must be rejected;
+			// different endpoints for the same event are legitimate
+			// (extension wants both POSTs).
+			name: "duplicate webhooks_consumed (event,endpoint) rejected",
+			mutate: func(in string) string {
+				return strings.Replace(in,
+					"webhooks_consumed:\n  - event: sales.order.created\n    endpoint: ${EXTENSION_WEBHOOK_BASE}/order_created\n",
+					"webhooks_consumed:\n  - event: sales.order.created\n    endpoint: ${EXTENSION_WEBHOOK_BASE}/order_created\n  - event: sales.order.created\n    endpoint: ${EXTENSION_WEBHOOK_BASE}/order_created\n",
+					1)
+			},
+			field:    "webhooks_consumed[1]",
+			fragment: "duplicate",
+		},
+		{
+			// Two posting_hooks entries with identical (ktype, when,
+			// endpoint) triple would fire the same callback twice
+			// per record event. Reject the literal triple-duplicate.
+			name: "duplicate posting_hooks triple rejected",
+			mutate: func(in string) string {
+				return strings.Replace(in,
+					"posting_hooks:\n  - ktype: sales.order\n    when: after_create\n    endpoint: ${EXTENSION_WEBHOOK_BASE}/order_hook\n",
+					"posting_hooks:\n  - ktype: sales.order\n    when: after_create\n    endpoint: ${EXTENSION_WEBHOOK_BASE}/order_hook\n  - ktype: sales.order\n    when: after_create\n    endpoint: ${EXTENSION_WEBHOOK_BASE}/order_hook\n",
+					1)
+			},
+			field:    "posting_hooks[1]",
+			fragment: "duplicate",
+		},
+		{
+			// Two ui_extensions entries with identical
+			// (slot, target_ktype, label, component_url) tuple would
+			// render two identical buttons firing the same component
+			// — unambiguously a manifest bug.
+			name: "duplicate ui_extensions tuple rejected",
+			mutate: func(in string) string {
+				return strings.Replace(in,
+					"ui_extensions:\n  - slot: right_pane\n    target_ktype: sales.order\n    component_url: ./ui/order_pane.js\n    label: Shipping Labels\n",
+					"ui_extensions:\n  - slot: right_pane\n    target_ktype: sales.order\n    component_url: ./ui/order_pane.js\n    label: Shipping Labels\n  - slot: right_pane\n    target_ktype: sales.order\n    component_url: ./ui/order_pane.js\n    label: Shipping Labels\n",
+					1)
+			},
+			field:    "ui_extensions[1]",
+			fragment: "duplicate",
+		},
+		{
+			// description error message must say "bytes" — the cap
+			// is len()-based (byte count), not rune-based; saying
+			// "chars" would be misleading for multi-byte UTF-8
+			// descriptions where byte count > visible char count.
+			name: "oversize description rejected with byte-count message",
+			mutate: func(in string) string {
+				huge := strings.Repeat("a", 4097)
+				return strings.Replace(in,
+					"description: Shipping label generator",
+					"description: "+huge,
+					1)
+			},
+			field:    "description",
+			fragment: "bytes exceeds 4096-byte",
+		},
 	}
 	for _, tc := range cases {
 		tc := tc

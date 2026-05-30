@@ -371,11 +371,19 @@ func exportTable(
 	//                                                  without it the query
 	//                                                  returns zero rows.
 	//
-	// marketplace_extension_installations is the first table to opt
-	// into FORCE ROW LEVEL SECURITY (000068), so the dump path must
-	// set the GUC defensively for every table — a future migration
-	// that promotes another table to FORCE would otherwise silently
-	// strip that table from the dump.
+	// Two tables in the current schema use FORCE ROW LEVEL SECURITY:
+	// user_tenant_roles (migrations/000049_user_tenant_roles.sql:32,
+	// pre-existing) and marketplace_extension_installations
+	// (migrations/000068_marketplace.sql:290, this PR). Both REQUIRE
+	// the GUC to be set for the dump to return rows — an owner-
+	// without-BYPASSRLS role observes zero rows otherwise. The
+	// pre-B2 dump path was buggy for user_tenant_roles too (latent
+	// silent zero-row export when the backup role was the schema
+	// owner without BYPASSRLS); wrapping every exportTable call in
+	// dbutil.WithTenantTx fixes both that latent bug AND the new
+	// 000068 case. A future migration that promotes a third table
+	// to FORCE is automatically covered — no per-table opt-in is
+	// required because the GUC is set unconditionally here.
 	var count int
 	err := dbutil.WithTenantTx(ctx, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		// We rely on row_to_json on the server so column lists don't need
