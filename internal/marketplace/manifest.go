@@ -836,11 +836,23 @@ func (e *ManifestErrors) addRaw(err *ManifestError) {
 
 // validateEndpoint enforces that the endpoint is either the literal
 // `${EXTENSION_WEBHOOK_BASE}` placeholder with an optional /-rooted
-// path component, or a fully-qualified HTTPS URL. Plain HTTP, other
-// schemes, and unknown placeholders are rejected. This is the
-// load-bearing check that keeps an extension from pointing webhook
-// dispatch at attacker-controlled domains or downgrading transport
-// to plaintext.
+// path component, or a fully-qualified HTTPS URL with NO embedded
+// `${...}` tokens. Plain HTTP, other schemes, and unknown
+// placeholders are rejected. This is the load-bearing check that
+// keeps an extension from pointing webhook dispatch at attacker-
+// controlled domains or downgrading transport to plaintext.
+//
+// The two-form contract (placeholder-prefix OR HTTPS URL) is
+// strict — an HTTPS URL with `${EXTENSION_WEBHOOK_BASE}` embedded
+// somewhere inside (e.g. `https://publisher.com/${EXTENSION_WEBHOOK_BASE}/x`)
+// is rejected. The placeholder is only meaningful when it IS the
+// URL prefix (the runtime engine substitutes the tenant's
+// webhook_base for the literal `${EXTENSION_WEBHOOK_BASE}` token);
+// embedding it inside a publisher-owned host would either leave
+// the literal string in the URL path (404) or yield a malformed
+// URL like `https://publisher.com/https://tenant.example/hooks/x`
+// after substitution. Either way it is a manifest bug we surface
+// at upload time rather than at dispatch time.
 func validateEndpoint(endpoint string) error {
 	if endpoint == "" {
 		return errors.New("required")
@@ -848,14 +860,21 @@ func validateEndpoint(endpoint string) error {
 	if endpointPlaceholder.MatchString(endpoint) {
 		return nil
 	}
-	// Any other `${...}` token is rejected — spec §3.1 says
-	// EXTENSION_WEBHOOK_BASE is the only allowed placeholder.
+	// Any `${...}` token here is wrong:
+	//   - Unknown placeholders are rejected per spec §3.1
+	//     (EXTENSION_WEBHOOK_BASE is the only allowed token).
+	//   - The known placeholder is also rejected at this point
+	//     because we already returned above when the endpoint was
+	//     a clean placeholder-prefix; reaching this branch means
+	//     the placeholder is embedded in the middle of an HTTPS
+	//     URL, which is not a supported shape.
 	if locs := unknownPlaceholderRe.FindAllString(endpoint, -1); len(locs) > 0 {
 		for _, p := range locs {
 			if p != PlaceholderWebhookBase {
 				return fmt.Errorf("only ${EXTENSION_WEBHOOK_BASE} placeholder is supported (got %s)", p)
 			}
 		}
+		return fmt.Errorf("${EXTENSION_WEBHOOK_BASE} placeholder must be the URL prefix, not embedded in an HTTPS URL")
 	}
 	return validateHTTPSURL(endpoint)
 }
