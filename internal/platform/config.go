@@ -336,7 +336,40 @@ type Config struct {
 	// adds ~17k queries/day total across the deployment, which is
 	// negligible against typical replica throughput. Sourced from
 	// KAPP_READ_REPLICA_LAG_SAMPLE_INTERVAL.
+	//
+	// Zero or negative values disable the background sampler
+	// entirely, which causes the router's Read() to immediately
+	// fall back to the primary on every call (a sampler that never
+	// runs leaves `lastSampledAt == 0`, and the router treats that
+	// as "unknown lag, use primary"). This is the
+	// `KAPP_READ_REPLICA_URL`-set but `_SAMPLE_INTERVAL=0` opt-out
+	// pattern, parallel to `KAPP_READ_REPLICA_LAG_TOLERANCE=0`
+	// above. The replica connection stays open (for explicit
+	// callers that already hold a pool reference) but every
+	// routing decision goes primary. The wiring helper
+	// (platform.WireReplicaRouter) logs a boot-time warning when
+	// this combination is configured so the silent fallback isn't
+	// invisible in operator logs.
 	ReadReplicaLagSampleInterval time.Duration
+
+	// ReadReplicaMaxConns / ReadReplicaMinConns override the pgx
+	// pool size for the replica connection independently of the
+	// primary. Without these, the replica inherits the same
+	// defaults pgxpool.ParseConfig derives from the replica DSN
+	// (max=cpu*4, min=0), which is identical to the primary and
+	// often the wrong shape: the primary's pool is sized for
+	// write-heavy OLTP (short connections, bounded latency), while
+	// the replica's pool is sized for read-heavy reporting (long
+	// SELECTs, room for slow rollups). Separating them lets the
+	// operator tune each pool's max connections to the underlying
+	// instance's `max_connections` setting without affecting the
+	// other.
+	//
+	// Zero or negative means "use pgx default for that bound"
+	// (i.e. don't override). Sourced from
+	// KAPP_READ_REPLICA_MAX_CONNS and KAPP_READ_REPLICA_MIN_CONNS.
+	ReadReplicaMaxConns int32
+	ReadReplicaMinConns int32
 }
 
 // LoadConfig reads configuration from environment variables and returns a
@@ -408,6 +441,8 @@ func LoadConfig() (*Config, error) {
 		ReadReplicaURL:               os.Getenv("KAPP_READ_REPLICA_URL"),
 		ReadReplicaLagTolerance:      getenvDurationAllowZero("KAPP_READ_REPLICA_LAG_TOLERANCE", 1*time.Second),
 		ReadReplicaLagSampleInterval: getenvDuration("KAPP_READ_REPLICA_LAG_SAMPLE_INTERVAL", 5*time.Second),
+		ReadReplicaMaxConns:          int32(getenvInt("KAPP_READ_REPLICA_MAX_CONNS", 0)),
+		ReadReplicaMinConns:          int32(getenvInt("KAPP_READ_REPLICA_MIN_CONNS", 0)),
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err

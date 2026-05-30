@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -75,6 +76,29 @@ type PoolRouter struct {
 	// detect a stalled sampler. atomic so writes from the sampler
 	// goroutine are visible without a memory barrier on the read.
 	lastSampledAt atomic.Int64
+
+	// sampleErrorCount is a monotonically-increasing count of
+	// SampleLag errors observed by the background sampler. The
+	// metrics layer reads this via LastErrorCount and publishes
+	// the delta to kapp_replica_sample_errors_total, so an
+	// operator can distinguish "replica unreachable" (counter
+	// climbing fast) from "lag spiked above tolerance" (counter
+	// flat, kapp_replica_lag_seconds high). The router itself does
+	// not log or surface metrics — it stays a pure routing primitive
+	// — it just exposes the counter through the accessor.
+	sampleErrorCount atomic.Uint64
+
+	// samplerMu guards samplerCancel / samplerDone. The fields are
+	// only ever read or written from StartLagSampler and Close,
+	// both of which are boot-time-only operations (see WithReplica
+	// docstring), so the mutex is essentially uncontended — it
+	// exists to make the "have we started a sampler?" check race-
+	// free with respect to a concurrent Close from a shutdown
+	// goroutine.
+	samplerMu     sync.Mutex
+	samplerCancel context.CancelFunc
+	samplerDone   chan struct{}
+	closeOnce     sync.Once
 }
 
 // NewPoolRouter constructs a router that routes every call to the
@@ -246,20 +270,122 @@ func (r *PoolRouter) LastLag() (time.Duration, time.Time, bool) {
 }
 
 // StartLagSampler launches a background goroutine that calls
-// SampleLag every interval until ctx is cancelled. Errors during
-// sampling are silently swallowed (logging is the caller's job — the
-// router has no logger dependency) but the cached sample timestamp
-// is NOT advanced on error, so a sustained sampling failure shows
-// up as "sample too old" in Read() and routes back to primary.
+// SampleLag every interval. The goroutine runs until either the
+// supplied ctx is cancelled or Close() is called — whichever
+// happens first. Close() additionally waits for the goroutine to
+// fully exit, so the caller can safely Close() the underlying
+// replica pool immediately after Close() returns without racing an
+// in-flight SampleLag query.
 //
-// Returns immediately; sampler runs until ctx is cancelled.
-// Returns false (and does nothing) when no replica is configured.
+// Errors during sampling are NOT propagated (the router has no
+// logger dependency) but each error increments LastErrorCount(),
+// which the metrics layer publishes as
+// kapp_replica_sample_errors_total — operators can alert on a
+// sustained climb to distinguish "replica unreachable" from "lag
+// spiked above tolerance". The cached sample timestamp is NOT
+// advanced on error, so a sustained sampling failure also shows up
+// as "sample too old" in Read() and routes back to primary.
+//
+// Returns true when the sampler was started, false when it was
+// not. False return cases (each is benign — no replica means no
+// sampler needed, non-positive interval means "disable sampling"):
+//
+//   - nil receiver
+//   - no replica configured (the no-op single-pool case)
+//   - interval <= 0 (treat as explicit "do not sample" — callers
+//     who pass 0 typically also expect Read() to refuse the
+//     replica because the staleness check will fire on the first
+//     call; a non-positive interval is the documented opt-out
+//     mirror of `lagTolerance <= 0`. The wiring helper logs a
+//     boot warning when this combination is configured with a
+//     non-empty KAPP_READ_REPLICA_URL so it isn't silent)
+//   - a sampler was already started on this router (StartLagSampler
+//     is boot-time-only; the second call is a no-op rather than
+//     leaking a second goroutine)
+//
+// The sampler runs against an internal context derived from the
+// supplied ctx — cancelling the supplied ctx OR calling Close()
+// stops the goroutine. Close() additionally blocks on the
+// goroutine's exit so resource cleanup ordering (sampler exits
+// before pool Close()) can be enforced LIFO in the service
+// entrypoint's cleanups stack.
 func (r *PoolRouter) StartLagSampler(ctx context.Context, interval time.Duration) bool {
 	if r == nil || r.replica == nil || interval <= 0 {
 		return false
 	}
-	go r.runLagSampler(ctx, interval)
+	r.samplerMu.Lock()
+	defer r.samplerMu.Unlock()
+	if r.samplerDone != nil {
+		// A sampler is already running; do not start a second one.
+		// The boot-time-only contract means this should never
+		// trigger in production wiring, but the guard keeps the
+		// router safe under a misconfigured test or future caller.
+		return false
+	}
+	samplerCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	r.samplerCancel = cancel
+	r.samplerDone = done
+	go func() {
+		defer close(done)
+		r.runLagSampler(samplerCtx, interval)
+	}()
 	return true
+}
+
+// Close cancels the lag sampler goroutine and waits for it to fully
+// exit. Safe to call multiple times (idempotent); safe to call when
+// no sampler was started (no-op).
+//
+// Wire Close() into the service shutdown stack so it runs BEFORE
+// the replica pool's Close(): if the pool closes while the sampler
+// has an in-flight SampleLag query, pgx returns an error from the
+// connection acquire (which is harmless and just bumps the error
+// counter) but on some pool states the close races with the
+// connection release and surfaces a panic. The router's Close()
+// waits for the goroutine, eliminating the window entirely.
+//
+// Cleanups in service entrypoints use a LIFO slice, so the correct
+// append order is:
+//
+//	cleanups = append(cleanups, func() { replicaPool.Close() })
+//	// ... wire router, start sampler ...
+//	cleanups = append(cleanups, func() { dbRouter.Close() })  // runs FIRST on shutdown
+//	cleanups = append(cleanups, stopReplicaGauge)             // runs FIRST-FIRST
+//
+// LIFO unwinds: stopReplicaGauge → dbRouter.Close (sampler joins)
+// → replicaPool.Close. Without this Close() the sampler goroutine
+// is only bound to the outer ctx, which the caller typically
+// cancels AFTER cleanup() returns — racing the pool close.
+func (r *PoolRouter) Close() {
+	if r == nil {
+		return
+	}
+	r.closeOnce.Do(func() {
+		r.samplerMu.Lock()
+		cancel, done := r.samplerCancel, r.samplerDone
+		r.samplerMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		if done != nil {
+			<-done
+		}
+	})
+}
+
+// LastErrorCount returns the monotonic count of SampleLag errors
+// observed by the background sampler since process start. Used by
+// the metrics layer to publish kapp_replica_sample_errors_total
+// (by polling and tracking the delta between observations).
+//
+// Safe on a nil receiver; returns 0 when no sampler has been
+// started or no errors have occurred.
+func (r *PoolRouter) LastErrorCount() uint64 {
+	if r == nil {
+		return 0
+	}
+	return r.sampleErrorCount.Load()
 }
 
 // sampleQueryTimeout returns the per-tick query timeout for the
@@ -283,9 +409,7 @@ func (r *PoolRouter) runLagSampler(ctx context.Context, interval time.Duration) 
 	// sample uses the same per-call budget the periodic ticks use
 	// so a stuck DB on first probe doesn't block process startup
 	// (parent ctx still ultimately bounds it).
-	firstCtx, firstCancel := context.WithTimeout(ctx, sampleQueryTimeout(interval))
-	_, _ = r.SampleLag(firstCtx)
-	firstCancel()
+	r.sampleOnce(ctx, interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -293,9 +417,38 @@ func (r *PoolRouter) runLagSampler(ctx context.Context, interval time.Duration) 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			sampleCtx, cancel := context.WithTimeout(ctx, sampleQueryTimeout(interval))
-			_, _ = r.SampleLag(sampleCtx)
-			cancel()
+			r.sampleOnce(ctx, interval)
 		}
 	}
+}
+
+// sampleOnce performs a single sampling probe with the bounded
+// per-tick timeout and books the result. Errors are not propagated
+// (the router has no logger and the metric publication path runs
+// out-of-band via LastErrorCount); they bump sampleErrorCount so
+// the metrics layer can publish kapp_replica_sample_errors_total.
+// Ctx.Done() during the probe is NOT counted as an error — it just
+// means shutdown is in progress and the sampler is about to exit
+// anyway, so counting it would generate a spurious bump on every
+// graceful shutdown.
+func (r *PoolRouter) sampleOnce(parent context.Context, interval time.Duration) {
+	sampleCtx, cancel := context.WithTimeout(parent, sampleQueryTimeout(interval))
+	_, err := r.SampleLag(sampleCtx)
+	cancel()
+	if err == nil {
+		return
+	}
+	if parent.Err() != nil {
+		// Parent ctx is done — either ctx.Canceled cascading from
+		// the shutdown signal, or a per-tick deadline that fired
+		// right as shutdown began. Either way the sampler is about
+		// to exit on the next select; counting the error would
+		// generate a spurious bump on every graceful shutdown and
+		// pollute kapp_replica_sample_errors_total with false
+		// positives. Real sampling failures (replica unreachable,
+		// slow query) still bump the counter because parent.Err()
+		// is nil in those cases.
+		return
+	}
+	r.sampleErrorCount.Add(1)
 }

@@ -20,9 +20,31 @@ import (
 // unset) the tracer hot-path is a single nil-check per call site —
 // otelpgx's tracer is safe to install unconditionally.
 func NewPool(ctx context.Context, dbURL string) (*pgxpool.Pool, error) {
+	return NewPoolWithSize(ctx, dbURL, 0, 0)
+}
+
+// NewPoolWithSize is NewPool with explicit min/max connection size
+// overrides. A zero (or negative) value for either bound means
+// "leave pgx's default for that bound alone" — passing 0/0 is
+// exactly equivalent to NewPool.
+//
+// Used by the read-replica wiring path so the replica pool can be
+// sized independently of the primary (KAPP_READ_REPLICA_MAX_CONNS /
+// KAPP_READ_REPLICA_MIN_CONNS in platform.Config). Replica workloads
+// (long reporting selects, dashboard rollups) typically want a
+// different connection-pool shape than the primary's write-heavy
+// OLTP workload, and pinning both pools to the same shared default
+// either over-provisions the primary or starves the replica.
+func NewPoolWithSize(ctx context.Context, dbURL string, maxConns, minConns int32) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(dbURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse db url: %w", err)
+	}
+	if maxConns > 0 {
+		cfg.MaxConns = maxConns
+	}
+	if minConns > 0 {
+		cfg.MinConns = minConns
 	}
 	// Two separate concerns govern the otelpgx options here. Both are
 	// deliberately wired; do NOT remove either thinking it's redundant.

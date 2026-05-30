@@ -25,7 +25,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
-	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/financeadapters"
@@ -97,20 +96,23 @@ func run() error {
 		defer adminPool.Close()
 	}
 
-	// Replica routing (A1). Same wiring as services/api/deps_build.go
-	// but pared down: no metrics registry in the bridge, so the gauge
-	// publisher is not registered here. The lag sampler still runs so
-	// /insight + /dashboard-digest dispatches benefit from replica
-	// offload when KAPP_READ_REPLICA_URL is set on this service.
-	dbRouter := dbutil.NewPoolRouter(pool)
-	if cfg.ReadReplicaURL != "" {
-		replicaPool, err := platform.NewPool(ctx, cfg.ReadReplicaURL)
-		if err != nil {
-			return fmt.Errorf("kchat-bridge: open replica pool: %w", err)
-		}
-		defer replicaPool.Close()
-		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance, cfg.ReadReplicaLagSampleInterval)
-		dbRouter.StartLagSampler(ctx, cfg.ReadReplicaLagSampleInterval)
+	// Replica routing (A1). platform.WireReplicaRouter centralises
+	// pool open, router build, lag sampler start, and the LIFO
+	// cleanup ordering that joins the sampler goroutine before
+	// closing the replica pool; see its docstring for the teardown
+	// contract.
+	//
+	// Bridge has no MetricsRegistry, so we pass nil — the helper
+	// silently skips lag/error gauge registration and just emits
+	// the close-router / close-pool cleanups. The lag sampler still
+	// runs so /insight + /dashboard-digest dispatches benefit from
+	// replica offload when KAPP_READ_REPLICA_URL is set.
+	dbRouter, replicaCleanups, err := platform.WireReplicaRouter(ctx, "kchat-bridge", cfg, pool, nil)
+	if err != nil {
+		return err
+	}
+	for _, fn := range replicaCleanups {
+		defer fn()
 	}
 
 	cache := platform.NewLRUCache(512, 5*time.Minute)

@@ -35,6 +35,17 @@ var _ FieldEncryptor = (*tenant.KeyManager)(nil)
 var (
 	ErrNotFound        = errors.New("record: not found")
 	ErrVersionConflict = errors.New("record: version conflict")
+
+	// errReplicaNotReady fires when snapshotVia targets a replica
+	// that is in recovery but has not yet replayed any transaction
+	// (pg_last_xact_replay_timestamp() returns NULL). In that state
+	// we have no safe ceiling for the walk — clock_timestamp() is
+	// the replica's wall clock and can be arbitrarily ahead of
+	// whatever WAL position the replica is actually serving from,
+	// so any `updated_at <= snapshot` filter would silently skip
+	// rows committed in the gap. The caller (pickReadPoolWithSnapshot)
+	// catches this and retries against the primary.
+	errReplicaNotReady = errors.New("record: replica has no replayed xact; snapshot would exceed visibility horizon")
 )
 
 // PGStore implements Store against PostgreSQL. Every mutation runs inside a
@@ -292,53 +303,143 @@ func checkCustomKTypeStatus(tkt *ktype.TenantKType, mode ktypeResolveMode) error
 	return nil
 }
 
-// dbNow returns Postgres's current timestamp from the primary pool.
-// Used to capture the keyset-walk snapshot ceiling in the same clock
-// domain that assigns `updated_at` values on commit, so app-server
-// clock skew (NTP jitter, container pause) cannot move the ceiling
-// backwards relative to row timestamps. clock_timestamp() is preferred
-// over now() / transaction_timestamp() because it is not frozen at
-// the start of the surrounding transaction — we want the wall-clock
-// instant this call is made, not the instant the outer scheduler's
-// transaction began.
+// dbNow returns Postgres's current wall-clock timestamp from the
+// primary pool. Used for single-shot timestamps that are NOT
+// subsequently used to filter visibility on a replica (e.g. as the
+// reference instant for a pure "is X expired?" check on the primary
+// itself).
+//
+// For keyset-walk snapshot ceilings (ForEach, ForEachByField,
+// ListAll, ListByField) callers MUST use pickReadPoolWithSnapshot
+// instead — that helper combines pool selection and snapshot
+// capture so the snapshot is guaranteed to be ≤ the chosen pool's
+// visibility horizon (see snapshotVia docstring for the replay-
+// timestamp gotcha that makes the combined helper mandatory).
+//
+// clock_timestamp() is preferred over now() / transaction_timestamp()
+// because it is not frozen at the start of the surrounding transaction
+// — we want the wall-clock instant this call is made, not the instant
+// the outer scheduler's transaction began.
 //
 // Returns timestamptz directly (no `AT TIME ZONE 'UTC'` cast) so the
-// result type carries its own UTC anchor rather than relying on
-// pgx's scan-default location for `timestamp without time zone`.
-// pgx v5 always normalises timestamptz to UTC on scan regardless of
-// the connection's TimeZone setting; the previous formulation only
-// produced UTC because pgx's plain-timestamp default *happens* to
-// be UTC. The explicit .UTC() below is kept as belt-and-suspenders
-// in case a future scan layer normalises timestamptz to the local
-// zone, but the SQL itself no longer depends on the driver's
-// timezone defaults.
-//
-// NOTE on replica routing: keyset walks (ForEach, ForEachByField, the
-// shared foreachKeyset) MUST use dbNowVia(pool), not dbNow, to capture
-// the snapshot from the SAME pool the per-chunk reads will use.
-// Otherwise a primary-captured ceiling can be ahead of the replica's
-// last-replayed xact by up to lagTolerance, and rows committed in
-// that window would be filtered IN by `updated_at <= snapshot` but
-// not yet visible on the replica — silently missed for this walk
-// (and only picked up if a subsequent walk's ceiling is high enough).
-// dbNow remains the right call for any single-shot timestamp read
-// that does not subsequently filter rows on the result.
+// result type carries its own UTC anchor rather than relying on pgx's
+// scan-default location. pgx v5 normalises timestamptz to UTC on scan
+// regardless of the connection's TimeZone setting; the explicit
+// .UTC() below is belt-and-suspenders in case a future scan layer
+// normalises timestamptz to the local zone.
 func (s *PGStore) dbNow(ctx context.Context) (time.Time, error) {
-	return s.dbNowVia(ctx, s.router.Primary())
-}
-
-// dbNowVia returns Postgres's current timestamp from the given pool.
-// Use when the snapshot timestamp will be used to filter rows on a
-// subsequent read against the SAME pool — see the contract on
-// foreachKeyset (the snapshot must be ≤ the pool's last-replayed
-// xact, otherwise rows committed between the pool's replay position
-// and `clock_timestamp()` would be filtered IN but not visible).
-func (s *PGStore) dbNowVia(ctx context.Context, pool *pgxpool.Pool) (time.Time, error) {
 	var t time.Time
-	if err := pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&t); err != nil {
+	if err := s.router.Primary().QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&t); err != nil {
 		return time.Time{}, fmt.Errorf("record: dbNow: %w", err)
 	}
 	return t.UTC(), nil
+}
+
+// snapshotVia returns a snapshot ceiling appropriate for a keyset
+// walk against the given pool. The returned timestamp is guaranteed
+// to be ≤ the pool's row-visibility horizon — any row matching
+// `updated_at <= snapshot` on that pool is guaranteed to be readable
+// from that pool.
+//
+// The semantics differ by pool kind, both gated by pg_is_in_recovery()
+// on the pool's connection (so the same code path works for the
+// primary, a streaming replica, or a Patroni/RDS read-replica that
+// the caller wired into either slot):
+//
+//   - Primary (not in recovery): returns clock_timestamp(). This is
+//     the freshest wall-clock instant; every committed row whose
+//     updated_at is ≤ this is by definition visible on the primary.
+//
+//   - Replica (in recovery, replay-ts non-NULL): returns
+//     pg_last_xact_replay_timestamp() — the commit timestamp of the
+//     most recent transaction the replica has replayed. By definition,
+//     every row whose updated_at is ≤ this commit timestamp has been
+//     replicated and is visible on this replica.
+//
+//     This is the correctness fix for the previous formulation. The
+//     prior code called clock_timestamp() on the replica too, but
+//     clock_timestamp() on a replica is the replica's WALL CLOCK,
+//     NOT its replay position. Under replication lag L the replica's
+//     wall clock ≈ now() but its visible state only covers commits
+//     up to now() − L. A walk with snapshot = clock_timestamp() and
+//     filter `updated_at <= snapshot` would match rows committed in
+//     the (now()−L, now()] window, but those rows have not yet been
+//     replicated — they pass the WHERE filter on the primary but are
+//     invisible on the replica. Because the cursor advances past
+//     them on the replica's empty result, they would be SILENTLY
+//     skipped by the walk and only picked up if a subsequent walk's
+//     ceiling happened to be high enough. Using
+//     pg_last_xact_replay_timestamp() makes the ceiling track the
+//     replica's actual visibility horizon, eliminating the gap.
+//
+//   - Replica (in recovery, replay-ts NULL): returns errReplicaNotReady.
+//     A freshly-started standby that has not yet replayed any
+//     transaction has no defined visibility horizon for committed-on-
+//     primary writes. The caller (pickReadPoolWithSnapshot) catches
+//     this and falls back to the primary for the walk.
+func (s *PGStore) snapshotVia(ctx context.Context, pool *pgxpool.Pool) (time.Time, error) {
+	var (
+		inRecovery bool
+		replayTS   *time.Time
+		clockTS    time.Time
+	)
+	err := pool.QueryRow(ctx, `
+		SELECT
+			pg_is_in_recovery(),
+			pg_last_xact_replay_timestamp(),
+			clock_timestamp()
+	`).Scan(&inRecovery, &replayTS, &clockTS)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("record: snapshot: %w", err)
+	}
+	if inRecovery {
+		if replayTS == nil {
+			return time.Time{}, errReplicaNotReady
+		}
+		return replayTS.UTC(), nil
+	}
+	return clockTS.UTC(), nil
+}
+
+// pickReadPoolWithSnapshot selects the pool a read-only keyset walk
+// should run against AND captures the snapshot ceiling for that walk,
+// atomically and from the same pool. Combining these two decisions
+// into one helper is the only way to enforce the foreachKeyset
+// invariant (snapshot ≤ pool visibility horizon) — picking the pool
+// in one call and capturing the snapshot in a separate one opens a
+// window where the router could be reconfigured between the two, or
+// the chosen pool could be a replica whose replay position has moved
+// since selection.
+//
+// The router's Read() lag-tolerance gate runs first. When that gate
+// says primary (no replica configured, lag exceeds tolerance, sample
+// is stale, lagTolerance is 0, etc.), this function never touches
+// the replica. When the gate picks the replica, this function still
+// enforces the stronger correctness gate (replay timestamp must be
+// non-NULL) before returning the replica; if the replica is in
+// recovery with no replayed xact yet, the call transparently falls
+// back to the primary and captures the snapshot there.
+//
+// Callers must pin the returned pool for the ENTIRE walk. Re-calling
+// Read() per chunk would let the router flip between primary and
+// replica mid-walk, which would mix two pools' snapshot semantics
+// under one ceiling. See the comment block at the top of
+// foreachKeyset for the worked-out failure mode.
+func (s *PGStore) pickReadPoolWithSnapshot(ctx context.Context) (*pgxpool.Pool, time.Time, error) {
+	readPool := s.router.Read()
+	snapshot, err := s.snapshotVia(ctx, readPool)
+	if err == nil {
+		return readPool, snapshot, nil
+	}
+	primary := s.router.Primary()
+	if errors.Is(err, errReplicaNotReady) && readPool != primary {
+		snapshot, err = s.snapshotVia(ctx, primary)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		return primary, snapshot, nil
+	}
+	return nil, time.Time{}, err
 }
 
 // Create inserts a new KRecord. The KType is looked up at version 0 ("latest")
@@ -759,22 +860,29 @@ func (s *PGStore) foreachKeyset(
 	fn ForEachFunc,
 ) error {
 	const chunk = 500
-	// Pin the read pool for the duration of this walk BEFORE
-	// capturing the snapshot. Calling s.router.Read() on every chunk
-	// would allow the router to flip primary→replica (or back)
-	// between chunks, which would mix two pools' snapshot semantics
-	// in one walk. Capture once, reuse for snapshot + every chunk.
+	// Pin the read pool for the duration of this walk BEFORE the
+	// first chunk. Calling s.router.Read() per chunk would allow the
+	// router to flip primary→replica (or back) between chunks, which
+	// would mix two pools' snapshot semantics under one ceiling.
+	// pickReadPoolWithSnapshot performs both selection and snapshot
+	// capture atomically (one DB round-trip on the chosen pool), so
+	// the returned snapshot is guaranteed to be ≤ that pool's
+	// visibility horizon — see the snapshotVia docstring for the
+	// pg_last_xact_replay_timestamp gotcha that mandates this.
 	//
-	// Taking the snapshot from the same pool the chunks will use is
-	// required for correctness on the replica path: if the snapshot
-	// were taken from the primary while chunks read from the replica,
-	// rows committed between the replica's last-replayed xact and the
-	// primary's clock_timestamp() would be filtered IN by
-	// `updated_at <= snapshot` but NOT visible on the replica —
-	// silently missed for this walk. Anchoring both reads to the
-	// replica's clock keeps the ceiling ≤ what the replica can return.
-	readPool := s.router.Read()
-	snapshot, err := s.dbNowVia(ctx, readPool)
+	// Specifically: capturing the snapshot via SELECT clock_timestamp()
+	// against the replica's connection returns the replica's WALL
+	// CLOCK, not the timestamp of its last replayed xact. Under
+	// replication lag L, the replica's wall clock ≈ now() but its
+	// visible state only covers commits up to now() − L. Rows
+	// committed in (now()−L, now()] would pass the
+	// `updated_at <= snapshot` filter on the primary but be invisible
+	// on the replica — silently missed by this walk (and only picked
+	// up if a subsequent walk happens to land them above its own
+	// ceiling). snapshotVia uses pg_last_xact_replay_timestamp() on
+	// replicas to make the ceiling track the replica's actual
+	// visibility horizon.
+	readPool, snapshot, err := s.pickReadPoolWithSnapshot(ctx)
 	if err != nil {
 		return err
 	}

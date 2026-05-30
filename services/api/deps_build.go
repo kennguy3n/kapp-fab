@@ -25,7 +25,6 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/captcha"
 	"github.com/kennguy3n/kapp-fab/internal/csrf"
 	"github.com/kennguy3n/kapp-fab/internal/dashboard"
-	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/docs"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/exporter"
@@ -161,44 +160,24 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		cleanups = append(cleanups, func() { adminPool.Close() })
 	}
 
-	// Optional read replica + PoolRouter. When KAPP_READ_REPLICA_URL
-	// is set, open a second pgx pool against the replica DSN and
-	// build a router that fans reads to the replica (when within
-	// KAPP_READ_REPLICA_LAG_TOLERANCE of the primary) and writes
-	// always to the primary. When the env var is unset, NewPoolRouter
-	// with only the primary is a no-op pass-through and every
-	// dbutil.WithReadOnlyTenantTx call resolves to the primary —
-	// behavior is identical to pre-A1 single-pool deployments. This
-	// ordering matters: insights/reporting/dashboard/record/search
-	// wiring below references the router, so it has to exist by the
-	// time those constructors run.
-	dbRouter := dbutil.NewPoolRouter(pool)
-	if cfg.ReadReplicaURL != "" {
-		replicaPool, err := platform.NewPool(ctx, cfg.ReadReplicaURL)
-		if err != nil {
-			runCleanups(cleanups)
-			return nil, nil, fmt.Errorf("api: open replica pool: %w", err)
-		}
-		cleanups = append(cleanups, func() { replicaPool.Close() })
-		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance, cfg.ReadReplicaLagSampleInterval)
-		// Background lag sampler keeps the cached lag observation
-		// fresh enough that PoolRouter.Read() can decide replica vs
-		// primary on the hot path with no per-query DB round-trip.
-		// Sampler interval and the staleness bound (2× the
-		// sample interval) live on the router so this wiring is the
-		// only ceremony required to opt a deployment in.
-		dbRouter.StartLagSampler(ctx, cfg.ReadReplicaLagSampleInterval)
-		stopReplicaGauge := platform.RegisterReplicaLagGauge(metrics, dbRouter, cfg.ReadReplicaLagSampleInterval)
-		cleanups = append(cleanups, stopReplicaGauge)
-		log.Printf("api: read replica enabled (lag tolerance=%s, sample every=%s)", cfg.ReadReplicaLagTolerance, cfg.ReadReplicaLagSampleInterval)
-	} else {
-		// Still wire the configured/lag gauges so /metrics surfaces
-		// "no replica configured" as an explicit zero rather than a
-		// missing series — alerts conditioned on
-		// kapp_replica_configured won't misfire on bootstrap.
-		stopReplicaGauge := platform.RegisterReplicaLagGauge(metrics, dbRouter, 0)
-		cleanups = append(cleanups, stopReplicaGauge)
+	// Optional read replica + PoolRouter. The wiring (open pool,
+	// build router with WithReplica, start lag sampler, register
+	// lag/error metrics, emit cleanups in shutdown-safe LIFO order)
+	// is shared across all five service entrypoints via
+	// platform.WireReplicaRouter — see its docstring for the
+	// teardown-ordering contract that the helper enforces (stop
+	// metrics publisher → join sampler goroutine → close replica
+	// pool). When KAPP_READ_REPLICA_URL is unset, the helper
+	// returns a single-pool router that behaves identically to
+	// pre-A1 single-pool deployments. The wiring must happen here
+	// (not lazily) because insights/reporting/dashboard/record/
+	// search constructors below reference the router.
+	dbRouter, replicaCleanups, err := platform.WireReplicaRouter(ctx, "api", cfg, pool, metrics)
+	if err != nil {
+		runCleanups(cleanups)
+		return nil, nil, err
 	}
+	cleanups = append(cleanups, replicaCleanups...)
 
 	// Tenant lookup cache. Tenant rows are small (<1 KB) and read on
 	// every authenticated request (auth.Middleware) plus every header-

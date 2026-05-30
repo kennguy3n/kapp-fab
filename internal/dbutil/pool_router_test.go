@@ -278,3 +278,78 @@ func TestPoolRouter_SampleQueryTimeoutBoundedByInterval(t *testing.T) {
 		})
 	}
 }
+
+// TestPoolRouter_Close_NoReplica_NoOp pins the contract that Close is
+// safe to call on a router built without a replica (no sampler ever
+// runs) and on a nil receiver. Services wire Close into deferred
+// cleanups regardless of whether KAPP_READ_REPLICA_URL was set, so
+// this MUST not panic.
+func TestPoolRouter_Close_NoReplica_NoOp(t *testing.T) {
+	primary := newLazyPool(t)
+	r := NewPoolRouter(primary)
+	r.Close()
+	r.Close() // idempotent
+	var nilRouter *PoolRouter
+	nilRouter.Close() // nil-safe
+}
+
+// TestPoolRouter_Close_Idempotent verifies double-Close does not
+// double-close the cancel channel or block. Real callers can have
+// shutdown paths that fan-out the cleanup (e.g. signal handler +
+// context cancel), so Close must tolerate concurrent or repeated
+// invocations.
+func TestPoolRouter_Close_Idempotent(t *testing.T) {
+	primary := newLazyPool(t)
+	replica := newLazyPool(t)
+	r := NewPoolRouter(primary).WithReplica(replica, 1*time.Second, 5*time.Second)
+	// StartLagSampler returns false on a closed/cancelled ctx without
+	// ever launching a goroutine in some test envs, but we want a
+	// real goroutine to verify the wait path. Use a fresh ctx with
+	// a long interval so the sampler doesn't actually do a probe.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := r.StartLagSampler(ctx, 10*time.Second)
+	if !started {
+		t.Fatalf("StartLagSampler should have started")
+	}
+	r.Close()
+	r.Close()
+	r.Close()
+}
+
+// TestPoolRouter_StartLagSampler_RejectsSecondStart pins the contract
+// that StartLagSampler returns false on a second call — preventing
+// stray goroutines from a misconfigured service that wires the
+// sampler twice. The first sampler keeps running; the second call is
+// a no-op.
+func TestPoolRouter_StartLagSampler_RejectsSecondStart(t *testing.T) {
+	primary := newLazyPool(t)
+	replica := newLazyPool(t)
+	r := NewPoolRouter(primary).WithReplica(replica, 1*time.Second, 5*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer r.Close()
+	if !r.StartLagSampler(ctx, 10*time.Second) {
+		t.Fatalf("first StartLagSampler should return true")
+	}
+	if r.StartLagSampler(ctx, 10*time.Second) {
+		t.Fatalf("second StartLagSampler should return false (sampler already running)")
+	}
+}
+
+// TestPoolRouter_LastErrorCount_ZeroBeforeAnyError pins the contract
+// that LastErrorCount returns 0 on a fresh router, on one with no
+// sampler started, and on a nil receiver. The metrics layer polls
+// this on every publish tick; returning a stale or panicking value
+// would surface as a misleading kapp_replica_sample_errors_total.
+func TestPoolRouter_LastErrorCount_ZeroBeforeAnyError(t *testing.T) {
+	var nilRouter *PoolRouter
+	if got := nilRouter.LastErrorCount(); got != 0 {
+		t.Fatalf("nil receiver LastErrorCount=%d want 0", got)
+	}
+	primary := newLazyPool(t)
+	r := NewPoolRouter(primary)
+	if got := r.LastErrorCount(); got != 0 {
+		t.Fatalf("fresh router LastErrorCount=%d want 0", got)
+	}
+}

@@ -137,18 +137,24 @@ func run() error {
 
 	// Replica routing (A1). Worker uses the router for the scheduled
 	// report runner and the insights query-cache refresh handler —
-	// both pure SELECTs. The gauge registration is deferred until the
-	// metrics registry is created further down; the sampler can run
-	// without it.
-	dbRouter := dbutil.NewPoolRouter(pool)
-	if cfg.ReadReplicaURL != "" {
-		replicaPool, err := platform.NewPool(ctx, cfg.ReadReplicaURL)
-		if err != nil {
-			return fmt.Errorf("worker: open replica pool: %w", err)
-		}
-		defer replicaPool.Close()
-		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance, cfg.ReadReplicaLagSampleInterval)
-		dbRouter.StartLagSampler(ctx, cfg.ReadReplicaLagSampleInterval)
+	// both pure SELECTs. Wiring (open pool, router build, sampler
+	// start, metrics + LIFO cleanup ordering for the sampler-vs-pool
+	// shutdown race) is shared with the other four service
+	// entrypoints via platform.WireReplicaRouter — see its docstring
+	// for the teardown contract.
+	//
+	// Worker is special-cased on the metrics registry: the registry
+	// is created further down (after handlers register), so we wire
+	// the router here with a nil metrics registry and let the helper
+	// noop the gauge registration. The lag/error metrics are
+	// re-registered below right after metrics is built — see
+	// "stopReplicaGauge" wiring around line ~390.
+	dbRouter, replicaCleanups, err := platform.WireReplicaRouter(ctx, "worker", cfg, pool, nil)
+	if err != nil {
+		return err
+	}
+	for _, fn := range replicaCleanups {
+		defer fn()
 	}
 
 	natsURL := cfg.EventBusURL

@@ -7,9 +7,9 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 )
 
-// RegisterReplicaLagGauge wires a Prometheus gauge that publishes the
-// most recent replica lag observation from the supplied router. Two
-// gauges are exported:
+// RegisterReplicaLagGauge wires Prometheus gauges + a counter that
+// surface the replica router's runtime state for alerting. Three
+// series are exported:
 //
 //   - kapp_replica_lag_seconds — the lag (seconds) of the most
 //     recent sample. Always >= 0. Zero means "primary == replica
@@ -19,6 +19,14 @@ import (
 //     otherwise. Exists so alerts can be conditional ("lag > 5s AND
 //     configured == 1") and skip the all-zero case where no replica
 //     is registered.
+//   - kapp_replica_sample_errors_total — monotonic counter of
+//     SampleLag errors observed by the background sampler. An
+//     operator can alert on a sustained climb ("errors > 0 in
+//     5m") to distinguish "replica unreachable" (counter climbing
+//     fast, lag gauge stale) from "lag spiked above tolerance"
+//     (counter flat, lag gauge high). Without this counter the two
+//     failure modes look identical at the lag-gauge level (the
+//     router's read path falls back to primary in both cases).
 //
 // The function returns a stop func that cancels the background
 // publisher goroutine; deps_build wires it into the standard
@@ -27,10 +35,10 @@ import (
 //
 // publishInterval is independent of the sampler interval: the
 // sampler is what queries the replica, this loop simply copies the
-// cached observation into the gauge. Default 5s matches the
-// recommended sample cadence; passing zero disables the publisher
-// entirely (use this in tests where you'd rather call PublishOnce
-// manually).
+// cached observation into the gauge / counter. Default 5s matches
+// the recommended sample cadence; passing zero disables the
+// publisher entirely (use this in tests where you'd rather call
+// PublishOnce manually).
 func RegisterReplicaLagGauge(reg *MetricsRegistry, router *dbutil.PoolRouter, publishInterval time.Duration) (stop func()) {
 	if reg == nil || router == nil {
 		// No metrics or no router → no-op. Return a stop that
@@ -46,6 +54,18 @@ func RegisterReplicaLagGauge(reg *MetricsRegistry, router *dbutil.PoolRouter, pu
 		"kapp_replica_configured",
 		"1 when a read replica is wired into the router, 0 otherwise. Use to condition alerts on lag.",
 	)
+	sampleErrorCounter := reg.Counter(
+		"kapp_replica_sample_errors_total",
+		"Cumulative count of SampleLag errors from the background lag sampler. Climbs when the replica is unreachable; flat when only lag is high.",
+	)
+
+	// lastErrCount tracks the most recently published error count
+	// so we can publish the delta into the (monotonic) Prometheus
+	// counter. The router's LastErrorCount is also monotonic, but
+	// publishOnce runs on a separate goroutine that can lag the
+	// sampler, so we must accumulate the delta rather than Set on
+	// the counter (counters don't support Set).
+	var lastErrCount uint64
 
 	// configured gauge can be set once at registration — the wiring
 	// does not change at runtime.
@@ -57,11 +77,16 @@ func RegisterReplicaLagGauge(reg *MetricsRegistry, router *dbutil.PoolRouter, pu
 
 	publishOnce := func() {
 		lag, _, ok := router.LastLag()
-		if !ok {
+		if ok {
+			lagGauge.Set(lag.Seconds())
+		} else {
 			lagGauge.Set(0)
-			return
 		}
-		lagGauge.Set(lag.Seconds())
+		cur := router.LastErrorCount()
+		if cur > lastErrCount {
+			sampleErrorCounter.Add(cur - lastErrCount)
+			lastErrCount = cur
+		}
 	}
 
 	// Emit an initial value so the gauge isn't "missing" in a fresh

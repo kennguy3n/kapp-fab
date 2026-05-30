@@ -24,7 +24,6 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/agents"
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/auth"
-	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/hr"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
@@ -88,15 +87,20 @@ func run() error {
 	// PoolRouter so a configured replica absorbs the read load.
 	// Writes (record.Create/Update/Delete in the tool handlers)
 	// always go to the primary regardless of routing decisions.
-	dbRouter := dbutil.NewPoolRouter(pool)
-	if cfg.ReadReplicaURL != "" {
-		replicaPool, err := platform.NewPool(ctx, cfg.ReadReplicaURL)
-		if err != nil {
-			return fmt.Errorf("agent-tools: open read replica pool: %w", err)
-		}
-		defer replicaPool.Close()
-		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance, cfg.ReadReplicaLagSampleInterval)
-		dbRouter.StartLagSampler(ctx, cfg.ReadReplicaLagSampleInterval)
+	// platform.WireReplicaRouter centralises pool open, router
+	// build, lag sampler start, and the LIFO cleanup ordering that
+	// joins the sampler goroutine before closing the replica pool;
+	// see its docstring for the teardown contract.
+	//
+	// Agent-tools has no MetricsRegistry, so we pass nil — the
+	// helper silently skips lag/error gauge registration and just
+	// emits the close-router / close-pool cleanups.
+	dbRouter, replicaCleanups, err := platform.WireReplicaRouter(ctx, "agent-tools", cfg, pool, nil)
+	if err != nil {
+		return err
+	}
+	for _, fn := range replicaCleanups {
+		defer fn()
 	}
 	recordStore := record.NewPGStoreWithRouter(dbRouter, ktypeRegistry, eventPublisher, auditor)
 	workflowEngine := workflow.NewEngine(pool, eventPublisher, auditor)

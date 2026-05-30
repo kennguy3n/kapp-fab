@@ -25,7 +25,6 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/auth"
-	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/importer"
 	"github.com/kennguy3n/kapp-fab/internal/importer/adapters"
@@ -86,15 +85,20 @@ func run() error {
 	// (used by validator dedup lookups) through the replica when
 	// KAPP_READ_REPLICA_URL is set. Writes (the actual record
 	// inserts the pipeline emits) always stay on the primary.
-	dbRouter := dbutil.NewPoolRouter(pool)
-	if cfg.ReadReplicaURL != "" {
-		replicaPool, err := platform.NewPool(ctx, cfg.ReadReplicaURL)
-		if err != nil {
-			return fmt.Errorf("importer: open read replica pool: %w", err)
-		}
-		defer replicaPool.Close()
-		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance, cfg.ReadReplicaLagSampleInterval)
-		dbRouter.StartLagSampler(ctx, cfg.ReadReplicaLagSampleInterval)
+	// platform.WireReplicaRouter centralises pool open, router
+	// build, lag sampler start, and the LIFO cleanup ordering that
+	// joins the sampler goroutine before closing the replica pool;
+	// see its docstring for the teardown contract.
+	//
+	// Importer has no MetricsRegistry, so we pass nil — the helper
+	// silently skips lag/error gauge registration and just emits
+	// the close-router / close-pool cleanups.
+	dbRouter, replicaCleanups, err := platform.WireReplicaRouter(ctx, "importer", cfg, pool, nil)
+	if err != nil {
+		return err
+	}
+	for _, fn := range replicaCleanups {
+		defer fn()
 	}
 	recordStore := record.NewPGStoreWithRouter(dbRouter, ktypeRegistry, eventPublisher, auditor)
 	rateLimiter := platform.NewRateLimiter(platform.DefaultRateLimitConfig())
