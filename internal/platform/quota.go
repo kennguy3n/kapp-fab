@@ -12,6 +12,50 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// recordCountTx is the in-transaction helper called by the record store
+// after every krecords INSERT (delta=+1) or soft-delete (delta=-1) so
+// tenant_record_counts.record_count stays in lockstep with the source
+// of truth. Lives on quota.go (rather than dbutil) because the counter
+// IS the quota — keeping the SQL next to CheckRecordCount keeps the
+// schema knowledge in one file.
+//
+// The UPSERT is required (not just UPDATE) because the counter row is
+// created lazily on the first insert per tenant; for a brand-new tenant
+// the row does not exist yet so a bare UPDATE would silently no-op and
+// the counter would never start tracking. ON CONFLICT lets the same
+// statement handle first-insert and steady-state in one roundtrip.
+//
+// Decrements are also UPSERT-shaped (with GREATEST(record_count + $2, 0)
+// in the UPDATE clause) so the rare race where a delete arrives before
+// the matching insert's counter UPSERT — for example a direct-SQL
+// repair script that creates a row outside the store — cannot drop the
+// counter below zero. The CHECK constraint in 000067 backs this up.
+func bumpTenantRecordCount(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, delta int64) error {
+	if delta == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx,
+		`INSERT INTO tenant_record_counts (tenant_id, record_count, updated_at)
+		 VALUES ($1, GREATEST($2, 0), now())
+		 ON CONFLICT (tenant_id) DO UPDATE
+		   SET record_count = GREATEST(tenant_record_counts.record_count + $2, 0),
+		       updated_at   = now()`,
+		tenantID, delta,
+	)
+	if err != nil {
+		return fmt.Errorf("quota: bump tenant_record_counts: %w", err)
+	}
+	return nil
+}
+
+// BumpTenantRecordCount is the exported alias the record store calls
+// from inside WithTenantTx. Keeping the lower-case implementation
+// lets us add a typed wrapper later (e.g. one that returns the new
+// value for observability) without breaking the call sites.
+func BumpTenantRecordCount(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, delta int64) error {
+	return bumpTenantRecordCount(ctx, tx, tenantID, delta)
+}
+
 // Quota is the parsed form of tenants.quota JSONB. Zero values mean "unlimited".
 type Quota struct {
 	MaxRecords        int64 `json:"max_records"`
@@ -38,16 +82,43 @@ func NewQuotaEnforcer(pool *pgxpool.Pool) *QuotaEnforcer {
 
 // CheckRecordCount returns ErrQuotaExceeded if the tenant already owns
 // MaxRecords active KRecords.
+//
+// Reads from tenant_record_counts (a denormalised single-row-per-tenant
+// counter maintained transactionally by the record store) instead of
+// scanning every krecords partition.
+//
+// Missing-row semantics: when no row exists in tenant_record_counts for
+// the tenant — i.e. a brand-new tenant that has never written a KRecord
+// (the counter row is created by the first insert via
+// BumpTenantRecordCount), or, on freshly-migrated installs, the narrow
+// window between the 000067 backfill running on existing data and the
+// next RecordCountReconciler tick — the enforcer treats the count as
+// zero and admits the write. A tenant with zero rows trivially fits any
+// MaxRecords > 0 limit, so a source-of-truth count(*) would be needless
+// work and re-introduce the O(n) scan we are eliminating. There is
+// deliberately no count(*) fallback path in this function. Drift
+// detection (the case where a tenant has rows but no counter, or stale
+// counters) is the job of RecordCountReconciler, not the hot path —
+// the reconciler upserts the absolute scan result once per day so the
+// missing-row case self-heals on the first tick.
 func (q *QuotaEnforcer) CheckRecordCount(ctx context.Context, tenantID uuid.UUID, quota Quota) error {
 	if quota.MaxRecords <= 0 {
 		return nil
 	}
 	var count int64
 	err := WithTenantTx(ctx, q.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
-			`SELECT count(*) FROM krecords WHERE tenant_id = $1 AND status != 'deleted'`,
+		err := tx.QueryRow(ctx,
+			`SELECT record_count FROM tenant_record_counts WHERE tenant_id = $1`,
 			tenantID,
 		).Scan(&count)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			count = 0
+			return nil
+		}
+		return err
 	})
 	if err != nil {
 		return fmt.Errorf("quota: count records: %w", err)

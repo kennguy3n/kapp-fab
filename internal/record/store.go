@@ -503,6 +503,16 @@ func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
 		if err != nil {
 			return fmt.Errorf("record: insert: %w", err)
 		}
+		// Bump the denormalised tenant record counter so
+		// platform.QuotaEnforcer.CheckRecordCount stays accurate
+		// without re-scanning every krecords partition. The bump
+		// runs inside the same WithTenantTx so a rollback (e.g.
+		// audit emit failure below) un-does the counter increment
+		// atomically with the krecords INSERT — there is no window
+		// where the counter is high relative to the source of truth.
+		if err := platform.BumpTenantRecordCount(ctx, tx, created.TenantID, +1); err != nil {
+			return err
+		}
 		// Swap the RETURNING ciphertext for the original plaintext so the
 		// event envelope and audit After are both human-readable.
 		created.Data = plaintext
@@ -1213,6 +1223,15 @@ func (s *PGStore) Delete(ctx context.Context, tenantID, id, actorID uuid.UUID) e
 		)
 		if err != nil {
 			return fmt.Errorf("record: soft delete: %w", err)
+		}
+
+		// Decrement the denormalised tenant record counter. Reached
+		// only after the "already deleted" early-return above, so the
+		// decrement runs exactly once per logical deletion — a replayed
+		// DELETE on a row already in status='deleted' is short-circuited
+		// at the ErrNotFound branch and never reaches this point.
+		if err := platform.BumpTenantRecordCount(ctx, tx, tenantID, -1); err != nil {
+			return err
 		}
 
 		// Soft delete does not touch the data column, so existing and

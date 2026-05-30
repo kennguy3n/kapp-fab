@@ -32,23 +32,23 @@ const (
 // in its own Setup Wizard — company profile, country/industry, the
 // chart-of-accounts template, and the initial role roster.
 type SetupWizardConfig struct {
-	CompanyName  string       `json:"company_name"`
-	Industry     string       `json:"industry,omitempty"`
-	Country      string       `json:"country,omitempty"`
-	CurrencyCode string       `json:"currency_code,omitempty"`
+	CompanyName  string `json:"company_name"`
+	Industry     string `json:"industry,omitempty"`
+	Country      string `json:"country,omitempty"`
+	CurrencyCode string `json:"currency_code,omitempty"`
 	// Locale is the IETF BCP 47 tag the API resolves the i18n
 	// bundle from for this tenant. When empty the wizard derives
 	// a sensible default from Country (CH→de, SA→ar, …) so
 	// operators that don't tick a locale checkbox still land on
 	// a locale that matches their statutory jurisdiction. See
 	// DefaultLocaleForCountry below for the full mapping.
-	Locale       string       `json:"locale,omitempty"`
-	CoATemplate  string       `json:"coa_template,omitempty"`
-	Roles        []WizardRole `json:"roles,omitempty"`
-	Users        []WizardUser `json:"users,omitempty"`
-	SampleData   bool         `json:"sample_data,omitempty"`
-	Plan         string       `json:"plan,omitempty"`
-	CreatedBy    uuid.UUID    `json:"created_by,omitempty"`
+	Locale      string       `json:"locale,omitempty"`
+	CoATemplate string       `json:"coa_template,omitempty"`
+	Roles       []WizardRole `json:"roles,omitempty"`
+	Users       []WizardUser `json:"users,omitempty"`
+	SampleData  bool         `json:"sample_data,omitempty"`
+	Plan        string       `json:"plan,omitempty"`
+	CreatedBy   uuid.UUID    `json:"created_by,omitempty"`
 }
 
 // DefaultLocaleForCountry returns the canonical UI locale tag the
@@ -696,7 +696,7 @@ type Wizard struct {
 	// "hi" for IN, but the shipped bundle whitelist may only know
 	// "en" — the resolver downgrades cleanly without rejecting
 	// the row). Nil leaves the wizard's derived tag unchanged.
-	localeResolver  LocaleResolver
+	localeResolver LocaleResolver
 }
 
 // ZKFabricProvisioner mints a new tenant + HMAC credential pair on
@@ -1257,6 +1257,25 @@ const (
 // dashboard reflects yesterday's footprint within one day.
 const defaultUsageSnapshotIntervalSeconds = 86400
 
+// defaultRecordCountRecountActionType / IntervalSeconds drive the
+// daily reconciliation of tenant_record_counts against the actual
+// krecords row count. The bump path in internal/record/store.go keeps
+// the counter accurate per-transaction; this handler exists to detect
+// drift caused by direct-SQL repair scripts, future writers that
+// bypass the store, or a regression in the bump itself. 24h is the
+// shortest cadence that does not add meaningful background load — the
+// reconciliation is a single COUNT(*) + UPSERT per tenant and the
+// daily storage_bytes / krecord_count snapshot already does exactly
+// the same work for telemetry, so the recount adds ~one duplicate
+// scan per tenant per day in exchange for a strict drift guarantee.
+// Action type is duplicated here (not imported from internal/platform)
+// for the same package-cycle reason every other constant in this
+// block is — internal/tenant must not depend on internal/platform.
+const (
+	defaultRecordCountRecountActionType      = "tenant_record_count_recount"
+	defaultRecordCountRecountIntervalSeconds = 86400
+)
+
 // defaultUnrealizedFXActionType / defaultUnrealizedFXIntervalSeconds
 // define the monthly cadence (~30d) at which the worker re-values
 // open AR/AP foreign-currency balances per tenant. Seeded only when
@@ -1338,6 +1357,7 @@ func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 		{defaultDataRetentionActionType, defaultDataRetentionIntervalSeconds},
 		{defaultReportScheduleActionType, defaultReportScheduleIntervalSeconds},
 		{defaultLMSCertificateActionType, defaultLMSCertificateIntervalSeconds},
+		{defaultRecordCountRecountActionType, defaultRecordCountRecountIntervalSeconds},
 	}
 	if DefaultFeaturesForPlan(plan)[FeatureFinance] {
 		defaults = append(defaults, struct {
