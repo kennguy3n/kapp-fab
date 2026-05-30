@@ -898,3 +898,121 @@ func TestMarketplaceRegistry_SetListedVersion_ConcurrentYank(t *testing.T) {
 		}
 	}
 }
+
+// TestMarketplaceRegistry_ListInstallationsByVersion verifies the
+// runtime BYPASSRLS guard added to Store.ListInstallationsByVersion
+// (PR #126 round-6 Devin Review). The method intentionally operates
+// without setting app.tenant_id so it can sweep installs across every
+// tenant for B7's "version removed" force-uninstall path. Because the
+// underlying table is FORCE RLS, the only way the query returns rows
+// is if the connection role has rolbypassrls=true. Calling it with a
+// non-bypass pool would silently return zero rows, which a caller
+// could misread as "no installs exist for this version" — the guard
+// converts that silent-empty-result mode into an explicit error.
+//
+// The test asserts:
+//
+//  1. With h.adminPool (BYPASSRLS) the call returns every install
+//     across both tenants;
+//  2. With h.pool when the connection is NOT BYPASSRLS, the call
+//     returns the role-mismatch error rather than silently empty
+//     results.
+//
+// On shared dev databases where h.pool itself is a superuser /
+// BYPASSRLS role, the non-bypass assertion is skipped via
+// poolEnforcesRLS — there's no negative case to verify.
+func TestMarketplaceRegistry_ListInstallationsByVersion(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	if h.adminPool == nil {
+		t.Skip("KAPP_TEST_ADMIN_DB_URL not set; skipping admin-pool test")
+	}
+
+	// Underscore-form publisher: the marketplace_extensions_publisher_format
+	// CHECK constraint disallows hyphens (and uniqueSlug() emits "pub-XXXX").
+	pub := fmt.Sprintf("pub_%s", strings.ReplaceAll(uuid.NewString()[:8], "-", ""))
+	ext, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pub, Slug: "listver",
+		DisplayName: "ListByVer Test", Description: "x",
+		Author: "Test", License: "MIT",
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension: %v", err)
+	}
+	manifest := &marketplace.Manifest{
+		SchemaVersion:  1,
+		Name:           ext.Name,
+		Publisher:      ext.Publisher,
+		Slug:           ext.Slug,
+		Version:        "1.0.0",
+		Author:         "Test",
+		License:        "MIT",
+		Description:    "list-ver",
+		MinKappVersion: "1.0.0",
+	}
+	ver, err := store.PublishVersion(ctx, marketplace.PublishVersionInput{
+		ExtensionID: ext.ID, Manifest: manifest,
+		BundleHash: strings.Repeat("a", 64), BundleSize: 1024,
+		BundleURL: "https://cdn.example/bundles/listver.tgz",
+	})
+	if err != nil {
+		t.Fatalf("PublishVersion: %v", err)
+	}
+
+	tnA, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("listver-a"), Name: "A", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("tenant A: %v", err)
+	}
+	tnB, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("listver-b"), Name: "B", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("tenant B: %v", err)
+	}
+	for _, tid := range []uuid.UUID{tnA.ID, tnB.ID} {
+		if _, err := store.Install(ctx, marketplace.InstallInput{
+			TenantID: tid, ExtensionID: ext.ID, ExtensionVersionID: ver.ID,
+			WebhookBase: "https://x.example/h",
+		}); err != nil {
+			t.Fatalf("Install(%s): %v", tid, err)
+		}
+	}
+
+	// 1. Admin pool path returns both rows.
+	all, err := store.ListInstallationsByVersion(ctx, h.adminPool, ver.ID)
+	if err != nil {
+		t.Fatalf("ListInstallationsByVersion(admin): %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("admin pool: want 2 installs, got %d (%+v)", len(all), all)
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, ins := range all {
+		seen[ins.TenantID] = true
+	}
+	if !seen[tnA.ID] || !seen[tnB.ID] {
+		t.Errorf("admin pool: missing tenant in results: A=%v B=%v", seen[tnA.ID], seen[tnB.ID])
+	}
+
+	// 2. App-pool path: must reject when the role is NOT BYPASSRLS.
+	//    On a shared dev DB where h.pool itself runs as superuser,
+	//    the role IS BYPASSRLS and the call succeeds — skip the
+	//    negative assertion in that case (it would be a false
+	//    negative, not a real bug).
+	if !poolEnforcesRLS(ctx, t, h) {
+		t.Logf("h.pool is a BYPASSRLS role; skipping non-bypass rejection assertion")
+		return
+	}
+	_, err = store.ListInstallationsByVersion(ctx, h.pool, ver.ID)
+	if err == nil {
+		t.Errorf("non-bypass pool: want error, got nil (RLS would otherwise silently return empty)")
+		return
+	}
+	if !strings.Contains(err.Error(), "BYPASSRLS") {
+		t.Errorf("non-bypass pool: want BYPASSRLS-shaped error, got %v", err)
+	}
+}

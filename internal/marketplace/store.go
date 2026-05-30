@@ -1077,14 +1077,35 @@ func (s *Store) ListInstallationsForTenant(ctx context.Context, tenantID uuid.UU
 // will return zero rows because the RLS policy's USING expression
 // returns false when `app.tenant_id` is unset.
 //
-// pool MUST be the admin pool (BYPASSRLS); calling with the
-// application pool returns an empty slice silently.
+// pool MUST be the admin pool (BYPASSRLS). A runtime guard verifies
+// the pool's connection role actually has rolbypassrls set; passing
+// the application pool (`kapp_app`) returns a clear error rather
+// than silently producing an empty slice that callers would
+// misinterpret as "no installs exist for this version".
 func (s *Store) ListInstallationsByVersion(ctx context.Context, adminPool *pgxpool.Pool, versionID uuid.UUID) ([]Installation, error) {
 	if adminPool == nil {
 		return nil, errors.New("marketplace: admin pool required for cross-tenant query")
 	}
 	if versionID == uuid.Nil {
 		return nil, fmt.Errorf("%w: version id required", ErrNotFound)
+	}
+	// Defense-in-depth: confirm the pool's role has BYPASSRLS.
+	// FORCE RLS on marketplace_extension_installations would
+	// otherwise silently return zero rows when called with a
+	// non-BYPASSRLS pool, which a caller could misread as "no
+	// installs of this version exist" and proceed with a destructive
+	// operator action (e.g. force-uninstall sweep) on a phantom-empty
+	// set. The check costs a single round-trip on the first call
+	// path; we deliberately do NOT cache it because operator tools
+	// may rebuild pools across config reloads.
+	var bypass bool
+	if err := adminPool.QueryRow(ctx,
+		`SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user`,
+	).Scan(&bypass); err != nil {
+		return nil, fmt.Errorf("marketplace: verify admin pool role: %w", err)
+	}
+	if !bypass {
+		return nil, errors.New("marketplace: ListInstallationsByVersion requires a BYPASSRLS pool (got non-bypass role)")
 	}
 	rows, err := adminPool.Query(ctx,
 		`SELECT id, tenant_id, extension_id, extension_version_id, status, settings::text,
