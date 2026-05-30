@@ -311,30 +311,30 @@ func TestIsValidWebhookBase(t *testing.T) {
 // each backoff strategy.
 func TestRetryPolicy_BackoffDelay(t *testing.T) {
 	tests := []struct {
-		name    string
-		policy  *RetryPolicy
-		want    []time.Duration
+		name   string
+		policy *RetryPolicy
+		want   []time.Duration
 	}{
 		{
 			name:   "linear",
 			policy: &RetryPolicy{MaxAttempts: 5, Backoff: "linear"},
 			want: []time.Duration{
-				0,                 // attempt 1
-				1 * time.Second,   // attempt 2
-				2 * time.Second,   // attempt 3
-				3 * time.Second,   // attempt 4
-				4 * time.Second,   // attempt 5
+				0,               // attempt 1
+				1 * time.Second, // attempt 2
+				2 * time.Second, // attempt 3
+				3 * time.Second, // attempt 4
+				4 * time.Second, // attempt 5
 			},
 		},
 		{
 			name:   "exponential",
 			policy: &RetryPolicy{MaxAttempts: 5, Backoff: "exponential"},
 			want: []time.Duration{
-				0,                 // attempt 1
-				1 * time.Second,   // attempt 2
-				2 * time.Second,   // attempt 3
-				4 * time.Second,   // attempt 4
-				8 * time.Second,   // attempt 5
+				0,               // attempt 1
+				1 * time.Second, // attempt 2
+				2 * time.Second, // attempt 3
+				4 * time.Second, // attempt 4
+				8 * time.Second, // attempt 5
 			},
 		},
 		{

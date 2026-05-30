@@ -7,17 +7,17 @@
 //
 // The engine is exposed via two top-level entry points:
 //
-//   Engine.Install   — transactional registration of the manifest's
-//                      KTypes / workflows / agent tools / webhook
-//                      subscriptions, sandwiched between a blocking
-//                      pre_install lifecycle hook and a best-effort
-//                      post_install lifecycle hook. Either the
-//                      whole install commits, or none of it does.
+//	Engine.Install   — transactional registration of the manifest's
+//	                   KTypes / workflows / agent tools / webhook
+//	                   subscriptions, sandwiched between a blocking
+//	                   pre_install lifecycle hook and a best-effort
+//	                   post_install lifecycle hook. Either the
+//	                   whole install commits, or none of it does.
 //
-//   Engine.Uninstall — symmetric teardown. Cascade deletes the
-//                      registration tables (via FK ON DELETE
-//                      CASCADE) and dispatches best-effort
-//                      pre_uninstall + post_uninstall hooks.
+//	Engine.Uninstall — symmetric teardown. Cascade deletes the
+//	                   registration tables (via FK ON DELETE
+//	                   CASCADE) and dispatches best-effort
+//	                   pre_uninstall + post_uninstall hooks.
 //
 // Tool dispatch is exposed via Dispatcher.Invoke, which performs
 // a signed HMAC-SHA256 HTTPS POST to the extension's webhook with
@@ -28,10 +28,10 @@
 // Lifecycle hooks are derived from the ${EXTENSION_WEBHOOK_BASE}
 // placeholder using a fixed path convention:
 //
-//   POST {EXTENSION_WEBHOOK_BASE}/lifecycle/pre_install
-//   POST {EXTENSION_WEBHOOK_BASE}/lifecycle/post_install
-//   POST {EXTENSION_WEBHOOK_BASE}/lifecycle/pre_uninstall
-//   POST {EXTENSION_WEBHOOK_BASE}/lifecycle/post_uninstall
+//	POST {EXTENSION_WEBHOOK_BASE}/lifecycle/pre_install
+//	POST {EXTENSION_WEBHOOK_BASE}/lifecycle/post_install
+//	POST {EXTENSION_WEBHOOK_BASE}/lifecycle/pre_uninstall
+//	POST {EXTENSION_WEBHOOK_BASE}/lifecycle/post_uninstall
 //
 // A 404 response on any lifecycle endpoint is treated as
 // "extension does not implement this phase" — the engine logs INFO
@@ -82,13 +82,13 @@ func (p LifecyclePhase) LifecyclePath() string {
 type DispatchKind string
 
 const (
-	KindToolInvoke              DispatchKind = "tool_invoke"
-	KindLifecyclePreInstall     DispatchKind = "lifecycle_pre_install"
-	KindLifecyclePostInstall    DispatchKind = "lifecycle_post_install"
-	KindLifecyclePreUninstall   DispatchKind = "lifecycle_pre_uninstall"
-	KindLifecyclePostUninstall  DispatchKind = "lifecycle_post_uninstall"
-	KindEventDelivery           DispatchKind = "event_delivery"
-	KindHealthCheck             DispatchKind = "health_check"
+	KindToolInvoke             DispatchKind = "tool_invoke"
+	KindLifecyclePreInstall    DispatchKind = "lifecycle_pre_install"
+	KindLifecyclePostInstall   DispatchKind = "lifecycle_post_install"
+	KindLifecyclePreUninstall  DispatchKind = "lifecycle_pre_uninstall"
+	KindLifecyclePostUninstall DispatchKind = "lifecycle_post_uninstall"
+	KindEventDelivery          DispatchKind = "event_delivery"
+	KindHealthCheck            DispatchKind = "health_check"
 )
 
 // DispatchKindForPhase maps a lifecycle phase to its dispatch log
@@ -120,6 +120,13 @@ var (
 	// The Install transaction has not been started yet — the
 	// installation row is not written.
 	ErrPreInstallRejected = errors.New("runtime: pre_install hook rejected install")
+
+	// ErrPreUninstallRejected is the uninstall counterpart. The
+	// extension's pre_uninstall hook returned a non-2xx,
+	// non-404 response; the engine refused to proceed with the
+	// uninstall. Operators can force-uninstall by setting
+	// UninstallRequest.SkipHooks = true.
+	ErrPreUninstallRejected = errors.New("runtime: pre_uninstall hook rejected uninstall")
 
 	// ErrInvalidWebhookBase is returned when the operator-supplied
 	// EXTENSION_WEBHOOK_BASE fails the same https:// + URL-parse
@@ -282,8 +289,8 @@ func (r *InstallRequest) NormalizedWebhookBase() string {
 // UninstallRequest captures the parameters of an Engine.Uninstall
 // call.
 type UninstallRequest struct {
-	TenantID         uuid.UUID
-	InstallationID   uuid.UUID
+	TenantID       uuid.UUID
+	InstallationID uuid.UUID
 	// UninstalledBy is the operator initiating the uninstall.
 	UninstalledBy uuid.UUID
 	// SkipHooks short-circuits both pre_ and post_uninstall hook

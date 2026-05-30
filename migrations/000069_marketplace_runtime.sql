@@ -74,12 +74,25 @@ ALTER TABLE marketplace_extension_installations
 -- install, future migrations may drop the default. We keep it for
 -- this migration because some integration-test fixtures predate B3
 -- and insert directly into the table.
-ALTER TABLE marketplace_extension_installations
-    ADD CONSTRAINT marketplace_installations_signing_secret_format_chk
-    CHECK (
-        signing_secret = ''
-        OR signing_secret ~ '^[A-Za-z0-9_-]{43}$'
-    );
+--
+-- ADD CONSTRAINT does not have an IF NOT EXISTS form; we wrap in a
+-- DO block so re-running the migration (e.g. after a previous
+-- partial failure on a later statement) is a no-op rather than
+-- erroring with 42710 "constraint already exists".
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'marketplace_installations_signing_secret_format_chk'
+    ) THEN
+        ALTER TABLE marketplace_extension_installations
+            ADD CONSTRAINT marketplace_installations_signing_secret_format_chk
+            CHECK (
+                signing_secret = ''
+                OR signing_secret ~ '^[A-Za-z0-9_-]{43}$'
+            );
+    END IF;
+END $$;
 
 -- ---------------------------------------------------------------
 -- 1. marketplace_extension_ktypes
