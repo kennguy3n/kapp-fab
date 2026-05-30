@@ -264,6 +264,16 @@ func (s *PGStore) bulkDeleteOne(
 		return fmt.Errorf("record: bulk delete: %w", err)
 	}
 
+	// Decrement the denormalised tenant record counter for this row.
+	// Per-row decrement (rather than one batched -N at the end of the
+	// outer BulkDelete loop) keeps the bookkeeping correct when a
+	// subset of the input ids fail the "already deleted" guard above —
+	// only rows that reach this point actually transitioned krecords
+	// out of the active set, so only this point may shrink the counter.
+	if err := platform.BumpTenantRecordCount(ctx, tx, tenantID, -1); err != nil {
+		return err
+	}
+
 	// Reuse the outer bulk-delete tx's connection for the KType lookup
 	// so a 1000-row bulk delete stays at one pool connection instead
 	// of acquiring N nested ones for the per-row decrypt step.
