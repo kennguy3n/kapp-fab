@@ -105,8 +105,14 @@ func (s *Store) WithConverter(c Converter) *Store {
 }
 
 // ComputeSummary returns the tenant's KPI summary. All counters scan
-// the live database in a single WithTenantTx so every query shares a
-// consistent snapshot of the tenant's data.
+// the live database in a single WithReadOnlyTenantTx so every query
+// shares a consistent MVCC snapshot of the tenant's data (the READ
+// ONLY transaction mode is just defense-in-depth — it doesn't relax
+// the snapshot guarantee, which comes from running the queries inside
+// the same transaction regardless of access mode). When a read
+// replica is wired AND within lag tolerance the snapshot is taken
+// against the replica; otherwise WithReadOnlyTenantTx falls back to
+// the primary. See dbutil.PoolRouter for the routing semantics.
 func (s *Store) ComputeSummary(ctx context.Context, tenantID uuid.UUID) (*Summary, error) {
 	if s == nil || s.router == nil {
 		return nil, errors.New("dashboard: store not wired")
