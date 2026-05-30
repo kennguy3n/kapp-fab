@@ -374,10 +374,27 @@ func (e *Engine) Uninstall(ctx context.Context, req *UninstallRequest) (*Uninsta
 	}
 
 	// Fetch the signing secret directly — Store does not expose it
-	// on Installation (it's runtime-only).
-	secret, err := e.loadSigningSecret(ctx, req.TenantID, req.InstallationID)
-	if err != nil {
-		return nil, err
+	// on Installation (it's runtime-only). Skipped when req.SkipHooks
+	// is true (operator force-uninstall): the secret is only consumed
+	// by the pre_/post_uninstall hook dispatch, so loading it when
+	// hooks are skipped would (a) be wasted work, and (b) prevent
+	// force-uninstall of any install row whose signing_secret column
+	// is empty — common for installs created by direct SQL (test
+	// fixtures, pre-B3 migrations) or by any future install path
+	// that didn't populate the column. Devin Review round-6 BUG_0001
+	// on PR #127 flagged this: force-uninstall is the operator's
+	// escape hatch when an extension is in a broken state, and an
+	// empty-secret guard at this point would defeat the purpose. The
+	// secret variable is left as the zero-value SigningSecret("") in
+	// the SkipHooks branch — the hooks.Dispatch calls below are
+	// gated by the same flag so it is never actually used.
+	var secret SigningSecret
+	if !req.SkipHooks {
+		loaded, err := e.loadSigningSecret(ctx, req.TenantID, req.InstallationID)
+		if err != nil {
+			return nil, err
+		}
+		secret = loaded
 	}
 
 	var preResult, postResult *LifecycleResult
@@ -457,12 +474,26 @@ func (e *Engine) Uninstall(ctx context.Context, req *UninstallRequest) (*Uninsta
 		if err := e.registrar.UnregisterAll(ctx, tx, req.TenantID, req.InstallationID); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx,
+		// RETURNING updated_at so the UninstallResult.Installation
+		// reflects the post-flip timestamp instead of the stale
+		// pre-tx GetInstallation value. Devin Review round-6
+		// BUG_0002 on PR #127 caught this: the previous code
+		// returned the row read at the top of Uninstall (which
+		// holds the OLD updated_at from when status was last
+		// changed, typically to 'active' at install time), so any
+		// caller using the returned Installation.UpdatedAt for
+		// audit / cache invalidation / display would see a value
+		// that pre-dates the uninstall by minutes or days.
+		// Scanning the RETURNING value into install.UpdatedAt
+		// in-place keeps the Status / UpdatedAt pair internally
+		// consistent without a follow-up GetInstallation re-read.
+		if err := tx.QueryRow(ctx,
 			`UPDATE marketplace_extension_installations
 			   SET status = 'uninstalled', updated_at = now()
-			 WHERE tenant_id = $1 AND id = $2`,
-			req.TenantID, req.InstallationID)
-		if err != nil {
+			 WHERE tenant_id = $1 AND id = $2
+			 RETURNING updated_at`,
+			req.TenantID, req.InstallationID,
+		).Scan(&install.UpdatedAt); err != nil {
 			return fmt.Errorf("runtime: engine: flip to uninstalled: %w", err)
 		}
 		return nil

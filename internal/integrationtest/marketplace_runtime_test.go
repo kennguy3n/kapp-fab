@@ -563,3 +563,321 @@ func TestMarketplaceRuntime_Uninstall_ConcurrentRace(t *testing.T) {
 		t.Fatalf("post-race Uninstall err = %v, want ErrConflict", err)
 	}
 }
+
+// TestMarketplaceRuntime_Uninstall_SkipHooksWithEmptySecret locks
+// in the round-6 Devin Review BUG_0001 fix on Engine.Uninstall
+// (engine.go: gate loadSigningSecret on !req.SkipHooks).
+//
+// Operator escape hatch: when an extension is in a broken state
+// (publisher domain expired, webhook permanently 404'ing) the
+// operator force-uninstalls by setting SkipHooks=true. The pre-fix
+// code path unconditionally loaded the per-install signing_secret
+// and returned `runtime: engine: install %s has empty signing
+// secret` if the column was empty — which is a guarantee for any
+// install row created by direct SQL (test fixtures, pre-B3
+// migrations, future hypothetical install paths that didn't
+// populate the column). The fix makes the secret load conditional
+// on !req.SkipHooks so a SkipHooks=true call doesn't depend on the
+// secret at all (it's only consumed by the gated hooks.Dispatch
+// calls below).
+//
+// Test setup:
+//  1. Install an extension normally (which populates
+//     signing_secret).
+//  2. Manually NULL the signing_secret via direct SQL (under the
+//     kapp role so we bypass RLS for the fixture mutation;
+//     simulates a corrupted or pre-migration install row).
+//  3. Engine.Uninstall(SkipHooks: false) → expect error
+//     ("empty signing secret") — preserves the existing safety
+//     net for the normal uninstall path that DOES need the
+//     secret.
+//  4. Engine.Uninstall(SkipHooks: true) → expect success —
+//     the operator escape hatch must work even with an empty
+//     secret.
+//  5. Post-uninstall: runtime tables cleared, status=uninstalled.
+//  6. UpdatedAt freshness (round-6 BUG_0002 regression): the
+//     returned Installation.UpdatedAt must reflect the
+//     now()-stamp from the UPDATE … RETURNING, not the stale
+//     pre-tx GetInstallation read.
+func TestMarketplaceRuntime_Uninstall_SkipHooksWithEmptySecret(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	pub := strings.ReplaceAll(uniqueSlug("rt-skiphooks"), "-", "_")
+	ext, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pub, Slug: "shipping",
+		DisplayName: "Shipping", Description: "SkipHooks regression",
+		Author: "ACME", License: "MIT",
+		Homepage: "https://acme.example/shipping",
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension: %v", err)
+	}
+	manifest := minimalRuntimeManifest(ext)
+	ver, err := store.PublishVersion(ctx, marketplace.PublishVersionInput{
+		ExtensionID: ext.ID, Manifest: manifest,
+		BundleHash: strings.Repeat("f", 64),
+		BundleSize: 4096,
+		BundleURL:  "https://cdn.example/bundles/rt-skiphooks.tgz",
+	})
+	if err != nil {
+		t.Fatalf("PublishVersion: %v", err)
+	}
+	rs := store.Reviews()
+	reviewer := uuid.New().String()
+	for _, step := range []marketplace.ReviewStatus{
+		marketplace.ReviewStatusAutomatedPassed,
+		marketplace.ReviewStatusManualReview,
+		marketplace.ReviewStatusApproved,
+	} {
+		if _, err := rs.UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
+			VersionID: ver.ID, Status: step, Reviewer: reviewer,
+		}); err != nil {
+			t.Fatalf("review transition to %s: %v", step, err)
+		}
+	}
+	if err := store.SetListedVersion(ctx, ext.ID, ver.Version); err != nil {
+		t.Fatalf("SetListedVersion: %v", err)
+	}
+	if err := store.UpdateExtensionStatus(ctx, ext.ID, marketplace.ExtensionStatusListed); err != nil {
+		t.Fatalf("UpdateExtensionStatus listed: %v", err)
+	}
+
+	tn, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("rt-skiphooks-a"), Name: "RT-SkipHooks", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("tenant: %v", err)
+	}
+
+	okTransport := &runtime.InMemoryTransport{Handler: runtime.StaticResponseHandler(200, []byte(`{"ok":true}`))}
+	okHooks := runtime.NewTransportHooks(okTransport, nil)
+	engine, err := runtime.NewEngine(runtime.EngineOptions{
+		Pool: h.pool, Store: store, Hooks: okHooks,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	bundle := minimalResolvedBundle(manifest)
+	installRes, err := engine.Install(ctx, &runtime.InstallRequest{
+		TenantID:    tn.ID,
+		ExtensionID: ext.ID,
+		VersionID:   ver.ID,
+		WebhookBase: "https://tenant-skiphooks.example/hooks",
+	}, bundle)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	installID := installRes.Installation.ID
+	installedAt := installRes.Installation.UpdatedAt
+
+	// Simulate a corrupted / pre-B3 install row: blank the
+	// signing_secret column. Runs through dbutil.WithTenantTx
+	// so the RLS context is set (h.pool is the kapp_app role
+	// with FORCE RLS in this test environment, so a raw UPDATE
+	// without app.tenant_id silently filters every row).
+	// Production code never does this; the column is NOT NULL
+	// with DEFAULT '' (set at install time by Engine.Install),
+	// so the only way to reach this state is direct DB
+	// intervention, which is exactly what the SkipHooks escape
+	// hatch is for.
+	if err := dbutil.WithTenantTx(ctx, h.pool, tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`UPDATE marketplace_extension_installations
+			   SET signing_secret = ''
+			 WHERE tenant_id = $1 AND id = $2`,
+			tn.ID, installID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected 1 row updated, got %d", tag.RowsAffected())
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("clear signing_secret: %v", err)
+	}
+
+	// Step 3: non-skip uninstall MUST still fail loudly with
+	// the empty-secret guard. This preserves the safety net
+	// for the normal uninstall path that does dispatch hooks
+	// and therefore does need the secret.
+	if _, err := engine.Uninstall(ctx, &runtime.UninstallRequest{
+		TenantID:       tn.ID,
+		InstallationID: installID,
+		SkipHooks:      false,
+	}); err == nil {
+		t.Fatal("expected non-SkipHooks Uninstall to fail with empty secret, got nil")
+	} else if !strings.Contains(err.Error(), "empty signing secret") {
+		t.Fatalf("expected empty-secret error, got: %v", err)
+	}
+
+	// Step 4: SkipHooks=true MUST succeed even though the
+	// secret is empty. This is the round-6 BUG_0001 fix.
+	uninstallRes, err := engine.Uninstall(ctx, &runtime.UninstallRequest{
+		TenantID:       tn.ID,
+		InstallationID: installID,
+		SkipHooks:      true,
+	})
+	if err != nil {
+		t.Fatalf("SkipHooks=true Uninstall: %v", err)
+	}
+	if uninstallRes == nil || uninstallRes.Installation == nil {
+		t.Fatalf("nil result: %+v", uninstallRes)
+	}
+	if uninstallRes.Installation.Status != marketplace.InstallStatusUninstalled {
+		t.Fatalf("status %q, want uninstalled", uninstallRes.Installation.Status)
+	}
+	if uninstallRes.PreUninstallResult != nil {
+		t.Fatalf("expected nil PreUninstallResult under SkipHooks, got %+v", uninstallRes.PreUninstallResult)
+	}
+	if uninstallRes.PostUninstallResult != nil {
+		t.Fatalf("expected nil PostUninstallResult under SkipHooks, got %+v", uninstallRes.PostUninstallResult)
+	}
+
+	// Step 5: runtime tables cleared.
+	afterCounts := readRuntimeCounts(ctx, t, h, tn.ID, installID)
+	if afterCounts.ktypes != 0 || afterCounts.workflows != 0 || afterCounts.tools != 0 || afterCounts.webhooks != 0 {
+		t.Fatalf("uninstall left rows: %+v", afterCounts)
+	}
+
+	// Step 6: UpdatedAt freshness (round-6 BUG_0002): the
+	// returned Installation.UpdatedAt must be strictly after
+	// the install-time UpdatedAt — proving the RETURNING
+	// updated_at clause landed and the result wasn't the
+	// stale pre-tx GetInstallation copy. Use After (not !=)
+	// because a stale value would compare equal, not zero.
+	if !uninstallRes.Installation.UpdatedAt.After(installedAt) {
+		t.Fatalf("UninstallResult.Installation.UpdatedAt %v not after install-time UpdatedAt %v — stale read regression (round-6 BUG_0002)",
+			uninstallRes.Installation.UpdatedAt, installedAt)
+	}
+
+	// Both UNINSTALL-phase hooks (pre + post) MUST have been
+	// skipped — Install above already fired its own pre/post
+	// hooks through the shared transport, so we filter the
+	// audit log by lifecycle path rather than asserting
+	// transport.Len() == 0.
+	for _, dispatch := range okTransport.Snapshot() {
+		if strings.Contains(dispatch.Target, "uninstall") {
+			t.Fatalf("expected zero uninstall-phase hook dispatches under SkipHooks, got target=%q", dispatch.Target)
+		}
+	}
+}
+
+// TestMarketplaceRuntime_Registrar_RetryFloor locks in the
+// round-6 Devin Review INFO_0003 fix on Registrar.insertAgentTools
+// (registrar.go: `if maxAttempts < 1 { maxAttempts = 1 }`).
+//
+// A code-constructed manifest (one that bypassed
+// marketplace.ParseManifest's default-and-validate pass) with
+// Retry.MaxAttempts = 0 would, pre-fix, slam into the DB CHECK
+// constraint `retry_max_attempts >= 1` at migration 000069 line
+// 209 and return a raw Postgres "23514" violation error. Post-fix,
+// the registrar floors the value to 1 before INSERT, mirroring the
+// same defensive guard in Dispatcher.Invoke
+// (dispatcher.go:146-148) so the two retry-policy write paths stay
+// in lock-step.
+//
+// Test setup: install with Retry: {MaxAttempts: 0, Backoff:
+// "exponential"} → verify the install succeeds AND
+// retry_max_attempts in the agent_tools row reads back as 1.
+func TestMarketplaceRuntime_Registrar_RetryFloor(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	pub := strings.ReplaceAll(uniqueSlug("rt-rfloor"), "-", "_")
+	ext, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pub, Slug: "shipping",
+		DisplayName: "Shipping", Description: "Registrar retry-floor regression",
+		Author: "ACME", License: "MIT",
+		Homepage: "https://acme.example/shipping",
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension: %v", err)
+	}
+	// Build a manifest with Retry.MaxAttempts=0 to exercise
+	// the floor. This bypasses ParseManifest (the validator
+	// would default this to 2 attempts) — the registrar is
+	// the only line of defence before the DB CHECK.
+	manifest := minimalRuntimeManifest(ext)
+	manifest.AgentTools[0].Retry = &marketplace.RetryRule{
+		MaxAttempts: 0,
+		Backoff:     "exponential",
+	}
+
+	ver, err := store.PublishVersion(ctx, marketplace.PublishVersionInput{
+		ExtensionID: ext.ID, Manifest: manifest,
+		BundleHash: strings.Repeat("c", 64),
+		BundleSize: 4096,
+		BundleURL:  "https://cdn.example/bundles/rt-rfloor.tgz",
+	})
+	if err != nil {
+		t.Fatalf("PublishVersion: %v", err)
+	}
+	rs := store.Reviews()
+	reviewer := uuid.New().String()
+	for _, step := range []marketplace.ReviewStatus{
+		marketplace.ReviewStatusAutomatedPassed,
+		marketplace.ReviewStatusManualReview,
+		marketplace.ReviewStatusApproved,
+	} {
+		if _, err := rs.UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
+			VersionID: ver.ID, Status: step, Reviewer: reviewer,
+		}); err != nil {
+			t.Fatalf("review transition to %s: %v", step, err)
+		}
+	}
+	if err := store.SetListedVersion(ctx, ext.ID, ver.Version); err != nil {
+		t.Fatalf("SetListedVersion: %v", err)
+	}
+	if err := store.UpdateExtensionStatus(ctx, ext.ID, marketplace.ExtensionStatusListed); err != nil {
+		t.Fatalf("UpdateExtensionStatus listed: %v", err)
+	}
+
+	tn, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("rt-rfloor-a"), Name: "RT-RFloor", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("tenant: %v", err)
+	}
+
+	okTransport := &runtime.InMemoryTransport{Handler: runtime.StaticResponseHandler(200, []byte(`{"ok":true}`))}
+	okHooks := runtime.NewTransportHooks(okTransport, nil)
+	engine, err := runtime.NewEngine(runtime.EngineOptions{
+		Pool: h.pool, Store: store, Hooks: okHooks,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	bundle := minimalResolvedBundle(manifest)
+	installRes, err := engine.Install(ctx, &runtime.InstallRequest{
+		TenantID:    tn.ID,
+		ExtensionID: ext.ID,
+		VersionID:   ver.ID,
+		WebhookBase: "https://tenant-rfloor.example/hooks",
+	}, bundle)
+	if err != nil {
+		// Pre-fix this would have been a DB CHECK violation
+		// (SQLSTATE 23514) bubbled up as a raw pgconn error.
+		t.Fatalf("Install: %v", err)
+	}
+
+	// Read back retry_max_attempts via the registrar's storage.
+	// Pre-fix: would have failed before getting here. Post-fix:
+	// the value MUST be 1 (the floor), not 0 (the requested
+	// value, which would be a constraint violation).
+	var retryMaxAttempts int
+	if err := dbutil.WithTenantTx(ctx, h.pool, tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT retry_max_attempts FROM marketplace_extension_agent_tools
+			  WHERE installation_id = $1`,
+			installRes.Installation.ID).Scan(&retryMaxAttempts)
+	}); err != nil {
+		t.Fatalf("read retry_max_attempts: %v", err)
+	}
+	if retryMaxAttempts != 1 {
+		t.Fatalf("retry_max_attempts = %d, want 1 (floor) — round-6 INFO_0003 regression", retryMaxAttempts)
+	}
+}

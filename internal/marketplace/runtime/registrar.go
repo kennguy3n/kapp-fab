@@ -353,6 +353,20 @@ func (r *Registrar) insertAgentTools(ctx context.Context, tx pgx.Tx, tenantID, i
 				backoff = "exponential"
 			}
 		}
+		// Defensive floor on MaxAttempts so a code-constructed
+		// manifest that sets Retry.MaxAttempts = 0 surfaces a
+		// structured validation error instead of slamming into the
+		// DB CHECK (`retry_max_attempts >= 1`, migration 000069
+		// line 209) and returning a raw Postgres error code. The
+		// manifest validator (ParseManifest) is the intended guard
+		// for the production path, but in-process test manifests
+		// bypass it. Devin Review round-6 INFO_0003 on PR #127
+		// asked for this floor to be symmetric with the same
+		// guard in Dispatcher.Invoke (dispatcher.go:146-148) so
+		// the two retry-policy write paths stay in lock-step.
+		if maxAttempts < 1 {
+			maxAttempts = 1
+		}
 
 		_, execErr := tx.Exec(ctx, `
 			INSERT INTO marketplace_extension_agent_tools
