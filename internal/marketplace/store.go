@@ -281,7 +281,14 @@ func (s *Store) UpdateExtensionStatus(ctx context.Context, id uuid.UUID, status 
 	// transition) or a true conflict to surface. Without the
 	// status guard, a `listed→deprecated` and `listed→removed`
 	// race could both UPDATE successfully and last-writer-wins.
-	for attempt := 0; attempt < 3; attempt++ {
+	// Retry budget = updateExtensionStatusMaxAttempts UPDATEs. The
+	// re-read at the bottom of each iteration costs a round-trip; if
+	// it were unconditional we would always pay one wasted re-read
+	// on the final iteration even though there is no further UPDATE
+	// to gate on the fresh state. Skip the re-read on the last
+	// attempt and fall through to the contention error.
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		tag, err := s.pool.Exec(ctx,
 			`UPDATE marketplace_extensions
 			   SET status = $2, updated_at = now()
@@ -293,6 +300,12 @@ func (s *Store) UpdateExtensionStatus(ctx context.Context, id uuid.UUID, status 
 		}
 		if tag.RowsAffected() == 1 {
 			return nil
+		}
+		// Last attempt: no further UPDATE to gate on the fresh
+		// state, so the re-read would be wasted. Break out and
+		// surface the contention error below.
+		if attempt == maxAttempts-1 {
+			break
 		}
 		// Re-read — either the row was concurrently transitioned
 		// (status no longer == current.Status) or the row was
@@ -313,7 +326,7 @@ func (s *Store) UpdateExtensionStatus(ctx context.Context, id uuid.UUID, status 
 		}
 		current = latest
 	}
-	return fmt.Errorf("marketplace: update extension status: gave up after 3 contended retries on id %s", id)
+	return fmt.Errorf("marketplace: update extension status: gave up after %d contended retries on id %s", maxAttempts, id)
 }
 
 func extensionStatusTransitionAllowed(from, to ExtensionStatus) ExtensionStatusTransition {

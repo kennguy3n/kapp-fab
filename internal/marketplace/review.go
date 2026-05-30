@@ -116,12 +116,57 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 		return nil, err
 	}
 
+	// Terminal-state self-loops (approved→approved, rejected→rejected,
+	// withdrawn→withdrawn) are special: the reviewer and reviewed_at
+	// columns are the audit trail of WHO decided this version and
+	// WHEN. Silently overwriting them on a second call would erase
+	// that audit detail — e.g. UpdateReviewState(approved, "bob") on
+	// a row already approved by "alice" would lose Alice's reviewer
+	// record. The transition graph allows the self-loop (so an
+	// at-least-once retry from the same caller succeeds) but here we
+	// gate the UPDATE explicitly:
+	//
+	//   - Same reviewer (or empty in.Reviewer): treat as a no-op
+	//     idempotent re-issue. Return the existing row unchanged
+	//     WITHOUT firing the UPDATE — automated_checks and notes
+	//     are not refreshed because a terminal row is, by spec,
+	//     frozen post-decision (re-running scans post-approval is
+	//     not a supported workflow; publishers re-submit by uploading
+	//     a new version).
+	//
+	//   - Different non-empty in.Reviewer: reject loudly. This is
+	//     either a UI bug (two reviewers racing) or a deliberate
+	//     audit-trail-overwrite attempt; either way it must not
+	//     silently succeed.
+	//
+	// Non-terminal self-loops (automated_passed→automated_passed
+	// etc.) are NOT gated here — the B7 worker re-issues those on
+	// retry and the UPDATE intentionally refreshes automated_checks
+	// with the new scan result.
+	if current.Status.IsTerminal() && current.Status == in.Status {
+		newReviewer := strings.TrimSpace(in.Reviewer)
+		if newReviewer != "" && newReviewer != current.Reviewer {
+			return nil, fmt.Errorf("%w: cannot change reviewer on terminal review row (current=%q, attempted=%q) — audit trail is write-once",
+				ErrInvalidManifest, current.Reviewer, newReviewer)
+		}
+		// Idempotent re-issue: same reviewer or empty override.
+		// Return the existing row unchanged.
+		return current, nil
+	}
+
 	// Optimistic-concurrency retry loop. We accept up to 3 contended
 	// attempts before giving up — the same budget UpdateExtensionStatus
 	// uses. Beyond that, something is wrong (e.g. a thundering herd of
 	// reviewers all hammering the same version) and surfacing the
 	// failure is better than silently looping.
-	for attempt := 0; attempt < 3; attempt++ {
+	//
+	// The re-read at the bottom of each iteration costs a round-trip;
+	// if unconditional we would always pay one wasted re-read on the
+	// final iteration even though there is no further UPDATE to gate
+	// on the fresh state. Skip the re-read on the last attempt and
+	// fall through to the contention error.
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if !reviewStatusTransitionAllowed(current.Status, in.Status) {
 			return nil, fmt.Errorf("%w: cannot transition review status from %q to %q",
 				ErrInvalidManifest, current.Status, in.Status)
@@ -179,6 +224,12 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("marketplace: update review state: %w", err)
 		}
+		// Last attempt: no further UPDATE to gate on the fresh
+		// state, so the re-read would be wasted. Break out and
+		// surface the contention error below.
+		if attempt == maxAttempts-1 {
+			break
+		}
 		// ErrNoRows from the RETURNING means either:
 		//   1. the row was deleted (CASCADE from version delete) —
 		//      surface as ErrNotFound, or
@@ -201,7 +252,7 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 		}
 		current = latest
 	}
-	return nil, fmt.Errorf("marketplace: update review state: gave up after 3 contended retries on version %s", in.VersionID)
+	return nil, fmt.Errorf("marketplace: update review state: gave up after %d contended retries on version %s", maxAttempts, in.VersionID)
 }
 
 // ListVersionsByReviewStatus returns the version ids currently in
@@ -250,10 +301,21 @@ func (rs *ReviewStateStore) ListVersionsByReviewStatus(ctx context.Context, stat
 // All states (terminal and non-terminal) allow self-loops so a B7
 // at-least-once worker that re-issues the same UpdateReviewState
 // call on retry succeeds without surfacing a spurious "invalid
-// transition" error. The UPDATE path still bumps updated_at and
+// transition" error.
+//
+// Non-terminal self-loops: the UPDATE path bumps updated_at and
 // re-writes automated_checks, which is the intended idempotent
 // behaviour (re-running automated scans against the same version
 // row overwrites the prior result with the fresh one).
+//
+// Terminal self-loops (approved→approved, rejected→rejected,
+// withdrawn→withdrawn): permitted by this function so the
+// transition-graph check in UpdateReviewState does not surface a
+// spurious error, but UpdateReviewState short-circuits BEFORE the
+// UPDATE fires — the existing row is returned unchanged so the
+// reviewer/reviewed_at audit trail cannot be overwritten. A caller
+// passing a different reviewer on a terminal-state row is rejected
+// loudly. See UpdateReviewState for the precise gate.
 //
 // Terminal states (approved / rejected / withdrawn) additionally
 // reject ALL non-self transitions — once a version is approved it

@@ -475,7 +475,14 @@ func validateManifest(m *Manifest, agg *ManifestErrors) {
 	} else if len(m.Description) > 4096 {
 		// 4 KiB description cap — prevents a manifest abusing the
 		// description field to push close to MaxManifestSizeBytes.
-		agg.add("description", fmt.Sprintf("description %d chars exceeds 4096-char limit", len(m.Description)))
+		// The limit is byte-based (len() on a string in Go returns
+		// the byte count, not the rune/character count). The error
+		// message uses "bytes" to match what the check actually
+		// counts: a UTF-8-encoded CJK manifest with 2,000 visible
+		// characters can land at ~6,000 bytes and would be rejected,
+		// which is the intended behaviour (the cap is about wire
+		// size, not visual length).
+		agg.add("description", fmt.Sprintf("description %d bytes exceeds 4096-byte limit", len(m.Description)))
 	}
 
 	if m.Homepage != "" {
@@ -571,12 +578,27 @@ func validateManifest(m *Manifest, agg *ManifestErrors) {
 	if len(m.AgentTools) > MaxAgentToolsPerBundle {
 		agg.add("agent_tools", fmt.Sprintf("count %d exceeds %d limit", len(m.AgentTools), MaxAgentToolsPerBundle))
 	}
+	// seenAgentToolDefs catches two entries pointing at the same
+	// definition file. The tool's name is read from the definition
+	// file at extract time (B6), so two entries sharing a definition
+	// would resolve to the same tool name and the install registrar
+	// would hit the (tenant_id, installation_id, tool_name) UNIQUE
+	// in marketplace_extension_agent_tools (B3 / 000069). Failing at
+	// upload time with a clear field error is cheaper than failing at
+	// install time with a constraint violation a tenant cannot easily
+	// debug. Mirrors the seenKTypePaths / seenWfPaths convention.
+	seenAgentToolDefs := make(map[string]struct{}, len(m.AgentTools))
 	for i, at := range m.AgentTools {
 		field := fmt.Sprintf("agent_tools[%d]", i)
 		if at.Definition == "" {
 			agg.add(field+".definition", "required")
 		} else if !bundleRelPathRegex.MatchString(at.Definition) {
 			agg.add(field+".definition", "must be a bundle-relative path of the form ./tools/foo.json")
+		} else {
+			if _, dup := seenAgentToolDefs[at.Definition]; dup {
+				agg.add(field+".definition", fmt.Sprintf("duplicate path %q (already referenced earlier)", at.Definition))
+			}
+			seenAgentToolDefs[at.Definition] = struct{}{}
 		}
 		if at.Handler == "" {
 			agg.add(field+".handler", "required (one of: webhook)")
@@ -628,6 +650,15 @@ func validateManifest(m *Manifest, agg *ManifestErrors) {
 	if len(m.WebhooksConsumed) > MaxWebhooksPerBundle {
 		agg.add("webhooks_consumed", fmt.Sprintf("count %d exceeds %d limit", len(m.WebhooksConsumed), MaxWebhooksPerBundle))
 	}
+	// Two subscriptions with the same (event, endpoint) tuple are a
+	// no-op duplicate — the dispatcher would fire the same payload at
+	// the same URL twice. Same event with two DIFFERENT endpoints is
+	// legitimate (extension wants both POSTs) so the dedupe is on the
+	// full tuple, not the event alone. The filter map is intentionally
+	// excluded from the key: two entries with the same event+endpoint
+	// but different filters would deliver overlapping subsets to the
+	// same URL, which is unambiguously a manifest bug.
+	seenWebhookSubs := make(map[string]struct{}, len(m.WebhooksConsumed))
 	for i, w := range m.WebhooksConsumed {
 		field := fmt.Sprintf("webhooks_consumed[%d]", i)
 		if w.Event == "" {
@@ -637,6 +668,13 @@ func validateManifest(m *Manifest, agg *ManifestErrors) {
 		}
 		if err := validateEndpoint(w.Endpoint); err != nil {
 			agg.add(field+".endpoint", err.Error())
+		}
+		if w.Event != "" && w.Endpoint != "" {
+			key := w.Event + "|" + w.Endpoint
+			if _, dup := seenWebhookSubs[key]; dup {
+				agg.add(field, fmt.Sprintf("duplicate (event=%q, endpoint=%q) (already referenced earlier)", w.Event, w.Endpoint))
+			}
+			seenWebhookSubs[key] = struct{}{}
 		}
 		// filter is optional; if present, every value must be
 		// non-empty (an empty value is almost always a YAML typo
@@ -658,6 +696,12 @@ func validateManifest(m *Manifest, agg *ManifestErrors) {
 	if len(m.PostingHooks) > MaxPostingHooksPerBundle {
 		agg.add("posting_hooks", fmt.Sprintf("count %d exceeds %d limit", len(m.PostingHooks), MaxPostingHooksPerBundle))
 	}
+	// Two posting hooks with the same (ktype, when, endpoint) triple
+	// would fire the same callback twice per record event. Same ktype
+	// + same when + DIFFERENT endpoints is legitimate (extension wants
+	// both endpoints called). Dedupe on the full triple — anything
+	// less is a manifest bug.
+	seenPostingHooks := make(map[string]struct{}, len(m.PostingHooks))
 	for i, ph := range m.PostingHooks {
 		field := fmt.Sprintf("posting_hooks[%d]", i)
 		if ph.KType == "" {
@@ -671,12 +715,28 @@ func validateManifest(m *Manifest, agg *ManifestErrors) {
 		if err := validateEndpoint(ph.Endpoint); err != nil {
 			agg.add(field+".endpoint", err.Error())
 		}
+		if ph.KType != "" && ph.When != "" && ph.Endpoint != "" {
+			key := ph.KType + "|" + ph.When + "|" + ph.Endpoint
+			if _, dup := seenPostingHooks[key]; dup {
+				agg.add(field, fmt.Sprintf("duplicate (ktype=%q, when=%q, endpoint=%q) (already referenced earlier)", ph.KType, ph.When, ph.Endpoint))
+			}
+			seenPostingHooks[key] = struct{}{}
+		}
 	}
 
 	// --- UI extensions ---
 	if len(m.UIExtensions) > MaxUIExtensionsPerBundle {
 		agg.add("ui_extensions", fmt.Sprintf("count %d exceeds %d limit", len(m.UIExtensions), MaxUIExtensionsPerBundle))
 	}
+	// Dedupe on the full (slot, target_ktype, label, component_url)
+	// tuple. Multiple `record_list_action`s for the same ktype with
+	// DIFFERENT (label, component_url) are legitimate (an extension
+	// wants several actions on one record list), so the key cannot be
+	// the (slot, target_ktype) pair alone. A literal copy-paste —
+	// exact 4-tuple match — is unambiguously a manifest bug and we
+	// reject it here rather than letting the catalog UI render two
+	// identical buttons that fire the same component.
+	seenUIExts := make(map[string]struct{}, len(m.UIExtensions))
 	for i, ui := range m.UIExtensions {
 		field := fmt.Sprintf("ui_extensions[%d]", i)
 		slotDef, ok := ValidUIExtensionSlots[ui.Slot]
@@ -702,6 +762,14 @@ func validateManifest(m *Manifest, agg *ManifestErrors) {
 			agg.add(field+".component_url", "required")
 		} else if !componentURLRegex.MatchString(ui.ComponentURL) {
 			agg.add(field+".component_url", "must be a bundle-relative .js or .mjs path (e.g. ./ui/foo.js, optionally with #anchor)")
+		}
+		if ui.Slot != "" && ui.ComponentURL != "" {
+			key := ui.Slot + "|" + ui.TargetKType + "|" + ui.Label + "|" + ui.ComponentURL
+			if _, dup := seenUIExts[key]; dup {
+				agg.add(field, fmt.Sprintf("duplicate (slot=%q, target_ktype=%q, label=%q, component_url=%q) (already referenced earlier)",
+					ui.Slot, ui.TargetKType, ui.Label, ui.ComponentURL))
+			}
+			seenUIExts[key] = struct{}{}
 		}
 	}
 
