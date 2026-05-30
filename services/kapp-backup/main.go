@@ -186,6 +186,19 @@ var TenantScopedTables = []string{
 	// purely procedural — the counter is rebuilt from krecords
 	// nightly by the reconciler).
 	"tenant_record_counts",
+	// Phase B2 — per-tenant marketplace extension installations.
+	// PK is the synthesised `id`, so the default (tenant_id, id)
+	// upsert path applies and no tableConflictKeys entry is
+	// needed. RLS is enabled on this table (000068); the dump
+	// path runs through dbutil.WithTenantTx so the tenant GUC is
+	// set when these rows are extracted/restored. Listed AFTER
+	// the rest of the tenant tables because the
+	// extension_version_id FK targets a GLOBAL catalog table
+	// (marketplace_extension_versions, not in this slice) that
+	// is operator-managed, not dump-managed — the marketplace
+	// catalog must be re-populated by the publisher pipeline
+	// before a tenant restore can land.
+	"marketplace_extension_installations",
 }
 
 // manifest is the first record in every dump file.

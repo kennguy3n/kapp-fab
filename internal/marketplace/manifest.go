@@ -184,91 +184,103 @@ var SPDXLicenseAllowlist = map[string]struct{}{
 // (e.g. the publisher prefix of each KType reference matches the
 // manifest's publisher) and the persistence layer relies on those
 // invariants when computing the denormalised count columns.
+//
+// Each field carries BOTH yaml and json tags because the YAML form
+// is the publisher-authored source of truth and the JSON form is
+// what PublishVersion serialises to the manifest JSONB column (see
+// store.go). The catalog UI then reads the JSON back through this
+// same struct, so the two encodings MUST agree on key names — if
+// the json tags were absent, encoding/json would emit Go-style
+// PascalCase (`SchemaVersion`, `MinKappVersion`, ...) and a UI
+// unmarshalling into a struct with the snake_case yaml-tagged
+// fields would silently produce zero values.
 type Manifest struct {
-	SchemaVersion       int              `yaml:"schema_version"`
-	Name                string           `yaml:"name"`
-	Version             string           `yaml:"version"`
-	Author              string           `yaml:"author"`
-	License             string           `yaml:"license"`
-	Description         string           `yaml:"description"`
-	Homepage            string           `yaml:"homepage"`
-	SupportEmail        string           `yaml:"support_email"`
-	Icon                string           `yaml:"icon"`
-	MinKappVersion      string           `yaml:"min_kapp_version"`
-	MaxKappVersion      string           `yaml:"max_kapp_version"`
-	FeaturesRequired    []string         `yaml:"features_required"`
-	PermissionsRequired []string         `yaml:"permissions_required"`
-	KTypes              []KTypeRef       `yaml:"ktypes"`
-	Workflows           []WorkflowRef    `yaml:"workflows"`
-	AgentTools          []AgentToolRef   `yaml:"agent_tools"`
-	WebhooksConsumed    []WebhookRef     `yaml:"webhooks_consumed"`
-	PostingHooks        []PostingHookRef `yaml:"posting_hooks"`
-	UIExtensions        []UIExtensionRef `yaml:"ui_extensions"`
-	SettingsSchema      string           `yaml:"settings_schema"`
-	SecretsRequired     []SecretRef      `yaml:"secrets_required"`
+	SchemaVersion       int              `yaml:"schema_version"       json:"schema_version"`
+	Name                string           `yaml:"name"                 json:"name"`
+	Version             string           `yaml:"version"              json:"version"`
+	Author              string           `yaml:"author"               json:"author"`
+	License             string           `yaml:"license"              json:"license"`
+	Description         string           `yaml:"description"          json:"description"`
+	Homepage            string           `yaml:"homepage"             json:"homepage,omitempty"`
+	SupportEmail        string           `yaml:"support_email"        json:"support_email,omitempty"`
+	Icon                string           `yaml:"icon"                 json:"icon,omitempty"`
+	MinKappVersion      string           `yaml:"min_kapp_version"     json:"min_kapp_version"`
+	MaxKappVersion      string           `yaml:"max_kapp_version"     json:"max_kapp_version,omitempty"`
+	FeaturesRequired    []string         `yaml:"features_required"    json:"features_required"`
+	PermissionsRequired []string         `yaml:"permissions_required" json:"permissions_required"`
+	KTypes              []KTypeRef       `yaml:"ktypes"               json:"ktypes,omitempty"`
+	Workflows           []WorkflowRef    `yaml:"workflows"            json:"workflows,omitempty"`
+	AgentTools          []AgentToolRef   `yaml:"agent_tools"          json:"agent_tools,omitempty"`
+	WebhooksConsumed    []WebhookRef     `yaml:"webhooks_consumed"    json:"webhooks_consumed,omitempty"`
+	PostingHooks        []PostingHookRef `yaml:"posting_hooks"        json:"posting_hooks,omitempty"`
+	UIExtensions        []UIExtensionRef `yaml:"ui_extensions"        json:"ui_extensions,omitempty"`
+	SettingsSchema      string           `yaml:"settings_schema"      json:"settings_schema,omitempty"`
+	SecretsRequired     []SecretRef      `yaml:"secrets_required"     json:"secrets_required,omitempty"`
 
 	// Derived fields populated by ParseManifest after validation —
 	// not present in the YAML source. Marked yaml:"-" so a hand-
 	// crafted manifest containing them is rejected as a "field not
 	// recognised" issue rather than silently overriding parser
-	// computation.
-	Publisher string `yaml:"-"`
-	Slug      string `yaml:"-"`
+	// computation. They ARE emitted in the JSON form because the
+	// catalog UI needs (publisher, slug) to render extension cards
+	// without re-parsing `name` on every read.
+	Publisher string `yaml:"-" json:"publisher"`
+	Slug      string `yaml:"-" json:"slug"`
 }
 
 // KTypeRef is one element of manifest.ktypes[]. spec §3 / §4.
 type KTypeRef struct {
-	Schema string `yaml:"schema"`
+	Schema string `yaml:"schema" json:"schema"`
 }
 
 // WorkflowRef is one element of manifest.workflows[].
 type WorkflowRef struct {
-	Definition string `yaml:"definition"`
+	Definition string `yaml:"definition" json:"definition"`
 }
 
 // AgentToolRef is one element of manifest.agent_tools[]. spec §6.
 type AgentToolRef struct {
-	Definition string     `yaml:"definition"`
-	Handler    string     `yaml:"handler"`
-	Endpoint   string     `yaml:"endpoint"`
-	Timeout    string     `yaml:"timeout"`
-	Retry      *RetryRule `yaml:"retry"`
+	Definition string     `yaml:"definition" json:"definition"`
+	Handler    string     `yaml:"handler"    json:"handler"`
+	Endpoint   string     `yaml:"endpoint"   json:"endpoint"`
+	Timeout    string     `yaml:"timeout"    json:"timeout"`
+	Retry      *RetryRule `yaml:"retry"      json:"retry,omitempty"`
 }
 
 // RetryRule is the retry block on agent_tools[] / posting_hooks[].
 type RetryRule struct {
-	MaxAttempts int    `yaml:"max_attempts"`
-	Backoff     string `yaml:"backoff"`
+	MaxAttempts int    `yaml:"max_attempts" json:"max_attempts"`
+	Backoff     string `yaml:"backoff"      json:"backoff"`
 }
 
 // WebhookRef is one element of manifest.webhooks_consumed[]. spec §7.
 type WebhookRef struct {
-	Event    string            `yaml:"event"`
-	Filter   map[string]string `yaml:"filter"`
-	Endpoint string            `yaml:"endpoint"`
+	Event    string            `yaml:"event"    json:"event"`
+	Filter   map[string]string `yaml:"filter"   json:"filter,omitempty"`
+	Endpoint string            `yaml:"endpoint" json:"endpoint"`
 }
 
 // PostingHookRef is one element of manifest.posting_hooks[]. B4.
 type PostingHookRef struct {
-	KType    string `yaml:"ktype"`
-	When     string `yaml:"when"`
-	Endpoint string `yaml:"endpoint"`
+	KType    string `yaml:"ktype"    json:"ktype"`
+	When     string `yaml:"when"     json:"when"`
+	Endpoint string `yaml:"endpoint" json:"endpoint"`
 }
 
 // UIExtensionRef is one element of manifest.ui_extensions[]. spec §8.
 type UIExtensionRef struct {
-	Slot         string `yaml:"slot"`
-	TargetKType  string `yaml:"target_ktype"`
-	Label        string `yaml:"label"`
-	ComponentURL string `yaml:"component_url"`
+	Slot         string `yaml:"slot"          json:"slot"`
+	TargetKType  string `yaml:"target_ktype"  json:"target_ktype"`
+	Label        string `yaml:"label"         json:"label"`
+	ComponentURL string `yaml:"component_url" json:"component_url"`
 }
 
 // SecretRef is one element of manifest.secrets_required[]. spec §9.
 type SecretRef struct {
-	Key         string `yaml:"key"`
-	Label       string `yaml:"label"`
-	Description string `yaml:"description"`
-	Sensitive   bool   `yaml:"sensitive"`
+	Key         string `yaml:"key"         json:"key"`
+	Label       string `yaml:"label"       json:"label"`
+	Description string `yaml:"description" json:"description,omitempty"`
+	Sensitive   bool   `yaml:"sensitive"   json:"sensitive"`
 }
 
 // ManifestError carries the per-field detail for a manifest rejection.
@@ -326,15 +338,25 @@ var (
 	// Compile once at init — the manifest validator is on the hot
 	// upload path and recompiling regexes per call would dominate
 	// validator latency for small manifests.
-	nameRegex            = regexp.MustCompile(`^[a-z][a-z0-9_-]{2,31}\.[a-z][a-z0-9_-]{2,31}$`)
-	publisherSlugRegex   = regexp.MustCompile(`^[a-z][a-z0-9_-]{2,31}$`)
+	// nameRegex / publisherSlugRegex MUST match the DB CHECK
+	// constraints in migrations/000068_marketplace.sql:99-103
+	// exactly (`^[a-z][a-z0-9_]*$`). The earlier draft of these
+	// regexes also allowed hyphens, which made the Go validator
+	// strictly looser than the DB: a manifest like `my-pub.my-ext`
+	// passed ParseManifest, then CreateExtension surfaced an opaque
+	// CHECK constraint violation at INSERT time. Keep these two
+	// boundaries in lock-step. extKTypeNameRegex below has the same
+	// constraint for the same reason (it references the publisher
+	// namespace).
+	nameRegex            = regexp.MustCompile(`^[a-z][a-z0-9_]{2,31}\.[a-z][a-z0-9_]{2,31}$`)
+	publisherSlugRegex   = regexp.MustCompile(`^[a-z][a-z0-9_]{2,31}$`)
 	semverRegex          = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.\-]+)?(\+[0-9A-Za-z.\-]+)?$`)
 	kappVersionRangeRe   = regexp.MustCompile(`^([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.\-]+)?(\+[0-9A-Za-z.\-]+)?|[0-9]+\.x|[0-9]+\.[0-9]+\.x)$`)
 	bundleRelPathRegex   = regexp.MustCompile(`^\./[A-Za-z0-9._\-/]+$`)
 	endpointPlaceholder  = regexp.MustCompile(`^\$\{EXTENSION_WEBHOOK_BASE\}(/[A-Za-z0-9._\-/#?=&%]*)?$`)
 	componentURLRegex    = regexp.MustCompile(`^\./[A-Za-z0-9._\-/]+(\.js|\.mjs)(#[A-Za-z0-9._\-]+)?$`)
 	secretKeyRegex       = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,63}$`)
-	extKTypeNameRegex    = regexp.MustCompile(`^ext\.[a-z][a-z0-9_-]{2,31}\.[a-z][a-z0-9_]*$`)
+	extKTypeNameRegex    = regexp.MustCompile(`^ext\.[a-z][a-z0-9_]{2,31}\.[a-z][a-z0-9_]*$`)
 	eventNameRegex       = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){1,3}$`)
 	platformKTypeRegex   = regexp.MustCompile(`^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`)
 	unknownPlaceholderRe = regexp.MustCompile(`\$\{[^}]+\}`)
@@ -366,9 +388,15 @@ func ParseManifest(data []byte) (*Manifest, error) {
 	dec.KnownFields(true)
 	var m Manifest
 	if err := dec.Decode(&m); err != nil {
-		if errors.Is(err, &yaml.TypeError{}) {
-			return nil, &ManifestError{Field: "", Message: fmt.Sprintf("yaml decode: %v", err)}
-		}
+		// Both yaml.TypeError (mismatched node kind) and other
+		// parser-level failures (syntax error, unknown field with
+		// KnownFields(true)) get wrapped identically — callers only
+		// need ErrInvalidManifest + the field-less message. An
+		// earlier draft had a `errors.Is(err, &yaml.TypeError{})`
+		// branch but yaml.TypeError is a value type and the &v{}
+		// target can never match by identity, so the branch was
+		// always dead; removed to make the actual single-path
+		// behaviour obvious.
 		return nil, &ManifestError{Field: "", Message: fmt.Sprintf("yaml decode: %v", err)}
 	}
 	// Second decode call to confirm there is no extra document — a
@@ -544,6 +572,15 @@ func validateManifest(m *Manifest, agg *ManifestErrors) {
 			agg.add(field+".endpoint", err.Error())
 		}
 		if at.Timeout == "" {
+			// Persist the spec §6 default ("timeout default 10s,
+			// max 30s") to BOTH the loop copy (so the validation
+			// below uses the defaulted value) AND the underlying
+			// slice element (so the returned *Manifest carries the
+			// default through json.Marshal in PublishVersion, and
+			// the manifest JSONB the catalog UI reads back has the
+			// explicit "10s" rather than an empty timeout that the
+			// runtime engine would have to re-default at dispatch).
+			m.AgentTools[i].Timeout = "10s"
 			at.Timeout = "10s"
 		}
 		if d, err := time.ParseDuration(at.Timeout); err != nil {
@@ -560,6 +597,11 @@ func validateManifest(m *Manifest, agg *ManifestErrors) {
 				agg.add(field+".retry.max_attempts", fmt.Sprintf("%d exceeds %d ceiling", at.Retry.MaxAttempts, AgentToolMaxAttemptsCap))
 			}
 			if at.Retry.Backoff == "" {
+				// at.Retry is a *RetryRule so this write reaches the
+				// shared struct through the pointer — m.AgentTools[i]
+				// .Retry.Backoff sees the same value. The .Timeout
+				// default above needs the explicit slice-index write
+				// because AgentToolRef itself is a value type.
 				at.Retry.Backoff = "exponential"
 			} else if _, ok := ValidRetryBackoff[at.Retry.Backoff]; !ok {
 				agg.add(field+".retry.backoff", fmt.Sprintf("backoff %q not recognised (linear or exponential)", at.Retry.Backoff))

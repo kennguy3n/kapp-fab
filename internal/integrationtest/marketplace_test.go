@@ -287,12 +287,32 @@ func TestMarketplaceRegistry_EndToEnd(t *testing.T) {
 	if err := store.UpdateInstallStatus(ctx, tnA.ID, instA.ID, marketplace.InstallStatusFailed, ""); err == nil {
 		t.Error("expected rejection: failed without reason")
 	}
+	// Transition graph: pending → active is rejected (must go
+	// through installing so the install worker's handshake/secrets
+	// validation runs). Drive the full pending → installing →
+	// active sequence the way B4's worker will at runtime.
+	if err := store.UpdateInstallStatus(ctx, tnA.ID, instA.ID, marketplace.InstallStatusActive, ""); err == nil {
+		t.Error("expected rejection: pending → active must transit through installing")
+	}
+	if err := store.UpdateInstallStatus(ctx, tnA.ID, instA.ID, marketplace.InstallStatusInstalling, ""); err != nil {
+		t.Fatalf("transition pending → installing: %v", err)
+	}
 	if err := store.UpdateInstallStatus(ctx, tnA.ID, instA.ID, marketplace.InstallStatusActive, ""); err != nil {
-		t.Fatalf("transition to active: %v", err)
+		t.Fatalf("transition installing → active: %v", err)
 	}
 	got, _ := store.GetInstallation(ctx, tnA.ID, instA.ID)
 	if got.Status != marketplace.InstallStatusActive {
 		t.Errorf("install status: want active got %q", got.Status)
+	}
+	// Self-loop on active is idempotent (the worker may re-issue
+	// the same status update; the FSM treats it as a no-op success).
+	if err := store.UpdateInstallStatus(ctx, tnA.ID, instA.ID, marketplace.InstallStatusActive, ""); err != nil {
+		t.Errorf("self-loop active→active rejected: %v", err)
+	}
+	// Disallowed jumps must surface ErrInvalidManifest at the
+	// store boundary rather than corrupt downstream state.
+	if err := store.UpdateInstallStatus(ctx, tnA.ID, instA.ID, marketplace.InstallStatusPending, ""); err == nil {
+		t.Error("expected rejection: active → pending is not a valid lifecycle move")
 	}
 	if err := store.RecordInstallHealthCheck(ctx, tnA.ID, instA.ID, "ok"); err != nil {
 		t.Fatalf("RecordInstallHealthCheck: %v", err)

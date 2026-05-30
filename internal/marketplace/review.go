@@ -196,9 +196,22 @@ func (rs *ReviewStateStore) ListVersionsByReviewStatus(ctx context.Context, stat
 }
 
 // reviewStatusTransitionAllowed encodes the directed graph from the
-// ReviewStatus godoc. Terminal states only allow self-loops (so
-// repeat writes of the same approved/rejected/withdrawn row succeed
-// for idempotency; this makes B7's at-least-once worker safe).
+// ReviewStatus godoc.
+//
+// All states (terminal and non-terminal) allow self-loops so a B7
+// at-least-once worker that re-issues the same UpdateReviewState
+// call on retry succeeds without surfacing a spurious "invalid
+// transition" error. The UPDATE path still bumps updated_at and
+// re-writes automated_checks, which is the intended idempotent
+// behaviour (re-running automated scans against the same version
+// row overwrites the prior result with the fresh one).
+//
+// Terminal states (approved / rejected / withdrawn) additionally
+// reject ALL non-self transitions — once a version is approved it
+// cannot fall back to manual_review, once rejected it cannot be
+// silently un-rejected, once withdrawn it cannot be resurrected.
+// Publishers re-submit by uploading a new version (new
+// extension_version_id, new review_state row).
 func reviewStatusTransitionAllowed(from, to ReviewStatus) bool {
 	if from == to {
 		return true
