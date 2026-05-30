@@ -85,16 +85,22 @@ func NewQuotaEnforcer(pool *pgxpool.Pool) *QuotaEnforcer {
 //
 // Reads from tenant_record_counts (a denormalised single-row-per-tenant
 // counter maintained transactionally by the record store) instead of
-// scanning every krecords partition. The fallback `count(*)` path runs
-// only when no counter row exists yet — i.e. for a brand-new tenant
-// that has never written a KRecord (counter row is created on first
-// insert), or — until the daily reconciliation handler's first tick on
-// freshly-migrated installs — for the narrow window between the
-// 000067 backfill and the next reconciliation. The fallback returns 0
-// for those callers because a tenant with zero rows trivially fits any
-// MaxRecords > 0 limit; the source-of-truth count(*) would be needless
-// work and re-introduce the O(n) scan we are eliminating. Drift
-// detection is the job of RecordCountReconciler, not the hot path.
+// scanning every krecords partition.
+//
+// Missing-row semantics: when no row exists in tenant_record_counts for
+// the tenant — i.e. a brand-new tenant that has never written a KRecord
+// (the counter row is created by the first insert via
+// BumpTenantRecordCount), or, on freshly-migrated installs, the narrow
+// window between the 000067 backfill running on existing data and the
+// next RecordCountReconciler tick — the enforcer treats the count as
+// zero and admits the write. A tenant with zero rows trivially fits any
+// MaxRecords > 0 limit, so a source-of-truth count(*) would be needless
+// work and re-introduce the O(n) scan we are eliminating. There is
+// deliberately no count(*) fallback path in this function. Drift
+// detection (the case where a tenant has rows but no counter, or stale
+// counters) is the job of RecordCountReconciler, not the hot path —
+// the reconciler upserts the absolute scan result once per day so the
+// missing-row case self-heals on the first tick.
 func (q *QuotaEnforcer) CheckRecordCount(ctx context.Context, tenantID uuid.UUID, quota Quota) error {
 	if quota.MaxRecords <= 0 {
 		return nil

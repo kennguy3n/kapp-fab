@@ -161,9 +161,17 @@ func (h *RecordCountReconciler) Handle(ctx context.Context, tenantID uuid.UUID, 
 			// distinguishable from an in-flight regression.
 			drift = float64(observed)
 		}
+		// Signed delta — positive when the counter lagged real growth
+		// (the bump path missed an insert), negative when the counter
+		// was too high (the bump path missed a delete, or a row was
+		// hand-edited un-deleted). Alerts should fire on |drift| > 0
+		// — use Prometheus abs() in the rule expression rather than
+		// pre-aggregating here so the dashboard preserves the sign,
+		// which is useful for triage ("missed insert vs missed
+		// delete").
 		h.metrics.Gauge(
 			"kapp_record_count_drift",
-			"Absolute drift between tenant_record_counts.record_count and the observed krecords scan at the last reconciliation tick.",
+			"Signed drift (observed - stored) between tenant_record_counts.record_count and the krecords scan at the last reconciliation tick. Positive: counter under-counted; negative: counter over-counted. Use abs() for alert thresholds.",
 			"tenant_id",
 		).Set(drift, tenantID.String())
 		h.metrics.Gauge(
