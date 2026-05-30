@@ -280,6 +280,7 @@ type Installation struct {
 //	ErrBundleTooLarge       → 413
 //	ErrPermissionScopeUnknown → 400
 //	ErrImmutableVersion     → 409
+//	ErrYanked               → 409
 var (
 	// ErrConflict signals a unique-constraint hit — either a
 	// duplicate (publisher, slug) extension insert or a duplicate
@@ -313,4 +314,14 @@ var (
 	// The DB trigger raises pgerror P0001 with a specific message; the
 	// repository translates that into this sentinel.
 	ErrImmutableVersion = errors.New("marketplace: version row is immutable; publish a new version instead")
+
+	// ErrYanked is returned when an operation requires a
+	// non-yanked version but the target version is yanked. Today
+	// it is raised by SetListedVersion (a yanked version cannot
+	// be the listed/recommended one because B6's install endpoint
+	// refuses to install yanked versions, spec §10). B6 will
+	// surface this as 409 Conflict so the operator UI can show a
+	// clear "version is yanked" message rather than a generic
+	// "invalid transition" error.
+	ErrYanked = errors.New("marketplace: version is yanked")
 )

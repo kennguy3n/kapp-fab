@@ -144,6 +144,35 @@ func TestMarketplaceRegistry_EndToEnd(t *testing.T) {
 		t.Fatalf("oversized bundle should return ErrBundleTooLarge, got %v", err)
 	}
 
+	// Bundle hash shape — non-hex / wrong-length / upper-case
+	// MUST be rejected in Go before the DB CHECK constraint
+	// surfaces an opaque SQLSTATE 23514. The integration check
+	// here is the load-bearing one: it pins the contract that an
+	// external caller (admin CLI, B6 handler) building
+	// PublishVersionInput from a header sees a clear
+	// ErrInvalidManifest, not an SQL error.
+	for _, badHash := range []string{
+		"not-a-hash",
+		strings.Repeat("X", 64), // uppercase hex
+		strings.Repeat("a", 63), // 63 chars
+		strings.Repeat("a", 65), // 65 chars
+		"deadbeef",              // 8 chars
+	} {
+		_, err := store.PublishVersion(ctx, marketplace.PublishVersionInput{
+			ExtensionID: ext.ID, Manifest: &marketplace.Manifest{
+				SchemaVersion: 1, Name: ext.Name, Publisher: ext.Publisher, Slug: ext.Slug,
+				Version: "9.9.10", Author: "x", License: "MIT", Description: "x",
+				MinKappVersion: "1.0.0",
+			},
+			BundleHash: badHash,
+			BundleSize: 4096,
+			BundleURL:  "https://cdn.example/bundles/badhash.tgz",
+		})
+		if !errors.Is(err, marketplace.ErrInvalidManifest) {
+			t.Fatalf("PublishVersion with hash=%q: want ErrInvalidManifest, got %v", badHash, err)
+		}
+	}
+
 	// --- (3) Second version + ListVersions ---
 	manifest2 := *manifest1
 	manifest2.Version = "1.1.0"
@@ -197,6 +226,13 @@ func TestMarketplaceRegistry_EndToEnd(t *testing.T) {
 	all, _ := store.ListVersions(ctx, ext.ID, true)
 	if len(all) != 2 {
 		t.Errorf("includeYanked should return both: got %d", len(all))
+	}
+
+	// SetListedVersion MUST reject a yanked version — installing a
+	// listed yanked version is forbidden by B6 (yanked = FALSE
+	// guard), so listing it would create an inconsistent catalog.
+	if err := store.SetListedVersion(ctx, ext.ID, "1.0.0"); !errors.Is(err, marketplace.ErrYanked) {
+		t.Errorf("SetListedVersion on yanked version: want ErrYanked, got %v", err)
 	}
 
 	// --- (6) Tenant-scoped install + RLS isolation ---

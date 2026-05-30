@@ -348,21 +348,38 @@ func (s *Store) SetListedVersion(ctx context.Context, extensionID uuid.UUID, ver
 	if extensionID == uuid.Nil || version == "" {
 		return fmt.Errorf("%w: extension id and version required", ErrNotFound)
 	}
-	// Verify the version row exists and belongs to the extension —
-	// the marketplace_extensions table has no FK to versions (would
-	// be a circular dependency: extensions.listed_version → versions
-	// → extensions.id), so the integrity check lives here.
-	var exists bool
-	if err := s.pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM marketplace_extension_versions
-		               WHERE extension_id = $1 AND version = $2)`,
+	// Verify the version row exists, belongs to the extension, AND
+	// is not yanked. The marketplace_extensions table has no FK to
+	// versions (would be a circular dependency:
+	// extensions.listed_version → versions → extensions.id), so the
+	// integrity check lives here.
+	//
+	// The yanked filter is load-bearing: B6's install endpoint
+	// refuses to install yanked versions (`yanked = FALSE` guard,
+	// spec §10), so listing a yanked version would create an
+	// inconsistent catalog state where the marketplace advertises a
+	// version that installs immediately fail on. The documented
+	// calling convention ("called by B7 when a version transitions
+	// to approved") naturally produces a non-yanked version, but a
+	// misrouted operator action or a future code path that calls
+	// SetListedVersion after a yank could land us in the broken
+	// state. Guarding here is the architectural fix.
+	var yanked bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT yanked FROM marketplace_extension_versions
+		  WHERE extension_id = $1 AND version = $2`,
 		extensionID, version,
-	).Scan(&exists); err != nil {
+	).Scan(&yanked)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: version %q does not exist for extension %s",
+				ErrNotFound, version, extensionID)
+		}
 		return fmt.Errorf("marketplace: set listed version: lookup: %w", err)
 	}
-	if !exists {
-		return fmt.Errorf("%w: version %q does not exist for extension %s",
-			ErrNotFound, version, extensionID)
+	if yanked {
+		return fmt.Errorf("%w: version %q on extension %s cannot be listed",
+			ErrYanked, version, extensionID)
 	}
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE marketplace_extensions
@@ -411,6 +428,16 @@ func (s *Store) PublishVersion(ctx context.Context, in PublishVersionInput) (*Ex
 	}
 	if in.BundleHash == "" {
 		return nil, fmt.Errorf("%w: bundle hash required", ErrInvalidManifest)
+	}
+	// Validate the bundle hash shape (lower-case hex, 64 chars)
+	// before the DB so an external caller wiring PublishVersionInput
+	// from a header / query param gets a clear field-level error
+	// instead of an opaque SQLSTATE 23514 from the bundle_hash CHECK
+	// constraint. HashBundle / HashBundleBytes always emit the
+	// canonical form, but admin tooling that takes the hash from an
+	// upload manifest could pass a non-canonical string.
+	if !IsValidBundleHash(in.BundleHash) {
+		return nil, fmt.Errorf("%w: bundle hash must be lower-case hex SHA-256 (64 chars)", ErrInvalidManifest)
 	}
 	if in.BundleSize <= 0 {
 		return nil, fmt.Errorf("%w: bundle size must be positive", ErrInvalidManifest)

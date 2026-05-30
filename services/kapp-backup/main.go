@@ -187,13 +187,17 @@ var TenantScopedTables = []string{
 	// nightly by the reconciler).
 	"tenant_record_counts",
 	// Phase B2 — per-tenant marketplace extension installations.
-	// PK is the synthesised `id`, so the default (tenant_id, id)
-	// upsert path applies and no tableConflictKeys entry is
-	// needed. RLS is enabled on this table (000068); the dump
-	// path runs through dbutil.WithTenantTx so the tenant GUC is
-	// set when these rows are extracted/restored. Listed AFTER
-	// the rest of the tenant tables because the
-	// extension_version_id FK targets a GLOBAL catalog table
+	// PK is a single-column surrogate `id UUID` (NOT the
+	// (tenant_id, id) composite the rest of the schema uses), so
+	// the table is declared in tableConflictKeys below with the
+	// explicit `{id}` conflict target — without that, the default
+	// fallback would emit `ON CONFLICT (tenant_id, id)` which
+	// Postgres rejects because there is no unique index on that
+	// pair. RLS is enabled on this table (000068); the dump path
+	// runs through dbutil.WithTenantTx so the tenant GUC is set
+	// when these rows are extracted/restored. Listed AFTER the
+	// rest of the tenant tables because the extension_version_id
+	// FK targets a GLOBAL catalog table
 	// (marketplace_extension_versions, not in this slice) that
 	// is operator-managed, not dump-managed — the marketplace
 	// catalog must be re-populated by the publisher pipeline
@@ -581,6 +585,35 @@ var tableConflictKeys = map[string][]string{
 	// counter observation, and the daily reconciler will re-true
 	// it up on the next tick anyway.
 	"tenant_record_counts": {"tenant_id"},
+	// Phase B2 — marketplace_extension_installations has PK (id)
+	// only (single-column UUID), NOT the (tenant_id, id) composite
+	// the rest of the tenant-scoped schema uses. The default
+	// resolveConflictKey fallback would emit
+	// `ON CONFLICT (tenant_id, id)`, which Postgres rejects with
+	// "there is no unique or exclusion constraint matching the ON
+	// CONFLICT specification" because the catalogue has no unique
+	// index spanning that pair. Declaring `{id}` here picks the
+	// actual PK so the restore upserts cleanly.
+	//
+	// migrations/000068_marketplace.sql also declares a separate
+	// UNIQUE (tenant_id, extension_id) — that is the
+	// human-meaningful natural key, but using it for the conflict
+	// target would require the dump to include both columns AND
+	// would silently reject re-restores of an install row whose
+	// surrogate id was regenerated. Sticking with the surrogate
+	// (id) keeps the dump → restore path round-trippable.
+	"marketplace_extension_installations": {"id"},
+	// Pre-existing — the `forms` table from 000003 also uses a
+	// single-column PK (`id UUID PRIMARY KEY DEFAULT
+	// gen_random_uuid()`) without a composite (tenant_id, id)
+	// unique. The same ON-CONFLICT mismatch applies; the bug is
+	// latent because in practice the dump/restore path for forms
+	// has not been exercised end-to-end since N3. Closing the
+	// drift now (one-line addition) is cheaper than re-discovering
+	// it during a future DR drill. Flagged by Devin Review on the
+	// B2 PR while triaging the marketplace_extension_installations
+	// case above.
+	"forms": {"id"},
 }
 
 // insertRow issues a parameterised INSERT that lists the columns from

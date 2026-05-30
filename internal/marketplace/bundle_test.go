@@ -119,3 +119,26 @@ func TestHashBundleNilReader(t *testing.T) {
 		t.Fatal("expected error on nil reader")
 	}
 }
+
+func TestIsValidBundleHash(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", false},
+		{"too_short", "abcdef", false},
+		{"too_long", "a" + string(make([]byte, 64)), false},
+		{"non_hex", "g" + string(make([]byte, 63)), false},
+		{"uppercase_hex", "ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890", false},
+		{"sha256_zero_input", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", true},
+		{"sha256_with_spaces", "  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  ", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsValidBundleHash(tc.in); got != tc.want {
+				t.Errorf("IsValidBundleHash(%q): want %v, got %v", tc.in, tc.want, got)
+			}
+		})
+	}
+}

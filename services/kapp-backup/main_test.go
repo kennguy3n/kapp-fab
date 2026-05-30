@@ -69,6 +69,33 @@ func TestConflictClauseCompositePK(t *testing.T) {
 			cols:  []string{"tenant_id", "name", "version", "definition"},
 			want:  `ON CONFLICT ("tenant_id", "name", "version") DO UPDATE SET "definition" = EXCLUDED."definition"`,
 		},
+		{
+			// Phase B2 — marketplace_extension_installations uses a
+			// SINGLE-column PK (`id UUID PRIMARY KEY`), NOT the
+			// (tenant_id, id) composite the rest of the tenant-scoped
+			// schema uses. Without the explicit entry, the
+			// resolveConflictKey fallback would emit ON CONFLICT
+			// (tenant_id, id), which Postgres rejects because there
+			// is no unique index spanning that pair. Lock in the
+			// `{id}` choice so a future refactor that drops the
+			// entry surfaces as a test failure rather than a runtime
+			// restore error.
+			table: "marketplace_extension_installations",
+			cols: []string{
+				"id", "tenant_id", "extension_id", "extension_version_id",
+				"webhook_base", "status", "settings", "secrets_ref",
+			},
+			want: `ON CONFLICT ("id") DO UPDATE SET "tenant_id" = EXCLUDED."tenant_id", "extension_id" = EXCLUDED."extension_id", "extension_version_id" = EXCLUDED."extension_version_id", "webhook_base" = EXCLUDED."webhook_base", "status" = EXCLUDED."status", "settings" = EXCLUDED."settings", "secrets_ref" = EXCLUDED."secrets_ref"`,
+		},
+		{
+			// Pre-existing — `forms` (migration 000003) has the same
+			// single-column PK shape, flagged by Devin Review while
+			// triaging marketplace_extension_installations. Same lock-in
+			// reason.
+			table: "forms",
+			cols:  []string{"id", "tenant_id", "ktype", "config", "status"},
+			want:  `ON CONFLICT ("id") DO UPDATE SET "tenant_id" = EXCLUDED."tenant_id", "ktype" = EXCLUDED."ktype", "config" = EXCLUDED."config", "status" = EXCLUDED."status"`,
+		},
 	} {
 		t.Run(tc.table, func(t *testing.T) {
 			got := conflictClause(tc.table, tc.cols)

@@ -426,7 +426,7 @@ func validateManifest(m *Manifest, agg *ManifestErrors) {
 	if m.Name == "" {
 		agg.add("name", "required")
 	} else if !nameRegex.MatchString(m.Name) {
-		agg.add("name", "must match ^[a-z][a-z0-9_-]{2,31}\\.[a-z][a-z0-9_-]{2,31}$")
+		agg.add("name", "must match ^[a-z][a-z0-9_]{2,31}\\.[a-z][a-z0-9_]{2,31}$")
 	} else {
 		parts := strings.SplitN(m.Name, ".", 2)
 		m.Publisher = parts[0]
