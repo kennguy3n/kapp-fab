@@ -176,6 +176,39 @@ func TestPoolRouter_LastLag_ReportsCachedAfterSample(t *testing.T) {
 	}
 }
 
+// TestPoolRouter_LastLag_HidesNotReplayedSentinel verifies the
+// architectural fix: the internal not-yet-replayed sentinel
+// (lastLagNanos<0, written by SampleLag when in_recovery=TRUE and
+// pg_last_xact_replay_timestamp() returns NULL) never leaks out
+// through the public LastLag API. The /metrics gauge consumer at
+// internal/platform/replica_metrics.go relies on this — without it,
+// kapp_replica_lag_seconds would briefly emit a negative value
+// (~-1e-9) on a fresh standby and violate the docstring's "Always
+// >= 0" contract on that gauge.
+//
+// Read() must still see the sentinel via its own direct atomic load
+// (see TestPoolRouter_FallsBackToPrimary_WhenLagNegativeSentinel), so
+// the fix is scoped to LastLag's external contract.
+func TestPoolRouter_LastLag_HidesNotReplayedSentinel(t *testing.T) {
+	primary := newLazyPool(t)
+	replica := newLazyPool(t)
+	r := NewPoolRouter(primary).WithReplica(replica, 1*time.Second, 5*time.Second)
+
+	r.lastLagNanos.Store(-1) // SampleLag's "standby not replayed" marker
+	r.lastSampledAt.Store(time.Now().UTC().UnixNano())
+
+	lag, at, ok := r.LastLag()
+	if ok {
+		t.Fatalf("LastLag() ok = true with sentinel -1ns; expected false (sentinel must not leak)")
+	}
+	if lag != 0 {
+		t.Fatalf("LastLag() lag = %v; expected 0 when sentinel is hidden (gauge must never see negative)", lag)
+	}
+	if !at.IsZero() {
+		t.Fatalf("LastLag() at = %v; expected zero time when sentinel is hidden", at)
+	}
+}
+
 func TestPoolRouter_NewPoolRouter_PanicsOnNilPrimary(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {

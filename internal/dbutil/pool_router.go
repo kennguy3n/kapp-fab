@@ -300,8 +300,27 @@ func (r *PoolRouter) SampleLag(ctx context.Context) (time.Duration, error) {
 }
 
 // LastLag returns the most recently observed lag and the wall clock
-// time it was observed. Returns (0, time.Time{}, false) when no
-// sample has been recorded. Used by the /metrics gauge.
+// time it was observed. Used by the /metrics gauge. The returned
+// duration is ALWAYS >= 0 — the router's internal not-yet-replayed
+// sentinel (a negative lastLagNanos value, see SampleLag) is folded
+// into ok=false here so it never leaks out into a public metric.
+//
+// Returns (0, time.Time{}, false) when:
+//
+//   - no sample has been recorded yet (sampler hasn't ticked, or the
+//     router has no replica configured), OR
+//
+//   - the most recent sample observed a standby that has not yet
+//     replayed any WAL (lastLagNanos<0). Read() consults
+//     lastLagNanos directly via its own atomic load and routes to
+//     primary via the lag<0 gate (see Read at line ~213); the
+//     external observable contract is "no usable sample", which is
+//     exactly what callers of LastLag need.
+//
+// Keeping the sentinel scoped to the internal lastLagNanos field
+// means a future change to how "not yet replayed" is represented
+// (e.g. a separate atomic flag) does not have to also rewrite the
+// public LastLag / metric contract.
 func (r *PoolRouter) LastLag() (time.Duration, time.Time, bool) {
 	if r == nil {
 		return 0, time.Time{}, false
@@ -310,7 +329,14 @@ func (r *PoolRouter) LastLag() (time.Duration, time.Time, bool) {
 	if at == 0 {
 		return 0, time.Time{}, false
 	}
-	return time.Duration(r.lastLagNanos.Load()), time.Unix(0, at), true
+	lag := time.Duration(r.lastLagNanos.Load())
+	if lag < 0 {
+		// Standby has sampled but not yet replayed any WAL. Treat
+		// as "no usable sample" externally; Read() still observes
+		// the sentinel via its direct atomic load.
+		return 0, time.Time{}, false
+	}
+	return lag, time.Unix(0, at), true
 }
 
 // StartLagSampler launches a background goroutine that calls
