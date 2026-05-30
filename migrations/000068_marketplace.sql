@@ -272,6 +272,22 @@ CREATE INDEX IF NOT EXISTS marketplace_installations_version_idx
     ON marketplace_extension_installations (extension_version_id);
 
 ALTER TABLE marketplace_extension_installations ENABLE ROW LEVEL SECURITY;
+-- FORCE makes the RLS policy apply even when the connection role is
+-- the table owner (e.g. the migration runner role or a DBA performing
+-- ad-hoc maintenance). Without FORCE, owner-role queries silently
+-- bypass the USING/WITH CHECK clauses — fine for the application
+-- pool (kapp_app, neither owner nor BYPASSRLS) but a defence-in-depth
+-- gap if a future ops procedure or a backup-restore tool issues
+-- cross-tenant reads under the owner role. The marketplace
+-- installations table is the first tenant-scoped table in this
+-- codebase to opt into FORCE; per-spec installations are the
+-- write-amplification surface (one row per tenant per installed
+-- extension, with operator-supplied webhook_base credentials in the
+-- column), so we apply the stricter posture here and audit the rest
+-- of the tenant-scoped tables for the same change in a separate
+-- migration once we have RLS-aware tooling for kapp-backup verified
+-- under the owner role.
+ALTER TABLE marketplace_extension_installations FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS marketplace_extension_installations_isolation
     ON marketplace_extension_installations;

@@ -786,8 +786,16 @@ func (s *Store) Install(ctx context.Context, in InstallInput) (*Installation, er
 	if in.WebhookBase == "" {
 		return nil, fmt.Errorf("%w: webhook_base required", ErrInvalidManifest)
 	}
-	if !strings.HasPrefix(strings.ToLower(in.WebhookBase), "https://") {
-		return nil, fmt.Errorf("%w: webhook_base must be https://", ErrInvalidManifest)
+	// Reuse the manifest validator's HTTPS check so the install path
+	// and the publisher's manifest endpoints are rejected on the same
+	// rules: https:// scheme only, host required, no userinfo
+	// component. Without the userinfo guard a tenant could persist
+	// `https://user:secret@webhook.tenant/...` and leak their own
+	// credentials in every outbound dispatch's URL; the DB CHECK
+	// (^https://) and the previous prefix-only check both let that
+	// through.
+	if err := validateHTTPSURL(in.WebhookBase); err != nil {
+		return nil, fmt.Errorf("%w: webhook_base: %v", ErrInvalidManifest, err)
 	}
 	settings := in.Settings
 	if len(settings) == 0 {
