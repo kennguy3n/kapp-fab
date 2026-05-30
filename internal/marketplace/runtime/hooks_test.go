@@ -444,6 +444,51 @@ func TestTransportHooks_PostInstall_3xx_BestEffortNotAborted(t *testing.T) {
 	}
 }
 
+// TestTransportHooks_LatencyMS_LocallyMeasured asserts that
+// LifecycleResult.LatencyMS reflects the WALL-CLOCK time spent in
+// the transport.Send call, NOT the transport's self-reported
+// resp.Latency field. The InMemoryTransport never populates
+// resp.Latency (it leaves the field at zero — see transport.go:223,
+// 233), so a previous version of this code that read result.LatencyMS
+// from resp.Latency silently reported 0ms for every test even when
+// real wall-clock time elapsed. Devin Review round-8 BUG_0002 on
+// PR #127. We use a handler that sleeps for a known minimum duration
+// and assert the reported LatencyMS is >= that duration in wall-clock
+// terms.
+func TestTransportHooks_LatencyMS_LocallyMeasured(t *testing.T) {
+	const sleepFloor = 25 * time.Millisecond
+	handler := func(_ context.Context, _ string, _ []byte, _ map[string]string) (*DispatchResponse, error) {
+		time.Sleep(sleepFloor)
+		// resp.Latency intentionally left at zero — this is what
+		// the old buggy path would have surfaced as LatencyMS.
+		return &DispatchResponse{Status: 200, Body: nil, Header: map[string]string{}}, nil
+	}
+	tr := &InMemoryTransport{Handler: handler}
+	hooks := NewTransportHooks(tr, nil, fixedClock(time.Unix(1700000000, 0).UTC()))
+
+	in := validLifecycleDispatch(t)
+	in.Phase = PhasePreInstall
+
+	res, err := hooks.Dispatch(context.Background(), in)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if res.Status != 200 || res.Aborted {
+		t.Fatalf("res = %+v, want status=200 aborted=false", res)
+	}
+	// LatencyMS must reflect the locally-measured wall-clock time
+	// around transport.Send (sleepFloor is the minimum), NOT the
+	// zero-valued resp.Latency that the InMemoryTransport returns.
+	// A small 5ms safety margin absorbs sleep-quantization jitter
+	// on slow CI machines without weakening the assertion that the
+	// local-measurement path is in effect (any 0 reading would be
+	// the bug regressing).
+	minMS := int((sleepFloor - 5*time.Millisecond) / time.Millisecond)
+	if res.LatencyMS < minMS {
+		t.Fatalf("LatencyMS = %d, want >= %d (sleepFloor=%v) — local wall-clock measurement broken; reading from resp.Latency=0 instead?", res.LatencyMS, minMS, sleepFloor)
+	}
+}
+
 func TestLifecyclePayload_DefaultEmpty(t *testing.T) {
 	b, err := MarshalLifecyclePayload(nil)
 	if err != nil {

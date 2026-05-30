@@ -503,9 +503,29 @@ func (e *Engine) Uninstall(ctx context.Context, req *UninstallRequest) (*Uninsta
 		// Scanning the RETURNING value into install.UpdatedAt
 		// in-place keeps the Status / UpdatedAt pair internally
 		// consistent without a follow-up GetInstallation re-read.
+		//
+		// failure_reason = NULL is REQUIRED to satisfy the
+		// `marketplace_installations_failure_reason_only_when_failed`
+		// CHECK at migration 000068:261-265:
+		//   (status <> 'failed' AND failure_reason IS NULL)
+		//   OR (status = 'failed' AND failure_reason IS NOT NULL)
+		// Without this clear, uninstalling a `failed` installation
+		// (which by definition has failure_reason IS NOT NULL)
+		// produces a row with status='uninstalled' AND
+		// failure_reason IS NOT NULL, which violates the CHECK and
+		// Postgres rejects with SQLSTATE 23514. Engine.Uninstall
+		// is the operator's escape hatch for broken installs, so
+		// the `failed → uninstalled` path MUST work cleanly.
+		// Store.UpdateInstallStatus handles this symmetrically at
+		// store.go:879-884 (clearing failure_reason on any non-
+		// failed transition); the engine bypasses the store for
+		// the in-tx flip but must mirror the same invariant.
+		// Devin Review round-8 BUG_0001 on PR #127.
 		if err := tx.QueryRow(ctx,
 			`UPDATE marketplace_extension_installations
-			   SET status = 'uninstalled', updated_at = now()
+			   SET status = 'uninstalled',
+			       updated_at = now(),
+			       failure_reason = NULL
 			 WHERE tenant_id = $1 AND id = $2
 			 RETURNING updated_at`,
 			req.TenantID, req.InstallationID,

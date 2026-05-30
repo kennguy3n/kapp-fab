@@ -360,7 +360,22 @@ func (h *transportHooks) Dispatch(ctx context.Context, in *LifecycleDispatch) (*
 		// error").
 		lastErr = nil
 		result.Err = nil
-		result.LatencyMS = int(resp.Latency / time.Millisecond)
+		// LatencyMS is wall-clock time measured locally around
+		// the transport.Send call (see line 329-331 above), NOT
+		// the transport-self-reported resp.Latency. This matches
+		// (a) the dispatch_log audit row written by
+		// writeDispatchLogComplete at line 347, which also uses
+		// the local `latency`, keeping LifecycleResult.LatencyMS
+		// in lock-step with what operators see in the DB;
+		// (b) Dispatcher.Invoke's result.Latency at
+		// dispatcher.go:238, which uses time.Since(started)
+		// locally for the same reason. resp.Latency is 0 for
+		// InMemoryTransport (used in tests) since it never
+		// populates the field, so reading from it would silently
+		// report 0ms in every unit/integration test even when
+		// real wall-clock time elapsed. Devin Review round-8
+		// BUG_0002 on PR #127.
+		result.LatencyMS = int(latency / time.Millisecond)
 		result.Status = resp.Status
 
 		// 404 = "extension did not implement this phase". Not an

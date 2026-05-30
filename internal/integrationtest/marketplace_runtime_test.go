@@ -1119,3 +1119,198 @@ func readLifecycleLogIncompleteRows(ctx context.Context, t *testing.T, h *harnes
 	}
 	return n
 }
+
+// TestMarketplaceRuntime_Uninstall_FromFailedClearsFailureReason
+// locks in the round-8 Devin Review BUG_0001 fix on Engine.Uninstall
+// (engine.go:507-510 → 524-532). The migration 000068:261-265
+// CHECK constraint marketplace_installations_failure_reason_only_when_failed
+// enforces:
+//
+//	(status <> 'failed' AND failure_reason IS NULL)
+//	OR (status = 'failed' AND failure_reason IS NOT NULL)
+//
+// so any transition from `failed → uninstalled` MUST set
+// failure_reason = NULL atomically with the status flip, or
+// Postgres rejects the UPDATE with SQLSTATE 23514 and the
+// uninstall tx aborts.
+//
+// Pre-fix: Engine.Uninstall set status='uninstalled' but left
+// failure_reason as-is. Uninstalling a `failed` installation —
+// the most operationally important case, since `failed` is the
+// state operators want to clean up — was structurally broken:
+// every attempt would hit the CHECK and the operator had no
+// escape hatch short of direct SQL. Post-fix: failure_reason is
+// cleared in the same UPDATE that flips status, mirroring
+// Store.UpdateInstallStatus's symmetric handling at
+// store.go:879-884.
+//
+// Test setup:
+//  1. install + publish + active install
+//  2. flip install to status='failed' with a populated
+//     failure_reason via Store.UpdateInstallStatus (the production
+//     code path for marking an install failed)
+//  3. Engine.Uninstall(SkipHooks: true) — SkipHooks because the
+//     simulated failure scenario didn't run hooks; we're testing
+//     the DB constraint compliance, not the hook flow
+//  4. expect success (no SQLSTATE 23514)
+//  5. read back the row: status='uninstalled' AND failure_reason IS NULL
+func TestMarketplaceRuntime_Uninstall_FromFailedClearsFailureReason(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	pub := strings.ReplaceAll(uniqueSlug("rt-failclr"), "-", "_")
+	ext, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pub, Slug: "shipping",
+		DisplayName: "Shipping", Description: "Failed→Uninstalled failure_reason clear regression",
+		Author: "ACME", License: "MIT",
+		Homepage: "https://acme.example/shipping",
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension: %v", err)
+	}
+	manifest := minimalRuntimeManifest(ext)
+	ver, err := store.PublishVersion(ctx, marketplace.PublishVersionInput{
+		ExtensionID: ext.ID, Manifest: manifest,
+		BundleHash: strings.Repeat("a", 64),
+		BundleSize: 4096,
+		BundleURL:  "https://cdn.example/bundles/rt-failclr.tgz",
+	})
+	if err != nil {
+		t.Fatalf("PublishVersion: %v", err)
+	}
+	rs := store.Reviews()
+	reviewer := uuid.New().String()
+	for _, step := range []marketplace.ReviewStatus{
+		marketplace.ReviewStatusAutomatedPassed,
+		marketplace.ReviewStatusManualReview,
+		marketplace.ReviewStatusApproved,
+	} {
+		if _, err := rs.UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
+			VersionID: ver.ID, Status: step, Reviewer: reviewer,
+		}); err != nil {
+			t.Fatalf("review transition to %s: %v", step, err)
+		}
+	}
+	if err := store.SetListedVersion(ctx, ext.ID, ver.Version); err != nil {
+		t.Fatalf("SetListedVersion: %v", err)
+	}
+	if err := store.UpdateExtensionStatus(ctx, ext.ID, marketplace.ExtensionStatusListed); err != nil {
+		t.Fatalf("UpdateExtensionStatus listed: %v", err)
+	}
+
+	tn, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("rt-failclr-a"), Name: "RT-FailClr", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("tenant: %v", err)
+	}
+
+	okTransport := &runtime.InMemoryTransport{Handler: runtime.StaticResponseHandler(200, []byte(`{"ok":true}`))}
+	okHooks := runtime.NewTransportHooks(okTransport, h.pool, nil)
+	engine, err := runtime.NewEngine(runtime.EngineOptions{
+		Pool: h.pool, Store: store, Hooks: okHooks,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	bundle := minimalResolvedBundle(manifest)
+	installRes, err := engine.Install(ctx, &runtime.InstallRequest{
+		TenantID:    tn.ID,
+		ExtensionID: ext.ID,
+		VersionID:   ver.ID,
+		WebhookBase: "https://tenant-failclr.example/hooks",
+	}, bundle)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	installID := installRes.Installation.ID
+
+	// Flip the install to `failed` via the production code path.
+	// active → failed is allowed (transitionAllowed at
+	// store.go:945-948) and Store.UpdateInstallStatus enforces
+	// failure_reason population via its own validation as well
+	// as the DB CHECK, so post-call the row is exactly the shape
+	// operators encounter in the wild (status='failed',
+	// failure_reason='<reason>').
+	const failReason = "simulated post-install webhook timeout"
+	if err := store.UpdateInstallStatus(ctx, tn.ID, installID, marketplace.InstallStatusFailed, failReason); err != nil {
+		t.Fatalf("UpdateInstallStatus failed: %v", err)
+	}
+
+	// Sanity check: the row really is in the `failed` state with
+	// a populated failure_reason — this is the precondition the
+	// CHECK is meant to enforce, and without this verification
+	// step a future code change that silently no-op'd
+	// UpdateInstallStatus could mask the regression by leaving
+	// the row in `active` (where uninstall trivially works).
+	beforeStatus, beforeReason := readInstallStatusAndReason(ctx, t, h, tn.ID, installID)
+	if beforeStatus != string(marketplace.InstallStatusFailed) {
+		t.Fatalf("precondition: install status %q, want failed", beforeStatus)
+	}
+	if beforeReason != failReason {
+		t.Fatalf("precondition: install failure_reason %q, want %q", beforeReason, failReason)
+	}
+
+	// Engine.Uninstall MUST succeed even though the install is
+	// in `failed` state with a populated failure_reason. Pre-fix
+	// this returned an SQLSTATE 23514 CHECK violation. SkipHooks
+	// because the simulated failure scenario didn't run hooks; we
+	// are testing CHECK compliance, not hook flow.
+	uninstallRes, err := engine.Uninstall(ctx, &runtime.UninstallRequest{
+		TenantID:       tn.ID,
+		InstallationID: installID,
+		SkipHooks:      true,
+	})
+	if err != nil {
+		t.Fatalf("Uninstall from failed status: %v (round-8 BUG_0001 regression: failure_reason not cleared in UPDATE, violates CHECK marketplace_installations_failure_reason_only_when_failed at migration 000068:261-265)", err)
+	}
+	if uninstallRes == nil || uninstallRes.Installation == nil {
+		t.Fatalf("nil result: %+v", uninstallRes)
+	}
+	if uninstallRes.Installation.Status != marketplace.InstallStatusUninstalled {
+		t.Fatalf("status %q, want uninstalled", uninstallRes.Installation.Status)
+	}
+
+	// Read back the row directly to confirm BOTH columns:
+	// status='uninstalled' AND failure_reason IS NULL. The
+	// CHECK constraint by itself would have rejected an UPDATE
+	// that produced any other shape, but we read both to leave
+	// no ambiguity about what the post-uninstall row looks like
+	// — protecting against a future refactor that drops the
+	// CHECK (e.g. for performance) and silently regresses the
+	// failure_reason-clearing semantic.
+	afterStatus, afterReason := readInstallStatusAndReason(ctx, t, h, tn.ID, installID)
+	if afterStatus != string(marketplace.InstallStatusUninstalled) {
+		t.Fatalf("post-uninstall status %q, want uninstalled", afterStatus)
+	}
+	if afterReason != "" {
+		t.Fatalf("post-uninstall failure_reason %q, want empty (NULL) — round-8 BUG_0001 regression: stale failure_reason carried forward into uninstalled state", afterReason)
+	}
+}
+
+// readInstallStatusAndReason returns the current status and
+// failure_reason of an install row. failure_reason returned as the
+// empty string when the DB column is NULL. Helper for
+// TestMarketplaceRuntime_Uninstall_FromFailedClearsFailureReason
+// (round-8 BUG_0001) so the assertion can check both columns in a
+// single SELECT. Runs under WithTenantTx so the kapp_app FORCE-RLS
+// pool sees the row.
+func readInstallStatusAndReason(ctx context.Context, t *testing.T, h *harness, tenantID, installID uuid.UUID) (string, string) {
+	t.Helper()
+	var status string
+	var reason *string
+	if err := dbutil.WithTenantTx(ctx, h.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT status, failure_reason
+			   FROM marketplace_extension_installations
+			  WHERE tenant_id = $1 AND id = $2`,
+			tenantID, installID).Scan(&status, &reason)
+	}); err != nil {
+		t.Fatalf("readInstallStatusAndReason: %v", err)
+	}
+	if reason == nil {
+		return status, ""
+	}
+	return status, *reason
+}
