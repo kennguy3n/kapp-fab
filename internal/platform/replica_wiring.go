@@ -18,18 +18,29 @@ import (
 //   - the PoolRouter (always non-nil; falls back to a single-pool
 //     router around primary when cfg.ReadReplicaURL is unset, so the
 //     caller can wire it into reads unconditionally)
-//   - a list of cleanup closures, already in correct shutdown order:
-//     append them to the caller's cleanups slice in order — the
-//     caller's runCleanups walks LIFO, which gives the required
-//     teardown sequence (stop metrics publisher → stop sampler /
-//     join goroutine → close replica pool). See PoolRouter.Close()
-//     docstring for why this order matters (in-flight SampleLag
-//     query vs. pool close).
+//
+//   - a single Stop closure the caller invokes (typically via
+//     `defer stop()`) to tear everything down in the only safe order.
+//     The closure internally runs:
+//
+//     1. stopGauge          — unsubscribe the /metrics publisher first
+//     so it does not observe a half-torn router
+//     2. router.Close()     — cancel the sampler goroutine and BLOCK
+//     on its exit (LIFO with respect to start)
+//     3. replicaPool.Close()— only AFTER the sampler is fully drained,
+//     so an in-flight SampleLag query cannot race with
+//     pgx's connection-release path on pool close
+//
+//     Returning a single closure (instead of a []func() slice the
+//     caller was previously expected to consume LIFO) makes the
+//     ordering inherent to the API. Callers cannot accidentally
+//     iterate the slice forward and tear the replica pool down
+//     before the sampler goroutine exits.
+//
 //   - an error if opening the replica pool fails. When no replica
-//     URL is configured, the helper returns (router, nil cleanups,
-//     nil) — the no-replica path needs no cleanup beyond the gauge
-//     registration the caller can do separately if it wants
-//     "configured=0" surfaced in /metrics.
+//     URL is configured the closure still runs (to unsubscribe the
+//     "configured=0" gauge that gets registered so alerts have a
+//     stable series on bootstrap) — it is always safe to call.
 //
 // service is a short tag used as the log prefix (e.g. "api",
 // "worker") so boot-time messages from each entrypoint are
@@ -46,7 +57,7 @@ func WireReplicaRouter(
 	cfg *Config,
 	primary *pgxpool.Pool,
 	metrics *MetricsRegistry,
-) (*dbutil.PoolRouter, []func(), error) {
+) (*dbutil.PoolRouter, func(), error) {
 	router := dbutil.NewPoolRouter(primary)
 
 	if cfg.ReadReplicaURL == "" {
@@ -58,7 +69,7 @@ func WireReplicaRouter(
 		// replica means no sampler is running anyway, but still
 		// idiomatic — cleanup pairs with registration).
 		stopGauge := RegisterReplicaLagGauge(metrics, router, 0)
-		return router, []func(){stopGauge}, nil
+		return router, stopGauge, nil
 	}
 
 	replicaPool, err := NewPoolWithSize(
@@ -72,21 +83,20 @@ func WireReplicaRouter(
 	started := router.StartLagSampler(ctx, cfg.ReadReplicaLagSampleInterval)
 	stopGauge := RegisterReplicaLagGauge(metrics, router, cfg.ReadReplicaLagSampleInterval)
 
-	// LIFO ordering for the cleanups slice:
-	//   index 0 (replicaPool.Close)  → runs LAST  on shutdown
-	//   index 1 (router.Close)       → runs MIDDLE  on shutdown
-	//   index 2 (stopGauge)          → runs FIRST   on shutdown
-	//
-	// Required so the sampler goroutine finishes (router.Close
-	// blocks on it) before we close the underlying replica pool. If
-	// the pool closes while the sampler has an in-flight SampleLag
-	// query, pgx returns a confusing wire-protocol error at best
-	// and races the connection-release path at worst. See
-	// PoolRouter.Close() docstring for the full rationale.
-	cleanups := []func(){
-		func() { replicaPool.Close() },
-		func() { router.Close() },
-		stopGauge,
+	// Single Stop closure with the only safe shutdown order baked in.
+	// Previously this was returned as `[]func(){pool.Close, router.Close,
+	// stopGauge}` and callers were expected to consume LIFO. Two of the
+	// five entrypoints did `for _, fn := range cleanups { defer fn() }`
+	// which only walks LIFO under Go 1.22+ loop-var semantics, and a
+	// caller iterating the slice forward would tear the replica pool
+	// down before the sampler goroutine exited — racing the in-flight
+	// SampleLag connection release path. Baking the order into a single
+	// closure makes that misuse unrepresentable. See PoolRouter.Close()
+	// docstring for the full rationale.
+	stop := func() {
+		stopGauge()
+		router.Close()
+		replicaPool.Close()
 	}
 
 	switch {
@@ -120,5 +130,5 @@ func WireReplicaRouter(
 		)
 	}
 
-	return router, cleanups, nil
+	return router, stop, nil
 }

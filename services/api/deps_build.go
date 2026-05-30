@@ -162,22 +162,24 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 
 	// Optional read replica + PoolRouter. The wiring (open pool,
 	// build router with WithReplica, start lag sampler, register
-	// lag/error metrics, emit cleanups in shutdown-safe LIFO order)
-	// is shared across all five service entrypoints via
-	// platform.WireReplicaRouter — see its docstring for the
-	// teardown-ordering contract that the helper enforces (stop
-	// metrics publisher → join sampler goroutine → close replica
-	// pool). When KAPP_READ_REPLICA_URL is unset, the helper
-	// returns a single-pool router that behaves identically to
-	// pre-A1 single-pool deployments. The wiring must happen here
-	// (not lazily) because insights/reporting/dashboard/record/
-	// search constructors below reference the router.
-	dbRouter, replicaCleanups, err := platform.WireReplicaRouter(ctx, "api", cfg, pool, metrics)
+	// lag/error metrics) is shared across all five service
+	// entrypoints via platform.WireReplicaRouter — see its
+	// docstring for the teardown-ordering contract the helper
+	// enforces internally (stop metrics publisher → join sampler
+	// goroutine → close replica pool). The helper returns a single
+	// stopReplica closure that bakes the order in, so this caller
+	// just appends one cleanup. When KAPP_READ_REPLICA_URL is
+	// unset, the helper returns a single-pool router that behaves
+	// identically to pre-A1 single-pool deployments. The wiring
+	// must happen here (not lazily) because insights/reporting/
+	// dashboard/record/search constructors below reference the
+	// router.
+	dbRouter, stopReplica, err := platform.WireReplicaRouter(ctx, "api", cfg, pool, metrics)
 	if err != nil {
 		runCleanups(cleanups)
 		return nil, nil, err
 	}
-	cleanups = append(cleanups, replicaCleanups...)
+	cleanups = append(cleanups, stopReplica)
 
 	// Tenant lookup cache. Tenant rows are small (<1 KB) and read on
 	// every authenticated request (auth.Middleware) plus every header-

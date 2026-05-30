@@ -149,21 +149,19 @@ func run() error {
 	// Replica routing (A1). Worker uses the router for the scheduled
 	// report runner and the insights query-cache refresh handler —
 	// both pure SELECTs. Wiring (open pool, router build, sampler
-	// start, metrics + LIFO cleanup ordering for the sampler-vs-pool
-	// shutdown race) is shared with the other four service
+	// start, metrics) is shared with the other four service
 	// entrypoints via platform.WireReplicaRouter — see its docstring
-	// for the teardown contract. The metrics registry was hoisted
-	// above the pool open (A2) so we can pass it directly here and
-	// have the helper publish kapp_replica_lag_seconds /
-	// kapp_replica_sample_errors_total alongside the regular
-	// worker metrics.
-	dbRouter, replicaCleanups, err := platform.WireReplicaRouter(ctx, "worker", cfg, pool, metrics)
+	// for the teardown contract the helper enforces internally
+	// (stopGauge → router.Close → replicaPool.Close). The metrics
+	// registry was hoisted above the pool open (A2) so we can pass
+	// it directly here and have the helper publish
+	// kapp_replica_lag_seconds / kapp_replica_sample_errors_total
+	// alongside the regular worker metrics.
+	dbRouter, stopReplica, err := platform.WireReplicaRouter(ctx, "worker", cfg, pool, metrics)
 	if err != nil {
 		return err
 	}
-	for _, fn := range replicaCleanups {
-		defer fn()
-	}
+	defer stopReplica()
 
 	natsURL := cfg.EventBusURL
 	if natsURL == "" {

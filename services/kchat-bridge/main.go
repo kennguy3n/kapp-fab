@@ -97,23 +97,22 @@ func run() error {
 	}
 
 	// Replica routing (A1). platform.WireReplicaRouter centralises
-	// pool open, router build, lag sampler start, and the LIFO
-	// cleanup ordering that joins the sampler goroutine before
-	// closing the replica pool; see its docstring for the teardown
+	// pool open, router build, lag sampler start, and the shutdown
+	// ordering that joins the sampler goroutine before closing the
+	// replica pool; the helper returns a single stopReplica closure
+	// that bakes the order in — see its docstring for the teardown
 	// contract.
 	//
 	// Bridge has no MetricsRegistry, so we pass nil — the helper
-	// silently skips lag/error gauge registration and just emits
-	// the close-router / close-pool cleanups. The lag sampler still
+	// silently skips lag/error gauge registration and just closes
+	// the router + replica pool on shutdown. The lag sampler still
 	// runs so /insight + /dashboard-digest dispatches benefit from
 	// replica offload when KAPP_READ_REPLICA_URL is set.
-	dbRouter, replicaCleanups, err := platform.WireReplicaRouter(ctx, "kchat-bridge", cfg, pool, nil)
+	dbRouter, stopReplica, err := platform.WireReplicaRouter(ctx, "kchat-bridge", cfg, pool, nil)
 	if err != nil {
 		return err
 	}
-	for _, fn := range replicaCleanups {
-		defer fn()
-	}
+	defer stopReplica()
 
 	cache := platform.NewLRUCache(512, 5*time.Minute)
 	registry := ktype.NewPGRegistry(pool, cache)

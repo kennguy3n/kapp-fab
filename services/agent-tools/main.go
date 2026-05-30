@@ -88,20 +88,19 @@ func run() error {
 	// Writes (record.Create/Update/Delete in the tool handlers)
 	// always go to the primary regardless of routing decisions.
 	// platform.WireReplicaRouter centralises pool open, router
-	// build, lag sampler start, and the LIFO cleanup ordering that
+	// build, lag sampler start, and the shutdown ordering that
 	// joins the sampler goroutine before closing the replica pool;
-	// see its docstring for the teardown contract.
+	// the helper returns a single stopReplica closure that bakes
+	// the order in — see its docstring for the teardown contract.
 	//
 	// Agent-tools has no MetricsRegistry, so we pass nil — the
 	// helper silently skips lag/error gauge registration and just
-	// emits the close-router / close-pool cleanups.
-	dbRouter, replicaCleanups, err := platform.WireReplicaRouter(ctx, "agent-tools", cfg, pool, nil)
+	// closes the router + replica pool on shutdown.
+	dbRouter, stopReplica, err := platform.WireReplicaRouter(ctx, "agent-tools", cfg, pool, nil)
 	if err != nil {
 		return err
 	}
-	for _, fn := range replicaCleanups {
-		defer fn()
-	}
+	defer stopReplica()
 	recordStore := record.NewPGStoreWithRouter(dbRouter, ktypeRegistry, eventPublisher, auditor)
 	workflowEngine := workflow.NewEngine(pool, eventPublisher, auditor)
 	tenantCache := platform.NewLRUCache(cfg.TenantCacheSize, 30*time.Second)
