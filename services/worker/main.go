@@ -116,6 +116,17 @@ func run() error {
 		}
 	}()
 
+	// Per-worker Prometheus registry. Hoisted up here (above the
+	// scheduler handler registration) so individual handlers can
+	// opt into emitting telemetry at construction time — notably
+	// the record-count reconciler, which surfaces drift between
+	// tenant_record_counts and the krecords scan as a gauge so
+	// silent regressions in the bump path page before they become
+	// a billing dispute. The actual /metrics listener still wires
+	// up below; the registry is just a thread-safe accumulator
+	// until then.
+	metrics := platform.NewMetricsRegistry()
+
 	pool, err := platform.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -291,6 +302,18 @@ func run() error {
 		tenant.ActionTypeUsageSnapshot,
 		tenant.NewUsageSnapshotHandler(meteringStore),
 	)
+	// Daily tenant_record_counts reconciliation — defends against
+	// drift between the in-transaction counter bump (record store)
+	// and the krecords source of truth. Reads the actual count(*),
+	// UPSERTs it back into tenant_record_counts, and emits a Prom
+	// drift gauge so a silent regression in the bump path pages
+	// before it turns into an under-billed tenant. Seeded per
+	// tenant by tenant.seedDefaultScheduledActions at the same 24h
+	// cadence as the usage snapshot.
+	schedRegistry.Register(
+		platform.ActionTypeRecordCountRecount,
+		platform.NewRecordCountReconciler(pool).WithMetrics(metrics),
+	)
 	// Daily data retention sweep — deletes old audit/event/SLA/
 	// notification rows per tenant according to the policies in
 	// data_retention_policies. Each DELETE runs under
@@ -363,11 +386,12 @@ func run() error {
 	// network partition longer than TCP keepalive).
 	identity := workerIdentity()
 
-	// Per-worker Prometheus registry, surfaced via the metrics
-	// listener wired below (KAPP_METRICS_ADDR). Wiring the registry
-	// into the leader elector and drain loop emits kapp_leader_active,
-	// kapp_outbox_drain_duration_seconds, and kapp_outbox_events_total.
-	metrics := platform.NewMetricsRegistry()
+	// Bind the outbox-drain metrics to the registry created above
+	// the scheduler-handler block. Hoisting NewMetricsRegistry up
+	// lets handlers opt into telemetry at construction time (notably
+	// the record-count reconciler's drift gauge) without forward-
+	// referencing a registry that does not yet exist; the leader
+	// elector / drain loop still see the same instance.
 	drainDur := metrics.Histogram("kapp_outbox_drain_duration_seconds", "Outbox drain batch latency in seconds.", platform.DefaultDurationBuckets, "result")
 	drainEvents := metrics.Counter("kapp_outbox_events_total", "Outbox events drained from the queue.", "result")
 
