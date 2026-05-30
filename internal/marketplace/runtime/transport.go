@@ -275,7 +275,14 @@ func StaticResponseHandler(status int, body []byte) func(ctx context.Context, ta
 // receive responses at distinct indices in some interleaving.
 // Order is not promised, but no caller can ever observe a torn
 // idx read.
-func SequenceHandler(responses []*DispatchResponse, errors []error) func(ctx context.Context, target string, body []byte, headers map[string]string) (*DispatchResponse, error) {
+//
+// Parameter is named `errs` rather than `errors` to avoid shadowing
+// the stdlib `errors` package imported above (Devin Review round-11
+// ANALYSIS_0006 on PR #127). The current body doesn't call
+// errors.Is / errors.New, but a future edit that did would silently
+// reach for the parameter slice instead of the package. Rename
+// removes the footgun before it bites.
+func SequenceHandler(responses []*DispatchResponse, errs []error) func(ctx context.Context, target string, body []byte, headers map[string]string) (*DispatchResponse, error) {
 	var idx atomic.Int64
 	return func(ctx context.Context, _ string, _ []byte, _ map[string]string) (*DispatchResponse, error) {
 		cur := int(idx.Add(1) - 1)
@@ -290,12 +297,12 @@ func SequenceHandler(responses []*DispatchResponse, errors []error) func(ctx con
 			}
 			resp = responses[i]
 		}
-		if len(errors) > 0 {
+		if len(errs) > 0 {
 			i := cur
-			if i >= len(errors) {
-				i = len(errors) - 1
+			if i >= len(errs) {
+				i = len(errs) - 1
 			}
-			err = errors[i]
+			err = errs[i]
 		}
 		return resp, err
 	}
