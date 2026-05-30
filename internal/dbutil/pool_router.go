@@ -58,8 +58,11 @@ type PoolRouter struct {
 	lagTolerance time.Duration
 
 	// sampleStaleness bounds how old the most recent lag observation
-	// may be before the router stops trusting it. Defaults to 2× the
-	// sampler interval; explicitly settable for tests.
+	// may be before the router stops trusting it. Defaults to
+	// `defaultStalenessMultiplier * sampleInterval` (i.e. 2× the
+	// interval the caller passes to WithReplica), floored at
+	// `minStalenessFloor` so ticker jitter doesn't flap routing.
+	// Explicitly overridable via WithSampleStaleness for tests.
 	sampleStaleness time.Duration
 
 	// lastLagNanos holds the most recent observed replication lag
@@ -88,29 +91,58 @@ func NewPoolRouter(primary *pgxpool.Pool) *PoolRouter {
 	return &PoolRouter{primary: primary}
 }
 
+// defaultStalenessMultiplier is how many sampler intervals may elapse
+// before the most recent observation is considered "too old" to
+// trust. The PoolRouter type contract documents this as 2× — see the
+// `Read()` semantics in the type docstring above. Keep this in
+// lock-step with the doc.
+const defaultStalenessMultiplier = 2
+
+// minStalenessFloor is the absolute lower bound for sampleStaleness
+// even when 2× the sampler interval is smaller. A sub-second
+// staleness window would cause routine ticker jitter (GC pauses,
+// scheduling) to flap the router back to primary on every Read()
+// call. One second is conservative; ~100 ms of jitter is well below
+// it on a healthy host.
+const minStalenessFloor = 1 * time.Second
+
 // WithReplica attaches a read replica pool and the lag tolerance the
 // router will enforce before routing any read to it. Pass nil
 // replica to clear a previously-configured replica (useful for tests
 // flipping between configurations); pass a non-positive tolerance to
 // effectively disable routing to the replica without un-wiring it.
 //
+// sampleInterval is the cadence the sampler will tick at (i.e. the
+// value the caller will subsequently pass to StartLagSampler). It is
+// taken at WithReplica time so the router can derive the default
+// sampleStaleness as `defaultStalenessMultiplier * sampleInterval`,
+// honouring the documented contract on the type. Pass zero to opt
+// out of the auto-default — the caller is then responsible for
+// calling WithSampleStaleness explicitly.
+//
 // Returns the receiver so this can be chained from NewPoolRouter.
-func (r *PoolRouter) WithReplica(replica *pgxpool.Pool, lagTolerance time.Duration) *PoolRouter {
+//
+// IMPORTANT: WithReplica is not safe to call concurrently with
+// Read() / SampleLag(). It is intended to be called once during
+// process boot before any goroutine starts issuing reads through
+// the router. Tests that flip configurations between subtests do so
+// serially.
+func (r *PoolRouter) WithReplica(replica *pgxpool.Pool, lagTolerance time.Duration, sampleInterval time.Duration) *PoolRouter {
 	r.replica = replica
 	r.lagTolerance = lagTolerance
-	if r.sampleStaleness <= 0 {
-		// Default to 30s — generous enough that a slow sampler tick
-		// doesn't immediately disqualify the replica, but tight
-		// enough that a fully stalled sampler is detected within
-		// one Prometheus scrape cycle (15s default).
-		r.sampleStaleness = 30 * time.Second
+	if r.sampleStaleness <= 0 && sampleInterval > 0 {
+		staleness := time.Duration(defaultStalenessMultiplier) * sampleInterval
+		if staleness < minStalenessFloor {
+			staleness = minStalenessFloor
+		}
+		r.sampleStaleness = staleness
 	}
 	return r
 }
 
 // WithSampleStaleness overrides the "how old can the last sample be"
-// bound used by Read(). Primarily for tests; production wiring
-// should leave this at the default (30s).
+// bound used by Read(). Primarily for tests; production wiring sets
+// this implicitly via WithReplica's sampleInterval (2× interval).
 func (r *PoolRouter) WithSampleStaleness(d time.Duration) *PoolRouter {
 	if d > 0 {
 		r.sampleStaleness = d
@@ -230,12 +262,30 @@ func (r *PoolRouter) StartLagSampler(ctx context.Context, interval time.Duration
 	return true
 }
 
+// sampleQueryTimeout returns the per-tick query timeout for the
+// sampler. Capped at interval/2 so a single slow query can't eat
+// the full tick budget — if the replica needs more than half an
+// interval just to answer the lag probe, that probe should fail and
+// the sample-staleness check in Read() will route subsequent reads
+// back to primary. The floor (100ms) protects against absurdly
+// short test intervals collapsing to a zero-timeout context.
+func sampleQueryTimeout(interval time.Duration) time.Duration {
+	t := interval / 2
+	if t < 100*time.Millisecond {
+		t = 100 * time.Millisecond
+	}
+	return t
+}
+
 func (r *PoolRouter) runLagSampler(ctx context.Context, interval time.Duration) {
 	// Take a first sample immediately so Read() can flip to the
 	// replica without waiting for the first tick. The initial
-	// sample is bounded by the parent ctx so a stuck DB doesn't
-	// block process shutdown.
-	_, _ = r.SampleLag(ctx)
+	// sample uses the same per-call budget the periodic ticks use
+	// so a stuck DB on first probe doesn't block process startup
+	// (parent ctx still ultimately bounds it).
+	firstCtx, firstCancel := context.WithTimeout(ctx, sampleQueryTimeout(interval))
+	_, _ = r.SampleLag(firstCtx)
+	firstCancel()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -243,7 +293,7 @@ func (r *PoolRouter) runLagSampler(ctx context.Context, interval time.Duration) 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			sampleCtx, cancel := context.WithTimeout(ctx, interval)
+			sampleCtx, cancel := context.WithTimeout(ctx, sampleQueryTimeout(interval))
 			_, _ = r.SampleLag(sampleCtx)
 			cancel()
 		}

@@ -102,13 +102,36 @@ func WithReadOnlyTenantTx(
 	if router == nil {
 		return errors.New("dbutil: nil router")
 	}
-	if tenantID == uuid.Nil {
-		return errors.New("dbutil: tenant id required")
-	}
-
 	pool := router.Read()
 	if pool == nil {
 		return errors.New("dbutil: router returned nil pool")
+	}
+	return WithReadOnlyTenantTxOnPool(ctx, pool, tenantID, fn)
+}
+
+// WithReadOnlyTenantTxOnPool is the pool-pinned variant of
+// WithReadOnlyTenantTx: instead of asking a PoolRouter where to read,
+// the caller passes the pool directly. Use this when a sequence of
+// reads must all hit the SAME pool — e.g. a keyset walk where the
+// snapshot ceiling is captured against one pool and every chunk must
+// honour that pool's replication position. Asking the router on every
+// chunk would let a router flip mid-walk leave one chunk reading
+// from primary and the next from replica, mixing two pools' snapshot
+// semantics under one ceiling.
+//
+// All the read-only / tenant-GUC / explicit-commit semantics of
+// WithReadOnlyTenantTx apply.
+func WithReadOnlyTenantTxOnPool(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	tenantID uuid.UUID,
+	fn func(ctx context.Context, tx pgx.Tx) error,
+) (err error) {
+	if pool == nil {
+		return errors.New("dbutil: nil pool")
+	}
+	if tenantID == uuid.Nil {
+		return errors.New("dbutil: tenant id required")
 	}
 
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})

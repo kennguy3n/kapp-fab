@@ -180,7 +180,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 			return nil, nil, fmt.Errorf("api: open replica pool: %w", err)
 		}
 		cleanups = append(cleanups, func() { replicaPool.Close() })
-		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance)
+		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance, cfg.ReadReplicaLagSampleInterval)
 		// Background lag sampler keeps the cached lag observation
 		// fresh enough that PoolRouter.Read() can decide replica vs
 		// primary on the hot path with no per-query DB round-trip.

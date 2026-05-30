@@ -46,7 +46,7 @@ func TestPoolRouter_NoReplica_AlwaysPrimary(t *testing.T) {
 func TestPoolRouter_ReplicaPicked_WhenSampleFresh_AndLagInTolerance(t *testing.T) {
 	primary := newLazyPool(t)
 	replica := newLazyPool(t)
-	r := NewPoolRouter(primary).WithReplica(replica, 500*time.Millisecond)
+	r := NewPoolRouter(primary).WithReplica(replica, 500*time.Millisecond, 5*time.Second)
 
 	// Simulate a fresh sample well within tolerance. WithSampleStaleness
 	// defaults to 30s, so a sample timestamp of "now" is fresh.
@@ -64,7 +64,7 @@ func TestPoolRouter_ReplicaPicked_WhenSampleFresh_AndLagInTolerance(t *testing.T
 func TestPoolRouter_FallsBackToPrimary_WhenLagExceedsTolerance(t *testing.T) {
 	primary := newLazyPool(t)
 	replica := newLazyPool(t)
-	r := NewPoolRouter(primary).WithReplica(replica, 100*time.Millisecond)
+	r := NewPoolRouter(primary).WithReplica(replica, 100*time.Millisecond, 5*time.Second)
 
 	r.lastLagNanos.Store(int64(500 * time.Millisecond)) // 5x tolerance
 	r.lastSampledAt.Store(time.Now().UTC().UnixNano())
@@ -78,7 +78,7 @@ func TestPoolRouter_FallsBackToPrimary_WhenSampleStale(t *testing.T) {
 	primary := newLazyPool(t)
 	replica := newLazyPool(t)
 	r := NewPoolRouter(primary).
-		WithReplica(replica, 1*time.Second).
+		WithReplica(replica, 1*time.Second, 5*time.Second).
 		WithSampleStaleness(50 * time.Millisecond)
 
 	// Lag would be acceptable, but the sample is older than the
@@ -94,7 +94,7 @@ func TestPoolRouter_FallsBackToPrimary_WhenSampleStale(t *testing.T) {
 func TestPoolRouter_FallsBackToPrimary_WhenNoSampleEverTaken(t *testing.T) {
 	primary := newLazyPool(t)
 	replica := newLazyPool(t)
-	r := NewPoolRouter(primary).WithReplica(replica, 1*time.Second)
+	r := NewPoolRouter(primary).WithReplica(replica, 1*time.Second, 5*time.Second)
 
 	// No sample stored (lastSampledAt is the zero atomic). Read should
 	// route to primary so a freshly-booted process doesn't flip to a
@@ -107,7 +107,7 @@ func TestPoolRouter_FallsBackToPrimary_WhenNoSampleEverTaken(t *testing.T) {
 func TestPoolRouter_FallsBackToPrimary_WhenLagToleranceNonPositive(t *testing.T) {
 	primary := newLazyPool(t)
 	replica := newLazyPool(t)
-	r := NewPoolRouter(primary).WithReplica(replica, 0)
+	r := NewPoolRouter(primary).WithReplica(replica, 0, 5*time.Second)
 
 	r.lastLagNanos.Store(0)
 	r.lastSampledAt.Store(time.Now().UTC().UnixNano())
@@ -129,7 +129,7 @@ func TestPoolRouter_LastLag_ReportsFalseBeforeFirstSample(t *testing.T) {
 func TestPoolRouter_LastLag_ReportsCachedAfterSample(t *testing.T) {
 	primary := newLazyPool(t)
 	replica := newLazyPool(t)
-	r := NewPoolRouter(primary).WithReplica(replica, 1*time.Second)
+	r := NewPoolRouter(primary).WithReplica(replica, 1*time.Second, 5*time.Second)
 
 	want := 250 * time.Millisecond
 	at := time.Now().UTC()
@@ -190,18 +190,49 @@ func TestPoolRouter_StartLagSampler_DeclinesWithoutReplica(t *testing.T) {
 func TestPoolRouter_StartLagSampler_DeclinesNonPositiveInterval(t *testing.T) {
 	primary := newLazyPool(t)
 	replica := newLazyPool(t)
-	r := NewPoolRouter(primary).WithReplica(replica, 1*time.Second)
+	r := NewPoolRouter(primary).WithReplica(replica, 1*time.Second, 5*time.Second)
 	if r.StartLagSampler(context.Background(), 0) {
 		t.Fatalf("StartLagSampler should return false on non-positive interval")
 	}
 }
 
-func TestPoolRouter_WithReplica_DefaultsStalenessTo30s(t *testing.T) {
+// TestPoolRouter_WithReplica_DefaultsStalenessTo2xInterval pins the
+// type contract: default sampleStaleness is 2× the sampler interval
+// passed to WithReplica. This is what the PoolRouter type docstring
+// promises ("if the last successful sample is older than 2× the
+// configured sample interval we treat the replica as unknown").
+func TestPoolRouter_WithReplica_DefaultsStalenessTo2xInterval(t *testing.T) {
 	primary := newLazyPool(t)
 	replica := newLazyPool(t)
-	r := NewPoolRouter(primary).WithReplica(replica, 1*time.Second)
-	if r.sampleStaleness != 30*time.Second {
-		t.Fatalf("default sampleStaleness = %v, want 30s", r.sampleStaleness)
+	interval := 5 * time.Second
+	r := NewPoolRouter(primary).WithReplica(replica, 1*time.Second, interval)
+	want := 2 * interval
+	if r.sampleStaleness != want {
+		t.Fatalf("default sampleStaleness = %v, want %v (2× %v)", r.sampleStaleness, want, interval)
+	}
+}
+
+// TestPoolRouter_WithReplica_FloorsStaleness asserts that
+// minStalenessFloor protects against absurdly short intervals (a
+// sub-second window would let routine ticker jitter flap routing).
+func TestPoolRouter_WithReplica_FloorsStaleness(t *testing.T) {
+	primary := newLazyPool(t)
+	replica := newLazyPool(t)
+	r := NewPoolRouter(primary).WithReplica(replica, 1*time.Second, 100*time.Millisecond)
+	if r.sampleStaleness < minStalenessFloor {
+		t.Fatalf("sampleStaleness = %v below floor %v", r.sampleStaleness, minStalenessFloor)
+	}
+}
+
+// TestPoolRouter_WithReplica_NoIntervalSkipsDefault verifies the
+// opt-out path: callers that pass zero sampleInterval must set
+// staleness explicitly via WithSampleStaleness.
+func TestPoolRouter_WithReplica_NoIntervalSkipsDefault(t *testing.T) {
+	primary := newLazyPool(t)
+	replica := newLazyPool(t)
+	r := NewPoolRouter(primary).WithReplica(replica, 1*time.Second, 0)
+	if r.sampleStaleness != 0 {
+		t.Fatalf("sampleStaleness = %v, want 0 (no implicit default with zero interval)", r.sampleStaleness)
 	}
 }
 
@@ -209,7 +240,7 @@ func TestPoolRouter_WithSampleStaleness_OverridesDefault(t *testing.T) {
 	primary := newLazyPool(t)
 	replica := newLazyPool(t)
 	r := NewPoolRouter(primary).
-		WithReplica(replica, 1*time.Second).
+		WithReplica(replica, 1*time.Second, 5*time.Second).
 		WithSampleStaleness(2 * time.Second)
 	if r.sampleStaleness != 2*time.Second {
 		t.Fatalf("override sampleStaleness = %v, want 2s", r.sampleStaleness)
@@ -220,9 +251,30 @@ func TestPoolRouter_WithSampleStaleness_RejectsNonPositive(t *testing.T) {
 	primary := newLazyPool(t)
 	replica := newLazyPool(t)
 	r := NewPoolRouter(primary).
-		WithReplica(replica, 1*time.Second).
+		WithReplica(replica, 1*time.Second, 5*time.Second).
 		WithSampleStaleness(0)
-	if r.sampleStaleness != 30*time.Second {
-		t.Fatalf("non-positive WithSampleStaleness should leave default; got %v", r.sampleStaleness)
+	want := 2 * 5 * time.Second
+	if r.sampleStaleness != want {
+		t.Fatalf("non-positive WithSampleStaleness should leave default %v; got %v", want, r.sampleStaleness)
+	}
+}
+
+func TestPoolRouter_SampleQueryTimeoutBoundedByInterval(t *testing.T) {
+	cases := []struct {
+		name     string
+		interval time.Duration
+		want     time.Duration
+	}{
+		{"5s halves to 2.5s", 5 * time.Second, 2500 * time.Millisecond},
+		{"10s halves to 5s", 10 * time.Second, 5 * time.Second},
+		{"100ms below floor", 100 * time.Millisecond, 100 * time.Millisecond},
+		{"1ms collapsed to floor", 1 * time.Millisecond, 100 * time.Millisecond},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sampleQueryTimeout(c.interval); got != c.want {
+				t.Fatalf("sampleQueryTimeout(%v)=%v want %v", c.interval, got, c.want)
+			}
+		})
 	}
 }

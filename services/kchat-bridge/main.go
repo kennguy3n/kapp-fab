@@ -109,7 +109,7 @@ func run() error {
 			return fmt.Errorf("kchat-bridge: open replica pool: %w", err)
 		}
 		defer replicaPool.Close()
-		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance)
+		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance, cfg.ReadReplicaLagSampleInterval)
 		dbRouter.StartLagSampler(ctx, cfg.ReadReplicaLagSampleInterval)
 	}
 

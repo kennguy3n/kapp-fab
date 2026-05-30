@@ -95,7 +95,7 @@ func run() error {
 			return fmt.Errorf("agent-tools: open read replica pool: %w", err)
 		}
 		defer replicaPool.Close()
-		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance)
+		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance, cfg.ReadReplicaLagSampleInterval)
 		dbRouter.StartLagSampler(ctx, cfg.ReadReplicaLagSampleInterval)
 	}
 	recordStore := record.NewPGStoreWithRouter(dbRouter, ktypeRegistry, eventPublisher, auditor)

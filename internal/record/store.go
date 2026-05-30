@@ -292,15 +292,15 @@ func checkCustomKTypeStatus(tkt *ktype.TenantKType, mode ktypeResolveMode) error
 	return nil
 }
 
-// dbNow returns Postgres's current timestamp. Used to capture the
-// keyset-walk snapshot ceiling in ListAll / ListByField / ForEach in
-// the same clock domain that assigns `updated_at` values on commit,
-// so app-server clock skew (NTP jitter, container pause) cannot move
-// the ceiling backwards relative to row timestamps. clock_timestamp()
-// is preferred over now() / transaction_timestamp() because it is
-// not frozen at the start of the surrounding transaction — we want
-// the wall-clock instant this call is made, not the instant the
-// outer scheduler's transaction began.
+// dbNow returns Postgres's current timestamp from the primary pool.
+// Used to capture the keyset-walk snapshot ceiling in the same clock
+// domain that assigns `updated_at` values on commit, so app-server
+// clock skew (NTP jitter, container pause) cannot move the ceiling
+// backwards relative to row timestamps. clock_timestamp() is preferred
+// over now() / transaction_timestamp() because it is not frozen at
+// the start of the surrounding transaction — we want the wall-clock
+// instant this call is made, not the instant the outer scheduler's
+// transaction began.
 //
 // Returns timestamptz directly (no `AT TIME ZONE 'UTC'` cast) so the
 // result type carries its own UTC anchor rather than relying on
@@ -312,9 +312,30 @@ func checkCustomKTypeStatus(tkt *ktype.TenantKType, mode ktypeResolveMode) error
 // in case a future scan layer normalises timestamptz to the local
 // zone, but the SQL itself no longer depends on the driver's
 // timezone defaults.
+//
+// NOTE on replica routing: keyset walks (ForEach, ForEachByField, the
+// shared foreachKeyset) MUST use dbNowVia(pool), not dbNow, to capture
+// the snapshot from the SAME pool the per-chunk reads will use.
+// Otherwise a primary-captured ceiling can be ahead of the replica's
+// last-replayed xact by up to lagTolerance, and rows committed in
+// that window would be filtered IN by `updated_at <= snapshot` but
+// not yet visible on the replica — silently missed for this walk
+// (and only picked up if a subsequent walk's ceiling is high enough).
+// dbNow remains the right call for any single-shot timestamp read
+// that does not subsequently filter rows on the result.
 func (s *PGStore) dbNow(ctx context.Context) (time.Time, error) {
+	return s.dbNowVia(ctx, s.router.Primary())
+}
+
+// dbNowVia returns Postgres's current timestamp from the given pool.
+// Use when the snapshot timestamp will be used to filter rows on a
+// subsequent read against the SAME pool — see the contract on
+// foreachKeyset (the snapshot must be ≤ the pool's last-replayed
+// xact, otherwise rows committed between the pool's replay position
+// and `clock_timestamp()` would be filtered IN but not visible).
+func (s *PGStore) dbNowVia(ctx context.Context, pool *pgxpool.Pool) (time.Time, error) {
 	var t time.Time
-	if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&t); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&t); err != nil {
 		return time.Time{}, fmt.Errorf("record: dbNow: %w", err)
 	}
 	return t.UTC(), nil
@@ -656,17 +677,21 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 //  1. Rows are visited in the same (updated_at DESC, id DESC) order
 //     as ListAll and ListPage, paginated internally via keyset.
 //  2. Snapshot consistency: a wall-clock ceiling is captured from
-//     Postgres clock_timestamp() before the first chunk. Every chunk
-//     filters `updated_at <= snapshot`. A row whose updated_at is
-//     bumped by a concurrent Update mid-walk is excluded from this
+//     Postgres clock_timestamp() against the same pool the chunks
+//     will read from (replica if routed, primary otherwise). Every
+//     chunk filters `updated_at <= snapshot`. A row whose updated_at
+//     is bumped by a concurrent Update mid-walk is excluded from this
 //     walk and picked up by the next sweep. The contract is "every
 //     row whose state was committed before walk start, exactly
 //     once", not "every row that ever existed during the walk". See
-//     PGStore.dbNow for the DB-clock vs app-clock rationale.
+//     PGStore.dbNow / PGStore.dbNowVia for the DB-clock vs
+//     app-clock rationale and the pool-affinity requirement.
 //  3. Each chunk runs in its own per-tenant transaction
-//     (platform.WithTenantTx). The walk does NOT hold a long-lived
-//     transaction, so it does not block autovacuum and cannot fail
-//     with a serialization-near-end-of-walk error.
+//     (dbutil.WithReadOnlyTenantTx, which routes to the replica when
+//     one is configured and within lag tolerance, primary otherwise).
+//     The walk does NOT hold a long-lived transaction, so it does not
+//     block autovacuum and cannot fail with a
+//     serialization-near-end-of-walk error.
 //  4. Decryption happens after the SQL result is read but before fn
 //     is called. fn receives plaintext.
 //  5. fn errors propagate up unchanged, EXCEPT the sentinel
@@ -734,7 +759,22 @@ func (s *PGStore) foreachKeyset(
 	fn ForEachFunc,
 ) error {
 	const chunk = 500
-	snapshot, err := s.dbNow(ctx)
+	// Pin the read pool for the duration of this walk BEFORE
+	// capturing the snapshot. Calling s.router.Read() on every chunk
+	// would allow the router to flip primary→replica (or back)
+	// between chunks, which would mix two pools' snapshot semantics
+	// in one walk. Capture once, reuse for snapshot + every chunk.
+	//
+	// Taking the snapshot from the same pool the chunks will use is
+	// required for correctness on the replica path: if the snapshot
+	// were taken from the primary while chunks read from the replica,
+	// rows committed between the replica's last-replayed xact and the
+	// primary's clock_timestamp() would be filtered IN by
+	// `updated_at <= snapshot` but NOT visible on the replica —
+	// silently missed for this walk. Anchoring both reads to the
+	// replica's clock keeps the ceiling ≤ what the replica can return.
+	readPool := s.router.Read()
+	snapshot, err := s.dbNowVia(ctx, readPool)
 	if err != nil {
 		return err
 	}
@@ -747,10 +787,11 @@ func (s *PGStore) foreachKeyset(
 		page := make([]KRecord, 0, chunk)
 		// foreachKeyset is the streaming primitive for ForEach,
 		// ForEachByField, ListAll and ListByField — every long-walk
-		// read in the system. Route the per-chunk SELECT through
-		// the replica when one is configured (same lag-tolerance
-		// semantics as ListPage).
-		err := dbutil.WithReadOnlyTenantTx(ctx, s.router, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// read in the system. Run the per-chunk SELECT against the
+		// SAME pool used for the snapshot (readPool, pinned above)
+		// so the chunk read sees rows up to its own clock_timestamp()
+		// snapshot, never a higher ceiling captured elsewhere.
+		err := dbutil.WithReadOnlyTenantTxOnPool(ctx, readPool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			sql, args := queryBuilder(haveLower, cursorTS, cursorID, snapshot, chunk)
 			rows, err := tx.Query(ctx, sql, args...)
 			if err != nil {
