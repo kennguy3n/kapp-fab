@@ -25,6 +25,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/captcha"
 	"github.com/kennguy3n/kapp-fab/internal/csrf"
 	"github.com/kennguy3n/kapp-fab/internal/dashboard"
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/docs"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/exporter"
@@ -160,6 +161,45 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		cleanups = append(cleanups, func() { adminPool.Close() })
 	}
 
+	// Optional read replica + PoolRouter. When KAPP_READ_REPLICA_URL
+	// is set, open a second pgx pool against the replica DSN and
+	// build a router that fans reads to the replica (when within
+	// KAPP_READ_REPLICA_LAG_TOLERANCE of the primary) and writes
+	// always to the primary. When the env var is unset, NewPoolRouter
+	// with only the primary is a no-op pass-through and every
+	// dbutil.WithReadOnlyTenantTx call resolves to the primary —
+	// behavior is identical to pre-A1 single-pool deployments. This
+	// ordering matters: insights/reporting/dashboard/record/search
+	// wiring below references the router, so it has to exist by the
+	// time those constructors run.
+	dbRouter := dbutil.NewPoolRouter(pool)
+	if cfg.ReadReplicaURL != "" {
+		replicaPool, err := platform.NewPool(ctx, cfg.ReadReplicaURL)
+		if err != nil {
+			runCleanups(cleanups)
+			return nil, nil, fmt.Errorf("api: open replica pool: %w", err)
+		}
+		cleanups = append(cleanups, func() { replicaPool.Close() })
+		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance)
+		// Background lag sampler keeps the cached lag observation
+		// fresh enough that PoolRouter.Read() can decide replica vs
+		// primary on the hot path with no per-query DB round-trip.
+		// Sampler interval and the staleness bound (2× the
+		// sample interval) live on the router so this wiring is the
+		// only ceremony required to opt a deployment in.
+		dbRouter.StartLagSampler(ctx, cfg.ReadReplicaLagSampleInterval)
+		stopReplicaGauge := platform.RegisterReplicaLagGauge(metrics, dbRouter, cfg.ReadReplicaLagSampleInterval)
+		cleanups = append(cleanups, stopReplicaGauge)
+		log.Printf("api: read replica enabled (lag tolerance=%s, sample every=%s)", cfg.ReadReplicaLagTolerance, cfg.ReadReplicaLagSampleInterval)
+	} else {
+		// Still wire the configured/lag gauges so /metrics surfaces
+		// "no replica configured" as an explicit zero rather than a
+		// missing series — alerts conditioned on
+		// kapp_replica_configured won't misfire on bootstrap.
+		stopReplicaGauge := platform.RegisterReplicaLagGauge(metrics, dbRouter, 0)
+		cleanups = append(cleanups, stopReplicaGauge)
+	}
+
 	// Tenant lookup cache. Tenant rows are small (<1 KB) and read on
 	// every authenticated request (auth.Middleware) plus every header-
 	// scoped lookup (importer / agent-tools), so a 30s read-through
@@ -215,7 +255,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	eventPublisher := events.NewPGPublisher(pool)
 	auditor := audit.NewPGLogger(pool)
 	tenantKTypeStore := ktype.NewTenantStore(pool)
-	recordStore := record.NewPGStore(pool, ktypeRegistry, eventPublisher, auditor).WithTenantKTypes(tenantKTypeStore)
+	recordStore := record.NewPGStoreWithRouter(dbRouter, ktypeRegistry, eventPublisher, auditor).WithTenantKTypes(tenantKTypeStore)
 	// Per-tenant field-level encryption is opt-in: when KAPP_MASTER_KEY
 	// is set, derive per-tenant keys and plug the KeyManager into the
 	// record store so schema fields marked {"encrypted": true} round-trip
@@ -479,7 +519,6 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		financeadapters.NewLandedCostLedgerAdapter(ledgerStore),
 	)
 
-
 	// Phase E leave-balance ledger + lesson-progress projections.
 	// Employee / leave-request / course / lesson records live in the
 	// generic KRecord store; the dedicated stores only cover the
@@ -564,7 +603,10 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	exchangeRateStore := apiExchangeRates
 	helpdeskStore := helpdesk.NewStore(pool)
 	reportStore := reporting.NewStore(pool)
-	reportRunner := reporting.NewRunner(pool)
+	// Reporting and insights are read-only — route through dbRouter
+	// so report execution lands on the replica when one is
+	// configured + within lag tolerance, primary otherwise.
+	reportRunner := reporting.NewRunnerWithRouter(dbRouter)
 
 	// Phase L — Insights. The query store + dashboard store back the
 	// /api/v1/insights surface; the runner wraps reporting.Runner so
@@ -573,7 +615,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	insightsQueryStore := insights.NewQueryStore(pool)
 	insightsDashboardStore := insights.NewDashboardStore(pool)
 	insightsCacheStore := insights.NewCacheStore(pool)
-	insightsRunner := insights.NewRunner(pool, insightsCacheStore, insightsQueryStore, reportRunner)
+	insightsRunner := insights.NewRunnerWithRouter(dbRouter, insightsCacheStore, insightsQueryStore, reportRunner)
 
 	// Phase L deferred — external data sources, dashboard embeds. The
 	// data source store encrypts connection strings with the per-
@@ -771,7 +813,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	reph := &reportsHandlers{store: reportStore, runner: reportRunner}
 	repsh := &reportScheduleHandlers{store: reporting.NewScheduleStore(pool)}
 	exph := &exportHandlers{store: exporter.NewStore(pool, adminPool)}
-	dashh := &dashboardHandlers{store: dashboard.NewStore(pool).WithConverter(dashboardRateAdapter{rates: apiExchangeRates})}
+	dashh := &dashboardHandlers{store: dashboard.NewStoreWithRouter(dbRouter).WithConverter(dashboardRateAdapter{rates: apiExchangeRates})}
 	insh := &insightsHandlers{
 		queries:    insightsQueryStore,
 		dashboards: insightsDashboardStore,

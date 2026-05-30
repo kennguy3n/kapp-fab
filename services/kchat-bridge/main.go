@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/financeadapters"
@@ -96,11 +97,27 @@ func run() error {
 		defer adminPool.Close()
 	}
 
+	// Replica routing (A1). Same wiring as services/api/deps_build.go
+	// but pared down: no metrics registry in the bridge, so the gauge
+	// publisher is not registered here. The lag sampler still runs so
+	// /insight + /dashboard-digest dispatches benefit from replica
+	// offload when KAPP_READ_REPLICA_URL is set on this service.
+	dbRouter := dbutil.NewPoolRouter(pool)
+	if cfg.ReadReplicaURL != "" {
+		replicaPool, err := platform.NewPool(ctx, cfg.ReadReplicaURL)
+		if err != nil {
+			return fmt.Errorf("kchat-bridge: open replica pool: %w", err)
+		}
+		defer replicaPool.Close()
+		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance)
+		dbRouter.StartLagSampler(ctx, cfg.ReadReplicaLagSampleInterval)
+	}
+
 	cache := platform.NewLRUCache(512, 5*time.Minute)
 	registry := ktype.NewPGRegistry(pool, cache)
 	eventPublisher := events.NewPGPublisher(pool)
 	auditor := audit.NewPGLogger(pool)
-	recordStore := record.NewPGStore(pool, registry, eventPublisher, auditor)
+	recordStore := record.NewPGStoreWithRouter(dbRouter, registry, eventPublisher, auditor)
 	workflowEngine := workflow.NewEngine(pool, eventPublisher, auditor)
 	ledgerStore := ledger.NewPGStore(pool, eventPublisher, auditor)
 	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
@@ -125,7 +142,7 @@ func run() error {
 	// the insights stack so /insight + /dashboard-digest can run a
 	// saved query without having to call back over HTTP into the API
 	// service.
-	reportingRunner := reporting.NewRunner(pool)
+	reportingRunner := reporting.NewRunnerWithRouter(dbRouter)
 	insightsQueries := insights.NewQueryStore(pool)
 	insightsDashboards := insights.NewDashboardStore(pool)
 	insightsCache := insights.NewCacheStore(pool)
@@ -135,7 +152,7 @@ func run() error {
 	// gate on the /insight slash command path for tenants downgraded
 	// from enterprise to business.
 	featureStore := tenant.NewFeatureStore(pool)
-	insightsRunner := insights.NewRunner(pool, insightsCache, insightsQueries, reportingRunner).
+	insightsRunner := insights.NewRunnerWithRouter(dbRouter, insightsCache, insightsQueries, reportingRunner).
 		WithFeaturePolicy(featureStore)
 	landedCostStore := finance.NewLandedCostStore(
 		pool,

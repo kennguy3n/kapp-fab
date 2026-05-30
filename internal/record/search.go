@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 )
 
 // SearchResult is one row returned by Search. It mirrors KRecord plus
@@ -43,7 +43,13 @@ func (s *PGStore) Search(
 	}
 
 	out := make([]SearchResult, 0, limit)
-	err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	// Full-text search is read-only by construction (only SELECT
+	// against krecords.search_vector). Route through the replica
+	// pool when one is configured AND lag is within tolerance —
+	// search ranks fully consistently within a few-second lag and
+	// is one of the heavier scans in the system, so it benefits
+	// the most from offloading to the replica.
+	err := dbutil.WithReadOnlyTenantTx(ctx, s.router, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var rows pgx.Rows
 		var err error
 		// The query uses plainto_tsquery so the user-supplied string

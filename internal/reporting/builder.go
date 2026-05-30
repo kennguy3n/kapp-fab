@@ -326,14 +326,46 @@ func (d *Definition) Validate() error {
 // Runner executes Definitions against the database. The runner never
 // concatenates caller-supplied strings into SQL directly: identifiers
 // go through isIdentifier + a whitelist and values flow as $N params.
+//
+// Holds a dbutil.PoolRouter so report execution (always read-only —
+// reports never mutate rows) can be served by the read replica when
+// one is configured AND the replica is within
+// KAPP_READ_REPLICA_LAG_TOLERANCE of the primary. When no replica is
+// configured the router transparently returns the primary, so the
+// migration from "single pool" to "primary+replica" is opt-in by
+// operator env var with no code-path divergence here.
 type Runner struct {
-	pool *pgxpool.Pool
+	router *dbutil.PoolRouter
 }
 
-// NewRunner wires a Runner from the shared pool.
+// NewRunner wires a Runner from the shared pool. Equivalent to
+// NewRunnerWithRouter(dbutil.NewPoolRouter(pool)); kept as the
+// canonical constructor for the common single-pool case so callers
+// that don't (yet) wire a replica don't have to reach into dbutil
+// just to build a no-op router.
 func NewRunner(pool *pgxpool.Pool) *Runner {
-	return &Runner{pool: pool}
+	return &Runner{router: dbutil.NewPoolRouter(pool)}
 }
+
+// NewRunnerWithRouter wires a Runner that can route read-only
+// queries to a replica via the supplied PoolRouter. Pass the same
+// router used by the rest of the process — there is no benefit to
+// having multiple routers and several downsides (each carries its
+// own lag sampler, each duplicates the metrics gauge).
+func NewRunnerWithRouter(router *dbutil.PoolRouter) *Runner {
+	if router == nil {
+		panic("reporting: NewRunnerWithRouter requires a non-nil router")
+	}
+	return &Runner{router: router}
+}
+
+// Pool returns the primary pool the runner is bound to. Reads in
+// internal callers (e.g. ad-hoc joins via Definition) sometimes
+// need the raw pool reference; this preserves backward compat with
+// callers that previously reached into Runner.pool. Reads through
+// this pool bypass the replica routing — only use when the caller
+// genuinely needs the primary (e.g. follow-up writes).
+func (r *Runner) Pool() *pgxpool.Pool { return r.router.Primary() }
 
 // Run executes the definition for a tenant and returns a Result. The
 // tenant_id is applied both as a WHERE condition and via the
@@ -363,7 +395,15 @@ func (r *Runner) RunWithStatementTimeout(ctx context.Context, tenantID uuid.UUID
 
 	rows := make([]map[string]any, 0)
 	columns := []string{}
-	err := dbutil.WithTenantTx(ctx, r.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	// Report execution is strictly read-only — buildQuery only emits
+	// SELECT, never DML. Route through WithReadOnlyTenantTx so the
+	// transaction runs against the replica pool when configured AND
+	// within lag tolerance, with transparent fallback to the primary
+	// otherwise. The READ ONLY transaction mode also defends against
+	// a hypothetical future bug where buildQuery produces DML — the
+	// replica will refuse it with an explicit error rather than
+	// silently dropping the write.
+	err := dbutil.WithReadOnlyTenantTx(ctx, r.router, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if timeout > 0 {
 			if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", timeout.Milliseconds())); err != nil {
 				return fmt.Errorf("reporting: set statement_timeout: %w", err)

@@ -78,8 +78,16 @@ const FeatureKeyInsightsSQLEditor = "insights_sql_editor"
 // statement timeouts. It wraps reporting.Runner so the underlying
 // query grammar (sources, filters, aggregations, sort, limit) is the
 // same. Cache hits return without touching reporting at all.
+//
+// router routes the runner's own read transactions (RunRawSQL and the
+// row_security probe inside it) to a replica pool when one is
+// configured AND the replica is within KAPP_READ_REPLICA_LAG_TOLERANCE
+// of the primary. Writes never originate from this runner — everything
+// it executes is a SELECT, plus a Set Transaction Read Only fence so
+// even a future bug emitting DML would error out instead of silently
+// modifying replica state.
 type Runner struct {
-	pool        *pgxpool.Pool
+	router      *dbutil.PoolRouter
 	cache       *CacheStore
 	queries     *QueryStore
 	reporting   *reporting.Runner
@@ -95,12 +103,30 @@ type Runner struct {
 // NewRunner wires a Runner with the standard caching + timeout
 // behaviour. Callers can swap in a CacheStore-less Runner for tests
 // by passing nil — Run then degrades to "always run, never cache".
+// The primary pool is used for the runner's bookkeeping (cache
+// reads/writes, query saves) — replica routing is opt-in through
+// NewRunnerWithRouter for callers that want their cold-path Run
+// dispatches and RunRawSQL execution served by the replica.
 func NewRunner(pool *pgxpool.Pool, cache *CacheStore, queries *QueryStore, reportingRunner *reporting.Runner) *Runner {
+	return NewRunnerWithRouter(dbutil.NewPoolRouter(pool), cache, queries, reportingRunner)
+}
+
+// NewRunnerWithRouter is the replica-aware constructor — pass the
+// process-wide PoolRouter so this runner shares the same lag sampler
+// and falls back to the primary in lock-step with every other read
+// path. If reportingRunner is nil, one is created from the same
+// router so the inner SELECT executes on the replica too (the cache
+// reads/writes on the runner side are unrelated to the reporting
+// transaction).
+func NewRunnerWithRouter(router *dbutil.PoolRouter, cache *CacheStore, queries *QueryStore, reportingRunner *reporting.Runner) *Runner {
+	if router == nil {
+		panic("insights: NewRunnerWithRouter requires a non-nil router")
+	}
 	if reportingRunner == nil {
-		reportingRunner = reporting.NewRunner(pool)
+		reportingRunner = reporting.NewRunnerWithRouter(router)
 	}
 	return &Runner{
-		pool:        pool,
+		router:      router,
 		cache:       cache,
 		queries:     queries,
 		reporting:   reportingRunner,
@@ -432,7 +458,19 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 
 	rows := make([]map[string]any, 0)
 	columns := []string{}
-	err := dbutil.WithTenantTx(ctx, r.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	// WithReadOnlyTenantTx opens the transaction with
+	// pgx.TxOptions{AccessMode: pgx.ReadOnly} so the read-only
+	// fence is set at BEGIN, not via an in-transaction SET
+	// TRANSACTION. This is strictly stronger than the previous
+	// "SET TRANSACTION READ ONLY mid-callback" pattern because
+	// it cannot be lost to a future refactor that issues a
+	// data-touching statement before the SET. It also lets the
+	// router serve this transaction from the replica when
+	// configured + within KAPP_READ_REPLICA_LAG_TOLERANCE,
+	// transparently falling back to the primary otherwise so
+	// the SQL editor never appears to "stop working" just
+	// because the replica is lagging.
+	err := dbutil.WithReadOnlyTenantTx(ctx, r.router, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if r.timeout > 0 {
 			if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", r.timeout.Milliseconds())); err != nil {
 				return fmt.Errorf("insights: set statement_timeout: %w", err)
@@ -456,36 +494,16 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 				return fmt.Errorf("insights: set lock_timeout: %w", err)
 			}
 		}
-		// Pin the transaction read-only before running user SQL.
-		// dbutil.WithTenantTx opens a read-write transaction and
-		// commits on success — without this guard, an enterprise
-		// user submitting `DELETE FROM crm_deals` (or any DML
-		// against an RLS-scoped table) would have the change
-		// persist. RLS bounds the blast radius to the caller's own
-		// tenant, but the editor's stated purpose is read-only ad
-		// hoc analysis, so PostgreSQL should reject DML/DDL with
-		// `cannot execute X in a read-only transaction` and surface
-		// it as a 400 rather than a silent commit. Visual runner
-		// has its own callback path and is unaffected.
-		//
-		// Ordering note: SET TRANSACTION READ ONLY is valid here
-		// even though dbutil.WithTenantTx has already run
-		// `SELECT set_config('app.tenant_id', $1, true)` first.
-		// PostgreSQL only requires SET TRANSACTION ISOLATION LEVEL
-		// to be the very first statement; READ ONLY / READ WRITE
-		// can be issued any time before the first statement that
-		// touches user-data tables (i.e. before the first snapshot
-		// acquisition).  set_config operates entirely in GUC
-		// memory — no snapshot, no xid, no row locks — so the
-		// "first data-touching statement" budget is still
-		// intact when we land here.  If WithTenantTx ever
-		// changes to issue actual table-touching SQL before its
-		// callback, this SET TRANSACTION must move earlier
-		// (or move into WithTenantTx itself) to preserve the
-		// invariant.
-		if _, err := tx.Exec(ctx, "SET TRANSACTION READ ONLY"); err != nil {
-			return fmt.Errorf("insights: set transaction read only: %w", err)
-		}
+		// Read-only fence is already set at BEGIN by
+		// WithReadOnlyTenantTx (pgx.TxOptions{AccessMode:
+		// pgx.ReadOnly}) — no in-transaction SET TRANSACTION
+		// READ ONLY needed. Any DML against an RLS-scoped table
+		// in the user-supplied SQL fails with PostgreSQL's
+		// "cannot execute X in a read-only transaction" before
+		// it can persist, which surfaces as a 400 rather than a
+		// silent commit. The editor's purpose is read-only ad
+		// hoc analysis; the visual runner has its own callback
+		// path and is unaffected.
 		// Defense-in-depth assertion: confirm RLS will actually
 		// be enforced for this transaction before running the
 		// user-supplied query.  Two ways the guarantee could

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
@@ -48,7 +49,20 @@ var (
 // Step 4 and 5 participate in the same transaction as step 3 so a failure
 // anywhere in the pipeline rolls the whole mutation back — no silent writes.
 type PGStore struct {
-	pool      *pgxpool.Pool
+	// pool is the primary write pool. Mutations (Create / Update /
+	// Delete / Bulk*) MUST go through this pool — never the router
+	// — so a routing decision can never accidentally aim a write at
+	// a replica that would either reject it (and surface a
+	// confusing wire-protocol error) or, worse, accept it on a
+	// misconfigured topology.
+	pool *pgxpool.Pool
+	// router routes read-only queries (Get / ListPage / forEach* /
+	// GetByIDs) between the primary pool and an optional replica
+	// pool based on the most recent lag observation. In the no-
+	// replica configuration the router is a thin wrapper whose
+	// Read() returns the primary, so existing single-pool
+	// deployments are unaffected.
+	router    *dbutil.PoolRouter
 	registry  *ktype.PGRegistry
 	publisher events.Publisher
 	auditor   audit.Logger
@@ -65,15 +79,37 @@ type PGStore struct {
 	tenantKTypes *ktype.TenantStore
 }
 
-// NewPGStore wires a PGStore from the shared pool and its collaborators.
+// NewPGStore wires a PGStore from the shared pool and its
+// collaborators. The store routes writes to `pool` and reads through
+// a single-pool PoolRouter (no replica) — call NewPGStoreWithRouter
+// when a separate read replica pool is available.
 func NewPGStore(
 	pool *pgxpool.Pool,
 	registry *ktype.PGRegistry,
 	publisher events.Publisher,
 	auditor audit.Logger,
 ) *PGStore {
+	return NewPGStoreWithRouter(dbutil.NewPoolRouter(pool), registry, publisher, auditor)
+}
+
+// NewPGStoreWithRouter wires a PGStore that routes reads via the
+// supplied PoolRouter while continuing to issue writes against the
+// router's primary. The router-based constructor is the form the
+// service entrypoints use after wiring KAPP_READ_REPLICA_URL — the
+// legacy NewPGStore is preserved for tests that hand-roll a store
+// without bringing the router into scope.
+func NewPGStoreWithRouter(
+	router *dbutil.PoolRouter,
+	registry *ktype.PGRegistry,
+	publisher events.Publisher,
+	auditor audit.Logger,
+) *PGStore {
+	if router == nil {
+		panic("record: NewPGStoreWithRouter requires a non-nil PoolRouter")
+	}
 	return &PGStore{
-		pool:      pool,
+		pool:      router.Primary(),
+		router:    router,
 		registry:  registry,
 		publisher: publisher,
 		auditor:   auditor,
@@ -365,9 +401,16 @@ func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
 }
 
 // Get returns a single record. RLS filters cross-tenant access.
+//
+// Get is read-only: it routes through WithReadOnlyTenantTx so the
+// query runs against the read-replica pool when one is configured
+// AND lag is within tolerance, and falls back to the primary
+// otherwise. The READ ONLY transaction mode is defense-in-depth —
+// a stray write inside the SELECT path fails at the driver instead
+// of being silently dropped on the replica.
 func (s *PGStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*KRecord, error) {
 	var out KRecord
-	err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	err := dbutil.WithReadOnlyTenantTx(ctx, s.router, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		err := tx.QueryRow(ctx,
 			`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
 			        created_by, created_at, updated_by, updated_at, deleted_at
@@ -451,7 +494,12 @@ func (s *PGStore) ListPage(ctx context.Context, tenantID uuid.UUID, filter ListF
 	// rather than `null` when no rows match — consistent with the OpenAPI
 	// list response contract.
 	out := make([]KRecord, 0, filter.Limit)
-	err = platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	// Read-only: the SELECT path goes through the replica when one
+	// is configured AND lag is within tolerance. ListPage is the
+	// hottest read in the system (every record list table view, every
+	// agent search, every report cursor) — routing it through the
+	// replica is exactly the OLTP-vs-analytics isolation A1 is for.
+	err = dbutil.WithReadOnlyTenantTx(ctx, s.router, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var (
 			rows pgx.Rows
 			err  error
@@ -697,7 +745,12 @@ func (s *PGStore) foreachKeyset(
 	)
 	for {
 		page := make([]KRecord, 0, chunk)
-		err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// foreachKeyset is the streaming primitive for ForEach,
+		// ForEachByField, ListAll and ListByField — every long-walk
+		// read in the system. Route the per-chunk SELECT through
+		// the replica when one is configured (same lag-tolerance
+		// semantics as ListPage).
+		err := dbutil.WithReadOnlyTenantTx(ctx, s.router, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			sql, args := queryBuilder(haveLower, cursorTS, cursorID, snapshot, chunk)
 			rows, err := tx.Query(ctx, sql, args...)
 			if err != nil {

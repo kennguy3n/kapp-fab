@@ -77,3 +77,71 @@ func WithTenantTx(
 	}
 	return nil
 }
+
+// WithReadOnlyTenantTx runs fn inside a read-only transaction with
+// the tenant GUC populated, picking the read pool via the supplied
+// PoolRouter. The transaction is opened with
+// pgx.TxOptions{AccessMode: pgx.ReadOnly} as defense-in-depth so a
+// stray INSERT/UPDATE/DELETE inside fn fails at the DB driver
+// boundary instead of silently committing — particularly important
+// when the router has routed us to a replica that would simply
+// reject the write at the protocol level with a less actionable
+// error.
+//
+// The fall-through semantics in PoolRouter.Read() apply: when the
+// router has no replica wired, or when the most recent lag sample
+// exceeds tolerance, this helper transparently runs against the
+// primary. Callers therefore get "as-fresh-as-the-lag-tolerance-
+// allows" reads without having to think about the routing layer.
+func WithReadOnlyTenantTx(
+	ctx context.Context,
+	router *PoolRouter,
+	tenantID uuid.UUID,
+	fn func(ctx context.Context, tx pgx.Tx) error,
+) (err error) {
+	if router == nil {
+		return errors.New("dbutil: nil router")
+	}
+	if tenantID == uuid.Nil {
+		return errors.New("dbutil: tenant id required")
+	}
+
+	pool := router.Read()
+	if pool == nil {
+		return errors.New("dbutil: router returned nil pool")
+	}
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return fmt.Errorf("dbutil: begin read-only tx: %w", err)
+	}
+
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback(context.Background())
+			panic(p)
+		}
+		if err != nil {
+			if rbErr := tx.Rollback(context.Background()); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+				err = fmt.Errorf("%w; rollback: %v", err, rbErr)
+			}
+		}
+	}()
+
+	if err = SetTenantContext(ctx, tx, tenantID); err != nil {
+		return err
+	}
+
+	if err = fn(ctx, tx); err != nil {
+		return err
+	}
+
+	// Even read-only tx benefits from an explicit commit so the
+	// snapshot the queries ran under is released back to the pool
+	// promptly (instead of waiting for the rollback in the defer
+	// to fire on err == nil, which would be a no-op).
+	if err = tx.Commit(ctx); err != nil {
+		return fmt.Errorf("dbutil: commit read-only tx: %w", err)
+	}
+	return nil
+}

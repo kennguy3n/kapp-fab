@@ -25,6 +25,7 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/auth"
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/importer"
 	"github.com/kennguy3n/kapp-fab/internal/importer/adapters"
@@ -81,7 +82,21 @@ func run() error {
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
 	eventPublisher := events.NewPGPublisher(pool)
 	auditor := audit.NewPGLogger(pool)
-	recordStore := record.NewPGStore(pool, ktypeRegistry, eventPublisher, auditor)
+	// A1: route read-only queries on the importer's record store
+	// (used by validator dedup lookups) through the replica when
+	// KAPP_READ_REPLICA_URL is set. Writes (the actual record
+	// inserts the pipeline emits) always stay on the primary.
+	dbRouter := dbutil.NewPoolRouter(pool)
+	if cfg.ReadReplicaURL != "" {
+		replicaPool, err := platform.NewPool(ctx, cfg.ReadReplicaURL)
+		if err != nil {
+			return fmt.Errorf("importer: open read replica pool: %w", err)
+		}
+		defer replicaPool.Close()
+		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance)
+		dbRouter.StartLagSampler(ctx, cfg.ReadReplicaLagSampleInterval)
+	}
+	recordStore := record.NewPGStoreWithRouter(dbRouter, ktypeRegistry, eventPublisher, auditor)
 	rateLimiter := platform.NewRateLimiter(platform.DefaultRateLimitConfig())
 	quotaEnforcer := platform.NewQuotaEnforcer(pool)
 

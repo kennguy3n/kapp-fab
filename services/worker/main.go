@@ -135,6 +135,22 @@ func run() error {
 		defer adminPool.Close()
 	}
 
+	// Replica routing (A1). Worker uses the router for the scheduled
+	// report runner and the insights query-cache refresh handler —
+	// both pure SELECTs. The gauge registration is deferred until the
+	// metrics registry is created further down; the sampler can run
+	// without it.
+	dbRouter := dbutil.NewPoolRouter(pool)
+	if cfg.ReadReplicaURL != "" {
+		replicaPool, err := platform.NewPool(ctx, cfg.ReadReplicaURL)
+		if err != nil {
+			return fmt.Errorf("worker: open replica pool: %w", err)
+		}
+		defer replicaPool.Close()
+		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance)
+		dbRouter.StartLagSampler(ctx, cfg.ReadReplicaLagSampleInterval)
+	}
+
 	natsURL := cfg.EventBusURL
 	if natsURL == "" {
 		natsURL = nats.DefaultURL
@@ -227,7 +243,7 @@ func run() error {
 	auditor := audit.NewPGLogger(pool)
 	ktypeCache := platform.NewLRUCache(cfg.KTypeCacheSize, 5*time.Minute)
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
-	recordStore := record.NewPGStore(pool, ktypeRegistry, publisher, auditor)
+	recordStore := record.NewPGStoreWithRouter(dbRouter, ktypeRegistry, publisher, auditor)
 	exchangeRates := ledger.NewExchangeRateStore(pool)
 	ledgerStore := ledger.NewPGStore(pool, publisher, auditor).WithExchangeRates(exchangeRates)
 	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
@@ -308,7 +324,7 @@ func run() error {
 	// "SMTP disabled" path is a soft no-op.
 	reportScheduleStore := reporting.NewScheduleStore(pool)
 	reportSavedStore := reporting.NewStore(pool)
-	reportRunner := reporting.NewRunner(pool)
+	reportRunner := reporting.NewRunnerWithRouter(dbRouter)
 	pdfConverter := print.DetectConverter()
 	schedRegistry.Register(
 		reporting.ActionTypeReportSchedule,
@@ -332,7 +348,7 @@ func run() error {
 	insightsQueryStore := insights.NewQueryStore(pool)
 	insightsCacheStore := insights.NewCacheStore(pool)
 	insightsFeatures := tenant.NewFeatureStore(pool)
-	insightsRunner := insights.NewRunner(pool, insightsCacheStore, insightsQueryStore, reportRunner).
+	insightsRunner := insights.NewRunnerWithRouter(dbRouter, insightsCacheStore, insightsQueryStore, reportRunner).
 		WithFeaturePolicy(insightsFeatures)
 	schedRegistry.Register(
 		insights.ActionTypeQueryCacheRefresh,
@@ -368,6 +384,12 @@ func run() error {
 	// into the leader elector and drain loop emits kapp_leader_active,
 	// kapp_outbox_drain_duration_seconds, and kapp_outbox_events_total.
 	metrics := platform.NewMetricsRegistry()
+	// Publish the replica lag observation (A1). When dbRouter has no
+	// replica configured, the publisher still exports
+	// kapp_replica_configured=0 so alerts conditioned on
+	// "configured AND lag > X" don't false-fire on bootstrap.
+	stopReplicaGauge := platform.RegisterReplicaLagGauge(metrics, dbRouter, cfg.ReadReplicaLagSampleInterval)
+	defer stopReplicaGauge()
 	drainDur := metrics.Histogram("kapp_outbox_drain_duration_seconds", "Outbox drain batch latency in seconds.", platform.DefaultDurationBuckets, "result")
 	drainEvents := metrics.Counter("kapp_outbox_events_total", "Outbox events drained from the queue.", "result")
 

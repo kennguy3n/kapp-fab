@@ -131,25 +131,40 @@ a read replica.
           extract(epoch FROM now() - pg_last_xact_replay_timestamp()) AS lag_seconds
    FROM pg_stat_replication;
    ```
-3. Add to the API's read-replica list. Kapp v0.1.0 does not yet route
-   reads to replicas automatically — the recommended rollout (see
-   [ADR-011](./adr/) once merged) is the env var `KAPP_READ_REPLICAS`
-   (comma-separated `host:port` list). Until that wiring lands, point
-   reporting / insights workloads at the replica via a separate DSN
-   served by a sidecar BFF or external view.
+3. Point each Kapp service at the replica via the A1 env vars (set
+   per-service on the api / worker / kchat-bridge / importer /
+   agent-tools deployments):
+
+   | Variable | Default | Purpose |
+   |---|---|---|
+   | `KAPP_READ_REPLICA_URL` | _(unset)_ | libpq DSN for the read-only pool. Leave unset to keep every read on the primary. |
+   | `KAPP_READ_REPLICA_LAG_TOLERANCE` | `1s` | Max observed lag before the router falls back to the primary. Tighten when the workload is read-after-write sensitive. |
+   | `KAPP_READ_REPLICA_LAG_SAMPLE_INTERVAL` | `5s` | How often the in-process sampler refreshes its lag observation. |
+
+   Wiring lives in `internal/dbutil/pool_router.go`. Reads route to the
+   replica only when the most recent lag sample is fresh AND within
+   tolerance; on any uncertainty (sampler stalled, replica unreachable,
+   no replica configured) the router falls back to the primary
+   transparently. All writes always go to the primary regardless.
 4. Rolling restart of API pods:
    ```bash
    kubectl -n kapp rollout restart deploy/api
    kubectl -n kapp rollout status  deploy/api --timeout=300s
    ```
-5. Verify `kapp_request_total{path=~"/api/v1/reports.*"}` traffic shows
-   reduced primary connection pressure.
-6. Monitor replication lag continuously. Alert at lag > 5 s; remove
-   from pool at lag > 30 s.
+5. Verify the rollout via the A1 metrics:
+   - `kapp_replica_configured == 1` on every pod with the replica wired
+   - `kapp_replica_lag_seconds` stays under tolerance during steady state
+   - `kapp_request_total{path=~"/api/v1/reports.*"}` and
+     `pg_stat_activity.numbackends` on the primary trend down
+6. Monitor replication lag continuously. Alert when
+   `kapp_replica_lag_seconds > 5` for > 1m (router will fall back to
+   primary, but degraded read fan-out is worth a page); remove from
+   pool when lag exceeds `KAPP_READ_REPLICA_LAG_TOLERANCE * 30` for an
+   extended window (router will already have stopped using it).
 
-**Rollback.** Remove the replica from `KAPP_READ_REPLICAS`, restart
-API pods, confirm reads route back to primary. Tear down the replica
-once drained.
+**Rollback.** Unset `KAPP_READ_REPLICA_URL`, rollout-restart pods,
+confirm `kapp_replica_configured == 0` and reads route back to primary.
+Tear down the replica once drained.
 
 ---
 

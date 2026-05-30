@@ -24,6 +24,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/agents"
 	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/auth"
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/hr"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
@@ -82,7 +83,22 @@ func run() error {
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
 	eventPublisher := events.NewPGPublisher(pool)
 	auditor := audit.NewPGLogger(pool)
-	recordStore := record.NewPGStore(pool, ktypeRegistry, eventPublisher, auditor)
+	// A1: read-only paths on the agent-tools service (record.Get,
+	// list-shape lookups inside tool executions) route through the
+	// PoolRouter so a configured replica absorbs the read load.
+	// Writes (record.Create/Update/Delete in the tool handlers)
+	// always go to the primary regardless of routing decisions.
+	dbRouter := dbutil.NewPoolRouter(pool)
+	if cfg.ReadReplicaURL != "" {
+		replicaPool, err := platform.NewPool(ctx, cfg.ReadReplicaURL)
+		if err != nil {
+			return fmt.Errorf("agent-tools: open read replica pool: %w", err)
+		}
+		defer replicaPool.Close()
+		dbRouter = dbRouter.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance)
+		dbRouter.StartLagSampler(ctx, cfg.ReadReplicaLagSampleInterval)
+	}
+	recordStore := record.NewPGStoreWithRouter(dbRouter, ktypeRegistry, eventPublisher, auditor)
 	workflowEngine := workflow.NewEngine(pool, eventPublisher, auditor)
 	tenantCache := platform.NewLRUCache(cfg.TenantCacheSize, 30*time.Second)
 	tenantSvc := tenant.NewPGStore(pool).WithCache(tenantCache)
