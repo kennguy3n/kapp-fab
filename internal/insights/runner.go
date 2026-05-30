@@ -441,11 +441,16 @@ func (r *Runner) RunRawSQL(ctx context.Context, tenantID uuid.UUID, rawSQL strin
 	// single source of truth for "exactly one statement, and that
 	// statement is read-only".
 	//
-	// `SET TRANSACTION READ ONLY` inside the per-tenant tx below
-	// is retained as defense-in-depth: if a future Postgres
-	// release adds a new statement node we don't yet classify,
-	// the read-only transaction surfaces it as a runtime error
-	// rather than letting it execute.
+	// The per-tenant tx below is opened via WithReadOnlyTenantTx,
+	// which sets pgx.TxOptions{AccessMode: pgx.ReadOnly} at BEGIN
+	// time. This is retained as defense-in-depth: if a future
+	// Postgres release adds a new statement node we don't yet
+	// classify, the read-only access mode surfaces it as a
+	// runtime error rather than letting it execute. Setting the
+	// fence at BEGIN is strictly stronger than the previous
+	// mid-callback `SET TRANSACTION READ ONLY` because it cannot
+	// be lost to a future refactor that issues a data-touching
+	// statement before the SET.
 	if err := validateRawSQL(rawSQL); err != nil {
 		return nil, err
 	}

@@ -303,38 +303,6 @@ func checkCustomKTypeStatus(tkt *ktype.TenantKType, mode ktypeResolveMode) error
 	return nil
 }
 
-// dbNow returns Postgres's current wall-clock timestamp from the
-// primary pool. Used for single-shot timestamps that are NOT
-// subsequently used to filter visibility on a replica (e.g. as the
-// reference instant for a pure "is X expired?" check on the primary
-// itself).
-//
-// For keyset-walk snapshot ceilings (ForEach, ForEachByField,
-// ListAll, ListByField) callers MUST use pickReadPoolWithSnapshot
-// instead — that helper combines pool selection and snapshot
-// capture so the snapshot is guaranteed to be ≤ the chosen pool's
-// visibility horizon (see snapshotVia docstring for the replay-
-// timestamp gotcha that makes the combined helper mandatory).
-//
-// clock_timestamp() is preferred over now() / transaction_timestamp()
-// because it is not frozen at the start of the surrounding transaction
-// — we want the wall-clock instant this call is made, not the instant
-// the outer scheduler's transaction began.
-//
-// Returns timestamptz directly (no `AT TIME ZONE 'UTC'` cast) so the
-// result type carries its own UTC anchor rather than relying on pgx's
-// scan-default location. pgx v5 normalises timestamptz to UTC on scan
-// regardless of the connection's TimeZone setting; the explicit
-// .UTC() below is belt-and-suspenders in case a future scan layer
-// normalises timestamptz to the local zone.
-func (s *PGStore) dbNow(ctx context.Context) (time.Time, error) {
-	var t time.Time
-	if err := s.router.Primary().QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&t); err != nil {
-		return time.Time{}, fmt.Errorf("record: dbNow: %w", err)
-	}
-	return t.UTC(), nil
-}
-
 // snapshotVia returns a snapshot ceiling appropriate for a keyset
 // walk against the given pool. The returned timestamp is guaranteed
 // to be ≤ the pool's row-visibility horizon — any row matching
@@ -795,8 +763,8 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 //     walk and picked up by the next sweep. The contract is "every
 //     row whose state was committed before walk start, exactly
 //     once", not "every row that ever existed during the walk". See
-//     PGStore.dbNow / PGStore.dbNowVia for the DB-clock vs
-//     app-clock rationale and the pool-affinity requirement.
+//     PGStore.snapshotVia for the DB-clock vs app-clock rationale
+//     and the pool-affinity requirement.
 //  3. Each chunk runs in its own per-tenant transaction
 //     (dbutil.WithReadOnlyTenantTx, which routes to the replica when
 //     one is configured and within lag tolerance, primary otherwise).
