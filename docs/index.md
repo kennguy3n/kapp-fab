@@ -8,6 +8,10 @@ If you are landing here for the first time, start with one of:
 
 - **Developer**: [Developer guide](./DEVELOPER_GUIDE.md), then
   [KType authoring guide](./KTYPE_AUTHORING_GUIDE.md).
+- **Extension author**: [Extension specification](./EXTENSION_SPEC.md)
+  defines the marketplace bundle format; see
+  [Plugin developer guide](./PLUGIN_DEVELOPER_GUIDE.md) for the
+  lower-level gRPC plugin SDK that extensions wrap.
 - **Operator / SRE**: [Operator guide](./OPERATOR_GUIDE.md), then
   [Capacity planning](./CAPACITY_PLANNING.md) and
   [Scaling runbook](./SCALING_RUNBOOK.md).
