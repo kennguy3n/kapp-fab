@@ -83,6 +83,19 @@ type UpdateReviewStateInput struct {
 //
 // A transition to a terminal state stamps ReviewedAt = now() if not
 // provided. Returns ErrNotFound if the version has no review state.
+//
+// Concurrency posture: the UPDATE asserts the status the transition
+// graph was checked against (`AND status = $expected`). If a
+// concurrent caller flipped the row in the gap between GetReviewState
+// and the Exec, RowsAffected==0 and the retry loop re-reads the
+// latest row to decide whether the new state is consistent with the
+// requested target (idempotent re-issue of a converging transition)
+// or a true conflict to surface. Without the status guard, a
+// `submitted→rejected` (by a human reviewer) and `submitted→
+// automated_passed` (by the B7 worker) race could both UPDATE
+// successfully and the last writer would silently overwrite the
+// other's decision — a rejected version could be reopened as
+// automated_passed. Same posture as UpdateExtensionStatus.
 func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateReviewStateInput) (*ReviewState, error) {
 	if in.VersionID == uuid.Nil {
 		return nil, fmt.Errorf("%w: version id required", ErrNotFound)
@@ -90,69 +103,105 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 	if !in.Status.Valid() {
 		return nil, fmt.Errorf("%w: unknown review status %q", ErrInvalidManifest, in.Status)
 	}
-	current, err := rs.GetReviewState(ctx, in.VersionID)
-	if err != nil {
-		return nil, err
-	}
-	if !reviewStatusTransitionAllowed(current.Status, in.Status) {
-		return nil, fmt.Errorf("%w: cannot transition review status from %q to %q",
-			ErrInvalidManifest, current.Status, in.Status)
-	}
-	// Approved / rejected require a reviewer + reviewed_at; the DB
-	// CHECK enforces this, but doing it here surfaces the actionable
-	// error to the caller.
+	// Approved / rejected require a reviewer; the DB CHECK enforces
+	// this, but the early check here surfaces the actionable error
+	// to the caller without spending a round-trip on the read.
 	needReviewer := in.Status == ReviewStatusApproved || in.Status == ReviewStatusRejected
 	if needReviewer && strings.TrimSpace(in.Reviewer) == "" {
 		return nil, fmt.Errorf("%w: reviewer required when status=%s", ErrInvalidManifest, in.Status)
 	}
-	reviewedAt := in.ReviewedAt
-	if needReviewer && reviewedAt == nil {
-		now := time.Now().UTC()
-		reviewedAt = &now
-	}
-	checks := in.AutomatedChecks
-	if len(checks) == 0 {
-		checks = current.AutomatedChecks
-	}
-	if len(checks) == 0 {
-		checks = []byte("{}")
-	}
-	notes := in.ManualNotes
-	if notes == "" {
-		notes = current.ManualReviewNotes
-	}
-	reviewer := in.Reviewer
-	if reviewer == "" {
-		reviewer = current.Reviewer
+
+	current, err := rs.GetReviewState(ctx, in.VersionID)
+	if err != nil {
+		return nil, err
 	}
 
-	var out ReviewState
-	err = rs.store.pool.QueryRow(ctx,
-		`UPDATE marketplace_extension_review_state
-		   SET status = $2,
-		       automated_checks = $3::jsonb,
-		       manual_review_notes = NULLIF($4,''),
-		       reviewer = NULLIF($5,''),
-		       reviewed_at = $6,
-		       updated_at = now()
-		 WHERE extension_version_id = $1
-		 RETURNING extension_version_id, status, automated_checks::text,
-		           COALESCE(manual_review_notes,''), COALESCE(reviewer,''),
-		           reviewed_at, created_at, updated_at`,
-		in.VersionID, string(in.Status), string(checks), notes, reviewer, reviewedAt,
-	).Scan(
-		&out.ExtensionVersionID, &out.Status,
-		scanJSONB(&out.AutomatedChecks),
-		&out.ManualReviewNotes, &out.Reviewer,
-		&out.ReviewedAt, &out.CreatedAt, &out.UpdatedAt,
-	)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrNotFound
+	// Optimistic-concurrency retry loop. We accept up to 3 contended
+	// attempts before giving up — the same budget UpdateExtensionStatus
+	// uses. Beyond that, something is wrong (e.g. a thundering herd of
+	// reviewers all hammering the same version) and surfacing the
+	// failure is better than silently looping.
+	for attempt := 0; attempt < 3; attempt++ {
+		if !reviewStatusTransitionAllowed(current.Status, in.Status) {
+			return nil, fmt.Errorf("%w: cannot transition review status from %q to %q",
+				ErrInvalidManifest, current.Status, in.Status)
 		}
-		return nil, fmt.Errorf("marketplace: update review state: %w", err)
+		reviewedAt := in.ReviewedAt
+		if needReviewer && reviewedAt == nil {
+			now := time.Now().UTC()
+			reviewedAt = &now
+		}
+		// Coalesce default values against `current` — when the caller
+		// omits a field (zero-value AutomatedChecks / ManualNotes /
+		// Reviewer), the existing row's value is preserved. Re-resolved
+		// on every retry because a concurrent update may have written
+		// fresh values that we should carry forward instead of clobber
+		// with whatever `current` held at attempt 0.
+		checks := in.AutomatedChecks
+		if len(checks) == 0 {
+			checks = current.AutomatedChecks
+		}
+		if len(checks) == 0 {
+			checks = []byte("{}")
+		}
+		notes := in.ManualNotes
+		if notes == "" {
+			notes = current.ManualReviewNotes
+		}
+		reviewer := in.Reviewer
+		if reviewer == "" {
+			reviewer = current.Reviewer
+		}
+
+		var out ReviewState
+		err = rs.store.pool.QueryRow(ctx,
+			`UPDATE marketplace_extension_review_state
+			   SET status = $2,
+			       automated_checks = $3::jsonb,
+			       manual_review_notes = NULLIF($4,''),
+			       reviewer = NULLIF($5,''),
+			       reviewed_at = $6,
+			       updated_at = now()
+			 WHERE extension_version_id = $1 AND status = $7
+			 RETURNING extension_version_id, status, automated_checks::text,
+			           COALESCE(manual_review_notes,''), COALESCE(reviewer,''),
+			           reviewed_at, created_at, updated_at`,
+			in.VersionID, string(in.Status), string(checks), notes, reviewer, reviewedAt, string(current.Status),
+		).Scan(
+			&out.ExtensionVersionID, &out.Status,
+			scanJSONB(&out.AutomatedChecks),
+			&out.ManualReviewNotes, &out.Reviewer,
+			&out.ReviewedAt, &out.CreatedAt, &out.UpdatedAt,
+		)
+		if err == nil {
+			return &out, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("marketplace: update review state: %w", err)
+		}
+		// ErrNoRows from the RETURNING means either:
+		//   1. the row was deleted (CASCADE from version delete) —
+		//      surface as ErrNotFound, or
+		//   2. the status guard failed because a concurrent caller
+		//      flipped the row — re-read and re-evaluate the
+		//      transition graph against the fresh state.
+		latest, lookupErr := rs.GetReviewState(ctx, in.VersionID)
+		if lookupErr != nil {
+			return nil, lookupErr
+		}
+		if latest.Status == in.Status {
+			// Concurrent caller landed the same target — idempotent
+			// success. Matches UpdateExtensionStatus's convergent-
+			// transition contract. Return the latest row (which carries
+			// the concurrent writer's reviewer / reviewed_at / notes)
+			// rather than re-running the UPDATE — the caller's intent
+			// is the resulting status, and overwriting fields written
+			// by the winning concurrent caller would lose audit detail.
+			return latest, nil
+		}
+		current = latest
 	}
-	return &out, nil
+	return nil, fmt.Errorf("marketplace: update review state: gave up after 3 contended retries on version %s", in.VersionID)
 }
 
 // ListVersionsByReviewStatus returns the version ids currently in
