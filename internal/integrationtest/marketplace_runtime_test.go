@@ -13,7 +13,9 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/runtime"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
@@ -323,55 +325,56 @@ func minimalResolvedBundle(m *marketplace.Manifest) *runtime.ResolvedBundle {
 
 type runtimeCounts struct{ ktypes, workflows, tools, webhooks int }
 
+// readRuntimeCounts runs through dbutil.WithTenantTx so app.tenant_id
+// is set transaction-local and cleared on COMMIT. The previous
+// implementation used `set_config('app.tenant_id', $1, false)` on a
+// raw pgxpool connection, which leaves the GUC sticky on the pooled
+// connection after Release — a future helper acquiring the same
+// connection would observe a tenant context it never set. Devin
+// Review round-5 on PR #127 flagged this as a footgun. Mirroring
+// the production write path (dbutil.WithTenantTx) closes that gap.
 func readRuntimeCounts(ctx context.Context, t *testing.T, h *harness, tenantID, installID uuid.UUID) runtimeCounts {
 	t.Helper()
 	var c runtimeCounts
-	conn, err := h.pool.Acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, `SELECT set_config('app.tenant_id', $1, false)`, tenantID.String()); err != nil {
-		t.Fatalf("set tenant: %v", err)
-	}
-	if err := conn.QueryRow(ctx,
-		`SELECT COUNT(*) FROM marketplace_extension_ktypes WHERE installation_id = $1`,
-		installID).Scan(&c.ktypes); err != nil {
-		t.Fatalf("count ktypes: %v", err)
-	}
-	if err := conn.QueryRow(ctx,
-		`SELECT COUNT(*) FROM marketplace_extension_workflows WHERE installation_id = $1`,
-		installID).Scan(&c.workflows); err != nil {
-		t.Fatalf("count workflows: %v", err)
-	}
-	if err := conn.QueryRow(ctx,
-		`SELECT COUNT(*) FROM marketplace_extension_agent_tools WHERE installation_id = $1`,
-		installID).Scan(&c.tools); err != nil {
-		t.Fatalf("count tools: %v", err)
-	}
-	if err := conn.QueryRow(ctx,
-		`SELECT COUNT(*) FROM marketplace_webhook_subscriptions WHERE installation_id = $1`,
-		installID).Scan(&c.webhooks); err != nil {
-		t.Fatalf("count webhooks: %v", err)
+	if err := dbutil.WithTenantTx(ctx, h.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM marketplace_extension_ktypes WHERE installation_id = $1`,
+			installID).Scan(&c.ktypes); err != nil {
+			return fmt.Errorf("count ktypes: %w", err)
+		}
+		if err := tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM marketplace_extension_workflows WHERE installation_id = $1`,
+			installID).Scan(&c.workflows); err != nil {
+			return fmt.Errorf("count workflows: %w", err)
+		}
+		if err := tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM marketplace_extension_agent_tools WHERE installation_id = $1`,
+			installID).Scan(&c.tools); err != nil {
+			return fmt.Errorf("count tools: %w", err)
+		}
+		if err := tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM marketplace_webhook_subscriptions WHERE installation_id = $1`,
+			installID).Scan(&c.webhooks); err != nil {
+			return fmt.Errorf("count webhooks: %w", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("readRuntimeCounts: %v", err)
 	}
 	return c
 }
 
+// readDispatchLogCount also runs through dbutil.WithTenantTx for the
+// same transaction-local-GUC reason as readRuntimeCounts.
 func readDispatchLogCount(ctx context.Context, t *testing.T, h *harness, tenantID, installID uuid.UUID) int {
 	t.Helper()
-	conn, err := h.pool.Acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, `SELECT set_config('app.tenant_id', $1, false)`, tenantID.String()); err != nil {
-		t.Fatalf("set tenant: %v", err)
-	}
 	var n int
-	if err := conn.QueryRow(ctx,
-		`SELECT COUNT(*) FROM marketplace_dispatch_log WHERE installation_id = $1`,
-		installID).Scan(&n); err != nil {
-		t.Fatalf("count dispatch_log: %v", err)
+	if err := dbutil.WithTenantTx(ctx, h.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM marketplace_dispatch_log WHERE installation_id = $1`,
+			installID).Scan(&n)
+	}); err != nil {
+		t.Fatalf("readDispatchLogCount: %v", err)
 	}
 	return n
 }

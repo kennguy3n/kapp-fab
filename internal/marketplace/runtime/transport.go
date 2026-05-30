@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -133,14 +135,57 @@ func (t *HTTPTransport) Send(ctx context.Context, target string, body []byte, he
 // the caller supplies + a per-call audit log of the requests it
 // saw. Tests assert on the audit log (header presence, body
 // contents) without spinning up a httptest.Server.
+//
+// Safe for concurrent use by multiple goroutines. The mu mutex
+// serialises Audit appends and reads — see Snapshot. Devin Review
+// round-5 on PR #127 caught a data race where the round-4 TOCTOU
+// regression test (TestMarketplaceRuntime_Uninstall_ConcurrentRace)
+// fanned two goroutines through a single InMemoryTransport's Send
+// path, racing the previous unguarded `t.Audit = append(...)` line.
+// The fix here serialises the append; tests that want to inspect
+// the audit log after the goroutines have joined should call
+// Snapshot to take a deep-copied view rather than touching the
+// raw slice. (Touching the raw field is still possible — but
+// concurrent inspection would race the writer goroutines unless
+// the test already joined them.)
 type InMemoryTransport struct {
 	// Handler is called for every Send. Returns the response or
 	// an error. Receives the canonical request shape (headers +
 	// body) the production transport would have sent.
 	Handler func(ctx context.Context, target string, body []byte, headers map[string]string) (*DispatchResponse, error)
 
-	// Audit captures every Send call for assertion.
+	// mu guards Audit. Acquired for every append in Send and for
+	// every read in Snapshot/Len. Tests that read Audit directly
+	// MUST first ensure all goroutines that could call Send have
+	// joined.
+	mu sync.Mutex
+	// Audit captures every Send call for assertion. Protected by
+	// mu. Tests that need a concurrent-safe view should call
+	// Snapshot.
 	Audit []InMemoryDispatch
+}
+
+// Snapshot returns a deep copy of the current Audit slice under
+// the mu lock. Use this from tests that want to inspect the audit
+// log while there may still be active Send callers (or from tests
+// that ran Send goroutines concurrently and want a race-free
+// view). Within the snapshot each InMemoryDispatch shares the
+// underlying Headers/Body byte buffers with the original entry —
+// callers must not mutate them.
+func (t *InMemoryTransport) Snapshot() []InMemoryDispatch {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]InMemoryDispatch, len(t.Audit))
+	copy(out, t.Audit)
+	return out
+}
+
+// Len returns the current Audit length under the mu lock. Use
+// from tests that just want a count without grabbing a snapshot.
+func (t *InMemoryTransport) Len() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.Audit)
 }
 
 // InMemoryDispatch is one entry in InMemoryTransport.Audit.
@@ -152,7 +197,10 @@ type InMemoryDispatch struct {
 }
 
 // Send records the call in the audit log, then delegates to
-// Handler.
+// Handler. Safe for concurrent use — the audit-log append is
+// guarded by t.mu (Devin Review round-5 on PR #127 caught the
+// race when the round-4 TOCTOU regression test fanned out two
+// concurrent Uninstall goroutines through one transport).
 func (t *InMemoryTransport) Send(ctx context.Context, target string, body []byte, headers map[string]string, timeout time.Duration) (*DispatchResponse, error) {
 	// Defensive copy of headers so the handler can't mutate the
 	// caller's map.
@@ -160,12 +208,15 @@ func (t *InMemoryTransport) Send(ctx context.Context, target string, body []byte
 	for k, v := range headers {
 		hdr[k] = v
 	}
-	t.Audit = append(t.Audit, InMemoryDispatch{
+	entry := InMemoryDispatch{
 		Target:  target,
 		Body:    append([]byte(nil), body...),
 		Headers: hdr,
 		Timeout: timeout,
-	})
+	}
+	t.mu.Lock()
+	t.Audit = append(t.Audit, entry)
+	t.mu.Unlock()
 	if t.Handler == nil {
 		// Default: 200 OK with empty body. Lets tests that don't
 		// care about response content omit the handler.
@@ -196,28 +247,38 @@ func StaticResponseHandler(status int, body []byte) func(ctx context.Context, ta
 // empty; the explicit guard below removes the foot-gun for any
 // future caller that constructs a SequenceHandler from a
 // dynamically-built slice.
+//
+// The closure is safe for concurrent calls. The internal cursor
+// is an atomic.Int64 — Devin Review round-5 on PR #127 flagged
+// the previous `idx := 0` capture as racy against any future test
+// that fans a SequenceHandler across multiple goroutines.
+// FetchAdd(1)-then-use makes "which entry does this call see"
+// well-defined even under contention: two concurrent callers will
+// receive responses at distinct indices in some interleaving.
+// Order is not promised, but no caller can ever observe a torn
+// idx read.
 func SequenceHandler(responses []*DispatchResponse, errors []error) func(ctx context.Context, target string, body []byte, headers map[string]string) (*DispatchResponse, error) {
-	idx := 0
+	var idx atomic.Int64
 	return func(ctx context.Context, _ string, _ []byte, _ map[string]string) (*DispatchResponse, error) {
+		cur := int(idx.Add(1) - 1)
 		var (
 			resp *DispatchResponse
 			err  error
 		)
 		if len(responses) > 0 {
-			i := idx
+			i := cur
 			if i >= len(responses) {
 				i = len(responses) - 1
 			}
 			resp = responses[i]
 		}
 		if len(errors) > 0 {
-			i := idx
+			i := cur
 			if i >= len(errors) {
 				i = len(errors) - 1
 			}
 			err = errors[i]
 		}
-		idx++
 		return resp, err
 	}
 }

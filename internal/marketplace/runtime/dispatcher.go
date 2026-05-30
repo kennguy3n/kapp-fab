@@ -122,6 +122,30 @@ func (d *Dispatcher) Invoke(ctx context.Context, in *InvokeRequest) (*InvokeResu
 
 	requestID := uuid.New()
 	retry := &RetryPolicy{MaxAttempts: desc.RetryMaxAttempts, Backoff: desc.RetryBackoff}
+	// Defensive floor on MaxAttempts so the retry loop is guaranteed
+	// to execute its body at least once even if a future code path
+	// (e.g. a direct INSERT into marketplace_extension_agent_tools
+	// that bypasses Registrar's defaulting at registrar.go:347) or
+	// an unexpected manifest defaulting bug sets RetryMaxAttempts <
+	// 1. Without this guard, the loop header `attempt <=
+	// retry.MaxAttempts` would skip the body for MaxAttempts == 0
+	// and fall straight through to the `panic("unreachable")` at
+	// the end of Invoke, taking down the agent runtime instead of
+	// surfacing a dispatch error.
+	//
+	// The DB CHECK `retry_max_attempts >= 1` at migration line 209
+	// already enforces this invariant at write-time, so this guard
+	// is belt-and-braces only. Devin Review round-5 on PR #127
+	// asked for a code-side floor so the panic invariant is truly
+	// unreachable without depending on the constraint — cheaper
+	// than re-reasoning about whether every future write path
+	// honours the constraint, and consistent with the same defence
+	// already in transportHooks.Dispatch's lifecycle path
+	// (newLifecycleRetryPolicy returns MaxAttempts: 3 — the
+	// constant ensures the value is always >= 1).
+	if retry.MaxAttempts < 1 {
+		retry.MaxAttempts = 1
+	}
 
 	result := &InvokeResult{RequestID: requestID}
 	var lastSendErr error
