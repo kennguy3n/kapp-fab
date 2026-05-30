@@ -74,13 +74,14 @@ func TestTransportHooks_PreInstall_2xx_NotAborted(t *testing.T) {
 	if res.Status != 200 || res.Attempt != 1 {
 		t.Fatalf("res = %+v want status=200 attempt=1", res)
 	}
-	if got := len(tr.Audit); got != 1 {
+	if got := tr.Len(); got != 1 {
 		t.Fatalf("audit len = %d, want 1", got)
 	}
-	if !strings.HasSuffix(tr.Audit[0].Target, "/lifecycle/pre_install") {
-		t.Fatalf("target = %q, want suffix /lifecycle/pre_install", tr.Audit[0].Target)
+	entry := tr.At(0)
+	if !strings.HasSuffix(entry.Target, "/lifecycle/pre_install") {
+		t.Fatalf("target = %q, want suffix /lifecycle/pre_install", entry.Target)
 	}
-	if tr.Audit[0].Headers[SignatureHeaderName] == "" {
+	if entry.Headers[SignatureHeaderName] == "" {
 		t.Fatalf("audit lacks signature header")
 	}
 }
@@ -102,8 +103,8 @@ func TestTransportHooks_PreInstall_404_NotAborted(t *testing.T) {
 	if res.Status != 404 {
 		t.Fatalf("status = %d, want 404", res.Status)
 	}
-	if len(tr.Audit) != 1 {
-		t.Fatalf("expected single attempt, got %d", len(tr.Audit))
+	if got := tr.Len(); got != 1 {
+		t.Fatalf("expected single attempt, got %d", got)
 	}
 }
 
@@ -125,8 +126,8 @@ func TestTransportHooks_PreInstall_4xxOther_Aborts(t *testing.T) {
 		t.Fatalf("status = %d, want 403", res.Status)
 	}
 	// 4xx is terminal — single attempt, no retries.
-	if len(tr.Audit) != 1 {
-		t.Fatalf("4xx should not retry; got %d attempts", len(tr.Audit))
+	if got := tr.Len(); got != 1 {
+		t.Fatalf("4xx should not retry; got %d attempts", got)
 	}
 }
 
@@ -157,8 +158,8 @@ func TestTransportHooks_PreInstall_5xxRetried_Aborts(t *testing.T) {
 	if dur < 2900*time.Millisecond {
 		t.Fatalf("dispatch returned in %s, expected at least 1+2 = 3s of backoff", dur)
 	}
-	if len(tr.Audit) != 3 {
-		t.Fatalf("audit len = %d, want 3 (all retries)", len(tr.Audit))
+	if got := tr.Len(); got != 3 {
+		t.Fatalf("audit len = %d, want 3 (all retries)", got)
 	}
 }
 
@@ -179,8 +180,8 @@ func TestTransportHooks_PreInstall_5xxThen2xx_Succeeds(t *testing.T) {
 	if res.Aborted || res.Status != 200 || res.Attempt != 2 {
 		t.Fatalf("res = %+v, want aborted=false status=200 attempt=2", res)
 	}
-	if len(tr.Audit) != 2 {
-		t.Fatalf("audit len = %d, want 2", len(tr.Audit))
+	if got := tr.Len(); got != 2 {
+		t.Fatalf("audit len = %d, want 2", got)
 	}
 }
 
@@ -293,8 +294,8 @@ func TestTransportHooks_PreInstall_408Retried_ThenSucceeds(t *testing.T) {
 	if res.Status != 200 || res.Attempt != 2 {
 		t.Fatalf("res = %+v, want status=200 attempt=2", res)
 	}
-	if len(tr.Audit) != 2 {
-		t.Fatalf("audit len = %d, want 2 attempts", len(tr.Audit))
+	if got := tr.Len(); got != 2 {
+		t.Fatalf("audit len = %d, want 2 attempts", got)
 	}
 }
 
@@ -410,7 +411,7 @@ func TestTransportHooks_PreInstall_3xx_TerminalNotRetried(t *testing.T) {
 			if res.Err != nil {
 				t.Fatalf("result.Err = %v, want nil (final attempt got an http round-trip)", res.Err)
 			}
-			if got := len(tr.Audit); got != 1 {
+			if got := tr.Len(); got != 1 {
 				t.Fatalf("audit len = %d, want 1 (3xx must NOT be retried)", got)
 			}
 		})
@@ -439,7 +440,7 @@ func TestTransportHooks_PostInstall_3xx_BestEffortNotAborted(t *testing.T) {
 	if res.Status != 302 || res.Attempt != 1 {
 		t.Fatalf("res = %+v, want status=302 attempt=1", res)
 	}
-	if got := len(tr.Audit); got != 1 {
+	if got := tr.Len(); got != 1 {
 		t.Fatalf("audit len = %d, want 1 (3xx must NOT be retried even on post-phase)", got)
 	}
 }

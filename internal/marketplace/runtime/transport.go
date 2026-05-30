@@ -137,35 +137,36 @@ func (t *HTTPTransport) Send(ctx context.Context, target string, body []byte, he
 // contents) without spinning up a httptest.Server.
 //
 // Safe for concurrent use by multiple goroutines. The mu mutex
-// serialises Audit appends and reads — see Snapshot. Devin Review
+// serialises audit appends and reads — see Snapshot. Devin Review
 // round-5 on PR #127 caught a data race where the round-4 TOCTOU
 // regression test (TestMarketplaceRuntime_Uninstall_ConcurrentRace)
 // fanned two goroutines through a single InMemoryTransport's Send
-// path, racing the previous unguarded `t.Audit = append(...)` line.
-// The fix here serialises the append; tests that want to inspect
-// the audit log after the goroutines have joined should call
-// Snapshot to take a deep-copied view rather than touching the
-// raw slice. (Touching the raw field is still possible — but
-// concurrent inspection would race the writer goroutines unless
-// the test already joined them.)
+// path, racing the previous unguarded `t.audit = append(...)` line.
+// The fix here serialises the append; tests inspect the audit log
+// via Snapshot (deep-copied view) or Len (counter) only — the
+// underlying slice is unexported so direct field access cannot
+// race a concurrent Send, and the type system enforces the
+// contract rather than relying on a comment. Devin Review round-10
+// ANALYSIS_0008 on PR #127 escalated the footgun risk to a true
+// encapsulation fix here.
 type InMemoryTransport struct {
 	// Handler is called for every Send. Returns the response or
 	// an error. Receives the canonical request shape (headers +
 	// body) the production transport would have sent.
 	Handler func(ctx context.Context, target string, body []byte, headers map[string]string) (*DispatchResponse, error)
 
-	// mu guards Audit. Acquired for every append in Send and for
-	// every read in Snapshot/Len. Tests that read Audit directly
-	// MUST first ensure all goroutines that could call Send have
-	// joined.
+	// mu guards audit. Acquired for every append in Send and for
+	// every read in Snapshot/Len. The field is unexported so all
+	// access goes through the mutex-guarded accessor methods —
+	// there is no Audit-the-field anymore, only Snapshot()/Len()/At().
 	mu sync.Mutex
-	// Audit captures every Send call for assertion. Protected by
-	// mu. Tests that need a concurrent-safe view should call
-	// Snapshot.
-	Audit []InMemoryDispatch
+	// audit captures every Send call for assertion. Protected by
+	// mu. Unexported on purpose: see Snapshot/Len/At for the
+	// read API. Devin Review round-10 ANALYSIS_0008.
+	audit []InMemoryDispatch
 }
 
-// Snapshot returns a deep copy of the current Audit slice under
+// Snapshot returns a deep copy of the current audit slice under
 // the mu lock. Use this from tests that want to inspect the audit
 // log while there may still be active Send callers (or from tests
 // that ran Send goroutines concurrently and want a race-free
@@ -175,20 +176,37 @@ type InMemoryTransport struct {
 func (t *InMemoryTransport) Snapshot() []InMemoryDispatch {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	out := make([]InMemoryDispatch, len(t.Audit))
-	copy(out, t.Audit)
+	out := make([]InMemoryDispatch, len(t.audit))
+	copy(out, t.audit)
 	return out
 }
 
-// Len returns the current Audit length under the mu lock. Use
+// Len returns the current audit length under the mu lock. Use
 // from tests that just want a count without grabbing a snapshot.
 func (t *InMemoryTransport) Len() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return len(t.Audit)
+	return len(t.audit)
 }
 
-// InMemoryDispatch is one entry in InMemoryTransport.Audit.
+// At returns the i-th audit entry under the mu lock — a single-
+// entry equivalent of Snapshot that avoids allocating a full
+// slice copy when the test only needs one row (typically i == 0).
+// Panics with a clear message if i is out of range; tests should
+// call Len first if they're not certain. Returns a copy with the
+// same shared-buffer caveat documented on Snapshot.
+func (t *InMemoryTransport) At(i int) InMemoryDispatch {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if i < 0 || i >= len(t.audit) {
+		panic(fmt.Sprintf("runtime: InMemoryTransport.At(%d): out of range (audit len = %d)", i, len(t.audit)))
+	}
+	return t.audit[i]
+}
+
+// InMemoryDispatch is one entry in InMemoryTransport's audit log.
+// Access via Snapshot, Len, or At — the underlying slice is
+// unexported. Devin Review round-10 ANALYSIS_0008 on PR #127.
 type InMemoryDispatch struct {
 	Target  string
 	Body    []byte
@@ -215,7 +233,7 @@ func (t *InMemoryTransport) Send(ctx context.Context, target string, body []byte
 		Timeout: timeout,
 	}
 	t.mu.Lock()
-	t.Audit = append(t.Audit, entry)
+	t.audit = append(t.audit, entry)
 	t.mu.Unlock()
 	if t.Handler == nil {
 		// Default: 200 OK with empty body. Lets tests that don't

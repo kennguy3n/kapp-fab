@@ -198,6 +198,20 @@ func (d *Dispatcher) Invoke(ctx context.Context, in *InvokeRequest) (*InvokeResu
 			StartedAt:          ts,
 		})
 		if err != nil {
+			// CRITICAL: tool invokes treat the audit trail as a
+			// hard dependency — a failed writeDispatchLogStart
+			// aborts the dispatch entirely. This is INTENTIONALLY
+			// asymmetric with lifecycle hooks (hooks.go:316-323)
+			// which treat audit-log failures as degraded-mode and
+			// continue dispatching. The rationale: tool invokes
+			// run on the hot agent-runtime path where every call
+			// is billable and the operator's compliance surface
+			// demands a complete trail; lifecycle hooks are fire-
+			// and-forget notifications where a missing log entry
+			// is tolerable if it lets the install/uninstall
+			// complete. A transient DB pool exhaustion will block
+			// tool invokes but NOT lifecycle hooks. Devin Review
+			// round-10 ANALYSIS_0001 on PR #127.
 			return nil, fmt.Errorf("runtime: invoke: open log: %w", err)
 		}
 

@@ -179,7 +179,7 @@ func TestMarketplaceRuntime_EndToEnd(t *testing.T) {
 		t.Fatalf("post_install result = %+v", installRes.PostInstallResult)
 	}
 	// 2 hook calls (pre + post) on the OK transport.
-	if got := len(okTransport.Audit); got != 2 {
+	if got := okTransport.Len(); got != 2 {
 		t.Fatalf("hook dispatches = %d, want 2 (pre + post)", got)
 	}
 
@@ -219,13 +219,14 @@ func TestMarketplaceRuntime_EndToEnd(t *testing.T) {
 	if invRes.Status != 200 || invRes.Attempt != 1 {
 		t.Fatalf("invoke result = %+v, want status=200 attempt=1", invRes)
 	}
-	if len(dispatchTransport.Audit) != 1 {
-		t.Fatalf("dispatcher audit len = %d, want 1", len(dispatchTransport.Audit))
+	if got := dispatchTransport.Len(); got != 1 {
+		t.Fatalf("dispatcher audit len = %d, want 1", got)
 	}
-	if dispatchTransport.Audit[0].Headers[runtime.SignatureHeaderName] == "" {
+	dispatchEntry := dispatchTransport.At(0)
+	if dispatchEntry.Headers[runtime.SignatureHeaderName] == "" {
 		t.Fatal("dispatcher did not stamp signature header")
 	}
-	if dispatchTransport.Audit[0].Headers[runtime.TimestampHeaderName] == "" {
+	if dispatchEntry.Headers[runtime.TimestampHeaderName] == "" {
 		t.Fatal("dispatcher did not stamp timestamp header")
 	}
 	// Verify dispatch_log row written.
