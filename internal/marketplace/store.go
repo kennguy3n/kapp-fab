@@ -272,19 +272,48 @@ func (s *Store) UpdateExtensionStatus(ctx context.Context, id uuid.UUID, status 
 		return fmt.Errorf("%w: cannot transition extension status from %q to %q",
 			ErrInvalidManifest, current.Status, status)
 	}
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE marketplace_extensions
-		   SET status = $2, updated_at = now()
-		 WHERE id = $1`,
-		id, string(status),
-	)
-	if err != nil {
-		return fmt.Errorf("marketplace: update extension status: %w", err)
+	// Optimistic concurrency: the UPDATE asserts the status the
+	// transition graph was checked against. If a concurrent caller
+	// flipped the row in the gap between GetExtension and this
+	// Exec, RowsAffected==0 and the loop below re-reads the latest
+	// row to decide whether the new state is consistent with the
+	// requested target (idempotent re-issue of a converging
+	// transition) or a true conflict to surface. Without the
+	// status guard, a `listed→deprecated` and `listed→removed`
+	// race could both UPDATE successfully and last-writer-wins.
+	for attempt := 0; attempt < 3; attempt++ {
+		tag, err := s.pool.Exec(ctx,
+			`UPDATE marketplace_extensions
+			   SET status = $2, updated_at = now()
+			 WHERE id = $1 AND status = $3`,
+			id, string(status), string(current.Status),
+		)
+		if err != nil {
+			return fmt.Errorf("marketplace: update extension status: %w", err)
+		}
+		if tag.RowsAffected() == 1 {
+			return nil
+		}
+		// Re-read — either the row was concurrently transitioned
+		// (status no longer == current.Status) or the row was
+		// deleted (ErrNotFound). Recompute the transition decision
+		// against the fresh state.
+		latest, err := s.GetExtension(ctx, id)
+		if err != nil {
+			return err
+		}
+		if latest.Status == status {
+			// Concurrent caller landed the same target — idempotent
+			// success. (Spec: status transitions are convergent.)
+			return nil
+		}
+		if !extensionStatusTransitionAllowed(latest.Status, status) {
+			return fmt.Errorf("%w: cannot transition extension status from %q to %q (concurrent change)",
+				ErrInvalidManifest, latest.Status, status)
+		}
+		current = latest
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return fmt.Errorf("marketplace: update extension status: gave up after 3 contended retries on id %s", id)
 }
 
 func extensionStatusTransitionAllowed(from, to ExtensionStatus) ExtensionStatusTransition {
@@ -435,7 +464,28 @@ func (s *Store) PublishVersion(ctx context.Context, in PublishVersionInput) (*Ex
 		out.PermissionsRequired = []string{}
 	}
 
-	err := s.pool.QueryRow(ctx,
+	// Atomic publish: the version INSERT and the review_state
+	// seed-row INSERT MUST land in the same transaction. Two
+	// separate auto-committed Exec calls could leave an orphan
+	// version row whose review_state row failed to insert (transient
+	// DB error, process crash between the two Execs). A retry of
+	// PublishVersion would then hit the (extension_id, version)
+	// UNIQUE and return ErrConflict, and B7's polling LEFT-JOIN
+	// (which the code comment below promises will always find a row)
+	// would silently skip the orphan forever. The seed-row write is
+	// idempotent (ON CONFLICT DO NOTHING) so it's safe inside the
+	// same transaction as the version write.
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("marketplace: publish version: begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+	if err := tx.QueryRow(ctx,
 		`INSERT INTO marketplace_extension_versions (
 			extension_id, version, bundle_hash, bundle_size_bytes, bundle_url, manifest,
 			min_kapp_version, max_kapp_version, features_required, permissions_required,
@@ -449,8 +499,7 @@ func (s *Store) PublishVersion(ctx context.Context, in PublishVersionInput) (*Ex
 		out.ExtensionID, out.Version, out.BundleHash, out.BundleSizeBytes, out.BundleURL, string(out.Manifest),
 		out.MinKappVersion, out.MaxKappVersion, out.FeaturesRequired, out.PermissionsRequired,
 		out.KtypesCount, out.WorkflowsCount, out.AgentToolsCount, out.UIExtensionsCount, out.WebhooksCount,
-	).Scan(&out.ID, &out.PublishedAt, &out.Yanked, &out.YankedReason)
-	if err != nil {
+	).Scan(&out.ID, &out.PublishedAt, &out.Yanked, &out.YankedReason); err != nil {
 		if isUniqueViolation(err) {
 			return nil, fmt.Errorf("%w: version %s already published for extension", ErrConflict, out.Version)
 		}
@@ -459,8 +508,11 @@ func (s *Store) PublishVersion(ctx context.Context, in PublishVersionInput) (*Ex
 	// Auto-create the review_state row so B7's polling queries can
 	// LEFT JOIN against a guaranteed-present row instead of needing
 	// COALESCE / NULL handling at every read site. The default
-	// status is `submitted` (per migration default).
-	if _, err := s.pool.Exec(ctx,
+	// status is `submitted` (per migration default). The version
+	// INSERT above and this seed INSERT are atomic via the enclosing
+	// transaction — see the begin/defer-rollback at the top of this
+	// branch.
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO marketplace_extension_review_state (extension_version_id)
 		 VALUES ($1)
 		 ON CONFLICT (extension_version_id) DO NOTHING`,
@@ -468,6 +520,10 @@ func (s *Store) PublishVersion(ctx context.Context, in PublishVersionInput) (*Ex
 	); err != nil {
 		return nil, fmt.Errorf("marketplace: seed review state: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("marketplace: publish version: commit: %w", err)
+	}
+	committed = true
 	return &out, nil
 }
 
@@ -703,6 +759,25 @@ func (s *Store) Install(ctx context.Context, in InstallInput) (*Installation, er
 // UpdateInstallStatus advances the lifecycle. Caller is responsible
 // for setting failureReason when status = failed (CHECK enforces).
 // Other transitions ignore failureReason.
+//
+// Transition graph (enforced by this method, not the DB CHECK):
+//
+//	pending     → installing | failed | uninstalled
+//	installing  → active     | failed | uninstalled
+//	active      → disabled   | failed | uninstalled
+//	disabled    → active     | uninstalled
+//	failed      → installing | uninstalled       (operator retry path)
+//	uninstalled → Ø                              (terminal)
+//
+// uninstalled is terminal — once a tenant uninstalls, the install
+// row is retained for audit (linkage to past audit events / webhook
+// signatures) but the lifecycle cannot re-activate. A fresh Install
+// call creates a new row with a new ID. Same posture as
+// UpdateExtensionStatus's `removed` and UpdateReviewState's
+// terminals — we want the at-least-once worker re-issue path to be
+// safely idempotent (self-loop) and out-of-order transitions to be
+// caught at the store boundary rather than corrupt downstream
+// dashboards / billing.
 func (s *Store) UpdateInstallStatus(ctx context.Context, tenantID, installID uuid.UUID, status InstallStatus, failureReason string) error {
 	if tenantID == uuid.Nil || installID == uuid.Nil {
 		return fmt.Errorf("%w: tenant id and install id required", ErrNotFound)
@@ -720,6 +795,29 @@ func (s *Store) UpdateInstallStatus(ctx context.Context, tenantID, installID uui
 		reason = nil
 	}
 	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// Read current status FOR UPDATE so a concurrent transition
+		// can't slip between the graph check and the UPDATE. The
+		// row lock is short-lived (single round-trip) and scoped to
+		// the install row; no risk of holding it across the
+		// callback's network boundary.
+		var currentRaw string
+		if err := tx.QueryRow(ctx,
+			`SELECT status
+			   FROM marketplace_extension_installations
+			  WHERE id = $1
+			  FOR UPDATE`,
+			installID,
+		).Scan(&currentRaw); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("marketplace: update install status: read current: %w", err)
+		}
+		current := InstallStatus(currentRaw)
+		if !installStatusTransitionAllowed(current, status) {
+			return fmt.Errorf("%w: cannot transition install status from %q to %q",
+				ErrInvalidManifest, current, status)
+		}
 		tag, err := tx.Exec(ctx,
 			`UPDATE marketplace_extension_installations
 			   SET status = $2,
@@ -736,6 +834,47 @@ func (s *Store) UpdateInstallStatus(ctx context.Context, tenantID, installID uui
 		}
 		return nil
 	})
+}
+
+func installStatusTransitionAllowed(from, to InstallStatus) bool {
+	if from == to {
+		return true
+	}
+	if from == InstallStatusUninstalled {
+		return false
+	}
+	switch from {
+	case InstallStatusPending:
+		switch to {
+		case InstallStatusInstalling, InstallStatusFailed, InstallStatusUninstalled:
+			return true
+		}
+	case InstallStatusInstalling:
+		switch to {
+		case InstallStatusActive, InstallStatusFailed, InstallStatusUninstalled:
+			return true
+		}
+	case InstallStatusActive:
+		switch to {
+		case InstallStatusDisabled, InstallStatusFailed, InstallStatusUninstalled:
+			return true
+		}
+	case InstallStatusDisabled:
+		switch to {
+		case InstallStatusActive, InstallStatusUninstalled:
+			return true
+		}
+	case InstallStatusFailed:
+		// Operator-driven retry: failed installs can re-enter the
+		// installing state once the underlying cause is fixed.
+		// Going directly back to active without re-installing would
+		// skip the handshake/secrets validation step.
+		switch to {
+		case InstallStatusInstalling, InstallStatusUninstalled:
+			return true
+		}
+	}
+	return false
 }
 
 // RecordInstallHealthCheck stamps the last_health_check_* columns.

@@ -175,6 +175,30 @@ var TenantScopedTables = []string{
 	// first; the order in this slice already satisfies that.
 	"cycle_count_sessions",
 	"cycle_count_lines",
+	// Phase A2 — O(1) per-tenant record counter that backs the
+	// quota check (CheckRecordCount). PK is (tenant_id) — there is
+	// no surrogate `id`, so the dump's default `(tenant_id, id)`
+	// fallback would silently degrade to ON CONFLICT DO NOTHING.
+	// Declared in tableConflictKeys below so a restore re-applies
+	// the observed record_count for an existing tenant rather than
+	// dropping it. Listed late because no other tenant-scoped
+	// table FK-references it (the krecords/quota relationship is
+	// purely procedural — the counter is rebuilt from krecords
+	// nightly by the reconciler).
+	"tenant_record_counts",
+	// Phase B2 — per-tenant marketplace extension installations.
+	// PK is the synthesised `id`, so the default (tenant_id, id)
+	// upsert path applies and no tableConflictKeys entry is
+	// needed. RLS is enabled on this table (000068); the dump
+	// path runs through dbutil.WithTenantTx so the tenant GUC is
+	// set when these rows are extracted/restored. Listed AFTER
+	// the rest of the tenant tables because the
+	// extension_version_id FK targets a GLOBAL catalog table
+	// (marketplace_extension_versions, not in this slice) that
+	// is operator-managed, not dump-managed — the marketplace
+	// catalog must be re-populated by the publisher pipeline
+	// before a tenant restore can land.
+	"marketplace_extension_installations",
 }
 
 // manifest is the first record in every dump file.
@@ -547,6 +571,16 @@ var tableConflictKeys = map[string][]string{
 	// PK. boms and work_orders use the standard (tenant_id, id) PK and
 	// fall through to the default path.
 	"bom_components": {"tenant_id", "bom_id", "component_item_id"},
+	// Phase A2 — tenant_record_counts has PK (tenant_id) with no
+	// `id` column, so the default upsert path would degrade to
+	// ON CONFLICT DO NOTHING and a re-restore would leave a stale
+	// record_count in place. The natural PK is the single
+	// tenant_id column — declaring it here makes the restore
+	// overwrite record_count + updated_at on conflict, which is
+	// the correct behaviour: the dump's value is the most recent
+	// counter observation, and the daily reconciler will re-true
+	// it up on the next tick anyway.
+	"tenant_record_counts": {"tenant_id"},
 }
 
 // insertRow issues a parameterised INSERT that lists the columns from

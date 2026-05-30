@@ -2,6 +2,7 @@ package marketplace
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -453,6 +454,174 @@ func TestValidateKTypeName(t *testing.T) {
 	}
 	if err := ValidateKTypeName("ext.acme.UPPERCASE", "acme"); err == nil {
 		t.Error("expected uppercase rejection")
+	}
+}
+
+// TestParseManifestAgentToolTimeoutDefaultPersisted regression-tests
+// the bug where the validator wrote the spec §6 "default 10s" timeout
+// to the loop-variable copy of AgentToolRef rather than the underlying
+// slice element, so the returned *Manifest carried an empty timeout
+// and PublishVersion serialised the JSONB column with no default.
+// After the fix, m.AgentTools[i].Timeout MUST equal "10s" when the
+// YAML omits the field, AND json.Marshal MUST emit the default in the
+// stored manifest JSONB (which is what the catalog UI reads).
+func TestParseManifestAgentToolTimeoutDefaultPersisted(t *testing.T) {
+	src := removeLine("    timeout: 5s")(validManifest())
+	m, err := ParseManifest([]byte(src))
+	if err != nil {
+		t.Fatalf("parse rejected after timeout removal: %v", err)
+	}
+	if len(m.AgentTools) != 1 {
+		t.Fatalf("want 1 agent tool, got %d", len(m.AgentTools))
+	}
+	if got := m.AgentTools[0].Timeout; got != "10s" {
+		t.Errorf("manifest.AgentTools[0].Timeout = %q, want \"10s\" (spec §6 default)", got)
+	}
+	// Catalog UI reads back through json.Unmarshal — the JSON form
+	// MUST also carry the default, otherwise a re-parse on the read
+	// side would zero it out.
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if !strings.Contains(string(out), `"timeout":"10s"`) {
+		t.Errorf("json output missing defaulted timeout=10s; got: %s", string(out))
+	}
+}
+
+// TestParseManifestRejectsHyphensInName regression-tests the bug
+// where the Go validator's nameRegex / publisherSlugRegex allowed `-`
+// in publisher / slug segments but the DB CHECK constraints in
+// migrations/000068_marketplace.sql:99-103 rejected hyphens with the
+// pattern `^[a-z][a-z0-9_]*$`. The validator MUST reject hyphens
+// up-front so the publisher receives a clear field-level error
+// instead of an opaque CHECK violation at INSERT time.
+func TestParseManifestRejectsHyphensInName(t *testing.T) {
+	cases := []struct {
+		name       string
+		manifestIn string
+		field      string
+	}{
+		{
+			name:       "hyphen in publisher segment",
+			manifestIn: replaceLine("name: acme.shipping", "name: my-pub.shipping")(validManifest()),
+			field:      "name",
+		},
+		{
+			name:       "hyphen in slug segment",
+			manifestIn: replaceLine("name: acme.shipping", "name: acme.my-ext")(validManifest()),
+			field:      "name",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseManifest([]byte(tc.manifestIn))
+			if err == nil {
+				t.Fatal("expected rejection but parse succeeded")
+			}
+			// Must be a ManifestError or ManifestErrors that surfaces
+			// the field name. Using errors.Is for ErrInvalidManifest
+			// is the contract callers rely on.
+			if !errors.Is(err, ErrInvalidManifest) {
+				t.Fatalf("errors.Is(err, ErrInvalidManifest) = false; err=%v", err)
+			}
+			if !strings.Contains(err.Error(), tc.field) {
+				t.Errorf("error message %q does not mention field %q", err.Error(), tc.field)
+			}
+		})
+	}
+}
+
+// TestParseManifestRejectsHyphensInExtKTypeName regression-tests the
+// same fix on the extKTypeNameRegex used by ValidateKTypeName — the
+// publisher segment of `ext.<pub>.<label>` MUST also match the DB
+// publisher pattern so an installed extension's KTypes can resolve
+// against a real marketplace_extensions row.
+func TestParseManifestRejectsHyphensInExtKTypeName(t *testing.T) {
+	if err := ValidateKTypeName("ext.my-pub.shipping_label", "my-pub"); err == nil {
+		t.Error("expected rejection of hyphenated publisher in ext.<pub>.<label>")
+	}
+}
+
+// TestManifestSerialisesAsSnakeCase regression-tests the bug where
+// the Manifest struct lacked json tags, so json.Marshal emitted
+// Go-style PascalCase keys (`SchemaVersion`, `MinKappVersion`, ...).
+// PublishVersion stores the marshalled JSON in the manifest JSONB
+// column, and the catalog UI reads it back through this same struct;
+// a key-case mismatch silently zeroed every field. After the fix,
+// every key MUST be the snake_case form the YAML source uses.
+func TestManifestSerialisesAsSnakeCase(t *testing.T) {
+	m, err := ParseManifest([]byte(validManifest()))
+	if err != nil {
+		t.Fatalf("happy-path parse failed: %v", err)
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	wantKeys := []string{
+		`"schema_version":`, `"min_kapp_version":`, `"max_kapp_version":`,
+		`"features_required":`, `"permissions_required":`,
+		`"agent_tools":`, `"webhooks_consumed":`, `"posting_hooks":`,
+		`"ui_extensions":`, `"secrets_required":`,
+		`"publisher":`, `"slug":`,
+	}
+	for _, k := range wantKeys {
+		if !strings.Contains(string(out), k) {
+			t.Errorf("json output missing snake_case key %s; got: %s", k, string(out))
+		}
+	}
+	pascalCaseKeys := []string{
+		`"SchemaVersion":`, `"MinKappVersion":`, `"FeaturesRequired":`,
+		`"AgentTools":`, `"WebhooksConsumed":`,
+	}
+	for _, k := range pascalCaseKeys {
+		if strings.Contains(string(out), k) {
+			t.Errorf("json output still emits Go-style key %s; struct tags regressed", k)
+		}
+	}
+}
+
+// TestInstallStatusTransitionAllowed pins the install lifecycle FSM
+// added to close the "UpdateInstallStatus accepts any transition"
+// finding. Spec posture: convergent self-loops are allowed (for the
+// at-least-once worker), uninstalled is terminal, and unauthorised
+// jumps like `uninstalled→active` or `active→pending` are rejected.
+func TestInstallStatusTransitionAllowed(t *testing.T) {
+	allowed := map[InstallStatus][]InstallStatus{
+		InstallStatusPending:     {InstallStatusInstalling, InstallStatusFailed, InstallStatusUninstalled},
+		InstallStatusInstalling:  {InstallStatusActive, InstallStatusFailed, InstallStatusUninstalled},
+		InstallStatusActive:      {InstallStatusDisabled, InstallStatusFailed, InstallStatusUninstalled},
+		InstallStatusDisabled:    {InstallStatusActive, InstallStatusUninstalled},
+		InstallStatusFailed:      {InstallStatusInstalling, InstallStatusUninstalled},
+		InstallStatusUninstalled: {},
+	}
+	allStates := []InstallStatus{
+		InstallStatusPending, InstallStatusInstalling, InstallStatusActive,
+		InstallStatusDisabled, InstallStatusFailed, InstallStatusUninstalled,
+	}
+	for _, from := range allStates {
+		// Self-loop is always allowed for idempotency.
+		if !installStatusTransitionAllowed(from, from) {
+			t.Errorf("self-loop %s→%s rejected", from, from)
+		}
+		for _, to := range allStates {
+			if from == to {
+				continue
+			}
+			want := false
+			for _, ok := range allowed[from] {
+				if ok == to {
+					want = true
+					break
+				}
+			}
+			got := installStatusTransitionAllowed(from, to)
+			if got != want {
+				t.Errorf("installStatusTransitionAllowed(%s, %s) = %v, want %v",
+					from, to, got, want)
+			}
+		}
 	}
 }
 
