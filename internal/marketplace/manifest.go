@@ -67,13 +67,28 @@ const PlaceholderWebhookBase = "${EXTENSION_WEBHOOK_BASE}"
 // so the validator requires target_ktype for those two; dashboard
 // widget + settings page are tenant-global and reject a stray
 // target_ktype to avoid silently misleading the operator.
+//
+// RequiresLabel mirrors the same per-slot conditional shape. Only
+// record_list_action treats `label` as load-bearing — it renders as
+// the button text in the record-list action menu, and an extension
+// shipping an empty label would surface a blank button to the
+// operator ("What does this do?"). The other three slots derive their
+// visible name from a different mechanism: right_pane uses the
+// target_ktype's display name as the tab title, dashboard_widget is
+// titled by the bundle's own internal header, and settings_page is
+// labeled by the marketplace catalog header rather than the manifest.
+// Requiring label for those three would create false-positive
+// validation errors for manifests that follow the spec's example (see
+// EXTENSION_SPEC §8 — only record_list_action carries a label in the
+// reference YAML).
 var ValidUIExtensionSlots = map[string]struct {
 	RequiresTargetKType bool
+	RequiresLabel       bool
 }{
-	"right_pane":         {RequiresTargetKType: true},
-	"dashboard_widget":   {RequiresTargetKType: false},
-	"record_list_action": {RequiresTargetKType: true},
-	"settings_page":      {RequiresTargetKType: false},
+	"right_pane":         {RequiresTargetKType: true, RequiresLabel: false},
+	"dashboard_widget":   {RequiresTargetKType: false, RequiresLabel: false},
+	"record_list_action": {RequiresTargetKType: true, RequiresLabel: true},
+	"settings_page":      {RequiresTargetKType: false, RequiresLabel: false},
 }
 
 // ValidPostingHookWhen enumerates the hook timings supported by B4
@@ -673,6 +688,9 @@ func validateManifest(m *Manifest, agg *ManifestErrors) {
 			}
 			if !slotDef.RequiresTargetKType && ui.TargetKType != "" {
 				agg.add(field+".target_ktype", fmt.Sprintf("must be omitted for slot %q (tenant-global slot)", ui.Slot))
+			}
+			if slotDef.RequiresLabel && strings.TrimSpace(ui.Label) == "" {
+				agg.add(field+".label", fmt.Sprintf("required for slot %q (renders as the action button text)", ui.Slot))
 			}
 		}
 		if ui.TargetKType != "" {

@@ -299,6 +299,43 @@ func TestParseManifestRejections(t *testing.T) {
 			fragment: ".js or .mjs",
 		},
 		{
+			// record_list_action renders as a button in the
+			// record-list action menu — the label is the button's
+			// visible text, so a publisher shipping an empty label
+			// would produce a blank button. Per ValidUIExtensionSlots
+			// RequiresLabel=true for this slot only; the other three
+			// slots derive their name from a different mechanism and
+			// MUST NOT require label (right_pane uses the
+			// target_ktype's display name as the tab title,
+			// dashboard_widget owns its own bundle-internal header,
+			// and settings_page is labeled by the marketplace catalog
+			// header rather than the manifest).
+			name: "ui_extension record_list_action without label rejected",
+			mutate: func(in string) string {
+				return strings.Replace(in,
+					"  - slot: right_pane\n    target_ktype: sales.order\n    component_url: ./ui/order_pane.js\n    label: Shipping Labels\n",
+					"  - slot: record_list_action\n    target_ktype: sales.order\n    component_url: ./ui/order_pane.js\n",
+					1)
+			},
+			field:    "ui_extensions[0].label",
+			fragment: "required for slot",
+		},
+		{
+			// Whitespace-only label is rejected via the
+			// strings.TrimSpace check, defending against a publisher
+			// putting "   " in the label field to bypass the
+			// non-empty validator.
+			name: "ui_extension record_list_action whitespace-only label rejected",
+			mutate: func(in string) string {
+				return strings.Replace(in,
+					"  - slot: right_pane\n    target_ktype: sales.order\n    component_url: ./ui/order_pane.js\n    label: Shipping Labels\n",
+					"  - slot: record_list_action\n    target_ktype: sales.order\n    component_url: ./ui/order_pane.js\n    label: \"   \"\n",
+					1)
+			},
+			field:    "ui_extensions[0].label",
+			fragment: "required for slot",
+		},
+		{
 			name:     "secret key lowercase rejected",
 			mutate:   replaceLine("  - key: CARRIER_API_KEY", "  - key: carrier_api_key"),
 			field:    "secrets_required[0].key",
