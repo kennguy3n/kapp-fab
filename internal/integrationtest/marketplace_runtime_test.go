@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -387,4 +388,175 @@ func canonicalToolNameFromDef(def, publisher, slug string) string {
 		base = base[idx+1:]
 	}
 	return fmt.Sprintf("ext.%s.%s_%s", publisher, slug, base)
+}
+
+// TestMarketplaceRuntime_Uninstall_ConcurrentRace locks in the
+// round-4 Devin Review TOCTOU fix on Engine.Uninstall (engine.go:
+// SELECT … FOR UPDATE inside the teardown tx).
+//
+// Setup: install an extension on tenant A, then fire two
+// Engine.Uninstall calls concurrently against the same installation
+// ID. With the fix in place, the row-lock inside the teardown tx
+// serializes the two callers and the second-arriving one observes
+// status='uninstalled' under the lock and returns ErrConflict.
+// Without the fix, both calls would have raced past the pre-tx
+// status check (both seeing status='active'), both would have run
+// UnregisterAll + UPDATE (second-call DELETEs become no-ops,
+// second-call UPDATE is idempotent), and BOTH would have returned
+// a successful UninstallResult — which is the actual misbehaviour
+// flagged. Exactly-one-success / exactly-one-conflict is the
+// observable contract this test enforces.
+//
+// Note we don't directly assert that pre_uninstall fires only once
+// — the hook dispatches BEFORE the lock-tx (so duplicate hooks are
+// acceptable; the publisher must already be idempotent because
+// lifecycle hooks retry up to 3 times anyway). The fix is about
+// the DB-state and the caller-visible result, not about hook
+// suppression.
+func TestMarketplaceRuntime_Uninstall_ConcurrentRace(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	// --- Seed catalog + tenant + install (same shape as
+	// TestMarketplaceRuntime_EndToEnd above) ---
+	pub := strings.ReplaceAll(uniqueSlug("rt-toctou"), "-", "_")
+	ext, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pub, Slug: "shipping",
+		DisplayName: "Shipping", Description: "TOCTOU regression",
+		Author: "ACME", License: "MIT",
+		Homepage: "https://acme.example/shipping",
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension: %v", err)
+	}
+	manifest := minimalRuntimeManifest(ext)
+	ver, err := store.PublishVersion(ctx, marketplace.PublishVersionInput{
+		ExtensionID: ext.ID, Manifest: manifest,
+		BundleHash: strings.Repeat("e", 64),
+		BundleSize: 4096,
+		BundleURL:  "https://cdn.example/bundles/rt-toctou.tgz",
+	})
+	if err != nil {
+		t.Fatalf("PublishVersion: %v", err)
+	}
+	rs := store.Reviews()
+	reviewer := uuid.New().String()
+	for _, step := range []marketplace.ReviewStatus{
+		marketplace.ReviewStatusAutomatedPassed,
+		marketplace.ReviewStatusManualReview,
+		marketplace.ReviewStatusApproved,
+	} {
+		if _, err := rs.UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
+			VersionID: ver.ID, Status: step, Reviewer: reviewer,
+		}); err != nil {
+			t.Fatalf("review transition to %s: %v", step, err)
+		}
+	}
+	if err := store.SetListedVersion(ctx, ext.ID, ver.Version); err != nil {
+		t.Fatalf("SetListedVersion: %v", err)
+	}
+	if err := store.UpdateExtensionStatus(ctx, ext.ID, marketplace.ExtensionStatusListed); err != nil {
+		t.Fatalf("UpdateExtensionStatus listed: %v", err)
+	}
+
+	tn, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("rt-toctou-a"), Name: "RT-TOCTOU", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("tenant: %v", err)
+	}
+
+	okTransport := &runtime.InMemoryTransport{Handler: runtime.StaticResponseHandler(200, []byte(`{"ok":true}`))}
+	okHooks := runtime.NewTransportHooks(okTransport, nil)
+	engine, err := runtime.NewEngine(runtime.EngineOptions{
+		Pool: h.pool, Store: store, Hooks: okHooks,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	bundle := minimalResolvedBundle(manifest)
+	installRes, err := engine.Install(ctx, &runtime.InstallRequest{
+		TenantID:    tn.ID,
+		ExtensionID: ext.ID,
+		VersionID:   ver.ID,
+		WebhookBase: "https://tenant-toctou.example/hooks",
+	}, bundle)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	installID := installRes.Installation.ID
+
+	// --- Two concurrent Uninstall calls. The SELECT … FOR UPDATE
+	// inside the teardown tx serializes them. ---
+	var (
+		wg         sync.WaitGroup
+		mu         sync.Mutex
+		results    []*runtime.UninstallResult
+		errs       []error
+		numCallers = 2
+		barrier    = make(chan struct{})
+	)
+	wg.Add(numCallers)
+	for i := 0; i < numCallers; i++ {
+		go func() {
+			defer wg.Done()
+			<-barrier // start both goroutines as simultaneously as we can
+			res, err := engine.Uninstall(ctx, &runtime.UninstallRequest{
+				TenantID:       tn.ID,
+				InstallationID: installID,
+			})
+			mu.Lock()
+			results = append(results, res)
+			errs = append(errs, err)
+			mu.Unlock()
+		}()
+	}
+	close(barrier) // release both
+	wg.Wait()
+
+	// Classify outcomes: exactly one success, exactly one
+	// ErrConflict. Anything else means the TOCTOU fix has
+	// regressed (e.g. both succeed → race-stomp; both error →
+	// over-strict locking).
+	var successes, conflicts, others int
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			successes++
+			if results[i] == nil || results[i].Installation == nil {
+				t.Fatalf("nil result on success: results[%d]=%+v", i, results[i])
+			}
+			if results[i].Installation.Status != marketplace.InstallStatusUninstalled {
+				t.Fatalf("successful uninstall status %q, want uninstalled", results[i].Installation.Status)
+			}
+		case errors.Is(err, marketplace.ErrConflict):
+			conflicts++
+		default:
+			others++
+			t.Errorf("unexpected error from concurrent Uninstall: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 || others != 0 {
+		t.Fatalf("concurrent uninstall outcomes = successes=%d conflicts=%d others=%d; want 1/1/0", successes, conflicts, others)
+	}
+
+	// Runtime tables must be cleared after the winning teardown.
+	afterCounts := readRuntimeCounts(ctx, t, h, tn.ID, installID)
+	if afterCounts.ktypes != 0 || afterCounts.workflows != 0 || afterCounts.tools != 0 || afterCounts.webhooks != 0 {
+		t.Fatalf("uninstall left rows: %+v", afterCounts)
+	}
+
+	// A third (post-race) Uninstall must also report conflict —
+	// confirms the row really did flip to uninstalled and the
+	// engine surfaces that via the pre-tx GetInstallation check
+	// (the cheap fast path) rather than the in-tx re-verify
+	// (the safety net for concurrent races).
+	_, err = engine.Uninstall(ctx, &runtime.UninstallRequest{
+		TenantID:       tn.ID,
+		InstallationID: installID,
+	})
+	if !errors.Is(err, marketplace.ErrConflict) {
+		t.Fatalf("post-race Uninstall err = %v, want ErrConflict", err)
+	}
 }

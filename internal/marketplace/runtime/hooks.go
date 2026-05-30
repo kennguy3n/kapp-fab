@@ -176,11 +176,39 @@ func NewTransportHooks(t Transport, now func() time.Time) LifecycleHooks {
 	return &transportHooks{transport: t, now: now}
 }
 
-// lifecycleRetry is the retry policy for lifecycle hooks. Lifecycle
-// dispatches are not as latency-sensitive as tool invokes so we use
-// a fixed 3-attempt exponential policy regardless of manifest
-// configuration (there is no manifest field for lifecycle retry).
-var lifecycleRetry = &RetryPolicy{MaxAttempts: 3, Backoff: "exponential"}
+// lifecycleRetryAttempts / lifecycleRetryBackoff are the immutable
+// scalar constants that define the lifecycle-hook retry policy.
+// Lifecycle dispatches are not as latency-sensitive as tool invokes
+// so we use a fixed 3-attempt exponential policy regardless of
+// manifest configuration (there is no manifest field for lifecycle
+// retry).
+//
+// Constants rather than a package-level `*RetryPolicy` pointer:
+// Devin Review round-4 on PR #127 flagged the previous
+// `var lifecycleRetry = &RetryPolicy{...}` form as fragile —
+// although today only read paths reference it, a future test or
+// refactor that mutated `lifecycleRetry.MaxAttempts` (e.g. to drive
+// down hook attempts in a fast-path test) would silently race every
+// other goroutine still dispatching through `transportHooks`.
+// Scalar constants + a per-call constructor eliminate that footgun:
+// each Dispatch invocation now mints its own *RetryPolicy on the
+// heap, so no shared mutable state is reachable from outside this
+// function. The DB-side dispatch CHECK (`retry_max_attempts >= 1`)
+// is irrelevant here — lifecycle hooks are not configurable per
+// manifest — but the same invariant is enforced statically by the
+// constant value.
+const (
+	lifecycleRetryAttempts = 3
+	lifecycleRetryBackoff  = "exponential"
+)
+
+// newLifecycleRetryPolicy returns a fresh *RetryPolicy with the
+// hard-coded lifecycle-hook attempts/backoff. Each call mints a
+// new heap allocation so the returned pointer is not aliased by
+// any other caller.
+func newLifecycleRetryPolicy() *RetryPolicy {
+	return &RetryPolicy{MaxAttempts: lifecycleRetryAttempts, Backoff: lifecycleRetryBackoff}
+}
 
 // is2xx reports whether status is in [200, 300).
 func is2xx(status int) bool { return status >= 200 && status < 300 }
@@ -209,6 +237,11 @@ func (h *transportHooks) Dispatch(ctx context.Context, in *LifecycleDispatch) (*
 		Endpoint:   endpoint,
 	}
 
+	// Mint a per-call *RetryPolicy via newLifecycleRetryPolicy so
+	// no two goroutines share an aliased pointer (round-4 finding
+	// on the previous package-level `lifecycleRetry` global).
+	retry := newLifecycleRetryPolicy()
+
 	dispatchReq := &DispatchRequest{
 		TenantID:           in.TenantID,
 		InstallationID:     in.InstallationID,
@@ -218,14 +251,14 @@ func (h *transportHooks) Dispatch(ctx context.Context, in *LifecycleDispatch) (*
 		URL:                endpoint,
 		Body:               in.Body,
 		Timeout:            timeout,
-		Retry:              lifecycleRetry,
+		Retry:              retry,
 		SigningSecret:      in.SigningSecret,
 		RequestID:          requestID,
 	}
 
 	var lastErr error
-	for attempt := 1; attempt <= lifecycleRetry.MaxAttempts; attempt++ {
-		if delay := lifecycleRetry.BackoffDelay(attempt); delay > 0 {
+	for attempt := 1; attempt <= retry.MaxAttempts; attempt++ {
+		if delay := retry.BackoffDelay(attempt); delay > 0 {
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()

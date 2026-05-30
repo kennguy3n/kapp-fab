@@ -23,8 +23,16 @@ import (
 //
 //  1. Validate the InstallRequest + the resolved bundle.
 //  2. Load the extension version row (catalog) and verify it
-//     is publishable: extension status = approved AND version
-//     is not yanked.
+//     is publishable: extension status = 'listed' AND version
+//     is not yanked. 'listed' is the downstream-of-'approved'
+//     state in the review state machine — only listed extensions
+//     are installable; 'approved' alone is necessary but not
+//     sufficient (the catalog row must also be promoted to
+//     'listed' via Store.SetListedVersion before any tenant can
+//     install it). The actual check is `ext.Status !=
+//     ExtensionStatusListed` at engine.go:Install — the previous
+//     doc comment that read "= approved" was stale (Devin
+//     Review round-4 on PR #127 caught the drift).
 //  3. Generate a fresh signing secret.
 //  4. Dispatch pre_install (BLOCKING). 4xx/5xx/transport
 //     failure → return ErrPreInstallRejected without touching
@@ -54,8 +62,11 @@ import (
 // Both flows are idempotent against retry — a second Install with
 // the same (tenant, extension) hits the marketplace_extension_
 // installations unique constraint and returns ErrConflict. A
-// second Uninstall on an already-uninstalled row is rejected by
-// the InstallStatus transition graph.
+// second Uninstall on an already-uninstalled row is rejected
+// twice over: first by the pre-tx GetInstallation status check,
+// and again by the in-tx SELECT … FOR UPDATE re-verify that
+// closes the TOCTOU window between the pre-tx check and the
+// teardown commit (Devin Review round-4 on PR #127).
 type Engine struct {
 	pool      *pgxpool.Pool
 	store     *marketplace.Store
@@ -404,9 +415,45 @@ func (e *Engine) Uninstall(ctx context.Context, req *UninstallRequest) (*Uninsta
 		preResult = res
 	}
 
-	// Transactional teardown: unregister runtime tables + flip
-	// status. The install row itself is retained for audit.
+	// Transactional teardown: re-lock the install row, re-verify
+	// it is still uninstall-eligible, then unregister runtime
+	// tables + flip status. The install row itself is retained
+	// for audit.
+	//
+	// The SELECT … FOR UPDATE here closes the TOCTOU window flagged
+	// by Devin Review round-3 on PR #127: between the pre-tx
+	// GetInstallation/status-check at the top of Uninstall and
+	// this tx, a concurrent Uninstall could have committed
+	// status='uninstalled'. Without re-verifying under the row
+	// lock, the second caller would (a) re-issue UnregisterAll
+	// against rows the first caller already deleted (no-op on the
+	// DB but the engine reports success to a no-op operation),
+	// and (b) re-write status='uninstalled' to status='uninstalled'
+	// — masking the conflict from the operator audit trail.
+	// Re-checking inside the lock mirrors the same pattern
+	// already used by Store.UpdateInstallStatus (store.go:885-924)
+	// so the two write paths stay in lock-step.
 	txErr := dbutil.WithTenantTx(ctx, e.pool, req.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var currentRaw string
+		if err := tx.QueryRow(ctx,
+			`SELECT status
+			   FROM marketplace_extension_installations
+			  WHERE tenant_id = $1 AND id = $2
+			  FOR UPDATE`,
+			req.TenantID, req.InstallationID,
+		).Scan(&currentRaw); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("%w: installation %s not found", marketplace.ErrNotFound, req.InstallationID)
+			}
+			return fmt.Errorf("runtime: engine: lock install row: %w", err)
+		}
+		if marketplace.InstallStatus(currentRaw) == marketplace.InstallStatusUninstalled {
+			// Concurrent uninstall already won the race and
+			// committed. Surface as ErrConflict so the caller
+			// can distinguish "you raced another uninstall"
+			// from "the runtime tables disappeared somehow".
+			return fmt.Errorf("%w: installation %s already uninstalled", marketplace.ErrConflict, req.InstallationID)
+		}
 		if err := e.registrar.UnregisterAll(ctx, tx, req.TenantID, req.InstallationID); err != nil {
 			return err
 		}
