@@ -117,6 +117,32 @@ func TestPoolRouter_FallsBackToPrimary_WhenLagToleranceNonPositive(t *testing.T)
 	}
 }
 
+// TestPoolRouter_FallsBackToPrimary_WhenLagNegativeSentinel pins the
+// contract that SampleLag uses a negative-nanos sentinel when the
+// replica is in recovery but has not yet replayed any WAL
+// (pg_last_xact_replay_timestamp() = NULL). Read()'s existing
+// `lag < 0` gate must treat that as "not ready" and route to primary,
+// so point reads (Get / ListPage / BulkFetch / Search) don't hit a
+// not-yet-caught-up standby whose visible state is only as fresh as
+// the base backup. Keyset walks have their own gate via
+// record.snapshotVia returning errReplicaNotReady — this test pins
+// the SampleLag-side defense.
+func TestPoolRouter_FallsBackToPrimary_WhenLagNegativeSentinel(t *testing.T) {
+	primary := newLazyPool(t)
+	replica := newLazyPool(t)
+	r := NewPoolRouter(primary).WithReplica(replica, 1*time.Second, 5*time.Second)
+
+	// Sample timestamp is fresh and lag is "in tolerance" by
+	// magnitude (1ns), but encoded as -1 to mean "standby not
+	// ready". Read() must NOT route to the replica.
+	r.lastLagNanos.Store(-1)
+	r.lastSampledAt.Store(time.Now().UTC().UnixNano())
+
+	if got := r.Read(); got != primary {
+		t.Fatalf("Read() should fall back to primary when lag<0 sentinel, got %p want %p", got, primary)
+	}
+}
+
 func TestPoolRouter_LastLag_ReportsFalseBeforeFirstSample(t *testing.T) {
 	primary := newLazyPool(t)
 	r := NewPoolRouter(primary)

@@ -80,7 +80,21 @@ func WireReplicaRouter(
 	}
 
 	router = router.WithReplica(replicaPool, cfg.ReadReplicaLagTolerance, cfg.ReadReplicaLagSampleInterval)
-	started := router.StartLagSampler(ctx, cfg.ReadReplicaLagSampleInterval)
+
+	// If lag tolerance is non-positive, Read() short-circuits to
+	// primary on every call regardless of any sampled lag, so the
+	// sampler goroutine would just burn one round-trip per interval
+	// for a result Read() never consults. Skip the sampler entirely
+	// in that case and log a WARN so an operator who sees "replica
+	// configured" in the boot logs but zero replica traffic in
+	// pg_stat_activity knows to set a positive tolerance. The replica
+	// pool is still opened so a later runtime knob (if we ever add
+	// one) could flip tolerance without re-opening the pool.
+	samplerEnabled := cfg.ReadReplicaLagTolerance > 0
+	var started bool
+	if samplerEnabled {
+		started = router.StartLagSampler(ctx, cfg.ReadReplicaLagSampleInterval)
+	}
 	stopGauge := RegisterReplicaLagGauge(metrics, router, cfg.ReadReplicaLagSampleInterval)
 
 	// Single Stop closure with the only safe shutdown order baked in.
@@ -100,6 +114,18 @@ func WireReplicaRouter(
 	}
 
 	switch {
+	case !samplerEnabled:
+		// Documented opt-out: KAPP_READ_REPLICA_URL is set but
+		// _LAG_TOLERANCE<=0. Read() unconditionally returns
+		// primary in that case, so the replica connection is
+		// wired but unused. Log a WARN so the operator sees the
+		// silent fallback rather than debugging a "why isn't my
+		// replica getting traffic?" mystery from the metrics
+		// alone. Same noise category as the interval=0 case below.
+		log.Printf(
+			"%s: WARN read replica configured (KAPP_READ_REPLICA_URL set) but lag tolerance is %s; all reads will route to primary and the lag sampler is skipped. Set a positive tolerance (e.g. 1s) to enable replica routing.",
+			service, cfg.ReadReplicaLagTolerance,
+		)
 	case !started && cfg.ReadReplicaLagSampleInterval <= 0:
 		// Documented opt-out: KAPP_READ_REPLICA_URL is set but
 		// _LAG_SAMPLE_INTERVAL=0. Routing will fall back to

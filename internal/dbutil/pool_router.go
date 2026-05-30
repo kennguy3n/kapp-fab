@@ -219,18 +219,37 @@ func (r *PoolRouter) Read() *pgxpool.Pool {
 
 // SampleLag executes the replication-lag query against the replica
 // and atomically updates the router's cached observation. Returns
-// the observed lag.
+// the observed lag, or a negative sentinel when the replica is in
+// recovery but has not yet replayed any WAL.
 //
-// The query mirrors the one in docs/SCALING_RUNBOOK.md so an
-// operator running it by hand sees the same number the router does:
+// The query asks Postgres three things in one round-trip so the
+// caller can distinguish three modes without a second probe:
 //
-//	SELECT GREATEST(0, extract(epoch FROM now() - pg_last_xact_replay_timestamp()))
+//	SELECT pg_is_in_recovery(),
+//	       pg_last_xact_replay_timestamp(),
+//	       EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))
 //
-// `pg_last_xact_replay_timestamp` is NULL on a primary (no upstream
-// to replay from). When NULL, SampleLag reports zero lag — by
-// definition a primary has zero lag relative to itself. This lets
-// the same router code be used in dev where DB_URL and
-// KAPP_READ_REPLICA_URL point at the same instance.
+//	1. in_recovery=FALSE: pool is a primary (or dev case where
+//	   DB_URL == KAPP_READ_REPLICA_URL — single instance). A primary
+//	   has zero lag relative to itself, so lag=0 and the router
+//	   happily routes to it.
+//
+//	2. in_recovery=TRUE, replay_ts=NULL: pool is a freshly-attached
+//	   standby that has not yet replayed any WAL. Its visible state
+//	   is only as fresh as the base backup, which can be hours old.
+//	   Reporting lag=0 here would route point reads (Get/ListPage/
+//	   BulkFetch/Search) to a not-yet-caught-up replica until the
+//	   first WAL apply lands. SampleLag instead stores a -1 ns lag
+//	   sentinel so Read()'s existing `lag < 0` gate (see line ~213)
+//	   falls back to primary. The sentinel is replaced by the real
+//	   lag as soon as replay_ts becomes non-NULL on a subsequent
+//	   sample. Note: keyset walks have a defense-in-depth gate of
+//	   their own — record.snapshotVia returns errReplicaNotReady on
+//	   the same condition — so they already fall back to primary
+//	   regardless of what SampleLag reports.
+//
+//	3. in_recovery=TRUE, replay_ts set: normal lagging standby.
+//	   lag = now() - replay_ts.
 //
 // SampleLag is safe to call from a single dedicated goroutine
 // (typically StartLagSampler below); concurrent callers are
@@ -239,17 +258,42 @@ func (r *PoolRouter) SampleLag(ctx context.Context) (time.Duration, error) {
 	if r == nil || r.replica == nil {
 		return 0, errors.New("dbutil: PoolRouter: no replica configured")
 	}
-	var lagSeconds float64
+	var (
+		inRecovery bool
+		replayTS   *time.Time
+		lagSeconds *float64
+	)
 	err := r.replica.QueryRow(ctx,
-		`SELECT COALESCE(
-		    GREATEST(0, EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))),
-		    0
-		)`,
-	).Scan(&lagSeconds)
+		`SELECT
+		    pg_is_in_recovery(),
+		    pg_last_xact_replay_timestamp(),
+		    EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))`,
+	).Scan(&inRecovery, &replayTS, &lagSeconds)
 	if err != nil {
 		return 0, fmt.Errorf("dbutil: PoolRouter sample lag: %w", err)
 	}
-	lag := time.Duration(lagSeconds * float64(time.Second))
+
+	var lag time.Duration
+	switch {
+	case inRecovery && replayTS == nil:
+		// Standby has not yet replayed any WAL — store -1 ns so
+		// Read() routes to primary via the lag<0 gate.
+		lag = -1
+	case lagSeconds == nil:
+		// Defensive: in_recovery=FALSE with a NULL extract result
+		// means we're on a primary (or a single-instance dev case).
+		// Lag is zero relative to itself.
+		lag = 0
+	default:
+		secs := *lagSeconds
+		if secs < 0 {
+			// Clock skew between primary and standby: replay_ts is
+			// in the future relative to the standby's now(). Treat
+			// as zero rather than a negative sentinel.
+			secs = 0
+		}
+		lag = time.Duration(secs * float64(time.Second))
+	}
 	r.lastLagNanos.Store(int64(lag))
 	r.lastSampledAt.Store(time.Now().UTC().UnixNano())
 	return lag, nil
