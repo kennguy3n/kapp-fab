@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
@@ -65,7 +66,18 @@ func RegisterReplicaLagGauge(reg *MetricsRegistry, router *dbutil.PoolRouter, pu
 	// publishOnce runs on a separate goroutine that can lag the
 	// sampler, so we must accumulate the delta rather than Set on
 	// the counter (counters don't support Set).
-	var lastErrCount uint64
+	//
+	// Stored as atomic.Uint64 even though today there is exactly
+	// one writer at any instant (the initial synchronous
+	// publishOnce below runs to completion before the ticker
+	// goroutine starts, and the goroutine is the only caller after
+	// that): the atomic makes the goroutine-safety property
+	// load-bearing on the type system, not on call-site ordering
+	// that a future maintainer adding a second invoker (e.g. an
+	// on-demand /metrics scrape hook, or a unit-test fixture
+	// running publishOnce alongside the ticker) could silently
+	// break.
+	var lastErrCount atomic.Uint64
 
 	// configured gauge can be set once at registration — the wiring
 	// does not change at runtime.
@@ -83,9 +95,22 @@ func RegisterReplicaLagGauge(reg *MetricsRegistry, router *dbutil.PoolRouter, pu
 			lagGauge.Set(0)
 		}
 		cur := router.LastErrorCount()
-		if cur > lastErrCount {
-			sampleErrorCounter.Add(cur - lastErrCount)
-			lastErrCount = cur
+		// Atomic CAS loop so concurrent publishers never
+		// double-count (each delta is emitted exactly once,
+		// against the lastErrCount snapshot we read at the top of
+		// this iteration). Without the CAS, two concurrent
+		// publishers reading lastErrCount=10 with router count=12
+		// would each Add(2), producing a counter of 14 instead of
+		// the true 12.
+		for {
+			prev := lastErrCount.Load()
+			if cur <= prev {
+				return
+			}
+			if lastErrCount.CompareAndSwap(prev, cur) {
+				sampleErrorCounter.Add(cur - prev)
+				return
+			}
 		}
 	}
 

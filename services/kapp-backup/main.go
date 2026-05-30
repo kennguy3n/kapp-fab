@@ -175,6 +175,17 @@ var TenantScopedTables = []string{
 	// first; the order in this slice already satisfies that.
 	"cycle_count_sessions",
 	"cycle_count_lines",
+	// Phase A2 — O(1) per-tenant record counter that backs the
+	// quota check (CheckRecordCount). PK is (tenant_id) — there is
+	// no surrogate `id`, so the dump's default `(tenant_id, id)`
+	// fallback would silently degrade to ON CONFLICT DO NOTHING.
+	// Declared in tableConflictKeys below so a restore re-applies
+	// the observed record_count for an existing tenant rather than
+	// dropping it. Listed late because no other tenant-scoped
+	// table FK-references it (the krecords/quota relationship is
+	// purely procedural — the counter is rebuilt from krecords
+	// nightly by the reconciler).
+	"tenant_record_counts",
 }
 
 // manifest is the first record in every dump file.
@@ -547,6 +558,16 @@ var tableConflictKeys = map[string][]string{
 	// PK. boms and work_orders use the standard (tenant_id, id) PK and
 	// fall through to the default path.
 	"bom_components": {"tenant_id", "bom_id", "component_item_id"},
+	// Phase A2 — tenant_record_counts has PK (tenant_id) with no
+	// `id` column, so the default upsert path would degrade to
+	// ON CONFLICT DO NOTHING and a re-restore would leave a stale
+	// record_count in place. The natural PK is the single
+	// tenant_id column — declaring it here makes the restore
+	// overwrite record_count + updated_at on conflict, which is
+	// the correct behaviour: the dump's value is the most recent
+	// counter observation, and the daily reconciler will re-true
+	// it up on the next tick anyway.
+	"tenant_record_counts": {"tenant_id"},
 }
 
 // insertRow issues a parameterised INSERT that lists the columns from

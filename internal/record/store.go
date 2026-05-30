@@ -67,12 +67,12 @@ type PGStore struct {
 	// confusing wire-protocol error) or, worse, accept it on a
 	// misconfigured topology.
 	pool *pgxpool.Pool
-	// router routes read-only queries (Get / ListPage / forEach* /
-	// GetByIDs) between the primary pool and an optional replica
-	// pool based on the most recent lag observation. In the no-
-	// replica configuration the router is a thin wrapper whose
-	// Read() returns the primary, so existing single-pool
-	// deployments are unaffected.
+	// router routes read-only queries (Get / List / ListPage /
+	// ListAll / ListByField / ForEach / ForEachByField) between
+	// the primary pool and an optional replica pool based on the
+	// most recent lag observation. In the no-replica configuration
+	// the router is a thin wrapper whose Read() returns the
+	// primary, so existing single-pool deployments are unaffected.
 	router    *dbutil.PoolRouter
 	registry  *ktype.PGRegistry
 	publisher events.Publisher

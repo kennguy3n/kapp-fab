@@ -359,14 +359,6 @@ func NewRunnerWithRouter(router *dbutil.PoolRouter) *Runner {
 	return &Runner{router: router}
 }
 
-// Pool returns the primary pool the runner is bound to. Reads in
-// internal callers (e.g. ad-hoc joins via Definition) sometimes
-// need the raw pool reference; this preserves backward compat with
-// callers that previously reached into Runner.pool. Reads through
-// this pool bypass the replica routing — only use when the caller
-// genuinely needs the primary (e.g. follow-up writes).
-func (r *Runner) Pool() *pgxpool.Pool { return r.router.Primary() }
-
 // Run executes the definition for a tenant and returns a Result. The
 // tenant_id is applied both as a WHERE condition and via the
 // dbutil.WithTenantTx GUC so RLS backs up the application-level
