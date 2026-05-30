@@ -209,11 +209,25 @@ func (d *Dispatcher) Invoke(ctx context.Context, in *InvokeRequest) (*InvokeResu
 		// 4xx (non-408) = terminal failure; surface to caller.
 		return result, nil
 	}
-	// Exhausted retries without ever getting an HTTP round-trip.
-	if lastSendErr != nil {
-		return nil, fmt.Errorf("runtime: invoke: tool %q exhausted retries: %w", in.ToolName, lastSendErr)
-	}
-	return result, nil
+	// Unreachable: every path inside the loop returns on the
+	// final attempt (transport-error branch returns via
+	// `attempt == retry.MaxAttempts`; HTTP branches return via
+	// the 2xx / 4xx / 5xx classifiers; the 5xx-retryable path
+	// also returns when attempt == MaxAttempts). The DB CHECK
+	// `retry_max_attempts >= 1` plus the loop header
+	// `attempt <= retry.MaxAttempts` guarantee the loop body
+	// always runs at least once. A defensive `return result,
+	// nil` here would mislead readers into thinking there is a
+	// reachable exit that propagates the in-flight result up
+	// without classification -- Devin Review ANALYSIS_0003
+	// round-2 on PR #127 flagged exactly that confusion. Using
+	// panic("unreachable") follows the same idiom as the standard
+	// library (cf. fmt/print.go) for compiler-required terminators
+	// on dead paths. lastSendErr is intentionally ignored here:
+	// if it were ever reached, the loop's final-attempt branch
+	// would have returned the wrapped transport error already.
+	_ = lastSendErr
+	panic("runtime: dispatcher.Invoke: unreachable: retry loop must terminate inside body")
 }
 
 // agentToolDescriptor is the row Dispatcher.lookupDescriptor pulls

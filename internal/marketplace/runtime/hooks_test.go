@@ -264,6 +264,113 @@ func TestLifecycleDispatch_Validate(t *testing.T) {
 	}
 }
 
+// TestTransportHooks_PreInstall_408Retried_ThenSucceeds locks in
+// Devin Review ANALYSIS_0002 round-2 on PR #127: 408 must be
+// retryable in the lifecycle hooks dispatcher just like it is in
+// the agent-tool Dispatcher (dispatcher.go:203). Before the fix a
+// 408 from a slow-to-start extension webhook would have aborted
+// pre_install on attempt 1 even though attempt 2 would have
+// succeeded.
+func TestTransportHooks_PreInstall_408Retried_ThenSucceeds(t *testing.T) {
+	responses := []*DispatchResponse{
+		{Status: 408, Header: map[string]string{}},
+		{Status: 200, Header: map[string]string{}},
+	}
+	tr := &InMemoryTransport{Handler: SequenceHandler(responses, nil)}
+	hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+
+	in := validLifecycleDispatch(t)
+	in.Phase = PhasePreInstall
+
+	res, err := hooks.Dispatch(context.Background(), in)
+	if err != nil {
+		t.Fatalf("expected nil err after 408->200, got %v", err)
+	}
+	if res.Aborted {
+		t.Fatalf("408->200 pre_install must not abort: %+v", res)
+	}
+	if res.Status != 200 || res.Attempt != 2 {
+		t.Fatalf("res = %+v, want status=200 attempt=2", res)
+	}
+	if len(tr.Audit) != 2 {
+		t.Fatalf("audit len = %d, want 2 attempts", len(tr.Audit))
+	}
+}
+
+// TestTransportHooks_PreInstall_408Exhausted_AbortsWithHttpReason
+// covers the exhaust path for 408: after all retries are
+// consumed the AbortReason must reflect the http status, not a
+// stale transport-error string. Cross-checks the lastErr-clear
+// fix in the same commit.
+func TestTransportHooks_PreInstall_408Exhausted_AbortsWithHttpReason(t *testing.T) {
+	responses := []*DispatchResponse{
+		{Status: 408, Header: map[string]string{}},
+		{Status: 408, Header: map[string]string{}},
+		{Status: 408, Header: map[string]string{}},
+	}
+	tr := &InMemoryTransport{Handler: SequenceHandler(responses, nil)}
+	hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+
+	in := validLifecycleDispatch(t)
+	in.Phase = PhasePreInstall
+
+	res, err := hooks.Dispatch(context.Background(), in)
+	if !errors.Is(err, ErrPreInstallRejected) {
+		t.Fatalf("err = %v, want ErrPreInstallRejected", err)
+	}
+	if !res.Aborted || res.Status != 408 || res.Attempt != 3 {
+		t.Fatalf("res = %+v, want aborted=true status=408 attempt=3", res)
+	}
+	wantReason := "http 408 after 3 attempts"
+	if res.AbortReason != wantReason {
+		t.Fatalf("AbortReason = %q, want %q", res.AbortReason, wantReason)
+	}
+	if res.Err != nil {
+		t.Fatalf("result.Err = %v, want nil (final attempt got an http round-trip)", res.Err)
+	}
+}
+
+// TestTransportHooks_PreInstall_TransportErrThen5xxExhausted_AbortReasonReflectsHttp
+// locks in Devin Review ANALYSIS_0001 round-2 on PR #127: when
+// attempt 1 fails at the transport layer and a subsequent
+// attempt completes an HTTP round-trip (even an unsuccessful
+// one), the AbortReason / result.Err must reflect the http
+// outcome from the final attempt — not the stale transport
+// error from attempt 1. The lastErr/result.Err reset after a
+// successful Send() guarantees this.
+func TestTransportHooks_PreInstall_TransportErrThen5xxExhausted_AbortReasonReflectsHttp(t *testing.T) {
+	responses := []*DispatchResponse{
+		nil,
+		{Status: 502, Header: map[string]string{}},
+		{Status: 502, Header: map[string]string{}},
+	}
+	errs := []error{
+		errors.New("simulated dns failure"),
+		nil,
+		nil,
+	}
+	tr := &InMemoryTransport{Handler: SequenceHandler(responses, errs)}
+	hooks := NewTransportHooks(tr, fixedClock(time.Unix(1700000000, 0).UTC()))
+
+	in := validLifecycleDispatch(t)
+	in.Phase = PhasePreInstall
+
+	res, err := hooks.Dispatch(context.Background(), in)
+	if !errors.Is(err, ErrPreInstallRejected) {
+		t.Fatalf("err = %v, want ErrPreInstallRejected", err)
+	}
+	if !res.Aborted || res.Status != 502 || res.Attempt != 3 {
+		t.Fatalf("res = %+v, want aborted=true status=502 attempt=3", res)
+	}
+	wantReason := "http 502 after 3 attempts"
+	if res.AbortReason != wantReason {
+		t.Fatalf("AbortReason = %q, want %q (stale transport err leaked from attempt 1)", res.AbortReason, wantReason)
+	}
+	if res.Err != nil {
+		t.Fatalf("result.Err = %v, want nil (final attempt got an http round-trip; stale transport err leaked)", res.Err)
+	}
+}
+
 func TestLifecyclePayload_DefaultEmpty(t *testing.T) {
 	b, err := MarshalLifecyclePayload(nil)
 	if err != nil {

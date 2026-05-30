@@ -248,6 +248,18 @@ func (h *transportHooks) Dispatch(ctx context.Context, in *LifecycleDispatch) (*
 			}
 			continue
 		}
+		// Clear any transport-error state captured by a prior
+		// attempt — this attempt got an HTTP round-trip, so
+		// AbortReason / result.Err must reflect the http result,
+		// not a stale lastErr from attempt N-1. Devin Review
+		// ANALYSIS_0001 round-2 on PR #127 — without this clear,
+		// a DNS failure on attempt 1 followed by a 5xx-exhaust
+		// reported "transport: dns failure" instead of
+		// "http 5xx after N attempts", and result.Err violated
+		// its documented contract ("final attempt's transport
+		// error").
+		lastErr = nil
+		result.Err = nil
 		result.LatencyMS = int(resp.Latency / time.Millisecond)
 		result.Status = resp.Status
 
@@ -262,12 +274,22 @@ func (h *transportHooks) Dispatch(ctx context.Context, in *LifecycleDispatch) (*
 			result.Aborted = false
 			return result, nil
 		}
-		// 4xx (except 404) = terminal extension-side rejection.
-		// Pre-phases abort; post-phases just log.
+		// 408 (Request Timeout) is retryable — mirrors the
+		// agent-tool Dispatcher behaviour at dispatcher.go:203
+		// so the two retry classifiers stay in lock-step. Devin
+		// Review ANALYSIS_0002 round-2 on PR #127 caught the
+		// drift: extensions whose webhook server returns 408 on
+		// startup would have aborted pre_install without retry
+		// even though the same 408 from a tool invoke retries.
+		if resp.Status == 408 || resp.Status >= 500 {
+			// 5xx + 408 = retryable. Continue the loop.
+			continue
+		}
+		// 4xx (except 404 / 408) = terminal extension-side
+		// rejection. Pre-phases abort; post-phases just log.
 		if resp.Status >= 400 && resp.Status < 500 {
 			break
 		}
-		// 5xx = retryable. Continue the loop.
 	}
 
 	// Exhausted retries OR terminal 4xx. Classify based on phase.
