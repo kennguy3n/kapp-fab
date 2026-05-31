@@ -370,19 +370,25 @@ func (w *ReviewWorker) recordFailureOrDeadLetter(
 		`{"ran_at":%q,"status":"dead_letter","worst":"error","checks":[{"name":"review.dead_letter","passed":false,"worst":"error","errors":1,"warns":0,"infos":0}]}`,
 		now.Format(time.RFC3339Nano),
 	))
-	// Note: RecordAttemptFailure cleared claimed_by/claimed_at
-	// inside its own tx, so the ExpectedClaim guard on this
-	// UPDATE would fail. Pass ExpectedClaim=nil and instead use
-	// MinAttemptCount: an admin Rescan landing between
-	// RecordAttemptFailure and this UPDATE would have reset
-	// attempt_count to 0, so the MinAttemptCount=MaxReviewAttempts
-	// predicate refuses the dead-letter UPDATE (UpdateReviewState
-	// surfaces this as ErrClaimLost; we drop the transition and
-	// let the next tick re-claim the freshly-rescanned row).
-	// Without this guard the dead-letter UPDATE would otherwise
-	// race the rescan and clobber a rescued row back to terminal
-	// state — admin Rescan + worker cycling = exactly the window
-	// where this matters.
+	// RecordAttemptFailure retains the claim on the >= MaxReviewAttempts
+	// path (see its godoc) so the dead-letter UPDATE can authenticate
+	// via ExpectedClaim — the exact same tuple the worker used for the
+	// pipeline run. This is the load-bearing guard against an admin
+	// Rescan landing between RecordAttemptFailure and this UPDATE:
+	// Rescan clears claimed_by/claimed_at, so the ExpectedClaim
+	// predicate fails and UpdateReviewState surfaces ErrClaimLost.
+	//
+	// MinAttemptCount=MaxReviewAttempts is kept as defense in depth.
+	// The ExpectedClaim guard is the primary correctness mechanism;
+	// MinAttemptCount catches a hypothetical bug where the claim is
+	// somehow preserved across a Rescan. Both guards firing is fine
+	// (they both demand the same outcome — refuse the UPDATE).
+	//
+	// Holding the claim through this transition also closes the
+	// wasted-pipeline-run window where another replica could
+	// otherwise claim a NULL-claim row between RecordAttemptFailure
+	// and this UPDATE, run a doomed pipeline, then find the row
+	// already dead-lettered.
 	if _, err := w.store.Reviews().UpdateReviewState(bookCtx, marketplace.UpdateReviewStateInput{
 		VersionID:       versionID,
 		Status:          marketplace.ReviewStatusDeadLetter,
@@ -392,7 +398,7 @@ func (w *ReviewWorker) recordFailureOrDeadLetter(
 			marketplace.MaxReviewAttempts, errMsg,
 		),
 		Reviewer:        "system",
-		ExpectedClaim:   nil,
+		ExpectedClaim:   expectedClaim,
 		MinAttemptCount: marketplace.MaxReviewAttempts,
 	}); err != nil {
 		if errors.Is(err, marketplace.ErrClaimLost) {

@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -526,9 +527,24 @@ func run() error {
 	mktReviewWorker := NewReviewWorker(mktStore, mktReviewPipeline, slog.Default(), 5*time.Second, 4, 4, identity)
 
 	// Spin the review worker on this replica regardless of
-	// leadership status. The goroutine unwinds when rootCtx
-	// cancels (process shutdown).
-	go mktReviewWorker.Run(ctx)
+	// leadership status. The goroutine unwinds when ctx cancels
+	// (process shutdown signal). We explicitly join via WaitGroup
+	// before returning from run() — relying on the implicit join
+	// via pool.Close() (which blocks until acquired connections
+	// release) works but the coupling is undocumented and fragile
+	// (e.g. if a future refactor moves the pool defer or splits
+	// the worker onto a separate pool, the implicit join breaks
+	// silently). The explicit Wait makes the shutdown contract
+	// load-bearing on the goroutine and surfaces any future
+	// long-running blocking call inside Run as a visible deadlock
+	// rather than a silent in-flight write at process exit.
+	var reviewWG sync.WaitGroup
+	reviewWG.Add(1)
+	go func() {
+		defer reviewWG.Done()
+		mktReviewWorker.Run(ctx)
+	}()
+	defer reviewWG.Wait()
 
 	return election.Run(ctx, func(leaderCtx context.Context) error {
 		return leadWorker(leaderCtx, leaderState{

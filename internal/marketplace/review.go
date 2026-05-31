@@ -684,13 +684,29 @@ func truncateUTF8(s string, maxBytes int) string {
 	return s[:out]
 }
 
-// RecordAttemptFailure increments attempt_count on the row, stamps
-// the new last_attempt_error / last_attempt_at, and clears the
-// worker's claim so the next ClaimSubmittedReviewVersions poll
-// re-picks the row immediately (no need to wait for the 10-minute
-// lease to lapse). The increment happens under FOR UPDATE on the
-// row so concurrent ClaimSubmittedReviewVersions calls see the
-// incremented counter atomically.
+// RecordAttemptFailure increments attempt_count on the row and
+// stamps the new last_attempt_error / last_attempt_at. The
+// increment happens under FOR UPDATE on the row so concurrent
+// ClaimSubmittedReviewVersions calls see the incremented counter
+// atomically.
+//
+// Claim handling is conditional on the post-increment count:
+//
+//   - count < MaxReviewAttempts: claim is cleared (set NULL) so
+//     the next ClaimSubmittedReviewVersions poll re-picks the row
+//     immediately, no need to wait for the 10-minute lease to
+//     lapse.
+//   - count >= MaxReviewAttempts: claim is RETAINED so the
+//     caller (worker) can run the dead-letter UpdateReviewState
+//     transition under its own ExpectedClaim guard. This closes
+//     a wasted-pipeline-run race window where, between this
+//     UPDATE committing and the dead-letter UPDATE landing,
+//     another replica could otherwise claim the row (claim was
+//     NULL) and begin a doomed pipeline run that the dead-letter
+//     transition would then invalidate. With the claim retained,
+//     ClaimSubmittedReviewVersions correctly skips the row
+//     (its WHERE clause requires NULL-or-stale claimed_at), so
+//     no second worker can race.
 //
 // When the post-increment attempt_count is >= MaxReviewAttempts,
 // returns (newCount, ErrReviewMaxAttemptsExceeded) WITHOUT
@@ -748,19 +764,27 @@ func (rs *ReviewStateStore) RecordAttemptFailure(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Increment + clear claim atomically. The claim guard fires
-	// when an admin Rescan landed between claim and this call:
-	// ResetReviewStateForRescan nulls claimed_by/claimed_at, so
-	// the guard's `claimed_by = $expectedBy` predicate fails and
-	// the UPDATE affects zero rows.
+	// Increment + conditionally clear claim atomically. The claim
+	// is retained when the post-increment count crosses
+	// MaxReviewAttempts so the caller's dead-letter UPDATE can
+	// authenticate via ExpectedClaim — see this method's godoc for
+	// the wasted-pipeline-run race this closes.
+	//
+	// The claim guard fires when an admin Rescan landed between
+	// claim and this call: ResetReviewStateForRescan nulls
+	// claimed_by/claimed_at, so the guard's `claimed_by =
+	// $expectedBy` predicate fails and the UPDATE affects zero
+	// rows.
 	var newCount int
 	err = tx.QueryRow(ctx,
 		`UPDATE marketplace_extension_review_state
 		    SET attempt_count = attempt_count + 1,
 		        last_attempt_error = $2,
 		        last_attempt_at = now(),
-		        claimed_at = NULL,
-		        claimed_by = NULL,
+		        claimed_at = CASE WHEN (attempt_count + 1) >= $6::int
+		                          THEN claimed_at ELSE NULL END,
+		        claimed_by = CASE WHEN (attempt_count + 1) >= $6::int
+		                          THEN claimed_by ELSE NULL END,
 		        updated_at = now()
 		  WHERE extension_version_id = $1
 		    AND status = $3
@@ -769,6 +793,7 @@ func (rs *ReviewStateStore) RecordAttemptFailure(
 		 RETURNING attempt_count`,
 		versionID, errMsg, string(ReviewStatusSubmitted),
 		expectedClaimBy, expectedClaimAt,
+		MaxReviewAttempts,
 	).Scan(&newCount)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

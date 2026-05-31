@@ -1045,14 +1045,22 @@ func (h *marketplaceHandlers) submitVersion(w http.ResponseWriter, r *http.Reque
 // reviewQueue returns versions that need reviewer / admin
 // attention: `submitted`, `automated_passed`, `manual_review`,
 // and `dead_letter` (B7.2 — abandoned after MaxReviewAttempts;
-// admin recovers via Rescan). Ordered FIFO per status (oldest
-// first) so the queue surfaces long-waiting items first.
+// admin recovers via Rescan). Each status block is FIFO (oldest
+// first via ListVersionsByReviewStatus's ORDER BY created_at).
 //
-// ?status= filters to a single review state. `dead_letter` is a
-// valid filter so the admin can isolate the abandoned queue and
-// triage each row before clicking Rescan; without the filter the
-// default response interleaves dead_letter rows with the
-// regular review queue so they aren't accidentally hidden.
+// Composition: when ?status= is omitted, the response concatenates
+// per-status pages in fixed order — submitted, automated_passed,
+// manual_review, dead_letter — NOT interleaved by created_at
+// across statuses. The fixed order keeps the UI grouping stable
+// (admins see fresh work at the top, abandoned rows at the
+// bottom), and dead_letter rows are appended rather than hidden
+// behind silent filtering. ?status=dead_letter isolates the
+// abandoned queue for triage before clicking Rescan.
+//
+// Response size: 4 statuses × 500-row per-status cap (enforced
+// by ListVersionsByReviewStatus) = 2000 items maximum in the
+// default response. A future paginated variant is the right home
+// for callers that need stable cursoring.
 func (h *marketplaceHandlers) reviewQueue(w http.ResponseWriter, r *http.Request) {
 	statusParam := strings.TrimSpace(r.URL.Query().Get("status"))
 	statuses := []marketplace.ReviewStatus{

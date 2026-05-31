@@ -118,6 +118,14 @@ func TestMarketplaceB72_AttemptCountIncrements(t *testing.T) {
 // worker would then run the dead_letter UpdateReviewState
 // transition; we verify that transition succeeds and produces a
 // terminal row that ClaimSubmittedReviewVersions no longer sees.
+//
+// As of the round-2 race fix, RecordAttemptFailure RETAINS the
+// claim on the >= MaxReviewAttempts path (see its godoc) so the
+// caller's dead-letter UPDATE can authenticate via ExpectedClaim.
+// This test verifies that contract end-to-end: after the final
+// RecordAttemptFailure, the claim columns must still match the
+// worker's last claim, and the dead-letter UpdateReviewState call
+// with that ExpectedClaim must succeed.
 func TestMarketplaceB72_DeadLetterAfterMaxAttempts(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
@@ -127,7 +135,10 @@ func TestMarketplaceB72_DeadLetterAfterMaxAttempts(t *testing.T) {
 	ver := seedExtensionVersion(t, store, "b72_dl")
 
 	const workerID = "worker-b72-dl"
-	var lastErr error
+	var (
+		lastErr   error
+		lastGuard *marketplace.ReviewClaimGuard
+	)
 	for i := 1; i <= marketplace.MaxReviewAttempts; i++ {
 		claims, err := store.ClaimSubmittedReviewVersions(ctx, workerID, 64)
 		if err != nil {
@@ -141,6 +152,7 @@ func TestMarketplaceB72_DeadLetterAfterMaxAttempts(t *testing.T) {
 			t.Errorf("attempt %d newCount=%d", i, newCount)
 		}
 		lastErr = err
+		lastGuard = guard
 		if i < marketplace.MaxReviewAttempts {
 			if err != nil {
 				t.Errorf("attempt %d: expected nil error, got %v", i, err)
@@ -155,17 +167,41 @@ func TestMarketplaceB72_DeadLetterAfterMaxAttempts(t *testing.T) {
 		t.Fatalf("final attempt did not signal max-attempts exceeded; got %v", lastErr)
 	}
 
+	// The retained-claim contract: after the final
+	// RecordAttemptFailure the claim columns must still match the
+	// worker's claim tuple (NOT NULL) so the dead-letter UPDATE
+	// can authenticate via ExpectedClaim.
+	var (
+		dbClaimedBy *string
+		dbClaimedAt *time.Time
+	)
+	if err := h.pool.QueryRow(ctx,
+		`SELECT claimed_by, claimed_at
+		   FROM marketplace_extension_review_state
+		  WHERE extension_version_id = $1`,
+		ver,
+	).Scan(&dbClaimedBy, &dbClaimedAt); err != nil {
+		t.Fatalf("read post-max claim: %v", err)
+	}
+	if dbClaimedBy == nil || dbClaimedAt == nil {
+		t.Fatalf("claim cleared after Max-th failure; expected retention for dead-letter handoff (claimed_by=%v claimed_at=%v)", dbClaimedBy, dbClaimedAt)
+	}
+	if *dbClaimedBy != lastGuard.ClaimedBy || !dbClaimedAt.Equal(lastGuard.ClaimedAt) {
+		t.Errorf("retained claim drifted: got (%q, %s) want (%q, %s)",
+			*dbClaimedBy, dbClaimedAt.UTC(), lastGuard.ClaimedBy, lastGuard.ClaimedAt.UTC())
+	}
+
 	// Worker drives the dead-letter transition via the standard
-	// UpdateReviewState path (no backdoor). The row stays in
-	// submitted with cleared claim columns until the worker does
-	// this step, so the transition mirrors what the production
-	// worker does on ErrReviewMaxAttemptsExceeded.
+	// UpdateReviewState path (no backdoor). Uses the retained
+	// claim as ExpectedClaim — the production worker does the
+	// same thing.
 	if _, err := store.Reviews().UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
-		VersionID:     ver,
-		Status:        marketplace.ReviewStatusDeadLetter,
-		Reviewer:      "system",
-		ManualNotes:   fmt.Sprintf("pipeline failed %d times", marketplace.MaxReviewAttempts),
-		ExpectedClaim: nil,
+		VersionID:       ver,
+		Status:          marketplace.ReviewStatusDeadLetter,
+		Reviewer:        "system",
+		ManualNotes:     fmt.Sprintf("pipeline failed %d times", marketplace.MaxReviewAttempts),
+		ExpectedClaim:   lastGuard,
+		MinAttemptCount: marketplace.MaxReviewAttempts,
 	}); err != nil {
 		t.Fatalf("dead-letter transition: %v", err)
 	}
@@ -419,25 +455,29 @@ func TestMarketplaceB72_MultiReplicaClaimSafety(t *testing.T) {
 }
 
 // TestMarketplaceB72_DeadLetterRaceWithRescan pins the
-// dead-letter-vs-rescan race fix added after Devin Review on
-// PR #134. The scenario:
+// dead-letter-vs-rescan defense-in-depth path. The scenario:
 //
-//  1. Worker pipeline fails, RecordAttemptFailure increments
-//     attempt_count to MaxReviewAttempts and clears the claim
-//     columns (returns ErrReviewMaxAttemptsExceeded).
+//  1. Some prior code path leaves the row at attempt_count =
+//     MaxReviewAttempts with NULL claim columns (the legacy
+//     RecordAttemptFailure behavior, or a hypothetical bug).
 //  2. Admin clicks Rescan; ResetReviewStateForRescan resets
-//     attempt_count to 0 (status stays submitted because
-//     RecordAttemptFailure didn't transition).
+//     attempt_count to 0.
 //  3. Worker proceeds with the dead-letter UpdateReviewState
-//     transition. ExpectedClaim is nil (step 1 cleared it), so
-//     the claim guard cannot fire — without the MinAttemptCount
-//     guard the UPDATE would clobber the rescued row back to
-//     dead_letter and admin Rescan would be silently undone.
+//     transition. ExpectedClaim is nil (claim was lost), so the
+//     ExpectedClaim guard cannot fire — without the
+//     MinAttemptCount guard the UPDATE would clobber the rescued
+//     row back to dead_letter and admin Rescan would be silently
+//     undone.
 //
 // With MinAttemptCount=MaxReviewAttempts on the dead-letter
 // UpdateReviewState call, the UPDATE refuses (attempt_count=0
 // after rescan) and surfaces as ErrClaimLost so the worker drops
 // the transition. Row remains submitted with a fresh budget.
+//
+// In current production code, the wasted-pipeline-run race fix
+// also retains the claim through Max, so the ExpectedClaim guard
+// is the primary defense; MinAttemptCount remains here as belt
+// and braces and is what this test pins.
 func TestMarketplaceB72_DeadLetterRaceWithRescan(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
@@ -536,6 +576,128 @@ func TestMarketplaceB72_DeadLetterStillWorksWithGuard(t *testing.T) {
 	}
 	if out.Status != marketplace.ReviewStatusDeadLetter {
 		t.Errorf("status = %s, want dead_letter", out.Status)
+	}
+}
+
+// TestMarketplaceB72_ClaimRetainedOnMaxAttempts pins the round-2
+// race fix: when the post-increment attempt_count crosses
+// MaxReviewAttempts, RecordAttemptFailure must RETAIN the claim
+// columns (not NULL them) so the caller's dead-letter UPDATE can
+// authenticate via ExpectedClaim. Below-Max increments still clear
+// the claim so the next ClaimSubmittedReviewVersions tick re-picks
+// the row immediately without waiting for the 10-min lease.
+//
+// Without claim retention, another replica could ClaimSubmittedReviewVersions
+// the row in the window between this UPDATE committing and the
+// dead-letter UPDATE landing, then run a doomed pipeline that
+// the dead-letter transition would invalidate — wasted work and
+// confusing audit log.
+func TestMarketplaceB72_ClaimRetainedOnMaxAttempts(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	preClaimSubmittedRows(ctx, t, h.pool)
+
+	// Below-Max: claim MUST be cleared so the next tick re-claims.
+	verBelow := seedExtensionVersion(t, store, "b72_below_max_claim_cleared")
+	const workerBelow = "worker-b72-below"
+	claimsBelow, err := store.ClaimSubmittedReviewVersions(ctx, workerBelow, 64)
+	if err != nil {
+		t.Fatalf("below: claim: %v", err)
+	}
+	cb := findClaim(t, claimsBelow, verBelow)
+	guardBelow := &marketplace.ReviewClaimGuard{ClaimedBy: workerBelow, ClaimedAt: cb.ClaimedAt}
+	if _, err := store.Reviews().RecordAttemptFailure(ctx, verBelow, guardBelow, "first failure"); err != nil {
+		t.Fatalf("below: record attempt failure: %v", err)
+	}
+	var (
+		belowBy *string
+		belowAt *time.Time
+	)
+	if err := h.pool.QueryRow(ctx,
+		`SELECT claimed_by, claimed_at
+		   FROM marketplace_extension_review_state
+		  WHERE extension_version_id = $1`,
+		verBelow,
+	).Scan(&belowBy, &belowAt); err != nil {
+		t.Fatalf("below: read post-failure claim: %v", err)
+	}
+	if belowBy != nil || belowAt != nil {
+		t.Errorf("below-Max claim should have been cleared; got (%v, %v)", belowBy, belowAt)
+	}
+
+	// At-Max: claim MUST be retained for the caller's dead-letter UPDATE.
+	verMax := seedExtensionVersion(t, store, "b72_at_max_claim_retained")
+	const workerMax = "worker-b72-max"
+	// Pre-stamp attempt_count to MaxReviewAttempts - 1 so the
+	// next RecordAttemptFailure crosses the threshold on its
+	// first call. Avoids running 5 sequential claim/fail cycles.
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE marketplace_extension_review_state
+		    SET attempt_count = $1
+		  WHERE extension_version_id = $2`,
+		marketplace.MaxReviewAttempts-1, verMax,
+	); err != nil {
+		t.Fatalf("at-max: pre-stamp: %v", err)
+	}
+	claimsMax, err := store.ClaimSubmittedReviewVersions(ctx, workerMax, 64)
+	if err != nil {
+		t.Fatalf("at-max: claim: %v", err)
+	}
+	cm := findClaim(t, claimsMax, verMax)
+	guardMax := &marketplace.ReviewClaimGuard{ClaimedBy: workerMax, ClaimedAt: cm.ClaimedAt}
+	newCount, recordErr := store.Reviews().RecordAttemptFailure(ctx, verMax, guardMax, "final failure")
+	if !errors.Is(recordErr, marketplace.ErrReviewMaxAttemptsExceeded) {
+		t.Fatalf("at-max: expected ErrReviewMaxAttemptsExceeded, got %v", recordErr)
+	}
+	if newCount != marketplace.MaxReviewAttempts {
+		t.Errorf("at-max: newCount = %d, want %d", newCount, marketplace.MaxReviewAttempts)
+	}
+	var (
+		maxBy *string
+		maxAt *time.Time
+	)
+	if err := h.pool.QueryRow(ctx,
+		`SELECT claimed_by, claimed_at
+		   FROM marketplace_extension_review_state
+		  WHERE extension_version_id = $1`,
+		verMax,
+	).Scan(&maxBy, &maxAt); err != nil {
+		t.Fatalf("at-max: read post-failure claim: %v", err)
+	}
+	if maxBy == nil || maxAt == nil {
+		t.Fatalf("at-Max claim should have been retained for dead-letter handoff; got (%v, %v)", maxBy, maxAt)
+	}
+	if *maxBy != workerMax || !maxAt.Equal(cm.ClaimedAt) {
+		t.Errorf("at-Max retained claim drifted: got (%q, %s) want (%q, %s)",
+			*maxBy, maxAt.UTC(), workerMax, cm.ClaimedAt.UTC())
+	}
+
+	// A second worker MUST NOT re-claim the retained-claim row
+	// before the lease expires — its claimed_at is fresh (just
+	// now()) so the ClaimSubmittedReviewVersions WHERE clause
+	// skips it.
+	const otherWorker = "worker-b72-other"
+	otherClaims, err := store.ClaimSubmittedReviewVersions(ctx, otherWorker, 64)
+	if err != nil {
+		t.Fatalf("other: claim: %v", err)
+	}
+	if c := findClaimOrNil(otherClaims, verMax); c != nil {
+		t.Errorf("at-Max row leaked to second worker before dead-letter transition; claim=%+v", c)
+	}
+
+	// The dead-letter UPDATE with the retained claim must succeed.
+	if _, err := store.Reviews().UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
+		VersionID:       verMax,
+		Status:          marketplace.ReviewStatusDeadLetter,
+		AutomatedChecks: []byte(`{"status":"dead_letter"}`),
+		ManualNotes:     "pipeline failed N times",
+		Reviewer:        "system",
+		ExpectedClaim:   guardMax,
+		MinAttemptCount: marketplace.MaxReviewAttempts,
+	}); err != nil {
+		t.Fatalf("at-max: dead-letter with retained claim: %v", err)
 	}
 }
 
