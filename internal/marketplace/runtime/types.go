@@ -68,10 +68,11 @@ type LifecyclePhase string
 // (/lifecycle/<value>) on the extension's webhook_base AND to a
 // DispatchKind enum value via DispatchKindForPhase.
 const (
-	PhasePreInstall    LifecyclePhase = "pre_install"
-	PhasePostInstall   LifecyclePhase = "post_install"
-	PhasePreUninstall  LifecyclePhase = "pre_uninstall"
-	PhasePostUninstall LifecyclePhase = "post_uninstall"
+	PhasePreInstall         LifecyclePhase = "pre_install"
+	PhasePostInstall        LifecyclePhase = "post_install"
+	PhasePreUninstall       LifecyclePhase = "pre_uninstall"
+	PhasePostUninstall      LifecyclePhase = "post_uninstall"
+	PhasePostUpdateSettings LifecyclePhase = "post_update_settings"
 )
 
 // LifecyclePath returns the URL path component for this phase as it
@@ -91,13 +92,14 @@ type DispatchKind string
 // (tool_invoke), the event delivery worker (event_delivery), and
 // the health-check probe (health_check).
 const (
-	KindToolInvoke             DispatchKind = "tool_invoke"
-	KindLifecyclePreInstall    DispatchKind = "lifecycle_pre_install"
-	KindLifecyclePostInstall   DispatchKind = "lifecycle_post_install"
-	KindLifecyclePreUninstall  DispatchKind = "lifecycle_pre_uninstall"
-	KindLifecyclePostUninstall DispatchKind = "lifecycle_post_uninstall"
-	KindEventDelivery          DispatchKind = "event_delivery"
-	KindHealthCheck            DispatchKind = "health_check"
+	KindToolInvoke                  DispatchKind = "tool_invoke"
+	KindLifecyclePreInstall         DispatchKind = "lifecycle_pre_install"
+	KindLifecyclePostInstall        DispatchKind = "lifecycle_post_install"
+	KindLifecyclePreUninstall       DispatchKind = "lifecycle_pre_uninstall"
+	KindLifecyclePostUninstall      DispatchKind = "lifecycle_post_uninstall"
+	KindLifecyclePostUpdateSettings DispatchKind = "lifecycle_post_update_settings"
+	KindEventDelivery               DispatchKind = "event_delivery"
+	KindHealthCheck                 DispatchKind = "health_check"
 )
 
 // DispatchKindForPhase maps a lifecycle phase to its dispatch log
@@ -114,6 +116,8 @@ func DispatchKindForPhase(p LifecyclePhase) DispatchKind {
 		return KindLifecyclePreUninstall
 	case PhasePostUninstall:
 		return KindLifecyclePostUninstall
+	case PhasePostUpdateSettings:
+		return KindLifecyclePostUpdateSettings
 	default:
 		return ""
 	}
@@ -315,6 +319,40 @@ type UninstallRequest struct {
 func (r *UninstallRequest) Validate() error {
 	if r == nil {
 		return errors.New("runtime: nil uninstall request")
+	}
+	if r.TenantID == uuid.Nil {
+		return errors.New("runtime: tenant_id required")
+	}
+	if r.InstallationID == uuid.Nil {
+		return errors.New("runtime: installation_id required")
+	}
+	return nil
+}
+
+// UpdateSettingsRequest captures the parameters of an
+// Engine.UpdateSettings call. The B6 API handler builds one of
+// these from a PATCH /installations/{id}/settings request body.
+type UpdateSettingsRequest struct {
+	TenantID       uuid.UUID
+	InstallationID uuid.UUID
+	// UpdatedBy is the operator initiating the change (audit
+	// only — the settings column has no "updated_by" today).
+	UpdatedBy uuid.UUID
+	// Settings is the new settings document. Validated against
+	// the version's settings_schema BEFORE the UPDATE, so a
+	// schema violation never reaches the DB.
+	Settings map[string]any
+	// SkipHooks short-circuits the post_update_settings hook
+	// dispatch. Mirrors UninstallRequest.SkipHooks; used when
+	// the extension's webhook server is known unreachable and
+	// the operator wants the settings change to land regardless.
+	SkipHooks bool
+}
+
+// Validate runs field-level sanity checks.
+func (r *UpdateSettingsRequest) Validate() error {
+	if r == nil {
+		return errors.New("runtime: nil update_settings request")
 	}
 	if r.TenantID == uuid.Nil {
 		return errors.New("runtime: tenant_id required")

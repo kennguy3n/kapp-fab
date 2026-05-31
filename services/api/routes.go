@@ -724,6 +724,91 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Get("/pay-runs/{id}/payslips", d.hrh.listPayRunPayslips)
 		})
 
+		// Phase 2a B6 — marketplace HTTP surface. Three logical
+		// groups share a single handler bundle:
+		//
+		//   - /api/v1/marketplace/extensions[/...] — tenant
+		//     browse + install + uninstall + settings update.
+		//     Reads are gated on `marketplace.read` so any
+		//     authenticated tenant member can browse; writes
+		//     (install / uninstall / settings) need
+		//     `marketplace.admin`.
+		//   - /api/v1/marketplace/publisher/extensions[/...] —
+		//     publisher-side surface (create extension, list
+		//     own extensions, submit a new version). Gated on
+		//     `marketplace.publisher` because publishing under
+		//     a tenant's slug must be restricted to the role.
+		//   - /api/v1/admin/marketplace/... — admin review
+		//     surface. Defined separately below under
+		//     adminChain.
+		//
+		// The handler is nil when its dependencies didn't
+		// construct (store/engine/resolver any nil). In that
+		// case we skip mounting — matches the iah / adminPool
+		// pattern further up.
+		if d.mph != nil {
+			r.Route("/api/v1/marketplace", func(r chi.Router) {
+				d.tenantChain(r)
+				r.Use(d.apiCallMW)
+
+				// Browse: anonymous-within-tenant read on the
+				// catalog. No write middleware needed.
+				r.Group(func(r chi.Router) {
+					r.Use(d.authzGate("marketplace.read", ""))
+					r.Get("/extensions", d.mph.listExtensions)
+					r.Get("/extensions/{ext_id}", d.mph.getExtension)
+					r.Get("/extensions/{ext_id}/versions", d.mph.listVersions)
+					r.Get("/installations", d.mph.listInstallations)
+					r.Get("/installations/{install_id}", d.mph.getInstallation)
+				})
+
+				// Install / uninstall / settings update.
+				// Idempotency middleware so a retried install
+				// request doesn't double-dispatch lifecycle
+				// hooks; rate-limit so a runaway script
+				// can't burn quota on bundle fetches.
+				r.Group(func(r chi.Router) {
+					r.Use(d.authzGate("marketplace.admin", ""))
+					r.Use(platform.IdempotencyMiddleware(d.pool))
+					r.Use(d.rateLimitMW)
+					r.Use(platform.QuotaMiddleware(d.quotaEnforcer))
+					r.Post("/installations", d.mph.install)
+					r.Patch("/installations/{install_id}/settings", d.mph.updateSettings)
+					r.Delete("/installations/{install_id}", d.mph.uninstall)
+				})
+
+				// Publisher surface — strictly more restrictive
+				// authz than the catalog read above. The role
+				// must be granted explicitly per tenant; B7
+				// will own the publisher-slug ownership table
+				// (we accept any tenant member with the role
+				// in v1).
+				r.Route("/publisher", func(r chi.Router) {
+					r.Use(d.authzGate("marketplace.publisher", ""))
+					r.Use(platform.IdempotencyMiddleware(d.pool))
+					r.Use(d.rateLimitMW)
+					r.Use(platform.QuotaMiddleware(d.quotaEnforcer))
+					r.Post("/extensions", d.mph.createExtension)
+					r.Get("/extensions", d.mph.listPublisherExtensions)
+					r.Post("/extensions/{ext_id}/versions", d.mph.submitVersion)
+				})
+			})
+
+			// Admin review queue — outside the tenant-scoped
+			// group above because review actions are cross-
+			// tenant operator surface (an admin reviews every
+			// publisher's submissions, not just their own
+			// tenant's). Mounts under adminChain alongside
+			// the isolation-audit + tier-upgrade endpoints.
+			r.Route("/api/v1/admin/marketplace", func(r chi.Router) {
+				d.adminChain(r)
+				r.Get("/review-queue", d.mph.reviewQueue)
+				r.Post("/versions/{ver_id}/review", d.mph.reviewTransition)
+				r.Post("/extensions/{ext_id}/list", d.mph.listExtension)
+				r.Post("/versions/{ver_id}/yank", d.mph.yankVersion)
+			})
+		}
+
 		// Phase I helpdesk surface. Tickets themselves ride the generic
 		// KRecord CRUD at /api/v1/records/helpdesk.ticket; these routes
 		// back the SLA policy list/upsert the UI needs when authoring

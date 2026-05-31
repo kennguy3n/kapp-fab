@@ -202,6 +202,7 @@ type apiDeps struct {
 	insembh        *insightsEmbedHandlers
 	hrh            *hrHandlers
 	inboundHandler *helpdeskInboundHandlers
+	mph            *marketplaceHandlers
 
 	// Prometheus-compatible metrics registry. Wired into the
 	// MetricsMiddleware for request_total + request_duration and

@@ -1003,12 +1003,28 @@ func (s *Store) GetInstallation(ctx context.Context, tenantID, installID uuid.UU
 	}
 	var out Installation
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// Tenant isolation is enforced via two independent
+		// mechanisms in defence-in-depth (same rationale as
+		// ListInstallationsForTenant just below):
+		//
+		//  1. RLS — the surrounding WithTenantTx sets
+		//     app.tenant_id and the policy on
+		//     marketplace_extension_installations restricts
+		//     to the matching tenant_id.
+		//  2. Explicit `AND tenant_id = $2` predicate.
+		//
+		// On a BYPASSRLS connection (integration test
+		// harness, ops scripts, the kapp_admin pool) the RLS
+		// policy is short-circuited; the explicit predicate
+		// is what keeps a cross-tenant lookup from leaking a
+		// row. Without it the install_id alone would resolve
+		// to whichever tenant happens to own the row.
 		row := tx.QueryRow(ctx,
 			`SELECT id, tenant_id, extension_id, extension_version_id, status, settings::text,
 			        webhook_base, installed_by, installed_at, updated_at,
 			        last_health_check_at, COALESCE(last_health_check_status,''), COALESCE(failure_reason,'')
 			 FROM marketplace_extension_installations
-			 WHERE id = $1`, installID,
+			 WHERE id = $1 AND tenant_id = $2`, installID, tenantID,
 		)
 		err := row.Scan(
 			&out.ID, &out.TenantID, &out.ExtensionID, &out.ExtensionVersionID, &out.Status,
