@@ -65,6 +65,7 @@ var TenantScopedTables = []string{
 	"tenant_ktypes",
 	"landed_cost_vouchers", "landed_cost_charges", "landed_cost_targets",
 	"cycle_count_sessions", "cycle_count_lines",
+	"tenant_record_counts",
 }
 
 // SchemaName returns the canonical dedicated-schema name for a

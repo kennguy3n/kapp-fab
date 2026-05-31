@@ -81,7 +81,25 @@ func run() error {
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
 	eventPublisher := events.NewPGPublisher(pool)
 	auditor := audit.NewPGLogger(pool)
-	recordStore := record.NewPGStore(pool, ktypeRegistry, eventPublisher, auditor)
+	// A1: route read-only queries on the importer's record store
+	// (used by validator dedup lookups) through the replica when
+	// KAPP_READ_REPLICA_URL is set. Writes (the actual record
+	// inserts the pipeline emits) always stay on the primary.
+	// platform.WireReplicaRouter centralises pool open, router
+	// build, lag sampler start, and the shutdown ordering that
+	// joins the sampler goroutine before closing the replica pool;
+	// the helper returns a single stopReplica closure that bakes
+	// the order in — see its docstring for the teardown contract.
+	//
+	// Importer has no MetricsRegistry, so we pass nil — the helper
+	// silently skips lag/error gauge registration and just closes
+	// the router + replica pool on shutdown.
+	dbRouter, stopReplica, err := platform.WireReplicaRouter(ctx, "importer", cfg, pool, nil)
+	if err != nil {
+		return err
+	}
+	defer stopReplica()
+	recordStore := record.NewPGStoreWithRouter(dbRouter, ktypeRegistry, eventPublisher, auditor)
 	rateLimiter := platform.NewRateLimiter(platform.DefaultRateLimitConfig())
 	quotaEnforcer := platform.NewQuotaEnforcer(pool)
 

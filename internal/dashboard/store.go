@@ -53,11 +53,15 @@ type Summary struct {
 	BaseCurrency string `json:"base_currency"`
 }
 
-// Store computes per-tenant dashboard summaries. The pool is the
-// regular application pool; every query runs under WithTenantTx so
-// RLS + app.tenant_id back up the explicit tenant_id predicate.
+// Store computes per-tenant dashboard summaries. router routes the
+// read-only aggregation transaction to a replica when one is
+// configured + within KAPP_READ_REPLICA_LAG_TOLERANCE, transparently
+// falling back to the primary otherwise. Every query runs under
+// WithReadOnlyTenantTx so RLS + app.tenant_id back up the explicit
+// tenant_id predicate and Postgres's READ ONLY tx mode catches a
+// regression that introduces DML on this path.
 type Store struct {
-	pool      *pgxpool.Pool
+	router    *dbutil.PoolRouter
 	converter Converter
 }
 
@@ -69,12 +73,26 @@ type Converter interface {
 	Convert(ctx context.Context, tenantID uuid.UUID, amount float64, from, to string) (float64, bool)
 }
 
-// NewStore wires a Store from the shared pool.
+// NewStore wires a Store from the shared pool. Equivalent to
+// NewStoreWithRouter(dbutil.NewPoolRouter(pool)); kept as the
+// canonical single-pool constructor so callers that haven't wired a
+// replica don't need to reach into dbutil. Returns nil when pool is
+// nil so the existing ComputeSummary nil-check still fires.
 func NewStore(pool *pgxpool.Pool) *Store {
 	if pool == nil {
 		return nil
 	}
-	return &Store{pool: pool}
+	return &Store{router: dbutil.NewPoolRouter(pool)}
+}
+
+// NewStoreWithRouter wires a Store that routes reads through the
+// supplied PoolRouter. Use this in the production wiring path where
+// a process-wide router with a lag sampler is available.
+func NewStoreWithRouter(router *dbutil.PoolRouter) *Store {
+	if router == nil {
+		return nil
+	}
+	return &Store{router: router}
 }
 
 // WithConverter wires a foreign-currency converter. When set, the
@@ -87,17 +105,27 @@ func (s *Store) WithConverter(c Converter) *Store {
 }
 
 // ComputeSummary returns the tenant's KPI summary. All counters scan
-// the live database in a single WithTenantTx so every query shares a
-// consistent snapshot of the tenant's data.
+// the live database in a single WithReadOnlyTenantTx so every query
+// shares a consistent MVCC snapshot of the tenant's data (the READ
+// ONLY transaction mode is just defense-in-depth — it doesn't relax
+// the snapshot guarantee, which comes from running the queries inside
+// the same transaction regardless of access mode). When a read
+// replica is wired AND within lag tolerance the snapshot is taken
+// against the replica; otherwise WithReadOnlyTenantTx falls back to
+// the primary. See dbutil.PoolRouter for the routing semantics.
 func (s *Store) ComputeSummary(ctx context.Context, tenantID uuid.UUID) (*Summary, error) {
-	if s == nil || s.pool == nil {
+	if s == nil || s.router == nil {
 		return nil, errors.New("dashboard: store not wired")
 	}
 	if tenantID == uuid.Nil {
 		return nil, errors.New("dashboard: tenant id required")
 	}
 	var out Summary
-	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	// Dashboard aggregation is purely read — KPI rollups, no writes.
+	// WithReadOnlyTenantTx routes to the replica when configured +
+	// within lag tolerance and tags the tx as READ ONLY for
+	// defense-in-depth.
+	err := dbutil.WithReadOnlyTenantTx(ctx, s.router, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx,
 			`SELECT COALESCE(base_currency, 'USD') FROM tenants WHERE id = $1`,
 			tenantID,

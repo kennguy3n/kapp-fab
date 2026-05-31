@@ -96,11 +96,29 @@ func run() error {
 		defer adminPool.Close()
 	}
 
+	// Replica routing (A1). platform.WireReplicaRouter centralises
+	// pool open, router build, lag sampler start, and the shutdown
+	// ordering that joins the sampler goroutine before closing the
+	// replica pool; the helper returns a single stopReplica closure
+	// that bakes the order in — see its docstring for the teardown
+	// contract.
+	//
+	// Bridge has no MetricsRegistry, so we pass nil — the helper
+	// silently skips lag/error gauge registration and just closes
+	// the router + replica pool on shutdown. The lag sampler still
+	// runs so /insight + /dashboard-digest dispatches benefit from
+	// replica offload when KAPP_READ_REPLICA_URL is set.
+	dbRouter, stopReplica, err := platform.WireReplicaRouter(ctx, "kchat-bridge", cfg, pool, nil)
+	if err != nil {
+		return err
+	}
+	defer stopReplica()
+
 	cache := platform.NewLRUCache(512, 5*time.Minute)
 	registry := ktype.NewPGRegistry(pool, cache)
 	eventPublisher := events.NewPGPublisher(pool)
 	auditor := audit.NewPGLogger(pool)
-	recordStore := record.NewPGStore(pool, registry, eventPublisher, auditor)
+	recordStore := record.NewPGStoreWithRouter(dbRouter, registry, eventPublisher, auditor)
 	workflowEngine := workflow.NewEngine(pool, eventPublisher, auditor)
 	ledgerStore := ledger.NewPGStore(pool, eventPublisher, auditor)
 	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
@@ -125,7 +143,7 @@ func run() error {
 	// the insights stack so /insight + /dashboard-digest can run a
 	// saved query without having to call back over HTTP into the API
 	// service.
-	reportingRunner := reporting.NewRunner(pool)
+	reportingRunner := reporting.NewRunnerWithRouter(dbRouter)
 	insightsQueries := insights.NewQueryStore(pool)
 	insightsDashboards := insights.NewDashboardStore(pool)
 	insightsCache := insights.NewCacheStore(pool)
@@ -135,7 +153,7 @@ func run() error {
 	// gate on the /insight slash command path for tenants downgraded
 	// from enterprise to business.
 	featureStore := tenant.NewFeatureStore(pool)
-	insightsRunner := insights.NewRunner(pool, insightsCache, insightsQueries, reportingRunner).
+	insightsRunner := insights.NewRunnerWithRouter(dbRouter, insightsCache, insightsQueries, reportingRunner).
 		WithFeaturePolicy(featureStore)
 	landedCostStore := finance.NewLandedCostStore(
 		pool,

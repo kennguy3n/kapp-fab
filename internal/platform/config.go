@@ -296,6 +296,80 @@ type Config struct {
 	// CSRF cookie. SHOULD be true in production (HTTPS); false
 	// only for local-dev HTTP. Sourced from KAPP_CSRF_COOKIE_SECURE.
 	CSRFCookieSecure bool
+
+	// ReadReplicaURL is an optional libpq-style connection string
+	// for a streaming read replica. When set, the API and worker
+	// route read-only queries (reporting runner, insights runner,
+	// record list / get, dashboard aggregation, full-text search)
+	// to the replica via dbutil.PoolRouter so the primary keeps
+	// connection-pool headroom for write-path traffic. Writes
+	// always go to the primary regardless. When empty, the router
+	// is a no-op single-pool wrapper and every read still hits the
+	// primary — the migration path is "boot with the env var unset
+	// and existing behaviour is preserved exactly". Sourced from
+	// KAPP_READ_REPLICA_URL.
+	ReadReplicaURL string
+
+	// ReadReplicaLagTolerance bounds how stale the replica may be
+	// before the router falls back to the primary for that read.
+	// The router samples lag against the replica every
+	// ReadReplicaLagSampleInterval and compares; if the most
+	// recent observation exceeds this tolerance, reads route to
+	// the primary until the next sample drops back under. Default
+	// 1s matches the rollout documented in
+	// docs/SCALING_RUNBOOK.md §2.3 step 2 ("wait for replication
+	// lag < 1s"). Sourced from KAPP_READ_REPLICA_LAG_TOLERANCE
+	// (parsed via time.ParseDuration; e.g. "1s", "500ms", "5s").
+	//
+	// Zero or negative values effectively disable replica routing
+	// (router always falls through to primary). This is the safe
+	// way to "un-wire" a misbehaving replica at runtime without a
+	// process restart — KAPP_READ_REPLICA_LAG_TOLERANCE=0s on the
+	// next deploy keeps the connection open but drains all reads
+	// back to the primary.
+	ReadReplicaLagTolerance time.Duration
+
+	// ReadReplicaLagSampleInterval controls how often the router's
+	// background sampler runs the lag query against the replica.
+	// Default 5s keeps the sample fresh without flooding the
+	// replica with single-row queries — at 5s cadence the sampler
+	// adds ~17k queries/day total across the deployment, which is
+	// negligible against typical replica throughput. Sourced from
+	// KAPP_READ_REPLICA_LAG_SAMPLE_INTERVAL.
+	//
+	// Zero or negative values disable the background sampler
+	// entirely, which causes the router's Read() to immediately
+	// fall back to the primary on every call (a sampler that never
+	// runs leaves `lastSampledAt == 0`, and the router treats that
+	// as "unknown lag, use primary"). This is the
+	// `KAPP_READ_REPLICA_URL`-set but `_SAMPLE_INTERVAL=0` opt-out
+	// pattern, parallel to `KAPP_READ_REPLICA_LAG_TOLERANCE=0`
+	// above. The replica connection stays open (for explicit
+	// callers that already hold a pool reference) but every
+	// routing decision goes primary. The wiring helper
+	// (platform.WireReplicaRouter) logs a boot-time warning when
+	// this combination is configured so the silent fallback isn't
+	// invisible in operator logs.
+	ReadReplicaLagSampleInterval time.Duration
+
+	// ReadReplicaMaxConns / ReadReplicaMinConns override the pgx
+	// pool size for the replica connection independently of the
+	// primary. Without these, the replica inherits the same
+	// defaults pgxpool.ParseConfig derives from the replica DSN
+	// (max=cpu*4, min=0), which is identical to the primary and
+	// often the wrong shape: the primary's pool is sized for
+	// write-heavy OLTP (short connections, bounded latency), while
+	// the replica's pool is sized for read-heavy reporting (long
+	// SELECTs, room for slow rollups). Separating them lets the
+	// operator tune each pool's max connections to the underlying
+	// instance's `max_connections` setting without affecting the
+	// other.
+	//
+	// Zero or negative means "use pgx default for that bound"
+	// (i.e. don't override). Sourced from
+	// KAPP_READ_REPLICA_MAX_CONNS and KAPP_READ_REPLICA_MIN_CONNS.
+	ReadReplicaMaxConns int32
+	ReadReplicaMinConns int32
 }
 
 // LoadConfig reads configuration from environment variables and returns a
@@ -363,6 +437,12 @@ func LoadConfig() (*Config, error) {
 		CSRFAllowedOrigins: splitCSV(os.Getenv("KAPP_CSRF_ALLOWED_ORIGINS")),
 		CSRFCookieName:     os.Getenv("KAPP_CSRF_COOKIE_NAME"),
 		CSRFCookieSecure:   getenvBool("KAPP_CSRF_COOKIE_SECURE", false),
+
+		ReadReplicaURL:               os.Getenv("KAPP_READ_REPLICA_URL"),
+		ReadReplicaLagTolerance:      getenvDurationAllowZero("KAPP_READ_REPLICA_LAG_TOLERANCE", 1*time.Second),
+		ReadReplicaLagSampleInterval: getenvDurationAllowZero("KAPP_READ_REPLICA_LAG_SAMPLE_INTERVAL", 5*time.Second),
+		ReadReplicaMaxConns:          int32(getenvInt("KAPP_READ_REPLICA_MAX_CONNS", 0)),
+		ReadReplicaMinConns:          int32(getenvInt("KAPP_READ_REPLICA_MIN_CONNS", 0)),
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -559,5 +639,3 @@ func getenvDurationAllowZero(key string, fallback time.Duration) time.Duration {
 	}
 	return d
 }
-
-

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 )
@@ -338,7 +339,11 @@ func (s *PGStore) BulkFetch(
 		return nil, nil
 	}
 	out := make([]KRecord, 0, len(ids))
-	err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	// BulkFetch is read-only — route through the replica pool when
+	// configured AND lag is within tolerance. The id-list lookup
+	// against the krecords partition is the same shape ListPage
+	// runs, so the replica routing argument is identical.
+	err := dbutil.WithReadOnlyTenantTx(ctx, s.router, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
 			        created_by, created_at, updated_by, updated_at, deleted_at

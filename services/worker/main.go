@@ -146,6 +146,23 @@ func run() error {
 		defer adminPool.Close()
 	}
 
+	// Replica routing (A1). Worker uses the router for the scheduled
+	// report runner and the insights query-cache refresh handler —
+	// both pure SELECTs. Wiring (open pool, router build, sampler
+	// start, metrics) is shared with the other four service
+	// entrypoints via platform.WireReplicaRouter — see its docstring
+	// for the teardown contract the helper enforces internally
+	// (stopGauge → router.Close → replicaPool.Close). The metrics
+	// registry was hoisted above the pool open (A2) so we can pass
+	// it directly here and have the helper publish
+	// kapp_replica_lag_seconds / kapp_replica_sample_errors_total
+	// alongside the regular worker metrics.
+	dbRouter, stopReplica, err := platform.WireReplicaRouter(ctx, "worker", cfg, pool, metrics)
+	if err != nil {
+		return err
+	}
+	defer stopReplica()
+
 	natsURL := cfg.EventBusURL
 	if natsURL == "" {
 		natsURL = nats.DefaultURL
@@ -238,7 +255,7 @@ func run() error {
 	auditor := audit.NewPGLogger(pool)
 	ktypeCache := platform.NewLRUCache(cfg.KTypeCacheSize, 5*time.Minute)
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
-	recordStore := record.NewPGStore(pool, ktypeRegistry, publisher, auditor)
+	recordStore := record.NewPGStoreWithRouter(dbRouter, ktypeRegistry, publisher, auditor)
 	exchangeRates := ledger.NewExchangeRateStore(pool)
 	ledgerStore := ledger.NewPGStore(pool, publisher, auditor).WithExchangeRates(exchangeRates)
 	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
@@ -331,7 +348,7 @@ func run() error {
 	// "SMTP disabled" path is a soft no-op.
 	reportScheduleStore := reporting.NewScheduleStore(pool)
 	reportSavedStore := reporting.NewStore(pool)
-	reportRunner := reporting.NewRunner(pool)
+	reportRunner := reporting.NewRunnerWithRouter(dbRouter)
 	pdfConverter := print.DetectConverter()
 	schedRegistry.Register(
 		reporting.ActionTypeReportSchedule,
@@ -355,7 +372,7 @@ func run() error {
 	insightsQueryStore := insights.NewQueryStore(pool)
 	insightsCacheStore := insights.NewCacheStore(pool)
 	insightsFeatures := tenant.NewFeatureStore(pool)
-	insightsRunner := insights.NewRunner(pool, insightsCacheStore, insightsQueryStore, reportRunner).
+	insightsRunner := insights.NewRunnerWithRouter(dbRouter, insightsCacheStore, insightsQueryStore, reportRunner).
 		WithFeaturePolicy(insightsFeatures)
 	schedRegistry.Register(
 		insights.ActionTypeQueryCacheRefresh,
@@ -388,10 +405,11 @@ func run() error {
 
 	// Bind the outbox-drain metrics to the registry created above
 	// the scheduler-handler block. Hoisting NewMetricsRegistry up
-	// lets handlers opt into telemetry at construction time (notably
-	// the record-count reconciler's drift gauge) without forward-
-	// referencing a registry that does not yet exist; the leader
-	// elector / drain loop still see the same instance.
+	// (A2) lets handlers opt into telemetry at construction time
+	// (notably the record-count reconciler's drift gauge AND the A1
+	// replica lag/error gauges) without forward-referencing a
+	// registry that does not yet exist; the leader elector / drain
+	// loop still see the same instance.
 	drainDur := metrics.Histogram("kapp_outbox_drain_duration_seconds", "Outbox drain batch latency in seconds.", platform.DefaultDurationBuckets, "result")
 	drainEvents := metrics.Counter("kapp_outbox_events_total", "Outbox events drained from the queue.", "result")
 

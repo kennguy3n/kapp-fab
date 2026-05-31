@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
@@ -34,6 +35,17 @@ var _ FieldEncryptor = (*tenant.KeyManager)(nil)
 var (
 	ErrNotFound        = errors.New("record: not found")
 	ErrVersionConflict = errors.New("record: version conflict")
+
+	// errReplicaNotReady fires when snapshotVia targets a replica
+	// that is in recovery but has not yet replayed any transaction
+	// (pg_last_xact_replay_timestamp() returns NULL). In that state
+	// we have no safe ceiling for the walk — clock_timestamp() is
+	// the replica's wall clock and can be arbitrarily ahead of
+	// whatever WAL position the replica is actually serving from,
+	// so any `updated_at <= snapshot` filter would silently skip
+	// rows committed in the gap. The caller (pickReadPoolWithSnapshot)
+	// catches this and retries against the primary.
+	errReplicaNotReady = errors.New("record: replica has no replayed xact; snapshot would exceed visibility horizon")
 )
 
 // PGStore implements Store against PostgreSQL. Every mutation runs inside a
@@ -48,7 +60,20 @@ var (
 // Step 4 and 5 participate in the same transaction as step 3 so a failure
 // anywhere in the pipeline rolls the whole mutation back — no silent writes.
 type PGStore struct {
-	pool      *pgxpool.Pool
+	// pool is the primary write pool. Mutations (Create / Update /
+	// Delete / Bulk*) MUST go through this pool — never the router
+	// — so a routing decision can never accidentally aim a write at
+	// a replica that would either reject it (and surface a
+	// confusing wire-protocol error) or, worse, accept it on a
+	// misconfigured topology.
+	pool *pgxpool.Pool
+	// router routes read-only queries (Get / List / ListPage /
+	// ListAll / ListByField / ForEach / ForEachByField) between
+	// the primary pool and an optional replica pool based on the
+	// most recent lag observation. In the no-replica configuration
+	// the router is a thin wrapper whose Read() returns the
+	// primary, so existing single-pool deployments are unaffected.
+	router    *dbutil.PoolRouter
 	registry  *ktype.PGRegistry
 	publisher events.Publisher
 	auditor   audit.Logger
@@ -65,15 +90,37 @@ type PGStore struct {
 	tenantKTypes *ktype.TenantStore
 }
 
-// NewPGStore wires a PGStore from the shared pool and its collaborators.
+// NewPGStore wires a PGStore from the shared pool and its
+// collaborators. The store routes writes to `pool` and reads through
+// a single-pool PoolRouter (no replica) — call NewPGStoreWithRouter
+// when a separate read replica pool is available.
 func NewPGStore(
 	pool *pgxpool.Pool,
 	registry *ktype.PGRegistry,
 	publisher events.Publisher,
 	auditor audit.Logger,
 ) *PGStore {
+	return NewPGStoreWithRouter(dbutil.NewPoolRouter(pool), registry, publisher, auditor)
+}
+
+// NewPGStoreWithRouter wires a PGStore that routes reads via the
+// supplied PoolRouter while continuing to issue writes against the
+// router's primary. The router-based constructor is the form the
+// service entrypoints use after wiring KAPP_READ_REPLICA_URL — the
+// legacy NewPGStore is preserved for tests that hand-roll a store
+// without bringing the router into scope.
+func NewPGStoreWithRouter(
+	router *dbutil.PoolRouter,
+	registry *ktype.PGRegistry,
+	publisher events.Publisher,
+	auditor audit.Logger,
+) *PGStore {
+	if router == nil {
+		panic("record: NewPGStoreWithRouter requires a non-nil PoolRouter")
+	}
 	return &PGStore{
-		pool:      pool,
+		pool:      router.Primary(),
+		router:    router,
 		registry:  registry,
 		publisher: publisher,
 		auditor:   auditor,
@@ -256,32 +303,111 @@ func checkCustomKTypeStatus(tkt *ktype.TenantKType, mode ktypeResolveMode) error
 	return nil
 }
 
-// dbNow returns Postgres's current timestamp. Used to capture the
-// keyset-walk snapshot ceiling in ListAll / ListByField / ForEach in
-// the same clock domain that assigns `updated_at` values on commit,
-// so app-server clock skew (NTP jitter, container pause) cannot move
-// the ceiling backwards relative to row timestamps. clock_timestamp()
-// is preferred over now() / transaction_timestamp() because it is
-// not frozen at the start of the surrounding transaction — we want
-// the wall-clock instant this call is made, not the instant the
-// outer scheduler's transaction began.
+// snapshotVia returns a snapshot ceiling appropriate for a keyset
+// walk against the given pool. The returned timestamp is guaranteed
+// to be ≤ the pool's row-visibility horizon — any row matching
+// `updated_at <= snapshot` on that pool is guaranteed to be readable
+// from that pool.
 //
-// Returns timestamptz directly (no `AT TIME ZONE 'UTC'` cast) so the
-// result type carries its own UTC anchor rather than relying on
-// pgx's scan-default location for `timestamp without time zone`.
-// pgx v5 always normalises timestamptz to UTC on scan regardless of
-// the connection's TimeZone setting; the previous formulation only
-// produced UTC because pgx's plain-timestamp default *happens* to
-// be UTC. The explicit .UTC() below is kept as belt-and-suspenders
-// in case a future scan layer normalises timestamptz to the local
-// zone, but the SQL itself no longer depends on the driver's
-// timezone defaults.
-func (s *PGStore) dbNow(ctx context.Context) (time.Time, error) {
-	var t time.Time
-	if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&t); err != nil {
-		return time.Time{}, fmt.Errorf("record: dbNow: %w", err)
+// The semantics differ by pool kind, both gated by pg_is_in_recovery()
+// on the pool's connection (so the same code path works for the
+// primary, a streaming replica, or a Patroni/RDS read-replica that
+// the caller wired into either slot):
+//
+//   - Primary (not in recovery): returns clock_timestamp(). This is
+//     the freshest wall-clock instant; every committed row whose
+//     updated_at is ≤ this is by definition visible on the primary.
+//
+//   - Replica (in recovery, replay-ts non-NULL): returns
+//     pg_last_xact_replay_timestamp() — the commit timestamp of the
+//     most recent transaction the replica has replayed. By definition,
+//     every row whose updated_at is ≤ this commit timestamp has been
+//     replicated and is visible on this replica.
+//
+//     This is the correctness fix for the previous formulation. The
+//     prior code called clock_timestamp() on the replica too, but
+//     clock_timestamp() on a replica is the replica's WALL CLOCK,
+//     NOT its replay position. Under replication lag L the replica's
+//     wall clock ≈ now() but its visible state only covers commits
+//     up to now() − L. A walk with snapshot = clock_timestamp() and
+//     filter `updated_at <= snapshot` would match rows committed in
+//     the (now()−L, now()] window, but those rows have not yet been
+//     replicated — they pass the WHERE filter on the primary but are
+//     invisible on the replica. Because the cursor advances past
+//     them on the replica's empty result, they would be SILENTLY
+//     skipped by the walk and only picked up if a subsequent walk's
+//     ceiling happened to be high enough. Using
+//     pg_last_xact_replay_timestamp() makes the ceiling track the
+//     replica's actual visibility horizon, eliminating the gap.
+//
+//   - Replica (in recovery, replay-ts NULL): returns errReplicaNotReady.
+//     A freshly-started standby that has not yet replayed any
+//     transaction has no defined visibility horizon for committed-on-
+//     primary writes. The caller (pickReadPoolWithSnapshot) catches
+//     this and falls back to the primary for the walk.
+func (s *PGStore) snapshotVia(ctx context.Context, pool *pgxpool.Pool) (time.Time, error) {
+	var (
+		inRecovery bool
+		replayTS   *time.Time
+		clockTS    time.Time
+	)
+	err := pool.QueryRow(ctx, `
+		SELECT
+			pg_is_in_recovery(),
+			pg_last_xact_replay_timestamp(),
+			clock_timestamp()
+	`).Scan(&inRecovery, &replayTS, &clockTS)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("record: snapshot: %w", err)
 	}
-	return t.UTC(), nil
+	if inRecovery {
+		if replayTS == nil {
+			return time.Time{}, errReplicaNotReady
+		}
+		return replayTS.UTC(), nil
+	}
+	return clockTS.UTC(), nil
+}
+
+// pickReadPoolWithSnapshot selects the pool a read-only keyset walk
+// should run against AND captures the snapshot ceiling for that walk,
+// atomically and from the same pool. Combining these two decisions
+// into one helper is the only way to enforce the foreachKeyset
+// invariant (snapshot ≤ pool visibility horizon) — picking the pool
+// in one call and capturing the snapshot in a separate one opens a
+// window where the router could be reconfigured between the two, or
+// the chosen pool could be a replica whose replay position has moved
+// since selection.
+//
+// The router's Read() lag-tolerance gate runs first. When that gate
+// says primary (no replica configured, lag exceeds tolerance, sample
+// is stale, lagTolerance is 0, etc.), this function never touches
+// the replica. When the gate picks the replica, this function still
+// enforces the stronger correctness gate (replay timestamp must be
+// non-NULL) before returning the replica; if the replica is in
+// recovery with no replayed xact yet, the call transparently falls
+// back to the primary and captures the snapshot there.
+//
+// Callers must pin the returned pool for the ENTIRE walk. Re-calling
+// Read() per chunk would let the router flip between primary and
+// replica mid-walk, which would mix two pools' snapshot semantics
+// under one ceiling. See the comment block at the top of
+// foreachKeyset for the worked-out failure mode.
+func (s *PGStore) pickReadPoolWithSnapshot(ctx context.Context) (*pgxpool.Pool, time.Time, error) {
+	readPool := s.router.Read()
+	snapshot, err := s.snapshotVia(ctx, readPool)
+	if err == nil {
+		return readPool, snapshot, nil
+	}
+	primary := s.router.Primary()
+	if errors.Is(err, errReplicaNotReady) && readPool != primary {
+		snapshot, err = s.snapshotVia(ctx, primary)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		return primary, snapshot, nil
+	}
+	return nil, time.Time{}, err
 }
 
 // Create inserts a new KRecord. The KType is looked up at version 0 ("latest")
@@ -375,9 +501,16 @@ func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
 }
 
 // Get returns a single record. RLS filters cross-tenant access.
+//
+// Get is read-only: it routes through WithReadOnlyTenantTx so the
+// query runs against the read-replica pool when one is configured
+// AND lag is within tolerance, and falls back to the primary
+// otherwise. The READ ONLY transaction mode is defense-in-depth —
+// a stray write inside the SELECT path fails at the driver instead
+// of being silently dropped on the replica.
 func (s *PGStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*KRecord, error) {
 	var out KRecord
-	err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	err := dbutil.WithReadOnlyTenantTx(ctx, s.router, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		err := tx.QueryRow(ctx,
 			`SELECT id, tenant_id, ktype, ktype_version, data, status, version,
 			        created_by, created_at, updated_by, updated_at, deleted_at
@@ -461,7 +594,12 @@ func (s *PGStore) ListPage(ctx context.Context, tenantID uuid.UUID, filter ListF
 	// rather than `null` when no rows match — consistent with the OpenAPI
 	// list response contract.
 	out := make([]KRecord, 0, filter.Limit)
-	err = platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	// Read-only: the SELECT path goes through the replica when one
+	// is configured AND lag is within tolerance. ListPage is the
+	// hottest read in the system (every record list table view, every
+	// agent search, every report cursor) — routing it through the
+	// replica is exactly the OLTP-vs-analytics isolation A1 is for.
+	err = dbutil.WithReadOnlyTenantTx(ctx, s.router, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var (
 			rows pgx.Rows
 			err  error
@@ -618,17 +756,21 @@ func (s *PGStore) ListAll(ctx context.Context, tenantID uuid.UUID, filter ListFi
 //  1. Rows are visited in the same (updated_at DESC, id DESC) order
 //     as ListAll and ListPage, paginated internally via keyset.
 //  2. Snapshot consistency: a wall-clock ceiling is captured from
-//     Postgres clock_timestamp() before the first chunk. Every chunk
-//     filters `updated_at <= snapshot`. A row whose updated_at is
-//     bumped by a concurrent Update mid-walk is excluded from this
+//     Postgres clock_timestamp() against the same pool the chunks
+//     will read from (replica if routed, primary otherwise). Every
+//     chunk filters `updated_at <= snapshot`. A row whose updated_at
+//     is bumped by a concurrent Update mid-walk is excluded from this
 //     walk and picked up by the next sweep. The contract is "every
 //     row whose state was committed before walk start, exactly
 //     once", not "every row that ever existed during the walk". See
-//     PGStore.dbNow for the DB-clock vs app-clock rationale.
+//     PGStore.snapshotVia for the DB-clock vs app-clock rationale
+//     and the pool-affinity requirement.
 //  3. Each chunk runs in its own per-tenant transaction
-//     (platform.WithTenantTx). The walk does NOT hold a long-lived
-//     transaction, so it does not block autovacuum and cannot fail
-//     with a serialization-near-end-of-walk error.
+//     (dbutil.WithReadOnlyTenantTx, which routes to the replica when
+//     one is configured and within lag tolerance, primary otherwise).
+//     The walk does NOT hold a long-lived transaction, so it does not
+//     block autovacuum and cannot fail with a
+//     serialization-near-end-of-walk error.
 //  4. Decryption happens after the SQL result is read but before fn
 //     is called. fn receives plaintext.
 //  5. fn errors propagate up unchanged, EXCEPT the sentinel
@@ -696,7 +838,29 @@ func (s *PGStore) foreachKeyset(
 	fn ForEachFunc,
 ) error {
 	const chunk = 500
-	snapshot, err := s.dbNow(ctx)
+	// Pin the read pool for the duration of this walk BEFORE the
+	// first chunk. Calling s.router.Read() per chunk would allow the
+	// router to flip primary→replica (or back) between chunks, which
+	// would mix two pools' snapshot semantics under one ceiling.
+	// pickReadPoolWithSnapshot performs both selection and snapshot
+	// capture atomically (one DB round-trip on the chosen pool), so
+	// the returned snapshot is guaranteed to be ≤ that pool's
+	// visibility horizon — see the snapshotVia docstring for the
+	// pg_last_xact_replay_timestamp gotcha that mandates this.
+	//
+	// Specifically: capturing the snapshot via SELECT clock_timestamp()
+	// against the replica's connection returns the replica's WALL
+	// CLOCK, not the timestamp of its last replayed xact. Under
+	// replication lag L, the replica's wall clock ≈ now() but its
+	// visible state only covers commits up to now() − L. Rows
+	// committed in (now()−L, now()] would pass the
+	// `updated_at <= snapshot` filter on the primary but be invisible
+	// on the replica — silently missed by this walk (and only picked
+	// up if a subsequent walk happens to land them above its own
+	// ceiling). snapshotVia uses pg_last_xact_replay_timestamp() on
+	// replicas to make the ceiling track the replica's actual
+	// visibility horizon.
+	readPool, snapshot, err := s.pickReadPoolWithSnapshot(ctx)
 	if err != nil {
 		return err
 	}
@@ -707,7 +871,13 @@ func (s *PGStore) foreachKeyset(
 	)
 	for {
 		page := make([]KRecord, 0, chunk)
-		err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// foreachKeyset is the streaming primitive for ForEach,
+		// ForEachByField, ListAll and ListByField — every long-walk
+		// read in the system. Run the per-chunk SELECT against the
+		// SAME pool used for the snapshot (readPool, pinned above)
+		// so the chunk read sees rows up to its own clock_timestamp()
+		// snapshot, never a higher ceiling captured elsewhere.
+		err := dbutil.WithReadOnlyTenantTxOnPool(ctx, readPool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			sql, args := queryBuilder(haveLower, cursorTS, cursorID, snapshot, chunk)
 			rows, err := tx.Query(ctx, sql, args...)
 			if err != nil {
