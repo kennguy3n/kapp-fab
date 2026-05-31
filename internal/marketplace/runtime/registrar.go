@@ -208,6 +208,9 @@ func (r *Registrar) RegisterAll(ctx context.Context, tx pgx.Tx, tenantID, instal
 	if err := r.insertWebhookSubscriptions(ctx, tx, tenantID, installationID, webhookBase, bundle.Manifest.WebhooksConsumed); err != nil {
 		return err
 	}
+	if err := r.insertPostingHooks(ctx, tx, tenantID, installationID, webhookBase, bundle.Manifest.PostingHooks); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -453,6 +456,105 @@ func (r *Registrar) insertWebhookSubscriptions(ctx context.Context, tx pgx.Tx, t
 		}
 	}
 	return nil
+}
+
+// insertPostingHooks materialises manifest.posting_hooks[] entries
+// as marketplace_webhook_subscriptions rows. B4 unifies posting
+// hooks with webhook subscriptions because they share the same
+// runtime dispatch path: record mutations emit `krecord.<verb>`
+// outbox events via internal/record/store.go:487/1123/1221, and the
+// event router fans them out to every matching subscription. By
+// representing posting hooks as webhook subscriptions on those same
+// generic event names — narrowed by a `{"ktype": "..."}` filter —
+// we get one dispatch path, one audit log, and one rate-limit
+// bucket. The filter mechanism (eventrouter/filter.go) already
+// supports JSONB equality, and the record-store payload at
+// internal/record/store.go:1240 emits `ktype` as a top-level field,
+// so the filter is evaluated by the same code path that handles
+// publisher-declared webhooks_consumed[] filters.
+//
+// Mapping:
+//
+//	posting_hooks[i].ktype    → KType whose mutation triggers the hook
+//	posting_hooks[i].when     → "after_create" | "after_update" | "after_delete"
+//	posting_hooks[i].endpoint → HTTPS POST target (relative or absolute)
+//
+// becomes
+//
+//	marketplace_webhook_subscriptions(
+//	  tenant_id        = $tenant
+//	  installation_id  = $install
+//	  event            = "krecord.created"|"krecord.updated"|"krecord.deleted"
+//	  filter           = '{"ktype": "<ktype>"}' (narrowed by record-store payload)
+//	  endpoint         = resolveEndpoint($endpoint, $webhookBase)
+//	)
+//
+// The mapping table for `when` → event suffix is intentionally
+// narrow: spec §3 enumerates only after_create / after_update /
+// after_delete; the manifest validator already rejects anything
+// else (manifest.go: ValidPostingHookWhen). A future schema
+// version that introduces e.g. `before_create` will need to extend
+// this mapping AND the record-store event-emit path.
+func (r *Registrar) insertPostingHooks(ctx context.Context, tx pgx.Tx, tenantID, installID uuid.UUID, webhookBase string, hooks []marketplace.PostingHookRef) error {
+	if len(hooks) == 0 {
+		return nil
+	}
+	now := r.nowOrDefault()
+	for i, hook := range hooks {
+		ktype := strings.TrimSpace(hook.KType)
+		if ktype == "" {
+			return fmt.Errorf("runtime: registrar: posting_hooks[%d]: missing ktype", i)
+		}
+		when := strings.TrimSpace(hook.When)
+		verb, ok := postingHookVerbSuffix(when)
+		if !ok {
+			return fmt.Errorf("runtime: registrar: posting_hooks[%d]: invalid when %q", i, when)
+		}
+		if strings.TrimSpace(hook.Endpoint) == "" {
+			return fmt.Errorf("runtime: registrar: posting_hooks[%d]: missing endpoint", i)
+		}
+		resolvedEndpoint, resolveErr := resolveEndpoint(hook.Endpoint, webhookBase)
+		if resolveErr != nil {
+			return fmt.Errorf("runtime: registrar: posting_hooks[%d]: %w", i, resolveErr)
+		}
+		// Subscribe to the generic record-store event and narrow
+		// by the payload's `ktype` field. This is the SAME event
+		// the record store actually emits today
+		// (internal/record/store.go:487/1123/1221), so the hook
+		// fires the moment we install instead of being inert
+		// pending a future record-store refactor.
+		eventName := "krecord." + verb
+		filterJSON, err := json.Marshal(map[string]string{"ktype": ktype})
+		if err != nil {
+			return fmt.Errorf("runtime: registrar: marshal posting_hook filter (ktype=%q): %w", ktype, err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO marketplace_webhook_subscriptions
+				(tenant_id, installation_id, event, filter, endpoint, registered_at)
+			VALUES ($1, $2, $3, $4::jsonb, $5, $6)`,
+			tenantID, installID, eventName, string(filterJSON), resolvedEndpoint, now,
+		); err != nil {
+			return fmt.Errorf("runtime: registrar: insert posting_hook (ktype=%q when=%q): %w", ktype, when, err)
+		}
+	}
+	return nil
+}
+
+// postingHookVerbSuffix maps the manifest's `when` value to the
+// suffix used on the subscription's event name. Mirrors the verb-
+// suffix shape that internal/record/store.go emits (.created /
+// .updated / .deleted) — see snapshotTypeFor at store.go:1267.
+func postingHookVerbSuffix(when string) (string, bool) {
+	switch when {
+	case "after_create":
+		return "created", true
+	case "after_update":
+		return "updated", true
+	case "after_delete":
+		return "deleted", true
+	default:
+		return "", false
+	}
 }
 
 // UnregisterAll deletes every row from the runtime tables for the
