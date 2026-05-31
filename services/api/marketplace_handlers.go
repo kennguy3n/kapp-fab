@@ -57,6 +57,8 @@ import (
 //	bundle.ErrBundleTransportInsecure  → 400
 //	runtime.ErrPreInstallRejected      → 422 (publisher refused)
 //	runtime.ErrPreUninstallRejected    → 422 (publisher refused uninstall)
+//	marketplace.ErrInvalidSignature    → 422 (cryptographic verification failed)
+//	marketplace.ErrPublisherNotVerified → 409 (state precondition)
 //
 // Anything else collapses to 500.
 type marketplaceHandlers struct {
@@ -462,6 +464,39 @@ func (h *marketplaceHandlers) install(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "version does not belong to extension", http.StatusBadRequest)
 		return
 	}
+
+	// Defence-in-depth short-circuit BEFORE the bundle fetch:
+	// reject installs against yanked versions (or against
+	// extensions whose listing has been pulled / suspended) so
+	// the CDN / cache layer isn't asked to resolve a bundle we
+	// were never going to install. The engine re-checks both
+	// invariants inside its tx (under SELECT FOR UPDATE on the
+	// extension row) so an extension that transitions to
+	// suspended between this check and the engine call is still
+	// rejected — this gate is purely an early-out so a yanked-
+	// version installation attempt fails on a single SELECT
+	// instead of a bundle.Resolver round trip.
+	if ver.Yanked {
+		h.writeError(w, fmt.Errorf("%w: version %s is yanked", marketplace.ErrYanked, verID))
+		return
+	}
+	ext, err := h.store.GetExtension(r.Context(), extID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	// Only ExtensionStatusListed accepts new installs. The other
+	// states (Unpublished — never went live; Deprecated — only
+	// existing installs continue; Removed — operator takedown)
+	// all reject. Mapped to 409 because the version row itself
+	// exists and is well-formed; the catalog-level status is the
+	// reason we refuse.
+	if ext.Status != marketplace.ExtensionStatusListed {
+		h.writeError(w, fmt.Errorf("%w: extension %s is %s",
+			marketplace.ErrConflict, extID, ext.Status))
+		return
+	}
+
 	resolved, err := h.resolver.Resolve(r.Context(), ver)
 	if err != nil {
 		h.writeError(w, err)
@@ -902,7 +937,13 @@ func (h *marketplaceHandlers) writeError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, marketplace.ErrConflict),
 		errors.Is(err, marketplace.ErrYanked),
-		errors.Is(err, marketplace.ErrImmutableVersion):
+		errors.Is(err, marketplace.ErrImmutableVersion),
+		errors.Is(err, marketplace.ErrPublisherNotVerified):
+		// ErrPublisherNotVerified is a state-precondition
+		// failure (e.g. SetAutoApprovePatch refusing to enable
+		// fast-path on an unverified row); 409 matches the
+		// rest of the state-precondition family (yanked,
+		// immutable version).
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, marketplace.ErrInvalidManifest),
 		errors.Is(err, marketplace.ErrPermissionScopeUnknown),
@@ -911,7 +952,14 @@ func (h *marketplaceHandlers) writeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, marketplace.ErrBundleTooLarge),
 		errors.Is(err, bundle.ErrBundleExceedsLimit):
 		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
-	case errors.Is(err, bundle.ErrBundleMalformed):
+	case errors.Is(err, bundle.ErrBundleMalformed),
+		errors.Is(err, marketplace.ErrInvalidSignature):
+		// ErrInvalidSignature: the bundle is structurally
+		// well-formed but no registered publisher key validated
+		// the detached signature. 422 because the request was
+		// authentic and authorised but the publisher-supplied
+		// signature failed cryptographic verification — the
+		// caller cannot recover by reformatting their request.
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 	case errors.Is(err, bundle.ErrBundleNotFound),
 		errors.Is(err, bundle.ErrBundleFetchFailed),

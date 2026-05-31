@@ -61,6 +61,18 @@ func (rs *ReviewStateStore) GetReviewState(ctx context.Context, versionID uuid.U
 // transitioning to approved or rejected, Reviewer MUST be non-empty
 // (the DB CHECK also enforces this — the early check here gives a
 // clearer error than a constraint violation).
+//
+// ExpectedClaim is the optional review-worker claim guard used by
+// B7's pipeline to defeat the TOCTOU race between an admin Rescan
+// (which clears claimed_by / claimed_at) and an in-flight Persist.
+// When set, the SQL UPDATE additionally gates on claimed_by AND
+// claimed_at matching the worker's recorded values; if the row's
+// claim was cleared in the gap, the UPDATE affects zero rows and
+// UpdateReviewState returns ErrClaimLost so the worker can drop
+// its result and let the next poll re-run the pipeline against
+// the freshly-reset row. Human-driven transitions (admin review,
+// publisher withdraw) leave ExpectedClaim nil and bypass the
+// guard.
 type UpdateReviewStateInput struct {
 	VersionID       uuid.UUID
 	Status          ReviewStatus
@@ -68,18 +80,43 @@ type UpdateReviewStateInput struct {
 	ManualNotes     string
 	Reviewer        string
 	ReviewedAt      *time.Time
+	ExpectedClaim   *ReviewClaimGuard
+}
+
+// ReviewClaimGuard is the (claimed_by, claimed_at) tuple recorded
+// on a marketplace_extension_review_state row when a worker claims
+// it via ClaimSubmittedReviewVersions. The pipeline carries this
+// tuple through Pipeline.Run → Pipeline.Persist and threads it
+// into the UpdateReviewState SQL so an admin Rescan that lands
+// between claim and persist (which clears these columns) reliably
+// aborts the worker's late transition. ClaimedAt MUST be the
+// exact timestamp the DB stamped on the row at claim time
+// (timestamptz round-trips losslessly through pgx); a re-read of
+// the row is not acceptable because the read itself races against
+// the rescan.
+type ReviewClaimGuard struct {
+	ClaimedBy string
+	ClaimedAt time.Time
 }
 
 // UpdateReviewState transitions a review row. Enforces the same
 // transition graph the B7 pipeline assumes:
 //
-//	submitted        → automated_passed | rejected | withdrawn
+//	submitted        → automated_passed | manual_review | rejected | withdrawn
 //	automated_passed → manual_review    | rejected | withdrawn
 //	manual_review    → approved | rejected | withdrawn
 //	approved         → (terminal; only the AutomatedChecks JSON may
 //	                    be amended for forensic detail)
 //	rejected         → (terminal; same caveat)
 //	withdrawn        → (terminal)
+//
+// Note: the worker emits BOTH automated_passed (no findings or
+// info-only findings — clear pass) and manual_review (one or more
+// warn-level findings) directly out of submitted in a single state
+// transition. There is no intermediate "automated complete, awaiting
+// human" state between submitted and manual_review — automated_passed
+// is reserved for the case where the automated pipeline alone
+// produces a verdict the system trusts.
 //
 // A transition to a terminal state stamps ReviewedAt = now() if not
 // provided. Returns ErrNotFound if the version has no review state.
@@ -198,6 +235,20 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 			reviewer = current.Reviewer
 		}
 
+		// Claim guard parameters. NULL when the caller (admin /
+		// human reviewer) does not pass an ExpectedClaim — the
+		// SQL OR-fallback (`$N IS NULL OR ... = $N`) lets the
+		// UPDATE proceed unchanged. When set, the UPDATE
+		// additionally gates on BOTH columns matching exactly,
+		// so a concurrent ResetReviewStateForRescan (which clears
+		// them to NULL) atomically aborts this UPDATE without
+		// race-prone read-then-write logic in Go.
+		var expectedClaimBy, expectedClaimAt any
+		if in.ExpectedClaim != nil {
+			expectedClaimBy = in.ExpectedClaim.ClaimedBy
+			expectedClaimAt = in.ExpectedClaim.ClaimedAt
+		}
+
 		var out ReviewState
 		err = rs.store.pool.QueryRow(ctx,
 			`UPDATE marketplace_extension_review_state
@@ -207,11 +258,15 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 			       reviewer = NULLIF($5,''),
 			       reviewed_at = $6,
 			       updated_at = now()
-			 WHERE extension_version_id = $1 AND status = $7
+			 WHERE extension_version_id = $1
+			   AND status = $7
+			   AND ($8::text IS NULL OR claimed_by = $8)
+			   AND ($9::timestamptz IS NULL OR claimed_at = $9)
 			 RETURNING extension_version_id, status, automated_checks::text,
 			           COALESCE(manual_review_notes,''), COALESCE(reviewer,''),
 			           reviewed_at, created_at, updated_at`,
 			in.VersionID, string(in.Status), string(checks), notes, reviewer, reviewedAt, string(current.Status),
+			expectedClaimBy, expectedClaimAt,
 		).Scan(
 			&out.ExtensionVersionID, &out.Status,
 			scanJSONB(&out.AutomatedChecks),
@@ -224,18 +279,38 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("marketplace: update review state: %w", err)
 		}
+		// ErrNoRows from the RETURNING means one of:
+		//   1. the row was deleted (CASCADE from version delete) —
+		//      surface as ErrNotFound (resolved in the lookup
+		//      below);
+		//   2. the status guard failed because a concurrent caller
+		//      flipped the row — re-read and re-evaluate the
+		//      transition graph against the fresh state;
+		//   3. the claim guard failed because a concurrent rescan
+		//      cleared claimed_by / claimed_at — surface as
+		//      ErrClaimLost so the worker can drop its result.
+		// We disambiguate by re-reading the row's current claim
+		// columns. The re-read is racy in isolation (claim could
+		// flip again between read and any subsequent action) but
+		// the worker treats ErrClaimLost as terminal-for-this-tick
+		// and lets the next poll re-claim, so the diagnosis only
+		// needs to be correct often enough to surface the right
+		// error class.
+		if in.ExpectedClaim != nil {
+			lost, claimErr := rs.claimGuardFailed(ctx, in.VersionID, in.ExpectedClaim)
+			if claimErr != nil {
+				return nil, claimErr
+			}
+			if lost {
+				return nil, ErrClaimLost
+			}
+		}
 		// Last attempt: no further UPDATE to gate on the fresh
 		// state, so the re-read would be wasted. Break out and
 		// surface the contention error below.
 		if attempt == maxAttempts-1 {
 			break
 		}
-		// ErrNoRows from the RETURNING means either:
-		//   1. the row was deleted (CASCADE from version delete) —
-		//      surface as ErrNotFound, or
-		//   2. the status guard failed because a concurrent caller
-		//      flipped the row — re-read and re-evaluate the
-		//      transition graph against the fresh state.
 		latest, lookupErr := rs.GetReviewState(ctx, in.VersionID)
 		if lookupErr != nil {
 			return nil, lookupErr
@@ -253,6 +328,44 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 		current = latest
 	}
 	return nil, fmt.Errorf("marketplace: update review state: gave up after %d contended retries on version %s", maxAttempts, in.VersionID)
+}
+
+// claimGuardFailed inspects the row's current claim columns and
+// reports whether the worker's recorded claim was overwritten by
+// a concurrent ResetReviewStateForRescan. A row that has been
+// deleted is reported as not-lost (the caller falls through to
+// the existing status-guard branch which translates ErrNoRows
+// from the lookup into ErrNotFound).
+func (rs *ReviewStateStore) claimGuardFailed(ctx context.Context, versionID uuid.UUID, expected *ReviewClaimGuard) (bool, error) {
+	var (
+		claimedBy *string
+		claimedAt *time.Time
+	)
+	err := rs.store.pool.QueryRow(ctx,
+		`SELECT claimed_by, claimed_at
+		   FROM marketplace_extension_review_state
+		  WHERE extension_version_id = $1`,
+		versionID,
+	).Scan(&claimedBy, &claimedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Row deleted out from under us — let the outer
+			// retry loop's lookup translate this to ErrNotFound.
+			return false, nil
+		}
+		return false, fmt.Errorf("marketplace: claim guard lookup: %w", err)
+	}
+	if claimedBy == nil || claimedAt == nil {
+		// Rescan cleared the claim entirely.
+		return true, nil
+	}
+	if *claimedBy != expected.ClaimedBy {
+		return true, nil
+	}
+	if !claimedAt.Equal(expected.ClaimedAt) {
+		return true, nil
+	}
+	return false, nil
 }
 
 // ListVersionsByReviewStatus returns the version ids currently in
@@ -295,6 +408,77 @@ func (rs *ReviewStateStore) ListVersionsByReviewStatus(ctx context.Context, stat
 	return out, rows.Err()
 }
 
+// ResetReviewStateForRescan re-claims a version for the review
+// worker by re-setting its review_state row to `submitted`.
+// Deliberately bypasses the normal reviewStatusTransitionAllowed
+// graph (which only models forward transitions out of `submitted`):
+// admin-initiated rescan is the one supported path that can move
+// a non-terminal row backwards in the graph. Refuses to operate on
+// terminal-state rows — once approved / rejected / withdrawn, the
+// version is immutable and the audit trail is sealed; publishers
+// re-submit by uploading a new version. The handler-side check
+// gates terminal rows before calling here; this method enforces
+// the same invariant defensively so a future caller can't bypass
+// it.
+//
+// The reset clears reviewer + reviewed_at + manual_review_notes +
+// automated_checks so the next worker run starts from a clean
+// slate. Findings live in their own table and are overwritten by
+// UpsertReviewFindings during the next pipeline run; the
+// findings_store deletes orphaned rows that the new run does not
+// re-emit (see UpsertReviewFindings godoc).
+func (s *Store) ResetReviewStateForRescan(ctx context.Context, versionID uuid.UUID) error {
+	if versionID == uuid.Nil {
+		return fmt.Errorf("%w: version id required", ErrNotFound)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return fmt.Errorf("marketplace: reset review state: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var current ReviewStatus
+	if err := tx.QueryRow(ctx,
+		`SELECT status FROM marketplace_extension_review_state
+		 WHERE extension_version_id = $1 FOR UPDATE`,
+		versionID,
+	).Scan(&current); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("marketplace: reset review state: select: %w", err)
+	}
+	if current.IsTerminal() {
+		return fmt.Errorf("%w: cannot rescan terminal review state %q",
+			ErrConflict, current)
+	}
+	// Also clear claimed_at / claimed_by atomically with the
+	// status reset. Without this the previous worker's claim
+	// would persist on the row, and the next worker's tick
+	// would skip the row until the 10-minute lease lapses — an
+	// admin clicking Rescan expects work to start immediately,
+	// not 10 minutes later.
+	if _, err := tx.Exec(ctx,
+		`UPDATE marketplace_extension_review_state
+		    SET status = $1,
+		        automated_checks = '{}'::jsonb,
+		        manual_review_notes = NULL,
+		        reviewer = NULL,
+		        reviewed_at = NULL,
+		        claimed_at = NULL,
+		        claimed_by = NULL,
+		        updated_at = now()
+		  WHERE extension_version_id = $2`,
+		string(ReviewStatusSubmitted), versionID,
+	); err != nil {
+		return fmt.Errorf("marketplace: reset review state: update: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("marketplace: reset review state: commit: %w", err)
+	}
+	return nil
+}
+
 // reviewStatusTransitionAllowed encodes the directed graph from the
 // ReviewStatus godoc.
 //
@@ -332,8 +516,17 @@ func reviewStatusTransitionAllowed(from, to ReviewStatus) bool {
 	}
 	switch from {
 	case ReviewStatusSubmitted:
+		// submitted→manual_review is the worker's path when one or
+		// more warn-level findings land: automated checks ran to
+		// completion but a human must decide. Without this edge the
+		// pipeline would have to two-step via automated_passed first,
+		// which would (a) confuse the audit trail (automated_passed
+		// would mean "checks ran cleanly" in one branch and "checks
+		// ran but produced warnings" in another) and (b) require a
+		// second UpdateReviewState call inside the same worker tick.
 		switch to {
-		case ReviewStatusAutomatedPassed, ReviewStatusRejected, ReviewStatusWithdrawn:
+		case ReviewStatusAutomatedPassed, ReviewStatusManualReview,
+			ReviewStatusRejected, ReviewStatusWithdrawn:
 			return true
 		}
 	case ReviewStatusAutomatedPassed:

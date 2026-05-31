@@ -56,6 +56,17 @@ func TestMarketplaceWriteErrorMapping(t *testing.T) {
 		{name: "ErrPreInstallRejected", err: runtime.ErrPreInstallRejected, want: http.StatusUnprocessableEntity},
 		{name: "ErrPreUninstallRejected", err: runtime.ErrPreUninstallRejected, want: http.StatusUnprocessableEntity},
 		{name: "wrapped ErrPreUninstallRejected", err: fmt.Errorf("%w: publisher said no", runtime.ErrPreUninstallRejected), want: http.StatusUnprocessableEntity},
+		// Forward-safety mappings for sentinels declared in
+		// types.go that don't yet have a live HTTP raise path
+		// in B7 but will once SetAutoApprovePatch / signature
+		// verification land in admin handlers. The bot would
+		// otherwise fall through to 500 (Devin Review
+		// ANALYSIS_0001 on fa364ea); pinning the mapping here
+		// keeps the contract intact for future callers.
+		{name: "ErrInvalidSignature", err: marketplace.ErrInvalidSignature, want: http.StatusUnprocessableEntity},
+		{name: "wrapped ErrInvalidSignature", err: fmt.Errorf("%w: key foo did not verify", marketplace.ErrInvalidSignature), want: http.StatusUnprocessableEntity},
+		{name: "ErrPublisherNotVerified", err: marketplace.ErrPublisherNotVerified, want: http.StatusConflict},
+		{name: "wrapped ErrPublisherNotVerified", err: fmt.Errorf("%w: cannot enable fast-path", marketplace.ErrPublisherNotVerified), want: http.StatusConflict},
 		{name: "unknown error → 500", err: errors.New("boom"), want: http.StatusInternalServerError},
 	}
 	for _, tc := range cases {

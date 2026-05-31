@@ -40,6 +40,19 @@ import (
 // The registrar re-asserts these invariants at insert time via
 // the DB CHECK constraints declared in migrations/000069, so a
 // bug in a caller cannot poison the registry.
+//
+// Immutability contract: once a ResolvedBundle has been returned
+// by bundle.Resolver.Resolve, every field on the bundle (and the
+// elements of every slice it carries) is read-only. The
+// CachingResolver intentionally returns the SAME pointer to
+// multiple callers (see CachingResolver.Resolve godoc) — a caller
+// mutating any field would corrupt every concurrent install of
+// the version. The registrar, the settings-schema validator, and
+// the engine.Install path treat the bundle as read-only;
+// downstream callers (B7 review pipeline, future B6 follow-ups)
+// MUST follow the same discipline. If a caller needs to derive a
+// mutated copy, copy the bundle (and the underlying slices /
+// json.RawMessage backing arrays) explicitly before mutating.
 type ResolvedBundle struct {
 	// Manifest is the parsed manifest, retained as the source of
 	// truth for retry policy / timeout / endpoint extraction on

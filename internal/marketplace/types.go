@@ -237,6 +237,31 @@ type ExtensionVersion struct {
 	Yanked              bool      `json:"yanked"`
 	YankedReason        string    `json:"yanked_reason,omitempty"`
 	PublishedAt         time.Time `json:"published_at"`
+
+	// Signature columns. Populated when the publisher attaches an
+	// ed25519 signature at submit time; otherwise all three remain
+	// nil/empty. The DB CHECK on marketplace_extension_versions
+	// enforces the all-or-nothing invariant. The three fields are
+	// kept on this struct (rather than a nested pointer) so the
+	// JSON shape stays flat for clients — Signature() returns a
+	// typed view when callers want one.
+	BundleSignature        string     `json:"bundle_signature,omitempty"`
+	BundleSignatureKeyID   string     `json:"bundle_signature_key_id,omitempty"`
+	SignedAt               *time.Time `json:"signed_at,omitempty"`
+}
+
+// Signature returns the typed BundleSignature view, or nil if the
+// version is unsigned. Convenience for callers that prefer the
+// struct over the flat columns.
+func (v ExtensionVersion) Signature() *BundleSignature {
+	if v.BundleSignature == "" || v.BundleSignatureKeyID == "" || v.SignedAt == nil {
+		return nil
+	}
+	return &BundleSignature{
+		SignatureB64: v.BundleSignature,
+		KeyID:        v.BundleSignatureKeyID,
+		SignedAt:     *v.SignedAt,
+	}
 }
 
 // ReviewState is the per-version operator review record. B7 owns the
@@ -250,6 +275,20 @@ type ReviewState struct {
 	ReviewedAt         *time.Time   `json:"reviewed_at,omitempty"`
 	CreatedAt          time.Time    `json:"created_at"`
 	UpdatedAt          time.Time    `json:"updated_at"`
+}
+
+// BundleSignature is the optional ed25519 signature attached to a
+// version row by the publisher at submit time. The fields are
+// all-or-nothing (the DB constraint enforces this). The pipeline's
+// SignatureCheck looks the KeyID up against marketplace_publisher_keys
+// to find the public key and runs sign.Verify against the raw bundle
+// bytes. The SignedAt timestamp is the wall-clock at submit time —
+// useful for replay-window reasoning but not load-bearing for the
+// verification logic.
+type BundleSignature struct {
+	SignatureB64 string
+	KeyID        string
+	SignedAt     time.Time
 }
 
 // Installation is the tenant-scoped per-install record. RLS isolates
@@ -324,4 +363,108 @@ var (
 	// clear "version is yanked" message rather than a generic
 	// "invalid transition" error.
 	ErrYanked = errors.New("marketplace: version is yanked")
+
+	// ErrInvalidSignature is the catch-all sentinel for a registered
+	// ed25519 key failing to verify a bundle's signature. B7's
+	// automated review pipeline raises this both at the structured-
+	// finding layer (severity=error, code=signature.invalid) and at
+	// the publisher submit endpoint when the early-reject path runs.
+	ErrInvalidSignature = errors.New("marketplace: invalid bundle signature")
+
+	// ErrPublisherNotVerified is returned by admin endpoints that
+	// require the auto-approve-patch flag (a B7.1 feature) when the
+	// publisher has not yet been operator-verified. Today the
+	// pipeline does not depend on it, but the verify/unverify
+	// admin endpoints surface this for the patch fast-path.
+	ErrPublisherNotVerified = errors.New("marketplace: publisher is not verified")
+
+	// ErrClaimLost is the B7 review pipeline's signal that an
+	// admin Rescan landed between a worker's claim and its Persist
+	// call. The atomic claim guard on UpdateReviewState refuses
+	// the transition; the worker logs + drops the result and the
+	// next poll re-claims the freshly-reset row to re-run the
+	// pipeline against the same version. See
+	// services/worker/review_worker.go and Pipeline.Persist for
+	// the full TOCTOU rationale.
+	ErrClaimLost = errors.New("marketplace: review claim lost (concurrent rescan)")
 )
+
+// Publisher is the publisher identity row. Backfilled at migration
+// time from the distinct publisher column on marketplace_extensions.
+// The verified_at + verified_by columns are the audit trail for the
+// operator's verification decision; auto_approve_patch is the gate
+// for the future fast-path (B7.1) that lets verified publishers'
+// patch-version bumps skip the manual_review step.
+type Publisher struct {
+	ID                 uuid.UUID  `json:"id"`
+	Slug               string     `json:"slug"`
+	DisplayName        string     `json:"display_name"`
+	ContactEmail       string     `json:"contact_email"`
+	VerifiedAt         *time.Time `json:"verified_at,omitempty"`
+	VerifiedBy         string     `json:"verified_by,omitempty"`
+	VerificationNotes  string     `json:"verification_notes,omitempty"`
+	AutoApprovePatch   bool       `json:"auto_approve_patch"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+// PublisherKey is one ed25519 public key registered by a publisher.
+// Multiple keys per publisher supports rotation: register the new
+// key, sign new uploads with it, then revoke the old key. The
+// pipeline considers any non-revoked key a valid signer; revoked
+// keys remain in the table so we can still verify signatures on
+// already-uploaded immutable version rows.
+type PublisherKey struct {
+	ID            uuid.UUID  `json:"id"`
+	PublisherID   uuid.UUID  `json:"publisher_id"`
+	KeyID         string     `json:"key_id"`
+	Algorithm     string     `json:"algorithm"`
+	PublicKeyB64  string     `json:"public_key_b64"`
+	Label         string     `json:"label,omitempty"`
+	RevokedAt     *time.Time `json:"revoked_at,omitempty"`
+	RevokedReason string     `json:"revoked_reason,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+}
+
+// Severity tags structured findings. The pipeline interprets the
+// severity as follows:
+//
+//	error — blocks the version; pipeline transitions to rejected.
+//	warn  — surfaces on the listing detail page as advisory output;
+//	        does NOT block.
+//	info  — recorded for forensic detail but not surfaced in the UI;
+//	        used e.g. by the SignatureCheck to note "publisher
+//	        unsigned" without flagging.
+type Severity string
+
+// The three severity tiers the pipeline emits — see the Severity
+// godoc for what each one signals to the marketplace UI and the
+// review state machine.
+const (
+	SeverityError Severity = "error"
+	SeverityWarn  Severity = "warn"
+	SeverityInfo  Severity = "info"
+)
+
+// Valid reports whether s is one of the three defined severities.
+func (s Severity) Valid() bool {
+	switch s {
+	case SeverityError, SeverityWarn, SeverityInfo:
+		return true
+	}
+	return false
+}
+
+// ReviewFinding is one structured output of an automated check. The
+// natural key is (extension_version_id, check_name, code, location)
+// so a re-scan replaces rather than duplicates findings.
+type ReviewFinding struct {
+	ID                 uuid.UUID `json:"id"`
+	ExtensionVersionID uuid.UUID `json:"extension_version_id"`
+	CheckName          string    `json:"check_name"`
+	Severity           Severity  `json:"severity"`
+	Code               string    `json:"code"`
+	Message            string    `json:"message"`
+	Location           string    `json:"location,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+}

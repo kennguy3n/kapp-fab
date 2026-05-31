@@ -37,6 +37,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
+	"github.com/kennguy3n/kapp-fab/internal/marketplace"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/eventrouter"
 	mktruntime "github.com/kennguy3n/kapp-fab/internal/marketplace/runtime"
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
@@ -489,6 +490,26 @@ func run() error {
 	mktLimiter := eventrouter.NewLimiter(100, time.Now)
 	mktRouter := eventrouter.NewRouter(pool, mktTransport, mktEncryptor, mktLimiter, time.Now)
 
+	// Marketplace review pipeline (B7). The review worker polls
+	// marketplace_extension_review_state for `submitted` rows and
+	// runs the automated checks (signature, manifest, KType
+	// namespace, endpoint scheme, icon, UI static analysis, etc.)
+	// against each. Singleton: only the elected leader drains the
+	// queue. The pipeline pulls the bundle from the version row's
+	// bundle_url over HTTPS; HTTPSource caps the body at
+	// MaxBundleSizeBytes and the per-request timeout at 30 s.
+	mktStore := marketplace.NewStore(pool)
+	mktReviewPipeline := buildReviewPipeline(mktStore, 30*time.Second)
+	// Reuse `identity` (computed above for leader election) rather
+	// than calling workerIdentity() again — the function reads
+	// os.Hostname() which is cheap but the duplication invites
+	// drift if the identity source ever becomes non-deterministic.
+	// The same identity is recorded as claimed_by on each review
+	// claim and threaded through to UpdateReviewState's claim
+	// guard, so consistency between leader-election and claim
+	// attribution is load-bearing for forensic correlation.
+	mktReviewWorker := NewReviewWorker(mktStore, mktReviewPipeline, slog.Default(), 5*time.Second, 4, identity)
+
 	return election.Run(ctx, func(leaderCtx context.Context) error {
 		return leadWorker(leaderCtx, leaderState{
 			cfg:               cfg,
@@ -506,6 +527,7 @@ func run() error {
 			drainHistogram:    drainDur,
 			drainCounter:      drainEvents,
 			marketplaceRouter: mktRouter,
+			reviewWorker:      mktReviewWorker,
 		})
 	})
 }
@@ -569,6 +591,13 @@ type leaderState struct {
 	// holds its own transport + rate-limit state.
 	marketplaceRouter *eventrouter.Router
 
+	// reviewWorker drives the B7 automated-review pipeline:
+	// claims `submitted` versions, runs the structural / signature
+	// checks, persists findings, and transitions to
+	// automated_passed | manual_review | rejected. Singleton on
+	// the elected leader so the same version isn't double-scanned.
+	reviewWorker *ReviewWorker
+
 	// helpdeskIMAP is the supervisor for the per-mailbox IMAP
 	// poller goroutines (Surface G). nil when adminPool is
 	// unavailable or no IMAP client factory is wired; in either
@@ -601,6 +630,9 @@ func leadWorker(leaderCtx context.Context, s leaderState) error {
 	go scheduler.RunLoop(leaderCtx, s.schedStore, s.schedRegistry, 10*time.Second)
 	go s.exportWorker.Run(leaderCtx)
 	go s.autoscaleLoop.Run(leaderCtx)
+	if s.reviewWorker != nil {
+		go s.reviewWorker.Run(leaderCtx)
+	}
 	if s.helpdeskIMAP != nil {
 		// Per-mailbox IMAP pollers. The supervisor handles
 		// Manager.StopAll on leaderCtx cancellation so a

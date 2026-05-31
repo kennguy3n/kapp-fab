@@ -405,6 +405,21 @@ func resolveJSONFile(files map[string][]byte, manifestPath, kind string) (body [
 	return body, named.Name, nil
 }
 
+// Untar exposes the bundle's tar.gz extraction logic to other
+// packages in the marketplace tree (notably internal/marketplace/
+// review, which needs the full file map — including icon and UI-
+// extension files — to run its check pipeline). The B6 hot path
+// uses untarGzip directly via Resolve; review uses Untar for the
+// same defence-in-depth (per-file cap, cumulative cap, no symlinks,
+// no traversal, single-root) without re-implementing those checks.
+//
+// The returned map is keyed by manifest-relative path (with the
+// archive's single root directory stripped) and values are the
+// file bodies. body must be the raw .tar.gz bytes.
+func Untar(body []byte) (map[string][]byte, error) {
+	return untarGzip(body)
+}
+
 // bundleRelPath normalises a manifest-supplied "./foo/bar.json"
 // into the "foo/bar.json" lookup key the extractor uses. Returns
 // (path, true) on success, (empty, false) if the input is not a
