@@ -299,6 +299,18 @@ type reviewQueueItem struct {
 	ReviewedAt        string                   `json:"reviewed_at,omitempty"`
 	CreatedAt         string                   `json:"created_at"`
 	UpdatedAt         string                   `json:"updated_at"`
+
+	// AttemptCount / LastAttemptError / LastAttemptAt are the
+	// B7.2 retry-accounting fields surfaced on every queue row
+	// so the admin UI can show "3 of 5 attempts, last error: …"
+	// next to each submitted version, and (more importantly) so
+	// dead_letter rows render the failure cause inline rather
+	// than requiring a separate "why did this dead-letter?"
+	// round trip. Empty / 0 / absent on rows that have never
+	// been claimed by the worker.
+	AttemptCount     int    `json:"attempt_count"`
+	LastAttemptError string `json:"last_attempt_error,omitempty"`
+	LastAttemptAt    string `json:"last_attempt_at,omitempty"`
 }
 
 type reviewTransitionRequestBody struct {
@@ -1030,16 +1042,32 @@ func (h *marketplaceHandlers) submitVersion(w http.ResponseWriter, r *http.Reque
 // Admin endpoints. Mount under adminChain.
 // ---------------------------------------------------------------------------
 
-// reviewQueue returns versions in `submitted` or
-// `automated_passed` review state — i.e. waiting for a human
-// reviewer. Ordered FIFO (oldest first) so the queue surfaces
-// long-waiting items first.
+// reviewQueue returns versions that need reviewer / admin
+// attention: `submitted`, `automated_passed`, `manual_review`,
+// and `dead_letter` (B7.2 — abandoned after MaxReviewAttempts;
+// admin recovers via Rescan). Each status block is FIFO (oldest
+// first via ListVersionsByReviewStatus's ORDER BY created_at).
+//
+// Composition: when ?status= is omitted, the response concatenates
+// per-status pages in fixed order — submitted, automated_passed,
+// manual_review, dead_letter — NOT interleaved by created_at
+// across statuses. The fixed order keeps the UI grouping stable
+// (admins see fresh work at the top, abandoned rows at the
+// bottom), and dead_letter rows are appended rather than hidden
+// behind silent filtering. ?status=dead_letter isolates the
+// abandoned queue for triage before clicking Rescan.
+//
+// Response size: 4 statuses × 500-row per-status cap (enforced
+// by ListVersionsByReviewStatus) = 2000 items maximum in the
+// default response. A future paginated variant is the right home
+// for callers that need stable cursoring.
 func (h *marketplaceHandlers) reviewQueue(w http.ResponseWriter, r *http.Request) {
 	statusParam := strings.TrimSpace(r.URL.Query().Get("status"))
 	statuses := []marketplace.ReviewStatus{
 		marketplace.ReviewStatusSubmitted,
 		marketplace.ReviewStatusAutomatedPassed,
 		marketplace.ReviewStatusManualReview,
+		marketplace.ReviewStatusDeadLetter,
 	}
 	if statusParam != "" {
 		s := marketplace.ReviewStatus(statusParam)
@@ -1081,6 +1109,21 @@ func (h *marketplaceHandlers) reviewTransition(w http.ResponseWriter, r *http.Re
 	status := marketplace.ReviewStatus(req.Status)
 	if !status.Valid() {
 		http.Error(w, "invalid review status", http.StatusBadRequest)
+		return
+	}
+	// dead_letter is a system-only terminal driven by the review
+	// worker after MaxReviewAttempts consecutive failures
+	// (B7.2). Manually transitioning here would bypass
+	// attempt_count tracking, leave last_attempt_error empty, and
+	// stamp a human reviewer onto a state whose semantic is "the
+	// system gave up". Admins wanting to permanently stop a
+	// version should use rejected (which carries the audit-trail
+	// reviewer); admins wanting to pause processing don't have a
+	// surface here today (none was requested in B7.2 — they can
+	// withdraw on the publisher side or reject via this endpoint).
+	if status == marketplace.ReviewStatusDeadLetter {
+		http.Error(w, "dead_letter is system-only and cannot be set manually; use rejected for permanent stop",
+			http.StatusBadRequest)
 		return
 	}
 	reviewer := actorOrDefault(r.Context()).String()
@@ -1193,9 +1236,14 @@ func reviewStateToItem(s marketplace.ReviewState) reviewQueueItem {
 		Reviewer:          s.Reviewer,
 		CreatedAt:         s.CreatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		UpdatedAt:         s.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
+		AttemptCount:     s.AttemptCount,
+		LastAttemptError: s.LastAttemptError,
 	}
 	if s.ReviewedAt != nil {
 		out.ReviewedAt = s.ReviewedAt.UTC().Format("2006-01-02T15:04:05Z07:00")
+	}
+	if s.LastAttemptAt != nil {
+		out.LastAttemptAt = s.LastAttemptAt.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 	return out
 }
@@ -1212,7 +1260,8 @@ func (h *marketplaceHandlers) writeError(w http.ResponseWriter, err error) {
 		errors.Is(err, marketplace.ErrYanked),
 		errors.Is(err, marketplace.ErrImmutableVersion),
 		errors.Is(err, marketplace.ErrPublisherNotVerified),
-		errors.Is(err, marketplace.ErrLastOwnerRemoval):
+		errors.Is(err, marketplace.ErrLastOwnerRemoval),
+		errors.Is(err, marketplace.ErrReviewMaxAttemptsExceeded):
 		// ErrPublisherNotVerified is a state-precondition
 		// failure (e.g. SetAutoApprovePatch refusing to enable
 		// fast-path on an unverified row); 409 matches the

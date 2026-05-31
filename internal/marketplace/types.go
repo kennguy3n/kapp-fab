@@ -117,19 +117,37 @@ const (
 	// review concluded (e.g. found a self-spotted bug). The version
 	// row is left in place but is treated as not-installable.
 	ReviewStatusWithdrawn ReviewStatus = "withdrawn"
+
+	// ReviewStatusDeadLetter — the review worker tried and failed
+	// MaxReviewAttempts times in a row (CDN unreachable, bundle
+	// parser exception, etc.). B7.2 terminal state. The version
+	// stays installable-blocked (not listed) until the admin
+	// Rescan endpoint moves it back to `submitted` with a fresh
+	// attempt budget. last_attempt_error on the row carries the
+	// last failure message so the operator can decide whether to
+	// rescan (transient) or investigate the bundle (persistent).
+	ReviewStatusDeadLetter ReviewStatus = "dead_letter"
 )
 
-// IsTerminal returns true for the three states (`approved`, `rejected`,
-// `withdrawn`) that the review pipeline never transitions out of.
+// IsTerminal returns true for the four states (`approved`, `rejected`,
+// `withdrawn`, `dead_letter`) that the review pipeline never
+// transitions out of without explicit admin intervention. Note that
+// `dead_letter` is recoverable via the admin Rescan endpoint — same
+// mechanism that re-runs a stuck `submitted` row — so terminal here
+// means "the worker won't move it on its own", not "immutable for
+// all time".
 func (s ReviewStatus) IsTerminal() bool {
 	switch s {
-	case ReviewStatusApproved, ReviewStatusRejected, ReviewStatusWithdrawn:
+	case ReviewStatusApproved,
+		ReviewStatusRejected,
+		ReviewStatusWithdrawn,
+		ReviewStatusDeadLetter:
 		return true
 	}
 	return false
 }
 
-// Valid reports whether the status matches one of the six well-known
+// Valid reports whether the status matches one of the seven well-known
 // values.
 func (s ReviewStatus) Valid() bool {
 	switch s {
@@ -138,7 +156,8 @@ func (s ReviewStatus) Valid() bool {
 		ReviewStatusManualReview,
 		ReviewStatusApproved,
 		ReviewStatusRejected,
-		ReviewStatusWithdrawn:
+		ReviewStatusWithdrawn,
+		ReviewStatusDeadLetter:
 		return true
 	}
 	return false
@@ -266,6 +285,12 @@ func (v ExtensionVersion) Signature() *BundleSignature {
 
 // ReviewState is the per-version operator review record. B7 owns the
 // transitions; this package's Store reads/writes the row.
+//
+// AttemptCount, LastAttemptError, and LastAttemptAt are B7.2's
+// dead-letter accounting. They are zero/empty for a freshly-created
+// row and are bumped by the worker via
+// ReviewStateStore.RecordAttemptFailure when a pipeline run errors.
+// Reset to zero/empty by ResetReviewStateForRescan.
 type ReviewState struct {
 	ExtensionVersionID uuid.UUID    `json:"extension_version_id"`
 	Status             ReviewStatus `json:"status"`
@@ -273,6 +298,9 @@ type ReviewState struct {
 	ManualReviewNotes  string       `json:"manual_review_notes,omitempty"`
 	Reviewer           string       `json:"reviewer,omitempty"`
 	ReviewedAt         *time.Time   `json:"reviewed_at,omitempty"`
+	AttemptCount       int          `json:"attempt_count"`
+	LastAttemptError   string       `json:"last_attempt_error,omitempty"`
+	LastAttemptAt      *time.Time   `json:"last_attempt_at,omitempty"`
 	CreatedAt          time.Time    `json:"created_at"`
 	UpdatedAt          time.Time    `json:"updated_at"`
 }
@@ -410,6 +438,16 @@ var (
 	// the request itself was authorised but the desired state
 	// transition would violate the invariant.
 	ErrLastOwnerRemoval = errors.New("marketplace: removing this owner would leave the publisher without an owner")
+
+	// ErrReviewMaxAttemptsExceeded is the dead-letter signal
+	// returned by ReviewStateStore.RecordAttemptFailure when the
+	// incremented attempt_count would meet or exceed
+	// MaxReviewAttempts. The worker catches this sentinel and
+	// transitions the row to ReviewStatusDeadLetter with a
+	// synthetic finding row recording the final failure. Mapped to
+	// 409 by writeError so admin endpoints that try to transition
+	// a dead-lettered row get a clear conflict.
+	ErrReviewMaxAttemptsExceeded = errors.New("marketplace: review max attempts exceeded")
 )
 
 // Publisher is the publisher identity row. Backfilled at migration

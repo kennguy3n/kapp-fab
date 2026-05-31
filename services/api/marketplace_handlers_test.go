@@ -481,4 +481,92 @@ func TestUpgradeHandlerContradictoryBodyRejected(t *testing.T) {
 	}
 }
 
+// TestReviewTransitionRejectsManualDeadLetter pins the B7.2
+// handler-level guard added after Devin Review on PR #134:
+// dead_letter is the system-only terminal driven by the worker
+// after MaxReviewAttempts failures, and the manual /review
+// endpoint MUST reject it with 400 so an admin can't bypass
+// attempt_count tracking and stamp themselves onto a state whose
+// semantic is "the system gave up". Other terminal statuses
+// (approved, rejected, withdrawn) are admin-authored and remain
+// reachable through this endpoint.
+//
+// Implementation: the rejection fires BEFORE the store call, so
+// a nil-store handler is sufficient; we don't need a live DB to
+// pin the guard.
+func TestReviewTransitionRejectsManualDeadLetter(t *testing.T) {
+	t.Parallel()
+
+	verID := uuid.New()
+	h := &marketplaceHandlers{}
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("ver_id", verID.String())
+	ctx := context.WithValue(context.Background(), chi.RouteCtxKey, rctx)
+
+	body := `{"status":"dead_letter","manual_review_notes":"admin says no"}`
+	req := httptest.NewRequest(http.MethodPost,
+		"/admin/marketplace/versions/"+verID.String()+"/review",
+		strings.NewReader(body)).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	h.reviewTransition(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%q)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "dead_letter is system-only") {
+		t.Fatalf("body = %q, want substring 'dead_letter is system-only'", rec.Body.String())
+	}
+}
+
+// TestReviewTransitionAcceptsAdminReachableStates documents the
+// inverse: admin-driven terminals (approved, rejected, withdrawn)
+// and intermediate states (automated_passed, manual_review) MUST
+// progress past the dead_letter guard. We can't drive the full
+// transition (no store) so we recover from the inevitable nil
+// dereference and assert that the response body does NOT carry
+// the dead_letter rejection text — which would mean the guard
+// incorrectly fired.
+func TestReviewTransitionAcceptsAdminReachableStates(t *testing.T) {
+	t.Parallel()
+
+	verID := uuid.New()
+
+	for _, status := range []string{
+		"approved",
+		"rejected",
+		"withdrawn",
+		"automated_passed",
+		"manual_review",
+	} {
+		status := status
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+
+			h := &marketplaceHandlers{}
+
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("ver_id", verID.String())
+			ctx := context.WithValue(context.Background(), chi.RouteCtxKey, rctx)
+
+			body := fmt.Sprintf(`{"status":%q}`, status)
+			req := httptest.NewRequest(http.MethodPost,
+				"/admin/marketplace/versions/"+verID.String()+"/review",
+				strings.NewReader(body)).WithContext(ctx)
+			rec := httptest.NewRecorder()
+
+			func() {
+				defer func() { _ = recover() }()
+				h.reviewTransition(rec, req)
+			}()
+
+			if strings.Contains(rec.Body.String(), "dead_letter is system-only") {
+				t.Fatalf("admin-reachable status %q tripped the dead_letter guard: body=%q",
+					status, rec.Body.String())
+			}
+		})
+	}
+}
+
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -38,14 +39,16 @@ func (rs *ReviewStateStore) GetReviewState(ctx context.Context, versionID uuid.U
 	err := rs.store.pool.QueryRow(ctx,
 		`SELECT extension_version_id, status, automated_checks::text,
 		        COALESCE(manual_review_notes,''), COALESCE(reviewer,''),
-		        reviewed_at, created_at, updated_at
+		        reviewed_at, attempt_count, last_attempt_error, last_attempt_at,
+		        created_at, updated_at
 		 FROM marketplace_extension_review_state
 		 WHERE extension_version_id = $1`, versionID,
 	).Scan(
 		&out.ExtensionVersionID, &out.Status,
 		scanJSONB(&out.AutomatedChecks),
 		&out.ManualReviewNotes, &out.Reviewer,
-		&out.ReviewedAt, &out.CreatedAt, &out.UpdatedAt,
+		&out.ReviewedAt, &out.AttemptCount, &out.LastAttemptError, &out.LastAttemptAt,
+		&out.CreatedAt, &out.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -81,6 +84,20 @@ type UpdateReviewStateInput struct {
 	Reviewer        string
 	ReviewedAt      *time.Time
 	ExpectedClaim   *ReviewClaimGuard
+	// MinAttemptCount, when > 0, adds an attempt_count >= N
+	// predicate to the UPDATE. Used by the worker's dead-letter
+	// transition as defense-in-depth alongside ExpectedClaim:
+	// RecordAttemptFailure retains the claim on the
+	// >= MaxReviewAttempts path so the worker passes both
+	// ExpectedClaim (primary correctness guard) and
+	// MinAttemptCount=MaxReviewAttempts (catches a hypothetical
+	// regression where the claim is somehow preserved across an
+	// admin Rescan that nevertheless reset attempt_count to 0).
+	// Both guards firing on the same Rescan-mid-flight scenario
+	// is intentional — they each demand the same outcome (refuse
+	// the UPDATE). Human-driven transitions leave this 0 and the
+	// guard is skipped.
+	MinAttemptCount int
 }
 
 // ReviewClaimGuard is the (claimed_by, claimed_at) tuple recorded
@@ -102,13 +119,20 @@ type ReviewClaimGuard struct {
 // UpdateReviewState transitions a review row. Enforces the same
 // transition graph the B7 pipeline assumes:
 //
-//	submitted        → automated_passed | manual_review | rejected | withdrawn
+//	submitted        → automated_passed | manual_review | rejected | withdrawn | dead_letter
 //	automated_passed → manual_review    | rejected | withdrawn
 //	manual_review    → approved | rejected | withdrawn
 //	approved         → (terminal; only the AutomatedChecks JSON may
 //	                    be amended for forensic detail)
 //	rejected         → (terminal; same caveat)
 //	withdrawn        → (terminal)
+//	dead_letter      → (terminal; recoverable via ResetReviewStateForRescan)
+//
+// dead_letter is the B7.2 system-driven terminal for "the worker
+// tried MaxReviewAttempts times and the pipeline never produced a
+// verdict". Reviewer-free transition (the system itself decided);
+// admin Rescan moves the row back to `submitted` with a fresh
+// attempt budget.
 //
 // Note: the worker emits BOTH automated_passed (no findings or
 // info-only findings — clear pass) and manual_review (one or more
@@ -262,16 +286,19 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 			   AND status = $7
 			   AND ($8::text IS NULL OR claimed_by = $8)
 			   AND ($9::timestamptz IS NULL OR claimed_at = $9)
+			   AND ($10::int = 0 OR attempt_count >= $10)
 			 RETURNING extension_version_id, status, automated_checks::text,
 			           COALESCE(manual_review_notes,''), COALESCE(reviewer,''),
-			           reviewed_at, created_at, updated_at`,
+			           reviewed_at, attempt_count, last_attempt_error, last_attempt_at,
+			           created_at, updated_at`,
 			in.VersionID, string(in.Status), string(checks), notes, reviewer, reviewedAt, string(current.Status),
-			expectedClaimBy, expectedClaimAt,
+			expectedClaimBy, expectedClaimAt, in.MinAttemptCount,
 		).Scan(
 			&out.ExtensionVersionID, &out.Status,
 			scanJSONB(&out.AutomatedChecks),
 			&out.ManualReviewNotes, &out.Reviewer,
-			&out.ReviewedAt, &out.CreatedAt, &out.UpdatedAt,
+			&out.ReviewedAt, &out.AttemptCount, &out.LastAttemptError, &out.LastAttemptAt,
+			&out.CreatedAt, &out.UpdatedAt,
 		)
 		if err == nil {
 			return &out, nil
@@ -288,7 +315,13 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 		//      transition graph against the fresh state;
 		//   3. the claim guard failed because a concurrent rescan
 		//      cleared claimed_by / claimed_at — surface as
-		//      ErrClaimLost so the worker can drop its result.
+		//      ErrClaimLost so the worker can drop its result;
+		//   4. the attempt_count guard failed because a concurrent
+		//      admin Rescan reset attempt_count to 0 between
+		//      RecordAttemptFailure and this UPDATE — also surface
+		//      as ErrClaimLost so the worker drops the dead-letter
+		//      transition (the row is now a fresh submitted attempt
+		//      that the next worker tick will re-claim).
 		// We disambiguate by re-reading the row's current claim
 		// columns. The re-read is racy in isolation (claim could
 		// flip again between read and any subsequent action) but
@@ -300,6 +333,15 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 			lost, claimErr := rs.claimGuardFailed(ctx, in.VersionID, in.ExpectedClaim)
 			if claimErr != nil {
 				return nil, claimErr
+			}
+			if lost {
+				return nil, ErrClaimLost
+			}
+		}
+		if in.MinAttemptCount > 0 {
+			lost, lookupErr := rs.attemptCountGuardFailed(ctx, in.VersionID, in.MinAttemptCount)
+			if lookupErr != nil {
+				return nil, lookupErr
 			}
 			if lost {
 				return nil, ErrClaimLost
@@ -368,6 +410,31 @@ func (rs *ReviewStateStore) claimGuardFailed(ctx context.Context, versionID uuid
 	return false, nil
 }
 
+// attemptCountGuardFailed inspects the row's current attempt_count
+// and reports whether it is below the worker's required minimum
+// (typically MaxReviewAttempts on the dead-letter transition path).
+// A "lost" verdict means an admin Rescan reset the counter and the
+// caller should drop the in-flight dead-letter transition. A row
+// that has been deleted is reported as not-lost (the caller falls
+// through to the existing status-guard branch which translates
+// ErrNoRows into ErrNotFound).
+func (rs *ReviewStateStore) attemptCountGuardFailed(ctx context.Context, versionID uuid.UUID, minRequired int) (bool, error) {
+	var attemptCount int
+	err := rs.store.pool.QueryRow(ctx,
+		`SELECT attempt_count
+		   FROM marketplace_extension_review_state
+		  WHERE extension_version_id = $1`,
+		versionID,
+	).Scan(&attemptCount)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("marketplace: attempt count guard lookup: %w", err)
+	}
+	return attemptCount < minRequired, nil
+}
+
 // ListVersionsByReviewStatus returns the version ids currently in
 // the given review status. Used by B7's review-queue UI to render
 // the "awaiting human" inbox. Ordered by review_state.created_at ASC
@@ -382,7 +449,8 @@ func (rs *ReviewStateStore) ListVersionsByReviewStatus(ctx context.Context, stat
 	rows, err := rs.store.pool.Query(ctx,
 		`SELECT extension_version_id, status, automated_checks::text,
 		        COALESCE(manual_review_notes,''), COALESCE(reviewer,''),
-		        reviewed_at, created_at, updated_at
+		        reviewed_at, attempt_count, last_attempt_error, last_attempt_at,
+		        created_at, updated_at
 		 FROM marketplace_extension_review_state
 		 WHERE status = $1
 		 ORDER BY created_at ASC
@@ -399,7 +467,8 @@ func (rs *ReviewStateStore) ListVersionsByReviewStatus(ctx context.Context, stat
 			&r.ExtensionVersionID, &r.Status,
 			scanJSONB(&r.AutomatedChecks),
 			&r.ManualReviewNotes, &r.Reviewer,
-			&r.ReviewedAt, &r.CreatedAt, &r.UpdatedAt,
+			&r.ReviewedAt, &r.AttemptCount, &r.LastAttemptError, &r.LastAttemptAt,
+			&r.CreatedAt, &r.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("marketplace: list versions by review status: scan: %w", err)
 		}
@@ -413,13 +482,19 @@ func (rs *ReviewStateStore) ListVersionsByReviewStatus(ctx context.Context, stat
 // Deliberately bypasses the normal reviewStatusTransitionAllowed
 // graph (which only models forward transitions out of `submitted`):
 // admin-initiated rescan is the one supported path that can move
-// a non-terminal row backwards in the graph. Refuses to operate on
-// terminal-state rows — once approved / rejected / withdrawn, the
-// version is immutable and the audit trail is sealed; publishers
-// re-submit by uploading a new version. The handler-side check
-// gates terminal rows before calling here; this method enforces
-// the same invariant defensively so a future caller can't bypass
-// it.
+// a non-terminal row backwards in the graph.
+//
+// Refuses to operate on the audit-trail terminal states (approved
+// / rejected / withdrawn) — once a human reviewer decided the
+// version, that decision is sealed and publishers re-submit by
+// uploading a new version. `dead_letter` is the exception: the
+// worker dead-lettered the row because it failed N attempts in a
+// row WITHOUT producing any verdict, so it has no audit trail to
+// preserve. Rescanning a dead-lettered row is exactly the
+// "investigate, then retry" workflow B7.2 introduces, so we
+// permit it. The handler-side check gates the audit terminals
+// before calling here; this method enforces the same invariant
+// defensively so a future caller can't bypass it.
 //
 // The reset clears reviewer + reviewed_at + manual_review_notes +
 // automated_checks so the next worker run starts from a clean
@@ -448,7 +523,12 @@ func (s *Store) ResetReviewStateForRescan(ctx context.Context, versionID uuid.UU
 		}
 		return fmt.Errorf("marketplace: reset review state: select: %w", err)
 	}
-	if current.IsTerminal() {
+	// Audit-trail terminals (approved/rejected/withdrawn) are sealed.
+	// dead_letter is also terminal in the worker's transition graph
+	// but represents "no verdict was produced after N attempts" —
+	// the row has no audit trail to preserve, and admin rescan is
+	// the documented recovery path for it.
+	if current.IsTerminal() && current != ReviewStatusDeadLetter {
 		return fmt.Errorf("%w: cannot rescan terminal review state %q",
 			ErrConflict, current)
 	}
@@ -458,6 +538,14 @@ func (s *Store) ResetReviewStateForRescan(ctx context.Context, versionID uuid.UU
 	// would skip the row until the 10-minute lease lapses — an
 	// admin clicking Rescan expects work to start immediately,
 	// not 10 minutes later.
+	// Reset attempt accounting too. An admin clicking Rescan is
+	// asserting "this time it'll work" — preserving attempt_count
+	// would mean a rescued row with 4 prior failures is one strike
+	// away from dead-lettering again on the first transient blip
+	// after rescan. The conservative choice is the full B7.2
+	// MaxReviewAttempts budget; if the rescued run also fails the
+	// operator gets the whole window to investigate before the
+	// dead-letter transition fires again.
 	if _, err := tx.Exec(ctx,
 		`UPDATE marketplace_extension_review_state
 		    SET status = $1,
@@ -467,6 +555,9 @@ func (s *Store) ResetReviewStateForRescan(ctx context.Context, versionID uuid.UU
 		        reviewed_at = NULL,
 		        claimed_at = NULL,
 		        claimed_by = NULL,
+		        attempt_count = 0,
+		        last_attempt_error = '',
+		        last_attempt_at = NULL,
 		        updated_at = now()
 		  WHERE extension_version_id = $2`,
 		string(ReviewStatusSubmitted), versionID,
@@ -524,9 +615,18 @@ func reviewStatusTransitionAllowed(from, to ReviewStatus) bool {
 		// would mean "checks ran cleanly" in one branch and "checks
 		// ran but produced warnings" in another) and (b) require a
 		// second UpdateReviewState call inside the same worker tick.
+		//
+		// submitted→dead_letter is the B7.2 retry-exhausted path:
+		// the worker tried MaxReviewAttempts times in a row and the
+		// pipeline never produced a verdict (CDN unreachable,
+		// bundle parser exception). Reviewer-free transition because
+		// the system itself decided to give up; the admin Rescan
+		// endpoint moves the row back to `submitted` with a fresh
+		// attempt budget when the operator has investigated.
 		switch to {
 		case ReviewStatusAutomatedPassed, ReviewStatusManualReview,
-			ReviewStatusRejected, ReviewStatusWithdrawn:
+			ReviewStatusRejected, ReviewStatusWithdrawn,
+			ReviewStatusDeadLetter:
 			return true
 		}
 	case ReviewStatusAutomatedPassed:
@@ -541,4 +641,218 @@ func reviewStatusTransitionAllowed(from, to ReviewStatus) bool {
 		}
 	}
 	return false
+}
+
+// MaxReviewAttempts is the upper bound on consecutive failed
+// pipeline runs against a single review row before the worker
+// transitions the row to ReviewStatusDeadLetter. Set to 5 so a
+// short blip (one bad CDN response, a transient DB error) gets
+// retried but a persistent failure (corrupted bundle, missing CDN
+// origin) surfaces to the admin queue within ≥5 ticks.
+//
+// Lives here (not in the worker package) so the store's transition
+// gate and the worker's loop reference the same constant; changing
+// it requires a single edit and is automatically reflected in the
+// transition-graph tests.
+const MaxReviewAttempts = 5
+
+// MaxAttemptErrorLen is the upper bound on the byte length of the
+// per-attempt error string persisted to last_attempt_error /
+// dead_letter manual_review_notes / synthetic-finding messages.
+// Pipeline errors are usually short, but a panic-wrapped multi-line
+// stack would otherwise blow out the admin queue response. 1 KiB
+// is generous for a one-line summary.
+//
+// Exported so worker-side bookkeeping (dead-letter UPDATE +
+// synthetic finding) can apply the SAME limit the store applies
+// internally to last_attempt_error, keeping all three fields
+// consistent.
+const MaxAttemptErrorLen = 1024
+
+// TruncateUTF8 returns s truncated to at most maxBytes bytes at a
+// UTF-8 rune boundary. If s is already <= maxBytes and valid UTF-8
+// it is returned unchanged. The returned string is guaranteed to
+// be valid UTF-8 even if s contained an invalid sequence at or
+// beyond maxBytes (PostgreSQL `text` columns reject invalid
+// UTF-8). Always produces a result of length <= maxBytes.
+func TruncateUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 || s == "" {
+		return ""
+	}
+	if len(s) <= maxBytes && utf8.ValidString(s) {
+		return s
+	}
+	// Walk runes until adding the next rune would exceed maxBytes.
+	// utf8.DecodeRuneInString returns RuneError + size=1 for an
+	// invalid byte; treat that byte as a stop signal so the
+	// returned string never contains the bad sequence.
+	out := 0
+	for out < len(s) && out < maxBytes {
+		r, size := utf8.DecodeRuneInString(s[out:])
+		if r == utf8.RuneError && size <= 1 {
+			break
+		}
+		if out+size > maxBytes {
+			break
+		}
+		out += size
+	}
+	return s[:out]
+}
+
+// RecordAttemptFailure increments attempt_count on the row and
+// stamps the new last_attempt_error / last_attempt_at. The
+// increment happens under FOR UPDATE on the row so concurrent
+// ClaimSubmittedReviewVersions calls see the incremented counter
+// atomically.
+//
+// Claim handling is conditional on the post-increment count:
+//
+//   - count < MaxReviewAttempts: claim is cleared (set NULL) so
+//     the next ClaimSubmittedReviewVersions poll re-picks the row
+//     immediately, no need to wait for the 10-minute lease to
+//     lapse.
+//   - count >= MaxReviewAttempts: claim is RETAINED so the
+//     caller (worker) can run the dead-letter UpdateReviewState
+//     transition under its own ExpectedClaim guard. This closes
+//     a wasted-pipeline-run race window where, between this
+//     UPDATE committing and the dead-letter UPDATE landing,
+//     another replica could otherwise claim the row (claim was
+//     NULL) and begin a doomed pipeline run that the dead-letter
+//     transition would then invalidate. With the claim retained,
+//     ClaimSubmittedReviewVersions correctly skips the row
+//     (its WHERE clause requires NULL-or-stale claimed_at), so
+//     no second worker can race.
+//
+// When the post-increment attempt_count is >= MaxReviewAttempts,
+// returns (newCount, ErrReviewMaxAttemptsExceeded) WITHOUT
+// transitioning the row. The caller (worker) catches the sentinel
+// and runs the dead-letter UpdateReviewState transition with a
+// synthetic finding row recording the final failure, so the
+// dead-letter path goes through the normal transition-graph guard
+// rather than a backdoor UPDATE here.
+//
+// expectedClaim is the same ReviewClaimGuard the worker passes to
+// UpdateReviewState: an admin Rescan landing between the worker's
+// claim and this call would have cleared the claim, so the UPDATE
+// guards on (claimed_by, claimed_at) matching exactly. If the
+// guard fails, returns (0, ErrClaimLost) and the worker drops the
+// attempt — the freshly-reset row's attempt_count is already 0,
+// so incrementing here would be wrong.
+func (rs *ReviewStateStore) RecordAttemptFailure(
+	ctx context.Context,
+	versionID uuid.UUID,
+	expectedClaim *ReviewClaimGuard,
+	errMsg string,
+) (int, error) {
+	if versionID == uuid.Nil {
+		return 0, fmt.Errorf("%w: version id required", ErrNotFound)
+	}
+	// Bound the stored error string. Pipeline errors are usually
+	// short but defensive: a panic-wrapped multi-line stack would
+	// blow out the admin queue response. 1 KiB is generous for a
+	// one-line summary.
+	//
+	// Truncate at a rune boundary, NOT at a raw byte position. A
+	// naive `errMsg[:maxErrLen]` slice could split a multi-byte
+	// UTF-8 character (Go errors usually ASCII, but file paths,
+	// wrapped library messages, or i18n text can carry runes), and
+	// PostgreSQL's `text` column type validates UTF-8 — an invalid
+	// trailing fragment causes the INSERT to fail with
+	// `invalid_byte_sequence_for_encoding`, which would mean the
+	// failure-recording UPDATE itself fails and attempt_count
+	// silently stops incrementing.
+	errMsg = TruncateUTF8(errMsg, MaxAttemptErrorLen)
+
+	var (
+		expectedClaimBy any
+		expectedClaimAt any
+	)
+	if expectedClaim != nil {
+		expectedClaimBy = expectedClaim.ClaimedBy
+		expectedClaimAt = expectedClaim.ClaimedAt
+	}
+
+	tx, err := rs.store.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return 0, fmt.Errorf("marketplace: record attempt failure: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Increment + conditionally clear claim atomically. The claim
+	// is retained when the post-increment count crosses
+	// MaxReviewAttempts so the caller's dead-letter UPDATE can
+	// authenticate via ExpectedClaim — see this method's godoc for
+	// the wasted-pipeline-run race this closes.
+	//
+	// The claim guard fires when an admin Rescan landed between
+	// claim and this call: ResetReviewStateForRescan nulls
+	// claimed_by/claimed_at, so the guard's `claimed_by =
+	// $expectedBy` predicate fails and the UPDATE affects zero
+	// rows.
+	var newCount int
+	err = tx.QueryRow(ctx,
+		`UPDATE marketplace_extension_review_state
+		    SET attempt_count = attempt_count + 1,
+		        last_attempt_error = $2,
+		        last_attempt_at = now(),
+		        claimed_at = CASE WHEN (attempt_count + 1) >= $6::int
+		                          THEN claimed_at ELSE NULL END,
+		        claimed_by = CASE WHEN (attempt_count + 1) >= $6::int
+		                          THEN claimed_by ELSE NULL END,
+		        updated_at = now()
+		  WHERE extension_version_id = $1
+		    AND status = $3
+		    AND ($4::text IS NULL OR claimed_by = $4)
+		    AND ($5::timestamptz IS NULL OR claimed_at = $5)
+		 RETURNING attempt_count`,
+		versionID, errMsg, string(ReviewStatusSubmitted),
+		expectedClaimBy, expectedClaimAt,
+		MaxReviewAttempts,
+	).Scan(&newCount)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Disambiguate row-deleted vs status-flipped vs
+			// claim-lost. We re-read under the same tx (no FOR
+			// UPDATE because we're about to commit-and-return).
+			var status ReviewStatus
+			var claimedBy *string
+			var claimedAt *time.Time
+			lookupErr := tx.QueryRow(ctx,
+				`SELECT status, claimed_by, claimed_at
+				   FROM marketplace_extension_review_state
+				  WHERE extension_version_id = $1`,
+				versionID,
+			).Scan(&status, &claimedBy, &claimedAt)
+			if lookupErr != nil {
+				if errors.Is(lookupErr, pgx.ErrNoRows) {
+					return 0, ErrNotFound
+				}
+				return 0, fmt.Errorf("marketplace: record attempt failure: disambiguate: %w", lookupErr)
+			}
+			if status != ReviewStatusSubmitted {
+				// Concurrent transition out of submitted —
+				// success, withdrawal, or admin rescan completing
+				// just-in-time. Treat as claim-lost so the worker
+				// drops its attempt.
+				return 0, ErrClaimLost
+			}
+			if expectedClaim != nil {
+				if claimedBy == nil || claimedAt == nil ||
+					*claimedBy != expectedClaim.ClaimedBy ||
+					!claimedAt.Equal(expectedClaim.ClaimedAt) {
+					return 0, ErrClaimLost
+				}
+			}
+			return 0, fmt.Errorf("marketplace: record attempt failure: update affected zero rows on version %s with no diagnosable cause", versionID)
+		}
+		return 0, fmt.Errorf("marketplace: record attempt failure: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("marketplace: record attempt failure: commit: %w", err)
+	}
+	if newCount >= MaxReviewAttempts {
+		return newCount, ErrReviewMaxAttemptsExceeded
+	}
+	return newCount, nil
 }
