@@ -320,6 +320,8 @@ type Installation struct {
 //	ErrPermissionScopeUnknown → 400
 //	ErrImmutableVersion     → 409
 //	ErrYanked               → 409
+//	ErrForbidden            → 403
+//	ErrLastOwnerRemoval     → 409
 var (
 	// ErrConflict signals a unique-constraint hit — either a
 	// duplicate (publisher, slug) extension insert or a duplicate
@@ -387,6 +389,27 @@ var (
 	// services/worker/review_worker.go and Pipeline.Persist for
 	// the full TOCTOU rationale.
 	ErrClaimLost = errors.New("marketplace: review claim lost (concurrent rescan)")
+
+	// ErrForbidden is returned by the B7.1 self-service publisher
+	// surface when the authenticated user is not a member of the
+	// publisher (or holds a role insufficient for the requested
+	// action — e.g. a `member` trying to invoke an owner-only
+	// member-management endpoint). Mapped to 403 by writeError.
+	// Distinct from ErrNotFound (404) so the engine can tell a
+	// non-member apart from a missing publisher; the HTTP layer
+	// can choose to collapse both into 404 to avoid leaking
+	// publisher existence to outsiders.
+	ErrForbidden = errors.New("marketplace: forbidden")
+
+	// ErrLastOwnerRemoval is the invariant guard on the
+	// publisher_members surface: "any publisher with members must
+	// have ≥1 owner." Returned by SetMemberRole(owner→member) and
+	// RemoveMember(last owner) when other (non-owner) members
+	// would remain after the change. Admin override endpoints
+	// bypass this guard explicitly. Mapped to 409 by writeError —
+	// the request itself was authorised but the desired state
+	// transition would violate the invariant.
+	ErrLastOwnerRemoval = errors.New("marketplace: removing this owner would leave the publisher without an owner")
 )
 
 // Publisher is the publisher identity row. Backfilled at migration
@@ -406,6 +429,81 @@ type Publisher struct {
 	AutoApprovePatch   bool       `json:"auto_approve_patch"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+// PublisherMemberRole is the role of a user in the publisher
+// membership table. Two-role RBAC: owner manages members + keys,
+// member manages keys only. See migrations/000075 for the
+// rationale on why we stopped at two roles.
+type PublisherMemberRole string
+
+const (
+	// PublisherMemberRoleOwner can add/remove other members and
+	// can manage keys. There must be ≥1 owner whenever a
+	// publisher has any members.
+	PublisherMemberRoleOwner PublisherMemberRole = "owner"
+
+	// PublisherMemberRoleMember can list members and manage keys
+	// (register / list / revoke) but cannot add or remove other
+	// members. Used to delegate key-rotation duty without
+	// granting full publisher control.
+	PublisherMemberRoleMember PublisherMemberRole = "member"
+)
+
+// Valid reports whether r is one of the recognised roles. Used
+// by the handler-side input validator before passing to the
+// store.
+func (r PublisherMemberRole) Valid() bool {
+	switch r {
+	case PublisherMemberRoleOwner, PublisherMemberRoleMember:
+		return true
+	}
+	return false
+}
+
+// AtLeast returns true if r is at least as privileged as other.
+// owner > member. Used by RequireMemberRole to gate owner-only
+// endpoints.
+func (r PublisherMemberRole) AtLeast(other PublisherMemberRole) bool {
+	rank := func(x PublisherMemberRole) int {
+		switch x {
+		case PublisherMemberRoleOwner:
+			return 2
+		case PublisherMemberRoleMember:
+			return 1
+		}
+		return 0
+	}
+	return rank(r) >= rank(other)
+}
+
+// PublisherMember is one (publisher, user, role) row. AddedBy
+// is the user_id of whoever added this member (nil for
+// admin-added rows since the admin acts on behalf of the
+// platform, not as a publisher member themselves). UserEmail
+// and UserDisplayName are populated by ListMembers / GetMember
+// via a JOIN with the users table so the API surface doesn't
+// need a second round-trip to render member rows; they are zero
+// values for store methods that do not need them (e.g.
+// RequireMemberRole, which only needs the role).
+type PublisherMember struct {
+	PublisherID     uuid.UUID           `json:"publisher_id"`
+	UserID          uuid.UUID           `json:"user_id"`
+	Role            PublisherMemberRole `json:"role"`
+	AddedBy         *uuid.UUID          `json:"added_by,omitempty"`
+	CreatedAt       time.Time           `json:"created_at"`
+	UpdatedAt       time.Time           `json:"updated_at"`
+	UserEmail       string              `json:"user_email,omitempty"`
+	UserDisplayName string              `json:"user_display_name,omitempty"`
+}
+
+// PublisherWithMembership pairs a Publisher row with the role of
+// the authenticated caller. Used by the "list publishers I'm a
+// member of" endpoint so the UI can render a per-row "You are an
+// owner / member" badge without a second round-trip.
+type PublisherWithMembership struct {
+	Publisher Publisher           `json:"publisher"`
+	Role      PublisherMemberRole `json:"role"`
 }
 
 // PublisherKey is one ed25519 public key registered by a publisher.
