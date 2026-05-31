@@ -1030,8 +1030,28 @@ func (s *Store) GetInstallation(ctx context.Context, tenantID, installID uuid.UU
 	return &out, nil
 }
 
-// ListInstallationsForTenant returns every install row visible to
-// the tenant (RLS-filtered). Ordered by installed_at DESC.
+// ListInstallationsForTenant returns every install row owned by the
+// tenant. Ordered by installed_at DESC.
+//
+// Tenant isolation is enforced via TWO independent mechanisms in
+// defence-in-depth:
+//
+//  1. RLS — the surrounding dbutil.WithTenantTx sets
+//     app.tenant_id and the policy on
+//     marketplace_extension_installations filters via
+//     `tenant_id = current_setting('app.tenant_id')::uuid`.
+//  2. Explicit `WHERE tenant_id = $1` predicate in the SQL itself.
+//
+// Either mechanism alone is sufficient on the production
+// application pool (kapp_app). The explicit predicate matters when
+// the same code path is reached via a BYPASSRLS connection —
+// integration-test harnesses, ops scripts, the kapp_admin pool —
+// where RLS is short-circuited. Without the predicate, those
+// callers would observe rows from every tenant; with the
+// predicate, the query is correct regardless of connection role.
+// Mirrors the same pattern used by services/kapp-backup/main.go's
+// exportTable (`WHERE tenant_id = $1`). Devin Review ANALYSIS_0005
+// on PR #128.
 func (s *Store) ListInstallationsForTenant(ctx context.Context, tenantID uuid.UUID) ([]Installation, error) {
 	if tenantID == uuid.Nil {
 		return nil, fmt.Errorf("%w: tenant id required", ErrNotFound)
@@ -1043,7 +1063,9 @@ func (s *Store) ListInstallationsForTenant(ctx context.Context, tenantID uuid.UU
 			        webhook_base, installed_by, installed_at, updated_at,
 			        last_health_check_at, COALESCE(last_health_check_status,''), COALESCE(failure_reason,'')
 			 FROM marketplace_extension_installations
+			 WHERE tenant_id = $1
 			 ORDER BY installed_at DESC`,
+			tenantID,
 		)
 		if err != nil {
 			return fmt.Errorf("marketplace: list installs: %w", err)

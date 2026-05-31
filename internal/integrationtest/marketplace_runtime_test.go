@@ -131,10 +131,13 @@ func TestMarketplaceRuntime_EndToEnd(t *testing.T) {
 	if !errors.Is(err, runtime.ErrPreInstallRejected) {
 		t.Fatalf("pre_install 403 should ErrPreInstallRejected; got %v", err)
 	}
-	// Verify NO install row was written for tnA × ext. Filtering by
-	// extension is necessary because on a BYPASSRLS connection
-	// ListInstallationsForTenant returns rows from every tenant,
-	// not just tnA — RLS is short-circuited on superuser pools.
+	// Verify NO install row was written for tnA × ext. The explicit
+	// `WHERE tenant_id = $1` predicate inside
+	// ListInstallationsForTenant means this query is correct under
+	// BOTH RLS-enforced (kapp_app) and BYPASSRLS (test harness)
+	// connection roles — the secondary in-loop tenant_id check below
+	// is defence-in-depth, not a workaround. Devin Review
+	// ANALYSIS_0005 on PR #128.
 	listA, err := store.ListInstallationsForTenant(ctx, tnA.ID)
 	if err != nil {
 		t.Fatalf("ListInstallationsForTenant A: %v", err)
