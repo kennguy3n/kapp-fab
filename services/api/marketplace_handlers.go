@@ -802,8 +802,16 @@ func (h *marketplaceHandlers) upgrade(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, err)
 		return
 	}
-	if in.Status == marketplace.InstallStatusUninstalled {
-		h.writeError(w, fmt.Errorf("%w: installation %s is uninstalled", marketplace.ErrConflict, installID))
+	// Allowlist: only 'active' and 'failed' may be upgraded. The
+	// engine re-applies this allowlist under FOR UPDATE; this is
+	// the same early-out pattern as the rest of this handler.
+	// See engine_upgrade.go for the full rationale (disabled
+	// installs must not be silently re-activated, pending must
+	// not be advanced before first-time setup completes).
+	if in.Status != marketplace.InstallStatusActive &&
+		in.Status != marketplace.InstallStatusFailed {
+		h.writeError(w, fmt.Errorf("%w: installation %s has status %q, upgrade requires 'active' or 'failed'",
+			marketplace.ErrConflict, installID, in.Status))
 		return
 	}
 

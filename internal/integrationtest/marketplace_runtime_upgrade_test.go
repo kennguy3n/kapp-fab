@@ -646,6 +646,120 @@ func TestMarketplaceRuntime_Upgrade_FromUninstalledRejected(t *testing.T) {
 	}
 }
 
+// TestMarketplaceRuntime_Upgrade_FromDisabledRejected pins the
+// allowlist semantics of Engine.Upgrade: `disabled` (and `pending`)
+// installs must NOT be upgradable. The in-tx UPDATE unconditionally
+// sets status='active', so a blocklist that only rejected
+// `uninstalled` + `installing` would silently re-activate a
+// `disabled` install (bypassing admin intent — e.g. an extension
+// paused for billing dispute or security review). Same hazard
+// applies to `pending` (would advance the install before first-time
+// setup completes).
+//
+// Both the pre-tx early-out and the in-tx FOR UPDATE guard must
+// reject. We can only exercise the pre-tx branch from outside the
+// engine — the in-tx branch is covered by code review (same
+// allowlist literal, same ErrConflict path).
+func TestMarketplaceRuntime_Upgrade_FromDisabledRejected(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	ext, fromVer, toVer, fromBundle, toBundle := seedTwoListedVersions(ctx, t, store, "upgdis")
+
+	tn, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("upgdis-tn"), Name: "UPG-D", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("tenant: %v", err)
+	}
+
+	transport := &runtime.InMemoryTransport{
+		Handler: runtime.StaticResponseHandler(200, []byte(`{"ok":true}`)),
+	}
+	hooks := runtime.NewTransportHooks(transport, h.pool, nil)
+	engine, err := runtime.NewEngine(runtime.EngineOptions{Pool: h.pool, Store: store, Hooks: hooks})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	installRes, err := engine.Install(ctx, &runtime.InstallRequest{
+		TenantID: tn.ID, ExtensionID: ext.ID, VersionID: fromVer.ID,
+		WebhookBase: "https://tn.example/hooks",
+	}, fromBundle)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// Force the install to 'disabled' via direct SQL — there is
+	// no public store method for status transitions in this PR's
+	// scope, and the production path (admin Pause endpoint) is
+	// out of scope for B6.1. Tenant-scoped tx is required because
+	// the install row is RLS-gated.
+	if err := dbutil.WithTenantTx(ctx, h.pool, tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`UPDATE marketplace_extension_installations
+			    SET status = 'disabled', updated_at = now()
+			  WHERE tenant_id = $1 AND id = $2`,
+			tn.ID, installRes.Installation.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("force disabled: %v", err)
+	}
+
+	_, err = engine.Upgrade(ctx, &runtime.UpgradeRequest{
+		TenantID:       tn.ID,
+		InstallationID: installRes.Installation.ID,
+		FromVersionID:  fromVer.ID,
+		ToVersionID:    toVer.ID,
+		KeepSettings:   true,
+	}, toBundle)
+	if !errors.Is(err, marketplace.ErrConflict) {
+		t.Fatalf("Upgrade of disabled should ErrConflict; got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("expected error mentioning 'disabled' status; got %v", err)
+	}
+
+	// Confirm the install row is still at FromVersionID and
+	// still 'disabled' — i.e. the rejected upgrade did NOT
+	// silently re-activate it.
+	cur, err := store.GetInstallation(ctx, tn.ID, installRes.Installation.ID)
+	if err != nil {
+		t.Fatalf("re-read install: %v", err)
+	}
+	if cur.Status != marketplace.InstallStatusDisabled {
+		t.Fatalf("install status mutated by rejected upgrade: got %q want %q",
+			cur.Status, marketplace.InstallStatusDisabled)
+	}
+	if cur.ExtensionVersionID != fromVer.ID {
+		t.Fatalf("install version mutated by rejected upgrade: got %s want %s",
+			cur.ExtensionVersionID, fromVer.ID)
+	}
+
+	// Same allowlist check applies to 'pending'.
+	if err := dbutil.WithTenantTx(ctx, h.pool, tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`UPDATE marketplace_extension_installations
+			    SET status = 'pending', updated_at = now()
+			  WHERE tenant_id = $1 AND id = $2`,
+			tn.ID, installRes.Installation.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("force pending: %v", err)
+	}
+	_, err = engine.Upgrade(ctx, &runtime.UpgradeRequest{
+		TenantID:       tn.ID,
+		InstallationID: installRes.Installation.ID,
+		FromVersionID:  fromVer.ID,
+		ToVersionID:    toVer.ID,
+		KeepSettings:   true,
+	}, toBundle)
+	if !errors.Is(err, marketplace.ErrConflict) {
+		t.Fatalf("Upgrade of pending should ErrConflict; got %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------

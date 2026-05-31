@@ -167,11 +167,21 @@ func (e *Engine) Upgrade(ctx context.Context, req *UpgradeRequest, newBundle *Re
 		return nil, fmt.Errorf("%w: install %s is at %s, expected %s",
 			ErrVersionMismatch, req.InstallationID, install.ExtensionVersionID, req.FromVersionID)
 	}
-	if install.Status == marketplace.InstallStatusUninstalled {
-		return nil, fmt.Errorf("%w: installation %s is uninstalled", marketplace.ErrConflict, req.InstallationID)
-	}
-	if install.Status == marketplace.InstallStatusInstalling {
-		return nil, fmt.Errorf("%w: installation %s is still installing", marketplace.ErrConflict, req.InstallationID)
+	// Allowlist (not blocklist): only `active` and `failed` may
+	// be upgraded. The doc comment at lines 60-63 states this
+	// explicitly. A blocklist would let `disabled` and `pending`
+	// installs slip through, and the in-tx UPDATE unconditionally
+	// sets status='active' — which would silently re-activate an
+	// install the admin had deliberately paused (e.g. for billing
+	// dispute or security review), and would advance `pending`
+	// before first-time setup completes. Both are surprising and
+	// wrong. `failed` is allowed because upgrading a failed
+	// install to a known-good version is a recovery path (status
+	// transitions back to 'active' as part of the upgrade).
+	if install.Status != marketplace.InstallStatusActive &&
+		install.Status != marketplace.InstallStatusFailed {
+		return nil, fmt.Errorf("%w: installation %s has status %q, upgrade requires 'active' or 'failed'",
+			marketplace.ErrConflict, req.InstallationID, install.Status)
 	}
 
 	// Step 3: pre_upgrade (BLOCKING unless skipped). Load the
@@ -266,11 +276,15 @@ func (e *Engine) Upgrade(ctx context.Context, req *UpgradeRequest, newBundle *Re
 			return fmt.Errorf("%w: install %s is now at %s, expected %s",
 				ErrVersionMismatch, req.InstallationID, currentVer, req.FromVersionID)
 		}
-		if marketplace.InstallStatus(status) == marketplace.InstallStatusUninstalled {
-			return fmt.Errorf("%w: installation %s is uninstalled", marketplace.ErrConflict, req.InstallationID)
-		}
-		if marketplace.InstallStatus(status) == marketplace.InstallStatusInstalling {
-			return fmt.Errorf("%w: installation %s is still installing", marketplace.ErrConflict, req.InstallationID)
+		// Same allowlist as the pre-tx guard above. A concurrent
+		// admin transition (e.g. Active → Disabled) between the
+		// pre-tx check and this FOR UPDATE would otherwise slip
+		// through and silently re-activate the install via the
+		// status='active' UPDATE below.
+		if marketplace.InstallStatus(status) != marketplace.InstallStatusActive &&
+			marketplace.InstallStatus(status) != marketplace.InstallStatusFailed {
+			return fmt.Errorf("%w: installation %s has status %q, upgrade requires 'active' or 'failed'",
+				marketplace.ErrConflict, req.InstallationID, status)
 		}
 		fromVersionID = currentVer
 
