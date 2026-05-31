@@ -220,6 +220,14 @@ func (ps *PublisherStore) VerifyPublisher(ctx context.Context, in VerifyPublishe
 // safe (the CHECK only constrains true) and is the recovery
 // path when an operator wants to revoke fast-path on an
 // already-verified publisher without unverifying them.
+//
+// The UPDATE is gated by `auto_approve_patch IS DISTINCT FROM
+// $2` so calls that don't change the value are a true no-op —
+// `updated_at` is preserved, no row is rewritten, and the
+// existing publisher row is returned unchanged. Audit-trail
+// consumers can rely on updated_at bumping only when the flag
+// actually flips. (Devin Review ANALYSIS_0001 on commit
+// 6783035 — no-op UPDATE was bumping updated_at.)
 func (ps *PublisherStore) SetAutoApprovePatch(ctx context.Context, publisherID uuid.UUID, autoApprove bool) (*Publisher, error) {
 	if publisherID == uuid.Nil {
 		return nil, fmt.Errorf("%w: publisher id required", ErrNotFound)
@@ -245,27 +253,41 @@ func (ps *PublisherStore) SetAutoApprovePatch(ctx context.Context, publisherID u
 		// on an unverified row is refused atomically (concurrent
 		// UnverifyPublisher race), but disabling auto-approve is
 		// always permitted regardless of verification state.
+		//
+		// AND auto_approve_patch IS DISTINCT FROM $2 makes the
+		// UPDATE a no-op when the column already equals the
+		// requested value — preserves updated_at semantics
+		// ("bumped only on meaningful change") which audit-trail
+		// consumers rely on. The zero-rows-affected branch below
+		// disambiguates no-op from the concurrent-unverify race.
 		`UPDATE marketplace_publishers
 		    SET auto_approve_patch = $2,
 		        updated_at = now()
 		  WHERE id = $1
-		    AND (verified_at IS NOT NULL OR $2 = FALSE)`,
+		    AND (verified_at IS NOT NULL OR $2 = FALSE)
+		    AND auto_approve_patch IS DISTINCT FROM $2`,
 		publisherID, autoApprove,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("marketplace: set auto_approve_patch: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		// Either the publisher doesn't exist or a concurrent
-		// UnverifyPublisher landed between the pre-check and
-		// the UPDATE. Disambiguate by re-reading: a missing row
-		// is ErrNotFound; a verified→unverified flip is
-		// ErrPublisherNotVerified.
-		_, err := ps.GetPublisher(ctx, publisherID)
+		// Three reasons the UPDATE matched zero rows:
+		//   (a) publisher doesn't exist                  → ErrNotFound
+		//   (b) verified→unverified race (autoApprove=true) → ErrPublisherNotVerified
+		//   (c) auto_approve_patch already equals $2     → idempotent no-op
+		// Disambiguate by re-reading the row.
+		cur, err := ps.GetPublisher(ctx, publisherID)
 		if err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("%w: publisher was unverified by a concurrent caller", ErrPublisherNotVerified)
+		if autoApprove && cur.VerifiedAt == nil {
+			return nil, fmt.Errorf("%w: publisher was unverified by a concurrent caller", ErrPublisherNotVerified)
+		}
+		// Idempotent no-op: the row already matches the desired
+		// state. Return the freshly-read row WITHOUT a write so
+		// updated_at is preserved.
+		return cur, nil
 	}
 	return ps.GetPublisher(ctx, publisherID)
 }

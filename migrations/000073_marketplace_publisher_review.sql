@@ -98,15 +98,39 @@ COMMENT ON TABLE marketplace_publishers IS
 COMMENT ON COLUMN marketplace_publishers.auto_approve_patch IS
     'Future fast-path for verified publishers with a track record: when true, patch-version bumps (z in x.y.z) skip the manual_review step if every automated check passes. B7 ships the column but always sets it false; B7.1 wires the fast-path logic.';
 
--- Backfill: every distinct publisher already in the catalog gets a row
--- so the FK from marketplace_extension_versions.bundle_signature_key_id
--- (which joins through this table) has somewhere to land.
+-- Backfill: every distinct publisher already in the catalog whose
+-- slug satisfies the new strict regex gets a row so the FK from
+-- marketplace_extension_versions.bundle_signature_key_id (which
+-- joins through this table) has somewhere to land.
+--
+-- The pre-B7 marketplace_extensions.publisher CHECK enforces only
+-- '^[a-z][a-z0-9_]*$' (any length ≥ 1); this new table tightens to
+-- length 3-32. Any pre-existing publisher slug shorter than 3
+-- chars or longer than 32 chars would fail the new CHECK at INSERT
+-- time and break the migration. We WHERE-filter the backfill so
+-- non-conforming legacy slugs are skipped — silently rewriting the
+-- slug here would orphan the publisher's existing catalog rows
+-- (marketplace_extensions.publisher is the de-facto identifier
+-- and is immutable post-publish per the 000068 trigger), so the
+-- correct migration shape is to leave legacy non-conforming rows
+-- without a marketplace_publishers row. There is no FK from
+-- marketplace_extensions.publisher → marketplace_publishers.slug
+-- so existing catalog rows remain functional.
+--
+-- Devin Review ANALYSIS_0002 on commit 6783035.
+--
+-- Operators can audit which legacy slugs were skipped with:
+--   SELECT DISTINCT publisher FROM marketplace_extensions
+--    WHERE publisher !~ '^[a-z][a-z0-9_]{2,31}$';
+-- and create publisher rows for them via the admin /publishers
+-- POST endpoint with a normalised slug.
 INSERT INTO marketplace_publishers (slug, display_name, contact_email)
 SELECT DISTINCT
     e.publisher,
     e.publisher,
     'noreply@' || e.publisher || '.invalid'
 FROM marketplace_extensions e
+WHERE e.publisher ~ '^[a-z][a-z0-9_]{2,31}$'
 ON CONFLICT (slug) DO NOTHING;
 
 -- 2) marketplace_publisher_keys --------------------------------------------

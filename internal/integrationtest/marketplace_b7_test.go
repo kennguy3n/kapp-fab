@@ -265,6 +265,51 @@ func TestMarketplacePublisher_SetAutoApprovePatch(t *testing.T) {
 	if _, err := pubs.SetAutoApprovePatch(ctx, uuid.New(), false); !errors.Is(err, marketplace.ErrNotFound) {
 		t.Fatalf("missing publisher: want ErrNotFound, got %v", err)
 	}
+
+	// (6) Idempotent no-op: setting auto_approve_patch to its
+	//     existing value MUST NOT bump updated_at. Audit-trail
+	//     consumers rely on updated_at flipping only on a real
+	//     state change. (Devin Review ANALYSIS_0001 on 6783035.)
+	//
+	//     `disabled2` from case (4) is the verified+disabled
+	//     baseline. Capture its updated_at, call SetAutoApprovePatch
+	//     with the SAME value, then assert updated_at didn't move.
+	updatedAtBefore := disabled2.UpdatedAt
+	noop, err := pubs.SetAutoApprovePatch(ctx, created.ID, false)
+	if err != nil {
+		t.Fatalf("no-op disable: %v", err)
+	}
+	if noop.AutoApprovePatch {
+		t.Errorf("no-op disable should leave AutoApprovePatch false, got true")
+	}
+	if !noop.UpdatedAt.Equal(updatedAtBefore) {
+		t.Errorf("no-op disable bumped updated_at; before=%v after=%v (want unchanged)", updatedAtBefore, noop.UpdatedAt)
+	}
+
+	// (7) Idempotent no-op on the true→true edge: re-verify so the
+	//     auto_approve_patch flag is true, then re-call with true
+	//     and assert updated_at is preserved.
+	if _, err := pubs.SetAutoApprovePatch(ctx, created.ID, true); err != nil {
+		t.Fatalf("re-enable for no-op-true test: %v", err)
+	}
+	cur, err := pubs.GetPublisher(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetPublisher after re-enable: %v", err)
+	}
+	if !cur.AutoApprovePatch {
+		t.Fatalf("re-enable should leave AutoApprovePatch true")
+	}
+	updatedAtBefore = cur.UpdatedAt
+	noop2, err := pubs.SetAutoApprovePatch(ctx, created.ID, true)
+	if err != nil {
+		t.Fatalf("no-op enable: %v", err)
+	}
+	if !noop2.AutoApprovePatch {
+		t.Errorf("no-op enable should leave AutoApprovePatch true, got false")
+	}
+	if !noop2.UpdatedAt.Equal(updatedAtBefore) {
+		t.Errorf("no-op enable bumped updated_at; before=%v after=%v (want unchanged)", updatedAtBefore, noop2.UpdatedAt)
+	}
 }
 
 // TestMarketplaceFindingsStore_UpsertSemantics exercises the
