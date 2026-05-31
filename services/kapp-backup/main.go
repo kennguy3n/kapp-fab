@@ -205,6 +205,28 @@ var TenantScopedTables = []string{
 	// catalog must be re-populated by the publisher pipeline
 	// before a tenant restore can land.
 	"marketplace_extension_installations",
+	// Phase B3 — runtime registration tables populated when a
+	// tenant installs an extension. Each row is owned by the
+	// installation_id, which itself FKs into
+	// marketplace_extension_installations(id); the install row MUST
+	// be restored first or the FKs will reject. The slice order
+	// above places installations BEFORE these four runtime tables
+	// to satisfy that constraint.
+	//
+	// PKs for ktypes/workflows/agent_tools are NOT the default
+	// (tenant_id, id) composite — they use the natural
+	// (tenant_id, installation_id, <name>) composite, so each is
+	// declared in tableConflictKeys below to pick the right ON
+	// CONFLICT target on restore.
+	//
+	// marketplace_webhook_subscriptions and marketplace_dispatch_log
+	// both have the default (tenant_id, id) PK, so they use the
+	// fallback path with no tableConflictKeys entry needed.
+	"marketplace_extension_ktypes",
+	"marketplace_extension_workflows",
+	"marketplace_extension_agent_tools",
+	"marketplace_webhook_subscriptions",
+	"marketplace_dispatch_log",
 }
 
 // manifest is the first record in every dump file.
@@ -654,6 +676,14 @@ var tableConflictKeys = map[string][]string{
 	// B2 PR while triaging the marketplace_extension_installations
 	// case above.
 	"forms": {"id"},
+	// Phase B3 — runtime registration tables with natural composite
+	// PKs. Without these entries, restores would emit
+	// `ON CONFLICT (tenant_id, id)` which Postgres rejects because
+	// no unique index spans that pair (the PK is
+	// (tenant_id, installation_id, <name>)).
+	"marketplace_extension_ktypes":      {"tenant_id", "installation_id", "ktype_name"},
+	"marketplace_extension_workflows":   {"tenant_id", "installation_id", "workflow_name"},
+	"marketplace_extension_agent_tools": {"tenant_id", "installation_id", "tool_name"},
 }
 
 // insertRow issues a parameterised INSERT that lists the columns from

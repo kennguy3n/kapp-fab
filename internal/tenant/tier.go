@@ -67,6 +67,11 @@ var TenantScopedTables = []string{
 	"cycle_count_sessions", "cycle_count_lines",
 	"tenant_record_counts",
 	"marketplace_extension_installations",
+	"marketplace_extension_ktypes",
+	"marketplace_extension_workflows",
+	"marketplace_extension_agent_tools",
+	"marketplace_webhook_subscriptions",
+	"marketplace_dispatch_log",
 }
 
 // SchemaName returns the canonical dedicated-schema name for a

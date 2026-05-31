@@ -827,13 +827,13 @@ func TestInsightsSQLEditorMode(t *testing.T) {
 //
 // We test three cases:
 //
-//   1. Default (DefaultLockTimeout = 5s).  Default-configured
-//      runner from NewRunner.
-//   2. Caller override (3s via WithLockTimeout).  Builder method
-//      mutates the runner and the new value is what fires.
-//   3. Disabled (0 via WithLockTimeout(0)).  The SET LOCAL is
-//      skipped entirely; the active lock_timeout is whatever the
-//      role/db default is (usually "0" meaning "no timeout").
+//  1. Default (DefaultLockTimeout = 5s).  Default-configured
+//     runner from NewRunner.
+//  2. Caller override (3s via WithLockTimeout).  Builder method
+//     mutates the runner and the new value is what fires.
+//  3. Disabled (0 via WithLockTimeout(0)).  The SET LOCAL is
+//     skipped entirely; the active lock_timeout is whatever the
+//     role/db default is (usually "0" meaning "no timeout").
 //
 // PostgreSQL canonicalises lock_timeout values according to magnitude:
 // round-second multiples (5000ms, 3000ms) format as "<n>s"; non-round
