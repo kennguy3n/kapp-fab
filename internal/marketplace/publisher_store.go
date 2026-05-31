@@ -161,9 +161,13 @@ func (ps *PublisherStore) VerifyPublisher(ctx context.Context, in VerifyPublishe
 		return nil, err
 	}
 	if cur.VerifiedAt != nil {
-		// Idempotent: existing row unchanged. The caller may
-		// still want to UPDATE auto_approve_patch on a verified
-		// row — that's a separate SetAutoApprovePatch call.
+		// Idempotent: existing row unchanged so verified_at /
+		// verified_by stay pinned to the FIRST verification
+		// action for audit integrity. To flip auto_approve_patch
+		// on an already-verified publisher, call
+		// SetAutoApprovePatch — VerifyPublisher's
+		// AutoApprovePatch input is the initial-verification
+		// flag only.
 		return cur, nil
 	}
 	// The UPDATE includes `AND verified_at IS NULL` so two
@@ -197,6 +201,73 @@ func (ps *PublisherStore) VerifyPublisher(ctx context.Context, in VerifyPublishe
 		return ps.GetPublisher(ctx, in.PublisherID)
 	}
 	return ps.GetPublisher(ctx, in.PublisherID)
+}
+
+// SetAutoApprovePatch flips the auto_approve_patch flag on an
+// already-verified publisher. Used when an operator wants to
+// enable (or revoke) the B7.1 patch fast-path on a publisher
+// that's already been operator-verified — VerifyPublisher's
+// idempotency contract keeps the audit-trail integrity of the
+// first verification, so this is the separate-call path the
+// VerifyPublisher godoc promises for tweaking the flag after
+// the fact.
+//
+// The DB CHECK auto_approve_requires_verified enforces the
+// invariant that auto_approve_patch can only be true on rows
+// with verified_at IS NOT NULL; we re-check Go-side so the
+// caller gets ErrPublisherNotVerified rather than a generic
+// CHECK violation. Setting AutoApprovePatch=false is always
+// safe (the CHECK only constrains true) and is the recovery
+// path when an operator wants to revoke fast-path on an
+// already-verified publisher without unverifying them.
+func (ps *PublisherStore) SetAutoApprovePatch(ctx context.Context, publisherID uuid.UUID, autoApprove bool) (*Publisher, error) {
+	if publisherID == uuid.Nil {
+		return nil, fmt.Errorf("%w: publisher id required", ErrNotFound)
+	}
+	if autoApprove {
+		// Pre-check so the caller gets the structured sentinel
+		// rather than the CHECK violation surface (which would
+		// land in the 500 fallthrough). The UPDATE below still
+		// includes the verified_at guard so a concurrent
+		// UnverifyPublisher between this read and the UPDATE is
+		// caught by the SQL predicate.
+		cur, err := ps.GetPublisher(ctx, publisherID)
+		if err != nil {
+			return nil, err
+		}
+		if cur.VerifiedAt == nil {
+			return nil, fmt.Errorf("%w: cannot enable auto_approve_patch on unverified publisher", ErrPublisherNotVerified)
+		}
+	}
+	tag, err := ps.store.pool.Exec(ctx,
+		// AND (verified_at IS NOT NULL OR $2 = FALSE) is the SQL
+		// mirror of the Go-side pre-check: enabling auto-approve
+		// on an unverified row is refused atomically (concurrent
+		// UnverifyPublisher race), but disabling auto-approve is
+		// always permitted regardless of verification state.
+		`UPDATE marketplace_publishers
+		    SET auto_approve_patch = $2,
+		        updated_at = now()
+		  WHERE id = $1
+		    AND (verified_at IS NOT NULL OR $2 = FALSE)`,
+		publisherID, autoApprove,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("marketplace: set auto_approve_patch: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Either the publisher doesn't exist or a concurrent
+		// UnverifyPublisher landed between the pre-check and
+		// the UPDATE. Disambiguate by re-reading: a missing row
+		// is ErrNotFound; a verified→unverified flip is
+		// ErrPublisherNotVerified.
+		_, err := ps.GetPublisher(ctx, publisherID)
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: publisher was unverified by a concurrent caller", ErrPublisherNotVerified)
+	}
+	return ps.GetPublisher(ctx, publisherID)
 }
 
 // UnverifyPublisher clears the verified_at / verified_by /

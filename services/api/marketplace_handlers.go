@@ -57,6 +57,8 @@ import (
 //	bundle.ErrBundleTransportInsecure  → 400
 //	runtime.ErrPreInstallRejected      → 422 (publisher refused)
 //	runtime.ErrPreUninstallRejected    → 422 (publisher refused uninstall)
+//	marketplace.ErrInvalidSignature    → 422 (cryptographic verification failed)
+//	marketplace.ErrPublisherNotVerified → 409 (state precondition)
 //
 // Anything else collapses to 500.
 type marketplaceHandlers struct {
@@ -935,7 +937,13 @@ func (h *marketplaceHandlers) writeError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, marketplace.ErrConflict),
 		errors.Is(err, marketplace.ErrYanked),
-		errors.Is(err, marketplace.ErrImmutableVersion):
+		errors.Is(err, marketplace.ErrImmutableVersion),
+		errors.Is(err, marketplace.ErrPublisherNotVerified):
+		// ErrPublisherNotVerified is a state-precondition
+		// failure (e.g. SetAutoApprovePatch refusing to enable
+		// fast-path on an unverified row); 409 matches the
+		// rest of the state-precondition family (yanked,
+		// immutable version).
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, marketplace.ErrInvalidManifest),
 		errors.Is(err, marketplace.ErrPermissionScopeUnknown),
@@ -944,7 +952,14 @@ func (h *marketplaceHandlers) writeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, marketplace.ErrBundleTooLarge),
 		errors.Is(err, bundle.ErrBundleExceedsLimit):
 		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
-	case errors.Is(err, bundle.ErrBundleMalformed):
+	case errors.Is(err, bundle.ErrBundleMalformed),
+		errors.Is(err, marketplace.ErrInvalidSignature):
+		// ErrInvalidSignature: the bundle is structurally
+		// well-formed but no registered publisher key validated
+		// the detached signature. 422 because the request was
+		// authentic and authorised but the publisher-supplied
+		// signature failed cryptographic verification — the
+		// caller cannot recover by reformatting their request.
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 	case errors.Is(err, bundle.ErrBundleNotFound),
 		errors.Is(err, bundle.ErrBundleFetchFailed),

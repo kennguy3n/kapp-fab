@@ -166,6 +166,107 @@ func TestMarketplacePublisherStore_EndToEnd(t *testing.T) {
 	}
 }
 
+// TestMarketplacePublisher_SetAutoApprovePatch exercises the
+// SetAutoApprovePatch path that VerifyPublisher's idempotency
+// contract delegates to (Devin Review ANALYSIS_0003 on commit
+// fa364ea — the godoc promised the method but it didn't exist).
+//
+// Invariants pinned:
+//   - flipping auto_approve_patch=true on an unverified publisher
+//     fails with ErrPublisherNotVerified (no CHECK violation
+//     leak).
+//   - flipping auto_approve_patch=true on a verified publisher
+//     succeeds and the row reflects the new value.
+//   - flipping auto_approve_patch=true is independent of
+//     VerifyPublisher's first-verification stamp — the existing
+//     verified_at / verified_by are preserved.
+//   - flipping auto_approve_patch=false is always permitted, even
+//     after the publisher has been unverified (recovery path).
+func TestMarketplacePublisher_SetAutoApprovePatch(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+	pubs := store.Publishers()
+
+	slug := strings.ReplaceAll(uniqueSlug("b7_apatch"), "-", "_")
+	created, err := pubs.CreatePublisher(ctx, marketplace.CreatePublisherInput{
+		Slug:         slug,
+		DisplayName:  "AutoApprovePatch Test",
+		ContactEmail: "auto@example.com",
+	})
+	if err != nil {
+		t.Fatalf("CreatePublisher: %v", err)
+	}
+
+	// (1) Unverified → enable: must refuse with the structured
+	//     sentinel, never a CHECK violation surface.
+	if _, err := pubs.SetAutoApprovePatch(ctx, created.ID, true); !errors.Is(err, marketplace.ErrPublisherNotVerified) {
+		t.Fatalf("enable on unverified: want ErrPublisherNotVerified, got %v", err)
+	}
+
+	// (2) Unverified → disable: always permitted (idempotent
+	//     no-op since the column is already false).
+	disabled, err := pubs.SetAutoApprovePatch(ctx, created.ID, false)
+	if err != nil {
+		t.Fatalf("disable on unverified: %v", err)
+	}
+	if disabled.AutoApprovePatch {
+		t.Errorf("disable should leave AutoApprovePatch false, got true")
+	}
+
+	// (3) Verify with AutoApprovePatch=false, then enable via
+	//     SetAutoApprovePatch — proves the fast-path can be
+	//     flipped on after the initial verification.
+	verified, err := pubs.VerifyPublisher(ctx, marketplace.VerifyPublisherInput{
+		PublisherID:      created.ID,
+		Reviewer:         "ops-1",
+		AutoApprovePatch: false,
+	})
+	if err != nil {
+		t.Fatalf("VerifyPublisher: %v", err)
+	}
+	if verified.AutoApprovePatch {
+		t.Fatalf("VerifyPublisher with AutoApprovePatch=false should leave it false")
+	}
+	verifiedAtBefore := *verified.VerifiedAt
+	verifiedByBefore := verified.VerifiedBy
+
+	enabled, err := pubs.SetAutoApprovePatch(ctx, created.ID, true)
+	if err != nil {
+		t.Fatalf("enable on verified: %v", err)
+	}
+	if !enabled.AutoApprovePatch {
+		t.Errorf("enable should flip AutoApprovePatch true, got false")
+	}
+	// Audit-trail integrity: the first-verification timestamp
+	// + reviewer MUST survive a SetAutoApprovePatch call.
+	if enabled.VerifiedAt == nil || !enabled.VerifiedAt.Equal(verifiedAtBefore) {
+		t.Errorf("verified_at should be unchanged by SetAutoApprovePatch; before=%v after=%v", verifiedAtBefore, enabled.VerifiedAt)
+	}
+	if enabled.VerifiedBy != verifiedByBefore {
+		t.Errorf("verified_by should be unchanged by SetAutoApprovePatch; before=%q after=%q", verifiedByBefore, enabled.VerifiedBy)
+	}
+
+	// (4) Verified → disable: succeeds and leaves verification
+	//     state intact (recovery path when ops wants to revoke
+	//     fast-path without unverifying).
+	disabled2, err := pubs.SetAutoApprovePatch(ctx, created.ID, false)
+	if err != nil {
+		t.Fatalf("disable on verified: %v", err)
+	}
+	if disabled2.AutoApprovePatch {
+		t.Errorf("disable should flip AutoApprovePatch false, got true")
+	}
+	if disabled2.VerifiedAt == nil {
+		t.Errorf("verified_at should survive a disable call")
+	}
+
+	// (5) Unknown publisher → ErrNotFound (not ErrPublisherNotVerified).
+	if _, err := pubs.SetAutoApprovePatch(ctx, uuid.New(), false); !errors.Is(err, marketplace.ErrNotFound) {
+		t.Fatalf("missing publisher: want ErrNotFound, got %v", err)
+	}
+}
+
 // TestMarketplaceFindingsStore_UpsertSemantics exercises the
 // natural-key replace semantics declared in UpsertReviewFindings's
 // godoc:
