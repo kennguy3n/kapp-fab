@@ -490,14 +490,24 @@ func run() error {
 	mktLimiter := eventrouter.NewLimiter(100, time.Now)
 	mktRouter := eventrouter.NewRouter(pool, mktTransport, mktEncryptor, mktLimiter, time.Now)
 
-	// Marketplace review pipeline (B7). The review worker polls
-	// marketplace_extension_review_state for `submitted` rows and
-	// runs the automated checks (signature, manifest, KType
-	// namespace, endpoint scheme, icon, UI static analysis, etc.)
-	// against each. Singleton: only the elected leader drains the
-	// queue. The pipeline pulls the bundle from the version row's
-	// bundle_url over HTTPS; HTTPSource caps the body at
-	// MaxBundleSizeBytes and the per-request timeout at 30 s.
+	// Marketplace review pipeline (B7 + B7.2). The review worker
+	// polls marketplace_extension_review_state for `submitted`
+	// rows and runs the automated checks (signature, manifest,
+	// KType namespace, endpoint scheme, icon, UI static analysis,
+	// etc.) against each. The pipeline pulls the bundle from the
+	// version row's bundle_url over HTTPS; HTTPSource caps the body
+	// at MaxBundleSizeBytes and the per-request timeout at 30 s.
+	//
+	// Multi-replica (B7.2): the review worker runs on every
+	// replica, not only the elected leader. The atomic
+	// UPDATE…RETURNING SKIP LOCKED claim + the
+	// (claimed_by, claimed_at) guard on UpdateReviewState already
+	// give exactly-one-claimer semantics, so spreading review
+	// across replicas scales throughput linearly without needing
+	// a coordinator process. The leader-singleton workers below
+	// (alerts, scheduler, export, autoscale, IMAP) remain
+	// singleton because they depend on global state that can't
+	// be sharded by the claim mechanism.
 	mktStore := marketplace.NewStore(pool)
 	mktReviewPipeline := buildReviewPipeline(mktStore, 30*time.Second)
 	// Reuse `identity` (computed above for leader election) rather
@@ -506,9 +516,19 @@ func run() error {
 	// drift if the identity source ever becomes non-deterministic.
 	// The same identity is recorded as claimed_by on each review
 	// claim and threaded through to UpdateReviewState's claim
-	// guard, so consistency between leader-election and claim
+	// guard, so consistency between identity and claim
 	// attribution is load-bearing for forensic correlation.
-	mktReviewWorker := NewReviewWorker(mktStore, mktReviewPipeline, slog.Default(), 5*time.Second, 4, identity)
+	//
+	// concurrency=4 caps in-flight per-version goroutines per
+	// replica (matches claimLimit), so a tick at claimLimit=4
+	// runs all 4 in parallel; a tick that claimed fewer just
+	// leaves headroom in the semaphore.
+	mktReviewWorker := NewReviewWorker(mktStore, mktReviewPipeline, slog.Default(), 5*time.Second, 4, 4, identity)
+
+	// Spin the review worker on this replica regardless of
+	// leadership status. The goroutine unwinds when rootCtx
+	// cancels (process shutdown).
+	go mktReviewWorker.Run(ctx)
 
 	return election.Run(ctx, func(leaderCtx context.Context) error {
 		return leadWorker(leaderCtx, leaderState{
@@ -527,7 +547,6 @@ func run() error {
 			drainHistogram:    drainDur,
 			drainCounter:      drainEvents,
 			marketplaceRouter: mktRouter,
-			reviewWorker:      mktReviewWorker,
 		})
 	})
 }
@@ -591,13 +610,6 @@ type leaderState struct {
 	// holds its own transport + rate-limit state.
 	marketplaceRouter *eventrouter.Router
 
-	// reviewWorker drives the B7 automated-review pipeline:
-	// claims `submitted` versions, runs the structural / signature
-	// checks, persists findings, and transitions to
-	// automated_passed | manual_review | rejected. Singleton on
-	// the elected leader so the same version isn't double-scanned.
-	reviewWorker *ReviewWorker
-
 	// helpdeskIMAP is the supervisor for the per-mailbox IMAP
 	// poller goroutines (Surface G). nil when adminPool is
 	// unavailable or no IMAP client factory is wired; in either
@@ -630,9 +642,10 @@ func leadWorker(leaderCtx context.Context, s leaderState) error {
 	go scheduler.RunLoop(leaderCtx, s.schedStore, s.schedRegistry, 10*time.Second)
 	go s.exportWorker.Run(leaderCtx)
 	go s.autoscaleLoop.Run(leaderCtx)
-	if s.reviewWorker != nil {
-		go s.reviewWorker.Run(leaderCtx)
-	}
+	// Note: the marketplace review worker is NOT started here —
+	// it runs on every replica (multi-replica posture, see B7.2),
+	// not only the leader. It's started in run() against rootCtx
+	// alongside runWorkerMetricsServer.
 	if s.helpdeskIMAP != nil {
 		// Per-mailbox IMAP pollers. The supervisor handles
 		// Manager.StopAll on leaderCtx cancellation so a
