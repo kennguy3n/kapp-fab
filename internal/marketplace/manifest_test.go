@@ -626,6 +626,46 @@ func TestParseManifestAgentToolTimeoutDefaultPersisted(t *testing.T) {
 	}
 }
 
+// TestParseManifestAgentToolMaxAttemptsDefaultPersisted regression-tests
+// the bug where a manifest that specified retry.backoff but omitted
+// retry.max_attempts was rejected with "must be >= 1" instead of being
+// defaulted to the spec-documented 2 (initial + 1 retry). The YAML
+// decoder writes 0 for an omitted int, and the validator was checking
+// `< 1` BEFORE applying the default — so any publisher following the
+// spec verbatim ("retry.backoff defaults to exponential, retry.max_attempts
+// defaults to 2") got a validation error on a perfectly valid manifest.
+// After the fix, retry.max_attempts == 0 is interpreted as "use the
+// spec default of 2", and both the loaded *Manifest and the JSON
+// serialization carry that default through to the catalog. Devin Review
+// ANALYSIS_pr-review-job-...0001 on PR #128.
+func TestParseManifestAgentToolMaxAttemptsDefaultPersisted(t *testing.T) {
+	src := removeLine("      max_attempts: 2")(validManifest())
+	m, err := ParseManifest([]byte(src))
+	if err != nil {
+		t.Fatalf("parse rejected after max_attempts removal: %v", err)
+	}
+	if len(m.AgentTools) != 1 {
+		t.Fatalf("want 1 agent tool, got %d", len(m.AgentTools))
+	}
+	if m.AgentTools[0].Retry == nil {
+		t.Fatalf("manifest.AgentTools[0].Retry = nil, want non-nil (Backoff set in baseline manifest)")
+	}
+	if got := m.AgentTools[0].Retry.MaxAttempts; got != 2 {
+		t.Errorf("manifest.AgentTools[0].Retry.MaxAttempts = %d, want 2 (spec default)", got)
+	}
+	// Catalog UI reads back through json.Unmarshal — the JSON form
+	// MUST also carry the default, otherwise a re-parse on the read
+	// side would zero it out and trigger the registrar's `< 1` floor
+	// instead of using the spec-documented 2.
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if !strings.Contains(string(out), `"max_attempts":2`) {
+		t.Errorf("json output missing defaulted max_attempts=2; got: %s", string(out))
+	}
+}
+
 // TestParseManifestRejectsHyphensInName regression-tests the bug
 // where the Go validator's nameRegex / publisherSlugRegex allowed `-`
 // in publisher / slug segments but the DB CHECK constraints in

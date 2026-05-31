@@ -628,6 +628,19 @@ func validateManifest(m *Manifest, agg *MultiManifestError) {
 			agg.add(field+".timeout", fmt.Sprintf("%s exceeds %s ceiling", d, AgentToolTimeoutMax))
 		}
 		if at.Retry != nil {
+			// Default MaxAttempts BEFORE validating it so a manifest
+			// that omits the field (YAML decoder writes 0 for the
+			// unset int) gets the spec-documented default of 2
+			// (initial + 1 retry) rather than a "must be >= 1"
+			// rejection. Mirrors the Backoff default below — both
+			// writes hit the underlying *RetryRule struct so the
+			// returned *Manifest's JSON serialization carries the
+			// explicit value (2 + "exponential") into the catalog
+			// rather than relying on every reader to re-default at
+			// dispatch time. Devin Review ANALYSIS_0001 on PR #128.
+			if at.Retry.MaxAttempts == 0 {
+				at.Retry.MaxAttempts = 2
+			}
 			if at.Retry.MaxAttempts < 1 {
 				agg.add(field+".retry.max_attempts", "must be >= 1")
 			} else if at.Retry.MaxAttempts > AgentToolMaxAttemptsCap {

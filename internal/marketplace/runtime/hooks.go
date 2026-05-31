@@ -284,10 +284,18 @@ func (h *transportHooks) Dispatch(ctx context.Context, in *LifecycleDispatch) (*
 	var lastErr error
 	for attempt := 1; attempt <= retry.MaxAttempts; attempt++ {
 		if delay := retry.BackoffDelay(attempt); delay > 0 {
+			// time.NewTimer + Stop() so a ctx.Done() that fires
+			// before the backoff elapses releases the underlying
+			// runtime timer immediately. Symmetric with the same
+			// pattern in Dispatcher.Invoke. Bounded leak wasn't an
+			// operational issue at MaxAttempts=3 with linear backoff,
+			// but the time.NewTimer form is the canonical Go pattern.
+			t := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
+				t.Stop()
 				return nil, ctx.Err()
-			case <-time.After(delay):
+			case <-t.C:
 			}
 		}
 		ts := h.now()

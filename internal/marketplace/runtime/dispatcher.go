@@ -175,10 +175,20 @@ func (d *Dispatcher) Invoke(ctx context.Context, in *InvokeRequest) (*InvokeResu
 
 	for attempt := 1; attempt <= retry.MaxAttempts; attempt++ {
 		if delay := retry.BackoffDelay(attempt); delay > 0 {
+			// time.NewTimer + Stop() so a ctx.Done() that fires
+			// before the backoff elapses releases the underlying
+			// runtime timer immediately instead of letting it sit
+			// in the heap until `delay` elapses. Bounded leak
+			// (max 16s × max 5 attempts = 80s per cancelled
+			// dispatch) wasn't an operational issue, but the
+			// time.NewTimer form is the canonical Go pattern and
+			// costs us one extra `defer t.Stop()` line.
+			t := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
+				t.Stop()
 				return nil, ctx.Err()
-			case <-time.After(delay):
+			case <-t.C:
 			}
 		}
 		ts := d.now()
