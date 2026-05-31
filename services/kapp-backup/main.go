@@ -38,6 +38,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 )
 
 // TenantScopedTables is the authoritative list of tables the backup
@@ -186,6 +188,45 @@ var TenantScopedTables = []string{
 	// purely procedural — the counter is rebuilt from krecords
 	// nightly by the reconciler).
 	"tenant_record_counts",
+	// Phase B2 — per-tenant marketplace extension installations.
+	// PK is a single-column surrogate `id UUID` (NOT the
+	// (tenant_id, id) composite the rest of the schema uses), so
+	// the table is declared in tableConflictKeys below with the
+	// explicit `{id}` conflict target — without that, the default
+	// fallback would emit `ON CONFLICT (tenant_id, id)` which
+	// Postgres rejects because there is no unique index on that
+	// pair. RLS is enabled on this table (000068); the dump path
+	// runs through dbutil.WithTenantTx so the tenant GUC is set
+	// when these rows are extracted/restored. Listed AFTER the
+	// rest of the tenant tables because the extension_version_id
+	// FK targets a GLOBAL catalog table
+	// (marketplace_extension_versions, not in this slice) that
+	// is operator-managed, not dump-managed — the marketplace
+	// catalog must be re-populated by the publisher pipeline
+	// before a tenant restore can land.
+	"marketplace_extension_installations",
+	// Phase B3 — runtime registration tables populated when a
+	// tenant installs an extension. Each row is owned by the
+	// installation_id, which itself FKs into
+	// marketplace_extension_installations(id); the install row MUST
+	// be restored first or the FKs will reject. The slice order
+	// above places installations BEFORE these four runtime tables
+	// to satisfy that constraint.
+	//
+	// PKs for ktypes/workflows/agent_tools are NOT the default
+	// (tenant_id, id) composite — they use the natural
+	// (tenant_id, installation_id, <name>) composite, so each is
+	// declared in tableConflictKeys below to pick the right ON
+	// CONFLICT target on restore.
+	//
+	// marketplace_webhook_subscriptions and marketplace_dispatch_log
+	// both have the default (tenant_id, id) PK, so they use the
+	// fallback path with no tableConflictKeys entry needed.
+	"marketplace_extension_ktypes",
+	"marketplace_extension_workflows",
+	"marketplace_extension_agent_tools",
+	"marketplace_webhook_subscriptions",
+	"marketplace_dispatch_log",
 }
 
 // manifest is the first record in every dump file.
@@ -338,38 +379,68 @@ func exportTable(
 	enc *json.Encoder,
 	generatedCols map[string]struct{},
 ) (int, error) {
-	// We rely on row_to_json on the server so column lists don't need
-	// to be hardcoded on the client — adding a column to the schema
-	// surfaces automatically in the dump.
-	rows, err := pool.Query(ctx,
-		fmt.Sprintf(`SELECT row_to_json(t) FROM %s AS t WHERE tenant_id = $1`, quoteIdent(table)),
-		tenantID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
+	// Run the SELECT inside dbutil.WithTenantTx so the `app.tenant_id`
+	// GUC is set on the connection backing the query. This makes the
+	// dump correct under any combination of:
+	//
+	//   - role bypasses RLS (owner, BYPASSRLS):       GUC harmless,
+	//                                                  WHERE clause filters.
+	//   - role enforces RLS, table is ENABLE only:    GUC + USING
+	//                                                  resolve to single
+	//                                                  tenant — WHERE is
+	//                                                  redundant but harmless.
+	//   - role enforces RLS, table is FORCE RLS:      GUC is REQUIRED;
+	//                                                  without it the query
+	//                                                  returns zero rows.
+	//
+	// Two tables in the current schema use FORCE ROW LEVEL SECURITY:
+	// user_tenant_roles (migrations/000049_user_tenant_roles.sql:32,
+	// pre-existing) and marketplace_extension_installations
+	// (migrations/000068_marketplace.sql:290, this PR). Both REQUIRE
+	// the GUC to be set for the dump to return rows — an owner-
+	// without-BYPASSRLS role observes zero rows otherwise. The
+	// pre-B2 dump path was buggy for user_tenant_roles too (latent
+	// silent zero-row export when the backup role was the schema
+	// owner without BYPASSRLS); wrapping every exportTable call in
+	// dbutil.WithTenantTx fixes both that latent bug AND the new
+	// 000068 case. A future migration that promotes a third table
+	// to FORCE is automatically covered — no per-table opt-in is
+	// required because the GUC is set unconditionally here.
 	var count int
-	for rows.Next() {
-		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
-			return count, err
+	err := dbutil.WithTenantTx(ctx, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// We rely on row_to_json on the server so column lists don't need
+		// to be hardcoded on the client — adding a column to the schema
+		// surfaces automatically in the dump.
+		rows, err := tx.Query(ctx,
+			fmt.Sprintf(`SELECT row_to_json(t) FROM %s AS t WHERE tenant_id = $1`, quoteIdent(table)),
+			tenantID,
+		)
+		if err != nil {
+			return err
 		}
-		var obj map[string]any
-		if err := json.Unmarshal(raw, &obj); err != nil {
-			return count, err
+		defer rows.Close()
+		for rows.Next() {
+			var raw []byte
+			if err := rows.Scan(&raw); err != nil {
+				return err
+			}
+			var obj map[string]any
+			if err := json.Unmarshal(raw, &obj); err != nil {
+				return err
+			}
+			// Drop GENERATED ALWAYS columns before the dump sees them.
+			for col := range generatedCols {
+				delete(obj, col)
+			}
+			obj["_table"] = table
+			if err := enc.Encode(obj); err != nil {
+				return err
+			}
+			count++
 		}
-		// Drop GENERATED ALWAYS columns before the dump sees them.
-		for col := range generatedCols {
-			delete(obj, col)
-		}
-		obj["_table"] = table
-		if err := enc.Encode(obj); err != nil {
-			return count, err
-		}
-		count++
-	}
-	return count, rows.Err()
+		return rows.Err()
+	})
+	return count, err
 }
 
 // restoreTenant inserts every row back into its source table. When a
@@ -386,25 +457,33 @@ func restoreTenant(ctx context.Context, pool *pgxpool.Pool, r io.Reader, remap m
 	if m.Type != "manifest" {
 		return errors.New("missing manifest record")
 	}
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return err
+	// Effective tenant_id is the manifest tenant after remap (a dump
+	// has exactly one source tenant by construction, and every row's
+	// tenant_id is rewritten via the same remap entry, so every
+	// inserted row lands under one destination tenant_id).
+	effectiveTenant := m.TenantID
+	if dst, ok := remap[m.TenantID]; ok {
+		effectiveTenant = dst
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	// Defensive strip on restore: dumps produced by older binaries
-	// (before the extract-side strip was added) still carry generated
-	// columns, and PostgreSQL would reject the INSERT with `cannot
-	// insert a non-DEFAULT value into column "<name>"`. We re-query
-	// the live schema so the strip stays in sync with whatever columns
-	// the target DB currently treats as GENERATED ALWAYS.
-	generated, err := loadGeneratedColumns(ctx, tx)
-	if err != nil {
-		return err
-	}
-	if err := restoreRows(ctx, tx, dec, remap, generated); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	// Use WithTenantTx so `app.tenant_id` is set for the duration of
+	// the restore. Required by FORCE ROW LEVEL SECURITY tables
+	// (marketplace_extension_installations and any future ones) — the
+	// owner role can no longer bypass the WITH CHECK policy on those
+	// tables, so the GUC must match the row's tenant_id at INSERT time.
+	// Harmless for ENABLE-only and BYPASSRLS roles.
+	return dbutil.WithTenantTx(ctx, pool, effectiveTenant, func(ctx context.Context, tx pgx.Tx) error {
+		// Defensive strip on restore: dumps produced by older binaries
+		// (before the extract-side strip was added) still carry generated
+		// columns, and PostgreSQL would reject the INSERT with `cannot
+		// insert a non-DEFAULT value into column "<name>"`. We re-query
+		// the live schema so the strip stays in sync with whatever columns
+		// the target DB currently treats as GENERATED ALWAYS.
+		generated, err := loadGeneratedColumns(ctx, tx)
+		if err != nil {
+			return err
+		}
+		return restoreRows(ctx, tx, dec, remap, generated)
+	})
 }
 
 func restoreRows(
@@ -568,6 +647,43 @@ var tableConflictKeys = map[string][]string{
 	// counter observation, and the daily reconciler will re-true
 	// it up on the next tick anyway.
 	"tenant_record_counts": {"tenant_id"},
+	// Phase B2 — marketplace_extension_installations has PK (id)
+	// only (single-column UUID), NOT the (tenant_id, id) composite
+	// the rest of the tenant-scoped schema uses. The default
+	// resolveConflictKey fallback would emit
+	// `ON CONFLICT (tenant_id, id)`, which Postgres rejects with
+	// "there is no unique or exclusion constraint matching the ON
+	// CONFLICT specification" because the catalogue has no unique
+	// index spanning that pair. Declaring `{id}` here picks the
+	// actual PK so the restore upserts cleanly.
+	//
+	// migrations/000068_marketplace.sql also declares a separate
+	// UNIQUE (tenant_id, extension_id) — that is the
+	// human-meaningful natural key, but using it for the conflict
+	// target would require the dump to include both columns AND
+	// would silently reject re-restores of an install row whose
+	// surrogate id was regenerated. Sticking with the surrogate
+	// (id) keeps the dump → restore path round-trippable.
+	"marketplace_extension_installations": {"id"},
+	// Pre-existing — the `forms` table from 000003 also uses a
+	// single-column PK (`id UUID PRIMARY KEY DEFAULT
+	// gen_random_uuid()`) without a composite (tenant_id, id)
+	// unique. The same ON-CONFLICT mismatch applies; the bug is
+	// latent because in practice the dump/restore path for forms
+	// has not been exercised end-to-end since N3. Closing the
+	// drift now (one-line addition) is cheaper than re-discovering
+	// it during a future DR drill. Flagged by Devin Review on the
+	// B2 PR while triaging the marketplace_extension_installations
+	// case above.
+	"forms": {"id"},
+	// Phase B3 — runtime registration tables with natural composite
+	// PKs. Without these entries, restores would emit
+	// `ON CONFLICT (tenant_id, id)` which Postgres rejects because
+	// no unique index spans that pair (the PK is
+	// (tenant_id, installation_id, <name>)).
+	"marketplace_extension_ktypes":      {"tenant_id", "installation_id", "ktype_name"},
+	"marketplace_extension_workflows":   {"tenant_id", "installation_id", "workflow_name"},
+	"marketplace_extension_agent_tools": {"tenant_id", "installation_id", "tool_name"},
 }
 
 // insertRow issues a parameterised INSERT that lists the columns from
