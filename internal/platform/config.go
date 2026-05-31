@@ -156,20 +156,33 @@ type Config struct {
 	// constructing deps directly) opt in via this flag.
 	AllowMarketplaceBundleMemory bool
 
-	// RequireMarketplaceBundleDir (sourced from
-	// KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR) is retained as the
-	// pre-round-5 strict-mode flag for back-compat with deploys
-	// that set it explicitly. After the round-5 default inversion
-	// it is redundant (strict mode is the default), but operators
-	// who pinned KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR=1 in their
-	// helm values continue to get the same behaviour.
+	// RequireMarketplaceBundleDirRaw (sourced from
+	// KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR) is the RAW, unparsed
+	// env value. It is intentionally kept as a string so the
+	// validator below can distinguish "unset" / explicit "1" /
+	// explicit "0" / unrecognised typo ("yes") — a distinction
+	// that the parsed bool collapses to (false / true / false /
+	// false) and so loses.
 	//
-	// KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR=0 / false is the
-	// pre-round-5 explicit opt-out into the in-memory fallback —
-	// the validator treats it as equivalent to
-	// KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY=1 so existing dev
-	// scripts that set =0 continue to boot.
-	RequireMarketplaceBundleDir bool
+	// Round-5 strict-mode is the default; this raw value is
+	// retained for back-compat with the pre-round-5 opt-in
+	// flag. Operators who pinned KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR=1
+	// in their helm values continue to get strict mode; operators
+	// who pinned =0 continue to get the legacy in-memory opt-out.
+	// Unrecognised values fall through to the AllowMarketplace-
+	// BundleMemory escape hatch and ultimately to the new
+	// strict-by-default behaviour.
+	//
+	// Round-6 Devin Review
+	// ANALYSIS_pr-review-job-eddc945c190b48c68501f872020714ee_0001
+	// flagged that Validate() previously read os.Getenv on this
+	// var directly, making the Config struct depend on process
+	// env state rather than being self-contained. Capturing the
+	// raw value here keeps the validator a pure function of the
+	// struct, which a future YAML loader can populate without
+	// having to set KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR in
+	// os.Environ.
+	RequireMarketplaceBundleDirRaw string
 
 	// Env is the operator-supplied deployment marker emitted into
 	// every structured log line ("dev", "staging", "production").
@@ -468,10 +481,10 @@ func LoadConfig() (*Config, error) {
 		RedisURL:         os.Getenv("REDIS_URL"),
 		RequireRedis:     getenvBool("KAPP_REQUIRE_REDIS", false),
 
-		MarketplaceBundleURLBase:     strings.TrimRight(os.Getenv("KAPP_MARKETPLACE_BUNDLE_URL_BASE"), "/"),
-		MarketplaceBundleDir:         os.Getenv("KAPP_MARKETPLACE_BUNDLE_DIR"),
-		AllowMarketplaceBundleMemory: getenvBool("KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY", false),
-		RequireMarketplaceBundleDir:  getenvBool("KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR", false),
+		MarketplaceBundleURLBase:       strings.TrimRight(os.Getenv("KAPP_MARKETPLACE_BUNDLE_URL_BASE"), "/"),
+		MarketplaceBundleDir:           os.Getenv("KAPP_MARKETPLACE_BUNDLE_DIR"),
+		AllowMarketplaceBundleMemory:   getenvBool("KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY", false),
+		RequireMarketplaceBundleDirRaw: os.Getenv("KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR"),
 
 		Env:              getenv("KAPP_ENV", "dev"),
 		LogFormat:        os.Getenv("KAPP_LOG_FORMAT"),
@@ -574,10 +587,18 @@ func (c *Config) Validate() error {
 	// to the round-5 default-strict path rather than silently
 	// permitting MemoryStore — a typo'd opt-OUT used to flip the
 	// data-loss footgun back on. The round-5 inversion catches it.
+	//
+	// Round-6 Devin Review
+	// ANALYSIS_pr-review-job-eddc945c190b48c68501f872020714ee_0001
+	// flagged that this branch previously read os.Getenv directly,
+	// making Validate() depend on process env rather than being a
+	// pure function of the struct. The raw value is now captured
+	// at LoadConfig time into c.RequireMarketplaceBundleDirRaw so
+	// Validate is self-contained and a future YAML loader can
+	// populate the struct without going through os.Environ.
 	if c.MarketplaceBundleURLBase != "" && c.MarketplaceBundleDir == "" {
-		requireRaw := os.Getenv("KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR")
 		var allowMemory bool
-		switch requireRaw {
+		switch c.RequireMarketplaceBundleDirRaw {
 		case "1", "true", "TRUE", "True":
 			allowMemory = false
 		case "0", "false", "FALSE", "False":

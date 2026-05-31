@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -369,13 +370,28 @@ func (h *marketplaceHandlers) submitMyPublisherVersion(w http.ResponseWriter, r 
 	// already persisted; if MarkReferenced fails the upload
 	// becomes immortal-via-FK-from-version anyway (a future
 	// GC predicate could JOIN extension_versions to catch this).
-	// Logging-only on failure.
+	//
+	// Round-6 Devin Review
+	// ANALYSIS_pr-review-job-eddc945c190b48c68501f872020714ee_0002
+	// flagged that a non-ErrNotFound failure was being silently
+	// swallowed via `_ = mrErr`. The access log only records
+	// the user-visible 201, so a transient DB blip on this
+	// best-effort call had no diagnostic trail — and a "bundle
+	// gone after a week" support ticket (post-OrphanRetention
+	// GC sweep) would be untraceable. Surface it via slog.Warn
+	// so operators can correlate the failure back to the root
+	// cause instead of guessing at the GC log.
 	if h.bundles != nil {
 		if mrErr := h.bundles.MarkReferenced(r.Context(), req.BundleHash); mrErr != nil &&
 			!errors.Is(mrErr, marketplace.ErrNotFound) {
-			// Same pattern as B7.2 dispatch-log errors: log,
-			// don't fail the user-visible op.
-			_ = mrErr // ServeHTTP-time logger is request-scoped; covered by access log
+			slog.Warn("marketplace bundle mark referenced failed",
+				slog.String("kind", "marketplace_bundle_mark_referenced_failed"),
+				slog.String("surface", "publisher_self_submit_version"),
+				slog.String("bundle_hash", req.BundleHash),
+				slog.String("extension_id", ext.ID.String()),
+				slog.String("version_id", ver.ID.String()),
+				slog.String("err", mrErr.Error()),
+			)
 		}
 	}
 

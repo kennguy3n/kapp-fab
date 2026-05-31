@@ -483,6 +483,30 @@ func StorageKeyForHash(hash string) string {
 // preserved — the rationale is documented in
 // migrations/000077). Returns ErrBundleTooLarge when len(Bytes)
 // exceeds marketplace.MaxBundleSizeBytes.
+//
+// CALLER CONTRACT (round-6 Devin Review
+// ANALYSIS_pr-review-job-eddc945c190b48c68501f872020714ee_0004):
+// the returned BundleUpload row is NOT marked referenced by
+// Upload; PublishVersion + Store.MarkReferenced is the
+// transition that pins the row against orphan-GC. Callers MUST
+// invoke MarkReferenced in the SAME request as Upload — typically
+// inside the publish-version handler immediately after a
+// successful PublishVersion call. The fix-it window between
+// Upload returning and MarkReferenced executing is bounded by:
+//
+//   - OrphanRetention (7d default) on the GC predicate, AND
+//   - the GC's `referenced_at IS NULL AND created_at < cutoff`
+//     double-gate.
+//
+// In practice the wall-clock gap is microseconds (same HTTP
+// handler), so the row is never simultaneously older than
+// OrphanRetention AND unreferenced AND visible to a concurrent
+// GC sweep. Splitting Upload and MarkReferenced across two
+// requests (e.g. caching the BundleUpload in client state and
+// publishing days later) WOULD expose the TOCTOU window — don't
+// do that; re-upload instead. The CLI (`kapp-publish publish`)
+// uploads and submits the version in one invocation, which is
+// the supported pattern.
 func (s *Store) Upload(ctx context.Context, in UploadInput) (*BundleUpload, error) {
 	if len(in.Bytes) == 0 {
 		return nil, fmt.Errorf("bundlestore: empty bundle payload")

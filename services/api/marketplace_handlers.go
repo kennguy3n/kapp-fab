@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -1118,14 +1119,30 @@ func (h *marketplaceHandlers) submitVersion(w http.ResponseWriter, r *http.Reque
 	// MarkReferenced returns marketplace.ErrNotFound for bundles
 	// hosted on a publisher CDN (no marketplace upload row exists);
 	// that's the legitimate publisher-CDN path, not an error.
+	//
+	// Round-6 Devin Review
+	// ANALYSIS_pr-review-job-eddc945c190b48c68501f872020714ee_0002
+	// flagged that a non-ErrNotFound failure was being silently
+	// swallowed: a transient DB blip on this best-effort call
+	// would leave the upload row unreferenced, eligible for
+	// GC after bundlestore.OrphanRetention (7d) — at which
+	// point the install resolver would 404 even though the
+	// version row was committed successfully. The access log
+	// only records the user-visible 201, so the failure had
+	// no diagnostic trail. Surface it via slog.Warn so a
+	// "bundle gone after a week" support ticket can be
+	// traced back to the actual root cause.
 	if h.bundles != nil {
 		if mrErr := h.bundles.MarkReferenced(r.Context(), req.BundleHash); mrErr != nil &&
 			!errors.Is(mrErr, marketplace.ErrNotFound) {
-			// Same posture as the publisher-self handler: log,
-			// don't fail the user-visible op. The access log
-			// captures the request; the version row is already
-			// committed and is the contract.
-			_ = mrErr
+			slog.Warn("marketplace bundle mark referenced failed",
+				slog.String("kind", "marketplace_bundle_mark_referenced_failed"),
+				slog.String("surface", "admin_submit_version"),
+				slog.String("bundle_hash", req.BundleHash),
+				slog.String("extension_id", extID.String()),
+				slog.String("version_id", ver.ID.String()),
+				slog.String("err", mrErr.Error()),
+			)
 		}
 	}
 
