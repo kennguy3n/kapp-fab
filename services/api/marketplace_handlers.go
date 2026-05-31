@@ -197,6 +197,18 @@ type updateSettingsResponse struct {
 //     equivalent to omitting Settings. Surfaces in the wire
 //     contract so a caller can be unambiguous (vs. "settings: {}"
 //     which would WIPE settings to {}).
+//
+// Cross-major-version contract: the keep-existing branches
+// (default and KeepSettings = true) only bypass schema
+// validation safely when the upgrade is forward-compatible
+// within a major version, i.e. the target schema is additive
+// relative to the source schema. Callers MUST supply a migrated
+// Settings document when upgrading across major versions whose
+// settings_schema has breaking changes — the engine is
+// schema-agnostic and will silently persist the stale document
+// otherwise. There is no engine-side guard for this: it is the
+// caller's responsibility (the publisher's CHANGELOG documents
+// which upgrades require Settings).
 type upgradeRequestBody struct {
 	FromVersionID string         `json:"from_version_id"`
 	ToVersionID   string         `json:"to_version_id"`

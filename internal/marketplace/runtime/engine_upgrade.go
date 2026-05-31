@@ -110,11 +110,21 @@ func (e *Engine) Upgrade(ctx context.Context, req *UpgradeRequest, newBundle *Re
 	// Step 2: catalog-side preconditions. We re-apply the same
 	// checks Install runs: extension is 'listed', target version
 	// belongs to that extension, target is not yanked. The
-	// catalog rows are read outside the tx — the in-tx FOR UPDATE
-	// on the install row at step 4a re-verifies version_id, and
-	// the in-tx re-registration would fail on a yanked target
-	// because the bundle resolver would refuse to serve a yanked
-	// hash. But fail-fast here so a yanked-target attempt doesn't
+	// catalog rows are read outside the tx; the in-tx FOR UPDATE
+	// on the install row at step 4a re-verifies extension_version_id
+	// against FromVersionID, but the yanked check is NOT re-run
+	// in-tx — Upgrade receives a pre-resolved *ResolvedBundle
+	// (the handler called the resolver before us), so the resolver
+	// is not invoked inside the tx and the "resolver refuses
+	// yanked hashes" safety net does not apply here. The race
+	// window between this check and the tx commit is microseconds
+	// wide; a concurrent admin Yank that lands between them will
+	// allow the upgrade to complete against a freshly-yanked
+	// version. This is the same accepted trade-off as Engine.Install
+	// (yank is an admin-rare event; the unique-namespace constraint
+	// still protects against more dangerous conflicts).
+	//
+	// We fail fast here so a yanked-target attempt doesn't
 	// dispatch pre_upgrade.
 	//
 	// We derive extension_id from the install row (the source of
