@@ -201,6 +201,18 @@ func (fs *FindingsStore) DeleteAllReviewFindings(ctx context.Context, versionID 
 // strand work for hours.
 const ReviewClaimLeaseDuration = 10 * time.Minute
 
+// ClaimedReviewVersion is the (version_id, claimed_at) tuple
+// returned by ClaimSubmittedReviewVersions. The worker threads
+// ClaimedAt into Pipeline.Persist (via Result.ClaimedAt and
+// UpdateReviewStateInput.ExpectedClaim) so the eventual state
+// UPDATE atomically aborts if an admin Rescan cleared the claim
+// in the gap between claim and persist (see UpdateReviewState's
+// claim-guard SQL).
+type ClaimedReviewVersion struct {
+	VersionID uuid.UUID
+	ClaimedAt time.Time
+}
+
 // ClaimSubmittedReviewVersions is the worker's polling query. It
 // atomically claims up to `limit` versions in the `submitted`
 // review state by stamping claimed_at + claimed_by inside a single
@@ -222,16 +234,19 @@ const ReviewClaimLeaseDuration = 10 * time.Minute
 // re-claim. This recovers work stranded by a crashed worker
 // without needing a separate sweeper job.
 //
-// workerID is recorded as claimed_by for forensic debugging
-// (which replica was running the pipeline when the row went
-// stale); it is NOT used for any locking decision — the
-// SKIP LOCKED + claimed_at lease enforces exactly-one-claimer.
+// workerID is recorded as claimed_by for forensic debugging AND
+// participates in the claim-guard SQL on UpdateReviewState (see
+// UpdateReviewStateInput.ExpectedClaim) so a concurrent rescan
+// that clears claimed_by reliably defeats a late Persist call.
+// The (workerID, claimedAt) tuple is unique per claim because
+// each ClaimSubmittedReviewVersions call stamps now() afresh,
+// even on re-claim by the same worker after a lease expiry.
 //
 // This is a Store-level method (not exposed via FindingsStore)
 // because it intentionally pulls from the review_state table, not
 // the findings table — but it lives here for proximity to the
 // pipeline's persistence flow.
-func (s *Store) ClaimSubmittedReviewVersions(ctx context.Context, workerID string, limit int) ([]uuid.UUID, error) {
+func (s *Store) ClaimSubmittedReviewVersions(ctx context.Context, workerID string, limit int) ([]ClaimedReviewVersion, error) {
 	if limit <= 0 {
 		limit = 4
 	}
@@ -256,6 +271,11 @@ func (s *Store) ClaimSubmittedReviewVersions(ctx context.Context, workerID strin
 	// either NULL (fresh row) or older than now() - lease (stale
 	// claim from a dead worker). Either way the row is up for
 	// grabs.
+	//
+	// RETURNING includes claimed_at so the worker can pass the
+	// exact DB-stamped timestamp through to UpdateReviewState's
+	// claim guard — a re-read of the column would race the
+	// rescan we're guarding against.
 	rows, err := s.pool.Query(ctx,
 		`WITH candidates AS (
 		    SELECT extension_version_id
@@ -272,7 +292,7 @@ func (s *Store) ClaimSubmittedReviewVersions(ctx context.Context, workerID strin
 		        updated_at = now()
 		   FROM candidates c
 		  WHERE s.extension_version_id = c.extension_version_id
-		 RETURNING s.extension_version_id`,
+		 RETURNING s.extension_version_id, s.claimed_at`,
 		string(ReviewStatusSubmitted),
 		fmt.Sprintf("%d milliseconds", ReviewClaimLeaseDuration.Milliseconds()),
 		limit,
@@ -282,49 +302,18 @@ func (s *Store) ClaimSubmittedReviewVersions(ctx context.Context, workerID strin
 		return nil, fmt.Errorf("marketplace: claim submitted versions: %w", err)
 	}
 	defer rows.Close()
-	out := make([]uuid.UUID, 0, limit)
+	out := make([]ClaimedReviewVersion, 0, limit)
 	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
+		var c ClaimedReviewVersion
+		if err := rows.Scan(&c.VersionID, &c.ClaimedAt); err != nil {
 			return nil, fmt.Errorf("marketplace: claim submitted versions: scan: %w", err)
 		}
-		out = append(out, id)
+		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return out, nil
-}
-
-// ReleaseReviewClaim clears the claim columns on a version. The
-// worker calls this from pipeline.Persist's commit path when the
-// state transition succeeds — the row's new status (automated_passed
-// / manual_review / rejected) means it will no longer match the
-// `status='submitted'` claim predicate anyway, but clearing
-// claimed_at on the transition keeps the column consistent with
-// the row's actual lifecycle and means an admin Rescan can re-set
-// the row to submitted without inheriting a stale claim.
-//
-// Also called by ResetReviewStateForRescan to drop the previous
-// claim atomically with the status reset.
-//
-// Idempotent: clearing an already-NULL claim is a no-op write.
-func (s *Store) ReleaseReviewClaim(ctx context.Context, versionID uuid.UUID) error {
-	if versionID == uuid.Nil {
-		return fmt.Errorf("%w: version id required", ErrNotFound)
-	}
-	_, err := s.pool.Exec(ctx,
-		`UPDATE marketplace_extension_review_state
-		    SET claimed_at = NULL,
-		        claimed_by = NULL,
-		        updated_at = now()
-		  WHERE extension_version_id = $1`,
-		versionID,
-	)
-	if err != nil {
-		return fmt.Errorf("marketplace: release review claim: %w", err)
-	}
-	return nil
 }
 
 // resolvePublisherKeysForVersion is the SignatureCheck's PolicyLoader.

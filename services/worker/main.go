@@ -500,7 +500,15 @@ func run() error {
 	// MaxBundleSizeBytes and the per-request timeout at 30 s.
 	mktStore := marketplace.NewStore(pool)
 	mktReviewPipeline := buildReviewPipeline(mktStore, 30*time.Second)
-	mktReviewWorker := NewReviewWorker(mktStore, mktReviewPipeline, slog.Default(), 5*time.Second, 4, workerIdentity())
+	// Reuse `identity` (computed above for leader election) rather
+	// than calling workerIdentity() again — the function reads
+	// os.Hostname() which is cheap but the duplication invites
+	// drift if the identity source ever becomes non-deterministic.
+	// The same identity is recorded as claimed_by on each review
+	// claim and threaded through to UpdateReviewState's claim
+	// guard, so consistency between leader-election and claim
+	// attribution is load-bearing for forensic correlation.
+	mktReviewWorker := NewReviewWorker(mktStore, mktReviewPipeline, slog.Default(), 5*time.Second, 4, identity)
 
 	return election.Run(ctx, func(leaderCtx context.Context) error {
 		return leadWorker(leaderCtx, leaderState{

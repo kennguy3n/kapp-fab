@@ -7,8 +7,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/kennguy3n/kapp-fab/internal/marketplace"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/review"
 )
@@ -100,27 +98,35 @@ func (w *ReviewWorker) Run(ctx context.Context) {
 }
 
 func (w *ReviewWorker) drain(ctx context.Context) {
-	ids, err := w.store.ClaimSubmittedReviewVersions(ctx, w.workerID, w.claimLimit)
+	claims, err := w.store.ClaimSubmittedReviewVersions(ctx, w.workerID, w.claimLimit)
 	if err != nil {
 		w.logger.Warn("review-worker: claim failed", slog.String("err", err.Error()))
 		return
 	}
-	for _, id := range ids {
+	for _, claim := range claims {
 		// Per-version timeout: the pipeline pulls the bundle from
 		// the CDN + runs static analysis; both are bounded by the
 		// per-source timeouts but defence in depth caps total wall
 		// time at 90s so a stuck DNS lookup doesn't pin a queue
 		// slot forever.
 		runCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-		w.processOne(runCtx, id)
+		w.processOne(runCtx, claim)
 		cancel()
 	}
 }
 
 // processOne runs the pipeline for a single claimed version and
-// persists the result. Errors are logged with the version id so
-// the operator can correlate.
-func (w *ReviewWorker) processOne(ctx context.Context, versionID uuid.UUID) {
+// persists the result. The claim's (workerID, claimedAt) tuple is
+// threaded into the pipeline Result so the state UPDATE atomically
+// aborts if an admin Rescan cleared the columns mid-flight (see
+// internal/marketplace/review.UpdateReviewState's claim guard).
+//
+// Errors are logged with the version id so the operator can
+// correlate. ErrClaimLost is logged at info level (it's an
+// expected outcome of the rescan race, not a fault) and the
+// freshly-reset row is re-picked-up by the next poll.
+func (w *ReviewWorker) processOne(ctx context.Context, claim marketplace.ClaimedReviewVersion) {
+	versionID := claim.VersionID
 	version, err := w.store.GetVersion(ctx, versionID)
 	if err != nil {
 		w.logger.Warn("review-worker: get version failed",
@@ -135,6 +141,16 @@ func (w *ReviewWorker) processOne(ctx context.Context, versionID uuid.UUID) {
 			slog.String("err", err.Error()))
 		return
 	}
+	// Attach claim metadata so Pipeline.Persist's state UPDATE
+	// includes the atomic claim guard. Without this, an admin
+	// Rescan that lands between drain() and Persist would lose
+	// its reset because the worker's late state transition would
+	// successfully match the `status = 'submitted'` guard on the
+	// freshly-reset row.
+	res.Claim = &marketplace.ReviewClaimGuard{
+		ClaimedBy: w.workerID,
+		ClaimedAt: claim.ClaimedAt,
+	}
 	if err := w.pipeline.Persist(ctx, res); err != nil {
 		// A persist failure means the row is still in
 		// `submitted` so the next poll re-claims it. The same
@@ -146,6 +162,21 @@ func (w *ReviewWorker) processOne(ctx context.Context, versionID uuid.UUID) {
 			// persist — drop the result, don't retry.
 			w.logger.Info("review-worker: version disappeared during pipeline",
 				slog.String("version_id", versionID.String()))
+			return
+		}
+		if errors.Is(err, marketplace.ErrClaimLost) {
+			// Admin Rescan cleared our claim between claim
+			// and persist. The freshly-reset row is back in
+			// `submitted` with claim columns NULL, so the
+			// next poll will re-claim it and the pipeline will
+			// re-run against the same version. Logged at info
+			// level because this is the rescan race the
+			// claim guard is explicitly designed to defeat —
+			// not an error path.
+			w.logger.Info("review-worker: claim lost to concurrent rescan, dropping result",
+				slog.String("version_id", versionID.String()),
+				slog.String("claimed_at", claim.ClaimedAt.Format(time.RFC3339Nano)),
+			)
 			return
 		}
 		w.logger.Warn("review-worker: persist failed",

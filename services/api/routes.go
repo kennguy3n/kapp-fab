@@ -818,7 +818,15 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 				r.Post("/publishers/{publisher_id}/verify", d.mph.adminVerifyPublisher)
 				r.Post("/publishers/{publisher_id}/unverify", d.mph.adminUnverifyPublisher)
 				r.Post("/publishers/{publisher_id}/keys", d.mph.adminRegisterPublisherKey)
-				r.Delete("/publishers/{publisher_id}/keys/{key_id}", d.mph.adminRevokePublisherKey)
+				// POST (not DELETE) for revocation: the handler
+				// requires a JSON body with a `reason` field, and
+				// many HTTP clients (browser fetch, certain curl
+				// versions, CDN/API gateways) strip or refuse
+				// request bodies on DELETE. POST .../revoke matches
+				// the rest of the admin verb surface
+				// (verify/unverify/yank/rescan) and removes the
+				// client-compat caveat.
+				r.Post("/publishers/{publisher_id}/keys/{key_id}/revoke", d.mph.adminRevokePublisherKey)
 
 				// B7 review findings + admin-initiated rescan.
 				r.Get("/versions/{ver_id}/findings", d.mph.adminListFindings)

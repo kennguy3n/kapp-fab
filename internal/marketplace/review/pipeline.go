@@ -144,6 +144,18 @@ type Result struct {
 	// CheckResults is the rolled-up summary used by the
 	// publisher dashboard.
 	CheckResults []CheckResultSummary
+
+	// Claim is the worker's (claimed_by, claimed_at) tuple as of
+	// the start of this pipeline run. Threaded through to
+	// Persist so the eventual UpdateReviewState UPDATE atomically
+	// aborts if an admin Rescan cleared the columns in the gap
+	// between claim and persist. Left nil for direct
+	// pipeline.Run callers (e.g. tests, ad-hoc invocations) that
+	// did not go through ClaimSubmittedReviewVersions; in that
+	// case Persist falls through to the un-guarded UPDATE so the
+	// human-driven transition paths (admin review, publisher
+	// withdraw) are unaffected.
+	Claim *marketplace.ReviewClaimGuard
 }
 
 // CheckResultSummary is the per-check rollup persisted into the
@@ -367,6 +379,21 @@ func summariseChecks(checks []Check, findings []marketplace.ReviewFinding) []Che
 // owns its own). Order matters: findings first, state second — so
 // a state of "rejected" never points at an empty findings table
 // (which would be confusing in the admin UI).
+//
+// Claim-guard ordering: when res.Claim is set, the state UPDATE
+// SQL atomically gates on (claimed_by, claimed_at) matching the
+// worker's recorded tuple. If an admin Rescan landed between
+// claim and persist (clearing both columns), the state UPDATE
+// returns ErrClaimLost, which Persist surfaces unwrapped so the
+// worker can pattern-match the sentinel and drop the result.
+// The earlier findings write may have already written stale rows;
+// that's an accepted trade-off because (a) the rescan does NOT
+// clear the findings table (it only clears the rollup JSONB
+// column, see ResetReviewStateForRescan), so the immediate state
+// is no worse than before persist ran, and (b) the next worker
+// poll re-claims the freshly-reset row and the next
+// UpsertReviewFindings replaces the entire finding set under the
+// natural-key idempotency contract.
 func (p *Pipeline) Persist(ctx context.Context, res *Result) error {
 	if res == nil {
 		return errors.New("review: persist nil result")
@@ -386,6 +413,7 @@ func (p *Pipeline) Persist(ctx context.Context, res *Result) error {
 			Status:          res.Status,
 			ManualNotes:     res.Notes,
 			AutomatedChecks: checksJSON,
+			ExpectedClaim:   res.Claim,
 		}
 		// Auto-system-attribution for terminal transitions the
 		// pipeline lands on its own (rejected when an error finding
@@ -397,6 +425,12 @@ func (p *Pipeline) Persist(ctx context.Context, res *Result) error {
 			in.Reviewer = "system"
 		}
 		if _, err := p.State.UpdateReviewState(ctx, in); err != nil {
+			// Surface ErrClaimLost unwrapped so the worker can
+			// errors.Is-match and treat it as a drop-and-retry
+			// signal instead of a persist failure.
+			if errors.Is(err, marketplace.ErrClaimLost) {
+				return err
+			}
 			return fmt.Errorf("review: persist state: %w", err)
 		}
 	}

@@ -377,6 +377,16 @@ var (
 	// pipeline does not depend on it, but the verify/unverify
 	// admin endpoints surface this for the patch fast-path.
 	ErrPublisherNotVerified = errors.New("marketplace: publisher is not verified")
+
+	// ErrClaimLost is the B7 review pipeline's signal that an
+	// admin Rescan landed between a worker's claim and its Persist
+	// call. The atomic claim guard on UpdateReviewState refuses
+	// the transition; the worker logs + drops the result and the
+	// next poll re-claims the freshly-reset row to re-run the
+	// pipeline against the same version. See
+	// services/worker/review_worker.go and Pipeline.Persist for
+	// the full TOCTOU rationale.
+	ErrClaimLost = errors.New("marketplace: review claim lost (concurrent rescan)")
 )
 
 // Publisher is the publisher identity row. Backfilled at migration

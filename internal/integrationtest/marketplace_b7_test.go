@@ -448,15 +448,18 @@ func TestMarketplace_ClaimSubmittedReviewVersions_AtomicLease(t *testing.T) {
 	ver := seedExtensionVersion(t, store, "claim")
 
 	// Helper: scan claims returned by a worker and return true
-	// if our test version is in the slice.
-	containsVer := func(t *testing.T, ids []uuid.UUID) bool {
+	// if our test version is in the slice. Also surfaces the
+	// per-claim timestamp so the test can assert it is non-zero
+	// (the worker threads it through to UpdateReviewState's
+	// claim guard).
+	containsVer := func(t *testing.T, claims []marketplace.ClaimedReviewVersion) (bool, time.Time) {
 		t.Helper()
-		for _, id := range ids {
-			if id == ver {
-				return true
+		for _, c := range claims {
+			if c.VersionID == ver {
+				return true, c.ClaimedAt
 			}
 		}
-		return false
+		return false, time.Time{}
 	}
 
 	// First claim by "worker-A": must atomically stamp claimed_at.
@@ -464,8 +467,12 @@ func TestMarketplace_ClaimSubmittedReviewVersions_AtomicLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimSubmittedReviewVersions (A): %v", err)
 	}
-	if !containsVer(t, idsA) {
+	foundA, claimedAtA := containsVer(t, idsA)
+	if !foundA {
 		t.Fatalf("worker-A did not claim our version (idsA=%d)", len(idsA))
+	}
+	if claimedAtA.IsZero() {
+		t.Fatalf("worker-A claim returned zero claimed_at (must round-trip the DB timestamp for guard SQL)")
 	}
 
 	// Direct DB read: verify claimed_at + claimed_by were
@@ -498,7 +505,7 @@ func TestMarketplace_ClaimSubmittedReviewVersions_AtomicLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimSubmittedReviewVersions (B): %v", err)
 	}
-	if containsVer(t, idsB) {
+	if foundB, _ := containsVer(t, idsB); foundB {
 		t.Errorf("worker-B re-claimed a row already held by worker-A within the lease window")
 	}
 
@@ -533,8 +540,12 @@ func TestMarketplace_ClaimSubmittedReviewVersions_AtomicLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimSubmittedReviewVersions (C, post-reset): %v", err)
 	}
-	if !containsVer(t, idsC) {
+	foundC, claimedAtC := containsVer(t, idsC)
+	if !foundC {
 		t.Fatalf("worker-C did not re-claim our version post-reset (idsC=%d)", len(idsC))
+	}
+	if !claimedAtC.After(claimedAtA) {
+		t.Errorf("worker-C claimed_at (%v) should be strictly after worker-A's stale value (%v) — proves the rescan path stamped a fresh timestamp", claimedAtC, claimedAtA)
 	}
 }
 
@@ -582,6 +593,126 @@ func TestMarketplace_SubmittedToManualReview_DirectTransition(t *testing.T) {
 	}
 	if len(post.AutomatedChecks) == 0 || string(post.AutomatedChecks) == "{}" {
 		t.Errorf("automated_checks JSONB should be populated, got %q", string(post.AutomatedChecks))
+	}
+}
+
+// TestMarketplace_UpdateReviewState_ClaimGuardDefeatsRescanRace
+// is the load-bearing regression for the TOCTOU window between
+// an admin Rescan and a worker's in-flight Pipeline.Persist
+// (Devin Review ANALYSIS_0002 on commit 41d7ec7).
+//
+// Reproducer without the guard:
+//  1. Worker claims a `submitted` row (stamps claimed_by /
+//     claimed_at). The worker holds (workerID, claimedAtA).
+//  2. Worker runs the pipeline (slow, ~seconds; bundle fetch +
+//     static analysis).
+//  3. Admin clicks Rescan while step 2 is in flight.
+//     ResetReviewStateForRescan clears findings + claimed_by +
+//     claimed_at and keeps status='submitted'.
+//  4. Worker calls Persist. The state UPDATE matches
+//     `status='submitted'` (true — the rescan kept it) and the
+//     OLD finding set is written over the freshly-cleared
+//     findings table. State transitions to `rejected` (or
+//     whatever the stale pipeline computed). Admin's
+//     intended re-run never happens; the row is now terminal
+//     and ResetReviewStateForRescan refuses a second attempt.
+//
+// Fix: UpdateReviewState's WHERE clause additionally gates on
+// (claimed_by, claimed_at) when the caller supplies an
+// ExpectedClaim. After the rescan clears the columns, the
+// late UPDATE matches zero rows and UpdateReviewState returns
+// ErrClaimLost so the worker can drop the stale result.
+//
+// The next worker poll re-claims the row and the pipeline
+// re-runs against the same version — which is the admin's
+// original intent.
+func TestMarketplace_UpdateReviewState_ClaimGuardDefeatsRescanRace(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	// Same noisy-DB pre-claim sweep as the atomic-lease test:
+	// stamp every submitted row so our seeded test row is the
+	// lone candidate.
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE marketplace_extension_review_state
+		    SET claimed_at = now(),
+		        claimed_by = 'test-pre-claim'
+		  WHERE status = 'submitted'`,
+	); err != nil {
+		t.Fatalf("pre-claim stale submitted rows: %v", err)
+	}
+
+	ver := seedExtensionVersion(t, store, "claim-guard")
+
+	// Step 1: worker claims. Capture (workerID, claimedAtA).
+	const workerID = "test-worker-A"
+	claims, err := store.ClaimSubmittedReviewVersions(ctx, workerID, 64)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedReviewVersions: %v", err)
+	}
+	var claimedAtA time.Time
+	for _, c := range claims {
+		if c.VersionID == ver {
+			claimedAtA = c.ClaimedAt
+		}
+	}
+	if claimedAtA.IsZero() {
+		t.Fatalf("worker did not claim our seeded version (claims=%d)", len(claims))
+	}
+
+	// Step 2: an admin Rescan lands between claim and Persist.
+	// ResetReviewStateForRescan clears claimed_by / claimed_at.
+	if err := store.ResetReviewStateForRescan(ctx, ver); err != nil {
+		t.Fatalf("ResetReviewStateForRescan: %v", err)
+	}
+
+	// Step 3: worker's late Persist call. The pipeline computed
+	// a `rejected` verdict against the now-stale bundle; without
+	// the claim guard this UPDATE would land and lock the row
+	// terminal. With the guard, the (workerID, claimedAtA) tuple
+	// no longer matches the row's NULL claim columns, so the
+	// UPDATE affects zero rows and UpdateReviewState returns
+	// ErrClaimLost.
+	_, err = store.Reviews().UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
+		VersionID:   ver,
+		Status:      marketplace.ReviewStatusRejected,
+		ManualNotes: "stale pipeline verdict (should be rejected by guard)",
+		Reviewer:    "system",
+		ExpectedClaim: &marketplace.ReviewClaimGuard{
+			ClaimedBy: workerID,
+			ClaimedAt: claimedAtA,
+		},
+	})
+	if !errors.Is(err, marketplace.ErrClaimLost) {
+		t.Fatalf("UpdateReviewState should have returned ErrClaimLost, got %v", err)
+	}
+
+	// Post-condition: row is still `submitted` (the rescan path
+	// kept it submitted with a NULL claim) and the worker's
+	// stale transition never landed. A fresh claim re-picks it
+	// up immediately, completing the admin's intended re-run.
+	post, err := store.Reviews().GetReviewState(ctx, ver)
+	if err != nil {
+		t.Fatalf("GetReviewState post-guard: %v", err)
+	}
+	if post.Status != marketplace.ReviewStatusSubmitted {
+		t.Fatalf("post-guard status should remain `submitted` (rescan path), got %q", post.Status)
+	}
+
+	idsAfter, err := store.ClaimSubmittedReviewVersions(ctx, "test-worker-B", 64)
+	if err != nil {
+		t.Fatalf("post-guard re-claim: %v", err)
+	}
+	found := false
+	for _, c := range idsAfter {
+		if c.VersionID == ver {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("post-guard fresh claim should re-pick up the version (the admin's intended re-run)")
 	}
 }
 

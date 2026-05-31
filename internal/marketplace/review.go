@@ -61,6 +61,18 @@ func (rs *ReviewStateStore) GetReviewState(ctx context.Context, versionID uuid.U
 // transitioning to approved or rejected, Reviewer MUST be non-empty
 // (the DB CHECK also enforces this — the early check here gives a
 // clearer error than a constraint violation).
+//
+// ExpectedClaim is the optional review-worker claim guard used by
+// B7's pipeline to defeat the TOCTOU race between an admin Rescan
+// (which clears claimed_by / claimed_at) and an in-flight Persist.
+// When set, the SQL UPDATE additionally gates on claimed_by AND
+// claimed_at matching the worker's recorded values; if the row's
+// claim was cleared in the gap, the UPDATE affects zero rows and
+// UpdateReviewState returns ErrClaimLost so the worker can drop
+// its result and let the next poll re-run the pipeline against
+// the freshly-reset row. Human-driven transitions (admin review,
+// publisher withdraw) leave ExpectedClaim nil and bypass the
+// guard.
 type UpdateReviewStateInput struct {
 	VersionID       uuid.UUID
 	Status          ReviewStatus
@@ -68,6 +80,23 @@ type UpdateReviewStateInput struct {
 	ManualNotes     string
 	Reviewer        string
 	ReviewedAt      *time.Time
+	ExpectedClaim   *ReviewClaimGuard
+}
+
+// ReviewClaimGuard is the (claimed_by, claimed_at) tuple recorded
+// on a marketplace_extension_review_state row when a worker claims
+// it via ClaimSubmittedReviewVersions. The pipeline carries this
+// tuple through Pipeline.Run → Pipeline.Persist and threads it
+// into the UpdateReviewState SQL so an admin Rescan that lands
+// between claim and persist (which clears these columns) reliably
+// aborts the worker's late transition. ClaimedAt MUST be the
+// exact timestamp the DB stamped on the row at claim time
+// (timestamptz round-trips losslessly through pgx); a re-read of
+// the row is not acceptable because the read itself races against
+// the rescan.
+type ReviewClaimGuard struct {
+	ClaimedBy string
+	ClaimedAt time.Time
 }
 
 // UpdateReviewState transitions a review row. Enforces the same
@@ -206,6 +235,20 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 			reviewer = current.Reviewer
 		}
 
+		// Claim guard parameters. NULL when the caller (admin /
+		// human reviewer) does not pass an ExpectedClaim — the
+		// SQL OR-fallback (`$N IS NULL OR ... = $N`) lets the
+		// UPDATE proceed unchanged. When set, the UPDATE
+		// additionally gates on BOTH columns matching exactly,
+		// so a concurrent ResetReviewStateForRescan (which clears
+		// them to NULL) atomically aborts this UPDATE without
+		// race-prone read-then-write logic in Go.
+		var expectedClaimBy, expectedClaimAt any
+		if in.ExpectedClaim != nil {
+			expectedClaimBy = in.ExpectedClaim.ClaimedBy
+			expectedClaimAt = in.ExpectedClaim.ClaimedAt
+		}
+
 		var out ReviewState
 		err = rs.store.pool.QueryRow(ctx,
 			`UPDATE marketplace_extension_review_state
@@ -215,11 +258,15 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 			       reviewer = NULLIF($5,''),
 			       reviewed_at = $6,
 			       updated_at = now()
-			 WHERE extension_version_id = $1 AND status = $7
+			 WHERE extension_version_id = $1
+			   AND status = $7
+			   AND ($8::text IS NULL OR claimed_by = $8)
+			   AND ($9::timestamptz IS NULL OR claimed_at = $9)
 			 RETURNING extension_version_id, status, automated_checks::text,
 			           COALESCE(manual_review_notes,''), COALESCE(reviewer,''),
 			           reviewed_at, created_at, updated_at`,
 			in.VersionID, string(in.Status), string(checks), notes, reviewer, reviewedAt, string(current.Status),
+			expectedClaimBy, expectedClaimAt,
 		).Scan(
 			&out.ExtensionVersionID, &out.Status,
 			scanJSONB(&out.AutomatedChecks),
@@ -232,18 +279,38 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("marketplace: update review state: %w", err)
 		}
+		// ErrNoRows from the RETURNING means one of:
+		//   1. the row was deleted (CASCADE from version delete) —
+		//      surface as ErrNotFound (resolved in the lookup
+		//      below);
+		//   2. the status guard failed because a concurrent caller
+		//      flipped the row — re-read and re-evaluate the
+		//      transition graph against the fresh state;
+		//   3. the claim guard failed because a concurrent rescan
+		//      cleared claimed_by / claimed_at — surface as
+		//      ErrClaimLost so the worker can drop its result.
+		// We disambiguate by re-reading the row's current claim
+		// columns. The re-read is racy in isolation (claim could
+		// flip again between read and any subsequent action) but
+		// the worker treats ErrClaimLost as terminal-for-this-tick
+		// and lets the next poll re-claim, so the diagnosis only
+		// needs to be correct often enough to surface the right
+		// error class.
+		if in.ExpectedClaim != nil {
+			lost, claimErr := rs.claimGuardFailed(ctx, in.VersionID, in.ExpectedClaim)
+			if claimErr != nil {
+				return nil, claimErr
+			}
+			if lost {
+				return nil, ErrClaimLost
+			}
+		}
 		// Last attempt: no further UPDATE to gate on the fresh
 		// state, so the re-read would be wasted. Break out and
 		// surface the contention error below.
 		if attempt == maxAttempts-1 {
 			break
 		}
-		// ErrNoRows from the RETURNING means either:
-		//   1. the row was deleted (CASCADE from version delete) —
-		//      surface as ErrNotFound, or
-		//   2. the status guard failed because a concurrent caller
-		//      flipped the row — re-read and re-evaluate the
-		//      transition graph against the fresh state.
 		latest, lookupErr := rs.GetReviewState(ctx, in.VersionID)
 		if lookupErr != nil {
 			return nil, lookupErr
@@ -261,6 +328,44 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 		current = latest
 	}
 	return nil, fmt.Errorf("marketplace: update review state: gave up after %d contended retries on version %s", maxAttempts, in.VersionID)
+}
+
+// claimGuardFailed inspects the row's current claim columns and
+// reports whether the worker's recorded claim was overwritten by
+// a concurrent ResetReviewStateForRescan. A row that has been
+// deleted is reported as not-lost (the caller falls through to
+// the existing status-guard branch which translates ErrNoRows
+// from the lookup into ErrNotFound).
+func (rs *ReviewStateStore) claimGuardFailed(ctx context.Context, versionID uuid.UUID, expected *ReviewClaimGuard) (bool, error) {
+	var (
+		claimedBy *string
+		claimedAt *time.Time
+	)
+	err := rs.store.pool.QueryRow(ctx,
+		`SELECT claimed_by, claimed_at
+		   FROM marketplace_extension_review_state
+		  WHERE extension_version_id = $1`,
+		versionID,
+	).Scan(&claimedBy, &claimedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Row deleted out from under us — let the outer
+			// retry loop's lookup translate this to ErrNotFound.
+			return false, nil
+		}
+		return false, fmt.Errorf("marketplace: claim guard lookup: %w", err)
+	}
+	if claimedBy == nil || claimedAt == nil {
+		// Rescan cleared the claim entirely.
+		return true, nil
+	}
+	if *claimedBy != expected.ClaimedBy {
+		return true, nil
+	}
+	if !claimedAt.Equal(expected.ClaimedAt) {
+		return true, nil
+	}
+	return false, nil
 }
 
 // ListVersionsByReviewStatus returns the version ids currently in

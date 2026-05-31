@@ -31,7 +31,7 @@ import (
 //	  POST   /api/v1/admin/marketplace/publishers/{publisher_id}/verify
 //	  POST   /api/v1/admin/marketplace/publishers/{publisher_id}/unverify
 //	  POST   /api/v1/admin/marketplace/publishers/{publisher_id}/keys
-//	  DELETE /api/v1/admin/marketplace/publishers/{publisher_id}/keys/{key_id}
+//	  POST   /api/v1/admin/marketplace/publishers/{publisher_id}/keys/{key_id}/revoke
 //	  GET    /api/v1/admin/marketplace/versions/{ver_id}/findings
 //	  POST   /api/v1/admin/marketplace/versions/{ver_id}/rescan
 //
