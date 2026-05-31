@@ -173,6 +173,89 @@ type updateSettingsResponse struct {
 	Installation installationView `json:"installation"`
 }
 
+// upgradeRequestBody is the wire shape for POST
+// /installations/{install_id}/upgrade. FromVersionID is required:
+// it carries the version the caller observed the install at when
+// it decided to upgrade, and the engine re-verifies the in-tx
+// row still holds that value before committing the swap. Without
+// it, two operators racing on the same install row could both
+// commit an upgrade and the second would silently double-bump
+// the version_id.
+//
+// Settings and KeepSettings are mutually exclusive:
+//
+//   - Settings = nil + KeepSettings = false (default): the engine
+//     reads the existing settings document under the row lock
+//     and writes it back verbatim. This is the common forward-
+//     compatible upgrade within a major version where the new
+//     schema is additive.
+//   - Settings != nil: the handler validated this document
+//     against the TARGET version's settings_schema before the
+//     engine sees the request. Use this for breaking-schema
+//     upgrades that require a migrated settings document.
+//   - KeepSettings = true: explicit "preserve existing" signal,
+//     equivalent to omitting Settings. Surfaces in the wire
+//     contract so a caller can be unambiguous (vs. "settings: {}"
+//     which would WIPE settings to {}).
+type upgradeRequestBody struct {
+	FromVersionID string         `json:"from_version_id"`
+	ToVersionID   string         `json:"to_version_id"`
+	Settings      map[string]any `json:"settings,omitempty"`
+	KeepSettings  bool           `json:"keep_settings,omitempty"`
+	// SettingsProvided distinguishes between "caller did not
+	// supply a settings document" (Settings is the zero-value
+	// nil map) and "caller explicitly sent settings: null". The
+	// JSON decoder collapses both into Settings == nil, so this
+	// flag is set by a custom UnmarshalJSON below that inspects
+	// the raw bytes.
+	SettingsProvided bool `json:"-"`
+}
+
+// UnmarshalJSON differentiates "settings absent from the body"
+// from "settings: null" from "settings: {}". The engine's three
+// branches (Settings != nil, KeepSettings, default-keep) require
+// the handler to know which of these the caller intended:
+//
+//   - {} present and non-null → Settings = parsed map (may be
+//     empty), SettingsProvided = true. Engine writes the parsed
+//     map (an empty map clears settings to {}).
+//   - settings: null → Settings = nil, SettingsProvided = true.
+//     Same as KeepSettings: existing settings preserved.
+//   - settings absent → Settings = nil, SettingsProvided = false.
+//     Default keep-existing branch.
+func (r *upgradeRequestBody) UnmarshalJSON(data []byte) error {
+	type alias upgradeRequestBody
+	aux := struct {
+		Settings *map[string]any `json:"settings,omitempty"`
+		*alias
+	}{alias: (*alias)(r)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if aux.Settings != nil {
+		r.Settings = *aux.Settings
+		r.SettingsProvided = true
+	} else {
+		// Either "settings: null" (raw contained the key with
+		// JSON null) or the key was absent. Differentiate by
+		// re-scanning the raw bytes for the key. This is
+		// O(len(body)) but body is bounded by the API max-body
+		// limit, so the cost is constant per request.
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(data, &probe); err == nil {
+			if raw, ok := probe["settings"]; ok && string(raw) == "null" {
+				r.SettingsProvided = true
+			}
+		}
+	}
+	return nil
+}
+
+type upgradeResponse struct {
+	Installation  installationView `json:"installation"`
+	FromVersionID string           `json:"from_version_id"`
+}
+
 type createExtensionRequestBody struct {
 	Publisher    string `json:"publisher"`
 	Slug         string `json:"slug"`
@@ -624,6 +707,159 @@ func (h *marketplaceHandlers) updateSettings(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, updateSettingsResponse{Installation: installationToView(res.Installation)})
 }
 
+// upgrade swaps an installation's extension_version_id to a new
+// version (must be the same extension) and atomically re-registers
+// the runtime tables (ktypes / workflows / agent_tools / webhook
+// subscriptions / posting_hooks) against the new bundle. The
+// install row's id, signing_secret, webhook_base, and installed_by
+// are preserved — operators are not asked to reconfigure
+// anything that didn't change.
+//
+// Settings semantics (see upgradeRequestBody godoc):
+//
+//   - Body omits "settings" entirely OR includes "settings: null":
+//     the engine reads the existing settings document under FOR
+//     UPDATE and writes it back verbatim. KeepSettings=true is
+//     the explicit form of the same intent.
+//   - Body includes "settings: {...}": the handler validates the
+//     new document against the TARGET version's settings_schema,
+//     and the engine writes it.
+//
+// The handler is the layer that owns schema validation (the
+// engine is intentionally schema-agnostic — it has the
+// resolver-supplied SettingsSchemaJSON only inside its own
+// install-time path). For the keep-existing path the engine
+// re-reads the existing settings document inside the tx so the
+// document the publisher's post_upgrade hook sees matches what
+// is in the DB; the handler doesn't re-validate the existing
+// document because it was already validated against the FROM
+// version's schema at install/update time and the forward-
+// compatible-within-major contract guarantees it remains valid
+// under additive-only schema changes.
+func (h *marketplaceHandlers) upgrade(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	installID, err := uuid.Parse(chi.URLParam(r, "install_id"))
+	if err != nil {
+		http.Error(w, "invalid installation_id", http.StatusBadRequest)
+		return
+	}
+	var req upgradeRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	fromVer, err := uuid.Parse(req.FromVersionID)
+	if err != nil {
+		http.Error(w, "invalid from_version_id", http.StatusBadRequest)
+		return
+	}
+	toVer, err := uuid.Parse(req.ToVersionID)
+	if err != nil {
+		http.Error(w, "invalid to_version_id", http.StatusBadRequest)
+		return
+	}
+
+	// Pre-flight: confirm the install row exists and is in a
+	// permissible state before we spend a CDN round trip on the
+	// bundle resolve. The engine's in-tx FOR UPDATE is still the
+	// authoritative guard against TOCTOU; this is just an
+	// early-out so a doomed request fails on a single SELECT.
+	in, err := h.store.GetInstallation(r.Context(), t.ID, installID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	if in.Status == marketplace.InstallStatusUninstalled {
+		h.writeError(w, fmt.Errorf("%w: installation %s is uninstalled", marketplace.ErrConflict, installID))
+		return
+	}
+
+	// Load the target version + extension so we can resolve the
+	// bundle and (if the caller supplied a settings document)
+	// validate it against the new schema.
+	verRow, err := h.store.GetVersion(r.Context(), toVer)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	if verRow.ExtensionID != in.ExtensionID {
+		// Cross-extension upgrade is not a real upgrade — it's
+		// an install of a different extension. Reject with 409
+		// rather than 400 because the request is syntactically
+		// valid; the precondition (versions must belong to the
+		// same extension) fails semantically.
+		h.writeError(w, fmt.Errorf("%w: target version %s belongs to extension %s, not install's extension %s",
+			marketplace.ErrConflict, toVer, verRow.ExtensionID, in.ExtensionID))
+		return
+	}
+	if verRow.Yanked {
+		h.writeError(w, fmt.Errorf("%w: target version %s is yanked", marketplace.ErrYanked, toVer))
+		return
+	}
+
+	resolved, err := h.resolver.Resolve(r.Context(), verRow)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	// Schema-validate the new settings document if the caller
+	// supplied one (settings present AND non-null in the body).
+	// The keep-existing branches (no settings key OR settings:null
+	// OR keep_settings: true) bypass validation — the existing
+	// document was already validated against the FROM version's
+	// schema and the forward-compatible-within-major contract
+	// keeps it valid under additive-only changes.
+	if req.SettingsProvided && req.Settings != nil {
+		if err := validateInstallSettings(resolved.SettingsSchemaJSON, req.Settings); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Translate the wire flags into the engine's
+	// UpgradeRequest contract:
+	//
+	//   - settings absent (SettingsProvided == false): default
+	//     keep-existing branch on the engine.
+	//   - settings: null (SettingsProvided == true, Settings ==
+	//     nil): equivalent to KeepSettings = true.
+	//   - keep_settings: true (regardless of settings field):
+	//     KeepSettings = true.
+	//   - settings: {...} (SettingsProvided == true, Settings !=
+	//     nil): pass through.
+	upgradeReq := &runtime.UpgradeRequest{
+		TenantID:       t.ID,
+		InstallationID: installID,
+		FromVersionID:  fromVer,
+		ToVersionID:    toVer,
+		UpgradedBy:     actorOrDefault(r.Context()),
+	}
+	switch {
+	case req.KeepSettings:
+		upgradeReq.KeepSettings = true
+	case req.SettingsProvided && req.Settings == nil:
+		// Wire form "settings: null" — same as keep-existing.
+		upgradeReq.KeepSettings = true
+	case req.SettingsProvided && req.Settings != nil:
+		upgradeReq.Settings = req.Settings
+	}
+
+	result, err := h.engine.Upgrade(r.Context(), upgradeReq, resolved)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, upgradeResponse{
+		Installation:  installationToView(result.Installation),
+		FromVersionID: result.FromVersionID.String(),
+	})
+}
+
 // uninstall hard-deletes the registry rows registered at install
 // time and marks the install row uninstalled. Lifecycle hooks
 // (pre_uninstall + post_uninstall) fire best-effort.
@@ -971,8 +1207,27 @@ func (h *marketplaceHandlers) writeError(w http.ResponseWriter, err error) {
 		// was well-formed — the upstream object store served bad
 		// bytes.
 		http.Error(w, err.Error(), http.StatusBadGateway)
+	case errors.Is(err, runtime.ErrVersionMismatch):
+		// Engine.Upgrade's TOCTOU guard caught a concurrent
+		// upgrade or uninstall+reinstall that changed the install
+		// row's extension_version_id between the caller's read
+		// and the engine's in-tx commit. 409 is the right status:
+		// the request itself was well-formed and authorised; the
+		// precondition (from_version_id) no longer holds. The
+		// caller should re-read the install row and decide
+		// whether the upgrade is still wanted.
+		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, runtime.ErrSameVersionUpgrade):
+		// Upgrade to the version the install is already at is
+		// rejected as a client error rather than silently no-op
+		// — silently bumping updated_at and firing lifecycle
+		// hooks for nothing would mislead audit consumers. 400
+		// because the body is malformed (from_version_id ==
+		// to_version_id is a programmer error in the caller).
+		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, runtime.ErrPreInstallRejected),
-		errors.Is(err, runtime.ErrPreUninstallRejected):
+		errors.Is(err, runtime.ErrPreUninstallRejected),
+		errors.Is(err, runtime.ErrPreUpgradeRejected):
 		// Symmetric with ErrPreInstallRejected. The extension's
 		// pre_uninstall webhook returned a structured rejection;
 		// the engine surfaces this distinct from a generic 500

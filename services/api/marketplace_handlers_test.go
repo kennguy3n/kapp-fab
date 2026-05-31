@@ -56,6 +56,20 @@ func TestMarketplaceWriteErrorMapping(t *testing.T) {
 		{name: "ErrPreInstallRejected", err: runtime.ErrPreInstallRejected, want: http.StatusUnprocessableEntity},
 		{name: "ErrPreUninstallRejected", err: runtime.ErrPreUninstallRejected, want: http.StatusUnprocessableEntity},
 		{name: "wrapped ErrPreUninstallRejected", err: fmt.Errorf("%w: publisher said no", runtime.ErrPreUninstallRejected), want: http.StatusUnprocessableEntity},
+		// B6.1 — Engine.Upgrade sentinels. pre_upgrade
+		// rejection mirrors the install/uninstall lifecycle
+		// shape (422). Version-mismatch is a precondition
+		// failure (409) — the caller observed an old
+		// extension_version_id; the engine's in-tx FOR UPDATE
+		// found the row had moved. Same-version is a 400
+		// because it's a malformed request (from == to is a
+		// programmer error, not a state transition).
+		{name: "ErrPreUpgradeRejected", err: runtime.ErrPreUpgradeRejected, want: http.StatusUnprocessableEntity},
+		{name: "wrapped ErrPreUpgradeRejected", err: fmt.Errorf("%w: extension refused upgrade", runtime.ErrPreUpgradeRejected), want: http.StatusUnprocessableEntity},
+		{name: "ErrVersionMismatch", err: runtime.ErrVersionMismatch, want: http.StatusConflict},
+		{name: "wrapped ErrVersionMismatch", err: fmt.Errorf("%w: install moved", runtime.ErrVersionMismatch), want: http.StatusConflict},
+		{name: "ErrSameVersionUpgrade", err: runtime.ErrSameVersionUpgrade, want: http.StatusBadRequest},
+		{name: "wrapped ErrSameVersionUpgrade", err: fmt.Errorf("%w: from==to", runtime.ErrSameVersionUpgrade), want: http.StatusBadRequest},
 		// Forward-safety mappings for sentinels declared in
 		// types.go that don't yet have a live HTTP raise path
 		// in B7 but will once SetAutoApprovePatch / signature
@@ -266,6 +280,91 @@ func TestReviewStateToItemReviewedAt(t *testing.T) {
 	item = reviewStateToItem(s)
 	if item.ReviewedAt != "" {
 		t.Fatalf("nil reviewed_at: got %q, want empty", item.ReviewedAt)
+	}
+}
+
+// TestUpgradeRequestBodyUnmarshal pins the tri-state settings
+// decoder: "settings absent" / "settings: null" / "settings: {}"
+// produce three distinct (Settings, SettingsProvided) outcomes
+// that drive different engine branches downstream
+// (default-keep / explicit-keep / explicit-write). A regression
+// here would silently swap "preserve existing settings" with
+// "wipe to empty document" — a data-loss bug for the publisher's
+// settings document. The unit shape is small enough to test
+// without a full HTTP harness; see
+// marketplace_runtime_upgrade_test.go for end-to-end coverage
+// of the same paths through the live engine.
+func TestUpgradeRequestBodyUnmarshal(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name             string
+		body             string
+		wantSettings     map[string]any
+		wantProvided     bool
+		wantKeepSettings bool
+	}{
+		{
+			name: "settings absent",
+			body: `{"from_version_id":"a","to_version_id":"b"}`,
+			// SettingsProvided false → engine default-keep branch.
+			wantProvided: false,
+		},
+		{
+			name:         "settings null",
+			body:         `{"from_version_id":"a","to_version_id":"b","settings":null}`,
+			wantProvided: true,
+			// nil map + provided=true → engine treats as keep.
+		},
+		{
+			name:         "settings empty object",
+			body:         `{"from_version_id":"a","to_version_id":"b","settings":{}}`,
+			wantProvided: true,
+			wantSettings: map[string]any{},
+			// non-nil map + provided=true → engine writes
+			// (in this case wipes to {}).
+		},
+		{
+			name:         "settings populated",
+			body:         `{"from_version_id":"a","to_version_id":"b","settings":{"foo":"bar"}}`,
+			wantProvided: true,
+			wantSettings: map[string]any{"foo": "bar"},
+		},
+		{
+			name:             "keep_settings true",
+			body:             `{"from_version_id":"a","to_version_id":"b","keep_settings":true}`,
+			wantProvided:     false,
+			wantKeepSettings: true,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got upgradeRequestBody
+			if err := json.Unmarshal([]byte(tc.body), &got); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if got.SettingsProvided != tc.wantProvided {
+				t.Fatalf("SettingsProvided = %v, want %v", got.SettingsProvided, tc.wantProvided)
+			}
+			if got.KeepSettings != tc.wantKeepSettings {
+				t.Fatalf("KeepSettings = %v, want %v", got.KeepSettings, tc.wantKeepSettings)
+			}
+			if tc.wantSettings == nil {
+				if got.Settings != nil {
+					t.Fatalf("Settings = %v, want nil", got.Settings)
+				}
+				return
+			}
+			if len(got.Settings) != len(tc.wantSettings) {
+				t.Fatalf("Settings len = %d, want %d (got=%v)", len(got.Settings), len(tc.wantSettings), got.Settings)
+			}
+			for k, want := range tc.wantSettings {
+				if got.Settings[k] != want {
+					t.Fatalf("Settings[%q] = %v, want %v", k, got.Settings[k], want)
+				}
+			}
+		})
 	}
 }
 

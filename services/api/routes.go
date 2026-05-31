@@ -778,6 +778,18 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 					r.Use(platform.QuotaMiddleware(d.quotaEnforcer))
 					r.Post("/installations", d.mph.install)
 					r.Patch("/installations/{install_id}/settings", d.mph.updateSettings)
+					// B6.1: in-place version swap. POST (not
+					// PATCH or PUT) because the operation is
+					// non-idempotent at the lifecycle-hook
+					// layer — re-issuing the same upgrade after
+					// it succeeded would trigger
+					// ErrSameVersionUpgrade or ErrVersionMismatch
+					// on the second call, not silently no-op.
+					// The idempotency middleware higher up
+					// handles retry-after-network-error
+					// dedup using the standard
+					// Idempotency-Key header.
+					r.Post("/installations/{install_id}/upgrade", d.mph.upgrade)
 					r.Delete("/installations/{install_id}", d.mph.uninstall)
 				})
 

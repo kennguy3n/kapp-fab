@@ -234,7 +234,7 @@ func is2xx(status int) bool { return status >= 200 && status < 300 }
 // isPreLifecycle reports whether the phase is a pre_-style phase
 // where extension failure should abort the engine.
 func isPreLifecycle(p LifecyclePhase) bool {
-	return p == PhasePreInstall || p == PhasePreUninstall
+	return p == PhasePreInstall || p == PhasePreUninstall || p == PhasePreUpgrade
 }
 
 // Dispatch signs and POSTs the lifecycle payload to the extension's
@@ -463,6 +463,8 @@ func phaseRejectedError(p LifecyclePhase) error {
 		return ErrPreInstallRejected
 	case PhasePreUninstall:
 		return ErrPreUninstallRejected
+	case PhasePreUpgrade:
+		return ErrPreUpgradeRejected
 	default:
 		return errors.New("runtime: unknown pre-phase rejection")
 	}

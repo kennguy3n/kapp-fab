@@ -73,6 +73,19 @@ const (
 	PhasePreUninstall       LifecyclePhase = "pre_uninstall"
 	PhasePostUninstall      LifecyclePhase = "post_uninstall"
 	PhasePostUpdateSettings LifecyclePhase = "post_update_settings"
+	// PhasePreUpgrade fires before Engine.Upgrade commits the
+	// in-tx registrar swap. BLOCKING: a non-2xx response surfaces
+	// as ErrPreUpgradeRejected and the engine returns without
+	// touching the DB. Use cases include the extension rejecting
+	// the upgrade when its server-side data migration is not
+	// ready, or refusing a downgrade.
+	PhasePreUpgrade LifecyclePhase = "pre_upgrade"
+	// PhasePostUpgrade fires after the in-tx registrar swap
+	// commits. BEST-EFFORT: a failure is recorded in
+	// dispatch_log but does NOT roll back the upgrade. The
+	// extension's webhook may use this to recompute caches /
+	// migrate per-install state to the new version's schema.
+	PhasePostUpgrade LifecyclePhase = "post_upgrade"
 )
 
 // LifecyclePath returns the URL path component for this phase as it
@@ -98,6 +111,8 @@ const (
 	KindLifecyclePreUninstall       DispatchKind = "lifecycle_pre_uninstall"
 	KindLifecyclePostUninstall      DispatchKind = "lifecycle_post_uninstall"
 	KindLifecyclePostUpdateSettings DispatchKind = "lifecycle_post_update_settings"
+	KindLifecyclePreUpgrade         DispatchKind = "lifecycle_pre_upgrade"
+	KindLifecyclePostUpgrade        DispatchKind = "lifecycle_post_upgrade"
 	KindEventDelivery               DispatchKind = "event_delivery"
 	KindHealthCheck                 DispatchKind = "health_check"
 )
@@ -118,6 +133,10 @@ func DispatchKindForPhase(p LifecyclePhase) DispatchKind {
 		return KindLifecyclePostUninstall
 	case PhasePostUpdateSettings:
 		return KindLifecyclePostUpdateSettings
+	case PhasePreUpgrade:
+		return KindLifecyclePreUpgrade
+	case PhasePostUpgrade:
+		return KindLifecyclePostUpgrade
 	default:
 		return ""
 	}
@@ -140,6 +159,29 @@ var (
 	// uninstall. Operators can force-uninstall by setting
 	// UninstallRequest.SkipHooks = true.
 	ErrPreUninstallRejected = errors.New("runtime: pre_uninstall hook rejected uninstall")
+
+	// ErrPreUpgradeRejected is returned when the extension's
+	// pre_upgrade lifecycle hook responds with a non-2xx status.
+	// The Upgrade transaction has not been started yet — the
+	// installation row's extension_version_id is unchanged.
+	// Operators can force-upgrade by setting
+	// UpgradeRequest.SkipHooks = true.
+	ErrPreUpgradeRejected = errors.New("runtime: pre_upgrade hook rejected upgrade")
+
+	// ErrVersionMismatch is returned by Engine.Upgrade when the
+	// installation's current extension_version_id no longer matches
+	// the caller's FromVersionID. Indicates a concurrent upgrade /
+	// uninstall+reinstall raced between the caller's read and the
+	// in-tx FOR UPDATE — the caller should re-read the install row
+	// and decide whether the upgrade is still wanted.
+	ErrVersionMismatch = errors.New("runtime: install version no longer matches expected from-version")
+
+	// ErrSameVersionUpgrade is returned by Engine.Upgrade when
+	// the target VersionID equals the install's current
+	// extension_version_id. Treated as a client error (no-op
+	// would silently bump updated_at + fire lifecycle hooks for
+	// nothing) so the caller can surface it as a 409.
+	ErrSameVersionUpgrade = errors.New("runtime: target version equals current install version")
 
 	// ErrInvalidWebhookBase is returned when the operator-supplied
 	// EXTENSION_WEBHOOK_BASE fails the same https:// + URL-parse
@@ -359,6 +401,95 @@ func (r *UpdateSettingsRequest) Validate() error {
 	}
 	if r.InstallationID == uuid.Nil {
 		return errors.New("runtime: installation_id required")
+	}
+	return nil
+}
+
+// UpgradeRequest captures the operator-supplied parameters of an
+// Engine.Upgrade call. The B6.1 API handler builds one of these
+// from a POST /installations/{id}/upgrade request body.
+//
+// Upgrade swaps the install row's extension_version_id from
+// FromVersionID to ToVersionID and re-registers every runtime
+// resource (ktypes, workflows, agent_tools, webhook_subscriptions)
+// against the new bundle inside a single transaction. The runtime
+// tables never observe a half-upgraded state: either the entire
+// swap commits or nothing changes.
+type UpgradeRequest struct {
+	TenantID       uuid.UUID
+	InstallationID uuid.UUID
+	// FromVersionID is the version the caller observed the install
+	// at when it decided to issue the upgrade. The engine's in-tx
+	// FOR UPDATE re-verifies the install row still holds this
+	// value before committing the swap — if a concurrent upgrade
+	// or uninstall+reinstall already moved the row, the engine
+	// returns ErrVersionMismatch so the caller can refresh and
+	// decide again rather than silently double-upgrading.
+	//
+	// FromVersionID is the TOCTOU guard that closes the window
+	// between the handler's pre-tx GetInstallation read and the
+	// engine's in-tx commit. Required.
+	FromVersionID uuid.UUID
+	// ToVersionID is the target version. Must belong to the same
+	// extension as the install row's current version, must not
+	// equal FromVersionID, and must not be yanked.
+	ToVersionID uuid.UUID
+	// Settings is the post-upgrade settings document. The handler
+	// has already validated it against the TARGET version's
+	// settings_schema. Nil means "keep the existing settings
+	// document verbatim" — the engine reads the current settings
+	// inside the tx (under FOR UPDATE) and rewrites them as-is.
+	// Passing an empty map clears settings to {}.
+	//
+	// The keep-existing semantic is load-bearing because the v1
+	// settings schema contract is forward-compatible within a
+	// major version (additive properties only). A caller upgrading
+	// within a major can omit Settings and have the engine pass
+	// through; a caller crossing a major MUST supply migrated
+	// settings (the handler enforces the schema validation against
+	// the new version before the engine sees the request).
+	Settings map[string]any
+	// KeepSettings selects the "do not touch settings" branch
+	// explicitly. If true, Settings is ignored and the engine
+	// preserves the existing settings document. Mutually exclusive
+	// with a non-nil Settings (validated at Validate).
+	KeepSettings bool
+	// UpgradedBy is the operator initiating the upgrade (audit).
+	// May be uuid.Nil for system-initiated upgrades (e.g. a
+	// publisher-pushed auto-upgrade for verified publishers).
+	UpgradedBy uuid.UUID
+	// SkipHooks short-circuits both pre_upgrade and post_upgrade
+	// dispatch. Used when the extension's webhook server is known
+	// to be unreachable and the operator wants the upgrade to
+	// land regardless. The audit log captures "skipped" entries
+	// for the missed hooks.
+	SkipHooks bool
+}
+
+// Validate runs field-level sanity checks. Engine.Upgrade calls
+// this before dispatching pre_upgrade so a malformed request
+// fails fast.
+func (r *UpgradeRequest) Validate() error {
+	if r == nil {
+		return errors.New("runtime: nil upgrade request")
+	}
+	if r.TenantID == uuid.Nil {
+		return errors.New("runtime: tenant_id required")
+	}
+	if r.InstallationID == uuid.Nil {
+		return errors.New("runtime: installation_id required")
+	}
+	if r.FromVersionID == uuid.Nil {
+		return errors.New("runtime: from_version_id required (TOCTOU guard)")
+	}
+	if r.ToVersionID == uuid.Nil {
+		return errors.New("runtime: to_version_id required")
+	}
+	if r.FromVersionID == r.ToVersionID {
+		return fmt.Errorf("%w: from %s == to %s", ErrSameVersionUpgrade, r.FromVersionID, r.ToVersionID)
+	}
+	if r.KeepSettings && r.Settings != nil {
+		return errors.New("runtime: keep_settings is mutually exclusive with a non-nil settings document")
 	}
 	return nil
 }
