@@ -86,14 +86,17 @@ type UpdateReviewStateInput struct {
 	ExpectedClaim   *ReviewClaimGuard
 	// MinAttemptCount, when > 0, adds an attempt_count >= N
 	// predicate to the UPDATE. Used by the worker's dead-letter
-	// transition to refuse the UPDATE if a concurrent admin
-	// Rescan reset attempt_count to 0 between RecordAttemptFailure
-	// and this UPDATE — without this guard the dead-letter UPDATE
-	// could clobber a freshly-rescanned row (the claim guard
-	// cannot help here because RecordAttemptFailure already
-	// cleared the claim columns, so the dead-letter call passes
-	// ExpectedClaim=nil and the claim guard never fires). Human-
-	// driven transitions leave this 0 and the guard is skipped.
+	// transition as defense-in-depth alongside ExpectedClaim:
+	// RecordAttemptFailure retains the claim on the
+	// >= MaxReviewAttempts path so the worker passes both
+	// ExpectedClaim (primary correctness guard) and
+	// MinAttemptCount=MaxReviewAttempts (catches a hypothetical
+	// regression where the claim is somehow preserved across an
+	// admin Rescan that nevertheless reset attempt_count to 0).
+	// Both guards firing on the same Rescan-mid-flight scenario
+	// is intentional — they each demand the same outcome (refuse
+	// the UPDATE). Human-driven transitions leave this 0 and the
+	// guard is skipped.
 	MinAttemptCount int
 }
 
