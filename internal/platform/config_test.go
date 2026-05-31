@@ -190,10 +190,21 @@ func TestLoadConfig_MarketplaceBundleStrictDefault(t *testing.T) {
 		{"REQUIRE_DIR=0 (legacy opt-out), uploads enabled, no dir - permits memory store", "0", "", "https://kapp.example.com", "", false},
 		{"REQUIRE_DIR=false (legacy opt-out alias), uploads enabled, no dir - permits memory store", "false", "", "https://kapp.example.com", "", false},
 
-		// Both flags together: ALLOW_MEMORY=1 wins (either
-		// explicit opt-in is enough).
+		// Both flags together: REQUIRE_DIR takes precedence when
+		// set to a recognised value (1/0/true/false). ALLOW_MEMORY
+		// is only consulted on the fall-through branch
+		// (REQUIRE_DIR unset OR unrecognised — see config.go:601-608).
+		// So:
+		//   REQUIRE_DIR=1 + ALLOW_MEMORY=anything → strict (REQUIRE_DIR=1 wins)
+		//   REQUIRE_DIR=0 + ALLOW_MEMORY=anything → permit (REQUIRE_DIR=0 wins)
+		// Round-8 Devin Review
+		// ANALYSIS_pr-review-job-7ff8a82e7f5642c6afa32bf912920045_0001
+		// flagged the previous grouping comment ("ALLOW_MEMORY=1
+		// wins") as contradicting the actual assertion on the
+		// next line (strict). The test names + code were always
+		// correct; only the grouping comment was misleading.
 		{"REQUIRE_DIR=1 + ALLOW_MEMORY=1 (contradictory) - REQUIRE_DIR=1 wins, strict", "1", "1", "https://kapp.example.com", "", true},
-		{"REQUIRE_DIR=0 + ALLOW_MEMORY=0 - either opt-out permits memory store", "0", "0", "https://kapp.example.com", "", false},
+		{"REQUIRE_DIR=0 + ALLOW_MEMORY=0 - REQUIRE_DIR=0 wins, permits memory store", "0", "0", "https://kapp.example.com", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
