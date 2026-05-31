@@ -773,6 +773,26 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 					// this endpoint. A tenant must already be able to
 					// browse the catalog to learn a bundle hash; once
 					// they have the hash the bytes are public.
+					//
+					// Devin Review
+					// ANALYSIS_pr-review-job-20b9bdccfe6d463c9a4d6ac7f0fea816_0003
+					// observed that this route is mounted under
+					// tenantChain so an unauthenticated/HTTPResolver-
+					// only fetch from outside the cluster would hit
+					// 401. That is the intended posture for two
+					// reasons:
+					//   1. LocalResolver short-circuits this route for
+					//      in-process installs, so the engine never
+					//      issues a loopback HTTP. The HTTP route
+					//      exists for external observability and for
+					//      future cross-cluster federation, neither
+					//      of which can dispense with tenant auth.
+					//   2. Bundle bytes are "public within an
+					//      authenticated tenant" but not anonymously
+					//      public: a bundle hash leaked into the open
+					//      should NOT let a passerby pull a
+					//      proprietary extension's bytes. The tenant
+					//      gate enforces that.
 					r.Get("/bundles/{hash}", d.mph.serveBundleByHash)
 				})
 

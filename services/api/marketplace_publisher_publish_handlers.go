@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/kapp-fab/internal/marketplace"
+	"github.com/kennguy3n/kapp-fab/internal/marketplace/bundlestore"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 )
 
@@ -284,11 +285,62 @@ func (h *marketplaceHandlers) submitMyPublisherVersion(w http.ResponseWriter, r 
 	if bundleURL == "" {
 		// Try to auto-fill from a marketplace-hosted upload row.
 		// The publisher MUST own the upload (defence-in-depth on
-		// top of the upload-time publisher-slug check).
+		// top of the upload-time publisher-slug check). When the
+		// hash matches a row uploaded by a DIFFERENT publisher
+		// (content-addressed dedup branch in bundlestore.Upload —
+		// first uploader's publisher_id wins on the row), return
+		// a clear 409 instead of falling through to the generic
+		// "bundle_url required" 400.
+		//
+		// Devin Review
+		// ANALYSIS_pr-review-job-20b9bdccfe6d463c9a4d6ac7f0fea816_0002
+		// flagged that the pre-fix path silently 400'd on
+		// cross-publisher dedup, leaving the caller confused
+		// about why a visibly-successful upload didn't satisfy
+		// the auto-fill. The new branch:
+		//   1. ErrBundleNotFound  → fall through to the generic
+		//      400 below (caller must upload first or supply
+		//      bundle_url).
+		//   2. Owned by caller    → auto-fill the marketplace URL.
+		//   3. Owned by someone else → 409 with a clear message
+		//      naming the dedup root cause + the workaround
+		//      (supply bundle_url explicitly).
+		//
+		// Note: this branch is essentially unreachable today
+		// because bundle bytes embed publisher in the manifest's
+		// `name` field (`<publisher>.<extension>`), so two
+		// publishers cannot legitimately have byte-identical
+		// bundles. The 409 path is defence-in-depth in case the
+		// manifest format ever drops the publisher prefix, or
+		// for the future-S3-import case where bytes might arrive
+		// from a path that bypasses ParseManifest's publisher
+		// derivation. The clear 409 future-proofs the UX.
 		if h.bundles != nil && h.bundleURLBase != "" {
 			up, lookupErr := h.bundles.GetByHash(r.Context(), req.BundleHash)
-			if lookupErr == nil && up.PublisherID != nil && *up.PublisherID == pubID {
+			switch {
+			case lookupErr == nil && up.PublisherID != nil && *up.PublisherID == pubID:
 				bundleURL = marketplaceBundleURL(h.bundleURLBase, up.ContentHash)
+			case lookupErr == nil && up.PublisherID != nil && *up.PublisherID != pubID:
+				http.Error(w,
+					"bundle_hash matches an upload owned by a different publisher (content-addressed dedup): "+
+						"supply bundle_url explicitly to publish a version against these bytes",
+					http.StatusConflict)
+				return
+			case lookupErr == nil && up.PublisherID == nil:
+				// Orphan upload (publisher_id NULL — possible
+				// for B8.1 admin-seeded bundles). Allow auto-
+				// fill: the row is unowned, so attaching it to
+				// any publisher's version is fine. (No row
+				// matches this shape today; defensive only.)
+				bundleURL = marketplaceBundleURL(h.bundleURLBase, up.ContentHash)
+			case lookupErr != nil && !errors.Is(lookupErr, bundlestore.ErrBundleNotFound):
+				// DB error reaching the bundlestore — not a
+				// caller-facing problem. Return 500 rather
+				// than papering over with the generic 400
+				// below: the caller would otherwise re-try
+				// upload and waste bandwidth.
+				h.writeError(w, lookupErr)
+				return
 			}
 		}
 	}

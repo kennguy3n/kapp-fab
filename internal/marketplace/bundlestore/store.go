@@ -253,6 +253,24 @@ func (d *DiskStore) keyPath(key string) (string, error) {
 // to match the MemoryStore contract — content-addressed bytes are
 // immutable so the bytes on disk and the bytes in `data` are
 // guaranteed identical.
+//
+// Devin Review
+// ANALYSIS_pr-review-job-20b9bdccfe6d463c9a4d6ac7f0fea816_0005
+// noted a Stat-then-Rename TOCTOU window: two concurrent Puts of
+// the same key could both pass the os.Stat check at line below
+// and both attempt the os.Rename. This is BENIGN by the content-
+// addressing invariant — every key is sha256(bytes), so the bytes
+// being renamed in are byte-identical to any bytes already at dst
+// or being raced into dst by a concurrent writer. The os.Rename
+// is atomic on POSIX filesystems, so the final on-disk state
+// after both renames is one of the two identical-bytes tmp files
+// — observably indistinguishable from a serialized execution.
+// The unused tmp file is removed by the loser's `cleanup` defer.
+// We deliberately do NOT add an O_EXCL-style "fail if exists"
+// check before the rename: that would convert benign loser-races
+// into spurious errors that the upload pipeline would have to
+// retry-or-collapse, paying coordination cost for zero
+// correctness gain.
 func (d *DiskStore) Put(_ context.Context, key, _ string, data []byte) error {
 	dst, err := d.keyPath(key)
 	if err != nil {

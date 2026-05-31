@@ -1349,6 +1349,101 @@ func (s *Store) ListInstallationsByVersion(ctx context.Context, adminPool *pgxpo
 	return out, rows.Err()
 }
 
+// VersionInstallCounts is the batched-per-version install
+// breakdown returned by CountInstallationsByVersions. The
+// Status map is keyed by InstallStatus (active/disabled/failed/
+// pending/installing/uninstalled) with counts; Total is the
+// sum across all statuses (which the publisher dashboard's
+// "TotalInstalls" surfaces as the version's install count).
+//
+// Versions absent from the result map have zero installs across
+// every status. Callers should treat a missing key as `{Total: 0,
+// Status: nil}` rather than re-querying.
+type VersionInstallCounts struct {
+	Total  int
+	Status map[InstallStatus]int
+}
+
+// CountInstallationsByVersions returns per-version, per-status
+// install counts for the supplied version IDs in ONE SQL round
+// trip. Replaces the per-version fan-out
+// (ListInstallationsByVersion called in a loop) that the
+// publisher dashboard's install-stats endpoint did pre-fix.
+//
+// The query SELECTs (extension_version_id, status, COUNT(*))
+// FROM marketplace_extension_installations GROUP BY (1, 2) WHERE
+// extension_version_id = ANY($1). Result rows are folded into a
+// map by version_id so the caller can iterate the original
+// versions slice and read counts in O(1).
+//
+// pool MUST be the admin pool (BYPASSRLS). The check matches
+// ListInstallationsByVersion's invariant — this is a cross-tenant
+// aggregate and would silently return zeros under the application
+// pool because of RLS.
+//
+// Devin Review
+// ANALYSIS_pr-review-job-20b9bdccfe6d463c9a4d6ac7f0fea816_0004
+// flagged the per-version fan-out as O(N) DB round-trips for
+// every dashboard refresh. Even though per-version install counts
+// stay small, the BYPASSRLS verification query at the head of
+// each ListInstallationsByVersion call was paying a real
+// per-version cost (a SELECT against pg_roles). Batching
+// eliminates both the per-version data query AND the per-version
+// role check.
+func (s *Store) CountInstallationsByVersions(
+	ctx context.Context,
+	adminPool *pgxpool.Pool,
+	versionIDs []uuid.UUID,
+) (map[uuid.UUID]VersionInstallCounts, error) {
+	if adminPool == nil {
+		return nil, errors.New("marketplace: admin pool required for cross-tenant query")
+	}
+	if len(versionIDs) == 0 {
+		return map[uuid.UUID]VersionInstallCounts{}, nil
+	}
+	var bypass bool
+	if err := adminPool.QueryRow(ctx,
+		`SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user`,
+	).Scan(&bypass); err != nil {
+		return nil, fmt.Errorf("marketplace: verify admin pool role: %w", err)
+	}
+	if !bypass {
+		return nil, errors.New("marketplace: CountInstallationsByVersions requires a BYPASSRLS pool (got non-bypass role)")
+	}
+	rows, err := adminPool.Query(ctx,
+		`SELECT extension_version_id, status, COUNT(*)
+		 FROM marketplace_extension_installations
+		 WHERE extension_version_id = ANY($1)
+		 GROUP BY extension_version_id, status`, versionIDs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("marketplace: count installs by versions: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[uuid.UUID]VersionInstallCounts, len(versionIDs))
+	for rows.Next() {
+		var (
+			vid    uuid.UUID
+			status InstallStatus
+			cnt    int
+		)
+		if err := rows.Scan(&vid, &status, &cnt); err != nil {
+			return nil, fmt.Errorf("marketplace: count installs by versions: scan: %w", err)
+		}
+		bucket, ok := out[vid]
+		if !ok {
+			bucket = VersionInstallCounts{Status: map[InstallStatus]int{}}
+		}
+		bucket.Status[status] += cnt
+		bucket.Total += cnt
+		out[vid] = bucket
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("marketplace: count installs by versions: rows: %w", err)
+	}
+	return out, nil
+}
+
 // jsonbScanner is a pgx Scanner that captures a JSONB column as
 // []byte. We use this rather than the standard *[]byte target
 // because pgx returns JSONB as a string by default unless explicitly

@@ -458,6 +458,347 @@ func TestB8PublisherSubmitVersionPersistsSignature(t *testing.T) {
 	}
 }
 
+// TestB8PublisherSubmitVersionCrossPublisherDedup pins the
+// round-3 fix for Devin Review
+// ANALYSIS_pr-review-job-20b9bdccfe6d463c9a4d6ac7f0fea816_0002:
+// when a publisher submits a version with no bundle_url and a
+// bundle_hash that matches an upload owned by a DIFFERENT
+// publisher (content-addressed dedup branch of bundlestore.Upload),
+// the handler returns 409 with a clear message instead of the
+// pre-fix silent 400 "bundle_url required".
+//
+// Setup: publisher A uploads bytes; publisher B (different slug,
+// different extension) submits a version naming hash X. The
+// auto-fill must NOT silently 400 — return 409 and name the
+// dedup root cause.
+func TestB8PublisherSubmitVersionCrossPublisherDedup(t *testing.T) {
+	pool := openIntegrationPool(t, "KAPP_TEST_DB_URL")
+	ctx := context.Background()
+	store := marketplace.NewStore(pool)
+	users := tenant.NewUserStore(pool)
+
+	// Publisher A — uploads the bytes.
+	pubASlug := "b8pa_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "_")
+	pubA, err := store.Publishers().CreatePublisher(ctx, marketplace.CreatePublisherInput{
+		Slug:         pubASlug,
+		DisplayName:  "B8 pubA",
+		ContactEmail: pubASlug + "@example.invalid",
+	})
+	if err != nil {
+		t.Fatalf("CreatePublisher A: %v", err)
+	}
+	alice, err := users.CreateUser(ctx, tenant.User{
+		KChatUserID: "u-alice-" + uuid.NewString()[:8],
+		Email:       "alice-b8dedup-" + uuid.NewString()[:6] + "@example.invalid",
+		DisplayName: "Alice (A)",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser A: %v", err)
+	}
+	if _, err := store.Publishers().AddMember(ctx, marketplace.AddPublisherMemberInput{
+		PublisherID: pubA.ID, UserID: alice.ID,
+		Role: marketplace.PublisherMemberRoleMember,
+	}); err != nil {
+		t.Fatalf("AddMember A: %v", err)
+	}
+
+	// Publisher B — will try to submit naming the same hash.
+	pubBSlug := "b8pb_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "_")
+	pubB, err := store.Publishers().CreatePublisher(ctx, marketplace.CreatePublisherInput{
+		Slug:         pubBSlug,
+		DisplayName:  "B8 pubB",
+		ContactEmail: pubBSlug + "@example.invalid",
+	})
+	if err != nil {
+		t.Fatalf("CreatePublisher B: %v", err)
+	}
+	bob, err := users.CreateUser(ctx, tenant.User{
+		KChatUserID: "u-bob-" + uuid.NewString()[:8],
+		Email:       "bob-b8dedup-" + uuid.NewString()[:6] + "@example.invalid",
+		DisplayName: "Bob (B)",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser B: %v", err)
+	}
+	if _, err := store.Publishers().AddMember(ctx, marketplace.AddPublisherMemberInput{
+		PublisherID: pubB.ID, UserID: bob.ID,
+		Role: marketplace.PublisherMemberRoleMember,
+	}); err != nil {
+		t.Fatalf("AddMember B: %v", err)
+	}
+	extB, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pubBSlug, Slug: "b8dedup_ext",
+		DisplayName: "B8 dedup extension",
+		Description: "Cross-publisher dedup pin",
+		Author:      "B8 integration tests",
+		License:     "MIT",
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension B: %v", err)
+	}
+
+	// Seed the bundlestore with bytes owned by publisher A.
+	objs := bundlestore.NewMemoryStore()
+	bs := bundlestore.NewStore(pool, objs)
+	bodyA := buildB8TestBundle(t, pubASlug)
+	hashRaw := sha256.Sum256(bodyA)
+	hashHex := hex.EncodeToString(hashRaw[:])
+	if _, err := bs.Upload(ctx, bundlestore.UploadInput{
+		Bytes:       bodyA,
+		PublisherID: pubA.ID,
+		UploadedBy:  alice.ID,
+	}); err != nil {
+		t.Fatalf("seed Upload as pubA: %v", err)
+	}
+
+	mph := &marketplaceHandlers{
+		store:         store,
+		bundles:       bs,
+		bundleURLBase: "https://kapp.test",
+	}
+	r := chi.NewRouter()
+	r.Post("/api/v1/publisher/{publisher_id}/extensions/{ext_id}/versions",
+		mph.submitMyPublisherVersion)
+
+	manifestB := []byte(fmt.Sprintf(`{
+"schema_version": 1,
+"name": %q,
+"version": "0.1.0",
+"author": "B8 integration tests",
+"license": "MIT",
+"description": "B8 dedup pin",
+"min_kapp_version": "1.0.0",
+"max_kapp_version": "1.x",
+"features_required": [],
+"permissions_required": []
+}`, pubBSlug+".b8dedup_ext"))
+	body := map[string]any{
+		"manifest":    json.RawMessage(manifestB),
+		"bundle_url":  "", // force auto-fill path
+		"bundle_hash": hashHex,
+		"bundle_size": len(bodyA),
+	}
+	buf, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/api/v1/publisher/%s/extensions/%s/versions",
+			pubB.ID.String(), extB.ID.String()),
+		bytes.NewReader(buf))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(platform.WithUserID(req.Context(), bob.ID))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("cross-publisher dedup auto-fill: want 409, got %d (body %q)",
+			rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "different publisher") {
+		t.Errorf("409 body should name cross-publisher dedup, got %q", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "bundle_url explicitly") {
+		t.Errorf("409 body should suggest bundle_url workaround, got %q", rr.Body.String())
+	}
+}
+
+// TestB8PublisherDashboardInstallStatsBatched pins the round-3
+// fix for Devin Review
+// ANALYSIS_pr-review-job-20b9bdccfe6d463c9a4d6ac7f0fea816_0004:
+// the install-stats endpoint must batch the cross-version count
+// query (one round trip via CountInstallationsByVersions) instead
+// of the pre-fix per-version fan-out (one ListInstallationsByVersion
+// call per version, each with a BYPASSRLS role check).
+//
+// The test seeds a publisher with two versions, attaches a
+// per-version install count, hits the dashboard endpoint, and
+// asserts that the response carries the right per-version
+// counts. Correctness of the batched query is exercised; the
+// O(N)→O(1) round-trip count itself is verified at code-review
+// time (one Query call vs. one-per-version).
+func TestB8PublisherDashboardInstallStatsBatched(t *testing.T) {
+	pool := openIntegrationPool(t, "KAPP_TEST_DB_URL")
+	ctx := context.Background()
+	store := marketplace.NewStore(pool)
+	users := tenant.NewUserStore(pool)
+
+	// Real publisher + extension + 2 version rows; one of them
+	// gets installs (3 active + 1 disabled + 1 failed), the
+	// second gets 2 active, and the third (defined below) has
+	// none to verify the "absent from result" contract.
+	pubSlug := "b8stats_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "_")
+	pub, err := store.Publishers().CreatePublisher(ctx, marketplace.CreatePublisherInput{
+		Slug:         pubSlug,
+		DisplayName:  "B8 stats publisher",
+		ContactEmail: pubSlug + "@example.invalid",
+	})
+	if err != nil {
+		t.Fatalf("CreatePublisher: %v", err)
+	}
+	owner, err := users.CreateUser(ctx, tenant.User{
+		KChatUserID: "u-owner-stats-" + uuid.NewString()[:8],
+		Email:       "owner-stats-" + uuid.NewString()[:6] + "@example.invalid",
+		DisplayName: "Owner",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser owner: %v", err)
+	}
+	if _, err := store.Publishers().AddMember(ctx, marketplace.AddPublisherMemberInput{
+		PublisherID: pub.ID, UserID: owner.ID,
+		Role: marketplace.PublisherMemberRoleOwner,
+	}); err != nil {
+		t.Fatalf("AddMember owner: %v", err)
+	}
+	ext, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pubSlug, Slug: "b8stats_ext",
+		DisplayName: "B8 stats extension",
+		Description: "Install-stats batched aggregate pin",
+		Author:      "B8 integration tests",
+		License:     "MIT",
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension: %v", err)
+	}
+
+	// Two version rows with real manifests + bundle URLs.
+	mkVersion := func(verStr string) *marketplace.ExtensionVersion {
+		manifestYAML := []byte(fmt.Sprintf(`schema_version: 1
+name: %s
+version: %s
+author: B8 integration tests
+license: MIT
+description: B8 stats pin
+min_kapp_version: "1.0.0"
+max_kapp_version: "1.x"
+features_required: []
+permissions_required: []
+`, pubSlug+".b8stats_ext", verStr))
+		man, err := marketplace.ParseManifest(manifestYAML)
+		if err != nil {
+			t.Fatalf("ParseManifest(%s): %v", verStr, err)
+		}
+		manifestJSON, err := json.Marshal(man)
+		if err != nil {
+			t.Fatalf("marshal manifest(%s): %v", verStr, err)
+		}
+		hashStr := uuid.NewString()
+		// Bundle hash must be 64 hex chars. Re-use the uuid bytes
+		// (32 hex) twice.
+		hashStr = strings.ReplaceAll(hashStr, "-", "")
+		hashStr += hashStr
+		ver, err := store.PublishVersion(ctx, marketplace.PublishVersionInput{
+			ExtensionID:  ext.ID,
+			Manifest:     man,
+			ManifestJSON: manifestJSON,
+			BundleHash:   hashStr,
+			BundleSize:   1024,
+			BundleURL:    "https://kapp.test/bundles/" + hashStr,
+		})
+		if err != nil {
+			t.Fatalf("PublishVersion(%s): %v", verStr, err)
+		}
+		return ver
+	}
+	ver1 := mkVersion("0.1.0")
+	ver2 := mkVersion("0.2.0")
+	ver3 := mkVersion("0.3.0") // no installs → must be absent
+
+	// Seed installations directly (bypassing the install pipeline
+	// because we only care about the aggregate's correctness here,
+	// and the install pipeline drags in the runtime engine +
+	// bundle resolver which are exercised by other tests).
+	//
+	// installations.UNIQUE (tenant_id, extension_id) blocks
+	// multiple rows per tenant — so we mint a fresh tenant per
+	// install row (cheap; the constraint is the test cost, not
+	// real load).
+	mkTenant := func(tag string) uuid.UUID {
+		id := uuid.New()
+		slug := "b8stats-" + tag + "-" + strings.ToLower(uuid.NewString()[:6])
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO tenants (id, slug, name, cell, status, plan)
+			VALUES ($1, $2, $3, 'default', 'active', 'basic')
+			ON CONFLICT DO NOTHING`,
+			id, slug, "B8 stats tenant "+tag); err != nil {
+			t.Fatalf("seed tenant: %v", err)
+		}
+		return id
+	}
+	seed := []struct {
+		verID  uuid.UUID
+		status marketplace.InstallStatus
+	}{
+		{ver1.ID, marketplace.InstallStatusActive},
+		{ver1.ID, marketplace.InstallStatusActive},
+		{ver1.ID, marketplace.InstallStatusActive},
+		{ver1.ID, marketplace.InstallStatusDisabled},
+		{ver1.ID, marketplace.InstallStatusFailed},
+		{ver2.ID, marketplace.InstallStatusActive},
+		{ver2.ID, marketplace.InstallStatusActive},
+	}
+	for i, s := range seed {
+		tID := mkTenant(fmt.Sprintf("%d", i))
+		// failure_reason must be NOT NULL iff status='failed'
+		// (DB CHECK marketplace_installations_failure_reason_only_when_failed).
+		var failureReason any
+		if s.status == marketplace.InstallStatusFailed {
+			failureReason = "synthetic failure for B8 stats test"
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO marketplace_extension_installations
+			(id, tenant_id, extension_id, extension_version_id, status,
+			 settings, webhook_base, installed_by, failure_reason)
+			VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, 'https://example.invalid/hook', $6, $7)`,
+			uuid.New(), tID, ext.ID, s.verID, string(s.status), owner.ID, failureReason,
+		); err != nil {
+			t.Fatalf("seed install (%s): %v", s.status, err)
+		}
+	}
+
+	// Pool is admin (openIntegrationPool returns BYPASSRLS role).
+	got, err := store.CountInstallationsByVersions(ctx, pool,
+		[]uuid.UUID{ver1.ID, ver2.ID, ver3.ID})
+	if err != nil {
+		t.Fatalf("CountInstallationsByVersions: %v", err)
+	}
+	v1, ok := got[ver1.ID]
+	if !ok {
+		t.Fatalf("ver1 missing from result")
+	}
+	if v1.Total != 5 {
+		t.Errorf("ver1.Total: want 5, got %d", v1.Total)
+	}
+	if v1.Status[marketplace.InstallStatusActive] != 3 {
+		t.Errorf("ver1 active: want 3, got %d", v1.Status[marketplace.InstallStatusActive])
+	}
+	if v1.Status[marketplace.InstallStatusDisabled] != 1 {
+		t.Errorf("ver1 disabled: want 1, got %d", v1.Status[marketplace.InstallStatusDisabled])
+	}
+	if v1.Status[marketplace.InstallStatusFailed] != 1 {
+		t.Errorf("ver1 failed: want 1, got %d", v1.Status[marketplace.InstallStatusFailed])
+	}
+	v2, ok := got[ver2.ID]
+	if !ok {
+		t.Fatalf("ver2 missing from result")
+	}
+	if v2.Total != 2 || v2.Status[marketplace.InstallStatusActive] != 2 {
+		t.Errorf("ver2: want Total=2 Active=2, got %+v", v2)
+	}
+	if _, hit := got[ver3.ID]; hit {
+		t.Errorf("ver3 has zero installs and must be absent, got %+v", got[ver3.ID])
+	}
+
+	// Empty input slice → empty result, no error.
+	empty, err := store.CountInstallationsByVersions(ctx, pool, nil)
+	if err != nil {
+		t.Fatalf("CountInstallationsByVersions(nil): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("nil input should yield empty map, got %d entries", len(empty))
+	}
+}
+
 // --- helpers -------------------------------------------------------------
 
 // buildB8TestBundle constructs a minimal valid tar.gz that

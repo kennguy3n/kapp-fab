@@ -122,6 +122,25 @@ type publisherVersionView struct {
 }
 
 func publisherVersionToView(v *marketplace.ExtensionVersion, rs *marketplace.ReviewState) publisherVersionView {
+	// Coalesce nil slices to empty slices so the JSON encoder
+	// emits `[]` instead of `null`. Devin Review
+	// ANALYSIS_pr-review-job-20b9bdccfe6d463c9a4d6ac7f0fea816_0006
+	// flagged that adding `omitempty` would mask the field when
+	// the publisher hasn't declared any features/permissions; an
+	// always-present empty array matches what TypeScript / OpenAPI
+	// consumers expect for `string[]` fields and avoids the
+	// `null vs [] vs undefined` ambiguity in downstream clients.
+	// The store already coerces nil to empty before INSERT, but
+	// we defend at the view boundary too — older rows or future
+	// SELECT paths that bypass the store can still return nil.
+	features := v.FeaturesRequired
+	if features == nil {
+		features = []string{}
+	}
+	perms := v.PermissionsRequired
+	if perms == nil {
+		perms = []string{}
+	}
 	out := publisherVersionView{
 		ID:                  v.ID,
 		ExtensionID:         v.ExtensionID,
@@ -131,8 +150,8 @@ func publisherVersionToView(v *marketplace.ExtensionVersion, rs *marketplace.Rev
 		BundleURL:           v.BundleURL,
 		MinKappVersion:      v.MinKappVersion,
 		MaxKappVersion:      v.MaxKappVersion,
-		FeaturesRequired:    v.FeaturesRequired,
-		PermissionsRequired: v.PermissionsRequired,
+		FeaturesRequired:    features,
+		PermissionsRequired: perms,
 		KtypesCount:         v.KtypesCount,
 		WorkflowsCount:      v.WorkflowsCount,
 		AgentToolsCount:     v.AgentToolsCount,
@@ -405,15 +424,14 @@ func (h *marketplaceHandlers) getMyPublisherExtensionInstallStats(w http.Respons
 			http.StatusServiceUnavailable)
 		return
 	}
-	// Fan out per-version: ListInstallationsByVersion takes a
-	// specific version ID (it rejects uuid.Nil at the store
-	// layer) so we cannot ask for "all versions of this
-	// extension" in one query. ListVersions(extID, true) already
-	// scopes us to the extension, after which one cross-tenant
-	// installations query per version composes the dashboard
-	// view. Popular extensions tend to have few live versions
-	// (most installs concentrate on the latest one or two), so
-	// the fan-out cost is bounded.
+	// Batched cross-version install-count query (one SQL round
+	// trip via CountInstallationsByVersions(extension_version_id =
+	// ANY($1)) instead of the pre-fix per-version fan-out).
+	// Devin Review
+	// ANALYSIS_pr-review-job-20b9bdccfe6d463c9a4d6ac7f0fea816_0004
+	// flagged the prior O(N) per-version queries (each with its
+	// own BYPASSRLS role check) as wasteful even though per-
+	// version counts stay small.
 	versions, err := h.store.ListVersions(r.Context(), extID, true)
 	if err != nil {
 		h.writeError(w, err)
@@ -425,32 +443,27 @@ func (h *marketplaceHandlers) getMyPublisherExtensionInstallStats(w http.Respons
 		ByStatus:      map[string]int{},
 		ByVersion:     make([]installStatsRow, 0, len(versions)),
 	}
+	versionIDs := make([]uuid.UUID, 0, len(versions))
+	for i := range versions {
+		versionIDs = append(versionIDs, versions[i].ID)
+	}
+	counts, err := h.store.CountInstallationsByVersions(r.Context(), h.adminPool, versionIDs)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
 	for i := range versions {
 		v := versions[i]
-		rows, err := h.store.ListInstallationsByVersion(r.Context(), h.adminPool, v.ID)
-		if err != nil {
-			h.writeError(w, err)
-			return
-		}
-		row := installStatsRow{
-			VersionID: v.ID,
-			Version:   v.Version,
-			Installs:  len(rows),
-		}
-		// Index-based loop: marketplace.Installation is a 216-byte
-		// struct (per gocritic rangeValCopy) and we only need
-		// ins.Status. Pay the copy on each iteration is wasted
-		// when the slice can be in the hundreds for popular extensions.
-		for i := range rows {
-			switch rows[i].Status {
-			case marketplace.InstallStatusActive:
-				row.ActiveCount++
-			case marketplace.InstallStatusDisabled:
-				row.DisabledCount++
-			case marketplace.InstallStatusFailed:
-				row.FailedCount++
+		row := installStatsRow{VersionID: v.ID, Version: v.Version}
+		bucket, hit := counts[v.ID]
+		if hit {
+			row.Installs = bucket.Total
+			row.ActiveCount = bucket.Status[marketplace.InstallStatusActive]
+			row.DisabledCount = bucket.Status[marketplace.InstallStatusDisabled]
+			row.FailedCount = bucket.Status[marketplace.InstallStatusFailed]
+			for status, n := range bucket.Status {
+				stats.ByStatus[string(status)] += n
 			}
-			stats.ByStatus[string(rows[i].Status)]++
 		}
 		stats.TotalInstalls += row.Installs
 		stats.ByVersion = append(stats.ByVersion, row)

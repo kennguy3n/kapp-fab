@@ -148,6 +148,13 @@ func TestLocalResolver_DisabledFallback(t *testing.T) {
 // TestLocalResolver_NotFound: store returns ErrBundleNotFound, the
 // resolver translates to the bundle package's sentinel so callers
 // can map to 404.
+//
+// Also pins Devin Review
+// ANALYSIS_pr-review-job-20b9bdccfe6d463c9a4d6ac7f0fea816_0001:
+// the wrapped error MUST carry operator-actionable context (the
+// marketplace URL base, the hash, and the documented multi-replica
+// constraint) so the operator can diagnose a non-shared bundlestore
+// from the access log without having to grep code.
 func TestLocalResolver_NotFound(t *testing.T) {
 	t.Parallel()
 	delegate := &fakeResolver{}
@@ -155,12 +162,25 @@ func TestLocalResolver_NotFound(t *testing.T) {
 	base := "https://kapp.example.com"
 	lr := NewLocalResolver(delegate, store, base)
 	h := strings.Repeat("a", 64)
+	bundleURL := base + "/api/v1/marketplace/bundles/" + h
 	_, err := lr.Resolve(context.Background(), &marketplace.ExtensionVersion{
-		BundleURL:  base + "/api/v1/marketplace/bundles/" + h,
+		BundleURL:  bundleURL,
 		BundleHash: h,
 	})
 	if !errors.Is(err, ErrBundleNotFound) {
 		t.Fatalf("expected ErrBundleNotFound, got %v", err)
+	}
+	// Wrapped message must name the hash, the URL, and the
+	// "shared across replicas" constraint so an operator reading
+	// the access log can diagnose the misconfiguration.
+	msg := err.Error()
+	for _, want := range []string{h, bundleURL, "shared across replicas"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("wrapped error missing operator context %q: %s", want, msg)
+		}
+	}
+	if delegate.called {
+		t.Fatalf("delegate must NOT be called on local-store miss: HTTPResolver fall-through hits the same tenant-gated endpoint and fails 401 — the architecturally honest fix is to surface the misconfiguration via the wrapped error, not attempt a doomed retry")
 	}
 }
 

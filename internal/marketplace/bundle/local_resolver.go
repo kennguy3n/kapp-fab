@@ -43,6 +43,26 @@ import (
 // upload endpoint generates URLs with it; older callers may have
 // stored the bare-hash form). This matches the server-side
 // chi.URLParam(r, "hash") which strips .tar.gz before lookup.
+//
+// Multi-replica deployments: a local-store miss on a marketplace-
+// hosted URL is NEVER swallowed silently. Devin Review
+// ANALYSIS_pr-review-job-20b9bdccfe6d463c9a4d6ac7f0fea816_0001
+// flagged the concern that a deploy with non-shared storage
+// (MemoryStore on every replica, or DiskStore on per-replica
+// local SSD) would 404 silently if the install request lands on a
+// different replica than the upload. The Resolve path wraps the
+// local-store ErrBundleNotFound with operator-actionable context
+// (marketplace URL base + hash + the documented backends), and
+// the install handler maps that to 404 with a clear body — the
+// operator sees the wrapped error in the access log and can
+// diagnose the configuration drift. Falling through to the
+// delegate (HTTPResolver) was considered and rejected: the
+// delegate would issue an unauthenticated HTTP fetch against the
+// tenant-gated /api/v1/marketplace/bundles route which fails 401
+// regardless of where the LB routes it. The clearer-error path
+// is the architecturally honest fix; the supported multi-replica
+// posture is DiskStore on a shared volume (EBS/NFS) or S3Store
+// (B8.1).
 
 // LocalResolver short-circuits marketplace-hosted bundle_urls so
 // the install pipeline reads bytes from the in-process
@@ -108,7 +128,17 @@ func (l *LocalResolver) Resolve(ctx context.Context, version *marketplace.Extens
 	_, rc, err := l.store.Fetch(ctx, hash)
 	if err != nil {
 		if errors.Is(err, bundlestore.ErrBundleNotFound) {
-			return nil, ErrBundleNotFound
+			// Wrap with operator-actionable context so the install
+			// handler's error response (and access log) names the
+			// most likely cause: a multi-replica deploy whose
+			// bundlestore is not shared across replicas. Preserves
+			// the ErrBundleNotFound sentinel so errors.Is checks
+			// (and the 404 mapping) keep working unchanged.
+			return nil, fmt.Errorf(
+				"%w: hash %q is marketplace-hosted (url %q) but not present in this replica's bundlestore — "+
+					"this typically means the bundlestore is not shared across replicas "+
+					"(configure DiskStore on a shared volume, or wait for S3Store in B8.1)",
+				ErrBundleNotFound, hash, version.BundleURL)
 		}
 		return nil, fmt.Errorf("%w: local store: %w", ErrBundleFetchFailed, err)
 	}
