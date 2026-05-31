@@ -20,6 +20,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/marketplace"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/eventrouter"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/runtime"
+	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
 
 // TestEventRouter_EndToEnd exercises the full B4 fan-out path:
@@ -65,6 +66,7 @@ func TestEventRouter_EndToEnd(t *testing.T) {
 		MinKappVersion:   "1.0.0",
 		FeaturesRequired: []string{"inventory"},
 		KTypes:           []marketplace.KTypeRef{{Schema: "./ktypes/label.json"}},
+		Workflows:        []marketplace.WorkflowRef{{Definition: "./workflows/print.json"}},
 		AgentTools: []marketplace.AgentToolRef{{
 			Definition: "./tools/ship.json",
 			Handler:    "webhook",
@@ -92,6 +94,7 @@ func TestEventRouter_EndToEnd(t *testing.T) {
 	}
 
 	ktypeName := fmt.Sprintf("ext.%s.%s_label", pub, ext.Slug)
+	workflowName := fmt.Sprintf("ext.%s.%s_print", pub, ext.Slug)
 	toolName := fmt.Sprintf("ext.%s.%s_ship", pub, ext.Slug)
 	bundle := &runtime.ResolvedBundle{
 		Manifest: manifest,
@@ -100,16 +103,25 @@ func TestEventRouter_EndToEnd(t *testing.T) {
 			Version:    1,
 			SchemaJSON: json.RawMessage(`{"type":"object"}`),
 		}},
+		Workflows: []runtime.ResolvedWorkflow{{
+			Name:           workflowName,
+			Version:        1,
+			DefinitionJSON: json.RawMessage(`{"states":["start","end"]}`),
+		}},
 		AgentTools: []runtime.ResolvedAgentTool{{
 			Name:           toolName,
 			DescriptorJSON: json.RawMessage(`{"name":"ship","args":{}}`),
 		}},
 	}
 
-	// Use a transport that records all calls.
+	// Use a transport that records all calls. The InMemoryTransport's
+	// Handler signature is (ctx, target, body, headers) — the leading
+	// context is required because B3's lifecycle hook path threads ctx
+	// for cancellation; the InstallRequest path will call into this
+	// handler for the install lifecycle hook dispatches as well.
 	var transportCalls int64
 	okTransport := &runtime.InMemoryTransport{
-		Handler: func(target string, body []byte, headers map[string]string) (*runtime.DispatchResponse, error) {
+		Handler: func(_ context.Context, target string, body []byte, headers map[string]string) (*runtime.DispatchResponse, error) {
 			atomic.AddInt64(&transportCalls, 1)
 			return &runtime.DispatchResponse{
 				Status: 200,
@@ -118,41 +130,83 @@ func TestEventRouter_EndToEnd(t *testing.T) {
 		},
 	}
 
-	// --- Provision tenant + install ---
-	tenantSlug := uniqueSlug("evrt-t")
-	tenant1, err := h.tenants.CreateTenant(ctx, tenantSlug, "Event-Router Test", "test", "free")
+	// --- Provision tenant ---
+	tenant1, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("evrt-t"), Name: "Event-Router Test", Cell: "test", Plan: "free",
+	})
 	if err != nil {
-		t.Fatalf("CreateTenant: %v", err)
+		t.Fatalf("tenant Create: %v", err)
 	}
 	tenantID := tenant1.ID
 
-	ver, err := store.CreateVersion(ctx, marketplace.CreateVersionInput{
-		ExtensionID:  ext.ID,
-		Version:      "1.0.0",
-		ManifestJSON: mustMarshal(t, manifest),
-		BundleURL:    "https://cdn.example/notify-1.0.0.zip",
-		BundleSHA256: "deadbeef",
-		BundleSize:   1024,
+	// --- Publish version through the production catalog path ---
+	// store.PublishVersion is the only public path that creates an
+	// marketplace_extension_versions row; we then walk the review
+	// state machine (submitted → automated_passed → manual_review →
+	// approved) and set listed_version (the version string, not the
+	// version uuid) before flipping the extension to 'listed'. This
+	// mirrors the B3 happy-path setup in
+	// marketplace_runtime_test.go.
+	ver, err := store.PublishVersion(ctx, marketplace.PublishVersionInput{
+		ExtensionID: ext.ID, Manifest: manifest,
+		BundleHash: strings.Repeat("d", 64),
+		BundleSize: 4096,
+		BundleURL:  "https://cdn.example/notify-1.0.0.zip",
 	})
 	if err != nil {
-		t.Fatalf("CreateVersion: %v", err)
+		t.Fatalf("PublishVersion: %v", err)
 	}
-	if err := store.SetReviewStatus(ctx, ver.ID, marketplace.ReviewStatusApproved); err != nil {
-		t.Fatalf("SetReviewStatus: %v", err)
+	rs := store.Reviews()
+	reviewer := uuid.New().String()
+	for _, step := range []marketplace.ReviewStatus{
+		marketplace.ReviewStatusAutomatedPassed,
+		marketplace.ReviewStatusManualReview,
+		marketplace.ReviewStatusApproved,
+	} {
+		if _, err := rs.UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
+			VersionID: ver.ID,
+			Status:    step,
+			Reviewer:  reviewer,
+		}); err != nil {
+			t.Fatalf("review transition to %s: %v", step, err)
+		}
 	}
-	if err := store.SetListedVersion(ctx, ext.ID, ver.ID); err != nil {
+	if err := store.SetListedVersion(ctx, ext.ID, ver.Version); err != nil {
 		t.Fatalf("SetListedVersion: %v", err)
 	}
+	if err := store.UpdateExtensionStatus(ctx, ext.ID, marketplace.ExtensionStatusListed); err != nil {
+		t.Fatalf("UpdateExtensionStatus listed: %v", err)
+	}
 
-	engine := runtime.NewEngine(h.pool, store, okTransport, nil)
-	result, err := engine.Install(ctx, runtime.InstallRequest{
-		TenantID:           tenantID,
-		ExtensionID:        ext.ID,
-		ExtensionVersionID: ver.ID,
-		WebhookBase:        "https://ext.acme.example",
-		InstalledBy:        uuid.New(),
-		Bundle:             bundle,
+	// --- Install through the runtime engine ---
+	// Hooks: the manifest declares ${EXTENSION_WEBHOOK_BASE}-rooted
+	// endpoints which the engine resolves and dispatches against
+	// during pre/post install. We share the same okTransport so we
+	// can later use the (reset) transportCalls counter for the
+	// post-install event-delivery assertions. NewTransportHooks owns
+	// the dispatch_log writes for the lifecycle path; the hooks
+	// counter is reset right after install completes.
+	okHooks := runtime.NewTransportHooks(okTransport, h.pool, nil)
+	engine, err := runtime.NewEngine(runtime.EngineOptions{
+		Pool:  h.pool,
+		Store: store,
+		Hooks: okHooks,
 	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	// InstalledBy left zero so the install row's installed_by column
+	// stays NULL (system install). The marketplace_extension_
+	// installations.installed_by FK requires the user_id to exist in
+	// auth.users when non-NULL; the runtime test harness doesn't seed
+	// a user, so we follow the same pattern as the B3 happy-path test
+	// at marketplace_runtime_test.go:162 (no InstalledBy).
+	result, err := engine.Install(ctx, &runtime.InstallRequest{
+		TenantID:    tenantID,
+		ExtensionID: ext.ID,
+		VersionID:   ver.ID,
+		WebhookBase: "https://ext.acme.example",
+	}, bundle)
 	if err != nil {
 		t.Fatalf("Engine.Install: %v", err)
 	}
@@ -297,7 +351,16 @@ func TestEventRouter_EndToEnd(t *testing.T) {
 
 	// --- Test 5: rate limit exhaustion ---
 	atomic.StoreInt64(&transportCalls, 0)
-	// Create a tiny limiter (1 RPM) to force a refusal.
+	// The router takes its budget from marketplace_extensions
+	// .rate_limit_rpm (joined inside lookupSubscriptions) — the
+	// limiter's DefaultRPM() is ONLY used when the column is < 1.
+	// To force a rate-limit refusal, lower the column to 1 first so
+	// the limiter is asked to enforce 1 RPM for this (tenant, ext).
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE marketplace_extensions SET rate_limit_rpm = 1 WHERE id = $1`,
+		ext.ID); err != nil {
+		t.Fatalf("set rate_limit_rpm=1: %v", err)
+	}
 	frozenNow := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	tinyLimiter := eventrouter.NewLimiter(1, func() time.Time { return frozenNow })
 	tinyRouter := eventrouter.NewRouter(h.pool, okTransport, runtime.NoopEncryptor(), tinyLimiter, func() time.Time { return frozenNow })

@@ -137,17 +137,27 @@ func (r *Router) RouteBatch(ctx context.Context, batch []events.Event) (int, err
 		return 0, errors.New("eventrouter: nil transport")
 	}
 	dispatched := 0
+	var errs []error
 	for _, e := range batch {
 		n, err := r.routeOne(ctx, e)
 		if err != nil {
-			// Subscription lookup failed (DB outage). Wrap
-			// and surface so the caller can log; the caller
-			// is expected to keep going rather than fail the
-			// whole batch — see the doc-comment above for
-			// the rationale.
-			return dispatched, fmt.Errorf("eventrouter: tenant=%s event=%s: %w", e.TenantID, e.Type, err)
+			// Subscription lookup failed (DB outage / RLS
+			// hiccup) for this event. Per the doc-comment
+			// above, marketplace event delivery is best-
+			// effort: a single failing event must NOT
+			// starve its siblings in the same batch. We
+			// accumulate the error and continue so every
+			// remaining event still gets its chance at
+			// subscription enumeration + dispatch. The
+			// caller (worker deliver()) logs the joined
+			// error and acks the outbox row regardless.
+			errs = append(errs, fmt.Errorf("eventrouter: tenant=%s event=%s: %w", e.TenantID, e.Type, err))
+			continue
 		}
 		dispatched += n
+	}
+	if len(errs) > 0 {
+		return dispatched, errors.Join(errs...)
 	}
 	return dispatched, nil
 }
