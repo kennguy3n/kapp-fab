@@ -308,26 +308,36 @@ func (p *Pipeline) Run(ctx context.Context, version *marketplace.ExtensionVersio
 // by severity per check_name so the publisher can see "4 warns
 // in ui_static" at a glance without fetching the full findings
 // list.
+//
+// Implementation note: we track per-check rows by *index into the
+// `out` slice* rather than `*CheckResultSummary` pointers because
+// `append` may reallocate the backing array — any pointer captured
+// before the realloc points at the old (detached) array and writes
+// through it would be silently dropped. Indices remain valid across
+// reallocations.
 func summariseChecks(checks []Check, findings []marketplace.ReviewFinding) []CheckResultSummary {
-	by := make(map[string]*CheckResultSummary, len(checks))
+	by := make(map[string]int, len(checks))
 	out := make([]CheckResultSummary, 0, len(checks))
 	for _, c := range checks {
 		name := c.Name()
-		summary := CheckResultSummary{Name: name, Passed: true}
-		out = append(out, summary)
-		by[name] = &out[len(out)-1]
+		by[name] = len(out)
+		out = append(out, CheckResultSummary{Name: name, Passed: true})
 	}
 	for i := range findings {
 		f := &findings[i]
-		s, ok := by[f.CheckName]
+		idx, ok := by[f.CheckName]
 		if !ok {
 			// Synthetic finding from a non-check source (e.g.
 			// bundle.load when the resolver fails). Surface as a
 			// new summary row at the end so the publisher sees it.
+			// Recording the index BEFORE append is safe because
+			// append only invalidates pointers — `out[idx]` after
+			// the append correctly addresses the new backing array.
+			idx = len(out)
+			by[f.CheckName] = idx
 			out = append(out, CheckResultSummary{Name: f.CheckName, Passed: true})
-			by[f.CheckName] = &out[len(out)-1]
-			s = by[f.CheckName]
 		}
+		s := &out[idx]
 		switch f.Severity {
 		case marketplace.SeverityError:
 			s.ErrorCount++

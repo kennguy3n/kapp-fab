@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -396,6 +397,74 @@ func TestUIStaticAnalysisCheck_IgnoresSubstrings(t *testing.T) {
 	for _, f := range got {
 		if strings.HasPrefix(f.Code, "ui.unsafe_global.") {
 			t.Fatalf("expected no ui.unsafe_global findings on substring, got %+v", got)
+		}
+	}
+}
+
+// TestUIStaticAnalysisCheck_FindingCodesSatisfyDBConstraint pins
+// that every Code the check could emit for `ui.unsafe_global.*`
+// satisfies the marketplace_review_findings_code_format CHECK
+// constraint enforced in migrations/000073:
+//
+//	^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$
+//
+// This guard would have caught BUG_0001 (the original implementation
+// embedded XMLHttpRequest / localStorage / sessionStorage / indexedDB
+// / importScripts verbatim in the code, which the DB CHECK rejects).
+// The case-sensitive matching against JS source is exercised by a
+// JS body that contains every flagged identifier so the check fires
+// for each one.
+func TestUIStaticAnalysisCheck_FindingCodesSatisfyDBConstraint(t *testing.T) {
+	t.Parallel()
+	js := []byte(`function init() {
+  window.x; document.x; navigator.x; location.x;
+  new XMLHttpRequest(); fetch('/x'); eval('1'); new Function('return 1');
+  importScripts('s'); alert('x');
+  localStorage.x; sessionStorage.x; indexedDB.x;
+}`)
+	bb := newBundle().
+		file("kapp-extension.yaml", []byte(goodManifest())).
+		file("ktypes/box.json", []byte(goodKTypeSchema())).
+		file("ui/main.js", js)
+	body, ver := loadVersion(t, bb, false, nil, "")
+	src := review.NewMemorySource()
+	src.Set(ver.ID.String(), body)
+
+	got := runChecks(t, src, ver, nil, []review.Check{review.UIStaticAnalysisCheck{}})
+
+	codeRe := regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`)
+	sawCodes := map[string]bool{}
+	for _, f := range got {
+		if !strings.HasPrefix(f.Code, "ui.unsafe_global.") {
+			continue
+		}
+		if !codeRe.MatchString(f.Code) {
+			t.Errorf("finding code %q violates marketplace_review_findings_code_format", f.Code)
+		}
+		sawCodes[f.Code] = true
+	}
+	// Every entry in the closed list (including Function, the
+	// previously undocumented global) must produce a lowercase-
+	// code finding. The expected slug list mirrors uiUnsafeGlobals
+	// in checks.go.
+	expected := []string{
+		"ui.unsafe_global.window",
+		"ui.unsafe_global.document",
+		"ui.unsafe_global.navigator",
+		"ui.unsafe_global.location",
+		"ui.unsafe_global.xmlhttprequest",
+		"ui.unsafe_global.fetch",
+		"ui.unsafe_global.eval",
+		"ui.unsafe_global.function",
+		"ui.unsafe_global.importscripts",
+		"ui.unsafe_global.alert",
+		"ui.unsafe_global.localstorage",
+		"ui.unsafe_global.sessionstorage",
+		"ui.unsafe_global.indexeddb",
+	}
+	for _, e := range expected {
+		if !sawCodes[e] {
+			t.Errorf("expected to see finding %q, did not (got %v)", e, sawCodes)
 		}
 	}
 }

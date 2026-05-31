@@ -421,17 +421,26 @@ func TestMarketplace_ClaimSubmittedReviewVersions_AtomicLease(t *testing.T) {
 	store := marketplace.NewStore(h.pool)
 
 	// The shared test DB accumulates submitted rows from other
-	// test runs that never get claimed (no worker is running).
-	// Stamp them all as claimed by a sentinel worker so they're
-	// excluded from the lease-window claim path — our test row
-	// then becomes the lone unclaimed submitted row and the
-	// per-call cap of 64 reliably surfaces it.
+	// test runs that never get claimed (no worker is running),
+	// and also rows claimed by prior runs whose claimed_at is now
+	// older than ReviewClaimLeaseDuration (10 min) — those are
+	// re-eligible for claim under the worker's lease-expiry
+	// branch. Stamp ALL submitted rows with a fresh claimed_at so
+	// none of them are in the candidate set: our seeded test row
+	// is then the lone NULL-claimed submitted row that
+	// ClaimSubmittedReviewVersions can return, and the per-call
+	// cap of 64 reliably surfaces it.
+	//
+	// We can't use `WHERE claimed_at IS NULL` here — rows whose
+	// claimed_at was set by a previous run (whether by another
+	// worker simulation, or by this test on a prior invocation)
+	// have aged past the 10-min lease and are once again in the
+	// claim candidate set.
 	if _, err := h.pool.Exec(ctx,
 		`UPDATE marketplace_extension_review_state
 		    SET claimed_at = now(),
 		        claimed_by = 'test-pre-claim'
-		  WHERE status = 'submitted'
-		    AND claimed_at IS NULL`,
+		  WHERE status = 'submitted'`,
 	); err != nil {
 		t.Fatalf("pre-claim stale submitted rows: %v", err)
 	}

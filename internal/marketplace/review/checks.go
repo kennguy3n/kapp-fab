@@ -507,12 +507,16 @@ func looksLikeSVG(b []byte) bool {
 // why their data didn't load).
 //
 // Findings:
-//   - warn (code=ui.unsafe_global): the body references a
+//   - warn (code=ui.unsafe_global.<slug>): the body references a
 //     browser-only global (window, document, navigator, location,
 //     XMLHttpRequest, fetch, eval, Function, importScripts, alert,
 //     localStorage, sessionStorage, indexedDB) — the Wasm sandbox
 //     does not expose these. The bundle will load but the
-//     specific feature won't work.
+//     specific feature won't work. The <slug> in the code is the
+//     lowercased global name (e.g. xmlhttprequest, localstorage)
+//     so it satisfies the marketplace_review_findings_code_format
+//     CHECK in migrations/000073 (lowercase identifiers only);
+//     the un-cased name is included in the human-readable Message.
 //   - info (code=ui.console_log): the body uses `console.log` —
 //     not an issue in itself, but the sandbox writes console
 //     output to the extension log, not the browser console,
@@ -523,23 +527,42 @@ type UIStaticAnalysisCheck struct{}
 // Name implements Check.
 func (UIStaticAnalysisCheck) Name() string { return "ui.static" }
 
+// uiUnsafeGlobal pairs the case-sensitive identifier the static
+// scan greps for with the lowercase slug used inside the finding
+// Code (which the marketplace_review_findings_code_format CHECK
+// in migrations/000073 enforces as lowercase-only). Keeping the
+// two as separate fields avoids losing case information in the
+// Message that the publisher reads.
+type uiUnsafeGlobal struct {
+	Name string // case-sensitive identifier as it appears in JS/TS
+	Slug string // lowercase identifier safe to embed in a finding code
+}
+
 // uiUnsafeGlobals is the closed list of browser globals the
 // Wasm sandbox does NOT expose. The Wasm host imports a small
 // `kapp.*` namespace and nothing else; references to anything in
 // this list will silently no-op at runtime.
-var uiUnsafeGlobals = []string{
-	"window",
-	"document",
-	"navigator",
-	"location",
-	"XMLHttpRequest",
-	"fetch",
-	"eval",
-	"importScripts",
-	"alert",
-	"localStorage",
-	"sessionStorage",
-	"indexedDB",
+//
+// `Function` is the global JS constructor `new Function("...")`
+// which lets a publisher build and invoke a function from a
+// string (effectively `eval`). The Wasm sandbox does not expose
+// it; flagged alongside `eval` so a publisher who routed around
+// a flagged `eval(...)` by switching to `new Function(...)` still
+// gets the same warning.
+var uiUnsafeGlobals = []uiUnsafeGlobal{
+	{Name: "window", Slug: "window"},
+	{Name: "document", Slug: "document"},
+	{Name: "navigator", Slug: "navigator"},
+	{Name: "location", Slug: "location"},
+	{Name: "XMLHttpRequest", Slug: "xmlhttprequest"},
+	{Name: "fetch", Slug: "fetch"},
+	{Name: "eval", Slug: "eval"},
+	{Name: "Function", Slug: "function"},
+	{Name: "importScripts", Slug: "importscripts"},
+	{Name: "alert", Slug: "alert"},
+	{Name: "localStorage", Slug: "localstorage"},
+	{Name: "sessionStorage", Slug: "sessionstorage"},
+	{Name: "indexedDB", Slug: "indexeddb"},
 }
 
 // uiFileExtensions are the file extensions the static check
@@ -580,14 +603,14 @@ func (UIStaticAnalysisCheck) Run(_ context.Context, b *Bundle) []marketplace.Rev
 		// a static check, and the publisher can suppress the
 		// finding by adjusting their source.
 		for _, g := range uiUnsafeGlobals {
-			if containsIdent(body, g) {
+			if containsIdent(body, g.Name) {
 				findings = append(findings, marketplace.ReviewFinding{
 					Severity: marketplace.SeverityWarn,
-					Code:     "ui.unsafe_global." + g,
+					Code:     "ui.unsafe_global." + g.Slug,
 					Location: p,
 					Message: fmt.Sprintf(
 						"%s references browser global %q which the Wasm sandbox does not expose",
-						p, g),
+						p, g.Name),
 				})
 			}
 		}

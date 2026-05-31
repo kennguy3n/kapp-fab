@@ -166,19 +166,35 @@ func (ps *PublisherStore) VerifyPublisher(ctx context.Context, in VerifyPublishe
 		// row — that's a separate SetAutoApprovePatch call.
 		return cur, nil
 	}
+	// The UPDATE includes `AND verified_at IS NULL` so two
+	// concurrent VerifyPublisher calls that both observed
+	// verified_at = NULL in their pre-read can't both write
+	// (only the first reaches a row whose verified_at is still
+	// NULL; the second sees zero rows affected and the audit
+	// trail keeps its first-verification timestamp). The Go-side
+	// pre-check above is an early-out to avoid the round-trip on
+	// the obvious "already verified" case; the SQL predicate is
+	// the authoritative guard.
 	now := time.Now().UTC()
-	_, err = ps.store.pool.Exec(ctx,
+	tag, err := ps.store.pool.Exec(ctx,
 		`UPDATE marketplace_publishers
 		    SET verified_at = $2,
 		        verified_by = $3,
 		        verification_notes = NULLIF($4,''),
 		        auto_approve_patch = $5,
 		        updated_at = now()
-		  WHERE id = $1`,
+		  WHERE id = $1
+		    AND verified_at IS NULL`,
 		in.PublisherID, now, in.Reviewer, in.Notes, in.AutoApprovePatch,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("marketplace: verify publisher: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// A concurrent caller verified between our pre-read and
+		// our UPDATE; surface the row that won the race so the
+		// caller sees the authoritative state.
+		return ps.GetPublisher(ctx, in.PublisherID)
 	}
 	return ps.GetPublisher(ctx, in.PublisherID)
 }
