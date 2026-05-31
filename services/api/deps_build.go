@@ -42,6 +42,9 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
 	"github.com/kennguy3n/kapp-fab/internal/manufacturing"
+	"github.com/kennguy3n/kapp-fab/internal/marketplace"
+	"github.com/kennguy3n/kapp-fab/internal/marketplace/bundle"
+	mktruntime "github.com/kennguy3n/kapp-fab/internal/marketplace/runtime"
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/print"
@@ -269,6 +272,51 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		log.Printf("api: per-tenant field encryption disabled (%s unset)", tenant.MasterKeyEnvVar)
 	}
 	workflowEngine := workflow.NewEngine(pool, eventPublisher, auditor)
+
+	// Marketplace runtime engine (Phase 2a B6). Used by the
+	// marketplace HTTP handlers to drive install / uninstall /
+	// settings-update lifecycle. The engine is constructed
+	// regardless of keyManager availability — when keyManager is
+	// nil (dev without KAPP_MASTER_KEY) the engine writes the
+	// signing secret in plaintext, mirroring the worker wiring.
+	// In production a non-nil keyManager is wired so the secret
+	// column carries ciphertext at rest.
+	marketplaceStore := marketplace.NewStore(pool)
+	// Lifecycle hooks dispatcher: production uses the same
+	// HTTPS POST + retry stack that B4's event router uses.
+	// Tests bypass this by constructing their own engine with
+	// NoopHooks (see internal/integrationtest/marketplace_*).
+	marketplaceHooks := mktruntime.NewTransportHooks(mktruntime.NewHTTPTransport(), pool, nil)
+	marketplaceEngine, err := mktruntime.NewEngine(mktruntime.EngineOptions{
+		Pool:      pool,
+		Store:     marketplaceStore,
+		Hooks:     marketplaceHooks,
+		Encryptor: keyManager,
+	})
+	if err != nil {
+		runCleanups(cleanups)
+		return nil, nil, fmt.Errorf("api: marketplace engine init: %w", err)
+	}
+	// Production bundle resolver. The default 30s HTTP timeout
+	// inside HTTPResolverOptions is generous enough for
+	// cold-cache CDN fetches without stalling install requests
+	// indefinitely. Tests inject bundle.NewInMemoryResolver.
+	//
+	// The HTTPResolver is wrapped in a CachingResolver so the
+	// install-time bundle fetch primes a per-process LRU; later
+	// PATCH /installations/{id}/settings calls only need
+	// SettingsSchemaJSON, which the cache serves without
+	// re-downloading the full .tar.gz from the CDN. Bundles are
+	// immutable post-publish (000068 BEFORE UPDATE trigger), so
+	// the cache has no semantic-staleness window. The default
+	// LRU bound (256 entries) gives ample headroom for the
+	// in-use working set on any single replica.
+	marketplaceResolver := bundle.NewCachingResolver(
+		bundle.NewHTTPResolver(bundle.HTTPResolverOptions{}),
+		bundle.DefaultResolverCacheSize,
+	)
+	mph := newMarketplaceHandlers(marketplaceStore, marketplaceEngine, marketplaceResolver)
+
 	formStore := forms.NewStore(pool, ktypeRegistry, recordStore)
 	if adminPool != nil {
 		formStore = formStore.WithAdminPool(adminPool)
@@ -1171,6 +1219,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		insembh:                insembh,
 		hrh:                    hrh,
 		inboundHandler:         inboundHandler,
+		mph:                    mph,
 		metrics:                metrics,
 		ktypeRegistry:          ktypeRegistry,
 		sessionStore:           sessionStore,

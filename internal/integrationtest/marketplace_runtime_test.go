@@ -769,6 +769,184 @@ func TestMarketplaceRuntime_Uninstall_SkipHooksWithEmptySecret(t *testing.T) {
 	}
 }
 
+// TestMarketplaceRuntime_UpdateSettings_EmptySecretSkipsHook locks
+// in the Devin Review ANALYSIS_0001 fix on Engine.UpdateSettings
+// (engine.go: refuse to dispatch post_update_settings with empty
+// signing secret, mirror Uninstall's loadSigningSecret invariant).
+//
+// Pre-fix the engine guard was `if !req.SkipHooks && secretCipher
+// != "" { decrypt }` — so an install row with an empty
+// signing_secret would silently fall through to the hook dispatch
+// with SigningSecret(""). The extension's webhook receiver would
+// then either reject the request as unsigned or accept an
+// unverifiable payload — both are worse than skipping the hook
+// entirely.
+//
+// Post-fix, the engine records a structured LifecycleResult with
+// Aborted=true and a non-nil Err explaining the skip, but does
+// NOT roll back the committed settings write (best-effort hook
+// contract).
+//
+// Test setup mirrors the Uninstall_SkipHooksWithEmptySecret test
+// fixture: install normally, clear signing_secret via direct SQL,
+// call UpdateSettings, assert (a) settings landed in the row,
+// (b) PostUpdateSettingsResult is non-nil with Aborted=true and a
+// non-nil Err, (c) no hook dispatches were emitted on the
+// transport for the post_update_settings phase.
+func TestMarketplaceRuntime_UpdateSettings_EmptySecretSkipsHook(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	pub := strings.ReplaceAll(uniqueSlug("rt-upd-empty"), "-", "_")
+	ext, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pub, Slug: "shipping",
+		DisplayName: "Shipping", Description: "UpdateSettings empty-secret regression",
+		Author: "ACME", License: "MIT",
+		Homepage: "https://acme.example/shipping",
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension: %v", err)
+	}
+	manifest := minimalRuntimeManifest(ext)
+	ver, err := store.PublishVersion(ctx, marketplace.PublishVersionInput{
+		ExtensionID: ext.ID, Manifest: manifest,
+		BundleHash: strings.Repeat("d", 64),
+		BundleSize: 4096,
+		BundleURL:  "https://cdn.example/bundles/rt-upd-empty.tgz",
+	})
+	if err != nil {
+		t.Fatalf("PublishVersion: %v", err)
+	}
+	rs := store.Reviews()
+	reviewer := uuid.New().String()
+	for _, step := range []marketplace.ReviewStatus{
+		marketplace.ReviewStatusAutomatedPassed,
+		marketplace.ReviewStatusManualReview,
+		marketplace.ReviewStatusApproved,
+	} {
+		if _, err := rs.UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
+			VersionID: ver.ID, Status: step, Reviewer: reviewer,
+		}); err != nil {
+			t.Fatalf("review transition to %s: %v", step, err)
+		}
+	}
+	if err := store.SetListedVersion(ctx, ext.ID, ver.Version); err != nil {
+		t.Fatalf("SetListedVersion: %v", err)
+	}
+	if err := store.UpdateExtensionStatus(ctx, ext.ID, marketplace.ExtensionStatusListed); err != nil {
+		t.Fatalf("UpdateExtensionStatus listed: %v", err)
+	}
+
+	tn, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("rt-upd-empty-a"), Name: "RT-UpdEmpty", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("tenant: %v", err)
+	}
+
+	okTransport := &runtime.InMemoryTransport{Handler: runtime.StaticResponseHandler(200, []byte(`{"ok":true}`))}
+	okHooks := runtime.NewTransportHooks(okTransport, h.pool, nil)
+	engine, err := runtime.NewEngine(runtime.EngineOptions{
+		Pool: h.pool, Store: store, Hooks: okHooks,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	bundle := minimalResolvedBundle(manifest)
+	installRes, err := engine.Install(ctx, &runtime.InstallRequest{
+		TenantID:    tn.ID,
+		ExtensionID: ext.ID,
+		VersionID:   ver.ID,
+		WebhookBase: "https://tenant-upd-empty.example/hooks",
+	}, bundle)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	installID := installRes.Installation.ID
+
+	// Snapshot the transport AFTER install so we can isolate the
+	// post_update_settings dispatches in the assertion below
+	// (install above already fired pre/post install hooks).
+	preUpdateDispatchCount := len(okTransport.Snapshot())
+
+	// Simulate a legacy / pre-B3 install row: clear the
+	// signing_secret column. The production install path
+	// guarantees non-empty, so this is the only realistic way to
+	// reach the legacy code path the fix guards.
+	if err := dbutil.WithTenantTx(ctx, h.pool, tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`UPDATE marketplace_extension_installations
+			   SET signing_secret = ''
+			 WHERE tenant_id = $1 AND id = $2`,
+			tn.ID, installID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected 1 row updated, got %d", tag.RowsAffected())
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("clear signing_secret: %v", err)
+	}
+
+	// UpdateSettings on the empty-secret row. Pre-fix this would
+	// proceed to dispatch the hook with SigningSecret(""). Post-
+	// fix it must (a) still persist the settings (best-effort
+	// hook contract), (b) record a structured LifecycleResult
+	// explaining the skip, (c) emit zero post_update_settings
+	// dispatches on the transport.
+	newSettings := map[string]any{"api_key": "after-clear"}
+	updRes, err := engine.UpdateSettings(ctx, &runtime.UpdateSettingsRequest{
+		TenantID:       tn.ID,
+		InstallationID: installID,
+		Settings:       newSettings,
+	})
+	if err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if updRes == nil || updRes.Installation == nil {
+		t.Fatalf("nil result: %+v", updRes)
+	}
+
+	// (a) Settings persisted.
+	var got map[string]any
+	if err := json.Unmarshal(updRes.Installation.Settings, &got); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if got["api_key"] != "after-clear" {
+		t.Fatalf("settings.api_key = %v, want after-clear", got["api_key"])
+	}
+
+	// (b) Structured skip result. Aborted=true with a non-nil
+	// Err means "we deliberately did not dispatch and here is
+	// why" — distinguishable from "we tried and the network
+	// failed" (which would have Aborted=true with a transport
+	// err string) by the absence of any transport activity.
+	if updRes.PostUpdateSettingsResult == nil {
+		t.Fatalf("PostUpdateSettingsResult = nil, want structured skip result")
+	}
+	if !updRes.PostUpdateSettingsResult.Aborted {
+		t.Fatalf("PostUpdateSettingsResult.Aborted = false, want true")
+	}
+	if updRes.PostUpdateSettingsResult.Err == nil {
+		t.Fatalf("PostUpdateSettingsResult.Err = nil, want non-nil")
+	}
+	if !strings.Contains(updRes.PostUpdateSettingsResult.Err.Error(), "empty signing secret") {
+		t.Fatalf("PostUpdateSettingsResult.Err = %v, want one mentioning 'empty signing secret'",
+			updRes.PostUpdateSettingsResult.Err)
+	}
+
+	// (c) Zero transport activity for the post_update_settings
+	// phase. Compare against the pre-update snapshot count to
+	// isolate install-time dispatches.
+	if afterCount := len(okTransport.Snapshot()); afterCount != preUpdateDispatchCount {
+		t.Fatalf("transport dispatches after UpdateSettings = %d, want %d (no new dispatches expected — hook must be skipped)",
+			afterCount, preUpdateDispatchCount)
+	}
+}
+
 // TestMarketplaceRuntime_Registrar_RetryFloor locks in the
 // round-6 Devin Review INFO_0003 fix on Registrar.insertAgentTools
 // (registrar.go: `if maxAttempts < 1 { maxAttempts = 1 }`).

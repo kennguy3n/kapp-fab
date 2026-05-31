@@ -625,6 +625,216 @@ func (e *Engine) Uninstall(ctx context.Context, req *UninstallRequest) (*Uninsta
 	}, nil
 }
 
+// UpdateSettingsResult is the return shape for Engine.UpdateSettings.
+type UpdateSettingsResult struct {
+	// Installation is the install row with the new settings + the
+	// refreshed updated_at timestamp.
+	Installation *marketplace.Installation
+	// PostUpdateSettingsResult records the best-effort
+	// post_update_settings hook dispatch. Nil when SkipHooks is
+	// set or the engine was constructed with NoopHooks.
+	PostUpdateSettingsResult *LifecycleResult
+}
+
+// UpdateSettings persists a new settings document for the
+// installation. The engine assumes the caller (B6 API handler)
+// has ALREADY validated the document against the version's
+// settings_schema — schema validation lives in the
+// internal/marketplace/settings package and is invoked at the
+// handler boundary because the handler has access to the bundle
+// resolver (the engine intentionally does not).
+//
+// The flow:
+//
+//  1. Open a tenant-scoped tx.
+//  2. SELECT … FOR UPDATE the install row, verify status is
+//     compatible (active / failed / disabled — anything except
+//     uninstalled).
+//  3. UPDATE settings = $1, updated_at = now(). RETURNING fields
+//     so the caller can render the updated row without a follow-
+//     up read.
+//  4. Commit.
+//  5. Best-effort dispatch post_update_settings lifecycle hook.
+//     A failure here is logged in dispatch_log but does NOT roll
+//     back the settings change — the persisted settings are the
+//     source of truth.
+//
+// Status semantics: status != 'uninstalled' is required. The
+// 'installing' state is rare for a settings update (the engine
+// promotes to 'active' atomically at install commit), but a
+// settings change against an 'installing' row would imply a
+// concurrent operator action mid-install. We err on the side of
+// rejecting that case with ErrConflict; the operator can retry
+// after the install completes.
+func (e *Engine) UpdateSettings(ctx context.Context, req *UpdateSettingsRequest) (*UpdateSettingsResult, error) {
+	if err := req.Validate(); err != nil {
+		return nil, err
+	}
+
+	// Marshal settings to bytes outside the tx so a malformed
+	// document fails the request fast (and without holding the
+	// row lock).
+	settingsBytes := []byte("{}")
+	if len(req.Settings) > 0 {
+		b, err := json.Marshal(req.Settings)
+		if err != nil {
+			return nil, fmt.Errorf("runtime: engine: marshal settings: %w", err)
+		}
+		settingsBytes = b
+	}
+
+	var (
+		installation marketplace.Installation
+		secret       SigningSecret
+	)
+
+	txErr := dbutil.WithTenantTx(ctx, e.pool, req.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// SELECT … FOR UPDATE locks the row so a concurrent
+		// settings update (or an uninstall) serializes behind us.
+		var (
+			status        string
+			secretCipher  string
+			extID, verID  uuid.UUID
+			webhookBase   string
+			installedAt   time.Time
+			updatedAt     time.Time
+			installedBy   *uuid.UUID
+			failureReason *string
+		)
+		row := tx.QueryRow(ctx,
+			`SELECT extension_id, extension_version_id, status, signing_secret,
+			        webhook_base, installed_by, installed_at, updated_at, failure_reason
+			   FROM marketplace_extension_installations
+			  WHERE tenant_id = $1 AND id = $2
+			  FOR UPDATE`,
+			req.TenantID, req.InstallationID)
+		if err := row.Scan(&extID, &verID, &status, &secretCipher, &webhookBase,
+			&installedBy, &installedAt, &updatedAt, &failureReason); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("%w: install %s", marketplace.ErrNotFound, req.InstallationID)
+			}
+			return fmt.Errorf("runtime: engine: load install: %w", err)
+		}
+		if status == string(marketplace.InstallStatusUninstalled) {
+			return fmt.Errorf("%w: installation %s is uninstalled", marketplace.ErrConflict, req.InstallationID)
+		}
+		if status == string(marketplace.InstallStatusInstalling) {
+			return fmt.Errorf("%w: installation %s is still installing", marketplace.ErrConflict, req.InstallationID)
+		}
+
+		// Apply the UPDATE. RETURNING refreshes updated_at so the
+		// returned struct matches the committed row precisely.
+		var newSettingsTxt string
+		var newUpdatedAt time.Time
+		row = tx.QueryRow(ctx,
+			`UPDATE marketplace_extension_installations
+			    SET settings = $1::jsonb,
+			        updated_at = now()
+			  WHERE tenant_id = $2 AND id = $3
+			  RETURNING settings::text, updated_at`,
+			string(settingsBytes), req.TenantID, req.InstallationID)
+		if err := row.Scan(&newSettingsTxt, &newUpdatedAt); err != nil {
+			return fmt.Errorf("runtime: engine: update settings: %w", err)
+		}
+
+		installation = marketplace.Installation{
+			ID:                 req.InstallationID,
+			TenantID:           req.TenantID,
+			ExtensionID:        extID,
+			ExtensionVersionID: verID,
+			Status:             marketplace.InstallStatus(status),
+			Settings:           []byte(newSettingsTxt),
+			WebhookBase:        webhookBase,
+			InstalledBy:        installedBy,
+			InstalledAt:        installedAt,
+			UpdatedAt:          newUpdatedAt,
+		}
+		if failureReason != nil {
+			installation.FailureReason = *failureReason
+		}
+
+		// Decrypt the signing secret inside the tx so the value
+		// used for the post-commit lifecycle dispatch matches the
+		// row's current state. Skipped on SkipHooks since the hook
+		// won't fire.
+		if !req.SkipHooks && secretCipher != "" {
+			plain, err := e.encryptor.DecryptString(req.TenantID, secretCipher)
+			if err != nil {
+				return fmt.Errorf("runtime: engine: decrypt signing secret: %w", err)
+			}
+			secret = SigningSecret(plain)
+		}
+		return nil
+	})
+	if txErr != nil {
+		return nil, txErr
+	}
+
+	out := &UpdateSettingsResult{Installation: &installation}
+
+	if req.SkipHooks {
+		return out, nil
+	}
+
+	// Refuse to dispatch the post_update_settings hook with an
+	// empty signing secret. The Install path always writes a
+	// non-empty secret (engine.go:269) and Uninstall hard-errors
+	// when the column is empty (loadSigningSecret returns an
+	// error). The same invariant must hold here: an empty
+	// SigningSecret would cause the extension's webhook receiver
+	// to either reject the request as unsigned or accept an
+	// unverifiable payload — both are worse than skipping the
+	// hook entirely. Record the skip as a structured
+	// LifecycleResult so callers (and the dispatch_log) see the
+	// reason, but do not roll back the settings write that has
+	// already committed (best-effort hook contract).
+	//
+	// This case fires only for legacy installs created via direct
+	// SQL or test fixtures bypassing Engine.Install; the
+	// production install path always writes a secret. Devin
+	// Review ANALYSIS_0001 on PR #130.
+	if secret == "" {
+		out.PostUpdateSettingsResult = &LifecycleResult{
+			Aborted:     true,
+			AbortReason: "missing signing secret on install — post_update_settings hook skipped",
+			Err:         fmt.Errorf("runtime: engine: install %s has empty signing secret", req.InstallationID),
+		}
+		return out, nil
+	}
+
+	// Best-effort post_update_settings dispatch. Failures land in
+	// the dispatch log but do not roll back the settings change.
+	body, err := MarshalLifecyclePayload(map[string]any{
+		"phase":           string(PhasePostUpdateSettings),
+		"tenant_id":       req.TenantID.String(),
+		"installation_id": req.InstallationID.String(),
+		"extension_id":    installation.ExtensionID.String(),
+		"version_id":      installation.ExtensionVersionID.String(),
+		"webhook_base":    installation.WebhookBase,
+		"settings":        req.Settings,
+		"updated_by":      uuidOrNilString(&req.UpdatedBy),
+	})
+	if err != nil {
+		out.PostUpdateSettingsResult = &LifecycleResult{Err: fmt.Errorf("runtime: engine: post_update_settings marshal: %w", err)}
+		return out, nil
+	}
+	res, postErr := e.hooks.Dispatch(ctx, &LifecycleDispatch{
+		TenantID:           req.TenantID,
+		InstallationID:     req.InstallationID,
+		ExtensionID:        installation.ExtensionID,
+		ExtensionVersionID: installation.ExtensionVersionID,
+		Phase:              PhasePostUpdateSettings,
+		WebhookBase:        installation.WebhookBase,
+		SigningSecret:      secret,
+		Body:               body,
+	})
+	if postErr != nil && res == nil {
+		res = &LifecycleResult{Err: postErr}
+	}
+	out.PostUpdateSettingsResult = res
+	return out, nil
+}
+
 // loadSigningSecret reads the per-install HMAC secret directly. The
 // marketplace.Store does NOT expose this column (the secret never
 // flows through Installation JSON). The engine has its own reader

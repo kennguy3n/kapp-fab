@@ -64,6 +64,17 @@ type ResolvedBundle struct {
 	// from Manifest, validates them inside the tx, and rejects
 	// the install if they fail.
 	AgentTools []ResolvedAgentTool
+
+	// SettingsSchemaJSON is the raw JSON Schema document body of
+	// the file pointed at by manifest.settings_schema (e.g.
+	// "./settings.json"). Optional — when the manifest declares
+	// no settings_schema, the bundle resolver leaves this nil and
+	// the B6 API handler treats every settings document as valid.
+	// Stored as a separate field (rather than inlined into the
+	// install row) because every install of a given version
+	// shares the same schema; persisting per-install is wasted
+	// storage.
+	SettingsSchemaJSON json.RawMessage
 }
 
 // ResolvedKType is the install-time form of a manifest KType

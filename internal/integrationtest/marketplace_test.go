@@ -1016,3 +1016,161 @@ func TestMarketplaceRegistry_ListInstallationsByVersion(t *testing.T) {
 		t.Errorf("non-bypass pool: want BYPASSRLS-shaped error, got %v", err)
 	}
 }
+
+// TestMarketplaceRegistry_SetListedAndStatus_Atomic pins the
+// transactional contract on SetListedAndStatus: it must commit
+// `listed_version` and `status` together or neither, and the
+// pre-write checks (version exists, version not yanked, target
+// status reachable from current status) must all hold under one
+// FOR-UPDATE lock so a concurrent YankVersion or
+// UpdateExtensionStatus can't squeeze in between the check and
+// the write.
+//
+// Cases covered:
+//
+//  1. Happy path: unpublished extension flips to listed with a
+//     pinned version in a single round-trip.
+//  2. Idempotency: a second call with the same args is a no-op
+//     (status already listed, listed_version already pinned).
+//  3. Rejection: yanked version cannot be listed (returns
+//     ErrYanked, neither field mutates).
+//  4. Rejection: missing version cannot be listed (returns
+//     ErrNotFound, neither field mutates).
+//  5. Rejection: missing extension returns ErrNotFound, no
+//     phantom row appears.
+//  6. Status-graph: an unreachable target (e.g. unpublished →
+//     removed without going through deprecated) returns
+//     ErrInvalidManifest with NO partial write.
+func TestMarketplaceRegistry_SetListedAndStatus_Atomic(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	pub := strings.ReplaceAll(uniqueSlug("setlas"), "-", "_")
+	ext, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pub, Slug: "thing",
+		DisplayName: "Thing", Description: "atomic",
+		Author: "x", License: "MIT",
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension: %v", err)
+	}
+	mf := &marketplace.Manifest{
+		SchemaVersion: 1, Name: ext.Name, Publisher: ext.Publisher, Slug: ext.Slug,
+		Version: "1.0.0", Author: "x", License: "MIT", Description: "v1",
+		MinKappVersion: "1.0.0",
+	}
+	if _, err := store.PublishVersion(ctx, marketplace.PublishVersionInput{
+		ExtensionID: ext.ID, Manifest: mf,
+		BundleHash: strings.Repeat("e", 64), BundleSize: 1024,
+		BundleURL: "https://cdn.example/setlas.tgz",
+	}); err != nil {
+		t.Fatalf("PublishVersion: %v", err)
+	}
+
+	// (1) Happy path.
+	if err := store.SetListedAndStatus(ctx, ext.ID, "1.0.0", marketplace.ExtensionStatusListed); err != nil {
+		t.Fatalf("SetListedAndStatus listed: %v", err)
+	}
+	got, err := store.GetExtension(ctx, ext.ID)
+	if err != nil {
+		t.Fatalf("GetExtension after list: %v", err)
+	}
+	if got.Status != marketplace.ExtensionStatusListed {
+		t.Errorf("status: want listed got %q", got.Status)
+	}
+	if got.ListedVersion != "1.0.0" {
+		t.Errorf("listed_version: want 1.0.0 got %q", got.ListedVersion)
+	}
+
+	// (2) Idempotent re-list (listed → listed permitted; same
+	// version → still committable; no failure).
+	if err := store.SetListedAndStatus(ctx, ext.ID, "1.0.0", marketplace.ExtensionStatusListed); err != nil {
+		t.Fatalf("idempotent re-list: %v", err)
+	}
+
+	// (3) Yanked version rejected, neither field mutates. We
+	// can't yank 1.0.0 (it's listed; the yank-of-listed pathway
+	// is its own separate flow), so publish a second version
+	// and yank it, then try to list it.
+	mf2 := *mf
+	mf2.Version = "1.1.0"
+	ver2, err := store.PublishVersion(ctx, marketplace.PublishVersionInput{
+		ExtensionID: ext.ID, Manifest: &mf2,
+		BundleHash: "f" + strings.Repeat("e", 63), BundleSize: 1024,
+		BundleURL: "https://cdn.example/setlas-v2.tgz",
+	})
+	if err != nil {
+		t.Fatalf("PublishVersion v2: %v", err)
+	}
+	if err := store.YankVersion(ctx, ver2.ID, "test"); err != nil {
+		t.Fatalf("YankVersion v2: %v", err)
+	}
+	if err := store.SetListedAndStatus(ctx, ext.ID, "1.1.0", marketplace.ExtensionStatusListed); !errors.Is(err, marketplace.ErrYanked) {
+		t.Errorf("SetListedAndStatus on yanked: want ErrYanked got %v", err)
+	}
+	pre, _ := store.GetExtension(ctx, ext.ID)
+	if pre.ListedVersion != "1.0.0" {
+		t.Errorf("listed_version mutated after yanked rejection: got %q", pre.ListedVersion)
+	}
+
+	// (4) Missing version rejected with ErrNotFound, no mutation.
+	if err := store.SetListedAndStatus(ctx, ext.ID, "9.9.9", marketplace.ExtensionStatusListed); !errors.Is(err, marketplace.ErrNotFound) {
+		t.Errorf("SetListedAndStatus on missing version: want ErrNotFound got %v", err)
+	}
+	pre, _ = store.GetExtension(ctx, ext.ID)
+	if pre.ListedVersion != "1.0.0" {
+		t.Errorf("listed_version mutated after missing-version rejection: got %q", pre.ListedVersion)
+	}
+
+	// (5) Missing extension rejected with ErrNotFound.
+	if err := store.SetListedAndStatus(ctx, uuid.New(), "1.0.0", marketplace.ExtensionStatusListed); !errors.Is(err, marketplace.ErrNotFound) {
+		t.Errorf("SetListedAndStatus on missing extension: want ErrNotFound got %v", err)
+	}
+
+	// (6) Status-graph rejection: per
+	// extensionStatusTransitionAllowed, unpublished → deprecated
+	// is forbidden (deprecated is only reachable from listed).
+	// We use a fresh `unpublished` extension and try the
+	// forbidden jump; the call must error AND leave both fields
+	// untouched.
+	pub3 := strings.ReplaceAll(uniqueSlug("setlas-bad"), "-", "_")
+	ext3, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pub3, Slug: "thing",
+		DisplayName: "T", Description: "rejected-transition",
+		Author: "x", License: "MIT",
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension ext3: %v", err)
+	}
+	if _, err := store.PublishVersion(ctx, marketplace.PublishVersionInput{
+		ExtensionID: ext3.ID, Manifest: &marketplace.Manifest{
+			SchemaVersion: 1, Name: ext3.Name, Publisher: ext3.Publisher, Slug: ext3.Slug,
+			Version: "1.0.0", Author: "x", License: "MIT", Description: "v1",
+			MinKappVersion: "1.0.0",
+		},
+		BundleHash: strings.Repeat("a", 63) + "b", BundleSize: 1024,
+		BundleURL: "https://cdn.example/setlas-bad.tgz",
+	}); err != nil {
+		t.Fatalf("PublishVersion ext3: %v", err)
+	}
+	if err := store.SetListedAndStatus(ctx, ext3.ID, "1.0.0", marketplace.ExtensionStatusDeprecated); !errors.Is(err, marketplace.ErrInvalidManifest) {
+		t.Errorf("SetListedAndStatus unpublished→deprecated: want ErrInvalidManifest got %v", err)
+	}
+	// Critical atomicity assertion: the transition-rejection path
+	// must NOT have written listed_version either. This is the
+	// guarantee the prior two-call sequence could violate
+	// (SetListedVersion succeeded, UpdateExtensionStatus then
+	// rejected — leaving listed_version pinned on an
+	// `unpublished` extension).
+	after3, err := store.GetExtension(ctx, ext3.ID)
+	if err != nil {
+		t.Fatalf("GetExtension ext3: %v", err)
+	}
+	if after3.ListedVersion != "" {
+		t.Errorf("listed_version leaked after status-graph rejection: got %q", after3.ListedVersion)
+	}
+	if after3.Status != marketplace.ExtensionStatusUnpublished {
+		t.Errorf("status leaked after status-graph rejection: got %q", after3.Status)
+	}
+}
