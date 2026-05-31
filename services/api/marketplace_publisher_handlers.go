@@ -442,7 +442,15 @@ func (h *marketplaceHandlers) adminRescanVersion(w http.ResponseWriter, r *http.
 		h.writeError(w, err)
 		return
 	}
-	if state.Status.IsTerminal() {
+	// IsTerminal() includes dead_letter (the worker's terminal
+	// for "gave up after MaxReviewAttempts"), but dead_letter is
+	// the one terminal state the admin Rescan flow is explicitly
+	// designed to recover from — that's the entire point of B7.2.
+	// The store layer's ResetReviewStateForRescan applies the same
+	// exemption under FOR UPDATE, but the handler must match the
+	// gate so a dead-lettered row doesn't get rejected here with a
+	// 409 before the request ever reaches the store.
+	if state.Status.IsTerminal() && state.Status != marketplace.ReviewStatusDeadLetter {
 		http.Error(w, "cannot rescan a version in terminal review state",
 			http.StatusConflict)
 		return

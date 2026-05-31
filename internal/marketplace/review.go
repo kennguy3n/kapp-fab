@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -83,6 +84,17 @@ type UpdateReviewStateInput struct {
 	Reviewer        string
 	ReviewedAt      *time.Time
 	ExpectedClaim   *ReviewClaimGuard
+	// MinAttemptCount, when > 0, adds an attempt_count >= N
+	// predicate to the UPDATE. Used by the worker's dead-letter
+	// transition to refuse the UPDATE if a concurrent admin
+	// Rescan reset attempt_count to 0 between RecordAttemptFailure
+	// and this UPDATE — without this guard the dead-letter UPDATE
+	// could clobber a freshly-rescanned row (the claim guard
+	// cannot help here because RecordAttemptFailure already
+	// cleared the claim columns, so the dead-letter call passes
+	// ExpectedClaim=nil and the claim guard never fires). Human-
+	// driven transitions leave this 0 and the guard is skipped.
+	MinAttemptCount int
 }
 
 // ReviewClaimGuard is the (claimed_by, claimed_at) tuple recorded
@@ -271,12 +283,13 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 			   AND status = $7
 			   AND ($8::text IS NULL OR claimed_by = $8)
 			   AND ($9::timestamptz IS NULL OR claimed_at = $9)
+			   AND ($10::int = 0 OR attempt_count >= $10)
 			 RETURNING extension_version_id, status, automated_checks::text,
 			           COALESCE(manual_review_notes,''), COALESCE(reviewer,''),
 			           reviewed_at, attempt_count, last_attempt_error, last_attempt_at,
 			           created_at, updated_at`,
 			in.VersionID, string(in.Status), string(checks), notes, reviewer, reviewedAt, string(current.Status),
-			expectedClaimBy, expectedClaimAt,
+			expectedClaimBy, expectedClaimAt, in.MinAttemptCount,
 		).Scan(
 			&out.ExtensionVersionID, &out.Status,
 			scanJSONB(&out.AutomatedChecks),
@@ -299,7 +312,13 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 		//      transition graph against the fresh state;
 		//   3. the claim guard failed because a concurrent rescan
 		//      cleared claimed_by / claimed_at — surface as
-		//      ErrClaimLost so the worker can drop its result.
+		//      ErrClaimLost so the worker can drop its result;
+		//   4. the attempt_count guard failed because a concurrent
+		//      admin Rescan reset attempt_count to 0 between
+		//      RecordAttemptFailure and this UPDATE — also surface
+		//      as ErrClaimLost so the worker drops the dead-letter
+		//      transition (the row is now a fresh submitted attempt
+		//      that the next worker tick will re-claim).
 		// We disambiguate by re-reading the row's current claim
 		// columns. The re-read is racy in isolation (claim could
 		// flip again between read and any subsequent action) but
@@ -311,6 +330,15 @@ func (rs *ReviewStateStore) UpdateReviewState(ctx context.Context, in UpdateRevi
 			lost, claimErr := rs.claimGuardFailed(ctx, in.VersionID, in.ExpectedClaim)
 			if claimErr != nil {
 				return nil, claimErr
+			}
+			if lost {
+				return nil, ErrClaimLost
+			}
+		}
+		if in.MinAttemptCount > 0 {
+			lost, lookupErr := rs.attemptCountGuardFailed(ctx, in.VersionID, in.MinAttemptCount)
+			if lookupErr != nil {
+				return nil, lookupErr
 			}
 			if lost {
 				return nil, ErrClaimLost
@@ -377,6 +405,31 @@ func (rs *ReviewStateStore) claimGuardFailed(ctx context.Context, versionID uuid
 		return true, nil
 	}
 	return false, nil
+}
+
+// attemptCountGuardFailed inspects the row's current attempt_count
+// and reports whether it is below the worker's required minimum
+// (typically MaxReviewAttempts on the dead-letter transition path).
+// A "lost" verdict means an admin Rescan reset the counter and the
+// caller should drop the in-flight dead-letter transition. A row
+// that has been deleted is reported as not-lost (the caller falls
+// through to the existing status-guard branch which translates
+// ErrNoRows into ErrNotFound).
+func (rs *ReviewStateStore) attemptCountGuardFailed(ctx context.Context, versionID uuid.UUID, minRequired int) (bool, error) {
+	var attemptCount int
+	err := rs.store.pool.QueryRow(ctx,
+		`SELECT attempt_count
+		   FROM marketplace_extension_review_state
+		  WHERE extension_version_id = $1`,
+		versionID,
+	).Scan(&attemptCount)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("marketplace: attempt count guard lookup: %w", err)
+	}
+	return attemptCount < minRequired, nil
 }
 
 // ListVersionsByReviewStatus returns the version ids currently in
@@ -600,6 +653,37 @@ func reviewStatusTransitionAllowed(from, to ReviewStatus) bool {
 // transition-graph tests.
 const MaxReviewAttempts = 5
 
+// truncateUTF8 returns s truncated to at most maxBytes bytes at a
+// UTF-8 rune boundary. If s is already <= maxBytes and valid UTF-8
+// it is returned unchanged. The returned string is guaranteed to
+// be valid UTF-8 even if s contained an invalid sequence at or
+// beyond maxBytes (PostgreSQL `text` columns reject invalid
+// UTF-8). Always produces a result of length <= maxBytes.
+func truncateUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 || s == "" {
+		return ""
+	}
+	if len(s) <= maxBytes && utf8.ValidString(s) {
+		return s
+	}
+	// Walk runes until adding the next rune would exceed maxBytes.
+	// utf8.DecodeRuneInString returns RuneError + size=1 for an
+	// invalid byte; treat that byte as a stop signal so the
+	// returned string never contains the bad sequence.
+	out := 0
+	for out < len(s) && out < maxBytes {
+		r, size := utf8.DecodeRuneInString(s[out:])
+		if r == utf8.RuneError && size <= 1 {
+			break
+		}
+		if out+size > maxBytes {
+			break
+		}
+		out += size
+	}
+	return s[:out]
+}
+
 // RecordAttemptFailure increments attempt_count on the row, stamps
 // the new last_attempt_error / last_attempt_at, and clears the
 // worker's claim so the next ClaimSubmittedReviewVersions poll
@@ -636,10 +720,18 @@ func (rs *ReviewStateStore) RecordAttemptFailure(
 	// short but defensive: a panic-wrapped multi-line stack would
 	// blow out the admin queue response. 1 KiB is generous for a
 	// one-line summary.
+	//
+	// Truncate at a rune boundary, NOT at a raw byte position. A
+	// naive `errMsg[:maxErrLen]` slice could split a multi-byte
+	// UTF-8 character (Go errors usually ASCII, but file paths,
+	// wrapped library messages, or i18n text can carry runes), and
+	// PostgreSQL's `text` column type validates UTF-8 — an invalid
+	// trailing fragment causes the INSERT to fail with
+	// `invalid_byte_sequence_for_encoding`, which would mean the
+	// failure-recording UPDATE itself fails and attempt_count
+	// silently stops incrementing.
 	const maxErrLen = 1024
-	if len(errMsg) > maxErrLen {
-		errMsg = errMsg[:maxErrLen]
-	}
+	errMsg = truncateUTF8(errMsg, maxErrLen)
 
 	var (
 		expectedClaimBy any

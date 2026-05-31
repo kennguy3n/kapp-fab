@@ -100,3 +100,56 @@ func TestMaxReviewAttempts_PositiveBound(t *testing.T) {
 		t.Fatalf("MaxReviewAttempts must be >= 3, got %d", MaxReviewAttempts)
 	}
 }
+
+// truncateUTF8 powers RecordAttemptFailure's error-message
+// bound (1 KiB). PostgreSQL `text` columns reject invalid UTF-8,
+// so a naive byte-slice would risk the failure-recording UPDATE
+// itself failing if an upstream error message ever carried a
+// multi-byte rune that straddled the cap. These cases pin the
+// rune-boundary truncation behaviour the production helper must
+// preserve.
+func TestTruncateUTF8(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{"empty_passthrough", "", 16, ""},
+		{"under_cap", "hello", 16, "hello"},
+		{"at_cap_ascii", "0123456789abcdef", 16, "0123456789abcdef"},
+		{"over_cap_ascii", "0123456789abcdefghij", 16, "0123456789abcdef"},
+		// "é" is 2 bytes (0xC3 0xA9). "abcéfg" = a(1) b(1) c(1)
+		// é(2) f(1) g(1) = 7 bytes. A naive slice at 4 would
+		// keep "abc" + first byte of "é", producing invalid
+		// UTF-8 (the 0xC3 lead byte without its 0xA9
+		// continuation). We must stop one rune earlier and
+		// return "abc".
+		{"rune_boundary_split_at_4", "abcéfg", 4, "abc"},
+		// "abcé" is exactly 5 bytes — fits the cap and the
+		// trailing 'f' does NOT fit (would push to 6). Return
+		// "abcé" intact (no rune split, no partial emission).
+		{"rune_boundary_fits_exact", "abcéfg", 5, "abcé"},
+		{"rune_boundary_plus_one", "abcéfg", 6, "abcéf"},
+		// 4-byte rune (emoji 😀 = 0xF0 0x9F 0x98 0x80). Cap of 3
+		// must drop the partial.
+		{"emoji_partial_dropped", "ab😀", 3, "ab"},
+		{"emoji_full_kept", "ab😀", 6, "ab😀"},
+		// Pre-existing invalid byte (lone 0xC3 with no follow-on)
+		// must be dropped, not propagated.
+		{"invalid_prefix_dropped", "ab\xC3", 16, "ab"},
+		{"zero_max", "anything", 0, ""},
+		{"negative_max", "anything", -1, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := truncateUTF8(c.in, c.max)
+			if got != c.want {
+				t.Fatalf("truncateUTF8(%q, %d) = %q, want %q", c.in, c.max, got, c.want)
+			}
+			if len(got) > c.max && c.max > 0 {
+				t.Fatalf("result %q (%d bytes) exceeds cap %d", got, len(got), c.max)
+			}
+		})
+	}
+}

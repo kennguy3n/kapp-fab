@@ -160,7 +160,7 @@ func (w *ReviewWorker) drain(ctx context.Context) {
 		return
 	}
 	var wg sync.WaitGroup
-	for _, claim := range claims {
+	for i, claim := range claims {
 		// Semaphore.Acquire is ctx-aware so a shutdown unblocks
 		// queued goroutines. If Acquire returns an error the
 		// only cause is ctx cancellation; we leave the
@@ -170,7 +170,8 @@ func (w *ReviewWorker) drain(ctx context.Context) {
 		if err := w.sem.Acquire(ctx, 1); err != nil {
 			w.logger.Info("review-worker: drain interrupted before all claims processed",
 				slog.String("err", err.Error()),
-				slog.Int("remaining", len(claims)),
+				slog.Int("remaining", len(claims)-i),
+				slog.Int("total", len(claims)),
 			)
 			break
 		}
@@ -280,18 +281,25 @@ func (w *ReviewWorker) recordFailureOrDeadLetter(
 	cause error,
 ) {
 	// Derive the bookkeeping context from the parent worker
-	// context (not context.Background) so a clean shutdown still
-	// cancels bookkeeping promptly. We DO drop the per-version
-	// 90s timeout that the caller's ctx carries so a near-budget
-	// pipeline error still has a small fresh window to record
-	// the failure (without this, a pipeline failure that ran out
-	// the clock would never increment attempt_count and the row
-	// would spin forever).
+	// context via context.WithoutCancel: parent values (loggers,
+	// trace IDs, request-scoped metadata) ARE inherited, but the
+	// parent's cancellation signal AND deadline are explicitly
+	// dropped. Two reasons:
 	//
-	// context.WithoutCancel pins the parent's values (loggers,
-	// trace IDs) but drops the parent's deadline; the explicit
-	// 10s budget then bounds the bookkeeping write so a
-	// truly-dead DB doesn't hang shutdown either.
+	//   1. The per-version processing ctx carries a 90s timeout.
+	//      A pipeline error fired right at the budget edge would
+	//      otherwise cancel the failure-recording UPDATE before
+	//      it can land — attempt_count never increments and the
+	//      row spins on every tick.
+	//   2. A worker shutdown should still allow the in-flight
+	//      bookkeeping write to complete (it's a single short
+	//      UPDATE) so attempt_count stays accurate across
+	//      restarts. Dropping the parent cancel achieves that.
+	//
+	// The explicit 10s timeout below is the actual upper bound:
+	// it stops a truly-dead DB from hanging the worker goroutine
+	// indefinitely. Shutdown latency is therefore bounded by the
+	// 10s budget on this call (not by parent ctx propagation).
 	bookCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 
@@ -362,12 +370,19 @@ func (w *ReviewWorker) recordFailureOrDeadLetter(
 		`{"ran_at":%q,"status":"dead_letter","worst":"error","checks":[{"name":"review.dead_letter","passed":false,"worst":"error","errors":1,"warns":0,"infos":0}]}`,
 		now.Format(time.RFC3339Nano),
 	))
-	// Note: RecordAttemptFailure cleared claimed_by/claimed_at,
-	// so the ExpectedClaim guard would fail here. Pass nil so
-	// the UPDATE proceeds unguarded — the row has already been
-	// mutated (attempt_count++, claim cleared) inside
-	// RecordAttemptFailure's same tx, so the dead-letter
-	// transition is correctly attributing to this worker.
+	// Note: RecordAttemptFailure cleared claimed_by/claimed_at
+	// inside its own tx, so the ExpectedClaim guard on this
+	// UPDATE would fail. Pass ExpectedClaim=nil and instead use
+	// MinAttemptCount: an admin Rescan landing between
+	// RecordAttemptFailure and this UPDATE would have reset
+	// attempt_count to 0, so the MinAttemptCount=MaxReviewAttempts
+	// predicate refuses the dead-letter UPDATE (UpdateReviewState
+	// surfaces this as ErrClaimLost; we drop the transition and
+	// let the next tick re-claim the freshly-rescanned row).
+	// Without this guard the dead-letter UPDATE would otherwise
+	// race the rescan and clobber a rescued row back to terminal
+	// state — admin Rescan + worker cycling = exactly the window
+	// where this matters.
 	if _, err := w.store.Reviews().UpdateReviewState(bookCtx, marketplace.UpdateReviewStateInput{
 		VersionID:       versionID,
 		Status:          marketplace.ReviewStatusDeadLetter,
@@ -376,9 +391,16 @@ func (w *ReviewWorker) recordFailureOrDeadLetter(
 			"pipeline failed %d times; last error: %s",
 			marketplace.MaxReviewAttempts, errMsg,
 		),
-		Reviewer:      "system",
-		ExpectedClaim: nil,
+		Reviewer:        "system",
+		ExpectedClaim:   nil,
+		MinAttemptCount: marketplace.MaxReviewAttempts,
 	}); err != nil {
+		if errors.Is(err, marketplace.ErrClaimLost) {
+			w.logger.Info("review-worker: dead-letter dropped, row was rescanned mid-flight",
+				slog.String("version_id", versionID.String()),
+			)
+			return
+		}
 		w.logger.Warn("review-worker: dead-letter transition failed",
 			slog.String("version_id", versionID.String()),
 			slog.String("err", err.Error()),

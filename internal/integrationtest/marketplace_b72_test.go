@@ -55,7 +55,7 @@ func TestMarketplaceB72_AttemptCountIncrements(t *testing.T) {
 	ctx := context.Background()
 	store := marketplace.NewStore(h.pool)
 
-	preClaimSubmittedRows(t, h.pool, ctx)
+	preClaimSubmittedRows(ctx, t, h.pool)
 	ver := seedExtensionVersion(t, store, "b72_inc")
 
 	const workerID = "worker-b72-inc"
@@ -123,7 +123,7 @@ func TestMarketplaceB72_DeadLetterAfterMaxAttempts(t *testing.T) {
 	ctx := context.Background()
 	store := marketplace.NewStore(h.pool)
 
-	preClaimSubmittedRows(t, h.pool, ctx)
+	preClaimSubmittedRows(ctx, t, h.pool)
 	ver := seedExtensionVersion(t, store, "b72_dl")
 
 	const workerID = "worker-b72-dl"
@@ -206,7 +206,7 @@ func TestMarketplaceB72_RescanResetsAttempts(t *testing.T) {
 	ctx := context.Background()
 	store := marketplace.NewStore(h.pool)
 
-	preClaimSubmittedRows(t, h.pool, ctx)
+	preClaimSubmittedRows(ctx, t, h.pool)
 	ver := seedExtensionVersion(t, store, "b72_rescan")
 
 	// Drive to dead_letter quickly: hand-stamp the row.
@@ -269,7 +269,7 @@ func TestMarketplaceB72_ClaimGuardOnRecordAttemptFailure(t *testing.T) {
 	ctx := context.Background()
 	store := marketplace.NewStore(h.pool)
 
-	preClaimSubmittedRows(t, h.pool, ctx)
+	preClaimSubmittedRows(ctx, t, h.pool)
 	ver := seedExtensionVersion(t, store, "b72_guard")
 
 	const workerID = "worker-b72-guard"
@@ -315,7 +315,7 @@ func TestMarketplaceB72_MultiReplicaClaimSafety(t *testing.T) {
 	ctx := context.Background()
 	store := marketplace.NewStore(h.pool)
 
-	preClaimSubmittedRows(t, h.pool, ctx)
+	preClaimSubmittedRows(ctx, t, h.pool)
 
 	// Seed N versions; spin K worker goroutines that each claim
 	// in a tight loop. Each version must be claimed by exactly
@@ -418,11 +418,132 @@ func TestMarketplaceB72_MultiReplicaClaimSafety(t *testing.T) {
 	// race.
 }
 
+// TestMarketplaceB72_DeadLetterRaceWithRescan pins the
+// dead-letter-vs-rescan race fix added after Devin Review on
+// PR #134. The scenario:
+//
+//  1. Worker pipeline fails, RecordAttemptFailure increments
+//     attempt_count to MaxReviewAttempts and clears the claim
+//     columns (returns ErrReviewMaxAttemptsExceeded).
+//  2. Admin clicks Rescan; ResetReviewStateForRescan resets
+//     attempt_count to 0 (status stays submitted because
+//     RecordAttemptFailure didn't transition).
+//  3. Worker proceeds with the dead-letter UpdateReviewState
+//     transition. ExpectedClaim is nil (step 1 cleared it), so
+//     the claim guard cannot fire — without the MinAttemptCount
+//     guard the UPDATE would clobber the rescued row back to
+//     dead_letter and admin Rescan would be silently undone.
+//
+// With MinAttemptCount=MaxReviewAttempts on the dead-letter
+// UpdateReviewState call, the UPDATE refuses (attempt_count=0
+// after rescan) and surfaces as ErrClaimLost so the worker drops
+// the transition. Row remains submitted with a fresh budget.
+func TestMarketplaceB72_DeadLetterRaceWithRescan(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	preClaimSubmittedRows(ctx, t, h.pool)
+	ver := seedExtensionVersion(t, store, "b72_deadletter_race")
+
+	// Drive attempt_count to MaxReviewAttempts and clear the
+	// claim, mirroring the state RecordAttemptFailure leaves
+	// behind on the Nth failure.
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE marketplace_extension_review_state
+		    SET attempt_count = $1,
+		        last_attempt_error = 'synthetic max',
+		        last_attempt_at = now(),
+		        claimed_by = NULL,
+		        claimed_at = NULL,
+		        updated_at = now()
+		  WHERE extension_version_id = $2`,
+		marketplace.MaxReviewAttempts, ver,
+	); err != nil {
+		t.Fatalf("stamp pre-deadletter: %v", err)
+	}
+
+	// Admin Rescan lands now: attempt_count back to 0.
+	if err := store.ResetReviewStateForRescan(ctx, ver); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+
+	// Worker's late dead-letter transition MUST refuse.
+	_, err := store.Reviews().UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
+		VersionID:       ver,
+		Status:          marketplace.ReviewStatusDeadLetter,
+		AutomatedChecks: []byte(`{"status":"dead_letter"}`),
+		ManualNotes:     "pipeline failed N times",
+		Reviewer:        "system",
+		ExpectedClaim:   nil,
+		MinAttemptCount: marketplace.MaxReviewAttempts,
+	})
+	if !errors.Is(err, marketplace.ErrClaimLost) {
+		t.Fatalf("dead-letter after rescan should return ErrClaimLost, got %v", err)
+	}
+
+	// Row must still be submitted with attempt_count=0 (the
+	// rescan's reset), NOT dead_letter.
+	got, err := store.Reviews().GetReviewState(ctx, ver)
+	if err != nil {
+		t.Fatalf("GetReviewState: %v", err)
+	}
+	if got.Status != marketplace.ReviewStatusSubmitted {
+		t.Errorf("status = %s, want %s (dead-letter must have been refused)", got.Status, marketplace.ReviewStatusSubmitted)
+	}
+	if got.AttemptCount != 0 {
+		t.Errorf("attempt_count = %d, want 0 (rescan reset must have survived)", got.AttemptCount)
+	}
+}
+
+// TestMarketplaceB72_DeadLetterStillWorksWithGuard sanity-checks
+// that the MinAttemptCount guard does NOT break the happy path:
+// a normal dead-letter transition (attempt_count == MaxAttempts,
+// no concurrent rescan) still succeeds.
+func TestMarketplaceB72_DeadLetterStillWorksWithGuard(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	preClaimSubmittedRows(ctx, t, h.pool)
+	ver := seedExtensionVersion(t, store, "b72_deadletter_happy")
+
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE marketplace_extension_review_state
+		    SET attempt_count = $1,
+		        last_attempt_error = 'synthetic',
+		        last_attempt_at = now(),
+		        claimed_by = NULL,
+		        claimed_at = NULL,
+		        updated_at = now()
+		  WHERE extension_version_id = $2`,
+		marketplace.MaxReviewAttempts, ver,
+	); err != nil {
+		t.Fatalf("stamp pre-deadletter: %v", err)
+	}
+
+	out, err := store.Reviews().UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
+		VersionID:       ver,
+		Status:          marketplace.ReviewStatusDeadLetter,
+		AutomatedChecks: []byte(`{"status":"dead_letter"}`),
+		ManualNotes:     "pipeline failed N times",
+		Reviewer:        "system",
+		ExpectedClaim:   nil,
+		MinAttemptCount: marketplace.MaxReviewAttempts,
+	})
+	if err != nil {
+		t.Fatalf("dead-letter happy path: %v", err)
+	}
+	if out.Status != marketplace.ReviewStatusDeadLetter {
+		t.Errorf("status = %s, want dead_letter", out.Status)
+	}
+}
+
 // preClaimSubmittedRows is the same hack used by the existing
 // B7 tests: stamp every existing `submitted` row with a fresh
 // claimed_at so our newly-seeded rows are the only NULL-claim
 // candidates in the shared test DB.
-func preClaimSubmittedRows(t *testing.T, pool *pgxpool.Pool, ctx context.Context) {
+func preClaimSubmittedRows(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	if _, err := pool.Exec(ctx,
 		`UPDATE marketplace_extension_review_state

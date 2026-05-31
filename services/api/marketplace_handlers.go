@@ -1103,6 +1103,21 @@ func (h *marketplaceHandlers) reviewTransition(w http.ResponseWriter, r *http.Re
 		http.Error(w, "invalid review status", http.StatusBadRequest)
 		return
 	}
+	// dead_letter is a system-only terminal driven by the review
+	// worker after MaxReviewAttempts consecutive failures
+	// (B7.2). Manually transitioning here would bypass
+	// attempt_count tracking, leave last_attempt_error empty, and
+	// stamp a human reviewer onto a state whose semantic is "the
+	// system gave up". Admins wanting to permanently stop a
+	// version should use rejected (which carries the audit-trail
+	// reviewer); admins wanting to pause processing don't have a
+	// surface here today (none was requested in B7.2 — they can
+	// withdraw on the publisher side or reject via this endpoint).
+	if status == marketplace.ReviewStatusDeadLetter {
+		http.Error(w, "dead_letter is system-only and cannot be set manually; use rejected for permanent stop",
+			http.StatusBadRequest)
+		return
+	}
 	reviewer := actorOrDefault(r.Context()).String()
 	rs := h.store.Reviews()
 	state, err := rs.UpdateReviewState(r.Context(), marketplace.UpdateReviewStateInput{
