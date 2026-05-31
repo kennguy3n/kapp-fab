@@ -44,6 +44,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/manufacturing"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/bundle"
+	"github.com/kennguy3n/kapp-fab/internal/marketplace/bundlestore"
 	mktruntime "github.com/kennguy3n/kapp-fab/internal/marketplace/runtime"
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
@@ -311,11 +312,112 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// the cache has no semantic-staleness window. The default
 	// LRU bound (256 entries) gives ample headroom for the
 	// in-use working set on any single replica.
+	// B8: bundle store first — the LocalResolver below short-
+	// circuits marketplace-hosted URLs through this store so the
+	// install pipeline doesn't loop back through the LB to fetch
+	// a bundle we already have in-process. The store is always
+	// constructed so the GET /bundles/{hash} handler can serve any
+	// bytes uploaded on this replica; publishers can only upload
+	// when cfg.MarketplaceBundleURLBase is non-empty (handler
+	// guard returns 503 when the base is unset).
+	//
+	// Backend selection:
+	//   - cfg.MarketplaceBundleDir set → DiskStore on the supplied
+	//     directory. Bytes survive process restart so a kube
+	//     rollout / pod swap does not orphan upload-metadata rows.
+	//     This is the recommended single-binary production posture
+	//     pending B8.1 (S3Store).
+	//   - Otherwise → MemoryStore. Suitable for unit tests and
+	//     local dev; NOT for production (the Devin Review
+	//     finding flagged this exact data-loss risk). The boot
+	//     logger surfaces the chosen backend so an operator who
+	//     forgot to set KAPP_MARKETPLACE_BUNDLE_DIR notices.
+	var bundleObjs bundlestore.ObjectStore
+	if cfg.MarketplaceBundleDir != "" {
+		ds, dsErr := bundlestore.NewDiskStore(cfg.MarketplaceBundleDir)
+		if dsErr != nil {
+			// Match the cleanup discipline of every other error
+			// return in buildDeps after the pool was acquired:
+			// without runCleanups(cleanups) the primary pool
+			// (and the admin pool when present) leak open
+			// connections until the process exits. On a kube
+			// CrashLoopBackOff loop driven by a bad
+			// KAPP_MARKETPLACE_BUNDLE_DIR (read-only volume,
+			// missing mount, perms error) that would exhaust
+			// PostgreSQL max_connections before an operator
+			// finishes diagnosing the directory misconfig.
+			// Devin Review BUG_pr-review-job-57272ee27b2241b785cf8405297dfdf0_0001
+			// flagged the missing cleanup.
+			runCleanups(cleanups)
+			return nil, nil, fmt.Errorf("init bundle disk store: %w", dsErr)
+		}
+		bundleObjs = ds
+		slog.Info("bundle store backend",
+			slog.String("backend", "disk"),
+			slog.String("root", ds.Root()))
+	} else {
+		// Reaching this branch with uploads enabled
+		// (MarketplaceBundleURLBase non-empty) is only
+		// possible when the operator has explicitly opted
+		// into MemoryStore via either
+		// KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY=1 (round-5
+		// alias) or the legacy KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR=0
+		// flag — the round-5 strict-default validator in
+		// platform.Config.Validate() fails the boot
+		// otherwise. The warn is retained because even an
+		// acknowledged opt-in is worth surfacing once at
+		// startup so it shows up in restart-incident triage.
+		bundleObjs = bundlestore.NewMemoryStore()
+		slog.Warn("bundle store backend",
+			slog.String("backend", "memory"),
+			slog.String("warning",
+				"in-process MemoryStore selected via KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY=1 (or legacy KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR=0): uploaded bundle bytes will be lost on process restart; set KAPP_MARKETPLACE_BUNDLE_DIR to a persistent volume for production"))
+	}
+	// adminPool wiring lets GCUnreferenced DELETE through the
+	// kapp_admin role; the migration grants DELETE only to
+	// kapp_admin so SELECT/INSERT/UPDATE remain on the main pool
+	// (which is kapp_app). Without the admin pool GCUnreferenced
+	// is rejected with bundlestore.ErrAdminPoolRequired at the
+	// entrypoint rather than failing mid-sweep with an opaque
+	// "permission denied" SQL error.
+	bundleStore := bundlestore.NewStore(pool, bundleObjs)
+	if adminPool != nil {
+		bundleStore = bundleStore.WithAdminPool(adminPool)
+	}
+
+	// Production bundle resolver chain (innermost → outermost):
+	//   HTTPResolver: net/http fetch from publisher CDN URLs.
+	//   LocalResolver: short-circuit marketplace-hosted URLs by
+	//     reading from bundleStore directly. Delegates non-
+	//     marketplace URLs to the HTTPResolver.
+	//   CachingResolver: per-process LRU keyed by (extension_id,
+	//     version_id). Wraps the LocalResolver so both publisher-
+	//     CDN bundles and marketplace-hosted bundles are cached.
+	//     Bundles are immutable post-publish (000068 BEFORE UPDATE
+	//     trigger), so the cache has no semantic-staleness
+	//     window. The default LRU bound (256 entries) gives ample
+	//     headroom for the in-use working set on any single
+	//     replica.
 	marketplaceResolver := bundle.NewCachingResolver(
-		bundle.NewHTTPResolver(bundle.HTTPResolverOptions{}),
+		bundle.NewLocalResolver(
+			bundle.NewHTTPResolver(bundle.HTTPResolverOptions{}),
+			bundleStore,
+			cfg.MarketplaceBundleURLBase,
+		),
 		bundle.DefaultResolverCacheSize,
 	)
 	mph := newMarketplaceHandlers(marketplaceStore, marketplaceEngine, marketplaceResolver)
+
+	// B8 wiring: publishers can upload + auto-fill marketplace
+	// URLs only when KAPP_MARKETPLACE_BUNDLE_URL_BASE is set
+	// (the handler's nil-base guard returns 503 otherwise). The
+	// bundleStore is the same one wired into the resolver above.
+	mph = mph.WithBundleStore(bundleStore, cfg.MarketplaceBundleURLBase)
+	if adminPool != nil {
+		// install-stats endpoint needs a BYPASSRLS pool to scan
+		// installations across every tenant schema.
+		mph = mph.WithAdminPool(adminPool)
+	}
 
 	formStore := forms.NewStore(pool, ktypeRegistry, recordStore)
 	if adminPool != nil {

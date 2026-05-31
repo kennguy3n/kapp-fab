@@ -6,15 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/kapp-fab/internal/marketplace"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/bundle"
+	"github.com/kennguy3n/kapp-fab/internal/marketplace/bundlestore"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/runtime"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/settings"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
@@ -65,6 +68,27 @@ type marketplaceHandlers struct {
 	store    *marketplace.Store
 	engine   *runtime.Engine
 	resolver bundle.Resolver
+
+	// bundles is the optional B8 marketplace-hosted bundle store.
+	// nil means the deploy has not opted into marketplace-hosted
+	// uploads (publishers MUST host bundles on their own CDN).
+	// When set, the publisher upload + dashboard surfaces mount.
+	bundles *bundlestore.Store
+
+	// bundleURLBase is the externally-visible host prefix used to
+	// build marketplace-hosted bundle URLs returned from the upload
+	// endpoint, e.g. "https://marketplace.example.com". Trailing
+	// slashes are trimmed. Empty when bundles is nil. Used only by
+	// the upload handler; the install-time resolver fetches via
+	// whatever URL is recorded on the version row.
+	bundleURLBase string
+
+	// adminPool is the BYPASSRLS pool used by handlers that need
+	// to query across tenant boundaries (e.g. publisher install
+	// statistics: count installs of my extension across every
+	// tenant). nil when the deploy does not provision an admin
+	// pool — the cross-tenant endpoints then return 503.
+	adminPool *pgxpool.Pool
 }
 
 // newMarketplaceHandlers constructs a handler bundle. Returns nil
@@ -76,6 +100,28 @@ func newMarketplaceHandlers(store *marketplace.Store, engine *runtime.Engine, re
 		return nil
 	}
 	return &marketplaceHandlers{store: store, engine: engine, resolver: resolver}
+}
+
+// WithBundleStore wires the optional B8 marketplace-hosted bundle
+// store + URL base into the handler bundle. Returns h so the
+// caller can chain. urlBase is trimmed of trailing slashes; an
+// empty urlBase keeps bundles nil so the upload routes don't mount.
+func (h *marketplaceHandlers) WithBundleStore(b *bundlestore.Store, urlBase string) *marketplaceHandlers {
+	if h == nil || b == nil || urlBase == "" {
+		return h
+	}
+	h.bundles = b
+	h.bundleURLBase = strings.TrimRight(urlBase, "/")
+	return h
+}
+
+// WithAdminPool wires the BYPASSRLS pool. Returns h for chaining.
+func (h *marketplaceHandlers) WithAdminPool(p *pgxpool.Pool) *marketplaceHandlers {
+	if h == nil || p == nil {
+		return h
+	}
+	h.adminPool = p
+	return h
 }
 
 // ---------------------------------------------------------------------------
@@ -108,19 +154,19 @@ type listInstallationsResponse struct {
 // tagged `json:"-"` because its raw form is a []byte; we surface
 // the parsed object here.
 type installationView struct {
-	ID                    uuid.UUID              `json:"id"`
-	TenantID              uuid.UUID              `json:"tenant_id"`
-	ExtensionID           uuid.UUID              `json:"extension_id"`
-	ExtensionVersionID    uuid.UUID              `json:"extension_version_id"`
+	ID                    uuid.UUID                 `json:"id"`
+	TenantID              uuid.UUID                 `json:"tenant_id"`
+	ExtensionID           uuid.UUID                 `json:"extension_id"`
+	ExtensionVersionID    uuid.UUID                 `json:"extension_version_id"`
 	Status                marketplace.InstallStatus `json:"status"`
-	Settings              map[string]any         `json:"settings"`
-	WebhookBase           string                 `json:"webhook_base"`
-	InstalledBy           *uuid.UUID             `json:"installed_by,omitempty"`
-	InstalledAt           string                 `json:"installed_at"`
-	UpdatedAt             string                 `json:"updated_at"`
-	LastHealthCheckAt     string                 `json:"last_health_check_at,omitempty"`
-	LastHealthCheckStatus string                 `json:"last_health_check_status,omitempty"`
-	FailureReason         string                 `json:"failure_reason,omitempty"`
+	Settings              map[string]any            `json:"settings"`
+	WebhookBase           string                    `json:"webhook_base"`
+	InstalledBy           *uuid.UUID                `json:"installed_by,omitempty"`
+	InstalledAt           string                    `json:"installed_at"`
+	UpdatedAt             string                    `json:"updated_at"`
+	LastHealthCheckAt     string                    `json:"last_health_check_at,omitempty"`
+	LastHealthCheckStatus string                    `json:"last_health_check_status,omitempty"`
+	FailureReason         string                    `json:"failure_reason,omitempty"`
 }
 
 func installationToView(in *marketplace.Installation) installationView {
@@ -280,11 +326,29 @@ type createExtensionRequestBody struct {
 	IconURL      string `json:"icon_url,omitempty"`
 }
 
+// publishVersionRequestBody is the wire shape for the admin
+// surface POST /api/v1/marketplace/publisher/extensions/{ext_id}/
+// versions endpoint. The publisher-self surface uses its own
+// `publisherSubmitVersionRequestBody` with additional URL-derived
+// fields (publisher_id).
+//
+// BundleSignature / BundleSignatureKeyID are the optional ed25519
+// detached signature pair — both-or-neither, validated by the
+// shared `parseBundleSignaturePair` helper. B6 (#130) shipped the
+// struct without signature fields; B7 (#131) added the store-side
+// `BundleSignature` plumbing but never wired it through the admin
+// handler, leaving SignatureCheck with nothing to verify even when
+// the publisher had registered ed25519 keys. Round-2 Devin Review
+// surfaced this as ANALYSIS_pr-review-job-6c5aa7fef9214efaacd238cc9ba21472_0001
+// — adding the fields here keeps the admin and publisher-self
+// surfaces wire-compatible for the same shape of submit request.
 type publishVersionRequestBody struct {
-	Manifest    json.RawMessage `json:"manifest"`     // raw manifest bytes (YAML or JSON)
-	BundleURL   string          `json:"bundle_url"`
-	BundleHash  string          `json:"bundle_hash"`
-	BundleSize  int64           `json:"bundle_size"`
+	Manifest             json.RawMessage `json:"manifest"` // raw manifest bytes (YAML or JSON)
+	BundleURL            string          `json:"bundle_url"`
+	BundleHash           string          `json:"bundle_hash"`
+	BundleSize           int64           `json:"bundle_size"`
+	BundleSignature      string          `json:"bundle_signature,omitempty"`
+	BundleSignatureKeyID string          `json:"bundle_signature_key_id,omitempty"`
 }
 
 type reviewQueueResponse struct {
@@ -511,19 +575,19 @@ func (h *marketplaceHandlers) getInstallation(w http.ResponseWriter, r *http.Req
 
 // install drives the end-to-end install flow:
 //
-//   1. Parse + validate request body (ext id, version id,
-//      webhook base, settings).
-//   2. Fetch the bundle via the resolver. Bundle hash is
-//      verified against the version row inside the resolver.
-//   3. Validate the operator-supplied settings against the
-//      bundle's settings_schema (when present).
-//   4. Call Engine.Install which runs pre_install hook, writes
-//      registry rows (KTypes / workflows / tools / webhook
-//      subscriptions), commits the install row, then fires
-//      post_install best-effort.
-//   5. Return the install row + signing secret. The secret is
-//      returned exactly once — the publisher uses it to
-//      configure their webhook server.
+//  1. Parse + validate request body (ext id, version id,
+//     webhook base, settings).
+//  2. Fetch the bundle via the resolver. Bundle hash is
+//     verified against the version row inside the resolver.
+//  3. Validate the operator-supplied settings against the
+//     bundle's settings_schema (when present).
+//  4. Call Engine.Install which runs pre_install hook, writes
+//     registry rows (KTypes / workflows / tools / webhook
+//     subscriptions), commits the install row, then fires
+//     post_install best-effort.
+//  5. Return the install row + signing secret. The secret is
+//     returned exactly once — the publisher uses it to
+//     configure their webhook server.
 //
 // Errors:
 //   - 400 for body parse / schema-violation / invalid webhook
@@ -1018,9 +1082,35 @@ func (h *marketplaceHandlers) submitVersion(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "manifest required", http.StatusBadRequest)
 		return
 	}
+	// Round-9 Devin Review
+	// ANALYSIS_pr-review-job-634b026415d343fd97f927a467cdd20f_0003
+	// flagged that the publisher-self submitMyPublisherVersion
+	// handler validates bundle_hash format + bundle_size > 0 at
+	// the handler layer (clean 400 with a publisher-actionable
+	// message), but the admin submitVersion path passed both
+	// fields through to PublishVersion without handler-level
+	// validation. The store would reject (CHECK constraints +
+	// IsValidBundleHash) but as a wrapped ErrInvalidManifest with
+	// a less-clear message, and the admin caller would not get
+	// the same crisp error the publisher path returns. Mirror the
+	// publisher-self validation here so both surfaces return
+	// identical 400 messages for identical inputs.
+	if !marketplace.IsValidBundleHash(req.BundleHash) {
+		http.Error(w, "invalid bundle_hash (expected lowercase hex SHA-256)", http.StatusBadRequest)
+		return
+	}
+	if req.BundleSize <= 0 {
+		http.Error(w, "bundle_size must be positive", http.StatusBadRequest)
+		return
+	}
 	man, err := marketplace.ParseManifest(req.Manifest)
 	if err != nil {
 		h.writeError(w, fmt.Errorf("%w: %w", marketplace.ErrInvalidManifest, err))
+		return
+	}
+	sig, sigErr := parseBundleSignaturePair(req.BundleSignature, req.BundleSignatureKeyID)
+	if sigErr != nil {
+		http.Error(w, sigErr.Error(), http.StatusBadRequest)
 		return
 	}
 	ver, err := h.store.PublishVersion(r.Context(), marketplace.PublishVersionInput{
@@ -1030,11 +1120,53 @@ func (h *marketplaceHandlers) submitVersion(w http.ResponseWriter, r *http.Reque
 		BundleSize:   req.BundleSize,
 		BundleURL:    req.BundleURL,
 		ManifestJSON: req.Manifest,
+		Signature:    sig,
 	})
 	if err != nil {
 		h.writeError(w, err)
 		return
 	}
+
+	// Best-effort: mark the upload row as referenced so the
+	// orphan-GC sweeper leaves it alone. Same posture as the
+	// publisher-self submitMyPublisherVersion handler (Devin
+	// Review BUG_pr-review-job-b3919d3b4b364f7b9155f6e5c6afd112_0001
+	// flagged that the admin path was missing this call, so an
+	// admin-published version pointing at a marketplace-hosted
+	// upload would have its backing bytes GC'd after
+	// bundlestore.OrphanRetention even though the version row
+	// kept referencing the URL).
+	//
+	// MarkReferenced returns marketplace.ErrNotFound for bundles
+	// hosted on a publisher CDN (no marketplace upload row exists);
+	// that's the legitimate publisher-CDN path, not an error.
+	//
+	// Round-6 Devin Review
+	// ANALYSIS_pr-review-job-eddc945c190b48c68501f872020714ee_0002
+	// flagged that a non-ErrNotFound failure was being silently
+	// swallowed: a transient DB blip on this best-effort call
+	// would leave the upload row unreferenced, eligible for
+	// GC after bundlestore.OrphanRetention (7d) — at which
+	// point the install resolver would 404 even though the
+	// version row was committed successfully. The access log
+	// only records the user-visible 201, so the failure had
+	// no diagnostic trail. Surface it via slog.Warn so a
+	// "bundle gone after a week" support ticket can be
+	// traced back to the actual root cause.
+	if h.bundles != nil {
+		if mrErr := h.bundles.MarkReferenced(r.Context(), req.BundleHash); mrErr != nil &&
+			!errors.Is(mrErr, marketplace.ErrNotFound) {
+			slog.Warn("marketplace bundle mark referenced failed",
+				slog.String("kind", "marketplace_bundle_mark_referenced_failed"),
+				slog.String("surface", "admin_submit_version"),
+				slog.String("bundle_hash", req.BundleHash),
+				slog.String("extension_id", extID.String()),
+				slog.String("version_id", ver.ID.String()),
+				slog.String("err", mrErr.Error()),
+			)
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, ver)
 }
 
@@ -1236,8 +1368,8 @@ func reviewStateToItem(s marketplace.ReviewState) reviewQueueItem {
 		Reviewer:          s.Reviewer,
 		CreatedAt:         s.CreatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		UpdatedAt:         s.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
-		AttemptCount:     s.AttemptCount,
-		LastAttemptError: s.LastAttemptError,
+		AttemptCount:      s.AttemptCount,
+		LastAttemptError:  s.LastAttemptError,
 	}
 	if s.ReviewedAt != nil {
 		out.ReviewedAt = s.ReviewedAt.UTC().Format("2006-01-02T15:04:05Z07:00")

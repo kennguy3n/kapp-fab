@@ -123,6 +123,113 @@ func TestLoadConfig_RequireRedisGate(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_MarketplaceBundleStrictDefault locks in the B8
+// round-5 hardening: when marketplace-hosted bundle uploads are
+// enabled (KAPP_MARKETPLACE_BUNDLE_URL_BASE non-empty),
+// KAPP_MARKETPLACE_BUNDLE_DIR MUST also be set BY DEFAULT —
+// otherwise LoadConfig fails the boot. The escape hatches
+// (KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY=1 round-5 alias OR the
+// pre-round-5 KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR=0 / false
+// explicit opt-out) permit the in-memory fallback when the
+// operator has acknowledged the data-loss-on-restart risk.
+//
+// Round-5 inversion (Devin Review
+// ANALYSIS_pr-review-job-da8e7cbbf34342c2956c6cec2c9ec29f_0002
+// flagged the round-4 opt-in posture as the wrong default):
+// silent MemoryStore selection corrupts the entire bundle catalog
+// on restart — metadata rows persist, bytes vanish, the install
+// resolver returns 404 for every previously-uploaded bundle. The
+// blast radius justifies failing loudly by default and requiring
+// the operator to opt INTO the in-memory fallback rather than
+// opting OUT of it. The round-4 RequireMarketplaceBundleDir=1
+// pattern remains supported (now redundant but back-compat-safe);
+// round-4 RequireMarketplaceBundleDir=0 — a previous explicit
+// opt-OUT — continues to permit MemoryStore so existing dev
+// scripts that set =0 do not regress.
+func TestLoadConfig_MarketplaceBundleStrictDefault(t *testing.T) {
+	cases := []struct {
+		name        string
+		requireFlag string
+		allowFlag   string
+		urlBase     string
+		bundleDir   string
+		wantErr     bool
+	}{
+		// Round-5 inversion: unset flag + uploads on + no dir
+		// is now a HARD FAIL (was: silent MemoryStore).
+		{"unset flags, uploads enabled, no dir - strict default fails", "", "", "https://kapp.example.com", "", true},
+		{"unset flags, uploads disabled, no dir - gate inert when uploads off", "", "", "", "", false},
+		{"unset flags, uploads enabled, dir set - production happy path", "", "", "https://kapp.example.com", "/var/kapp/bundles", false},
+
+		// Round-5 escape hatch: AllowMemory=1 acknowledges the
+		// data-loss-on-restart risk and permits MemoryStore.
+		{"ALLOW_MEMORY=1, uploads enabled, no dir - explicit memory opt-in permits", "", "1", "https://kapp.example.com", "", false},
+		{"ALLOW_MEMORY=true alias, uploads enabled, no dir - permits memory store", "", "true", "https://kapp.example.com", "", false},
+		{"ALLOW_MEMORY=0 explicit, uploads enabled, no dir - strict still fails", "", "0", "https://kapp.example.com", "", true},
+		{"ALLOW_MEMORY=unrecognised, uploads enabled, no dir - falls back to strict", "", "yes", "https://kapp.example.com", "", true},
+
+		// Round-5 BEHAVIORAL CHANGE: typo'd REQUIRE_DIR no
+		// longer silently flips the data-loss footgun on.
+		// Pre-round-5 treated unrecognised as `false` (permit);
+		// round-5 ignores it and falls through to ALLOW_MEMORY
+		// which defaults to false → strict.
+		{"REQUIRE_DIR=yes (unrecognised) + ALLOW_MEMORY unset - falls through to strict", "yes", "", "https://kapp.example.com", "", true},
+		{"REQUIRE_DIR=yes (unrecognised) + ALLOW_MEMORY=1 - opt-in still works", "yes", "1", "https://kapp.example.com", "", false},
+
+		// Round-4 strict-mode flag remains back-compat:
+		// REQUIRE_DIR=1 is now redundant but still produces the
+		// same behaviour as the new strict default.
+		{"REQUIRE_DIR=1, uploads enabled, dir set - production happy path", "1", "", "https://kapp.example.com", "/var/kapp/bundles", false},
+		{"REQUIRE_DIR=1, uploads enabled, no dir - hard fail (redundant w/ default)", "1", "", "https://kapp.example.com", "", true},
+		{"REQUIRE_DIR=1, uploads disabled, no dir - gate inert when uploads off", "1", "", "", "", false},
+		{"REQUIRE_DIR=true alias, uploads enabled, no dir - hard fail", "true", "", "https://kapp.example.com", "", true},
+
+		// Round-4 explicit opt-OUT (REQUIRE_DIR=0 / false)
+		// must keep working as the legacy escape hatch so
+		// existing dev scripts do not break on upgrade.
+		{"REQUIRE_DIR=0 (legacy opt-out), uploads enabled, no dir - permits memory store", "0", "", "https://kapp.example.com", "", false},
+		{"REQUIRE_DIR=false (legacy opt-out alias), uploads enabled, no dir - permits memory store", "false", "", "https://kapp.example.com", "", false},
+
+		// Both flags together: REQUIRE_DIR takes precedence when
+		// set to a recognised value (1/0/true/false). ALLOW_MEMORY
+		// is only consulted on the fall-through branch
+		// (REQUIRE_DIR unset OR unrecognised — see config.go:601-608).
+		// So:
+		//   REQUIRE_DIR=1 + ALLOW_MEMORY=anything → strict (REQUIRE_DIR=1 wins)
+		//   REQUIRE_DIR=0 + ALLOW_MEMORY=anything → permit (REQUIRE_DIR=0 wins)
+		// Round-8 Devin Review
+		// ANALYSIS_pr-review-job-7ff8a82e7f5642c6afa32bf912920045_0001
+		// flagged the previous grouping comment ("ALLOW_MEMORY=1
+		// wins") as contradicting the actual assertion on the
+		// next line (strict). The test names + code were always
+		// correct; only the grouping comment was misleading.
+		{"REQUIRE_DIR=1 + ALLOW_MEMORY=1 (contradictory) - REQUIRE_DIR=1 wins, strict", "1", "1", "https://kapp.example.com", "", true},
+		{"REQUIRE_DIR=0 + ALLOW_MEMORY=0 - REQUIRE_DIR=0 wins, permits memory store", "0", "0", "https://kapp.example.com", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DB_URL", "postgres://localhost/test")
+			t.Setenv("KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR", tc.requireFlag)
+			t.Setenv("KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY", tc.allowFlag)
+			t.Setenv("KAPP_MARKETPLACE_BUNDLE_URL_BASE", tc.urlBase)
+			t.Setenv("KAPP_MARKETPLACE_BUNDLE_DIR", tc.bundleDir)
+			cfg, err := LoadConfig()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error from LoadConfig but got cfg=%+v", cfg)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if cfg.MarketplaceBundleDir != tc.bundleDir {
+				t.Errorf("MarketplaceBundleDir = %q, want %q", cfg.MarketplaceBundleDir, tc.bundleDir)
+			}
+		})
+	}
+}
+
 // TestLoadConfig_EnvAndLogDefaults verifies that the new Phase 4
 // observability config keys default safely when unset.
 func TestLoadConfig_EnvAndLogDefaults(t *testing.T) {
