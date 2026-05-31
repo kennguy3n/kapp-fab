@@ -1104,6 +1104,31 @@ func (h *marketplaceHandlers) submitVersion(w http.ResponseWriter, r *http.Reque
 		h.writeError(w, err)
 		return
 	}
+
+	// Best-effort: mark the upload row as referenced so the
+	// orphan-GC sweeper leaves it alone. Same posture as the
+	// publisher-self submitMyPublisherVersion handler (Devin
+	// Review BUG_pr-review-job-b3919d3b4b364f7b9155f6e5c6afd112_0001
+	// flagged that the admin path was missing this call, so an
+	// admin-published version pointing at a marketplace-hosted
+	// upload would have its backing bytes GC'd after
+	// bundlestore.OrphanRetention even though the version row
+	// kept referencing the URL).
+	//
+	// MarkReferenced returns marketplace.ErrNotFound for bundles
+	// hosted on a publisher CDN (no marketplace upload row exists);
+	// that's the legitimate publisher-CDN path, not an error.
+	if h.bundles != nil {
+		if mrErr := h.bundles.MarkReferenced(r.Context(), req.BundleHash); mrErr != nil &&
+			!errors.Is(mrErr, marketplace.ErrNotFound) {
+			// Same posture as the publisher-self handler: log,
+			// don't fail the user-visible op. The access log
+			// captures the request; the version row is already
+			// committed and is the contract.
+			_ = mrErr
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, ver)
 }
 

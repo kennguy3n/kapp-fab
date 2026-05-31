@@ -135,6 +135,22 @@ type Config struct {
 	// recommended production posture.
 	MarketplaceBundleDir string
 
+	// RequireMarketplaceBundleDir (sourced from
+	// KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR) opts a deployment into
+	// the strict "marketplace uploads MUST be persistently backed"
+	// mode. When MarketplaceBundleURLBase is non-empty (uploads
+	// enabled), MarketplaceBundleDir MUST also be non-empty —
+	// otherwise LoadConfig fails the boot rather than silently
+	// selecting the in-process MemoryStore for production traffic.
+	//
+	// Mirrors RequireRedis's posture: production opts into the
+	// strict gate so a misconfigured deploy fails loudly rather
+	// than serving uploads whose bytes vanish on the next restart
+	// (the Devin Review ANALYSIS_pr-review-job-b3919d3b4b364f7b9155f6e5c6afd112_0003
+	// flagged this exact data-loss footgun). Default false so
+	// local dev / unit tests continue to boot under MemoryStore.
+	RequireMarketplaceBundleDir bool
+
 	// Env is the operator-supplied deployment marker emitted into
 	// every structured log line ("dev", "staging", "production").
 	// Sourced from KAPP_ENV. Empty values default to "dev" so a
@@ -432,8 +448,9 @@ func LoadConfig() (*Config, error) {
 		RedisURL:         os.Getenv("REDIS_URL"),
 		RequireRedis:     getenvBool("KAPP_REQUIRE_REDIS", false),
 
-		MarketplaceBundleURLBase: strings.TrimRight(os.Getenv("KAPP_MARKETPLACE_BUNDLE_URL_BASE"), "/"),
-		MarketplaceBundleDir:     os.Getenv("KAPP_MARKETPLACE_BUNDLE_DIR"),
+		MarketplaceBundleURLBase:    strings.TrimRight(os.Getenv("KAPP_MARKETPLACE_BUNDLE_URL_BASE"), "/"),
+		MarketplaceBundleDir:        os.Getenv("KAPP_MARKETPLACE_BUNDLE_DIR"),
+		RequireMarketplaceBundleDir: getenvBool("KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR", false),
 
 		Env:              getenv("KAPP_ENV", "dev"),
 		LogFormat:        os.Getenv("KAPP_LOG_FORMAT"),
@@ -515,6 +532,9 @@ func (c *Config) Validate() error {
 	}
 	if c.RequireRedis && c.RedisURL == "" {
 		return errors.New("KAPP_REQUIRE_REDIS=1 but REDIS_URL is empty; set REDIS_URL or unset KAPP_REQUIRE_REDIS to permit in-process fallback")
+	}
+	if c.RequireMarketplaceBundleDir && c.MarketplaceBundleURLBase != "" && c.MarketplaceBundleDir == "" {
+		return errors.New("KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR=1 and KAPP_MARKETPLACE_BUNDLE_URL_BASE is set but KAPP_MARKETPLACE_BUNDLE_DIR is empty; set KAPP_MARKETPLACE_BUNDLE_DIR to a persistent volume or unset KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR to permit the in-memory fallback (uploaded bundle bytes will not survive process restart)")
 	}
 	if c.KTypeCacheSize <= 0 || c.AuthzCacheSize <= 0 || c.TenantCacheSize <= 0 {
 		// LoadConfig() routes every KAPP_*_CACHE_SIZE through

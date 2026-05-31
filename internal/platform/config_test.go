@@ -123,6 +123,63 @@ func TestLoadConfig_RequireRedisGate(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_RequireMarketplaceBundleDirGate locks in the B8
+// round-4 hardening: when marketplace-hosted bundle uploads are
+// enabled (KAPP_MARKETPLACE_BUNDLE_URL_BASE non-empty) AND the
+// operator opts into the strict mode via
+// KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR, KAPP_MARKETPLACE_BUNDLE_DIR
+// MUST also be set. Otherwise the boot fails loudly rather than
+// silently selecting the in-process MemoryStore — whose bytes
+// vanish on the next process restart, leaving the metadata table
+// dangling and the install-time resolver returning 404 for
+// previously-uploaded bundles.
+//
+// Devin Review ANALYSIS_pr-review-job-b3919d3b4b364f7b9155f6e5c6afd112_0003
+// flagged the data-loss footgun. This gate mirrors RequireRedis's
+// posture: production opts in; local-dev / unit tests boot under
+// the in-memory backend without configuration gymnastics.
+func TestLoadConfig_RequireMarketplaceBundleDirGate(t *testing.T) {
+	cases := []struct {
+		name        string
+		requireFlag string
+		urlBase     string
+		bundleDir   string
+		wantErr     bool
+	}{
+		{"unset flag, uploads enabled, no dir - dev default permits memory store", "", "https://kapp.example.com", "", false},
+		{"unset flag, uploads disabled, no dir - dev default permits memory store", "", "", "", false},
+		{"required flag set, uploads enabled, dir set - production happy path", "1", "https://kapp.example.com", "/var/kapp/bundles", false},
+		{"required flag set, uploads enabled, no dir - hard fail", "1", "https://kapp.example.com", "", true},
+		{"required flag set, uploads disabled, no dir - gate inert when uploads off", "1", "", "", false},
+		{"required=true alias, uploads enabled, no dir - hard fail", "true", "https://kapp.example.com", "", true},
+		{"required=TRUE alias, uploads enabled, no dir - hard fail", "TRUE", "https://kapp.example.com", "", true},
+		{"required=0 explicit opt-out, uploads enabled, no dir - permits memory store", "0", "https://kapp.example.com", "", false},
+		{"required=false explicit opt-out, uploads enabled, no dir - permits memory store", "false", "https://kapp.example.com", "", false},
+		{"required=unrecognised falls back to default false", "yes", "https://kapp.example.com", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DB_URL", "postgres://localhost/test")
+			t.Setenv("KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR", tc.requireFlag)
+			t.Setenv("KAPP_MARKETPLACE_BUNDLE_URL_BASE", tc.urlBase)
+			t.Setenv("KAPP_MARKETPLACE_BUNDLE_DIR", tc.bundleDir)
+			cfg, err := LoadConfig()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error from LoadConfig but got cfg=%+v", cfg)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if cfg.MarketplaceBundleDir != tc.bundleDir {
+				t.Errorf("MarketplaceBundleDir = %q, want %q", cfg.MarketplaceBundleDir, tc.bundleDir)
+			}
+		})
+	}
+}
+
 // TestLoadConfig_EnvAndLogDefaults verifies that the new Phase 4
 // observability config keys default safely when unset.
 func TestLoadConfig_EnvAndLogDefaults(t *testing.T) {

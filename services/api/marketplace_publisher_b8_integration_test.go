@@ -799,6 +799,224 @@ permissions_required: []
 	}
 }
 
+// TestB8AdminSubmitVersionMarksUploadReferenced pins the round-4
+// fix for Devin Review
+// BUG_pr-review-job-b3919d3b4b364f7b9155f6e5c6afd112_0001: the
+// admin submitVersion handler MUST call bundles.MarkReferenced
+// after a successful PublishVersion, so the orphan-GC sweeper
+// leaves the upload row alone. Pre-fix, the admin path silently
+// skipped this call (publisher-self path had it) — admin-published
+// versions backed by marketplace-hosted uploads would have their
+// bytes deleted after bundlestore.OrphanRetention even though the
+// version row kept referencing the URL.
+//
+// Setup: a publisher uploads bytes (upload row, referenced_at
+// NULL). Admin calls submitVersion naming the same hash. After
+// the 201, the upload row's referenced_at MUST be non-NULL.
+func TestB8AdminSubmitVersionMarksUploadReferenced(t *testing.T) {
+	pool := openIntegrationPool(t, "KAPP_TEST_DB_URL")
+	ctx := context.Background()
+	store := marketplace.NewStore(pool)
+	users := tenant.NewUserStore(pool)
+
+	pubSlug := "b8adm_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "_")
+	pub, err := store.Publishers().CreatePublisher(ctx, marketplace.CreatePublisherInput{
+		Slug:         pubSlug,
+		DisplayName:  "B8 admin MarkReferenced publisher",
+		ContactEmail: pubSlug + "@example.invalid",
+	})
+	if err != nil {
+		t.Fatalf("CreatePublisher: %v", err)
+	}
+	uploader, err := users.CreateUser(ctx, tenant.User{
+		KChatUserID: "u-uploader-" + uuid.NewString()[:8],
+		Email:       "uploader-b8adm-" + uuid.NewString()[:6] + "@example.invalid",
+		DisplayName: "Uploader",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser uploader: %v", err)
+	}
+	ext, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher:   pubSlug,
+		Slug:        "b8adm_ext",
+		DisplayName: "B8 admin MarkReferenced extension",
+		Description: "Pins admin submitVersion -> MarkReferenced",
+		Author:      "B8 integration tests",
+		License:     "MIT",
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension: %v", err)
+	}
+
+	// Seed the bundlestore with bytes owned by the publisher.
+	// The upload row is created with referenced_at = NULL.
+	objs := bundlestore.NewMemoryStore()
+	bs := bundlestore.NewStore(pool, objs)
+	body := buildB8TestBundle(t, pubSlug)
+	hashRaw := sha256.Sum256(body)
+	hashHex := hex.EncodeToString(hashRaw[:])
+	upload, err := bs.Upload(ctx, bundlestore.UploadInput{
+		Bytes:       body,
+		PublisherID: pub.ID,
+		UploadedBy:  uploader.ID,
+	})
+	if err != nil {
+		t.Fatalf("seed Upload: %v", err)
+	}
+	if upload.ReferencedAt != nil {
+		t.Fatalf("precondition: fresh upload row should have referenced_at NULL, got %v",
+			*upload.ReferencedAt)
+	}
+
+	// Admin handler wired against the same bundle store.
+	mph := &marketplaceHandlers{
+		store:         store,
+		bundles:       bs,
+		bundleURLBase: "https://kapp.test",
+	}
+	r := chi.NewRouter()
+	r.Post("/api/v1/admin/marketplace/extensions/{ext_id}/versions",
+		mph.submitVersion)
+
+	manifestJSON := []byte(fmt.Sprintf(`{
+"schema_version": 1,
+"name": %q,
+"version": "0.1.0",
+"author": "B8 integration tests",
+"license": "MIT",
+"description": "B8 admin MarkReferenced pin",
+"min_kapp_version": "1.0.0",
+"max_kapp_version": "1.x",
+"features_required": [],
+"permissions_required": []
+}`, pubSlug+".b8adm_ext"))
+
+	reqBody := map[string]any{
+		"manifest":    json.RawMessage(manifestJSON),
+		"bundle_url":  "https://kapp.test/api/v1/marketplace/bundles/" + hashHex + ".tar.gz",
+		"bundle_hash": hashHex,
+		"bundle_size": len(body),
+	}
+	buf, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/api/v1/admin/marketplace/extensions/%s/versions", ext.ID.String()),
+		bytes.NewReader(buf))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("admin submitVersion: want 201, got %d (body %q)",
+			rr.Code, rr.Body.String())
+	}
+
+	// The contract under test: the upload row's referenced_at
+	// MUST be non-NULL after the admin publish. Pre-fix this
+	// was NULL — orphan-GC would have deleted the bytes after
+	// OrphanRetention.
+	after, err := bs.GetByHash(ctx, hashHex)
+	if err != nil {
+		t.Fatalf("GetByHash after publish: %v", err)
+	}
+	if after.ReferencedAt == nil {
+		t.Fatalf("admin submitVersion did not mark upload row referenced; ReferencedAt still NULL")
+	}
+
+	// And: a second admin submit naming the same hash for a
+	// different version must keep the bytes referenced — the
+	// COALESCE on the UPDATE preserves the original timestamp.
+	first := *after.ReferencedAt
+	manifestJSON2 := []byte(fmt.Sprintf(`{
+"schema_version": 1,
+"name": %q,
+"version": "0.2.0",
+"author": "B8 integration tests",
+"license": "MIT",
+"description": "B8 admin MarkReferenced pin v2",
+"min_kapp_version": "1.0.0",
+"max_kapp_version": "1.x",
+"features_required": [],
+"permissions_required": []
+}`, pubSlug+".b8adm_ext"))
+	reqBody2 := map[string]any{
+		"manifest":    json.RawMessage(manifestJSON2),
+		"bundle_url":  "https://kapp.test/api/v1/marketplace/bundles/" + hashHex + ".tar.gz",
+		"bundle_hash": hashHex,
+		"bundle_size": len(body),
+	}
+	buf2, err := json.Marshal(reqBody2)
+	if err != nil {
+		t.Fatalf("marshal request v2: %v", err)
+	}
+	req2 := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/api/v1/admin/marketplace/extensions/%s/versions", ext.ID.String()),
+		bytes.NewReader(buf2))
+	req2.Header.Set("Content-Type", "application/json")
+	rr2 := httptest.NewRecorder()
+	r.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusCreated {
+		t.Fatalf("admin submitVersion v2: want 201, got %d (body %q)",
+			rr2.Code, rr2.Body.String())
+	}
+	second, err := bs.GetByHash(ctx, hashHex)
+	if err != nil {
+		t.Fatalf("GetByHash v2: %v", err)
+	}
+	if second.ReferencedAt == nil {
+		t.Fatalf("upload row lost referenced_at on subsequent publish; got NULL")
+	}
+	if !second.ReferencedAt.Equal(first) {
+		t.Errorf("subsequent publish must preserve original referenced_at (COALESCE) — first=%v second=%v",
+			first, *second.ReferencedAt)
+	}
+
+	// And: admin submit naming a hash that has no upload row
+	// (the legitimate publisher-CDN path) must NOT fail — the
+	// handler treats ErrNotFound as the by-design CDN case.
+	cdnHashRaw := sha256.Sum256([]byte("not-on-marketplace-" + hashHex))
+	cdnHashHex := hex.EncodeToString(cdnHashRaw[:])
+	manifestJSON3 := []byte(fmt.Sprintf(`{
+"schema_version": 1,
+"name": %q,
+"version": "0.3.0",
+"author": "B8 integration tests",
+"license": "MIT",
+"description": "B8 admin MarkReferenced pin v3 (publisher CDN)",
+"min_kapp_version": "1.0.0",
+"max_kapp_version": "1.x",
+"features_required": [],
+"permissions_required": []
+}`, pubSlug+".b8adm_ext"))
+	reqBody3 := map[string]any{
+		"manifest":    json.RawMessage(manifestJSON3),
+		"bundle_url":  "https://publisher-cdn.example.invalid/" + cdnHashHex + ".tar.gz",
+		"bundle_hash": cdnHashHex,
+		"bundle_size": len(body),
+	}
+	buf3, err := json.Marshal(reqBody3)
+	if err != nil {
+		t.Fatalf("marshal request v3: %v", err)
+	}
+	req3 := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/api/v1/admin/marketplace/extensions/%s/versions", ext.ID.String()),
+		bytes.NewReader(buf3))
+	req3.Header.Set("Content-Type", "application/json")
+	rr3 := httptest.NewRecorder()
+	r.ServeHTTP(rr3, req3)
+	if rr3.Code != http.StatusCreated {
+		t.Fatalf("admin submitVersion (publisher-CDN bundle, no upload row): want 201, got %d (body %q)",
+			rr3.Code, rr3.Body.String())
+	}
+
+	// Suppress unused-import warnings if helpers shift; pubSlug
+	// already exercised above.
+	_ = uploader
+	_ = platform.WithUserID
+}
+
 // --- helpers -------------------------------------------------------------
 
 // buildB8TestBundle constructs a minimal valid tar.gz that
