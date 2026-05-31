@@ -520,6 +520,28 @@ func (h *marketplaceHandlers) updateSettings(w http.ResponseWriter, r *http.Requ
 	// the version it was installed at (the version's schema
 	// is the source of truth for what's valid — NOT the
 	// extension's current listed_version, which may be newer).
+	//
+	// This pre-tx read is intentionally NOT serialised with the
+	// engine's in-tx SELECT FOR UPDATE on the same row at
+	// engine.go:718-722 — we trade a small TOCTOU window for
+	// not holding a row lock across the bundle resolve +
+	// JSON-Schema compile (which can be seconds against a cold
+	// CDN). Two facts make the trade safe:
+	//
+	//   1. extension_version_id is functionally immutable for an
+	//      install row in B6 — Engine.Upgrade is deferred to
+	//      B6.1; the v1 migration path is uninstall-then-reinstall
+	//      which creates a fresh row. So in current production
+	//      code the value cannot change between our read and the
+	//      engine's commit.
+	//   2. Extension manifest spec contract: settings schemas are
+	//      forward-compatible within a major version (additive
+	//      properties only). Even if B6.1 lands a same-tx upgrade
+	//      that mutates extension_version_id between our pre-read
+	//      and the engine's FOR UPDATE, a document valid under
+	//      v1.X is required to be valid under v1.Y for Y > X.
+	//
+	// Devin Review ANALYSIS_pr-review-job-...-bbc14be-0004.
 	in, err := h.store.GetInstallation(r.Context(), t.ID, id)
 	if err != nil {
 		h.writeError(w, err)
