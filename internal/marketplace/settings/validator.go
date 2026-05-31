@@ -648,8 +648,22 @@ func joinPath(parent, key string) string {
 func checkFormat(format, s string) bool {
 	switch format {
 	case "email":
-		_, err := mail.ParseAddress(s)
-		return err == nil
+		// JSON Schema draft 2020-12 §7.3.2 references RFC 5321
+		// "mailbox" / RFC 5322 "addr-spec" — i.e. the bare
+		// `local-part@domain` form, NOT the RFC 5322 "name-addr"
+		// form (`"John Doe" <john@example.com>`). net/mail's
+		// ParseAddress accepts both. Reject the name-addr form
+		// here by requiring (a) Name to be empty and (b) the
+		// canonical Address to equal the trimmed input — that
+		// excludes inputs that ParseAddress massaged (e.g.
+		// dropping comments or display names) while still
+		// accepting the bare addr-spec form the spec actually
+		// admits.
+		addr, err := mail.ParseAddress(s)
+		if err != nil {
+			return false
+		}
+		return addr.Name == "" && addr.Address == s
 	case "uri":
 		u, err := url.Parse(s)
 		return err == nil && u.Scheme != "" && u.Host != ""

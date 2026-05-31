@@ -216,6 +216,44 @@ func TestValidate_Format(t *testing.T) {
 	}
 }
 
+// TestValidate_EmailFormatRejectsNameAddr verifies the email format
+// check rejects RFC 5322 name-addr forms (e.g. `"Display" <addr>`).
+// JSON Schema draft 2020-12 §7.3.2 references RFC 5321 mailbox /
+// RFC 5322 addr-spec — the bare `local-part@domain` form only.
+// net/mail's ParseAddress accepts name-addr too, so a permissive
+// `_, err := mail.ParseAddress(s)` would let `"x" <x@y.com>` slip
+// through.
+func TestValidate_EmailFormatRejectsNameAddr(t *testing.T) {
+	v, err := NewValidator([]byte(`{"type":"string","format":"email"}`))
+	if err != nil {
+		t.Fatalf("NewValidator: %v", err)
+	}
+	cases := []struct {
+		input   string
+		wantErr bool
+		note    string
+	}{
+		{`"a@b.com"`, false, "bare addr-spec passes"},
+		{`"a.b+c@example.co.uk"`, false, "subdomain + dotted local-part"},
+		{`"\"Display\" <a@b.com>"`, true, "name-addr is RFC 5322 only — rejected"},
+		{`"<a@b.com>"`, true, "angle-addr form rejected"},
+		{`"not-an-email"`, true, "no @ — rejected"},
+		{`""`, true, "empty string rejected"},
+	}
+	for _, c := range cases {
+		t.Run(c.note, func(t *testing.T) {
+			err := v.ValidateRaw([]byte(c.input))
+			if c.wantErr {
+				if !errors.Is(err, ErrValidation) {
+					t.Errorf("input=%s: want ErrValidation, got %v", c.input, err)
+				}
+			} else if err != nil {
+				t.Errorf("input=%s: want nil, got %v", c.input, err)
+			}
+		})
+	}
+}
+
 func TestValidate_NestedProperties(t *testing.T) {
 	schema := []byte(`{
 		"type": "object",

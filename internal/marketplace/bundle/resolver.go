@@ -46,6 +46,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kennguy3n/kapp-fab/internal/marketplace"
@@ -564,7 +565,16 @@ func (r *byteReader) Read(p []byte) (int, error) {
 // the version ID; Resolve returns the registered entry verbatim
 // (no fetch, no hash check beyond the explicit one performed at
 // registration time).
+//
+// Safe for concurrent use: Set / Resolve both take an internal
+// RWMutex. Production callers register all bundles up front during
+// test setup and then issue concurrent Resolve calls (e.g. when the
+// integration test fires multiple installs in parallel, or when
+// CachingResolver tests stress the wrapper) — the mutex makes that
+// pattern safe without forcing every test to externalise its own
+// locking.
 type InMemoryResolver struct {
+	mu      sync.RWMutex
 	bundles map[string]*runtime.ResolvedBundle
 }
 
@@ -579,6 +589,8 @@ func NewInMemoryResolver() *InMemoryResolver {
 // rows; useful in test harnesses where we construct manifests
 // programmatically.
 func (r *InMemoryResolver) Set(versionID string, b *runtime.ResolvedBundle) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.bundles[versionID] = b
 }
 
@@ -588,7 +600,9 @@ func (r *InMemoryResolver) Resolve(_ context.Context, version *marketplace.Exten
 	if version == nil {
 		return nil, errors.New("bundle: nil version")
 	}
+	r.mu.RLock()
 	b, ok := r.bundles[version.ID.String()]
+	r.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("%w: version_id=%s", ErrBundleNotFound, version.ID)
 	}

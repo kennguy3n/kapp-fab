@@ -55,6 +55,7 @@ import (
 //	bundle.ErrBundleExceedsLimit       → 413
 //	bundle.ErrBundleTransportInsecure  → 400
 //	runtime.ErrPreInstallRejected      → 422 (publisher refused)
+//	runtime.ErrPreUninstallRejected    → 422 (publisher refused uninstall)
 //
 // Anything else collapses to 500.
 type marketplaceHandlers struct {
@@ -523,6 +524,19 @@ func (h *marketplaceHandlers) updateSettings(w http.ResponseWriter, r *http.Requ
 		h.writeError(w, err)
 		return
 	}
+	// Short-circuit on terminal status before doing the
+	// (potentially CDN-bound) bundle fetch and JSON-Schema
+	// compile. The engine's in-tx SELECT FOR UPDATE at
+	// engine.go:718-722 is still the authoritative guard
+	// against the TOCTOU window between this check and the
+	// settings write — we just save the wasted round-trip
+	// on the obvious case where the install is already
+	// torn down. The 409 / ErrConflict mapping mirrors what
+	// the engine would return.
+	if in.Status == marketplace.InstallStatusUninstalled {
+		h.writeError(w, fmt.Errorf("%w: installation %s is uninstalled", marketplace.ErrConflict, id))
+		return
+	}
 	ver, err := h.store.GetVersion(r.Context(), in.ExtensionVersionID)
 	if err != nil {
 		h.writeError(w, err)
@@ -883,7 +897,16 @@ func (h *marketplaceHandlers) writeError(w http.ResponseWriter, err error) {
 		// was well-formed — the upstream object store served bad
 		// bytes.
 		http.Error(w, err.Error(), http.StatusBadGateway)
-	case errors.Is(err, runtime.ErrPreInstallRejected):
+	case errors.Is(err, runtime.ErrPreInstallRejected),
+		errors.Is(err, runtime.ErrPreUninstallRejected):
+		// Symmetric with ErrPreInstallRejected. The extension's
+		// pre_uninstall webhook returned a structured rejection;
+		// the engine surfaces this distinct from a generic 500
+		// transport failure so operators can see the publisher
+		// explicitly refused the uninstall. 422 is the right
+		// status because the request itself was well-formed and
+		// authorised; the publisher rejected the lifecycle
+		// transition.
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)

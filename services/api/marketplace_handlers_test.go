@@ -52,7 +52,10 @@ func TestMarketplaceWriteErrorMapping(t *testing.T) {
 		{name: "ErrBundleMalformed", err: bundle.ErrBundleMalformed, want: http.StatusUnprocessableEntity},
 		{name: "ErrBundleNotFound", err: bundle.ErrBundleNotFound, want: http.StatusBadGateway},
 		{name: "ErrBundleFetchFailed", err: bundle.ErrBundleFetchFailed, want: http.StatusBadGateway},
+		{name: "ErrBundleHashMismatch", err: marketplace.ErrBundleHashMismatch, want: http.StatusBadGateway},
 		{name: "ErrPreInstallRejected", err: runtime.ErrPreInstallRejected, want: http.StatusUnprocessableEntity},
+		{name: "ErrPreUninstallRejected", err: runtime.ErrPreUninstallRejected, want: http.StatusUnprocessableEntity},
+		{name: "wrapped ErrPreUninstallRejected", err: fmt.Errorf("%w: publisher said no", runtime.ErrPreUninstallRejected), want: http.StatusUnprocessableEntity},
 		{name: "unknown error → 500", err: errors.New("boom"), want: http.StatusInternalServerError},
 	}
 	for _, tc := range cases {
