@@ -356,11 +356,22 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 			slog.String("backend", "disk"),
 			slog.String("root", ds.Root()))
 	} else {
+		// Reaching this branch with uploads enabled
+		// (MarketplaceBundleURLBase non-empty) is only
+		// possible when the operator has explicitly opted
+		// into MemoryStore via either
+		// KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY=1 (round-5
+		// alias) or the legacy KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR=0
+		// flag — the round-5 strict-default validator in
+		// platform.Config.Validate() fails the boot
+		// otherwise. The warn is retained because even an
+		// acknowledged opt-in is worth surfacing once at
+		// startup so it shows up in restart-incident triage.
 		bundleObjs = bundlestore.NewMemoryStore()
 		slog.Warn("bundle store backend",
 			slog.String("backend", "memory"),
 			slog.String("warning",
-				"in-process MemoryStore: uploaded bundle bytes will be lost on process restart; set KAPP_MARKETPLACE_BUNDLE_DIR to a persistent volume for production"))
+				"in-process MemoryStore selected via KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY=1 (or legacy KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR=0): uploaded bundle bytes will be lost on process restart; set KAPP_MARKETPLACE_BUNDLE_DIR to a persistent volume for production"))
 	}
 	// adminPool wiring lets GCUnreferenced DELETE through the
 	// kapp_admin role; the migration grants DELETE only to

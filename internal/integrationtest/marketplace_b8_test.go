@@ -6,6 +6,7 @@ package integrationtest
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -207,6 +208,124 @@ func TestB8BundleStore_MarkReferencedAndGC(t *testing.T) {
 	// gc row is gone.
 	if _, err := bs.GetByHash(ctx, upGC.ContentHash); !errors.Is(err, bundlestore.ErrBundleNotFound) {
 		t.Errorf("gc row should be deleted post-GC, got %v", err)
+	}
+}
+
+// failingDeleteObjectStore wraps a MemoryStore but always returns
+// a non-nil error from Delete. Used to exercise the
+// metadata-deleted-but-object-delete-failed branch of
+// GCUnreferenced so the round-5 StorageReclaimed counter fix can
+// be pinned.
+type failingDeleteObjectStore struct {
+	inner *bundlestore.MemoryStore
+}
+
+func (f *failingDeleteObjectStore) Put(ctx context.Context, key, contentType string, data []byte) error {
+	return f.inner.Put(ctx, key, contentType, data)
+}
+
+func (f *failingDeleteObjectStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	return f.inner.Get(ctx, key)
+}
+
+func (f *failingDeleteObjectStore) Exists(ctx context.Context, key string) (bool, error) {
+	return f.inner.Exists(ctx, key)
+}
+
+func (f *failingDeleteObjectStore) Delete(_ context.Context, _ string) error {
+	return errors.New("simulated object-store Delete failure for GC test")
+}
+
+// TestB8BundleStore_GCStorageReclaimedAccurate pins the round-5
+// Devin Review fix for
+// ANALYSIS_pr-review-job-da8e7cbbf34342c2956c6cec2c9ec29f_0001.
+// Pre-fix, GCUnreferenced incremented StorageReclaimed
+// immediately after the metadata DELETE — BEFORE the object-store
+// Delete was attempted — so an operator using the counter for
+// capacity-planning saw inflated numbers when the object delete
+// failed. The fix is to increment StorageReclaimed only on the
+// success path (after DeletedObjects++) so the counter accurately
+// reflects bytes actually freed from the object store.
+//
+// The invariant pinned: when Delete always fails,
+//
+//	DeletedRows      == N  (metadata wiped)
+//	DeletedObjects   == 0  (no object-store deletes succeeded)
+//	OrphanedObjects  == N  (every metadata-delete left an orphan)
+//	StorageReclaimed == 0  (NO bytes reclaimed)
+//
+// Pre-fix this test would fail with StorageReclaimed == sum(sizes).
+func TestB8BundleStore_GCStorageReclaimedAccurate(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+	pubs := store.Publishers()
+
+	pub := mustCreatePublisher(t, ctx, pubs, "b8_gc_counter")
+	alice := mustCreateUser(t, ctx, h, "alice_b8_gc_counter")
+
+	// Inject a failing-Delete object-store wrapper around the
+	// real MemoryStore so Upload/Fetch still work end-to-end
+	// but the GC sweep's object delete fires the orphan branch.
+	objs := &failingDeleteObjectStore{inner: bundlestore.NewMemoryStore()}
+	bs := bundlestore.NewStore(h.pool, objs).WithAdminPool(h.pool)
+
+	// Upload two orphans (no MarkReferenced) so they're eligible
+	// for GC. Use distinct bytes so each gets its own metadata
+	// row and the counter sum is non-trivial.
+	body1 := []byte("orphan one — counter accuracy regression test")
+	body2 := []byte("orphan two — must NOT inflate StorageReclaimed when object delete fails")
+	up1, err := bs.Upload(ctx, bundlestore.UploadInput{
+		Bytes: body1, PublisherID: pub.ID, UploadedBy: alice.ID,
+	})
+	if err != nil {
+		t.Fatalf("Upload(orphan1): %v", err)
+	}
+	up2, err := bs.Upload(ctx, bundlestore.UploadInput{
+		Bytes: body2, PublisherID: pub.ID, UploadedBy: alice.ID,
+	})
+	if err != nil {
+		t.Fatalf("Upload(orphan2): %v", err)
+	}
+
+	res, err := bs.GCUnreferenced(ctx, 1*time.Millisecond)
+	if err != nil {
+		t.Fatalf("GCUnreferenced: %v", err)
+	}
+
+	// DeletedRows: both orphans had their metadata wiped.
+	if res.DeletedRows < 2 {
+		t.Errorf("DeletedRows: want >=2, got %d", res.DeletedRows)
+	}
+	// OrphanedObjects: every metadata-delete left an orphan
+	// (Delete always fails).
+	if res.OrphanedObjects < 2 {
+		t.Errorf("OrphanedObjects: want >=2, got %d", res.OrphanedObjects)
+	}
+	// DeletedObjects: zero object-store deletes succeeded.
+	if res.DeletedObjects != 0 {
+		t.Errorf("DeletedObjects: want 0 (all Delete calls failed), got %d", res.DeletedObjects)
+	}
+	// StorageReclaimed: THE ROUND-5 FIX. Pre-fix this would
+	// equal len(body1)+len(body2). Post-fix it MUST be 0 because
+	// no bytes were actually freed from the object store.
+	if res.StorageReclaimed != 0 {
+		t.Errorf("StorageReclaimed: want 0 (no bytes freed when Delete fails), got %d", res.StorageReclaimed)
+	}
+	// Invariant: DeletedRows == DeletedObjects + OrphanedObjects.
+	if res.DeletedRows != res.DeletedObjects+res.OrphanedObjects {
+		t.Errorf("invariant: DeletedRows(%d) != DeletedObjects(%d) + OrphanedObjects(%d)",
+			res.DeletedRows, res.DeletedObjects, res.OrphanedObjects)
+	}
+
+	// Defensive: the metadata rows really are gone, so a
+	// subsequent GetByHash on either upload returns
+	// ErrBundleNotFound regardless of the orphaned bytes.
+	if _, err := bs.GetByHash(ctx, up1.ContentHash); !errors.Is(err, bundlestore.ErrBundleNotFound) {
+		t.Errorf("orphan1 metadata should be gone post-GC, got %v", err)
+	}
+	if _, err := bs.GetByHash(ctx, up2.ContentHash); !errors.Is(err, bundlestore.ErrBundleNotFound) {
+		t.Errorf("orphan2 metadata should be gone post-GC, got %v", err)
 	}
 }
 

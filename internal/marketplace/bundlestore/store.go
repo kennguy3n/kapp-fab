@@ -721,6 +721,20 @@ func (s *Store) ListPublisherUploads(ctx context.Context, publisherID uuid.UUID,
 }
 
 // GCResult summarises one GCUnreferenced sweep.
+//
+// Counter semantics (round-5 hardening):
+//   - DeletedRows: metadata rows removed (regardless of whether
+//     the object-store Delete succeeded).
+//   - DeletedObjects: object-store keys removed successfully.
+//   - OrphanedObjects: metadata row removed but object-store
+//     Delete failed (bytes still occupy disk / S3).
+//   - StorageReclaimed: bytes actually freed from the object
+//     store. Only incremented on the (DeletedRows ∧
+//     ¬OrphanedObjects) path so dashboards built on this value
+//     reflect true reclaimed capacity rather than the
+//     pre-round-5 "intended-to-reclaim" inflation.
+//
+// Invariant: DeletedRows == DeletedObjects + OrphanedObjects.
 type GCResult struct {
 	Scanned          int
 	DeletedRows      int
@@ -800,12 +814,24 @@ func (s *Store) GCUnreferenced(ctx context.Context, minAge time.Duration) (*GCRe
 			continue
 		}
 		result.DeletedRows++
-		result.StorageReclaimed += c.size
 		if err := s.objs.Delete(ctx, c.key); err != nil {
+			// Round-5 Devin Review
+			// ANALYSIS_pr-review-job-da8e7cbbf34342c2956c6cec2c9ec29f_0001
+			// flagged that StorageReclaimed was incremented
+			// before the object-store Delete, so an operator
+			// using the counter for capacity-planning saw
+			// inflated numbers when Delete failed. The
+			// OrphanedObjects counter still signals the
+			// discrepancy, but two counters telling
+			// contradictory stories made the dashboard
+			// useless. Increment only on the success path so
+			// StorageReclaimed accurately reflects bytes
+			// actually freed from the object store.
 			result.OrphanedObjects++
 			continue
 		}
 		result.DeletedObjects++
+		result.StorageReclaimed += c.size
 	}
 	return result, nil
 }

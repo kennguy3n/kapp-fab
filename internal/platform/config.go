@@ -135,20 +135,40 @@ type Config struct {
 	// recommended production posture.
 	MarketplaceBundleDir string
 
-	// RequireMarketplaceBundleDir (sourced from
-	// KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR) opts a deployment into
-	// the strict "marketplace uploads MUST be persistently backed"
-	// mode. When MarketplaceBundleURLBase is non-empty (uploads
-	// enabled), MarketplaceBundleDir MUST also be non-empty —
-	// otherwise LoadConfig fails the boot rather than silently
-	// selecting the in-process MemoryStore for production traffic.
+	// AllowMarketplaceBundleMemory (sourced from
+	// KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY) is the explicit dev /
+	// test opt-in for the in-process MemoryStore when uploads are
+	// enabled. Default false — the strict gate below fails the
+	// boot when MarketplaceBundleURLBase is set but
+	// MarketplaceBundleDir is empty, unless this flag is true.
 	//
-	// Mirrors RequireRedis's posture: production opts into the
-	// strict gate so a misconfigured deploy fails loudly rather
-	// than serving uploads whose bytes vanish on the next restart
-	// (the Devin Review ANALYSIS_pr-review-job-b3919d3b4b364f7b9155f6e5c6afd112_0003
-	// flagged this exact data-loss footgun). Default false so
-	// local dev / unit tests continue to boot under MemoryStore.
+	// Inverted-default rationale (Devin Review round-5
+	// ANALYSIS_pr-review-job-da8e7cbbf34342c2956c6cec2c9ec29f_0002
+	// flagged the opt-in posture as the wrong default):
+	// MemoryStore bytes vanish on every process restart while the
+	// metadata rows persist, leaving the install-time resolver
+	// returning 404 for previously-uploaded bundles — a silent
+	// data-loss footgun whose blast radius is the entire bundle
+	// catalog. Production deploys that want uploads MUST mount a
+	// persistent volume (KAPP_MARKETPLACE_BUNDLE_DIR) or wire
+	// S3Store; dev / test setups that genuinely want MemoryStore
+	// (typically unit-test fixtures using LoadConfig instead of
+	// constructing deps directly) opt in via this flag.
+	AllowMarketplaceBundleMemory bool
+
+	// RequireMarketplaceBundleDir (sourced from
+	// KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR) is retained as the
+	// pre-round-5 strict-mode flag for back-compat with deploys
+	// that set it explicitly. After the round-5 default inversion
+	// it is redundant (strict mode is the default), but operators
+	// who pinned KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR=1 in their
+	// helm values continue to get the same behaviour.
+	//
+	// KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR=0 / false is the
+	// pre-round-5 explicit opt-out into the in-memory fallback —
+	// the validator treats it as equivalent to
+	// KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY=1 so existing dev
+	// scripts that set =0 continue to boot.
 	RequireMarketplaceBundleDir bool
 
 	// Env is the operator-supplied deployment marker emitted into
@@ -448,9 +468,10 @@ func LoadConfig() (*Config, error) {
 		RedisURL:         os.Getenv("REDIS_URL"),
 		RequireRedis:     getenvBool("KAPP_REQUIRE_REDIS", false),
 
-		MarketplaceBundleURLBase:    strings.TrimRight(os.Getenv("KAPP_MARKETPLACE_BUNDLE_URL_BASE"), "/"),
-		MarketplaceBundleDir:        os.Getenv("KAPP_MARKETPLACE_BUNDLE_DIR"),
-		RequireMarketplaceBundleDir: getenvBool("KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR", false),
+		MarketplaceBundleURLBase:     strings.TrimRight(os.Getenv("KAPP_MARKETPLACE_BUNDLE_URL_BASE"), "/"),
+		MarketplaceBundleDir:         os.Getenv("KAPP_MARKETPLACE_BUNDLE_DIR"),
+		AllowMarketplaceBundleMemory: getenvBool("KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY", false),
+		RequireMarketplaceBundleDir:  getenvBool("KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR", false),
 
 		Env:              getenv("KAPP_ENV", "dev"),
 		LogFormat:        os.Getenv("KAPP_LOG_FORMAT"),
@@ -533,8 +554,40 @@ func (c *Config) Validate() error {
 	if c.RequireRedis && c.RedisURL == "" {
 		return errors.New("KAPP_REQUIRE_REDIS=1 but REDIS_URL is empty; set REDIS_URL or unset KAPP_REQUIRE_REDIS to permit in-process fallback")
 	}
-	if c.RequireMarketplaceBundleDir && c.MarketplaceBundleURLBase != "" && c.MarketplaceBundleDir == "" {
-		return errors.New("KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR=1 and KAPP_MARKETPLACE_BUNDLE_URL_BASE is set but KAPP_MARKETPLACE_BUNDLE_DIR is empty; set KAPP_MARKETPLACE_BUNDLE_DIR to a persistent volume or unset KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR to permit the in-memory fallback (uploaded bundle bytes will not survive process restart)")
+	// Round-5 inverted default: marketplace bundle uploads MUST
+	// be persistently backed by default. When uploads are enabled
+	// (URL_BASE non-empty) but no persistent DIR is configured,
+	// the operator must EXPLICITLY opt into the in-memory
+	// fallback to acknowledge the data-loss risk on restart.
+	//
+	// Precedence (most specific wins):
+	//   1. KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR=1 / true: strict
+	//      (round-4 strict-mode flag; redundant w/ default but
+	//      back-compat-preserved for deploys that pinned it).
+	//   2. KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR=0 / false: legacy
+	//      explicit opt-out — permits MemoryStore.
+	//   3. Otherwise (REQUIRE_DIR unset OR unrecognised):
+	//      KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY=1 permits;
+	//      anything else (default) → strict.
+	//
+	// Unrecognised REQUIRE_DIR values (e.g. "yes") fall through
+	// to the round-5 default-strict path rather than silently
+	// permitting MemoryStore — a typo'd opt-OUT used to flip the
+	// data-loss footgun back on. The round-5 inversion catches it.
+	if c.MarketplaceBundleURLBase != "" && c.MarketplaceBundleDir == "" {
+		requireRaw := os.Getenv("KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR")
+		var allowMemory bool
+		switch requireRaw {
+		case "1", "true", "TRUE", "True":
+			allowMemory = false
+		case "0", "false", "FALSE", "False":
+			allowMemory = true
+		default:
+			allowMemory = c.AllowMarketplaceBundleMemory
+		}
+		if !allowMemory {
+			return errors.New("KAPP_MARKETPLACE_BUNDLE_URL_BASE is set but KAPP_MARKETPLACE_BUNDLE_DIR is empty; set KAPP_MARKETPLACE_BUNDLE_DIR to a persistent volume for production, or explicitly opt into the in-memory fallback via KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY=1 (uploaded bundle bytes will not survive process restart)")
+		}
 	}
 	if c.KTypeCacheSize <= 0 || c.AuthzCacheSize <= 0 || c.TenantCacheSize <= 0 {
 		// LoadConfig() routes every KAPP_*_CACHE_SIZE through
