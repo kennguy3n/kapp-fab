@@ -11,6 +11,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -395,6 +396,184 @@ func seedExtensionVersion(t *testing.T, store *marketplace.Store, prefix string)
 		t.Fatalf("PublishVersion: %v", err)
 	}
 	return ver.ID
+}
+
+// TestMarketplace_ClaimSubmittedReviewVersions_AtomicLease exercises
+// the atomic-claim semantics in Store.ClaimSubmittedReviewVersions.
+// The B7 worker pulls submitted rows via an UPDATE...RETURNING
+// CTE that stamps claimed_at / claimed_by inside SKIP LOCKED so
+// concurrent claims never race on the same row.
+//
+// The test exercises three load-bearing invariants:
+//
+//  1. A claimed row's claimed_at is non-NULL post-claim
+//     (UPDATE-RETURNING is doing the write, not just locking).
+//  2. A second claim against the same row returns it again ONLY
+//     after the lease window has lapsed, never before
+//     (regression for the bare SELECT FOR UPDATE SKIP LOCKED
+//     pattern that released locks at end-of-statement).
+//  3. ResetReviewStateForRescan clears the claim atomically with
+//     the status reset, so an admin clicking Rescan doesn't have
+//     to wait 10 minutes for the lease to lapse.
+func TestMarketplace_ClaimSubmittedReviewVersions_AtomicLease(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	// The shared test DB accumulates submitted rows from other
+	// test runs that never get claimed (no worker is running).
+	// Stamp them all as claimed by a sentinel worker so they're
+	// excluded from the lease-window claim path — our test row
+	// then becomes the lone unclaimed submitted row and the
+	// per-call cap of 64 reliably surfaces it.
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE marketplace_extension_review_state
+		    SET claimed_at = now(),
+		        claimed_by = 'test-pre-claim'
+		  WHERE status = 'submitted'
+		    AND claimed_at IS NULL`,
+	); err != nil {
+		t.Fatalf("pre-claim stale submitted rows: %v", err)
+	}
+
+	ver := seedExtensionVersion(t, store, "claim")
+
+	// Helper: scan claims returned by a worker and return true
+	// if our test version is in the slice.
+	containsVer := func(t *testing.T, ids []uuid.UUID) bool {
+		t.Helper()
+		for _, id := range ids {
+			if id == ver {
+				return true
+			}
+		}
+		return false
+	}
+
+	// First claim by "worker-A": must atomically stamp claimed_at.
+	idsA, err := store.ClaimSubmittedReviewVersions(ctx, "worker-A", 64)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedReviewVersions (A): %v", err)
+	}
+	if !containsVer(t, idsA) {
+		t.Fatalf("worker-A did not claim our version (idsA=%d)", len(idsA))
+	}
+
+	// Direct DB read: verify claimed_at + claimed_by were
+	// written by the UPDATE inside the claim.
+	var claimedBy string
+	var claimedAt *time.Time
+	if err := h.pool.QueryRow(ctx,
+		`SELECT claimed_by, claimed_at
+		   FROM marketplace_extension_review_state
+		  WHERE extension_version_id = $1`, ver,
+	).Scan(&claimedBy, &claimedAt); err != nil {
+		t.Fatalf("read post-claim row: %v", err)
+	}
+	if claimedBy != "worker-A" {
+		t.Errorf("post-claim claimed_by: want worker-A got %q", claimedBy)
+	}
+	if claimedAt == nil {
+		t.Fatalf("post-claim claimed_at: should be non-NULL after atomic claim")
+	}
+
+	// Second claim by "worker-B" inside the lease window: row
+	// MUST NOT be re-claimed. This is the load-bearing
+	// regression for the pool.Query-vs-WithTx bug — a bare
+	// SELECT FOR UPDATE SKIP LOCKED would release its locks
+	// at end-of-statement and worker-B would re-claim the row
+	// immediately. The atomic UPDATE...RETURNING fixes this by
+	// making claimed_at non-NULL inside the same statement
+	// that's holding the lock.
+	idsB, err := store.ClaimSubmittedReviewVersions(ctx, "worker-B", 64)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedReviewVersions (B): %v", err)
+	}
+	if containsVer(t, idsB) {
+		t.Errorf("worker-B re-claimed a row already held by worker-A within the lease window")
+	}
+
+	// ResetReviewStateForRescan must clear the claim atomically
+	// with the status reset so the next claim picks it up
+	// immediately (admin Rescan UX requirement). Without the
+	// claim columns being cleared, the row would be invisible
+	// to the worker for the full 10-minute lease.
+	if err := store.ResetReviewStateForRescan(ctx, ver); err != nil {
+		t.Fatalf("ResetReviewStateForRescan: %v", err)
+	}
+	var postResetBy *string
+	var postResetAt *time.Time
+	if err := h.pool.QueryRow(ctx,
+		`SELECT claimed_by, claimed_at
+		   FROM marketplace_extension_review_state
+		  WHERE extension_version_id = $1`, ver,
+	).Scan(&postResetBy, &postResetAt); err != nil {
+		t.Fatalf("read post-reset row: %v", err)
+	}
+	if postResetBy != nil {
+		t.Errorf("post-reset claimed_by should be NULL, got %q", *postResetBy)
+	}
+	if postResetAt != nil {
+		t.Errorf("post-reset claimed_at should be NULL, got %v", *postResetAt)
+	}
+
+	// A fresh claim post-reset must pick up the row again
+	// (proves the reset+immediate-reclaim path the admin UX
+	// relies on).
+	idsC, err := store.ClaimSubmittedReviewVersions(ctx, "worker-C", 64)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedReviewVersions (C, post-reset): %v", err)
+	}
+	if !containsVer(t, idsC) {
+		t.Fatalf("worker-C did not re-claim our version post-reset (idsC=%d)", len(idsC))
+	}
+}
+
+// TestMarketplace_SubmittedToManualReview_DirectTransition
+// pins the state-graph edge submitted→manual_review that the
+// B7 pipeline relies on when warn-level findings land on a
+// fresh submission (e.g. UIStaticAnalysisCheck flagging eval()
+// usage). Without this edge the pipeline would have to two-
+// step via automated_passed first, polluting the audit trail
+// (automated_passed would mean BOTH "checks ran cleanly" and
+// "checks ran but produced warnings" depending on the path).
+func TestMarketplace_SubmittedToManualReview_DirectTransition(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	ver := seedExtensionVersion(t, store, "submitted-to-manual")
+
+	// Pre-check: row starts in submitted.
+	pre, err := store.Reviews().GetReviewState(ctx, ver)
+	if err != nil {
+		t.Fatalf("GetReviewState pre: %v", err)
+	}
+	if pre.Status != marketplace.ReviewStatusSubmitted {
+		t.Fatalf("pre status: want submitted got %q", pre.Status)
+	}
+
+	// The transition the pipeline emits when one or more
+	// warn-level findings produce a manual_review verdict.
+	post, err := store.Reviews().UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
+		VersionID:   ver,
+		Status:      marketplace.ReviewStatusManualReview,
+		ManualNotes: "1 warn / 0 info finding(s); human review required",
+		AutomatedChecks: []byte(
+			`{"checks":[{"name":"ui_static","passed":false,"worst":"warn","errors":0,"warns":1,"infos":0}]}`),
+	})
+	if err != nil {
+		t.Fatalf("UpdateReviewState submitted→manual_review: %v", err)
+	}
+	if post.Status != marketplace.ReviewStatusManualReview {
+		t.Fatalf("post status: want manual_review got %q", post.Status)
+	}
+	if post.ManualReviewNotes == "" {
+		t.Errorf("manual_review notes should be set, got empty")
+	}
+	if len(post.AutomatedChecks) == 0 || string(post.AutomatedChecks) == "{}" {
+		t.Errorf("automated_checks JSONB should be populated, got %q", string(post.AutomatedChecks))
+	}
 }
 
 func minInt(a, b int) int {

@@ -25,18 +25,23 @@ type BundleSizeCheck struct{}
 // Name implements Check.
 func (BundleSizeCheck) Name() string { return "bundle.size" }
 
-// Run implements Check.
+// Run implements Check. Accumulates both findings (size + hash
+// drift) when both fail; a bundle that is over-cap AND hashes
+// differently is a clear "publisher swapped the file post-
+// submit" signal and the publisher gets one re-submission
+// covering both issues, not two round-trips.
 func (BundleSizeCheck) Run(_ context.Context, b *Bundle) []marketplace.ReviewFinding {
+	var findings []marketplace.ReviewFinding
 	size := int64(len(b.RawBytes))
 	if size > marketplace.MaxBundleSizeBytes {
-		return []marketplace.ReviewFinding{{
+		findings = append(findings, marketplace.ReviewFinding{
 			Severity: marketplace.SeverityError,
 			Code:     "bundle.size.exceeds_cap",
 			Location: "",
 			Message: fmt.Sprintf(
 				"bundle is %d bytes; exceeds %d-byte cap",
 				size, marketplace.MaxBundleSizeBytes),
-		}}
+		})
 	}
 	// Hash drift: the catalog row claims a hash; the bytes we
 	// fetched compute to a different hash. Either the publisher
@@ -45,16 +50,16 @@ func (BundleSizeCheck) Run(_ context.Context, b *Bundle) []marketplace.ReviewFin
 	// submission time. Either way the version is unreviewable
 	// against its declared hash.
 	if b.Version != nil && b.Version.BundleHash != "" && b.Version.BundleHash != b.Hash {
-		return []marketplace.ReviewFinding{{
+		findings = append(findings, marketplace.ReviewFinding{
 			Severity: marketplace.SeverityError,
 			Code:     "bundle.hash.mismatch",
 			Location: "",
 			Message: fmt.Sprintf(
 				"bundle bytes hash to %s but catalog records %s",
 				b.Hash, b.Version.BundleHash),
-		}}
+		})
 	}
-	return nil
+	return findings
 }
 
 // ManifestSchemaCheck re-validates the manifest with the strict

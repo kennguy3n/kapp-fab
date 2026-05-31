@@ -405,8 +405,6 @@ func resolveJSONFile(files map[string][]byte, manifestPath, kind string) (body [
 	return body, named.Name, nil
 }
 
-// bundleRelPath normalises a manifest-supplied "./foo/bar.json"
-// into the "foo/bar.json" lookup key the extractor uses. Returns
 // Untar exposes the bundle's tar.gz extraction logic to other
 // packages in the marketplace tree (notably internal/marketplace/
 // review, which needs the full file map — including icon and UI-
@@ -422,6 +420,8 @@ func Untar(body []byte) (map[string][]byte, error) {
 	return untarGzip(body)
 }
 
+// bundleRelPath normalises a manifest-supplied "./foo/bar.json"
+// into the "foo/bar.json" lookup key the extractor uses. Returns
 // (path, true) on success, (empty, false) if the input is not a
 // bundle-relative path of the documented form.
 func bundleRelPath(p string) (string, bool) {

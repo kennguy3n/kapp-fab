@@ -15,6 +15,7 @@ package review
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -127,6 +128,37 @@ type Result struct {
 	WorstSeverity marketplace.Severity     // "" if no findings
 	Status        marketplace.ReviewStatus // resolved review status
 	Notes         string                   // human-readable summary
+
+	// RanAt is the wall-clock time when the pipeline started
+	// running the check chain. Stored in the automated_checks
+	// JSONB column on Persist so the publisher UI can show
+	// "last automated scan completed at" without joining the
+	// findings table.
+	RanAt time.Time
+
+	// CheckResults is the per-check summary aggregated from
+	// Findings + the set of checks that actually ran. Persisted
+	// to marketplace_extension_review_state.automated_checks as
+	// the canonical "this scan produced this verdict" record.
+	// Findings stay in their own table for per-finding queries;
+	// CheckResults is the rolled-up summary used by the
+	// publisher dashboard.
+	CheckResults []CheckResultSummary
+}
+
+// CheckResultSummary is the per-check rollup persisted into the
+// automated_checks JSONB column. One row per check that ran in
+// the pipeline, including checks that produced zero findings
+// (so the publisher can see "signature: ran, 0 findings"
+// distinct from "signature: didn't run, e.g. version pre-dated
+// the check").
+type CheckResultSummary struct {
+	Name        string               `json:"name"`
+	Passed      bool                 `json:"passed"`
+	WorstLevel  marketplace.Severity `json:"worst,omitempty"`
+	ErrorCount  int                  `json:"errors"`
+	WarnCount   int                  `json:"warns"`
+	InfoCount   int                  `json:"infos"`
 }
 
 // policyKey is the type used as the context value for PolicyContext.
@@ -182,20 +214,28 @@ func (p *Pipeline) Run(ctx context.Context, version *marketplace.ExtensionVersio
 		// finding. The state transitions to "rejected" with notes
 		// pointing at the load error.
 		now := p.nowFn()
+		loadFinding := marketplace.ReviewFinding{
+			ExtensionVersionID: version.ID,
+			CheckName:          "bundle.load",
+			Code:               "bundle.unloadable",
+			Severity:           marketplace.SeverityError,
+			Location:           "",
+			Message:            fmt.Sprintf("could not load bundle for review: %v", err),
+			CreatedAt:          now,
+		}
 		res := &Result{
-			VersionID: version.ID,
-			Findings: []marketplace.ReviewFinding{{
-				ExtensionVersionID: version.ID,
-				CheckName:          "bundle.load",
-				Code:               "bundle.unloadable",
-				Severity:           marketplace.SeverityError,
-				Location:           "",
-				Message:            fmt.Sprintf("could not load bundle for review: %v", err),
-				CreatedAt:          now,
-			}},
+			VersionID:     version.ID,
+			Findings:      []marketplace.ReviewFinding{loadFinding},
 			WorstSeverity: marketplace.SeverityError,
 			Status:        marketplace.ReviewStatusRejected,
 			Notes:         "bundle could not be loaded for review",
+			RanAt:         now,
+			CheckResults: []CheckResultSummary{{
+				Name:       "bundle.load",
+				Passed:     false,
+				WorstLevel: marketplace.SeverityError,
+				ErrorCount: 1,
+			}},
 		}
 		return res, nil
 	}
@@ -252,11 +292,64 @@ func (p *Pipeline) Run(ctx context.Context, version *marketplace.ExtensionVersio
 	})
 
 	res := &Result{
-		VersionID: version.ID,
-		Findings:  findings,
+		VersionID:    version.ID,
+		Findings:     findings,
+		RanAt:        now,
+		CheckResults: summariseChecks(p.Checks, findings),
 	}
 	res.WorstSeverity, res.Status, res.Notes = computeStateTransition(findings, policy)
 	return res, nil
+}
+
+// summariseChecks builds the per-check rollup that lives in the
+// automated_checks JSONB column. Walks the ordered check list
+// (NOT the findings) so a check that produced zero findings
+// still appears in the summary as `passed=true`. Counts findings
+// by severity per check_name so the publisher can see "4 warns
+// in ui_static" at a glance without fetching the full findings
+// list.
+func summariseChecks(checks []Check, findings []marketplace.ReviewFinding) []CheckResultSummary {
+	by := make(map[string]*CheckResultSummary, len(checks))
+	out := make([]CheckResultSummary, 0, len(checks))
+	for _, c := range checks {
+		name := c.Name()
+		summary := CheckResultSummary{Name: name, Passed: true}
+		out = append(out, summary)
+		by[name] = &out[len(out)-1]
+	}
+	for i := range findings {
+		f := &findings[i]
+		s, ok := by[f.CheckName]
+		if !ok {
+			// Synthetic finding from a non-check source (e.g.
+			// bundle.load when the resolver fails). Surface as a
+			// new summary row at the end so the publisher sees it.
+			out = append(out, CheckResultSummary{Name: f.CheckName, Passed: true})
+			by[f.CheckName] = &out[len(out)-1]
+			s = by[f.CheckName]
+		}
+		switch f.Severity {
+		case marketplace.SeverityError:
+			s.ErrorCount++
+			s.Passed = false
+			s.WorstLevel = marketplace.SeverityError
+		case marketplace.SeverityWarn:
+			s.WarnCount++
+			s.Passed = false
+			if s.WorstLevel != marketplace.SeverityError {
+				s.WorstLevel = marketplace.SeverityWarn
+			}
+		case marketplace.SeverityInfo:
+			s.InfoCount++
+			// Info-only does NOT flip Passed — info findings are
+			// advisory by spec (e.g. "publisher unsigned but
+			// has no keys yet").
+			if s.WorstLevel == "" {
+				s.WorstLevel = marketplace.SeverityInfo
+			}
+		}
+	}
+	return out
 }
 
 // Persist writes the result to both sinks. The two writes are NOT
@@ -274,10 +367,15 @@ func (p *Pipeline) Persist(ctx context.Context, res *Result) error {
 		}
 	}
 	if p.State != nil {
+		checksJSON, err := encodeAutomatedChecks(res)
+		if err != nil {
+			return fmt.Errorf("review: encode automated_checks: %w", err)
+		}
 		in := marketplace.UpdateReviewStateInput{
-			VersionID:   res.VersionID,
-			Status:      res.Status,
-			ManualNotes: res.Notes,
+			VersionID:       res.VersionID,
+			Status:          res.Status,
+			ManualNotes:     res.Notes,
+			AutomatedChecks: checksJSON,
 		}
 		// Auto-system-attribution for terminal transitions the
 		// pipeline lands on its own (rejected when an error finding
@@ -293,6 +391,29 @@ func (p *Pipeline) Persist(ctx context.Context, res *Result) error {
 		}
 	}
 	return nil
+}
+
+// encodeAutomatedChecks builds the JSONB payload for the
+// automated_checks column. Schema is intentionally flat so
+// downstream consumers (publisher UI, ops dashboards) can read
+// `automated_checks.checks[*].name = 'signature'` without
+// jq-grep gymnastics. The findings table remains the canonical
+// per-finding store; this column is the rolled-up scan record
+// (one JSONB per scan) for the publisher dashboard's
+// "checks ran" pane.
+func encodeAutomatedChecks(res *Result) ([]byte, error) {
+	payload := struct {
+		RanAt         time.Time            `json:"ran_at"`
+		Status        marketplace.ReviewStatus `json:"status"`
+		WorstSeverity marketplace.Severity `json:"worst,omitempty"`
+		Checks        []CheckResultSummary `json:"checks"`
+	}{
+		RanAt:         res.RanAt,
+		Status:        res.Status,
+		WorstSeverity: res.WorstSeverity,
+		Checks:        res.CheckResults,
+	}
+	return json.Marshal(payload)
 }
 
 // nowFn returns p.Now() with a time.Now fallback.

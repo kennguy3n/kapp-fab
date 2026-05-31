@@ -39,17 +39,25 @@ type ReviewWorker struct {
 
 	interval   time.Duration
 	claimLimit int
+	workerID   string
 }
 
 // NewReviewWorker wires a worker. claimLimit caps the per-tick
 // batch size; 4 keeps tail latency low while still amortising the
 // DB round-trip cost across multiple versions.
 //
+// workerID is recorded on each claimed row's claimed_by column for
+// forensic debugging (which replica was running the pipeline when
+// a row went stale). It does NOT participate in any locking
+// decision — the atomic SKIP LOCKED claim + claimed_at lease
+// (see Store.ClaimSubmittedReviewVersions) enforces exactly-one-
+// claimer semantics. An empty workerID falls back to a sentinel.
+//
 // The pipeline argument MUST already have Source/Policy/Findings/
 // State sinks wired against the same Store this worker owns; the
 // worker only adds the polling + state-transition machinery on top
 // of review.Pipeline.Run + Persist.
-func NewReviewWorker(store *marketplace.Store, pipeline *review.Pipeline, logger *slog.Logger, interval time.Duration, claimLimit int) *ReviewWorker {
+func NewReviewWorker(store *marketplace.Store, pipeline *review.Pipeline, logger *slog.Logger, interval time.Duration, claimLimit int, workerID string) *ReviewWorker {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
@@ -65,6 +73,7 @@ func NewReviewWorker(store *marketplace.Store, pipeline *review.Pipeline, logger
 		logger:     logger,
 		interval:   interval,
 		claimLimit: claimLimit,
+		workerID:   workerID,
 	}
 }
 
@@ -91,7 +100,7 @@ func (w *ReviewWorker) Run(ctx context.Context) {
 }
 
 func (w *ReviewWorker) drain(ctx context.Context) {
-	ids, err := w.store.ClaimSubmittedReviewVersions(ctx, w.claimLimit)
+	ids, err := w.store.ClaimSubmittedReviewVersions(ctx, w.workerID, w.claimLimit)
 	if err != nil {
 		w.logger.Warn("review-worker: claim failed", slog.String("err", err.Error()))
 		return

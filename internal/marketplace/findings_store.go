@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -192,45 +193,90 @@ func (fs *FindingsStore) DeleteAllReviewFindings(ctx context.Context, versionID 
 	return nil
 }
 
-// ClaimSubmittedReviewVersions is the worker's polling query.
-// Returns up to `limit` versions in the `submitted` review state,
-// ordered oldest-first, with SKIP LOCKED so concurrent workers
-// don't conflict. Each row is returned to the worker WITHIN a
-// transaction it owns — the worker is responsible for advancing
-// the row's status and committing the tx. If the tx rolls back,
-// the SKIP LOCKED unblocks the row for the next poll cycle.
+// ReviewClaimLeaseDuration is how long a worker holds an
+// atomically-claimed review_state row before another worker can
+// re-claim it via the lease-expiry branch. Long enough to outlast
+// the 90s per-version pipeline timeout (so a healthy worker never
+// races itself) and short enough that an operator restart doesn't
+// strand work for hours.
+const ReviewClaimLeaseDuration = 10 * time.Minute
+
+// ClaimSubmittedReviewVersions is the worker's polling query. It
+// atomically claims up to `limit` versions in the `submitted`
+// review state by stamping claimed_at + claimed_by inside a single
+// UPDATE...RETURNING statement, ordered oldest-first.
 //
-// The worker uses dbutil.WithTx (no tenant GUC — review state is
-// global). Returns the locked transaction so the caller can
-// process the version IDs and commit at the end.
+// Why UPDATE...RETURNING (not SELECT FOR UPDATE SKIP LOCKED):
+// `s.pool.Query` runs the statement under an implicit per-statement
+// transaction whose locks release at end-of-statement. A bare
+// SELECT FOR UPDATE SKIP LOCKED would lose its locks the moment
+// the result rows reach the worker's Go code, leaving a window
+// where a concurrent worker (or the same worker on its next tick,
+// before pipeline.Persist advances the status) could re-claim the
+// same row. The canonical Postgres job-queue pattern is to fold
+// the claim AND the state-mutation that proves it claimed into a
+// single atomic UPDATE, which is what this method does.
+//
+// Lease expiry: rows whose claimed_at is older than the lease
+// duration (see ReviewClaimLeaseDuration) are eligible for
+// re-claim. This recovers work stranded by a crashed worker
+// without needing a separate sweeper job.
+//
+// workerID is recorded as claimed_by for forensic debugging
+// (which replica was running the pipeline when the row went
+// stale); it is NOT used for any locking decision — the
+// SKIP LOCKED + claimed_at lease enforces exactly-one-claimer.
 //
 // This is a Store-level method (not exposed via FindingsStore)
 // because it intentionally pulls from the review_state table, not
 // the findings table — but it lives here for proximity to the
 // pipeline's persistence flow.
-func (s *Store) ClaimSubmittedReviewVersions(ctx context.Context, limit int) ([]uuid.UUID, error) {
+func (s *Store) ClaimSubmittedReviewVersions(ctx context.Context, workerID string, limit int) ([]uuid.UUID, error) {
 	if limit <= 0 {
 		limit = 4
 	}
 	if limit > 64 {
 		limit = 64
 	}
-	// SELECT ... FOR UPDATE SKIP LOCKED is the canonical
-	// idempotent worker pattern. The same row will be re-emitted
-	// to the next poll if the worker's tx aborts.
+	if strings.TrimSpace(workerID) == "" {
+		// Forensic-only field; never gate the claim on it being
+		// non-empty, but normalise to a sentinel so the DB never
+		// stores an empty TEXT (which would obscure the
+		// "set by some worker, identity unknown" case).
+		workerID = "unknown-worker"
+	}
+	// The CTE picks the row IDs to claim inside SKIP LOCKED so
+	// concurrent workers don't conflict on the ORDER BY. The
+	// outer UPDATE flips claimed_at to now() atomically; rows
+	// thus disappear from the SKIP LOCKED candidate set for any
+	// concurrent claim in the same statement-window because
+	// their claimed_at is non-NULL.
 	//
-	// We do NOT advance the status here — the worker advances
-	// via UpdateReviewState after running the pipeline. This
-	// keeps Claim's contract simple ("give me work") and the
-	// transition writes funnel through the single audited path.
+	// Lease-expiry branch: status='submitted' AND claimed_at is
+	// either NULL (fresh row) or older than now() - lease (stale
+	// claim from a dead worker). Either way the row is up for
+	// grabs.
 	rows, err := s.pool.Query(ctx,
-		`SELECT extension_version_id
-		   FROM marketplace_extension_review_state
-		  WHERE status = $1
-		  ORDER BY created_at ASC
-		  FOR UPDATE SKIP LOCKED
-		  LIMIT $2`,
-		string(ReviewStatusSubmitted), limit,
+		`WITH candidates AS (
+		    SELECT extension_version_id
+		      FROM marketplace_extension_review_state
+		     WHERE status = $1
+		       AND (claimed_at IS NULL OR claimed_at < now() - $2::interval)
+		     ORDER BY created_at ASC
+		     FOR UPDATE SKIP LOCKED
+		     LIMIT $3
+		 )
+		 UPDATE marketplace_extension_review_state s
+		    SET claimed_at = now(),
+		        claimed_by = $4,
+		        updated_at = now()
+		   FROM candidates c
+		  WHERE s.extension_version_id = c.extension_version_id
+		 RETURNING s.extension_version_id`,
+		string(ReviewStatusSubmitted),
+		fmt.Sprintf("%d milliseconds", ReviewClaimLeaseDuration.Milliseconds()),
+		limit,
+		workerID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("marketplace: claim submitted versions: %w", err)
@@ -248,6 +294,37 @@ func (s *Store) ClaimSubmittedReviewVersions(ctx context.Context, limit int) ([]
 		return nil, err
 	}
 	return out, nil
+}
+
+// ReleaseReviewClaim clears the claim columns on a version. The
+// worker calls this from pipeline.Persist's commit path when the
+// state transition succeeds — the row's new status (automated_passed
+// / manual_review / rejected) means it will no longer match the
+// `status='submitted'` claim predicate anyway, but clearing
+// claimed_at on the transition keeps the column consistent with
+// the row's actual lifecycle and means an admin Rescan can re-set
+// the row to submitted without inheriting a stale claim.
+//
+// Also called by ResetReviewStateForRescan to drop the previous
+// claim atomically with the status reset.
+//
+// Idempotent: clearing an already-NULL claim is a no-op write.
+func (s *Store) ReleaseReviewClaim(ctx context.Context, versionID uuid.UUID) error {
+	if versionID == uuid.Nil {
+		return fmt.Errorf("%w: version id required", ErrNotFound)
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE marketplace_extension_review_state
+		    SET claimed_at = NULL,
+		        claimed_by = NULL,
+		        updated_at = now()
+		  WHERE extension_version_id = $1`,
+		versionID,
+	)
+	if err != nil {
+		return fmt.Errorf("marketplace: release review claim: %w", err)
+	}
+	return nil
 }
 
 // resolvePublisherKeysForVersion is the SignatureCheck's PolicyLoader.

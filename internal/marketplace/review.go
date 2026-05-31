@@ -73,13 +73,21 @@ type UpdateReviewStateInput struct {
 // UpdateReviewState transitions a review row. Enforces the same
 // transition graph the B7 pipeline assumes:
 //
-//	submitted        → automated_passed | rejected | withdrawn
+//	submitted        → automated_passed | manual_review | rejected | withdrawn
 //	automated_passed → manual_review    | rejected | withdrawn
 //	manual_review    → approved | rejected | withdrawn
 //	approved         → (terminal; only the AutomatedChecks JSON may
 //	                    be amended for forensic detail)
 //	rejected         → (terminal; same caveat)
 //	withdrawn        → (terminal)
+//
+// Note: the worker emits BOTH automated_passed (no findings or
+// info-only findings — clear pass) and manual_review (one or more
+// warn-level findings) directly out of submitted in a single state
+// transition. There is no intermediate "automated complete, awaiting
+// human" state between submitted and manual_review — automated_passed
+// is reserved for the case where the automated pipeline alone
+// produces a verdict the system trusts.
 //
 // A transition to a terminal state stamps ReviewedAt = now() if not
 // provided. Returns ErrNotFound if the version has no review state.
@@ -339,6 +347,12 @@ func (s *Store) ResetReviewStateForRescan(ctx context.Context, versionID uuid.UU
 		return fmt.Errorf("%w: cannot rescan terminal review state %q",
 			ErrConflict, current)
 	}
+	// Also clear claimed_at / claimed_by atomically with the
+	// status reset. Without this the previous worker's claim
+	// would persist on the row, and the next worker's tick
+	// would skip the row until the 10-minute lease lapses — an
+	// admin clicking Rescan expects work to start immediately,
+	// not 10 minutes later.
 	if _, err := tx.Exec(ctx,
 		`UPDATE marketplace_extension_review_state
 		    SET status = $1,
@@ -346,6 +360,8 @@ func (s *Store) ResetReviewStateForRescan(ctx context.Context, versionID uuid.UU
 		        manual_review_notes = NULL,
 		        reviewer = NULL,
 		        reviewed_at = NULL,
+		        claimed_at = NULL,
+		        claimed_by = NULL,
 		        updated_at = now()
 		  WHERE extension_version_id = $2`,
 		string(ReviewStatusSubmitted), versionID,
@@ -395,8 +411,17 @@ func reviewStatusTransitionAllowed(from, to ReviewStatus) bool {
 	}
 	switch from {
 	case ReviewStatusSubmitted:
+		// submitted→manual_review is the worker's path when one or
+		// more warn-level findings land: automated checks ran to
+		// completion but a human must decide. Without this edge the
+		// pipeline would have to two-step via automated_passed first,
+		// which would (a) confuse the audit trail (automated_passed
+		// would mean "checks ran cleanly" in one branch and "checks
+		// ran but produced warnings" in another) and (b) require a
+		// second UpdateReviewState call inside the same worker tick.
 		switch to {
-		case ReviewStatusAutomatedPassed, ReviewStatusRejected, ReviewStatusWithdrawn:
+		case ReviewStatusAutomatedPassed, ReviewStatusManualReview,
+			ReviewStatusRejected, ReviewStatusWithdrawn:
 			return true
 		}
 	case ReviewStatusAutomatedPassed:

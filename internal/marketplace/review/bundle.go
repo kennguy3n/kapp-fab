@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kennguy3n/kapp-fab/internal/marketplace"
@@ -131,9 +132,12 @@ func (s *HTTPSource) Fetch(ctx context.Context, version *marketplace.ExtensionVe
 }
 
 // MemorySource is the test-only SourceFetcher backed by an in-
-// memory table of (version.ID → bytes). Concurrent-safe (the
-// pipeline may resolve in parallel batches).
+// memory table of (version.ID → bytes). Concurrent-safe —
+// guarded by a RWMutex so a test that runs the pipeline against
+// multiple versions in parallel (or with -race) doesn't trip the
+// map-write detector.
 type MemorySource struct {
+	mu    sync.RWMutex
 	bytes map[string][]byte
 }
 
@@ -146,6 +150,8 @@ func NewMemorySource() *MemorySource {
 // Set registers the .tar.gz body for a version. Overwrites silently
 // (tests intentionally re-load with mutated bytes for tamper cases).
 func (m *MemorySource) Set(versionID string, body []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.bytes == nil {
 		m.bytes = make(map[string][]byte)
 	}
@@ -158,6 +164,8 @@ func (m *MemorySource) Fetch(_ context.Context, version *marketplace.ExtensionVe
 	if version == nil {
 		return nil, errors.New("review: nil version")
 	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if m.bytes == nil {
 		return nil, fmt.Errorf("review: no bytes registered for %s", version.ID)
 	}

@@ -500,7 +500,7 @@ func run() error {
 	// MaxBundleSizeBytes and the per-request timeout at 30 s.
 	mktStore := marketplace.NewStore(pool)
 	mktReviewPipeline := buildReviewPipeline(mktStore, 30*time.Second)
-	mktReviewWorker := NewReviewWorker(mktStore, mktReviewPipeline, slog.Default(), 5*time.Second, 4)
+	mktReviewWorker := NewReviewWorker(mktStore, mktReviewPipeline, slog.Default(), 5*time.Second, 4, workerIdentity())
 
 	return election.Run(ctx, func(leaderCtx context.Context) error {
 		return leadWorker(leaderCtx, leaderState{

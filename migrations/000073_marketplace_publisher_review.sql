@@ -287,3 +287,60 @@ COMMENT ON COLUMN marketplace_review_findings.code IS
     'Machine-parsable identifier for the specific finding within a check — e.g. permission.unused, ui.eval, ktype.namespace_mismatch. Stable across pipeline runs so publishers can write CI assertions against specific codes.';
 COMMENT ON COLUMN marketplace_review_findings.location IS
     'Best-effort location pointer for the finding: file path inside the bundle when applicable, otherwise '''' (empty string). Used in the natural-key UNIQUE so two findings with the same code but different locations remain distinct rows.';
+
+-- 5) marketplace_extension_review_state.claim_* columns -------------------
+--
+-- B7's review worker drains the queue by SELECTing rows in
+-- `submitted` and processing them. Without a transactional lease
+-- column the SELECT FOR UPDATE SKIP LOCKED would run inside the
+-- pool's per-statement transaction and the row locks would release
+-- at end-of-statement, leaving a leader-handover or rapid-retick
+-- race where two workers process the same version concurrently.
+--
+-- We add claimed_at + claimed_by to convert the SELECT-then-process
+-- pattern into an atomic UPDATE...RETURNING (the canonical Postgres
+-- job-queue pattern):
+--
+--   UPDATE ... SET claimed_at = now(), claimed_by = $worker
+--    WHERE id IN (
+--        SELECT ... FROM ... WHERE status='submitted'
+--          AND (claimed_at IS NULL OR claimed_at < now()-interval)
+--        FOR UPDATE SKIP LOCKED
+--        LIMIT $batch
+--    )
+--   RETURNING ...
+--
+-- The atomic UPDATE inside the SKIP LOCKED scope is what gives
+-- exactly-one-claimer semantics: the row's claimed_at flips
+-- non-NULL inside the same statement that's holding the lock, so
+-- a concurrent worker's SKIP LOCKED scan sees either the locked
+-- row (skipped) or the post-update row (filtered out by
+-- claimed_at IS NULL guard).
+--
+-- Lease expiry: a worker that claims a row then crashes mid-pipeline
+-- leaves the row with claimed_at set and status still `submitted`.
+-- The expiry clause (`claimed_at < now() - interval`) means the
+-- next worker tick re-claims it after the lease lapses. The lease
+-- is set to 10 minutes in code: longer than the 90s per-version
+-- pipeline timeout (so a healthy worker never races itself) and
+-- short enough that operator restarts don't strand work for hours.
+--
+-- claimed_by stores the worker's hostname for forensic debugging
+-- (which replica was handling this version when it stalled). Not
+-- used for locking decisions — SKIP LOCKED handles that.
+ALTER TABLE marketplace_extension_review_state
+    ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+
+-- Partial index: only rows that have been claimed are interesting
+-- for the lease-expiry scan; the vast majority of rows have
+-- claimed_at = NULL and we don't want to bloat the index with
+-- them.
+CREATE INDEX IF NOT EXISTS marketplace_extension_review_state_claimed_at_idx
+    ON marketplace_extension_review_state (claimed_at)
+    WHERE claimed_at IS NOT NULL;
+
+COMMENT ON COLUMN marketplace_extension_review_state.claimed_at IS
+    'Set to now() when the review worker atomically claims this version for processing (status=''submitted'' + claimed_at IS NULL guard). Cleared back to NULL by the worker''s state-transition write at the end of pipeline.Persist. A claimed_at older than the lease (10 minutes) means the claiming worker crashed; the next tick re-claims the row.';
+COMMENT ON COLUMN marketplace_extension_review_state.claimed_by IS
+    'Hostname of the worker currently holding the claim. Forensic-only — SKIP LOCKED + the claimed_at lease enforce exactly-one-claimer; claimed_by tells the operator which replica was running the pipeline when the row went stale.';
