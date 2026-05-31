@@ -134,6 +134,47 @@ func TestValidate_ArrayItems(t *testing.T) {
 	}
 }
 
+// TestValidate_StringLengthUsesRuneCount locks in the Devin Review
+// BUG_0001 fix on PR #130 — minLength/maxLength must count Unicode
+// code points (per JSON Schema draft 2020-12 §6.3.1-6.3.2), not
+// UTF-8 byte length. The pre-fix `len(s)` would have made
+// minLength too lenient and maxLength too strict for any non-ASCII
+// input.
+func TestValidate_StringLengthUsesRuneCount(t *testing.T) {
+	// 3 runes ("🎉🎉🎉") encode as 12 UTF-8 bytes. Pre-fix this
+	// would pass minLength: 12 (byte count) but is actually 3
+	// characters — should FAIL minLength: 4 and PASS minLength: 3.
+	schema := []byte(`{"type":"string","minLength":4,"maxLength":10}`)
+	v, err := NewValidator(schema)
+	if err != nil {
+		t.Fatalf("NewValidator: %v", err)
+	}
+	// 3 emoji = 3 runes < minLength=4: must FAIL post-fix.
+	// Pre-fix: 12 bytes > minLength=4 → passes incorrectly.
+	if err := v.ValidateRaw([]byte(`"🎉🎉🎉"`)); !errors.Is(err, ErrValidation) {
+		t.Errorf("3-emoji string with minLength=4: want ValidationError, got %v", err)
+	}
+	// 5 ASCII = 5 runes & 5 bytes — passes either way.
+	if err := v.ValidateRaw([]byte(`"hello"`)); err != nil {
+		t.Errorf("5-char string with minLength=4: %v", err)
+	}
+	// 10 emoji = 10 runes & 40 bytes — passes maxLength=10 post-fix,
+	// pre-fix would FAIL because 40 bytes > maxLength=10.
+	if err := v.ValidateRaw([]byte(`"🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉"`)); err != nil {
+		t.Errorf("10-emoji string with maxLength=10: want pass (10 runes), got %v", err)
+	}
+	// 11 emoji = 11 runes — must FAIL maxLength=10.
+	if err := v.ValidateRaw([]byte(`"🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉"`)); !errors.Is(err, ErrValidation) {
+		t.Errorf("11-emoji string with maxLength=10: want ValidationError, got %v", err)
+	}
+	// Mixed CJK + ASCII: "こんにちは" is 5 runes (5 hiragana,
+	// 15 UTF-8 bytes). Must PASS minLength=4, maxLength=10.
+	// Pre-fix would FAIL maxLength=10 because 15 bytes > 10.
+	if err := v.ValidateRaw([]byte(`"こんにちは"`)); err != nil {
+		t.Errorf("5-rune CJK with min/max=4/10: want pass, got %v", err)
+	}
+}
+
 func TestValidate_Pattern(t *testing.T) {
 	schema := []byte(`{"type": "string", "pattern": "^[a-z]+$"}`)
 	v, err := NewValidator(schema)

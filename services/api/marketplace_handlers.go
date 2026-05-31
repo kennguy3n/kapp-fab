@@ -43,17 +43,18 @@ import (
 //
 // Sentinel-error translation (mapping defined in writeError):
 //
-//	marketplace.ErrNotFound        → 404
-//	marketplace.ErrConflict        → 409
-//	marketplace.ErrInvalidManifest → 400
-//	marketplace.ErrBundleTooLarge  → 413
-//	marketplace.ErrYanked          → 409
-//	bundle.ErrBundleNotFound       → 502
-//	bundle.ErrBundleFetchFailed    → 502
-//	bundle.ErrBundleMalformed      → 422
-//	bundle.ErrBundleExceedsLimit   → 413
-//	bundle.ErrBundleTransportInsecure → 400
-//	runtime.ErrPreInstallRejected  → 422 (publisher refused)
+//	marketplace.ErrNotFound            → 404
+//	marketplace.ErrConflict            → 409
+//	marketplace.ErrInvalidManifest     → 400
+//	marketplace.ErrBundleTooLarge      → 413
+//	marketplace.ErrBundleHashMismatch  → 502 (upstream integrity failure)
+//	marketplace.ErrYanked              → 409
+//	bundle.ErrBundleNotFound           → 502
+//	bundle.ErrBundleFetchFailed        → 502
+//	bundle.ErrBundleMalformed          → 422
+//	bundle.ErrBundleExceedsLimit       → 413
+//	bundle.ErrBundleTransportInsecure  → 400
+//	runtime.ErrPreInstallRejected      → 422 (publisher refused)
 //
 // Anything else collapses to 500.
 type marketplaceHandlers struct {
@@ -873,7 +874,14 @@ func (h *marketplaceHandlers) writeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, bundle.ErrBundleMalformed):
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 	case errors.Is(err, bundle.ErrBundleNotFound),
-		errors.Is(err, bundle.ErrBundleFetchFailed):
+		errors.Is(err, bundle.ErrBundleFetchFailed),
+		errors.Is(err, marketplace.ErrBundleHashMismatch):
+		// ErrBundleHashMismatch is an upstream-integrity failure:
+		// the CDN delivered bytes that don't match the catalog-
+		// recorded SHA-256. Surfaces as 502 alongside the other
+		// bundle-fetch failures because the operator's request
+		// was well-formed — the upstream object store served bad
+		// bytes.
 		http.Error(w, err.Error(), http.StatusBadGateway)
 	case errors.Is(err, runtime.ErrPreInstallRejected):
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)

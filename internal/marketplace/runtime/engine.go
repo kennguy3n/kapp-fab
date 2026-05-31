@@ -776,6 +776,32 @@ func (e *Engine) UpdateSettings(ctx context.Context, req *UpdateSettingsRequest)
 		return out, nil
 	}
 
+	// Refuse to dispatch the post_update_settings hook with an
+	// empty signing secret. The Install path always writes a
+	// non-empty secret (engine.go:269) and Uninstall hard-errors
+	// when the column is empty (loadSigningSecret returns an
+	// error). The same invariant must hold here: an empty
+	// SigningSecret would cause the extension's webhook receiver
+	// to either reject the request as unsigned or accept an
+	// unverifiable payload — both are worse than skipping the
+	// hook entirely. Record the skip as a structured
+	// LifecycleResult so callers (and the dispatch_log) see the
+	// reason, but do not roll back the settings write that has
+	// already committed (best-effort hook contract).
+	//
+	// This case fires only for legacy installs created via direct
+	// SQL or test fixtures bypassing Engine.Install; the
+	// production install path always writes a secret. Devin
+	// Review ANALYSIS_0001 on PR #130.
+	if secret == "" {
+		out.PostUpdateSettingsResult = &LifecycleResult{
+			Aborted:     true,
+			AbortReason: "missing signing secret on install — post_update_settings hook skipped",
+			Err:         fmt.Errorf("runtime: engine: install %s has empty signing secret", req.InstallationID),
+		}
+		return out, nil
+	}
+
 	// Best-effort post_update_settings dispatch. Failures land in
 	// the dispatch log but do not roll back the settings change.
 	body, err := MarshalLifecyclePayload(map[string]any{

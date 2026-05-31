@@ -49,6 +49,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -525,16 +526,23 @@ func (n *schemaNode) validateArray(arr []any, path string, errs *[]error) {
 }
 
 func (n *schemaNode) validateString(s, path string, errs *[]error) {
-	if n.minLength != nil && len(s) < *n.minLength {
+	// JSON Schema draft 2020-12 defines minLength/maxLength as the number
+	// of Unicode code points ("characters"), not UTF-8 byte length. For
+	// ASCII-only inputs the two are identical, but anything with multi-
+	// byte characters (emoji, CJK, accented Latin) would otherwise see
+	// minLength check too lenient and maxLength too strict. utf8.
+	// RuneCountInString is the canonical Go equivalent.
+	runes := utf8.RuneCountInString(s)
+	if n.minLength != nil && runes < *n.minLength {
 		*errs = append(*errs, &ValidationError{
 			Path:    path,
-			Message: fmt.Sprintf("string length %d < minLength %d", len(s), *n.minLength),
+			Message: fmt.Sprintf("string length %d < minLength %d", runes, *n.minLength),
 		})
 	}
-	if n.maxLength != nil && len(s) > *n.maxLength {
+	if n.maxLength != nil && runes > *n.maxLength {
 		*errs = append(*errs, &ValidationError{
 			Path:    path,
-			Message: fmt.Sprintf("string length %d > maxLength %d", len(s), *n.maxLength),
+			Message: fmt.Sprintf("string length %d > maxLength %d", runes, *n.maxLength),
 		})
 	}
 	if n.pattern != nil && !n.pattern.MatchString(s) {

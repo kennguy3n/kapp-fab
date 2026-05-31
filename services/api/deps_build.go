@@ -42,9 +42,9 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
 	"github.com/kennguy3n/kapp-fab/internal/manufacturing"
-"github.com/kennguy3n/kapp-fab/internal/marketplace"
-"github.com/kennguy3n/kapp-fab/internal/marketplace/bundle"
-mktruntime "github.com/kennguy3n/kapp-fab/internal/marketplace/runtime"
+	"github.com/kennguy3n/kapp-fab/internal/marketplace"
+	"github.com/kennguy3n/kapp-fab/internal/marketplace/bundle"
+	mktruntime "github.com/kennguy3n/kapp-fab/internal/marketplace/runtime"
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/print"
@@ -301,7 +301,20 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// inside HTTPResolverOptions is generous enough for
 	// cold-cache CDN fetches without stalling install requests
 	// indefinitely. Tests inject bundle.NewInMemoryResolver.
-	marketplaceResolver := bundle.NewHTTPResolver(bundle.HTTPResolverOptions{})
+	//
+	// The HTTPResolver is wrapped in a CachingResolver so the
+	// install-time bundle fetch primes a per-process LRU; later
+	// PATCH /installations/{id}/settings calls only need
+	// SettingsSchemaJSON, which the cache serves without
+	// re-downloading the full .tar.gz from the CDN. Bundles are
+	// immutable post-publish (000068 BEFORE UPDATE trigger), so
+	// the cache has no semantic-staleness window. The default
+	// LRU bound (256 entries) gives ample headroom for the
+	// in-use working set on any single replica.
+	marketplaceResolver := bundle.NewCachingResolver(
+		bundle.NewHTTPResolver(bundle.HTTPResolverOptions{}),
+		bundle.DefaultResolverCacheSize,
+	)
 	mph := newMarketplaceHandlers(marketplaceStore, marketplaceEngine, marketplaceResolver)
 
 	formStore := forms.NewStore(pool, ktypeRegistry, recordStore)
