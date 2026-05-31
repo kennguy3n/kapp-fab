@@ -405,13 +405,15 @@ func (h *marketplaceHandlers) getMyPublisherExtensionInstallStats(w http.Respons
 			http.StatusServiceUnavailable)
 		return
 	}
-	installs, err := h.store.ListInstallationsByVersion(r.Context(), h.adminPool, uuid.Nil)
-	// uuid.Nil to ListInstallationsByVersion would scan the
-	// entire table — explicitly fan out per-version below
-	// instead.
-	_ = installs
-	_ = err
-
+	// Fan out per-version: ListInstallationsByVersion takes a
+	// specific version ID (it rejects uuid.Nil at the store
+	// layer) so we cannot ask for "all versions of this
+	// extension" in one query. ListVersions(extID, true) already
+	// scopes us to the extension, after which one cross-tenant
+	// installations query per version composes the dashboard
+	// view. Popular extensions tend to have few live versions
+	// (most installs concentrate on the latest one or two), so
+	// the fan-out cost is bounded.
 	versions, err := h.store.ListVersions(r.Context(), extID, true)
 	if err != nil {
 		h.writeError(w, err)

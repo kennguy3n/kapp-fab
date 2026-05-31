@@ -49,6 +49,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -97,11 +99,15 @@ var ErrBundleTooLarge = marketplace.ErrBundleTooLarge
 // IO failure.
 //
 // Backends:
-//   - MemoryStore: in-process map for tests and bootstrap deploys.
+//   - MemoryStore: in-process map for tests.
+//   - DiskStore: filesystem-backed for single-binary deploys with
+//     persistent storage (e.g. an EBS volume, NFS mount, or a
+//     local dev box). Survives process restart, which MemoryStore
+//     does not. Selected via KAPP_MARKETPLACE_BUNDLE_DIR.
 //   - S3Store (TODO B8.1): wraps internal/files/s3.go for the
-//     production rollout. Until then production deploys use the
-//     MemoryStore via the same wiring — fine for staging where
-//     the worker and API share a process.
+//     multi-replica production rollout. Until that lands, the
+//     production posture is DiskStore on a persistent volume; the
+//     MemoryStore is dev/test only.
 type ObjectStore interface {
 	Put(ctx context.Context, key, contentType string, data []byte) error
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
@@ -178,6 +184,168 @@ func (m *MemoryStore) Delete(_ context.Context, key string) error {
 	return nil
 }
 
+// DiskStore is the filesystem-backed ObjectStore used by
+// production single-binary deploys that mount a persistent volume
+// (EBS / NFS / local SSD) under KAPP_MARKETPLACE_BUNDLE_DIR. It
+// survives process restart, which MemoryStore does not — the
+// motivating Devin Review finding flagged that swapping a deploy
+// process would silently lose every uploaded bundle.
+//
+// Layout: bytes are written under {root}/{StorageKeyForHash(hash)},
+// e.g. {root}/bundles/sha256/ab/abcd….tar.gz. The two-byte
+// prefix sharding keeps directory listings bounded for filesystems
+// where listing a million-entry directory is expensive.
+//
+// Concurrency: Put is implemented as write-to-tmp-then-rename so
+// a partial write never produces a half-formed object visible to
+// Get. Two writers racing on the same key both produce the same
+// bytes (content-addressed) so the rename is safe.
+//
+// This is intentionally simple — no compression, no encryption,
+// no signed URLs. v1 is "write the bytes to a file, read them
+// back later." S3Store remains the multi-replica answer.
+type DiskStore struct {
+	root string
+}
+
+// NewDiskStore constructs a DiskStore rooted at dir. The directory
+// is created (with 0o750 perms) if it does not exist; if dir is
+// empty the constructor returns an error so the operator does not
+// silently write bundles to the process CWD.
+func NewDiskStore(dir string) (*DiskStore, error) {
+	if dir == "" {
+		return nil, fmt.Errorf("bundlestore: DiskStore requires a non-empty root directory")
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("bundlestore: resolve disk root %q: %w", dir, err)
+	}
+	if err := os.MkdirAll(abs, 0o750); err != nil {
+		return nil, fmt.Errorf("bundlestore: mkdir disk root %q: %w", abs, err)
+	}
+	return &DiskStore{root: abs}, nil
+}
+
+// Root returns the absolute directory the DiskStore writes under.
+// Exposed for observability / dashboard surfaces; never used to
+// build user-visible URLs.
+func (d *DiskStore) Root() string { return d.root }
+
+// keyPath joins the key onto the store root. The key is
+// canonicalised by StorageKeyForHash so it does not contain `..`
+// or absolute prefixes, but Clean is applied defensively and the
+// result is asserted to remain inside root so a future key-format
+// change cannot escape the directory.
+func (d *DiskStore) keyPath(key string) (string, error) {
+	joined := filepath.Join(d.root, filepath.Clean("/"+key))
+	rel, err := filepath.Rel(d.root, joined)
+	if err != nil {
+		return "", fmt.Errorf("bundlestore: resolve disk key %q: %w", key, err)
+	}
+	if strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+		return "", fmt.Errorf("bundlestore: disk key %q escapes root", key)
+	}
+	return joined, nil
+}
+
+// Put writes data under key using a write-to-tmp + rename for
+// atomicity. A second Put with the same key is treated as a no-op
+// to match the MemoryStore contract — content-addressed bytes are
+// immutable so the bytes on disk and the bytes in `data` are
+// guaranteed identical.
+func (d *DiskStore) Put(_ context.Context, key, _ string, data []byte) error {
+	dst, err := d.keyPath(key)
+	if err != nil {
+		return err
+	}
+	if _, statErr := os.Stat(dst); statErr == nil {
+		return nil // idempotent
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("bundlestore: stat disk key %q: %w", key, statErr)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+		return fmt.Errorf("bundlestore: mkdir disk shard: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".put-*")
+	if err != nil {
+		return fmt.Errorf("bundlestore: create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("bundlestore: write temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("bundlestore: fsync temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("bundlestore: close temp: %w", err)
+	}
+	if err := os.Rename(tmpName, dst); err != nil {
+		return fmt.Errorf("bundlestore: rename to %q: %w", dst, err)
+	}
+	cleanup = false
+	return nil
+}
+
+// Get opens the file under key for streaming read. Returns
+// ErrBundleNotFound if the file does not exist.
+func (d *DiskStore) Get(_ context.Context, key string) (io.ReadCloser, error) {
+	dst, err := d.keyPath(key)
+	if err != nil {
+		return nil, err
+	}
+	// gosec G304 — dst is constrained by keyPath's root assertion
+	// above. The caller cannot supply an arbitrary path.
+	f, err := os.Open(dst) // #nosec G304
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrBundleNotFound
+		}
+		return nil, fmt.Errorf("bundlestore: open disk key %q: %w", key, err)
+	}
+	return f, nil
+}
+
+// Exists probes whether key is present. Used by the upload
+// handler's metadata-row + bytes consistency check.
+func (d *DiskStore) Exists(_ context.Context, key string) (bool, error) {
+	dst, err := d.keyPath(key)
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Stat(dst)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("bundlestore: stat disk key %q: %w", key, err)
+}
+
+// Delete removes the file under key. Missing file is a no-op so
+// GC re-runs are idempotent. The parent shard directory is left
+// in place (cheap, avoids racing with concurrent Puts of other
+// hashes that happen to share a prefix).
+func (d *DiskStore) Delete(_ context.Context, key string) error {
+	dst, err := d.keyPath(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("bundlestore: remove disk key %q: %w", key, err)
+	}
+	return nil
+}
+
 // BundleUpload is the metadata row for one stored bundle. ID is
 // generated server-side; ContentHash is the SHA-256 hex of the
 // bytes and is the primary natural key (UNIQUE in SQL).
@@ -211,25 +379,53 @@ type UploadInput struct {
 
 // Store wraps an ObjectStore with the metadata table that lets us
 // dedup, GC, and audit uploads. Construct one per process via
-// NewStore.
+// NewStore. The optional admin pool, set via WithAdminPool, is
+// used only by GCUnreferenced — the read/insert/update path goes
+// through the primary pool.
 type Store struct {
-	pool  *pgxpool.Pool
-	objs  ObjectStore
-	nower func() time.Time
+	pool      *pgxpool.Pool
+	adminPool *pgxpool.Pool // optional, required by GCUnreferenced
+	objs      ObjectStore
+	nower     func() time.Time
 }
 
 // NewStore wires a Store over the shared pool and an ObjectStore.
-// The pool MUST have BYPASSRLS effective privileges because the
-// marketplace_bundle_uploads table is platform-global (no
-// tenant_id column); a per-tenant pool would observe nothing.
-// deps_build constructs this with the same admin pool used by the
-// review worker's findings_store.
+// The pool can be the kapp_app pool — marketplace_bundle_uploads
+// has no tenant_id column (platform-global table, see
+// migrations/000077) so RLS does not apply to it. SELECT / INSERT
+// / UPDATE all run through this pool.
+//
+// DELETE requires kapp_admin (granted in migrations/000077:166)
+// and is therefore routed through an optional admin pool wired by
+// WithAdminPool — calling GCUnreferenced without that is rejected
+// with ErrAdminPoolRequired rather than failing with an opaque
+// "permission denied" SQL error inside the sweep.
 func NewStore(pool *pgxpool.Pool, objs ObjectStore) *Store {
 	if pool == nil || objs == nil {
 		panic("bundlestore: NewStore requires non-nil pool and ObjectStore")
 	}
 	return &Store{pool: pool, objs: objs, nower: time.Now}
 }
+
+// WithAdminPool wires the BYPASSRLS / kapp_admin pool used by
+// GCUnreferenced for DELETE. Idempotent; passing nil clears the
+// wired pool. Returns s so the caller can chain.
+func (s *Store) WithAdminPool(adminPool *pgxpool.Pool) *Store {
+	if s == nil {
+		return nil
+	}
+	s.adminPool = adminPool
+	return s
+}
+
+// ErrAdminPoolRequired is returned by GCUnreferenced when the
+// admin pool has not been wired via WithAdminPool. The migration
+// grants DELETE on marketplace_bundle_uploads to kapp_admin only
+// (see migrations/000077:166); running the sweep through the
+// regular kapp_app pool would fail with an opaque "permission
+// denied" SQL error. Surface a clear failure at the entrypoint
+// instead, so the operator wires the admin pool intentionally.
+var ErrAdminPoolRequired = errors.New("bundlestore: admin pool required for GC (only kapp_admin has DELETE)")
 
 // SetClock swaps the internal clock for tests. nil restores time.Now.
 func (s *Store) SetClock(f func() time.Time) {
@@ -430,16 +626,33 @@ func (s *Store) Fetch(ctx context.Context, hash string) (*BundleUpload, io.ReadC
 // PublishVersion insert; a failed PublishVersion leaves the row
 // unreferenced and the GC sweeper reclaims it after
 // OrphanRetention.
+//
+// Returns marketplace.ErrNotFound when no upload row matches the
+// hash — this happens legitimately when the publisher hosts the
+// bundle on their own CDN (no marketplace upload was ever
+// recorded). Callers should treat that case as best-effort and
+// continue; an unknown hash is not an error from the publish
+// pipeline's perspective because the version row's FK to the
+// extension is the real GC anchor, not referenced_at on a
+// possibly-absent upload row.
 func (s *Store) MarkReferenced(ctx context.Context, hash string) error {
 	if hash == "" {
 		return fmt.Errorf("bundlestore: hash required")
 	}
-	_, err := s.pool.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE marketplace_bundle_uploads
 		   SET referenced_at = COALESCE(referenced_at, now())
 		 WHERE content_hash = $1`, hash)
 	if err != nil {
 		return fmt.Errorf("bundlestore: mark referenced: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Bundle was not uploaded through us — publisher hosts it
+		// on their own CDN. The caller (publisher-version handler)
+		// is already swallowing this as best-effort; surfacing
+		// ErrNotFound makes the contract honest and lets a future
+		// caller (e.g. an admin tool) distinguish.
+		return marketplace.ErrNotFound
 	}
 	return nil
 }
@@ -511,12 +724,21 @@ type GCResult struct {
 // back the metadata delete because re-inserting metadata for an
 // object that may not exist would mislead future readers.
 func (s *Store) GCUnreferenced(ctx context.Context, minAge time.Duration) (*GCResult, error) {
+	// Migration 000077 grants DELETE only to kapp_admin; the
+	// primary pool is kapp_app so a DELETE here would fail with
+	// "permission denied" mid-sweep. Refuse upfront so the
+	// operator wires the admin pool explicitly. The select query
+	// is also routed through the admin pool so the scan and the
+	// delete observe identical visibility.
+	if s.adminPool == nil {
+		return nil, ErrAdminPoolRequired
+	}
 	if minAge <= 0 {
 		minAge = OrphanRetention
 	}
 	cutoff := s.nower().UTC().Add(-minAge)
 
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.adminPool.Query(ctx, `
 		SELECT id, storage_key, size_bytes
 		  FROM marketplace_bundle_uploads
 		 WHERE referenced_at IS NULL
@@ -546,7 +768,7 @@ func (s *Store) GCUnreferenced(ctx context.Context, minAge time.Duration) (*GCRe
 
 	result := &GCResult{Scanned: len(candidates)}
 	for _, c := range candidates {
-		tag, delErr := s.pool.Exec(ctx, `
+		tag, delErr := s.adminPool.Exec(ctx, `
 			DELETE FROM marketplace_bundle_uploads
 			 WHERE id = $1
 			   AND referenced_at IS NULL

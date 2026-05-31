@@ -210,7 +210,16 @@ func (h *marketplaceHandlers) uploadPublisherBundle(w http.ResponseWriter, r *ht
 	// then attempt to publish under B via a separate compromised
 	// account. Rejecting at upload time is defence-in-depth on
 	// top of the PublishVersion gate (which we add separately).
-	if rb.Manifest != nil && rb.Manifest.Publisher != "" && rb.Manifest.Publisher != pub.Slug {
+	//
+	// EqualFold mirrors the version-submit (publish) handler and
+	// the dashboard's requirePublisherOwnsExtension — keeping all
+	// three slug-equality gates on the same comparator. publisher
+	// slugs are regex-restricted to `^[a-z][a-z0-9_]{2,31}$`
+	// (lowercase only, see internal/marketplace/manifest.go) so
+	// the two callers cannot differ in practice today; matching
+	// case-insensitively is defence-in-depth against a future
+	// loosening of the slug constraint.
+	if rb.Manifest != nil && rb.Manifest.Publisher != "" && !strings.EqualFold(rb.Manifest.Publisher, pub.Slug) {
 		http.Error(w, fmt.Sprintf(
 			"manifest publisher %q does not match upload publisher %q",
 			rb.Manifest.Publisher, pub.Slug,

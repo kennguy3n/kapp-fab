@@ -191,14 +191,48 @@ func packDir(dir string) ([]byte, error) {
 		if err != nil {
 			return err
 		}
+		name := d.Name()
 		if d.IsDir() {
+			// Prune VCS metadata + common build-output dirs at
+			// the directory level. WalkDir's file-name switch
+			// further down only runs for regular files (the
+			// IsDir() guard returns first), so a ".git"
+			// directory would otherwise be recursed into and
+			// every blob inside would land in the bundle.
+			// That is a triple hazard:
+			//   1. security — git history can contain
+			//      secrets the publisher believed were
+			//      scrubbed (force-pushed branches, removed
+			//      lines in `git log -p`);
+			//   2. size — .git can easily exceed the 10 MiB
+			//      MaxBundleSizeBytes cap on a repo of any
+			//      age;
+			//   3. determinism — .git contents (HEAD ref,
+			//      pack files, reflog) vary across clones, so
+			//      the "same source tree → same hash"
+			//      contract documented above breaks.
+			// `path != dir` guards against a publisher
+			// accidentally pointing `pack` at a literal ".git"
+			// directory — odd but we should at least error
+			// loudly instead of silently producing an empty
+			// bundle.
+			if path != dir {
+				switch name {
+				case ".git", ".hg", ".svn",
+					"node_modules", "__pycache__",
+					"dist", "build", "target",
+					".idea", ".vscode":
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 		// Skip macOS / editor / VCS noise that should never
-		// ship inside a bundle.
-		name := d.Name()
+		// ship inside a bundle. .gitignore is included
+		// deliberately — it conveys intent and is often
+		// referenced from the manifest.
 		switch name {
-		case ".DS_Store", "Thumbs.db", ".git", ".gitignore":
+		case ".DS_Store", "Thumbs.db":
 			return nil
 		}
 		if strings.HasSuffix(name, "~") || strings.HasSuffix(name, ".swp") {

@@ -146,7 +146,11 @@ func TestB8BundleStore_MarkReferencedAndGC(t *testing.T) {
 	pub := mustCreatePublisher(t, ctx, pubs, "b8_gc")
 	alice := mustCreateUser(t, ctx, h, "alice_b8_gc")
 	objs := bundlestore.NewMemoryStore()
-	bs := bundlestore.NewStore(h.pool, objs)
+	// GCUnreferenced requires an admin pool (migration grants
+	// DELETE only to kapp_admin). The test harness pool is
+	// BYPASSRLS / superuser so it has the same effective
+	// privileges in tests.
+	bs := bundlestore.NewStore(h.pool, objs).WithAdminPool(h.pool)
 
 	bodyKeep := []byte("KEEP — will be referenced")
 	bodyGC := []byte("GC — will stay orphan, swept")

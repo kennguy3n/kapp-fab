@@ -184,6 +184,78 @@ permissions_required: []
 	}
 }
 
+// TestPackDirSkipsVCSAndBuildDirs pins the BUG_0001 fix from
+// Devin Review: nested .git / .hg / .svn / node_modules / dist /
+// build / target / __pycache__ / .idea / .vscode directories MUST
+// NOT have their contents land in the produced tar.gz. Each is a
+// vector for either (a) secret leakage (.git history can contain
+// committed-then-removed credentials), (b) determinism breakage
+// (.git contents vary across clones; node_modules timestamps),
+// or (c) bundle bloat (any of build/dist/target/node_modules can
+// easily exceed the 10 MiB cap).
+func TestPackDirSkipsVCSAndBuildDirs(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "kapp-extension.yaml"), []byte("manifest body"))
+	mustWrite(t, filepath.Join(dir, "ui_ext", "icon.png"), []byte("png"))
+
+	// Plant decoys in every directory the packer must prune.
+	// HEAD is the canonical .git contents fingerprint; pack file
+	// is the file-most-likely-to-contain-secrets; node_modules
+	// is the size hazard. The decoy bytes are the same per dir
+	// so a leak would surface clearly in the assertion.
+	for _, sub := range []string{
+		".git", ".hg", ".svn",
+		"node_modules", "__pycache__",
+		"dist", "build", "target",
+		".idea", ".vscode",
+	} {
+		mustWrite(t, filepath.Join(dir, sub, "DO_NOT_PACK"), []byte("LEAK"))
+		mustWrite(t, filepath.Join(dir, sub, "nested", "DEEP_LEAK"), []byte("LEAK"))
+	}
+
+	body, err := packDir(dir)
+	if err != nil {
+		t.Fatalf("packDir: %v", err)
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("gzip: %v", err)
+	}
+	tr := tar.NewReader(gz)
+	got := map[string]bool{}
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar.Next: %v", err)
+		}
+		got[hdr.Name] = true
+	}
+	if !got["bundle/kapp-extension.yaml"] {
+		t.Fatalf("expected bundle/kapp-extension.yaml present, got %v", got)
+	}
+	if !got["bundle/ui_ext/icon.png"] {
+		t.Fatalf("expected bundle/ui_ext/icon.png present, got %v", got)
+	}
+	for name := range got {
+		// any path under the pruned dirs is a leak. Anchor on
+		// the substring so both top-level and nested paths
+		// trigger.
+		for _, leak := range []string{
+			"/.git/", "/.hg/", "/.svn/",
+			"/node_modules/", "/__pycache__/",
+			"/dist/", "/build/", "/target/",
+			"/.idea/", "/.vscode/",
+		} {
+			if strings.Contains(name, leak) {
+				t.Errorf("BUG_0001 regression: %q leaked through %q prune", name, leak)
+			}
+		}
+	}
+}
+
 // --- helpers -------------------------------------------------------------
 
 func mapKeys(m map[string]string) []string {

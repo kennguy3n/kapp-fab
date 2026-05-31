@@ -117,6 +117,24 @@ type Config struct {
 	// localhost:8080" to match the local LISTEN_ADDR.
 	MarketplaceBundleURLBase string
 
+	// MarketplaceBundleDir is the filesystem path under which the
+	// marketplace-hosted bundle storage backend persists uploaded
+	// tar.gz bytes. Sourced from KAPP_MARKETPLACE_BUNDLE_DIR.
+	//
+	// Empty value selects the in-process MemoryStore — fine for
+	// unit tests and ephemeral dev boots but NOT for production:
+	// bytes are lost on every process restart, leaving the
+	// metadata row dangling and the install-time resolver
+	// returning 404 for previously-uploaded bundles. Single-
+	// binary production deploys should mount a persistent volume
+	// (EBS / NFS / local SSD) and point this env var at it; the
+	// DiskStore backend writes bytes there and survives restart.
+	// The eventual multi-replica answer is S3Store (TODO B8.1)
+	// which will key off a separate KAPP_MARKETPLACE_BUNDLE_S3_*
+	// set; until then DiskStore on a shared volume is the
+	// recommended production posture.
+	MarketplaceBundleDir string
+
 	// Env is the operator-supplied deployment marker emitted into
 	// every structured log line ("dev", "staging", "production").
 	// Sourced from KAPP_ENV. Empty values default to "dev" so a
@@ -415,6 +433,7 @@ func LoadConfig() (*Config, error) {
 		RequireRedis:     getenvBool("KAPP_REQUIRE_REDIS", false),
 
 		MarketplaceBundleURLBase: strings.TrimRight(os.Getenv("KAPP_MARKETPLACE_BUNDLE_URL_BASE"), "/"),
+		MarketplaceBundleDir:     os.Getenv("KAPP_MARKETPLACE_BUNDLE_DIR"),
 
 		Env:              getenv("KAPP_ENV", "dev"),
 		LogFormat:        os.Getenv("KAPP_LOG_FORMAT"),

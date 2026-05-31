@@ -320,8 +320,46 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// bytes uploaded on this replica; publishers can only upload
 	// when cfg.MarketplaceBundleURLBase is non-empty (handler
 	// guard returns 503 when the base is unset).
-	bundleObjs := bundlestore.NewMemoryStore()
+	//
+	// Backend selection:
+	//   - cfg.MarketplaceBundleDir set → DiskStore on the supplied
+	//     directory. Bytes survive process restart so a kube
+	//     rollout / pod swap does not orphan upload-metadata rows.
+	//     This is the recommended single-binary production posture
+	//     pending B8.1 (S3Store).
+	//   - Otherwise → MemoryStore. Suitable for unit tests and
+	//     local dev; NOT for production (the Devin Review
+	//     finding flagged this exact data-loss risk). The boot
+	//     logger surfaces the chosen backend so an operator who
+	//     forgot to set KAPP_MARKETPLACE_BUNDLE_DIR notices.
+	var bundleObjs bundlestore.ObjectStore
+	if cfg.MarketplaceBundleDir != "" {
+		ds, dsErr := bundlestore.NewDiskStore(cfg.MarketplaceBundleDir)
+		if dsErr != nil {
+			return nil, nil, fmt.Errorf("init bundle disk store: %w", dsErr)
+		}
+		bundleObjs = ds
+		slog.Info("bundle store backend",
+			slog.String("backend", "disk"),
+			slog.String("root", ds.Root()))
+	} else {
+		bundleObjs = bundlestore.NewMemoryStore()
+		slog.Warn("bundle store backend",
+			slog.String("backend", "memory"),
+			slog.String("warning",
+				"in-process MemoryStore: uploaded bundle bytes will be lost on process restart; set KAPP_MARKETPLACE_BUNDLE_DIR to a persistent volume for production"))
+	}
+	// adminPool wiring lets GCUnreferenced DELETE through the
+	// kapp_admin role; the migration grants DELETE only to
+	// kapp_admin so SELECT/INSERT/UPDATE remain on the main pool
+	// (which is kapp_app). Without the admin pool GCUnreferenced
+	// is rejected with bundlestore.ErrAdminPoolRequired at the
+	// entrypoint rather than failing mid-sweep with an opaque
+	// "permission denied" SQL error.
 	bundleStore := bundlestore.NewStore(pool, bundleObjs)
+	if adminPool != nil {
+		bundleStore = bundleStore.WithAdminPool(adminPool)
+	}
 
 	// Production bundle resolver chain (innermost → outermost):
 	//   HTTPResolver: net/http fetch from publisher CDN URLs.
