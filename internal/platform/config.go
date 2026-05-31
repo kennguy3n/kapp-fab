@@ -98,6 +98,25 @@ type Config struct {
 	// to boot without Redis.
 	RequireRedis bool
 
+	// MarketplaceBundleURLBase is the externally-visible URL prefix
+	// that the marketplace appends "/api/v1/marketplace/bundles/<hash>.tar.gz"
+	// to when handing a publisher back a marketplace-hosted bundle
+	// URL (see Phase B8). Sourced from KAPP_MARKETPLACE_BUNDLE_URL_BASE.
+	//
+	// Empty value disables marketplace-hosted bundle uploads — the
+	// publisher must continue to host bundles on their own CDN and
+	// pass an externally-resolvable bundle_url to PublishVersion.
+	// The upload endpoint returns 503 in that case so the kapp-
+	// publish CLI degrades clearly rather than producing a broken
+	// bundle row that nobody can resolve.
+	//
+	// Production deployments behind a load balancer typically set
+	// this to the public LB URL (e.g. "https://kapp.example.com")
+	// so the resolver running inside any tenant can reach the
+	// bundle GET endpoint. Single-host dev sets it to "http://
+	// localhost:8080" to match the local LISTEN_ADDR.
+	MarketplaceBundleURLBase string
+
 	// Env is the operator-supplied deployment marker emitted into
 	// every structured log line ("dev", "staging", "production").
 	// Sourced from KAPP_ENV. Empty values default to "dev" so a
@@ -394,6 +413,9 @@ func LoadConfig() (*Config, error) {
 		TenantCacheSize:  getenvInt("KAPP_TENANT_CACHE_SIZE", 256),
 		RedisURL:         os.Getenv("REDIS_URL"),
 		RequireRedis:     getenvBool("KAPP_REQUIRE_REDIS", false),
+
+		MarketplaceBundleURLBase: strings.TrimRight(os.Getenv("KAPP_MARKETPLACE_BUNDLE_URL_BASE"), "/"),
+
 		Env:              getenv("KAPP_ENV", "dev"),
 		LogFormat:        os.Getenv("KAPP_LOG_FORMAT"),
 		LogLevel:         os.Getenv("KAPP_LOG_LEVEL"),

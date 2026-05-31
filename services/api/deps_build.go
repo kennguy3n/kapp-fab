@@ -44,6 +44,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/manufacturing"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/bundle"
+	"github.com/kennguy3n/kapp-fab/internal/marketplace/bundlestore"
 	mktruntime "github.com/kennguy3n/kapp-fab/internal/marketplace/runtime"
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
@@ -311,11 +312,50 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// the cache has no semantic-staleness window. The default
 	// LRU bound (256 entries) gives ample headroom for the
 	// in-use working set on any single replica.
+	// B8: bundle store first — the LocalResolver below short-
+	// circuits marketplace-hosted URLs through this store so the
+	// install pipeline doesn't loop back through the LB to fetch
+	// a bundle we already have in-process. The store is always
+	// constructed so the GET /bundles/{hash} handler can serve any
+	// bytes uploaded on this replica; publishers can only upload
+	// when cfg.MarketplaceBundleURLBase is non-empty (handler
+	// guard returns 503 when the base is unset).
+	bundleObjs := bundlestore.NewMemoryStore()
+	bundleStore := bundlestore.NewStore(pool, bundleObjs)
+
+	// Production bundle resolver chain (innermost → outermost):
+	//   HTTPResolver: net/http fetch from publisher CDN URLs.
+	//   LocalResolver: short-circuit marketplace-hosted URLs by
+	//     reading from bundleStore directly. Delegates non-
+	//     marketplace URLs to the HTTPResolver.
+	//   CachingResolver: per-process LRU keyed by (extension_id,
+	//     version_id). Wraps the LocalResolver so both publisher-
+	//     CDN bundles and marketplace-hosted bundles are cached.
+	//     Bundles are immutable post-publish (000068 BEFORE UPDATE
+	//     trigger), so the cache has no semantic-staleness
+	//     window. The default LRU bound (256 entries) gives ample
+	//     headroom for the in-use working set on any single
+	//     replica.
 	marketplaceResolver := bundle.NewCachingResolver(
-		bundle.NewHTTPResolver(bundle.HTTPResolverOptions{}),
+		bundle.NewLocalResolver(
+			bundle.NewHTTPResolver(bundle.HTTPResolverOptions{}),
+			bundleStore,
+			cfg.MarketplaceBundleURLBase,
+		),
 		bundle.DefaultResolverCacheSize,
 	)
 	mph := newMarketplaceHandlers(marketplaceStore, marketplaceEngine, marketplaceResolver)
+
+	// B8 wiring: publishers can upload + auto-fill marketplace
+	// URLs only when KAPP_MARKETPLACE_BUNDLE_URL_BASE is set
+	// (the handler's nil-base guard returns 503 otherwise). The
+	// bundleStore is the same one wired into the resolver above.
+	mph = mph.WithBundleStore(bundleStore, cfg.MarketplaceBundleURLBase)
+	if adminPool != nil {
+		// install-stats endpoint needs a BYPASSRLS pool to scan
+		// installations across every tenant schema.
+		mph = mph.WithAdminPool(adminPool)
+	}
 
 	formStore := forms.NewStore(pool, ktypeRegistry, recordStore)
 	if adminPool != nil {

@@ -764,6 +764,16 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 					// (slug + display name + verified posture +
 					// has-keys signal). Key material is admin-only.
 					r.Get("/publishers/{slug}", d.mph.getPublisherPublic)
+
+					// B8: marketplace-hosted bundle serve. Content-
+					// addressed (path is the SHA-256 hex of the bytes)
+					// so the response is safe to cache for a year with
+					// immutable. Public-within-tenant: the read gate
+					// above (marketplace.read) is the only RBAC on
+					// this endpoint. A tenant must already be able to
+					// browse the catalog to learn a bundle hash; once
+					// they have the hash the bytes are public.
+					r.Get("/bundles/{hash}", d.mph.serveBundleByHash)
 				})
 
 				// Install / uninstall / settings update.
@@ -885,6 +895,18 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 					r.Get("/{publisher_id}", d.mph.getMyPublisher)
 					r.Get("/{publisher_id}/members", d.mph.listMyPublisherMembers)
 					r.Get("/{publisher_id}/keys", d.mph.listMyPublisherKeys)
+
+					// B8 — publisher dashboard reads. Member-level access
+					// (per-handler RequireMemberRole gate); covers extensions,
+					// versions, review state, findings, install statistics,
+					// and bundle upload history.
+					r.Get("/{publisher_id}/extensions", d.mph.listMyPublisherExtensions)
+					r.Get("/{publisher_id}/extensions/{ext_id}", d.mph.getMyPublisherExtension)
+					r.Get("/{publisher_id}/extensions/{ext_id}/versions", d.mph.listMyPublisherVersions)
+					r.Get("/{publisher_id}/extensions/{ext_id}/versions/{ver_id}/review", d.mph.getMyPublisherVersionReview)
+					r.Get("/{publisher_id}/extensions/{ext_id}/versions/{ver_id}/findings", d.mph.listMyPublisherVersionFindings)
+					r.Get("/{publisher_id}/extensions/{ext_id}/install-stats", d.mph.getMyPublisherExtensionInstallStats)
+					r.Get("/{publisher_id}/bundles", d.mph.listMyPublisherBundleUploads)
 				})
 
 				// Mutating sub-group. Mirrors the existing
@@ -903,6 +925,14 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 					r.Delete("/{publisher_id}/members/{user_id}", d.mph.removeMyPublisherMember)
 					r.Post("/{publisher_id}/keys", d.mph.registerMyPublisherKey)
 					r.Post("/{publisher_id}/keys/{key_id}/revoke", d.mph.revokeMyPublisherKey)
+
+					// B8 — publisher upload + version-submit. The bundle
+					// upload is a multipart POST that the IdempotencyMW
+					// dedups via the body-content hash (any retry of the
+					// same bytes is collapsed to the same upload row).
+					r.Post("/{publisher_id}/bundles", d.mph.uploadPublisherBundle)
+					r.Post("/{publisher_id}/extensions", d.mph.createMyPublisherExtension)
+					r.Post("/{publisher_id}/extensions/{ext_id}/versions", d.mph.submitMyPublisherVersion)
 				})
 			})
 		}

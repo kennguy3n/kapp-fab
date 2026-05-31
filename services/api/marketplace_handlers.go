@@ -12,9 +12,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kennguy3n/kapp-fab/internal/marketplace"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/bundle"
+	"github.com/kennguy3n/kapp-fab/internal/marketplace/bundlestore"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/runtime"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/settings"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
@@ -65,6 +67,27 @@ type marketplaceHandlers struct {
 	store    *marketplace.Store
 	engine   *runtime.Engine
 	resolver bundle.Resolver
+
+	// bundles is the optional B8 marketplace-hosted bundle store.
+	// nil means the deploy has not opted into marketplace-hosted
+	// uploads (publishers MUST host bundles on their own CDN).
+	// When set, the publisher upload + dashboard surfaces mount.
+	bundles *bundlestore.Store
+
+	// bundleURLBase is the externally-visible host prefix used to
+	// build marketplace-hosted bundle URLs returned from the upload
+	// endpoint, e.g. "https://marketplace.example.com". Trailing
+	// slashes are trimmed. Empty when bundles is nil. Used only by
+	// the upload handler; the install-time resolver fetches via
+	// whatever URL is recorded on the version row.
+	bundleURLBase string
+
+	// adminPool is the BYPASSRLS pool used by handlers that need
+	// to query across tenant boundaries (e.g. publisher install
+	// statistics: count installs of my extension across every
+	// tenant). nil when the deploy does not provision an admin
+	// pool — the cross-tenant endpoints then return 503.
+	adminPool *pgxpool.Pool
 }
 
 // newMarketplaceHandlers constructs a handler bundle. Returns nil
@@ -76,6 +99,28 @@ func newMarketplaceHandlers(store *marketplace.Store, engine *runtime.Engine, re
 		return nil
 	}
 	return &marketplaceHandlers{store: store, engine: engine, resolver: resolver}
+}
+
+// WithBundleStore wires the optional B8 marketplace-hosted bundle
+// store + URL base into the handler bundle. Returns h so the
+// caller can chain. urlBase is trimmed of trailing slashes; an
+// empty urlBase keeps bundles nil so the upload routes don't mount.
+func (h *marketplaceHandlers) WithBundleStore(b *bundlestore.Store, urlBase string) *marketplaceHandlers {
+	if h == nil || b == nil || urlBase == "" {
+		return h
+	}
+	h.bundles = b
+	h.bundleURLBase = strings.TrimRight(urlBase, "/")
+	return h
+}
+
+// WithAdminPool wires the BYPASSRLS pool. Returns h for chaining.
+func (h *marketplaceHandlers) WithAdminPool(p *pgxpool.Pool) *marketplaceHandlers {
+	if h == nil || p == nil {
+		return h
+	}
+	h.adminPool = p
+	return h
 }
 
 // ---------------------------------------------------------------------------
@@ -108,19 +153,19 @@ type listInstallationsResponse struct {
 // tagged `json:"-"` because its raw form is a []byte; we surface
 // the parsed object here.
 type installationView struct {
-	ID                    uuid.UUID              `json:"id"`
-	TenantID              uuid.UUID              `json:"tenant_id"`
-	ExtensionID           uuid.UUID              `json:"extension_id"`
-	ExtensionVersionID    uuid.UUID              `json:"extension_version_id"`
+	ID                    uuid.UUID                 `json:"id"`
+	TenantID              uuid.UUID                 `json:"tenant_id"`
+	ExtensionID           uuid.UUID                 `json:"extension_id"`
+	ExtensionVersionID    uuid.UUID                 `json:"extension_version_id"`
 	Status                marketplace.InstallStatus `json:"status"`
-	Settings              map[string]any         `json:"settings"`
-	WebhookBase           string                 `json:"webhook_base"`
-	InstalledBy           *uuid.UUID             `json:"installed_by,omitempty"`
-	InstalledAt           string                 `json:"installed_at"`
-	UpdatedAt             string                 `json:"updated_at"`
-	LastHealthCheckAt     string                 `json:"last_health_check_at,omitempty"`
-	LastHealthCheckStatus string                 `json:"last_health_check_status,omitempty"`
-	FailureReason         string                 `json:"failure_reason,omitempty"`
+	Settings              map[string]any            `json:"settings"`
+	WebhookBase           string                    `json:"webhook_base"`
+	InstalledBy           *uuid.UUID                `json:"installed_by,omitempty"`
+	InstalledAt           string                    `json:"installed_at"`
+	UpdatedAt             string                    `json:"updated_at"`
+	LastHealthCheckAt     string                    `json:"last_health_check_at,omitempty"`
+	LastHealthCheckStatus string                    `json:"last_health_check_status,omitempty"`
+	FailureReason         string                    `json:"failure_reason,omitempty"`
 }
 
 func installationToView(in *marketplace.Installation) installationView {
@@ -281,10 +326,10 @@ type createExtensionRequestBody struct {
 }
 
 type publishVersionRequestBody struct {
-	Manifest    json.RawMessage `json:"manifest"`     // raw manifest bytes (YAML or JSON)
-	BundleURL   string          `json:"bundle_url"`
-	BundleHash  string          `json:"bundle_hash"`
-	BundleSize  int64           `json:"bundle_size"`
+	Manifest   json.RawMessage `json:"manifest"` // raw manifest bytes (YAML or JSON)
+	BundleURL  string          `json:"bundle_url"`
+	BundleHash string          `json:"bundle_hash"`
+	BundleSize int64           `json:"bundle_size"`
 }
 
 type reviewQueueResponse struct {
@@ -511,19 +556,19 @@ func (h *marketplaceHandlers) getInstallation(w http.ResponseWriter, r *http.Req
 
 // install drives the end-to-end install flow:
 //
-//   1. Parse + validate request body (ext id, version id,
-//      webhook base, settings).
-//   2. Fetch the bundle via the resolver. Bundle hash is
-//      verified against the version row inside the resolver.
-//   3. Validate the operator-supplied settings against the
-//      bundle's settings_schema (when present).
-//   4. Call Engine.Install which runs pre_install hook, writes
-//      registry rows (KTypes / workflows / tools / webhook
-//      subscriptions), commits the install row, then fires
-//      post_install best-effort.
-//   5. Return the install row + signing secret. The secret is
-//      returned exactly once — the publisher uses it to
-//      configure their webhook server.
+//  1. Parse + validate request body (ext id, version id,
+//     webhook base, settings).
+//  2. Fetch the bundle via the resolver. Bundle hash is
+//     verified against the version row inside the resolver.
+//  3. Validate the operator-supplied settings against the
+//     bundle's settings_schema (when present).
+//  4. Call Engine.Install which runs pre_install hook, writes
+//     registry rows (KTypes / workflows / tools / webhook
+//     subscriptions), commits the install row, then fires
+//     post_install best-effort.
+//  5. Return the install row + signing secret. The secret is
+//     returned exactly once — the publisher uses it to
+//     configure their webhook server.
 //
 // Errors:
 //   - 400 for body parse / schema-violation / invalid webhook
@@ -1236,8 +1281,8 @@ func reviewStateToItem(s marketplace.ReviewState) reviewQueueItem {
 		Reviewer:          s.Reviewer,
 		CreatedAt:         s.CreatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		UpdatedAt:         s.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
-		AttemptCount:     s.AttemptCount,
-		LastAttemptError: s.LastAttemptError,
+		AttemptCount:      s.AttemptCount,
+		LastAttemptError:  s.LastAttemptError,
 	}
 	if s.ReviewedAt != nil {
 		out.ReviewedAt = s.ReviewedAt.UTC().Format("2006-01-02T15:04:05Z07:00")
