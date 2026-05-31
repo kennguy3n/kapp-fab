@@ -9,6 +9,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -273,6 +274,187 @@ func TestB8PublisherUploadDisabledFallsBack(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("disabled-deploy: want 503, got %d (body %q)",
 			rr.Code, rr.Body.String())
+	}
+}
+
+// TestB8PublisherSubmitVersionPersistsSignature pins the BUG_0001
+// fix from Devin Review round-2: a publisher who submits a version
+// through the publisher-self endpoint with bundle_signature +
+// bundle_signature_key_id MUST end up with the trio
+// (signature_b64 + key_id + signed_at) persisted on the version
+// row. The pre-fix handler decoded the wire body into a struct
+// missing those fields, so `json.Decoder` silently dropped them
+// and the version was stored unsigned — leaving SignatureCheck
+// with nothing to verify even though the CLI dutifully sent the
+// signature on every publish.
+//
+// The contract verified here:
+//   - both signature fields set    -> BundleSignature + KeyID
+//     persisted; SignedAt non-zero (set by handler at submit time).
+//   - signature alone (no key id)  -> 400 (both-or-neither).
+//   - key id alone (no signature)  -> 400.
+//   - both empty                   -> version persisted unsigned.
+func TestB8PublisherSubmitVersionPersistsSignature(t *testing.T) {
+	pool := openIntegrationPool(t, "KAPP_TEST_DB_URL")
+	ctx := context.Background()
+	store := marketplace.NewStore(pool)
+	users := tenant.NewUserStore(pool)
+
+	pubSlug := "b8sig_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "_")
+	pub, err := store.Publishers().CreatePublisher(ctx, marketplace.CreatePublisherInput{
+		Slug:         pubSlug,
+		DisplayName:  "B8 signature publisher",
+		ContactEmail: pubSlug + "@example.invalid",
+	})
+	if err != nil {
+		t.Fatalf("CreatePublisher: %v", err)
+	}
+	alice, err := users.CreateUser(ctx, tenant.User{
+		KChatUserID: "u-alice-" + uuid.NewString()[:8],
+		Email:       "alice-b8sig-" + uuid.NewString()[:6] + "@example.invalid",
+		DisplayName: "Alice B8 signature",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if _, err := store.Publishers().AddMember(ctx, marketplace.AddPublisherMemberInput{
+		PublisherID: pub.ID,
+		UserID:      alice.ID,
+		Role:        marketplace.PublisherMemberRoleMember,
+	}); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+	// Pre-create the extension row so submitMyPublisherVersion
+	// has a target. CreateExtension forces the publisher_id+slug
+	// uniqueness.
+	ext, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher:   pubSlug,
+		Slug:        "b8sig_ext",
+		DisplayName: "B8 signature extension",
+		Description: "Pins the signature round-trip",
+		Author:      "B8 integration tests",
+		License:     "MIT",
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension: %v", err)
+	}
+
+	mph := &marketplaceHandlers{store: store}
+	r := chi.NewRouter()
+	r.Post("/api/v1/publisher/{publisher_id}/extensions/{ext_id}/versions",
+		mph.submitMyPublisherVersion)
+
+	manifest := func(version string) []byte {
+		return []byte(fmt.Sprintf(`{
+"schema_version": 1,
+"name": %q,
+"version": %q,
+"author": "B8 integration tests",
+"license": "MIT",
+"description": "B8 signature pin",
+"min_kapp_version": "1.0.0",
+"max_kapp_version": "1.x",
+"features_required": [],
+"permissions_required": []
+}`, pubSlug+".b8sig_ext", version))
+	}
+
+	submit := func(t *testing.T, version, hash, b64, keyID string) *httptest.ResponseRecorder {
+		t.Helper()
+		body := map[string]any{
+			"manifest":    json.RawMessage(manifest(version)),
+			"bundle_url":  "https://example.invalid/" + hash + ".tar.gz",
+			"bundle_hash": hash,
+			"bundle_size": 4096,
+		}
+		if b64 != "" {
+			body["bundle_signature"] = b64
+		}
+		if keyID != "" {
+			body["bundle_signature_key_id"] = keyID
+		}
+		buf, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost,
+			fmt.Sprintf("/api/v1/publisher/%s/extensions/%s/versions",
+				pub.ID.String(), ext.ID.String()),
+			bytes.NewReader(buf))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(platform.WithUserID(req.Context(), alice.ID))
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+		return rr
+	}
+
+	// Helper: produce a base64-encoded fake-but-shape-valid
+	// signature. The DB CHECK constraint requires exactly 88
+	// base64 characters (64 bytes -> 86 chars + "==" padding).
+	fakeSig := func() string {
+		return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 64))
+	}
+
+	// --- step 1: signed submit ---
+	{
+		hash := strings.Repeat("a", 64)
+		b64 := fakeSig()
+		keyID := "test-key-1"
+		rr := submit(t, "0.1.0", hash, b64, keyID)
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("signed submit: want 201, got %d (body %q)", rr.Code, rr.Body.String())
+		}
+		ver, err := store.GetVersionByExtensionAndVersion(ctx, ext.ID, "0.1.0")
+		if err != nil {
+			t.Fatalf("GetVersion: %v", err)
+		}
+		if ver.BundleSignature != b64 {
+			t.Errorf("BundleSignature: want %q, got %q", b64, ver.BundleSignature)
+		}
+		if ver.BundleSignatureKeyID != keyID {
+			t.Errorf("BundleSignatureKeyID: want %q, got %q", keyID, ver.BundleSignatureKeyID)
+		}
+		if ver.SignedAt == nil {
+			t.Error("SignedAt should be non-nil after signed submit")
+		}
+	}
+
+	// --- step 2: signature without key_id -> 400 ---
+	{
+		hash := strings.Repeat("b", 64)
+		rr := submit(t, "0.2.0", hash, fakeSig(), "")
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("sig-only submit: want 400, got %d (body %q)", rr.Code, rr.Body.String())
+		}
+	}
+
+	// --- step 3: key_id without signature -> 400 ---
+	{
+		hash := strings.Repeat("c", 64)
+		rr := submit(t, "0.3.0", hash, "", "lonely-key")
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("keyid-only submit: want 400, got %d (body %q)", rr.Code, rr.Body.String())
+		}
+	}
+
+	// --- step 4: unsigned submit -> 201, no signature persisted ---
+	{
+		hash := strings.Repeat("d", 64)
+		rr := submit(t, "0.4.0", hash, "", "")
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("unsigned submit: want 201, got %d (body %q)", rr.Code, rr.Body.String())
+		}
+		ver, err := store.GetVersionByExtensionAndVersion(ctx, ext.ID, "0.4.0")
+		if err != nil {
+			t.Fatalf("GetVersion: %v", err)
+		}
+		if ver.BundleSignature != "" || ver.BundleSignatureKeyID != "" {
+			t.Errorf("unsigned submit should leave signature empty, got sig=%q key=%q",
+				ver.BundleSignature, ver.BundleSignatureKeyID)
+		}
+		if ver.SignedAt != nil {
+			t.Error("unsigned submit should leave SignedAt nil")
+		}
 	}
 }
 

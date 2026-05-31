@@ -325,11 +325,29 @@ type createExtensionRequestBody struct {
 	IconURL      string `json:"icon_url,omitempty"`
 }
 
+// publishVersionRequestBody is the wire shape for the admin
+// surface POST /api/v1/marketplace/publisher/extensions/{ext_id}/
+// versions endpoint. The publisher-self surface uses its own
+// `publisherSubmitVersionRequestBody` with additional URL-derived
+// fields (publisher_id).
+//
+// BundleSignature / BundleSignatureKeyID are the optional ed25519
+// detached signature pair — both-or-neither, validated by the
+// shared `parseBundleSignaturePair` helper. B6 (#130) shipped the
+// struct without signature fields; B7 (#131) added the store-side
+// `BundleSignature` plumbing but never wired it through the admin
+// handler, leaving SignatureCheck with nothing to verify even when
+// the publisher had registered ed25519 keys. Round-2 Devin Review
+// surfaced this as ANALYSIS_pr-review-job-6c5aa7fef9214efaacd238cc9ba21472_0001
+// — adding the fields here keeps the admin and publisher-self
+// surfaces wire-compatible for the same shape of submit request.
 type publishVersionRequestBody struct {
-	Manifest   json.RawMessage `json:"manifest"` // raw manifest bytes (YAML or JSON)
-	BundleURL  string          `json:"bundle_url"`
-	BundleHash string          `json:"bundle_hash"`
-	BundleSize int64           `json:"bundle_size"`
+	Manifest             json.RawMessage `json:"manifest"` // raw manifest bytes (YAML or JSON)
+	BundleURL            string          `json:"bundle_url"`
+	BundleHash           string          `json:"bundle_hash"`
+	BundleSize           int64           `json:"bundle_size"`
+	BundleSignature      string          `json:"bundle_signature,omitempty"`
+	BundleSignatureKeyID string          `json:"bundle_signature_key_id,omitempty"`
 }
 
 type reviewQueueResponse struct {
@@ -1068,6 +1086,11 @@ func (h *marketplaceHandlers) submitVersion(w http.ResponseWriter, r *http.Reque
 		h.writeError(w, fmt.Errorf("%w: %w", marketplace.ErrInvalidManifest, err))
 		return
 	}
+	sig, sigErr := parseBundleSignaturePair(req.BundleSignature, req.BundleSignatureKeyID)
+	if sigErr != nil {
+		http.Error(w, sigErr.Error(), http.StatusBadRequest)
+		return
+	}
 	ver, err := h.store.PublishVersion(r.Context(), marketplace.PublishVersionInput{
 		ExtensionID:  extID,
 		Manifest:     man,
@@ -1075,6 +1098,7 @@ func (h *marketplaceHandlers) submitVersion(w http.ResponseWriter, r *http.Reque
 		BundleSize:   req.BundleSize,
 		BundleURL:    req.BundleURL,
 		ManifestJSON: req.Manifest,
+		Signature:    sig,
 	})
 	if err != nil {
 		h.writeError(w, err)

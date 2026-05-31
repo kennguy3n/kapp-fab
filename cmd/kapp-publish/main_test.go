@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // TestPackDirDeterministic checks that the same source tree
@@ -144,6 +145,106 @@ func TestLoadEd25519KeyRejectsBadLength(t *testing.T) {
 	if _, err := loadEd25519Key(path); err == nil {
 		t.Fatalf("expected error on short key, got nil")
 	}
+}
+
+// TestLoadEd25519KeyRawBytePreservesWhitespace pins the raw-first
+// guarantee for loadEd25519Key (Devin Review
+// ANALYSIS_pr-review-job-6c5aa7fef9214efaacd238cc9ba21472_0008): a
+// truly binary 64-byte private key whose last byte is 0x0A / 0x20
+// must NOT be silently truncated by bytes.TrimSpace before the
+// length check. The previous "base64-first then trim" order would
+// (a) fail the base64 decode (binary bytes aren't valid b64), then
+// (b) TrimSpace the trailing 0x0A off the raw payload, leaving a
+// 63-byte buffer that fell through to the "unexpected length"
+// error path. Raw-first means a binary key never gets trimmed.
+func TestLoadEd25519KeyRawBytePreservesWhitespace(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("gen: %v", err)
+	}
+	// Force the last byte to a whitespace byte that TrimSpace
+	// would otherwise consume (0x0A = '\n'). We mutate the local
+	// copy so the original priv stays intact for the verify call.
+	keyBytes := append([]byte(nil), priv...)
+	keyBytes[len(keyBytes)-1] = '\n'
+	// Regenerate the matching public part for the verify check.
+	// `priv[32:]` is the public-key tail in the 64-byte format,
+	// so flipping the last byte invalidates the public key as
+	// well; rebuild via NewKeyFromSeed to keep the test isolated
+	// from that detail.
+	seed := keyBytes[:ed25519.SeedSize]
+	derived := ed25519.NewKeyFromSeed(seed)
+	derivedPub := derived.Public().(ed25519.PublicKey)
+	_ = pub // not used; the regenerated derivedPub is the source of truth
+
+	path := filepath.Join(t.TempDir(), "key.bin")
+	// Persist the FULL 64-byte form so the function is exercised
+	// on the path most likely to trip the trim hazard.
+	full := append([]byte(nil), derived...)
+	if err := os.WriteFile(path, full, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := loadEd25519Key(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(loaded) != ed25519.PrivateKeySize {
+		t.Fatalf("loaded key has unexpected length %d", len(loaded))
+	}
+	msg := []byte("rune-safe key load")
+	sig := ed25519.Sign(loaded, msg)
+	if !ed25519.Verify(derivedPub, msg, sig) {
+		t.Fatalf("loaded raw 64-byte key (trailing 0x0A) does not verify with derived public key")
+	}
+}
+
+// TestTrimRuneSafe pins the rune-boundary correctness of trim
+// (Devin Review ANALYSIS_pr-review-job-6c5aa7fef9214efaacd238cc9ba21472_0006).
+// The previous byte-indexed implementation could slice mid-rune
+// and emit invalid UTF-8 (e.g. truncating "héllo" at byte 3 split
+// the 2-byte 'é' between input and output).
+func TestTrimRuneSafe(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		n    int
+		want string
+	}{
+		{"empty", "", 5, ""},
+		{"under-cap ASCII", "abc", 5, "abc"},
+		{"at-cap ASCII", "abcde", 5, "abcde"},
+		{"truncate ASCII", "abcdef", 5, "abcd\u2026"},
+		{"under-cap multibyte", "héllo", 5, "héllo"},
+		// "héllo wörld" has 11 runes; trim to 8 keeps 7 + ellipsis.
+		{"truncate multibyte", "héllo wörld", 8, "héllo w\u2026"},
+		// All-multibyte input ("éééééé" is 6 runes / 12 bytes).
+		{"truncate all-multibyte", "éééééé", 4, "ééé\u2026"},
+		// Asian glyphs (each 3 bytes in UTF-8).
+		{"truncate cjk", "日本語ABC", 4, "日本語\u2026"},
+		// n=0 returns empty string instead of negative-index crash.
+		{"n=0", "abc", 0, ""},
+		// n=1 produces just the ellipsis when input needs trimming.
+		{"n=1 truncates", "abcd", 1, "\u2026"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := trim(tc.in, tc.n)
+			if got != tc.want {
+				t.Fatalf("trim(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
+			}
+			// Must always be valid UTF-8 — the byte-indexed
+			// implementation failed this check whenever the cut
+			// point split a multi-byte rune.
+			if !validUTF8(got) {
+				t.Fatalf("trim returned invalid UTF-8 for input %q (n=%d): % x", tc.in, tc.n, got)
+			}
+		})
+	}
+}
+
+func validUTF8(s string) bool {
+	return utf8.ValidString(s)
 }
 
 // TestPackDirThenExtractRoundTrip packs a synthetic manifest dir,

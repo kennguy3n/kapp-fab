@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -40,6 +41,42 @@ import (
 //   * after a successful PublishVersion call, mark the upload row
 //     as "referenced" so the orphan-GC sweeper leaves it alone.
 
+// parseBundleSignaturePair validates the wire-level both-or-neither
+// rule on the optional ed25519 signature pair and converts it into
+// the store's marketplace.BundleSignature value. Shared between the
+// publisher-self and admin submit-version handlers so both endpoints
+// produce the same wire contract and the same store input.
+//
+// Contract:
+//   - both empty  -> (nil, nil) — version row gets no signature.
+//   - both set    -> non-nil BundleSignature with SignedAt=now (UTC);
+//     the store fills SignedAt internally if zero but we set it here
+//     so the persisted timestamp matches the wall-clock at the API
+//     boundary, not at PublishVersion-tx-commit time which can drift
+//     under load.
+//   - one set     -> error.
+//
+// Trimming: leading/trailing whitespace is stripped before the
+// empty-vs-present test so a CLI that newline-terminated its base64
+// signature file doesn't accidentally trip the "one set, one empty"
+// rejection.
+func parseBundleSignaturePair(b64, keyID string) (*marketplace.BundleSignature, error) {
+	b64 = strings.TrimSpace(b64)
+	keyID = strings.TrimSpace(keyID)
+	if b64 == "" && keyID == "" {
+		return nil, nil
+	}
+	if b64 == "" || keyID == "" {
+		return nil, fmt.Errorf(
+			"bundle_signature and bundle_signature_key_id must be set together (one without the other is rejected)")
+	}
+	return &marketplace.BundleSignature{
+		SignatureB64: b64,
+		KeyID:        keyID,
+		SignedAt:     time.Now().UTC(),
+	}, nil
+}
+
 // publisherCreateExtensionRequestBody is the wire shape for the
 // publisher-self create-extension call. Distinct from the admin
 // createExtensionRequestBody because the publisher field is
@@ -60,11 +97,33 @@ type publisherCreateExtensionRequestBody struct {
 // when omitted, the handler auto-fills it from the marketplace-
 // hosted URL for the supplied hash. BundleHash + BundleSize are
 // REQUIRED so the handler can validate against the upload row.
+//
+// BundleSignature / BundleSignatureKeyID carry the optional
+// detached ed25519 signature over the bundle bytes. The CLI
+// (`kapp-publish publish --bundle-signature <b64>
+// --bundle-signature-key-id <id>`) emits both fields together;
+// the server requires both-or-neither — a wire request with
+// only one is rejected with 400 because PublishVersion would
+// otherwise return the same error wrapped as ErrInvalidManifest
+// and the caller would have to guess which field was missing.
+// When both are present we wire `marketplace.BundleSignature`
+// into PublishVersionInput.Signature so the version row carries
+// the trio (signature_b64 + key_id + signed_at) for B7's
+// SignatureCheck to verify post-resolve.
+//
+// Historical context: B8 round-1 added the CLI's signature flags
+// and the wire fields on the CLI's request struct but missed the
+// matching server-side fields here; `json.Decoder` silently drops
+// unknown fields, so the signature data round-tripped through the
+// CLI without ever reaching the version row. Devin Review surfaced
+// this in BUG_pr-review-job-6c5aa7fef9214efaacd238cc9ba21472_0001.
 type publisherSubmitVersionRequestBody struct {
-	Manifest   json.RawMessage `json:"manifest"`
-	BundleURL  string          `json:"bundle_url,omitempty"`
-	BundleHash string          `json:"bundle_hash"`
-	BundleSize int64           `json:"bundle_size"`
+	Manifest             json.RawMessage `json:"manifest"`
+	BundleURL            string          `json:"bundle_url,omitempty"`
+	BundleHash           string          `json:"bundle_hash"`
+	BundleSize           int64           `json:"bundle_size"`
+	BundleSignature      string          `json:"bundle_signature,omitempty"`
+	BundleSignatureKeyID string          `json:"bundle_signature_key_id,omitempty"`
 }
 
 // createMyPublisherExtension is POST
@@ -191,11 +250,33 @@ func (h *marketplaceHandlers) submitMyPublisherVersion(w http.ResponseWriter, r 
 		h.writeError(w, fmt.Errorf("%w: %w", marketplace.ErrInvalidManifest, err))
 		return
 	}
-	if man.Publisher != "" && !strings.EqualFold(man.Publisher, pub.Slug) {
+	// Publisher MUST be populated. ParseManifest derives it from
+	// the manifest's `name` field (split on `.`); a manifest that
+	// reached this point with an empty Publisher would mean a
+	// future refactor weakened that invariant. Reject explicitly
+	// rather than letting an empty-publisher manifest bypass the
+	// slug-equality gate via the previous `!= ""` short-circuit
+	// (Devin Review ANALYSIS_pr-review-job-6c5aa7fef9214efaacd238cc9ba21472_0002).
+	if man.Publisher == "" {
+		http.Error(w, "manifest publisher segment is empty (manifest name must be `<publisher>.<slug>`)",
+			http.StatusBadRequest)
+		return
+	}
+	if !strings.EqualFold(man.Publisher, pub.Slug) {
 		http.Error(w, fmt.Sprintf(
 			"manifest publisher %q does not match URL publisher %q",
 			man.Publisher, pub.Slug,
 		), http.StatusBadRequest)
+		return
+	}
+
+	// Signature pair is optional but both-or-neither. Reject early
+	// rather than letting PublishVersion's signature CHECK return
+	// an opaque ErrInvalidManifest — the caller's contract is on
+	// the publisher endpoint, not on the store.
+	sig, sigErr := parseBundleSignaturePair(req.BundleSignature, req.BundleSignatureKeyID)
+	if sigErr != nil {
+		http.Error(w, sigErr.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -224,6 +305,7 @@ func (h *marketplaceHandlers) submitMyPublisherVersion(w http.ResponseWriter, r 
 		BundleSize:   req.BundleSize,
 		BundleURL:    bundleURL,
 		ManifestJSON: req.Manifest,
+		Signature:    sig,
 	})
 	if err != nil {
 		h.writeError(w, err)

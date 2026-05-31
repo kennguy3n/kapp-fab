@@ -219,7 +219,26 @@ func (h *marketplaceHandlers) uploadPublisherBundle(w http.ResponseWriter, r *ht
 	// the two callers cannot differ in practice today; matching
 	// case-insensitively is defence-in-depth against a future
 	// loosening of the slug constraint.
-	if rb.Manifest != nil && rb.Manifest.Publisher != "" && !strings.EqualFold(rb.Manifest.Publisher, pub.Slug) {
+	// Publisher slug MUST be populated. ParseManifest derives it
+	// from the manifest's `name` field via SplitN(".", 2) and the
+	// `name` field is required + regex-enforced, so an empty
+	// Publisher after a successful Extract is impossible TODAY.
+	// We still reject explicitly rather than letting an empty
+	// Publisher bypass the slug-equality gate via the previous
+	// `Publisher != ""` short-circuit (Devin Review
+	// ANALYSIS_pr-review-job-6c5aa7fef9214efaacd238cc9ba21472_0002).
+	// Defence-in-depth against a future refactor that weakens the
+	// derivation invariant.
+	if rb.Manifest == nil {
+		http.Error(w, "extracted bundle has no manifest", http.StatusBadRequest)
+		return
+	}
+	if rb.Manifest.Publisher == "" {
+		http.Error(w, "manifest publisher segment is empty (manifest name must be `<publisher>.<slug>`)",
+			http.StatusBadRequest)
+		return
+	}
+	if !strings.EqualFold(rb.Manifest.Publisher, pub.Slug) {
 		http.Error(w, fmt.Sprintf(
 			"manifest publisher %q does not match upload publisher %q",
 			rb.Manifest.Publisher, pub.Slug,

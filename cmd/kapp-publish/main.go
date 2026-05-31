@@ -66,6 +66,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kennguy3n/kapp-fab/internal/marketplace"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/bundle"
@@ -339,11 +340,32 @@ func runValidate(args []string) error {
 	return nil
 }
 
+// trim returns s capped to at most n RUNES (not bytes), appending
+// an ellipsis when truncation occurs. The previous byte-indexed
+// implementation produced corrupt output when the cut point fell
+// inside a multi-byte UTF-8 sequence (Devin Review
+// ANALYSIS_pr-review-job-6c5aa7fef9214efaacd238cc9ba21472_0006).
+// Used for cosmetic CLI output only; manifest descriptions
+// commonly contain non-ASCII (e.g. smart quotes, Asian glyphs,
+// emoji) so rune-safety matters even for short strings.
 func trim(s string, n int) string {
-	if len(s) <= n {
+	if n <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	var b strings.Builder
+	count := 0
+	for _, r := range s {
+		if count == n-1 {
+			break
+		}
+		b.WriteRune(r)
+		count++
+	}
+	b.WriteRune('\u2026')
+	return b.String()
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +417,24 @@ func runSign(args []string) error {
 //   - 32 raw bytes (the seed; we expand via ed25519.NewKeyFromSeed).
 //   - Base64 (standard or URL-safe) of either of the above.
 //
+// Order of attempts (Devin Review
+// ANALYSIS_pr-review-job-6c5aa7fef9214efaacd238cc9ba21472_0008):
+//  1. Try the raw bytes FIRST when the file is exactly 32 or 64
+//     bytes. A real binary key won't be TrimSpace-mutated and the
+//     base64 fallback can't misidentify it.
+//  2. If the raw length doesn't match, fall back to base64. Strip
+//     surrounding whitespace (a newline from `echo $KEY > key.b64`)
+//     and try standard / URL-safe / raw variants.
+//
+// The previous "base64-first, TrimSpace, then raw fallback" order
+// had two latent hazards: (a) bytes.TrimSpace on a truly binary
+// 64-byte key could strip trailing 0x09/0x0A/0x0D/0x20 bytes that
+// happen to land at the file end, corrupting the key; (b) a 32-byte
+// raw key whose bytes happened to be valid base64 could be decoded
+// to ~24 bytes and produce a confusing "unexpected length" error
+// instead of being accepted as a seed. Raw-first closes both windows
+// because binary keys never need trimming.
+//
 // PEM is intentionally not supported in v1 — adding x509-PEM
 // parsing pulls in heavier dependencies and the file-level
 // shape is unstable enough that the bytes-then-base64 union is
@@ -406,25 +446,36 @@ func loadEd25519Key(path string) (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Raw-first: accept a truly binary 32/64-byte key before we
+	// touch TrimSpace at all.
+	switch len(raw) {
+	case ed25519.PrivateKeySize:
+		return ed25519.PrivateKey(append([]byte(nil), raw...)), nil
+	case ed25519.SeedSize:
+		return ed25519.NewKeyFromSeed(raw), nil
+	}
+	// Fall through to base64. Trim whitespace only on this branch
+	// — binary keys never reach here so we cannot truncate a valid
+	// raw key by stripping a coincidental trailing 0x0A.
 	trimmed := bytes.TrimSpace(raw)
-	// Try base64 first; if the decode round-trips, use it.
-	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.RawURLEncoding} {
-		if decoded, derr := enc.DecodeString(string(trimmed)); derr == nil {
-			if len(decoded) == ed25519.PrivateKeySize || len(decoded) == ed25519.SeedSize {
-				trimmed = decoded
-				break
-			}
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding, base64.URLEncoding,
+		base64.RawStdEncoding, base64.RawURLEncoding,
+	} {
+		decoded, derr := enc.DecodeString(string(trimmed))
+		if derr != nil {
+			continue
+		}
+		switch len(decoded) {
+		case ed25519.PrivateKeySize:
+			return ed25519.PrivateKey(append([]byte(nil), decoded...)), nil
+		case ed25519.SeedSize:
+			return ed25519.NewKeyFromSeed(decoded), nil
 		}
 	}
-	switch len(trimmed) {
-	case ed25519.PrivateKeySize:
-		return ed25519.PrivateKey(append([]byte(nil), trimmed...)), nil
-	case ed25519.SeedSize:
-		return ed25519.NewKeyFromSeed(trimmed), nil
-	default:
-		return nil, fmt.Errorf("ed25519 key: unexpected length %d (want %d raw, %d seed, or base64 of either)",
-			len(trimmed), ed25519.PrivateKeySize, ed25519.SeedSize)
-	}
+	return nil, fmt.Errorf(
+		"ed25519 key %q: unexpected length %d (want %d raw private, %d raw seed, or base64 of either)",
+		path, len(raw), ed25519.PrivateKeySize, ed25519.SeedSize)
 }
 
 // ---------------------------------------------------------------------------
