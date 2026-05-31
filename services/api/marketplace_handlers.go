@@ -763,6 +763,23 @@ func (h *marketplaceHandlers) upgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject contradictory combinations at the wire layer rather
+	// than letting one field silently win. keep_settings is the
+	// explicit "preserve existing" signal; a non-null settings
+	// document is the explicit "migrate to this document" signal.
+	// Sending both at once is operator confusion — return 400 so
+	// the caller fixes the request rather than silently getting
+	// one of the two interpretations. "settings: null" + keep_settings
+	// is fine because both express the same intent (preserve).
+	//
+	// Checked here (pre-DB, pre-resolve) because it's pure body
+	// validation — no point spending a SELECT + a CDN round trip
+	// on a request the wire contract already disallows.
+	if req.KeepSettings && req.SettingsProvided && req.Settings != nil {
+		http.Error(w, "keep_settings and a non-null settings document are mutually exclusive", http.StatusBadRequest)
+		return
+	}
+
 	// Pre-flight: confirm the install row exists and is in a
 	// permissible state before we spend a CDN round trip on the
 	// bundle resolve. The engine's in-tx FOR UPDATE is still the

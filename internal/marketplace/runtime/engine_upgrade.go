@@ -66,9 +66,14 @@ type UpgradeResult struct {
 //     c. Registrar.RegisterAll against the NEW bundle — re-writes
 //        the same tables with the new manifest's resources.
 //     d. UPDATE the install row: extension_version_id =
-//        ToVersionID, settings = (Settings || KeepSettings ?
-//        existing : '{}'), updated_at = now(). RETURNING the
-//        post-commit row.
+//        ToVersionID; settings is either the caller-supplied
+//        document (req.Settings != nil) or the existing settings
+//        read inside the tx (the default, also explicit via
+//        req.KeepSettings). The engine never wipes settings to
+//        '{}' on upgrade — that would silently strip the
+//        publisher's configuration; the handler must explicitly
+//        send Settings={} to do that. updated_at = now().
+//        RETURNING the post-commit row.
 //     Commit. If any step fails, the whole tx rolls back. The
 //     install row's extension_version_id remains at FromVersionID
 //     and the runtime tables remain at the old version's shape.
