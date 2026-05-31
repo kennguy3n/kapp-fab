@@ -653,13 +653,26 @@ func reviewStatusTransitionAllowed(from, to ReviewStatus) bool {
 // transition-graph tests.
 const MaxReviewAttempts = 5
 
-// truncateUTF8 returns s truncated to at most maxBytes bytes at a
+// MaxAttemptErrorLen is the upper bound on the byte length of the
+// per-attempt error string persisted to last_attempt_error /
+// dead_letter manual_review_notes / synthetic-finding messages.
+// Pipeline errors are usually short, but a panic-wrapped multi-line
+// stack would otherwise blow out the admin queue response. 1 KiB
+// is generous for a one-line summary.
+//
+// Exported so worker-side bookkeeping (dead-letter UPDATE +
+// synthetic finding) can apply the SAME limit the store applies
+// internally to last_attempt_error, keeping all three fields
+// consistent.
+const MaxAttemptErrorLen = 1024
+
+// TruncateUTF8 returns s truncated to at most maxBytes bytes at a
 // UTF-8 rune boundary. If s is already <= maxBytes and valid UTF-8
 // it is returned unchanged. The returned string is guaranteed to
 // be valid UTF-8 even if s contained an invalid sequence at or
 // beyond maxBytes (PostgreSQL `text` columns reject invalid
 // UTF-8). Always produces a result of length <= maxBytes.
-func truncateUTF8(s string, maxBytes int) string {
+func TruncateUTF8(s string, maxBytes int) string {
 	if maxBytes <= 0 || s == "" {
 		return ""
 	}
@@ -746,8 +759,7 @@ func (rs *ReviewStateStore) RecordAttemptFailure(
 	// `invalid_byte_sequence_for_encoding`, which would mean the
 	// failure-recording UPDATE itself fails and attempt_count
 	// silently stops incrementing.
-	const maxErrLen = 1024
-	errMsg = truncateUTF8(errMsg, maxErrLen)
+	errMsg = TruncateUTF8(errMsg, MaxAttemptErrorLen)
 
 	var (
 		expectedClaimBy any

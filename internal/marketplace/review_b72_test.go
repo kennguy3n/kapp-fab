@@ -101,7 +101,7 @@ func TestMaxReviewAttempts_PositiveBound(t *testing.T) {
 	}
 }
 
-// truncateUTF8 powers RecordAttemptFailure's error-message
+// TruncateUTF8 powers RecordAttemptFailure's error-message
 // bound (1 KiB). PostgreSQL `text` columns reject invalid UTF-8,
 // so a naive byte-slice would risk the failure-recording UPDATE
 // itself failing if an upstream error message ever carried a
@@ -143,9 +143,9 @@ func TestTruncateUTF8(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := truncateUTF8(c.in, c.max)
+			got := TruncateUTF8(c.in, c.max)
 			if got != c.want {
-				t.Fatalf("truncateUTF8(%q, %d) = %q, want %q", c.in, c.max, got, c.want)
+				t.Fatalf("TruncateUTF8(%q, %d) = %q, want %q", c.in, c.max, got, c.want)
 			}
 			if len(got) > c.max && c.max > 0 {
 				t.Fatalf("result %q (%d bytes) exceeds cap %d", got, len(got), c.max)

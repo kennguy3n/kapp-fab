@@ -300,10 +300,43 @@ func (w *ReviewWorker) recordFailureOrDeadLetter(
 	// it stops a truly-dead DB from hanging the worker goroutine
 	// indefinitely. Shutdown latency is therefore bounded by the
 	// 10s budget on this call (not by parent ctx propagation).
+	// Skip the attempt bump on shutdown-propagated cancellation:
+	// the per-version runCtx is derived from the worker's Run(ctx)
+	// → drain(ctx) chain, so a graceful shutdown surfaces here as
+	// ctx.Err() == context.Canceled. That's a clean restart, not a
+	// real pipeline failure — consuming retry budget for it would
+	// (worst case, on a hot-restart loop) burn through
+	// MaxReviewAttempts on a single in-flight row and dead-letter
+	// a perfectly healthy version. We leave the row claimed: the
+	// 10-minute lease lapses, ClaimSubmittedReviewVersions picks
+	// it up on a different replica with a fresh budget, and
+	// last_attempt_error stays unchanged.
+	//
+	// A 90s per-version deadline firing returns DeadlineExceeded,
+	// NOT Canceled, and we DO want to bump attempt_count for that
+	// — the bundle is genuinely too slow, retry budget is the
+	// right surface to make admin Rescan necessary eventually.
+	// (Canceled vs DeadlineExceeded is the contract documented at
+	// pkg.go.dev/context#WithCancel and #WithDeadline.)
+	if errors.Is(ctx.Err(), context.Canceled) {
+		w.logger.Info("review-worker: pipeline cancelled (likely shutdown), skipping attempt-count bump",
+			slog.String("version_id", versionID.String()),
+			slog.String("cause", cause.Error()),
+		)
+		return
+	}
+
 	bookCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 
-	errMsg := cause.Error()
+	// Truncate once at the worker boundary so the SAME bound is
+	// applied to (a) last_attempt_error via RecordAttemptFailure,
+	// (b) the synthetic dead-letter finding's Message, and (c) the
+	// dead-letter UPDATE's ManualNotes. Otherwise the admin queue
+	// response for a dead-lettered row could carry a 1KiB-trimmed
+	// last_attempt_error alongside a multi-KiB ManualNotes — same
+	// underlying error, three inconsistent views.
+	errMsg := marketplace.TruncateUTF8(cause.Error(), marketplace.MaxAttemptErrorLen)
 	newCount, err := w.store.Reviews().RecordAttemptFailure(bookCtx, versionID, expectedClaim, errMsg)
 	if errors.Is(err, marketplace.ErrClaimLost) {
 		w.logger.Info("review-worker: claim lost during failure recording, dropping attempt",
