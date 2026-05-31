@@ -1082,6 +1082,27 @@ func (h *marketplaceHandlers) submitVersion(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "manifest required", http.StatusBadRequest)
 		return
 	}
+	// Round-9 Devin Review
+	// ANALYSIS_pr-review-job-634b026415d343fd97f927a467cdd20f_0003
+	// flagged that the publisher-self submitMyPublisherVersion
+	// handler validates bundle_hash format + bundle_size > 0 at
+	// the handler layer (clean 400 with a publisher-actionable
+	// message), but the admin submitVersion path passed both
+	// fields through to PublishVersion without handler-level
+	// validation. The store would reject (CHECK constraints +
+	// IsValidBundleHash) but as a wrapped ErrInvalidManifest with
+	// a less-clear message, and the admin caller would not get
+	// the same crisp error the publisher path returns. Mirror the
+	// publisher-self validation here so both surfaces return
+	// identical 400 messages for identical inputs.
+	if !marketplace.IsValidBundleHash(req.BundleHash) {
+		http.Error(w, "invalid bundle_hash (expected lowercase hex SHA-256)", http.StatusBadRequest)
+		return
+	}
+	if req.BundleSize <= 0 {
+		http.Error(w, "bundle_size must be positive", http.StatusBadRequest)
+		return
+	}
 	man, err := marketplace.ParseManifest(req.Manifest)
 	if err != nil {
 		h.writeError(w, fmt.Errorf("%w: %w", marketplace.ErrInvalidManifest, err))

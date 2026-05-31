@@ -107,7 +107,33 @@ func (l *LocalResolver) Resolve(ctx context.Context, version *marketplace.Extens
 		return nil, fmt.Errorf("local resolver: nil version")
 	}
 	hash, ok := l.matchMarketplaceHash(version.BundleURL)
-	if !ok || l.store == nil {
+	// Round-9 Devin Review
+	// ANALYSIS_pr-review-job-634b026415d343fd97f927a467cdd20f_0001
+	// flagged that the previous `if !ok || l.store == nil` collapsed
+	// two architecturally different cases:
+	//
+	//   (a) URL is NOT marketplace-hosted     → delegate is correct.
+	//   (b) URL IS marketplace-hosted but
+	//       store is nil                       → misconfiguration.
+	//
+	// Case (b) is a config error: the operator wired a
+	// KAPP_MARKETPLACE_BUNDLE_URL_BASE but the LocalResolver was
+	// constructed with a nil store. Falling through to the delegate
+	// (HTTPResolver) issues a tenant-gated HTTP fetch against our
+	// own marketplace bundles route which 401s regardless of where
+	// the LB routes it — the operator sees an opaque ErrBundleFetchFailed
+	// and has no breadcrumb pointing at the missing store wiring.
+	// In practice deps_build.go always passes a non-nil store, but
+	// defense-in-depth: a future config-loader refactor or a hand-
+	// constructed LocalResolver in tests should fail fast with a
+	// pointed error instead of silently going through the HTTP path.
+	if ok && l.store == nil {
+		return nil, fmt.Errorf(
+			"local resolver: bundle_url %q matches marketplace URL base %q but the bundlestore is not wired into this resolver; "+
+				"check the application's bundle-store configuration (KAPP_MARKETPLACE_BUNDLE_DIR / KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY) and the deps_build wiring",
+			version.BundleURL, l.urlBase)
+	}
+	if !ok {
 		if l.delegate == nil {
 			return nil, fmt.Errorf("local resolver: no delegate and url %q is not marketplace-hosted", version.BundleURL)
 		}

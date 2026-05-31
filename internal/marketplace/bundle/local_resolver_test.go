@@ -145,6 +145,50 @@ func TestLocalResolver_DisabledFallback(t *testing.T) {
 	}
 }
 
+// TestLocalResolver_MarketplaceURLWithNilStoreReturnsConfigError pins
+// the Round-9 Devin Review
+// ANALYSIS_pr-review-job-634b026415d343fd97f927a467cdd20f_0001 fix:
+// if the URL matches the marketplace base BUT the store is nil
+// (a misconfiguration where the operator wired
+// KAPP_MARKETPLACE_BUNDLE_URL_BASE without a working bundlestore),
+// the resolver MUST fail fast with an operator-actionable error
+// rather than falling through to the delegate (HTTPResolver). The
+// previous behaviour collapsed this case with the legitimate
+// "delegate handles non-marketplace URLs" path, so a misconfigured
+// deploy saw an opaque ErrBundleFetchFailed from a 401-ing self-
+// loopback fetch instead of the real cause.
+//
+// The urlBase here is non-empty so matchMarketplaceHash returns
+// ok=true; passing nil for the store triggers the new branch.
+func TestLocalResolver_MarketplaceURLWithNilStoreReturnsConfigError(t *testing.T) {
+	t.Parallel()
+	delegate := &fakeResolver{}
+	base := "https://kapp.example.com"
+	lr := NewLocalResolver(delegate, nil, base)
+	h := strings.Repeat("a", 64)
+	_, err := lr.Resolve(context.Background(), &marketplace.ExtensionVersion{
+		BundleURL:  base + "/api/v1/marketplace/bundles/" + h,
+		BundleHash: h,
+	})
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"bundle_url",
+		"bundlestore is not wired",
+		"KAPP_MARKETPLACE_BUNDLE_DIR",
+		base,
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("expected error to contain %q for operator diagnosability, got: %s", want, msg)
+		}
+	}
+	if delegate.called {
+		t.Fatalf("delegate must NOT be called when marketplace URL hits a nil-store LocalResolver: the HTTPResolver would issue a tenant-gated 401-bound self-loopback fetch and bury the real config error")
+	}
+}
+
 // TestLocalResolver_NotFound: store returns ErrBundleNotFound, the
 // resolver translates to the bundle package's sentinel so callers
 // can map to 404.

@@ -760,6 +760,11 @@ func (s *Store) ListPublisherUploads(ctx context.Context, publisherID uuid.UUID,
 //
 // Invariant: DeletedRows == DeletedObjects + OrphanedObjects.
 type GCResult struct {
+	// Scanned is the number of candidate orphan rows examined by
+	// this sweep. Capped at 1000 by the candidate-scan LIMIT —
+	// see GCUnreferenced doc for the batching contract: when
+	// Scanned == 1000, more orphans may exist and the caller MUST
+	// re-invoke until Scanned < 1000 to fully drain.
 	Scanned          int
 	DeletedRows      int
 	DeletedObjects   int
@@ -771,6 +776,29 @@ type GCResult struct {
 // never been referenced by a PublishVersion call, and removes the
 // backing object-store bytes. minAge <=0 falls back to
 // OrphanRetention. Returns a per-sweep summary.
+//
+// Batching contract (Round-9 Devin Review
+// ANALYSIS_pr-review-job-634b026415d343fd97f927a467cdd20f_0002):
+// a single invocation reclaims AT MOST 1000 orphan rows
+// (LIMIT 1000 on the candidate scan). The cap is intentional —
+// bounded scan keeps the admin pool's connection budget
+// predictable and avoids a long-running transaction across
+// thousands of object-store deletes — but it imposes a contract
+// on the caller:
+//
+//   - If GCResult.Scanned == 1000, MORE orphans may exist;
+//     the caller MUST re-invoke until Scanned < 1000 to fully
+//     drain. A cron that calls GCUnreferenced once per interval
+//     bounded to ≤1000 reclaims/interval will fall behind if
+//     orphan creation exceeds 1000/interval (e.g. a CI farm
+//     uploading test bundles without ever publishing them).
+//   - Operators can compose this primitive into a "drain-to-
+//     completion" loop or schedule short bursts; the package
+//     does NOT do this internally because the right pacing
+//     depends on the caller's pool size and SLO budget.
+//   - The 1000 cap is deliberately not configurable in v1.
+//     Bumping it widens the same-tx pressure profile in ways
+//     that warrant a load test before tuning.
 //
 // Failure mode: if the metadata row is deleted but the object
 // delete fails, the GCResult's OrphanedObjects counter is bumped
