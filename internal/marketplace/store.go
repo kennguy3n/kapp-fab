@@ -449,6 +449,112 @@ func (s *Store) SetListedVersion(ctx context.Context, extensionID uuid.UUID, ver
 	return nil
 }
 
+// SetListedAndStatus atomically (a) pins `version` as the
+// extension's default install target and (b) flips the
+// extension's status. This is the single-statement equivalent of
+// calling SetListedVersion + UpdateExtensionStatus back-to-back,
+// but inside one transaction — so the two writes either both
+// land or neither does. Devin Review BUG_pr-review-job-...-0001
+// flagged that the prior two-call sequence could leave the
+// catalog in a half-applied state (listed_version pinned but
+// status still `unpublished`), where the tenant browse query
+// (which filters by `status = 'listed'`) hides an extension that
+// has a listed_version pinned and would otherwise be installable.
+//
+// Locking posture mirrors SetListedVersion + UpdateExtensionStatus
+// combined:
+//
+//  1. SELECT FOR UPDATE on the target version row (serializes
+//     against YankVersion).
+//  2. SELECT FOR UPDATE on the extension row (serializes against
+//     any concurrent UpdateExtensionStatus, so we can read the
+//     current status under the lock and check the transition
+//     graph without a retry loop).
+//  3. UPDATE marketplace_extensions SET listed_version = ?,
+//     status = ? in a single statement.
+//
+// The retry loop UpdateExtensionStatus uses is unnecessary here
+// because the FOR UPDATE on the extensions row eliminates the
+// race window between the transition check and the write.
+//
+// Returns:
+//   - ErrNotFound if the extension or (extension_id, version)
+//     pair does not exist.
+//   - ErrYanked if the version exists but is yanked.
+//   - ErrInvalidManifest if the requested status transition is
+//     not permitted from the current status (matches the error
+//     UpdateExtensionStatus surfaces; the call site treats it as
+//     a 400 / configuration error rather than a server fault).
+//   - nil on success.
+func (s *Store) SetListedAndStatus(ctx context.Context, extensionID uuid.UUID, version string, status ExtensionStatus) error {
+	if extensionID == uuid.Nil || version == "" {
+		return fmt.Errorf("%w: extension id and version required", ErrNotFound)
+	}
+	if !status.Valid() {
+		return fmt.Errorf("%w: unknown status %q", ErrInvalidManifest, status)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return fmt.Errorf("marketplace: set listed and status: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Lock the version row first — same lock SetListedVersion
+	// takes, for the same reason (serialize against YankVersion).
+	var yanked bool
+	err = tx.QueryRow(ctx,
+		`SELECT yanked FROM marketplace_extension_versions
+		  WHERE extension_id = $1 AND version = $2
+		  FOR UPDATE`,
+		extensionID, version,
+	).Scan(&yanked)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: version %q does not exist for extension %s",
+				ErrNotFound, version, extensionID)
+		}
+		return fmt.Errorf("marketplace: set listed and status: lock version row: %w", err)
+	}
+	if yanked {
+		return fmt.Errorf("%w: version %q on extension %s cannot be listed",
+			ErrYanked, version, extensionID)
+	}
+
+	// Lock the extensions row so the status read + the UPDATE
+	// are atomic against any concurrent UpdateExtensionStatus.
+	var currentStatus string
+	err = tx.QueryRow(ctx,
+		`SELECT status FROM marketplace_extensions
+		  WHERE id = $1
+		  FOR UPDATE`,
+		extensionID,
+	).Scan(&currentStatus)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: extension %s does not exist", ErrNotFound, extensionID)
+		}
+		return fmt.Errorf("marketplace: set listed and status: lock extension row: %w", err)
+	}
+	from := ExtensionStatus(currentStatus)
+	if !extensionStatusTransitionAllowed(from, status) {
+		return fmt.Errorf("%w: cannot transition extension status from %q to %q",
+			ErrInvalidManifest, from, status)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE marketplace_extensions
+		   SET listed_version = $2, status = $3, updated_at = now()
+		 WHERE id = $1`,
+		extensionID, version, string(status),
+	); err != nil {
+		return fmt.Errorf("marketplace: set listed and status: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("marketplace: set listed and status: commit: %w", err)
+	}
+	return nil
+}
+
 // PublishVersionInput is the parameter block for PublishVersion. The
 // caller is responsible for having already parsed + validated the
 // manifest and hashed the bundle — see ParseManifest and HashBundle.

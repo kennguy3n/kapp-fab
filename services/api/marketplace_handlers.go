@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -785,11 +786,14 @@ func (h *marketplaceHandlers) listExtension(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "version required", http.StatusBadRequest)
 		return
 	}
-	if err := h.store.SetListedVersion(r.Context(), extID, req.Version); err != nil {
-		h.writeError(w, err)
-		return
-	}
-	if err := h.store.UpdateExtensionStatus(r.Context(), extID, marketplace.ExtensionStatusListed); err != nil {
+	// Single-tx atomic write. The prior two-call sequence
+	// (SetListedVersion + UpdateExtensionStatus) could leave
+	// the catalog in a half-applied state on the rare DB-mid-
+	// flight failure where the first call lands but the second
+	// fails: listed_version pinned but status still
+	// `unpublished`, which the tenant browse filter hides.
+	// Devin Review BUG_pr-review-job-...-0001.
+	if err := h.store.SetListedAndStatus(r.Context(), extID, req.Version, marketplace.ExtensionStatusListed); err != nil {
 		h.writeError(w, err)
 		return
 	}
@@ -909,6 +913,20 @@ func (h *marketplaceHandlers) writeError(w http.ResponseWriter, err error) {
 		// transition.
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 	default:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// Defense-in-depth: log the full error server-side so an
+		// operator triaging a 500 can grep the API log for the
+		// concrete cause, but DO NOT surface the underlying
+		// error string to the HTTP client. Unknown errors here
+		// originate from infrastructure layers (pgx, network,
+		// context cancellation, etc.) and frequently carry
+		// SQL fragments, hostnames, file paths, or stack-derived
+		// detail that would let an unauthenticated probe
+		// fingerprint the deployment. The sentinel-mapped arms
+		// above intentionally pass err.Error() through because
+		// those messages are produced by the marketplace package
+		// with controlled wording. Devin Review
+		// BUG_pr-review-job-...-0002.
+		log.Printf("api: marketplace_handlers: 500 fallthrough: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 	}
 }

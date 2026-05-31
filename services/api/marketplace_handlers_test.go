@@ -67,8 +67,24 @@ func TestMarketplaceWriteErrorMapping(t *testing.T) {
 			if rec.Code != tc.want {
 				t.Fatalf("status = %d, want %d", rec.Code, tc.want)
 			}
-			if !strings.Contains(rec.Body.String(), tc.err.Error()) && rec.Code != http.StatusInternalServerError {
-				t.Fatalf("body %q missing sentinel message %q", rec.Body.String(), tc.err.Error())
+			body := rec.Body.String()
+			if rec.Code == http.StatusInternalServerError {
+				// 500s deliberately do NOT echo the underlying
+				// error string — that path was leaking SQL / pgx
+				// internals to unauthenticated callers. Assert
+				// the generic message AND that the sentinel
+				// substring did NOT leak. Devin Review
+				// BUG_pr-review-job-...-0002.
+				if !strings.Contains(body, "internal server error") {
+					t.Fatalf("500 body %q missing generic message", body)
+				}
+				if strings.Contains(body, tc.err.Error()) && tc.err.Error() != "internal server error" {
+					t.Fatalf("500 body %q leaked underlying error %q", body, tc.err.Error())
+				}
+				return
+			}
+			if !strings.Contains(body, tc.err.Error()) {
+				t.Fatalf("body %q missing sentinel message %q", body, tc.err.Error())
 			}
 		})
 	}
