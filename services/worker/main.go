@@ -37,6 +37,8 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
+	"github.com/kennguy3n/kapp-fab/internal/marketplace/eventrouter"
+	mktruntime "github.com/kennguy3n/kapp-fab/internal/marketplace/runtime"
 	"github.com/kennguy3n/kapp-fab/internal/notifications"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/print"
@@ -256,6 +258,31 @@ func run() error {
 	ktypeCache := platform.NewLRUCache(cfg.KTypeCacheSize, 5*time.Minute)
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
 	recordStore := record.NewPGStoreWithRouter(dbRouter, ktypeRegistry, publisher, auditor)
+
+	// Per-tenant field-level encryption: mirrors services/api/deps_build.go
+	// initialisation so the worker can decrypt marketplace_extension_installations.
+	// signing_secret values on the event-router fan-out path. Without this,
+	// production deploys (which set KAPP_MASTER_KEY) would observe ciphertext
+	// and fail HMAC signing with a misleading mismatch error. Missing /
+	// short master keys keep the worker on the plaintext path (dev mode).
+	var workerKeyManager *tenant.KeyManager
+	if masterKey, mkErr := tenant.LoadMasterKey(); mkErr == nil {
+		prevKey, perr := tenant.LoadPrevMasterKey()
+		if perr != nil {
+			return perr
+		}
+		km, kmErr := tenant.NewKeyManagerWithPrev(masterKey, prevKey, time.Hour)
+		if kmErr != nil {
+			return kmErr
+		}
+		workerKeyManager = km
+		log.Printf("worker: per-tenant field encryption enabled")
+	} else if !errors.Is(mkErr, tenant.ErrMasterKeyMissing) {
+		return mkErr
+	} else {
+		log.Printf("worker: per-tenant field encryption disabled (%s unset)", tenant.MasterKeyEnvVar)
+	}
+
 	exchangeRates := ledger.NewExchangeRateStore(pool)
 	ledgerStore := ledger.NewPGStore(pool, publisher, auditor).WithExchangeRates(exchangeRates)
 	invoicePoster := ledger.NewInvoicePoster(ledgerStore, recordStore)
@@ -443,22 +470,42 @@ func run() error {
 	helpdeskPasswords := newWorkerPasswordResolver(ctx, cfg, 5*time.Minute, slog.Default())
 	helpdeskIMAP := newHelpdeskIMAPState(pool, adminPool, recordStore, helpdeskStore, imapFactory, helpdeskPasswords, slog.Default())
 
+	// Marketplace event router (B4). Constructed unconditionally so
+	// the deliver() callback can fan events out to extension webhook
+	// subscriptions. The transport is a production HTTPTransport
+	// (HTTPS-only, 1 MiB body cap); the rate limiter is per-process
+	// in-memory keyed by (tenant_id, extension_id). A future B6
+	// follow-up may move the limiter to Redis so multiple worker
+	// replicas share the budget — today each replica enforces its
+	// own bucket, which is an over-budget bound rather than an
+	// under-budget one (acceptable for ingress capacity protection).
+	mktTransport := mktruntime.NewHTTPTransport()
+	var mktEncryptor mktruntime.Encryptor
+	if workerKeyManager != nil {
+		mktEncryptor = workerKeyManager
+	} else {
+		mktEncryptor = mktruntime.NoopEncryptor()
+	}
+	mktLimiter := eventrouter.NewLimiter(100, time.Now)
+	mktRouter := eventrouter.NewRouter(pool, mktTransport, mktEncryptor, mktLimiter, time.Now)
+
 	return election.Run(ctx, func(leaderCtx context.Context) error {
 		return leadWorker(leaderCtx, leaderState{
-			cfg:            cfg,
-			publisher:      publisher,
-			alerts:         alerts,
-			router:         router,
-			schedStore:     schedStore,
-			schedRegistry:  schedRegistry,
-			exportWorker:   exportWorker,
-			autoscaleLoop:  autoscaleLoop,
-			batcher:        batcher,
-			nc:             nc,
-			bridge:         bridge,
-			helpdeskIMAP:   helpdeskIMAP,
-			drainHistogram: drainDur,
-			drainCounter:   drainEvents,
+			cfg:               cfg,
+			publisher:         publisher,
+			alerts:            alerts,
+			router:            router,
+			schedStore:        schedStore,
+			schedRegistry:     schedRegistry,
+			exportWorker:      exportWorker,
+			autoscaleLoop:     autoscaleLoop,
+			batcher:           batcher,
+			nc:                nc,
+			bridge:            bridge,
+			helpdeskIMAP:      helpdeskIMAP,
+			drainHistogram:    drainDur,
+			drainCounter:      drainEvents,
+			marketplaceRouter: mktRouter,
 		})
 	})
 }
@@ -513,6 +560,14 @@ type leaderState struct {
 	batcher       *AdaptiveBatcher
 	nc            *nats.Conn
 	bridge        *kchatBridgeNotifier
+
+	// marketplaceRouter fans drained outbox events out to
+	// marketplace_webhook_subscriptions registered at install time
+	// (manifest.webhooks_consumed[] + manifest.posting_hooks[]).
+	// nil disables the marketplace fan-out (test/dev paths that
+	// don't have the extension runtime tables wired). The router
+	// holds its own transport + rate-limit state.
+	marketplaceRouter *eventrouter.Router
 
 	// helpdeskIMAP is the supervisor for the per-mailbox IMAP
 	// poller goroutines (Surface G). nil when adminPool is
@@ -597,7 +652,7 @@ func drainLoop(ctx context.Context, s leaderState) error {
 		}
 	}()
 
-	deliverFn := deliver(s.nc, s.bridge, s.router)
+	deliverFn := deliver(s.nc, s.bridge, s.router, s.marketplaceRouter)
 	for {
 		waitCtx, waitCancel := context.WithTimeout(ctx, tickInterval)
 		_, waitErr := listenConn.WaitForNotification(waitCtx)
@@ -737,7 +792,7 @@ func acquireListenConn(ctx context.Context, connString string) (*pgx.Conn, error
 // Side-effect failures (bridge, router) are logged but do NOT fail the batch —
 // the event is already durably on NATS, so a flapping sidecar never blocks
 // forward progress of the outbox.
-func deliver(nc *nats.Conn, bridge *kchatBridgeNotifier, router *notificationRouter) func(ctx context.Context, batch []events.Event) error {
+func deliver(nc *nats.Conn, bridge *kchatBridgeNotifier, router *notificationRouter, mktRouter *eventrouter.Router) func(ctx context.Context, batch []events.Event) error {
 	return func(ctx context.Context, batch []events.Event) error {
 		g, ctx := errgroup.WithContext(ctx)
 		g.SetLimit(8)
@@ -763,6 +818,22 @@ func deliver(nc *nats.Conn, bridge *kchatBridgeNotifier, router *notificationRou
 				}
 				if router != nil {
 					router.route(ctx, e)
+				}
+				// Marketplace event router (B4). Best-effort side-
+				// effect alongside NATS publish + kchat-bridge —
+				// route errors are logged but never bubble up so a
+				// slow or broken extension cannot stall the outbox
+				// drain. The router does its own per-attempt
+				// dispatch_log writes; a higher-level metric on
+				// dispatch outcomes is layered on at B6 / B7 time.
+				if mktRouter != nil {
+					if _, err := mktRouter.RouteBatch(ctx, []events.Event{e}); err != nil {
+						slog.Default().Warn("marketplace router",
+							slog.String("event_type", e.Type),
+							slog.String("event_id", e.ID.String()),
+							slog.String("err", err.Error()),
+						)
+					}
 				}
 				return nil
 			})

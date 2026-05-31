@@ -47,7 +47,36 @@ type Dispatcher struct {
 	// symmetric across the install → dispatch flow. Devin Review
 	// ANALYSIS_0004 on PR #128.
 	encryptor Encryptor
+	// limiter is the optional per-(tenant, extension) rate budget
+	// shared with the B4 event router. nil disables rate limiting
+	// (tests, dev). When set, Invoke checks Allow() before the
+	// first attempt and returns ErrRateLimited if refused. Retry
+	// attempts do NOT re-check the limiter — a partial invoke
+	// that already consumed a token completes its retry budget so
+	// the operator-visible result is consistent ("this call took
+	// N attempts" rather than "this call got rate-limited halfway
+	// through").
+	limiter RateLimiter
 }
+
+// RateLimiter is the narrow interface Dispatcher consumes for the
+// per-(tenant, extension) budget. The concrete production type is
+// internal/marketplace/eventrouter.Limiter; declaring the
+// interface here breaks the otherwise-circular import (eventrouter
+// already imports runtime for Transport / SignRequest). Tests can
+// supply a stub that returns deterministic allow/refuse values.
+type RateLimiter interface {
+	Allow(tenantID, extensionID uuid.UUID, rpm int) bool
+	DefaultRPM() int
+}
+
+// ErrRateLimited is returned by Dispatcher.Invoke when the per-
+// (tenant, extension) bucket is empty. Callers can errors.Is
+// against this sentinel to distinguish rate-limit refusals from
+// other dispatch failures (e.g. for surfacing a 429 to the caller
+// or backing off the agent runtime). The error wraps the tool
+// name + extension id so a log line is self-describing.
+var ErrRateLimited = errors.New("runtime: dispatch rate-limited")
 
 // NewDispatcher constructs a Dispatcher with the supplied pool +
 // transport. If now is nil, time.Now is used. The returned
@@ -69,6 +98,16 @@ func NewDispatcher(pool *pgxpool.Pool, transport Transport, now func() time.Time
 // ANALYSIS_0004 on PR #128.
 func (d *Dispatcher) WithEncryptor(enc Encryptor) *Dispatcher {
 	d.encryptor = resolveEncryptor(enc)
+	return d
+}
+
+// WithRateLimiter wires a per-(tenant, extension) rate budget into
+// the dispatcher. Passing nil restores the unlimited path (the
+// pre-B4 behaviour). Production wires the same
+// eventrouter.Limiter the worker constructs so agent-tool invokes
+// and event-delivery dispatches share the budget.
+func (d *Dispatcher) WithRateLimiter(l RateLimiter) *Dispatcher {
+	d.limiter = l
 	return d
 }
 
@@ -141,6 +180,24 @@ func (d *Dispatcher) Invoke(ctx context.Context, in *InvokeRequest) (*InvokeResu
 	desc, err := d.lookupDescriptor(ctx, in)
 	if err != nil {
 		return nil, err
+	}
+
+	// Rate-limit gate: refuse if the per-(tenant, extension)
+	// bucket is empty. The descriptor pull above already paid the
+	// DB cost; we accept that cost on a refused call because the
+	// audit trail still benefits from knowing what was attempted
+	// (a future iteration may write a "rate_limited" dispatch_log
+	// row — today the refusal is surfaced only through the
+	// returned error). Retry attempts do NOT re-check the limiter
+	// (see field comment on `limiter`).
+	if d.limiter != nil {
+		rpm := desc.RateLimitRPM
+		if rpm < 1 {
+			rpm = d.limiter.DefaultRPM()
+		}
+		if !d.limiter.Allow(in.TenantID, desc.ExtensionID, rpm) {
+			return nil, fmt.Errorf("%w: tool %q extension %s rpm=%d", ErrRateLimited, in.ToolName, desc.ExtensionID, rpm)
+		}
 	}
 
 	requestID := uuid.New()
@@ -333,6 +390,12 @@ type agentToolDescriptor struct {
 	Timeout            time.Duration
 	RetryMaxAttempts   int
 	RetryBackoff       string
+	// RateLimitRPM is the per-extension override pulled from
+	// marketplace_extensions.rate_limit_rpm (migration 000071).
+	// 0 means "fall through to the limiter's default rpm"; the
+	// Dispatcher's rate-limit gate normalises that fallback so
+	// the descriptor stays a thin row mirror.
+	RateLimitRPM int
 }
 
 func (d *Dispatcher) lookupDescriptor(ctx context.Context, in *InvokeRequest) (*agentToolDescriptor, error) {
@@ -350,6 +413,7 @@ func (d *Dispatcher) lookupDescriptor(ctx context.Context, in *InvokeRequest) (*
 			maxAttempts  int
 			backoff      string
 		)
+		var rateLimitRPM int
 		row := tx.QueryRow(ctx, `
 			SELECT i.extension_id,
 			       i.extension_version_id,
@@ -359,16 +423,19 @@ func (d *Dispatcher) lookupDescriptor(ctx context.Context, in *InvokeRequest) (*
 			       t.handler,
 			       t.timeout_ms,
 			       t.retry_max_attempts,
-			       t.retry_backoff
+			       t.retry_backoff,
+			       e.rate_limit_rpm
 			  FROM marketplace_extension_installations AS i
 			  JOIN marketplace_extension_agent_tools AS t
 			    ON t.tenant_id = i.tenant_id
 			   AND t.installation_id = i.id
+			  JOIN marketplace_extensions AS e
+			    ON e.id = i.extension_id
 			 WHERE i.id = $1
 			   AND t.tool_name = $2`,
 			in.InstallationID, in.ToolName,
 		)
-		scanErr := row.Scan(&extID, &verID, &status, &signing, &endpoint, &handler, &timeoutMs, &maxAttempts, &backoff)
+		scanErr := row.Scan(&extID, &verID, &status, &signing, &endpoint, &handler, &timeoutMs, &maxAttempts, &backoff, &rateLimitRPM)
 		if scanErr != nil {
 			if errors.Is(scanErr, pgx.ErrNoRows) {
 				return ErrToolNotRegistered
@@ -394,6 +461,7 @@ func (d *Dispatcher) lookupDescriptor(ctx context.Context, in *InvokeRequest) (*
 		desc.Timeout = time.Duration(timeoutMs) * time.Millisecond
 		desc.RetryMaxAttempts = maxAttempts
 		desc.RetryBackoff = backoff
+		desc.RateLimitRPM = rateLimitRPM
 		return nil
 	})
 	if err != nil {
