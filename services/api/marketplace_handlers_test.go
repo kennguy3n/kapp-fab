@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,11 +11,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/kapp-fab/internal/marketplace"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/bundle"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/runtime"
+	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
 
 // TestMarketplaceWriteErrorMapping pins the sentinel-error →
@@ -56,6 +60,20 @@ func TestMarketplaceWriteErrorMapping(t *testing.T) {
 		{name: "ErrPreInstallRejected", err: runtime.ErrPreInstallRejected, want: http.StatusUnprocessableEntity},
 		{name: "ErrPreUninstallRejected", err: runtime.ErrPreUninstallRejected, want: http.StatusUnprocessableEntity},
 		{name: "wrapped ErrPreUninstallRejected", err: fmt.Errorf("%w: publisher said no", runtime.ErrPreUninstallRejected), want: http.StatusUnprocessableEntity},
+		// B6.1 — Engine.Upgrade sentinels. pre_upgrade
+		// rejection mirrors the install/uninstall lifecycle
+		// shape (422). Version-mismatch is a precondition
+		// failure (409) — the caller observed an old
+		// extension_version_id; the engine's in-tx FOR UPDATE
+		// found the row had moved. Same-version is a 400
+		// because it's a malformed request (from == to is a
+		// programmer error, not a state transition).
+		{name: "ErrPreUpgradeRejected", err: runtime.ErrPreUpgradeRejected, want: http.StatusUnprocessableEntity},
+		{name: "wrapped ErrPreUpgradeRejected", err: fmt.Errorf("%w: extension refused upgrade", runtime.ErrPreUpgradeRejected), want: http.StatusUnprocessableEntity},
+		{name: "ErrVersionMismatch", err: runtime.ErrVersionMismatch, want: http.StatusConflict},
+		{name: "wrapped ErrVersionMismatch", err: fmt.Errorf("%w: install moved", runtime.ErrVersionMismatch), want: http.StatusConflict},
+		{name: "ErrSameVersionUpgrade", err: runtime.ErrSameVersionUpgrade, want: http.StatusBadRequest},
+		{name: "wrapped ErrSameVersionUpgrade", err: fmt.Errorf("%w: from==to", runtime.ErrSameVersionUpgrade), want: http.StatusBadRequest},
 		// Forward-safety mappings for sentinels declared in
 		// types.go that don't yet have a live HTTP raise path
 		// in B7 but will once SetAutoApprovePatch / signature
@@ -266,6 +284,200 @@ func TestReviewStateToItemReviewedAt(t *testing.T) {
 	item = reviewStateToItem(s)
 	if item.ReviewedAt != "" {
 		t.Fatalf("nil reviewed_at: got %q, want empty", item.ReviewedAt)
+	}
+}
+
+// TestUpgradeRequestBodyUnmarshal pins the tri-state settings
+// decoder: "settings absent" / "settings: null" / "settings: {}"
+// produce three distinct (Settings, SettingsProvided) outcomes
+// that drive different engine branches downstream
+// (default-keep / explicit-keep / explicit-write). A regression
+// here would silently swap "preserve existing settings" with
+// "wipe to empty document" — a data-loss bug for the publisher's
+// settings document. The unit shape is small enough to test
+// without a full HTTP harness; see
+// marketplace_runtime_upgrade_test.go for end-to-end coverage
+// of the same paths through the live engine.
+func TestUpgradeRequestBodyUnmarshal(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name             string
+		body             string
+		wantSettings     map[string]any
+		wantProvided     bool
+		wantKeepSettings bool
+	}{
+		{
+			name: "settings absent",
+			body: `{"from_version_id":"a","to_version_id":"b"}`,
+			// SettingsProvided false → engine default-keep branch.
+			wantProvided: false,
+		},
+		{
+			name:         "settings null",
+			body:         `{"from_version_id":"a","to_version_id":"b","settings":null}`,
+			wantProvided: true,
+			// nil map + provided=true → engine treats as keep.
+		},
+		{
+			name:         "settings empty object",
+			body:         `{"from_version_id":"a","to_version_id":"b","settings":{}}`,
+			wantProvided: true,
+			wantSettings: map[string]any{},
+			// non-nil map + provided=true → engine writes
+			// (in this case wipes to {}).
+		},
+		{
+			name:         "settings populated",
+			body:         `{"from_version_id":"a","to_version_id":"b","settings":{"foo":"bar"}}`,
+			wantProvided: true,
+			wantSettings: map[string]any{"foo": "bar"},
+		},
+		{
+			name:             "keep_settings true",
+			body:             `{"from_version_id":"a","to_version_id":"b","keep_settings":true}`,
+			wantProvided:     false,
+			wantKeepSettings: true,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got upgradeRequestBody
+			if err := json.Unmarshal([]byte(tc.body), &got); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if got.SettingsProvided != tc.wantProvided {
+				t.Fatalf("SettingsProvided = %v, want %v", got.SettingsProvided, tc.wantProvided)
+			}
+			if got.KeepSettings != tc.wantKeepSettings {
+				t.Fatalf("KeepSettings = %v, want %v", got.KeepSettings, tc.wantKeepSettings)
+			}
+			if tc.wantSettings == nil {
+				if got.Settings != nil {
+					t.Fatalf("Settings = %v, want nil", got.Settings)
+				}
+				return
+			}
+			if len(got.Settings) != len(tc.wantSettings) {
+				t.Fatalf("Settings len = %d, want %d (got=%v)", len(got.Settings), len(tc.wantSettings), got.Settings)
+			}
+			for k, want := range tc.wantSettings {
+				if got.Settings[k] != want {
+					t.Fatalf("Settings[%q] = %v, want %v", k, got.Settings[k], want)
+				}
+			}
+		})
+	}
+}
+
+// TestUpgradeHandlerContradictoryBodyRejected pins the handler's
+// 400 guard against {keep_settings: true, settings: {populated}}.
+// The wire contract says the two fields are mutually exclusive;
+// previously the switch would silently let keep_settings win and
+// the caller's settings document would be dropped without
+// feedback. This test reproduces the contradictory body and
+// verifies a 400 lands before the handler touches the store /
+// resolver / engine — so a misconfigured handler with nil deps
+// still produces the correct rejection. "settings: null" +
+// keep_settings is the legitimate equivalent (both mean
+// preserve), so that combination must NOT trip the guard.
+func TestUpgradeHandlerContradictoryBodyRejected(t *testing.T) {
+	t.Parallel()
+
+	tenantID := uuid.New()
+	installID := uuid.New()
+
+	cases := []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantSubstr string
+	}{
+		{
+			name:       "keep_settings + populated settings rejected",
+			body:       fmt.Sprintf(`{"from_version_id":%q,"to_version_id":%q,"keep_settings":true,"settings":{"foo":"bar"}}`, uuid.New(), uuid.New()),
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "mutually exclusive",
+		},
+		{
+			name:       "keep_settings + empty settings object rejected",
+			body:       fmt.Sprintf(`{"from_version_id":%q,"to_version_id":%q,"keep_settings":true,"settings":{}}`, uuid.New(), uuid.New()),
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "mutually exclusive",
+		},
+		{
+			name: "keep_settings + settings:null is allowed",
+			// Both express "preserve existing"; the guard must
+			// not fire. A 400 still lands downstream because
+			// the handler's nil-store dereferences on
+			// GetInstallation — but the response body must
+			// NOT carry the mutual-exclusivity message, which
+			// proves the wire-contract guard let this through.
+			body:       fmt.Sprintf(`{"from_version_id":%q,"to_version_id":%q,"keep_settings":true,"settings":null}`, uuid.New(), uuid.New()),
+			wantStatus: 0, // unchecked — we only assert NOT the rejection message
+			wantSubstr: "",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// A fresh marketplaceHandlers with nil deps is
+			// enough because the contradiction guard fires
+			// BEFORE the first store / resolver call. The
+			// legitimate body case will dereference past the
+			// guard and panic in the test harness, which we
+			// recover from explicitly.
+			h := &marketplaceHandlers{}
+
+			// chi.RouteContext carries the {install_id} URL
+			// param; production routing populates this via
+			// chi.URLParam.
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("install_id", installID.String())
+
+			ctx := context.WithValue(context.Background(), chi.RouteCtxKey, rctx)
+			ctx = platform.WithTenant(ctx, &tenant.Tenant{ID: tenantID, Status: tenant.StatusActive})
+
+			req := httptest.NewRequest(http.MethodPost,
+				"/installations/"+installID.String()+"/upgrade",
+				strings.NewReader(tc.body)).WithContext(ctx)
+			rec := httptest.NewRecorder()
+
+			func() {
+				defer func() {
+					// Recover from the nil-store panic on
+					// the legitimate-body case so we can
+					// still assert on the response body
+					// captured up to that point.
+					_ = recover()
+				}()
+				h.upgrade(rec, req)
+			}()
+
+			if tc.wantStatus != 0 && rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body=%q)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			body := rec.Body.String()
+			if tc.wantSubstr != "" {
+				if !strings.Contains(body, tc.wantSubstr) {
+					t.Fatalf("body = %q, want substring %q", body, tc.wantSubstr)
+				}
+			} else {
+				// Legitimate body: must NOT carry the
+				// rejection message. The handler may have
+				// progressed and panicked / errored
+				// downstream; we only care that the guard
+				// itself didn't fire.
+				if strings.Contains(body, "mutually exclusive") {
+					t.Fatalf("body = %q unexpectedly carried mutual-exclusivity message", body)
+				}
+			}
+		})
 	}
 }
 
