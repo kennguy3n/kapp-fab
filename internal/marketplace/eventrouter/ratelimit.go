@@ -7,13 +7,26 @@ import (
 	"github.com/google/uuid"
 )
 
-// Limiter is the shared per-`(tenant_id, extension_id)` rate
-// budget consumed by BOTH the B4 event router (event_delivery
-// kind in marketplace_dispatch_log) AND the B3 agent-tool
-// dispatcher (tool_invoke kind). The budget is a property of the
-// extension's webhook receiver — its ingress capacity — not of
-// the dispatcher's call path, so both consumers share the same
-// bucket.
+// Limiter is the per-process, per-`(tenant_id, extension_id)`
+// rate budget for marketplace dispatches. Both the B4 event router
+// (event_delivery kind in marketplace_dispatch_log) and the B3
+// agent-tool dispatcher (tool_invoke kind) consult Limiter.Allow
+// via the runtime.RateLimiter interface — when a *Limiter instance
+// is wired into both consumers WITHIN A SINGLE PROCESS, they share
+// one bucket per (tenant, extension) pair and the in-process budget
+// is correctly unified across event-delivery and tool-invoke.
+//
+// CROSS-PROCESS / CROSS-REPLICA caveat: production deployments run
+// the worker (event router) and the API (agent-tool dispatcher) in
+// separate processes, and each may have multiple replicas. Each
+// process holds its own *Limiter, so the "extension's ingress
+// capacity" is enforced per-process, NOT globally. A B6/B7 follow-
+// up can swap this in-process bucket for a Redis-backed shared
+// bucket (same Allow signature, same RateLimiter interface — only
+// the implementation changes) when cross-replica budget sharing is
+// required. The worker startup log at
+// services/worker/main.go:477-480 also records this caveat for
+// operators.
 //
 // The implementation is a classic token bucket: each bucket
 // holds at most `capacity` tokens, refills at `refillPerSecond`

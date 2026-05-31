@@ -236,20 +236,63 @@ func TestEventRouter_EndToEnd(t *testing.T) {
 	}
 
 	// --- Test 4: posting-hook-derived event ---
+	// Posting hooks now register as subscriptions on the generic
+	// `krecord.created` event with filter={"ktype": "..."}, so a
+	// krecord.created event whose payload.ktype matches the hook's
+	// KType should dispatch. Also exercises that the SAME event
+	// type can fan out to multiple subscriptions (record.updated
+	// has no ktype-narrowing webhook_consumed subscription, but
+	// posting_hook for ktype X on krecord.created has filter
+	// `ktype = ext.<pub>.<slug>_label`).
 	atomic.StoreInt64(&transportCalls, 0)
-	postingEvt := fmt.Sprintf("ext.%s.%s_label.created", pub, ext.Slug)
+	postingHookPayload, _ := json.Marshal(map[string]any{
+		"ktype":     fmt.Sprintf("ext.%s.%s_label", pub, ext.Slug),
+		"record_id": "rec_4",
+	})
 	n, err = router.RouteBatch(ctx, []events.Event{{
 		ID:        uuid.New(),
 		TenantID:  tenantID,
-		Type:      postingEvt,
-		Payload:   json.RawMessage(`{"record_id": "rec_4"}`),
+		Type:      "krecord.created",
+		Payload:   postingHookPayload,
 		CreatedAt: time.Now(),
 	}})
 	if err != nil {
 		t.Fatalf("RouteBatch (posting-hook): %v", err)
 	}
+	// We expect 1 posting-hook dispatch. The webhooks_consumed
+	// subscription on `record.created` (with filter status=posted)
+	// does NOT match because the event type is `krecord.created`
+	// (the actual record-store emit), not the manifest's
+	// `record.created` string. Publishers who want to subscribe to
+	// the generic record event will use `krecord.created` going
+	// forward — that's the actual emitted event-type today.
 	if n != 1 {
 		t.Fatalf("RouteBatch (posting-hook): expected 1 dispatch, got %d", n)
+	}
+
+	// --- Test 4b: krecord.created with NON-matching ktype payload ---
+	// Posting hook is filter-narrowed by ktype, so a krecord.created
+	// for a different ktype must NOT fire the hook.
+	atomic.StoreInt64(&transportCalls, 0)
+	nonMatchKTypePayload, _ := json.Marshal(map[string]any{
+		"ktype":     "ext.different.publisher_kind",
+		"record_id": "rec_5",
+	})
+	n, err = router.RouteBatch(ctx, []events.Event{{
+		ID:        uuid.New(),
+		TenantID:  tenantID,
+		Type:      "krecord.created",
+		Payload:   nonMatchKTypePayload,
+		CreatedAt: time.Now(),
+	}})
+	if err != nil {
+		t.Fatalf("RouteBatch (posting-hook ktype mismatch): %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("RouteBatch (posting-hook ktype mismatch): expected 0, got %d", n)
+	}
+	if c := atomic.LoadInt64(&transportCalls); c != 0 {
+		t.Fatalf("transport calls (posting-hook ktype mismatch): expected 0, got %d", c)
 	}
 
 	// --- Test 5: rate limit exhaustion ---

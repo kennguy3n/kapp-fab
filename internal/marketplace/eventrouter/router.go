@@ -104,19 +104,28 @@ func NewRouter(
 
 // RouteBatch is the worker's entry point. For each event in the
 // batch, the router looks up matching subscriptions and fires
-// signed dispatches. Errors on individual subscriptions are
-// logged but never bubble up — the outbox row is considered
-// "delivered to the marketplace router" once we have made our
-// best attempt at every match. The dispatch_log table is the
-// authoritative per-attempt record; the outbox events table
-// only tracks "did this event reach the router".
+// signed dispatches. Per-subscription dispatch failures are logged
+// but never bubble up — a slow or broken extension cannot starve
+// its siblings. The dispatch_log table is the authoritative
+// per-attempt record; the outbox events table only tracks "did
+// this event reach the router".
 //
 // Returns the count of subscriptions actually dispatched (after
-// filter + rate-limit), which the caller can observe for
-// metrics. A non-nil error means the router could not even
-// enumerate subscriptions (DB outage) — the caller should
-// surface that and the outbox row should NOT be marked
-// delivered, so the next drain tick retries.
+// filter + rate-limit), which the caller can observe for metrics.
+//
+// Error semantics for the caller (services/worker/main.go deliver()):
+//
+// Marketplace event delivery is **best-effort, side-effect-only**
+// alongside NATS publish + kchat-bridge. A non-nil error here means
+// subscription enumeration failed (typically a DB outage during the
+// lookup tx) for at least one event in the batch. The worker
+// LOGS the error and continues — it does NOT block the outbox row
+// from being marked delivered, because doing so would make a
+// transient marketplace DB issue stall every other event consumer
+// (NATS, kchat-bridge) for the same drain batch. That trade-off is
+// deliberate: extension event delivery has at-MOST-once semantics
+// today; a follow-up (B6 / B7) can add a separate dead-letter table
+// for failed marketplace routings if at-least-once is required.
 func (r *Router) RouteBatch(ctx context.Context, batch []events.Event) (int, error) {
 	if r == nil {
 		return 0, errors.New("eventrouter: nil router")
@@ -131,9 +140,11 @@ func (r *Router) RouteBatch(ctx context.Context, batch []events.Event) (int, err
 	for _, e := range batch {
 		n, err := r.routeOne(ctx, e)
 		if err != nil {
-			// Hard error (DB outage): surface up so the
-			// outbox stays uncommitted and the next
-			// drain tick retries.
+			// Subscription lookup failed (DB outage). Wrap
+			// and surface so the caller can log; the caller
+			// is expected to keep going rather than fail the
+			// whole batch — see the doc-comment above for
+			// the rationale.
 			return dispatched, fmt.Errorf("eventrouter: tenant=%s event=%s: %w", e.TenantID, e.Type, err)
 		}
 		dispatched += n
@@ -401,10 +412,10 @@ func (r *Router) dispatchOne(ctx context.Context, e events.Event, sub *subscript
 
 		if sendErr != nil {
 			if logRowID != uuid.Nil {
-				if e := runtime.WriteDispatchLogComplete(ctx, r.pool, dispatchReq.TenantID, logRowID, 0, latency, sendErr); e != nil {
+				if logErr := runtime.WriteDispatchLogComplete(ctx, r.pool, dispatchReq.TenantID, logRowID, 0, latency, sendErr); logErr != nil {
 					slog.Default().Warn("eventrouter: write dispatch log complete (transport err)",
 						slog.String("subscription_id", sub.ID.String()),
-						slog.String("err", e.Error()),
+						slog.String("err", logErr.Error()),
 					)
 				}
 			}
@@ -415,10 +426,10 @@ func (r *Router) dispatchOne(ctx context.Context, e events.Event, sub *subscript
 		}
 
 		if logRowID != uuid.Nil {
-			if e := runtime.WriteDispatchLogComplete(ctx, r.pool, dispatchReq.TenantID, logRowID, resp.Status, latency, nil); e != nil {
+			if logErr := runtime.WriteDispatchLogComplete(ctx, r.pool, dispatchReq.TenantID, logRowID, resp.Status, latency, nil); logErr != nil {
 				slog.Default().Warn("eventrouter: write dispatch log complete",
 					slog.String("subscription_id", sub.ID.String()),
-					slog.String("err", e.Error()),
+					slog.String("err", logErr.Error()),
 				)
 			}
 		}

@@ -821,11 +821,21 @@ func deliver(nc *nats.Conn, bridge *kchatBridgeNotifier, router *notificationRou
 				}
 				// Marketplace event router (B4). Best-effort side-
 				// effect alongside NATS publish + kchat-bridge —
-				// route errors are logged but never bubble up so a
-				// slow or broken extension cannot stall the outbox
-				// drain. The router does its own per-attempt
-				// dispatch_log writes; a higher-level metric on
-				// dispatch outcomes is layered on at B6 / B7 time.
+				// route errors (including subscription-lookup DB
+				// outages) are logged but never bubble up. A slow
+				// or broken extension cannot stall the outbox
+				// drain, and a transient marketplace-DB issue
+				// cannot block NATS / kchat-bridge delivery for
+				// the rest of the batch. Extension event delivery
+				// has at-most-once semantics today; a follow-up
+				// (B6 / B7) can add a dead-letter table for
+				// failed routings if at-least-once is needed. The
+				// router writes per-attempt dispatch_log rows; a
+				// higher-level metric on dispatch outcomes is
+				// also layered on at B6 / B7 time. The error
+				// contract is documented at
+				// internal/marketplace/eventrouter/router.go on
+				// the RouteBatch doc-comment.
 				if mktRouter != nil {
 					if _, err := mktRouter.RouteBatch(ctx, []events.Event{e}); err != nil {
 						slog.Default().Warn("marketplace router",
