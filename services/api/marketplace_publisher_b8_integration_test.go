@@ -19,6 +19,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -1015,6 +1016,175 @@ func TestB8AdminSubmitVersionMarksUploadReferenced(t *testing.T) {
 	// already exercised above.
 	_ = uploader
 	_ = platform.WithUserID
+}
+
+// TestB8UploadResponseExpiresAtOmittedWhenReferenced pins the
+// round-7 Devin Review
+// BUG_pr-review-job-2430454d8f6e45f2bac501c46cdcab2a_0001 fix.
+//
+// Pre-fix: uploadBundleResponse.ExpiresAt was a non-pointer
+// time.Time always computed as upload.CreatedAt + OrphanRetention.
+// For a content-addressed dedup hit on a row that was ALREADY
+// referenced by an earlier PublishVersion call, Upload returns
+// the original row — so the API response surfaced an ExpiresAt
+// potentially weeks in the past (CreatedAt + 7d for a row whose
+// CreatedAt was N weeks ago), falsely implying the bundle was
+// about to be GC'd when in fact it was immortal (referenced
+// rows are never touched by the orphan sweeper).
+//
+// Post-fix: ExpiresAt is *time.Time + omitempty + computed via
+// expiresAtOrNil(CreatedAt, ReferencedAt). The list endpoint
+// already used that pattern; the upload response is now
+// consistent.
+//
+// Contract under test:
+//  1. First upload of a fresh bundle: response carries an
+//     explicit expires_at (the GC deadline) because the row's
+//     ReferencedAt is NULL.
+//  2. After MarkReferenced fires (in practice via PublishVersion;
+//     here we simulate by calling it directly to keep the test
+//     hermetic), a second upload of the same bytes returns the
+//     dedup hit and the response MUST omit expires_at entirely
+//     (omitempty on *time.Time).
+func TestB8UploadResponseExpiresAtOmittedWhenReferenced(t *testing.T) {
+	pool := openIntegrationPool(t, "KAPP_TEST_DB_URL")
+	ctx := context.Background()
+	store := marketplace.NewStore(pool)
+	users := tenant.NewUserStore(pool)
+
+	pubSlug := "b8exp_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "_")
+	pub, err := store.Publishers().CreatePublisher(ctx, marketplace.CreatePublisherInput{
+		Slug:         pubSlug,
+		DisplayName:  "B8 ExpiresAt publisher",
+		ContactEmail: pubSlug + "@example.invalid",
+	})
+	if err != nil {
+		t.Fatalf("CreatePublisher: %v", err)
+	}
+	alice, err := users.CreateUser(ctx, tenant.User{
+		KChatUserID: "u-alice-b8exp-" + uuid.NewString()[:8],
+		Email:       "alice-b8exp-" + uuid.NewString()[:6] + "@example.invalid",
+		DisplayName: "Alice B8 ExpiresAt",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if _, err := store.Publishers().AddMember(ctx, marketplace.AddPublisherMemberInput{
+		PublisherID: pub.ID,
+		UserID:      alice.ID,
+		Role:        marketplace.PublisherMemberRoleMember,
+	}); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+
+	objs := bundlestore.NewMemoryStore()
+	bs := bundlestore.NewStore(pool, objs)
+	mph := &marketplaceHandlers{
+		store:         store,
+		bundles:       bs,
+		bundleURLBase: "https://kapp.test",
+	}
+	r := chi.NewRouter()
+	r.Route("/api/v1/publisher/{publisher_id}", func(pr chi.Router) {
+		pr.Post("/bundles", mph.uploadPublisherBundle)
+	})
+
+	body := buildB8TestBundle(t, pubSlug)
+	hashRaw := sha256.Sum256(body)
+	hashHex := hex.EncodeToString(hashRaw[:])
+
+	// --- first upload: fresh row, MUST carry expires_at ------
+	mpBody1, contentType1 := buildB8Multipart(t, "expat.tar.gz", body)
+	req1 := httptest.NewRequest(http.MethodPost,
+		"/api/v1/publisher/"+pub.ID.String()+"/bundles", mpBody1)
+	req1.Header.Set("Content-Type", contentType1)
+	req1 = req1.WithContext(platform.WithUserID(req1.Context(), alice.ID))
+	rr1 := httptest.NewRecorder()
+	r.ServeHTTP(rr1, req1)
+	if rr1.Code != http.StatusCreated {
+		t.Fatalf("first upload: want 201, got %d (body %q)", rr1.Code, rr1.Body.String())
+	}
+	// Decode into a permissive map so we can distinguish
+	// "expires_at omitted" from "expires_at: null" from
+	// "expires_at: <timestamp>" — the omitempty contract under
+	// test depends on the difference between a present-but-nil
+	// field and an absent field.
+	var raw1 map[string]json.RawMessage
+	if err := json.Unmarshal(rr1.Body.Bytes(), &raw1); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	if _, ok := raw1["expires_at"]; !ok {
+		t.Fatalf("first upload (fresh row): expires_at MUST be present in response, got keys %v",
+			rawKeys(raw1))
+	}
+	var firstExpires time.Time
+	if err := json.Unmarshal(raw1["expires_at"], &firstExpires); err != nil {
+		t.Fatalf("first upload: decode expires_at: %v (raw=%s)", err, raw1["expires_at"])
+	}
+	// Sanity: the deadline must be ~OrphanRetention in the
+	// future, not stale or in the past.
+	if delta := time.Until(firstExpires); delta < bundlestore.OrphanRetention/2 {
+		t.Errorf("first upload: expires_at should be ~7d in the future, got delta=%v (expires=%v)",
+			delta, firstExpires)
+	}
+
+	// --- step 2: mark the row referenced --------------------
+	// In production this happens via PublishVersion; here we
+	// short-circuit so the test pins only the response shape
+	// without dragging in the full extension lifecycle.
+	if err := bs.MarkReferenced(ctx, hashHex); err != nil {
+		t.Fatalf("MarkReferenced: %v", err)
+	}
+
+	// --- second upload: dedup hit on referenced row ----------
+	// Pre-fix this would still emit "expires_at": <timestamp>
+	// (CreatedAt + 7d) because the field was a non-pointer
+	// time.Time. Post-fix the field is *time.Time + omitempty,
+	// so a referenced row produces an absent key.
+	mpBody2, contentType2 := buildB8Multipart(t, "expat.tar.gz", body)
+	req2 := httptest.NewRequest(http.MethodPost,
+		"/api/v1/publisher/"+pub.ID.String()+"/bundles", mpBody2)
+	req2.Header.Set("Content-Type", contentType2)
+	req2 = req2.WithContext(platform.WithUserID(req2.Context(), alice.ID))
+	rr2 := httptest.NewRecorder()
+	r.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusCreated {
+		t.Fatalf("dedup upload: want 201, got %d (body %q)", rr2.Code, rr2.Body.String())
+	}
+	var raw2 map[string]json.RawMessage
+	if err := json.Unmarshal(rr2.Body.Bytes(), &raw2); err != nil {
+		t.Fatalf("decode dedup response: %v", err)
+	}
+	if _, ok := raw2["expires_at"]; ok {
+		t.Errorf("BUG_0001 regression: dedup upload on referenced row MUST omit expires_at "+
+			"(field is *time.Time + omitempty for immortal rows); got expires_at=%s in response",
+			raw2["expires_at"])
+	}
+	// Sanity: the hash + bundle_url MUST still match (dedup
+	// returns the original row, not a new ID).
+	var dedupResp struct {
+		BundleHash string `json:"bundle_hash"`
+		BundleURL  string `json:"bundle_url"`
+	}
+	if err := json.Unmarshal(rr2.Body.Bytes(), &dedupResp); err != nil {
+		t.Fatalf("decode dedup response struct: %v", err)
+	}
+	if dedupResp.BundleHash != hashHex {
+		t.Errorf("dedup hash mismatch: want %s, got %s", hashHex, dedupResp.BundleHash)
+	}
+	if !strings.Contains(dedupResp.BundleURL, hashHex) {
+		t.Errorf("dedup URL should embed the original hash %s, got %q", hashHex, dedupResp.BundleURL)
+	}
+}
+
+// rawKeys returns the keys of a raw JSON map (sorted is not
+// needed — only used in error messages).
+func rawKeys(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 // --- helpers -------------------------------------------------------------

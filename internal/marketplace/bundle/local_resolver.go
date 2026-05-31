@@ -131,9 +131,32 @@ func (l *LocalResolver) Resolve(ctx context.Context, version *marketplace.Extens
 			// Wrap with operator-actionable context so the install
 			// handler's error response (and access log) names the
 			// most likely cause: a multi-replica deploy whose
-			// bundlestore is not shared across replicas. Preserves
-			// the ErrBundleNotFound sentinel so errors.Is checks
-			// (and the 404 mapping) keep working unchanged.
+			// bundlestore is not shared across replicas. Wrap with
+			// bundle.ErrBundleNotFound so errors.Is on the install
+			// pipeline's sentinel set keeps matching.
+			//
+			// Round-7 Devin Review
+			// ANALYSIS_pr-review-job-2430454d8f6e45f2bac501c46cdcab2a_0002
+			// correctly noted that bundle.ErrBundleNotFound maps to
+			// 502 (not 404) in writeError at
+			// services/api/marketplace_handlers.go:56-57 — the
+			// previous "(and the 404 mapping) keep working
+			// unchanged" comment was wrong about the status code.
+			// 502 is the right status for this path: this is the
+			// INSTALL pipeline ("the resolver failed to fetch
+			// bytes for a version that previously existed"), not
+			// the bundle-serve pipeline. The bundle-serve handler
+			// (serveBundleByHash) bypasses LocalResolver entirely
+			// and maps bundlestore.ErrBundleNotFound directly to
+			// 404 ("no such bundle hash"). The two paths return
+			// different status codes because they answer different
+			// questions:
+			//   - GET .../bundles/{hash}: "does this hash exist?"
+			//     → 404 if not
+			//   - install pipeline: "fetch the bytes for the
+			//     hash on this published version" → 502 if the
+			//     row exists but our replica cannot serve the
+			//     bytes (upstream / config drift)
 			return nil, fmt.Errorf(
 				"%w: hash %q is marketplace-hosted (url %q) but not present in this replica's bundlestore — "+
 					"this typically means the bundlestore is not shared across replicas "+

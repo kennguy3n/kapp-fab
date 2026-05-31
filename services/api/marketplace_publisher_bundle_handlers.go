@@ -58,16 +58,30 @@ import (
 // uploadBundleResponse is the JSON shape returned from the upload
 // endpoint. BundleURL is a marketplace-hosted URL the publisher
 // passes to PublishVersion; BundleHash + BundleSize feed the same
-// PublishVersion fields. ExpiresAt is the GC deadline for unused
-// uploads (publisher has until then to reference the hash in a
-// PublishVersion call before the orphan sweeper reclaims).
+// PublishVersion fields. ExpiresAt is the GC deadline for an
+// upload that has NOT yet been referenced by a PublishVersion
+// call; once referenced the row is immortal and the field is
+// omitted entirely (nil pointer + omitempty).
+//
+// Round-7 Devin Review
+// BUG_pr-review-job-2430454d8f6e45f2bac501c46cdcab2a_0001
+// flagged that this field used to be a non-pointer time.Time
+// always computed as upload.CreatedAt + OrphanRetention. For a
+// content-addressed dedup hit on a row that was ALREADY referenced
+// by an earlier PublishVersion call, Upload returns the original
+// row (bundlestore/store.go:561) — so the response would surface
+// an ExpiresAt potentially weeks in the past, falsely implying
+// the bundle was about to be GC'd. The list endpoint already
+// used *time.Time + expiresAtOrNil correctly; this brings the
+// upload response onto the same shape so the publisher console
+// and dashboard agree about the same underlying row.
 type uploadBundleResponse struct {
-	UploadID    uuid.UUID `json:"upload_id"`
-	BundleURL   string    `json:"bundle_url"`
-	BundleHash  string    `json:"bundle_hash"`
-	BundleSize  int64     `json:"bundle_size"`
-	ContentType string    `json:"content_type"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	UploadID    uuid.UUID  `json:"upload_id"`
+	BundleURL   string     `json:"bundle_url"`
+	BundleHash  string     `json:"bundle_hash"`
+	BundleSize  int64      `json:"bundle_size"`
+	ContentType string     `json:"content_type"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	// ManifestPreview lets the publisher console show
 	// "this bundle declares X ktypes / Y workflows / Z tools"
 	// without a second extract — the upload handler already did
@@ -267,7 +281,7 @@ func (h *marketplaceHandlers) uploadPublisherBundle(w http.ResponseWriter, r *ht
 		BundleHash:  upload.ContentHash,
 		BundleSize:  upload.SizeBytes,
 		ContentType: upload.ContentType,
-		ExpiresAt:   upload.CreatedAt.Add(bundlestore.OrphanRetention),
+		ExpiresAt:   expiresAtOrNil(upload.CreatedAt, upload.ReferencedAt),
 		ManifestPreview: manifestPreview{
 			Name:            rb.Manifest.Name,
 			Version:         rb.Manifest.Version,

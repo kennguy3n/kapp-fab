@@ -193,6 +193,31 @@ func packDir(dir string) ([]byte, error) {
 			return err
 		}
 		name := d.Name()
+		// Reject symlinks before any read-or-recurse decision.
+		// WalkDir reports symlinks as their lstat entry (does not
+		// follow them) but os.ReadFile / os.Stat / os.MkdirAll
+		// further down WOULD follow them, so a symlink inside the
+		// source tree pointing at /etc/shadow or ../secrets/
+		// would silently land in the bundle.
+		//
+		// Round-7 Devin Review
+		// ANALYSIS_pr-review-job-2430454d8f6e45f2bac501c46cdcab2a_0009
+		// flagged this as a future-hardening item. We reject hard
+		// instead of skip so a well-meaning publisher who wedged a
+		// "deps -> ../shared-config" symlink into their source tree
+		// gets a clear error pointing at the offending path —
+		// silently dropping the entry would produce a non-functional
+		// bundle whose manifest references a now-missing file. The
+		// publisher's recourse is to either inline the target into
+		// the source dir or restructure the manifest to live under
+		// the linked target's real path.
+		if d.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf(
+				"refusing to pack symlink %q: bundle source tree must contain only regular files and directories "+
+					"(symlinks would silently include or escape the source dir at extract time). "+
+					"Resolve by replacing the symlink with its target contents or restructuring the source",
+				path)
+		}
 		if d.IsDir() {
 			// Prune VCS metadata + common build-output dirs at
 			// the directory level. WalkDir's file-name switch

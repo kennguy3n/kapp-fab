@@ -357,6 +357,70 @@ func TestPackDirSkipsVCSAndBuildDirs(t *testing.T) {
 	}
 }
 
+// TestPackDirRejectsSymlinks pins the round-7 Devin Review
+// ANALYSIS_0009 fix: packDir uses filepath.WalkDir (which does
+// NOT follow symlinks at walk time) plus os.ReadFile (which
+// DOES follow them at read time), so an in-tree symlink would
+// silently include the target bytes in the bundle. A "deps ->
+// /etc/shadow" or "shared -> ../../../../private" link is a
+// real footgun even for a well-meaning publisher (e.g. one who
+// symlinked a monorepo's shared config into the extension's
+// source dir). The fix rejects symlinks hard at WalkDir time so
+// the publisher gets a clear error pointing at the offending
+// path instead of a broken bundle.
+func TestPackDirRejectsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "kapp-extension.yaml"), []byte("manifest body"))
+	target := filepath.Join(dir, "target.txt")
+	mustWrite(t, target, []byte("target body"))
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(target, link); err != nil {
+		// Some filesystems (FAT/exFAT) don't support symlinks;
+		// skip rather than fail because the production path
+		// only matters on platforms that DO support them.
+		t.Skipf("symlink unsupported on this filesystem: %v", err)
+	}
+
+	_, err := packDir(dir)
+	if err == nil {
+		t.Fatal("packDir(dir-with-symlink) returned nil; expected rejection")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected error to mention symlink, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "link.txt") {
+		t.Fatalf("expected error to name the offending path link.txt, got %v", err)
+	}
+}
+
+// TestPackDirRejectsSymlinkedDir verifies the symlink guard also
+// fires for directory-typed symlinks. WalkDir does not recurse
+// into them (no follow) so the previous code path never crashed,
+// but the guard MUST still reject them so a publisher who points
+// "vendor -> /home/me/shared/" gets a clear error rather than a
+// silently empty "vendor/" in the bundle.
+func TestPackDirRejectsSymlinkedDir(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "kapp-extension.yaml"), []byte("manifest body"))
+	other := t.TempDir()
+	mustWrite(t, filepath.Join(other, "shared.txt"), []byte("shared body"))
+	link := filepath.Join(dir, "vendor")
+	if err := os.Symlink(other, link); err != nil {
+		t.Skipf("symlink unsupported on this filesystem: %v", err)
+	}
+
+	_, err := packDir(dir)
+	if err == nil {
+		t.Fatal("packDir(dir-with-symlinked-dir) returned nil; expected rejection")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected error to mention symlink, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "vendor") {
+		t.Fatalf("expected error to name the offending path vendor, got %v", err)
+	}
+}
+
 // --- helpers -------------------------------------------------------------
 
 func mapKeys(m map[string]string) []string {
