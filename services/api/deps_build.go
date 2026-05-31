@@ -336,6 +336,19 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	if cfg.MarketplaceBundleDir != "" {
 		ds, dsErr := bundlestore.NewDiskStore(cfg.MarketplaceBundleDir)
 		if dsErr != nil {
+			// Match the cleanup discipline of every other error
+			// return in buildDeps after the pool was acquired:
+			// without runCleanups(cleanups) the primary pool
+			// (and the admin pool when present) leak open
+			// connections until the process exits. On a kube
+			// CrashLoopBackOff loop driven by a bad
+			// KAPP_MARKETPLACE_BUNDLE_DIR (read-only volume,
+			// missing mount, perms error) that would exhaust
+			// PostgreSQL max_connections before an operator
+			// finishes diagnosing the directory misconfig.
+			// Devin Review BUG_pr-review-job-57272ee27b2241b785cf8405297dfdf0_0001
+			// flagged the missing cleanup.
+			runCleanups(cleanups)
 			return nil, nil, fmt.Errorf("init bundle disk store: %w", dsErr)
 		}
 		bundleObjs = ds
