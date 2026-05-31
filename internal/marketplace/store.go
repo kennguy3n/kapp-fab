@@ -808,7 +808,7 @@ func (s *Store) Install(ctx context.Context, in InstallInput) (*Installation, er
 	// (^https://) and the previous prefix-only check both let that
 	// through.
 	if err := validateHTTPSURL(in.WebhookBase); err != nil {
-		return nil, fmt.Errorf("%w: webhook_base: %v", ErrInvalidManifest, err)
+		return nil, fmt.Errorf("%w: webhook_base: %w", ErrInvalidManifest, err)
 	}
 	settings := in.Settings
 	if len(settings) == 0 {

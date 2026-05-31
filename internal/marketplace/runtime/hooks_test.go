@@ -213,7 +213,7 @@ func TestTransportHooks_PostInstall_5xxExhausted_NotAborted(t *testing.T) {
 }
 
 func TestTransportHooks_PreInstall_TransportError_Aborts(t *testing.T) {
-	tr := &InMemoryTransport{Handler: func(ctx context.Context, _ string, _ []byte, _ map[string]string) (*DispatchResponse, error) {
+	tr := &InMemoryTransport{Handler: func(_ context.Context, _ string, _ []byte, _ map[string]string) (*DispatchResponse, error) {
 		return nil, errors.New("simulated dns failure")
 	}}
 	hooks := NewTransportHooks(tr, nil, fixedClock(time.Unix(1700000000, 0).UTC()))

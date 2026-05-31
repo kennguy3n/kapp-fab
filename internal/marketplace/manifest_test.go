@@ -100,7 +100,7 @@ func rejectsOn(t *testing.T, mutate func(string) string, expectField, expectFrag
 	if !errors.Is(err, ErrInvalidManifest) {
 		t.Fatalf("expected ErrInvalidManifest sentinel, got %v", err)
 	}
-	var merrs *ManifestErrors
+	var merrs *MultiManifestError
 	if errors.As(err, &merrs) {
 		matched := false
 		var fields, msgs []string
@@ -656,7 +656,7 @@ func TestParseManifestRejectsHyphensInName(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected rejection but parse succeeded")
 			}
-			// Must be a ManifestError or ManifestErrors that surfaces
+			// Must be a ManifestError or MultiManifestError that surfaces
 			// the field name. Using errors.Is for ErrInvalidManifest
 			// is the contract callers rely on.
 			if !errors.Is(err, ErrInvalidManifest) {
@@ -762,7 +762,7 @@ func TestInstallStatusTransitionAllowed(t *testing.T) {
 	}
 }
 
-func TestManifestErrorsUnwrapErrInvalidManifest(t *testing.T) {
+func TestMultiManifestErrorUnwrapErrInvalidManifest(t *testing.T) {
 	src := replaceLine("schema_version: 1", "schema_version: 2")(validManifest())
 	_, err := ParseManifest([]byte(src))
 	if err == nil {

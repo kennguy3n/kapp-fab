@@ -147,7 +147,10 @@ type noopHooks struct{}
 // that do not exercise the hook layer.
 func NoopHooks() LifecycleHooks { return noopHooks{} }
 
-func (noopHooks) Dispatch(ctx context.Context, in *LifecycleDispatch) (*LifecycleResult, error) {
+// Dispatch is the noop implementation: every call validates the
+// payload, then returns a fixed 200/empty success with no side
+// effects.
+func (noopHooks) Dispatch(_ context.Context, in *LifecycleDispatch) (*LifecycleResult, error) {
 	if err := in.Validate(); err != nil {
 		return nil, err
 	}
@@ -234,6 +237,13 @@ func isPreLifecycle(p LifecyclePhase) bool {
 	return p == PhasePreInstall || p == PhasePreUninstall
 }
 
+// Dispatch signs and POSTs the lifecycle payload to the extension's
+// /lifecycle/{phase} endpoint via the configured Transport, then
+// classifies the response per the spec (5xx → retry-eligible per
+// phase semantics; non-2xx on pre_ phases → aborted; transport
+// error on pre_ phases → aborted with ErrLifecycleTransport).
+// Writes start/complete rows to marketplace_dispatch_log around
+// each attempt when pool is non-nil.
 func (h *transportHooks) Dispatch(ctx context.Context, in *LifecycleDispatch) (*LifecycleResult, error) {
 	if err := in.Validate(); err != nil {
 		return nil, err

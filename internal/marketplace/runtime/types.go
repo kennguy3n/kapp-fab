@@ -64,6 +64,9 @@ import (
 // ${EXTENSION_WEBHOOK_BASE}/lifecycle/{phase}.
 type LifecyclePhase string
 
+// LifecyclePhase enum values. Each maps to a URL path suffix
+// (/lifecycle/<value>) on the extension's webhook_base AND to a
+// DispatchKind enum value via DispatchKindForPhase.
 const (
 	PhasePreInstall    LifecyclePhase = "pre_install"
 	PhasePostInstall   LifecyclePhase = "post_install"
@@ -81,6 +84,12 @@ func (p LifecyclePhase) LifecyclePath() string {
 // value per audit-log row type.
 type DispatchKind string
 
+// DispatchKind enum values. Each is a string written verbatim to
+// marketplace_dispatch_log.kind. The lifecycle_* values correspond
+// one-to-one to LifecyclePhase via DispatchKindForPhase; the
+// remaining values are written by the agent-tool dispatcher
+// (tool_invoke), the event delivery worker (event_delivery), and
+// the health-check probe (health_check).
 const (
 	KindToolInvoke             DispatchKind = "tool_invoke"
 	KindLifecyclePreInstall    DispatchKind = "lifecycle_pre_install"
@@ -212,7 +221,7 @@ func IsValidWebhookBase(base string) error {
 	}
 	u, err := url.Parse(base)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidWebhookBase, err)
+		return fmt.Errorf("%w: %w", ErrInvalidWebhookBase, err)
 	}
 	if u.Host == "" {
 		return ErrInvalidWebhookBase

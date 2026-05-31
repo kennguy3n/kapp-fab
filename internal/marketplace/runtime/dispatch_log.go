@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -11,6 +12,17 @@ import (
 
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 )
+
+// ErrDispatchLogCompletionInconsistent is returned by
+// writeDispatchLogComplete when the caller passes neither a
+// non-zero HTTP status nor a transport error. It exists so future
+// callers cannot silently violate the
+// marketplace_dispatch_log_completion_consistent_chk DB CHECK
+// (migration 000069 lines 324-327), which requires that any row
+// with a non-NULL completed_at also has at least one of
+// response_status or error populated. Devin Review ANALYSIS_0002
+// on PR #128 flagged the previous undocumented contract.
+var ErrDispatchLogCompletionInconsistent = errors.New("runtime: dispatch log completion requires status > 0 or non-nil sendErr")
 
 // dispatchLogStart captures the inputs to writeDispatchLogStart.
 // Extracted to a struct so both the agent-tool Dispatcher and the
@@ -76,11 +88,25 @@ func writeDispatchLogStart(ctx context.Context, pool *pgxpool.Pool, in dispatchL
 // writeDispatchLogStart with the response status, latency, and any
 // transport-level error from the HTTP attempt.
 //
+// API contract: the caller MUST pass either status > 0 OR a
+// non-nil sendErr. Passing (status=0, sendErr=nil) would write a
+// row with completed_at = now() but both response_status and
+// error NULL, violating
+// marketplace_dispatch_log_completion_consistent_chk on the DB
+// side. The pre-flight check below catches that locally and
+// returns ErrDispatchLogCompletionInconsistent so a refactor or
+// new caller surfaces the bug before the SQL round-trip rather
+// than as an opaque constraint-violation error from Postgres.
+// Devin Review ANALYSIS_0002 on PR #128.
+//
 // A nil rowID is a no-op — the in-flight INSERT failed, so there's
 // no row to complete; the caller already surfaced the start error.
 func writeDispatchLogComplete(ctx context.Context, pool *pgxpool.Pool, tenantID, rowID uuid.UUID, status int, latency time.Duration, sendErr error) error {
 	if rowID == uuid.Nil {
 		return nil
+	}
+	if status <= 0 && sendErr == nil {
+		return ErrDispatchLogCompletionInconsistent
 	}
 	var (
 		statusPtr  *int

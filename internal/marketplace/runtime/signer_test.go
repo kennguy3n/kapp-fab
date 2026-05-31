@@ -41,8 +41,8 @@ func TestCanonicalRequest_EmptyBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CanonicalRequest: %v", err)
 	}
-	// SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-	if !strings.Contains(got, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") {
+	const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	if !strings.Contains(got, emptySHA256) {
 		t.Errorf("canonical does not embed SHA-256(empty): %q", got)
 	}
 }

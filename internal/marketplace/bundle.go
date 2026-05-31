@@ -71,7 +71,7 @@ const (
 //
 // The caller is responsible for closing r (HashBundle is read-only and
 // does not retain a reference to it).
-func HashBundle(r io.Reader) (string, int64, error) {
+func HashBundle(r io.Reader) (hexHash string, size int64, err error) {
 	if r == nil {
 		return "", 0, errors.New("marketplace: nil bundle reader")
 	}
@@ -81,9 +81,9 @@ func HashBundle(r io.Reader) (string, int64, error) {
 	// "exceeds cap" (reject). The +1 lets the peek see the next byte
 	// without inflating io.Copy's internal buffer growth.
 	limited := io.LimitReader(r, MaxBundleSizeBytes+1)
-	size, err := io.Copy(h, limited)
-	if err != nil {
-		return "", size, fmt.Errorf("marketplace: read bundle: %w", err)
+	size, copyErr := io.Copy(h, limited)
+	if copyErr != nil {
+		return "", size, fmt.Errorf("marketplace: read bundle: %w", copyErr)
 	}
 	if size > MaxBundleSizeBytes {
 		return "", size, ErrBundleTooLarge
@@ -104,7 +104,7 @@ func HashBundle(r io.Reader) (string, int64, error) {
 // where the caller has already accumulated the full payload (e.g.
 // after a successful streaming upload to object storage where the
 // uploader buffered the body for signature verification).
-func HashBundleBytes(b []byte) (string, int64, error) {
+func HashBundleBytes(b []byte) (hexHash string, size int64, err error) {
 	if int64(len(b)) > MaxBundleSizeBytes {
 		return "", int64(len(b)), ErrBundleTooLarge
 	}

@@ -211,29 +211,61 @@ func (r *Registrar) RegisterAll(ctx context.Context, tx pgx.Tx, tenantID, instal
 	return nil
 }
 
-// resolveEndpoint substitutes the install's webhook_base for the
-// ${EXTENSION_WEBHOOK_BASE} placeholder declared in manifest
-// endpoints. The manifest validator (B2) restricts endpoints to the
-// `${EXTENSION_WEBHOOK_BASE}(/path)?` shape, so the only allowed
-// outputs of this function are `<base>` or `<base>/<path>`. After
-// resolution the result MUST be an https:// URL — that's how the
-// DB CHECK constraint on agent_tools.endpoint /
-// webhook_subscriptions.endpoint gates malformed installs.
+// resolveEndpoint resolves a manifest-declared endpoint to the
+// concrete URL the dispatcher and webhook delivery will POST to.
+//
+// The manifest validator (validateEndpoint, manifest.go §3.1)
+// accepts two forms — kept in sync here per Devin Review
+// BUG_0001 on PR #128 which caught a divergence where the
+// registrar only handled the placeholder form and would reject
+// any direct-HTTPS manifest at install time even though the
+// validator had previously accepted it:
+//
+//  1. `${EXTENSION_WEBHOOK_BASE}` — optionally followed by a
+//     `/`-rooted path component. This form is rewritten by
+//     substituting the install's webhook_base for the literal
+//     placeholder token, yielding `<webhookBase>` or
+//     `<webhookBase>/<path>`.
+//  2. A fully-qualified `https://` URL — passed through
+//     unchanged. The validator has already enforced the scheme,
+//     non-empty host, and absence of any embedded `${...}`
+//     token (which would otherwise leave a literal-string
+//     placeholder in the final URL).
+//
+// After resolution the result MUST be an https:// URL — that is
+// what the DB CHECK constraint on agent_tools.endpoint /
+// webhook_subscriptions.endpoint enforces at insert time.
 func resolveEndpoint(endpoint, webhookBase string) (string, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
 		return "", errors.New("empty endpoint")
 	}
 	const placeholder = "${EXTENSION_WEBHOOK_BASE}"
-	if !strings.HasPrefix(endpoint, placeholder) {
-		return "", fmt.Errorf("endpoint %q must start with %s", endpoint, placeholder)
+	if strings.HasPrefix(endpoint, placeholder) {
+		// Form 1: placeholder-prefixed. Substitute webhookBase for the
+		// literal token. The substitution result must still be
+		// https:// — anything else means the install row's
+		// webhook_base was accepted via a path that didn't enforce
+		// the scheme (e.g. a direct SQL insert that skirted
+		// Store.CreateInstall). Treat this as a hard error rather
+		// than silently dispatching over plaintext.
+		suffix := endpoint[len(placeholder):]
+		resolved := webhookBase + suffix
+		if !strings.HasPrefix(resolved, "https://") {
+			return "", fmt.Errorf("resolved endpoint %q must use https://", resolved)
+		}
+		return resolved, nil
 	}
-	suffix := endpoint[len(placeholder):]
-	resolved := webhookBase + suffix
-	if !strings.HasPrefix(resolved, "https://") {
-		return "", fmt.Errorf("resolved endpoint %q must use https://", resolved)
+	// Form 2: fully-qualified HTTPS URL. The manifest validator has
+	// already enforced the scheme and the absence of embedded
+	// ${...} tokens, but we re-check the scheme here so a row that
+	// reached this point through a non-validator path (e.g. a
+	// kapp-backup restore that bypassed manifest validation)
+	// cannot trick the dispatcher into POSTing over plaintext.
+	if !strings.HasPrefix(endpoint, "https://") {
+		return "", fmt.Errorf("endpoint %q must be a fully-qualified https:// URL or start with %s", endpoint, placeholder)
 	}
-	return resolved, nil
+	return endpoint, nil
 }
 
 func (r *Registrar) insertKTypes(ctx context.Context, tx pgx.Tx, tenantID, installID uuid.UUID, publisher string, kts []ResolvedKType) error {

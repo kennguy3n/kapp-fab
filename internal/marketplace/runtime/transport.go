@@ -58,7 +58,7 @@ func NewHTTPTransport() *HTTPTransport {
 			// here, so Client.Timeout stays 0 (unlimited). Setting
 			// both would create confusing "which one fires first"
 			// semantics.
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				// Refuse redirects. A 301/302 from the extension
 				// would force the dispatcher to re-sign for the
 				// new URL OR replay the signature against a URL
@@ -97,11 +97,11 @@ func (t *HTTPTransport) Send(ctx context.Context, target string, body []byte, he
 		// retry loop classifies this as a retryable transport
 		// error.
 		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, fmt.Errorf("%w: %v", ErrDispatchTimeout, err)
+			return nil, fmt.Errorf("%w: %w", ErrDispatchTimeout, err)
 		}
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	// Read response with a hard cap. Anything beyond the cap is
 	// discarded.
 	limited := io.LimitReader(resp.Body, MaxResponseBodyBytes+1)
@@ -247,7 +247,7 @@ func (t *InMemoryTransport) Send(ctx context.Context, target string, body []byte
 // returns the supplied status/body on every call. Convenience for
 // the common "always return 200" or "always return 502" test.
 func StaticResponseHandler(status int, body []byte) func(ctx context.Context, target string, body []byte, headers map[string]string) (*DispatchResponse, error) {
-	return func(ctx context.Context, target string, _ []byte, _ map[string]string) (*DispatchResponse, error) {
+	return func(_ context.Context, _ string, _ []byte, _ map[string]string) (*DispatchResponse, error) {
 		return &DispatchResponse{Status: status, Body: body, Header: map[string]string{}, Latency: 0}, nil
 	}
 }
@@ -284,7 +284,7 @@ func StaticResponseHandler(status int, body []byte) func(ctx context.Context, ta
 // removes the footgun before it bites.
 func SequenceHandler(responses []*DispatchResponse, errs []error) func(ctx context.Context, target string, body []byte, headers map[string]string) (*DispatchResponse, error) {
 	var idx atomic.Int64
-	return func(ctx context.Context, _ string, _ []byte, _ map[string]string) (*DispatchResponse, error) {
+	return func(_ context.Context, _ string, _ []byte, _ map[string]string) (*DispatchResponse, error) {
 		cur := int(idx.Add(1) - 1)
 		var (
 			resp *DispatchResponse

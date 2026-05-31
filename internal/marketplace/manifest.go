@@ -318,15 +318,15 @@ func (e *ManifestError) Error() string {
 // the sentinel without losing the per-field detail.
 func (e *ManifestError) Unwrap() error { return ErrInvalidManifest }
 
-// ManifestErrors aggregates multiple ManifestError values. The
+// MultiManifestError aggregates multiple ManifestError values. The
 // validator collects every problem in a single pass rather than
 // short-circuiting on the first failure so publishers see all
 // issues at once instead of fixing one at a time.
-type ManifestErrors struct {
+type MultiManifestError struct {
 	Errors []*ManifestError
 }
 
-func (e *ManifestErrors) Error() string {
+func (e *MultiManifestError) Error() string {
 	if len(e.Errors) == 0 {
 		return ErrInvalidManifest.Error()
 	}
@@ -340,7 +340,7 @@ func (e *ManifestErrors) Error() string {
 // Unwrap routes errors.Is(err, ErrInvalidManifest) and
 // errors.Is(err, ErrPermissionScopeUnknown) through the aggregated
 // set so callers don't have to walk the slice themselves.
-func (e *ManifestErrors) Unwrap() []error {
+func (e *MultiManifestError) Unwrap() []error {
 	out := make([]error, 0, len(e.Errors)+1)
 	out = append(out, ErrInvalidManifest)
 	for _, me := range e.Errors {
@@ -379,7 +379,7 @@ var (
 
 // ParseManifest parses raw kapp-extension.yaml bytes into a typed
 // Manifest with every spec §2/§3/§4/§6/§7/§8/§9 invariant checked.
-// Returns *ManifestErrors (wrapping ErrInvalidManifest) with the full
+// Returns *MultiManifestError (wrapping ErrInvalidManifest) with the full
 // list of issues on rejection, or the validated Manifest on success.
 //
 // The parser is strict — yaml.Decoder.KnownFields(true) is enabled so
@@ -423,7 +423,7 @@ func ParseManifest(data []byte) (*Manifest, error) {
 		return nil, &ManifestError{Field: "", Message: "manifest contains multiple YAML documents; only one is permitted"}
 	}
 
-	agg := &ManifestErrors{}
+	agg := &MultiManifestError{}
 	validateManifest(&m, agg)
 	if len(agg.Errors) > 0 {
 		return nil, agg
@@ -431,7 +431,7 @@ func ParseManifest(data []byte) (*Manifest, error) {
 	return &m, nil
 }
 
-func validateManifest(m *Manifest, agg *ManifestErrors) {
+func validateManifest(m *Manifest, agg *MultiManifestError) {
 	// --- schema_version ---
 	if m.SchemaVersion != ManifestSchemaVersion {
 		agg.add("schema_version", fmt.Sprintf("must be %d (got %d)", ManifestSchemaVersion, m.SchemaVersion))
@@ -826,11 +826,11 @@ func validateManifest(m *Manifest, agg *ManifestErrors) {
 	}
 }
 
-func (e *ManifestErrors) add(field, msg string) {
+func (e *MultiManifestError) add(field, msg string) {
 	e.Errors = append(e.Errors, &ManifestError{Field: field, Message: msg})
 }
 
-func (e *ManifestErrors) addRaw(err *ManifestError) {
+func (e *MultiManifestError) addRaw(err *ManifestError) {
 	e.Errors = append(e.Errors, err)
 }
 
@@ -887,7 +887,7 @@ func validateEndpoint(endpoint string) error {
 func validateHTTPSURL(s string) error {
 	u, err := url.Parse(s)
 	if err != nil {
-		return fmt.Errorf("invalid URL: %v", err)
+		return fmt.Errorf("invalid URL: %w", err)
 	}
 	if !strings.EqualFold(u.Scheme, "https") {
 		return fmt.Errorf("scheme %q rejected; https required", u.Scheme)
