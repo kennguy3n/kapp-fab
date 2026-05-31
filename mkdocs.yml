@@ -136,6 +136,7 @@ nav:
     - API pagination:           API_PAGINATION.md
     - Infrastructure:           INFRASTRUCTURE.md
     - Plugin developer guide:   PLUGIN_DEVELOPER_GUIDE.md
+    - Extension specification:  EXTENSION_SPEC.md
     - Documentation site:       DOCS_SITE.md
 
   - ADRs:
