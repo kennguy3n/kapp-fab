@@ -496,7 +496,7 @@ func TestFirstCodingSlice(t *testing.T) {
 
 	// 4. Alice creates a note in acme; Bob creates a note in globex.
 	aliceNote, err := h.records.Create(ctx, record.KRecord{
-		TenantID:  acme.ID, KType: kname,
+		TenantID: acme.ID, KType: kname,
 		Data:      json.RawMessage(`{"title":"Acme launch plan","body":"Q1 roadmap"}`),
 		CreatedBy: alice.ID,
 	})
@@ -504,7 +504,7 @@ func TestFirstCodingSlice(t *testing.T) {
 		t.Fatalf("alice create note: %v", err)
 	}
 	bobNote, err := h.records.Create(ctx, record.KRecord{
-		TenantID:  globex.ID, KType: kname,
+		TenantID: globex.ID, KType: kname,
 		Data:      json.RawMessage(`{"title":"Globex offsite","body":"Week of Nov 14"}`),
 		CreatedBy: bob.ID,
 	})
