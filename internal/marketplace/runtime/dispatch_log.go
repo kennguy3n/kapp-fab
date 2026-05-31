@@ -116,7 +116,24 @@ func writeDispatchLogComplete(ctx context.Context, pool *pgxpool.Pool, tenantID,
 	if status > 0 {
 		statusPtr = &status
 	}
-	if latency > 0 {
+	// Always record latency when the call reached the completion
+	// helper at all, even when the HTTP round-trip finished in
+	// under one millisecond (truncated to 0ms by the integer
+	// conversion below). The previous `if latency > 0` guard left
+	// sub-millisecond responses with response_latency_ms = NULL,
+	// which (a) loses signal for analytics queries that AVG/p99
+	// over the column, and (b) wrongly implies "no latency was
+	// observed" when in fact the dispatcher measured a real but
+	// sub-resolution value. The DB CHECK on the completion
+	// invariant (chk above) does NOT require response_latency_ms
+	// to be non-NULL, so this is purely a data-quality fix and
+	// cannot break existing rows. Negative latency would indicate
+	// a clock-skew bug at the caller (time.Since on a future
+	// `started` timestamp) and is intentionally left as NULL so
+	// the bug surfaces in analytics rather than silently being
+	// recorded as zero. Devin Review ANALYSIS_0004 (edited) on
+	// PR #128.
+	if latency >= 0 {
 		ms := int(latency / time.Millisecond)
 		latencyPtr = &ms
 	}
