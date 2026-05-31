@@ -462,6 +462,39 @@ func (h *marketplaceHandlers) install(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "version does not belong to extension", http.StatusBadRequest)
 		return
 	}
+
+	// Defence-in-depth short-circuit BEFORE the bundle fetch:
+	// reject installs against yanked versions (or against
+	// extensions whose listing has been pulled / suspended) so
+	// the CDN / cache layer isn't asked to resolve a bundle we
+	// were never going to install. The engine re-checks both
+	// invariants inside its tx (under SELECT FOR UPDATE on the
+	// extension row) so an extension that transitions to
+	// suspended between this check and the engine call is still
+	// rejected — this gate is purely an early-out so a yanked-
+	// version installation attempt fails on a single SELECT
+	// instead of a bundle.Resolver round trip.
+	if ver.Yanked {
+		h.writeError(w, fmt.Errorf("%w: version %s is yanked", marketplace.ErrYanked, verID))
+		return
+	}
+	ext, err := h.store.GetExtension(r.Context(), extID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	// Only ExtensionStatusListed accepts new installs. The other
+	// states (Unpublished — never went live; Deprecated — only
+	// existing installs continue; Removed — operator takedown)
+	// all reject. Mapped to 409 because the version row itself
+	// exists and is well-formed; the catalog-level status is the
+	// reason we refuse.
+	if ext.Status != marketplace.ExtensionStatusListed {
+		h.writeError(w, fmt.Errorf("%w: extension %s is %s",
+			marketplace.ErrConflict, extID, ext.Status))
+		return
+	}
+
 	resolved, err := h.resolver.Resolve(r.Context(), ver)
 	if err != nil {
 		h.writeError(w, err)

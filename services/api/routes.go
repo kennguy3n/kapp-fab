@@ -760,6 +760,10 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 					r.Get("/extensions/{ext_id}/versions", d.mph.listVersions)
 					r.Get("/installations", d.mph.listInstallations)
 					r.Get("/installations/{install_id}", d.mph.getInstallation)
+					// B7 publisher browse: read-only public info
+					// (slug + display name + verified posture +
+					// has-keys signal). Key material is admin-only.
+					r.Get("/publishers/{slug}", d.mph.getPublisherPublic)
 				})
 
 				// Install / uninstall / settings update.
@@ -806,6 +810,19 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 				r.Post("/versions/{ver_id}/review", d.mph.reviewTransition)
 				r.Post("/extensions/{ext_id}/list", d.mph.listExtension)
 				r.Post("/versions/{ver_id}/yank", d.mph.yankVersion)
+
+				// B7 publisher CRUD + verification + key management.
+				r.Post("/publishers", d.mph.adminCreatePublisher)
+				r.Get("/publishers", d.mph.adminListPublishers)
+				r.Get("/publishers/{publisher_id}", d.mph.adminGetPublisher)
+				r.Post("/publishers/{publisher_id}/verify", d.mph.adminVerifyPublisher)
+				r.Post("/publishers/{publisher_id}/unverify", d.mph.adminUnverifyPublisher)
+				r.Post("/publishers/{publisher_id}/keys", d.mph.adminRegisterPublisherKey)
+				r.Delete("/publishers/{publisher_id}/keys/{key_id}", d.mph.adminRevokePublisherKey)
+
+				// B7 review findings + admin-initiated rescan.
+				r.Get("/versions/{ver_id}/findings", d.mph.adminListFindings)
+				r.Post("/versions/{ver_id}/rescan", d.mph.adminRescanVersion)
 			})
 		}
 

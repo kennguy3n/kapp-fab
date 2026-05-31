@@ -82,6 +82,16 @@ func NewCachingResolver(inner Resolver, capacity int) *CachingResolver {
 // migration ever relaxes this immutability, the cache key should
 // be widened to (ID, BundleHash) so a hash drift evicts stale
 // entries automatically.
+//
+// Return-pointer aliasing: Resolve intentionally returns the SAME
+// *runtime.ResolvedBundle pointer to every caller that hits a
+// given cache slot. The runtime.ResolvedBundle godoc declares the
+// bundle (and every field / slice it carries) immutable after a
+// successful Resolve. Concurrent installs of the same version
+// share the bundle pointer; a caller mutating any field would
+// corrupt every other in-flight install. If you need a derived,
+// mutated copy, copy the bundle (and the slice / json.RawMessage
+// backing arrays) yourself before mutating.
 func (c *CachingResolver) Resolve(ctx context.Context, version *marketplace.ExtensionVersion) (*runtime.ResolvedBundle, error) {
 	if version == nil {
 		return nil, errors.New("bundle: nil version")

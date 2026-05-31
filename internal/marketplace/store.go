@@ -2,10 +2,12 @@ package marketplace
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -570,6 +572,18 @@ type PublishVersionInput struct {
 	BundleSize   int64
 	BundleURL    string
 	ManifestJSON []byte // serialised representation, persisted in JSONB column
+
+	// Signature is optional. When non-nil, all three subfields are
+	// required (the DB CHECK on marketplace_extension_versions
+	// enforces this). The publisher-facing submit endpoint populates
+	// this from the multipart form's `bundle_signature` /
+	// `bundle_signature_key_id` fields when the publisher has
+	// registered ed25519 keys; the B7 SignatureCheck verifies it
+	// post-resolve. PublishVersion does NOT verify the signature
+	// itself — verification is the pipeline's job because it needs
+	// the bundle bytes (which the store doesn't see). PublishVersion
+	// only persists the trio.
+	Signature *BundleSignature
 }
 
 // PublishVersion inserts a new immutable per-version row. Returns
@@ -643,6 +657,18 @@ func (s *Store) PublishVersion(ctx context.Context, in PublishVersionInput) (*Ex
 		UIExtensionsCount:   len(in.Manifest.UIExtensions),
 		WebhooksCount:       len(in.Manifest.WebhooksConsumed),
 	}
+	if in.Signature != nil {
+		if in.Signature.SignatureB64 == "" || in.Signature.KeyID == "" {
+			return nil, fmt.Errorf("%w: signature requires both signature_b64 and key_id", ErrInvalidManifest)
+		}
+		out.BundleSignature = in.Signature.SignatureB64
+		out.BundleSignatureKeyID = in.Signature.KeyID
+		signedAt := in.Signature.SignedAt
+		if signedAt.IsZero() {
+			signedAt = time.Now().UTC()
+		}
+		out.SignedAt = &signedAt
+	}
 	if out.FeaturesRequired == nil {
 		out.FeaturesRequired = []string{}
 	}
@@ -671,20 +697,30 @@ func (s *Store) PublishVersion(ctx context.Context, in PublishVersionInput) (*Ex
 			_ = tx.Rollback(ctx)
 		}
 	}()
+	var sigB64Param, sigKeyIDParam any = nil, nil
+	var signedAtParam any
+	if in.Signature != nil {
+		sigB64Param = out.BundleSignature
+		sigKeyIDParam = out.BundleSignatureKeyID
+		signedAtParam = *out.SignedAt
+	}
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO marketplace_extension_versions (
 			extension_id, version, bundle_hash, bundle_size_bytes, bundle_url, manifest,
 			min_kapp_version, max_kapp_version, features_required, permissions_required,
-			ktypes_count, workflows_count, agent_tools_count, ui_extensions_count, webhooks_count
+			ktypes_count, workflows_count, agent_tools_count, ui_extensions_count, webhooks_count,
+			bundle_signature, bundle_signature_key_id, signed_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6::jsonb,
 			$7, NULLIF($8,''), $9, $10,
-			$11, $12, $13, $14, $15
+			$11, $12, $13, $14, $15,
+			$16, $17, $18
 		)
 		RETURNING id, published_at, yanked, COALESCE(yanked_reason,'')`,
 		out.ExtensionID, out.Version, out.BundleHash, out.BundleSizeBytes, out.BundleURL, string(out.Manifest),
 		out.MinKappVersion, out.MaxKappVersion, out.FeaturesRequired, out.PermissionsRequired,
 		out.KtypesCount, out.WorkflowsCount, out.AgentToolsCount, out.UIExtensionsCount, out.WebhooksCount,
+		sigB64Param, sigKeyIDParam, signedAtParam,
 	).Scan(&out.ID, &out.PublishedAt, &out.Yanked, &out.YankedReason); err != nil {
 		if isUniqueViolation(err) {
 			return nil, fmt.Errorf("%w: version %s already published for extension", ErrConflict, out.Version)
@@ -720,12 +756,15 @@ func (s *Store) GetVersion(ctx context.Context, id uuid.UUID) (*ExtensionVersion
 		return nil, fmt.Errorf("%w: id required", ErrNotFound)
 	}
 	var out ExtensionVersion
+	var sigB64, sigKeyID sql.NullString
+	var signedAt sql.NullTime
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, extension_id, version, bundle_hash, bundle_size_bytes, bundle_url, manifest::text,
 		        min_kapp_version, COALESCE(max_kapp_version,''),
 		        features_required, permissions_required,
 		        ktypes_count, workflows_count, agent_tools_count, ui_extensions_count, webhooks_count,
-		        yanked, COALESCE(yanked_reason,''), published_at
+		        yanked, COALESCE(yanked_reason,''), published_at,
+		        bundle_signature, bundle_signature_key_id, signed_at
 		 FROM marketplace_extension_versions WHERE id = $1`, id,
 	).Scan(
 		&out.ID, &out.ExtensionID, &out.Version, &out.BundleHash, &out.BundleSizeBytes, &out.BundleURL,
@@ -734,6 +773,7 @@ func (s *Store) GetVersion(ctx context.Context, id uuid.UUID) (*ExtensionVersion
 		&out.FeaturesRequired, &out.PermissionsRequired,
 		&out.KtypesCount, &out.WorkflowsCount, &out.AgentToolsCount, &out.UIExtensionsCount, &out.WebhooksCount,
 		&out.Yanked, &out.YankedReason, &out.PublishedAt,
+		&sigB64, &sigKeyID, &signedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -741,6 +781,7 @@ func (s *Store) GetVersion(ctx context.Context, id uuid.UUID) (*ExtensionVersion
 		}
 		return nil, fmt.Errorf("marketplace: get version: %w", err)
 	}
+	assignVersionSignature(&out, sigB64, sigKeyID, signedAt)
 	return &out, nil
 }
 
@@ -751,12 +792,15 @@ func (s *Store) GetVersionByExtensionAndVersion(ctx context.Context, extensionID
 		return nil, fmt.Errorf("%w: extension id and version required", ErrNotFound)
 	}
 	var out ExtensionVersion
+	var sigB64, sigKeyID sql.NullString
+	var signedAt sql.NullTime
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, extension_id, version, bundle_hash, bundle_size_bytes, bundle_url, manifest::text,
 		        min_kapp_version, COALESCE(max_kapp_version,''),
 		        features_required, permissions_required,
 		        ktypes_count, workflows_count, agent_tools_count, ui_extensions_count, webhooks_count,
-		        yanked, COALESCE(yanked_reason,''), published_at
+		        yanked, COALESCE(yanked_reason,''), published_at,
+		        bundle_signature, bundle_signature_key_id, signed_at
 		 FROM marketplace_extension_versions
 		 WHERE extension_id = $1 AND version = $2`, extensionID, version,
 	).Scan(
@@ -766,6 +810,7 @@ func (s *Store) GetVersionByExtensionAndVersion(ctx context.Context, extensionID
 		&out.FeaturesRequired, &out.PermissionsRequired,
 		&out.KtypesCount, &out.WorkflowsCount, &out.AgentToolsCount, &out.UIExtensionsCount, &out.WebhooksCount,
 		&out.Yanked, &out.YankedReason, &out.PublishedAt,
+		&sigB64, &sigKeyID, &signedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -773,7 +818,27 @@ func (s *Store) GetVersionByExtensionAndVersion(ctx context.Context, extensionID
 		}
 		return nil, fmt.Errorf("marketplace: get version by (ext,version): %w", err)
 	}
+	assignVersionSignature(&out, sigB64, sigKeyID, signedAt)
 	return &out, nil
+}
+
+// assignVersionSignature copies the three nullable signature columns
+// off the SQL row into the typed ExtensionVersion. Kept tight so the
+// three call sites (GetVersion / GetVersionByExtensionAndVersion /
+// ListVersions) all use identical assignment logic — a future signed_at
+// timezone normalization or KeyID validation would land here once and
+// apply to all reads.
+func assignVersionSignature(v *ExtensionVersion, sigB64, sigKeyID sql.NullString, signedAt sql.NullTime) {
+	if sigB64.Valid {
+		v.BundleSignature = sigB64.String
+	}
+	if sigKeyID.Valid {
+		v.BundleSignatureKeyID = sigKeyID.String
+	}
+	if signedAt.Valid {
+		t := signedAt.Time
+		v.SignedAt = &t
+	}
 }
 
 // ListVersions returns the version rows for an extension ordered by
@@ -788,7 +853,8 @@ func (s *Store) ListVersions(ctx context.Context, extensionID uuid.UUID, include
 	             min_kapp_version, COALESCE(max_kapp_version,''),
 	             features_required, permissions_required,
 	             ktypes_count, workflows_count, agent_tools_count, ui_extensions_count, webhooks_count,
-	             yanked, COALESCE(yanked_reason,''), published_at
+	             yanked, COALESCE(yanked_reason,''), published_at,
+	             bundle_signature, bundle_signature_key_id, signed_at
 	      FROM marketplace_extension_versions
 	      WHERE extension_id = $1`
 	if !includeYanked {
@@ -803,6 +869,8 @@ func (s *Store) ListVersions(ctx context.Context, extensionID uuid.UUID, include
 	out := make([]ExtensionVersion, 0, 8)
 	for rows.Next() {
 		var v ExtensionVersion
+		var sigB64, sigKeyID sql.NullString
+		var signedAt sql.NullTime
 		if err := rows.Scan(
 			&v.ID, &v.ExtensionID, &v.Version, &v.BundleHash, &v.BundleSizeBytes, &v.BundleURL,
 			scanJSONB(&v.Manifest),
@@ -810,9 +878,11 @@ func (s *Store) ListVersions(ctx context.Context, extensionID uuid.UUID, include
 			&v.FeaturesRequired, &v.PermissionsRequired,
 			&v.KtypesCount, &v.WorkflowsCount, &v.AgentToolsCount, &v.UIExtensionsCount, &v.WebhooksCount,
 			&v.Yanked, &v.YankedReason, &v.PublishedAt,
+			&sigB64, &sigKeyID, &signedAt,
 		); err != nil {
 			return nil, fmt.Errorf("marketplace: list versions: scan: %w", err)
 		}
+		assignVersionSignature(&v, sigB64, sigKeyID, signedAt)
 		out = append(out, v)
 	}
 	if err := rows.Err(); err != nil {

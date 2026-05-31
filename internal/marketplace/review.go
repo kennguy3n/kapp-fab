@@ -295,6 +295,69 @@ func (rs *ReviewStateStore) ListVersionsByReviewStatus(ctx context.Context, stat
 	return out, rows.Err()
 }
 
+// ResetReviewStateForRescan re-claims a version for the review
+// worker by re-setting its review_state row to `submitted`.
+// Deliberately bypasses the normal reviewStatusTransitionAllowed
+// graph (which only models forward transitions out of `submitted`):
+// admin-initiated rescan is the one supported path that can move
+// a non-terminal row backwards in the graph. Refuses to operate on
+// terminal-state rows — once approved / rejected / withdrawn, the
+// version is immutable and the audit trail is sealed; publishers
+// re-submit by uploading a new version. The handler-side check
+// gates terminal rows before calling here; this method enforces
+// the same invariant defensively so a future caller can't bypass
+// it.
+//
+// The reset clears reviewer + reviewed_at + manual_review_notes +
+// automated_checks so the next worker run starts from a clean
+// slate. Findings live in their own table and are overwritten by
+// UpsertReviewFindings during the next pipeline run; the
+// findings_store deletes orphaned rows that the new run does not
+// re-emit (see UpsertReviewFindings godoc).
+func (s *Store) ResetReviewStateForRescan(ctx context.Context, versionID uuid.UUID) error {
+	if versionID == uuid.Nil {
+		return fmt.Errorf("%w: version id required", ErrNotFound)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return fmt.Errorf("marketplace: reset review state: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var current ReviewStatus
+	if err := tx.QueryRow(ctx,
+		`SELECT status FROM marketplace_extension_review_state
+		 WHERE extension_version_id = $1 FOR UPDATE`,
+		versionID,
+	).Scan(&current); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("marketplace: reset review state: select: %w", err)
+	}
+	if current.IsTerminal() {
+		return fmt.Errorf("%w: cannot rescan terminal review state %q",
+			ErrConflict, current)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE marketplace_extension_review_state
+		    SET status = $1,
+		        automated_checks = '{}'::jsonb,
+		        manual_review_notes = NULL,
+		        reviewer = NULL,
+		        reviewed_at = NULL,
+		        updated_at = now()
+		  WHERE extension_version_id = $2`,
+		string(ReviewStatusSubmitted), versionID,
+	); err != nil {
+		return fmt.Errorf("marketplace: reset review state: update: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("marketplace: reset review state: commit: %w", err)
+	}
+	return nil
+}
+
 // reviewStatusTransitionAllowed encodes the directed graph from the
 // ReviewStatus godoc.
 //
