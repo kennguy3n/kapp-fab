@@ -840,9 +840,70 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 				// client-compat caveat.
 				r.Post("/publishers/{publisher_id}/keys/{key_id}/revoke", d.mph.adminRevokePublisherKey)
 
+				// B7.1 admin bootstrap for publisher membership.
+				// Used by the operator to seed the first owner
+				// after creating a publisher row, and as a forced
+				// recovery path that bypasses the ≥1-owner
+				// invariant (e.g. when a publisher organisation
+				// loses access to all of its owner accounts).
+				r.Post("/publishers/{publisher_id}/members", d.mph.adminAddPublisherMember)
+				r.Get("/publishers/{publisher_id}/members", d.mph.adminListPublisherMembers)
+				r.Delete("/publishers/{publisher_id}/members/{user_id}", d.mph.adminRemovePublisherMember)
+
 				// B7 review findings + admin-initiated rescan.
 				r.Get("/versions/{ver_id}/findings", d.mph.adminListFindings)
 				r.Post("/versions/{ver_id}/rescan", d.mph.adminRescanVersion)
+			})
+
+			// B7.1 publisher self-service surface. Mounts under
+			// tenantChain so the authenticated user_id is
+			// stamped from JWT claims (not the X-User-ID header,
+			// which was removed in Phase 1 — see deps_build.go
+			// for the rationale). Per-publisher authorisation
+			// is enforced inside each handler via
+			// store.Publishers().RequireMemberRole; the chain
+			// intentionally does NOT add a wrapper middleware
+			// that resolves publisher_id → membership row,
+			// because chi's nested-route param parsing happens
+			// after the middleware chain runs and a wrapper
+			// would have to re-parse chi.URLParam itself,
+			// doubling the parse work and forcing a second
+			// store round-trip on every iteration. The
+			// per-handler gate keeps every route's RBAC
+			// explicit and skippable for unit tests.
+			r.Route("/api/v1/publisher", func(r chi.Router) {
+				d.tenantChain(r)
+				r.Use(d.apiCallMW)
+
+				// Read-only sub-group. No idempotency /
+				// rate-limit / quota — these are cheap
+				// GETs and the surrounding apiCallMW
+				// already provides per-tenant request
+				// accounting.
+				r.Group(func(r chi.Router) {
+					r.Get("/", d.mph.listMyPublishers)
+					r.Get("/{publisher_id}", d.mph.getMyPublisher)
+					r.Get("/{publisher_id}/members", d.mph.listMyPublisherMembers)
+					r.Get("/{publisher_id}/keys", d.mph.listMyPublisherKeys)
+				})
+
+				// Mutating sub-group. Mirrors the existing
+				// /marketplace/publisher surface:
+				// idempotency (so a retried POST after a
+				// network error doesn't double-add a
+				// member or register two keys with the
+				// same Idempotency-Key) + per-tenant rate
+				// limit + quota counter.
+				r.Group(func(r chi.Router) {
+					r.Use(platform.IdempotencyMiddleware(d.pool))
+					r.Use(d.rateLimitMW)
+					r.Use(platform.QuotaMiddleware(d.quotaEnforcer))
+					r.Post("/{publisher_id}/members", d.mph.addMyPublisherMember)
+					r.Patch("/{publisher_id}/members/{user_id}", d.mph.setMyPublisherMemberRole)
+					r.Delete("/{publisher_id}/members/{user_id}", d.mph.removeMyPublisherMember)
+					r.Post("/{publisher_id}/keys", d.mph.registerMyPublisherKey)
+					r.Post("/{publisher_id}/keys/{key_id}/revoke", d.mph.revokeMyPublisherKey)
+				})
 			})
 		}
 

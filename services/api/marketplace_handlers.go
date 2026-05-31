@@ -1211,13 +1211,34 @@ func (h *marketplaceHandlers) writeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, marketplace.ErrConflict),
 		errors.Is(err, marketplace.ErrYanked),
 		errors.Is(err, marketplace.ErrImmutableVersion),
-		errors.Is(err, marketplace.ErrPublisherNotVerified):
+		errors.Is(err, marketplace.ErrPublisherNotVerified),
+		errors.Is(err, marketplace.ErrLastOwnerRemoval):
 		// ErrPublisherNotVerified is a state-precondition
 		// failure (e.g. SetAutoApprovePatch refusing to enable
 		// fast-path on an unverified row); 409 matches the
 		// rest of the state-precondition family (yanked,
 		// immutable version).
+		//
+		// ErrLastOwnerRemoval is the B7.1 "any publisher with
+		// members must have ≥1 owner" invariant guard: the
+		// request was authorised but the resulting state
+		// would violate the invariant. Caller recovers by
+		// either promoting another member to owner first or
+		// removing the other members so the publisher reverts
+		// to admin-only management.
 		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, marketplace.ErrForbidden):
+		// B7.1 self-service surface: the authenticated user is
+		// not a member of the publisher (or holds a role
+		// insufficient for the requested action). 403 is
+		// the right status — the JWT was valid (otherwise the
+		// chain wouldn't have admitted the request) but the
+		// caller lacks the per-publisher authorisation. The
+		// engine returns this distinct from ErrNotFound so
+		// the API layer can decide whether to leak publisher
+		// existence (it does NOT for the self-service surface
+		// — see the handler-side collapse to 404).
+		http.Error(w, err.Error(), http.StatusForbidden)
 	case errors.Is(err, marketplace.ErrInvalidManifest),
 		errors.Is(err, marketplace.ErrPermissionScopeUnknown),
 		errors.Is(err, bundle.ErrBundleTransportInsecure):
