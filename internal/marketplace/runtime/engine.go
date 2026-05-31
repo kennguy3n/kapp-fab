@@ -79,6 +79,14 @@ type Engine struct {
 	// pin this to a deterministic value to assert against. Nil
 	// uses GenerateSigningSecret.
 	generateSecret func() (SigningSecret, error)
+	// encryptor wraps signing_secret reads/writes against the
+	// marketplace_extension_installations column. See
+	// encryptor.go for the full motivation — short version is
+	// Devin Review ANALYSIS_0004 on PR #128 (signing secrets
+	// appeared in plaintext in kapp-backup dumps). Always non-nil
+	// after NewEngine — defaults to noopEncryptor when
+	// EngineOptions.Encryptor is nil.
+	encryptor Encryptor
 }
 
 // EngineOptions configures an Engine at construction time.
@@ -101,6 +109,15 @@ type EngineOptions struct {
 	// GenerateSecret is the signing-secret factory. Defaults to
 	// GenerateSigningSecret if nil.
 	GenerateSecret func() (SigningSecret, error)
+	// Encryptor encrypts signing_secret at the column level so
+	// the DB row — and any downstream backup, replica, or read-
+	// only audit reader — carries ciphertext rather than the raw
+	// HMAC key. Optional: when nil, the engine falls back to
+	// plaintext (dev mode, no KAPP_MASTER_KEY). Production deploys
+	// MUST wire a real Encryptor (typically *tenant.KeyManager
+	// from internal/tenant/encryption.go). Devin Review
+	// ANALYSIS_0004 on PR #128.
+	Encryptor Encryptor
 }
 
 // NewEngine constructs an Engine from EngineOptions. Returns an
@@ -119,6 +136,7 @@ func NewEngine(opts EngineOptions) (*Engine, error) {
 		hooks:          opts.Hooks,
 		now:            opts.Now,
 		generateSecret: opts.GenerateSecret,
+		encryptor:      resolveEncryptor(opts.Encryptor),
 	}
 	if e.registrar == nil {
 		e.registrar = NewRegistrar()
@@ -250,6 +268,16 @@ func (e *Engine) Install(ctx context.Context, req *InstallRequest, bundle *Resol
 	if req.InstalledBy != uuid.Nil {
 		installedByArg = req.InstalledBy
 	}
+	// Encrypt the signing_secret BEFORE the INSERT so the DB row
+	// carries ciphertext rather than the raw HMAC key. The same
+	// ciphertext is later returned to kapp-backup's row_to_json
+	// dump, so the backup file inherits encryption-at-rest without
+	// kapp-backup needing to know which columns are sensitive
+	// (Devin Review ANALYSIS_0004 on PR #128).
+	secretCiphertext, err := e.encryptor.EncryptString(req.TenantID, string(secret))
+	if err != nil {
+		return nil, fmt.Errorf("runtime: engine: encrypt signing secret: %w", err)
+	}
 	txErr := dbutil.WithTenantTx(ctx, e.pool, req.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 		// INSERT install row (status='installing', signing_secret).
 		row := tx.QueryRow(ctx,
@@ -261,7 +289,7 @@ func (e *Engine) Install(ctx context.Context, req *InstallRequest, bundle *Resol
 			)
 			RETURNING id, tenant_id, extension_id, extension_version_id, status, settings::text,
 			          webhook_base, installed_by, installed_at, updated_at`,
-			req.TenantID, req.ExtensionID, req.VersionID, string(settingsJSON), webhookBase, installedByArg, string(secret),
+			req.TenantID, req.ExtensionID, req.VersionID, string(settingsJSON), webhookBase, installedByArg, secretCiphertext,
 		)
 		var installedBy *uuid.UUID
 		var settingsTxt string
@@ -601,6 +629,13 @@ func (e *Engine) Uninstall(ctx context.Context, req *UninstallRequest) (*Uninsta
 // marketplace.Store does NOT expose this column (the secret never
 // flows through Installation JSON). The engine has its own reader
 // because hook dispatch needs it.
+//
+// The column carries ciphertext when KAPP_MASTER_KEY is configured
+// (via the wired Encryptor) and plaintext when it isn't (dev). The
+// concrete tenant.KeyManager.DecryptString returns prefix-less
+// values verbatim, so a single DecryptString call handles both
+// shapes — there is no need for explicit prefix sniffing here.
+// Devin Review ANALYSIS_0004 on PR #128.
 func (e *Engine) loadSigningSecret(ctx context.Context, tenantID, installID uuid.UUID) (SigningSecret, error) {
 	var secret string
 	err := dbutil.WithTenantTx(ctx, e.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -622,7 +657,11 @@ func (e *Engine) loadSigningSecret(ctx context.Context, tenantID, installID uuid
 	if secret == "" {
 		return "", fmt.Errorf("runtime: engine: install %s has empty signing secret", installID)
 	}
-	return SigningSecret(secret), nil
+	plain, err := e.encryptor.DecryptString(tenantID, secret)
+	if err != nil {
+		return "", fmt.Errorf("runtime: engine: decrypt signing secret: %w", err)
+	}
+	return SigningSecret(plain), nil
 }
 
 // uuidOrNilString returns the string form of u or "" for uuid.Nil

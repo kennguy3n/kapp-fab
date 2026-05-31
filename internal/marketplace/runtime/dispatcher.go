@@ -38,15 +38,38 @@ type Dispatcher struct {
 	pool      *pgxpool.Pool
 	transport Transport
 	now       func() time.Time
+	// encryptor decrypts the signing_secret column on the
+	// marketplace_extension_installations row joined into the
+	// agent-tool lookup query. Always non-nil after construction
+	// (NewDispatcher initialises it to noopEncryptor and
+	// WithEncryptor overrides). Production wires the same
+	// *tenant.KeyManager that Engine uses so encrypt/decrypt are
+	// symmetric across the install → dispatch flow. Devin Review
+	// ANALYSIS_0004 on PR #128.
+	encryptor Encryptor
 }
 
 // NewDispatcher constructs a Dispatcher with the supplied pool +
-// transport. If now is nil, time.Now is used.
+// transport. If now is nil, time.Now is used. The returned
+// Dispatcher reads signing_secret as plaintext; call WithEncryptor
+// to wire column-level decryption (required when the engine wrote
+// the secret encrypted, which is the production path).
 func NewDispatcher(pool *pgxpool.Pool, transport Transport, now func() time.Time) *Dispatcher {
 	if now == nil {
 		now = time.Now
 	}
-	return &Dispatcher{pool: pool, transport: transport, now: now}
+	return &Dispatcher{pool: pool, transport: transport, now: now, encryptor: noopEncryptor{}}
+}
+
+// WithEncryptor returns the receiver after replacing its column-
+// encryption shim. Passing nil restores the noop encryptor
+// (plaintext on disk). Designed as a fluent setter so existing
+// call sites that used the positional NewDispatcher constructor
+// keep working without a signature change. Devin Review
+// ANALYSIS_0004 on PR #128.
+func (d *Dispatcher) WithEncryptor(enc Encryptor) *Dispatcher {
+	d.encryptor = resolveEncryptor(enc)
+	return d
 }
 
 // InvokeRequest is the per-call payload to Dispatcher.Invoke.
@@ -345,7 +368,17 @@ func (d *Dispatcher) lookupDescriptor(ctx context.Context, in *InvokeRequest) (*
 		desc.ExtensionID = extID
 		desc.ExtensionVersionID = verID
 		desc.InstallStatus = status
-		desc.SigningSecret = SigningSecret(signing)
+		// Decrypt under the SAME tenant_id used to encrypt at
+		// install time (HKDF salt = tenant uuid). A mismatch
+		// here would surface as GCM auth failure rather than
+		// silent plaintext leakage, but the only reachable
+		// caller is dbutil.WithTenantTx which already pins the
+		// tx to in.TenantID, so the symmetry is structural.
+		plain, decErr := d.encryptor.DecryptString(in.TenantID, signing)
+		if decErr != nil {
+			return fmt.Errorf("runtime: dispatcher: decrypt signing secret: %w", decErr)
+		}
+		desc.SigningSecret = SigningSecret(plain)
 		desc.Endpoint = endpoint
 		desc.Handler = handler
 		desc.Timeout = time.Duration(timeoutMs) * time.Millisecond

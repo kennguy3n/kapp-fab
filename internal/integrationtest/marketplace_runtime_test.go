@@ -1304,6 +1304,188 @@ func TestMarketplaceRuntime_Uninstall_FromFailedClearsFailureReason(t *testing.T
 	}
 }
 
+// TestMarketplaceRuntime_SigningSecretEncryptedAtRest is the
+// regression test for Devin Review ANALYSIS_0004 on PR #128.
+//
+// The finding: kapp-backup's exportTable does
+// `SELECT row_to_json(t) FROM tbl AS t WHERE tenant_id = $1`, which
+// captures every column of the row verbatim. Before this fix the
+// signing_secret column held the raw HMAC key as plaintext, which
+// meant any backup file inherited the secret in plaintext too — a
+// high-value target for anyone who could read the dump (a stolen
+// backup blob, a leaked S3 object, a read-only audit reader, a
+// PITR replica with the same plaintext on disk, etc.).
+//
+// The architecturally correct fix is column-level encryption at
+// rest using the existing per-tenant *tenant.KeyManager (the same
+// machinery the record store uses for {"encrypted":true} fields).
+// With that wired, the DB row carries ciphertext, kapp-backup's
+// row_to_json picks up ciphertext automatically (no kapp-backup-
+// side allowlist needed), and Engine.Uninstall + Dispatcher.Invoke
+// decrypt symmetrically at read time using the same KeyManager.
+//
+// This test pins both halves of the invariant:
+//
+//  1. After Engine.Install, the raw signing_secret column carries
+//     the tenant.KeyManager ciphertext prefix ("kapp:enc:v1:") and
+//     does NOT contain the plaintext secret as a substring —
+//     guarding against any future refactor that silently drops the
+//     encrypt step before INSERT.
+//
+//  2. Dispatcher.Invoke (constructed with the SAME KeyManager via
+//     WithEncryptor) still produces a working signed request —
+//     proving the engine→dispatcher decrypt path is symmetric.
+//     This catches the "encrypted on write but the dispatcher
+//     reads ciphertext as the HMAC key" regression.
+//
+//  3. The plaintext secret string never appears in the column
+//     value — belt-and-suspenders check that protects against a
+//     future encrypt implementation that silently passes plaintext
+//     through (e.g. a noop-by-accident).
+func TestMarketplaceRuntime_SigningSecretEncryptedAtRest(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	// Use a fixed 32-byte master key local to the test so the
+	// assertion does not depend on KAPP_MASTER_KEY plumbing in
+	// the test harness. The KeyManager only requires ≥32 bytes —
+	// not the rotated production key.
+	masterKey := []byte("test-master-key-32-bytes-padding-x")
+	km, err := tenant.NewKeyManager(masterKey, 0)
+	if err != nil {
+		t.Fatalf("NewKeyManager: %v", err)
+	}
+
+	pub := strings.ReplaceAll(uniqueSlug("rt-encsec"), "-", "_")
+	ext, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pub, Slug: "shipping",
+		DisplayName: "Shipping", Description: "Encryption-at-rest regression",
+		Author: "ACME", License: "MIT",
+		Homepage: "https://acme.example/shipping",
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension: %v", err)
+	}
+	manifest := minimalRuntimeManifest(ext)
+	ver, err := store.PublishVersion(ctx, marketplace.PublishVersionInput{
+		ExtensionID: ext.ID, Manifest: manifest,
+		BundleHash: strings.Repeat("e", 64),
+		BundleSize: 4096,
+		BundleURL:  "https://cdn.example/bundles/rt-encsec.tgz",
+	})
+	if err != nil {
+		t.Fatalf("PublishVersion: %v", err)
+	}
+	rs := store.Reviews()
+	reviewer := uuid.New().String()
+	for _, step := range []marketplace.ReviewStatus{
+		marketplace.ReviewStatusAutomatedPassed,
+		marketplace.ReviewStatusManualReview,
+		marketplace.ReviewStatusApproved,
+	} {
+		if _, err := rs.UpdateReviewState(ctx, marketplace.UpdateReviewStateInput{
+			VersionID: ver.ID, Status: step, Reviewer: reviewer,
+		}); err != nil {
+			t.Fatalf("review transition to %s: %v", step, err)
+		}
+	}
+	if err := store.SetListedVersion(ctx, ext.ID, ver.Version); err != nil {
+		t.Fatalf("SetListedVersion: %v", err)
+	}
+	if err := store.UpdateExtensionStatus(ctx, ext.ID, marketplace.ExtensionStatusListed); err != nil {
+		t.Fatalf("UpdateExtensionStatus listed: %v", err)
+	}
+
+	tn, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("rt-encsec-a"), Name: "RT-EncSec", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("tenant: %v", err)
+	}
+
+	bundle := minimalResolvedBundle(manifest)
+	okTransport := &runtime.InMemoryTransport{Handler: runtime.StaticResponseHandler(200, []byte(`{"ok":true}`))}
+	okHooks := runtime.NewTransportHooks(okTransport, h.pool, nil)
+	engine, err := runtime.NewEngine(runtime.EngineOptions{
+		Pool:      h.pool,
+		Store:     store,
+		Hooks:     okHooks,
+		Encryptor: km,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	installRes, err := engine.Install(ctx, &runtime.InstallRequest{
+		TenantID:    tn.ID,
+		ExtensionID: ext.ID,
+		VersionID:   ver.ID,
+		WebhookBase: "https://tenant.example/hooks",
+	}, bundle)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	plaintextSecret := string(installRes.SigningSecret)
+	if plaintextSecret == "" {
+		t.Fatal("Install returned empty plaintext secret")
+	}
+
+	// (1) Read the RAW column value bypassing decryption and
+	// assert ciphertext shape.
+	var rawColumn string
+	if err := dbutil.WithTenantTx(ctx, h.pool, tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT signing_secret FROM marketplace_extension_installations
+			  WHERE tenant_id = $1 AND id = $2`,
+			tn.ID, installRes.Installation.ID).Scan(&rawColumn)
+	}); err != nil {
+		t.Fatalf("read raw column: %v", err)
+	}
+	if !strings.HasPrefix(rawColumn, "kapp:enc:v1:") {
+		t.Fatalf("signing_secret column does not carry ciphertext prefix: stored=%q (encrypt step lost?)", rawColumn)
+	}
+	if strings.Contains(rawColumn, plaintextSecret) {
+		t.Fatalf("signing_secret column contains plaintext substring (encrypt was a no-op): stored=%q", rawColumn)
+	}
+
+	// (2) The dispatcher constructed with the SAME KeyManager
+	// successfully signs and dispatches — round-trip decrypt works.
+	toolName := canonicalToolNameFromDef(manifest.AgentTools[0].Definition, manifest.Publisher, manifest.Slug)
+	dispatchTransport := &runtime.InMemoryTransport{
+		Handler: runtime.StaticResponseHandler(200, []byte(`{"result":"ok"}`)),
+	}
+	disp := runtime.NewDispatcher(h.pool, dispatchTransport, nil).WithEncryptor(km)
+	invRes, err := disp.Invoke(ctx, &runtime.InvokeRequest{
+		TenantID:       tn.ID,
+		InstallationID: installRes.Installation.ID,
+		ToolName:       toolName,
+		Body:           []byte(`{"order_id":"1"}`),
+	})
+	if err != nil {
+		t.Fatalf("Dispatcher.Invoke (with encryptor): %v", err)
+	}
+	if invRes.Status != 200 {
+		t.Fatalf("dispatch status = %d, want 200 (decrypt path may have broken signing)", invRes.Status)
+	}
+	if dispatchTransport.Len() != 1 {
+		t.Fatalf("dispatch len = %d, want 1", dispatchTransport.Len())
+	}
+	if dispatchTransport.At(0).Headers[runtime.SignatureHeaderName] == "" {
+		t.Fatal("dispatcher did not stamp signature header (decrypt failed?)")
+	}
+
+	// (3) Symmetric Engine.Uninstall: must be able to decrypt the
+	// secret to dispatch lifecycle hooks. We don't assert on the
+	// hook payload here — just that the uninstall path completes
+	// without a decrypt error.
+	if _, err := engine.Uninstall(ctx, &runtime.UninstallRequest{
+		TenantID:       tn.ID,
+		InstallationID: installRes.Installation.ID,
+	}); err != nil {
+		t.Fatalf("Uninstall (with encryptor): %v", err)
+	}
+}
+
 // readInstallStatusAndReason returns the current status and
 // failure_reason of an install row. failure_reason returned as the
 // empty string when the DB column is NULL. Helper for
