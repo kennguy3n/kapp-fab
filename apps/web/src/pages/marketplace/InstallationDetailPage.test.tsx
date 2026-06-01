@@ -760,6 +760,94 @@ describe("InstallationDetailPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("onSaveSettings respects the in-flight mutation guard even when the disabled state is bypassed (round-12 ANALYSIS_0003)", async () => {
+    // Round-12 ANALYSIS_0003: the Save settings button is
+    // disabled while settingsMutation.isPending is true, but
+    // disabled is a UI gate, not a data-path gate (same
+    // argument as the round-8 BUG_0001 validity-gate fix and
+    // the round-10 ANALYSIS_0003 Cancel requestClose fix on
+    // InstallExtensionDialog). Accessibility tools, programmatic
+    // invocation, or a future refactor swapping disabled for a
+    // styling-only class can all bypass it. Without the round-12
+    // guard, a synthetic click that bypasses the disabled
+    // attribute while the first PATCH is in flight would call
+    // settingsMutation.mutate() a SECOND time. The optimistic
+    // onMutate would stage another snapshot on top of the in-
+    // flight one (the previousData rollback chain only knows
+    // about one prior snapshot, so an error after a double-
+    // mutate would only restore the second-to-last value, not
+    // the truly-canonical server state). The fix mirrors
+    // InstallExtensionDialog.onConfirm: explicit
+    // `if (settingsMutation.isPending) return;` at the top of
+    // onSaveSettings.
+    //
+    // Pin via the same __reactProps$ bypass pattern the round-8
+    // BUG_0001 test uses: hold updateMarketplaceInstallationSettings
+    // pending via a deferred-resolve mock, type a valid edit
+    // and click Save normally to flip the mutation into pending
+    // state, then pull the React-attached onClick off the Save
+    // DOM node and invoke it directly. Pre-fix, the bypass
+    // click would fire a second mutate() and the SDK would be
+    // called twice. Post-fix, the in-flight guard short-circuits
+    // and the call count stays at 1.
+    let resolveSave!: (v: unknown) => void;
+    updateMarketplaceInstallationSettings.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    renderPage();
+    await waitFor(() => {
+      const ta = screen.getByPlaceholderText(
+        /api_key/i,
+      ) as HTMLTextAreaElement;
+      expect(ta.value).toContain("secret");
+    });
+    const textarea = screen.getByPlaceholderText(
+      /api_key/i,
+    ) as HTMLTextAreaElement;
+    // Type a valid edit so settingsTouched flips to true and
+    // settingsDraft updates — Save will enable.
+    await userEvent.clear(textarea);
+    await userEvent.type(textarea, '{{"api_key":"new"}');
+    const btn = screen.getByRole("button", {
+      name: /Save settings/i,
+    }) as HTMLButtonElement;
+    await waitFor(() => expect(btn.disabled).toBe(false));
+    // Standard click — fires the first PATCH (held pending by
+    // the mock).
+    await userEvent.click(btn);
+    // Wait for the mutation to flip into the pending state so
+    // the Save button renders disabled.
+    await waitFor(() => expect(btn.disabled).toBe(true));
+    expect(updateMarketplaceInstallationSettings).toHaveBeenCalledTimes(1);
+    // Bypass: pull the React-attached onClick directly.
+    const propsKey = Object.keys(btn).find((k) =>
+      k.startsWith("__reactProps$"),
+    );
+    expect(propsKey).toBeDefined();
+    const props = (btn as unknown as Record<string, { onClick?: () => void }>)[
+      propsKey!
+    ];
+    expect(props.onClick).toBeTypeOf("function");
+    await act(async () => {
+      props.onClick!();
+    });
+    // The isPending guard short-circuited — settingsMutation.mutate
+    // was NOT called a second time. Pre-fix, the call count
+    // would be 2 here (the original pending call + the bypass
+    // click producing a second mutate that fires a second SDK
+    // PATCH).
+    expect(updateMarketplaceInstallationSettings).toHaveBeenCalledTimes(1);
+    // Drain the pending mutation so we don't leak the unresolved
+    // promise into the test runner.
+    resolveSave({
+      ...ROW,
+      settings: { api_key: "new" },
+    });
+  });
+
   it("collapses the upgrade panel when the installed version's published_at is unparseable (round-9 ANALYSIS_0002)", async () => {
     // Round-9 ANALYSIS_0002: pre-fix, the upgrade-panel gate
     // was `installedPublishedAt === null`. `null` covers

@@ -439,6 +439,98 @@ describe("InstallExtensionDialog", () => {
     });
   });
 
+  it("Install button respects the in-flight install guard even when the disabled attribute is bypassed (round-12 ANALYSIS_0003)", async () => {
+    // Round-12 ANALYSIS_0003: pre-fix, onConfirm went through
+    // setValidationError(null) and straight into the gate
+    // sequence without checking install.isPending. The Install
+    // button's `disabled={pending || !settingsFormValid}` prop
+    // gated standard clicks, but a synthetic click that bypassed
+    // the disabled attribute (the same vectors covered by the
+    // round-7 onConfirm settings-validity guard, the round-8
+    // BUG_0001 onSaveSettings guard, and the round-10 Cancel
+    // requestClose guard) would have invoked install.mutate() a
+    // SECOND time while the first install was still in flight.
+    // The SDK generates a fresh Idempotency-Key per call (by-
+    // design — bot self-ACK on round-11 ANALYSIS_0005, so user-
+    // initiated retries are treated as new requests), so a
+    // double-submit would NOT be deduplicated server-side; it
+    // would race against the in-flight install and produce a
+    // duplicate pre_install dispatch + a 409 on the second
+    // request. Pin via the same __reactProps$ bypass pattern
+    // the round-10 Cancel test uses: hold the install mutation
+    // pending, pull the React-attached onClick off the Install
+    // DOM node, invoke it directly, and assert
+    // installMarketplaceExtension was called exactly ONCE
+    // (the original pending call). Pre-fix, the call count
+    // would be 2.
+    let resolveInstall!: (v: unknown) => void;
+    installMarketplaceExtension.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveInstall = resolve;
+        }),
+    );
+    renderDialog();
+    const urlInput = screen.getByLabelText(/Webhook base URL/i);
+    await userEvent.clear(urlInput);
+    await userEvent.type(urlInput, "https://t.example.com");
+    await userEvent.click(
+      screen.getByRole("button", { name: /Install extension/i }),
+    );
+    // Wait for the mutation to flip into the pending state so
+    // the Install button renders disabled. While pending, the
+    // button's label is "Installing…" rather than "Install
+    // extension", so we match either via /Install(?:ing)?/i.
+    await waitFor(() => {
+      const installBtn = screen.getByRole("button", {
+        name: /^Install(?:ing|\s)/i,
+      }) as HTMLButtonElement;
+      expect(installBtn.disabled).toBe(true);
+    });
+    expect(installMarketplaceExtension).toHaveBeenCalledTimes(1);
+    const installBtn = screen.getByRole("button", {
+      name: /^Install(?:ing|\s)/i,
+    }) as HTMLButtonElement;
+    // Bypass: pull the React-attached onClick directly. This
+    // simulates accessibility tools / programmatic invocation /
+    // a future refactor that drops the disabled attribute.
+    const propsKey = Object.keys(installBtn).find((k) =>
+      k.startsWith("__reactProps$"),
+    );
+    expect(propsKey).toBeDefined();
+    const props = (installBtn as unknown as Record<
+      string,
+      { onClick?: () => void }
+    >)[propsKey!];
+    expect(props.onClick).toBeTypeOf("function");
+    await act(async () => {
+      props.onClick!();
+    });
+    // The isPending guard short-circuited — install.mutate was
+    // NOT called a second time. Pre-fix, the call count would
+    // be 2 here (the original pending call + the bypass click
+    // producing a second mutate that fires a second SDK
+    // request with a fresh idempotency key).
+    expect(installMarketplaceExtension).toHaveBeenCalledTimes(1);
+    // Drain the pending mutation so we don't leak the unresolved
+    // promise into the test runner.
+    resolveInstall({
+      installation: {
+        id: "i-1",
+        tenant_id: "t-1",
+        extension_id: "ext-1",
+        extension_version_id: "ver-1",
+        installed_version: "1.2.0",
+        status: "active",
+        settings: {},
+        webhook_base: "https://t.example.com",
+        installed_at: "2025-02-01T00:00:00Z",
+        updated_at: "2025-02-01T00:00:00Z",
+      },
+      signing_secret: "s",
+    });
+  });
+
   it("surfaces a server error inside the dialog", async () => {
     installMarketplaceExtension.mockRejectedValueOnce(
       new Error("409 install already exists"),

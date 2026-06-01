@@ -385,6 +385,28 @@ export function InstallationDetailPage() {
     : null;
 
   const onSaveSettings = () => {
+    // Round-12 ANALYSIS_0003: defense-in-depth in-flight guard,
+    // mirroring InstallExtensionDialog.onConfirm and the round-10
+    // ANALYSIS_0003 requestClose helper. The Save button is
+    // already disabled on `settingsMutation.isPending` (see line
+    // ~580), so a standard browser click is gated, but disabled
+    // is a UI gate not a data-path gate — accessibility tools
+    // firing synthetic clicks, programmatic invocation (e2e
+    // tests calling onSaveSettings() directly, third-party
+    // scripts wiring keyboard shortcuts), and any future
+    // refactor that swaps the disabled prop for a styling-only
+    // class can all bypass it. Without this guard, those side
+    // doors would let a second click through while the first
+    // PATCH is in flight: the optimistic onMutate would stage
+    // ANOTHER snapshot on top of the in-flight one (the
+    // previousData rollback chain only knows about one prior
+    // snapshot, so an error after a double-mutate would only
+    // restore the second-to-last value, not the truly-canonical
+    // server state). Cheaper to gate at the handler and keep
+    // parity with onConfirm. No-op on the happy-path (the
+    // disabled button means we never hit it in the standard
+    // click flow).
+    if (settingsMutation.isPending) return;
     setSettingsError(null);
     // Round-8 BUG_0001: defense-in-depth re-check of the
     // settings-form validity signal at the top of onSaveSettings,

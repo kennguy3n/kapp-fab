@@ -156,6 +156,30 @@ export function InstallExtensionDialog({
   });
 
   const onConfirm = () => {
+    // Round-12 ANALYSIS_0003: defense-in-depth in-flight guard,
+    // mirroring requestClose below and the round-7 ANALYSIS_0002
+    // / round-8 BUG_0001 pattern. The Install button is already
+    // `disabled={pending || !settingsFormValid}` (line ~336), so
+    // a standard browser click is gated, but the same UI-gate-
+    // is-not-a-data-path-gate argument applies here as on
+    // requestClose: accessibility tools firing synthetic clicks,
+    // programmatic invocation (e2e tests calling onConfirm()
+    // directly, third-party scripts wiring keyboard shortcuts),
+    // and any future refactor that swaps the disabled prop for
+    // a styling-only "looks-disabled" class can all bypass it.
+    // Without this guard, those side doors would let a second
+    // click through while the first install is in flight. The
+    // SDK generates a fresh `Idempotency-Key` per call (see
+    // packages/client/src/index.ts:2008 — by-design, so user-
+    // initiated retries are treated as new requests), so a
+    // double-submit would NOT be deduplicated server-side; it
+    // would race against the in-flight install and produce a
+    // second pre_install dispatch + a unique-constraint 409.
+    // Cheaper to gate at the dialog and keep parity with the
+    // requestClose / onSaveSettings pattern. No-op on the
+    // happy-path (the disabled button means we never hit it in
+    // the standard click flow).
+    if (install.isPending) return;
     setValidationError(null);
     // Round-7 ANALYSIS_0002: defense-in-depth re-check of the
     // settings-form validity signal at the top of onConfirm,
