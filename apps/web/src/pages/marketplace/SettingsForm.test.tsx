@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   FREEFORM_VALIDITY_KEY,
@@ -227,6 +227,102 @@ describe("SettingsForm", () => {
     ];
     expect(cbBLastCall[0]).toBe(FREEFORM_VALIDITY_KEY);
     expect(cbBLastCall[1]).toBe(true);
+  });
+
+  it("NestedJsonEditor rejects non-object JSON (number, array, primitive) for object-typed schema fields (round-6 ANALYSIS_0005)", async () => {
+    // Round-6 ANALYSIS_0005: NestedJsonEditor renders the
+    // free-form JSON textarea for any SCHEMA property declared
+    // `type: "object"`. Pre-fix, its onChange parser accepted
+    // ANY valid JSON: typing `42` or `[1,2]` would parse cleanly
+    // and forward the result to the parent, where the engine's
+    // gojsonschema check would 400 on save — confusing UX (the
+    // textarea showed no error, Save was enabled, but the
+    // server rejected it). The architecturally correct fix is
+    // to reject the type at the editor boundary.
+    //
+    // We pin three observable behaviours:
+    //   1. Typing a number (42) surfaces "Expected an object
+    //      (got number)" and suppresses onChange.
+    //   2. Typing an array ([1,2]) surfaces "Expected an object
+    //      (got array)" — the diagnostic explicitly names array
+    //      because the user can see brackets on screen and the
+    //      "did you mean braces?" cue is immediate.
+    //   3. Recovery to a valid object ({"k":1}) clears the error
+    //      and fires onChange with the parsed object.
+    const schema: SettingsSchema = {
+      type: "object",
+      properties: {
+        config: { type: "object", title: "Config" },
+      },
+    };
+    const onChange = vi.fn();
+    const calls: Array<[string, boolean]> = [];
+    render(
+      <SettingsForm
+        schema={schema}
+        value={{}}
+        onChange={onChange}
+        onValidityChange={(k, v) => calls.push([k, v])}
+      />,
+    );
+    const ta = document.getElementById(
+      "setting-config",
+    ) as HTMLTextAreaElement;
+    expect(ta).toBeTruthy();
+
+    // 1. Number — valid JSON, invalid schema type.
+    await userEvent.type(ta, "42");
+    expect(
+      screen.getByText(/Expected an object \(got number\)/i),
+    ).toBeInTheDocument();
+    // onChange MUST NOT have fired with `42` as the value.
+    expect(
+      onChange.mock.calls.some(([next]) =>
+        Object.values(next as Record<string, unknown>).some(
+          (v) => v === 42,
+        ),
+      ),
+    ).toBe(false);
+    // Validity signal went red under the editor's id key.
+    expect(
+      calls.some(([k, v]) => k === "setting-config" && v === false),
+    ).toBe(true);
+
+    // 2. Array — valid JSON, invalid schema type. userEvent
+    // interprets `[` and `{` as key-descriptor delimiters, so
+    // we route the array case through fireEvent.change to send
+    // the literal string in a single value-set rather than a
+    // keystroke stream. (Doubling `[[` is the documented
+    // userEvent escape but is brittle across versions; the
+    // fireEvent route is unambiguous and tests the same code
+    // path because the editor's onChange handler is invoked
+    // identically.)
+    fireEvent.change(ta, { target: { value: "[1,2]" } });
+    expect(
+      screen.getByText(/Expected an object \(got array\)/i),
+    ).toBeInTheDocument();
+
+    // 3. Recovery to a valid object.
+    fireEvent.change(ta, { target: { value: '{"k":1}' } });
+    // Error text disappears once the object parse succeeds.
+    expect(
+      screen.queryByText(/Expected an object/i),
+    ).not.toBeInTheDocument();
+    // onChange fired with the parsed object.
+    const lastObjectCall = onChange.mock.calls.find(
+      ([next]) =>
+        typeof next === "object" &&
+        next !== null &&
+        typeof (next as Record<string, unknown>).config === "object" &&
+        (next as Record<string, Record<string, unknown>>).config.k === 1,
+    );
+    expect(lastObjectCall).toBeDefined();
+    // Final validity signal is back to valid.
+    const lastCall = [...calls]
+      .reverse()
+      .find(([k]) => k === "setting-config");
+    expect(lastCall).toBeDefined();
+    expect(lastCall![1]).toBe(true);
   });
 
   it("emits typed values via onChange", async () => {

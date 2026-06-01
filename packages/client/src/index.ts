@@ -2057,7 +2057,7 @@ export class ApiClient {
     // use `!= null` while `settings` used `!== undefined`. Both
     // are typed optional, so a TypeScript-correct caller can only
     // pass `undefined`; both checks behave identically in that
-    // case. The divergence was a copy-paste hazard \u2014 a future
+    // case. The divergence was a copy-paste hazard — a future
     // contributor adding a third optional field would have two
     // patterns to mimic and could pick the wrong one. `!= null`
     // is the strictly more defensive of the two (it additionally
@@ -3249,13 +3249,30 @@ export interface MarketplaceExtensionVersion {
 
 // MarketplaceInstallation mirrors services/api/marketplace_handlers.go
 // installationView. Settings is the parsed object (never raw bytes).
+//
+// Round-6 BUG_0001: settings is typed as `Record<string, unknown> | null`
+// to honestly reflect what the Go side CAN emit, even though the
+// current installationToView coerces nil maps to map[string]any{}
+// before serialising (services/api/marketplace_handlers.go:189-198).
+// The handler-side coercion is correct but it's not a contract a
+// future refactor is bound to — a different list endpoint, a
+// streaming variant, or a partial-update payload could reasonably
+// re-introduce `settings: null` on the wire. Pre-fix, the TS type
+// claimed non-null while the existing UI defensively wrote
+// `install.data.settings ?? {}` in two places and the regression
+// test had to cast through `as any` to feed null. The bug is the
+// type lie, not the runtime behaviour: a future consumer reading
+// `installation.settings.someKey` without the null guard would
+// crash at runtime with no TS warning. Tightening to nullable
+// forces all consumers to null-coalesce explicitly. Existing
+// `?? {}` sites remain correct; new consumers get caught by tsc.
 export interface MarketplaceInstallation {
   id: string;
   tenant_id: string;
   extension_id: string;
   extension_version_id: string;
   status: InstallStatus;
-  settings: Record<string, unknown>;
+  settings: Record<string, unknown> | null;
   webhook_base: string;
   installed_by?: string;
   installed_at: string;

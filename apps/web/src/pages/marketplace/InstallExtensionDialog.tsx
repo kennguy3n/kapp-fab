@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
   Badge,
@@ -108,19 +108,41 @@ export function InstallExtensionDialog({
   // SettingsForm — the component already accepts a schema prop.
   const schema = useMemo(() => null, []);
 
-  // Reset state when the dialog is reopened for a different version.
+  // Reset state when the dialog is shown for a different version.
   // Includes the validity set: per-editor-key signals from the
   // previously-mounted SettingsForm refer to keys that may no
   // longer be in the new schema, and the previous version's
   // unmount-cleanup will already have cleared its own keys. We
   // start from an empty set to avoid any chance of carrying
   // stale invalid-key entries across the version swap.
-  useEffect(() => {
+  //
+  // Round-6 ANALYSIS_0001: the reset MUST happen during render,
+  // not in a useEffect. React's standard derived-state-from-
+  // props pattern: hold previous version.id in state, compare
+  // during render, and if it changed, schedule the resets
+  // SYNCHRONOUSLY before children reconcile. Pre-fix we used
+  // useEffect, which runs post-commit — so on a version swap
+  // the new SettingsForm subtree (keyed on version.id) would
+  // mount during the render with the STALE `settings` prop
+  // still in scope, the FreeformJsonEditor's lazy init would
+  // seed its text buffer from the previous version's settings,
+  // and only AFTER the commit would the effect run and the
+  // parent settings finally clear. By then the textarea had
+  // already painted the wrong bytes. Doing the reset in render
+  // via setSettings({}) is React's official guidance for
+  // "derive state from prop change" (see the React docs page
+  // "You Might Not Need an Effect"). The setState calls during
+  // render are queued; React re-renders before painting, so
+  // the new SettingsForm subtree mounts against the freshly-
+  // empty settings as a single atomic remount.
+  const [prevVersionId, setPrevVersionId] = useState(version.id);
+  if (version.id !== prevVersionId) {
+    setPrevVersionId(version.id);
     setSettings({});
     setValidationError(null);
     setWebhookBase(defaultWebhookBase());
     setSettingsInvalidKeys(new Set());
-  }, [version.id]);
+  }
 
   const install = useMutation({
     mutationFn: (input: { settings: Record<string, unknown> }) =>
@@ -249,7 +271,22 @@ export function InstallExtensionDialog({
 
         <section>
           <h4 style={{ margin: "0 0 8px" }}>Settings</h4>
+          {/*
+           * Round-6 ANALYSIS_0001: key the SettingsForm subtree on
+           * version.id so that if the dialog's lifecycle ever
+           * changes (e.g. the parent stops force-unmounting via
+           * `installVersionId={null}` between version switches —
+           * any future "next version" inline action would do this),
+           * the uncontrolled FreeformJsonEditor's textarea buffer
+           * AND the parent's `settings` state reset together as a
+           * single atomic remount. Today the dialog always
+           * unmounts between versions so this is dead weight, but
+           * the cost is one React key and the gain is defense-in-
+           * depth against a future refactor silently introducing a
+           * stale-textarea bug.
+           */}
           <SettingsForm
+            key={version.id}
             schema={schema}
             value={settings}
             onChange={setSettings}

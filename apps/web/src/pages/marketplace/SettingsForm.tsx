@@ -431,6 +431,42 @@ function NestedJsonEditor({
           }
           try {
             const parsed = JSON.parse(e.target.value);
+            // Round-6 ANALYSIS_0005: NestedJsonEditor is mounted
+            // for SCHEMA properties declared `type: "object"`, so
+            // an array or a primitive (number, string, boolean,
+            // null) is a schema-type mismatch we must surface
+            // before forwarding to the parent. Pre-fix, the
+            // editor accepted any valid JSON and the parent's
+            // `settings[key] = parsed` would propagate the bad
+            // type forward; the engine's server-side
+            // gojsonschema check would then 400 on save, leaving
+            // the user wondering why their textarea, which
+            // parsed cleanly, "got rejected" by the server.
+            //
+            // Architecturally correct: reject the type at the
+            // editor boundary so the validity signal goes red
+            // (Save disables) the moment the user types `42` or
+            // `[1,2]`. We also suppress the onChange so the
+            // parent's settings draft doesn't briefly carry a
+            // value of the wrong type that would then have to
+            // be re-emitted on the next valid keystroke. Mirrors
+            // the FreeformJsonEditor pattern of error-on-parse
+            // + suppress-onChange; the editor's text buffer
+            // still holds the bad bytes so the user can fix the
+            // error without losing their place.
+            //
+            // null is a JSON-valid value but not an object;
+            // Array.isArray catches `[]`; typeof catches
+            // primitives. The remaining case (plain object) is
+            // the only one we forward.
+            if (
+              parsed === null ||
+              typeof parsed !== "object" ||
+              Array.isArray(parsed)
+            ) {
+              setError("Expected an object (got " + describeJsonType(parsed) + ")");
+              return;
+            }
             setError(null);
             onChange(parsed);
           } catch (err) {
@@ -453,6 +489,19 @@ function NestedJsonEditor({
       )}
     </div>
   );
+}
+
+// describeJsonType returns a short, user-facing name for the
+// JSON type of a parsed value. Used by NestedJsonEditor's
+// type-mismatch error to tell the user WHAT they typed instead
+// of "object" — e.g. "Expected an object (got array)" is more
+// useful than just "Expected an object", because the user can
+// see the bytes on screen and the mismatch is immediately
+// actionable ("oh, I have brackets instead of braces").
+function describeJsonType(v: unknown): string {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "array";
+  return typeof v;
 }
 
 // FreeformJsonEditor is the fallback for installs whose manifest

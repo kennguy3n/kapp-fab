@@ -176,7 +176,7 @@ describe("Marketplace SDK", () => {
     // pattern. The server's upgradeRequestBody treats omission
     // and `keep_settings:false` as identical (both fall through
     // to the default keep-existing branch), so this is a
-    // wire-contract honesty fix \u2014 it doesn't change server
+    // wire-contract honesty fix — it doesn't change server
     // semantics but it ensures the next person who copies the
     // pattern into a field where false IS semantically distinct
     // doesn't inherit the bug.
@@ -213,7 +213,7 @@ describe("Marketplace SDK", () => {
     // Negative case: caller didn't supply keep_settings at all
     // (the common case where they want the engine's default
     // keep-existing branch). The SDK MUST NOT render an
-    // unsolicited `keep_settings: false` in the body \u2014 the
+    // unsolicited `keep_settings: false` in the body — the
     // wire shape stays minimal.
     const fetchSpy = vi.fn().mockResolvedValue(
       mockJSON({
@@ -243,13 +243,13 @@ describe("Marketplace SDK", () => {
 
   it("upgradeMarketplaceInstallation omits settings when explicitly null (round-5 ANALYSIS_0005)", async () => {
     // Round-5 ANALYSIS_0005: the SDK's two optional upgrade
-    // fields used divergent inclusion checks \u2014 keep_settings
+    // fields used divergent inclusion checks — keep_settings
     // used `!= null` (covers both undefined and null) while
     // settings used `!== undefined` (only covers undefined). TS
     // types both as optional, so a TypeScript-correct caller
     // can only ever pass `undefined`. But untyped JS callers
     // (third-party scripts, codegen, runtime config) CAN pass
-    // `null` \u2014 and the pre-fix divergence meant the SDK would
+    // `null` — and the pre-fix divergence meant the SDK would
     // faithfully forward `settings: null` on the wire while
     // silently dropping `keep_settings: null`. That asymmetry
     // is the copy-paste hazard Devin Review flagged.
@@ -280,7 +280,7 @@ describe("Marketplace SDK", () => {
     await api.upgradeMarketplaceInstallation("install-1", {
       from_version_id: "v0",
       to_version_id: "v1",
-      // The cast-to-null is the whole point of this test \u2014 an
+      // The cast-to-null is the whole point of this test — an
       // untyped JS caller might send these as actual null values,
       // and the SDK must defend equally against both.
       keep_settings: null as unknown as boolean,
@@ -296,7 +296,7 @@ describe("Marketplace SDK", () => {
     // Companion to the previous test: an explicitly-supplied
     // settings document, even one that's the empty object {},
     // MUST round-trip onto the wire. The `!= null` check must
-    // NOT short-circuit on truthy-falsy values \u2014 an empty
+    // NOT short-circuit on truthy-falsy values — an empty
     // object is the canonical "wipe my settings to defaults"
     // signal, distinct from omission (which preserves the
     // current document).
@@ -326,6 +326,74 @@ describe("Marketplace SDK", () => {
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
     expect("settings" in body).toBe(true);
     expect(body.settings).toEqual({});
+  });
+
+  it("MarketplaceInstallation type accepts a null settings field on the wire (round-6 BUG_0001)", async () => {
+    // Round-6 BUG_0001: MarketplaceInstallation.settings is
+    // typed `Record<string, unknown> | null` because a future
+    // Go-side refactor (or a different endpoint that surfaces
+    // the same shape) could legitimately emit `null` despite
+    // the current installationToView coercion to {}. Pre-fix,
+    // the type claimed non-null and a future consumer doing
+    // `installation.settings.someKey` would crash at runtime
+    // with no TS warning.
+    //
+    // We pin the type contract three ways:
+    //   1. The list-style response with `settings: null`
+    //      round-trips through getMarketplaceInstallation
+    //      without an unchecked-property access (the SDK
+    //      itself doesn't poke into settings; it just hands
+    //      the row back).
+    //   2. The same wire shape with `settings: {}` continues
+    //      to round-trip identically — the union widening
+    //      didn't break the populated case.
+    //   3. The wire response's settings round-trips byte-for-
+    //      byte: passing null on the wire surfaces null in
+    //      the decoded object, not an auto-defaulted {}.
+    const fetchSpyNull = vi.fn().mockResolvedValue(
+      mockJSON({
+        id: "install-1",
+        tenant_id: "tnt-1",
+        extension_id: "ext-1",
+        extension_version_id: "ver-1",
+        status: "active",
+        settings: null,
+        webhook_base: "https://t.example.com",
+        installed_at: "2025-03-01T00:00:00Z",
+        updated_at: "2025-03-01T00:00:00Z",
+      }),
+    );
+    const apiNull = newClient(fetchSpyNull);
+    const rowNull = await apiNull.getMarketplaceInstallation("install-1");
+    expect(rowNull.settings).toBeNull();
+    // Type narrowing: TS now forces the consumer to guard
+    // before deref'ing — this assertion (compile-and-pass)
+    // proves the narrowed branch is reachable.
+    if (rowNull.settings !== null) {
+      // Unreachable; but if it were, the inferred type inside
+      // the branch would be Record<string, unknown>.
+      expect(typeof rowNull.settings).toBe("object");
+    }
+
+    const fetchSpyEmpty = vi.fn().mockResolvedValue(
+      mockJSON({
+        id: "install-1",
+        tenant_id: "tnt-1",
+        extension_id: "ext-1",
+        extension_version_id: "ver-1",
+        status: "active",
+        settings: {},
+        webhook_base: "https://t.example.com",
+        installed_at: "2025-03-01T00:00:00Z",
+        updated_at: "2025-03-01T00:00:00Z",
+      }),
+    );
+    const apiEmpty = newClient(fetchSpyEmpty);
+    const rowEmpty = await apiEmpty.getMarketplaceInstallation("install-1");
+    expect(rowEmpty.settings).toEqual({});
+    // Empty object is distinct from null on the wire — the
+    // SDK must NOT coerce one to the other.
+    expect(rowEmpty.settings).not.toBeNull();
   });
 
   it("uninstallMarketplaceExtension DELETEs with Idempotency-Key", async () => {

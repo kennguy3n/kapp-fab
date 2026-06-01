@@ -402,7 +402,7 @@ describe("InstallationDetailPage", () => {
     await waitFor(() =>
       expect(textarea.value).toBe('{"unterminated'),
     );
-    // Save must be disabled \u2014 the editor's text is unparseable,
+    // Save must be disabled — the editor's text is unparseable,
     // so the parent's settingsDraft is stale and saving would
     // be misleading. Without the round-3 validity lift this
     // would still be enabled.
@@ -457,7 +457,7 @@ describe("InstallationDetailPage", () => {
     // useEffect (the dependency is referential).
     getMarketplaceInstallation.mockResolvedValueOnce({ ...ROW });
     // Force a refetch by reading from the QueryClient through
-    // an external trigger \u2014 we re-render via state by
+    // an external trigger — we re-render via state by
     // dispatching a focus event (react-query's
     // refetchOnWindowFocus default is true in some configs,
     // but the test's qc disables retry only). The simplest
@@ -479,7 +479,7 @@ describe("InstallationDetailPage", () => {
       name: /^Cancel$/i,
     });
     await userEvent.click(cancel);
-    // Same DOM node \u2014 no remount.
+    // Same DOM node — no remount.
     const afterNode = screen.getByPlaceholderText(
       /api_key/i,
     ) as HTMLTextAreaElement;
@@ -514,10 +514,12 @@ describe("InstallationDetailPage", () => {
     // Pre-fix, step 3 would either time out (React aborts the
     // render and leaves the tree in an error boundary) or emit
     // the max-update-depth error visible in step 4.
+    // Round-6 BUG_0001: settings is now typed `Record<string, unknown> | null`
+    // so the null literal is a valid value; the prior `as any` cast is
+    // no longer needed.
     const nullSettingsRow = { ...ROW, settings: null };
     getMarketplaceInstallation.mockReset();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    getMarketplaceInstallation.mockResolvedValue(nullSettingsRow as any);
+    getMarketplaceInstallation.mockResolvedValue(nullSettingsRow);
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       renderPage();

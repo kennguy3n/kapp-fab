@@ -157,7 +157,7 @@ describe("InstallExtensionDialog", () => {
     //      inline warning surface appears (UX cue that the
     //      reason is the JSON, not the URL or anything else).
     //   3. Clicking the disabled button does NOT call the API
-    //      \u2014 i.e. even if the click-handler was somehow reached
+    //      — i.e. even if the click-handler was somehow reached
     //      (e.g. via keyboard or screen reader bypass), the
     //      install would still not fire because the SAVE GUARD
     //      is the button's disabled state, not a separate
@@ -181,12 +181,12 @@ describe("InstallExtensionDialog", () => {
     // to reflect the invalid state.
     await waitFor(() => expect(installButton).toBeDisabled());
     // The inline warning surfaces so the user knows WHY Install
-    // is greyed out (it might otherwise look like a bug \u2014 they
+    // is greyed out (it might otherwise look like a bug — they
     // typed something, why can't they install?).
     expect(
       screen.getByText(/Resolve the JSON parse error/i),
     ).toBeInTheDocument();
-    // Attempting the click is a no-op \u2014 disabled buttons don't
+    // Attempting the click is a no-op — disabled buttons don't
     // fire onClick from userEvent.click(), so the mock stays
     // untouched. The pre-fix code would have called the mock.
     await userEvent.click(installButton);
@@ -199,7 +199,7 @@ describe("InstallExtensionDialog", () => {
     // come back. The unmount-cleanup ref-pattern from round 4
     // (ANALYSIS_0004) handles the editor's tear-down, but
     // re-enabling on a buffer recovery is driven by the
-    // validity-signal effect inside the editor \u2014 we pin that
+    // validity-signal effect inside the editor — we pin that
     // round-trip works end-to-end (signal-invalid \u2192 disable \u2192
     // signal-valid \u2192 enable) without an unmount in between.
     renderDialog();
@@ -218,6 +218,78 @@ describe("InstallExtensionDialog", () => {
     await userEvent.clear(ta);
     await userEvent.type(ta, '{{"ok":1}');
     await waitFor(() => expect(installButton).not.toBeDisabled());
+  });
+
+  it("remounts the SettingsForm subtree when the version prop changes so the uncontrolled JSON textarea resets (round-6 ANALYSIS_0001)", async () => {
+    // Round-6 ANALYSIS_0001: the dialog's `version.id` useEffect
+    // resets parent state (settings, validationError,
+    // webhookBase, settingsInvalidKeys) when the version
+    // changes, but the SettingsForm subtree (which owns the
+    // uncontrolled FreeformJsonEditor textarea buffer) was not
+    // keyed on version.id. Today this is unreachable because
+    // the parent always force-unmounts the dialog via
+    // `installVersionId={null}` between version switches —
+    // but if a future "switch version inline" UX ever lands
+    // (think a dropdown inside the dialog that lets the user
+    // pick a newer version without closing), the parent state
+    // would reset while the textarea kept its stale buffer.
+    // The architecturally correct fix is to add
+    // `key={version.id}` to <SettingsForm/> so a version swap
+    // remounts both halves atomically.
+    //
+    // We pin the contract by:
+    //   1. Mounting the dialog with VER.
+    //   2. Typing into the textarea (uncontrolled buffer holds
+    //      it).
+    //   3. Rerendering with a DIFFERENT version object (same
+    //      shape, different id).
+    //   4. Asserting the textarea's text buffer is now empty —
+    //      the proof that the remount actually fired.
+    const qc = new QueryClient({
+      defaultOptions: { mutations: { retry: false } },
+    });
+    const { rerender } = render(
+      <QueryClientProvider client={qc}>
+        <InstallExtensionDialog
+          extension={EXT}
+          version={VER}
+          onClose={vi.fn()}
+          onInstalled={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+    const ta1 = screen.getByPlaceholderText(
+      '{"api_key":"…"}',
+    ) as HTMLTextAreaElement;
+    await userEvent.type(ta1, '{{"api_key":"abc"}');
+    expect(ta1.value).toContain("api_key");
+    // Swap to a new version object. The useEffect resets
+    // parent state; the React `key={version.id}` on
+    // SettingsForm forces a remount of the editor subtree.
+    const VER2 = { ...VER, id: "ver-2", version: "1.3.0" };
+    rerender(
+      <QueryClientProvider client={qc}>
+        <InstallExtensionDialog
+          extension={EXT}
+          version={VER2}
+          onClose={vi.fn()}
+          onInstalled={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+    // The textarea must be a freshly-mounted element with an
+    // empty buffer — re-fetching it by placeholder (a brand-
+    // new node since the previous one was unmounted) and
+    // verifying the value is now empty proves the remount
+    // actually fired.
+    const ta2 = screen.getByPlaceholderText(
+      '{"api_key":"…"}',
+    ) as HTMLTextAreaElement;
+    expect(ta2.value).toBe("");
+    // And the buffer reference is a different DOM node (the
+    // previous textarea was unmounted as part of the remount,
+    // not patched in place).
+    expect(ta2).not.toBe(ta1);
   });
 
   it("surfaces a server error inside the dialog", async () => {
