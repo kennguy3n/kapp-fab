@@ -102,8 +102,10 @@ export function InstallationDetailPage() {
     onMutate: async (next) => {
       // Optimistic update: capture the previous snapshot so we
       // can restore it on error, then stage the new settings in
-      // cache. The mutation's onSettled invalidates so the next
-      // useQuery render syncs to the server's canonical view.
+      // cache. onSettled below invalidates so the next useQuery
+      // render syncs to the server's canonical view — important
+      // for the error path where the rolled-back snapshot may
+      // already be stale from another tab / a server-side mutate.
       await qc.cancelQueries({
         queryKey: ["marketplace", "installation", installId],
       });
@@ -135,6 +137,17 @@ export function InstallationDetailPage() {
       );
       qc.invalidateQueries({ queryKey: ["marketplace", "installations"] });
       setSettingsTouched(false);
+    },
+    onSettled: () => {
+      // Always refetch the installation row after the mutation
+      // settles (success or error). On error, the cache holds
+      // the rolled-back snapshot which may itself be stale; on
+      // success, the onSuccess setQueryData already wrote the
+      // server response but a background refetch keeps the cache
+      // honest if another tab raced the same mutation.
+      qc.invalidateQueries({
+        queryKey: ["marketplace", "installation", installId],
+      });
     },
   });
 
@@ -183,9 +196,37 @@ export function InstallationDetailPage() {
     : [];
   const installedVersion =
     allVersions.find((v) => v.id === row.extension_version_id) ?? null;
-  const upgradableVersions = allVersions.filter(
-    (v) => v.id !== row.extension_version_id && !v.yanked,
-  );
+  // Upgrade panel must only surface versions that are strictly
+  // newer than the installed one (by published_at). A previous
+  // implementation included every non-yanked non-current version,
+  // which meant a tenant already on the most-recent publish would
+  // see older versions in the "A newer version is available"
+  // panel and could accidentally downgrade — risking settings
+  // schema incompatibility, removed permissions, or workflow
+  // drift the upgrade flow can't unwind. We compare timestamps
+  // (same ordering basis as sortVersionsByPublishedDesc) rather
+  // than SemVer because publishers may backport patches: 1.0.4
+  // shipped chronologically AFTER 1.1.0 is still "newer" from a
+  // "what the publisher last released" perspective.
+  //
+  // If installedVersion is null (e.g. the installed row points
+  // at a version that was hard-deleted from the catalog, which
+  // shouldn't happen but is defensible), the upgrade panel
+  // collapses rather than showing every available version as a
+  // candidate upgrade target with no anchor.
+  const installedPublishedAt = installedVersion
+    ? new Date(installedVersion.published_at).getTime()
+    : null;
+  const upgradableVersions =
+    installedPublishedAt === null
+      ? []
+      : allVersions.filter((v) => {
+          if (v.id === row.extension_version_id) return false;
+          if (v.yanked) return false;
+          const t = new Date(v.published_at).getTime();
+          if (!Number.isFinite(t)) return false;
+          return t > installedPublishedAt;
+        });
   const upgradeTarget = upgradeTargetId
     ? allVersions.find((v) => v.id === upgradeTargetId) ?? null
     : null;
@@ -367,7 +408,26 @@ export function InstallationDetailPage() {
           </CardContent>
         </Card>
 
-        {upgradableVersions.length > 0 && (
+        {upgradableVersions.length === 0 ? (
+          // Affirmative "you're current" panel. Avoids the
+          // ambiguity of a silently-absent upgrade card (users
+          // wondered "is the upgrade flow broken or am I current?").
+          // Only rendered for non-uninstalled rows — uninstalled
+          // installations have no upgrade path by definition.
+          row.status !== "uninstalled" && installedVersion ? (
+            <Card>
+              <CardContent style={{ padding: 16 }}>
+                <h3 style={{ marginTop: 0 }}>Upgrade</h3>
+                <p style={{ color: "#6b7280", fontSize: 13, marginTop: 0 }}>
+                  You are already on the latest approved version
+                  (v{installedVersion.version}, published{" "}
+                  {formatTimestamp(installedVersion.published_at)}). New
+                  publishes will surface here automatically.
+                </p>
+              </CardContent>
+            </Card>
+          ) : null
+        ) : (
           <Card>
             <CardContent style={{ padding: 16 }}>
               <h3 style={{ marginTop: 0 }}>Upgrade</h3>

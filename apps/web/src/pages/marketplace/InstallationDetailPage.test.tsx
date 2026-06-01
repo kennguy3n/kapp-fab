@@ -178,6 +178,73 @@ describe("InstallationDetailPage", () => {
     );
   });
 
+  it("collapses the upgrade panel when installed version is the most-recent publish (no downgrade offers)", async () => {
+    // Tenant is on ver-1 (1.2.0, published 2025-02-01). The
+    // older ver-0 (1.1.0, published 2025-01-15) is in the
+    // catalogue but MUST NOT appear in the upgrade panel,
+    // otherwise users would be silently offered to downgrade
+    // — a real risk for settings-schema-incompatible reverts.
+    const rowOnLatest = { ...ROW, extension_version_id: "ver-1" };
+    getMarketplaceInstallation.mockReset();
+    getMarketplaceInstallation.mockResolvedValue(rowOnLatest);
+    renderPage();
+    // Wait for the page to load — v1.2.0 appears in the header
+    // version line and (post-fix) in the "already on latest"
+    // empty-state copy, so we don't pin on getByText here.
+    await waitFor(() =>
+      expect(screen.getAllByText(/v1\.2\.0/).length).toBeGreaterThan(0),
+    );
+    // The upgrade panel renders an "Upgrade to vX" button when
+    // any newer version is available. Confirm NONE exist —
+    // including no button offering to "upgrade" back to v1.1.0.
+    expect(
+      screen.queryByRole("button", { name: /Upgrade to v1\.1\.0/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Upgrade to v/i }),
+    ).not.toBeInTheDocument();
+    // Affirmative signal that the panel ackownledges already-latest.
+    expect(
+      screen.getByText(/already on the latest approved version/i),
+    ).toBeInTheDocument();
+  });
+
+  it("invalidates the installation query in onSettled so error-path stale rollbacks get refetched", async () => {
+    // Settings update fails; onMutate has already optimistically
+    // staged the new value into cache, onError rolls it back to
+    // the pre-mutate snapshot. That snapshot may itself be
+    // stale (another tab edited concurrently), so the mutation
+    // MUST trigger a background refetch via onSettled. We pin
+    // that by observing getMarketplaceInstallation is called a
+    // second time after the failed PATCH settles.
+    updateMarketplaceInstallationSettings.mockRejectedValueOnce(
+      new Error("boom"),
+    );
+    renderPage();
+    await waitFor(() =>
+      expect(getMarketplaceInstallation).toHaveBeenCalledTimes(1),
+    );
+    // Touch the settings field then click Save. The schema is
+    // currently null in this page (see comment in
+    // onSaveSettings) so SettingsForm renders the free-form
+    // JSON textarea — we target it via its placeholder rather
+    // than a label (the textarea is intentionally label-less
+    // because the surrounding Card heading is the label).
+    const textarea = await screen.findByPlaceholderText(/api_key/i);
+    await userEvent.clear(textarea);
+    await userEvent.type(textarea, '{{"api_key":"new"}');
+    await userEvent.click(
+      screen.getByRole("button", { name: /Save settings/i }),
+    );
+    // After the mutation settles (success or error) the
+    // installation query MUST be invalidated, triggering a
+    // background refetch — observable as a second call to
+    // getMarketplaceInstallation.
+    await waitFor(() =>
+      expect(getMarketplaceInstallation.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
+  });
+
   it("confirms before uninstalling and posts the DELETE", async () => {
     uninstallMarketplaceExtension.mockResolvedValueOnce(undefined);
     renderPage();

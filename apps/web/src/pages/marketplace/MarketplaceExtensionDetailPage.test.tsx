@@ -175,4 +175,55 @@ describe("MarketplaceExtensionDetailPage", () => {
     );
     expect(screen.getByText("records.write")).toBeInTheDocument();
   });
+
+  it("opens the install dialog from the Versions-tab per-row Install when listed_version is empty (regression: header CTA disabled but per-row should still work via picked-version lookup)", async () => {
+    // Simulates a publisher who has approved versions in the
+    // catalogue but hasn't promoted any of them as the
+    // listed_version yet — e.g. a soft-launch state. The
+    // header CTA is disabled (no listedVersion to anchor to),
+    // but the Versions tab lists every approved version with
+    // its own per-row Install button. Prior to the BUG_0001
+    // fix the dialog gate required listedVersion to be
+    // truthy, so clicking the per-row Install set
+    // installVersionId but the dialog never rendered (silent
+    // no-op for the user). The fix anchors the dialog on the
+    // picked version via versions.find(), so the dialog
+    // opens regardless of listedVersion state.
+    getMarketplaceExtension.mockResolvedValueOnce({
+      extension: { ...EXT_FIXTURE.extension, listed_version: "" },
+      versions: EXT_FIXTURE.versions,
+    });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: /Versions/i })).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByRole("tab", { name: /Versions/i }));
+    // The header CTA + the 2 per-row buttons all match
+    // /^Install$/i; the header CTA is disabled with a
+    // title="No installable version is available." tooltip
+    // when listed_version is empty.
+    const allInstalls = await screen.findAllByRole("button", {
+      name: /^Install$/i,
+    });
+    expect(allInstalls.length).toBeGreaterThanOrEqual(2);
+    const headerCta = allInstalls.find(
+      (b) =>
+        b.getAttribute("title") === "No installable version is available.",
+    );
+    expect(headerCta).toBeDefined();
+    expect(headerCta).toBeDisabled();
+    // The per-row Install buttons should NOT be disabled and
+    // clicking one MUST open the install dialog.
+    const perRow = allInstalls.find((b) => !b.hasAttribute("disabled"));
+    expect(perRow).toBeDefined();
+    await userEvent.click(perRow!);
+    // The InstallExtensionDialog opens with a permission-summary
+    // section; pin on that text so we know the dialog rendered
+    // even though listedVersion is empty.
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Install Inventory Sync/i),
+      ).toBeInTheDocument(),
+    );
+  });
 });

@@ -137,6 +137,60 @@ describe("MarketplaceInstallationsPage", () => {
     expect(screen.getByText(/v1\.1\.0/)).toBeInTheDocument();
   });
 
+  it("does NOT fan out a per-row listMarketplaceVersions call (versions reused from getMarketplaceExtension to avoid N+1)", async () => {
+    // Regression for the N+1 round-trip pattern: each row used
+    // to fire its own useQuery against listMarketplaceVersions,
+    // duplicating data already present in the parent's
+    // getMarketplaceExtension response. After the fix the page
+    // should NEVER call listMarketplaceVersions — versions are
+    // sourced from the extQueries[i].data.versions array and
+    // passed down as a prop.
+    listMarketplaceInstallations.mockResolvedValueOnce({
+      items: [
+        {
+          id: "install-1",
+          tenant_id: "tnt-1",
+          extension_id: "ext-1",
+          extension_version_id: "ver-0",
+          status: "active",
+          settings: {},
+          webhook_base: "https://acme.example.com",
+          installed_at: "2025-03-01T00:00:00Z",
+          updated_at: "2025-03-01T00:00:00Z",
+        },
+        {
+          id: "install-2",
+          tenant_id: "tnt-1",
+          extension_id: "ext-1", // same extension, different install
+          extension_version_id: "ver-1",
+          status: "disabled",
+          settings: {},
+          webhook_base: "",
+          installed_at: "2025-03-02T00:00:00Z",
+          updated_at: "2025-03-02T00:00:00Z",
+        },
+      ],
+    });
+    getMarketplaceExtension.mockResolvedValue({
+      extension: EXT,
+      versions: VERSIONS.items,
+    });
+    renderPage();
+    // Wait for the rows to actually render so we know the
+    // useQueries cycle has settled.
+    await waitFor(() =>
+      expect(screen.getAllByText(/Inventory Sync/i).length).toBeGreaterThan(0),
+    );
+    // The extension lookup query MUST fire (once per unique
+    // extension id) — but listMarketplaceVersions MUST NOT.
+    expect(getMarketplaceExtension).toHaveBeenCalledWith("ext-1");
+    expect(listMarketplaceVersions).not.toHaveBeenCalled();
+    // Both rows resolve their version labels — proving that
+    // versions did flow through the shared lookup.
+    expect(screen.getByText(/v1\.1\.0/)).toBeInTheDocument();
+    expect(screen.getByText(/v1\.2\.0/)).toBeInTheDocument();
+  });
+
   it("surfaces failure_reason inline for failed installs", async () => {
     listMarketplaceInstallations.mockResolvedValueOnce({
       items: [

@@ -207,22 +207,39 @@ export function MarketplaceExtensionDetailPage() {
         </TabsContent>
       </Tabs>
 
-      {installVersionId && listedVersion && (
-        <InstallExtensionDialog
-          extension={ext}
-          version={versions.find((v) => v.id === installVersionId) ?? listedVersion}
-          onClose={() => setInstallVersionId(null)}
-          onInstalled={(res) => {
-            setInstallVersionId(null);
-            // Invalidate both list queries so the
-            // installed-list view and the cross-query
-            // already-installed badge above reflect the new
-            // row immediately.
-            qc.invalidateQueries({ queryKey: ["marketplace", "installations"] });
-            navigate(`/marketplace/installed/${res.installation.id}`);
-          }}
-        />
-      )}
+      {installVersionId &&
+        (() => {
+          // Anchor the dialog to whichever specific version the
+          // user picked (header CTA always picks listedVersion,
+          // Versions tab picks per-row). versions[] is the
+          // authoritative array — the ID always originated from
+          // it via setInstallVersionId, so .find() is guaranteed.
+          // The previous `?? listedVersion` fallback masked the
+          // case where listedVersion was null but a per-row
+          // Versions-tab Install was clicked: the gate refused
+          // to render, leaving the user with a silent no-op
+          // button. Now we render whenever the picked version
+          // resolves; if it somehow can't (defensive), we drop
+          // the dialog rather than render with a wrong version.
+          const picked = versions.find((v) => v.id === installVersionId);
+          if (!picked) return null;
+          return (
+            <InstallExtensionDialog
+              extension={ext}
+              version={picked}
+              onClose={() => setInstallVersionId(null)}
+              onInstalled={(res) => {
+                setInstallVersionId(null);
+                // Invalidate both list queries so the
+                // installed-list view and the cross-query
+                // already-installed badge above reflect the new
+                // row immediately.
+                qc.invalidateQueries({ queryKey: ["marketplace", "installations"] });
+                navigate(`/marketplace/installed/${res.installation.id}`);
+              }}
+            />
+          );
+        })()}
     </section>
   );
 }

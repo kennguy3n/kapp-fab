@@ -1,10 +1,14 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
+// useQuery is still used by the installations list above; we
+// deliberately dropped the per-row useQuery (was N+1 against
+// listMarketplaceVersions for data already in extQueries).
 import { Badge, Card, CardContent } from "@kapp/ui";
 import { api } from "../../lib/api";
 import type {
   MarketplaceExtension,
+  MarketplaceExtensionVersion,
   MarketplaceInstallation,
   MarketplaceListInstallationsResponse,
 } from "@kapp/client";
@@ -53,13 +57,27 @@ export function MarketplaceInstallationsPage() {
     })),
   });
 
-  // Build extId -> Extension lookup once per render. Failed
-  // queries are dropped so a per-row 404 doesn't take the
-  // whole list down — the row just renders the bare ID.
+  // Build extId -> Extension AND extId -> Versions lookups once
+  // per render. Failed queries are dropped so a per-row 404
+  // doesn't take the whole list down — the row just renders the
+  // bare ID. We piggyback on getMarketplaceExtension's response
+  // (which already includes versions[] from the same
+  // listApprovedVersions backend path that GET .../versions uses)
+  // rather than firing a second per-row useQuery against
+  // listMarketplaceVersions — that was an N+1 round-trip with
+  // zero additional data, since the two endpoints return the
+  // exact same approved-non-yanked version list.
   const extLookup: Record<string, MarketplaceExtension | undefined> = {};
+  const versionsLookup: Record<
+    string,
+    MarketplaceExtensionVersion[] | undefined
+  > = {};
   extQueries.forEach((q, i) => {
     const id = extIds[i];
-    if (q.data) extLookup[id] = q.data.extension;
+    if (q.data) {
+      extLookup[id] = q.data.extension;
+      versionsLookup[id] = q.data.versions;
+    }
   });
 
   return (
@@ -116,6 +134,7 @@ export function MarketplaceInstallationsPage() {
                   key={row.id}
                   row={row}
                   ext={extLookup[row.extension_id]}
+                  versions={versionsLookup[row.extension_id]}
                 />
               ))}
             </tbody>
@@ -128,18 +147,12 @@ export function MarketplaceInstallationsPage() {
 function InstallationRow({
   row,
   ext,
+  versions,
 }: {
   row: MarketplaceInstallation;
   ext: MarketplaceExtension | undefined;
+  versions: MarketplaceExtensionVersion[] | undefined;
 }) {
-  // useExtensionVersions is always called (Rules of Hooks);
-  // the `enabled` flag short-circuits the actual network round
-  // trip when we don't yet have an extension to scope to.
-  const versions = useQuery({
-    queryKey: ["marketplace", "extension-versions", ext?.id ?? ""],
-    queryFn: () => api.listMarketplaceVersions(ext!.id),
-    enabled: !!ext?.id,
-  });
   return (
     <tr style={{ borderTop: "1px solid #e5e7eb" }}>
       <Td>
@@ -173,7 +186,7 @@ function InstallationRow({
           </div>
         )}
       </Td>
-      <Td>{renderVersion(row, ext, versions.data?.items)}</Td>
+      <Td>{renderVersion(row, ext, versions)}</Td>
       <Td>{formatTimestamp(row.installed_at)}</Td>
       <Td>
         {row.last_health_check_at ? (
@@ -207,7 +220,7 @@ function InstallationRow({
 function renderVersion(
   row: MarketplaceInstallation,
   ext: MarketplaceExtension | undefined,
-  versions: { id: string; version: string }[] | undefined,
+  versions: MarketplaceExtensionVersion[] | undefined,
 ): React.ReactNode {
   if (!ext) {
     return (
