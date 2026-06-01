@@ -402,8 +402,6 @@ function NestedJsonEditor({
   // server's payload and leave the user wondering "what was
   // actually stored?". `undefined` is the only case that
   // legitimately yields an empty buffer (the field is unset).
-  const isPlainObject = (v: unknown): v is Record<string, unknown> =>
-    v !== null && typeof v === "object" && !Array.isArray(v);
   const [text, setText] = useState(() =>
     value === undefined ? "" : JSON.stringify(value, null, 2),
   );
@@ -601,6 +599,19 @@ function describeJsonType(v: unknown): string {
   if (v === null) return "null";
   if (Array.isArray(v)) return "array";
   return typeof v;
+}
+
+// isPlainObject is the type-guard for "JSON object" — non-null,
+// typeof object, not an array. Module-scope (rather than inlined
+// inside NestedJsonEditor) for parity with describeJsonType
+// above: both are stateless predicates the editor consults at
+// mount AND on every keystroke, and hoisting avoids redeclaring
+// the closure on every render. Round-11 ANALYSIS_0004 — pre-fix
+// the helper was declared inside NestedJsonEditor's body, which
+// was functionally correct (no captured component state) but
+// inconsistent with the existing module-scope helper sibling.
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
 // FreeformJsonEditor is the fallback for installs whose manifest
