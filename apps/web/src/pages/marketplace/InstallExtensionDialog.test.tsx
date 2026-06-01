@@ -357,6 +357,88 @@ describe("InstallExtensionDialog", () => {
     ).toBeInTheDocument();
   });
 
+  it("Cancel button respects the in-flight install guard even when the disabled attribute is bypassed (round-10 ANALYSIS_0003)", async () => {
+    // Round-10 ANALYSIS_0003: pre-fix, the Cancel button passed
+    // `onClick={onClose}` directly while only the modal's
+    // backdrop/ESC handler wrapped it with the `install.isPending`
+    // guard. The disabled attribute (disabled={install.isPending})
+    // is a UI gate, not a data-path gate — accessibility tools
+    // firing the listener directly, programmatic invocation, or
+    // a future refactor swapping disabled for a styling-only
+    // class would all skip React's gate and call onClose mid-
+    // install. The fix routes BOTH the modal close and the
+    // Cancel button through a single `requestClose` helper that
+    // checks isPending before invoking onClose.
+    //
+    // Pin via the same __reactProps$ bypass pattern the round-8
+    // BUG_0001 Save-button test uses: hold the install mutation
+    // pending, pull the React-attached onClick off the Cancel
+    // DOM node, invoke it directly, and assert onClose was NOT
+    // called. Pre-fix, the call would go through. Post-fix, the
+    // requestClose guard short-circuits.
+    let resolveInstall!: (v: unknown) => void;
+    installMarketplaceExtension.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveInstall = resolve;
+        }),
+    );
+    const { onClose } = renderDialog();
+    const urlInput = screen.getByLabelText(/Webhook base URL/i);
+    await userEvent.clear(urlInput);
+    await userEvent.type(urlInput, "https://t.example.com");
+    await userEvent.click(
+      screen.getByRole("button", { name: /Install extension/i }),
+    );
+    // Wait for the mutation to flip into the pending state so
+    // both Cancel and Install render disabled.
+    await waitFor(() => {
+      const cancel = screen.getByRole("button", {
+        name: /Cancel/i,
+      }) as HTMLButtonElement;
+      expect(cancel.disabled).toBe(true);
+    });
+    const cancelBtn = screen.getByRole("button", {
+      name: /Cancel/i,
+    }) as HTMLButtonElement;
+    // Bypass: pull the React-attached onClick directly. This
+    // simulates accessibility tools / programmatic invocation /
+    // a future refactor that drops the disabled attribute.
+    const propsKey = Object.keys(cancelBtn).find((k) =>
+      k.startsWith("__reactProps$"),
+    );
+    expect(propsKey).toBeDefined();
+    const props = (cancelBtn as unknown as Record<
+      string,
+      { onClick?: () => void }
+    >)[propsKey!];
+    expect(props.onClick).toBeTypeOf("function");
+    await act(async () => {
+      props.onClick!();
+    });
+    // The requestClose guard short-circuited — onClose was not
+    // called. Pre-fix, this would have fired the parent's
+    // onClose, dismissing the dialog mid-install.
+    expect(onClose).not.toHaveBeenCalled();
+    // Drain the pending mutation so we don't leak the unresolved
+    // promise into the test runner.
+    resolveInstall({
+      installation: {
+        id: "i-1",
+        tenant_id: "t-1",
+        extension_id: "ext-1",
+        extension_version_id: "ver-1",
+        installed_version: "1.2.0",
+        status: "active",
+        settings: {},
+        webhook_base: "https://t.example.com",
+        installed_at: "2025-02-01T00:00:00Z",
+        updated_at: "2025-02-01T00:00:00Z",
+      },
+      signing_secret: "s",
+    });
+  });
+
   it("surfaces a server error inside the dialog", async () => {
     installMarketplaceExtension.mockRejectedValueOnce(
       new Error("409 install already exists"),

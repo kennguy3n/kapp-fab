@@ -500,6 +500,103 @@ describe("SettingsForm", () => {
     expect(recoveredFreeformValidity).toBeDefined();
     expect(recoveredFreeformValidity![1]).toBe(true);
   });
+
+  it("NestedJsonEditor distinguishes truly-empty from whitespace-only and refuses to silently unset on whitespace input (round-10 ANALYSIS_0002)", async () => {
+    // Round-10 ANALYSIS_0002: pre-fix, the NestedJsonEditor
+    // collapsed both `raw === ""` and `raw === "   "` into the
+    // same `onChange(undefined)` (unsetting the optional
+    // object-typed field). That's wrong by the same UX argument
+    // round-8 ANALYSIS_0005 fixed for the FreeformJsonEditor:
+    //   * raw === ""        → user cleared the textarea
+    //                         intending to unset the field.
+    //   * raw === "   "     → user has a populated nested
+    //                         object, clears it, then types a
+    //                         few spaces. The textarea shows
+    //                         whitespace while the parent's
+    //                         settings draft silently drops the
+    //                         key — an unset the user didn't
+    //                         intend.
+    // Post-fix:
+    //   * raw === ""        → emit undefined (UI promise:
+    //                         clears the field).
+    //   * trimmed === ""    → set error, suppress onChange, and
+    //                         signal invalid under the editor's
+    //                         id key so Save is gated.
+    //   * trimmed === "{}"  → emit {} (explicit empty object).
+    // Pin all three transitions so the parity with
+    // FreeformJsonEditor can't silently drift again.
+    const schema: SettingsSchema = {
+      type: "object",
+      properties: {
+        config: { type: "object", title: "Config" },
+      },
+    };
+    const onChange = vi.fn();
+    const calls: Array<[string, boolean]> = [];
+    render(
+      <SettingsForm
+        schema={schema}
+        value={{ config: { k: 1 } }}
+        onChange={onChange}
+        onValidityChange={(k, v) => calls.push([k, v])}
+      />,
+    );
+    const ta = document.getElementById(
+      "setting-config",
+    ) as HTMLTextAreaElement;
+    expect(ta).toBeTruthy();
+    // 1. Truly empty: user clears the textarea → emit a fresh
+    // settings object with `config` unset (undefined preserved
+    // via the parent's `Object.assign({}, value)` + delete
+    // pattern — observable as the `config` key being absent
+    // from the most recent emit).
+    fireEvent.change(ta, { target: { value: "" } });
+    expect(ta.value).toBe("");
+    expect(
+      screen.queryByText(/Whitespace-only input is not valid JSON/i),
+    ).not.toBeInTheDocument();
+    const emptyEmit = [...onChange.mock.calls].reverse()[0];
+    expect(emptyEmit).toBeDefined();
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        emptyEmit![0] as Record<string, unknown>,
+        "config",
+      ),
+    ).toBe(false);
+    const emptyEmitCount = onChange.mock.calls.length;
+    // 2. Whitespace-only: the unset emit MUST NOT fire, error
+    // message surfaces, and the validity signal flips to
+    // invalid under the editor's id key so the parent's
+    // settingsFormValid bit drops.
+    fireEvent.change(ta, { target: { value: "   " } });
+    expect(ta.value).toBe("   ");
+    expect(
+      screen.getByText(/Whitespace-only input is not valid JSON/i),
+    ).toBeInTheDocument();
+    expect(onChange.mock.calls.length).toBe(emptyEmitCount);
+    const lastValidity = [...calls]
+      .reverse()
+      .find(([k]) => k === "setting-config");
+    expect(lastValidity).toBeDefined();
+    expect(lastValidity![1]).toBe(false);
+    // 3. Explicit "{}" reset: error clears, onChange fires
+    // with `config: {}`, and validity recovers to valid.
+    fireEvent.change(ta, { target: { value: "{}" } });
+    expect(ta.value).toBe("{}");
+    expect(
+      screen.queryByText(/Whitespace-only input is not valid JSON/i),
+    ).not.toBeInTheDocument();
+    const lastObjectEmit = [...onChange.mock.calls].reverse()[0];
+    expect(lastObjectEmit).toBeDefined();
+    expect(
+      (lastObjectEmit![0] as Record<string, Record<string, unknown>>).config,
+    ).toEqual({});
+    const recoveredValidity = [...calls]
+      .reverse()
+      .find(([k]) => k === "setting-config");
+    expect(recoveredValidity).toBeDefined();
+    expect(recoveredValidity![1]).toBe(true);
+  });
 });
 
 describe("validateAgainstSchema", () => {

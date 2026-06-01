@@ -211,13 +211,33 @@ export function InstallExtensionDialog({
     install.mutate({ settings });
   };
 
+  // Round-10 ANALYSIS_0003: a single requestClose helper used by
+  // BOTH the modal's backdrop/ESC handler AND the explicit Cancel
+  // button, so the in-flight-install guard can't be bypassed via
+  // the disabled-attribute side door the same way the round-7
+  // ANALYSIS_0002 (Install button) and round-8 BUG_0001 (Save
+  // settings button) defense-in-depth patterns close their own
+  // disabled-bypass vectors. Pre-fix, the Cancel button passed
+  // `onClick={onClose}` directly while only the modal's onClose
+  // wrapped it with the isPending check — meaning a synthetic
+  // click that bypassed the disabled attribute (accessibility
+  // tools firing the listener directly, programmatic invocation,
+  // a future refactor swapping disabled for a styling-only
+  // class) would close the dialog mid-install. The impact is
+  // limited (the mutation continues, onInstalled still fires)
+  // but the asymmetry would surprise a maintainer reading
+  // either path expecting the guards to match. Pattern parity
+  // also means future close vectors (e.g. a keyboard shortcut,
+  // an outside-click handler) get the guard for free.
+  const requestClose = () => {
+    if (install.isPending) return;
+    onClose();
+  };
+
   return (
     <ControlledModal
       open
-      onClose={() => {
-        if (install.isPending) return;
-        onClose();
-      }}
+      onClose={requestClose}
       title={`Install ${extension.display_name} v${version.version}`}
     >
       <div style={{ display: "grid", gap: 16, padding: "8px 0" }}>
@@ -349,7 +369,7 @@ export function InstallExtensionDialog({
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <Button
             variant="outline"
-            onClick={onClose}
+            onClick={requestClose}
             disabled={install.isPending}
           >
             Cancel

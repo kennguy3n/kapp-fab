@@ -489,14 +489,51 @@ function NestedJsonEditor({
         value={text}
         disabled={disabled}
         onChange={(e) => {
-          setText(e.target.value);
-          if (e.target.value.trim() === "") {
+          const raw = e.target.value;
+          setText(raw);
+          // Round-10 ANALYSIS_0002: mirror the
+          // FreeformJsonEditor whitespace handling (round-8
+          // ANALYSIS_0005). Pre-fix, NestedJsonEditor collapsed
+          // both `raw === ""` and `raw === "   "` into the same
+          // `onChange(undefined)` (unsetting the optional
+          // object-typed field). That's wrong by the same UX
+          // argument that motivated the FreeformJsonEditor fix:
+          // a user who had a populated nested object, cleared
+          // it, then accidentally typed a few spaces would have
+          // their field silently unset — the textarea would
+          // show whitespace while the parent's settings draft
+          // dropped the key. Today the no-schema fallback is
+          // the only mounted editor, so this is latent rather
+          // than user-reachable; once B6.2 wires settings_schema
+          // with `type: "object"` properties, NestedJsonEditor
+          // will be the active surface and the asymmetry would
+          // matter. Closing now keeps the two editors honest:
+          //   * raw === ""        → unset (UI promise: empty
+          //                         textarea reverts the field
+          //                         to its undefined/default
+          //                         state, which the schema's
+          //                         `required` arr handles
+          //                         server-side).
+          //   * trimmed === ""    → parse error + invalid
+          //                         validity signal, gating Save
+          //                         the same way an unparseable
+          //                         JSON body would.
+          //   * trimmed === "{}"  → unchanged: explicit empty
+          //                         object.
+          if (raw === "") {
             setError(null);
             onChange(undefined);
             return;
           }
+          const trimmed = raw.trim();
+          if (trimmed === "") {
+            setError(
+              "Whitespace-only input is not valid JSON. Clear the textarea to unset this field, or type `{}` to send an empty object explicitly.",
+            );
+            return;
+          }
           try {
-            const parsed = JSON.parse(e.target.value);
+            const parsed = JSON.parse(trimmed);
             // Round-6 ANALYSIS_0005: NestedJsonEditor is mounted
             // for SCHEMA properties declared `type: "object"`, so
             // an array or a primitive (number, string, boolean,
