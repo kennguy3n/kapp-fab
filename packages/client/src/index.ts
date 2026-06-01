@@ -2052,8 +2052,21 @@ export class ApiClient {
     // prevents the next person from copy-pasting the wrong
     // pattern into a third field where false IS semantically
     // distinct from omitted.
+    // Round-5 ANALYSIS_0005 consistency fix: unified both optional
+    // fields under `!= null` rather than letting `keep_settings`
+    // use `!= null` while `settings` used `!== undefined`. Both
+    // are typed optional, so a TypeScript-correct caller can only
+    // pass `undefined`; both checks behave identically in that
+    // case. The divergence was a copy-paste hazard \u2014 a future
+    // contributor adding a third optional field would have two
+    // patterns to mimic and could pick the wrong one. `!= null`
+    // is the strictly more defensive of the two (it additionally
+    // covers untyped JS callers passing `null`, which JSON would
+    // otherwise faithfully include and which the server's
+    // upgradeRequestBody would then have to defend against). Pin
+    // by sdk.test.ts round-trip cases.
     if (input.keep_settings != null) body.keep_settings = input.keep_settings;
-    if (input.settings !== undefined) body.settings = input.settings;
+    if (input.settings != null) body.settings = input.settings;
     return this.request(
       `/marketplace/installations/${encodeURIComponent(installId)}/upgrade`,
       {

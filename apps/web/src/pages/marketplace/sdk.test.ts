@@ -241,6 +241,93 @@ describe("Marketplace SDK", () => {
     expect("keep_settings" in body).toBe(false);
   });
 
+  it("upgradeMarketplaceInstallation omits settings when explicitly null (round-5 ANALYSIS_0005)", async () => {
+    // Round-5 ANALYSIS_0005: the SDK's two optional upgrade
+    // fields used divergent inclusion checks \u2014 keep_settings
+    // used `!= null` (covers both undefined and null) while
+    // settings used `!== undefined` (only covers undefined). TS
+    // types both as optional, so a TypeScript-correct caller
+    // can only ever pass `undefined`. But untyped JS callers
+    // (third-party scripts, codegen, runtime config) CAN pass
+    // `null` \u2014 and the pre-fix divergence meant the SDK would
+    // faithfully forward `settings: null` on the wire while
+    // silently dropping `keep_settings: null`. That asymmetry
+    // is the copy-paste hazard Devin Review flagged.
+    //
+    // The fix unifies both checks under `!= null`, which is the
+    // strictly more defensive of the two: a null on EITHER
+    // field is now dropped from the wire body. This test pins
+    // the unified contract by feeding both fields explicit
+    // nulls (cast through unknown to bypass the optional-only
+    // type) and asserting both are absent from the request body.
+    const fetchSpy = vi.fn().mockResolvedValue(
+      mockJSON({
+        installation: {
+          id: "install-1",
+          tenant_id: "tnt-1",
+          extension_id: "ext-1",
+          extension_version_id: "v1",
+          status: "active",
+          settings: {},
+          webhook_base: "https://t.example.com",
+          installed_at: "2025-03-01T00:00:00Z",
+          updated_at: "2025-03-01T00:00:00Z",
+        },
+        from_version_id: "v0",
+      }),
+    );
+    const api = newClient(fetchSpy);
+    await api.upgradeMarketplaceInstallation("install-1", {
+      from_version_id: "v0",
+      to_version_id: "v1",
+      // The cast-to-null is the whole point of this test \u2014 an
+      // untyped JS caller might send these as actual null values,
+      // and the SDK must defend equally against both.
+      keep_settings: null as unknown as boolean,
+      settings: null as unknown as Record<string, unknown>,
+    });
+    const init = fetchSpy.mock.calls[0][1];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect("keep_settings" in body).toBe(false);
+    expect("settings" in body).toBe(false);
+  });
+
+  it("upgradeMarketplaceInstallation forwards settings={} when supplied (round-5 ANALYSIS_0005 positive case)", async () => {
+    // Companion to the previous test: an explicitly-supplied
+    // settings document, even one that's the empty object {},
+    // MUST round-trip onto the wire. The `!= null` check must
+    // NOT short-circuit on truthy-falsy values \u2014 an empty
+    // object is the canonical "wipe my settings to defaults"
+    // signal, distinct from omission (which preserves the
+    // current document).
+    const fetchSpy = vi.fn().mockResolvedValue(
+      mockJSON({
+        installation: {
+          id: "install-1",
+          tenant_id: "tnt-1",
+          extension_id: "ext-1",
+          extension_version_id: "v1",
+          status: "active",
+          settings: {},
+          webhook_base: "https://t.example.com",
+          installed_at: "2025-03-01T00:00:00Z",
+          updated_at: "2025-03-01T00:00:00Z",
+        },
+        from_version_id: "v0",
+      }),
+    );
+    const api = newClient(fetchSpy);
+    await api.upgradeMarketplaceInstallation("install-1", {
+      from_version_id: "v0",
+      to_version_id: "v1",
+      settings: {},
+    });
+    const init = fetchSpy.mock.calls[0][1];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect("settings" in body).toBe(true);
+    expect(body.settings).toEqual({});
+  });
+
   it("uninstallMarketplaceExtension DELETEs with Idempotency-Key", async () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     const api = newClient(fetchSpy);

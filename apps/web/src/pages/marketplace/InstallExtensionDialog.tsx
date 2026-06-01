@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
   Badge,
@@ -54,6 +54,48 @@ export function InstallExtensionDialog({
   const [webhookBase, setWebhookBase] = useState(defaultWebhookBase());
   const [settings, setSettings] = useState<Record<string, unknown>>({});
   const [validationError, setValidationError] = useState<string | null>(null);
+  // settingsInvalidKeys mirrors the same per-editor-key validity
+  // map InstallationDetailPage uses (round-4 ANALYSIS_0001). The
+  // dialog has the same exact failure mode: the
+  // FreeformJsonEditor (and any future NestedJsonEditor under a
+  // B6.2 schema) only fires onChange when its text buffer parses
+  // cleanly, so the parent's `settings` state retains the LAST
+  // valid value when the buffer is mid-stream unparseable. Pre-
+  // round-5 the dialog had no validity signal threaded at all,
+  // which meant clicking Install while the textarea showed
+  // "{not valid json" silently submitted the previous valid
+  // value instead of the bytes on screen — confusing UX ("the
+  // install succeeded but it didn't use the keys I just typed").
+  // The fix mirrors the SettingsForm.tsx contract: each editor
+  // identifies itself with a stable key, the parent tracks the
+  // set of currently-invalid editors, and the Install button is
+  // disabled iff the set is non-empty. Today only the freeform
+  // editor is mounted (the dialog has no schema wired yet — see
+  // the `useMemo(() => null, [])` below), so this is
+  // architecturally over-built for the present case; under B6.2
+  // it will compose with multiple object-typed schema fields
+  // exactly the way InstallationDetailPage does.
+  const [settingsInvalidKeys, setSettingsInvalidKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const settingsFormValid = settingsInvalidKeys.size === 0;
+  const handleSettingsValidity = useCallback(
+    (key: string, valid: boolean) => {
+      setSettingsInvalidKeys((prev) => {
+        if (valid) {
+          if (!prev.has(key)) return prev;
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        }
+        if (prev.has(key)) return prev;
+        const next = new Set(prev);
+        next.add(key);
+        return next;
+      });
+    },
+    [],
+  );
 
   // Fetch the version's settings_schema from the manifest. The
   // backend doesn't currently expose a dedicated schema endpoint
@@ -67,10 +109,17 @@ export function InstallExtensionDialog({
   const schema = useMemo(() => null, []);
 
   // Reset state when the dialog is reopened for a different version.
+  // Includes the validity set: per-editor-key signals from the
+  // previously-mounted SettingsForm refer to keys that may no
+  // longer be in the new schema, and the previous version's
+  // unmount-cleanup will already have cleared its own keys. We
+  // start from an empty set to avoid any chance of carrying
+  // stale invalid-key entries across the version swap.
   useEffect(() => {
     setSettings({});
     setValidationError(null);
     setWebhookBase(defaultWebhookBase());
+    setSettingsInvalidKeys(new Set());
   }, [version.id]);
 
   const install = useMutation({
@@ -204,8 +253,21 @@ export function InstallExtensionDialog({
             schema={schema}
             value={settings}
             onChange={setSettings}
+            onValidityChange={handleSettingsValidity}
             disabled={install.isPending}
           />
+          {!settingsFormValid && (
+            <p
+              style={{
+                margin: "4px 0 0",
+                fontSize: 12,
+                color: "#b91c1c",
+              }}
+            >
+              Resolve the JSON parse error above before installing — the
+              install will use the text currently on screen.
+            </p>
+          )}
         </section>
 
         {validationError && (
@@ -228,7 +290,13 @@ export function InstallExtensionDialog({
           <Button
             variant="primary"
             onClick={onConfirm}
-            disabled={install.isPending}
+            // Gate Install on settingsFormValid for the exact reason
+            // the Save button on InstallationDetailPage does:
+            // unparseable JSON in any underlying editor keeps the
+            // parent's `settings` state pinned to the LAST valid
+            // value, which is NOT what's on screen. Submitting that
+            // would silently install the stale-but-valid document.
+            disabled={install.isPending || !settingsFormValid}
           >
             {install.isPending ? "Installing…" : "Install extension"}
           </Button>
