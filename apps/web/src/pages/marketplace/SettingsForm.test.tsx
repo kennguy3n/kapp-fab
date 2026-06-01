@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
+  FREEFORM_VALIDITY_KEY,
   SettingsForm,
   validateAgainstSchema,
   type SettingsSchema,
@@ -32,6 +33,200 @@ describe("SettingsForm", () => {
     expect(screen.getByLabelText(/API Key/)).toBeInTheDocument();
     expect(screen.getByLabelText(/max_retries/)).toBeInTheDocument();
     expect(screen.getByLabelText(/enabled/)).toBeInTheDocument();
+  });
+
+  it("identifies the no-schema editor by a stable validity key (round-4 ANALYSIS_0001)", async () => {
+    // Round-4 ANALYSIS_0001: the per-editor validity key lets
+    // the parent's settingsInvalidKeys Set disambiguate signals
+    // from multiple editors that may be mounted at the same
+    // time (B6.2 will wire schemas with multiple object-typed
+    // fields, each rendering its own NestedJsonEditor). For
+    // FreeformJsonEditor (the no-schema fallback) the key is the
+    // stable FREEFORM_VALIDITY_KEY constant — pin both the
+    // initial-valid signal and the invalid-on-bad-json
+    // transition use this key so a future refactor can't
+    // silently fork it.
+    const calls: Array<[string, boolean]> = [];
+    const onValidityChange = (k: string, v: boolean) => {
+      calls.push([k, v]);
+    };
+    render(
+      <SettingsForm
+        schema={null}
+        value={{}}
+        onChange={vi.fn()}
+        onValidityChange={onValidityChange}
+      />,
+    );
+    // Type unparseable JSON to force the invalid transition.
+    const ta = screen.getByPlaceholderText(
+      '{"api_key":"…"}',
+    ) as HTMLTextAreaElement;
+    await userEvent.type(ta, '{{"unterminated');
+    // Every signal must use the freeform sentinel key — no other
+    // key namespace should ever fire from this branch of the form.
+    expect(calls.length).toBeGreaterThan(0);
+    for (const [key] of calls) {
+      expect(key).toBe(FREEFORM_VALIDITY_KEY);
+    }
+    // And the final state is invalid (the last signal flipped to false).
+    const last = calls[calls.length - 1];
+    expect(last[1]).toBe(false);
+  });
+
+  it("per-editor validity signals don't race when multiple object-typed schema fields render (round-4 ANALYSIS_0001)", async () => {
+    // Round-4 ANALYSIS_0001: a B6.2-shape schema with multiple
+    // object-typed properties spins up multiple NestedJsonEditor
+    // instances simultaneously. Each carries its own text
+    // buffer + parse-validity state, but the parent funnels all
+    // signals through a single onValidityChange callback. The
+    // pre-fix signature was (valid: boolean), so editor A's
+    // "invalid" signal was overwritten by editor B's later
+    // "valid" signal — the parent's bit reflected only the most
+    // recent signal rather than the conjunction. Save would
+    // then be silently enabled while editor A still held
+    // unparseable text.
+    //
+    // The fix carries a per-editor key on every signal so the
+    // parent can maintain a Set<string> of invalid keys. This
+    // test pins:
+    //   1. Two editors signal independently using distinct keys
+    //      (their `id` props: "setting-config_a", "setting-config_b").
+    //   2. After corrupting BOTH editors and then recovering
+    //      ONE, the recovery signal must NOT lose information
+    //      about the still-invalid editor — i.e. the recorded
+    //      signals must contain the unrecovered key's "false"
+    //      with no overwriting "true" for that same key.
+    const schema: SettingsSchema = {
+      type: "object",
+      properties: {
+        config_a: { type: "object", title: "Config A" },
+        config_b: { type: "object", title: "Config B" },
+      },
+    };
+    const calls: Array<[string, boolean]> = [];
+    const onValidityChange = (k: string, v: boolean) => {
+      calls.push([k, v]);
+    };
+    render(
+      <SettingsForm
+        schema={schema}
+        value={{}}
+        onChange={vi.fn()}
+        onValidityChange={onValidityChange}
+      />,
+    );
+    // The NestedJsonEditor textareas are addressed by their
+    // SettingsField label-id pairing (id="setting-${name}").
+    // Find both by their id (the textarea has id=).
+    const taA = document.getElementById(
+      "setting-config_a",
+    ) as HTMLTextAreaElement;
+    const taB = document.getElementById(
+      "setting-config_b",
+    ) as HTMLTextAreaElement;
+    expect(taA).toBeTruthy();
+    expect(taB).toBeTruthy();
+    // Corrupt both editors with unparseable text. Each should
+    // fire a signal under its own per-editor key.
+    await userEvent.type(taA, '{{"unterminated');
+    await userEvent.type(taB, '{{"also unterminated');
+    // Both keys must have produced at least one invalid signal.
+    expect(calls.some(([k, v]) => k === "setting-config_a" && v === false)).toBe(
+      true,
+    );
+    expect(calls.some(([k, v]) => k === "setting-config_b" && v === false)).toBe(
+      true,
+    );
+    // Recover only editor A.
+    await userEvent.clear(taA);
+    await userEvent.type(taA, '{{"ok":1}');
+    // Recovery must be reported under editor A's key — NOT under
+    // editor B's. The pre-fix signature would've signalled a
+    // bare `true` and the parent would have stomped on B's
+    // still-invalid state.
+    const recoveryA = calls.find(
+      (c, i) => i > 0 && c[0] === "setting-config_a" && c[1] === true,
+    );
+    expect(recoveryA).toBeDefined();
+    // Critical assertion: editor B never silently flipped to
+    // valid in the recorded signals. The most recent signal for
+    // key "setting-config_b" must still be false.
+    const lastB = [...calls]
+      .reverse()
+      .find(([k]) => k === "setting-config_b");
+    expect(lastB).toBeDefined();
+    expect(lastB![1]).toBe(false);
+  });
+
+  it("unmount cleanup uses the LATEST onValidityChange identity, not the initial-mount one (round-4 ANALYSIS_0004)", async () => {
+    // Round-4 ANALYSIS_0004: the unmount cleanup useEffect used
+    // an empty dep array, so it captured only the
+    // onValidityChange identity from initial render. If the
+    // parent passed a fresh closure on a later render (e.g. an
+    // inline arrow function rather than a useCallback-stable
+    // one), the cleanup path would call the stale initial-mount
+    // closure rather than the current one — silently
+    // re-validating a parent that no longer exists, or missing
+    // the parent that's currently mounted.
+    //
+    // The fix captures onValidityChange in a useRef updated on
+    // every render. The cleanup dereferences the ref at unmount
+    // time, so it always reaches the latest callback.
+    //
+    // We pin the contract by:
+    //   1. Mounting an editor with callback cbA, typing
+    //      unparseable text to put it into the invalid state.
+    //   2. Re-rendering with callback cbB.
+    //   3. Unmounting the editor.
+    //   4. Asserting cbB (NOT cbA) received the on-unmount
+    //      "restore-to-valid" signal.
+    const cbA = vi.fn();
+    const cbB = vi.fn();
+    const { rerender, unmount } = render(
+      <SettingsForm
+        schema={null}
+        value={{}}
+        onChange={vi.fn()}
+        onValidityChange={cbA}
+      />,
+    );
+    const ta = screen.getByPlaceholderText(
+      '{"api_key":"…"}',
+    ) as HTMLTextAreaElement;
+    // Put the editor into invalid state so the unmount-path
+    // restore-to-valid signal will actually fire.
+    await userEvent.type(ta, '{{"unterminated');
+    // Drain cbA so we can specifically observe cbB's calls.
+    expect(cbA).toHaveBeenCalled();
+    const callsBeforeRerender = cbA.mock.calls.length;
+    // Re-render with a new callback identity. The editor must
+    // NOT remount — same React tree, just a prop swap.
+    rerender(
+      <SettingsForm
+        schema={null}
+        value={{}}
+        onChange={vi.fn()}
+        onValidityChange={cbB}
+      />,
+    );
+    // Unmount. The cleanup must signal restore-to-valid via the
+    // LATEST callback (cbB) — the pre-fix code captured cbA on
+    // mount and would call it here.
+    unmount();
+    // cbA should NOT have received any further calls after the
+    // re-render. The pre-fix path would have routed the unmount
+    // restore-to-valid signal through cbA, failing this assertion.
+    expect(cbA.mock.calls.length).toBe(callsBeforeRerender);
+    // cbB must have received the unmount restore-to-valid signal
+    // under the freeform sentinel key.
+    expect(cbB).toHaveBeenCalled();
+    const cbBLastCall = cbB.mock.calls[cbB.mock.calls.length - 1] as [
+      string,
+      boolean,
+    ];
+    expect(cbBLastCall[0]).toBe(FREEFORM_VALIDITY_KEY);
+    expect(cbBLastCall[1]).toBe(true);
   });
 
   it("emits typed values via onChange", async () => {

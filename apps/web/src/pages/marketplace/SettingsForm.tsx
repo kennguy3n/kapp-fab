@@ -1,6 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { Input, Select } from "@kapp/ui";
 
+// Stable validity key for the no-schema fallback editor. There is
+// at most one FreeformJsonEditor in the tree at any time (it's
+// the no-schema branch in SettingsForm), so a constant key is
+// sufficient — the parent's per-key validity map (see
+// InstallationDetailPage.settingsInvalidKeys) tracks freeform
+// independently of any schema-driven NestedJsonEditor instances
+// (which use their own `id` as the validity key, one per object-
+// typed field). Exported so tests can refer to it by symbol.
+export const FREEFORM_VALIDITY_KEY = "__settings_freeform__";
+
 /**
  * SettingsForm renders the install / update-settings document
  * editor. When the version manifest declares a settings_schema
@@ -64,7 +74,16 @@ export function SettingsForm({
   // last typed. Schema-driven controls (Input, Select) are by
   // construction always parsable, so the typed-field path does
   // not fire this callback — it stays implicitly valid.
-  onValidityChange?: (valid: boolean) => void;
+  //
+  // The signature carries a per-editor `key` so multiple
+  // editors mounted at the same time don't race — each signal
+  // identifies which editor it came from, and the parent
+  // maintains a per-key validity map. Today only one editor
+  // (the no-schema FreeformJsonEditor) is mounted at a time, but
+  // B6.2 will wire settings_schema with potentially multiple
+  // object-typed fields each rendering a NestedJsonEditor; the
+  // map-based parent state is the correct shape for that.
+  onValidityChange?: (key: string, valid: boolean) => void;
   disabled?: boolean;
 }) {
   if (!schema || !schema.properties || Object.keys(schema.properties).length === 0) {
@@ -116,7 +135,7 @@ function SettingsField({
   schema: SettingsSchemaProperty;
   value: unknown;
   onChange: (next: unknown) => void;
-  onValidityChange?: (valid: boolean) => void;
+  onValidityChange?: (key: string, valid: boolean) => void;
   disabled?: boolean;
 }) {
   const label = schema.title ?? name;
@@ -171,7 +190,7 @@ function renderControl({
   schema: SettingsSchemaProperty;
   value: unknown;
   onChange: (next: unknown) => void;
-  onValidityChange?: (valid: boolean) => void;
+  onValidityChange?: (key: string, valid: boolean) => void;
   disabled?: boolean;
 }) {
   // Enum first — always renders as a Select regardless of base
@@ -338,7 +357,7 @@ function NestedJsonEditor({
   id: string;
   value: unknown;
   onChange: (next: unknown) => void;
-  onValidityChange?: (valid: boolean) => void;
+  onValidityChange?: (key: string, valid: boolean) => void;
   disabled?: boolean;
 }) {
   // Uncontrolled-with-buffer pattern: the textarea owns its own
@@ -369,17 +388,29 @@ function NestedJsonEditor({
   // an invalid-JSON error in the editor while Save is enabled
   // and would silently send the last valid parsed draft instead
   // of the text on screen — the textarea "loses" to the cache.
+  //
+  // We capture onValidityChange in a ref so the unmount cleanup
+  // path below always reaches the LATEST callback identity,
+  // never the one captured on initial mount. In practice the
+  // parent passes a useCallback-stable closure today, but the
+  // ref pattern makes the editor robust to identity churn — a
+  // future caller can inline an arrow function without
+  // accidentally stranding a stale closure on the unmount path.
+  const onValidityChangeRef = useRef(onValidityChange);
+  useEffect(() => {
+    onValidityChangeRef.current = onValidityChange;
+  }, [onValidityChange]);
   const lastSignalled = useRef<boolean | null>(null);
   useEffect(() => {
     const valid = error === null;
     if (lastSignalled.current === valid) return;
     lastSignalled.current = valid;
-    onValidityChange?.(valid);
-  }, [error, onValidityChange]);
+    onValidityChangeRef.current?.(id, valid);
+  }, [error, id]);
   useEffect(() => {
     return () => {
       if (lastSignalled.current === false) {
-        onValidityChange?.(true);
+        onValidityChangeRef.current?.(id, true);
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -458,7 +489,7 @@ function FreeformJsonEditor({
 }: {
   value: Record<string, unknown>;
   onChange: (next: Record<string, unknown>) => void;
-  onValidityChange?: (valid: boolean) => void;
+  onValidityChange?: (key: string, valid: boolean) => void;
   disabled?: boolean;
 }) {
   const [text, setText] = useState(() =>
@@ -470,18 +501,27 @@ function FreeformJsonEditor({
   // See NestedJsonEditor for the validity-propagation contract.
   // Identical pattern: signal on transition, restore-to-valid
   // on unmount so a remount can't leave the parent's Save stuck
-  // in disabled.
+  // in disabled. The ref-based latest-callback capture protects
+  // the unmount cleanup against onValidityChange identity churn.
+  // We pass FREEFORM_VALIDITY_KEY as the key because at most one
+  // FreeformJsonEditor exists in the tree at a time (no-schema
+  // branch); the parent's per-key map disambiguates this from
+  // any schema-driven NestedJsonEditor signals.
+  const onValidityChangeRef = useRef(onValidityChange);
+  useEffect(() => {
+    onValidityChangeRef.current = onValidityChange;
+  }, [onValidityChange]);
   const lastSignalled = useRef<boolean | null>(null);
   useEffect(() => {
     const valid = error === null;
     if (lastSignalled.current === valid) return;
     lastSignalled.current = valid;
-    onValidityChange?.(valid);
-  }, [error, onValidityChange]);
+    onValidityChangeRef.current?.(FREEFORM_VALIDITY_KEY, valid);
+  }, [error]);
   useEffect(() => {
     return () => {
       if (lastSignalled.current === false) {
-        onValidityChange?.(true);
+        onValidityChangeRef.current?.(FREEFORM_VALIDITY_KEY, true);
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

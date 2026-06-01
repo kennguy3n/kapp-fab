@@ -486,6 +486,66 @@ describe("InstallationDetailPage", () => {
     expect(afterNode).toBe(firstNode);
   });
 
+  it("renders without an infinite render loop when install.data.settings is null (round-4 BUG_0001)", async () => {
+    // Round-4 BUG_0001 (1dffed5 → 1dffed5 review pass): the
+    // install.data useEffect used to call setSettingsDraft(next)
+    // unconditionally, gated only the resetKey bump on
+    // sameAsDraft. install.data.settings can be null/undefined
+    // (Go-side installationView.Settings is map[string]any
+    // without omitempty, and a nil Go map marshals as JSON null).
+    // The `?? {}` fallback synthesises a NEW {} ref on every
+    // effect run; settingsDraft is in the dep array, so the
+    // unconditional setState scheduled a render with a new ref →
+    // re-render → effect re-fires → new {} → setState → re-render
+    // → infinite loop → React's "Maximum update depth exceeded"
+    // error tears the tree down.
+    //
+    // The fix: move setSettingsDraft inside the !sameAsDraft
+    // guard so the unchanged-document path is a true no-op.
+    //
+    // We pin the fix by:
+    //   1. Mocking the install row with settings: null
+    //   2. Rendering the page
+    //   3. Verifying the page paints to a steady state (Active
+    //      badge appears) within a normal waitFor timeout
+    //   4. Verifying no console.error about max-update-depth was
+    //      emitted during the run
+    //
+    // Pre-fix, step 3 would either time out (React aborts the
+    // render and leaves the tree in an error boundary) or emit
+    // the max-update-depth error visible in step 4.
+    const nullSettingsRow = { ...ROW, settings: null };
+    getMarketplaceInstallation.mockReset();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    getMarketplaceInstallation.mockResolvedValue(nullSettingsRow as any);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderPage();
+      // The page must paint past the loading state. If the
+      // effect were looping, install.data would never settle
+      // into a stable commit and waitFor would time out.
+      await waitFor(() =>
+        expect(
+          screen.getByRole("heading", { name: /Inventory Sync/i }),
+        ).toBeInTheDocument(),
+      );
+      // No max-update-depth error from React. We accept any
+      // unrelated console.error (none should fire in practice,
+      // but the assertion is specifically that the infinite
+      // loop signature isn't present).
+      const maxDepthCalls = consoleError.mock.calls.filter((args) =>
+        args.some(
+          (a) =>
+            typeof a === "string" &&
+            /Maximum update depth exceeded/i.test(a),
+        ),
+      );
+      expect(maxDepthCalls).toHaveLength(0);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("upgradeMutation invalidates the installation query on settle (parity with settingsMutation, ANALYSIS_0003)", async () => {
     // ANALYSIS_0003 (round 3): settingsMutation has an
     // onSettled handler that invalidates the installation

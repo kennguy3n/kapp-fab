@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   useMutation,
@@ -77,8 +77,13 @@ export function InstallationDetailPage() {
   );
   const [settingsTouched, setSettingsTouched] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
-  // settingsFormValid tracks the parse-validity of the underlying
-  // JSON textarea editors (FreeformJsonEditor / NestedJsonEditor).
+  // settingsInvalidKeys tracks the parse-validity of every
+  // underlying JSON textarea editor (FreeformJsonEditor /
+  // NestedJsonEditor). Each editor identifies itself with a
+  // stable key when it signals validity; the parent maintains
+  // the set of currently-invalid editors, and the form is
+  // valid iff the set is empty.
+  //
   // The editors keep their own text buffer for cursor-stability
   // reasons (see SettingsForm.tsx) and only call onChange when
   // the buffer parses cleanly — so without this lift, the
@@ -88,7 +93,42 @@ export function InstallationDetailPage() {
   // of the text on screen — confusing UX ("my save succeeded but
   // it's not what I had typed"). We disable Save whenever any
   // child editor signals invalid.
-  const [settingsFormValid, setSettingsFormValid] = useState(true);
+  //
+  // The previous shape was a single boolean replaced wholesale
+  // on every signal. That worked while exactly one editor was
+  // mounted (today: the no-schema FreeformJsonEditor), but
+  // raced once B6.2 ships settings_schema with multiple object-
+  // typed fields: editor A signalling invalid would be
+  // immediately overwritten by editor B signalling valid, and
+  // the parent's bit would reflect only the last signal rather
+  // than the conjunction. Pinning to per-editor keys lets each
+  // editor's signal coexist; the conjunction (set is empty) is
+  // the parent's source of truth.
+  const [settingsInvalidKeys, setSettingsInvalidKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const settingsFormValid = settingsInvalidKeys.size === 0;
+  // handleSettingsValidity is memoised so its identity is stable
+  // across renders. The child editors capture it once and re-use
+  // it for the rest of their lifetime; identity churn would not
+  // affect correctness (the editors guard with a ref against
+  // stale-closure cleanup, see SettingsForm.tsx) but a stable
+  // identity avoids the redundant-effect-rerun that would
+  // follow an inline arrow function.
+  const handleSettingsValidity = useCallback((key: string, valid: boolean) => {
+    setSettingsInvalidKeys((prev) => {
+      if (valid) {
+        if (!prev.has(key)) return prev;
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      }
+      if (prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+  }, []);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [upgradeTargetId, setUpgradeTargetId] = useState<string | null>(null);
   // settingsResetKey is the parent contract that lets SettingsForm
@@ -130,13 +170,31 @@ export function InstallationDetailPage() {
   // pathological structures), and the canonical-order issue
   // doesn't apply because both sides come from the same
   // setSettingsDraft path on the previous tick.
+  // BUG_0001 (round-4) — the previous shape called
+  // setSettingsDraft(next) unconditionally and only gated the
+  // resetKey bump on sameAsDraft. That looks innocuous when
+  // install.data.settings is a stable reference (React Query
+  // caches the deserialised object), but install.data.settings
+  // CAN be null/undefined (the Go side's installationView.Settings
+  // is map[string]any without omitempty, and a nil Go map
+  // marshals as JSON null). The `?? {}` fallback then synthesises
+  // a NEW {} ref on every effect run; settingsDraft is in the
+  // dep array, so the unconditional setState scheduled an update
+  // with a new ref → re-render → effect re-fires → new {} ref →
+  // setState → re-render → infinite loop → max-update-depth
+  // crash. The fix is to gate setSettingsDraft itself on
+  // !sameAsDraft so the unchanged-document case is a true no-op.
+  // (This also removes the redundant single extra render that
+  // happened in the non-null case for the same reason — even a
+  // referentially-new but semantically-equal `next` no longer
+  // triggers a setState.)
   useEffect(() => {
     if (install.data && !settingsTouched) {
       const next = install.data.settings ?? {};
       const sameAsDraft =
         JSON.stringify(next) === JSON.stringify(settingsDraft);
-      setSettingsDraft(next);
       if (!sameAsDraft) {
+        setSettingsDraft(next);
         setSettingsResetKey((k) => k + 1);
       }
     }
@@ -430,7 +488,7 @@ export function InstallationDetailPage() {
                 setSettingsDraft(next);
                 setSettingsTouched(true);
               }}
-              onValidityChange={setSettingsFormValid}
+              onValidityChange={handleSettingsValidity}
               disabled={settingsMutation.isPending}
             />
             {settingsError && (
