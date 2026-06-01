@@ -375,10 +375,49 @@ function NestedJsonEditor({
   // the value prop on mount only — re-seeding on a subsequent
   // render would race with mid-typing edits. See the resetKey
   // pattern in InstallationDetailPage for the parent contract.
+  // Round-7 ANALYSIS_0003: type-check the value prop at mount,
+  // not just on keystroke. Pre-fix, the lazy initialiser
+  // stringified ANY value — including null, arrays, and
+  // primitives — and the keystroke-time check at line ~462
+  // only fired on user input. So if the server returned a
+  // mismatched value for a `type: "object"` field (most
+  // commonly `{"config": null}`, since a missing Go map
+  // marshals as JSON null and a future endpoint that omits
+  // the handler-side coercion would surface it), the textarea
+  // would display `"null"` with no error, the validity signal
+  // would be valid, and Save would be enabled — until the
+  // user typed a single character. That meant a user who
+  // simply opened the editor and clicked Save would
+  // round-trip the wrong-type value back to the server, which
+  // would 400 with no obvious local diagnostic. Mirroring the
+  // keystroke check at the initial state closes the gap and
+  // means the user sees the diagnostic as soon as the editor
+  // mounts.
+  //
+  // The text buffer continues to show the raw stringified
+  // value (including literal `null`, `[1,2]`, `42`) so the
+  // user can see exactly what the server returned and make
+  // an informed decision about replacing it. We do NOT
+  // collapse the buffer to empty — that would hide the
+  // server's payload and leave the user wondering "what was
+  // actually stored?". `undefined` is the only case that
+  // legitimately yields an empty buffer (the field is unset).
+  const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+    v !== null && typeof v === "object" && !Array.isArray(v);
   const [text, setText] = useState(() =>
     value === undefined ? "" : JSON.stringify(value, null, 2),
   );
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(() => {
+    // undefined → field is unset; empty buffer + valid signal.
+    // The engine's server-side gojsonschema will reject the
+    // empty payload if the field is required; that's the
+    // correct surface for required-field errors.
+    if (value === undefined) return null;
+    if (!isPlainObject(value)) {
+      return "Expected an object (got " + describeJsonType(value) + ")";
+    }
+    return null;
+  });
   // Propagate validity up so the parent can disable Save when
   // the textarea contents are unparseable. Effect-on-change so
   // we only fire when the local error transitions, and on
@@ -459,11 +498,7 @@ function NestedJsonEditor({
             // Array.isArray catches `[]`; typeof catches
             // primitives. The remaining case (plain object) is
             // the only one we forward.
-            if (
-              parsed === null ||
-              typeof parsed !== "object" ||
-              Array.isArray(parsed)
-            ) {
+            if (!isPlainObject(parsed)) {
               setError("Expected an object (got " + describeJsonType(parsed) + ")");
               return;
             }

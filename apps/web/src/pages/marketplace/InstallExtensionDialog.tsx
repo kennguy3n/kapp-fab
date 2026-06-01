@@ -157,6 +157,36 @@ export function InstallExtensionDialog({
 
   const onConfirm = () => {
     setValidationError(null);
+    // Round-7 ANALYSIS_0002: defense-in-depth re-check of the
+    // settings-form validity signal at the top of onConfirm,
+    // mirroring the webhook + schema gates below. The Install
+    // button's `disabled={pending || !settingsFormValid}` prop
+    // (line ~336) already prevents the click in standard
+    // browsers, but `<button disabled>` is not a hard wall:
+    //   * Some accessibility tools can fire synthetic click
+    //     events that bypass the disabled attribute.
+    //   * Programmatic invocation (e.g. an e2e test calling
+    //     `onConfirm()` directly, or a third-party script
+    //     wiring its own keyboard shortcut) routes around the
+    //     button entirely.
+    //   * A future refactor could swap the disabled prop for
+    //     a styling-only "looks-disabled" class without
+    //     realising the validity gate is purely visual.
+    // Since the parent's settings draft retains the last valid
+    // parsed object while the textarea shows mid-stream
+    // unparseable text, submitting through any of those side
+    // doors would silently send the stale-but-valid draft
+    // instead of the bytes on screen — same UX failure mode
+    // the validity-signal lift was designed to close, and now
+    // closed at the data path too. Cost is two lines; benefit
+    // is no longer relying on a single UI gate for a data-
+    // integrity invariant.
+    if (!settingsFormValid) {
+      setValidationError(
+        "Fix the settings JSON before installing — the textarea contents are not parseable.",
+      );
+      return;
+    }
     if (!webhookBase.trim()) {
       setValidationError("Webhook base URL is required.");
       return;

@@ -529,6 +529,38 @@ export function InstallationDetailPage() {
                   setSettingsDraft(row.settings ?? {});
                   setSettingsTouched(false);
                   setSettingsError(null);
+                  // Round-7 ANALYSIS_0004: explicitly clear
+                  // settingsInvalidKeys on Discard rather than
+                  // relying on the child editor's unmount-
+                  // cleanup effect to fire `onValidityChange(
+                  // key, true)`. The implicit path is sound
+                  // today (React commits cleanup effects of
+                  // the outgoing tree before the new tree
+                  // mounts, so the resetKey bump on the next
+                  // line tears the old editors down first; and
+                  // the Save button's `!settingsTouched` check
+                  // is also false here, so even a momentarily
+                  // stale invalid-keys set can't enable Save).
+                  // But: the chain (a) couples Discard's
+                  // correctness to the editor's cleanup
+                  // contract, (b) silently breaks if a future
+                  // refactor swaps SettingsForm for a
+                  // component that doesn't fire the
+                  // cleanup signal, and (c) is non-obvious to
+                  // a reader who has to follow the chain
+                  // through SettingsForm.tsx's effect to
+                  // convince themselves Discard is safe. Doing
+                  // the reset explicitly here makes Discard's
+                  // post-condition local and obvious: after
+                  // this handler runs, the parent's draft +
+                  // touched + error + validity all return to
+                  // the clean-slate state regardless of what
+                  // the child editors do. The unmount cleanup
+                  // remains correct (and load-bearing for
+                  // other reset paths like version swap), but
+                  // is no longer the SOURCE of truth for the
+                  // Discard reset's correctness.
+                  setSettingsInvalidKeys(new Set());
                   // Re-mount SettingsForm so the JSON-textarea
                   // editors discard their internal buffer and
                   // re-seed from row.settings. The uncontrolled-

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -290,6 +290,71 @@ describe("InstallExtensionDialog", () => {
     // previous textarea was unmounted as part of the remount,
     // not patched in place).
     expect(ta2).not.toBe(ta1);
+  });
+
+  it("onConfirm refuses to submit even when the disabled state is bypassed by removing the disabled attribute (round-7 ANALYSIS_0002)", async () => {
+    // Round-7 ANALYSIS_0002: the Install button is disabled
+    // while settingsFormValid is false, but disabled is a UI
+    // gate, not a data-path gate. Accessibility tools can fire
+    // synthetic click events that bypass the disabled
+    // attribute, programmatic invocations route around the
+    // button entirely, and a future refactor could replace
+    // the disabled prop with a styling-only class. We add a
+    // re-check of settingsFormValid at the top of onConfirm
+    // so the data-path itself rejects a submit attempt with
+    // unparseable settings, no matter how the click was
+    // dispatched. Pinning this with a test that explicitly
+    // strips the disabled attribute and then dispatches the
+    // click — the test would pass pre-fix only by accident
+    // (the disabled gate happens to also short-circuit), so
+    // we have to bypass it to exercise the new in-handler
+    // guard.
+    renderDialog();
+    const ta = screen.getByPlaceholderText(
+      '{"api_key":"…"}',
+    ) as HTMLTextAreaElement;
+    // Mid-stream invalid JSON: the textarea parses-fails and
+    // onChange is suppressed, so the parent's `settings`
+    // state retains the last valid value ({}). Without the
+    // round-7 guard, a click-via-bypass would silently submit
+    // {} instead of the bytes on screen.
+    fireEvent.change(ta, { target: { value: '{"oops":' } });
+    await screen.findByText(/Resolve the JSON parse error above before installing/i);
+    const btn = screen.getByRole("button", { name: /Install extension/i });
+    // Sanity: standard click is blocked by the disabled
+    // attribute today.
+    expect(btn).toBeDisabled();
+    // Bypass: pull the React-attached onClick handler off
+    // the element via `__reactProps$<random>` and invoke it
+    // directly. fireEvent and userEvent both go through
+    // React's event delegation which still consults the
+    // React-side `disabled` prop even after we mutate the
+    // DOM attribute, so they don't actually exercise the
+    // round-7 guard. The realistic synthetic-click vectors
+    // (accessibility tools firing the listener directly,
+    // programmatic e2e invocations, future refactors
+    // swapping disabled for a class) skip React's gate
+    // entirely — we mirror that by reading the registered
+    // onClick handler off the React DOM node and invoking
+    // it. If onConfirm doesn't have its own validity check
+    // at the top, the install mutation will fire with the
+    // stale parent `settings` value of `{}` even though the
+    // textarea currently shows unparseable text.
+    const propsKey = Object.keys(btn).find((k) =>
+      k.startsWith("__reactProps$"),
+    );
+    expect(propsKey).toBeDefined();
+    const props = (btn as unknown as Record<string, { onClick?: () => void }>)[
+      propsKey!
+    ];
+    expect(props.onClick).toBeTypeOf("function");
+    await act(async () => {
+      props.onClick!();
+    });
+    expect(installMarketplaceExtension).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText(/Fix the settings JSON before installing/i),
+    ).toBeInTheDocument();
   });
 
   it("surfaces a server error inside the dialog", async () => {

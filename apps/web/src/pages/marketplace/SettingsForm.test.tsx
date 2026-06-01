@@ -325,6 +325,87 @@ describe("SettingsForm", () => {
     expect(lastCall![1]).toBe(true);
   });
 
+  it("NestedJsonEditor type-checks the value prop at MOUNT for object-typed schema fields (round-7 ANALYSIS_0003)", async () => {
+    // Round-7 ANALYSIS_0003: the type-mismatch check inside
+    // the keystroke handler only ran on user input — so if
+    // the server returned a non-object value for a
+    // `type: "object"` field (e.g. `{"config": null}`,
+    // which the Go side can emit since nil maps marshal as
+    // JSON null without `omitempty`), the textarea would
+    // display `"null"` with no error, the validity signal
+    // would stay valid, and Save would be enabled until the
+    // user typed a single character. A user who opened the
+    // editor and clicked Save would round-trip the wrong-
+    // type value back to the server, which would 400. The
+    // fix mirrors the keystroke check at the lazy
+    // initialiser. We pin the three independent invariants
+    // separately: (a) textarea shows the raw value bytes
+    // (not collapsed to empty — the user needs to see what
+    // the server gave us); (b) error message appears
+    // immediately; (c) parent's validity callback fires
+    // with `false` at mount, not just after a keystroke.
+    const schema: SettingsSchema = {
+      type: "object",
+      properties: {
+        config: { type: "object" },
+      },
+    };
+    const onChange = vi.fn();
+    const calls: Array<[string, boolean]> = [];
+    const onValidityChange = vi.fn((key: string, valid: boolean) => {
+      calls.push([key, valid]);
+    });
+    render(
+      <SettingsForm
+        schema={schema}
+        value={{ config: null }}
+        onChange={onChange}
+        onValidityChange={onValidityChange}
+      />,
+    );
+    const ta = screen.getByLabelText(/config/i) as HTMLTextAreaElement;
+    // (a) Raw bytes visible.
+    expect(ta.value).toBe("null");
+    // (b) Diagnostic surfaced immediately.
+    expect(
+      screen.getByText(/Expected an object \(got null\)/i),
+    ).toBeInTheDocument();
+    // (c) Parent received an `invalid` signal at mount — not
+    // just after a keystroke. The first signal for the
+    // config field must be `false`.
+    const configSignals = calls.filter(([k]) => k === "setting-config");
+    expect(configSignals.length).toBeGreaterThan(0);
+    expect(configSignals[0][1]).toBe(false);
+    // (d) onChange was NOT called — the bad type didn't leak
+    // out to the parent draft.
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("NestedJsonEditor type-checks the value prop at MOUNT for ARRAYS (round-7 ANALYSIS_0003)", async () => {
+    // Symmetric coverage for the array case. The Go side
+    // can't emit an array for a `type: "object"` field today
+    // (the handler would have to mistakenly assign a slice),
+    // but the editor's contract is "reject non-objects" —
+    // testing both null and array pins the symmetry of the
+    // mount-time check.
+    const schema: SettingsSchema = {
+      type: "object",
+      properties: { config: { type: "object" } },
+    };
+    const onChange = vi.fn();
+    render(
+      <SettingsForm
+        schema={schema}
+        value={{ config: [1, 2, 3] }}
+        onChange={onChange}
+      />,
+    );
+    expect(
+      screen.getByText(/Expected an object \(got array\)/i),
+    ).toBeInTheDocument();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it("emits typed values via onChange", async () => {
     const schema: SettingsSchema = {
       type: "object",

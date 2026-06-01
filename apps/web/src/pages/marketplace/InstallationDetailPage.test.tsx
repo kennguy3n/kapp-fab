@@ -359,6 +359,100 @@ describe("InstallationDetailPage", () => {
     });
   });
 
+  it("Discard explicitly clears settingsInvalidKeys so the Save button is locally consistent even before the editor unmount-cleanup runs (round-7 ANALYSIS_0004)", async () => {
+    // Round-7 ANALYSIS_0004: Discard previously cleared
+    // settingsDraft + settingsTouched + settingsError and
+    // bumped settingsResetKey to remount SettingsForm — but
+    // it did NOT explicitly clear settingsInvalidKeys. The
+    // cleanup was implicit, relying on the JSON editor's
+    // unmount-cleanup effect firing
+    // `onValidityChange(key, true)` to remove the stale key.
+    // That chain is sound today (React commits cleanup
+    // effects of the outgoing tree before mounting the new
+    // one), but the implicit dependency on effect ordering
+    // is fragile: a future refactor that swaps SettingsForm
+    // for a component without the cleanup signal would
+    // silently leave the parent's invalid-keys set non-
+    // empty across a Discard, even though the user's intent
+    // was a clean-slate reset.
+    //
+    // The fix is to do the reset explicitly in the Discard
+    // handler. We pin it via this test: type invalid JSON
+    // to mark the form invalid, click Discard, then type
+    // a SINGLE valid character. Pre-fix, that single char
+    // wouldn't be enough to flip settingsTouched + clear
+    // the invalid key in time — actually it would, because
+    // typing fires the editor's keystroke handler which
+    // clears the local error and re-signals valid. So
+    // we need a stronger probe: assert that immediately
+    // after Discard, BEFORE any user interaction at all,
+    // the user can type a single valid char and Save
+    // immediately becomes enabled. If the invalid keys set
+    // were stranded, the user's first keystroke wouldn't
+    // clear it (the validity signal would already be
+    // `valid` from the editor's perspective — its lazy
+    // initialiser saw a valid {} value), and Save would
+    // stay disabled until the editor was further toggled.
+    renderPage();
+    await waitFor(() => {
+      const ta = screen.getByPlaceholderText(
+        /api_key/i,
+      ) as HTMLTextAreaElement;
+      expect(ta.value).toContain("secret");
+    });
+    const textarea1 = screen.getByPlaceholderText(
+      /api_key/i,
+    ) as HTMLTextAreaElement;
+    // Step 1: corrupt the textarea so settingsInvalidKeys
+    // gets the FREEFORM key added (invalid).
+    await userEvent.clear(textarea1);
+    await userEvent.type(textarea1, '{{"broken');
+    await waitFor(() => {
+      const save = screen.getByRole("button", {
+        name: /Save settings/i,
+      }) as HTMLButtonElement;
+      expect(save.disabled).toBe(true);
+    });
+    // Step 2: Discard. The handler must clear the
+    // settingsInvalidKeys set explicitly, and remount the
+    // editor (which will also fire its own unmount
+    // cleanup). We assert the post-Discard observable: the
+    // re-mounted editor's text buffer is back to the
+    // canonical "secret" value, the Save button is disabled
+    // because settingsTouched is false, AND the invalid
+    // keys set is empty (proved by the next step).
+    await userEvent.click(
+      screen.getByRole("button", { name: /Discard changes/i }),
+    );
+    await waitFor(() => {
+      const ta = screen.getByPlaceholderText(
+        /api_key/i,
+      ) as HTMLTextAreaElement;
+      expect(ta.value).toContain("secret");
+      expect(ta.value).not.toContain("broken");
+    });
+    // Save button is disabled — settingsTouched is false.
+    const saveAfterDiscard = screen.getByRole("button", {
+      name: /Save settings/i,
+    }) as HTMLButtonElement;
+    expect(saveAfterDiscard.disabled).toBe(true);
+    // Step 3: type a single valid char. settingsTouched
+    // flips to true. If the invalid-keys set is correctly
+    // empty, Save must enable immediately — settingsFormValid
+    // is true because the freshly-mounted editor signalled
+    // valid at mount AND we've added no invalid entries.
+    const textarea2 = screen.getByPlaceholderText(
+      /api_key/i,
+    ) as HTMLTextAreaElement;
+    await userEvent.type(textarea2, " ");
+    await waitFor(() => {
+      const save = screen.getByRole("button", {
+        name: /Save settings/i,
+      }) as HTMLButtonElement;
+      expect(save.disabled).toBe(false);
+    });
+  });
+
   it("Save settings is disabled while the JSON editor contains unparseable text (ANALYSIS_0002)", async () => {
     // ANALYSIS_0002 (round 3): FreeformJsonEditor keeps its own
     // text buffer. On a parse error it shows the error message
