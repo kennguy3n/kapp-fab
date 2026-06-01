@@ -42,18 +42,28 @@ export function MarketplaceBrowsePage() {
   const [publisherFilter, setPublisherFilter] = useState("");
   const debouncedSearch = useDebounced(search, 250);
   const debouncedPublisher = useDebounced(publisherFilter, 250);
+  // Round-9 ANALYSIS_0001: normalise the filter values ONCE and
+  // use the same normalised form in both the cache key and the
+  // queryFn. Pre-fix, the key used `.trim()` (which keeps `""`
+  // for an empty filter) while the queryFn used `.trim() ||
+  // undefined` (which collapses `""` to absent). That divergence
+  // was harmless today because the page never passes `undefined`
+  // into the key — both sides ALWAYS see `""` for an empty
+  // filter, so the response under that key never raced a
+  // response under a hypothetical `undefined` key. But the
+  // contract "cache key and queryFn agree on the request shape"
+  // is load-bearing for React Query's identity guarantees, and
+  // a future refactor that read `qSearch` / `qPublisher` from
+  // state with conditional spread (a common pattern when a
+  // third filter ships) would silently fork cache identity off
+  // the wire identity. Single source of truth closes that.
+  const qSearch = debouncedSearch.trim() || undefined;
+  const qPublisher = debouncedPublisher.trim() || undefined;
 
   const q = useQuery<MarketplaceListExtensionsResponse>({
-    queryKey: [
-      "marketplace",
-      "extensions",
-      { q: debouncedSearch.trim(), publisher: debouncedPublisher.trim() },
-    ],
+    queryKey: ["marketplace", "extensions", { q: qSearch, publisher: qPublisher }],
     queryFn: () =>
-      api.listMarketplaceExtensions({
-        q: debouncedSearch.trim() || undefined,
-        publisher: debouncedPublisher.trim() || undefined,
-      }),
+      api.listMarketplaceExtensions({ q: qSearch, publisher: qPublisher }),
   });
 
   const items = q.data?.items ?? [];

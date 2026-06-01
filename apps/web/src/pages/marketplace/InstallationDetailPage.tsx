@@ -344,9 +344,32 @@ export function InstallationDetailPage() {
   // shouldn't happen but is defensible), the upgrade panel
   // collapses rather than showing every available version as a
   // candidate upgrade target with no anchor.
-  const installedPublishedAt = installedVersion
+  //
+  // Round-9 ANALYSIS_0002: explicit Number.isFinite gate on the
+  // installed-side anchor. Pre-fix, the early-return was just
+  // `installedPublishedAt === null` — NaN slipped through
+  // (`new Date("not a date").getTime()` returns NaN, not null).
+  // That fell into the filter branch where `t > NaN` is always
+  // `false`, producing an empty list. Safe (no upgrades offered
+  // when the anchor is indeterminate) but the upstream gate was
+  // doing the work via a confusing NaN-comparison side effect
+  // instead of an explicit check, and the per-row
+  // `!Number.isFinite(t)` was load-bearing for both the
+  // installed-side NaN AND the per-row NaN. Lifting the
+  // installed-side check up to the gate makes the two NaN
+  // domains independent: the installed-side NaN now produces
+  // the same explicit "no upgrades" collapse as the null case
+  // (with a clearer code path for future maintainers), and the
+  // per-row `!Number.isFinite(t)` retains its own role of
+  // skipping individual rows whose published_at is unparseable
+  // without disabling the whole panel.
+  const installedPublishedAtRaw = installedVersion
     ? new Date(installedVersion.published_at).getTime()
     : null;
+  const installedPublishedAt =
+    installedPublishedAtRaw !== null && Number.isFinite(installedPublishedAtRaw)
+      ? installedPublishedAtRaw
+      : null;
   const upgradableVersions =
     installedPublishedAt === null
       ? []

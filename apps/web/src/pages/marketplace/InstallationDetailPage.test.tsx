@@ -759,4 +759,65 @@ describe("InstallationDetailPage", () => {
       await screen.findByText(/Fix the settings JSON before saving/i),
     ).toBeInTheDocument();
   });
+
+  it("collapses the upgrade panel when the installed version's published_at is unparseable (round-9 ANALYSIS_0002)", async () => {
+    // Round-9 ANALYSIS_0002: pre-fix, the upgrade-panel gate
+    // was `installedPublishedAt === null`. `null` covers
+    // hard-deleted-from-catalog (no installedVersion match),
+    // but NOT the case where installedVersion exists with an
+    // unparseable published_at — `new Date("garbage").getTime()`
+    // returns NaN, not null. The gate's `=== null` check
+    // passed NaN through, falling into the filter branch
+    // where `t > NaN` is always false. That produced the same
+    // empty list as the null case BUT via a confusing
+    // NaN-comparison side effect rather than an explicit
+    // collapse, and conflated two distinct domains (anchor
+    // NaN vs per-row NaN). Post-fix, `installedPublishedAt`
+    // is lifted through a Number.isFinite gate before reaching
+    // the filter, so the NaN-anchor case produces the same
+    // explicit "already on the latest approved version"
+    // empty-state copy that the null case does. The per-row
+    // `!Number.isFinite(t)` continues to guard per-row NaN
+    // independently.
+    //
+    // Pin via observable behavior: tenant is installed on a
+    // version with a clearly-unparseable published_at; the
+    // catalogue also lists a NEWER version (well-formed
+    // timestamp) that, pre-fix, the filter still skipped via
+    // the NaN-comparison accident. Post-fix, the explicit
+    // gate makes the same observable outcome the result of an
+    // explicit collapse — and the "already on the latest"
+    // empty-state surfaces, distinguishing it from the case
+    // where the catalogue genuinely has no newer version.
+    const garbageInstalledVersion = {
+      ...VERSIONS_RESP.items[1],
+      published_at: "not-a-real-timestamp",
+    };
+    const newerVersion = VERSIONS_RESP.items[0];
+    getMarketplaceExtension.mockReset();
+    getMarketplaceExtension.mockResolvedValueOnce({
+      extension: EXT,
+      versions: [newerVersion, garbageInstalledVersion],
+    });
+    renderPage();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: /Inventory Sync/i }),
+      ).toBeInTheDocument(),
+    );
+    // No upgrade CTA — even though v1.2.0 has a strictly later
+    // published_at than NaN (every comparison vs NaN is false,
+    // so the per-row filter would have returned [] pre-fix too,
+    // but the gate now collapses explicitly upstream so the
+    // empty-state copy reflects intent).
+    expect(
+      screen.queryByRole("button", { name: /Upgrade to v/i }),
+    ).not.toBeInTheDocument();
+    // Affirmative signal — the page reaches the "already on
+    // the latest approved version" branch instead of any
+    // half-rendered upgrade panel.
+    expect(
+      await screen.findByText(/already on the latest approved version/i),
+    ).toBeInTheDocument();
+  });
 });

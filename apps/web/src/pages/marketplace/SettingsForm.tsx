@@ -435,6 +435,33 @@ function NestedJsonEditor({
   // ref pattern makes the editor robust to identity churn — a
   // future caller can inline an arrow function without
   // accidentally stranding a stale closure on the unmount path.
+  //
+  // Round-9 ANALYSIS_0003: the unmount-cleanup effect (line
+  // below) has an empty dep array on purpose, so it captures
+  // the `id` value from initial mount. That is correct here
+  // because `id` is structurally stable across the editor
+  // instance's lifetime: the parent (renderControl in
+  // SettingsForm) computes it as `setting-${name}` where `name`
+  // is the schema property key, and the SettingsForm parent
+  // also uses `name` as React's `key` prop on the surrounding
+  // <SettingsField>. Any change to the property identity would
+  // therefore trigger a full remount (new key → new component
+  // instance → fresh mount-time `id` capture) rather than a
+  // mid-lifetime `id` swap on the same instance. Adding `id`
+  // to the dep array would be ACTIVELY WRONG, not just
+  // redundant: the cleanup would fire on id change, signal
+  // `(oldId, true)` against the parent's invalidKeys set
+  // (clearing the wrong entry, since the OLD id is still
+  // sitting in the set), and then the rebuilt effect would
+  // never signal `(newId, false)` — only the keystroke effect
+  // does that, and only on a transition. So we keep the empty
+  // dep array and lock the id contract in via the
+  // `id` = `setting-${name}` + React key invariants above.
+  // If a future schema-aware editor needed dynamic ids, the
+  // correct fix would be to lift the id into a ref alongside
+  // `onValidityChangeRef` so cleanup always reaches the
+  // current id — but until that need exists, ref-of-id is
+  // over-engineering.
   const onValidityChangeRef = useRef(onValidityChange);
   useEffect(() => {
     onValidityChangeRef.current = onValidityChange;
