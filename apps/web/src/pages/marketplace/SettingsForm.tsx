@@ -82,10 +82,27 @@ function useValiditySignal(
   error: string | null,
   onValidityChange?: (key: string, valid: boolean) => void,
 ) {
+  // Round-14 ANALYSIS_0002: assign the ref synchronously DURING
+  // render, not in a useEffect. The effect-based variant would
+  // be correct today (React guarantees commit-phase effects fire
+  // in declaration order, so the ref-update effect would always
+  // commit before the signal effect that reads through it), but
+  // it introduces a theoretical one-frame gap that widens once
+  // a caller wraps the editor in a Suspense boundary or a
+  // useTransition that interrupts/resumes renders — the render
+  // would suspend with the OLD callback captured into the
+  // closure that schedules the signal effect, and on resume the
+  // effect would still fire through the stale callback because
+  // its dep array (`error, key`) didn't change. The synchronous
+  // in-render assignment is the modern React idiom (see
+  // react.dev "Avoiding recreating the ref contents") and
+  // closes the theoretical gap. The trade-off is that the
+  // assignment runs on every render rather than only when the
+  // identity changes, but assignment to a ref slot is
+  // effectively free (no allocation, no scheduling) — strictly
+  // safer for no measurable cost.
   const onValidityChangeRef = useRef(onValidityChange);
-  useEffect(() => {
-    onValidityChangeRef.current = onValidityChange;
-  }, [onValidityChange]);
+  onValidityChangeRef.current = onValidityChange;
   const lastSignalled = useRef<boolean | null>(null);
   useEffect(() => {
     const valid = error === null;
