@@ -77,6 +77,18 @@ export function InstallationDetailPage() {
   );
   const [settingsTouched, setSettingsTouched] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
+  // settingsFormValid tracks the parse-validity of the underlying
+  // JSON textarea editors (FreeformJsonEditor / NestedJsonEditor).
+  // The editors keep their own text buffer for cursor-stability
+  // reasons (see SettingsForm.tsx) and only call onChange when
+  // the buffer parses cleanly — so without this lift, the
+  // parent's settingsDraft holds the LAST valid parsed object
+  // while the textarea shows unparseable text. Save would then
+  // be enabled and would send the stale-but-valid draft instead
+  // of the text on screen — confusing UX ("my save succeeded but
+  // it's not what I had typed"). We disable Save whenever any
+  // child editor signals invalid.
+  const [settingsFormValid, setSettingsFormValid] = useState(true);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [upgradeTargetId, setUpgradeTargetId] = useState<string | null>(null);
   // settingsResetKey is the parent contract that lets SettingsForm
@@ -97,15 +109,38 @@ export function InstallationDetailPage() {
   // successful mutation (the cache row changes -> useEffect
   // resets the draft). settingsTouched guards against trampling
   // a user's in-progress edit when the cache invalidates from
-  // some other tab. We also bump settingsResetKey whenever this
-  // useEffect fires a reset, so the textarea text resyncs to the
-  // freshly-seeded settingsDraft.
+  // some other tab.
+  //
+  // We deliberately do NOT bump settingsResetKey unconditionally
+  // here: the save-success path already bumps it in
+  // settingsMutation.onSuccess (so the textarea re-seeds from
+  // the canonical server response), and then onSettled triggers
+  // an invalidation/refetch that re-enters this effect with a
+  // fresh install.data reference. If we bumped here too, every
+  // successful save would remount SettingsForm 2–3 times in
+  // quick succession (initial onSuccess bump + onSettled-driven
+  // refetch bump + any background refetch). Each remount tears
+  // down the JSON textareas' internal buffers, briefly flashes
+  // the editor, and forces the parent's settingsFormValid back
+  // to its initial state. Cheap individually, wasteful in
+  // aggregate. The fix: gate the bump on whether the draft is
+  // already in sync with the canonical document. JSON.stringify
+  // is the cheapest deep-equal we can justify here (settings
+  // are small documents — keys are user-typed schema names, not
+  // pathological structures), and the canonical-order issue
+  // doesn't apply because both sides come from the same
+  // setSettingsDraft path on the previous tick.
   useEffect(() => {
     if (install.data && !settingsTouched) {
-      setSettingsDraft(install.data.settings ?? {});
-      setSettingsResetKey((k) => k + 1);
+      const next = install.data.settings ?? {};
+      const sameAsDraft =
+        JSON.stringify(next) === JSON.stringify(settingsDraft);
+      setSettingsDraft(next);
+      if (!sameAsDraft) {
+        setSettingsResetKey((k) => k + 1);
+      }
     }
-  }, [install.data, settingsTouched]);
+  }, [install.data, settingsTouched, settingsDraft]);
 
   const settingsMutation = useMutation({
     mutationFn: (next: Record<string, unknown>) =>
@@ -189,6 +224,20 @@ export function InstallationDetailPage() {
       );
       qc.invalidateQueries({ queryKey: ["marketplace", "installations"] });
       setUpgradeTargetId(null);
+    },
+    onSettled: () => {
+      // Parity with settingsMutation: always refetch the
+      // installation row after the mutation settles. The success
+      // path's setQueryData above is correct for the common case,
+      // but on error the cache holds the pre-upgrade snapshot
+      // which may be stale relative to what the engine
+      // committed before failing (e.g. settings normalised, a
+      // partial advance the engine then rolled back, or another
+      // tab racing the same install). A background refetch
+      // converges to canonical with no UI cost.
+      qc.invalidateQueries({
+        queryKey: ["marketplace", "installation", installId],
+      });
     },
   });
 
@@ -381,6 +430,7 @@ export function InstallationDetailPage() {
                 setSettingsDraft(next);
                 setSettingsTouched(true);
               }}
+              onValidityChange={setSettingsFormValid}
               disabled={settingsMutation.isPending}
             />
             {settingsError && (
@@ -435,7 +485,11 @@ export function InstallationDetailPage() {
               </Button>
               <Button
                 variant="primary"
-                disabled={!settingsTouched || settingsMutation.isPending}
+                disabled={
+                  !settingsTouched ||
+                  !settingsFormValid ||
+                  settingsMutation.isPending
+                }
                 onClick={onSaveSettings}
               >
                 {settingsMutation.isPending ? "Saving…" : "Save settings"}

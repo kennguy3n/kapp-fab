@@ -165,6 +165,82 @@ describe("Marketplace SDK", () => {
     expect("settings" in body).toBe(false);
   });
 
+  it("upgradeMarketplaceInstallation forwards keep_settings:false on the wire instead of dropping it on a falsy check (ANALYSIS_0004)", async () => {
+    // ANALYSIS_0004 (round 3): the SDK previously had
+    // `if (input.keep_settings) body.keep_settings = true;`,
+    // which (a) hard-coded `true` regardless of the caller's
+    // value and (b) silently dropped `false`. Both behaviours
+    // violate the "forward what the caller sent" wire-contract
+    // rule we already enforce for `limit` (ANALYSIS_0005,
+    // round 2). The fix uses `!= null`, mirroring the limit
+    // pattern. The server's upgradeRequestBody treats omission
+    // and `keep_settings:false` as identical (both fall through
+    // to the default keep-existing branch), so this is a
+    // wire-contract honesty fix \u2014 it doesn't change server
+    // semantics but it ensures the next person who copies the
+    // pattern into a field where false IS semantically distinct
+    // doesn't inherit the bug.
+    const fetchSpy = vi.fn().mockResolvedValue(
+      mockJSON({
+        installation: {
+          id: "i1",
+          tenant_id: "t",
+          extension_id: "e",
+          extension_version_id: "v",
+          status: "active",
+          settings: {},
+          webhook_base: "https://x",
+          installed_at: "2025-01-01T00:00:00Z",
+          updated_at: "2025-01-01T00:00:00Z",
+        },
+        from_version_id: "v0",
+      }),
+    );
+    const api = newClient(fetchSpy);
+    await api.upgradeMarketplaceInstallation("install-1", {
+      from_version_id: "v0",
+      to_version_id: "v1",
+      keep_settings: false,
+    });
+    const init = fetchSpy.mock.calls[0][1];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    // Key MUST be present and MUST be false (not coerced to true).
+    expect("keep_settings" in body).toBe(true);
+    expect(body.keep_settings).toBe(false);
+  });
+
+  it("upgradeMarketplaceInstallation omits keep_settings when undefined (ANALYSIS_0004 negative case)", async () => {
+    // Negative case: caller didn't supply keep_settings at all
+    // (the common case where they want the engine's default
+    // keep-existing branch). The SDK MUST NOT render an
+    // unsolicited `keep_settings: false` in the body \u2014 the
+    // wire shape stays minimal.
+    const fetchSpy = vi.fn().mockResolvedValue(
+      mockJSON({
+        installation: {
+          id: "i1",
+          tenant_id: "t",
+          extension_id: "e",
+          extension_version_id: "v",
+          status: "active",
+          settings: {},
+          webhook_base: "https://x",
+          installed_at: "2025-01-01T00:00:00Z",
+          updated_at: "2025-01-01T00:00:00Z",
+        },
+        from_version_id: "v0",
+      }),
+    );
+    const api = newClient(fetchSpy);
+    await api.upgradeMarketplaceInstallation("install-1", {
+      from_version_id: "v0",
+      to_version_id: "v1",
+    });
+    const init = fetchSpy.mock.calls[0][1];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect("keep_settings" in body).toBe(false);
+  });
+
   it("uninstallMarketplaceExtension DELETEs with Idempotency-Key", async () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     const api = newClient(fetchSpy);

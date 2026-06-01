@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Input, Select } from "@kapp/ui";
 
 /**
@@ -45,11 +45,26 @@ export function SettingsForm({
   schema,
   value,
   onChange,
+  onValidityChange,
   disabled,
 }: {
   schema: SettingsSchema | null;
   value: Record<string, unknown>;
   onChange: (next: Record<string, unknown>) => void;
+  // onValidityChange propagates the JSON-textarea editors'
+  // parse-error state up to the parent so the Save button can
+  // be disabled while the textarea contents are unparseable.
+  // Without this, the parent's settingsDraft retains the LAST
+  // valid parsed value while the user is mid-edit on invalid
+  // JSON — the textarea shows the error message, but Save is
+  // still enabled and would send the stale-but-valid draft
+  // instead of the text currently visible. The server
+  // re-validates so data is safe, but the UX is confusing: a
+  // successful save with data that does not match what the user
+  // last typed. Schema-driven controls (Input, Select) are by
+  // construction always parsable, so the typed-field path does
+  // not fire this callback — it stays implicitly valid.
+  onValidityChange?: (valid: boolean) => void;
   disabled?: boolean;
 }) {
   if (!schema || !schema.properties || Object.keys(schema.properties).length === 0) {
@@ -57,6 +72,7 @@ export function SettingsForm({
       <FreeformJsonEditor
         value={value}
         onChange={onChange}
+        onValidityChange={onValidityChange}
         disabled={disabled}
       />
     );
@@ -72,6 +88,7 @@ export function SettingsForm({
           required={required.has(key)}
           schema={prop}
           value={value[key]}
+          onValidityChange={onValidityChange}
           onChange={(next) => {
             const merged = { ...value };
             if (next === undefined) delete merged[key];
@@ -91,6 +108,7 @@ function SettingsField({
   schema,
   value,
   onChange,
+  onValidityChange,
   disabled,
 }: {
   name: string;
@@ -98,6 +116,7 @@ function SettingsField({
   schema: SettingsSchemaProperty;
   value: unknown;
   onChange: (next: unknown) => void;
+  onValidityChange?: (valid: boolean) => void;
   disabled?: boolean;
 }) {
   const label = schema.title ?? name;
@@ -109,6 +128,7 @@ function SettingsField({
     schema,
     value,
     onChange,
+    onValidityChange,
     disabled,
   });
   return (
@@ -143,6 +163,7 @@ function renderControl({
   schema,
   value,
   onChange,
+  onValidityChange,
   disabled,
 }: {
   id: string;
@@ -150,6 +171,7 @@ function renderControl({
   schema: SettingsSchemaProperty;
   value: unknown;
   onChange: (next: unknown) => void;
+  onValidityChange?: (valid: boolean) => void;
   disabled?: boolean;
 }) {
   // Enum first — always renders as a Select regardless of base
@@ -274,6 +296,7 @@ function renderControl({
           id={id}
           value={value}
           onChange={onChange}
+          onValidityChange={onValidityChange}
           disabled={disabled}
         />
       );
@@ -309,11 +332,13 @@ function NestedJsonEditor({
   id,
   value,
   onChange,
+  onValidityChange,
   disabled,
 }: {
   id: string;
   value: unknown;
   onChange: (next: unknown) => void;
+  onValidityChange?: (valid: boolean) => void;
   disabled?: boolean;
 }) {
   // Uncontrolled-with-buffer pattern: the textarea owns its own
@@ -335,6 +360,30 @@ function NestedJsonEditor({
     value === undefined ? "" : JSON.stringify(value, null, 2),
   );
   const [error, setError] = useState<string | null>(null);
+  // Propagate validity up so the parent can disable Save when
+  // the textarea contents are unparseable. Effect-on-change so
+  // we only fire when the local error transitions, and on
+  // unmount we restore valid — if a remount drops this editor
+  // from the tree we don't want a stale "invalid" sticking the
+  // parent's Save in disabled. Without this, the user could see
+  // an invalid-JSON error in the editor while Save is enabled
+  // and would silently send the last valid parsed draft instead
+  // of the text on screen — the textarea "loses" to the cache.
+  const lastSignalled = useRef<boolean | null>(null);
+  useEffect(() => {
+    const valid = error === null;
+    if (lastSignalled.current === valid) return;
+    lastSignalled.current = valid;
+    onValidityChange?.(valid);
+  }, [error, onValidityChange]);
+  useEffect(() => {
+    return () => {
+      if (lastSignalled.current === false) {
+        onValidityChange?.(true);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   return (
     <div>
       <textarea
@@ -404,10 +453,12 @@ function NestedJsonEditor({
 function FreeformJsonEditor({
   value,
   onChange,
+  onValidityChange,
   disabled,
 }: {
   value: Record<string, unknown>;
   onChange: (next: Record<string, unknown>) => void;
+  onValidityChange?: (valid: boolean) => void;
   disabled?: boolean;
 }) {
   const [text, setText] = useState(() =>
@@ -416,6 +467,25 @@ function FreeformJsonEditor({
       : JSON.stringify(value, null, 2),
   );
   const [error, setError] = useState<string | null>(null);
+  // See NestedJsonEditor for the validity-propagation contract.
+  // Identical pattern: signal on transition, restore-to-valid
+  // on unmount so a remount can't leave the parent's Save stuck
+  // in disabled.
+  const lastSignalled = useRef<boolean | null>(null);
+  useEffect(() => {
+    const valid = error === null;
+    if (lastSignalled.current === valid) return;
+    lastSignalled.current = valid;
+    onValidityChange?.(valid);
+  }, [error, onValidityChange]);
+  useEffect(() => {
+    return () => {
+      if (lastSignalled.current === false) {
+        onValidityChange?.(true);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   return (
     <div>
       <p style={{ margin: "0 0 6px", fontSize: 12, color: "#6b7280" }}>

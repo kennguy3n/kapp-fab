@@ -2038,7 +2038,21 @@ export class ApiClient {
       from_version_id: input.from_version_id,
       to_version_id: input.to_version_id,
     };
-    if (input.keep_settings) body.keep_settings = true;
+    // Forward keep_settings verbatim when the caller supplied it
+    // (whether true or false). The truthy check `if (input.keep_settings)`
+    // silently dropped keep_settings=false from the wire — same
+    // class of bug the limit parameter at L1968 was fixed for in
+    // the prior round. The server's upgradeRequestBody treats
+    // omission and `keep_settings: false` as identical (both fall
+    // through to the default-keep branch), so the observable
+    // behaviour doesn't change; the value of the fix is wire-
+    // contract honesty: the SDK forwards what the caller sent and
+    // nothing else. Aligning the two boolean/falsy-prone params
+    // (limit, keep_settings) under the same `!= null` rule
+    // prevents the next person from copy-pasting the wrong
+    // pattern into a third field where false IS semantically
+    // distinct from omitted.
+    if (input.keep_settings != null) body.keep_settings = input.keep_settings;
     if (input.settings !== undefined) body.settings = input.settings;
     return this.request(
       `/marketplace/installations/${encodeURIComponent(installId)}/upgrade`,
