@@ -12,6 +12,98 @@ import { Input, Select } from "@kapp/ui";
 export const FREEFORM_VALIDITY_KEY = "__settings_freeform__";
 
 /**
+ * useValiditySignal centralises the validity-propagation contract
+ * shared by every uncontrolled-buffer JSON editor in this file
+ * (FreeformJsonEditor today, NestedJsonEditor today, and any
+ * future schema-driven editors B6.2 lights up — for example a
+ * dedicated "array of objects" editor that round-trips through a
+ * textarea instead of typed inputs).
+ *
+ * The hook encodes four invariants the editors had previously
+ * duplicated (round-13 ANALYSIS_0005 — Devin Review observed the
+ * two copies sitting side-by-side were ~25 lines of identical
+ * boilerplate). All four are load-bearing for correctness:
+ *
+ *   1. Latest-callback capture via ref. The parent passes a
+ *      useCallback-stable closure today, but the contract should
+ *      remain robust to callback identity churn — a future caller
+ *      that inlines an arrow function must not strand a stale
+ *      closure on the unmount cleanup path. We mirror the
+ *      onValidityChange identity into a ref synchronously on
+ *      every render (via the effect), then always invoke through
+ *      the ref so signal-on-error and signal-on-unmount both
+ *      reach the latest callback.
+ *
+ *   2. Dedup on the signal effect. error → boolean → "signal
+ *      only on transition" prevents re-signalling on every render
+ *      that doesn't change validity. Without this, the parent's
+ *      setSettingsInvalidKeys would receive false-positive churn
+ *      on every keystroke that doesn't move the error state,
+ *      which (with the parent's Set identity check) is benign
+ *      today but couples performance to React's batching.
+ *
+ *   3. Restore-to-valid on unmount. If a remount drops the editor
+ *      from the tree (parent triggers a SettingsForm key change
+ *      on version swap or Discard), we don't want a stale invalid
+ *      flag sticking the parent's Save in disabled. The cleanup
+ *      checks lastSignalled === false and only signals "valid"
+ *      if we'd previously signalled "invalid" — avoiding a
+ *      spurious signal in the steady-state-valid case.
+ *
+ *   4. Empty dep array on the unmount cleanup. The cleanup MUST
+ *      fire exactly once at component teardown, never on every
+ *      render and never on dep change. Adding `key` to the deps
+ *      would be actively wrong: the cleanup would fire on key
+ *      change, signal (oldKey, true) against the parent's
+ *      invalidKeys set (clearing the wrong entry, since the OLD
+ *      key is still sitting in the set), and then the rebuilt
+ *      effect would never signal (newKey, false) — only the
+ *      keystroke effect does that, and only on a transition.
+ *      The eslint disable below is intentional and load-bearing.
+ *
+ * Inputs:
+ *   - key: the validity-map key under which the parent tracks
+ *     this editor's validity. For NestedJsonEditor, this is the
+ *     stable `id` = `setting-${name}`; for FreeformJsonEditor,
+ *     this is the module-level FREEFORM_VALIDITY_KEY constant.
+ *     The key must be structurally stable across the editor
+ *     instance's lifetime (parent reconciles a new instance via
+ *     React key on schema property change, so within one
+ *     instance the key never changes).
+ *   - error: the editor's local parse-error state. null →
+ *     valid; non-null → invalid. Dependency drives the signal
+ *     effect.
+ *   - onValidityChange: optional parent callback (the dialog or
+ *     detail page may opt out of validity tracking, in which
+ *     case the editor renders without gating Save).
+ */
+function useValiditySignal(
+  key: string,
+  error: string | null,
+  onValidityChange?: (key: string, valid: boolean) => void,
+) {
+  const onValidityChangeRef = useRef(onValidityChange);
+  useEffect(() => {
+    onValidityChangeRef.current = onValidityChange;
+  }, [onValidityChange]);
+  const lastSignalled = useRef<boolean | null>(null);
+  useEffect(() => {
+    const valid = error === null;
+    if (lastSignalled.current === valid) return;
+    lastSignalled.current = valid;
+    onValidityChangeRef.current?.(key, valid);
+  }, [error, key]);
+  useEffect(() => {
+    return () => {
+      if (lastSignalled.current === false) {
+        onValidityChangeRef.current?.(key, true);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+}
+
+/**
  * SettingsForm renders the install / update-settings document
  * editor. When the version manifest declares a settings_schema
  * (JSON Schema draft-07 subset that the engine validates with
@@ -416,69 +508,20 @@ function NestedJsonEditor({
     }
     return null;
   });
-  // Propagate validity up so the parent can disable Save when
-  // the textarea contents are unparseable. Effect-on-change so
-  // we only fire when the local error transitions, and on
-  // unmount we restore valid — if a remount drops this editor
-  // from the tree we don't want a stale "invalid" sticking the
-  // parent's Save in disabled. Without this, the user could see
-  // an invalid-JSON error in the editor while Save is enabled
-  // and would silently send the last valid parsed draft instead
-  // of the text on screen — the textarea "loses" to the cache.
-  //
-  // We capture onValidityChange in a ref so the unmount cleanup
-  // path below always reaches the LATEST callback identity,
-  // never the one captured on initial mount. In practice the
-  // parent passes a useCallback-stable closure today, but the
-  // ref pattern makes the editor robust to identity churn — a
-  // future caller can inline an arrow function without
-  // accidentally stranding a stale closure on the unmount path.
-  //
-  // Round-9 ANALYSIS_0003: the unmount-cleanup effect (line
-  // below) has an empty dep array on purpose, so it captures
-  // the `id` value from initial mount. That is correct here
-  // because `id` is structurally stable across the editor
-  // instance's lifetime: the parent (renderControl in
-  // SettingsForm) computes it as `setting-${name}` where `name`
-  // is the schema property key, and the SettingsForm parent
-  // also uses `name` as React's `key` prop on the surrounding
-  // <SettingsField>. Any change to the property identity would
-  // therefore trigger a full remount (new key → new component
-  // instance → fresh mount-time `id` capture) rather than a
-  // mid-lifetime `id` swap on the same instance. Adding `id`
-  // to the dep array would be ACTIVELY WRONG, not just
-  // redundant: the cleanup would fire on id change, signal
-  // `(oldId, true)` against the parent's invalidKeys set
-  // (clearing the wrong entry, since the OLD id is still
-  // sitting in the set), and then the rebuilt effect would
-  // never signal `(newId, false)` — only the keystroke effect
-  // does that, and only on a transition. So we keep the empty
-  // dep array and lock the id contract in via the
-  // `id` = `setting-${name}` + React key invariants above.
-  // If a future schema-aware editor needed dynamic ids, the
-  // correct fix would be to lift the id into a ref alongside
-  // `onValidityChangeRef` so cleanup always reaches the
-  // current id — but until that need exists, ref-of-id is
-  // over-engineering.
-  const onValidityChangeRef = useRef(onValidityChange);
-  useEffect(() => {
-    onValidityChangeRef.current = onValidityChange;
-  }, [onValidityChange]);
-  const lastSignalled = useRef<boolean | null>(null);
-  useEffect(() => {
-    const valid = error === null;
-    if (lastSignalled.current === valid) return;
-    lastSignalled.current = valid;
-    onValidityChangeRef.current?.(id, valid);
-  }, [error, id]);
-  useEffect(() => {
-    return () => {
-      if (lastSignalled.current === false) {
-        onValidityChangeRef.current?.(id, true);
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Round-13 ANALYSIS_0005: the four-invariant validity
+  // contract (latest-callback ref, dedup-on-transition, restore-
+  // to-valid on unmount, empty-dep cleanup) lives in
+  // `useValiditySignal` so this editor and FreeformJsonEditor
+  // can't drift, and any future schema-driven editor B6.2 adds
+  // inherits the correct behaviour by composition. The hook's
+  // docstring (top of file) carries the full rationale,
+  // including why an empty dep array on the unmount cleanup is
+  // load-bearing here: `id` = `setting-${name}` is structurally
+  // stable across this editor instance's lifetime (parent uses
+  // `name` as React's key on <SettingsField>, so any change to
+  // the property identity triggers a remount with a fresh
+  // mount-time id capture rather than a mid-lifetime id swap).
+  useValiditySignal(id, error, onValidityChange);
   return (
     <div>
       <textarea
@@ -657,34 +700,14 @@ function FreeformJsonEditor({
       : JSON.stringify(value, null, 2),
   );
   const [error, setError] = useState<string | null>(null);
-  // See NestedJsonEditor for the validity-propagation contract.
-  // Identical pattern: signal on transition, restore-to-valid
-  // on unmount so a remount can't leave the parent's Save stuck
-  // in disabled. The ref-based latest-callback capture protects
-  // the unmount cleanup against onValidityChange identity churn.
-  // We pass FREEFORM_VALIDITY_KEY as the key because at most one
+  // Round-13 ANALYSIS_0005: shares the validity-propagation
+  // contract with NestedJsonEditor via useValiditySignal (see
+  // the hook's docstring for the four invariants). We pass
+  // FREEFORM_VALIDITY_KEY as the key because at most one
   // FreeformJsonEditor exists in the tree at a time (no-schema
   // branch); the parent's per-key map disambiguates this from
   // any schema-driven NestedJsonEditor signals.
-  const onValidityChangeRef = useRef(onValidityChange);
-  useEffect(() => {
-    onValidityChangeRef.current = onValidityChange;
-  }, [onValidityChange]);
-  const lastSignalled = useRef<boolean | null>(null);
-  useEffect(() => {
-    const valid = error === null;
-    if (lastSignalled.current === valid) return;
-    lastSignalled.current = valid;
-    onValidityChangeRef.current?.(FREEFORM_VALIDITY_KEY, valid);
-  }, [error]);
-  useEffect(() => {
-    return () => {
-      if (lastSignalled.current === false) {
-        onValidityChangeRef.current?.(FREEFORM_VALIDITY_KEY, true);
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useValiditySignal(FREEFORM_VALIDITY_KEY, error, onValidityChange);
   return (
     <div>
       <p style={{ margin: "0 0 6px", fontSize: 12, color: "#6b7280" }}>

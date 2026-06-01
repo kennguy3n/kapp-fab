@@ -144,12 +144,44 @@ export function InstallExtensionDialog({
     setSettingsInvalidKeys(new Set());
   }
 
+  // Round-13 ANALYSIS_0004: the mutationFn receives all
+  // user-typed inputs via the `input` parameter rather than
+  // closing over them from component scope. The previous shape
+  // captured `webhookBase` from the render-time closure while
+  // forwarding `settings` through `input`, which worked by
+  // accident:
+  //   * TanStack Query invokes the version of mutationFn from
+  //     the render in which mutate() was called, so the
+  //     captured webhookBase was always "the value at click
+  //     time" — which is what we wanted.
+  //   * The webhook Input is `disabled={install.isPending}`
+  //     (line ~342) so the user can't change it mid-flight,
+  //     reinforcing the closure-captured value.
+  // But the asymmetry was misleading: the data flow for
+  // `settings` was explicit-through-input while `webhookBase`
+  // was implicit-through-closure, and a future refactor that
+  // dropped the disabled guard on the Input (e.g. enabling
+  // mid-install URL edits for a "retry with different
+  // origin" flow) would silently change the contract —
+  // because the mutationFn would suddenly see the new value
+  // rather than the click-time value, with no visible signal
+  // at the call site explaining why. Threading webhookBase
+  // through the input makes the data flow uniform with
+  // settings, encodes the click-time-capture intent into the
+  // call-site call, and pins the contract in the function
+  // signature so a future maintainer trying to remove the
+  // disabled guard will see the explicit input parameter and
+  // understand that the captured-at-click semantics are
+  // intentional, not accidental.
   const install = useMutation({
-    mutationFn: (input: { settings: Record<string, unknown> }) =>
+    mutationFn: (input: {
+      settings: Record<string, unknown>;
+      webhook_base: string;
+    }) =>
       api.installMarketplaceExtension({
         extension_id: extension.id,
         version_id: version.id,
-        webhook_base: webhookBase.trim(),
+        webhook_base: input.webhook_base,
         settings: input.settings,
       }),
     onSuccess: (res) => onInstalled(res),
@@ -232,7 +264,7 @@ export function InstallExtensionDialog({
         return;
       }
     }
-    install.mutate({ settings });
+    install.mutate({ settings, webhook_base: webhookBase.trim() });
   };
 
   // Round-10 ANALYSIS_0003: a single requestClose helper used by
