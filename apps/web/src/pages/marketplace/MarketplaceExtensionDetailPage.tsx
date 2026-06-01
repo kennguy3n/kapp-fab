@@ -198,7 +198,21 @@ export function MarketplaceExtensionDetailPage() {
           <VersionsTab
             versions={versions}
             ext={ext}
-            installable={!installRow && ext.status === "listed"}
+            // Round-8 ANALYSIS_0004: deliberately a weaker gate than
+            // the header CTA's `installable` (line ~109). The header
+            // CTA installs the listed/default version, so its gate
+            // bakes in `!!listedVersion && !listedVersion.yanked`. The
+            // VersionsTab gate is a *prerequisite* (no install row +
+            // ext.status==="listed") that enables per-row Install
+            // buttons; each row then applies its own `!v.yanked`
+            // check inside `VersionsTab` (see Install button below).
+            // Naming the VersionsTab prop `canInstallVersions`
+            // (instead of also calling it `installable`) makes the
+            // distinction explicit so future maintainers don't
+            // collapse them into one variable and accidentally hide
+            // every per-row Install button when the listed default
+            // happens to be yanked.
+            canInstallVersions={!installRow && ext.status === "listed"}
             onInstall={(id) => setInstallVersionId(id)}
           />
         </TabsContent>
@@ -378,12 +392,17 @@ function OverviewTab({
 function VersionsTab({
   versions,
   ext,
-  installable,
+  canInstallVersions,
   onInstall,
 }: {
   versions: MarketplaceExtensionVersion[];
   ext: MarketplaceGetExtensionResponse["extension"];
-  installable: boolean;
+  // Whether per-row Install buttons may be shown at all. This is the
+  // *enabling* precondition — each row still applies its own
+  // `!v.yanked` check before rendering the button (see below). The
+  // header CTA's `installable` flag is a different, stricter gate
+  // baking in the listed default's yank state; do not unify them.
+  canInstallVersions: boolean;
   onInstall: (versionId: string) => void;
 }) {
   if (versions.length === 0) {
@@ -440,7 +459,7 @@ function VersionsTab({
                 )}
               </Td>
               <Td>
-                {installable && !v.yanked && (
+                {canInstallVersions && !v.yanked && (
                   <Button
                     variant="outline"
                     size="sm"

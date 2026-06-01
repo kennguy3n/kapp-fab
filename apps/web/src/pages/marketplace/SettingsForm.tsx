@@ -624,8 +624,38 @@ function FreeformJsonEditor({
         onChange={(e) => {
           const raw = e.target.value;
           setText(raw);
+          // Round-8 ANALYSIS_0005: distinguish truly-empty
+          // (raw === "") from whitespace-only (raw.trim() === ""
+          // but raw !== ""). Pre-fix, both were collapsed into
+          // `onChange({})`, which means a user who had populated
+          // settings, cleared them, then accidentally typed a
+          // few spaces (or a stray IME deadkey resolving to
+          // whitespace) and hit Save would have silently wiped
+          // their config — the textarea would show " " while
+          // the mutation payload was {}. The "leave empty" UI
+          // promise (see hint text above) was meant for the
+          // genuinely-empty case, not for whitespace. Now:
+          //   * raw === ""        → reset to {} (UI promise).
+          //   * trimmed === ""    → surface a parse error so
+          //                         the validity signal flips
+          //                         to invalid and Save is
+          //                         disabled until the user
+          //                         either clears the box or
+          //                         types `{}` explicitly.
+          //   * trimmed === "{}"  → unchanged: explicit reset.
+          if (raw === "") {
+            setError(null);
+            onChange({});
+            return;
+          }
           const trimmed = raw.trim();
-          if (trimmed === "" || trimmed === "{}") {
+          if (trimmed === "") {
+            setError(
+              "Whitespace-only input is not valid JSON. Clear the textarea to reset settings, or type `{}` to clear all keys explicitly.",
+            );
+            return;
+          }
+          if (trimmed === "{}") {
             setError(null);
             onChange({});
             return;

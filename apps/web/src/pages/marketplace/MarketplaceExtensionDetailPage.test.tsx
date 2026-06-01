@@ -226,4 +226,57 @@ describe("MarketplaceExtensionDetailPage", () => {
       ).toBeInTheDocument(),
     );
   });
+
+  it("Versions-tab per-row Install button remains available when the listed default version is yanked (round-8 ANALYSIS_0004 distinct from header CTA)", async () => {
+    // Round-8 ANALYSIS_0004: the header CTA's `installable`
+    // and the VersionsTab's `canInstallVersions` prop look
+    // similar but encode different invariants. The header
+    // CTA installs the listed/default version, so its gate
+    // bakes in `!!listedVersion && !listedVersion.yanked`.
+    // The VersionsTab gate is a *prerequisite* (no install
+    // row + ext.status==="listed") that enables per-row
+    // Install buttons; each row applies its own `!v.yanked`
+    // check.
+    //
+    // This test pins the case where the two gates produce
+    // visibly different results: the listed default version
+    // is yanked, so the header CTA must be disabled, BUT
+    // the non-yanked older version's per-row Install button
+    // must still be available. Pre-rename ("installable"
+    // for both flags), a maintainer who collapsed them into
+    // one variable would have silently hidden every per-row
+    // Install button when the listed default happened to be
+    // yanked.
+    getMarketplaceExtension.mockResolvedValueOnce({
+      extension: EXT_FIXTURE.extension,
+      versions: [
+        // listed default is yanked
+        { ...EXT_FIXTURE.versions[0], yanked: true, yanked_reason: "CVE" },
+        // older version is healthy
+        EXT_FIXTURE.versions[1],
+      ],
+    });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: /Versions/i })).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByRole("tab", { name: /Versions/i }));
+    const allInstalls = await screen.findAllByRole("button", {
+      name: /^Install$/i,
+    });
+    // Header CTA must be disabled with the yanked tooltip.
+    const headerCta = allInstalls.find(
+      (b) => b.getAttribute("title") === "Default version is yanked.",
+    );
+    expect(headerCta).toBeDefined();
+    expect(headerCta).toBeDisabled();
+    // At least one per-row Install button (for the healthy
+    // older version) must still be enabled — confirms
+    // `canInstallVersions` did NOT inherit the header CTA's
+    // yanked check.
+    const enabledPerRow = allInstalls.filter(
+      (b) => !b.hasAttribute("disabled") && b !== headerCta,
+    );
+    expect(enabledPerRow.length).toBeGreaterThanOrEqual(1);
+  });
 });

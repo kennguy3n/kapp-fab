@@ -429,6 +429,77 @@ describe("SettingsForm", () => {
     );
     expect(lastStringCall).toBeDefined();
   });
+
+  it("FreeformJsonEditor distinguishes truly-empty from whitespace-only and refuses to silently emit {} on whitespace input (round-8 ANALYSIS_0005)", async () => {
+    // Round-8 ANALYSIS_0005: pre-fix, the FreeformJsonEditor
+    // short-circuited `trimmed === "" || trimmed === "{}"` to
+    // `onChange({})`. That collapsed two architecturally
+    // different cases into the same emit:
+    //   * raw === ""        → user cleared the textarea
+    //                         intending "leave settings empty"
+    //   * raw === "   "     → user has populated settings,
+    //                         clears them, then accidentally
+    //                         types a few spaces. The textarea
+    //                         shows " " while the parent's
+    //                         payload silently becomes {} —
+    //                         a wipe the user didn't intend.
+    // Post-fix:
+    //   * raw === ""        → emit {} (UI "leave empty" promise)
+    //   * trimmed === ""    → set error, suppress onChange, and
+    //                         signal invalid so Save is gated
+    //   * trimmed === "{}"  → unchanged: explicit reset to {}
+    // Pin all three transitions in a single test so future
+    // refactors can't silently collapse them again.
+    const onChange = vi.fn();
+    const onValidityChange = vi.fn<(key: string, valid: boolean) => void>();
+    render(
+      <SettingsForm
+        schema={null}
+        value={{ api_key: "old" }}
+        onChange={onChange}
+        onValidityChange={onValidityChange}
+      />,
+    );
+    const ta = screen.getByPlaceholderText(
+      '{"api_key":"…"}',
+    ) as HTMLTextAreaElement;
+    // 1. Truly empty: simulate the user clearing the box.
+    fireEvent.change(ta, { target: { value: "" } });
+    expect(onChange).toHaveBeenLastCalledWith({});
+    expect(ta.value).toBe("");
+    expect(
+      screen.queryByText(/Whitespace-only input is not valid JSON/i),
+    ).not.toBeInTheDocument();
+    const emptyEmitCount = onChange.mock.calls.length;
+    // 2. Whitespace-only: the {} emit MUST NOT fire, error
+    // message surfaces, and the validity signal flips to
+    // invalid via the FREEFORM key so the parent's
+    // settingsFormValid bit drops.
+    fireEvent.change(ta, { target: { value: "   " } });
+    expect(ta.value).toBe("   ");
+    expect(
+      screen.getByText(/Whitespace-only input is not valid JSON/i),
+    ).toBeInTheDocument();
+    expect(onChange.mock.calls.length).toBe(emptyEmitCount);
+    const lastFreeformValidity = [...onValidityChange.mock.calls]
+      .reverse()
+      .find(([k]) => k === FREEFORM_VALIDITY_KEY);
+    expect(lastFreeformValidity).toBeDefined();
+    expect(lastFreeformValidity![1]).toBe(false);
+    // 3. Explicit "{}" reset: error clears, onChange({}) fires,
+    // and the validity signal recovers to valid.
+    fireEvent.change(ta, { target: { value: "{}" } });
+    expect(ta.value).toBe("{}");
+    expect(
+      screen.queryByText(/Whitespace-only input is not valid JSON/i),
+    ).not.toBeInTheDocument();
+    expect(onChange).toHaveBeenLastCalledWith({});
+    const recoveredFreeformValidity = [...onValidityChange.mock.calls]
+      .reverse()
+      .find(([k]) => k === FREEFORM_VALIDITY_KEY);
+    expect(recoveredFreeformValidity).toBeDefined();
+    expect(recoveredFreeformValidity![1]).toBe(true);
+  });
 });
 
 describe("validateAgainstSchema", () => {

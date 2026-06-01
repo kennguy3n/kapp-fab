@@ -363,6 +363,32 @@ export function InstallationDetailPage() {
 
   const onSaveSettings = () => {
     setSettingsError(null);
+    // Round-8 BUG_0001: defense-in-depth re-check of the
+    // settings-form validity signal at the top of onSaveSettings,
+    // mirroring the round-7 ANALYSIS_0002 guard in
+    // InstallExtensionDialog.onConfirm. The Save button is
+    // already disabled on `!settingsFormValid` (see line ~580),
+    // but `<button disabled>` is a UI gate, not a data-path
+    // gate — accessibility tools firing synthetic clicks,
+    // programmatic invocation (e2e tests calling onSaveSettings
+    // directly, third-party scripts wiring keyboard shortcuts),
+    // and future refactors that swap the disabled prop for a
+    // styling-only class can all bypass it. Since the parent's
+    // settingsDraft retains the last valid parsed object while
+    // the textarea shows mid-stream unparseable text (see the
+    // uncontrolled-with-buffer pattern documented in
+    // SettingsForm.tsx), submitting through any of those side
+    // doors would silently send the stale-but-valid draft
+    // instead of the bytes on screen — confusing UX ("my save
+    // succeeded but it's not what I had typed"). Closing this
+    // at the data path makes the validity signal load-bearing
+    // for correctness, not just for the visual disabled state.
+    if (!settingsFormValid) {
+      setSettingsError(
+        "Fix the settings JSON before saving — the textarea contents are not parseable.",
+      );
+      return;
+    }
     // No schema yet (see InstallExtensionDialog for the rationale)
     // — once B6.2 ships the schema endpoint, fetch it here and
     // run validateAgainstSchema before mutating.
