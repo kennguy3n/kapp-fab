@@ -1944,6 +1944,152 @@ export class ApiClient {
       }
     );
   }
+
+  // --- Phase 2a B5 — marketplace tenant surface ---------------------
+  // These wrap the routes mounted under /api/v1/marketplace in
+  // services/api/routes.go (tenantChain). The wire shapes mirror
+  // listExtensionsResponse / installResponse / upgradeResponse in
+  // services/api/marketplace_handlers.go and are kept in lock-step
+  // with the Go DTOs — when a field is added there, add it here.
+
+  listMarketplaceExtensions(
+    opts: MarketplaceListExtensionsOptions = {}
+  ): Promise<MarketplaceListExtensionsResponse> {
+    const params = new URLSearchParams();
+    if (opts.publisher) params.set("publisher", opts.publisher);
+    if (opts.q) params.set("q", opts.q);
+    // `!= null` covers both undefined (param omitted) and null
+    // (explicit null). Critically, this does NOT short-circuit
+    // on limit=0 the way `if (opts.limit)` would. Today the
+    // server clamps limit<=0 to 500 server-side, but the wire
+    // contract is "if the caller sent a number, forward it" —
+    // a future server change to treat 0 as "no rows" must not
+    // be silently subverted by a falsy check on the client.
+    if (opts.limit != null) params.set("limit", String(opts.limit));
+    const qs = params.toString();
+    return this.request(`/marketplace/extensions${qs ? `?${qs}` : ""}`);
+  }
+
+  getMarketplaceExtension(
+    extId: string
+  ): Promise<MarketplaceGetExtensionResponse> {
+    return this.request(
+      `/marketplace/extensions/${encodeURIComponent(extId)}`
+    );
+  }
+
+  listMarketplaceVersions(
+    extId: string
+  ): Promise<MarketplaceListVersionsResponse> {
+    return this.request(
+      `/marketplace/extensions/${encodeURIComponent(extId)}/versions`
+    );
+  }
+
+  listMarketplaceInstallations(): Promise<MarketplaceListInstallationsResponse> {
+    return this.request(`/marketplace/installations`);
+  }
+
+  getMarketplaceInstallation(installId: string): Promise<MarketplaceInstallation> {
+    return this.request(
+      `/marketplace/installations/${encodeURIComponent(installId)}`
+    );
+  }
+
+  installMarketplaceExtension(
+    input: InstallMarketplaceExtensionInput
+  ): Promise<InstallMarketplaceExtensionResponse> {
+    return this.request(`/marketplace/installations`, {
+      method: "POST",
+      // Idempotency-Key matches IdempotencyMiddleware wired on the
+      // install/upgrade/uninstall/updateSettings group — a retried
+      // POST after a network glitch must NOT double-dispatch the
+      // pre_install hook or create a second install row.
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateMarketplaceInstallationSettings(
+    installId: string,
+    settings: Record<string, unknown>
+  ): Promise<MarketplaceUpdateSettingsResponse> {
+    return this.request(
+      `/marketplace/installations/${encodeURIComponent(installId)}/settings`,
+      {
+        method: "PATCH",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ settings }),
+      }
+    );
+  }
+
+  upgradeMarketplaceInstallation(
+    installId: string,
+    input: UpgradeMarketplaceInstallationInput
+  ): Promise<UpgradeMarketplaceInstallationResponse> {
+    // settings is the optional caller-supplied migrated document.
+    // When the caller wants to preserve the existing document, pass
+    // `keep_settings: true` (or omit settings entirely) — the engine
+    // reads the row under FOR UPDATE and writes the same document
+    // back. The wire contract is verbatim from upgradeRequestBody in
+    // marketplace_handlers.go.
+    const body: Record<string, unknown> = {
+      from_version_id: input.from_version_id,
+      to_version_id: input.to_version_id,
+    };
+    // Forward keep_settings verbatim when the caller supplied it
+    // (whether true or false). The truthy check `if (input.keep_settings)`
+    // silently dropped keep_settings=false from the wire — same
+    // class of bug the limit parameter at L1968 was fixed for in
+    // the prior round. The server's upgradeRequestBody treats
+    // omission and `keep_settings: false` as identical (both fall
+    // through to the default-keep branch), so the observable
+    // behaviour doesn't change; the value of the fix is wire-
+    // contract honesty: the SDK forwards what the caller sent and
+    // nothing else. Aligning the two boolean/falsy-prone params
+    // (limit, keep_settings) under the same `!= null` rule
+    // prevents the next person from copy-pasting the wrong
+    // pattern into a third field where false IS semantically
+    // distinct from omitted.
+    // Round-5 ANALYSIS_0005 consistency fix: unified both optional
+    // fields under `!= null` rather than letting `keep_settings`
+    // use `!= null` while `settings` used `!== undefined`. Both
+    // are typed optional, so a TypeScript-correct caller can only
+    // pass `undefined`; both checks behave identically in that
+    // case. The divergence was a copy-paste hazard — a future
+    // contributor adding a third optional field would have two
+    // patterns to mimic and could pick the wrong one. `!= null`
+    // is the strictly more defensive of the two (it additionally
+    // covers untyped JS callers passing `null`, which JSON would
+    // otherwise faithfully include and which the server's
+    // upgradeRequestBody would then have to defend against). Pin
+    // by sdk.test.ts round-trip cases.
+    if (input.keep_settings != null) body.keep_settings = input.keep_settings;
+    if (input.settings != null) body.settings = input.settings;
+    return this.request(
+      `/marketplace/installations/${encodeURIComponent(installId)}/upgrade`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(body),
+      }
+    );
+  }
+
+  uninstallMarketplaceExtension(installId: string): Promise<void> {
+    return this.request(
+      `/marketplace/installations/${encodeURIComponent(installId)}`,
+      {
+        method: "DELETE",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+
+  getMarketplacePublisher(slug: string): Promise<MarketplacePublisherPublic> {
+    return this.request(`/marketplace/publishers/${encodeURIComponent(slug)}`);
+  }
 }
 
 // --- Phase N9d: cycle counts -----------------------------------------
@@ -3036,4 +3182,166 @@ export interface LandedCostPostResult {
     id: string;
     posted_at: string;
   };
+}
+
+// --- Phase 2a B5 — marketplace tenant types -------------------------
+// Wire shapes that mirror the Go marketplace package + the handler
+// DTOs in services/api/marketplace_handlers.go. Kept flat (no nested
+// `signature` field) for the same reason the Go-side ExtensionVersion
+// struct keeps the three signature columns at the top level — JSON
+// consumers iterate fields by name.
+
+export type ExtensionStatus =
+  | "unpublished"
+  | "listed"
+  | "deprecated"
+  | "removed";
+
+export type InstallStatus =
+  | "pending"
+  | "installing"
+  | "active"
+  | "disabled"
+  | "failed"
+  | "uninstalled";
+
+export interface MarketplaceExtension {
+  id: string;
+  name: string;
+  publisher: string;
+  slug: string;
+  display_name: string;
+  description: string;
+  author: string;
+  license: string;
+  homepage?: string;
+  support_email?: string;
+  icon_url?: string;
+  status: ExtensionStatus;
+  listed_version?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MarketplaceExtensionVersion {
+  id: string;
+  extension_id: string;
+  version: string;
+  bundle_hash: string;
+  bundle_size_bytes: number;
+  bundle_url: string;
+  min_kapp_version: string;
+  max_kapp_version?: string;
+  features_required: string[];
+  permissions_required: string[];
+  ktypes_count: number;
+  workflows_count: number;
+  agent_tools_count: number;
+  ui_extensions_count: number;
+  webhooks_count: number;
+  yanked: boolean;
+  yanked_reason?: string;
+  published_at: string;
+  bundle_signature?: string;
+  bundle_signature_key_id?: string;
+  signed_at?: string;
+}
+
+// MarketplaceInstallation mirrors services/api/marketplace_handlers.go
+// installationView. Settings is the parsed object (never raw bytes).
+//
+// Round-6 BUG_0001: settings is typed as `Record<string, unknown> | null`
+// to honestly reflect what the Go side CAN emit, even though the
+// current installationToView coerces nil maps to map[string]any{}
+// before serialising (services/api/marketplace_handlers.go:189-198).
+// The handler-side coercion is correct but it's not a contract a
+// future refactor is bound to — a different list endpoint, a
+// streaming variant, or a partial-update payload could reasonably
+// re-introduce `settings: null` on the wire. Pre-fix, the TS type
+// claimed non-null while the existing UI defensively wrote
+// `install.data.settings ?? {}` in two places and the regression
+// test had to cast through `as any` to feed null. The bug is the
+// type lie, not the runtime behaviour: a future consumer reading
+// `installation.settings.someKey` without the null guard would
+// crash at runtime with no TS warning. Tightening to nullable
+// forces all consumers to null-coalesce explicitly. Existing
+// `?? {}` sites remain correct; new consumers get caught by tsc.
+export interface MarketplaceInstallation {
+  id: string;
+  tenant_id: string;
+  extension_id: string;
+  extension_version_id: string;
+  status: InstallStatus;
+  settings: Record<string, unknown> | null;
+  webhook_base: string;
+  installed_by?: string;
+  installed_at: string;
+  updated_at: string;
+  last_health_check_at?: string;
+  last_health_check_status?: string;
+  failure_reason?: string;
+}
+
+export interface MarketplacePublisherPublic {
+  id: string;
+  slug: string;
+  display_name: string;
+  verified: boolean;
+  has_keys: boolean;
+}
+
+export interface MarketplaceListExtensionsOptions {
+  publisher?: string;
+  q?: string;
+  limit?: number;
+}
+
+export interface MarketplaceListExtensionsResponse {
+  items: MarketplaceExtension[];
+}
+
+export interface MarketplaceGetExtensionResponse {
+  extension: MarketplaceExtension;
+  versions: MarketplaceExtensionVersion[];
+}
+
+export interface MarketplaceListVersionsResponse {
+  items: MarketplaceExtensionVersion[];
+}
+
+export interface MarketplaceListInstallationsResponse {
+  items: MarketplaceInstallation[];
+}
+
+export interface InstallMarketplaceExtensionInput {
+  extension_id: string;
+  version_id: string;
+  webhook_base: string;
+  settings?: Record<string, unknown>;
+}
+
+export interface InstallMarketplaceExtensionResponse {
+  installation: MarketplaceInstallation;
+  signing_secret: string;
+}
+
+export interface UpgradeMarketplaceInstallationInput {
+  from_version_id: string;
+  to_version_id: string;
+  // Mutually exclusive with keep_settings — when present, replaces
+  // the persisted document with this caller-migrated value.
+  settings?: Record<string, unknown>;
+  // Explicit "preserve existing" signal. Equivalent to omitting both
+  // settings and keep_settings; surfaced so a caller can be
+  // unambiguous about intent vs. "settings: {}" (which WIPES).
+  keep_settings?: boolean;
+}
+
+export interface UpgradeMarketplaceInstallationResponse {
+  installation: MarketplaceInstallation;
+  from_version_id: string;
+}
+
+export interface MarketplaceUpdateSettingsResponse {
+  installation: MarketplaceInstallation;
 }

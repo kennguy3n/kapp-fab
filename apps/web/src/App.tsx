@@ -301,6 +301,22 @@ const PortalNewTicketPage = lazyNamed(
   () => import("./pages/portal/PortalNewTicketPage"),
   "PortalNewTicketPage",
 );
+const MarketplaceBrowsePage = lazyNamed(
+  () => import("./pages/marketplace/MarketplaceBrowsePage"),
+  "MarketplaceBrowsePage",
+);
+const MarketplaceExtensionDetailPage = lazyNamed(
+  () => import("./pages/marketplace/MarketplaceExtensionDetailPage"),
+  "MarketplaceExtensionDetailPage",
+);
+const MarketplaceInstallationsPage = lazyNamed(
+  () => import("./pages/marketplace/MarketplaceInstallationsPage"),
+  "MarketplaceInstallationsPage",
+);
+const InstallationDetailPage = lazyNamed(
+  () => import("./pages/marketplace/InstallationDetailPage"),
+  "InstallationDetailPage",
+);
 
 const tenantKey = (): string =>
   localStorage.getItem("kapp.tenant") ?? "default";
@@ -497,6 +513,13 @@ const navSections: NavSection[] = [
     links: [
       { to: "/insights/queries", label: "Query Builder" },
       { to: "/insights/dashboards", label: "Dashboards" },
+    ],
+  },
+  {
+    title: "Marketplace",
+    links: [
+      { to: "/marketplace", label: "Browse" },
+      { to: "/marketplace/installed", label: "Installed" },
     ],
   },
   {
@@ -857,6 +880,19 @@ function AppShell() {
               <Route
                 path="/insights/data-sources"
                 element={<InsightsDataSourcesPage />}
+              />
+              <Route path="/marketplace" element={<MarketplaceBrowsePage />} />
+              <Route
+                path="/marketplace/extensions/:extId"
+                element={<MarketplaceExtensionDetailPage />}
+              />
+              <Route
+                path="/marketplace/installed"
+                element={<MarketplaceInstallationsPage />}
+              />
+              <Route
+                path="/marketplace/installed/:installId"
+                element={<InstallationDetailPage />}
               />
               <Route path="/search" element={<SearchPage />} />
               <Route path="/admin/webhooks" element={<WebhooksPage />} />
