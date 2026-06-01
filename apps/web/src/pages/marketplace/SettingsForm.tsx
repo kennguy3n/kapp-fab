@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { Input, Select } from "@kapp/ui";
 
 /**
@@ -316,6 +316,21 @@ function NestedJsonEditor({
   onChange: (next: unknown) => void;
   disabled?: boolean;
 }) {
+  // Uncontrolled-with-buffer pattern: the textarea owns its own
+  // text state so the user can keep typing through an in-flight
+  // invalid-JSON moment (e.g. `{"foo":` mid-keystroke) without
+  // the parent's re-render resetting the cursor to the previous
+  // valid value. The trade-off is that a parent-driven reset
+  // (Discard changes, save success, cross-tab refetch, switch
+  // to a different installation) won't propagate into the
+  // textarea on its own.
+  //
+  // We resolve that by requiring callers to remount the editor
+  // when they want a reset, via React's standard `key` prop on
+  // the enclosing SettingsForm. The init state below seeds from
+  // the value prop on mount only — re-seeding on a subsequent
+  // render would race with mid-typing edits. See the resetKey
+  // pattern in InstallationDetailPage for the parent contract.
   const [text, setText] = useState(() =>
     value === undefined ? "" : JSON.stringify(value, null, 2),
   );
@@ -365,6 +380,27 @@ function NestedJsonEditor({
 // key/value bag; the engine accepts the document as-is. We still
 // validate JSON parsability client-side so a syntax error doesn't
 // surface as a 400 from the server.
+//
+// Reset semantics: uncontrolled-with-buffer (same as
+// NestedJsonEditor). The textarea seeds from the value prop on
+// mount and never re-seeds — this preserves cursor position +
+// mid-typing invalid-JSON state through unrelated parent
+// re-renders (e.g. a sibling mutation rewriting cache). Parent-
+// driven resets (Discard, save success, cross-tab refetch,
+// switch installation) MUST go through React's `key` prop on
+// SettingsForm — incrementing the key remounts this component
+// and re-seeds from the fresh value prop. See resetKey in
+// InstallationDetailPage for the contract.
+//
+// A previous implementation tried to auto-detect resets by
+// watching `value` in a useEffect and only resyncing when
+// Object.keys(value).length === 0. That broke the common case
+// (settings already populated, user types over them, then
+// clicks Discard — Discard sets value back to the previous
+// non-empty object, which the useEffect couldn't distinguish
+// from the textarea's own emit, so the textarea kept the
+// pre-discard edits and the user could accidentally save
+// stale data on the next keystroke).
 function FreeformJsonEditor({
   value,
   onChange,
@@ -374,28 +410,12 @@ function FreeformJsonEditor({
   onChange: (next: Record<string, unknown>) => void;
   disabled?: boolean;
 }) {
-  const initial = useMemo(
-    () => JSON.stringify(value ?? {}, null, 2),
-    // Intentional dependency-list omission of `value`: this is
-    // an uncontrolled-textarea pattern — we want the seed text
-    // only on first mount, not on every parent re-render. The
-    // textarea's own `onChange` is the source of truth from
-    // then on.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
+  const [text, setText] = useState(() =>
+    Object.keys(value ?? {}).length === 0
+      ? ""
+      : JSON.stringify(value, null, 2),
   );
-  const [text, setText] = useState(initial);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    // Reset only when the parent legitimately resets the value
-    // to a fresh object (e.g. user switched extensions). We
-    // compare to the stable empty representation to avoid
-    // round-tripping the text on every keystroke.
-    if (Object.keys(value).length === 0 && text !== "{}" && text !== "") {
-      setText("");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value]);
   return (
     <div>
       <p style={{ margin: "0 0 6px", fontSize: 12, color: "#6b7280" }}>

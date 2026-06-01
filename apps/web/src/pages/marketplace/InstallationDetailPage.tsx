@@ -60,21 +60,16 @@ export function InstallationDetailPage() {
   });
 
   // Pull the extension for header context + version resolution.
-  const extId = install.data?.extension_id;
+  // The /extensions/{id} endpoint already returns versions[] from
+  // the same listApprovedVersions backend path that the dedicated
+  // listMarketplaceVersions endpoint uses, so we read versions
+  // off this response rather than firing a second round-trip.
+  // (Same N+1 elimination pattern as MarketplaceInstallationsPage
+  // — see its renderVersion + versionsLookup for the prior art.)
   const ext = useQuery<MarketplaceGetExtensionResponse>({
-    queryKey: ["marketplace", "extension", extId],
-    queryFn: () => api.getMarketplaceExtension(extId!),
-    enabled: !!extId,
-  });
-
-  // Available versions for the upgrade picker. Already-installed
-  // version is excluded server-side from the upgrade target
-  // gate, but we filter it from the picker UI too so the user
-  // doesn't see a redundant "upgrade to current".
-  const versions = useQuery({
-    queryKey: ["marketplace", "extension-versions", extId],
-    queryFn: () => api.listMarketplaceVersions(extId!),
-    enabled: !!extId,
+    queryKey: ["marketplace", "extension", install.data?.extension_id],
+    queryFn: () => api.getMarketplaceExtension(install.data!.extension_id),
+    enabled: !!install.data?.extension_id,
   });
 
   const [settingsDraft, setSettingsDraft] = useState<Record<string, unknown>>(
@@ -84,15 +79,31 @@ export function InstallationDetailPage() {
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [upgradeTargetId, setUpgradeTargetId] = useState<string | null>(null);
+  // settingsResetKey is the parent contract that lets SettingsForm
+  // (and the uncontrolled JSON textareas inside it) re-seed their
+  // internal text buffers from the new value prop. The textareas
+  // are intentionally uncontrolled so the user can type through
+  // mid-stream invalid JSON without the parent re-render erasing
+  // their cursor; the trade-off is that a parent-driven reset
+  // (Discard, save success, cross-tab refetch) won't propagate on
+  // its own. We bump this counter at every reset site, and pass
+  // it as React's `key` on SettingsForm — forcing a remount and a
+  // fresh seed. Cheap because SettingsForm holds no expensive
+  // state of its own, and Discard explicitly DOES want focus to
+  // reset (it's a "go back to clean slate" action).
+  const [settingsResetKey, setSettingsResetKey] = useState(0);
 
   // Sync the draft with the server state on first load + after a
   // successful mutation (the cache row changes -> useEffect
   // resets the draft). settingsTouched guards against trampling
   // a user's in-progress edit when the cache invalidates from
-  // some other tab.
+  // some other tab. We also bump settingsResetKey whenever this
+  // useEffect fires a reset, so the textarea text resyncs to the
+  // freshly-seeded settingsDraft.
   useEffect(() => {
     if (install.data && !settingsTouched) {
       setSettingsDraft(install.data.settings ?? {});
+      setSettingsResetKey((k) => k + 1);
     }
   }, [install.data, settingsTouched]);
 
@@ -137,6 +148,15 @@ export function InstallationDetailPage() {
       );
       qc.invalidateQueries({ queryKey: ["marketplace", "installations"] });
       setSettingsTouched(false);
+      // Re-mount SettingsForm so the JSON-textarea editors
+      // re-seed from the canonical server document. Without
+      // this, the textarea would keep showing the user's last
+      // pre-save draft text (which happens to equal the saved
+      // value today, but only because we send the draft as the
+      // payload — if the server ever normalises / canonicalises
+      // settings on write, the cache would diverge from the
+      // textarea).
+      setSettingsResetKey((k) => k + 1);
     },
     onSettled: () => {
       // Always refetch the installation row after the mutation
@@ -191,8 +211,11 @@ export function InstallationDetailPage() {
   }
   const row = install.data!;
   const extension = ext.data?.extension;
-  const allVersions = versions.data?.items
-    ? sortVersionsByPublishedDesc(versions.data.items)
+  // ext.data.versions is the authoritative source for the upgrade
+  // picker; we sort newest-first by published_at (NOT SemVer —
+  // see sortVersionsByPublishedDesc rationale).
+  const allVersions = ext.data?.versions
+    ? sortVersionsByPublishedDesc(ext.data.versions)
     : [];
   const installedVersion =
     allVersions.find((v) => v.id === row.extension_version_id) ?? null;
@@ -347,6 +370,11 @@ export function InstallationDetailPage() {
               immediately after saving.
             </p>
             <SettingsForm
+              // key forces remount when the parent legitimately
+              // resets the draft (Discard, save success, cross-
+              // tab refetch). See settingsResetKey docstring for
+              // the full contract.
+              key={settingsResetKey}
               schema={null}
               value={settingsDraft}
               onChange={(next) => {
@@ -393,6 +421,14 @@ export function InstallationDetailPage() {
                   setSettingsDraft(row.settings ?? {});
                   setSettingsTouched(false);
                   setSettingsError(null);
+                  // Re-mount SettingsForm so the JSON-textarea
+                  // editors discard their internal buffer and
+                  // re-seed from row.settings. The uncontrolled-
+                  // textarea pattern they use intentionally
+                  // doesn't auto-sync on prop changes (see
+                  // SettingsForm.tsx for rationale) — this is
+                  // the parent-side half of that contract.
+                  setSettingsResetKey((k) => k + 1);
                 }}
               >
                 Discard changes

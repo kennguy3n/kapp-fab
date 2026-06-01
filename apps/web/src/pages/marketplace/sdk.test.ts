@@ -41,6 +41,31 @@ describe("Marketplace SDK", () => {
     expect(url).toContain("q=inv");
   });
 
+  it("listMarketplaceExtensions forwards limit=0 instead of dropping it on a falsy check (ANALYSIS_0005)", async () => {
+    // The SDK previously used `if (opts.limit)`, which is falsy
+    // for 0 — so a caller asking for "limit=0" silently sent no
+    // limit param. The server today clamps limit<=0 to 500, so
+    // the misbehaviour is observable only at the wire layer
+    // (URL doesn't include `limit=0`). Pin the contract: if
+    // the caller passed a number, the SDK forwards it.
+    const fetchSpy = vi.fn().mockResolvedValue(mockJSON({ items: [] }));
+    const api = newClient(fetchSpy);
+    await api.listMarketplaceExtensions({ limit: 0 });
+    const url = fetchSpy.mock.calls[0][0] as string;
+    expect(url).toContain("limit=0");
+  });
+
+  it("listMarketplaceExtensions omits limit param when undefined (ANALYSIS_0005 negative case)", async () => {
+    // Negative case: `limit: undefined` (or simply not passed)
+    // MUST NOT render a `limit=` query param. The fix uses
+    // `!= null`, which treats undefined + null as "not sent".
+    const fetchSpy = vi.fn().mockResolvedValue(mockJSON({ items: [] }));
+    const api = newClient(fetchSpy);
+    await api.listMarketplaceExtensions({});
+    const url = fetchSpy.mock.calls[0][0] as string;
+    expect(url).not.toContain("limit=");
+  });
+
   it("installMarketplaceExtension POSTs with body + Idempotency-Key header", async () => {
     const fetchSpy = vi.fn().mockResolvedValue(
       mockJSON({

@@ -230,7 +230,21 @@ describe("InstallationDetailPage", () => {
     // JSON textarea — we target it via its placeholder rather
     // than a label (the textarea is intentionally label-less
     // because the surrounding Card heading is the label).
-    const textarea = await screen.findByPlaceholderText(/api_key/i);
+    //
+    // The textarea is re-mounted when settingsResetKey bumps on
+    // initial install.data settle (see BUG_0001 fix), so we
+    // re-query inside waitFor until the seeded post-remount
+    // node is in the DOM — a stale ref to the pre-remount node
+    // would be detached and userEvent.clear would fail.
+    await waitFor(() => {
+      const ta = screen.getByPlaceholderText(
+        /api_key/i,
+      ) as HTMLTextAreaElement;
+      expect(ta.value).toContain("secret");
+    });
+    const textarea = screen.getByPlaceholderText(
+      /api_key/i,
+    ) as HTMLTextAreaElement;
     await userEvent.clear(textarea);
     await userEvent.type(textarea, '{{"api_key":"new"}');
     await userEvent.click(
@@ -264,5 +278,84 @@ describe("InstallationDetailPage", () => {
     await waitFor(() =>
       expect(uninstallMarketplaceExtension).toHaveBeenCalledWith("install-1"),
     );
+  });
+
+  it("does NOT call listMarketplaceVersions — versions come from getMarketplaceExtension (no N+1 round-trip)", async () => {
+    // ANALYSIS_0001 (round 2): /extensions/{id} already returns
+    // versions[] via listApprovedVersions, so a second call to
+    // listMarketplaceVersions would be a wasted round trip and
+    // a cache key the rest of the page never invalidates. Pin
+    // the no-op the same way MarketplaceInstallationsPage's
+    // own N+1 regression test does (see its test file for
+    // prior art).
+    renderPage();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: /Inventory Sync/i }),
+      ).toBeInTheDocument(),
+    );
+    // Upgrade panel renders — if it relied on the dropped
+    // listMarketplaceVersions, this would never paint.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /Upgrade to v1\.2\.0/i }),
+      ).toBeInTheDocument(),
+    );
+    // The dropped query must NOT have fired.
+    expect(listMarketplaceVersions).not.toHaveBeenCalled();
+  });
+
+  it("Discard changes button resets the settings textarea text to the canonical server value (BUG_0001)", async () => {
+    // BUG_0001 (round 2): the textarea was uncontrolled and its
+    // useEffect resync only fired when the parent value reset
+    // to an empty object. Real installs ship non-empty
+    // settings (here {api_key: "secret"}), so Discard would
+    // reset settingsDraft + settingsTouched but the textarea
+    // text kept the pre-discard edits. On the next keystroke
+    // the user resumed from stale data and could accidentally
+    // save it.
+    //
+    // The fix is the settingsResetKey contract in
+    // InstallationDetailPage — a counter bumped on every
+    // parent-side reset (Discard, save success, cross-tab
+    // refetch). It's passed as React's `key` on SettingsForm,
+    // forcing the FreeformJsonEditor to remount and re-seed
+    // its text buffer from the canonical row.settings.
+    renderPage();
+    // Wait for the page to settle — the SettingsForm remounts
+    // once on initial install.data settle (see settingsResetKey
+    // bump in the install.data useEffect) so a ref taken before
+    // that point would be a detached node.
+    await waitFor(() => {
+      const ta = screen.getByPlaceholderText(
+        /api_key/i,
+      ) as HTMLTextAreaElement;
+      expect(ta.value).toContain("secret");
+    });
+    // User types over the canonical value.
+    {
+      const ta = screen.getByPlaceholderText(
+        /api_key/i,
+      ) as HTMLTextAreaElement;
+      await userEvent.clear(ta);
+      await userEvent.type(ta, '{{"api_key":"NEW_VALUE"}');
+      expect(ta.value).toContain("NEW_VALUE");
+    }
+    // User clicks Discard.
+    await userEvent.click(
+      screen.getByRole("button", { name: /Discard changes/i }),
+    );
+    // The remounted FreeformJsonEditor must seed from the
+    // canonical {api_key: "secret"} document — NOT from the
+    // user's mid-edit "NEW_VALUE" snapshot. Re-query so we get
+    // the post-Discard remounted node, not the detached pre-
+    // Discard one.
+    await waitFor(() => {
+      const ta = screen.getByPlaceholderText(
+        /api_key/i,
+      ) as HTMLTextAreaElement;
+      expect(ta.value).toContain("secret");
+      expect(ta.value).not.toContain("NEW_VALUE");
+    });
   });
 });

@@ -152,13 +152,32 @@ export function extensionStatusVariant(status: ExtensionStatus): BadgeVariant {
 // the newest publish first regardless of SemVer comparison. The
 // tie-breaker on equal timestamps falls back to lexicographic
 // SemVer descending so the order is at least deterministic.
+//
+// NaN safety: server-sent published_at values are always valid
+// RFC3339 strings, but a malformed payload (mock, replay, etc.)
+// must not break the sort. The Array.prototype.sort contract
+// requires the comparator to return a finite number; returning
+// NaN produces engine-defined, non-deterministic ordering. We
+// treat NaN timestamps as "older than every finite timestamp"
+// (sorts to the bottom) and fall back to SemVer-desc when both
+// inputs are NaN so ordering remains deterministic.
 export function sortVersionsByPublishedDesc(
   versions: MarketplaceExtensionVersion[],
 ): MarketplaceExtensionVersion[] {
   return [...versions].sort((a, b) => {
     const ta = new Date(a.published_at).getTime();
     const tb = new Date(b.published_at).getTime();
-    if (ta !== tb) return tb - ta;
+    const aFinite = Number.isFinite(ta);
+    const bFinite = Number.isFinite(tb);
+    if (aFinite && bFinite) {
+      if (ta !== tb) return tb - ta;
+      return b.version.localeCompare(a.version);
+    }
+    // Exactly one side finite — the finite side sorts first
+    // (newer than "no known timestamp").
+    if (aFinite) return -1;
+    if (bFinite) return 1;
+    // Both NaN — deterministic SemVer tiebreaker, descending.
     return b.version.localeCompare(a.version);
   });
 }

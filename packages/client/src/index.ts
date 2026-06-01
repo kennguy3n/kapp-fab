@@ -1958,7 +1958,14 @@ export class ApiClient {
     const params = new URLSearchParams();
     if (opts.publisher) params.set("publisher", opts.publisher);
     if (opts.q) params.set("q", opts.q);
-    if (opts.limit) params.set("limit", String(opts.limit));
+    // `!= null` covers both undefined (param omitted) and null
+    // (explicit null). Critically, this does NOT short-circuit
+    // on limit=0 the way `if (opts.limit)` would. Today the
+    // server clamps limit<=0 to 500 server-side, but the wire
+    // contract is "if the caller sent a number, forward it" —
+    // a future server change to treat 0 as "no rows" must not
+    // be silently subverted by a falsy check on the client.
+    if (opts.limit != null) params.set("limit", String(opts.limit));
     const qs = params.toString();
     return this.request(`/marketplace/extensions${qs ? `?${qs}` : ""}`);
   }

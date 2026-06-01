@@ -237,8 +237,30 @@ function renderVersion(
       </span>
     );
   }
+  // "Update available" needs a published_at-timestamp comparison,
+  // not a SemVer-string inequality, for the same reason the
+  // upgrade panel on InstallationDetailPage (BUG_0002 in round 1)
+  // uses timestamps: publishers may ship a backport patch (e.g.
+  // 1.0.4 published chronologically AFTER 1.1.0), and even if the
+  // strings don't match, an installation pinned on the LATER
+  // publish should not be flagged as "Update available" — doing
+  // so would invite a tenant admin to "upgrade" themselves into
+  // an older publish that the upgrade-detail page would
+  // immediately tell them they're already past.
+  //
+  // The listed_version field stores a SemVer string; we have to
+  // resolve it back to a Version row to read its published_at.
+  // If the publisher hasn't marked any version as the listed
+  // default (soft-launch), there's no anchor to compare against,
+  // and the badge collapses — same logic as the install
+  // dialog gate on MarketplaceExtensionDetailPage.
+  const listed = ext.listed_version
+    ? versions?.find((v) => v.version === ext.listed_version)
+    : undefined;
+  const ti = new Date(installed.published_at).getTime();
+  const tl = listed ? new Date(listed.published_at).getTime() : NaN;
   const isBehind =
-    ext.listed_version && installed.version !== ext.listed_version;
+    Number.isFinite(ti) && Number.isFinite(tl) && tl > ti;
   return (
     <span>
       v{installed.version}
