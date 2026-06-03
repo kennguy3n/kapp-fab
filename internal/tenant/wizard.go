@@ -697,6 +697,10 @@ type Wizard struct {
 	// "en" — the resolver downgrades cleanly without rejecting
 	// the row). Nil leaves the wizard's derived tag unchanged.
 	localeResolver LocaleResolver
+	// geoIP is the optional IP→country detector SmartDefaults
+	// consults as the last-resort country source. Nil skips the
+	// geo step (see WithGeoIPResolver / resolveCountry).
+	geoIP GeoIPResolver
 }
 
 // ZKFabricProvisioner mints a new tenant + HMAC credential pair on
@@ -1469,4 +1473,813 @@ func seedDefaultRetentionPolicies(ctx context.Context, tx pgx.Tx, tenantID uuid.
 		}
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Workstream 8 — Default-Wired Onboarding & Guided Setup
+//
+// SmartDefaults wraps RunSetupWizard with zero-configuration country
+// detection so a brand-new tenant lands on a productive workspace in
+// under two minutes. SeedSampleData populates realistic, interlinked
+// demo records so dashboards / reports / insights have data the moment
+// the operator first logs in. Both are additive, clearly-named entry
+// points; they do not touch the existing RunSetupWizard control flow.
+//
+// KType names are duplicated as local string constants rather than
+// imported from internal/crm, internal/finance, … to avoid an import
+// cycle (those packages import internal/ktype which imports
+// internal/platform which imports internal/tenant). This mirrors the
+// action-type constant duplication already used throughout this file.
+const (
+	sampleKTypeContact  = "crm.contact"
+	sampleKTypeDeal     = "crm.deal"
+	sampleKTypeInvoice  = "finance.ar_invoice"
+	sampleKTypeItem     = "inventory.item"
+	sampleKTypeEmployee = "hr.employee"
+	sampleKTypeProject  = "projects.project"
+	// gettingStartedKType is the tasks.task KType the onboarding
+	// checklist is stored under so it shows up in the operator's
+	// normal task surfaces in addition to the dedicated
+	// OnboardingChecklistPage.
+	gettingStartedKType = "tasks.task"
+)
+
+// Country-detection source labels reported on SmartDefaultsResult so
+// the caller / UI can explain *why* a given country was chosen
+// (e.g. "auto-detected from your KChat profile").
+const (
+	CountrySourceExplicit      = "explicit"
+	CountrySourceProfileLocale = "profile_locale"
+	CountrySourceGeoIP         = "geoip"
+	CountrySourceFallback      = "fallback"
+)
+
+// GeoIPResolver maps a client IP to an ISO 3166-1 alpha-2 country
+// code. It is the last-resort country detector SmartDefaults consults
+// when neither an explicit country nor a KChat profile locale is
+// available. Implementations back onto a MaxMind-style database or an
+// upstream lookup service; a nil resolver simply skips the geo step.
+type GeoIPResolver interface {
+	CountryForIP(ip string) (country string, ok bool)
+}
+
+// WithGeoIPResolver attaches the IP→country detector SmartDefaults
+// falls back to when no explicit country or profile locale is
+// supplied. Returns the wizard for fluent chaining; passing nil is a
+// no-op (the geo step is simply skipped).
+func (w *Wizard) WithGeoIPResolver(r GeoIPResolver) *Wizard {
+	if r != nil {
+		w.geoIP = r
+	}
+	return w
+}
+
+// SmartDefaultsConfig is the minimal payload the onboarding flow needs
+// to provision a zero-configuration tenant. Everything statutory
+// (CoA, currency, locale, timezone, feature set, roles) is resolved
+// automatically from the detected country and the plan — the operator
+// only has to confirm a company name.
+type SmartDefaultsConfig struct {
+	// CompanyName is the only strictly-required field; it is passed
+	// straight through to RunSetupWizard.
+	CompanyName string `json:"company_name"`
+	// Plan drives the feature set and retention windows
+	// (DefaultFeaturesForPlan via seedDefaultFeatures). Empty is
+	// treated as the free tier by the downstream seeders.
+	Plan string `json:"plan,omitempty"`
+	// CreatedBy is the tenant owner. It is stamped as created_by on
+	// every seeded record and as the assignee of the Getting Started
+	// checklist task.
+	CreatedBy uuid.UUID `json:"created_by,omitempty"`
+	// SampleData, when true, populates the tenant with interlinked
+	// demo records (see SeedSampleData).
+	SampleData bool `json:"sample_data,omitempty"`
+	// Country, when set, wins over every auto-detection source. It
+	// is the value the wizard UI sends once the operator confirms or
+	// edits the auto-detected country. ISO 3166-1 alpha-2.
+	Country string `json:"country,omitempty"`
+	// ProfileLocale is the KChat user profile locale (e.g. "de-CH").
+	// SmartDefaults extracts the region subtag as the detected
+	// country when Country is empty.
+	ProfileLocale string `json:"profile_locale,omitempty"`
+	// ClientIP is the request source address used for the geo-IP
+	// fallback when neither Country nor ProfileLocale yields a
+	// region.
+	ClientIP string `json:"client_ip,omitempty"`
+	// Users carries optional team invites collected on the wizard's
+	// second step. Threaded straight through to RunSetupWizard.
+	Users []WizardUser `json:"users,omitempty"`
+}
+
+// SmartDefaultsResult reports what the zero-config provisioning
+// resolved. It embeds the underlying WizardResult so callers keep
+// access to AccountsInserted / RolesInserted / LocaleUsed / … while
+// also seeing the auto-detected country, currency, timezone, the
+// seeded sample-data summary, and the Getting Started checklist id.
+type SmartDefaultsResult struct {
+	WizardResult
+	DetectedCountry string            `json:"detected_country"`
+	CountrySource   string            `json:"country_source"`
+	CurrencyUsed    string            `json:"currency_used"`
+	TimezoneUsed    string            `json:"timezone_used"`
+	ChecklistTaskID uuid.UUID         `json:"checklist_task_id"`
+	SampleData      *SampleDataResult `json:"sample_data,omitempty"`
+}
+
+// SampleDataResult counts the interlinked demo records SeedSampleData
+// created so the caller can surface "we set up N example records" in
+// the wizard completion screen.
+type SampleDataResult struct {
+	Contacts  int `json:"contacts"`
+	Deals     int `json:"deals"`
+	Invoices  int `json:"invoices"`
+	Items     int `json:"items"`
+	Employees int `json:"employees"`
+	Projects  int `json:"projects"`
+}
+
+// Total returns the number of demo records created across all KTypes.
+func (r *SampleDataResult) Total() int {
+	if r == nil {
+		return 0
+	}
+	return r.Contacts + r.Deals + r.Invoices + r.Items + r.Employees + r.Projects
+}
+
+// CountryFromLocaleTag extracts the ISO 3166-1 alpha-2 region subtag
+// from a BCP 47 locale tag (e.g. "de-CH" → "CH", "en_US" → "US",
+// "zh-Hant-HK" → "HK"). It returns "" when the tag carries no region
+// subtag ("de", "en") so callers can fall through to the next
+// detection source. Both "-" and "_" separators are accepted because
+// KChat profiles have historically emitted either.
+func CountryFromLocaleTag(tag string) string {
+	t := strings.TrimSpace(tag)
+	if t == "" {
+		return ""
+	}
+	parts := strings.FieldsFunc(t, func(r rune) bool { return r == '-' || r == '_' })
+	for i, p := range parts {
+		if i == 0 {
+			// First subtag is the language; never a region.
+			continue
+		}
+		if len(p) != 2 {
+			continue
+		}
+		allAlpha := true
+		for _, c := range p {
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+				allAlpha = false
+				break
+			}
+		}
+		if allAlpha {
+			return strings.ToUpper(p)
+		}
+	}
+	return ""
+}
+
+// DefaultCurrencyForCountry returns the ISO 4217 functional currency
+// the wizard should pre-fill for the given ISO 3166-1 alpha-2 country.
+// The mapping covers every country with a registered CoA template /
+// tax pack so SmartDefaults never has to ask; unmapped countries fall
+// back to USD, which keeps the 3-letter CHECK on tenants.base_currency
+// satisfied and matches the generic IFRS chart's reporting currency.
+func DefaultCurrencyForCountry(country string) string {
+	switch strings.ToUpper(strings.TrimSpace(country)) {
+	case "US", "EC", "SV", "PA":
+		return "USD"
+	case "DE", "FR", "IT", "ES", "IE", "AT", "NL", "BE", "PT", "FI", "GR":
+		return "EUR"
+	case "GB":
+		return "GBP"
+	case "CH":
+		return "CHF"
+	case "JP":
+		return "JPY"
+	case "CN":
+		return "CNY"
+	case "HK":
+		return "HKD"
+	case "TW":
+		return "TWD"
+	case "SG":
+		return "SGD"
+	case "MY":
+		return "MYR"
+	case "TH":
+		return "THB"
+	case "ID":
+		return "IDR"
+	case "VN":
+		return "VND"
+	case "PH":
+		return "PHP"
+	case "IN":
+		return "INR"
+	case "AU":
+		return "AUD"
+	case "NZ":
+		return "NZD"
+	case "CA":
+		return "CAD"
+	case "AE":
+		return "AED"
+	case "SA":
+		return "SAR"
+	case "QA":
+		return "QAR"
+	case "KW":
+		return "KWD"
+	case "BH":
+		return "BHD"
+	case "OM":
+		return "OMR"
+	// LATAM. PA and EC use the USD case above (both are USD-ised
+	// economies). The rest carry their own currency even though
+	// CO/PE/CR/UY/DO/GT/PY/TT share the latam_ifrs_basic chart.
+	case "BR":
+		return "BRL"
+	case "MX":
+		return "MXN"
+	case "AR":
+		return "ARS"
+	case "CL":
+		return "CLP"
+	case "CO":
+		return "COP"
+	case "PE":
+		return "PEN"
+	case "CR":
+		return "CRC"
+	case "UY":
+		return "UYU"
+	case "DO":
+		return "DOP"
+	case "GT":
+		return "GTQ"
+	case "PY":
+		return "PYG"
+	case "TT":
+		return "TTD"
+	// Europe Extended (non-euro).
+	case "PL":
+		return "PLN"
+	case "SE":
+		return "SEK"
+	case "NO":
+		return "NOK"
+	case "DK":
+		return "DKK"
+	case "CZ":
+		return "CZK"
+	case "HU":
+		return "HUF"
+	case "RO":
+		return "RON"
+	// Africa + East Asia.
+	case "ZA":
+		return "ZAR"
+	case "NG":
+		return "NGN"
+	case "KE":
+		return "KES"
+	case "EG":
+		return "EGP"
+	case "KR":
+		return "KRW"
+	default:
+		return "USD"
+	}
+}
+
+// DefaultTimezoneForCountry returns the canonical IANA timezone the
+// wizard should pre-fill for the given ISO 3166-1 alpha-2 country.
+// One representative zone per country is chosen (the commercial
+// capital for multi-zone countries) so first-run never has to
+// disambiguate; the operator can change it from the admin surface.
+// Unmapped countries fall back to "UTC", matching the column default
+// on migration 000047.
+func DefaultTimezoneForCountry(country string) string {
+	switch strings.ToUpper(strings.TrimSpace(country)) {
+	case "US", "CA":
+		return "America/New_York"
+	case "GB", "IE", "PT":
+		return "Europe/London"
+	case "DE", "AT", "CH", "NL", "BE":
+		return "Europe/Berlin"
+	case "FR":
+		return "Europe/Paris"
+	case "IT":
+		return "Europe/Rome"
+	case "ES":
+		return "Europe/Madrid"
+	case "JP":
+		return "Asia/Tokyo"
+	case "CN":
+		return "Asia/Shanghai"
+	case "HK":
+		return "Asia/Hong_Kong"
+	case "TW":
+		return "Asia/Taipei"
+	case "SG":
+		return "Asia/Singapore"
+	case "MY":
+		return "Asia/Kuala_Lumpur"
+	case "TH":
+		return "Asia/Bangkok"
+	case "ID":
+		return "Asia/Jakarta"
+	case "VN":
+		return "Asia/Ho_Chi_Minh"
+	case "PH":
+		return "Asia/Manila"
+	case "IN":
+		return "Asia/Kolkata"
+	case "AU":
+		return "Australia/Sydney"
+	case "NZ":
+		return "Pacific/Auckland"
+	case "AE":
+		return "Asia/Dubai"
+	case "SA", "QA", "BH", "KW":
+		return "Asia/Riyadh"
+	case "OM":
+		return "Asia/Muscat"
+	case "KR":
+		return "Asia/Seoul"
+	// LATAM — one representative zone per country (commercial centre).
+	case "BR":
+		return "America/Sao_Paulo"
+	case "MX":
+		return "America/Mexico_City"
+	case "AR":
+		return "America/Argentina/Buenos_Aires"
+	case "CL":
+		return "America/Santiago"
+	case "CO":
+		return "America/Bogota"
+	case "PE":
+		return "America/Lima"
+	case "CR":
+		return "America/Costa_Rica"
+	case "UY":
+		return "America/Montevideo"
+	case "DO":
+		return "America/Santo_Domingo"
+	case "GT":
+		return "America/Guatemala"
+	case "PY":
+		return "America/Asuncion"
+	case "TT":
+		return "America/Port_of_Spain"
+	case "PA":
+		return "America/Panama"
+	case "EC":
+		return "America/Guayaquil"
+	case "SV":
+		return "America/El_Salvador"
+	// Europe (euro + extended) not already grouped above.
+	case "FI":
+		return "Europe/Helsinki"
+	case "GR":
+		return "Europe/Athens"
+	case "PL":
+		return "Europe/Warsaw"
+	case "SE":
+		return "Europe/Stockholm"
+	case "NO":
+		return "Europe/Oslo"
+	case "DK":
+		return "Europe/Copenhagen"
+	case "CZ":
+		return "Europe/Prague"
+	case "HU":
+		return "Europe/Budapest"
+	case "RO":
+		return "Europe/Bucharest"
+	// Africa.
+	case "ZA":
+		return "Africa/Johannesburg"
+	case "NG":
+		return "Africa/Lagos"
+	case "KE":
+		return "Africa/Nairobi"
+	case "EG":
+		return "Africa/Cairo"
+	default:
+		return "UTC"
+	}
+}
+
+// resolveCountry applies the SmartDefaults detection precedence:
+// explicit operator choice → KChat profile locale region → geo-IP →
+// fallback (no country). It returns the detected ISO 3166-1 alpha-2
+// code (or "" when nothing resolves) and a CountrySource* label
+// explaining the winning source.
+func (w *Wizard) resolveCountry(cfg SmartDefaultsConfig) (country, source string) {
+	if c := strings.ToUpper(strings.TrimSpace(cfg.Country)); len(c) == 2 {
+		return c, CountrySourceExplicit
+	}
+	if c := CountryFromLocaleTag(cfg.ProfileLocale); c != "" {
+		return c, CountrySourceProfileLocale
+	}
+	if w.geoIP != nil && strings.TrimSpace(cfg.ClientIP) != "" {
+		if c, ok := w.geoIP.CountryForIP(strings.TrimSpace(cfg.ClientIP)); ok {
+			if up := strings.ToUpper(strings.TrimSpace(c)); len(up) == 2 {
+				return up, CountrySourceGeoIP
+			}
+		}
+	}
+	return "", CountrySourceFallback
+}
+
+// SmartDefaults provisions a tenant with zero manual configuration. It
+// auto-detects the country (from an explicit choice, the KChat profile
+// locale, or geo-IP), resolves the statutory CoA template, currency,
+// locale, and timezone from that country, enables the plan-appropriate
+// feature set, optionally seeds interlinked sample data, and always
+// creates a "Getting Started" checklist task. It delegates the
+// account / role / feature / locale seeding to RunSetupWizard so there
+// is exactly one code path that writes those rows.
+func (w *Wizard) SmartDefaults(ctx context.Context, tenantID uuid.UUID, cfg SmartDefaultsConfig) (*SmartDefaultsResult, error) {
+	if tenantID == uuid.Nil {
+		return nil, errors.New("tenant: smart defaults requires tenant id")
+	}
+	if strings.TrimSpace(cfg.CompanyName) == "" {
+		return nil, errors.New("tenant: smart defaults requires company_name")
+	}
+
+	country, source := w.resolveCountry(cfg)
+	currency := DefaultCurrencyForCountry(country)
+	timezone := DefaultTimezoneForCountry(country)
+
+	// Delegate the statutory seeding to RunSetupWizard. Country drives
+	// CoA + locale resolution there; an empty Country is valid and
+	// resolves to the generic IFRS chart + English locale. Leaving
+	// CoATemplate / Locale empty lets the wizard's own country-derived
+	// defaults run rather than duplicating that logic here.
+	//
+	// SampleData is deliberately NOT forwarded: RunSetupWizard does not
+	// act on it, and SmartDefaults seeds the demo records itself below
+	// (after the checklist) so the seeding currency is the resolved one.
+	wizCfg := SetupWizardConfig{
+		CompanyName:  cfg.CompanyName,
+		Country:      country,
+		CurrencyCode: currency,
+		Plan:         cfg.Plan,
+		CreatedBy:    cfg.CreatedBy,
+		Users:        cfg.Users,
+	}
+	wr, err := w.RunSetupWizard(ctx, tenantID, wizCfg)
+	if err != nil {
+		return nil, err
+	}
+
+	out := &SmartDefaultsResult{
+		WizardResult:    *wr,
+		DetectedCountry: country,
+		CountrySource:   source,
+		CurrencyUsed:    currency,
+		TimezoneUsed:    timezone,
+	}
+
+	// Persist the resolved timezone and seed the Getting Started
+	// checklist in one tenant-scoped tx so both land (or roll back)
+	// atomically under the app.tenant_id GUC the RLS policies require.
+	if err := dbutil.WithTenantTx(ctx, w.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if timezone != "" {
+			if _, err := tx.Exec(ctx,
+				`UPDATE tenants SET timezone = $1, updated_at = now() WHERE id = $2`,
+				timezone, tenantID,
+			); err != nil {
+				return fmt.Errorf("tenant: smart defaults persist timezone: %w", err)
+			}
+		}
+		taskID, created, err := seedGettingStartedChecklist(ctx, tx, tenantID, cfg.CreatedBy)
+		if err != nil {
+			return err
+		}
+		out.ChecklistTaskID = taskID
+		// Only a freshly-inserted checklist adds a row; the idempotent
+		// reuse path must not double-count on wizard re-runs.
+		if created {
+			if err := bumpTenantRecordCount(ctx, tx, tenantID, 1); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	// Sample data runs after the wizard tx so a seeding hiccup never
+	// rolls back the (already-committed) statutory setup — the tenant
+	// is usable even if the demo records fail to populate.
+	if cfg.SampleData {
+		sd, err := w.SeedSampleData(ctx, tenantID, cfg.CreatedBy, currency)
+		if err != nil {
+			return out, fmt.Errorf("tenant: smart defaults seed sample data: %w", err)
+		}
+		out.SampleData = sd
+	}
+
+	return out, nil
+}
+
+// gettingStartedSteps returns the canonical first-use milestones the
+// onboarding checklist tracks. The same three steps back the
+// /getting-started KChat card and the OnboardingChecklistPage so the
+// surfaces never drift. Each carries a stable key (for completion
+// tracking) and a deep link to the page that completes it.
+//
+// It is a function (not a package-level var) so every call returns a
+// freshly-allocated slice and maps: a caller that later mutates a step
+// (e.g. flipping "done") can never corrupt a shared template or race
+// another tenant's seeding.
+func gettingStartedSteps() []map[string]any {
+	return []map[string]any{
+		{"key": "create_contact", "label": "Create your first contact", "done": false, "link": "/records/crm.contact/new"},
+		{"key": "send_invoice", "label": "Send your first invoice", "done": false, "link": "/records/finance.ar_invoice/new"},
+		{"key": "import_data", "label": "Import existing data", "done": false, "link": "/imports/new"},
+	}
+}
+
+// seedGettingStartedChecklist creates the onboarding checklist as a
+// tasks.task KRecord. It is idempotent per tenant: a second call is a
+// no-op that returns the existing task's id, so re-running the wizard
+// never spawns duplicate checklists. The caller must already hold a
+// tenant-scoped tx (app.tenant_id set).
+//
+// The returned created flag reports whether a new record was inserted
+// (true) or an existing checklist was reused (false) so the caller can
+// keep tenant_record_counts in lockstep without double-counting on
+// re-runs.
+func seedGettingStartedChecklist(ctx context.Context, tx pgx.Tx, tenantID, createdBy uuid.UUID) (id uuid.UUID, created bool, err error) {
+	const checklistTitle = "Getting Started"
+
+	// Idempotency: reuse an existing checklist if one was already
+	// seeded for this tenant (data->>'onboarding' == "checklist").
+	var existing uuid.UUID
+	lookupErr := tx.QueryRow(ctx,
+		`SELECT id FROM krecords
+		  WHERE tenant_id = $1 AND ktype = $2 AND deleted_at IS NULL
+		    AND data->>'onboarding' = 'checklist'
+		  LIMIT 1`,
+		tenantID, gettingStartedKType,
+	).Scan(&existing)
+	switch {
+	case lookupErr == nil:
+		return existing, false, nil
+	case errors.Is(lookupErr, pgx.ErrNoRows):
+		// fall through and create it
+	default:
+		return uuid.Nil, false, fmt.Errorf("tenant: lookup getting-started checklist: %w", lookupErr)
+	}
+
+	data := map[string]any{
+		"title":       checklistTitle,
+		"status":      "open",
+		"assignee":    createdBy.String(),
+		"description": "Complete these steps to get the most out of your workspace.",
+		"onboarding":  "checklist",
+		"steps":       gettingStartedSteps(),
+	}
+	newID, insErr := insertSeedRecord(ctx, tx, tenantID, createdBy, gettingStartedKType, data)
+	if insErr != nil {
+		return uuid.Nil, false, fmt.Errorf("tenant: seed getting-started checklist: %w", insErr)
+	}
+	return newID, true, nil
+}
+
+// SeedSampleData populates the tenant with realistic, interlinked demo
+// records so dashboards, reports, and insights have data immediately:
+// 5 contacts, 3 deals, 2 invoices, 5 inventory items, 3 employees, and
+// 1 project. Records are linked through their ref fields (deals →
+// contacts, invoices → contacts + deals, employees → manager, project
+// → owner) so cross-module rollups render on first login. All inserts
+// run inside one tenant-scoped tx so a partial failure rolls the whole
+// demo set back rather than leaving dangling references.
+func (w *Wizard) SeedSampleData(ctx context.Context, tenantID, createdBy uuid.UUID, currency string) (*SampleDataResult, error) {
+	if tenantID == uuid.Nil {
+		return nil, errors.New("tenant: seed sample data requires tenant id")
+	}
+	if len(currency) != 3 {
+		currency = "USD"
+	}
+	owner := createdBy.String()
+	res := &SampleDataResult{}
+
+	if err := dbutil.WithTenantTx(ctx, w.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// --- Contacts -------------------------------------------------
+		contactSeeds := []struct {
+			name, email, phone string
+		}{
+			{"Ada Lovelace", "ada@example.com", "+1-202-555-0101"},
+			{"Alan Turing", "alan@example.com", "+44-20-7946-0102"},
+			{"Grace Hopper", "grace@example.com", "+1-202-555-0103"},
+			{"Katherine Johnson", "katherine@example.com", "+1-202-555-0104"},
+			{"Edsger Dijkstra", "edsger@example.com", "+31-20-555-0105"},
+		}
+		contactIDs := make([]uuid.UUID, 0, len(contactSeeds))
+		for _, c := range contactSeeds {
+			id, err := insertSeedRecord(ctx, tx, tenantID, createdBy, sampleKTypeContact, map[string]any{
+				"name":  c.name,
+				"email": c.email,
+				"phone": c.phone,
+				"owner": owner,
+			})
+			if err != nil {
+				return err
+			}
+			contactIDs = append(contactIDs, id)
+		}
+		res.Contacts = len(contactIDs)
+
+		// --- Deals (linked to the first three contacts) ---------------
+		dealSeeds := []struct {
+			name   string
+			stage  string
+			amount float64
+		}{
+			{"Acme Platform Rollout", "qualification", 12000},
+			{"Globex Annual Renewal", "proposal", 48000},
+			{"Initech Pilot", "negotiation", 7500},
+		}
+		dealIDs := make([]uuid.UUID, 0, len(dealSeeds))
+		for i, d := range dealSeeds {
+			id, err := insertSeedRecord(ctx, tx, tenantID, createdBy, sampleKTypeDeal, map[string]any{
+				"name":       d.name,
+				"stage":      d.stage,
+				"amount":     d.amount,
+				"currency":   currency,
+				"close_date": sampleDate(30 + i*15),
+				"contact":    contactIDs[i].String(),
+				"owner":      owner,
+				"notes":      "Sample deal created during onboarding.",
+			})
+			if err != nil {
+				return err
+			}
+			dealIDs = append(dealIDs, id)
+		}
+		res.Deals = len(dealIDs)
+
+		// --- Invoices (linked to a contact + the matching deal) -------
+		for i := 0; i < 2; i++ {
+			subtotal := dealSeeds[i].amount
+			tax := subtotal * 0.1
+			if _, err := insertSeedRecord(ctx, tx, tenantID, createdBy, sampleKTypeInvoice, map[string]any{
+				"customer_id":    contactIDs[i].String(),
+				"deal_id":        dealIDs[i].String(),
+				"invoice_number": fmt.Sprintf("INV-%04d", i+1),
+				"issue_date":     sampleDate(0),
+				"due_date":       sampleDate(30),
+				"subtotal":       subtotal,
+				"tax_amount":     tax,
+				"total":          subtotal + tax,
+				"currency":       currency,
+				"status":         "draft",
+				"owner":          owner,
+			}); err != nil {
+				return err
+			}
+			res.Invoices++
+		}
+
+		// --- Inventory items -----------------------------------------
+		itemSeeds := []struct {
+			sku, name, uom string
+		}{
+			{"SKU-1001", "Widget", "each"},
+			{"SKU-1002", "Gadget", "each"},
+			{"SKU-1003", "Cable (2m)", "each"},
+			{"SKU-1004", "Mounting Kit", "box"},
+			{"SKU-1005", "Replacement Filter", "each"},
+		}
+		for _, it := range itemSeeds {
+			if _, err := insertSeedRecord(ctx, tx, tenantID, createdBy, sampleKTypeItem, map[string]any{
+				"sku":           it.sku,
+				"name":          it.name,
+				"uom":           it.uom,
+				"active":        true,
+				"reorder_level": 10,
+				"reorder_qty":   50,
+			}); err != nil {
+				return err
+			}
+			res.Items++
+		}
+
+		// --- Employees (reports interlinked to the first hire) --------
+		empSeeds := []struct {
+			name, email, dept, title string
+		}{
+			{"Maria Garcia", "maria@example.com", "Operations", "Operations Manager"},
+			{"James Smith", "james@example.com", "Sales", "Account Executive"},
+			{"Wei Chen", "wei@example.com", "Engineering", "Software Engineer"},
+		}
+		empIDs := make([]uuid.UUID, 0, len(empSeeds))
+		for i, e := range empSeeds {
+			data := map[string]any{
+				"name":            e.name,
+				"email":           e.email,
+				"department":      e.dept,
+				"designation":     e.title,
+				"date_of_joining": sampleDate(-90 + i*10),
+				"status":          "active",
+			}
+			// Reports (index > 0) roll up to the first hire so the
+			// org chart renders a two-level tree out of the box.
+			if i > 0 && len(empIDs) > 0 {
+				data["reporting_to"] = empIDs[0].String()
+			}
+			id, err := insertSeedRecord(ctx, tx, tenantID, createdBy, sampleKTypeEmployee, data)
+			if err != nil {
+				return err
+			}
+			empIDs = append(empIDs, id)
+		}
+		res.Employees = len(empIDs)
+
+		// --- Project (owned by the tenant owner) ---------------------
+		if _, err := insertSeedRecord(ctx, tx, tenantID, createdBy, sampleKTypeProject, map[string]any{
+			"name":        "Onboarding Demo Project",
+			"description": "A sample project linking the demo records together.",
+			"code":        "DEMO-1",
+			"owner":       owner,
+			"start_date":  sampleDate(0),
+			"end_date":    sampleDate(60),
+			"status":      "active",
+		}); err != nil {
+			return err
+		}
+		res.Projects = 1
+
+		// Keep the denormalised quota counter in lockstep with the
+		// rows we just inserted.
+		if err := bumpTenantRecordCount(ctx, tx, tenantID, int64(res.Total())); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return res, nil
+}
+
+// bumpTenantRecordCount keeps the denormalised tenant_record_counts
+// quota counter in lockstep with direct krecord inserts that bypass
+// record.PGStore.Create (insertSeedRecord, which is what the seeders
+// use). It inlines platform.BumpTenantRecordCount to avoid the
+// platform→tenant import cycle and must run inside the caller's
+// tenant-scoped tx. A zero delta is a no-op.
+func bumpTenantRecordCount(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, delta int64) error {
+	if delta == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO tenant_record_counts (tenant_id, record_count, updated_at)
+		 VALUES ($1, GREATEST($2, 0), now())
+		 ON CONFLICT (tenant_id) DO UPDATE
+		   SET record_count = GREATEST(tenant_record_counts.record_count + $2, 0),
+		       updated_at   = now()`,
+		tenantID, delta,
+	); err != nil {
+		return fmt.Errorf("tenant: bump record count: %w", err)
+	}
+	return nil
+}
+
+// insertSeedRecord inserts one KRecord directly via SQL inside the
+// caller's tenant-scoped tx. Every seeded KType is at schema version 1
+// and lands in the active state. It returns the new record id so demo
+// records can be interlinked through their ref fields. Unlike
+// record.PGStore.Create it deliberately skips KType-schema validation
+// and audit/event emission — the seeder controls the payloads and a
+// burst of "demo data created" audit rows would only add noise to a
+// brand-new tenant's log.
+func insertSeedRecord(ctx context.Context, tx pgx.Tx, tenantID, createdBy uuid.UUID, ktype string, data map[string]any) (uuid.UUID, error) {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("tenant: marshal %s seed: %w", ktype, err)
+	}
+	id := uuid.New()
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO krecords (id, tenant_id, ktype, ktype_version, data, status, version, created_by)
+		 VALUES ($1, $2, $3, 1, $4, 'active', 1, $5)`,
+		id, tenantID, ktype, raw, createdBy,
+	); err != nil {
+		return uuid.Nil, fmt.Errorf("tenant: insert %s seed: %w", ktype, err)
+	}
+	return id, nil
+}
+
+// sampleDate returns an ISO-8601 (YYYY-MM-DD) date offsetDays from
+// today, used to give the demo records plausible past/future dates so
+// time-bucketed reports and pipelines render meaningfully.
+func sampleDate(offsetDays int) string {
+	return time.Now().UTC().AddDate(0, 0, offsetDays).Format("2006-01-02")
 }

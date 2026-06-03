@@ -6,6 +6,7 @@ import { api } from "../lib/api";
 import { KTypeList } from "../components/KTypeList";
 import { KanbanView } from "../components/KanbanView";
 import { RightPane } from "../components/RightPane";
+import { RecordEmptyState } from "../components/EmptyStates";
 
 type ViewMode = "list" | "kanban";
 
@@ -290,7 +291,39 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
             </button>
           </div>
         </header>
-        {mode === "kanban" && hasKanban ? (
+        {records.length === 0 ? (
+          // Context-aware empty state. When there is an active saved
+          // view with a filter, an empty result means "nothing matches
+          // this filter" rather than "this module is empty", so
+          // RecordEmptyState (via filterActive) renders a message-only
+          // "no matches" state. Otherwise we surface the module CTA that
+          // opens the create form (and the importer) so a brand-new
+          // tenant always has an obvious next step.
+          (() => {
+            // "No matches" is only the right message when an active
+            // filter emptied a non-empty module. Two conditions must
+            // hold: (1) the view carries effective filters (null/""
+            // values are no-ops in matchesFilters), and (2) the server
+            // actually returned rows — otherwise the module is genuinely
+            // empty and a brand-new tenant must see the create/import CTA
+            // (the whole point of this onboarding work), not "No matches
+            // for this view".
+            const filterActive =
+              hasEffectiveFilters(activeView?.filters) &&
+              (recordsQuery.data?.length ?? 0) > 0;
+            return (
+              <RecordEmptyState
+                ktype={ktype}
+                ktypeName={kt.name}
+                filterActive={filterActive}
+                onCreate={() => navigate(`/records/${ktype}/new`)}
+                onImport={
+                  filterActive ? undefined : () => navigate("/imports/new")
+                }
+              />
+            );
+          })()
+        ) : mode === "kanban" && hasKanban ? (
           <KanbanView
             ktype={kt}
             records={records}
@@ -355,6 +388,23 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
   );
 }
 
+// isEffectiveFilterValue reports whether a filter value actually
+// constrains the list. null / undefined / "" are treated as no-ops
+// (matchesFilters skips them), so a saved view carrying only such
+// values isn't really filtering anything. Shared with the empty-state
+// filterActive check so the two never disagree.
+function isEffectiveFilterValue(v: unknown): boolean {
+  return v !== undefined && v !== null && v !== "";
+}
+
+// hasEffectiveFilters is true when at least one filter key carries a
+// value that would actually narrow the result set.
+function hasEffectiveFilters(
+  filters: Record<string, unknown> | undefined | null,
+): boolean {
+  return !!filters && Object.values(filters).some(isEffectiveFilterValue);
+}
+
 // matchesFilters checks each top-level key in the filter against the
 // record's `data` payload. Equality semantics mirror the BaseTable
 // filter primitives: missing keys match (the predicate is undefined),
@@ -363,7 +413,7 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
 function matchesFilters(r: KRecord, filters: Record<string, unknown>): boolean {
   const data = r.data as Record<string, unknown>;
   for (const [key, expected] of Object.entries(filters)) {
-    if (expected === undefined || expected === null || expected === "") continue;
+    if (!isEffectiveFilterValue(expected)) continue;
     const actual = data[key];
     if (Array.isArray(expected)) {
       if (!expected.includes(actual as string | number)) return false;

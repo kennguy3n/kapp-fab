@@ -50,44 +50,25 @@ describe("SetupWizardPage", () => {
     await waitFor(() => expect(next).not.toBeDisabled());
   });
 
-  it("pre-selects the country-specific CoA template on step 1", async () => {
+  it("advances from the company step straight to the optional team step", async () => {
     renderWizard();
     const user = userEvent.setup();
     await user.type(screen.getByLabelText(/Company name/i), "Acme Co");
-    // Country US should drive the CoA pre-selection to us_gaap_basic
-    // via defaultCoATemplateForCountry. We don't import the helper
-    // directly (it's private); we drive the UI and inspect which
-    // radio button is checked.
-    await user.type(screen.getByLabelText(/Country/i), "US");
+    // Clear any browser-detected country so the test is deterministic.
+    await user.clear(screen.getByLabelText(/Country/i));
     await user.click(screen.getByRole("button", { name: /Next/i }));
 
-    // Step 1: the radio for us_gaap_basic must be checked even
-    // though the user never clicked it; the country mapping is the
-    // contract under test.
-    const usRadio = await screen.findByRole("radio", {
-      name: /US GAAP Basic/i,
-    });
-    expect(usRadio).toBeChecked();
-    // And the generic IFRS fallback should NOT be checked.
-    const ifrsRadio = screen.getByRole("radio", {
-      name: /IFRS Basic \(Generic\)/i,
-    });
-    expect(ifrsRadio).not.toBeChecked();
+    // The two-step wizard has no CoA selection step — advancing from
+    // the company step lands directly on the team-invite step.
+    expect(
+      await screen.findByPlaceholderText(/name@example/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Finish setup/i }),
+    ).toBeInTheDocument();
   });
 
-  it("falls back to ifrs_basic when the country has no specific template", async () => {
-    renderWizard();
-    const user = userEvent.setup();
-    await user.type(screen.getByLabelText(/Company name/i), "Acme Co");
-    await user.type(screen.getByLabelText(/Country/i), "ZZ");
-    await user.click(screen.getByRole("button", { name: /Next/i }));
-    const ifrs = await screen.findByRole("radio", {
-      name: /IFRS Basic \(Generic\)/i,
-    });
-    expect(ifrs).toBeChecked();
-  });
-
-  it("submits the wizard payload to /api/v1/tenants/{id}/setup with the resolved fields", async () => {
+  it("derives coa_template + locale from country and submits them to /api/v1/tenants/{id}/setup", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -106,12 +87,11 @@ describe("SetupWizardPage", () => {
     renderWizard();
     const user = userEvent.setup();
     await user.type(screen.getByLabelText(/Company name/i), "Acme Co");
+    await user.clear(screen.getByLabelText(/Country/i));
     await user.type(screen.getByLabelText(/Country/i), "SG");
     await user.click(screen.getByRole("button", { name: /Next/i }));
-    // Step 1 → Next without changing the CoA pre-selection (sg_basic).
-    await user.click(await screen.findByRole("button", { name: /Next/i }));
 
-    // Step 2: fill the first invited user's email, then submit.
+    // Team step: fill the first invited user's email, then submit.
     const emailInput = await screen.findByPlaceholderText(/name@example/i);
     await user.type(emailInput, "owner@acme.example");
     await user.click(screen.getByRole("button", { name: /Finish setup/i }));
@@ -123,9 +103,41 @@ describe("SetupWizardPage", () => {
     const payload = JSON.parse(init.body as string);
     expect(payload.company_name).toBe("Acme Co");
     expect(payload.country).toBe("SG");
+    // CoA template resolves from the country without a manual step.
     expect(payload.coa_template).toBe("sg_basic");
     expect(payload.users).toHaveLength(1);
     expect(payload.users[0].email).toBe("owner@acme.example");
+  });
+
+  it("lets the operator skip team invites entirely", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => "",
+      json: async () => ({
+        tenant_id: TENANT_ID,
+        accounts_inserted: 42,
+        roles_inserted: 14,
+        users_inserted: 0,
+        coa_template_used: "ifrs_basic",
+        locale_used: "en",
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWizard();
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/Company name/i), "Acme Co");
+    await user.clear(screen.getByLabelText(/Country/i));
+    await user.click(screen.getByRole("button", { name: /Next/i }));
+
+    // Skip without entering any team members.
+    await user.click(await screen.findByRole("button", { name: /Skip for now/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = fetchMock.mock.calls[0]!;
+    const payload = JSON.parse(init.body as string);
+    expect(payload.users).toHaveLength(0);
   });
 
   it("renders the missing-tenant-id error when the route param is empty", async () => {
