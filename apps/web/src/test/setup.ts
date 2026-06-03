@@ -1,22 +1,44 @@
 // Vitest global setup. Loaded once per test file (see vitest.config.ts
-// `test.setupFiles`). Three responsibilities:
+// `test.setupFiles`). Four responsibilities:
 //
 //   1. Register @testing-library/jest-dom matchers (toBeInTheDocument,
 //      toHaveAttribute, ...) on Vitest's expect. Without this every
 //      RTL test would need to import the matchers locally.
-//   2. Clear React Testing Library's mounted-component cache between
+//   2. Stand up the MSW (Mock Service Worker) node server so any
+//      component / ApiClient call that reaches the real `fetch` is
+//      answered by a deterministic handler (src/test/msw/handlers.ts)
+//      instead of hitting the network. Handlers are reset between
+//      tests so a per-test `server.use(...)` override never leaks.
+//   3. Clear React Testing Library's mounted-component cache between
 //      tests so a forgotten unmount in one test doesn't leak into
 //      the next.
-//   3. Polyfill DOM globals that jsdom 25 still ships incomplete:
+//   4. Polyfill DOM globals that jsdom 25 still ships incomplete:
 //      window.matchMedia is referenced by Tailwind's `prefers-color-
 //      scheme` queries and by some recharts utilities; ResizeObserver
 //      is referenced by the chart container in recharts.
 import "@testing-library/jest-dom/vitest";
-import { afterEach } from "vitest";
+import { afterAll, afterEach, beforeAll } from "vitest";
 import { cleanup } from "@testing-library/react";
+import { server } from "./msw/server";
+
+// onUnhandledRequest "error" makes an un-mocked request fail the test
+// rather than silently escaping to the network — the determinism
+// guarantee the suite relies on. Tests that intentionally bypass MSW
+// (vi.stubGlobal("fetch", ...) or vi.mock("../lib/api")) never reach
+// this layer, so they are unaffected.
+beforeAll(() => {
+  server.listen({ onUnhandledRequest: "error" });
+});
 
 afterEach(() => {
   cleanup();
+  // Drop any per-test handler overrides so each test starts from the
+  // default handler set.
+  server.resetHandlers();
+});
+
+afterAll(() => {
+  server.close();
 });
 
 if (typeof window !== "undefined") {
