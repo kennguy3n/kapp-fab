@@ -1,0 +1,399 @@
+# docker-compose.prod.yml — Workstream 4 (NoOps Infrastructure).
+#
+# A single command brings up the entire Kapp stack with secure defaults,
+# automated nightly backups, and a self-maintaining database:
+#
+#     docker compose -f docker-compose.prod.yml --profile production up -d
+#
+# Bootstrap (secret generation, .env.production, migrations, first admin)
+# is handled by scripts/docker-prod-setup.sh. This file is the runtime
+# topology only.
+#
+# Differences from the dev docker-compose.yml (which is left untouched):
+#   * PostgreSQL 16 tuned for production (wal_level=replica) plus a
+#     sidecar cron container that pg_dumps nightly into the ZK Object
+#     Fabric backup bucket.
+#   * Redis 7 with AOF persistence (dev runs with persistence disabled).
+#   * NATS with JetStream enabled and file storage persisted.
+#   * ZK Object Fabric in its production profile.
+#   * Caddy reverse proxy terminating TLS with automatic HTTPS
+#     (Let's Encrypt) in front of the API.
+#   * All three Go services (api, worker, kchat-bridge) run with
+#     KAPP_ENV=production and the security-critical env vars the app
+#     fail-closes on at boot.
+#   * Health checks and per-container memory / CPU limits on every
+#     service.
+#
+# Security-critical environment variables (KAPP_JWT_SECRET,
+# KAPP_MASTER_KEY, KCHAT_*, Stripe keys, domain, ACME email) are read
+# from .env.production. They are intentionally referenced as plain
+# ${VAR} (not ${VAR:?}) so `docker compose config` parses cleanly in CI
+# without the secrets present; the application layer fail-closes at boot
+# when a required value is missing (e.g. the API refuses to start without
+# a >=32-byte KAPP_JWT_SECRET — see .env.example and internal/auth).
+#
+# Every service is gated behind the `production` profile so this file is
+# inert unless `--profile production` is passed, preventing an accidental
+# `docker compose up` from starting the production topology.
+
+x-production: &production
+  profiles: ["production"]
+  restart: unless-stopped
+
+services:
+  postgres:
+    <<: *production
+    image: postgres:16
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=replica"
+      - "-c"
+      - "max_wal_senders=10"
+      - "-c"
+      - "max_replication_slots=10"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-kapp}
+      POSTGRES_USER: ${POSTGRES_USER:-kapp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kapp} -d ${POSTGRES_DB:-kapp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+
+  # Nightly logical backup sidecar. Runs pg_dump on a cron schedule and
+  # streams the compressed dump into the ZK Object Fabric backup bucket
+  # via the S3-compatible data plane (zk-fabric:8080). The dump command
+  # is rendered into a crontab at start and the container then runs cron
+  # in the foreground so its health can be supervised like any other
+  # service.
+  pg-backup:
+    <<: *production
+    image: postgres:16
+    entrypoint: ["/bin/bash", "-c"]
+    # NOTE: every shell expansion below is written with $$ so Compose
+    # leaves it untouched and the container shell evaluates it at runtime.
+    # A single $ would be interpolated by Compose at `config` time —
+    # baking secrets into the rendered config and blanking the runtime
+    # variables (ts, dump). The values come from this service's
+    # environment block.
+    command:
+      - |
+        set -euo pipefail
+        apt-get update -qq && apt-get install -y -qq cron awscli >/dev/null
+        cat >/usr/local/bin/kapp-backup.sh <<'SCRIPT'
+        #!/usr/bin/env bash
+        set -euo pipefail
+        ts="$$(date -u +%Y%m%dT%H%M%SZ)"
+        dump="/tmp/kapp-$${ts}.sql.gz"
+        PGPASSWORD="$${POSTGRES_PASSWORD}" pg_dump \
+          -h postgres -U "$${POSTGRES_USER:-kapp}" -d "$${POSTGRES_DB:-kapp}" \
+          | gzip -9 > "$${dump}"
+        AWS_ACCESS_KEY_ID="$${ZK_FABRIC_ACCESS_KEY}" \
+        AWS_SECRET_ACCESS_KEY="$${ZK_FABRIC_SECRET_KEY}" \
+          aws --endpoint-url "$${ZK_FABRIC_ENDPOINT:-http://zk-fabric:8080}" \
+              s3 cp "$${dump}" "s3://$${ZK_FABRIC_BACKUP_BUCKET:-kapp-backups}/$${ts}.sql.gz"
+        rm -f "$${dump}"
+        SCRIPT
+        chmod +x /usr/local/bin/kapp-backup.sh
+        # /etc/cron.d/ is a SYSTEM crontab: the 6th field is a username
+        # (root) and the command follows. Debian's cron daemon reads this
+        # directory directly, so we do NOT also `crontab` it — installing
+        # a system-format file as a user crontab would treat `root` as the
+        # command and fail on every tick.
+        printf '%s root . /etc/kapp-backup.env; /usr/local/bin/kapp-backup.sh >> /var/log/kapp-backup.log 2>&1\n' \
+          "$${BACKUP_CRON:-0 3 * * *}" > /etc/cron.d/kapp-backup
+        # Emit `export KEY=VALUE` (not bare KEY=VALUE): the cron line sources
+        # this file into its /bin/sh and then runs kapp-backup.sh, which has a
+        # bash shebang and so executes as a child process. Only *exported*
+        # variables are inherited by that child, so without `export` the
+        # script would see empty POSTGRES_PASSWORD / ZK_FABRIC_* and the dump
+        # + upload would fail every night. Only the POSTGRES_ / ZK_FABRIC_
+        # values (no spaces) are exported — BACKUP_CRON is deliberately
+        # excluded: its value (`0 3 * * *`) contains spaces and globs, so
+        # `export BACKUP_CRON=0 3 * * *` would be malformed when sourced. It
+        # is consumed only at container start to render the cron schedule
+        # above, never inside kapp-backup.sh.
+        # The file holds POSTGRES_PASSWORD and ZK_FABRIC_* secrets, so write
+        # it under `umask 077` — it is created 0600 (owner-only) from the
+        # start, never momentarily world-readable as a `chmod` after the
+        # redirect would leave it.
+        ( umask 077; env | grep -E '^(POSTGRES_|ZK_FABRIC_)' | sed 's/^/export /' > /etc/kapp-backup.env )
+        chmod 0644 /etc/cron.d/kapp-backup
+        touch /var/log/kapp-backup.log
+        cron && tail -F /var/log/kapp-backup.log
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-kapp}
+      POSTGRES_USER: ${POSTGRES_USER:-kapp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      ZK_FABRIC_ENDPOINT: ${ZK_FABRIC_ENDPOINT:-http://zk-fabric:8080}
+      ZK_FABRIC_ACCESS_KEY: ${ZK_FABRIC_ACCESS_KEY}
+      ZK_FABRIC_SECRET_KEY: ${ZK_FABRIC_SECRET_KEY}
+      ZK_FABRIC_BACKUP_BUCKET: ${ZK_FABRIC_BACKUP_BUCKET:-kapp-backups}
+      BACKUP_CRON: ${BACKUP_CRON:-0 3 * * *}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      zk-fabric:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep cron > /dev/null || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+
+  redis:
+    <<: *production
+    image: redis:7-alpine
+    # AOF persistence (everysec fsync) so the distributed rate-limiter and
+    # idempotency state survive a restart without losing more than one
+    # second of writes.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+
+  nats:
+    <<: *production
+    image: nats:2-alpine
+    # JetStream enabled with on-disk storage so durable streams/consumers
+    # persist across restarts.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    volumes:
+      - natsdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8222/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+
+  zk-fabric:
+    <<: *production
+    image: ghcr.io/kennguy3n/zk-object-fabric:latest
+    environment:
+      # Production profile: fail-closed startup guards on, real placement
+      # engine. Object bytes persist in the named volume.
+      ZK_FABRIC_PROFILE: production
+      ZK_FABRIC_ADMIN_TOKEN: ${ZK_FABRIC_ADMIN_TOKEN}
+    volumes:
+      - zkdata:/data/objects
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+
+  api:
+    <<: *production
+    # The production profile deploys the released, multi-arch image that the
+    # CI/CD release pipeline builds and pushes to the registry — it is not
+    # built from source here. api / worker / kchat-bridge share one image and
+    # select their role via the command/entrypoint baked into that image;
+    # override the tag (or whole reference) with KAPP_IMAGE / KAPP_IMAGE_TAG.
+    image: ${KAPP_IMAGE:-ghcr.io/kennguy3n/kapp-fab}:${KAPP_IMAGE_TAG:-latest}
+    environment:
+      KAPP_ENV: production
+      LISTEN_ADDR: ":8080"
+      DB_URL: "postgres://${APP_DB_USER:-kapp_app}:${APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-kapp}?sslmode=disable"
+      ADMIN_DB_URL: "postgres://${ADMIN_DB_USER:-kapp_admin}:${ADMIN_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-kapp}?sslmode=disable"
+      NATS_URL: "nats://nats:4222"
+      REDIS_URL: "redis://redis:6379/0"
+      KAPP_REQUIRE_REDIS: "1"
+      KAPP_REQUIRE_JWT: "1"
+      # Security-critical secrets — the app fail-closes at boot if unset.
+      KAPP_JWT_SECRET: ${KAPP_JWT_SECRET}
+      KAPP_MASTER_KEY: ${KAPP_MASTER_KEY}
+      KAPP_PLATFORM_ADMIN_USERS: ${KAPP_PLATFORM_ADMIN_USERS:-}
+      KCHAT_BASE_URL: ${KCHAT_BASE_URL}
+      KCHAT_API_KEY: ${KCHAT_API_KEY}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      ZK_FABRIC_ENDPOINT: "http://zk-fabric:8080"
+      ZK_FABRIC_CONSOLE_ENDPOINT: "http://zk-fabric:8081"
+      ZK_FABRIC_ADMIN_TOKEN: ${ZK_FABRIC_ADMIN_TOKEN}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      zk-fabric:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
+
+  worker:
+    <<: *production
+    image: ${KAPP_IMAGE:-ghcr.io/kennguy3n/kapp-fab}:${KAPP_IMAGE_TAG:-latest}
+    environment:
+      KAPP_ENV: production
+      DB_URL: "postgres://${APP_DB_USER:-kapp_app}:${APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-kapp}?sslmode=disable"
+      ADMIN_DB_URL: "postgres://${ADMIN_DB_USER:-kapp_admin}:${ADMIN_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-kapp}?sslmode=disable"
+      # The platform DB-maintenance loop (VACUUM / ANALYZE / REINDEX /
+      # partition creation) needs ownership of every table it touches, which
+      # on PostgreSQL 16 means connecting as the schema-owning role — there
+      # is no MAINTAIN privilege before PG17. That role is the bootstrap
+      # superuser the migrations run as (POSTGRES_USER). The worker starts
+      # the loop only when this is set; leaving it empty disables the loop
+      # and leans on autovacuum instead. Only the worker gets this DSN — the
+      # api / kchat-bridge services never run maintenance.
+      MAINT_DB_URL: "postgres://${POSTGRES_USER:-kapp}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-kapp}?sslmode=disable"
+      NATS_URL: "nats://nats:4222"
+      REDIS_URL: "redis://redis:6379/0"
+      KAPP_METRICS_ADDR: ":9090"
+      KAPP_JWT_SECRET: ${KAPP_JWT_SECRET}
+      KAPP_MASTER_KEY: ${KAPP_MASTER_KEY}
+      KCHAT_BASE_URL: ${KCHAT_BASE_URL}
+      KCHAT_API_KEY: ${KCHAT_API_KEY}
+      ZK_FABRIC_ENDPOINT: "http://zk-fabric:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      zk-fabric:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:9090/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
+
+  kchat-bridge:
+    <<: *production
+    image: ${KAPP_IMAGE:-ghcr.io/kennguy3n/kapp-fab}:${KAPP_IMAGE_TAG:-latest}
+    environment:
+      KAPP_ENV: production
+      LISTEN_ADDR: ":8090"
+      DB_URL: "postgres://${APP_DB_USER:-kapp_app}:${APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-kapp}?sslmode=disable"
+      NATS_URL: "nats://nats:4222"
+      KAPP_JWT_SECRET: ${KAPP_JWT_SECRET}
+      KCHAT_BASE_URL: ${KCHAT_BASE_URL}
+      KCHAT_API_KEY: ${KCHAT_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8090/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+
+  caddy:
+    <<: *production
+    image: caddy:2-alpine
+    # Automatic HTTPS via Let's Encrypt. Caddy obtains and renews the
+    # certificate for ${KAPP_DOMAIN}; ${ACME_EMAIL} receives expiry
+    # notices. The inline Caddyfile reverse-proxies the public domain to
+    # the api service.
+    command:
+      - "caddy"
+      - "reverse-proxy"
+      - "--from"
+      - "${KAPP_DOMAIN:-localhost}"
+      - "--to"
+      - "api:8080"
+    environment:
+      ACME_AGREE: "true"
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # Probe the HTTP listener WITHOUT following redirects (no -L). When
+      # KAPP_DOMAIN is a real domain Caddy answers :80 with a 308 to its
+      # HTTPS vhost; a redirect-following probe would then try to resolve
+      # the public domain from inside the container and fail even though
+      # Caddy is perfectly healthy. curl without -L treats the 308 as a
+      # successful response (-f only fails on >=400), and when the domain is
+      # localhost the proxied 200 passes the same check. curl ships in
+      # caddy:2-alpine; the admin API is not enabled in reverse-proxy mode,
+      # so the public listener is the right liveness signal.
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:80 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+
+volumes:
+  pgdata:
+  redisdata:
+  natsdata:
+  zkdata:
+  caddydata:
+  caddyconfig:
