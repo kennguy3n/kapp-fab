@@ -127,6 +127,24 @@ type Plan struct {
 	DisplayName string          `json:"display_name"`
 	Limits      PlanLimits      `json:"limits"`
 	Features    map[string]bool `json:"features"`
+
+	// PriceID is the Stripe Price the billing layer charges this
+	// plan against (e.g. "price_1AbCdEf..."). It is deliberately
+	// NOT stored in plan_definitions: Stripe issues different price
+	// ids per account/mode (test vs live), so baking them into a
+	// migration would pin every environment to one account's ids.
+	// PlanStore therefore leaves this empty; the billing package
+	// populates it from STRIPE_PRICE_ID_<PLAN> env vars (see
+	// internal/billing.Config) when it returns plans to the UI. An
+	// empty PriceID means "free / no Stripe checkout required".
+	PriceID string `json:"price_id,omitempty"`
+
+	// TrialDays is the length of the free trial new paid
+	// subscriptions start with. Derived from TrialDaysForPlan so
+	// the value is a single source of truth in code rather than a
+	// per-environment DB column. Zero means "no trial" (the free
+	// plan, and any unrecognised plan name).
+	TrialDays int `json:"trial_days"`
 }
 
 // MaxJoinsForPlan returns the per-query JOIN ceiling allowed for the
@@ -148,6 +166,30 @@ func MaxJoinsForPlan(plan string) int {
 		return 2
 	case PlanEnterprise:
 		return 4
+	default:
+		return 0
+	}
+}
+
+// TrialDaysForPlan returns the free-trial length (in days) a new
+// paid subscription on the named plan starts with. Kept as a pure
+// function — mirroring MaxJoinsForPlan and DefaultFeaturesForPlan —
+// so trial policy is a single source of truth in code rather than a
+// per-environment DB column.
+//
+//   - free        → 0 (no Stripe subscription, so no trial)
+//   - starter     → 14
+//   - business    → 14
+//   - enterprise  → 30
+//
+// Any unrecognised plan name falls through to 0 so a typo fails
+// closed (no unexpected free trial) rather than granting one.
+func TrialDaysForPlan(plan string) int {
+	switch plan {
+	case PlanStarter, PlanBusiness:
+		return 14
+	case PlanEnterprise:
+		return 30
 	default:
 		return 0
 	}
@@ -242,6 +284,11 @@ func scanPlan(r planRow) (Plan, error) {
 	if err := json.Unmarshal(features, &p.Features); err != nil {
 		return Plan{}, fmt.Errorf("tenant: decode plan features: %w", err)
 	}
+	// TrialDays is policy-in-code (see TrialDaysForPlan), not a
+	// stored column, so stamp it on every row the store returns.
+	// PriceID is left empty here — only the billing layer knows the
+	// environment's Stripe price ids.
+	p.TrialDays = TrialDaysForPlan(p.Name)
 	return p, nil
 }
 

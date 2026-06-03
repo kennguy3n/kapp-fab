@@ -72,6 +72,7 @@ var TenantScopedTables = []string{
 	"marketplace_extension_agent_tools",
 	"marketplace_webhook_subscriptions",
 	"marketplace_dispatch_log",
+	"billing_subscriptions", "billing_invoices", "billing_events",
 }
 
 // SchemaName returns the canonical dedicated-schema name for a

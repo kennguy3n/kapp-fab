@@ -27,6 +27,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/kennguy3n/kapp-fab/internal/audit"
+	"github.com/kennguy3n/kapp-fab/internal/billing"
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/exporter"
@@ -347,6 +348,31 @@ func run() error {
 	schedRegistry.Register(
 		tenant.ActionTypeUsageSnapshot,
 		tenant.NewUsageSnapshotHandler(meteringStore),
+	)
+	// Workstream 1 — daily billing usage-sync + trial-expiry
+	// enforcement. The handler pushes the current period's metered
+	// usage to Stripe and suspends tenants whose trial has lapsed
+	// past the 7-day grace window. Seeded per tenant by the signup
+	// wizard's AutoProvision flow (tenant.ActionTypeBillingUsageSync)
+	// at the same 24h cadence as the usage snapshot. The service is
+	// safe when Stripe is unconfigured (billing.LoadConfig returns a
+	// disabled config) — SyncUsage no-ops and EnforceTrialExpiry only
+	// acts on tenants that actually have a subscription row, so
+	// registering the handler unconditionally is harmless.
+	billingCfg := billing.LoadConfig()
+	billingService := billing.NewService(billing.ServiceDeps{
+		Config:   billingCfg,
+		Stripe:   billing.NewClient(billingCfg),
+		Store:    billing.NewStore(pool).WithAdminPool(adminPool),
+		Tenants:  tenant.NewPGStore(pool),
+		Plans:    tenant.NewPlanStore(pool),
+		Features: tenant.NewFeatureStore(pool),
+		Usage:    meteringStore,
+		Logger:   logger,
+	})
+	schedRegistry.Register(
+		tenant.ActionTypeBillingUsageSync,
+		billing.NewUsageSyncHandler(billingService),
 	)
 	// Daily tenant_record_counts reconciliation — defends against
 	// drift between the in-transaction counter bump (record store)

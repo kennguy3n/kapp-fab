@@ -162,6 +162,8 @@ type apiDeps struct {
 	authh          *authHandlers
 	eh             *eventsHandlers
 	th             *tenantHandlers
+	bilh           *billingHandlers
+	sigh           *signupHandlers
 	feath          *featuresHandlers
 	plch           *placementHandlers
 	reth           *retentionHandlers

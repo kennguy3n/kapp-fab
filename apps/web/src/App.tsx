@@ -100,6 +100,11 @@ const RecordFormPage = lazyNamed(
   "RecordFormPage",
 );
 const LoginPage = lazyNamed(() => import("./pages/LoginPage"), "LoginPage");
+const SignupPage = lazyNamed(() => import("./pages/SignupPage"), "SignupPage");
+const BillingPage = lazyNamed(
+  () => import("./pages/BillingPage"),
+  "BillingPage",
+);
 const TenantListPage = lazyNamed(
   () => import("./pages/TenantListPage"),
   "TenantListPage",
@@ -530,6 +535,7 @@ const navSections: NavSection[] = [
       { to: "/admin/placement", label: "Placement Policy" },
       { to: "/admin/retention", label: "Retention" },
       { to: "/admin/usage", label: "Usage" },
+      { to: "/billing", label: "Billing" },
       { to: "/admin/audit", label: "Audit Log" },
       { to: "/admin/roles", label: "Roles" },
       { to: "/admin/webhooks", label: "Webhooks" },
@@ -602,6 +608,7 @@ export function App() {
               visitors don't see tenant navigation. */}
           <Route path="/forms/:formId" element={<FormPage />} />
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/signup" element={<SignupPage />} />
           {/* Helpdesk customer portal. Runs outside the authenticated
               AppShell — portal users never see the tenant's internal
               nav/data; only their own tickets. */}
@@ -852,6 +859,7 @@ function AppShell() {
                 element={<RetentionPoliciesPage />}
               />
               <Route path="/admin/usage" element={<UsageDashboardPage />} />
+              <Route path="/billing" element={<BillingPage />} />
               <Route path="/admin/audit" element={<AuditLogPage />} />
               <Route path="/admin/roles" element={<RoleManagementPage />} />
               <Route

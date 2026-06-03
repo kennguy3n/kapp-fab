@@ -227,6 +227,18 @@ var TenantScopedTables = []string{
 	"marketplace_extension_agent_tools",
 	"marketplace_webhook_subscriptions",
 	"marketplace_dispatch_log",
+	// Workstream 1 — Stripe billing (migrations/000078). All three
+	// carry tenant_id + RLS and use a single-column `id UUID PRIMARY
+	// KEY` (NOT the (tenant_id, id) composite), so each is declared
+	// in tableConflictKeys below with the explicit `{id}` target —
+	// otherwise the default fallback would emit
+	// `ON CONFLICT (tenant_id, id)` which Postgres rejects. They FK
+	// only to tenants(id) (a global catalog table, not dump-managed),
+	// not to each other, so their relative order here is irrelevant
+	// for restore.
+	"billing_subscriptions",
+	"billing_invoices",
+	"billing_events",
 }
 
 // manifest is the first record in every dump file.
@@ -684,6 +696,16 @@ var tableConflictKeys = map[string][]string{
 	"marketplace_extension_ktypes":      {"tenant_id", "installation_id", "ktype_name"},
 	"marketplace_extension_workflows":   {"tenant_id", "installation_id", "workflow_name"},
 	"marketplace_extension_agent_tools": {"tenant_id", "installation_id", "tool_name"},
+	// Workstream 1 — billing tables (000078) each use a single-column
+	// `id UUID PRIMARY KEY`, so declare `{id}` to avoid the
+	// `ON CONFLICT (tenant_id, id)` mismatch the default path would
+	// emit. The natural keys (UNIQUE (tenant_id) on subscriptions,
+	// UNIQUE stripe_invoice_id / stripe_event_id on the other two)
+	// are not used as the conflict target so a dump → restore round
+	// trip keys on the surrogate id the dump actually carries.
+	"billing_subscriptions": {"id"},
+	"billing_invoices":      {"id"},
+	"billing_events":        {"id"},
 }
 
 // insertRow issues a parameterised INSERT that lists the columns from

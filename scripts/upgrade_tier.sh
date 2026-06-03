@@ -90,6 +90,7 @@ TABLES=(
   marketplace_extension_agent_tools
   marketplace_webhook_subscriptions
   marketplace_dispatch_log
+  billing_subscriptions billing_invoices billing_events
 )
 
 # Build a Postgres TEXT[] literal: ARRAY['t1','t2',...]
