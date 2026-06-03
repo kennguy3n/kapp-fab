@@ -37,6 +37,7 @@ import { LocaleSwitcher } from "./components/LocaleSwitcher";
 import { MobileNav } from "./components/MobileNav";
 import { MobileSheet } from "./components/MobileSheet";
 import { OfflineIndicator } from "./components/OfflineIndicator";
+import { useCloseOnRouteChange } from "./lib/useCloseOnRouteChange";
 import { LocaleProvider } from "./lib/i18n";
 
 // Deep link into the host KChat client for the mobile Chat tab.
@@ -770,6 +771,11 @@ function AppShell() {
   const [mobileSheet, setMobileSheet] = useState<
     "notifications" | "more" | null
   >(null);
+  // Close the mobile sheet on any navigation — tapping a NavLink already
+  // calls onClose, but browser back/forward (the primary dismiss gesture
+  // on mobile) changes the route without it, which would otherwise leave
+  // the sheet overlaying the new page.
+  useCloseOnRouteChange(() => setMobileSheet(null));
   const featuresQuery = useQuery({
     queryKey: ["tenant-features", tenantKey()],
     queryFn: () => api.listTenantFeatures(tenantKey()),

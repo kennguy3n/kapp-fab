@@ -106,9 +106,13 @@ export function POSPage() {
   useEffect(() => {
     const unsubscribe = subscribeQueue(() => void refreshQueueCount());
     void refreshQueueCount();
-    void drainQueue(posFinalizeReplay, POS_MUTATION_TYPE).then(() =>
-      refreshQueueCount(),
-    );
+    // Best-effort: a rejection here means IndexedDB is unavailable
+    // (private mode / storage pressure). Swallow it like OfflineIndicator
+    // does so it doesn't surface as an unhandledrejection; the count
+    // refresh below still runs.
+    void drainQueue(posFinalizeReplay, POS_MUTATION_TYPE)
+      .catch(() => undefined)
+      .then(() => refreshQueueCount());
     return () => {
       unsubscribe();
     };
