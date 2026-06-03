@@ -95,6 +95,10 @@ const RecordListPage = lazyNamed(
   () => import("./pages/RecordListPage"),
   "RecordListPage",
 );
+const OnboardingChecklistPage = lazyNamed(
+  () => import("./pages/OnboardingChecklistPage"),
+  "OnboardingChecklistPage",
+);
 const RecordFormPage = lazyNamed(
   () => import("./pages/RecordFormPage"),
   "RecordFormPage",
@@ -848,6 +852,10 @@ function AppShell() {
           <Suspense fallback={<ShellRouteFallback />}>
             <Routes>
               <Route path="/" element={<DashboardPage />} />
+              <Route
+                path="/onboarding"
+                element={<OnboardingChecklistPage />}
+              />
               <Route path="/admin/tenants" element={<TenantListPage />} />
               <Route
                 path="/admin/consolidation"

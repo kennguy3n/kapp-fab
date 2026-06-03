@@ -6,6 +6,7 @@ import { api } from "../lib/api";
 import { KTypeList } from "../components/KTypeList";
 import { KanbanView } from "../components/KanbanView";
 import { RightPane } from "../components/RightPane";
+import { RecordEmptyState } from "../components/EmptyStates";
 
 type ViewMode = "list" | "kanban";
 
@@ -290,7 +291,29 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
             </button>
           </div>
         </header>
-        {mode === "kanban" && hasKanban ? (
+        {records.length === 0 ? (
+          // Context-aware empty state. When there is an active saved
+          // view with a filter, an empty result means "nothing matches
+          // this filter" rather than "this module is empty", so we show
+          // a message-only state; otherwise we surface the module CTA
+          // that opens the create form (or the importer) so a brand-new
+          // tenant always has an obvious next step.
+          activeView?.filters &&
+          Object.keys(activeView.filters).length > 0 ? (
+            <RecordEmptyState
+              ktype={ktype}
+              ktypeName={kt.name}
+              onCreate={() => navigate(`/records/${ktype}/new`)}
+            />
+          ) : (
+            <RecordEmptyState
+              ktype={ktype}
+              ktypeName={kt.name}
+              onCreate={() => navigate(`/records/${ktype}/new`)}
+              onImport={() => navigate("/imports/new")}
+            />
+          )
+        ) : mode === "kanban" && hasKanban ? (
           <KanbanView
             ktype={kt}
             records={records}

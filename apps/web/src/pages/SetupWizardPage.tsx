@@ -2,27 +2,44 @@ import { useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import {
-  SupportedLocales,
   bestSupportedLocaleForCountry,
   localeInfo,
   useTranslation,
 } from "../lib/i18n";
 
-// SetupWizardPage drives the tenant setup wizard on the frontend. It
-// collects the first-run company profile, CoA template, and initial
-// user roster and posts the aggregated payload to
-// POST /api/v1/tenants/{id}/setup. The backend seed logic lives in
-// internal/tenant/wizard.go — the shape of `SetupPayload` mirrors
-// `tenant.SetupWizardConfig`.
+// SetupWizardPage drives the tenant setup wizard on the frontend.
+//
+// Workstream 8 (Default-Wired Onboarding) collapses the wizard to two
+// steps so a new tenant reaches a productive workspace in under two
+// minutes:
+//
+//   1. Company name + country (the country is auto-detected from the
+//      browser locale and stays editable).
+//   2. Invite team members (entirely optional / skippable).
+//
+// Everything else the old multi-step wizard asked for — chart of
+// accounts, currency, locale, roles, and feature flags — now resolves
+// automatically from the country on the backend (see
+// internal/tenant/wizard.go SmartDefaults / RunSetupWizard). The
+// frontend still posts to POST /api/v1/tenants/{id}/setup; the shape
+// of `SetupPayload` mirrors `tenant.SetupWizardConfig`, with the
+// statutory fields derived from the country rather than picked by the
+// operator.
 
-// CoA template options match the files in
-// internal/tenant/coa_templates/. Adding a new template is a matter of
-// dropping a JSON file in that folder, registering it in
-// chartOfAccountsTemplates (wizard.go), and extending this list. The
-// country-specific charts encode the local statutory liability
-// accounts (e.g. CPF Payable for SG, GPSSA Payable for AE,
-// AHV/ALV/BVG split for CH) so the payroll engine's deduction lines
-// have a matching ledger destination on day one.
+// COA_TEMPLATES is the catalogue of chart-of-accounts templates the
+// platform ships, keyed by the value persisted on the tenant. New
+// charts are added by dropping a JSON file in the coa_templates
+// folder, registering it in chartOfAccountsTemplates (wizard.go), and
+// extending this list. The country-specific charts encode the local
+// statutory liability accounts (e.g. CPF Payable for SG, GPSSA Payable
+// for AE, AHV/ALV/BVG split for CH) so the payroll engine's deduction
+// lines have a matching ledger destination on day one.
+//
+// The guided 2-step wizard no longer asks the operator to pick a chart
+// (it now derives from country — see defaultCoATemplateForCountry),
+// but this list is retained as the single source of truth for which
+// template values are valid, and is the anchor cmd/new-tax-pack patches
+// when a new statutory pack ships.
 const COA_TEMPLATES = [
   { value: "us_gaap_basic", label: "US GAAP Basic" },
   { value: "ifrs_basic", label: "IFRS Basic (Generic)" },
@@ -96,22 +113,19 @@ const COA_TEMPLATES = [
   // SCAFFOLD: cmd/new-tax-pack inserts new COA_TEMPLATES entries above this line.
 ];
 
-// defaultCoATemplateForCountry mirrors
-// tenant.DefaultCoATemplateForCountry in internal/tenant/wizard.go so
-// the wizard's CoA radio pre-selects the country-specific chart when
-// the user picks a country in step 0. Keeping the table in lockstep
-// with the backend means a SG tenant sees sg_basic checked rather
-// than us_gaap_basic, and the payroll deduction lines have matching
-// liability accounts on day one.
+// COUNTRY_COA_DEFAULTS mirrors tenant.DefaultCoATemplateForCountry in
+// internal/tenant/wizard.go so the wizard can resolve the
+// country-specific chart without a manual CoA selection step. Keeping
+// the table in lockstep with the backend means a SG tenant gets
+// sg_basic and the payroll deduction lines have matching liability
+// accounts on day one.
 //
 // Drift safety: the backend applies the same country -> template
-// mapping when callers omit coa_template entirely (direct API / CLI
-// consumers go through that branch). The frontend always sends an
-// explicit value matching the user's on-screen selection, so a stale
-// frontend with this table out of date would persist its own choice
-// rather than triggering the backend re-resolve — keep this map in
-// sync with internal/tenant/wizard.go on every PR that adds a tax
-// pack.
+// mapping when callers omit coa_template entirely. The frontend sends
+// an explicit value derived from the country here so the persisted
+// chart matches the (read-only) country the operator confirmed — keep
+// this map in sync with internal/tenant/wizard.go on every PR that
+// adds a tax pack.
 const COUNTRY_COA_DEFAULTS: Record<string, string> = {
   US: "us_gaap_basic",
   SG: "sg_basic",
@@ -129,8 +143,6 @@ const COUNTRY_COA_DEFAULTS: Record<string, string> = {
   KW: "kw_basic",
   BH: "bh_basic",
   OM: "om_basic",
-  // PR-2d: Americas — five standards-named charts plus a
-  // shared LATAM IFRS chart for the remaining ten jurisdictions.
   CA: "ca_aspe_basic",
   BR: "br_cpc_basic",
   MX: "mx_nif_basic",
@@ -146,7 +158,6 @@ const COUNTRY_COA_DEFAULTS: Record<string, string> = {
   GT: "latam_ifrs_basic",
   PY: "latam_ifrs_basic",
   TT: "latam_ifrs_basic",
-  // Phase N1 — Europe Core + AU.
   GB: "gb_basic",
   DE: "de_basic",
   FR: "fr_basic",
@@ -158,7 +169,6 @@ const COUNTRY_COA_DEFAULTS: Record<string, string> = {
   AT: "at_basic",
   PT: "pt_basic",
   AU: "au_basic",
-  // Phase N2 — Europe Extended.
   PL: "pl_basic",
   SE: "se_basic",
   NO: "no_basic",
@@ -168,7 +178,6 @@ const COUNTRY_COA_DEFAULTS: Record<string, string> = {
   HU: "hu_basic",
   RO: "ro_basic",
   GR: "gr_basic",
-  // Phase N3 — Africa + East Asia.
   ZA: "za_basic",
   NG: "ng_basic",
   KE: "ke_basic",
@@ -180,7 +189,36 @@ const COUNTRY_COA_DEFAULTS: Record<string, string> = {
 
 function defaultCoATemplateForCountry(country: string): string {
   const code = country.trim().toUpperCase();
-  return COUNTRY_COA_DEFAULTS[code] ?? "ifrs_basic";
+  const derived = COUNTRY_COA_DEFAULTS[code] ?? "ifrs_basic";
+  // Guard against a COUNTRY_COA_DEFAULTS entry pointing at a template
+  // value no longer present in COA_TEMPLATES (e.g. a pack renamed
+  // without updating both tables): fall back to the generic IFRS chart
+  // rather than persisting an unknown template id.
+  return COA_TEMPLATES.some((t) => t.value === derived) ? derived : "ifrs_basic";
+}
+
+// detectCountryFromBrowser extracts an ISO 3166-1 alpha-2 region code
+// from the browser's preferred languages (e.g. "de-CH" -> "CH"). It is
+// purely a convenience pre-fill for the country field; the operator
+// can always edit it, and the backend re-detects authoritatively from
+// the KChat profile locale / geo-IP. Returns "" when no region subtag
+// is present so the field starts empty rather than guessing.
+function detectCountryFromBrowser(): string {
+  if (typeof navigator === "undefined") {
+    return "";
+  }
+  const candidates = [navigator.language, ...(navigator.languages ?? [])];
+  for (const tag of candidates) {
+    if (!tag) continue;
+    const parts = tag.split(/[-_]/);
+    for (let i = 1; i < parts.length; i++) {
+      const p = parts[i];
+      if (p && p.length === 2 && /^[a-zA-Z]{2}$/.test(p)) {
+        return p.toUpperCase();
+      }
+    }
+  }
+  return "";
 }
 
 interface InitialUser {
@@ -217,15 +255,16 @@ const AVAILABLE_ROLES = [
 
 interface SetupPayload {
   company_name: string;
-  industry?: string;
   country?: string;
+  // coa_template is derived from country (defaultCoATemplateForCountry)
+  // rather than selected by the operator — the wizard no longer shows a
+  // CoA step. Sending the explicit value keeps the persisted chart in
+  // lockstep with the confirmed country.
   coa_template: string;
-  // locale is the BCP 47 tag the wizard wants the backend to persist
-  // on tenants.locale. Omitting it (empty string → not sent) defers
-  // to the backend's DefaultLocaleForCountry mapping for the chosen
-  // country, mirroring the cfg.Locale-empty branch in
-  // internal/tenant/wizard.go. The frontend always sends an explicit
-  // tag the user can see in the step-0 picker.
+  // locale is the BCP 47 tag derived from country
+  // (bestSupportedLocaleForCountry). Always a shipped-catalogue tag so
+  // the backend's operator-supplied validator accepts it
+  // unconditionally.
   locale?: string;
   users: InitialUser[];
 }
@@ -236,11 +275,9 @@ interface SetupResult {
   roles_inserted: number;
   users_inserted: number;
   coa_template_used: string;
-  // locale_used reflects the locale the backend actually persisted
-  // to tenants.locale after resolver downgrade. May differ from the
-  // tag the wizard sent when the requested tag has no shipped
-  // catalogue (e.g. "hi" → "en" today). The completion screen
-  // surfaces this so the user can see what was actually committed.
+  // locale_used reflects the locale the backend actually persisted to
+  // tenants.locale after resolver downgrade. The completion screen
+  // surfaces this so the user sees what was committed.
   locale_used: string;
 }
 
@@ -251,51 +288,23 @@ export function SetupWizardPage() {
 
   const [step, setStep] = useState(0);
   const [companyName, setCompanyName] = useState("");
-  const [industry, setIndustry] = useState("");
-  const [country, setCountry] = useState("");
-  // coaTemplate is empty until the user explicitly picks one from the
-  // step-1 radio list. While empty, the effective value is derived
-  // from the country field (see effectiveCoaTemplate below) so the UI
-  // pre-selects the country-specific chart without needing a useEffect
-  // sync between country and CoA. Once the user picks, the value
-  // becomes sticky regardless of subsequent country edits.
-  const [coaTemplate, setCoaTemplate] = useState("");
-  // locale follows the same sticky-once-picked pattern as coaTemplate.
-  // While empty, the effective UI locale is derived from country (via
-  // bestSupportedLocaleForCountry, which downgrades unshipped tags to
-  // the nearest shipped catalogue — so an IN tenant lands on en
-  // until hi.json ships). Once the user picks an explicit locale from
-  // the step-0 dropdown, the value becomes sticky and country edits
-  // no longer override it. This mirrors the explicit-vs-implicit
-  // resolution in internal/tenant/wizard.go where an operator-
-  // supplied cfg.Locale bypasses the resolver downgrade.
-  const [locale, setLocaleState] = useState("");
+  // The country field is pre-filled from the browser locale so the
+  // common case ("my company is in the country my browser says")
+  // needs zero typing. detectedCountry is captured once so we can show
+  // the "auto-detected" hint only while the value is untouched.
+  const [detectedCountry] = useState(detectCountryFromBrowser);
+  const [country, setCountry] = useState(detectedCountry);
   const [users, setUsers] = useState<InitialUser[]>([
     { email: "", display_name: "", role: "tenant.admin", roles: ["tenant.admin"] },
   ]);
 
-  const effectiveCoaTemplate =
-    coaTemplate || defaultCoATemplateForCountry(country);
-  // effectiveLocale is the tag the wizard will both submit to the
-  // backend AND apply to the live UI. The three-stage fallback
-  // mirrors the precedence the user expects:
-  //
-  //   1. explicit pick from the step-0 dropdown wins outright
-  //   2. country-derived locale (downgraded to the shipped catalogue
-  //      set via bestSupportedLocaleForCountry) — so typing "DE"
-  //      flips the UI to German on step 1+ without an explicit pick
-  //   3. the LocaleProvider's current value (navigator / cookie /
-  //      localStorage resolution) — so a user with a French
-  //      browser who hasn't entered a country yet still sees the
-  //      dropdown reading "Français" instead of being forced to
-  //      "English" via DefaultLocale
-  //
-  // The dropdown reflects this value and the wizard submits it as-is
-  // so the persisted tenants.locale matches what the user picked
-  // (whether explicitly or via country derivation) without the
-  // backend silently re-deriving from a different source.
-  const effectiveLocale =
-    locale || (country ? bestSupportedLocaleForCountry(country) : providerLocale);
+  // CoA + locale resolve from the (read-only-by-default) country. The
+  // operator never picks them; this is the "everything else resolves
+  // from country automatically" contract from Workstream 8.
+  const effectiveCoaTemplate = defaultCoATemplateForCountry(country);
+  const effectiveLocale = country
+    ? bestSupportedLocaleForCountry(country)
+    : providerLocale;
 
   const tenantId = id ?? "";
 
@@ -307,8 +316,7 @@ export function SetupWizardPage() {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "X-Tenant-ID":
-              localStorage.getItem("kapp.tenant") ?? tenantId,
+            "X-Tenant-ID": localStorage.getItem("kapp.tenant") ?? tenantId,
             ...(localStorage.getItem("kapp.token")
               ? {
                   Authorization: `Bearer ${localStorage.getItem("kapp.token")}`,
@@ -325,37 +333,17 @@ export function SetupWizardPage() {
       return (await res.json()) as SetupResult;
     },
     onSuccess: () => {
-      // After the wizard seeds the chart of accounts, roles, and
-      // initial user memberships, drop the user at the tenant root so
-      // they can start working. The success step below still renders
-      // a summary before this runs.
-      setStep(3);
+      setStep(2);
     },
   });
 
-  // Apply the locale switch when the user advances past step 0 so the
-  // wizard's remaining steps render in the chosen language. We do this
-  // here rather than in a useEffect on `country` change because the
-  // user might type a country code slowly (e.g. "S" → "SG") and we
-  // don't want the UI to flicker through partial-match locales. The
-  // step-0 Next button is the natural commit point.
-  //
-  // We only persist via setLocale when the user has expressed locale
-  // intent — either an explicit dropdown pick (locale is set) or a
-  // country that derives one (country is set). When both are empty
-  // the LocaleProvider already holds the navigator/cookie-derived
-  // value (which is what effectiveLocale falls back to above), so
-  // calling setLocale would be a redundant write to the same value;
-  // skipping the call keeps the user's existing global locale
-  // preference intact rather than "freezing" the navigator-detected
-  // value into the cookie just because they advanced past step 0.
-  //
-  // The LocaleSwitcher in the header writes to the same source of
-  // truth (LocaleProvider.setLocale), so a user who picks a locale
-  // via the global header instead of the wizard dropdown ends up
-  // with the same effective state when they reach step 1.
+  // Apply the country-derived locale when the user advances past the
+  // company step so the team step renders in the resolved language. We
+  // only call setLocale when a country is present (effectiveLocale is
+  // otherwise the LocaleProvider's existing value, making the write a
+  // redundant no-op that would freeze the navigator-detected value).
   const advancePastCompany = () => {
-    if (locale || country) {
+    if (country) {
       setLocale(effectiveLocale);
     }
     setStep(1);
@@ -382,44 +370,15 @@ export function SetupWizardPage() {
     [users],
   );
 
-  const submitWizard = () => {
+  // submitWizard posts the aggregated payload. `extraUsers` lets the
+  // "Skip" button finish with no invites regardless of half-typed rows.
+  const submitWizard = (includeUsers = true) => {
     submit.mutate({
       company_name: companyName.trim(),
-      industry: industry.trim() || undefined,
       country: country.trim() || undefined,
       coa_template: effectiveCoaTemplate,
-      // Submit the same tag the dropdown displayed, after both the
-      // country-derived fallback and the LocaleProvider fallback have
-      // resolved. This guarantees the persisted tenants.locale equals
-      // what the user saw on the form — no silent re-derivation on the
-      // backend.
-      //
-      // The submitted value is always a shipped catalogue tag because
-      // bestSupportedLocaleForCountry pipes the canonical tag through
-      // bestSupportedLocale's progressive-subtag downgrade (so CN's
-      // canonical "zh-Hans" becomes "zh", IN's "hi" becomes "en")
-      // before it surfaces in the dropdown. The backend's strict
-      // operator-supplied validator (which skips the resolver and
-      // hits IsSupported directly) therefore accepts the value
-      // unconditionally — we can never send a canonical-but-unshipped
-      // tag like "zh-Hans" or "hi" because the dropdown never holds
-      // one.
-      //
-      // When `hi.json` or `zh-Hans.json` ship in a future PR,
-      // bestSupportedLocale will stop downgrading those tags and the
-      // wizard will start submitting them directly without any code
-      // change to this site — the auto-promotion happens via the
-      // dropdown's shipped-catalogue lookup, not via a backend
-      // re-derivation we'd have to coordinate.
-      //
-      // Sending `undefined` here would re-introduce the mismatch the
-      // bot flagged: the dropdown might show "Français" (from the
-      // LocaleProvider's navigator fallback) while the backend
-      // persists "en" because cfg.Country was empty and
-      // DefaultLocaleForCountry("") returns "en". Always submitting
-      // effectiveLocale closes that mismatch.
       locale: effectiveLocale,
-      users: validUsers,
+      users: includeUsers ? validUsers : [],
     });
   };
 
@@ -438,9 +397,9 @@ export function SetupWizardPage() {
     <section style={{ maxWidth: 640 }}>
       <h1>Tenant Setup</h1>
       <p style={{ color: "#6b7280" }}>
-        Seeds the chart of accounts, default roles, and invites your
-        starting team. You can edit every value after setup from the
-        admin pages.
+        Just confirm your company name and country — we set up your chart
+        of accounts, currency, language, roles, and features automatically.
+        You can change any of it later from the admin pages.
       </p>
       <ol
         style={{
@@ -454,21 +413,12 @@ export function SetupWizardPage() {
       >
         {[
           { stepId: "company", label: t("wizard.step.company") },
-          { stepId: "coa", label: t("wizard.step.coa") },
           { stepId: "users", label: t("wizard.step.users") },
-          { stepId: "done", label: t("wizard.step.done") },
         ].map(({ stepId, label }, i) => (
-          // The React key is the stable step identifier ("company"
-          // / "coa" / "users" / "done") rather than the translated
-          // label so a locale whose translations collide (e.g.
-          // an abbreviation that maps two step names to the same
-          // string) doesn't trigger a duplicate-key warning or
-          // reorder during reconciliation.  The field is named
-          // `stepId` (not `id`) to avoid shadowing the `id` from
-          // `useParams` higher up in the component — both are
-          // string-typed and a future contributor copy-pasting
-          // markup between the outer and inner scopes could miss
-          // that they refer to different values otherwise.
+          // The React key is the stable step identifier rather than the
+          // translated label so a locale whose translations collide
+          // doesn't trigger a duplicate-key warning. `stepId` (not
+          // `id`) avoids shadowing the route `id` from useParams.
           <li
             key={stepId}
             style={{
@@ -492,59 +442,18 @@ export function SetupWizardPage() {
             />
           </label>
           <label style={{ display: "grid", gap: 4 }}>
-            Industry
-            <input
-              value={industry}
-              onChange={(e) => setIndustry(e.target.value)}
-              placeholder="e.g. Software, Retail"
-            />
-          </label>
-          <label style={{ display: "grid", gap: 4 }}>
             Country
             <input
               value={country}
               onChange={(e) => setCountry(e.target.value)}
-              placeholder="ISO country code or name"
+              placeholder="ISO country code (e.g. US, SG, DE)"
             />
-          </label>
-          <label style={{ display: "grid", gap: 4 }}>
-            {t("common.language")}
-            <select
-              value={effectiveLocale}
-              onChange={(e) => setLocaleState(e.target.value)}
-              aria-label={t("common.language")}
-            >
-              {SupportedLocales.map((info) => (
-                <option key={info.tag} value={info.tag}>
-                  {info.name}
-                </option>
-              ))}
-            </select>
             <span style={{ color: "#6b7280", fontSize: 12 }}>
-              {locale
-                ? // The user has picked explicitly. Show which country
-                  // would have selected the same locale (or note that
-                  // they're overriding the country-derived default).
-                  country &&
-                  effectiveLocale !== bestSupportedLocaleForCountry(country)
-                  ? t("wizard.locale.override_hint", {
-                      country: country.trim().toUpperCase(),
-                      default: localeInfo(
-                        bestSupportedLocaleForCountry(country),
-                      ).name,
-                    })
-                  : t("wizard.locale.explicit_hint")
-                : country
-                  ? t("wizard.locale.country_hint", {
-                      country: country.trim().toUpperCase(),
-                    })
-                  : // No explicit pick AND no country — the dropdown
-                    // shows the LocaleProvider's current value (the
-                    // navigator / cookie / localStorage resolution),
-                    // so the "browser's preferred language" hint copy
-                    // accurately describes what's about to be
-                    // persisted.
-                    t("wizard.locale.browser_hint")}
+              {detectedCountry && country === detectedCountry
+                ? `Auto-detected from your browser (${detectedCountry}). Edit if this isn't right — your chart of accounts, currency, and language follow from it.`
+                : country.trim()
+                  ? `Chart of accounts, currency, and language will be set up for ${country.trim().toUpperCase()}.`
+                  : "Leave blank to use generic IFRS defaults, or enter a country to localise your setup."}
             </span>
           </label>
           <div>
@@ -561,47 +470,11 @@ export function SetupWizardPage() {
 
       {step === 1 && (
         <div style={{ display: "grid", gap: 12 }}>
-          <fieldset style={{ border: "1px solid #e5e7eb", padding: 12 }}>
-            <legend>Chart of Accounts template</legend>
-            {COA_TEMPLATES.map((tpl) => (
-              <label
-                key={tpl.value}
-                style={{ display: "block", padding: "4px 0" }}
-              >
-                <input
-                  type="radio"
-                  name="coa"
-                  value={tpl.value}
-                  checked={effectiveCoaTemplate === tpl.value}
-                  onChange={(e) => setCoaTemplate(e.target.value)}
-                />{" "}
-                {tpl.label}
-              </label>
-            ))}
-          </fieldset>
-          <p style={{ color: "#6b7280", fontSize: 12 }}>
-            Templates live in <code>internal/tenant/coa_templates/</code>.
-            Every account is inserted with{" "}
-            <code>ON CONFLICT (tenant_id, code) DO NOTHING</code> so the
-            step is safe to re-run.
-          </p>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" onClick={() => setStep(0)}>
-              {t("common.back")}
-            </button>
-            <button type="button" onClick={() => setStep(2)}>
-              {t("common.next")}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {step === 2 && (
-        <div style={{ display: "grid", gap: 12 }}>
           <p style={{ fontSize: 13, color: "#6b7280" }}>
-            Invite initial team members. Each user is seeded into the{" "}
+            Invite your team (optional). Each user is seeded into the{" "}
             <code>users</code> table and added to the tenant via{" "}
-            <code>user_tenants</code> with the selected role.
+            <code>user_tenants</code> with the selected role. You can skip
+            this and invite people later from the admin pages.
           </p>
           <table style={{ width: "100%", fontSize: 13 }}>
             <thead>
@@ -656,10 +529,10 @@ export function SetupWizardPage() {
                           prev.map((row, j) =>
                             j === i
                               ? {
-                                  ...row,
                                   // Keep `role` aligned with the first
                                   // selection so the legacy single-role
                                   // back-end column stays populated.
+                                  ...row,
                                   role: next[0] ?? row.role,
                                   roles: next,
                                 }
@@ -709,12 +582,19 @@ export function SetupWizardPage() {
             </button>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" onClick={() => setStep(1)}>
+            <button type="button" onClick={() => setStep(0)}>
               {t("common.back")}
             </button>
             <button
               type="button"
-              onClick={submitWizard}
+              onClick={() => submitWizard(false)}
+              disabled={submit.isPending}
+            >
+              Skip for now
+            </button>
+            <button
+              type="button"
+              onClick={() => submitWizard(true)}
               disabled={submit.isPending}
             >
               {submit.isPending ? "Running setup…" : "Finish setup"}
@@ -728,7 +608,7 @@ export function SetupWizardPage() {
         </div>
       )}
 
-      {step === 3 && submit.data && (
+      {step === 2 && submit.data && (
         <div style={{ display: "grid", gap: 12 }}>
           <h2>Setup complete</h2>
           <ul style={{ fontSize: 13 }}>
@@ -736,13 +616,6 @@ export function SetupWizardPage() {
               CoA template: <code>{submit.data.coa_template_used}</code>
             </li>
             <li>
-              {/* locale_used reflects the locale the backend persisted
-                  after its resolver downgrade. May differ from the
-                  effectiveLocale the wizard rendered with (e.g. the
-                  user picked "hi" in step 0 but the backend
-                  downgraded to "en" because hi.json doesn't ship).
-                  Showing the persisted value is the source of truth
-                  for what subsequent sessions will render against. */}
               {t("wizard.complete.locale_used", {
                 locale: localeInfo(submit.data.locale_used).name,
                 tag: submit.data.locale_used,
@@ -752,7 +625,14 @@ export function SetupWizardPage() {
             <li>Roles seeded: {submit.data.roles_inserted}</li>
             <li>Users invited: {submit.data.users_inserted}</li>
           </ul>
-          <div>
+          <p style={{ fontSize: 13, color: "#6b7280" }}>
+            Next, work through your <strong>Getting Started</strong> checklist
+            to create your first contact, send an invoice, and import data.
+          </p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" onClick={() => navigate("/onboarding")}>
+              Open Getting Started
+            </button>
             <button type="button" onClick={() => navigate("/")}>
               Go to tenant home
             </button>

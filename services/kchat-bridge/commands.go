@@ -238,9 +238,11 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.budgetCommand(ctx, req)
 	case "landed-cost":
 		return d.landedCostCmd(ctx, req)
+	case "getting-started", "getting_started":
+		return d.gettingStarted(ctx, req)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /project, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /return, /requisition, /stock, /reverse-stock-move, /batch, /work-order (also /wo, /workorder), /bom, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /shift, /cycle-count, /budget, /landed-cost, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /project, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /return, /requisition, /stock, /reverse-stock-move, /batch, /work-order (also /wo, /workorder), /bom, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /shift, /cycle-count, /budget, /landed-cost, /getting-started, /help",
 		}, nil
 	default:
 		return CommandResponse{
@@ -1437,6 +1439,111 @@ func (d *CommandDispatcher) dashboardDigest(ctx context.Context, req CommandRequ
 	}
 	return CommandResponse{
 		Text: fmt.Sprintf("Dashboard digest — %s", match.Name),
+		Card: &card,
+	}, nil
+}
+
+// gettingStartedStep mirrors the step shape the onboarding wizard
+// seeds onto the Getting Started checklist (tasks.task KRecord with
+// data.onboarding == "checklist"); see
+// internal/tenant/wizard.go gettingStartedSteps.
+type gettingStartedStep struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	Done  bool   `json:"done"`
+	Link  string `json:"link"`
+}
+
+type gettingStartedData struct {
+	Title      string               `json:"title"`
+	Onboarding string               `json:"onboarding"`
+	Dismissed  bool                 `json:"dismissed"`
+	Steps      []gettingStartedStep `json:"steps"`
+}
+
+// gettingStarted posts the tenant's onboarding checklist as a KChat
+// card with one action button per incomplete step, deep-linking to
+// the page that completes it. It reads the checklist seeded by the
+// setup wizard (the tasks.task KRecord with data.onboarding ==
+// "checklist") rather than hard-coding the steps so the card always
+// reflects the operator's real progress.
+func (d *CommandDispatcher) gettingStarted(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if req.TenantID == uuid.Nil {
+		return CommandResponse{Text: "/getting-started: tenant context required"}, nil
+	}
+	if d.records == nil {
+		return CommandResponse{Text: "/getting-started: record store not configured for this deployment"}, nil
+	}
+
+	tasks, err := d.records.List(ctx, req.TenantID, record.ListFilter{
+		KType: "tasks.task",
+		Limit: 100,
+	})
+	if err != nil {
+		return CommandResponse{}, err
+	}
+
+	var checklist *gettingStartedData
+	for i := range tasks {
+		var data gettingStartedData
+		if err := json.Unmarshal(tasks[i].Data, &data); err != nil {
+			continue
+		}
+		if data.Onboarding == "checklist" {
+			checklist = &data
+			break
+		}
+	}
+	if checklist == nil {
+		return CommandResponse{
+			Text: "No Getting Started checklist found for this workspace yet. It is created automatically when your tenant is set up.",
+		}, nil
+	}
+
+	done := 0
+	for _, s := range checklist.Steps {
+		if s.Done {
+			done++
+		}
+	}
+	title := checklist.Title
+	if title == "" {
+		title = "Getting Started"
+	}
+
+	card := Card{
+		Title:    title,
+		Subtitle: fmt.Sprintf("%d of %d steps complete", done, len(checklist.Steps)),
+	}
+	base := strings.TrimRight(d.dashboardBase, "/")
+	for _, s := range checklist.Steps {
+		status := "○"
+		if s.Done {
+			status = "✓"
+		}
+		card.Fields = append(card.Fields, CardKV{
+			Label: status,
+			Value: s.Label,
+		})
+		// Surface an action button for the steps still to do so the
+		// card reads as a to-do list, not a status report. Completed
+		// steps don't need a CTA. Links require a configured base URL.
+		if !s.Done && s.Link != "" && base != "" {
+			card.Actions = append(card.Actions, CardLink{
+				Label: s.Label,
+				URL:   base + s.Link,
+			})
+		}
+	}
+	if base != "" {
+		card.Actions = append(card.Actions, CardLink{
+			Label: "Open checklist",
+			URL:   base + "/onboarding",
+		})
+	}
+
+	return CommandResponse{
+		Text: fmt.Sprintf("%s — %d of %d steps complete", title, done, len(checklist.Steps)),
 		Card: &card,
 	}, nil
 }
