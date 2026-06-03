@@ -10,6 +10,15 @@ import { App } from "./App";
 // package later (or splitting it across multiple files) doesn't
 // require an apps/web code change.
 import "@kapp/ui/styles/globals.css";
+import { postIdentityToServiceWorker } from "./lib/swIdentity";
+import { registerPOSReplay } from "./lib/posReplay";
+
+// Register app-lifetime offline replay handlers BEFORE first render so
+// the shell-level drainAll() (OfflineIndicator) can replay queued
+// mutations on reconnect regardless of which route is mounted — not only
+// while the originating page happens to be open. Unrelated to the SW
+// below: the offline queue works in dev/test too (plain IndexedDB).
+registerPOSReplay();
 
 const queryClient = new QueryClient();
 
@@ -25,3 +34,24 @@ ReactDOM.createRoot(rootEl).render(
     </QueryClientProvider>
   </React.StrictMode>
 );
+
+// Register the PWA service worker (public/sw.js) for offline support
+// and installability. Only in production builds: in dev, Vite's HMR
+// and the unhashed module graph make a caching SW actively harmful
+// (it would serve stale modules), and the test/SSR environments have
+// no `navigator.serviceWorker`. Registration failures are swallowed —
+// the app must work without the SW.
+if (import.meta.env.PROD && "serviceWorker" in navigator) {
+  // Kick off the identity handshake immediately (not gated on `load`) so
+  // a controlling SW can invalidate another user's cache as early as
+  // possible. Re-post if the controller changes mid-session.
+  void postIdentityToServiceWorker();
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    void postIdentityToServiceWorker();
+  });
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+      // Registration is best-effort; the app still works uncached.
+    });
+  });
+}

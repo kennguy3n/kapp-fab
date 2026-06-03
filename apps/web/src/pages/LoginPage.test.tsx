@@ -1,10 +1,18 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { server } from "../test/msw/server";
 import { LoginPage } from "./LoginPage";
+import { postIdentityToServiceWorker } from "../lib/swIdentity";
+
+// On a credential change the SPA must re-post the SW identity (without a
+// full reload) so the service worker drops the prior user's cached API
+// reads. Mock the helper so we can assert LoginPage invokes it.
+vi.mock("../lib/swIdentity", () => ({
+  postIdentityToServiceWorker: vi.fn(() => Promise.resolve()),
+}));
 
 // LoginPage talks to POST /api/v1/auth/sso through the raw fetch API
 // (not the ApiClient), so we exercise it through MSW rather than a
@@ -26,6 +34,7 @@ function renderLogin(initialEntry = "/login") {
 describe("LoginPage", () => {
   beforeEach(() => {
     localStorage.clear();
+    vi.mocked(postIdentityToServiceWorker).mockClear();
   });
   afterEach(() => {
     localStorage.clear();
@@ -42,6 +51,8 @@ describe("LoginPage", () => {
     await screen.findByText("Home dashboard");
     expect(localStorage.getItem("kapp.tenant")).toBe("acme");
     expect(localStorage.getItem("kapp.token")).toBe("dev-token-123");
+    // Identity re-posted to the SW after the credential change.
+    expect(postIdentityToServiceWorker).toHaveBeenCalledTimes(1);
   });
 
   it("exchanges a manually pasted KChat auth code via POST /auth/sso", async () => {
@@ -60,6 +71,8 @@ describe("LoginPage", () => {
       "00000000-0000-4000-8000-000000000001",
     );
     expect(localStorage.getItem("kapp.expires_at")).not.toBeNull();
+    // Identity re-posted to the SW after the SSO credential change.
+    expect(postIdentityToServiceWorker).toHaveBeenCalledTimes(1);
   });
 
   it("auto-exchanges the ?code= query param on mount", async () => {
@@ -84,6 +97,8 @@ describe("LoginPage", () => {
     expect(await screen.findByText(/SSO failed \(401\)/i)).toBeInTheDocument();
     expect(screen.queryByText("Home dashboard")).not.toBeInTheDocument();
     expect(localStorage.getItem("kapp.token")).toBeNull();
+    // No credential change, so the SW identity is not re-posted.
+    expect(postIdentityToServiceWorker).not.toHaveBeenCalled();
     // Button is re-enabled so the user can retry.
     expect(screen.getByRole("button", { name: /Continue/i })).not.toBeDisabled();
   });

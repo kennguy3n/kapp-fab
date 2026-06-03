@@ -1,4 +1,10 @@
-import { lazy, Suspense, type ComponentType } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useState,
+  type ComponentType,
+} from "react";
 import {
   Link,
   NavLink,
@@ -28,7 +34,16 @@ import {
 import { api } from "./lib/api";
 import { NotificationBell } from "./components/NotificationBell";
 import { LocaleSwitcher } from "./components/LocaleSwitcher";
+import { MobileNav } from "./components/MobileNav";
+import { MobileSheet } from "./components/MobileSheet";
+import { OfflineIndicator } from "./components/OfflineIndicator";
+import { useCloseOnRouteChange } from "./lib/useCloseOnRouteChange";
 import { LocaleProvider } from "./lib/i18n";
+
+// Deep link into the host KChat client for the mobile Chat tab.
+// Overridable per-deployment via VITE_KCHAT_URL; defaults to the
+// kchat:// custom scheme the desktop/mobile KChat clients register.
+const KCHAT_DEEP_LINK = import.meta.env.VITE_KCHAT_URL || "kchat://";
 
 /**
  * Route-level code splitting.  Every page is loaded on first
@@ -719,8 +734,48 @@ function AppNavLink({ to, label }: { to: string; label: string }) {
   );
 }
 
+/**
+ * Subscribe to a CSS media query. The initial state is read
+ * synchronously from `matchMedia` so the first render already matches
+ * the viewport (no flash of the wrong layout), and a `change` listener
+ * keeps it live across resizes / device-orientation changes. Falls back
+ * to `false` where `matchMedia` is unavailable (SSR / older test envs).
+ */
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia(query).matches
+      : false,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function")
+      return;
+    const mql = window.matchMedia(query);
+    const onChange = () => setMatches(mql.matches);
+    onChange();
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
+
 function AppShell() {
   const location = useLocation();
+  // Tailwind's `md` breakpoint. Used to MOUNT desktop-only header
+  // controls (rather than just CSS-hiding them) so their effects don't
+  // run on mobile — see the NotificationBell note below.
+  const isDesktop = useMediaQuery("(min-width: 768px)");
+  // Which mobile bottom-sheet is open. The sidebar is hidden below the
+  // `md` breakpoint, so the bottom tab bar's "More" tab opens the full
+  // nav and "Notifications" opens the inbox in a sheet.
+  const [mobileSheet, setMobileSheet] = useState<
+    "notifications" | "more" | null
+  >(null);
+  // Close the mobile sheet on any navigation — tapping a NavLink already
+  // calls onClose, but browser back/forward (the primary dismiss gesture
+  // on mobile) changes the route without it, which would otherwise leave
+  // the sheet overlaying the new page.
+  useCloseOnRouteChange(() => setMobileSheet(null));
   const featuresQuery = useQuery({
     queryKey: ["tenant-features", tenantKey()],
     queryFn: () => api.listTenantFeatures(tenantKey()),
@@ -787,7 +842,9 @@ function AppShell() {
 
   return (
     <div className="flex min-h-screen bg-bg">
-      <Sidebar defaultCollapsed={false}>
+      {/* Desktop/tablet sidebar — hidden on mobile (<768px), where the
+          bottom MobileNav + the "More" sheet take over. */}
+      <Sidebar defaultCollapsed={false} className="hidden md:flex">
         <SidebarHeader>
           <Link to="/" className="flex items-center gap-2">
             <div className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-accent-fg font-bold">
@@ -830,10 +887,22 @@ function AppShell() {
               </Badge>
             )}
             <LocaleSwitcher className="hidden md:inline-flex w-auto" />
-            <NotificationBell />
+            {/* Desktop only, and UNMOUNTED (not just CSS-hidden) on
+                mobile. On mobile the bottom MobileNav owns the
+                Notifications surface (its tab opens the inbox in a
+                full-width sheet); a second header bell would be a
+                duplicate entry point with a 360px dropdown that
+                overflows narrow viewports. Unmounting also stops the
+                bell's 30s notifications poll from running on viewports
+                where its badge is never shown. `isDesktop` is read
+                synchronously on first render, so there's no flash. */}
+            {isDesktop && <NotificationBell />}
           </div>
         </header>
-        <div className="flex-1 p-6 overflow-auto">
+        <OfflineIndicator />
+        {/* Extra bottom padding on mobile so the fixed MobileNav bar
+            doesn't overlap the last of the scrollable content. */}
+        <div className="flex-1 overflow-auto p-6 pb-20 md:pb-6">
           <Suspense fallback={<ShellRouteFallback />}>
             <Routes>
               <Route path="/" element={<DashboardPage />} />
@@ -1002,6 +1071,23 @@ function AppShell() {
           </Suspense>
         </div>
       </main>
+
+      <MobileNav
+        chatHref={KCHAT_DEEP_LINK}
+        activeSheet={mobileSheet}
+        onNotificationsClick={() =>
+          setMobileSheet((s) => (s === "notifications" ? null : "notifications"))
+        }
+        onMoreClick={() => setMobileSheet((s) => (s === "more" ? null : "more"))}
+      />
+
+      {mobileSheet && (
+        <MobileSheet
+          mode={mobileSheet}
+          sections={visible}
+          onClose={() => setMobileSheet(null)}
+        />
+      )}
     </div>
   );
 }

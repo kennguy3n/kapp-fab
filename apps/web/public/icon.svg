@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Kapp">
+  <rect width="512" height="512" rx="96" fill="#2563eb" />
+  <path
+    d="M170 116h54v110l104-110h66L290 254l108 142h-68L224 268v128h-54z"
+    fill="#ffffff"
+  />
+</svg>
