@@ -280,3 +280,78 @@ func TestTenantMiddleware_ProductionRejectsHeaderPath(t *testing.T) {
 		}
 	})
 }
+
+// TestRequiresJWTAtBoot pins the shared boot-gate predicate used by
+// services/api and both sidecars (importer, agent-tools): outside a
+// development environment a service must refuse to boot without a
+// signer (RequireJWT defaults true), while development and an explicit
+// KAPP_REQUIRE_JWT=0 opt-out keep the legacy header bridge available.
+func TestRequiresJWTAtBoot(t *testing.T) {
+	cases := []struct {
+		name       string
+		env        string
+		requireJWT bool
+		want       bool
+	}{
+		{"empty env (dev) does not require", "", true, false},
+		{"development does not require", "development", true, false},
+		{"dev alias does not require", "dev", true, false},
+		{"test env does not require", "test", true, false},
+		{"production default requires", "production", true, true},
+		{"prod alias default requires", "prod", true, true},
+		{"staging default requires", "staging", true, true},
+		{"production opt-out does not require", "production", false, false},
+		{"staging opt-out does not require", "staging", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{Env: tc.env, RequireJWT: tc.requireJWT}
+			if got := cfg.RequiresJWTAtBoot(); got != tc.want {
+				t.Errorf("RequiresJWTAtBoot(env=%q, requireJWT=%v) = %v; want %v",
+					tc.env, tc.requireJWT, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRequiresJWTAtBoot_ViaLoadConfig exercises the real LoadConfig →
+// RequiresJWTAtBoot path (rather than a hand-built Config), pinning the
+// gate against LoadConfig's actual defaulting: KAPP_REQUIRE_JWT
+// defaults true and KAPP_ENV drives IsNonDev. REDIS_URL is supplied for
+// the staging cases because KAPP_REQUIRE_REDIS also defaults true
+// outside development and would otherwise fail Validate().
+func TestRequiresJWTAtBoot_ViaLoadConfig(t *testing.T) {
+	cases := []struct {
+		name       string
+		env        string
+		requireJWT string // raw KAPP_REQUIRE_JWT ("" = unset → defaults true)
+		redisURL   string
+		want       bool
+	}{
+		{"unset env defaults to dev → no boot gate", "", "", "", false},
+		{"staging default requires JWT at boot", "staging", "", "redis://localhost:6379", true},
+		{"staging opt-out disables boot gate", "staging", "0", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DB_URL", "postgres://localhost/test")
+			t.Setenv("KAPP_ENV", tc.env)
+			t.Setenv("KAPP_REQUIRE_JWT", tc.requireJWT)
+			t.Setenv("REDIS_URL", tc.redisURL)
+			if tc.redisURL == "" {
+				t.Setenv("KAPP_REQUIRE_REDIS", "0")
+			} else {
+				t.Setenv("KAPP_REQUIRE_REDIS", "")
+			}
+
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if got := cfg.RequiresJWTAtBoot(); got != tc.want {
+				t.Errorf("RequiresJWTAtBoot via LoadConfig (env=%q, requireJWT=%q) = %v; want %v",
+					tc.env, tc.requireJWT, got, tc.want)
+			}
+		})
+	}
+}
