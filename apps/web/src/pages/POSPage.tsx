@@ -3,11 +3,12 @@ import { useQuery } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
 import { api } from "../lib/api";
 import {
-  drainAll,
+  countQueue,
+  drainQueue,
   enqueue,
-  listQueue,
   registerReplayHandler,
   subscribeQueue,
+  type QueuedMutation,
 } from "../lib/offlineQueue";
 
 const KTYPE_PROFILE = "sales.pos_profile";
@@ -81,8 +82,7 @@ export function POSPage() {
 
   const refreshQueueCount = useCallback(async () => {
     try {
-      const pending = await listQueue(POS_MUTATION_TYPE);
-      setQueueCount(pending.length);
+      setQueueCount(await countQueue(POS_MUTATION_TYPE));
     } catch {
       // IndexedDB unavailable (e.g. private mode) — leave count at 0.
     }
@@ -108,25 +108,27 @@ export function POSPage() {
   //     finish) so a cashier reopening POS offline sees queued work right
   //     away, and keep it fresh as the queue changes.
   useEffect(() => {
-    const unregister = registerReplayHandler(
-      POS_MUTATION_TYPE,
-      async (mutation) => {
-        const payload = mutation.payload as POSFinalizePayload;
-        await api.finalizePOSInvoice(payload.posInvoiceId, mutation.id);
-      },
-    );
+    const replay = async (mutation: QueuedMutation) => {
+      const payload = mutation.payload as POSFinalizePayload;
+      await api.finalizePOSInvoice(payload.posInvoiceId, mutation.id);
+    };
+    const unregister = registerReplayHandler(POS_MUTATION_TYPE, replay);
     const unsubscribe = subscribeQueue(() => void refreshQueueCount());
 
-    // Surface any already-pending work before attempting a drain.
+    // Surface any already-pending work immediately, then replay our own
+    // type DIRECTLY via drainQueue — not the shell's drainAll(). The
+    // always-mounted OfflineIndicator mounts before this page and may
+    // have already started a coalesced drainAll() pass before `replay`
+    // was registered; joining that in-flight pass would skip POS
+    // entirely, stranding finalizes queued in a prior session until the
+    // connection next cycles. Draining our type here is deterministic
+    // regardless of effect ordering. The shell still owns the GLOBAL
+    // drain on reconnect (every handler is registered by then).
     void refreshQueueCount();
-    const drain = () => void drainAll().then(() => refreshQueueCount());
-    drain();
-    const onOnline = () => drain();
-    window.addEventListener("online", onOnline);
+    void drainQueue(replay, POS_MUTATION_TYPE).then(() => refreshQueueCount());
     return () => {
       unregister();
       unsubscribe();
-      window.removeEventListener("online", onOnline);
     };
   }, [refreshQueueCount]);
 

@@ -16,6 +16,15 @@
  *   2. Read API caching: GET /api/* is network-first with a cached
  *      fallback, and successful responses are stored so the same read
  *      works offline (stale-while-revalidate semantics).
+ *   3. Per-identity isolation of the read cache: cached GET /api/*
+ *      responses are keyed only by URL (Cache API default) and carry no
+ *      auth context, so on a shared device (e.g. a POS terminal) the
+ *      next user must not be served the previous user's cached reads.
+ *      The app posts its current identity (a non-reversible hash of the
+ *      active tenant + token) via postMessage; when it changes, the SW
+ *      drops the API cache. There is no logout flow in the app today, so
+ *      this identity-change signal — sent on every load — is what bounds
+ *      one user's cached data to that user.
  *
  * Why the SW deliberately leaves mutations alone:
  *   Transparently intercepting POST/PUT/PATCH/DELETE and synthesising a
@@ -37,7 +46,13 @@
 const CACHE_VERSION = "v1";
 const STATIC_CACHE = `kapp-static-${CACHE_VERSION}`;
 const API_CACHE = `kapp-api-${CACHE_VERSION}`;
+// Small bookkeeping cache (survives SW restarts) holding the last
+// identity the API cache was populated for. Kept out of the activate
+// cleanup below so the identity persists across deploys.
+const META_CACHE = `kapp-meta-${CACHE_VERSION}`;
+const IDENTITY_KEY = "/__kapp_identity__";
 const APP_SHELL = ["/", "/manifest.json", "/icon.svg"];
+const KNOWN_CACHES = [STATIC_CACHE, API_CACHE, META_CACHE];
 
 // --- Lifecycle -------------------------------------------------------
 self.addEventListener("install", (event) => {
@@ -56,12 +71,36 @@ self.addEventListener("activate", (event) => {
       .then((keys) =>
         Promise.all(
           keys
-            .filter((k) => k !== STATIC_CACHE && k !== API_CACHE)
+            .filter((k) => !KNOWN_CACHES.includes(k))
             .map((k) => caches.delete(k)),
         ),
       )
       .then(() => self.clients.claim()),
   );
+});
+
+// --- Identity isolation ---------------------------------------------
+// The app posts { type: "kapp:identity", id } whenever it loads. If the
+// identity differs from the one the API cache was last populated for, we
+// drop the API cache so a different user on a shared device can't read
+// the previous user's cached responses. The identity is an opaque hash
+// computed app-side (see src/main.tsx) — the SW never sees the raw
+// token. The static/app-shell cache holds only public, non-tenant assets
+// so it is intentionally left untouched.
+async function applyIdentity(id) {
+  const meta = await caches.open(META_CACHE);
+  const prevRes = await meta.match(IDENTITY_KEY);
+  const prev = prevRes ? await prevRes.text() : null;
+  if (prev === id) return;
+  await caches.delete(API_CACHE);
+  await meta.put(IDENTITY_KEY, new Response(id));
+}
+
+self.addEventListener("message", (event) => {
+  const data = event.data;
+  if (data && data.type === "kapp:identity") {
+    event.waitUntil(applyIdentity(String(data.id ?? "")));
+  }
 });
 
 // --- Fetch routing ---------------------------------------------------

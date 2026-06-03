@@ -27,7 +27,10 @@ import {
   initials,
 } from "@kapp/ui";
 import { api } from "./lib/api";
-import { NotificationBell } from "./components/NotificationBell";
+import {
+  NotificationBell,
+  NotificationInbox,
+} from "./components/NotificationBell";
 import { LocaleSwitcher } from "./components/LocaleSwitcher";
 import { MobileNav } from "./components/MobileNav";
 import { OfflineIndicator } from "./components/OfflineIndicator";
@@ -1099,7 +1102,12 @@ export function MobileSheet({
         </div>
         <div className="flex-1 overflow-y-auto p-3">
           {mode === "notifications" ? (
-            <NotificationBell />
+            // The sheet IS the inbox surface, so embed the inbox list
+            // directly. Rendering <NotificationBell /> here would nest a
+            // popover-trigger button (which opens its own absolutely-
+            // positioned dropdown) inside the sheet — the wrong control
+            // for a full-screen panel.
+            <NotificationInbox />
           ) : (
             // Tapping any nav link navigates and closes the sheet — the
             // click bubbles up to this wrapper's handler. These are plain

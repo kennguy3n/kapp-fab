@@ -166,4 +166,32 @@ describe("offlineQueue", () => {
     expect(calls).toBe(1);
     unregister();
   });
+
+  // Regression: the shell (OfflineIndicator) mounts before a page can
+  // register its replay handler, so its drainAll() runs against an empty
+  // handler map and the coalescing `drainInFlight` would otherwise make
+  // a page's subsequent drainAll() join that handler-less pass — skipping
+  // replay. A page must therefore drain its OWN type via drainQueue,
+  // which is independent of drainAll coalescing.
+  it("direct drainQueue replays even while a handler-less drainAll is in flight", async () => {
+    await enqueue(mutation("p1", "pos.finalize"));
+
+    // Shell drains first with nothing registered (the real mount order).
+    const shellPass = drainAll();
+
+    // Page registers its handler and drains its own type directly.
+    const handled: string[] = [];
+    const replay = async (m: QueuedMutation) => {
+      handled.push(m.id);
+    };
+    const unregister = registerReplayHandler("pos.finalize", replay);
+    await drainQueue(replay, "pos.finalize");
+    await shellPass;
+
+    // The entry was replayed by the direct drain, not stranded by the
+    // coalesced handler-less drainAll pass.
+    expect(handled).toEqual(["p1"]);
+    expect((await listQueue("pos.finalize")).length).toBe(0);
+    unregister();
+  });
 });

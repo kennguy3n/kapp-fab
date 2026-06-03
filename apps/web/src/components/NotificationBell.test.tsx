@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
 import { server } from "../test/msw/server";
-import { NotificationBell } from "./NotificationBell";
+import { NotificationBell, NotificationInbox } from "./NotificationBell";
 
 // NotificationBell fetches /api/v1/notifications directly (raw fetch),
 // so the component is exercised end-to-end through MSW. The default
@@ -40,6 +40,17 @@ function renderBell() {
   return render(
     <QueryClientProvider client={qc}>
       <NotificationBell />
+    </QueryClientProvider>,
+  );
+}
+
+function renderInbox() {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={qc}>
+      <NotificationInbox />
     </QueryClientProvider>,
   );
 }
@@ -148,5 +159,33 @@ describe("NotificationBell", () => {
     renderBell();
     await waitFor(() => expect(seen.tenant).toBe("acme"));
     expect(seen.auth).toBe("Bearer tok");
+  });
+});
+
+describe("NotificationInbox", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem("kapp.tenant", "acme");
+    localStorage.setItem("kapp.token", "tok");
+  });
+
+  // Regression: the mobile notifications sheet embeds the inbox directly.
+  // It must render the list as in-flow content WITHOUT a popover-trigger
+  // button to tap first (rendering <NotificationBell /> there would nest
+  // a bell button + absolutely-positioned dropdown inside the sheet).
+  it("renders the notification list inline, with no bell trigger", async () => {
+    server.use(
+      http.get(`${API}/notifications`, () =>
+        HttpResponse.json([notif({ title: "Approval needed", body: "PO-42" })]),
+      ),
+    );
+    renderInbox();
+    // List content is present immediately (no click needed)...
+    expect(await screen.findByText("Approval needed")).toBeInTheDocument();
+    expect(screen.getByText("PO-42")).toBeInTheDocument();
+    // ...and there is no "Notifications" popover-trigger bell button.
+    expect(
+      screen.queryByRole("button", { name: /Notifications/i }),
+    ).not.toBeInTheDocument();
   });
 });
