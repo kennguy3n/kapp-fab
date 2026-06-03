@@ -2,7 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
 import { api } from "../lib/api";
-import { drainQueue, enqueue, listQueue } from "../lib/offlineQueue";
+import {
+  drainAll,
+  enqueue,
+  listQueue,
+  registerReplayHandler,
+  subscribeQueue,
+} from "../lib/offlineQueue";
 
 const KTYPE_PROFILE = "sales.pos_profile";
 const KTYPE_INVOICE = "sales.pos_invoice";
@@ -93,32 +99,33 @@ export function POSPage() {
   const subtotal = cart.reduce((s, l) => s + l.qty * l.unitPrice, 0);
   const total = subtotal; // tax stub — real tax pack runs server-side
 
-  // Drain the offline queue once on mount and whenever the network
-  // flips back to online. Drains are best-effort; failures stay in
-  // the queue and surface in the status strip so the cashier knows
-  // there's pending work.
+  // Wire POS into the shared offline queue:
+  //   - Register the typed replay handler so the shell-level drainAll()
+  //     (OfflineIndicator) can replay POS finalizes on reconnect even when
+  //     this page isn't mounted. Each retry reuses the queue-entry id as
+  //     the idempotency key so the server collapses duplicates.
+  //   - Show the pending count IMMEDIATELY (don't wait for a drain to
+  //     finish) so a cashier reopening POS offline sees queued work right
+  //     away, and keep it fresh as the queue changes.
   useEffect(() => {
-    let cancelled = false;
-    const drain = async () => {
-      try {
-        // drainQueue removes each entry it successfully replays and
-        // leaves failures in place; it reads the store fresh each call
-        // so a stale 'online' listener racing a finalize still starts
-        // from the canonical persisted slice.
-        await drainQueue(async (mutation) => {
-          const payload = mutation.payload as POSFinalizePayload;
-          await api.finalizePOSInvoice(payload.posInvoiceId, mutation.id);
-        }, POS_MUTATION_TYPE);
-      } catch {
-        // IndexedDB unavailable — nothing to drain.
-      }
-      if (!cancelled) await refreshQueueCount();
-    };
-    void drain();
-    const onOnline = () => void drain();
+    const unregister = registerReplayHandler(
+      POS_MUTATION_TYPE,
+      async (mutation) => {
+        const payload = mutation.payload as POSFinalizePayload;
+        await api.finalizePOSInvoice(payload.posInvoiceId, mutation.id);
+      },
+    );
+    const unsubscribe = subscribeQueue(() => void refreshQueueCount());
+
+    // Surface any already-pending work before attempting a drain.
+    void refreshQueueCount();
+    const drain = () => void drainAll().then(() => refreshQueueCount());
+    drain();
+    const onOnline = () => drain();
     window.addEventListener("online", onOnline);
     return () => {
-      cancelled = true;
+      unregister();
+      unsubscribe();
       window.removeEventListener("online", onOnline);
     };
   }, [refreshQueueCount]);

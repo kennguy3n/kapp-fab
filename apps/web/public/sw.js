@@ -95,6 +95,14 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(handleStatic(request));
 });
 
+// Write-through to the cache that never rejects into the caller. cache.put
+// can fail when storage quota is exceeded; since the response is already
+// being returned, a failed cache write is non-fatal and is swallowed here
+// so it doesn't surface as an unhandled promise rejection in the SW.
+function cachePut(cache, key, res) {
+  return cache.put(key, res).catch(() => {});
+}
+
 // Network-first for document navigations; fall back to the cached app
 // shell so an offline cold start still renders the SPA. A successful
 // fetch refreshes the cached "/" shell so the offline fallback doesn't
@@ -104,7 +112,7 @@ async function handleNavigation(request) {
   const cache = await caches.open(STATIC_CACHE);
   try {
     const res = await fetch(request);
-    if (res && res.ok) cache.put("/", res.clone());
+    if (res && res.ok) cachePut(cache, "/", res.clone());
     return res;
   } catch {
     const shell = (await cache.match("/")) || (await cache.match(request));
@@ -118,7 +126,7 @@ async function handleStatic(request) {
   const cached = await cache.match(request);
   const network = fetch(request)
     .then((res) => {
-      if (res && res.ok) cache.put(request, res.clone());
+      if (res && res.ok) cachePut(cache, request, res.clone());
       return res;
     })
     .catch(() => undefined);
@@ -130,7 +138,7 @@ async function handleApiRead(request) {
   const cache = await caches.open(API_CACHE);
   try {
     const res = await fetch(request);
-    if (res && res.ok) cache.put(request, res.clone());
+    if (res && res.ok) cachePut(cache, request, res.clone());
     return res;
   } catch {
     const cached = await cache.match(request);

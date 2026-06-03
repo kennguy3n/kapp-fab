@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, act, waitFor } from "@testing-library/react";
 
 const countQueue = vi.fn<() => Promise<number>>();
+const drainAll = vi.fn<() => Promise<void>>();
 let queueListener: (() => void) | null = null;
 const subscribeQueue = vi.fn((listener: () => void) => {
   queueListener = listener;
@@ -12,6 +13,7 @@ const subscribeQueue = vi.fn((listener: () => void) => {
 
 vi.mock("../lib/offlineQueue", () => ({
   countQueue: () => countQueue(),
+  drainAll: () => drainAll(),
   subscribeQueue: (listener: () => void) => subscribeQueue(listener),
 }));
 
@@ -29,6 +31,8 @@ describe("OfflineIndicator", () => {
   beforeEach(() => {
     countQueue.mockReset();
     countQueue.mockResolvedValue(0);
+    drainAll.mockReset();
+    drainAll.mockResolvedValue(undefined);
     subscribeQueue.mockClear();
     queueListener = null;
     setOnline(true);
@@ -105,6 +109,19 @@ describe("OfflineIndicator", () => {
     await waitFor(() =>
       expect(screen.getByRole("status")).toHaveTextContent(/5 changes queued/i),
     );
+  });
+
+  it("drives the global drain on mount and on reconnect", async () => {
+    render(<OfflineIndicator />);
+    await act(async () => {});
+    // Mounted → one drain attempt.
+    expect(drainAll).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+    });
+    // Reconnect → another drain so "syncing" is truthful from any page.
+    expect(drainAll).toHaveBeenCalledTimes(2);
   });
 
   it("reacts to the browser offline/online events", async () => {

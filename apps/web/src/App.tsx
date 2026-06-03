@@ -23,6 +23,7 @@ import {
   SidebarItem,
   SidebarToggle,
   TooltipProvider,
+  cn,
   initials,
 } from "@kapp/ui";
 import { api } from "./lib/api";
@@ -1053,7 +1054,7 @@ function AppShell() {
  * Rendered only on mobile (`md:hidden`) — on larger viewports the
  * sidebar/header already expose these surfaces.
  */
-function MobileSheet({
+export function MobileSheet({
   mode,
   sections,
   onClose,
@@ -1101,14 +1102,33 @@ function MobileSheet({
             <NotificationBell />
           ) : (
             // Tapping any nav link navigates and closes the sheet — the
-            // click bubbles up to this wrapper's handler.
+            // click bubbles up to this wrapper's handler. These are plain
+            // NavLinks (not SidebarGroup/SidebarItem): those call
+            // useSidebar() and throw outside a <Sidebar> provider, and the
+            // sheet is a sibling of the sidebar, not a descendant.
             <div onClick={onClose}>
               {sections.map((section) => (
-                <SidebarGroup key={section.title} title={section.title}>
+                <div key={section.title} className="mb-3">
+                  <p className="px-2 pb-1 text-xs font-semibold uppercase tracking-wide text-fg-muted">
+                    {section.title}
+                  </p>
                   {section.links.map((link) => (
-                    <AppNavLink key={link.to} to={link.to} label={link.label} />
+                    <NavLink
+                      key={link.to}
+                      to={link.to}
+                      className={({ isActive }) =>
+                        cn(
+                          "block rounded-md px-2 py-2 text-sm font-medium transition-colors",
+                          isActive
+                            ? "bg-accent/10 text-accent"
+                            : "text-fg hover:bg-bg-muted",
+                        )
+                      }
+                    >
+                      {link.label}
+                    </NavLink>
                   ))}
-                </SidebarGroup>
+                </div>
               ))}
             </div>
           )}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { countQueue, subscribeQueue } from "../lib/offlineQueue";
+import { countQueue, drainAll, subscribeQueue } from "../lib/offlineQueue";
 
 /**
  * OfflineIndicator is a shell-level banner that surfaces two related
@@ -10,8 +10,14 @@ import { countQueue, subscribeQueue } from "../lib/offlineQueue";
  *      cache) but the user should know writes are being deferred.
  *   2. Pending offline mutations — writes that failed while offline
  *      are persisted to the shared IndexedDB queue (offlineQueue.ts)
- *      by both the app (e.g. POS finalize) and the service worker
- *      (background-sync queue). The count reflects both sources.
+ *      by the app layer (e.g. POS finalize).
+ *
+ * Because it's always mounted in the shell, this component also OWNS
+ * the global drain: on reconnect (and on mount) it calls `drainAll()`,
+ * which replays every registered mutation type via its handler. That's
+ * what makes the "syncing" message truthful regardless of which page is
+ * open — previously a queued write only drained while POSPage happened
+ * to be mounted.
  *
  * The banner is hidden entirely when the app is online with an empty
  * queue, so it costs nothing in the common case.
@@ -44,16 +50,24 @@ export function OfflineIndicator() {
           // IndexedDB unavailable — treat as an empty queue.
         });
     };
+    // Drive the global drain on mount and on reconnect, then re-count.
+    // Re-count also fires whenever the queue changes so the banner
+    // shrinks as entries replay.
+    const drainThenRefresh = () => {
+      drainAll()
+        .catch(() => {
+          // Drain errors are handled per-entry inside the queue.
+        })
+        .finally(refresh);
+    };
     refresh();
-    // Re-count whenever the queue changes (in-app or service-worker
-    // writes) and whenever connectivity flips, since a reconnect
-    // triggers a drain that shrinks the queue.
+    drainThenRefresh();
     const unsubscribe = subscribeQueue(refresh);
-    window.addEventListener("online", refresh);
+    window.addEventListener("online", drainThenRefresh);
     return () => {
       cancelled = true;
       unsubscribe();
-      window.removeEventListener("online", refresh);
+      window.removeEventListener("online", drainThenRefresh);
     };
   }, []);
 

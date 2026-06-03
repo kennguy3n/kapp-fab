@@ -6,12 +6,13 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   clearQueue,
   countQueue,
+  drainAll,
   drainQueue,
   enqueue,
   listQueue,
+  registerReplayHandler,
   removeFromQueue,
   subscribeQueue,
-  QUEUE_CHANGED_EVENT,
   type QueuedMutation,
 } from "./offlineQueue";
 
@@ -118,42 +119,51 @@ describe("offlineQueue", () => {
     expect(listener).toHaveBeenCalledTimes(2);
   });
 
-  it("bridges service-worker postMessage events to subscribers", () => {
-    // jsdom has no navigator.serviceWorker; stand in a minimal
-    // EventTarget so the SW-message bridge in subscribeQueue is exercised.
-    const swTarget = new EventTarget();
-    const original = Object.getOwnPropertyDescriptor(navigator, "serviceWorker");
-    Object.defineProperty(navigator, "serviceWorker", {
-      value: swTarget,
-      configurable: true,
+  it("drainAll replays only registered types and removes succeeded entries", async () => {
+    await enqueue(mutation("p1", "pos.finalize"));
+    await enqueue(mutation("p2", "pos.finalize"));
+    await enqueue(mutation("o1", "other.kind"));
+
+    const handled: string[] = [];
+    const unregister = registerReplayHandler("pos.finalize", async (m) => {
+      handled.push(m.id);
     });
 
-    const listener = vi.fn();
-    const unsubscribe = subscribeQueue(listener);
+    await drainAll();
 
-    // The service worker posts this shape to its clients on a queue write.
-    swTarget.dispatchEvent(
-      new MessageEvent("message", { data: { type: QUEUE_CHANGED_EVENT } }),
-    );
-    expect(listener).toHaveBeenCalledTimes(1);
+    // Both pos.finalize entries replayed and removed; the unregistered
+    // "other.kind" entry is left untouched.
+    expect(handled.sort()).toEqual(["p1", "p2"]);
+    expect((await listQueue("pos.finalize")).length).toBe(0);
+    expect((await listQueue("other.kind")).map((m) => m.id)).toEqual(["o1"]);
 
-    // Unrelated messages are ignored.
-    swTarget.dispatchEvent(
-      new MessageEvent("message", { data: { type: "something-else" } }),
-    );
-    expect(listener).toHaveBeenCalledTimes(1);
+    unregister();
+  });
 
-    unsubscribe();
-    swTarget.dispatchEvent(
-      new MessageEvent("message", { data: { type: QUEUE_CHANGED_EVENT } }),
-    );
-    expect(listener).toHaveBeenCalledTimes(1);
+  it("drainAll leaves failed entries queued for a later pass", async () => {
+    await enqueue(mutation("p1", "pos.finalize"));
+    const unregister = registerReplayHandler("pos.finalize", async () => {
+      throw new Error("still offline");
+    });
 
-    if (original) Object.defineProperty(navigator, "serviceWorker", original);
-    else
-      Object.defineProperty(navigator, "serviceWorker", {
-        value: undefined,
-        configurable: true,
-      });
+    await drainAll();
+
+    expect((await listQueue("pos.finalize")).map((m) => m.id)).toEqual(["p1"]);
+    unregister();
+  });
+
+  it("drainAll coalesces concurrent calls into one in-flight pass", async () => {
+    await enqueue(mutation("p1", "pos.finalize"));
+    let calls = 0;
+    const unregister = registerReplayHandler("pos.finalize", async (m) => {
+      calls += 1;
+      void m;
+    });
+
+    await Promise.all([drainAll(), drainAll()]);
+
+    // The entry is replayed exactly once despite two concurrent drains.
+    expect(calls).toBe(1);
+    unregister();
   });
 });

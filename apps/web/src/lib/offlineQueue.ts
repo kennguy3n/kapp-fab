@@ -2,21 +2,21 @@
 //
 // This generalises the offline-replay pattern that previously lived
 // inline in POSPage (a localStorage queue of pending POS finalize
-// calls). Two consumers share this one mechanism:
+// calls). Offline writes are owned entirely by the app layer (the
+// service worker deliberately does NOT intercept mutations — see the
+// header of public/sw.js for why a synthesised "queued" response would
+// corrupt the typed ApiClient). The flow is:
 //
-//   1. In-app code (POSPage, future mutation surfaces) enqueues a
-//      `QueuedMutation` when a write fails because the device is
-//      offline, then drains the queue on reconnect via `drainQueue`.
-//   2. The service worker (public/sw.js) writes to the SAME database
-//      ("kapp-offline" / "mutations" object store) when it intercepts
-//      a failed mutating `fetch`, and replays them under a Background
-//      Sync event. Because both writers target one store, the
-//      OfflineIndicator's pending count reflects queued work from
-//      either path.
+//   1. A surface (POSPage, future mutation surfaces) enqueues a
+//      `QueuedMutation` when a write fails because the device is offline.
+//   2. The surface registers a typed replay handler for its mutation
+//      `type` via `registerReplayHandler`.
+//   3. The always-mounted shell calls `drainAll()` on reconnect, which
+//      replays every registered kind with its idempotency key so retries
+//      collapse to a single server-side outcome.
 //
-// IndexedDB (not localStorage) is used because: it is available to
-// service workers (localStorage is not), it stores structured values
-// without manual JSON (de)serialisation, and it does not block the
+// IndexedDB (not localStorage) is used because it stores structured
+// values without manual JSON (de)serialisation and does not block the
 // main thread.
 
 const DB_NAME = "kapp-offline";
@@ -26,10 +26,7 @@ const STORE = "mutations";
 /**
  * Fired on `window` whenever the queue changes (enqueue / remove /
  * clear). Components such as OfflineIndicator subscribe via
- * `subscribeQueue` to refresh their pending count. The service worker
- * cannot dispatch into the page, so SW-side writes additionally
- * `postMessage` the page (see public/sw.js) which re-dispatches this
- * event — `subscribeQueue` wires up that bridge.
+ * `subscribeQueue` to refresh their pending count.
  */
 export const QUEUE_CHANGED_EVENT = "kapp:offline-queue-changed";
 
@@ -72,13 +69,26 @@ function openDB(): Promise<IDBDatabase> {
     };
     req.onsuccess = () => {
       const db = req.result;
-      // If the connection is later force-closed (e.g. a version change
-      // from another tab), drop the cached promise so the next call
+      // If another tab opens the DB with a higher version, close this
+      // connection so we don't block its upgrade (and so that tab's
+      // open doesn't hang on `onblocked`). The matching `onclose` below
+      // drops the cached promise so the next call here reopens.
+      db.onversionchange = () => db.close();
+      // If the connection is later force-closed (e.g. the version change
+      // above, or eviction), drop the cached promise so the next call
       // reopens instead of handing out a dead connection.
       db.onclose = () => {
         dbPromise = null;
       };
       resolve(db);
+    };
+    // A version upgrade is blocked by another tab's still-open
+    // connection. Rather than leave `dbPromise` as a never-resolving
+    // promise (which would wedge the queue for the whole session),
+    // reject so the caller can retry once the other tab releases.
+    req.onblocked = () => {
+      dbPromise = null;
+      reject(req.error ?? new Error("open blocked by another connection"));
     };
     req.onerror = () => {
       // Don't cache the rejection: a transient open failure (storage
@@ -186,9 +196,12 @@ export interface DrainResult {
  * consumer can drain independently without stepping on each other).
  *
  * Draining is sequential by design: replays often have ordering or
- * rate constraints, and a failure mid-batch should stop spamming the
- * (likely still-offline) network — remaining entries simply stay
- * queued for the next drain.
+ * rate constraints. Every queued entry is attempted on each pass —
+ * a handler failure is recorded in `failed` and the entry is left in
+ * the queue for the next drain, but it does NOT abort the remaining
+ * entries (POS finalizes are independent, so one bad entry shouldn't
+ * strand the rest). When genuinely offline `fetch` rejects almost
+ * immediately, so this is N fast failures rather than N slow timeouts.
  */
 export async function drainQueue(
   handler: (mutation: QueuedMutation) => Promise<void>,
@@ -209,23 +222,72 @@ export async function drainQueue(
   return { succeeded, failed };
 }
 
+// --- Shell-level global drain ----------------------------------------
+//
+// A mutation can only be replayed by code that knows its typed shape
+// (idempotency key, endpoint, dependent IDs). So each surface that
+// enqueues a mutation kind registers a replay handler for its `type`;
+// the always-mounted shell (OfflineIndicator) then calls drainAll() on
+// reconnect to replay every registered kind — the queue no longer drains
+// only while the originating page happens to be mounted.
+
+type ReplayHandler = (mutation: QueuedMutation) => Promise<void>;
+const replayHandlers = new Map<string, ReplayHandler>();
+
+/**
+ * Register a replay handler for a mutation `type`. The shell-level
+ * `drainAll()` uses these to replay queued mutations regardless of which
+ * page is currently mounted. Returns an unregister function (safe to call
+ * even if a newer handler has since replaced this one).
+ */
+export function registerReplayHandler(
+  type: string,
+  handler: ReplayHandler,
+): () => void {
+  replayHandlers.set(type, handler);
+  return () => {
+    if (replayHandlers.get(type) === handler) replayHandlers.delete(type);
+  };
+}
+
+let drainInFlight: Promise<void> | null = null;
+
+/**
+ * Replay every registered mutation type once. Concurrent callers share a
+ * single in-flight pass, so a page mount plus an `online` event don't
+ * replay the same entries twice. Types with no registered handler are
+ * left untouched (their owning surface hasn't mounted yet this session).
+ */
+export function drainAll(): Promise<void> {
+  if (drainInFlight) return drainInFlight;
+  drainInFlight = (async () => {
+    for (const [type, handler] of replayHandlers) {
+      try {
+        await drainQueue(handler, type);
+      } catch {
+        // A throw here means the queue itself was unreadable (IndexedDB
+        // unavailable) — per-entry handler failures are swallowed inside
+        // drainQueue. Move on to the next type.
+      }
+    }
+  })().finally(() => {
+    drainInFlight = null;
+  });
+  return drainInFlight;
+}
+
 /**
  * Subscribe to queue-change notifications. Returns an unsubscribe
- * function. Fires for in-page mutations (via the window event) and —
- * because sw.js posts a message to its clients on every SW-side queue
- * write — for service-worker mutations too.
+ * function. Fires for every in-page queue write (enqueue / remove /
+ * clear). All writers are in-page — the service worker deliberately
+ * never touches the queue — so a single window event is sufficient.
  */
 export function subscribeQueue(listener: () => void): () => void {
   if (typeof window === "undefined") return () => undefined;
   const onEvent = () => listener();
-  const onMessage = (e: MessageEvent) => {
-    if (e.data && e.data.type === QUEUE_CHANGED_EVENT) listener();
-  };
   window.addEventListener(QUEUE_CHANGED_EVENT, onEvent);
-  navigator.serviceWorker?.addEventListener?.("message", onMessage);
   return () => {
     window.removeEventListener(QUEUE_CHANGED_EVENT, onEvent);
-    navigator.serviceWorker?.removeEventListener?.("message", onMessage);
   };
 }
 
