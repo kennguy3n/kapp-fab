@@ -187,12 +187,17 @@ func run() error {
 	//     /api/v1/agents/tools. The X-Tenant-ID header is ignored
 	//     once auth.Middleware is active.
 	//   - signer == nil + non-dev KAPP_ENV (default): refuse to boot.
-	//     KAPP_REQUIRE_JWT defaults to true outside development, so a
-	//     prod/staging deploy without a signer fails here instead of
-	//     booting into a 100%-403 state — platform.TenantMiddleware
-	//     rejects every request in production, so a sidecar that only
-	//     logged "running WITHOUT JWT auth" would be silently
-	//     non-functional. Operators opt out with KAPP_REQUIRE_JWT=0.
+	//     KAPP_REQUIRE_JWT defaults to true outside development. Without
+	//     this gate a non-dev deploy would degrade rather than fail, and
+	//     the failure mode differs by posture: in production
+	//     platform.TenantMiddleware rejects every request (it fails
+	//     closed when IsProductionEnv()), so a sidecar that only logged
+	//     "running WITHOUT JWT auth" would be silently non-functional
+	//     (100%-403); in staging the legacy X-Tenant-ID header path is
+	//     still served, so the sidecar would instead silently trust
+	//     caller-supplied tenant headers — the cross-tenant spoofing risk
+	//     this gate exists to close. Operators opt out with
+	//     KAPP_REQUIRE_JWT=0.
 	//   - signer == nil + development (or KAPP_REQUIRE_JWT=0): WARN +
 	//     legacy header path, bridge mode for clusters that have not
 	//     rolled JWT to their sidecars yet.
