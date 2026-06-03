@@ -128,24 +128,3 @@ func (c Config) PlanForPriceID(priceID string) string {
 func (c Config) RequiresPayment(plan string) bool {
 	return plan != tenant.PlanFree && c.PriceIDForPlan(plan) != ""
 }
-
-// EnrichPlan returns a copy of p with PriceID populated from the
-// environment's price-id map. PlanStore leaves PriceID empty because
-// the price ids are environment-specific (test vs live Stripe
-// accounts); the billing layer is the only component that knows them,
-// so the plan-list API enriches each row here before returning it to
-// the UI.
-func (c Config) EnrichPlan(p tenant.Plan) tenant.Plan {
-	p.PriceID = c.PriceIDForPlan(p.Name)
-	return p
-}
-
-// EnrichPlans applies EnrichPlan across a slice, returning a new
-// slice so the caller's input is left untouched.
-func (c Config) EnrichPlans(plans []tenant.Plan) []tenant.Plan {
-	out := make([]tenant.Plan, len(plans))
-	for i, p := range plans {
-		out[i] = c.EnrichPlan(p)
-	}
-	return out
-}

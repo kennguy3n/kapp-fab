@@ -76,20 +76,3 @@ func TestRequiresPayment(t *testing.T) {
 		}
 	}
 }
-
-func TestEnrichPlanPopulatesPriceID(t *testing.T) {
-	cfg := loadConfigWithPrices(t)
-	enriched := cfg.EnrichPlan(tenant.Plan{Name: tenant.PlanStarter})
-	if enriched.PriceID != "price_starter" {
-		t.Fatalf("EnrichPlan left PriceID = %q, want price_starter", enriched.PriceID)
-	}
-	// EnrichPlans must not mutate the caller's slice.
-	in := []tenant.Plan{{Name: tenant.PlanBusiness}}
-	out := cfg.EnrichPlans(in)
-	if in[0].PriceID != "" {
-		t.Fatal("EnrichPlans mutated the input slice")
-	}
-	if out[0].PriceID != "price_business" {
-		t.Fatalf("EnrichPlans price = %q, want price_business", out[0].PriceID)
-	}
-}

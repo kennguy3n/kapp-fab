@@ -525,7 +525,16 @@ func (s *Service) onSubscriptionDeleted(ctx context.Context, tenantID uuid.UUID,
 	if err != nil {
 		return fmt.Errorf("billing: parse subscription object: %w", err)
 	}
-	if sub, gerr := s.store.GetSubscriptionByTenant(ctx, tenantID); gerr == nil {
+	// A missing row (ErrNoSubscription) is fine — there's simply
+	// nothing to cancel — but any other error (e.g. a transient DB
+	// failure) must surface so the webhook returns non-2xx and Stripe
+	// retries; otherwise we'd downgrade the tenant below while leaving
+	// the subscription row stale with no self-healing guarantee.
+	sub, gerr := s.store.GetSubscriptionByTenant(ctx, tenantID)
+	if gerr != nil && !errors.Is(gerr, ErrNoSubscription) {
+		return gerr
+	}
+	if gerr == nil {
 		sub.Status = SubStatusCanceled
 		sub.Plan = tenant.PlanFree
 		sub.CancelAtPeriodEnd = obj.CancelAtPeriodEnd
