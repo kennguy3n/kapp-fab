@@ -167,12 +167,17 @@ export async function installApiMock(
           : json(route, { error: "not found" }, 404);
       }
       if (method === "PUT" || method === "PATCH") {
-        // updateRecord PATCHes `{ data }` as well.
+        // updateRecord PATCHes `{ data }` as well. Updating a record
+        // that doesn't exist is a 404 — same as GET above and as the
+        // real API behaves — rather than fabricating a phantom record
+        // that the next GET wouldn't find (an internally inconsistent
+        // mock).
+        if (!existing) return json(route, { error: "not found" }, 404);
         const { data } = request.postDataJSON() as {
           data: Record<string, unknown>;
         };
-        if (existing) existing.data = data;
-        return json(route, existing ?? makeDeal(id, data));
+        existing.data = data;
+        return json(route, existing);
       }
     }
 

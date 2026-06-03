@@ -48,10 +48,19 @@ function isoAt(offsetSeconds: number): string {
   return new Date(EPOCH + offsetSeconds * 1000).toISOString();
 }
 
-/** Deterministic, well-formed v4-shaped UUID seeded from `n`. Not a
- *  real random UUID — just a stable, unique, correctly-formatted id so
- *  code that splits/validates the UUID shape (e.g. RLS guards) accepts
- *  it. */
+/** Deterministic, UUID-*shaped* id seeded from `n` — e.g.
+ *  `makeId("tenant", 1)` → `tenant00-0000-4000-8000-000000000001`.
+ *
+ *  The 8-4-4-4-12 segment layout matches a UUID so anything that only
+ *  splits on `-` or checks the shape accepts it, and the leading
+ *  segment embeds the entity label so ids are legible in test output
+ *  and assertion diffs. It is deliberately NOT a valid RFC-4122 UUID:
+ *  the label segment can contain non-hex characters. That's fine
+ *  because this is a frontend unit-test factory — the ids only ever
+ *  flow into mocked/MSW-intercepted API calls, never to a real
+ *  Postgres `uuid` column. If a future test needs a strictly-hex id
+ *  (e.g. to round-trip through a real backend), pass an explicit
+ *  hex `id` via `overrides` rather than relying on this helper. */
 export function makeId(prefix: string, n: number = seq()): string {
   const hex = n.toString(16).padStart(12, "0");
   return `${prefix.padEnd(8, "0").slice(0, 8)}-0000-4000-8000-${hex}`;
