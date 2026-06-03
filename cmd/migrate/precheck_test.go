@@ -42,6 +42,13 @@ func TestAnalyzeSQL_FlagsBackwardIncompatible(t *testing.T) {
 			"NOT NULL without DEFAULT",
 		},
 		{
+			// A safe leading clause (DEFAULT) must not mask an unsafe
+			// sibling clause in the same multi-clause ALTER.
+			"multi-clause add column hides unsafe sibling",
+			"ALTER TABLE users ADD COLUMN a text NOT NULL DEFAULT 'x', ADD COLUMN b text NOT NULL;",
+			"NOT NULL without DEFAULT",
+		},
+		{
 			"lowercase still flagged",
 			"alter table users drop column nickname;",
 			"DROP COLUMN",
@@ -68,6 +75,11 @@ func TestAnalyzeSQL_AllowsBackwardCompatible(t *testing.T) {
 		"DROP INDEX CONCURRENTLY IF EXISTS idx_old;",
 		// GENERATED column may be NOT NULL without an explicit DEFAULT.
 		"ALTER TABLE invoices ADD COLUMN total_cents bigint GENERATED ALWAYS AS (total * 100) STORED NOT NULL;",
+		// Every clause in a multi-clause ALTER carries its own DEFAULT.
+		"ALTER TABLE users ADD COLUMN a text NOT NULL DEFAULT 'x', ADD COLUMN b text NOT NULL DEFAULT 'y';",
+		// A comma inside a type modifier must not split the clause and
+		// strand the trailing DEFAULT from its NOT NULL column.
+		"ALTER TABLE invoices ADD COLUMN amount numeric(10,2) NOT NULL DEFAULT 0;",
 	}
 	for _, sql := range safe {
 		if rules := findingRules(sql); len(rules) != 0 {

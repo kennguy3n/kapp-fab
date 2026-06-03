@@ -165,7 +165,8 @@ Usage:
   migrate bootstrap [V]     Prime schema_migrations on a legacy DB.
   migrate pre-check [-all]  Refuse non-backward-compatible migrations.
   migrate apply [--canary]  Apply pending migrations across all cells.
-  migrate rollback [N]      Roll back last N migrations on all cells.
+  migrate rollback [N]               Roll back last N migrations (all cells).
+  migrate rollback --to-version V    Roll all cells down to version V.
 
 Environment:
   DB_URL                    PostgreSQL DSN (required for DB ops).
@@ -349,6 +350,54 @@ func inspectSchemaMigrations(ctx context.Context, db *sql.DB) (schemaMigrationsS
 	return schemaMigrationsPopulated, nil
 }
 
+// ensureBootstrapped refuses to run forward migrations on a database that
+// was provisioned by the legacy psql-loop — the Kapp sentinel table is
+// present but schema_migrations has never been primed.  It must run on
+// the raw *sql.DB BEFORE golang-migrate's WithInstance, which would
+// otherwise CREATE schema_migrations inside its constructor and erase the
+// distinction between a fresh DB and a legacy one.  cmd names the caller
+// ("up" / "apply") so the operator-facing error is accurate.
+func ensureBootstrapped(ctx context.Context, db *sql.DB, cmd string) error {
+	status, err := inspectSchemaMigrations(ctx, db)
+	if err != nil {
+		return fmt.Errorf("%s: inspect %s: %w", cmd, schemaMigrationsTable, err)
+	}
+	if status == schemaMigrationsPopulated {
+		return nil
+	}
+	hasSentinel, perr := tableExists(ctx, db, kappSentinelTable)
+	if perr != nil {
+		return fmt.Errorf("%s: probe %s: %w", cmd, kappSentinelTable, perr)
+	}
+	if !hasSentinel {
+		return nil
+	}
+	// Describe schema_migrations precisely so the operator can correlate
+	// the message with what they see in psql.  Multi-line guidance is
+	// emitted via fmt.Fprintf separately from the short error string so
+	// staticcheck's ST1005 (no punctuation/newlines in error strings) is
+	// honored.
+	var stateDesc string
+	switch status {
+	case schemaMigrationsAbsent:
+		stateDesc = "missing"
+	case schemaMigrationsEmpty:
+		stateDesc = "empty"
+	case schemaMigrationsPopulated:
+		// Unreachable: handled by the early return above.  Defensive
+		// default for future enum additions.
+		stateDesc = "in an unexpected state"
+	}
+	fmt.Fprintf(os.Stderr,
+		"%s exists but %s is %s; this DB was provisioned by the legacy psql-loop\n\n"+
+			"Run:\n\n    go run ./cmd/migrate bootstrap\n\n"+
+			"to mark existing migrations as applied without re-running them.\n",
+		kappSentinelTable, schemaMigrationsTable, stateDesc,
+	)
+	return fmt.Errorf("%s: legacy DB detected (%s present, %s %s)",
+		cmd, kappSentinelTable, schemaMigrationsTable, stateDesc)
+}
+
 func cmdUp(args []string) error {
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
@@ -371,58 +420,13 @@ func cmdUp(args []string) error {
 		}
 	}()
 
-	// Pre-check: detect the legacy-DB case BEFORE WithInstance ever
-	// touches schema_migrations.  WithInstance unconditionally CREATEs
-	// the table inside its own constructor; if we let it run first
-	// we'd lose the ability to distinguish "fresh DB" from "legacy DB
-	// where someone ran psql-loop migrations directly".  The fix is
-	// structural: do the probe on the raw *sql.DB first, decide
-	// whether to proceed, then hand the DB to WithInstance.
+	// Refuse to run on a legacy psql-loop DB BEFORE WithInstance ever
+	// touches schema_migrations (see ensureBootstrapped for why the
+	// probe must happen on the raw *sql.DB first).
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer cancel()
-	status, err := inspectSchemaMigrations(ctx, db)
-	if err != nil {
-		return fmt.Errorf("up: inspect %s: %w", schemaMigrationsTable, err)
-	}
-	if status != schemaMigrationsPopulated {
-		hasSentinel, perr := tableExists(ctx, db, kappSentinelTable)
-		if perr != nil {
-			return fmt.Errorf("up: probe %s: %w", kappSentinelTable, perr)
-		}
-		if hasSentinel {
-			// Describe schema_migrations precisely so the operator
-			// can correlate the message with what they see in psql.
-			// status here is either schemaMigrationsAbsent (no
-			// table at all) or schemaMigrationsEmpty (table exists
-			// but no rows).  Both states need bootstrap, but
-			// saying "empty" when the table is absent is
-			// factually misleading.
-			//
-			// Multi-line guidance is returned via fmt.Fprintf
-			// after the short error string so staticcheck's
-			// ST1005 (no punctuation/newlines in error strings)
-			// is honored.
-			var stateDesc string
-			switch status {
-			case schemaMigrationsAbsent:
-				stateDesc = "missing"
-			case schemaMigrationsEmpty:
-				stateDesc = "empty"
-			case schemaMigrationsPopulated:
-				// Unreachable: outer `if status != schemaMigrationsPopulated`
-				// already excludes this case.  Defensive default for
-				// future enum additions.
-				stateDesc = "in an unexpected state"
-			}
-			fmt.Fprintf(os.Stderr,
-				"%s exists but %s is %s; this DB was provisioned by the legacy psql-loop\n\n"+
-					"Run:\n\n    go run ./cmd/migrate bootstrap\n\n"+
-					"to mark existing migrations as applied without re-running them.\n",
-				kappSentinelTable, schemaMigrationsTable, stateDesc,
-			)
-			return fmt.Errorf("up: legacy DB detected (%s present, %s %s)",
-				kappSentinelTable, schemaMigrationsTable, stateDesc)
-		}
+	if err := ensureBootstrapped(ctx, db, "up"); err != nil {
+		return err
 	}
 
 	m, err := openMigrate(src, db)
@@ -947,15 +951,49 @@ func analyzeSQL(version uint, name, sqlText string) []precheckFinding {
 				out = append(out, precheckFinding{version, name, r.label, snippet(stmt)})
 			}
 		}
-		if addColumnNotNullRE.MatchString(stmt) &&
-			!defaultClauseRE.MatchString(stmt) &&
-			!generatedRE.MatchString(stmt) {
-			out = append(out, precheckFinding{
-				version, name, "ADD COLUMN ... NOT NULL without DEFAULT", snippet(stmt),
-			})
+		// ADD COLUMN ... NOT NULL is checked per top-level clause so a
+		// multi-clause ALTER like `ADD COLUMN a text NOT NULL DEFAULT 'x',
+		// ADD COLUMN b text NOT NULL` cannot hide an unsafe column behind
+		// a sibling's DEFAULT.  Splitting on depth-0 commas leaves type
+		// modifiers such as NUMERIC(10,2) intact.
+		for _, clause := range splitTopLevelCommas(stmt) {
+			if addColumnNotNullRE.MatchString(clause) &&
+				!defaultClauseRE.MatchString(clause) &&
+				!generatedRE.MatchString(clause) {
+				out = append(out, precheckFinding{
+					version, name, "ADD COLUMN ... NOT NULL without DEFAULT", snippet(stmt),
+				})
+				break
+			}
 		}
 	}
 	return out
+}
+
+// splitTopLevelCommas splits s on commas that sit at parenthesis depth 0,
+// so column definitions inside an ALTER TABLE are separated while commas
+// nested in type modifiers (e.g. NUMERIC(10,2)) or function calls stay
+// with their clause.  Input is expected to be literal/comment-stripped by
+// splitStatements, so quotes need no special handling here.
+func splitTopLevelCommas(s string) []string {
+	var parts []string
+	depth, start := 0, 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(parts, s[start:])
 }
 
 // snippet collapses a statement's internal whitespace and truncates it
@@ -1198,17 +1236,33 @@ func cmdApply(args []string) error {
 }
 
 // applyUp runs `up` against a single cell DSN, mapping ErrNoChange to a
-// successful no-op so re-running apply is idempotent.
+// successful no-op so re-running apply is idempotent.  Like cmdUp, it
+// refuses to run on a legacy psql-loop DB (sentinel present but
+// schema_migrations unprimed) so `apply` cannot blindly re-run every
+// migration from 000001 on a database that golang-migrate never managed.
 func applyUp(src *migratesource.LegacySource, dsn string) error {
 	db, err := openDBURL(dsn)
 	if err != nil {
 		return err
 	}
-	m, err := openMigrate(src, db)
-	if err != nil {
-		_ = db.Close()
+	owned := true
+	defer func() {
+		if owned {
+			_ = db.Close()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
+	defer cancel()
+	if err := ensureBootstrapped(ctx, db, "apply"); err != nil {
 		return err
 	}
+
+	m, err := openMigrate(src, db)
+	if err != nil {
+		return err
+	}
+	owned = false // migrate now owns db
 	defer closeMigrate(m)
 
 	switch err := m.Up(); {
@@ -1229,10 +1283,53 @@ func applyUp(src *migratesource.LegacySource, dsn string) error {
 
 func cmdRollback(args []string) error {
 	fs := flag.NewFlagSet("rollback", flag.ContinueOnError)
+	// uint flag (not int) so there is no signed→unsigned conversion to
+	// guard; --to-version 0 is a valid target, so "was it set?" is
+	// tracked via fs.Visit rather than a sentinel default.
+	toVersion := fs.Uint("to-version", 0,
+		"roll every cell back down to (but never below) this schema version; "+
+			"overrides the positional N and is a no-op on cells already at or below it")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	toVersionSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "to-version" {
+			toVersionSet = true
+		}
+	})
 	rest := fs.Args()
+
+	src, err := openSource()
+	if err != nil {
+		return err
+	}
+	cells, err := parseCells()
+	if err != nil {
+		return err
+	}
+
+	// Version-targeted rollback (used by the automated deploy): undo only
+	// the migrations applied above a captured pre-deploy baseline.  This
+	// stays correct even when a multi-cell apply fails partway — a cell
+	// that never advanced past the baseline is left untouched instead of
+	// being over-rolled-back by a fixed step count.
+	if toVersionSet {
+		if len(rest) > 0 {
+			return errors.New("rollback: --to-version cannot be combined with a positional N")
+		}
+		target := *toVersion
+		for i := len(cells) - 1; i >= 0; i-- {
+			label := fmt.Sprintf("cell %d/%d", i+1, len(cells))
+			fmt.Printf("rollback: %s: rolling back to version %06d\n", label, target)
+			if err := rollbackToVersion(src, cells[i].dsn, target); err != nil {
+				return fmt.Errorf("rollback: %s: %w", label, err)
+			}
+		}
+		fmt.Printf("rollback: completed across %d cell(s)\n", len(cells))
+		return nil
+	}
+
 	n := 1
 	switch len(rest) {
 	case 0:
@@ -1247,15 +1344,6 @@ func cmdRollback(args []string) error {
 	}
 	if n < 1 {
 		return fmt.Errorf("rollback: N must be >= 1, got %d", n)
-	}
-
-	src, err := openSource()
-	if err != nil {
-		return err
-	}
-	cells, err := parseCells()
-	if err != nil {
-		return err
 	}
 
 	// Roll back in reverse apply order so the canary (applied first)
@@ -1335,6 +1423,87 @@ func rollbackDown(src *migratesource.LegacySource, dsn string, n int) error {
 	return nil
 }
 
+// rollbackToVersion reverts one cell down to (but never below) target,
+// undoing exactly the migrations whose version is greater than target.
+// Like rollbackDown it walks the actual applied versions downward via the
+// source's Prev() — never by arithmetic on the version number — so a
+// numbering gap from a sibling workstream cannot misclassify a present
+// migration.  A cell already at or below target is left untouched, which
+// is what makes a partial multi-cell apply safe to undo: cells that never
+// advanced past the pre-deploy baseline are no-ops.  Every version being
+// undone must have a .down.sql companion or the rollback is refused.
+func rollbackToVersion(src *migratesource.LegacySource, dsn string, target uint) error {
+	db, err := openDBURL(dsn)
+	if err != nil {
+		return err
+	}
+	m, err := openMigrate(src, db)
+	if err != nil {
+		_ = db.Close()
+		return err
+	}
+	defer closeMigrate(m)
+
+	current, _, vErr := m.Version()
+	if errors.Is(vErr, migrate.ErrNilVersion) {
+		fmt.Println("  no migrations applied; nothing to roll back")
+		return nil
+	}
+	if vErr != nil {
+		return fmt.Errorf("read version: %w", vErr)
+	}
+	if current <= target {
+		fmt.Printf("  already at version %06d (<= target %06d); nothing to roll back\n",
+			current, target)
+		return nil
+	}
+
+	// Count the applied migrations strictly above target, verifying each
+	// has a down companion before we touch the DB.
+	probe := current
+	steps := 0
+	for probe > target {
+		if !src.HasDown(probe) {
+			return fmt.Errorf(
+				"version %06d is forward-only (no .down.sql companion); manual rollback required",
+				probe,
+			)
+		}
+		steps++
+		prev, pErr := src.Prev(probe)
+		if pErr != nil {
+			// No earlier migration on disk: undoing probe reaches the
+			// pre-migration baseline (version 0), which only matches the
+			// request when target is the baseline itself.
+			if target != 0 {
+				return fmt.Errorf(
+					"cannot reach target version %06d: ran out of applied migrations at %06d",
+					target, probe)
+			}
+			break
+		}
+		probe = prev
+	}
+
+	switch err := m.Steps(-steps); {
+	case errors.Is(err, migrate.ErrNoChange):
+		fmt.Println("  nothing to roll back")
+		return nil
+	case err != nil:
+		return err
+	}
+	v, dirty, pvErr := m.Version()
+	if errors.Is(pvErr, migrate.ErrNilVersion) {
+		fmt.Println("  rolled back to the pre-migration baseline")
+		return nil
+	}
+	if pvErr != nil {
+		return fmt.Errorf("post-rollback version: %w", pvErr)
+	}
+	fmt.Printf("  rolled back %d step(s); current version=%06d dirty=%v\n", steps, v, dirty)
+	return nil
+}
+
 // writeSentinel creates the readiness drain file. While it exists, the
 // API replicas' platform.ReadinessProbe reports 503 so the LB drains
 // connections for the duration of the migration apply.
@@ -1352,11 +1521,16 @@ func writeSentinel(path string) error {
 // (the apply may have failed before creating it); any other failure is
 // logged but not fatal so it can't mask the apply's real exit status.
 func removeSentinel(path string) {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(os.Stderr, "apply: warning: could not remove readiness sentinel %s: %v\n", path, err)
-		return
+	switch err := os.Remove(path); {
+	case err == nil:
+		fmt.Printf("apply: removed readiness sentinel %s\n", path)
+	case errors.Is(err, os.ErrNotExist):
+		// The sentinel was never created (e.g. apply failed before
+		// writeSentinel ran): nothing to remove and nothing to report.
+	default:
+		fmt.Fprintf(os.Stderr,
+			"apply: warning: could not remove readiness sentinel %s: %v\n", path, err)
 	}
-	fmt.Printf("apply: removed readiness sentinel %s\n", path)
 }
 
 // waitHealthy polls url until it returns 200 or timeout elapses.

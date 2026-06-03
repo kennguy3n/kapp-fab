@@ -105,21 +105,43 @@ compose() {
 # migrate CLI invocation
 # -------------------------------------------------------------------------
 
+# urlencode percent-encodes a string for safe use in a URL userinfo
+# component (RFC 3986): unreserved characters pass through, everything
+# else becomes %XX. LC_ALL=C makes ${#s}/${s:i:1} iterate raw bytes so
+# multibyte characters encode correctly.
+urlencode() {
+	local s="$1" out="" i c LC_ALL=C
+	for ((i = 0; i < ${#s}; i++)); do
+		c="${s:i:1}"
+		case "$c" in
+		[a-zA-Z0-9.~_-]) out+="$c" ;;
+		*) out+="$(printf '%%%02X' "'$c")" ;;
+		esac
+	done
+	printf '%s' "$out"
+}
+
 # build_db_url derives the admin DSN from the env file when DB_URL is not
-# supplied, mirroring docker-prod-setup.sh's connection string.
+# supplied, mirroring docker-prod-setup.sh's connection string. The env
+# file is sourced inside a subshell so its variables can never leak into
+# the deploy script's scope, and the userinfo is percent-encoded so a
+# password containing URL-reserved characters yields a valid DSN.
 build_db_url() {
 	if [ -n "${DB_URL:-}" ]; then
 		printf '%s' "$DB_URL"
 		return 0
 	fi
-	# shellcheck disable=SC1090
-	[ -f "$ENV_FILE" ] && . "$ENV_FILE"
-	local user="${POSTGRES_USER:-kapp}"
-	local pass="${POSTGRES_PASSWORD:-}"
-	local db="${POSTGRES_DB:-kapp}"
-	local host="${MIGRATE_DB_HOST:-localhost}"
-	local port="${MIGRATE_DB_PORT:-5432}"
-	printf 'postgres://%s:%s@%s:%s/%s?sslmode=disable' "$user" "$pass" "$host" "$port" "$db"
+	(
+		# shellcheck disable=SC1090
+		[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+		local user="${POSTGRES_USER:-kapp}"
+		local pass="${POSTGRES_PASSWORD:-}"
+		local db="${POSTGRES_DB:-kapp}"
+		local host="${MIGRATE_DB_HOST:-localhost}"
+		local port="${MIGRATE_DB_PORT:-5432}"
+		printf 'postgres://%s:%s@%s:%s/%s?sslmode=disable' \
+			"$(urlencode "$user")" "$(urlencode "$pass")" "$host" "$port" "$db"
+	)
 }
 
 # migrate runs the Workstream 7 migrate CLI. It prefers a prebuilt binary
@@ -158,6 +180,20 @@ migrate() {
 		-e KAPP_CELL_HEALTH_URLS="${KAPP_CELL_HEALTH_URLS:-}" \
 		"golang:${go_version:-1.25}" \
 		go run ./cmd/migrate "$@"
+}
+
+# detect_current_version prints the schema version currently applied
+# (per `migrate version`), or 0 when the DB has no migrations. It is
+# captured BEFORE apply so a failed deploy can roll the schema back to
+# exactly this baseline — never below it — regardless of how many
+# migrations actually committed across cells.
+detect_current_version() {
+	[ "$DRY_RUN" = "1" ] && { printf '0'; return 0; }
+	local out v
+	out="$(migrate version 2>/dev/null || true)"
+	v="$(printf '%s\n' "$out" \
+		| sed -n 's/.*current version=0*\([0-9][0-9]*\).*/\1/p' | head -n1)"
+	printf '%s' "${v:-0}"
 }
 
 # -------------------------------------------------------------------------
@@ -288,14 +324,17 @@ isolation_audit() {
 # rollback
 # -------------------------------------------------------------------------
 
-# rollback undoes a failed deploy: roll the schema back by the number of
-# migrations this run applied, then restore the previous image tag across
-# all services.
+# rollback undoes a failed deploy: roll the schema back to the version
+# captured before this run applied any migrations, then restore the
+# previous image tag across all services. Targeting the pre-deploy
+# version (rather than a fixed step count) keeps a partially-applied
+# multi-cell deploy correct: cells still at the baseline are left
+# untouched instead of being unwound into unrelated earlier migrations.
 rollback() {
 	warn "initiating automated rollback"
 	if [ "${PENDING:-0}" -gt 0 ]; then
-		log "rolling back ${PENDING} migration(s)"
-		migrate rollback "$PENDING" \
+		log "rolling schema back to pre-deploy version ${PRE_VERSION:-0}"
+		migrate rollback --to-version "${PRE_VERSION:-0}" \
 			|| warn "migration rollback failed; engage on-call (see docs/UPGRADE_RUNBOOK.md)"
 	else
 		log "no migrations were applied; skipping schema rollback"
@@ -384,6 +423,11 @@ main() {
 		| sed -n 's/.* \([0-9]\{1,\}\) pending migration.*/\1/p' | head -n1)"
 	PENDING="${PENDING:-0}"
 	log "pending migrations to apply: ${PENDING}"
+
+	# Snapshot the pre-deploy schema version so a failed apply rolls back
+	# to exactly this baseline (see rollback()).
+	PRE_VERSION="$(detect_current_version)"
+	log "pre-deploy schema version: ${PRE_VERSION}"
 
 	log "Step 2/6: applying migrations (sentinel: ${READINESS_SENTINEL})"
 	local apply_args=(apply --readiness-sentinel "$READINESS_SENTINEL")

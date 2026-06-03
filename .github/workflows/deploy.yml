@@ -20,8 +20,10 @@ on:
     tags:
       - "v*"
 
-# Never run two deploys for the same tag concurrently; a later push for
-# the same tag cancels an in-flight run.
+# Never run two deploys for the same tag concurrently. cancel-in-progress
+# is false, so a later run for the same tag queues behind the in-flight
+# one rather than cancelling it — a deploy must never be interrupted
+# mid-rollout.
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
