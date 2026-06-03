@@ -26,12 +26,31 @@ const (
 // handlers. Inactive tenants (suspended/archived/deleting) are rejected with
 // 403 Forbidden.
 //
-// This middleware is intentionally small and header-driven for Phase A. Once
-// JWT auth lands, the tenant claim will move into the token and this middleware
-// will decode it from there instead.
+// This middleware is the legacy header-driven tenant-scoping path. The API
+// surface migrated to JWT-derived scoping (auth.Middleware) in Phase 1; only
+// the importer / agent-tools sidecars still mount it as a fallback when they
+// boot without a JWT signer. Because the X-Tenant-ID header is attacker-
+// controllable, trusting it lets any caller on the network impersonate any
+// tenant — exactly the impersonation hole Phase 1 closed on services/api.
+//
+// Fail-closed in production: when KAPP_ENV=production this middleware refuses
+// EVERY request with 403 rather than honouring the header, so a sidecar
+// accidentally deployed to production without JWT cannot silently re-open the
+// hole. Development (KAPP_ENV unset / dev) keeps the header path so local
+// docker-compose flows that predate JWT continue to work.
 func TenantMiddleware(svc TenantLookup) func(http.Handler) http.Handler {
+	// Capture the deployment posture once, at construction (boot) time,
+	// rather than calling IsProductionEnv() — which reads os.Getenv
+	// under a lock — on every request. KAPP_ENV does not change after
+	// boot, so the single read is authoritative and avoids per-request
+	// overhead and env-mutation races in tests.
+	productionFailClosed := IsProductionEnv()
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if productionFailClosed {
+				http.Error(w, "X-Tenant-ID header tenant scoping is disabled in production; use JWT authentication", http.StatusForbidden)
+				return
+			}
 			raw := r.Header.Get("X-Tenant-ID")
 			if raw == "" {
 				http.Error(w, "X-Tenant-ID header required", http.StatusBadRequest)

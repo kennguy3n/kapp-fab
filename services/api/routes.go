@@ -39,6 +39,15 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
+	// Security response headers (CSP, X-Frame-Options,
+	// X-Content-Type-Options, and HSTS in production) are mounted at
+	// the very top of the chain so EVERY response — public bootstrap
+	// routes, authenticated API, error responses written by inner
+	// middleware — carries the baseline hardening headers. HSTS is
+	// emitted only when KAPP_ENV=production (see
+	// SecurityHeadersConfigFromConfig) so the plain-HTTP dev listener
+	// does not pin browsers to HTTPS.
+	r.Use(platform.SecurityHeadersMiddleware(platform.SecurityHeadersConfigFromConfig(d.cfg)))
 	r.Use(platform.RequestIDMiddleware(logger))
 	// TracingMiddleware runs AFTER RequestIDMiddleware so the
 	// ctx-scoped logger already exists when the trace_id /

@@ -100,6 +100,9 @@ func (f *fakeSessionStore) Touch(context.Context, uuid.UUID, uuid.UUID, time.Tim
 func (f *fakeSessionStore) ActiveCount(context.Context, uuid.UUID) (int, error) {
 	return 0, errNotImplementedInTest
 }
+func (f *fakeSessionStore) RotateRefresh(context.Context, uuid.UUID, uuid.UUID, string, string) error {
+	return errNotImplementedInTest
+}
 
 var errNotImplementedInTest = &testNotImplErr{}
 
