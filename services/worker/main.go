@@ -412,6 +412,17 @@ func run() error {
 	autoscaleEngine := platform.NewAutoscaleEngine(pool, platform.DefaultAutoscalePolicy(), nil)
 	autoscaleLoop := platform.NewAutoscaleLoop(autoscaleEngine, 60*time.Second)
 
+	// Platform-scoped daily database maintenance (Workstream 4). Like the
+	// autoscaler it is a control-plane loop, NOT a tenant-scoped
+	// scheduled_actions row: it manages range partitions, refreshes
+	// planner statistics, reindexes high-churn indexes, and triggers
+	// VACUUM across the whole database, none of which belong to any one
+	// tenant. Started on the elected leader alongside autoscaleLoop.
+	dbMaintenanceLoop := platform.NewDBMaintenanceLoop(
+		platform.NewDBMaintenanceWorker(pool, platform.LoadDBMaintenanceConfig(), slog.Default()),
+		24*time.Hour,
+	)
+
 	// Adaptive batch sizing for the outbox drain. Starts at
 	// drainBatch (the historical fixed value) so steady-state
 	// behaviour is unchanged until the batcher observes a reason
@@ -556,6 +567,7 @@ func run() error {
 			schedRegistry:     schedRegistry,
 			exportWorker:      exportWorker,
 			autoscaleLoop:     autoscaleLoop,
+			dbMaintenanceLoop: dbMaintenanceLoop,
 			batcher:           batcher,
 			nc:                nc,
 			bridge:            bridge,
@@ -614,9 +626,13 @@ type leaderState struct {
 	schedRegistry *scheduler.Registry
 	exportWorker  *ExportWorker
 	autoscaleLoop *platform.AutoscaleLoop
-	batcher       *AdaptiveBatcher
-	nc            *nats.Conn
-	bridge        *kchatBridgeNotifier
+	// dbMaintenanceLoop runs the platform-scoped daily DB maintenance
+	// sweep (partition management, ANALYZE, REINDEX, VACUUM). Leader-only,
+	// like autoscaleLoop.
+	dbMaintenanceLoop *platform.DBMaintenanceLoop
+	batcher           *AdaptiveBatcher
+	nc                *nats.Conn
+	bridge            *kchatBridgeNotifier
 
 	// marketplaceRouter fans drained outbox events out to
 	// marketplace_webhook_subscriptions registered at install time
@@ -658,6 +674,7 @@ func leadWorker(leaderCtx context.Context, s leaderState) error {
 	go scheduler.RunLoop(leaderCtx, s.schedStore, s.schedRegistry, 10*time.Second)
 	go s.exportWorker.Run(leaderCtx)
 	go s.autoscaleLoop.Run(leaderCtx)
+	go s.dbMaintenanceLoop.Run(leaderCtx)
 	// Note: the marketplace review worker is NOT started here —
 	// it runs on every replica (multi-replica posture, see B7.2),
 	// not only the leader. It's started in run() against rootCtx
