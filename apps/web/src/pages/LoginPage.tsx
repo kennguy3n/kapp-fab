@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { postIdentityToServiceWorker } from "../lib/swIdentity";
 
 // LoginPage drives the Phase H JWT auth flow. The dev path still
 // accepts a hand-pasted tenant slug + token for local work, but the
@@ -48,6 +49,10 @@ export function LoginPage() {
         "kapp.expires_at",
         String(Date.now() + body.expires_in * 1000),
       );
+      // Credentials changed without a full reload — re-post the new
+      // identity so the SW drops any prior user's cached API reads
+      // (fire-and-forget; no-ops when the SW isn't present).
+      void postIdentityToServiceWorker();
       navigate("/");
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -64,6 +69,9 @@ export function LoginPage() {
     }
     localStorage.setItem("kapp.tenant", tenant);
     if (token) localStorage.setItem("kapp.token", token);
+    // See the SSO path above: re-post identity after the credential
+    // change so the SW's read-cache isolation tracks the new user.
+    void postIdentityToServiceWorker();
     navigate("/");
   };
 
