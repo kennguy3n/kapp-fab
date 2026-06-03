@@ -330,9 +330,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
+          # Match the paths pinned in apps/web/playwright/playwright.config.ts
+          # (reporter html outputFolder + outputDir), which resolve relative
+          # to that config's directory.
           path: |
-            playwright-report/
-            apps/web/test-results/
+            apps/web/playwright/playwright-report/
+            apps/web/playwright/test-results/
           retention-days: 7
           if-no-files-found: ignore
 

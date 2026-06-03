@@ -30,7 +30,17 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   workers: 1,
-  reporter: [["list"]],
+  // `list` for readable console output; `html` so a CI failure ships a
+  // browsable report (with the on-first-retry trace) as an artifact.
+  // Both output paths are pinned explicitly below so they resolve
+  // deterministically relative to THIS config's directory
+  // (apps/web/playwright/) regardless of the Playwright version's
+  // default-resolution heuristics — the CI `upload report` step
+  // references these exact paths.
+  reporter: [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]],
+  // Per-test artifacts (traces, screenshots). Pinned for the same
+  // reason as the report folder above.
+  outputDir: "test-results",
   timeout: 30_000,
   expect: { timeout: 10_000 },
   use: {
