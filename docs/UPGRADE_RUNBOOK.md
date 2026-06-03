@@ -43,6 +43,22 @@ the script or the CD pipeline is unavailable.
   # or: scripts/deploy.sh v0.2.0
   ```
 
+### Secret-value constraints
+
+The CD pipeline injects deploy values into the remote shell over SSH as
+single-quoted inline env vars (e.g. `KAPP_ADMIN_TOKEN='<secret>'` in
+`.github/workflows/deploy.yml`). Because of that, any value carried this
+way **must not contain a literal single-quote (`'`)** — one would break
+the remote command into a shell syntax error and fail the deploy with a
+cryptic message. This applies to the secrets/vars interpolated into the
+SSH command: `STAGING_ADMIN_TOKEN` / `PRODUCTION_ADMIN_TOKEN`,
+`STAGING_DEPLOY_PATH` / `PRODUCTION_DEPLOY_PATH`, and `STAGING_DOMAIN` /
+`PRODUCTION_DOMAIN`. Tokens we mint are URL/base64-safe and satisfy this, but
+operator-set values should be chosen accordingly. If a value ever needs
+an embedded `'`, switch that step to stream the values over stdin
+(`ssh … bash -s`) or escape them with `printf %q` rather than relying on
+single-quoting.
+
 ### What the script does (in order)
 
 1. **`migrate pre-check`** — parses every pending migration and **aborts

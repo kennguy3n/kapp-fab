@@ -512,36 +512,17 @@ func cmdDown(args []string) error {
 	if vErr != nil {
 		return fmt.Errorf("down: read version: %w", vErr)
 	}
-	// Bounds check: refuse up front when n exceeds the number of
-	// applied migrations.  golang-migrate's Steps(-n) would surface a
-	// generic error in that case; this gives operators a clear
-	// message and lets the HasDown loop below assume probe>=1 so its
-	// arithmetic is straightforward.
-	//
-	// uint(n) is safe here: n is checked >= 1 above so the cast does
-	// not wrap, and current is a uint so the comparison is exact.
-	nu := uint(n) //nolint:gosec // n is bounded >=1 above; no sign change
-	if nu > current {
-		return fmt.Errorf(
-			"down: N=%d exceeds current version %06d (only %d migration(s) applied)",
-			n, current, current,
-		)
-	}
-	// Probe every rollback target's HasDown.  We walk i in [0, n)
-	// using the bounded uint computed above, so the loop counter is
-	// always representable and there is no dead overflow guard.
-	//
-	// Coupling note: this arithmetic (probe := current - step)
-	// assumes migration versions are strictly contiguous starting at
-	// 000001.  That invariant is enforced by
-	// migratesource.LegacySource.Validate(), which the
-	// openSourceValidated() call above runs before we get here.  If
-	// the contiguity rule is ever relaxed (e.g. allowing gaps in the
-	// numbering), this loop must be reworked to walk the sorted
-	// applied-versions list returned by golang-migrate instead of
-	// computing positions arithmetically.
-	for step := uint(0); step < nu; step++ {
-		probe := current - step
+	// Verify every rollback target has a .down.sql companion before we
+	// touch the DB.  We walk the actual applied versions downward via the
+	// source's Prev() rather than arithmetic on the version number, so the
+	// check stays correct even if migration numbering is ever allowed to
+	// have gaps.  This mirrors rollbackDown (the WS7 multi-cell path) so
+	// both rollback routines share one walking strategy.  Prev() failing
+	// before we have probed n targets means N exceeds the number of
+	// applied migrations, which we report up front instead of letting
+	// Steps(-n) surface a generic error.
+	probe := current
+	for step := 0; step < n; step++ {
 		if !src.HasDown(probe) {
 			return fmt.Errorf(
 				"down: version %06d is forward-only (no .down.sql companion); "+
@@ -549,6 +530,17 @@ func cmdDown(args []string) error {
 				probe,
 			)
 		}
+		if step == n-1 {
+			break
+		}
+		prev, pErr := src.Prev(probe)
+		if pErr != nil {
+			return fmt.Errorf(
+				"down: N=%d exceeds applied migrations (only %d applied above the baseline)",
+				n, step+1,
+			)
+		}
+		probe = prev
 	}
 	if err := m.Steps(-n); err != nil {
 		if errors.Is(err, migrate.ErrNoChange) {
