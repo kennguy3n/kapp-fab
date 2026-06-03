@@ -130,6 +130,21 @@ func (s *memSessionStore) ActiveCount(context.Context, uuid.UUID) (int, error) {
 	return 0, nil
 }
 
+func (s *memSessionStore) RotateRefresh(_ context.Context, _, sessionID uuid.UUID, oldJTI, newJTI string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok || sess.RevokedAt != nil {
+		return auth.ErrRefreshReuse
+	}
+	if sess.RefreshJTI != oldJTI {
+		return auth.ErrRefreshReuse
+	}
+	sess.RefreshJTI = newJTI
+	sess.LastUsedAt = time.Now()
+	return nil
+}
+
 // memEvaluator implements authz.Evaluator. The grant map is keyed by
 // (tenantID, userID, action, resource); a missing entry means
 // authz.ErrDenied. This is enough surface to exercise the gate

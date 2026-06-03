@@ -94,9 +94,49 @@ type Config struct {
 	// into the strict Redis-required mode. Production deployments
 	// SHOULD set KAPP_REQUIRE_REDIS=1 (or =true) so a misconfigured
 	// REDIS_URL fails the boot loudly instead of silently degrading
-	// to per-pod rate limiting. Default false so local dev continues
-	// to boot without Redis.
+	// to per-pod rate limiting. Default depends on the deployment
+	// posture: false in development (so a local boot works without
+	// Redis) and true in any non-development KAPP_ENV (staging /
+	// production) so a misconfigured REDIS_URL fails the boot loudly
+	// rather than silently degrading to per-pod limiting. An explicit
+	// KAPP_REQUIRE_REDIS=0 / =1 always wins over the posture default.
 	RequireRedis bool
+
+	// AuthzEnforce (sourced from KAPP_AUTHZ_ENFORCE) gates the
+	// authorization (RBAC) evaluator. ENABLED by default — the secure
+	// posture — so a deployment that forgets to set the var still
+	// enforces permissions. Set KAPP_AUTHZ_ENFORCE=0 (or =false) to
+	// explicitly opt out, which is only appropriate for local dev
+	// against pre-JWT clients and is logged at WARN at startup.
+	AuthzEnforce bool
+
+	// RequireJWT (sourced from KAPP_REQUIRE_JWT) requires the API to
+	// boot with a working JWT signer. ENABLED by default so a missing
+	// or unreadable KAPP_JWT_SECRET fails the boot loudly instead of
+	// silently disabling the SSO / Bearer-token auth path and leaving
+	// the admin chain returning 503. Set KAPP_REQUIRE_JWT=0 (or
+	// =false) only for local dev that still relies on the legacy
+	// header path. The fatal-on-missing behaviour is additionally
+	// gated on a non-development KAPP_ENV so unset-and-dev boots stay
+	// ergonomic.
+	RequireJWT bool
+
+	// CSPHeader (sourced from KAPP_CSP_HEADER) is the
+	// Content-Security-Policy value emitted by
+	// SecurityHeadersMiddleware on every response. Empty falls back to
+	// DefaultCSPHeader, a conservative self-only policy. Operators
+	// serving a frontend from a separate origin (CDN, asset host)
+	// override this to widen the allowlist.
+	CSPHeader string
+
+	// JWTSecretPresent / MasterKeyPresent capture whether
+	// KAPP_JWT_SECRET / KAPP_MASTER_KEY were set at LoadConfig time.
+	// They are booleans rather than the secret values themselves so
+	// the secrets never live on the Config struct (which is logged in
+	// part and passed widely); Validate consults them for the
+	// production fail-closed gate without ever holding the material.
+	JWTSecretPresent bool
+	MasterKeyPresent bool
 
 	// MarketplaceBundleURLBase is the externally-visible URL prefix
 	// that the marketplace appends "/api/v1/marketplace/bundles/<hash>.tar.gz"
@@ -461,6 +501,11 @@ type Config struct {
 // LoadConfig reads configuration from environment variables and returns a
 // validated Config. It returns an error if a required value is missing.
 func LoadConfig() (*Config, error) {
+	// Resolve the deployment posture first: several defaults below
+	// (RequireRedis, and the production fail-closed gate in Validate)
+	// key off whether KAPP_ENV names a non-development environment.
+	env := getenv("KAPP_ENV", "dev")
+	nonDev := envIsNonDev(env)
 	cfg := &Config{
 		DatabaseURL:      os.Getenv("DB_URL"),
 		AdminDatabaseURL: os.Getenv("ADMIN_DB_URL"),
@@ -479,14 +524,19 @@ func LoadConfig() (*Config, error) {
 		AuthzCacheSize:   getenvInt("KAPP_AUTHZ_CACHE_SIZE", 512),
 		TenantCacheSize:  getenvInt("KAPP_TENANT_CACHE_SIZE", 256),
 		RedisURL:         os.Getenv("REDIS_URL"),
-		RequireRedis:     getenvBool("KAPP_REQUIRE_REDIS", false),
+		RequireRedis:     getenvBool("KAPP_REQUIRE_REDIS", nonDev),
+		AuthzEnforce:     getenvBool("KAPP_AUTHZ_ENFORCE", true),
+		RequireJWT:       getenvBool("KAPP_REQUIRE_JWT", true),
+		CSPHeader:        getenv("KAPP_CSP_HEADER", DefaultCSPHeader),
+		JWTSecretPresent: os.Getenv("KAPP_JWT_SECRET") != "",
+		MasterKeyPresent: os.Getenv("KAPP_MASTER_KEY") != "",
 
 		MarketplaceBundleURLBase:       strings.TrimRight(os.Getenv("KAPP_MARKETPLACE_BUNDLE_URL_BASE"), "/"),
 		MarketplaceBundleDir:           os.Getenv("KAPP_MARKETPLACE_BUNDLE_DIR"),
 		AllowMarketplaceBundleMemory:   getenvBool("KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY", false),
 		RequireMarketplaceBundleDirRaw: os.Getenv("KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR"),
 
-		Env:              getenv("KAPP_ENV", "dev"),
+		Env:              env,
 		LogFormat:        os.Getenv("KAPP_LOG_FORMAT"),
 		LogLevel:         os.Getenv("KAPP_LOG_LEVEL"),
 		MetricsAddr:      os.Getenv("KAPP_METRICS_ADDR"),
@@ -564,6 +614,17 @@ func (c *Config) Validate() error {
 	if c.DatabaseURL == "" {
 		return errors.New("DB_URL is required")
 	}
+	// Production fail-closed gate. When KAPP_ENV=production the
+	// security-critical secrets must all be present; a missing value
+	// is a fatal boot error rather than a WARN-and-degrade. We collect
+	// EVERY missing variable and report them in a single error so an
+	// operator fixes the whole set in one pass instead of rebooting
+	// once per missing var. Non-production postures (dev / staging)
+	// skip this gate so local boots and pre-prod environments stay
+	// ergonomic; staging still gets the RequireRedis check below.
+	if missing := c.MissingProductionEnv(); len(missing) > 0 {
+		return fmt.Errorf("KAPP_ENV=%s requires these env vars to be set; missing: %s", c.Env, strings.Join(missing, ", "))
+	}
 	if c.RequireRedis && c.RedisURL == "" {
 		return errors.New("KAPP_REQUIRE_REDIS=1 but REDIS_URL is empty; set REDIS_URL or unset KAPP_REQUIRE_REDIS to permit in-process fallback")
 	}
@@ -635,6 +696,113 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// DefaultCSPHeader is the Content-Security-Policy emitted by
+// SecurityHeadersMiddleware when KAPP_CSP_HEADER is unset. It is a
+// conservative self-only policy: scripts, styles, images and other
+// subresources may load only from the serving origin, the page may
+// not be framed (clickjacking defence, complementing X-Frame-Options),
+// and no plugins / <base> hijacking are permitted. Deployments that
+// serve a frontend from a separate asset origin override it via
+// KAPP_CSP_HEADER.
+const DefaultCSPHeader = "default-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+
+// normalizeEnv lower-cases and trims a KAPP_ENV value so the posture
+// predicates accept "Production", " prod " and "production" alike.
+func normalizeEnv(env string) string {
+	return strings.ToLower(strings.TrimSpace(env))
+}
+
+// IsProduction reports whether KAPP_ENV names a production deployment.
+// The fail-closed/fatal behaviours (missing-secret boot failure,
+// rate-limiter 503, X-Tenant-ID header rejection) apply only here.
+func (c *Config) IsProduction() bool {
+	switch normalizeEnv(c.Env) {
+	case "production", "prod":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsDevelopment reports whether KAPP_ENV names a development-class
+// deployment (or is unset). Development keeps the ergonomic defaults:
+// Redis optional, JWT optional, header fallback permitted.
+func (c *Config) IsDevelopment() bool {
+	switch normalizeEnv(c.Env) {
+	case "", "dev", "development", "local", "test":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsNonDev reports whether KAPP_ENV names anything other than a
+// development-class environment (i.e. staging or production). Used for
+// defaults that should harden everywhere except local dev, such as
+// RequireRedis.
+func (c *Config) IsNonDev() bool {
+	return !c.IsDevelopment()
+}
+
+// envIsNonDev is the package-level form of IsNonDev used by LoadConfig
+// before a Config exists. It mirrors IsDevelopment's accept-list.
+func envIsNonDev(env string) bool {
+	switch normalizeEnv(env) {
+	case "", "dev", "development", "local", "test":
+		return false
+	default:
+		return true
+	}
+}
+
+// usesEnvSecretBackend reports whether the JWT signing material is
+// expected to come from KAPP_JWT_SECRET (the "env" secrets backend).
+// When the operator selected a non-env backend (file / aws / vault /
+// gcp) the secret legitimately lives elsewhere, so the production gate
+// must not demand KAPP_JWT_SECRET.
+func (c *Config) usesEnvSecretBackend() bool {
+	backend := normalizeEnv(c.SecretProvider)
+	return backend == "" || backend == "env"
+}
+
+// MissingProductionEnv returns the security-critical env vars that are
+// unset while KAPP_ENV=production. It is the single source of truth for
+// both the LoadConfig-time fatal gate (Validate) and the structured
+// boot-time summary emitted by the API's startup validation, so the
+// two never drift. The returned slice is empty for any non-production
+// posture. Order is stable (JWT, master key, Redis) so the error
+// message and the boot log read consistently.
+func (c *Config) MissingProductionEnv() []string {
+	if !c.IsProduction() {
+		return nil
+	}
+	var missing []string
+	if c.usesEnvSecretBackend() && !c.JWTSecretPresent {
+		missing = append(missing, "KAPP_JWT_SECRET")
+	}
+	if !c.MasterKeyPresent {
+		missing = append(missing, "KAPP_MASTER_KEY")
+	}
+	if c.RedisURL == "" {
+		missing = append(missing, "REDIS_URL")
+	}
+	return missing
+}
+
+// IsProductionEnv reports whether the process environment names a
+// production deployment. It exists for code paths that need the
+// posture but do not hold a *Config — notably TenantMiddleware, which
+// must fail the X-Tenant-ID header path closed in production. It reads
+// KAPP_ENV directly so a single env var drives every posture decision.
+func IsProductionEnv() bool {
+	switch normalizeEnv(os.Getenv("KAPP_ENV")) {
+	case "production", "prod":
+		return true
+	default:
+		return false
+	}
 }
 
 // getenvBool parses a string env var as a boolean. Accepts the strings

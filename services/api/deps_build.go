@@ -89,6 +89,60 @@ func runCleanups(cleanups []func()) {
 	}
 }
 
+// validateRuntimeEnv performs boot-time validation of the security-
+// critical environment, emitting a single structured summary and, in
+// production, an aggregated error listing EVERY missing variable
+// rather than failing on the first. It is intentionally additive to
+// platform.Config.Validate (which gates the same set at LoadConfig
+// time): both consult Config.MissingProductionEnv so the two layers
+// never disagree about what "configured" means.
+//
+// Behaviour by posture:
+//   - production: any missing var in MissingProductionEnv is fatal;
+//     the returned error names all of them in one message.
+//   - non-production: never fatal, but each recommended-but-missing
+//     var is logged at WARN so operators promoting an environment to
+//     production see exactly what they must set first.
+func validateRuntimeEnv(cfg *platform.Config, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Info("api: startup env validation",
+		slog.String("kapp_env", cfg.Env),
+		slog.Bool("production", cfg.IsProduction()),
+		slog.Bool("authz_enforce", cfg.AuthzEnforce),
+		slog.Bool("require_jwt", cfg.RequireJWT),
+		slog.Bool("require_redis", cfg.RequireRedis),
+	)
+	if cfg.IsProduction() {
+		if missing := cfg.MissingProductionEnv(); len(missing) > 0 {
+			logger.Error("api: production boot blocked on missing env vars",
+				slog.String("missing", strings.Join(missing, ", ")),
+			)
+			return fmt.Errorf("api: KAPP_ENV=production requires these env vars to be set; missing: %s", strings.Join(missing, ", "))
+		}
+		return nil
+	}
+	// Non-production: surface (but do not fail on) the same set so the
+	// gap is visible before promotion to production.
+	var recommended []string
+	if cfg.RequireJWT && !cfg.JWTSecretPresent && (cfg.SecretProvider == "" || strings.EqualFold(cfg.SecretProvider, "env")) {
+		recommended = append(recommended, "KAPP_JWT_SECRET")
+	}
+	if !cfg.MasterKeyPresent {
+		recommended = append(recommended, "KAPP_MASTER_KEY")
+	}
+	if cfg.RedisURL == "" {
+		recommended = append(recommended, "REDIS_URL")
+	}
+	if len(recommended) > 0 {
+		logger.Warn("api: env vars unset (required when KAPP_ENV=production)",
+			slog.String("unset", strings.Join(recommended, ", ")),
+		)
+	}
+	return nil
+}
+
 // buildDeps wires every dependency the API surface needs into a
 // single apiDeps value. It is the partner of registerRoutes: run()
 // builds, registers, then serves; the three concerns now live in
@@ -135,6 +189,20 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 			panic(rec)
 		}
 	}()
+
+	// Startup env validation runs before any resource is acquired so a
+	// misconfigured production boot fails fast and cheaply. It emits a
+	// single structured summary listing EVERY missing critical var
+	// (not just the first) and, in production, returns an aggregated
+	// error. This is defense-in-depth: platform.LoadConfig already
+	// gates the same set at parse time via Config.MissingProductionEnv,
+	// but buildDeps is also reachable directly (tests, future
+	// entrypoints), so re-checking here keeps the invariant local to
+	// the wiring path too. Both layers consult the same helper so they
+	// never drift.
+	if err := validateRuntimeEnv(cfg, logger); err != nil {
+		return nil, nil, err
+	}
 
 	// Process-wide metrics registry. Hoisted before any cache /
 	// middleware so the caches and the request-counting middleware
@@ -218,8 +286,14 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// MethodMiddleware) against every gated route. Routes that always
 	// require authorization (e.g. /api/v1/roles) mount
 	// authz.Middleware directly and are not affected by this gate.
-	authzDisabled := os.Getenv("KAPP_AUTHZ_ENFORCE") == "0" || strings.EqualFold(os.Getenv("KAPP_AUTHZ_ENFORCE"), "false")
-	authzEnforced := !authzDisabled
+	// cfg.AuthzEnforce is the parsed KAPP_AUTHZ_ENFORCE value (default
+	// true). Reading it from the validated Config rather than
+	// re-parsing os.Getenv here keeps the secure-by-default semantics
+	// in one place (platform.LoadConfig) instead of duplicating the
+	// parse — an unrecognised value now defaults to ENABLED rather
+	// than the old direct-compare which only disabled on exact
+	// "0"/"false".
+	authzEnforced := cfg.AuthzEnforce
 	authzGate := func(action, resource string) func(http.Handler) http.Handler {
 		if !authzEnforced {
 			return func(next http.Handler) http.Handler { return next }
@@ -450,9 +524,15 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 			}
 			log.Printf("api: redis rate limiter init failed, falling back to in-process: %v", err)
 		} else {
-			redisLimiter = rl
+			// Fail-closed in production: when KAPP_ENV=production an
+			// unreachable Redis backend makes the limiter return 503
+			// rather than allowing every request through, so an
+			// attacker cannot bypass rate limiting by knocking Redis
+			// over. Development stays fail-open so a local Redis blip
+			// does not block work.
+			redisLimiter = rl.WithFailClosed(cfg.IsProduction())
 			cleanups = append(cleanups, func() { _ = redisLimiter.Close() })
-			log.Printf("api: distributed rate limiter enabled (redis)")
+			log.Printf("api: distributed rate limiter enabled (redis, fail_closed=%t)", cfg.IsProduction())
 		}
 		ipRL, err := platform.NewRedisIPRateLimiter(ctx, cfg.RedisURL)
 		if err != nil {
@@ -1166,6 +1246,21 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		} else {
 			log.Printf("api: JWT auth disabled (%v)", err)
 		}
+	}
+
+	// RequireJWT fail-closed gate. With KAPP_REQUIRE_JWT defaulting to
+	// true, a production boot that ends up WITHOUT a working signer is
+	// a misconfiguration we refuse rather than serve. Booting anyway
+	// would leave the admin/control-plane chain answering 503 on every
+	// request (see adminChain below) — a silently broken deployment.
+	// The missing-secret case is already caught earlier by
+	// platform.LoadConfig's production gate; this additionally covers
+	// the "secret present but signer construction failed" path. In
+	// development the signer stays optional so local flows that rely
+	// on the legacy header path keep booting.
+	if cfg.RequireJWT && cfg.IsProduction() && authh.signer == nil {
+		runCleanups(cleanups)
+		return nil, nil, fmt.Errorf("api: KAPP_REQUIRE_JWT is set and KAPP_ENV=production but the JWT signer could not be initialised; refusing to boot with auth disabled")
 	}
 
 	// adminChain wraps a chi router with the JWT + IsPlatformAdmin

@@ -347,9 +347,54 @@ func (s *SSOService) Refresh(ctx context.Context, refreshToken string) (*Exchang
 	if err != nil {
 		return nil, err
 	}
+
+	// Refresh-token rotation: each refresh CONSUMES the presented
+	// token and issues a brand-new one, so a refresh token is
+	// single-use. Rotation requires a session store and a session-
+	// scoped token (SessionID + jti present); the legacy local-dev
+	// path without a store returns the presented token unchanged so
+	// `make dev` flows keep working.
+	//
+	// RotateRefresh is a compare-and-swap on the session's refresh_jti.
+	// A replayed token — one whose jti was already rotated away by an
+	// earlier (legitimate or attacker) refresh — matches no live row
+	// and returns ErrRefreshReuse. That is the reuse signal: we revoke
+	// the entire session family so BOTH the attacker's stolen token
+	// and the legitimate client's current token stop working, forcing
+	// a fresh login. Because rotation chains forward within a single
+	// session row, that row IS the family and Revoke() neutralises it.
+	refreshOut := refreshToken
+	if s.sessions != nil && claims.SessionID != uuid.Nil && claims.JWTID != "" {
+		newJTI := uuid.NewString()
+		if err := s.sessions.RotateRefresh(ctx, claims.TenantID, claims.SessionID, claims.JWTID, newJTI); err != nil {
+			if errors.Is(err, ErrRefreshReuse) {
+				if rerr := s.sessions.Revoke(ctx, claims.TenantID, claims.SessionID); rerr != nil {
+					slog.Default().Error("refresh reuse: session family revocation failed",
+						slog.String("tenant_id", claims.TenantID.String()),
+						slog.String("session_id", claims.SessionID.String()),
+						slog.String("err", rerr.Error()),
+					)
+				}
+				slog.Default().Warn("refresh token reuse detected; session family revoked",
+					slog.String("tenant_id", claims.TenantID.String()),
+					slog.String("user_id", claims.UserID.String()),
+					slog.String("session_id", claims.SessionID.String()),
+				)
+			}
+			return nil, err
+		}
+		refreshClaims := base
+		refreshClaims.JWTID = newJTI
+		rotated, err := s.signer.IssueRefresh(refreshClaims)
+		if err != nil {
+			return nil, err
+		}
+		refreshOut = rotated
+	}
+
 	return &ExchangeResult{
 		AccessToken:  access,
-		RefreshToken: refreshToken,
+		RefreshToken: refreshOut,
 		TenantID:     claims.TenantID,
 		SessionID:    claims.SessionID,
 		ExpiresIn:    int64(s.signer.cfg.AccessTTL.Seconds()),

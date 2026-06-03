@@ -21,6 +21,16 @@ var ErrSessionNotFound = errors.New("auth: session not found")
 // and defaults to DefaultMaxSessions when absent.
 var ErrSessionLimit = errors.New("auth: tenant session limit reached")
 
+// ErrRefreshReuse is returned by RotateRefresh when the presented
+// refresh JTI no longer matches the session's current refresh_jti —
+// i.e. the token was already consumed by an earlier rotation. This is
+// the refresh-token reuse / replay signal: the caller revokes the
+// whole session family and rejects the request. Distinguished from
+// ErrSessionNotFound (the session is simply gone/revoked/expired) so
+// the caller can react to an active attack versus an ordinary stale
+// session.
+var ErrRefreshReuse = errors.New("auth: refresh token reuse detected")
+
 // DefaultMaxSessions is the per-tenant concurrent-session cap applied
 // when tenants.quota does not override it. Generous enough for a
 // small team; a quota bump is the escape hatch.
@@ -54,6 +64,15 @@ type SessionStore interface {
 	RevokeByTenant(ctx context.Context, tenantID uuid.UUID) error
 	Touch(ctx context.Context, tenantID, sessionID uuid.UUID, now time.Time) error
 	ActiveCount(ctx context.Context, tenantID uuid.UUID) (int, error)
+	// RotateRefresh atomically swaps the session's refresh_jti from
+	// oldJTI to newJTI as part of refresh-token rotation. It is a
+	// compare-and-swap: the UPDATE only fires when the row's current
+	// refresh_jti still equals oldJTI (and the session is live), so a
+	// concurrent rotation or a replayed/stale token cannot both
+	// succeed. Returns ErrRefreshReuse when no live row matches
+	// oldJTI — the reuse signal the caller turns into a family
+	// revocation.
+	RotateRefresh(ctx context.Context, tenantID, sessionID uuid.UUID, oldJTI, newJTI string) error
 }
 
 // PGSessionStore is the PostgreSQL implementation. The sessions table
@@ -217,6 +236,37 @@ func (s *PGSessionStore) Touch(ctx context.Context, tenantID, sessionID uuid.UUI
 			now, tenantID, sessionID,
 		)
 		return err
+	})
+}
+
+// RotateRefresh atomically consumes the presented refresh JTI and
+// installs a freshly-minted one, implementing single-use refresh
+// tokens. The UPDATE is a compare-and-swap guarded on
+// refresh_jti = oldJTI (plus the live-session predicates), so it is
+// safe under concurrency: of two requests presenting the same token,
+// at most one observes RowsAffected == 1 and the loser gets
+// ErrRefreshReuse. A replayed token whose JTI was already rotated away
+// likewise matches no row and returns ErrRefreshReuse, which the SSO
+// layer escalates to a family revocation.
+func (s *PGSessionStore) RotateRefresh(ctx context.Context, tenantID, sessionID uuid.UUID, oldJTI, newJTI string) error {
+	if oldJTI == "" || newJTI == "" {
+		return errors.New("auth: rotate refresh requires both old and new jti")
+	}
+	return withTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		ct, err := tx.Exec(ctx,
+			`UPDATE sessions
+			    SET refresh_jti = $1, last_used_at = now()
+			  WHERE tenant_id = $2 AND id = $3 AND refresh_jti = $4
+			    AND revoked_at IS NULL AND expires_at > now()`,
+			newJTI, tenantID, sessionID, oldJTI,
+		)
+		if err != nil {
+			return err
+		}
+		if ct.RowsAffected() == 0 {
+			return ErrRefreshReuse
+		}
+		return nil
 	})
 }
 

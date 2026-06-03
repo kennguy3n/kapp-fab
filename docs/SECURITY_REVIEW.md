@@ -329,8 +329,22 @@ handler runs. Conversely, the portal handlers reject any token
 that does not carry `scope: "portal"`. The two scopes share the
 HMAC signing key but cannot be substituted.
 
-**Open items**: refresh tokens are not yet rotated on use (low
-priority — sessions are short-lived).
+**Refresh-token rotation (single-use).** Each call to
+`SSOService.Refresh` (`internal/auth/sso.go`) CONSUMES the presented
+refresh token and issues a brand-new one, so a refresh token is
+single-use. The session row's `refresh_jti` is advanced via a
+compare-and-swap (`PGSessionStore.RotateRefresh`): the `UPDATE` only
+fires when the row's current `refresh_jti` still equals the presented
+token's `jti`. A replayed token — one whose `jti` was already rotated
+away by an earlier (legitimate or attacker) refresh — matches no live
+row and is treated as **reuse**: the entire session family is revoked
+(`Revoke`), invalidating BOTH the attacker's stolen token and the
+legitimate client's current token and forcing a fresh login. Because
+rotation chains forward within a single session row, that row IS the
+family. The reuse event is logged at WARN for alerting. Rotation
+requires a session store and a session-scoped token; the legacy
+local-dev path without a store returns the presented token unchanged
+so `make dev` flows keep working.
 
 ---
 
@@ -651,21 +665,30 @@ fixture under `KAPP_TEST_DB_URL`.
 
 ## Operator-facing env var dependencies
 
-The Phase 1 security hardening assumes the following env vars are
-set in any non-dev deployment. Unset values degrade the listed
-security property to the local-dev shape (single-tenant, single-
-operator laptop) and do **not** cause an obvious failure mode —
-operator runbooks must include each one explicitly.
+The security hardening assumes the following env vars are set in any
+non-dev deployment. **Fail-closed posture (Workstream 2):** when
+`KAPP_ENV=production`, missing `KAPP_JWT_SECRET` / `KAPP_MASTER_KEY` /
+`REDIS_URL` are no longer a silent degrade — they cause a **fatal boot
+error**. `platform.LoadConfig` collects EVERY missing variable and
+reports them in a single error (it does not fail on the first), so an
+operator fixes the whole set in one pass. Outside production the same
+gaps are logged at WARN (so they are visible before promotion) but
+remain non-fatal, keeping local `docker compose` dev flows ergonomic.
+The "degraded behaviour" column below therefore describes the
+**non-production** posture; in production each row marked Critical/High
+blocks boot instead.
 
-| Env var | When unset, this is degraded | Severity |
+| Env var | When unset (non-prod degrade; prod = fatal boot) | Severity |
 | --- | --- | --- |
+| `KAPP_ENV` | Selects the deployment posture. Unset / `dev` / `development` / `local` / `test` = development (ergonomic, fail-open). `production` (or `prod`) turns on every fail-closed gate: fatal boot on missing secrets, rate-limiter 503 on Redis outage, `X-Tenant-ID` header path disabled, HSTS emitted. Other values (e.g. `staging`) are treated as non-dev for `RequireRedis` but do not trip the production secret gate. | Critical — must be `production` in prod |
 | `ADMIN_DB_URL` | SSO refresh **cannot** re-query `users.is_platform_admin`; the `IsPlatformAdmin` claim passes through cached from the refresh token until expiry (24h). Cross-tenant audit / tenant CRUD admin-bypass paths also fall back to the per-tenant pool. | High in prod; ignored in dev |
-| `KAPP_JWT_SECRET` | JWT auth is disabled entirely. The admin-only chain refuses to register routes and returns 503 instead of 401/403. SSO endpoints are not wired. | Critical in prod |
-| `KAPP_MASTER_KEY` | Per-tenant field-level encryption is off; schema fields marked `{"encrypted": true}` round-trip as plaintext. | High in prod for tenants with sensitive PII |
-| `REDIS_URL` | Rate limiters fall back to in-process (per-pod) buckets. The IP-rate-limiter sweep goroutine still GCs old buckets so memory stays bounded, but a multi-replica deployment loses cross-replica fairness. | Medium |
+| `KAPP_JWT_SECRET` | Non-prod: JWT auth is disabled; the admin-only chain returns 503 and SSO endpoints are not wired. **Prod: fatal boot** (unless a non-`env` `KAPP_SECRET_PROVIDER` supplies the signing key). With `KAPP_REQUIRE_JWT` (default **true**) a production boot that ends up without a working signer for any reason is refused. | Critical in prod |
+| `KAPP_MASTER_KEY` | Non-prod: per-tenant field-level encryption is off; fields marked `{"encrypted": true}` round-trip as plaintext. **Prod: fatal boot.** | High in prod for tenants with sensitive PII |
+| `REDIS_URL` | Non-prod: rate limiters fall back to in-process (per-pod) buckets (fail-open). **Prod: fatal boot** — and when Redis is configured but becomes unreachable at runtime the limiter fails **closed** (HTTP 503) instead of allowing requests through. | Medium → Critical in prod |
 | `SMTP_HOST` | Portal magic-link delivery is disabled. `/api/v1/portal/auth/request` returns 503 instead of silently dropping the email. | High for portal users |
-| `KAPP_AUTHZ_ENFORCE` | Default is enforcement **ON**. Setting `=0` / `=false` disables the authz gate and emits a startup WARN. | Critical in prod |
-| `KAPP_REQUIRE_JWT` | Phase 5 sidecar gate. When unset (default), `services/importer` and `services/agent-tools` fall back to the legacy `X-Tenant-ID` header path with a loud WARN if `KAPP_JWT_SECRET` is also unset — bridge mode for clusters that haven't rolled out JWT to their sidecars. Setting to `1` makes both sidecars refuse to boot when the secret is missing, eliminating the silent-degrade path. | Critical in prod |
+| `KAPP_AUTHZ_ENFORCE` | Default is enforcement **ON** (secure default — was previously opt-in). Setting `=0` / `=false` disables the authz gate and emits a startup WARN. | Critical in prod |
+| `KAPP_REQUIRE_JWT` | API gate, default **true**: a production boot without a working JWT signer is refused (`services/api`). Separately, the sidecar helper `auth.RequireJWT()` (`services/importer`, `services/agent-tools`) defaults **false** and gates only those sidecars' fallback to the legacy `X-Tenant-ID` header path — set it to `1` there so a missing secret fails their boot too. | Critical in prod |
+| `KAPP_CSP_HEADER` | Content-Security-Policy emitted by `SecurityHeadersMiddleware`. Unset falls back to a conservative self-only policy (`DefaultCSPHeader`). Override when serving a frontend from a separate origin. | Low |
 | `KAPP_SSE_ADDR` | Phase 6 SSE-listener split. When unset (default), `/api/v1/events/stream` is co-mounted on the main API listener, which forces `WriteTimeout=0` across every API route — widening the slow-write attack surface. Setting to a dedicated host:port (e.g. `:8081`) splits the SSE handler onto its own `http.Server` under `LongStreamTimeouts` so the main API listener adopts `DefaultHTTPTimeouts` (Write=120s). Recommended for staging / production; the SSE port should sit behind the same internal network policy as `KAPP_METRICS_ADDR`. | Medium in prod |
 | `KAPP_METRICS_ADDR` | When unset, `/metrics` mounts on the main router (passes through the auth chain + competes for request goroutines). When set, a dedicated `http.Server` serves scrapes under `MetricsHTTPTimeouts` so Prometheus traffic is isolated from user-facing latency. | Medium in prod |
 | `KAPP_PLATFORM_ADMIN_USERS` | Bootstrap-time **KChat user ID** list (NOT Kapp UUIDs). One-step by design: (1) operator reads the candidate user's KChat ID from KChat itself, (2) sets the env var to that ID (comma-separated for multiple admins), (3) the user's first **fresh SSO exchange** (NOT a refresh) sees the match and persists `is_platform_admin = TRUE`. Promotion happens inside `upsertUser`, which only runs in `Exchange`; if the candidate already has a live session, they must log out and back in so their next request goes through `Exchange`. Re-read on every fresh exchange so operators can keep appending admin IDs without restarting. Unset is fine once at least one row in `users` already has `is_platform_admin = TRUE`. **Legacy mode**: an earlier revision keyed this on Kapp internal UUIDs, which forced an unworkable two-step bootstrap because the operator could not enumerate the UUID before INSERT — that mode is no longer supported. Operators upgrading must replace Kapp UUIDs with KChat IDs. | Low (bootstrap-only) |
