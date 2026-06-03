@@ -849,7 +849,14 @@ function AppShell() {
               </Badge>
             )}
             <LocaleSwitcher className="hidden md:inline-flex w-auto" />
-            <NotificationBell />
+            {/* Hidden on mobile: the bottom MobileNav owns the
+                Notifications surface there (its tab opens the inbox in a
+                full-width sheet). Showing the header bell too would mean
+                two notification entry points and a 360px dropdown that
+                overflows narrow viewports. */}
+            <span className="hidden md:inline-flex">
+              <NotificationBell />
+            </span>
           </div>
         </header>
         <OfflineIndicator />
@@ -1106,8 +1113,10 @@ export function MobileSheet({
             // directly. Rendering <NotificationBell /> here would nest a
             // popover-trigger button (which opens its own absolutely-
             // positioned dropdown) inside the sheet — the wrong control
-            // for a full-screen panel.
-            <NotificationInbox />
+            // for a full-screen panel. `showTitle={false}` drops the
+            // inbox's own "Notifications" heading since the sheet header
+            // above already provides one (keeps "Mark all read").
+            <NotificationInbox showTitle={false} />
           ) : (
             // Tapping any nav link navigates and closes the sheet — the
             // click bubbles up to this wrapper's handler. These are plain

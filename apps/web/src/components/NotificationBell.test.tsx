@@ -44,13 +44,13 @@ function renderBell() {
   );
 }
 
-function renderInbox() {
+function renderInbox(props: { showTitle?: boolean } = {}) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={qc}>
-      <NotificationInbox />
+      <NotificationInbox {...props} />
     </QueryClientProvider>,
   );
 }
@@ -187,5 +187,26 @@ describe("NotificationInbox", () => {
     expect(
       screen.queryByRole("button", { name: /Notifications/i }),
     ).not.toBeInTheDocument();
+  });
+
+  // The desktop dropdown has no chrome of its own, so the inbox renders
+  // its own "Notifications" heading by default.
+  it("renders its own title by default", async () => {
+    renderInbox();
+    expect(await screen.findByText("Notifications")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Mark all read/i }),
+    ).toBeInTheDocument();
+  });
+
+  // The mobile sheet already renders a "Notifications" header above the
+  // inbox, so it passes showTitle={false} to avoid a duplicate heading.
+  // The "Mark all read" action must remain regardless.
+  it("suppresses its title when showTitle is false (keeps Mark all read)", async () => {
+    renderInbox({ showTitle: false });
+    expect(
+      await screen.findByRole("button", { name: /Mark all read/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Notifications")).not.toBeInTheDocument();
   });
 });

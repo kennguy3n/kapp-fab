@@ -41,6 +41,28 @@ async function identityHash(): Promise<string> {
     .join("");
 }
 
+// Tell the SW who's using it so it can isolate the read cache per
+// identity (no logout flow exists, so this signal is what bounds one
+// user's cached data). We post it as EARLY as possible — at module eval,
+// not inside the `load` handler — so that on a returning (already
+// controlled) visitor the SW drops a stale API cache before the app's
+// first reads can be served from it. On the very first visit the page
+// isn't controlled yet, so the SW isn't intercepting fetches and there
+// is nothing to leak. `serviceWorker.ready` resolves as soon as there's
+// an active registration, independent of the fresh register() below.
+async function postIdentityToServiceWorker(): Promise<void> {
+  try {
+    const id = await identityHash();
+    const reg = await navigator.serviceWorker.ready;
+    (reg.active ?? navigator.serviceWorker.controller)?.postMessage({
+      type: "kapp:identity",
+      id,
+    });
+  } catch {
+    // Isolation degrades gracefully if crypto.subtle is unavailable.
+  }
+}
+
 // Register the PWA service worker (public/sw.js) for offline support
 // and installability. Only in production builds: in dev, Vite's HMR
 // and the unhashed module graph make a caching SW actively harmful
@@ -48,23 +70,16 @@ async function identityHash(): Promise<string> {
 // no `navigator.serviceWorker`. Registration failures are swallowed —
 // the app must work without the SW.
 if (import.meta.env.PROD && "serviceWorker" in navigator) {
+  // Kick off the identity handshake immediately (not gated on `load`) so
+  // a controlling SW can invalidate another user's cache as early as
+  // possible. Re-post if the controller changes mid-session.
+  void postIdentityToServiceWorker();
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    void postIdentityToServiceWorker();
+  });
   window.addEventListener("load", () => {
-    navigator.serviceWorker
-      .register("/sw.js")
-      .then(async () => {
-        // Tell the SW who's using it so it can isolate the read cache
-        // per identity (no logout flow exists, so this load-time signal
-        // is what bounds one user's cached data). Best-effort.
-        try {
-          const id = await identityHash();
-          const reg = await navigator.serviceWorker.ready;
-          reg.active?.postMessage({ type: "kapp:identity", id });
-        } catch {
-          // Isolation degrades gracefully if crypto.subtle is unavailable.
-        }
-      })
-      .catch(() => {
-        // Registration is best-effort; the app still works uncached.
-      });
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+      // Registration is best-effort; the app still works uncached.
+    });
   });
 }

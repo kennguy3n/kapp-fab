@@ -131,7 +131,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  event.respondWith(handleStatic(request));
+  event.respondWith(handleStatic(request, event));
 });
 
 // Write-through to the cache that never rejects into the caller. cache.put
@@ -159,8 +159,11 @@ async function handleNavigation(request) {
   }
 }
 
-// Stale-while-revalidate for static assets.
-async function handleStatic(request) {
+// Stale-while-revalidate for static assets. When a cached copy exists we
+// return it immediately and refresh in the background; the background
+// fetch is handed to event.waitUntil() so the SW isn't terminated before
+// the revalidation writes through (per the SW lifecycle spec).
+async function handleStatic(request, event) {
   const cache = await caches.open(STATIC_CACHE);
   const cached = await cache.match(request);
   const network = fetch(request)
@@ -169,7 +172,12 @@ async function handleStatic(request) {
       return res;
     })
     .catch(() => undefined);
-  return cached || (await network) || Response.error();
+  if (cached) {
+    // Keep the worker alive until the background refresh settles.
+    event.waitUntil(network);
+    return cached;
+  }
+  return (await network) || Response.error();
 }
 
 // Network-first for read APIs, caching successes for offline reads.

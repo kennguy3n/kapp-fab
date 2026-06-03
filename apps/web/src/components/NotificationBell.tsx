@@ -45,18 +45,45 @@ async function markAllRead(): Promise<void> {
 }
 
 /**
- * useNotifications centralises the notifications query + read mutations
- * so both the header bell (badge + popover) and the standalone inbox
- * panel share one React Query cache entry (`["notifications"]`) — a
- * single network subscription, one source of truth for read state.
+ * Shared notifications query. Both the header bell (badge) and the inbox
+ * panel read from one React Query cache entry (`["notifications"]`), so
+ * there's a single network subscription and one source of truth for read
+ * state no matter how many consumers are mounted. Kept free of mutations
+ * so the badge-only consumer (the bell) doesn't allocate useMutation
+ * instances it never invokes.
  */
-function useNotifications() {
-  const qc = useQueryClient();
+function useNotificationsQuery() {
   const list = useQuery({
     queryKey: ["notifications"],
     queryFn: fetchNotifications,
     refetchInterval: 30000,
   });
+  const items = list.data ?? [];
+  const unread = items.filter((n) => !n.read).length;
+  return { items, unread };
+}
+
+/**
+ * NotificationInbox renders just the inbox contents (optional header +
+ * list) as a plain in-flow block, with no popover positioning of its
+ * own. It's the single source of truth for the inbox UI, embedded both
+ * inside the header bell's dropdown and directly in the mobile
+ * notifications sheet (where a popover-trigger button would be the wrong
+ * surface — the sheet IS the inbox).
+ *
+ * `showTitle` (default true) controls the "Notifications" heading. The
+ * desktop dropdown has no title of its own so it keeps the heading; the
+ * mobile sheet already renders a "Notifications" header, so it passes
+ * `false` to avoid a duplicated title (the "Mark all read" action stays
+ * in the row regardless).
+ */
+export function NotificationInbox({
+  showTitle = true,
+}: {
+  showTitle?: boolean;
+}) {
+  const qc = useQueryClient();
+  const { items, unread } = useNotificationsQuery();
   const readOne = useMutation({
     mutationFn: markRead,
     onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
@@ -65,21 +92,6 @@ function useNotifications() {
     mutationFn: markAllRead,
     onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
   });
-  const items = list.data ?? [];
-  const unread = items.filter((n) => !n.read).length;
-  return { items, unread, readOne, readAll };
-}
-
-/**
- * NotificationInbox renders just the inbox contents (header + list) as a
- * plain in-flow block, with no popover positioning of its own. It's the
- * single source of truth for the inbox UI, embedded both inside the
- * header bell's dropdown and directly in the mobile notifications sheet
- * (where a popover-trigger button would be the wrong surface — the sheet
- * IS the inbox).
- */
-export function NotificationInbox() {
-  const { items, unread, readOne, readAll } = useNotifications();
 
   return (
     <div>
@@ -87,11 +99,11 @@ export function NotificationInbox() {
         style={{
           padding: 10,
           display: "flex",
-          justifyContent: "space-between",
+          justifyContent: showTitle ? "space-between" : "flex-end",
           borderBottom: "1px solid #e5e7eb",
         }}
       >
-        <strong>Notifications</strong>
+        {showTitle && <strong>Notifications</strong>}
         <button
           onClick={() => readAll.mutate()}
           disabled={readAll.isPending || unread === 0}
@@ -152,7 +164,7 @@ export function NotificationInbox() {
  */
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
-  const { unread } = useNotifications();
+  const { unread } = useNotificationsQuery();
 
   return (
     <div style={{ position: "relative" }}>

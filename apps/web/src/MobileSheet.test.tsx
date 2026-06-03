@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MobileSheet } from "./App";
 
 const sections = [
@@ -10,10 +11,33 @@ const sections = [
 ];
 
 function renderSheet(onClose = vi.fn()) {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
   const utils = render(
-    <MemoryRouter initialEntries={["/"]}>
-      <MobileSheet mode="more" sections={sections} onClose={onClose} />
-    </MemoryRouter>,
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/"]}>
+        <MobileSheet mode="more" sections={sections} onClose={onClose} />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  return { ...utils, onClose };
+}
+
+function renderNotificationsSheet(onClose = vi.fn()) {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const utils = render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/"]}>
+        <MobileSheet
+          mode="notifications"
+          sections={sections}
+          onClose={onClose}
+        />
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
   return { ...utils, onClose };
 }
@@ -40,5 +64,20 @@ describe("MobileSheet (more mode)", () => {
     const { onClose } = renderSheet();
     await user.click(screen.getByRole("link", { name: "Leads" }));
     expect(onClose).toHaveBeenCalled();
+  });
+});
+
+describe("MobileSheet (notifications mode)", () => {
+  // Regression: the sheet renders its own "Notifications" header, and the
+  // embedded inbox used to render a second one — a duplicated heading.
+  // The inbox is now passed showTitle={false}, so exactly one
+  // "Notifications" heading appears in the sheet.
+  it("shows a single 'Notifications' header (no duplicate from the inbox)", async () => {
+    renderNotificationsSheet();
+    expect(await screen.findAllByText("Notifications")).toHaveLength(1);
+    // The inbox content still renders (its "Mark all read" action).
+    expect(
+      screen.getByRole("button", { name: /Mark all read/i }),
+    ).toBeInTheDocument();
   });
 });
