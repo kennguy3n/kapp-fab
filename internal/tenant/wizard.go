@@ -697,6 +697,11 @@ type Wizard struct {
 	// "en" — the resolver downgrades cleanly without rejecting
 	// the row). Nil leaves the wizard's derived tag unchanged.
 	localeResolver LocaleResolver
+	// welcomeNotifier sends the post-provisioning welcome KChat DM
+	// from the AutoProvision flow. Optional: nil skips the DM (the
+	// rest of provisioning still completes). Set via
+	// WithWelcomeNotifier. See AutoProvision below.
+	welcomeNotifier WelcomeNotifier
 }
 
 // ZKFabricProvisioner mints a new tenant + HMAC credential pair on
@@ -1469,4 +1474,133 @@ func seedDefaultRetentionPolicies(ctx context.Context, tx pgx.Tx, tenantID uuid.
 		}
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// AutoProvision (Workstream 1 — self-service signup)
+//
+// AutoProvision is the one-call provisioning path the self-service
+// SignupService drives. It is intentionally a NEW, self-contained
+// entry point layered on top of RunSetupWizard rather than an edit to
+// the existing wizard flow, so it can evolve independently of the
+// admin /tenants/{id}/setup path (and of Workstream 8's edits to the
+// other wizard functions).
+//
+// It chains, in order:
+//
+//	1. RunSetupWizard  — seed CoA / roles / users, persist
+//	                     currency/country/locale, seed the default
+//	                     scheduled actions + feature flags + retention
+//	                     policies, and provision the ZK Object Fabric.
+//	2. billing usage-sync scheduled action — seed the per-tenant daily
+//	                     job that pushes metered usage to Stripe and
+//	                     enforces trial-grace expiry.
+//	3. welcome KChat DM — best-effort greeting to the owner.
+// ---------------------------------------------------------------------------
+
+// WelcomeNotifier sends the welcome DM to a freshly-provisioned
+// tenant's owner over KChat. It is an interface (rather than a hard
+// dependency on a KChat client) so the tenant package stays free of a
+// messaging import and tests can assert the DM was attempted with a
+// trivial fake. A nil notifier on the wizard skips the step.
+type WelcomeNotifier interface {
+	SendWelcome(ctx context.Context, w WelcomeMessage) error
+}
+
+// WelcomeMessage is the payload handed to WelcomeNotifier. It carries
+// everything a KChat DM template needs without exposing the wizard's
+// internals.
+type WelcomeMessage struct {
+	TenantID    uuid.UUID
+	TenantSlug  string
+	KChatUserID string
+	DisplayName string
+	Plan        string
+}
+
+// WithWelcomeNotifier attaches the welcome-DM notifier used by
+// AutoProvision. Returns the wizard for fluent chaining. Passing nil
+// is equivalent to never calling it (the DM step is skipped).
+func (w *Wizard) WithWelcomeNotifier(n WelcomeNotifier) *Wizard {
+	w.welcomeNotifier = n
+	return w
+}
+
+// AutoProvisionConfig is the input to AutoProvision. It embeds the
+// standard SetupWizardConfig and adds the owner-identity fields the
+// welcome DM needs.
+type AutoProvisionConfig struct {
+	SetupWizardConfig
+
+	// OwnerKChatUserID + OwnerDisplayName identify the recipient of
+	// the welcome DM. When OwnerKChatUserID is empty the DM is
+	// skipped (provisioning still succeeds).
+	OwnerKChatUserID string
+	OwnerDisplayName string
+
+	// TenantSlug is included verbatim in the welcome message so the
+	// notifier doesn't need a second tenant lookup.
+	TenantSlug string
+}
+
+// AutoProvision runs the full self-service provisioning chain for an
+// already-created tenant row. The tenant is created (status 'active')
+// by SignupService before this is called; AutoProvision seeds it and
+// greets the owner.
+//
+// Failure semantics mirror RunSetupWizard: the seed/ZK steps surface
+// their error to the caller. The welcome DM is best-effort — a KChat
+// outage must not fail an otherwise-successful provision — so a DM
+// error is logged-by-return only when nothing else failed, and even
+// then it is wrapped so the caller can distinguish it. The
+// billing-action seed is idempotent (INSERT … WHERE NOT EXISTS) so a
+// re-run never duplicates the row.
+func (w *Wizard) AutoProvision(ctx context.Context, tenantID uuid.UUID, cfg AutoProvisionConfig) (*WizardResult, error) {
+	res, err := w.RunSetupWizard(ctx, tenantID, cfg.SetupWizardConfig)
+	if err != nil {
+		return res, err
+	}
+
+	if err := w.seedBillingUsageSyncAction(ctx, tenantID); err != nil {
+		return res, err
+	}
+
+	if w.welcomeNotifier != nil && cfg.OwnerKChatUserID != "" {
+		if derr := w.welcomeNotifier.SendWelcome(ctx, WelcomeMessage{
+			TenantID:    tenantID,
+			TenantSlug:  cfg.TenantSlug,
+			KChatUserID: cfg.OwnerKChatUserID,
+			DisplayName: cfg.OwnerDisplayName,
+			Plan:        cfg.Plan,
+		}); derr != nil {
+			return res, fmt.Errorf("tenant: autoprovision welcome dm: %w", derr)
+		}
+	}
+
+	return res, nil
+}
+
+// seedBillingUsageSyncAction inserts the per-tenant daily billing
+// usage-sync scheduled action. Idempotent on (tenant_id,
+// action_type), matching seedDefaultScheduledActions, so it is safe
+// to call on every AutoProvision (and on a re-provision of an
+// existing tenant).
+func (w *Wizard) seedBillingUsageSyncAction(ctx context.Context, tenantID uuid.UUID) error {
+	now := time.Now().UTC()
+	return dbutil.WithTenantTx(ctx, w.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO scheduled_actions
+			     (tenant_id, action_type, interval_seconds, next_run_at, payload, enabled)
+			 SELECT $1, $2, $3, $4, '{}'::jsonb, TRUE
+			  WHERE NOT EXISTS (
+			      SELECT 1 FROM scheduled_actions
+			       WHERE tenant_id = $1 AND action_type = $2
+			  )`,
+			tenantID, ActionTypeBillingUsageSync, defaultBillingUsageSyncIntervalSeconds, now,
+		)
+		if err != nil {
+			return fmt.Errorf("tenant: seed billing usage-sync action: %w", err)
+		}
+		return nil
+	})
 }

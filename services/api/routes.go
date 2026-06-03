@@ -324,6 +324,48 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Get("/", d.meth.listPlans)
 		})
 
+		// Workstream 1 — billing (Stripe). subscribe / usage /
+		// portal-session are tenant-scoped: the tenant is taken from
+		// the JWT-stamped context (tenantChain), never a body field,
+		// so a caller can only ever act on their own tenant. The
+		// webhook is the public Stripe sink — authenticated by the
+		// Stripe-Signature HMAC rather than a JWT — so it sits in its
+		// own group outside tenantChain. It carries no captcha
+		// (Stripe can't solve one) and is CSRF-exempt by exact path
+		// (see publicCSRFExemptPathSet). The whole group is nil-
+		// guarded so a binary built without billing wiring simply
+		// omits the routes rather than panicking.
+		if d.bilh != nil {
+			r.Route("/api/v1/billing", func(r chi.Router) {
+				r.Group(func(r chi.Router) {
+					d.tenantChain(r)
+					r.Post("/subscribe", d.bilh.subscribe)
+					r.Get("/usage", d.bilh.usage)
+					r.Post("/portal-session", d.bilh.portalSession)
+				})
+				r.Post("/webhook", d.bilh.webhook)
+			})
+		}
+
+		// Workstream 1 — self-service signup. Public POST mounted
+		// outside the JWT gate (a not-yet-existing tenant has no
+		// JWT) but behind the same IP rate limiter + captcha the
+		// other public POST endpoints use. The handler verifies the
+		// caller's KChat identity before creating any tenant, so the
+		// fail-closed auth posture is preserved — signup never mints
+		// a session itself.
+		if d.sigh != nil {
+			r.Group(func(r chi.Router) {
+				if d.publicFormIPLimit != nil {
+					r.Use(d.publicFormIPLimit)
+				}
+				if d.captchaMW != nil {
+					r.Use(d.captchaMW)
+				}
+				r.Post("/api/v1/signup", d.sigh.signup)
+			})
+		}
+
 		// Phase J/K — runtime isolation audit. Returns the JSON
 		// report from platform.IsolationAuditor.Run. Admin-only
 		// in spirit; the route group is intentionally not wrapped

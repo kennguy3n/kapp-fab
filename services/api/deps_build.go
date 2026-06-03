@@ -22,6 +22,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/auth"
 	"github.com/kennguy3n/kapp-fab/internal/authz"
 	"github.com/kennguy3n/kapp-fab/internal/base"
+	"github.com/kennguy3n/kapp-fab/internal/billing"
 	"github.com/kennguy3n/kapp-fab/internal/captcha"
 	"github.com/kennguy3n/kapp-fab/internal/csrf"
 	"github.com/kennguy3n/kapp-fab/internal/dashboard"
@@ -966,6 +967,41 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		iah = &isolationAuditHandlers{auditor: platform.NewIsolationAuditor(pool, adminPool)}
 	}
 	meth := &meteringHandlers{metering: meteringStore, tenants: tenantSvc, plans: planStore, features: featureStore}
+
+	// Workstream 1 — billing (Stripe) + self-service signup.
+	//
+	// billing.LoadConfig never fails: with no STRIPE_* env vars the
+	// config is "disabled" and the service serves the free plan only
+	// (paid-plan calls return ErrBillingDisabled → 503). The store's
+	// admin pool backs the webhook reverse lookups (customer/sub id →
+	// tenant) which legitimately span tenants; it may be nil in dev,
+	// in which case those lookups degrade to ErrUnknownCustomer.
+	billingCfg := billing.LoadConfig()
+	billingStore := billing.NewStore(pool).WithAdminPool(adminPool)
+	billingSvc := billing.NewService(billing.ServiceDeps{
+		Config:   billingCfg,
+		Stripe:   billing.NewClient(billingCfg),
+		Store:    billingStore,
+		Tenants:  tenantSvc,
+		Plans:    planStore,
+		Features: featureStore,
+		Usage:    meteringStore,
+		Logger:   logger,
+	})
+	bilh := &billingHandlers{svc: billingSvc, metering: meteringStore, plans: planStore, logger: logger}
+
+	// Self-service signup. The KChat client verifies the signing-up
+	// user's identity (code exchange) before any tenant row is
+	// created — signup fails closed on an unverified email. The
+	// signup cell is operator-configurable (KAPP_SIGNUP_CELL);
+	// NewSignupService falls back to a sensible default when empty.
+	userStore := tenant.NewUserStore(pool).WithAdminPool(adminPool)
+	signupVerifier := kchatSignupVerifier{
+		client: auth.NewHTTPKChatClient(os.Getenv("KCHAT_BASE_URL"), os.Getenv("KCHAT_API_KEY")),
+	}
+	signupSvc := tenant.NewSignupService(tenantSvc, userStore, wizard, signupVerifier, os.Getenv("KAPP_SIGNUP_CELL"))
+	sigh := &signupHandlers{svc: signupSvc, logger: logger}
+
 	kh := &ktypeHandlers{registry: ktypeRegistry}
 	tkh := &tenantKTypeHandlers{store: tenantKTypeStore, logger: logger}
 	// recordHandlers calls AuthorizeRecord from update()/delete() to
@@ -1379,6 +1415,8 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		authh:                  authh,
 		eh:                     eh,
 		th:                     th,
+		bilh:                   bilh,
+		sigh:                   sigh,
 		feath:                  feath,
 		plch:                   plch,
 		reth:                   reth,
@@ -1506,6 +1544,14 @@ func publicCSRFExemptPathSet() [][2]string {
 	return [][2]string{
 		// {prefix, suffix}: POST /api/v1/forms/{id}/submit
 		{"/api/v1/forms/", "/submit"},
+		// {prefix, ""}: exact-path POST /api/v1/billing/webhook —
+		// the Stripe webhook sink. Stripe posts server-to-server
+		// with no Origin header and no Kapp JWT, so the CSRF
+		// Origin/Referer allowlist would reject every legitimate
+		// delivery. Authenticity is established instead by the
+		// Stripe-Signature HMAC the handler re-validates before
+		// trusting the body (see billingHandlers.webhook).
+		{"/api/v1/billing/webhook", ""},
 	}
 }
 
@@ -1525,6 +1571,15 @@ func isPublicCSRFExempt(r *http.Request, patterns [][2]string) bool {
 	p := r.URL.Path
 	for _, pat := range patterns {
 		prefix, suffix := pat[0], pat[1]
+		// An empty suffix denotes an exact-path pattern (a fixed
+		// route with no {id} segment, e.g. the Stripe webhook):
+		// match only when the whole path equals the prefix.
+		if suffix == "" {
+			if p == prefix {
+				return true
+			}
+			continue
+		}
 		if !strings.HasPrefix(p, prefix) || !strings.HasSuffix(p, suffix) {
 			continue
 		}
