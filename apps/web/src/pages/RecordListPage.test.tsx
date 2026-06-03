@@ -120,6 +120,53 @@ describe("RecordListPage", () => {
     expect(screen.queryByText("Gamma")).toBeNull();
   });
 
+  it("shows the module create CTA (not 'No matches') when the module is genuinely empty even with an active saved-view filter", async () => {
+    // Regression: a brand-new tenant (0 server records) with a
+    // pre-configured default view must still see the onboarding CTA,
+    // not a misleading "No matches for this view".
+    getKType.mockResolvedValue(FIXTURE_KTYPE);
+    listRecords.mockResolvedValue([]);
+    listViews.mockResolvedValue([
+      {
+        id: "v-default",
+        ktype: "crm.deal",
+        name: "Negotiation",
+        filters: { stage: "negotiation" },
+        sort: "",
+        is_default: true,
+        shared: false,
+      },
+    ]);
+    renderPage();
+    expect(await screen.findByText("No deals yet")).toBeInTheDocument();
+    expect(screen.getByText("Create your first deal")).toBeInTheDocument();
+    expect(screen.queryByText("No matches for this view")).toBeNull();
+  });
+
+  it("shows 'No matches for this view' when records exist but the active filter excludes them all", async () => {
+    getKType.mockResolvedValue(FIXTURE_KTYPE);
+    listRecords.mockResolvedValue([
+      row("r1", "Acme", "open", 100),
+      row("r2", "Beta", "won", 250),
+    ]);
+    listViews.mockResolvedValue([
+      {
+        id: "v-default",
+        ktype: "crm.deal",
+        name: "Negotiation",
+        filters: { stage: "negotiation" },
+        sort: "",
+        is_default: true,
+        shared: false,
+      },
+    ]);
+    renderPage();
+    expect(
+      await screen.findByText("No matches for this view"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No deals yet")).toBeNull();
+  });
+
   it("applies the saved view's sort spec to order the rendered rows", async () => {
     getKType.mockResolvedValue(FIXTURE_KTYPE);
     listRecords.mockResolvedValue([

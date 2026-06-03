@@ -377,8 +377,9 @@ export function SetupWizardPage() {
     [users],
   );
 
-  // submitWizard posts the aggregated payload. `extraUsers` lets the
-  // "Skip" button finish with no invites regardless of half-typed rows.
+  // submitWizard posts the aggregated payload. The `includeUsers`
+  // flag lets the "Skip" button finish with no invites (sending an
+  // empty users array) regardless of any half-typed invite rows.
   const submitWizard = (includeUsers = true) => {
     submit.mutate({
       company_name: companyName.trim(),
@@ -408,35 +409,41 @@ export function SetupWizardPage() {
         of accounts, currency, language, roles, and features automatically.
         You can change any of it later from the admin pages.
       </p>
-      <ol
-        style={{
-          display: "flex",
-          gap: 16,
-          listStyle: "none",
-          padding: 0,
-          margin: "16px 0",
-          fontSize: 13,
-        }}
-      >
-        {[
-          { stepId: "company", label: t("wizard.step.company") },
-          { stepId: "users", label: t("wizard.step.users") },
-        ].map(({ stepId, label }, i) => (
-          // The React key is the stable step identifier rather than the
-          // translated label so a locale whose translations collide
-          // doesn't trigger a duplicate-key warning. `stepId` (not
-          // `id`) avoids shadowing the route `id` from useParams.
-          <li
-            key={stepId}
-            style={{
-              color: i === step ? "#111827" : "#9ca3af",
-              fontWeight: i === step ? 600 : 400,
-            }}
-          >
-            {i + 1}. {label}
-          </li>
-        ))}
-      </ol>
+      {/* The two-step indicator is only meaningful while the operator
+          is moving through the wizard (steps 0-1). On the completion
+          screen (step === 2) neither step is "active", so a dimmed
+          indicator above the success message is just noise — hide it. */}
+      {step < 2 && (
+        <ol
+          style={{
+            display: "flex",
+            gap: 16,
+            listStyle: "none",
+            padding: 0,
+            margin: "16px 0",
+            fontSize: 13,
+          }}
+        >
+          {[
+            { stepId: "company", label: t("wizard.step.company") },
+            { stepId: "users", label: t("wizard.step.users") },
+          ].map(({ stepId, label }, i) => (
+            // The React key is the stable step identifier rather than the
+            // translated label so a locale whose translations collide
+            // doesn't trigger a duplicate-key warning. `stepId` (not
+            // `id`) avoids shadowing the route `id` from useParams.
+            <li
+              key={stepId}
+              style={{
+                color: i === step ? "#111827" : "#9ca3af",
+                fontWeight: i === step ? 600 : 400,
+              }}
+            >
+              {i + 1}. {label}
+            </li>
+          ))}
+        </ol>
+      )}
 
       {step === 0 && (
         <div style={{ display: "grid", gap: 12 }}>

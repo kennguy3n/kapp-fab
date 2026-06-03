@@ -300,11 +300,17 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
           // opens the create form (and the importer) so a brand-new
           // tenant always has an obvious next step.
           (() => {
-            // Use effective-value semantics (not just key count) so a
-            // view with only null/"" filter values — which matchesFilters
-            // treats as no-ops — still shows the module CTA, not a
-            // misleading "No matches".
-            const filterActive = hasEffectiveFilters(activeView?.filters);
+            // "No matches" is only the right message when an active
+            // filter emptied a non-empty module. Two conditions must
+            // hold: (1) the view carries effective filters (null/""
+            // values are no-ops in matchesFilters), and (2) the server
+            // actually returned rows — otherwise the module is genuinely
+            // empty and a brand-new tenant must see the create/import CTA
+            // (the whole point of this onboarding work), not "No matches
+            // for this view".
+            const filterActive =
+              hasEffectiveFilters(activeView?.filters) &&
+              (recordsQuery.data?.length ?? 0) > 0;
             return (
               <RecordEmptyState
                 ktype={ktype}
