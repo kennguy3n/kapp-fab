@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -106,6 +107,34 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 		r.Get("/metrics", d.metrics.Handler())
 	}
 	r.Get("/api/v1/", rootHandler)
+
+	// Workstream 6 — health dashboard + status page surface.
+	// Constructed once here so the public, admin, and tenant-scoped
+	// health routes below share a single checker (and its probe
+	// configuration). ZK fabric connectivity is probed against the
+	// same console endpoint the setup wizard provisions against.
+	// Construction only fails when d.pool is nil (never in a booted
+	// API), so a failure degrades to "health endpoints absent"
+	// rather than a panic.
+	hh, hhErr := newHealthHandlers(d, os.Getenv("ZK_FABRIC_CONSOLE_ENDPOINT"))
+	if hhErr != nil {
+		log.Printf("api: WARN health endpoints disabled: %v", hhErr)
+	}
+	if hh != nil {
+		// Public, unauthenticated component status. Sanitized so a
+		// scrape cannot fingerprint internal topology. Fronted by the
+		// shared per-IP limiter (same backend the public embed route
+		// uses) so the unauthenticated probe fan-out cannot be turned
+		// into a load-amplification vector; that limiter fails open, so
+		// a Redis hiccup never takes the status page down. RealIP has
+		// already run on the parent router, so the limiter keys on the
+		// true client address.
+		if d.publicEmbedIPLimit != nil {
+			r.With(d.publicEmbedIPLimit).Get("/api/v1/health", hh.publicHealth)
+		} else {
+			r.Get("/api/v1/health", hh.publicHealth)
+		}
+	}
 
 	// Phase H auth routes. SSO and refresh are unauthenticated (they
 	// bootstrap the auth context); the rest of the surface will be
@@ -291,6 +320,12 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 					r.Get("/usage", d.meth.usageMe)
 					r.Get("/usage/history", d.meth.usageHistory)
 					r.Post("/plan", d.meth.changePlanMe)
+					// Workstream 6 — tenant-scoped self-health. Runs
+					// under tenantChain so every read is RLS-scoped to
+					// the caller's own tenant.
+					if hh != nil {
+						r.Get("/health", hh.tenantHealth)
+					}
 				})
 			})
 
@@ -323,6 +358,19 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 		r.Route("/api/v1/plans", func(r chi.Router) {
 			r.Get("/", d.meth.listPlans)
 		})
+
+		// Workstream 6 — admin operator dashboard feed. Registered as
+		// a Group (not a Route) so it can mount adminChain on the full
+		// /api/v1/admin/health/detailed path without colliding with
+		// the separate /api/v1/admin Route block below (chi panics on
+		// a duplicate mount of the same prefix). adminChain gates it
+		// behind JWT + IsPlatformAdmin and scrubs any tenant context.
+		if hh != nil {
+			r.Group(func(r chi.Router) {
+				d.adminChain(r)
+				r.Get("/api/v1/admin/health/detailed", hh.adminHealthDetailed)
+			})
+		}
 
 		// Phase J/K — runtime isolation audit. Returns the JSON
 		// report from platform.IsolationAuditor.Run. Admin-only
