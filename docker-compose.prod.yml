@@ -105,11 +105,15 @@ services:
         rm -f "$${dump}"
         SCRIPT
         chmod +x /usr/local/bin/kapp-backup.sh
+        # /etc/cron.d/ is a SYSTEM crontab: the 6th field is a username
+        # (root) and the command follows. Debian's cron daemon reads this
+        # directory directly, so we do NOT also `crontab` it — installing
+        # a system-format file as a user crontab would treat `root` as the
+        # command and fail on every tick.
         printf '%s root . /etc/kapp-backup.env; /usr/local/bin/kapp-backup.sh >> /var/log/kapp-backup.log 2>&1\n' \
           "$${BACKUP_CRON:-0 3 * * *}" > /etc/cron.d/kapp-backup
         env | grep -E '^(POSTGRES_|ZK_FABRIC_|BACKUP_)' > /etc/kapp-backup.env
         chmod 0644 /etc/cron.d/kapp-backup
-        crontab /etc/cron.d/kapp-backup
         touch /var/log/kapp-backup.log
         cron && tail -F /var/log/kapp-backup.log
     environment:

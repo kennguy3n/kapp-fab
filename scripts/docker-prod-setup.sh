@@ -50,11 +50,15 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 [ -f "$COMPOSE_FILE" ] || die "compose file not found: $COMPOSE_FILE"
 
-# gen_secret prints a URL-safe random secret of at least 48 characters
-# (well above the 32-byte minimum auth.NewSigner enforces for the JWT
-# secret and the field-level encryption master key).
+# gen_secret prints a URL-safe random secret of a fixed, guaranteed
+# length: 32 random bytes rendered as 64 hex chars. hex is used instead
+# of base64 so there are no '+' / '/' / '=' chars to strip — which means
+# the length is exact (no risk of `cut` silently producing a short
+# secret). 64 chars is well above the 32-byte minimum the auth layer
+# enforces for the JWT secret and the field-level encryption master key
+# (tenant.loadKeyFromEnv accepts it via either its base64 or raw path).
 gen_secret() {
-    openssl rand -base64 48 | tr -d '\n=+/' | cut -c1-48
+    openssl rand -hex 32
 }
 
 # Load any existing answers so re-runs preserve generated secrets and
