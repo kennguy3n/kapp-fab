@@ -296,6 +296,46 @@ jobs:
       - run: npm ci
       - run: npm run test -w @kapp/web
 
+  # Playwright E2E suite for apps/web (Workstream 3). Separate from
+  # `web-tests` (Vitest) so a browser-flow regression surfaces
+  # independently from a unit failure, and from `web` (vite build) so
+  # the failure annotations land on the spec rather than the build.
+  # Like the other web jobs it has no `needs:` — all run in parallel
+  # and share the npm cache keyed on package-lock.json.
+  #
+  # The specs are fully deterministic: they mock every /api/v1 request
+  # via page.route (see apps/web/playwright/mock-api.ts), so the job
+  # needs no backend, database, or network — just the dev server,
+  # which the Playwright config boots itself (webServer).
+  web-e2e:
+    name: web e2e (playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      # Pull only chromium (the config's single-engine matrix) plus
+      # its OS deps. Pinning to the Playwright version in the
+      # lockfile keeps the browser build and the runner library in
+      # lockstep.
+      - name: install playwright chromium
+        run: npx playwright install --with-deps chromium
+      - name: run e2e suite
+        run: npx playwright test --config=apps/web/playwright/playwright.config.ts
+      - name: upload report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            apps/web/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
   rust-sdk:
     name: rust-sdk (fmt + clippy + test, ${{ matrix.toolchain }})
     runs-on: ubuntu-latest
