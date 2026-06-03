@@ -276,6 +276,12 @@ const UsageDashboardPage = lazyNamed(
   () => import("./pages/UsageDashboardPage"),
   "UsageDashboardPage",
 );
+// Workstream 6 — public status page + admin operator health dashboard.
+const StatusPage = lazyNamed(() => import("./pages/StatusPage"), "StatusPage");
+const AdminHealthPage = lazyNamed(
+  () => import("./pages/AdminHealthPage"),
+  "AdminHealthPage",
+);
 const SearchPage = lazyNamed(() => import("./pages/SearchPage"), "SearchPage");
 const WebhooksPage = lazyNamed(
   () => import("./pages/WebhooksPage"),
@@ -530,6 +536,7 @@ const navSections: NavSection[] = [
       { to: "/admin/placement", label: "Placement Policy" },
       { to: "/admin/retention", label: "Retention" },
       { to: "/admin/usage", label: "Usage" },
+      { to: "/admin/health", label: "System Health" },
       { to: "/admin/audit", label: "Audit Log" },
       { to: "/admin/roles", label: "Roles" },
       { to: "/admin/webhooks", label: "Webhooks" },
@@ -625,6 +632,10 @@ export function App() {
               auth so it can be iframed into any external surface.  The
               owning tenant's rate-limit bucket is enforced server-side. */}
           <Route path="/embed/:token" element={<InsightsEmbedPage />} />
+          {/* Public platform status page (Workstream 6). Rendered
+              outside the app shell so anonymous visitors can check
+              availability without a tenant context or login. */}
+          <Route path="/status" element={<StatusPage />} />
           <Route path="/*" element={<AppShell />} />
         </Routes>
         </Suspense>
@@ -852,6 +863,7 @@ function AppShell() {
                 element={<RetentionPoliciesPage />}
               />
               <Route path="/admin/usage" element={<UsageDashboardPage />} />
+              <Route path="/admin/health" element={<AdminHealthPage />} />
               <Route path="/admin/audit" element={<AuditLogPage />} />
               <Route path="/admin/roles" element={<RoleManagementPage />} />
               <Route
