@@ -20,7 +20,12 @@ const REPO_ROOT = path.resolve(HERE, "../../..");
 // deterministically intercept those requests via page.route (see
 // mock-api.ts). Demo mode would swap in the in-memory shim and defeat
 // the interception.
-const PORT = 4173;
+// A non-default port: Vite's dev server defaults to 5173 and `vite
+// preview` to 4173, so picking 4319 keeps the E2E web server from
+// colliding with either if a developer happens to be running one.
+// `--strictPort` (below) still makes any collision fail loudly rather
+// than silently shifting ports.
+const PORT = 4319;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 
 export default defineConfig({
@@ -57,10 +62,15 @@ export default defineConfig({
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
   ],
   webServer: {
-    command:
-      "npm run dev --workspace=apps/web -- --host 127.0.0.1 --port 4173 --strictPort",
+    command: `npm run dev --workspace=apps/web -- --host 127.0.0.1 --port ${PORT} --strictPort`,
     url: BASE_URL,
     cwd: REPO_ROOT,
+    // Force demo mode OFF for the spawned dev server regardless of the
+    // developer's shell env. The specs need the real ApiClient (plain
+    // fetch to /api/v1) so page.route can intercept; VITE_DEMO_MODE=true
+    // would swap in the in-memory shim (see src/lib/api.ts) and silently
+    // defeat every interception. Pinning it here closes that footgun.
+    env: { VITE_DEMO_MODE: "false" },
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
     stdout: "pipe",

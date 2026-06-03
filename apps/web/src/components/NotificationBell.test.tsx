@@ -99,7 +99,9 @@ describe("NotificationBell", () => {
       ),
       http.post(`${API}/notifications/n1/read`, () => {
         read = true;
-        return HttpResponse.json(null, { status: 204 });
+        // 204 No Content carries no body — match the default handler
+        // in test/msw/handlers.ts (bare HttpResponse, not .json(null)).
+        return new HttpResponse(null, { status: 204 });
       }),
     );
     const user = userEvent.setup();
