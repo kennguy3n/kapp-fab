@@ -199,12 +199,16 @@ log "Running database migrations"
 # throwaway golang container attached to the compose network so it can
 # reach the postgres service by name without publishing the DB port.
 MIGRATE_DB_URL="postgres://${POSTGRES_USER:-kapp}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-kapp}?sslmode=disable"
+# Pin the migration toolchain to the exact Go version go.mod declares so the
+# throwaway build never drifts from the version the service binaries are built
+# with; fall back to the minor tag if go.mod cannot be read.
+GO_VERSION="$(awk '/^go [0-9]/ {print $2; exit}' "$REPO_ROOT/go.mod")"
 docker run --rm \
     --network "${PROJECT_NAME}_default" \
     -v "$REPO_ROOT":/src \
     -w /src \
     -e DB_URL="$MIGRATE_DB_URL" \
-    golang:1.25 \
+    "golang:${GO_VERSION:-1.25}" \
     go run ./cmd/migrate up
 
 if [ -n "$FIRST_ADMIN_KCHAT_ID" ]; then

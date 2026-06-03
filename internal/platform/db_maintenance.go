@@ -396,12 +396,22 @@ func (w *DBMaintenanceWorker) managePartitions(ctx context.Context) {
 		}
 		desired := DesiredPartitionCount(estRows, w.cfg.PartitionCapacity, w.cfg.PartitionTargetCount)
 		plan := PartitionPlan(parent, w.cfg.PartitionTargetCount)
-		existing, err := w.countPlannedPartitions(ctx, plan)
+		existing, err := w.existingPlannedPartitions(ctx, plan)
 		if err != nil {
-			w.logger.Warn("db maintenance: count partitions", "table", parent, "err", err)
+			w.logger.Warn("db maintenance: list partitions", "table", parent, "err", err)
 			continue
 		}
-		for i := existing; i < desired && i < len(plan); i++ {
+		// Create every planned partition below the desired count that does
+		// not already exist, scanning the whole prefix rather than resuming
+		// from a count. A count-as-next-index shortcut assumes the existing
+		// partitions form a gapless prefix; a transient failure that creates
+		// p01 but not p00 would then be skipped forever. Iterating the prefix
+		// and consulting the existing-name set fills such a hole on a later
+		// sweep, and IF NOT EXISTS keeps already-present partitions a no-op.
+		for i := 0; i < desired && i < len(plan); i++ {
+			if existing[plan[i].Name] {
+				continue
+			}
 			w.createPartition(ctx, parent, plan[i], estRows)
 		}
 	}
@@ -559,16 +569,23 @@ func (w *DBMaintenanceWorker) reindexHighChurn(ctx context.Context) {
 	if len(w.cfg.HighChurnIndexes) == 0 {
 		return
 	}
-	last, err := w.lastSuccessfulRun(ctx, MaintenanceTaskReindex)
-	if err != nil {
-		w.logger.Warn("db maintenance: last reindex lookup", "err", err)
-		return
-	}
-	if !dueWeekly(last, w.now(), w.cfg.ReindexInterval) {
-		return
-	}
+	now := w.now()
 	for _, idx := range w.cfg.HighChurnIndexes {
 		if !validIdent(idx) {
+			continue
+		}
+		// Gate the cadence per index, not per phase. A single last-success
+		// timestamp for the whole reindex task lets one index's success
+		// satisfy the gate and suppress retries of a sibling index that
+		// failed, for up to a full interval. Scoping the lookup to this
+		// index means a persistently failing index is retried every sweep
+		// while healthy indexes still honor the weekly cadence.
+		last, err := w.lastSuccessfulRunForTarget(ctx, MaintenanceTaskReindex, idx)
+		if err != nil {
+			w.logger.Warn("db maintenance: last reindex lookup", "index", idx, "err", err)
+			continue
+		}
+		if !dueWeekly(last, now, w.cfg.ReindexInterval) {
 			continue
 		}
 		start := w.now()
@@ -577,7 +594,7 @@ func (w *DBMaintenanceWorker) reindexHighChurn(ctx context.Context) {
 		//
 		// Simple protocol for the same cache-hygiene reason as ANALYZE/VACUUM
 		// above (dynamic, per-index one-shot statement).
-		_, err := w.pool.Exec(ctx, fmt.Sprintf("REINDEX INDEX CONCURRENTLY %s", idx), pgx.QueryExecModeSimpleProtocol)
+		_, err = w.pool.Exec(ctx, fmt.Sprintf("REINDEX INDEX CONCURRENTLY %s", idx), pgx.QueryExecModeSimpleProtocol)
 		dur := w.now().Sub(start)
 		if err != nil {
 			w.logger.Warn("db maintenance: reindex", "index", idx, "err", err)
@@ -606,36 +623,56 @@ func (w *DBMaintenanceWorker) estimateRows(ctx context.Context, relName string) 
 	return est, nil
 }
 
-// countPlannedPartitions counts how many of the planned partition names
-// already exist as relations, which (because PartitionPlan is order- and
-// total-stable) equals the index of the next partition to create.
-func (w *DBMaintenanceWorker) countPlannedPartitions(ctx context.Context, plan []PartitionSpec) (int, error) {
+// existingPlannedPartitions returns the set of planned partition names that
+// already exist as relations in the public schema. Returning the concrete
+// set (rather than a bare count) lets managePartitions create exactly the
+// missing partitions: a count used as the next-to-create index assumes the
+// existing partitions form a gapless prefix, so a hole left by an earlier
+// transient failure would be skipped permanently. The relnamespace filter
+// keeps an unrelated relation of the same name in another schema from being
+// mistaken for one of ours.
+func (w *DBMaintenanceWorker) existingPlannedPartitions(ctx context.Context, plan []PartitionSpec) (map[string]bool, error) {
 	names := make([]string, 0, len(plan))
 	for _, s := range plan {
 		names = append(names, s.Name)
 	}
-	var count int
-	err := w.pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM pg_class
-		  WHERE relkind IN ('r', 'p') AND relname = ANY($1)`,
+	rows, err := w.pool.Query(ctx,
+		`SELECT relname FROM pg_class
+		  WHERE relkind IN ('r', 'p')
+		    AND relnamespace = 'public'::regnamespace
+		    AND relname = ANY($1)`,
 		names,
-	).Scan(&count)
+	)
 	if err != nil {
-		return 0, fmt.Errorf("count planned partitions: %w", err)
+		return nil, fmt.Errorf("list planned partitions: %w", err)
 	}
-	return count, nil
+	defer rows.Close()
+	existing := make(map[string]bool, len(plan))
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan planned partition: %w", err)
+		}
+		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate planned partitions: %w", err)
+	}
+	return existing, nil
 }
 
-// lastSuccessfulRun returns the timestamp of the most recent successful
-// run of a task, or the zero time when the task has never succeeded.
-func (w *DBMaintenanceWorker) lastSuccessfulRun(ctx context.Context, task string) (time.Time, error) {
+// lastSuccessfulRunForTarget returns the timestamp of the most recent
+// successful run of a task against a specific target (e.g. one index), or
+// the zero time when that target has never succeeded. Scoping by target lets
+// a cadence gate be evaluated per target instead of per task.
+func (w *DBMaintenanceWorker) lastSuccessfulRunForTarget(ctx context.Context, task, target string) (time.Time, error) {
 	var ts time.Time
 	err := w.pool.QueryRow(ctx,
 		`SELECT created_at FROM platform_maintenance_log
-		  WHERE task = $1 AND status = $2
+		  WHERE task = $1 AND target = $2 AND status = $3
 		  ORDER BY created_at DESC
 		  LIMIT 1`,
-		task, maintenanceStatusOK,
+		task, target, maintenanceStatusOK,
 	).Scan(&ts)
 	if err != nil {
 		// No rows is the expected "never run" case; surface it as the

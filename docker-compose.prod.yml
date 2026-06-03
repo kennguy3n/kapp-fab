@@ -222,15 +222,12 @@ services:
 
   api:
     <<: *production
-    # The multi-stage build that produces the api / worker / kchat-bridge
-    # binaries is shared across services via a build target. The image
-    # reference lets `docker compose pull` use a pre-built image in CI/CD
-    # while `build` supports a local `--build`.
+    # The production profile deploys the released, multi-arch image that the
+    # CI/CD release pipeline builds and pushes to the registry — it is not
+    # built from source here. api / worker / kchat-bridge share one image and
+    # select their role via the command/entrypoint baked into that image;
+    # override the tag (or whole reference) with KAPP_IMAGE / KAPP_IMAGE_TAG.
     image: ${KAPP_IMAGE:-ghcr.io/kennguy3n/kapp-fab}:${KAPP_IMAGE_TAG:-latest}
-    build:
-      context: .
-      dockerfile: ${KAPP_DOCKERFILE:-Dockerfile}
-      target: api
     environment:
       KAPP_ENV: production
       LISTEN_ADDR: ":8080"
@@ -275,10 +272,6 @@ services:
   worker:
     <<: *production
     image: ${KAPP_IMAGE:-ghcr.io/kennguy3n/kapp-fab}:${KAPP_IMAGE_TAG:-latest}
-    build:
-      context: .
-      dockerfile: ${KAPP_DOCKERFILE:-Dockerfile}
-      target: worker
     environment:
       KAPP_ENV: production
       DB_URL: "postgres://${APP_DB_USER:-kapp_app}:${APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-kapp}?sslmode=disable"
@@ -324,10 +317,6 @@ services:
   kchat-bridge:
     <<: *production
     image: ${KAPP_IMAGE:-ghcr.io/kennguy3n/kapp-fab}:${KAPP_IMAGE_TAG:-latest}
-    build:
-      context: .
-      dockerfile: ${KAPP_DOCKERFILE:-Dockerfile}
-      target: kchat-bridge
     environment:
       KAPP_ENV: production
       LISTEN_ADDR: ":8090"
