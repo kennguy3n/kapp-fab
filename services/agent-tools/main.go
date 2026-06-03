@@ -43,6 +43,18 @@ func main() {
 	}
 }
 
+// sidecarRequiresJWTAtBoot reports whether this sidecar must refuse to
+// boot when no JWT signer is available. It mirrors the services/api
+// boot gate (cfg.RequireJWT && cfg.IsNonDev): JWT is required by
+// default outside development, so a prod/staging deploy without a
+// signer fails loudly here instead of booting into a 100%-403 state
+// (platform.TenantMiddleware rejects every request in production). An
+// operator opts a non-dev deploy back into the legacy X-Tenant-ID
+// header bridge with KAPP_REQUIRE_JWT=0.
+func sidecarRequiresJWTAtBoot(cfg *platform.Config) bool {
+	return cfg.RequireJWT && cfg.IsNonDev()
+}
+
 func run() error {
 	cfg, err := platform.LoadConfig()
 	if err != nil {
@@ -167,30 +179,38 @@ func run() error {
 	// services/api. Before Phase 5 this sidecar trusted the
 	// X-Tenant-ID header outright, which let any caller on the
 	// internal network spoof a tenant id and run agent tools
-	// against rows that belong to somebody else. The mitigation
-	// is rate-limited by KAPP_REQUIRE_JWT:
+	// against rows that belong to somebody else. The boot-time gate
+	// mirrors services/api's posture (cfg.RequireJWT && cfg.IsNonDev),
+	// so the sidecar fails loudly at boot rather than at request time:
 	//
 	//   - signer != nil  (KAPP_JWT_SECRET set): JWT required on
 	//     /api/v1/agents/tools. The X-Tenant-ID header is ignored
 	//     once auth.Middleware is active.
-	//   - signer == nil + KAPP_REQUIRE_JWT=1: refuse to boot.
-	//   - signer == nil + default: WARN + legacy header path,
-	//     bridge mode for clusters that have not rolled JWT to
-	//     their sidecars yet.
+	//   - signer == nil + non-dev KAPP_ENV (default): refuse to boot.
+	//     KAPP_REQUIRE_JWT defaults to true outside development, so a
+	//     prod/staging deploy without a signer fails here instead of
+	//     booting into a 100%-403 state — platform.TenantMiddleware
+	//     rejects every request in production, so a sidecar that only
+	//     logged "running WITHOUT JWT auth" would be silently
+	//     non-functional. Operators opt out with KAPP_REQUIRE_JWT=0.
+	//   - signer == nil + development (or KAPP_REQUIRE_JWT=0): WARN +
+	//     legacy header path, bridge mode for clusters that have not
+	//     rolled JWT to their sidecars yet.
 	signer, signerErr := auth.SignerFromEnv()
 	sessionStore := auth.NewPGSessionStore(pool)
-	requireJWT := auth.RequireJWT()
+	requireJWT := sidecarRequiresJWTAtBoot(cfg)
 	switch {
 	case signer != nil:
 		logger.Info("jwt auth enabled", slog.String("algorithm", "HS256"))
 	case requireJWT:
-		return fmt.Errorf("agent-tools: KAPP_REQUIRE_JWT=1 but KAPP_JWT_SECRET is unset or invalid: %w", signerErr)
+		return fmt.Errorf("agent-tools: JWT auth is required but KAPP_JWT_SECRET is unset or invalid (KAPP_REQUIRE_JWT defaults to true when KAPP_ENV=%s is not a development environment); set KAPP_JWT_SECRET to enable JWT-derived tenant scoping, or set KAPP_REQUIRE_JWT=0 to permit the legacy X-Tenant-ID header path: %w", cfg.Env, signerErr)
 	default:
 		logger.Warn(
 			"agent-tools running WITHOUT JWT auth — X-Tenant-ID header is trusted; "+
-				"this is UNSAFE for any non-trusted network. Set KAPP_JWT_SECRET to enable "+
-				"JWT-derived tenant scoping and KAPP_REQUIRE_JWT=1 to make the boot fail "+
-				"loudly when the secret is missing",
+				"this is UNSAFE for any non-trusted network. This fallback is only "+
+				"reached in development or when KAPP_REQUIRE_JWT=0; set KAPP_JWT_SECRET "+
+				"to enable JWT-derived tenant scoping. Non-development deployments refuse "+
+				"to boot without a signer by default",
 			slog.String("signer_err", signerErr.Error()),
 		)
 	}

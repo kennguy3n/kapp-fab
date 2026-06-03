@@ -40,6 +40,18 @@ func main() {
 	}
 }
 
+// sidecarRequiresJWTAtBoot reports whether this sidecar must refuse to
+// boot when no JWT signer is available. It mirrors the services/api
+// boot gate (cfg.RequireJWT && cfg.IsNonDev): JWT is required by
+// default outside development, so a prod/staging deploy without a
+// signer fails loudly here instead of booting into a 100%-403 state
+// (platform.TenantMiddleware rejects every request in production). An
+// operator opts a non-dev deploy back into the legacy X-Tenant-ID
+// header bridge with KAPP_REQUIRE_JWT=0.
+func sidecarRequiresJWTAtBoot(cfg *platform.Config) bool {
+	return cfg.RequireJWT && cfg.IsNonDev()
+}
+
 func run() error {
 	cfg, err := platform.LoadConfig()
 	if err != nil {
@@ -120,36 +132,41 @@ func run() error {
 	// Phase 5: derive tenant from a verified JWT (mirrors
 	// services/api). Before Phase 5 the importer trusted the
 	// X-Tenant-ID header outright, which let any caller with
-	// network access spoof a different tenant. The mitigation is
-	// rate-limited by KAPP_REQUIRE_JWT:
+	// network access spoof a different tenant. The boot-time gate
+	// mirrors services/api's posture (cfg.RequireJWT && cfg.IsNonDev),
+	// so the importer fails loudly at boot rather than at request time:
 	//
 	//   - signer != nil  (KAPP_JWT_SECRET set): JWT required on
 	//     every /api/v1/imports request. The X-Tenant-ID header
 	//     is ignored once auth.Middleware is active because the
 	//     middleware writes the JWT-claim tenant onto the context
 	//     AFTER any caller-supplied header would have been read.
-	//   - signer == nil  + KAPP_REQUIRE_JWT=1: refuse to mount the
-	//     route. Operators get a 503 + clear log line so a
-	//     misconfigured prod deploy fails the boot.
-	//   - signer == nil  + KAPP_REQUIRE_JWT unset (default): WARN
-	//     log + fall back to the legacy header path. This is the
-	//     bridge mode for clusters that haven't rolled out JWT to
-	//     their sidecars yet; the WARN is intentionally noisy so
-	//     operators see it in every boot.
+	//   - signer == nil + non-dev KAPP_ENV (default): refuse to boot.
+	//     KAPP_REQUIRE_JWT defaults to true outside development, so a
+	//     prod/staging deploy without a signer fails here instead of
+	//     booting into a 100%-403 state — platform.TenantMiddleware
+	//     rejects every request in production, so an importer that only
+	//     logged "running WITHOUT JWT auth" would be silently
+	//     non-functional. Operators opt out with KAPP_REQUIRE_JWT=0.
+	//   - signer == nil + development (or KAPP_REQUIRE_JWT=0): WARN +
+	//     legacy header path, bridge mode for clusters that haven't
+	//     rolled out JWT to their sidecars yet; the WARN is
+	//     intentionally noisy so operators see it in every boot.
 	signer, signerErr := auth.SignerFromEnv()
 	sessionStore := auth.NewPGSessionStore(pool)
-	requireJWT := auth.RequireJWT()
+	requireJWT := sidecarRequiresJWTAtBoot(cfg)
 	switch {
 	case signer != nil:
 		logger.Info("jwt auth enabled", slog.String("algorithm", "HS256"))
 	case requireJWT:
-		return fmt.Errorf("importer: KAPP_REQUIRE_JWT=1 but KAPP_JWT_SECRET is unset or invalid: %w", signerErr)
+		return fmt.Errorf("importer: JWT auth is required but KAPP_JWT_SECRET is unset or invalid (KAPP_REQUIRE_JWT defaults to true when KAPP_ENV=%s is not a development environment); set KAPP_JWT_SECRET to enable JWT-derived tenant scoping, or set KAPP_REQUIRE_JWT=0 to permit the legacy X-Tenant-ID header path: %w", cfg.Env, signerErr)
 	default:
 		logger.Warn(
 			"importer running WITHOUT JWT auth — X-Tenant-ID header is trusted; "+
-				"this is UNSAFE for any non-trusted network. Set KAPP_JWT_SECRET to enable "+
-				"JWT-derived tenant scoping and KAPP_REQUIRE_JWT=1 to make the boot fail "+
-				"loudly when the secret is missing",
+				"this is UNSAFE for any non-trusted network. This fallback is only "+
+				"reached in development or when KAPP_REQUIRE_JWT=0; set KAPP_JWT_SECRET "+
+				"to enable JWT-derived tenant scoping. Non-development deployments refuse "+
+				"to boot without a signer by default",
 			slog.String("signer_err", signerErr.Error()),
 		)
 	}
