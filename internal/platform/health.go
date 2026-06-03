@@ -231,6 +231,11 @@ func (h *HealthChecker) Check(ctx context.Context) SystemHealth {
 	}
 	wg.Wait()
 
+	// aggregateStatus MUST run before the sort below: critical[i] is
+	// aligned with results[i] only in probe-registration order, and
+	// sorting results by name would break that positional coupling and
+	// misattribute the critical flags. Aggregate first, then sort the
+	// (already-folded) results purely for deterministic output.
 	overall := aggregateStatus(results, critical)
 	sort.Slice(results, func(i, j int) bool { return results[i].Name < results[j].Name })
 	return SystemHealth{
