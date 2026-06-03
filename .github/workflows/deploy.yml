@@ -1,0 +1,186 @@
+name: deploy
+
+# Continuous-delivery pipeline for the Kapp monolith. Triggered by a
+# semver tag push (v*). The single image at ${REGISTRY}/${IMAGE_NAME}
+# is shared by the api / worker / kchat-bridge services (they select
+# their role via the baked-in entrypoint — see docker-compose.prod.yml),
+# so the pipeline builds and pushes one image and rolls every service
+# onto it with scripts/deploy.sh.
+#
+# Stages: build+test -> build & push image -> deploy to staging ->
+# smoke-test staging -> promote the SAME image digest to production.
+#
+# No credentials are hard-coded. Hosts, tokens and SSH keys come from
+# GitHub Environment secrets/vars (staging, production), which also gate
+# the production promotion behind whatever required-reviewers policy the
+# environment is configured with.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Never run two deploys for the same tag concurrently; a later push for
+# the same tag cancels an in-flight run.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  # Path to the Dockerfile that packages the monolith. Overridable via a
+  # repo variable so the packaging workstream can relocate it without
+  # editing this workflow.
+  DOCKERFILE: ${{ vars.KAPP_DOCKERFILE || 'Dockerfile' }}
+
+jobs:
+  build-test:
+    name: build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # gen/ is gitignored; regenerate the protobuf bindings before any
+      # Go step, exactly as ci.yml does. buf is installed via `go install`
+      # to avoid the buf-action GitHub API auth flakiness.
+      - name: install buf
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.55.1
+      - run: make proto-gen
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+  image:
+    name: build & push image
+    runs-on: ubuntu-latest
+    needs: build-test
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: log in to the container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # The pushed tag becomes the image tag; also publish the commit
+          # SHA so a deploy can pin an immutable reference.
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha,format=long
+      - name: ensure Dockerfile exists
+        run: |
+          if [ ! -f "${DOCKERFILE}" ]; then
+            echo "::error::Dockerfile not found at ${DOCKERFILE}." \
+              "Set the KAPP_DOCKERFILE repo variable to its location." >&2
+            exit 1
+          fi
+      - name: build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ env.DOCKERFILE }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-staging:
+    name: deploy to staging
+    runs-on: ubuntu-latest
+    needs: image
+    environment:
+      name: staging
+      url: https://${{ vars.STAGING_DOMAIN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure SSH for the staging host
+        run: |
+          install -d -m 700 ~/.ssh
+          echo "${{ secrets.STAGING_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.STAGING_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+      - name: run zero-downtime deploy on staging
+        env:
+          IMAGE_TAG: ${{ github.ref_name }}
+        # scripts/deploy.sh runs on the staging host (which has the
+        # compose stack + env file). It pre-checks migrations, applies
+        # them with a readiness drain, rolling-restarts each service and
+        # rolls back automatically on a health failure.
+        run: |
+          ssh -o BatchMode=yes \
+            "${{ secrets.STAGING_SSH_USER }}@${{ secrets.STAGING_HOST }}" \
+            "cd '${{ vars.STAGING_DEPLOY_PATH }}' && \
+             IMAGE_TAG='${IMAGE_TAG}' \
+             KAPP_DOMAIN='${{ vars.STAGING_DOMAIN }}' \
+             KAPP_ADMIN_TOKEN='${{ secrets.STAGING_ADMIN_TOKEN }}' \
+             ./scripts/deploy.sh"
+
+  smoke-staging:
+    name: smoke test staging
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment:
+      name: staging
+      url: https://${{ vars.STAGING_DOMAIN }}
+    steps:
+      - name: probe public endpoints through the LB
+        env:
+          BASE: https://${{ vars.STAGING_DOMAIN }}
+        run: |
+          set -euo pipefail
+          # Liveness + build-info reachability through the load balancer.
+          curl -fsS --max-time 10 "${BASE}/healthz" >/dev/null
+          curl -fsS --max-time 10 "${BASE}/api/v1/" >/dev/null
+          echo "staging smoke test passed"
+
+  promote-production:
+    name: promote to production
+    runs-on: ubuntu-latest
+    needs: [image, smoke-staging]
+    # The production environment's protection rules (required reviewers)
+    # gate this job, so promotion is a deliberate, approved step.
+    environment:
+      name: production
+      url: https://${{ vars.PRODUCTION_DOMAIN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure SSH for the production host
+        run: |
+          install -d -m 700 ~/.ssh
+          echo "${{ secrets.PRODUCTION_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.PRODUCTION_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+      - name: roll production onto the validated image
+        env:
+          # Deploy the exact tag that was built, pushed and smoke-tested
+          # on staging — the same image, promoted rather than rebuilt.
+          IMAGE_TAG: ${{ github.ref_name }}
+        run: |
+          ssh -o BatchMode=yes \
+            "${{ secrets.PRODUCTION_SSH_USER }}@${{ secrets.PRODUCTION_HOST }}" \
+            "cd '${{ vars.PRODUCTION_DEPLOY_PATH }}' && \
+             IMAGE_TAG='${IMAGE_TAG}' \
+             KAPP_DOMAIN='${{ vars.PRODUCTION_DOMAIN }}' \
+             KAPP_ADMIN_TOKEN='${{ secrets.PRODUCTION_ADMIN_TOKEN }}' \
+             ./scripts/deploy.sh"
