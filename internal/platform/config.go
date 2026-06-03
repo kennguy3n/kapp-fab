@@ -750,6 +750,20 @@ func (c *Config) IsNonDev() bool {
 	return !c.IsDevelopment()
 }
 
+// RequiresJWTAtBoot reports whether a service must refuse to boot when
+// no JWT signer is available. JWT is required by default outside
+// development (RequireJWT defaults true, gated by IsNonDev), so a
+// prod/staging deploy without a signer fails loudly at boot instead of
+// degrading at request time — in production platform.TenantMiddleware
+// rejects every request (silent 100%-403), and in staging the legacy
+// X-Tenant-ID header path would otherwise be silently trusted
+// (cross-tenant spoofing). Operators opt a non-dev deploy back into
+// that bridge with KAPP_REQUIRE_JWT=0. services/api and both sidecars
+// (importer, agent-tools) share this single boot-gate predicate.
+func (c *Config) RequiresJWTAtBoot() bool {
+	return c.RequireJWT && c.IsNonDev()
+}
+
 // envIsNonDev is the package-level form of IsNonDev used by LoadConfig
 // before a Config exists. It mirrors IsDevelopment's accept-list.
 func envIsNonDev(env string) bool {

@@ -1261,7 +1261,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// pre-production deploy fails loudly at boot instead of degrading.
 	// In development the signer stays optional so local flows that rely
 	// on the legacy header path keep booting.
-	if cfg.RequireJWT && cfg.IsNonDev() && authh.signer == nil {
+	if cfg.RequiresJWTAtBoot() && authh.signer == nil {
 		runCleanups(cleanups)
 		return nil, nil, fmt.Errorf("api: KAPP_REQUIRE_JWT is set and KAPP_ENV=%s but the JWT signer could not be initialised; refusing to boot with auth disabled", cfg.Env)
 	}

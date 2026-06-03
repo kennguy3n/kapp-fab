@@ -43,18 +43,6 @@ func main() {
 	}
 }
 
-// sidecarRequiresJWTAtBoot reports whether this sidecar must refuse to
-// boot when no JWT signer is available. It mirrors the services/api
-// boot gate (cfg.RequireJWT && cfg.IsNonDev): JWT is required by
-// default outside development, so a prod/staging deploy without a
-// signer fails loudly here instead of booting into a 100%-403 state
-// (platform.TenantMiddleware rejects every request in production). An
-// operator opts a non-dev deploy back into the legacy X-Tenant-ID
-// header bridge with KAPP_REQUIRE_JWT=0.
-func sidecarRequiresJWTAtBoot(cfg *platform.Config) bool {
-	return cfg.RequireJWT && cfg.IsNonDev()
-}
-
 func run() error {
 	cfg, err := platform.LoadConfig()
 	if err != nil {
@@ -203,7 +191,7 @@ func run() error {
 	//     rolled JWT to their sidecars yet.
 	signer, signerErr := auth.SignerFromEnv()
 	sessionStore := auth.NewPGSessionStore(pool)
-	requireJWT := sidecarRequiresJWTAtBoot(cfg)
+	requireJWT := cfg.RequiresJWTAtBoot()
 	switch {
 	case signer != nil:
 		logger.Info("jwt auth enabled", slog.String("algorithm", "HS256"))
