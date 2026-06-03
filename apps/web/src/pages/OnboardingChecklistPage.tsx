@@ -55,6 +55,18 @@ export function OnboardingChecklistPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
 
+  // We fetch the tasks.task list and pick the onboarding record
+  // client-side (findChecklist). A server-side `data.onboarding =
+  // 'checklist'` predicate would be leaner, but the REST list endpoint
+  // (services/api/records.go) intentionally exposes only
+  // status/cursor/limit/offset — arbitrary JSONB field filtering lives
+  // in record.PGStore.ListByField, which is reachable from Go callers
+  // (the /getting-started KChat command uses it) but not over REST.
+  // Threading a field predicate through the handler + ListFilter +
+  // client SDK is the right long-term fix, but those are shared files
+  // outside this workstream; RecordListPage carries the same caveat.
+  // The cost here is bounded: exactly one checklist task exists per
+  // tenant and the list is fetched once on mount.
   const tasksQuery = useQuery({
     queryKey: ["records", CHECKLIST_KTYPE],
     queryFn: () => api.listRecords(CHECKLIST_KTYPE),

@@ -1957,11 +1957,18 @@ func (w *Wizard) SmartDefaults(ctx context.Context, tenantID uuid.UUID, cfg Smar
 				return fmt.Errorf("tenant: smart defaults persist timezone: %w", err)
 			}
 		}
-		taskID, err := seedGettingStartedChecklist(ctx, tx, tenantID, cfg.CreatedBy)
+		taskID, created, err := seedGettingStartedChecklist(ctx, tx, tenantID, cfg.CreatedBy)
 		if err != nil {
 			return err
 		}
 		out.ChecklistTaskID = taskID
+		// Only a freshly-inserted checklist adds a row; the idempotent
+		// reuse path must not double-count on wizard re-runs.
+		if created {
+			if err := bumpTenantRecordCount(ctx, tx, tenantID, 1); err != nil {
+				return err
+			}
+		}
 		return nil
 	}); err != nil {
 		return nil, err
@@ -1981,15 +1988,22 @@ func (w *Wizard) SmartDefaults(ctx context.Context, tenantID uuid.UUID, cfg Smar
 	return out, nil
 }
 
-// gettingStartedSteps are the canonical first-use milestones the
+// gettingStartedSteps returns the canonical first-use milestones the
 // onboarding checklist tracks. The same three steps back the
 // /getting-started KChat card and the OnboardingChecklistPage so the
 // surfaces never drift. Each carries a stable key (for completion
 // tracking) and a deep link to the page that completes it.
-var gettingStartedSteps = []map[string]any{
-	{"key": "create_contact", "label": "Create your first contact", "done": false, "link": "/records/crm.contact/new"},
-	{"key": "send_invoice", "label": "Send your first invoice", "done": false, "link": "/records/finance.ar_invoice/new"},
-	{"key": "import_data", "label": "Import existing data", "done": false, "link": "/imports/new"},
+//
+// It is a function (not a package-level var) so every call returns a
+// freshly-allocated slice and maps: a caller that later mutates a step
+// (e.g. flipping "done") can never corrupt a shared template or race
+// another tenant's seeding.
+func gettingStartedSteps() []map[string]any {
+	return []map[string]any{
+		{"key": "create_contact", "label": "Create your first contact", "done": false, "link": "/records/crm.contact/new"},
+		{"key": "send_invoice", "label": "Send your first invoice", "done": false, "link": "/records/finance.ar_invoice/new"},
+		{"key": "import_data", "label": "Import existing data", "done": false, "link": "/imports/new"},
+	}
 }
 
 // seedGettingStartedChecklist creates the onboarding checklist as a
@@ -1997,13 +2011,18 @@ var gettingStartedSteps = []map[string]any{
 // no-op that returns the existing task's id, so re-running the wizard
 // never spawns duplicate checklists. The caller must already hold a
 // tenant-scoped tx (app.tenant_id set).
-func seedGettingStartedChecklist(ctx context.Context, tx pgx.Tx, tenantID, createdBy uuid.UUID) (uuid.UUID, error) {
+//
+// The returned created flag reports whether a new record was inserted
+// (true) or an existing checklist was reused (false) so the caller can
+// keep tenant_record_counts in lockstep without double-counting on
+// re-runs.
+func seedGettingStartedChecklist(ctx context.Context, tx pgx.Tx, tenantID, createdBy uuid.UUID) (id uuid.UUID, created bool, err error) {
 	const checklistTitle = "Getting Started"
 
 	// Idempotency: reuse an existing checklist if one was already
 	// seeded for this tenant (data->>'onboarding' == "checklist").
 	var existing uuid.UUID
-	err := tx.QueryRow(ctx,
+	lookupErr := tx.QueryRow(ctx,
 		`SELECT id FROM krecords
 		  WHERE tenant_id = $1 AND ktype = $2 AND deleted_at IS NULL
 		    AND data->>'onboarding' = 'checklist'
@@ -2011,12 +2030,12 @@ func seedGettingStartedChecklist(ctx context.Context, tx pgx.Tx, tenantID, creat
 		tenantID, gettingStartedKType,
 	).Scan(&existing)
 	switch {
-	case err == nil:
-		return existing, nil
-	case errors.Is(err, pgx.ErrNoRows):
+	case lookupErr == nil:
+		return existing, false, nil
+	case errors.Is(lookupErr, pgx.ErrNoRows):
 		// fall through and create it
 	default:
-		return uuid.Nil, fmt.Errorf("tenant: lookup getting-started checklist: %w", err)
+		return uuid.Nil, false, fmt.Errorf("tenant: lookup getting-started checklist: %w", lookupErr)
 	}
 
 	data := map[string]any{
@@ -2025,13 +2044,13 @@ func seedGettingStartedChecklist(ctx context.Context, tx pgx.Tx, tenantID, creat
 		"assignee":    createdBy.String(),
 		"description": "Complete these steps to get the most out of your workspace.",
 		"onboarding":  "checklist",
-		"steps":       gettingStartedSteps,
+		"steps":       gettingStartedSteps(),
 	}
-	id, err := insertSeedRecord(ctx, tx, tenantID, createdBy, gettingStartedKType, data)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("tenant: seed getting-started checklist: %w", err)
+	newID, insErr := insertSeedRecord(ctx, tx, tenantID, createdBy, gettingStartedKType, data)
+	if insErr != nil {
+		return uuid.Nil, false, fmt.Errorf("tenant: seed getting-started checklist: %w", insErr)
 	}
-	return id, nil
+	return newID, true, nil
 }
 
 // SeedSampleData populates the tenant with realistic, interlinked demo
@@ -2199,17 +2218,9 @@ func (w *Wizard) SeedSampleData(ctx context.Context, tenantID, createdBy uuid.UU
 		res.Projects = 1
 
 		// Keep the denormalised quota counter in lockstep with the
-		// rows we just inserted. Mirrors platform.BumpTenantRecordCount
-		// (inlined to avoid the platform→tenant import cycle).
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO tenant_record_counts (tenant_id, record_count, updated_at)
-			 VALUES ($1, GREATEST($2, 0), now())
-			 ON CONFLICT (tenant_id) DO UPDATE
-			   SET record_count = GREATEST(tenant_record_counts.record_count + $2, 0),
-			       updated_at   = now()`,
-			tenantID, int64(res.Total()),
-		); err != nil {
-			return fmt.Errorf("tenant: bump record count for sample data: %w", err)
+		// rows we just inserted.
+		if err := bumpTenantRecordCount(ctx, tx, tenantID, int64(res.Total())); err != nil {
+			return err
 		}
 		return nil
 	}); err != nil {
@@ -2217,6 +2228,29 @@ func (w *Wizard) SeedSampleData(ctx context.Context, tenantID, createdBy uuid.UU
 	}
 
 	return res, nil
+}
+
+// bumpTenantRecordCount keeps the denormalised tenant_record_counts
+// quota counter in lockstep with direct krecord inserts that bypass
+// record.PGStore.Create (insertSeedRecord, which is what the seeders
+// use). It inlines platform.BumpTenantRecordCount to avoid the
+// platform→tenant import cycle and must run inside the caller's
+// tenant-scoped tx. A zero delta is a no-op.
+func bumpTenantRecordCount(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, delta int64) error {
+	if delta == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO tenant_record_counts (tenant_id, record_count, updated_at)
+		 VALUES ($1, GREATEST($2, 0), now())
+		 ON CONFLICT (tenant_id) DO UPDATE
+		   SET record_count = GREATEST(tenant_record_counts.record_count + $2, 0),
+		       updated_at   = now()`,
+		tenantID, delta,
+	); err != nil {
+		return fmt.Errorf("tenant: bump record count: %w", err)
+	}
+	return nil
 }
 
 // insertSeedRecord inserts one KRecord directly via SQL inside the

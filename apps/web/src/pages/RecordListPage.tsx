@@ -300,10 +300,11 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
           // opens the create form (and the importer) so a brand-new
           // tenant always has an obvious next step.
           (() => {
-            const filterActive = Boolean(
-              activeView?.filters &&
-                Object.keys(activeView.filters).length > 0,
-            );
+            // Use effective-value semantics (not just key count) so a
+            // view with only null/"" filter values — which matchesFilters
+            // treats as no-ops — still shows the module CTA, not a
+            // misleading "No matches".
+            const filterActive = hasEffectiveFilters(activeView?.filters);
             return (
               <RecordEmptyState
                 ktype={ktype}
@@ -381,6 +382,23 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
   );
 }
 
+// isEffectiveFilterValue reports whether a filter value actually
+// constrains the list. null / undefined / "" are treated as no-ops
+// (matchesFilters skips them), so a saved view carrying only such
+// values isn't really filtering anything. Shared with the empty-state
+// filterActive check so the two never disagree.
+function isEffectiveFilterValue(v: unknown): boolean {
+  return v !== undefined && v !== null && v !== "";
+}
+
+// hasEffectiveFilters is true when at least one filter key carries a
+// value that would actually narrow the result set.
+function hasEffectiveFilters(
+  filters: Record<string, unknown> | undefined | null,
+): boolean {
+  return !!filters && Object.values(filters).some(isEffectiveFilterValue);
+}
+
 // matchesFilters checks each top-level key in the filter against the
 // record's `data` payload. Equality semantics mirror the BaseTable
 // filter primitives: missing keys match (the predicate is undefined),
@@ -389,7 +407,7 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
 function matchesFilters(r: KRecord, filters: Record<string, unknown>): boolean {
   const data = r.data as Record<string, unknown>;
   for (const [key, expected] of Object.entries(filters)) {
-    if (expected === undefined || expected === null || expected === "") continue;
+    if (!isEffectiveFilterValue(expected)) continue;
     const actual = data[key];
     if (Array.isArray(expected)) {
       if (!expected.includes(actual as string | number)) return false;
