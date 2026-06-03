@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -147,6 +148,12 @@ func (h *healthHandlers) publicHealth(w http.ResponseWriter, r *http.Request) {
 			LatencyMS: c.LatencyMS,
 		})
 	}
+	// Re-sort by the public label so the response ordering is derived
+	// from the sanitized names rather than the internal probe order
+	// Check() sorts by; otherwise the alphabetical internal ordering
+	// (postgres, redis, …) would survive the rename and let a scrape
+	// infer the internal naming scheme.
+	sort.SliceStable(comps, func(i, j int) bool { return comps[i].Name < comps[j].Name })
 	availability := 100.0
 	if len(comps) > 0 {
 		availability = float64(operational) / float64(len(comps)) * 100
