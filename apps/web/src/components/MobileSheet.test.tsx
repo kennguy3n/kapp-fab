@@ -3,7 +3,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MobileSheet } from "./App";
+import { MobileSheet } from "./MobileSheet";
 
 const sections = [
   { title: "Overview", links: [{ to: "/", label: "Dashboard" }] },
