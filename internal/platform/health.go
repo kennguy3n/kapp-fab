@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"sync"
@@ -414,7 +415,14 @@ func (h *HealthChecker) checkZKFabric(ctx context.Context) ComponentHealth {
 		c.LatencyMS = h.elapsedMS(start)
 		return c
 	}
-	defer func() { _ = resp.Body.Close() }()
+	// Drain before close so the transport can reuse the TCP
+	// connection on the next probe cycle; an undrained body forces a
+	// fresh handshake each time. We only care about the status line,
+	// so the body is discarded.
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 	c.Detail = map[string]any{"http_status": resp.StatusCode}
 	c.LatencyMS = h.elapsedMS(start)
 	return c
