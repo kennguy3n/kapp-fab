@@ -11,11 +11,26 @@
 -- platform_maintenance_log is a CONTROL-PLANE table: it has no
 -- per-customer column and therefore no row-level security, exactly like
 -- platform_scale_events (see migrations/000041_cell_capacity.sql). The
--- worker reads and writes it through the regular kapp_app pool — no
--- BYPASSRLS admin pool is required because there is nothing to isolate.
--- The migration-rls-check workflow only requires ENABLE ROW LEVEL
--- SECURITY for tables whose body declares a customer-scoping column,
--- which this table deliberately does not.
+-- migration-rls-check workflow only requires ENABLE ROW LEVEL SECURITY for
+-- tables whose body declares a customer-scoping column, which this table
+-- deliberately does not.
+--
+-- A NOTE ON PRIVILEGES. The maintenance loop issues VACUUM, ANALYZE,
+-- REINDEX and CREATE TABLE ... PARTITION OF. On PostgreSQL 16 every one of
+-- those requires ownership of the target relation (or superuser): the
+-- MAINTAIN privilege and the pg_maintain predefined role that would let a
+-- non-owner run them were reverted before 16.0 and only shipped in
+-- PostgreSQL 17. Because the loop maintains *every* user table (it drives
+-- ANALYZE/VACUUM off pg_stat_user_tables, not a fixed list), there is no
+-- table-level GRANT that suffices on 16 — the worker must connect as the
+-- role that owns the schema. That role is the bootstrap superuser the
+-- migrations themselves run as (POSTGRES_USER, default `kapp`); the worker
+-- is pointed at it through a dedicated MAINT_DB_URL pool (see
+-- services/worker/main.go) that is created ONLY when that DSN is supplied,
+-- so the maintenance loop is explicitly disabled rather than silently
+-- no-opping where it lacks privileges. No new grant is therefore needed
+-- here for the maintenance verbs; the GRANTs below cover only read/write
+-- of the audit table itself by the regular pools.
 --
 -- NOTE ON NUMBERING: prefix 000078 is reserved by a parallel workstream
 -- merging concurrently, so this file uses 000079 as coordinated. The
@@ -47,6 +62,13 @@ CREATE TABLE IF NOT EXISTS platform_maintenance_log (
 CREATE INDEX IF NOT EXISTS platform_maintenance_log_task_idx
     ON platform_maintenance_log (task, created_at DESC);
 
+-- Read/write of the audit table by the regular pools. The maintenance loop
+-- itself writes through the privileged MAINT_DB_URL pool (see the privilege
+-- note above), but granting kapp_app SELECT/INSERT keeps the table usable
+-- from the ordinary app role too — e.g. an admin dashboard reading recent
+-- runs, or a future in-request annotation — without reaching for the admin
+-- pool. INSERT is harmless to grant and avoids a surprise permission error
+-- if the loop is ever pointed at a non-superuser owner role.
 GRANT SELECT, INSERT ON platform_maintenance_log TO kapp_app;
 GRANT USAGE, SELECT ON SEQUENCE platform_maintenance_log_id_seq TO kapp_app;
 

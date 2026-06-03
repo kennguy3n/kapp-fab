@@ -338,9 +338,15 @@ func dueWeekly(last, now time.Time, interval time.Duration) bool {
 }
 
 // DBMaintenanceWorker performs one maintenance sweep against a database
-// pool. It is safe to run on the worker's regular kapp_app pool: every
-// table it touches is control-plane or operates via VACUUM / ANALYZE /
-// REINDEX, none of which require BYPASSRLS.
+// pool. Its verbs — VACUUM, ANALYZE, REINDEX, and CREATE TABLE ...
+// PARTITION OF — all require ownership of the target relation on
+// PostgreSQL 16 (the MAINTAIN privilege that would let a non-owner run them
+// only exists from PostgreSQL 17). Because the sweep covers every user
+// table, no per-table GRANT suffices: the pool passed here must belong to
+// the role that owns the schema. The worker wires it to a dedicated
+// MAINT_DB_URL pool (the bootstrap superuser the migrations run as) and
+// only starts the loop when that DSN is configured, so it never silently
+// no-ops against an under-privileged connection. See migration 000079.
 type DBMaintenanceWorker struct {
 	pool   *pgxpool.Pool
 	cfg    DBMaintenanceConfig
@@ -410,6 +416,13 @@ func (w *DBMaintenanceWorker) createPartition(ctx context.Context, parent string
 		return
 	}
 	start := w.now()
+	// CREATE TABLE ... PARTITION OF requires ownership of the parent table
+	// on PostgreSQL 16, which is why the loop runs on the owner-role
+	// MAINT_DB_URL pool (see the worker wiring and migration 000079). The
+	// bounds and relation names are sentinels or identRe-validated, so the
+	// DDL string is safe; it runs under the default protocol because, unlike
+	// VACUUM / REINDEX CONCURRENTLY, plain CREATE TABLE is fine inside the
+	// implicit transaction pgx uses.
 	_, err := w.pool.Exec(ctx, spec.createSQL(parent))
 	dur := w.now().Sub(start)
 	if err != nil {
@@ -478,7 +491,16 @@ func (w *DBMaintenanceWorker) refreshStatistics(ctx context.Context) {
 		start := w.now()
 		// #nosec G201 -- s.relName comes from pg_stat_user_tables and is
 		// re-validated against identRe immediately above.
-		_, err := w.pool.Exec(ctx, fmt.Sprintf("ANALYZE %s", s.relName))
+		//
+		// Run admin verbs (ANALYZE/VACUUM/REINDEX) under the simple protocol.
+		// They execute fine under pgx's default cache-statement mode too, but
+		// the relation name is interpolated into the SQL text, so on a
+		// partitioned schema with many tables/partitions each distinct
+		// statement would land its own one-shot entry in the per-connection
+		// prepared-statement cache and thrash its LRU. These are dynamic,
+		// single-use statements with no parameters, so the simple protocol is
+		// the right fit: no Parse/Describe round-trip and nothing cached.
+		_, err := w.pool.Exec(ctx, fmt.Sprintf("ANALYZE %s", s.relName), pgx.QueryExecModeSimpleProtocol)
 		dur := w.now().Sub(start)
 		if err != nil {
 			w.logger.Warn("db maintenance: analyze", "table", s.relName, "err", err)
@@ -515,7 +537,11 @@ func (w *DBMaintenanceWorker) detectBloatAndVacuum(ctx context.Context) {
 		start := w.now()
 		// #nosec G201 -- s.relName comes from pg_stat_user_tables and is
 		// re-validated against identRe immediately above.
-		_, err := w.pool.Exec(ctx, fmt.Sprintf("VACUUM (ANALYZE) %s", s.relName))
+		//
+		// Simple protocol for the same reason as ANALYZE above: a dynamic,
+		// per-relation one-shot statement that should not populate the
+		// prepared-statement cache.
+		_, err := w.pool.Exec(ctx, fmt.Sprintf("VACUUM (ANALYZE) %s", s.relName), pgx.QueryExecModeSimpleProtocol)
 		dur := w.now().Sub(start)
 		if err != nil {
 			w.logger.Warn("db maintenance: vacuum", "table", s.relName, "err", err)
@@ -548,7 +574,10 @@ func (w *DBMaintenanceWorker) reindexHighChurn(ctx context.Context) {
 		start := w.now()
 		// #nosec G201 -- idx is drawn from the operator-configured index
 		// list and re-validated against identRe immediately above.
-		_, err := w.pool.Exec(ctx, fmt.Sprintf("REINDEX INDEX CONCURRENTLY %s", idx))
+		//
+		// Simple protocol for the same cache-hygiene reason as ANALYZE/VACUUM
+		// above (dynamic, per-index one-shot statement).
+		_, err := w.pool.Exec(ctx, fmt.Sprintf("REINDEX INDEX CONCURRENTLY %s", idx), pgx.QueryExecModeSimpleProtocol)
 		dur := w.now().Sub(start)
 		if err != nil {
 			w.logger.Warn("db maintenance: reindex", "index", idx, "err", err)

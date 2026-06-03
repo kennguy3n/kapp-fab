@@ -418,10 +418,32 @@ func run() error {
 	// planner statistics, reindexes high-churn indexes, and triggers
 	// VACUUM across the whole database, none of which belong to any one
 	// tenant. Started on the elected leader alongside autoscaleLoop.
-	dbMaintenanceLoop := platform.NewDBMaintenanceLoop(
-		platform.NewDBMaintenanceWorker(pool, platform.LoadDBMaintenanceConfig(), slog.Default()),
-		24*time.Hour,
-	)
+	//
+	// Every one of those verbs requires ownership of the target relation on
+	// PostgreSQL 16 (the MAINTAIN privilege that would let a non-owner run
+	// them only lands in PG17), and the sweep covers every user table, so
+	// neither the kapp_app pool nor the BYPASSRLS kapp_admin pool can drive
+	// it — both are non-owners. It therefore runs on a dedicated pool opened
+	// from MAINT_DB_URL, which must name the schema-owning role (the
+	// bootstrap superuser the migrations run as; see migration 000079 and
+	// docker-compose.prod.yml). When MAINT_DB_URL is unset the loop is left
+	// nil and simply not started: the database falls back to autovacuum
+	// rather than the loop silently no-opping against an under-privileged
+	// connection.
+	var dbMaintenanceLoop *platform.DBMaintenanceLoop
+	if maintURL := os.Getenv("MAINT_DB_URL"); maintURL != "" {
+		maintPool, mErr := platform.NewPool(ctx, maintURL)
+		if mErr != nil {
+			return fmt.Errorf("connect maintenance pool: %w", mErr)
+		}
+		defer maintPool.Close()
+		dbMaintenanceLoop = platform.NewDBMaintenanceLoop(
+			platform.NewDBMaintenanceWorker(maintPool, platform.LoadDBMaintenanceConfig(), slog.Default()),
+			24*time.Hour,
+		)
+	} else {
+		slog.Default().Info("db maintenance loop disabled: MAINT_DB_URL not set; relying on autovacuum")
+	}
 
 	// Adaptive batch sizing for the outbox drain. Starts at
 	// drainBatch (the historical fixed value) so steady-state
@@ -674,7 +696,11 @@ func leadWorker(leaderCtx context.Context, s leaderState) error {
 	go scheduler.RunLoop(leaderCtx, s.schedStore, s.schedRegistry, 10*time.Second)
 	go s.exportWorker.Run(leaderCtx)
 	go s.autoscaleLoop.Run(leaderCtx)
-	go s.dbMaintenanceLoop.Run(leaderCtx)
+	// dbMaintenanceLoop is nil when MAINT_DB_URL is not configured (see the
+	// wiring in run()); only the leader starts it, and only when present.
+	if s.dbMaintenanceLoop != nil {
+		go s.dbMaintenanceLoop.Run(leaderCtx)
+	}
 	// Note: the marketplace review worker is NOT started here —
 	// it runs on every replica (multi-replica posture, see B7.2),
 	// not only the leader. It's started in run() against rootCtx

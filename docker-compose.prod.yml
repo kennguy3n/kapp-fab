@@ -123,7 +123,11 @@ services:
         # `export BACKUP_CRON=0 3 * * *` would be malformed when sourced. It
         # is consumed only at container start to render the cron schedule
         # above, never inside kapp-backup.sh.
-        env | grep -E '^(POSTGRES_|ZK_FABRIC_)' | sed 's/^/export /' > /etc/kapp-backup.env
+        # The file holds POSTGRES_PASSWORD and ZK_FABRIC_* secrets, so write
+        # it under `umask 077` — it is created 0600 (owner-only) from the
+        # start, never momentarily world-readable as a `chmod` after the
+        # redirect would leave it.
+        ( umask 077; env | grep -E '^(POSTGRES_|ZK_FABRIC_)' | sed 's/^/export /' > /etc/kapp-backup.env )
         chmod 0644 /etc/cron.d/kapp-backup
         touch /var/log/kapp-backup.log
         cron && tail -F /var/log/kapp-backup.log
@@ -279,6 +283,15 @@ services:
       KAPP_ENV: production
       DB_URL: "postgres://${APP_DB_USER:-kapp_app}:${APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-kapp}?sslmode=disable"
       ADMIN_DB_URL: "postgres://${ADMIN_DB_USER:-kapp_admin}:${ADMIN_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-kapp}?sslmode=disable"
+      # The platform DB-maintenance loop (VACUUM / ANALYZE / REINDEX /
+      # partition creation) needs ownership of every table it touches, which
+      # on PostgreSQL 16 means connecting as the schema-owning role — there
+      # is no MAINTAIN privilege before PG17. That role is the bootstrap
+      # superuser the migrations run as (POSTGRES_USER). The worker starts
+      # the loop only when this is set; leaving it empty disables the loop
+      # and leans on autovacuum instead. Only the worker gets this DSN — the
+      # api / kchat-bridge services never run maintenance.
+      MAINT_DB_URL: "postgres://${POSTGRES_USER:-kapp}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-kapp}?sslmode=disable"
       NATS_URL: "nats://nats:4222"
       REDIS_URL: "redis://redis:6379/0"
       KAPP_METRICS_ADDR: ":9090"
@@ -368,7 +381,16 @@ services:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://localhost:80 >/dev/null 2>&1 || exit 1"]
+      # Probe the HTTP listener WITHOUT following redirects (no -L). When
+      # KAPP_DOMAIN is a real domain Caddy answers :80 with a 308 to its
+      # HTTPS vhost; a redirect-following probe would then try to resolve
+      # the public domain from inside the container and fail even though
+      # Caddy is perfectly healthy. curl without -L treats the 308 as a
+      # successful response (-f only fails on >=400), and when the domain is
+      # localhost the proxied 200 passes the same check. curl ships in
+      # caddy:2-alpine; the admin API is not enabled in reverse-proxy mode,
+      # so the public listener is the right liveness signal.
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:80 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 5
