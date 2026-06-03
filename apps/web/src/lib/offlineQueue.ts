@@ -203,7 +203,7 @@ export interface DrainResult {
  * strand the rest). When genuinely offline `fetch` rejects almost
  * immediately, so this is N fast failures rather than N slow timeouts.
  */
-export async function drainQueue(
+async function drainQueueOnce(
   handler: (mutation: QueuedMutation) => Promise<void>,
   type?: string,
 ): Promise<DrainResult> {
@@ -220,6 +220,53 @@ export async function drainQueue(
     }
   }
   return { succeeded, failed };
+}
+
+// One in-flight drain chain per mutation `type` (the untyped "all"
+// drain shares the "*" key). Concurrent drains of the same type — e.g.
+// POSPage's mount-time `drainQueue(replay, "pos.finalize")` racing the
+// shell's reconnect `drainAll()` — would otherwise both snapshot the
+// same entries and replay them twice (server idempotency collapses the
+// duplicates, but the extra round-trips are wasted). Chaining serialises
+// them: the later caller waits for the in-flight pass, then runs its own
+// pass over whatever remains, so a freshly-enqueued entry is never
+// stranded. The entry is cleared in a `finally` so a failed pass can't
+// wedge the chain.
+const drainChains = new Map<string, Promise<unknown>>();
+
+/**
+ * Drain queued mutations sequentially, invoking `handler` for each.
+ * A handler that resolves marks the entry done and removes it; a
+ * handler that throws leaves the entry queued so a later drain
+ * retries it. Pass `type` to drain only one mutation kind — entries
+ * of other kinds are left untouched (so POS and a generic mutation
+ * consumer can drain independently without stepping on each other).
+ *
+ * Concurrent calls for the same `type` are serialised (not run in
+ * parallel) so two drain triggers can't replay the same entries at
+ * once; each pass still re-reads the queue, so nothing newly enqueued
+ * between passes is missed.
+ */
+export function drainQueue(
+  handler: (mutation: QueuedMutation) => Promise<void>,
+  type?: string,
+): Promise<DrainResult> {
+  const key = type ?? "*";
+  const prior = drainChains.get(key) ?? Promise.resolve();
+  // Run after any in-flight drain for this key; swallow the prior pass's
+  // outcome so one failing drain doesn't reject the next caller's pass.
+  const run = prior.then(
+    () => drainQueueOnce(handler, type),
+    () => drainQueueOnce(handler, type),
+  );
+  // Subsequent callers chain off `tail` (which never rejects) and the
+  // tail of the chain removes itself once settled.
+  const tail = run.catch(() => undefined);
+  drainChains.set(key, tail);
+  void tail.finally(() => {
+    if (drainChains.get(key) === tail) drainChains.delete(key);
+  });
+  return run;
 }
 
 // --- Shell-level global drain ----------------------------------------
@@ -294,4 +341,5 @@ export function subscribeQueue(listener: () => void): () => void {
 /** Test-only: drop the cached connection so a fresh DB can be opened. */
 export function __resetForTests(): void {
   dbPromise = null;
+  drainChains.clear();
 }

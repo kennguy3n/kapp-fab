@@ -167,6 +167,60 @@ describe("offlineQueue", () => {
     unregister();
   });
 
+  it("serialises concurrent same-type drainQueue calls so each entry replays once", async () => {
+    await enqueue(mutation("p1", "pos.finalize", "2024-01-01T00:00:01.000Z"));
+    await enqueue(mutation("p2", "pos.finalize", "2024-01-01T00:00:02.000Z"));
+    let calls = 0;
+    const handler = async (m: QueuedMutation) => {
+      calls += 1;
+      void m;
+    };
+
+    // POSPage's mount-time drain racing the shell's reconnect drain of
+    // the same type: chaining serialises them rather than both snapshotting
+    // and replaying the same entries.
+    const [first, second] = await Promise.all([
+      drainQueue(handler, "pos.finalize"),
+      drainQueue(handler, "pos.finalize"),
+    ]);
+
+    // Two entries, two handler invocations total — no double replay.
+    expect(calls).toBe(2);
+    // The first pass drains both; the second runs afterwards over an
+    // already-empty queue.
+    expect(first.succeeded.sort()).toEqual(["p1", "p2"]);
+    expect(second.succeeded).toEqual([]);
+    expect(await countQueue("pos.finalize")).toBe(0);
+  });
+
+  it("a drainQueue call started after a prior pass still drains entries enqueued in between", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    await enqueue(mutation("p1", "pos.finalize", "2024-01-01T00:00:01.000Z"));
+    const handled: string[] = [];
+
+    // First pass blocks on `gate` while handling p1, modelling a slow replay.
+    const slow = async (m: QueuedMutation) => {
+      handled.push(m.id);
+      if (m.id === "p1") await gate;
+    };
+    const firstPass = drainQueue(slow, "pos.finalize");
+
+    // A new entry is enqueued while the first pass is in flight, then a
+    // second drain is requested. It must not be stranded.
+    await enqueue(mutation("p2", "pos.finalize", "2024-01-01T00:00:02.000Z"));
+    const secondPass = drainQueue(slow, "pos.finalize");
+
+    release();
+    await Promise.all([firstPass, secondPass]);
+
+    expect(handled).toContain("p1");
+    expect(handled).toContain("p2");
+    expect(await countQueue("pos.finalize")).toBe(0);
+  });
+
   // Regression: the shell (OfflineIndicator) mounts before a page can
   // register its replay handler, so its drainAll() runs against an empty
   // handler map and the coalescing `drainInFlight` would otherwise make
