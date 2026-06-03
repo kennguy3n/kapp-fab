@@ -122,6 +122,16 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
 
   if (request.mode === "navigate") {
+    // Full-page navigations to an API route must NOT be intercepted. The
+    // primary SSO entry point is a real document navigation
+    // (<a href="/api/v1/auth/kchat/start">) that the server answers with a
+    // 302 to an external OAuth provider. A navigation-mode fetch() inside
+    // the SW that meets a cross-origin redirect becomes a network error,
+    // which would drop us into the catch below and serve the cached app
+    // shell — silently breaking the OAuth hand-off. Returning without
+    // calling respondWith() lets the browser perform the navigation (and
+    // follow the redirect) exactly as it would with no SW installed.
+    if (isApiRequest(url)) return;
     event.respondWith(handleNavigation(request));
     return;
   }

@@ -11,6 +11,14 @@ import { App } from "./App";
 // require an apps/web code change.
 import "@kapp/ui/styles/globals.css";
 import { postIdentityToServiceWorker } from "./lib/swIdentity";
+import { registerPOSReplay } from "./lib/posReplay";
+
+// Register app-lifetime offline replay handlers BEFORE first render so
+// the shell-level drainAll() (OfflineIndicator) can replay queued
+// mutations on reconnect regardless of which route is mounted — not only
+// while the originating page happens to be open. Unrelated to the SW
+// below: the offline queue works in dev/test too (plain IndexedDB).
+registerPOSReplay();
 
 const queryClient = new QueryClient();
 

@@ -6,19 +6,17 @@ import {
   countQueue,
   drainQueue,
   enqueue,
-  registerReplayHandler,
   subscribeQueue,
-  type QueuedMutation,
 } from "../lib/offlineQueue";
+import {
+  POS_MUTATION_TYPE,
+  posFinalizeReplay,
+  type POSFinalizePayload,
+} from "../lib/posReplay";
 
 const KTYPE_PROFILE = "sales.pos_profile";
 const KTYPE_INVOICE = "sales.pos_invoice";
 const KTYPE_ITEM = "inventory.item";
-
-// Mutation discriminator for the shared offline queue. POS finalize
-// replays are stored alongside any other queued mutations in the same
-// IndexedDB store but drained independently via this type tag.
-const POS_MUTATION_TYPE = "pos.finalize";
 
 interface ItemData {
   name?: string;
@@ -40,13 +38,6 @@ interface CartLine {
   itemName: string;
   qty: number;
   unitPrice: number;
-}
-
-/** Replay body for a queued POS finalize. The queue entry's `id` is
- *  the idempotency key reused on retry so duplicates collapse. */
-interface POSFinalizePayload {
-  posInvoiceId: string;
-  total: number;
 }
 
 /**
@@ -99,35 +90,26 @@ export function POSPage() {
   const subtotal = cart.reduce((s, l) => s + l.qty * l.unitPrice, 0);
   const total = subtotal; // tax stub — real tax pack runs server-side
 
-  // Wire POS into the shared offline queue:
-  //   - Register the typed replay handler so the shell-level drainAll()
-  //     (OfflineIndicator) can replay POS finalizes on reconnect even when
-  //     this page isn't mounted. Each retry reuses the queue-entry id as
-  //     the idempotency key so the server collapses duplicates.
+  // Wire POS into the shared offline queue. The replay handler itself is
+  // registered app-wide at startup (lib/posReplay.ts) — NOT here — so the
+  // shell-level drainAll() can replay POS finalizes on reconnect even when
+  // this page isn't mounted. This effect only does the page-local work:
   //   - Show the pending count IMMEDIATELY (don't wait for a drain to
   //     finish) so a cashier reopening POS offline sees queued work right
   //     away, and keep it fresh as the queue changes.
+  //   - Drain our own type DIRECTLY on mount. The always-mounted
+  //     OfflineIndicator may already have a coalesced drainAll() pass in
+  //     flight; draining our type here is deterministic regardless of
+  //     effect ordering, so entering POS replays pending finalizes at
+  //     once. Each retry reuses the queue-entry id as the idempotency key
+  //     so the server collapses duplicates.
   useEffect(() => {
-    const replay = async (mutation: QueuedMutation) => {
-      const payload = mutation.payload as POSFinalizePayload;
-      await api.finalizePOSInvoice(payload.posInvoiceId, mutation.id);
-    };
-    const unregister = registerReplayHandler(POS_MUTATION_TYPE, replay);
     const unsubscribe = subscribeQueue(() => void refreshQueueCount());
-
-    // Surface any already-pending work immediately, then replay our own
-    // type DIRECTLY via drainQueue — not the shell's drainAll(). The
-    // always-mounted OfflineIndicator mounts before this page and may
-    // have already started a coalesced drainAll() pass before `replay`
-    // was registered; joining that in-flight pass would skip POS
-    // entirely, stranding finalizes queued in a prior session until the
-    // connection next cycles. Draining our type here is deterministic
-    // regardless of effect ordering. The shell still owns the GLOBAL
-    // drain on reconnect (every handler is registered by then).
     void refreshQueueCount();
-    void drainQueue(replay, POS_MUTATION_TYPE).then(() => refreshQueueCount());
+    void drainQueue(posFinalizeReplay, POS_MUTATION_TYPE).then(() =>
+      refreshQueueCount(),
+    );
     return () => {
-      unregister();
       unsubscribe();
     };
   }, [refreshQueueCount]);
