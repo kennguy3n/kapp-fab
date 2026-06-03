@@ -9,8 +9,11 @@ const OPERATIONAL = {
   status: "operational" as const,
   component_availability_percent: 100,
   components: [
-    { name: "postgres", status: "operational" as const, latency_ms: 1.2 },
-    { name: "redis", status: "operational" as const, latency_ms: 0.4 },
+    // The public API emits generic, technology-agnostic names
+    // (database, cache, …) rather than raw probe names (postgres,
+    // redis, …) so a public scrape cannot fingerprint the stack.
+    { name: "database", status: "operational" as const, latency_ms: 1.2 },
+    { name: "cache", status: "operational" as const, latency_ms: 0.4 },
   ],
   incidents: [
     { summary: "Platform capacity increased to absorb load", at: "2026-06-01T12:00:00Z" },
@@ -22,8 +25,8 @@ const DEGRADED = {
   status: "degraded" as const,
   component_availability_percent: 50,
   components: [
-    { name: "postgres", status: "operational" as const, latency_ms: 1.0 },
-    { name: "outbox", status: "degraded" as const, latency_ms: 2.0 },
+    { name: "database", status: "operational" as const, latency_ms: 1.0 },
+    { name: "event_delivery", status: "degraded" as const, latency_ms: 2.0 },
   ],
   incidents: [],
   checked_at: "2026-06-03T00:00:00Z",

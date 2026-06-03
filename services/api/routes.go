@@ -113,8 +113,18 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 	}
 	if hh != nil {
 		// Public, unauthenticated component status. Sanitized so a
-		// scrape cannot fingerprint internal topology.
-		r.Get("/api/v1/health", hh.publicHealth)
+		// scrape cannot fingerprint internal topology. Fronted by the
+		// shared per-IP limiter (same backend the public embed route
+		// uses) so the unauthenticated probe fan-out cannot be turned
+		// into a load-amplification vector; that limiter fails open, so
+		// a Redis hiccup never takes the status page down. RealIP has
+		// already run on the parent router, so the limiter keys on the
+		// true client address.
+		if d.publicEmbedIPLimit != nil {
+			r.With(d.publicEmbedIPLimit).Get("/api/v1/health", hh.publicHealth)
+		} else {
+			r.Get("/api/v1/health", hh.publicHealth)
+		}
 	}
 
 	// Phase H auth routes. SSO and refresh are unauthenticated (they

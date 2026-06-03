@@ -45,16 +45,21 @@ const STATUS_META: Record<HealthStatus, { label: string; color: string; bg: stri
   down: { label: "Down", color: "#991b1b", bg: "#fee2e2" },
 };
 
-// COMPONENT_LABELS maps the backend's machine names onto something a
-// non-engineer reading the public page can parse. Unknown names fall
-// back to the raw key so a newly added probe still renders.
+// COMPONENT_LABELS maps the public API's generic component names onto
+// display strings. The public /api/v1/health endpoint deliberately
+// emits technology-agnostic names (database, cache, …) rather than the
+// internal probe names (postgres, redis, …) so a scrape can't
+// fingerprint the stack; these keys mirror that contract. Unknown
+// names fall back to the raw key so a newly added component still
+// renders.
 const COMPONENT_LABELS: Record<string, string> = {
-  postgres: "Database",
-  redis: "Cache",
-  nats: "Event Bus",
-  zk_object_fabric: "Object Storage",
-  outbox: "Event Delivery",
-  worker: "Background Jobs",
+  database: "Database",
+  cache: "Cache",
+  event_bus: "Event Bus",
+  object_storage: "Object Storage",
+  event_delivery: "Event Delivery",
+  background_jobs: "Background Jobs",
+  service: "Service",
 };
 
 function StatusPill({ status }: { status: HealthStatus }) {

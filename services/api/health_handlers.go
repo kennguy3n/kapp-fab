@@ -64,11 +64,42 @@ func newHealthHandlers(d *apiDeps, zkFabricEndpoint string) (*healthHandlers, er
 // unauthenticated callers: status + latency only. Internal error
 // strings and probe detail (hostnames, lag numbers, backlog counts)
 // stay behind the admin endpoint so a public scrape cannot
-// fingerprint the deployment's topology.
+// fingerprint the deployment's topology. Name is a generic functional
+// label (see publicComponentName), never the raw probe name.
 type publicComponent struct {
 	Name      string                   `json:"name"`
 	Status    platform.ComponentStatus `json:"status"`
 	LatencyMS float64                  `json:"latency_ms"`
+}
+
+// publicComponentNames maps internal probe names to generic,
+// technology-agnostic labels for the unauthenticated surface. The raw
+// probe names (postgres, redis, nats, zk_object_fabric, …) name the
+// underlying tech stack, so emitting them verbatim would let a public
+// scrape fingerprint the deployment — exactly what the publicComponent
+// sanitization claims to prevent. The public endpoint reports these
+// functional labels instead; the admin endpoint keeps the raw names
+// for operators.
+var publicComponentNames = map[string]string{
+	"postgres":         "database",
+	"redis":            "cache",
+	"nats":             "event_bus",
+	"zk_object_fabric": "object_storage",
+	"outbox":           "event_delivery",
+	"worker":           "background_jobs",
+}
+
+// publicComponentName returns the generic label for an internal probe
+// name. Any probe missing from the map collapses to the constant
+// "service" rather than falling through to its raw name, so a
+// future probe can never accidentally leak its technology on the
+// public surface — it just shows up as an unnamed service until the
+// mapping is extended.
+func publicComponentName(internal string) string {
+	if label, ok := publicComponentNames[internal]; ok {
+		return label
+	}
+	return "service"
 }
 
 // publicIncident is a deliberately lossy projection of a
@@ -111,7 +142,7 @@ func (h *healthHandlers) publicHealth(w http.ResponseWriter, r *http.Request) {
 			operational++
 		}
 		comps = append(comps, publicComponent{
-			Name:      c.Name,
+			Name:      publicComponentName(c.Name),
 			Status:    c.Status,
 			LatencyMS: c.LatencyMS,
 		})
@@ -293,7 +324,11 @@ func (h *healthHandlers) cellHealth(ctx context.Context) []cellHealth {
 // join to tenants resolves a human-readable name for the dashboard.
 func (h *healthHandlers) topTenants(ctx context.Context) []topTenant {
 	out := []topTenant{}
-	periodStart := time.Date(time.Now().UTC().Year(), time.Now().UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
+	// Sample the clock once: reading time.Now() separately for Year
+	// and Month could straddle a month/year rollover and compute a
+	// period_start in the wrong month.
+	now := time.Now().UTC()
+	periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	rows, err := h.adminPool.Query(ctx,
 		`SELECT u.tenant_id, COALESCE(t.name, ''), u.value
 		   FROM tenant_usage u
