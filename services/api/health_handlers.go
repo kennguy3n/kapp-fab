@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -10,6 +11,16 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
+
+// healthHandlerTimeout bounds an entire health request — the
+// concurrent probes (each already capped at HealthConfig.ProbeTimeout)
+// plus the handler's own DB reads. The public /api/v1/health route is
+// mounted outside the router's 30s timeout group (mirroring /healthz),
+// so without this ceiling the incident/aggregate queries would inherit
+// an unbounded request context. 5s comfortably exceeds the ~2s probe
+// budget and a fast indexed read while still guaranteeing the endpoint
+// can never hang on a stuck dependency.
+const healthHandlerTimeout = 5 * time.Second
 
 // healthHandlers backs Workstream 6's health surface: a public
 // component-status endpoint, an admin-only operator dashboard feed,
@@ -88,7 +99,10 @@ type publicHealthResponse struct {
 // instantaneous availability percentage, and a sanitized capacity-
 // change history.
 func (h *healthHandlers) publicHealth(w http.ResponseWriter, r *http.Request) {
-	sys := h.checker.Check(r.Context())
+	ctx, cancel := context.WithTimeout(r.Context(), healthHandlerTimeout)
+	defer cancel()
+
+	sys := h.checker.Check(ctx)
 
 	comps := make([]publicComponent, 0, len(sys.Components))
 	operational := 0
@@ -111,7 +125,7 @@ func (h *healthHandlers) publicHealth(w http.ResponseWriter, r *http.Request) {
 		Status:                       sys.Status,
 		ComponentAvailabilityPercent: availability,
 		Components:                   comps,
-		Incidents:                    h.recentIncidents(r),
+		Incidents:                    h.recentIncidents(ctx),
 		CheckedAt:                    sys.CheckedAt,
 	})
 }
@@ -123,9 +137,9 @@ func (h *healthHandlers) publicHealth(w http.ResponseWriter, r *http.Request) {
 // without a GUC. Read failures collapse to an empty list — the
 // incident feed is best-effort decoration, not a hard dependency of
 // the status endpoint.
-func (h *healthHandlers) recentIncidents(r *http.Request) []publicIncident {
+func (h *healthHandlers) recentIncidents(ctx context.Context) []publicIncident {
 	incidents := []publicIncident{}
-	rows, err := h.pool.Query(r.Context(),
+	rows, err := h.pool.Query(ctx,
 		`SELECT event_type, created_at
 		   FROM platform_scale_events
 		  WHERE event_type IN ('scale_up', 'scale_down')
@@ -202,15 +216,18 @@ type adminHealthResponse struct {
 // (BYPASSRLS); when it is not configured the aggregates are returned
 // empty rather than failing the whole request.
 func (h *healthHandlers) adminHealthDetailed(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), healthHandlerTimeout)
+	defer cancel()
+
 	resp := adminHealthResponse{
-		System:     h.checker.Check(r.Context()),
+		System:     h.checker.Check(ctx),
 		Cells:      []cellHealth{},
 		TopTenants: []topTenant{},
 		Pool:       poolStats(h.pool),
 	}
 	if h.adminPool != nil {
-		resp.Cells = h.cellHealth(r)
-		resp.TopTenants = h.topTenants(r)
+		resp.Cells = h.cellHealth(ctx)
+		resp.TopTenants = h.topTenants(ctx)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -239,9 +256,9 @@ func poolStats(pool *pgxpool.Pool) poolHealth {
 // 'default' cell, matching the autoscaler's convention. Read errors
 // degrade to an empty slice so a transient control-plane hiccup does
 // not blank the entire dashboard.
-func (h *healthHandlers) cellHealth(r *http.Request) []cellHealth {
+func (h *healthHandlers) cellHealth(ctx context.Context) []cellHealth {
 	out := []cellHealth{}
-	rows, err := h.adminPool.Query(r.Context(),
+	rows, err := h.adminPool.Query(ctx,
 		`SELECT c.id, c.region, c.max_tenants, c.cpu_pct, c.mem_pct,
 		        c.conn_saturation_pct,
 		        COALESCE(t.cnt, 0) AS tenant_count
@@ -274,10 +291,10 @@ func (h *healthHandlers) cellHealth(r *http.Request) []cellHealth {
 // topTenants ranks tenants by API-call volume in the current metering
 // period. Runs on adminPool because tenant_usage is RLS-scoped; the
 // join to tenants resolves a human-readable name for the dashboard.
-func (h *healthHandlers) topTenants(r *http.Request) []topTenant {
+func (h *healthHandlers) topTenants(ctx context.Context) []topTenant {
 	out := []topTenant{}
 	periodStart := time.Date(time.Now().UTC().Year(), time.Now().UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
-	rows, err := h.adminPool.Query(r.Context(),
+	rows, err := h.adminPool.Query(ctx,
 		`SELECT u.tenant_id, COALESCE(t.name, ''), u.value
 		   FROM tenant_usage u
 		   LEFT JOIN tenants t ON t.id = u.tenant_id
@@ -312,9 +329,12 @@ func (h *healthHandlers) tenantHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx, cancel := context.WithTimeout(r.Context(), healthHandlerTimeout)
+	defer cancel()
+
 	limits := map[string]int64{}
 	if h.plans != nil {
-		if plan, err := h.plans.Get(r.Context(), t.Plan); err == nil {
+		if plan, err := h.plans.Get(ctx, t.Plan); err == nil {
 			limits = map[string]int64{
 				"api_calls":     plan.Limits.APICalls,
 				"storage_bytes": plan.Limits.StorageBytes,
@@ -327,7 +347,7 @@ func (h *healthHandlers) tenantHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	th, err := h.checker.TenantHealth(r.Context(), t.ID, limits)
+	th, err := h.checker.TenantHealth(ctx, t.ID, limits)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

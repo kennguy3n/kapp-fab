@@ -262,9 +262,12 @@ func aggregateStatus(results []ComponentHealth, critical []bool) ComponentStatus
 
 // elapsedMS returns milliseconds since start as a rounded float so
 // JSON output stays compact and tests are not at the mercy of
-// sub-millisecond jitter.
-func elapsedMS(start time.Time) float64 {
-	return float64(time.Since(start).Microseconds()) / 1000.0
+// sub-millisecond jitter. It reads "now" through the checker's
+// injectable clock (h.cfg.now) — the same clock that produced start —
+// so a test that fakes the clock sees latencies measured against that
+// clock rather than the real wall clock.
+func (h *HealthChecker) elapsedMS(start time.Time) float64 {
+	return float64(h.cfg.now().Sub(start).Microseconds()) / 1000.0
 }
 
 // checkPostgres pings the pool and, on success, samples standby
@@ -277,10 +280,10 @@ func (h *HealthChecker) checkPostgres(ctx context.Context) ComponentHealth {
 	if err := h.cfg.Pool.Ping(ctx); err != nil {
 		c.Status = StatusDown
 		c.Error = err.Error()
-		c.LatencyMS = elapsedMS(start)
+		c.LatencyMS = h.elapsedMS(start)
 		return c
 	}
-	c.LatencyMS = elapsedMS(start)
+	c.LatencyMS = h.elapsedMS(start)
 
 	// pg_last_xact_replay_timestamp() is non-NULL only on a standby
 	// replaying WAL; on a primary it returns NULL, which we surface
@@ -316,7 +319,7 @@ func (h *HealthChecker) checkRedis(ctx context.Context) ComponentHealth {
 	if err != nil {
 		c.Status = StatusDown
 		c.Error = fmt.Sprintf("parse redis url: %v", err)
-		c.LatencyMS = elapsedMS(start)
+		c.LatencyMS = h.elapsedMS(start)
 		return c
 	}
 	client := redis.NewClient(opts)
@@ -325,7 +328,7 @@ func (h *HealthChecker) checkRedis(ctx context.Context) ComponentHealth {
 		c.Status = StatusDown
 		c.Error = err.Error()
 	}
-	c.LatencyMS = elapsedMS(start)
+	c.LatencyMS = h.elapsedMS(start)
 	return c
 }
 
@@ -379,7 +382,7 @@ func (h *HealthChecker) checkNATS(ctx context.Context) ComponentHealth {
 			}
 		}
 	}
-	c.LatencyMS = elapsedMS(start)
+	c.LatencyMS = h.elapsedMS(start)
 	return c
 }
 
@@ -396,19 +399,19 @@ func (h *HealthChecker) checkZKFabric(ctx context.Context) ComponentHealth {
 	if err != nil {
 		c.Status = StatusDown
 		c.Error = err.Error()
-		c.LatencyMS = elapsedMS(start)
+		c.LatencyMS = h.elapsedMS(start)
 		return c
 	}
 	resp, err := h.cfg.HTTPClient.Do(req)
 	if err != nil {
 		c.Status = StatusDown
 		c.Error = err.Error()
-		c.LatencyMS = elapsedMS(start)
+		c.LatencyMS = h.elapsedMS(start)
 		return c
 	}
 	defer func() { _ = resp.Body.Close() }()
 	c.Detail = map[string]any{"http_status": resp.StatusCode}
-	c.LatencyMS = elapsedMS(start)
+	c.LatencyMS = h.elapsedMS(start)
 	return c
 }
 
@@ -433,7 +436,7 @@ func (h *HealthChecker) checkOutbox(ctx context.Context) ComponentHealth {
 	if err != nil {
 		c.Status = StatusDown
 		c.Error = err.Error()
-		c.LatencyMS = elapsedMS(start)
+		c.LatencyMS = h.elapsedMS(start)
 		return c
 	}
 	c.Detail = map[string]any{
@@ -446,7 +449,7 @@ func (h *HealthChecker) checkOutbox(ctx context.Context) ComponentHealth {
 	case backlog >= h.cfg.OutboxBacklogWarn:
 		c.Status = StatusDegraded
 	}
-	c.LatencyMS = elapsedMS(start)
+	c.LatencyMS = h.elapsedMS(start)
 	return c
 }
 
@@ -467,12 +470,12 @@ func (h *HealthChecker) checkWorkerHeartbeat(ctx context.Context) ComponentHealt
 	if err != nil {
 		c.Status = StatusDown
 		c.Error = err.Error()
-		c.LatencyMS = elapsedMS(start)
+		c.LatencyMS = h.elapsedMS(start)
 		return c
 	}
 	if lastRun == nil {
 		c.Detail = map[string]any{"last_run_at": nil}
-		c.LatencyMS = elapsedMS(start)
+		c.LatencyMS = h.elapsedMS(start)
 		return c
 	}
 	age := h.cfg.now().Sub(*lastRun)
@@ -486,7 +489,7 @@ func (h *HealthChecker) checkWorkerHeartbeat(ctx context.Context) ComponentHealt
 	case age >= h.cfg.WorkerStaleWarn:
 		c.Status = StatusDegraded
 	}
-	c.LatencyMS = elapsedMS(start)
+	c.LatencyMS = h.elapsedMS(start)
 	return c
 }
 

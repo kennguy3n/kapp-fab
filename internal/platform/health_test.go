@@ -182,6 +182,28 @@ func TestCheckRedis(t *testing.T) {
 	}
 }
 
+// TestElapsedMS_UsesInjectableClock pins the latency helper to the
+// checker's injectable clock. Under a faked clock the measured
+// duration must be derived from h.cfg.now (here a deterministic 250ms
+// jump), not the real wall clock — the old time.Since(start) version
+// would report years, so this guards against that regression.
+func TestElapsedMS_UsesInjectableClock(t *testing.T) {
+	t.Parallel()
+	hc, err := NewHealthChecker(HealthConfig{Pool: dummyPool(t)})
+	if err != nil {
+		t.Fatalf("new checker: %v", err)
+	}
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	current := base
+	hc.cfg.now = func() time.Time { return current }
+
+	start := hc.cfg.now()
+	current = base.Add(250 * time.Millisecond)
+	if got := hc.elapsedMS(start); got != 250 {
+		t.Errorf("elapsedMS = %v, want 250 (must measure via injectable clock)", got)
+	}
+}
+
 func TestCheckNATS_Unreachable(t *testing.T) {
 	t.Parallel()
 	hc, _ := NewHealthChecker(HealthConfig{
