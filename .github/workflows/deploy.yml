@@ -64,9 +64,6 @@ jobs:
     name: build & push image
     runs-on: ubuntu-latest
     needs: build-test
-    outputs:
-      image: ${{ steps.meta.outputs.tags }}
-      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
