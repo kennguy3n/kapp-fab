@@ -23,11 +23,13 @@ const API = "/api/v1";
 export const handlers = [
   // --- Notifications (NotificationBell, raw fetch) --------------------
   http.get(`${API}/notifications`, () => HttpResponse.json([])),
+  // 204 No Content carries no body, so use a bare HttpResponse rather
+  // than HttpResponse.json(null, ...) (which would attach a JSON body).
   http.post(`${API}/notifications/:id/read`, () =>
-    HttpResponse.json(null, { status: 204 }),
+    new HttpResponse(null, { status: 204 }),
   ),
   http.post(`${API}/notifications/read-all`, () =>
-    HttpResponse.json(null, { status: 204 }),
+    new HttpResponse(null, { status: 204 }),
   ),
 
   // --- Auth (LoginPage SSO code exchange, raw fetch) ------------------

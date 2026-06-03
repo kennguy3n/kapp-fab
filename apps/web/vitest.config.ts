@@ -54,7 +54,11 @@ export default defineConfig({
       // the percentages reflect real component/page coverage.
       include: ["src/**/*.{ts,tsx}"],
       exclude: [
+        // `test.include` matches both *.test.* and *.spec.*, so exclude
+        // both from coverage — otherwise a future src/**/*.spec.ts would
+        // run as a test and count its own lines toward the metrics.
         "src/**/*.test.{ts,tsx}",
+        "src/**/*.spec.{ts,tsx}",
         "src/test/**",
         "src/main.tsx",
         "src/vite-env.d.ts",
