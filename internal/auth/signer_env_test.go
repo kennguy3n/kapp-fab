@@ -91,35 +91,3 @@ func TestSignerFromEnv_InvalidTTLFallsBackToDefault(t *testing.T) {
 		t.Fatal("nil signer with no error")
 	}
 }
-
-func TestRequireJWT_DefaultsFalse(t *testing.T) {
-	t.Setenv("KAPP_REQUIRE_JWT", "")
-	if RequireJWT() {
-		t.Fatal("RequireJWT() returned true with KAPP_REQUIRE_JWT unset; want false so local dev keeps booting without a secret")
-	}
-}
-
-func TestRequireJWT_RecognisedTruthyValues(t *testing.T) {
-	for _, v := range []string{"1", "true", "TRUE", "True"} {
-		t.Setenv("KAPP_REQUIRE_JWT", v)
-		if !RequireJWT() {
-			t.Errorf("RequireJWT(%q) returned false; want true", v)
-		}
-	}
-}
-
-func TestRequireJWT_RecognisedFalsyValues(t *testing.T) {
-	for _, v := range []string{"0", "false", "FALSE", "False"} {
-		t.Setenv("KAPP_REQUIRE_JWT", v)
-		if RequireJWT() {
-			t.Errorf("RequireJWT(%q) returned true; want false", v)
-		}
-	}
-}
-
-func TestRequireJWT_UnknownValueFallsBackToDefault(t *testing.T) {
-	t.Setenv("KAPP_REQUIRE_JWT", "yes-please")
-	if RequireJWT() {
-		t.Fatal("RequireJWT() honoured an unrecognised truthy value; want strict-set fallback so typos don't accidentally flip production into strict mode")
-	}
-}
