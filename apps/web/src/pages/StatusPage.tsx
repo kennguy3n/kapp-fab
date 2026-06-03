@@ -136,9 +136,13 @@ export function StatusPage() {
       <section style={{ marginTop: 32 }}>
         <h2 style={{ fontSize: 16 }}>Components</h2>
         <div style={{ marginTop: 8 }}>
-          {data.components.map((c) => (
+          {data.components.map((c, i) => (
             <div
-              key={c.name}
+              // Index-suffixed: the public API collapses any unmapped
+              // component to the generic "service" label, so names are
+              // not guaranteed unique — keying on name alone could
+              // collide if two unmapped probes ever co-exist.
+              key={`${c.name}-${i}`}
               style={{
                 display: "flex",
                 alignItems: "center",
