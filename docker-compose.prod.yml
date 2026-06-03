@@ -112,7 +112,13 @@ services:
         # command and fail on every tick.
         printf '%s root . /etc/kapp-backup.env; /usr/local/bin/kapp-backup.sh >> /var/log/kapp-backup.log 2>&1\n' \
           "$${BACKUP_CRON:-0 3 * * *}" > /etc/cron.d/kapp-backup
-        env | grep -E '^(POSTGRES_|ZK_FABRIC_|BACKUP_)' > /etc/kapp-backup.env
+        # Emit `export KEY=VALUE` (not bare KEY=VALUE): the cron line sources
+        # this file into its /bin/sh and then runs kapp-backup.sh, which has a
+        # bash shebang and so executes as a child process. Only *exported*
+        # variables are inherited by that child, so without `export` the
+        # script would see empty POSTGRES_PASSWORD / ZK_FABRIC_* and the dump
+        # + upload would fail every night.
+        env | grep -E '^(POSTGRES_|ZK_FABRIC_|BACKUP_)' | sed 's/^/export /' > /etc/kapp-backup.env
         chmod 0644 /etc/cron.d/kapp-backup
         touch /var/log/kapp-backup.log
         cron && tail -F /var/log/kapp-backup.log
