@@ -1,92 +1,43 @@
 /*
  * Kapp service worker.
  *
+ * Scope: read-path offline support only. The SW makes the SPA boot and
+ * read data offline; it intentionally does NOT touch mutating requests.
+ *
  * Responsibilities:
  *   1. App-shell + static-asset caching so the SPA boots offline.
- *      - Navigations: network-first, falling back to the cached
- *        shell ("/") so a cold offline launch still renders the app.
- *      - Hashed static assets (scripts/styles/fonts/images):
- *        cache-first with a background revalidate (stale-while-
- *        revalidate) — instant loads, fresh on the next visit.
+ *      - Navigations: network-first, falling back to the cached shell
+ *        ("/") so a cold offline launch still renders the app. A
+ *        successful navigation also refreshes the cached shell, so the
+ *        offline fallback self-heals after a deploy.
+ *      - Hashed static assets (scripts/styles/fonts/images): cache-first
+ *        with a background revalidate (stale-while-revalidate) — instant
+ *        loads, fresh on the next visit.
  *   2. Read API caching: GET /api/* is network-first with a cached
  *      fallback, and successful responses are stored so the same read
  *      works offline (stale-while-revalidate semantics).
- *   3. Offline mutation queue: a failed mutating /api/* request
- *      (POST/PUT/PATCH/DELETE) is persisted to the shared IndexedDB
- *      queue (same DB/store as src/lib/offlineQueue.ts) and a
- *      Background Sync is registered to replay it on reconnect. The
- *      page is notified so the OfflineIndicator's count updates.
  *
- * This file is served from /sw.js (apps/web/public/) so its scope is
- * the whole origin. It is intentionally dependency-free — service
- * workers run in a separate context and can't import the app bundle.
+ * Why the SW deliberately leaves mutations alone:
+ *   Transparently intercepting POST/PUT/PATCH/DELETE and synthesising a
+ *   "queued" response is unsafe — the app's ApiClient treats any 2xx as
+ *   success and parses the body as the typed result (e.g. a KRecord), so
+ *   a fake 202 silently corrupts callers that read fields off the
+ *   response (e.g. `created.id`). It also can't replay typed app
+ *   mutations correctly (idempotency keys, dependent IDs). Offline writes
+ *   are therefore owned by the app layer via src/lib/offlineQueue.ts,
+ *   where each surface (e.g. POSPage) enqueues a typed, idempotent
+ *   mutation and drains it on reconnect. Letting a failed mutation reject
+ *   naturally is what triggers that app-level handling.
+ *
+ * This file is served from /sw.js (apps/web/public/) so its scope is the
+ * whole origin. It is intentionally dependency-free — service workers run
+ * in a separate context and can't import the app bundle.
  */
 
 const CACHE_VERSION = "v1";
 const STATIC_CACHE = `kapp-static-${CACHE_VERSION}`;
 const API_CACHE = `kapp-api-${CACHE_VERSION}`;
 const APP_SHELL = ["/", "/manifest.json", "/icon.svg"];
-
-const SYNC_TAG = "kapp-sync-mutations";
-const QUEUE_CHANGED = "kapp:offline-queue-changed";
-
-// --- IndexedDB queue (mirrors src/lib/offlineQueue.ts) ---------------
-const DB_NAME = "kapp-offline";
-const DB_VERSION = 1;
-const STORE = "mutations";
-
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(STORE)) {
-        const store = db.createObjectStore(STORE, { keyPath: "id" });
-        store.createIndex("type", "type", { unique: false });
-        store.createIndex("queuedAt", "queuedAt", { unique: false });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function putMutation(mutation) {
-  const db = await openDB();
-  await new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readwrite");
-    tx.objectStore(STORE).put(mutation);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function getAllMutations() {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readonly");
-    const req = tx.objectStore(STORE).getAll();
-    req.onsuccess = () => resolve(req.result || []);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function deleteMutation(id) {
-  const db = await openDB();
-  await new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readwrite");
-    tx.objectStore(STORE).delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function notifyClients() {
-  const all = await self.clients.matchAll({ includeUncontrolled: true });
-  for (const client of all) {
-    client.postMessage({ type: QUEUE_CHANGED });
-  }
-}
 
 // --- Lifecycle -------------------------------------------------------
 self.addEventListener("install", (event) => {
@@ -126,12 +77,10 @@ self.addEventListener("fetch", (event) => {
   // parties) pass straight through to the network.
   if (url.origin !== self.location.origin) return;
 
-  if (request.method !== "GET") {
-    if (isApiRequest(url)) {
-      event.respondWith(handleMutation(request));
-    }
-    return;
-  }
+  // Mutations are owned by the app layer (see header). Don't intercept:
+  // letting them hit the network — and reject naturally when offline —
+  // is what lets the app's typed offline queue take over.
+  if (request.method !== "GET") return;
 
   if (request.mode === "navigate") {
     event.respondWith(handleNavigation(request));
@@ -147,13 +96,18 @@ self.addEventListener("fetch", (event) => {
 });
 
 // Network-first for document navigations; fall back to the cached app
-// shell so an offline cold start still renders the SPA.
+// shell so an offline cold start still renders the SPA. A successful
+// fetch refreshes the cached "/" shell so the offline fallback doesn't
+// go stale after a deploy (the bundle's assets are content-hashed, so
+// the refreshed shell always references URLs that resolve).
 async function handleNavigation(request) {
+  const cache = await caches.open(STATIC_CACHE);
   try {
-    return await fetch(request);
+    const res = await fetch(request);
+    if (res && res.ok) cache.put("/", res.clone());
+    return res;
   } catch {
-    const cache = await caches.open(STATIC_CACHE);
-    const shell = await cache.match("/");
+    const shell = (await cache.match("/")) || (await cache.match(request));
     return shell || Response.error();
   }
 }
@@ -187,82 +141,3 @@ async function handleApiRead(request) {
     );
   }
 }
-
-// Try a mutating request; on network failure persist it and register a
-// Background Sync so it replays on reconnect.
-async function handleMutation(request) {
-  try {
-    return await fetch(request.clone());
-  } catch {
-    await queueRequest(request);
-    if ("sync" in self.registration) {
-      try {
-        await self.registration.sync.register(SYNC_TAG);
-      } catch {
-        // Sync registration unsupported — the queue still drains on
-        // the next page load / explicit drain.
-      }
-    }
-    return new Response(
-      JSON.stringify({ queued: true, message: "Request queued offline." }),
-      { status: 202, headers: { "Content-Type": "application/json" } },
-    );
-  }
-}
-
-async function queueRequest(request) {
-  const body = await request.clone().text();
-  const headers = {};
-  for (const [key, value] of request.headers.entries()) headers[key] = value;
-  const id =
-    request.headers.get("Idempotency-Key") ||
-    (self.crypto && self.crypto.randomUUID
-      ? self.crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  await putMutation({
-    id,
-    type: "sw.request",
-    payload: { url: request.url, method: request.method, headers, body },
-    queuedAt: new Date().toISOString(),
-  });
-  await notifyClients();
-}
-
-// --- Background Sync replay -----------------------------------------
-self.addEventListener("sync", (event) => {
-  if (event.tag === SYNC_TAG) {
-    event.waitUntil(replayQueue());
-  }
-});
-
-async function replayQueue() {
-  const pending = (await getAllMutations()).filter(
-    (m) => m.type === "sw.request",
-  );
-  let changed = false;
-  for (const mutation of pending) {
-    const { url, method, headers, body } = mutation.payload;
-    try {
-      const res = await fetch(url, {
-        method,
-        headers,
-        body: body || undefined,
-      });
-      if (res && res.ok) {
-        await deleteMutation(mutation.id);
-        changed = true;
-      }
-    } catch {
-      // Still offline — leave the entry for the next sync.
-    }
-  }
-  if (changed) await notifyClients();
-}
-
-// Allow the page to trigger a drain explicitly (e.g. on reconnect when
-// Background Sync isn't available).
-self.addEventListener("message", (event) => {
-  if (event.data && event.data.type === "kapp:drain-queue") {
-    event.waitUntil(replayQueue());
-  }
-});

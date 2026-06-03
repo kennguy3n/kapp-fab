@@ -1,6 +1,11 @@
 import type { ReactNode } from "react";
-import { NavLink } from "react-router-dom";
+import { Link, NavLink, useLocation } from "react-router-dom";
 import { cn } from "@kapp/ui";
+
+// The Records tab is a quick link to the primary record type, but it
+// represents the whole Records section, so it stays highlighted on any
+// `/records/*` route — not just this default type.
+const RECORDS_DEFAULT = "/records/crm.lead";
 
 /**
  * MobileNav is the bottom tab bar shown only on small viewports
@@ -9,9 +14,10 @@ import { cn } from "@kapp/ui";
  *
  * It exposes the five primary destinations from the responsive spec:
  * Dashboard, Records, Chat (a KChat deep link), Notifications, and
- * More. Dashboard/Records are in-app routes (react-router `NavLink`,
- * so the active tab is driven by the router match). Chat is an
- * external deep link into the host KChat client. Notifications and
+ * More. Dashboard is a router `NavLink` (active on the index route).
+ * Records links to the primary record type but is highlighted for the
+ * whole `/records/*` section. Chat is an external deep link into the
+ * host KChat client. Notifications and
  * More are actions wired by AppShell to open a bottom sheet (the
  * notifications inbox and the full navigation menu respectively),
  * because neither has a dedicated route.
@@ -55,6 +61,9 @@ export function MobileNav({
   onMoreClick,
   activeSheet = null,
 }: MobileNavProps) {
+  const { pathname } = useLocation();
+  // Highlight Records for the whole section, not just the default type.
+  const recordsActive = pathname.startsWith("/records");
   return (
     <nav
       aria-label="Primary"
@@ -74,18 +83,20 @@ export function MobileNav({
         <span>Dashboard</span>
       </NavLink>
 
-      <NavLink
-        to="/records/crm.lead"
-        className={({ isActive }) =>
-          cn(tabBase, isActive ? tabActive : tabInactive)
-        }
+      {/* A plain Link (not NavLink): NavLink only marks itself active on
+          a prefix match of its own `to`, but Records should highlight for
+          the entire `/records/*` section regardless of the active type. */}
+      <Link
+        to={RECORDS_DEFAULT}
+        aria-current={recordsActive ? "page" : undefined}
+        className={cn(tabBase, recordsActive ? tabActive : tabInactive)}
       >
         <TabIcon>
           <rect x="4" y="3" width="16" height="18" rx="2" />
           <path d="M8 8h8M8 12h8M8 16h5" />
         </TabIcon>
         <span>Records</span>
-      </NavLink>
+      </Link>
 
       {/* Chat is an external deep link into the host KChat client, so
           it's a plain anchor (not a router NavLink) and never carries

@@ -59,16 +59,13 @@ export function OfflineIndicator() {
 
   if (online && pending === 0) return null;
 
-  const queuedLabel =
-    pending > 0
-      ? `${pending} change${pending === 1 ? "" : "s"} queued`
-      : null;
+  const changeCount = `${pending} change${pending === 1 ? "" : "s"}`;
 
   const message = !online
-    ? queuedLabel
-      ? `You're offline — ${queuedLabel}, will sync when reconnected.`
+    ? pending > 0
+      ? `You're offline — ${changeCount} queued, will sync when reconnected.`
       : "You're offline — changes will sync when you reconnect."
-    : `Back online — syncing ${queuedLabel}…`;
+    : `Back online — syncing ${changeCount}…`;
 
   return (
     <div

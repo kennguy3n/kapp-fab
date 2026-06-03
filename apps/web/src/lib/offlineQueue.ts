@@ -70,8 +70,27 @@ function openDB(): Promise<IDBDatabase> {
         store.createIndex("queuedAt", "queuedAt", { unique: false });
       }
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error ?? new Error("open failed"));
+    req.onsuccess = () => {
+      const db = req.result;
+      // If the connection is later force-closed (e.g. a version change
+      // from another tab), drop the cached promise so the next call
+      // reopens instead of handing out a dead connection.
+      db.onclose = () => {
+        dbPromise = null;
+      };
+      resolve(db);
+    };
+    req.onerror = () => {
+      // Don't cache the rejection: a transient open failure (storage
+      // pressure, a blocked upgrade) would otherwise permanently wedge
+      // the queue for the rest of the session. Clear it so the next
+      // call retries.
+      dbPromise = null;
+      reject(req.error ?? new Error("open failed"));
+    };
+  }).catch((err) => {
+    dbPromise = null;
+    throw err;
   });
   return dbPromise;
 }

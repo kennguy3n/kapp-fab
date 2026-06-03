@@ -51,12 +51,20 @@ describe("MobileNav", () => {
     expect(records).not.toHaveAttribute("aria-current");
   });
 
-  it("marks the Records tab active on a records route", () => {
+  it("marks the Records tab active on its default records route", () => {
     renderNav({}, ["/records/crm.lead"]);
     const records = screen.getByRole("link", { name: /Records/i });
     expect(records).toHaveAttribute("aria-current", "page");
     const dashboard = screen.getByRole("link", { name: /Dashboard/i });
     expect(dashboard).not.toHaveAttribute("aria-current");
+  });
+
+  it("keeps the Records tab active on any /records/* route, not just the default type", () => {
+    renderNav({}, ["/records/inventory.item"]);
+    const records = screen.getByRole("link", { name: /Records/i });
+    expect(records).toHaveAttribute("aria-current", "page");
+    // It still links to the primary record type as a quick entry point.
+    expect(records).toHaveAttribute("href", "/records/crm.lead");
   });
 
   it("invokes the Notifications and More callbacks on tap", async () => {
