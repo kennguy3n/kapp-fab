@@ -65,6 +65,15 @@ describe("MobileSheet (more mode)", () => {
     await user.click(screen.getByRole("link", { name: "Leads" }));
     expect(onClose).toHaveBeenCalled();
   });
+
+  // The sheet should dismiss only on an actual navigation (a NavLink tap),
+  // not when a non-interactive element like a section header is tapped.
+  it("does not close when a section header (non-link) is tapped", async () => {
+    const user = userEvent.setup();
+    const { onClose } = renderSheet();
+    await user.click(screen.getByText("Overview"));
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });
 
 describe("MobileSheet (notifications mode)", () => {

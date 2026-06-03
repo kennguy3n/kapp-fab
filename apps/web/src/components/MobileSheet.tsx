@@ -80,12 +80,15 @@ export function MobileSheet({
             // above already provides one (keeps "Mark all read").
             <NotificationInbox showTitle={false} />
           ) : (
-            // Tapping any nav link navigates and closes the sheet — the
-            // click bubbles up to this wrapper's handler. These are plain
-            // NavLinks (not SidebarGroup/SidebarItem): those call
-            // useSidebar() and throw outside a <Sidebar> provider, and the
-            // sheet is a sibling of the sidebar, not a descendant.
-            <div onClick={onClose}>
+            // Close the sheet only when an actual nav link is tapped (it
+            // navigates away), NOT on taps to section headers or the gaps
+            // between links. onClose is therefore attached per-NavLink
+            // rather than to a wrapper, so a stray tap on a header doesn't
+            // dismiss the menu. These are plain NavLinks (not
+            // SidebarGroup/SidebarItem): those call useSidebar() and throw
+            // outside a <Sidebar> provider, and the sheet is a sibling of
+            // the sidebar, not a descendant.
+            <div>
               {sections.map((section) => (
                 <div key={section.title} className="mb-3">
                   <p className="px-2 pb-1 text-xs font-semibold uppercase tracking-wide text-fg-muted">
@@ -95,6 +98,7 @@ export function MobileSheet({
                     <NavLink
                       key={link.to}
                       to={link.to}
+                      onClick={onClose}
                       className={({ isActive }) =>
                         cn(
                           "block rounded-md px-2 py-2 text-sm font-medium transition-colors",
