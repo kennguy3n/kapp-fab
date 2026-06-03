@@ -127,6 +127,12 @@ func NewSignupService(store *PGStore, users *UserStore, wizard *Wizard, verifier
 // required fields. The handler maps it to a 400.
 var ErrInvalidSignup = errors.New("tenant: invalid signup request")
 
+// ErrIdentityVerification is returned when the caller's KChat identity
+// could not be verified (bad/expired code, empty profile, or a KChat
+// outage). The handler maps it to a 401 with a generic message so an
+// unauthenticated caller never sees the upstream error detail.
+var ErrIdentityVerification = errors.New("tenant: signup identity verification failed")
+
 // Signup runs the full self-service flow and returns the created
 // tenant + owner. The owning user is bound to the tenant with the
 // tenant.owner role so a follow-up KChat SSO login resolves the
@@ -157,10 +163,12 @@ func (s *SignupService) Signup(ctx context.Context, in SignupInput) (*SignupResu
 
 	identity, err := s.verifier.VerifySignup(ctx, in.KChatCode, in.RedirectURI)
 	if err != nil {
-		return nil, fmt.Errorf("tenant: signup identity verification: %w", err)
+		// Wrap the upstream detail for server-side logs but tag it with
+		// ErrIdentityVerification so the handler answers 401 generically.
+		return nil, fmt.Errorf("%w: %w", ErrIdentityVerification, err)
 	}
 	if identity.KChatUserID == "" {
-		return nil, errors.New("tenant: signup identity missing kchat user id")
+		return nil, fmt.Errorf("%w: identity missing kchat user id", ErrIdentityVerification)
 	}
 
 	slug := in.Slug

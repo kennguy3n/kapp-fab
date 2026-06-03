@@ -113,15 +113,25 @@ func userIDString(u *tenant.User) string {
 	return u.ID.String()
 }
 
-// writeSignupError maps signup sentinel errors onto status codes.
+// writeSignupError maps signup sentinel errors onto status codes. Only
+// errors that are genuinely the caller's fault echo a message back; any
+// unmatched error is treated as an internal failure and answered 500
+// with a generic body so this public, unauthenticated endpoint never
+// leaks DB/KChat internals (and so callers get a retryable 5xx rather
+// than a misleading 400).
 func (h *signupHandlers) writeSignupError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, tenant.ErrInvalidSignup):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, tenant.ErrSlugTaken):
 		http.Error(w, "slug already taken", http.StatusConflict)
+	case errors.Is(err, tenant.ErrIdentityVerification):
+		http.Error(w, "could not verify KChat identity", http.StatusUnauthorized)
 	default:
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		if h.logger != nil {
+			h.logger.Error("signup: internal error", slog.String("error", err.Error()))
+		}
+		http.Error(w, "signup failed", http.StatusInternalServerError)
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -177,8 +179,8 @@ func (s *Service) Subscribe(ctx context.Context, tenantID uuid.UUID, planName, s
 		CustomerID:      customerID,
 		PriceID:         priceID,
 		TrialPeriodDays: plan.TrialDays,
-		SuccessURL:      successURL,
-		CancelURL:       cancelURL,
+		SuccessURL:      s.sanitizeReturnURL(successURL),
+		CancelURL:       s.sanitizeReturnURL(cancelURL),
 		TenantID:        tenantID.String(),
 	})
 	if err != nil {
@@ -201,6 +203,38 @@ func (s *Service) Subscribe(ctx context.Context, tenantID uuid.UUID, planName, s
 		RequiresPayment: true,
 		CheckoutURL:     session.URL,
 	}, nil
+}
+
+// sanitizeReturnURL guards the post-checkout redirect targets. Stripe
+// sends the user's browser to SuccessURL / CancelURL after checkout, so
+// a caller who replayed a stolen tenant JWT could otherwise steer the
+// victim to an attacker-controlled origin (a post-payment phishing
+// page). A client value is accepted only when it is an absolute http(s)
+// URL whose scheme+host match the operator-configured ReturnURL;
+// anything else falls back to ReturnURL (which may be empty, in which
+// case Stripe uses the account's default return and no client value is
+// honored). This keeps redirects pinned to the app's own origin while
+// still letting the frontend choose a same-origin landing path.
+func (s *Service) sanitizeReturnURL(candidate string) string {
+	if candidate == "" {
+		return s.cfg.ReturnURL
+	}
+	if s.cfg.ReturnURL == "" {
+		// No trusted base to compare against — refuse the client value.
+		return ""
+	}
+	base, err := url.Parse(s.cfg.ReturnURL)
+	if err != nil {
+		return s.cfg.ReturnURL
+	}
+	u, err := url.Parse(candidate)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return s.cfg.ReturnURL
+	}
+	if !strings.EqualFold(u.Scheme, base.Scheme) || !strings.EqualFold(u.Host, base.Host) {
+		return s.cfg.ReturnURL
+	}
+	return candidate
 }
 
 // PortalSession opens a Stripe Billing Portal session for the
@@ -244,6 +278,15 @@ func (s *Service) HandleWebhook(ctx context.Context, payload []byte, sigHeader s
 
 	tenantID, err := s.resolveTenant(ctx, event)
 	if err != nil {
+		// An event type we don't act on (Stripe sends dozens beyond the
+		// four we handle). The signature already verified, so the
+		// delivery is authentic — acknowledge it with success so Stripe
+		// doesn't enter a 72h retry storm over events we intentionally
+		// ignore. Only genuine processing failures should surface as an
+		// error (→ non-2xx → Stripe retry).
+		if errors.Is(err, errUnhandledEvent) {
+			return nil
+		}
 		return err
 	}
 
@@ -305,8 +348,9 @@ func (s *Service) resolveTenant(ctx context.Context, event Event) (uuid.UUID, er
 		}
 		return uuid.Nil, ErrUnknownCustomer
 	default:
-		// Unhandled event type. We still need a tenant to record it
-		// for audit; try a best-effort customer lookup, else skip.
+		// An event type we don't act on. Signal the caller to skip it
+		// (HandleWebhook acknowledges with success rather than erroring,
+		// so Stripe doesn't retry events we intentionally ignore).
 		return uuid.Nil, errUnhandledEvent
 	}
 }
@@ -568,16 +612,7 @@ func (s *Service) EnforceTrialExpiry(ctx context.Context, tenantID uuid.UUID) er
 		}
 		return err
 	}
-	// Only trialing/past-due subscriptions are candidates for
-	// trial-expiry suspension. An active subscription is paid; a
-	// canceled one already downgraded to free.
-	if sub.Status != SubStatusTrialing && sub.Status != SubStatusPastDue {
-		return nil
-	}
-	if sub.TrialEnd == nil {
-		return nil
-	}
-	if s.now().Before(sub.TrialEnd.Add(trialGrace)) {
+	if !graceExpired(sub, s.now()) {
 		return nil
 	}
 	if err := s.tenants.Suspend(ctx, tenantID); err != nil {
@@ -592,4 +627,37 @@ func (s *Service) EnforceTrialExpiry(ctx context.Context, tenantID uuid.UUID) er
 		slog.String("tenant_id", tenantID.String()),
 		slog.String("subscription_status", sub.Status))
 	return nil
+}
+
+// graceExpired reports whether an unpaid subscription has run past its
+// grace window and is due for suspension. It is a pure function of the
+// subscription and the current time so the policy is unit-testable
+// without a store.
+//
+// Only trialing/past-due subscriptions are candidates (an active sub is
+// paid; a canceled one already downgraded to free). The grace anchor is
+// chosen by status: a trialing sub is measured from the end of its
+// trial, while a past-due sub (payment failed after a paid period —
+// possibly with no trial at all) is measured from the end of its
+// current billing period. Anchoring solely on TrialEnd would let a
+// past-due, never-trialed subscription (TrialEnd == nil) evade
+// suspension forever.
+func graceExpired(sub *Subscription, now time.Time) bool {
+	if sub.Status != SubStatusTrialing && sub.Status != SubStatusPastDue {
+		return false
+	}
+	var anchor *time.Time
+	if sub.Status == SubStatusTrialing {
+		anchor = sub.TrialEnd
+	} else { // SubStatusPastDue
+		anchor = sub.CurrentPeriodEnd
+		if anchor == nil {
+			anchor = sub.TrialEnd
+		}
+	}
+	if anchor == nil {
+		// No anchor to measure grace from — can't safely suspend yet.
+		return false
+	}
+	return !now.Before(anchor.Add(trialGrace))
 }

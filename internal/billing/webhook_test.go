@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -83,5 +84,41 @@ func TestConstructEventMalformedHeader(t *testing.T) {
 		if _, err := ConstructEvent(body, h, testWebhookSecret, now); !errors.Is(err, ErrInvalidSignature) {
 			t.Errorf("header %q error = %v, want ErrInvalidSignature", h, err)
 		}
+	}
+}
+
+// TestHandleWebhookUnhandledEventAcknowledged guards against the
+// 72h-retry-storm regression: a correctly-signed event whose type we
+// don't act on (Stripe emits dozens beyond the four we handle) must be
+// acknowledged with a nil error (→ HTTP 200) rather than surfaced as a
+// failure (→ non-2xx → Stripe retries for 72h). resolveTenant returns
+// the unhandled sentinel before touching the store, so a nil store is
+// safe here.
+func TestHandleWebhookUnhandledEventAcknowledged(t *testing.T) {
+	body := []byte(`{"id":"evt_x","type":"checkout.session.completed","data":{"object":{"id":"cs_1"}}}`)
+	signedAt := time.Unix(1_700_000_000, 0)
+	sig := signPayload(body, testWebhookSecret, signedAt)
+
+	svc := NewService(ServiceDeps{Config: Config{WebhookSecret: testWebhookSecret}})
+	svc.now = func() time.Time { return signedAt }
+
+	if err := svc.HandleWebhook(context.Background(), body, sig); err != nil {
+		t.Fatalf("HandleWebhook on unhandled event = %v, want nil (acknowledged)", err)
+	}
+}
+
+// TestHandleWebhookBadSignatureRejected confirms HandleWebhook still
+// fails closed on an unauthenticated body even for an unhandled type —
+// the signature gate runs before the skip.
+func TestHandleWebhookBadSignatureRejected(t *testing.T) {
+	body := []byte(`{"id":"evt_y","type":"checkout.session.completed","data":{"object":{}}}`)
+	signedAt := time.Unix(1_700_000_000, 0)
+	sig := signPayload(body, "wrong_secret", signedAt)
+
+	svc := NewService(ServiceDeps{Config: Config{WebhookSecret: testWebhookSecret}})
+	svc.now = func() time.Time { return signedAt }
+
+	if err := svc.HandleWebhook(context.Background(), body, sig); !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("HandleWebhook bad signature = %v, want ErrInvalidSignature", err)
 	}
 }

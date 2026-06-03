@@ -84,11 +84,22 @@ const METRICS: { key: string; label: string; limit: keyof PlanLimits }[] = [
   { key: "user_seats", label: "User seats", limit: "user_seats" },
 ];
 
+// Stripe zero-decimal currencies: the API expects/returns amounts in
+// the major unit (no cents), so they must NOT be divided by 100.
+// https://stripe.com/docs/currencies#zero-decimal
+const ZERO_DECIMAL_CURRENCIES = new Set([
+  "bif", "clp", "djf", "gnf", "jpy", "kmf", "krw", "mga", "pyg",
+  "rwf", "ugx", "vnd", "vuv", "xaf", "xof", "xpf",
+]);
+
 function formatMoney(minor: number, currency: string): string {
-  // Stripe amounts are in the currency's minor unit (cents). Render
-  // with two decimals; an unknown/empty currency falls back to the
-  // raw major-unit number.
-  const major = minor / 100;
+  // Stripe amounts are in the currency's smallest unit — 1/100th of the
+  // major unit for most currencies (cents), but already the major unit
+  // for zero-decimal currencies (JPY, KRW, VND, …), which must not be
+  // divided. An unknown/empty currency falls back to the raw value.
+  const isZeroDecimal =
+    !!currency && ZERO_DECIMAL_CURRENCIES.has(currency.toLowerCase());
+  const major = isZeroDecimal ? minor : minor / 100;
   if (!currency) return major.toFixed(2);
   try {
     return new Intl.NumberFormat(undefined, {
@@ -96,7 +107,7 @@ function formatMoney(minor: number, currency: string): string {
       currency: currency.toUpperCase(),
     }).format(major);
   } catch {
-    return `${major.toFixed(2)} ${currency.toUpperCase()}`;
+    return `${major.toFixed(isZeroDecimal ? 0 : 2)} ${currency.toUpperCase()}`;
   }
 }
 

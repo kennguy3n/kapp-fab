@@ -159,9 +159,17 @@ func (h *billingHandlers) usage(w http.ResponseWriter, r *http.Request) {
 // re-encoded form) are handed to the verifier because the HMAC is
 // computed over the exact payload Stripe sent.
 func (h *billingHandlers) webhook(w http.ResponseWriter, r *http.Request) {
-	payload, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBody))
+	// Read one byte past the cap so an over-limit body is detected
+	// explicitly: a silently truncated body would still fail the HMAC
+	// (the signature is over the full payload), but it would surface as
+	// an opaque "invalid signature" rather than the true cause.
+	payload, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBody+1))
 	if err != nil {
 		http.Error(w, "could not read body", http.StatusBadRequest)
+		return
+	}
+	if int64(len(payload)) > maxWebhookBody {
+		http.Error(w, "webhook body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	sig := r.Header.Get("Stripe-Signature")

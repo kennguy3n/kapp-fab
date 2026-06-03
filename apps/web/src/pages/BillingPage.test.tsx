@@ -138,6 +138,34 @@ describe("BillingPage", () => {
     expect(JSON.parse(init.body as string).plan).toBe("free");
   });
 
+  it("formats zero-decimal currency invoices without dividing by 100", async () => {
+    // JPY is a Stripe zero-decimal currency: a 4900 minor-unit amount
+    // IS ¥4,900, not ¥49. Guards against the cents-everywhere bug.
+    stubFetch({
+      usage: {
+        ok: true,
+        status: 200,
+        body: {
+          ...USAGE,
+          invoices: [
+            {
+              stripe_invoice_id: "in_jpy",
+              status: "paid",
+              amount_due: 4900,
+              amount_paid: 4900,
+              currency: "jpy",
+              created_at: "2025-02-01T00:00:00Z",
+            },
+          ],
+        },
+      },
+    });
+    render(<BillingPage />);
+    await screen.findByText("starter");
+    expect(screen.getByText(/4,900/)).toBeInTheDocument();
+    expect(screen.queryByText(/49\.00/)).not.toBeInTheDocument();
+  });
+
   it("renders the load-error banner when usage fails", async () => {
     stubFetch({ usage: { ok: false, status: 500, body: {} } });
     render(<BillingPage />);
