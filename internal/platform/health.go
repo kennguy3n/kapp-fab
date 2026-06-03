@@ -542,7 +542,11 @@ func (h *HealthChecker) TenantHealth(ctx context.Context, tenantID uuid.UUID, pl
 		return out, errors.New("platform: tenant health requires a tenant id")
 	}
 
-	periodStart := time.Date(h.cfg.now().UTC().Year(), h.cfg.now().UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
+	// Sample the clock once: reading h.cfg.now() separately for Year
+	// and Month could straddle a month/year rollover and compute a
+	// period_start in the wrong month.
+	now := h.cfg.now().UTC()
+	periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 
 	err := dbutil.WithReadOnlyTenantTxOnPool(ctx, h.cfg.Pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		usage := map[string]int64{}
