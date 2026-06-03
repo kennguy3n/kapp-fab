@@ -15,10 +15,90 @@ Cross-references:
 - Pre-deploy verification: [SECURITY_HARDENING.md §17.1](./SECURITY_HARDENING.md#171-pre-deployment-checklist)
 - CI gates: `.github/workflows/ci.yml`, `migration-numbering-check.yml`,
   `migration-rls-check.yml`, `api-versioning-check.yml`.
+- CD pipeline: `.github/workflows/deploy.yml` (tag push → build → push
+  image → staging deploy → smoke test → gated production promotion).
 
 ---
 
-## 7.1 Standard Release (Zero-Downtime)
+## 7.0 Automated Zero-Downtime Deploy (`scripts/deploy.sh`)
+
+The standard release path is now automated. **Prefer this over the
+manual procedure in §7.1**, which is documented as the fallback for when
+the script or the CD pipeline is unavailable.
+
+### What runs it
+
+- **CD pipeline** — pushing a semver tag (`vX.Y.Z`) triggers
+  `.github/workflows/deploy.yml`, which builds and pushes the shared
+  `api`/`worker`/`kchat-bridge` image, runs `scripts/deploy.sh` against
+  **staging**, smoke-tests it, then promotes the *same image* to
+  **production** behind the `production` GitHub Environment's required-
+  reviewer gate. Hosts, SSH keys and admin tokens are supplied as
+  Environment secrets/vars — nothing is hard-coded.
+- **Manually** on a deploy host that has the compose stack and
+  `.env.production`:
+
+  ```bash
+  IMAGE_TAG=v0.2.0 scripts/deploy.sh
+  # or: scripts/deploy.sh v0.2.0
+  ```
+
+### What the script does (in order)
+
+1. **`migrate pre-check`** — parses every pending migration and **aborts
+   the deploy** if any is not backward-compatible (column/table drops,
+   table/column renames, `ADD COLUMN ... NOT NULL` without a `DEFAULT`,
+   `SET NOT NULL` on an existing column). Such changes must go through
+   the maintenance-window path in §7.3. A numbering gap from a sibling
+   workstream (see `migrations/000079_db_maintenance.sql`) is reported as
+   a non-fatal warning, not a block.
+2. **`migrate apply --readiness-sentinel <path>`** — applies pending
+   migrations across every cell (`KAPP_CELL_DSNS`, falling back to
+   `DB_URL` as a single cell). While applying, it writes the readiness
+   sentinel so each API replica's readiness probe
+   (`internal/platform.ReadinessProbe`) returns `503` and the LB drains
+   in-flight connections. With more than one cell, `--canary` applies to
+   the first cell and waits for its health check before continuing.
+3. **Rolling restart** — recreates `api`, `worker` and `kchat-bridge`
+   one replica at a time: scale up a new replica on the new image,
+   health-check it, then drain an old replica. Requires `≥2` replicas of
+   a service for a gap-free rollout of that service.
+4. **Health check after each replica**, plus a load-balancer health
+   check (`https://$KAPP_DOMAIN/healthz`) once all services are rolled.
+5. **Automated rollback on failure** — if any health check fails, the
+   schema is rolled back by exactly the number of migrations this deploy
+   applied (`migrate rollback N`, which refuses forward-only migrations
+   and tells you to escalate) and the previous image tag is restored.
+6. **RLS isolation audit** — `GET /api/v1/admin/isolation-audit`
+   (Bearer `KAPP_ADMIN_TOKEN`) must report `"passed": true`; otherwise
+   the deploy is treated as failed and rolled back.
+
+### Useful knobs
+
+| Variable | Purpose |
+| --- | --- |
+| `IMAGE_TAG` | **Required.** Tag to roll out (or pass as `$1`). |
+| `ROLLBACK_TAG` | Tag to restore on failure (auto-detected from the running `api` container when unset). |
+| `API_REPLICAS` / `WORKER_REPLICAS` / `KCHAT_BRIDGE_REPLICAS` | Replica counts (default `2`/`1`/`1`). |
+| `KAPP_CELL_DSNS` / `KAPP_CELL_HEALTH_URLS` | Multi-cell canary targets. |
+| `READINESS_SENTINEL` | Drain file path (default `/var/run/kapp/migrating`). |
+| `KAPP_ADMIN_TOKEN` | Bearer token for the isolation audit (skipped with a warning if unset). |
+| `DRY_RUN=1` | Print the docker/curl/migrate commands instead of running them. |
+
+Standalone pre-flight check (no deploy), e.g. in a PR gate:
+
+```bash
+DB_URL="$KAPP_ADMIN_DB_URL" go run ./cmd/migrate pre-check
+# or, with no DB available, check every on-disk migration:
+go run ./cmd/migrate pre-check -all
+```
+
+---
+
+## 7.1 Standard Release (Zero-Downtime) — manual fallback
+
+> Prefer `scripts/deploy.sh` (§7.0). Use the manual `kubectl` steps below
+> only when the automated path is unavailable.
 
 **Preconditions** (CI gates these; release is blocked if any fail):
 
@@ -104,10 +184,14 @@ curl -s https://api.kapp.example.com/api/v1/ | jq '.version'
 
 Migration rollback (only if the migration itself caused the issue —
 binary rollback usually suffices because migrations are written to be
-backward-compatible):
+backward-compatible). `scripts/deploy.sh` does this automatically on a
+health failure; to do it by hand use `migrate rollback`, which walks the
+applied versions via the source driver (so a numbering gap can't make a
+present migration look forward-only) and refuses any migration without a
+`.down.sql` companion:
 
 ```bash
-DB_URL="$KAPP_ADMIN_DB_URL" go run ./cmd/migrate down 1
+DB_URL="$KAPP_ADMIN_DB_URL" go run ./cmd/migrate rollback 1
 DB_URL="$KAPP_ADMIN_DB_URL" go run ./cmd/migrate version
 ```
 
