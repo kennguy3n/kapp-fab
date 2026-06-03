@@ -1,0 +1,19 @@
+{
+  "name": "Kapp",
+  "short_name": "Kapp",
+  "description": "Kapp — the multi-tenant business operating suite for KChat.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#ffffff",
+  "theme_color": "#2563eb",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any maskable"
+    }
+  ]
+}

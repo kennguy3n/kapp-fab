@@ -1,13 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
 import { api } from "../lib/api";
+import { drainQueue, enqueue, listQueue } from "../lib/offlineQueue";
 
 const KTYPE_PROFILE = "sales.pos_profile";
 const KTYPE_INVOICE = "sales.pos_invoice";
 const KTYPE_ITEM = "inventory.item";
 
-const QUEUE_STORAGE_KEY = "kapp.pos.offline-queue";
+// Mutation discriminator for the shared offline queue. POS finalize
+// replays are stored alongside any other queued mutations in the same
+// IndexedDB store but drained independently via this type tag.
+const POS_MUTATION_TYPE = "pos.finalize";
 
 interface ItemData {
   name?: string;
@@ -31,14 +35,11 @@ interface CartLine {
   unitPrice: number;
 }
 
-interface QueuedInvoice {
-  /** stable client-side id used as the Idempotency-Key on the
-   *  finalize POST so replays after reconnect collapse to the
-   *  same server-side outcome. */
-  idempotencyKey: string;
+/** Replay body for a queued POS finalize. The queue entry's `id` is
+ *  the idempotency key reused on retry so duplicates collapse. */
+interface POSFinalizePayload {
   posInvoiceId: string;
   total: number;
-  queuedAt: string;
 }
 
 /**
@@ -48,12 +49,12 @@ interface QueuedInvoice {
  * the /api/v1/pos/invoices/{id}/finalize endpoint.
  *
  * Offline behaviour:
- *  - All finalize calls go through `attemptFinalize` which catches
- *    network errors and persists the pending invoice into a
- *    localStorage-backed queue (`kapp.pos.offline-queue`).
- *  - On reconnect (or whenever the page mounts) the queue is
- *    drained sequentially. Each retry reuses the original
- *    idempotency_key so the server collapses duplicates.
+ *  - A finalize call that fails on the network persists the pending
+ *    invoice into the shared IndexedDB offline queue
+ *    (src/lib/offlineQueue.ts), tagged with the `pos.finalize` type.
+ *  - On reconnect (or whenever the page mounts) the queue is drained
+ *    sequentially. Each retry reuses the original idempotency key (the
+ *    queue entry id) so the server collapses duplicates.
  */
 export function POSPage() {
   const profilesQ = useQuery<KRecord[]>({
@@ -69,8 +70,17 @@ export function POSPage() {
   const [cart, setCart] = useState<CartLine[]>([]);
   const [barcode, setBarcode] = useState("");
   const [tendered, setTendered] = useState("0");
-  const [queue, setQueue] = useState<QueuedInvoice[]>(() => loadQueue());
+  const [queueCount, setQueueCount] = useState(0);
   const [status, setStatus] = useState<string>("");
+
+  const refreshQueueCount = useCallback(async () => {
+    try {
+      const pending = await listQueue(POS_MUTATION_TYPE);
+      setQueueCount(pending.length);
+    } catch {
+      // IndexedDB unavailable (e.g. private mode) — leave count at 0.
+    }
+  }, []);
 
   const profile = useMemo(() => {
     if (!profilesQ.data) return null;
@@ -90,32 +100,19 @@ export function POSPage() {
   useEffect(() => {
     let cancelled = false;
     const drain = async () => {
-      // loadQueue() reads from localStorage so concurrent drains
-      // (e.g. a stale 'online' listener firing while finalize is
-      // also racing) all start from the same source-of-truth slice.
-      const pending = loadQueue();
-      if (pending.length === 0) return;
-      const remaining: QueuedInvoice[] = [];
-      for (const q of pending) {
-        try {
-          await api.finalizePOSInvoice(q.posInvoiceId, q.idempotencyKey);
-          if (cancelled) return;
-        } catch {
-          remaining.push(q);
-        }
+      try {
+        // drainQueue removes each entry it successfully replays and
+        // leaves failures in place; it reads the store fresh each call
+        // so a stale 'online' listener racing a finalize still starts
+        // from the canonical persisted slice.
+        await drainQueue(async (mutation) => {
+          const payload = mutation.payload as POSFinalizePayload;
+          await api.finalizePOSInvoice(payload.posInvoiceId, mutation.id);
+        }, POS_MUTATION_TYPE);
+      } catch {
+        // IndexedDB unavailable — nothing to drain.
       }
-      if (cancelled) return;
-      // Functional setQueue avoids stomping a sibling finalize that
-      // appended to the queue between loadQueue() and now: keep any
-      // ids in `prev` that aren't in the current `pending` slice and
-      // merge them with `remaining`.
-      setQueue((prev) => {
-        const pendingIds = new Set(pending.map((p) => p.idempotencyKey));
-        const appendedDuringDrain = prev.filter((p) => !pendingIds.has(p.idempotencyKey));
-        const merged = [...remaining, ...appendedDuringDrain];
-        saveQueue(merged);
-        return merged;
-      });
+      if (!cancelled) await refreshQueueCount();
     };
     void drain();
     const onOnline = () => void drain();
@@ -124,7 +121,7 @@ export function POSPage() {
       cancelled = true;
       window.removeEventListener("online", onOnline);
     };
-  }, []);
+  }, [refreshQueueCount]);
 
   const addByBarcode = () => {
     const code = barcode.trim();
@@ -199,22 +196,21 @@ export function POSPage() {
         setCart([]);
         setTendered("0");
       } catch (err) {
-        // Network or transient error — queue for replay. Functional
-        // setQueue updater so a concurrent drain that ran between
-        // this render and this catch can't overwrite the appended
-        // entry with its stale closure value.
-        const queued: QueuedInvoice = {
-          idempotencyKey,
-          posInvoiceId: created.id,
-          total,
-          queuedAt: new Date().toISOString(),
-        };
-        setQueue((prev) => {
-          const next = [...prev, queued];
-          saveQueue(next);
-          return next;
-        });
-        setStatus(`Queued offline: ${(err as Error).message}`);
+        // Network or transient error — queue for replay. The entry id
+        // is the idempotency key so the eventual replay collapses to
+        // the same server-side outcome as this attempt.
+        try {
+          await enqueue({
+            id: idempotencyKey,
+            type: POS_MUTATION_TYPE,
+            payload: { posInvoiceId: created.id, total } satisfies POSFinalizePayload,
+            queuedAt: new Date().toISOString(),
+          });
+          await refreshQueueCount();
+          setStatus(`Queued offline: ${(err as Error).message}`);
+        } catch {
+          setStatus(`Finalize failed and could not queue: ${(err as Error).message}`);
+        }
       }
     } catch (err) {
       setStatus(`Cart save failed: ${(err as Error).message}`);
@@ -222,7 +218,7 @@ export function POSPage() {
   };
 
   return (
-    <section style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16 }}>
+    <section className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_1fr]">
       <div>
         <h1>Point of Sale</h1>
         <div style={{ marginBottom: 12 }}>
@@ -276,7 +272,7 @@ export function POSPage() {
         </div>
       </div>
 
-      <aside style={{ borderLeft: "1px solid #e5e7eb", paddingLeft: 16 }}>
+      <aside className="lg:border-l lg:border-border lg:pl-4">
         <h2>Cart</h2>
         {cart.length === 0 ? (
           <p style={{ color: "#6b7280" }}>Empty.</p>
@@ -319,9 +315,9 @@ export function POSPage() {
           Finalize
         </button>
 
-        {queue.length > 0 && (
+        {queueCount > 0 && (
           <div style={{ marginTop: 16, padding: 8, background: "#fef3c7", borderRadius: 4 }}>
-            <strong>Offline queue:</strong> {queue.length} pending
+            <strong>Offline queue:</strong> {queueCount} pending
           </div>
         )}
         {status && (
@@ -364,20 +360,4 @@ function itemTile(): React.CSSProperties {
   };
 }
 
-function loadQueue(): QueuedInvoice[] {
-  try {
-    const raw = localStorage.getItem(QUEUE_STORAGE_KEY);
-    if (!raw) return [];
-    return JSON.parse(raw) as QueuedInvoice[];
-  } catch {
-    return [];
-  }
-}
 
-function saveQueue(q: QueuedInvoice[]): void {
-  try {
-    localStorage.setItem(QUEUE_STORAGE_KEY, JSON.stringify(q));
-  } catch {
-    // best-effort — quota exceeded or storage disabled in private mode.
-  }
-}

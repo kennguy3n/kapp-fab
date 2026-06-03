@@ -1,4 +1,4 @@
-import { lazy, Suspense, type ComponentType } from "react";
+import { lazy, Suspense, useState, type ComponentType } from "react";
 import {
   Link,
   NavLink,
@@ -28,7 +28,14 @@ import {
 import { api } from "./lib/api";
 import { NotificationBell } from "./components/NotificationBell";
 import { LocaleSwitcher } from "./components/LocaleSwitcher";
+import { MobileNav } from "./components/MobileNav";
+import { OfflineIndicator } from "./components/OfflineIndicator";
 import { LocaleProvider } from "./lib/i18n";
+
+// Deep link into the host KChat client for the mobile Chat tab.
+// Overridable per-deployment via VITE_KCHAT_URL; defaults to the
+// kchat:// custom scheme the desktop/mobile KChat clients register.
+const KCHAT_DEEP_LINK = import.meta.env.VITE_KCHAT_URL || "kchat://";
 
 /**
  * Route-level code splitting.  Every page is loaded on first
@@ -721,6 +728,12 @@ function AppNavLink({ to, label }: { to: string; label: string }) {
 
 function AppShell() {
   const location = useLocation();
+  // Which mobile bottom-sheet is open. The sidebar is hidden below the
+  // `md` breakpoint, so the bottom tab bar's "More" tab opens the full
+  // nav and "Notifications" opens the inbox in a sheet.
+  const [mobileSheet, setMobileSheet] = useState<
+    "notifications" | "more" | null
+  >(null);
   const featuresQuery = useQuery({
     queryKey: ["tenant-features", tenantKey()],
     queryFn: () => api.listTenantFeatures(tenantKey()),
@@ -787,7 +800,9 @@ function AppShell() {
 
   return (
     <div className="flex min-h-screen bg-bg">
-      <Sidebar defaultCollapsed={false}>
+      {/* Desktop/tablet sidebar — hidden on mobile (<768px), where the
+          bottom MobileNav + the "More" sheet take over. */}
+      <Sidebar defaultCollapsed={false} className="hidden md:flex">
         <SidebarHeader>
           <Link to="/" className="flex items-center gap-2">
             <div className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-accent-fg font-bold">
@@ -833,7 +848,10 @@ function AppShell() {
             <NotificationBell />
           </div>
         </header>
-        <div className="flex-1 p-6 overflow-auto">
+        <OfflineIndicator />
+        {/* Extra bottom padding on mobile so the fixed MobileNav bar
+            doesn't overlap the last of the scrollable content. */}
+        <div className="flex-1 overflow-auto p-6 pb-20 md:pb-6">
           <Suspense fallback={<ShellRouteFallback />}>
             <Routes>
               <Route path="/" element={<DashboardPage />} />
@@ -1002,6 +1020,100 @@ function AppShell() {
           </Suspense>
         </div>
       </main>
+
+      <MobileNav
+        chatHref={KCHAT_DEEP_LINK}
+        activeSheet={mobileSheet}
+        onNotificationsClick={() =>
+          setMobileSheet((s) => (s === "notifications" ? null : "notifications"))
+        }
+        onMoreClick={() => setMobileSheet((s) => (s === "more" ? null : "more"))}
+      />
+
+      {mobileSheet && (
+        <MobileSheet
+          mode={mobileSheet}
+          sections={visible}
+          onClose={() => setMobileSheet(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * MobileSheet is the slide-up panel opened from the bottom MobileNav.
+ * Two modes:
+ *   - "more": the full navigation menu (the sidebar's content), since
+ *     the sidebar itself is hidden on mobile. Tapping any link closes
+ *     the sheet (handled by the click bubbling to the list wrapper).
+ *   - "notifications": the notification inbox (reuses NotificationBell
+ *     so there's a single source of truth for the inbox UI).
+ *
+ * Rendered only on mobile (`md:hidden`) — on larger viewports the
+ * sidebar/header already expose these surfaces.
+ */
+function MobileSheet({
+  mode,
+  sections,
+  onClose,
+}: {
+  mode: "notifications" | "more";
+  sections: NavSection[];
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 md:hidden" role="dialog" aria-modal="true">
+      <button
+        type="button"
+        aria-label="Close menu"
+        onClick={onClose}
+        className="absolute inset-0 h-full w-full bg-black/40"
+      />
+      <div className="absolute inset-x-0 bottom-0 flex max-h-[80vh] flex-col rounded-t-2xl border-t border-border bg-bg-elevated pb-16 shadow-2xl">
+        <div className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
+          <span className="font-semibold">
+            {mode === "more" ? "Menu" : "Notifications"}
+          </span>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="rounded-md p-1 text-fg-muted hover:text-fg"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="h-5 w-5"
+              aria-hidden="true"
+            >
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-3">
+          {mode === "notifications" ? (
+            <NotificationBell />
+          ) : (
+            // Tapping any nav link navigates and closes the sheet — the
+            // click bubbles up to this wrapper's handler.
+            <div onClick={onClose}>
+              {sections.map((section) => (
+                <SidebarGroup key={section.title} title={section.title}>
+                  {section.links.map((link) => (
+                    <AppNavLink key={link.to} to={link.to} label={link.label} />
+                  ))}
+                </SidebarGroup>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

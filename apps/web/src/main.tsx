@@ -25,3 +25,17 @@ ReactDOM.createRoot(rootEl).render(
     </QueryClientProvider>
   </React.StrictMode>
 );
+
+// Register the PWA service worker (public/sw.js) for offline support
+// and installability. Only in production builds: in dev, Vite's HMR
+// and the unhashed module graph make a caching SW actively harmful
+// (it would serve stale modules), and the test/SSR environments have
+// no `navigator.serviceWorker`. Registration failures are swallowed —
+// the app must work without the SW.
+if (import.meta.env.PROD && "serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+      // Registration is best-effort; the app still works uncached.
+    });
+  });
+}
