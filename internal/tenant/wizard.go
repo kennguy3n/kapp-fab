@@ -1696,6 +1696,59 @@ func DefaultCurrencyForCountry(country string) string {
 		return "BHD"
 	case "OM":
 		return "OMR"
+	// LATAM. PA and EC use the USD case above (both are USD-ised
+	// economies). The rest carry their own currency even though
+	// CO/PE/CR/UY/DO/GT/PY/TT share the latam_ifrs_basic chart.
+	case "BR":
+		return "BRL"
+	case "MX":
+		return "MXN"
+	case "AR":
+		return "ARS"
+	case "CL":
+		return "CLP"
+	case "CO":
+		return "COP"
+	case "PE":
+		return "PEN"
+	case "CR":
+		return "CRC"
+	case "UY":
+		return "UYU"
+	case "DO":
+		return "DOP"
+	case "GT":
+		return "GTQ"
+	case "PY":
+		return "PYG"
+	case "TT":
+		return "TTD"
+	// Europe Extended (non-euro).
+	case "PL":
+		return "PLN"
+	case "SE":
+		return "SEK"
+	case "NO":
+		return "NOK"
+	case "DK":
+		return "DKK"
+	case "CZ":
+		return "CZK"
+	case "HU":
+		return "HUF"
+	case "RO":
+		return "RON"
+	// Africa + East Asia.
+	case "ZA":
+		return "ZAR"
+	case "NG":
+		return "NGN"
+	case "KE":
+		return "KES"
+	case "EG":
+		return "EGP"
+	case "KR":
+		return "KRW"
 	default:
 		return "USD"
 	}
@@ -1754,6 +1807,67 @@ func DefaultTimezoneForCountry(country string) string {
 		return "Asia/Riyadh"
 	case "OM":
 		return "Asia/Muscat"
+	case "KR":
+		return "Asia/Seoul"
+	// LATAM — one representative zone per country (commercial centre).
+	case "BR":
+		return "America/Sao_Paulo"
+	case "MX":
+		return "America/Mexico_City"
+	case "AR":
+		return "America/Argentina/Buenos_Aires"
+	case "CL":
+		return "America/Santiago"
+	case "CO":
+		return "America/Bogota"
+	case "PE":
+		return "America/Lima"
+	case "CR":
+		return "America/Costa_Rica"
+	case "UY":
+		return "America/Montevideo"
+	case "DO":
+		return "America/Santo_Domingo"
+	case "GT":
+		return "America/Guatemala"
+	case "PY":
+		return "America/Asuncion"
+	case "TT":
+		return "America/Port_of_Spain"
+	case "PA":
+		return "America/Panama"
+	case "EC":
+		return "America/Guayaquil"
+	case "SV":
+		return "America/El_Salvador"
+	// Europe (euro + extended) not already grouped above.
+	case "FI":
+		return "Europe/Helsinki"
+	case "GR":
+		return "Europe/Athens"
+	case "PL":
+		return "Europe/Warsaw"
+	case "SE":
+		return "Europe/Stockholm"
+	case "NO":
+		return "Europe/Oslo"
+	case "DK":
+		return "Europe/Copenhagen"
+	case "CZ":
+		return "Europe/Prague"
+	case "HU":
+		return "Europe/Budapest"
+	case "RO":
+		return "Europe/Bucharest"
+	// Africa.
+	case "ZA":
+		return "Africa/Johannesburg"
+	case "NG":
+		return "Africa/Lagos"
+	case "KE":
+		return "Africa/Nairobi"
+	case "EG":
+		return "Africa/Cairo"
 	default:
 		return "UTC"
 	}
@@ -1806,13 +1920,16 @@ func (w *Wizard) SmartDefaults(ctx context.Context, tenantID uuid.UUID, cfg Smar
 	// resolves to the generic IFRS chart + English locale. Leaving
 	// CoATemplate / Locale empty lets the wizard's own country-derived
 	// defaults run rather than duplicating that logic here.
+	//
+	// SampleData is deliberately NOT forwarded: RunSetupWizard does not
+	// act on it, and SmartDefaults seeds the demo records itself below
+	// (after the checklist) so the seeding currency is the resolved one.
 	wizCfg := SetupWizardConfig{
 		CompanyName:  cfg.CompanyName,
 		Country:      country,
 		CurrencyCode: currency,
 		Plan:         cfg.Plan,
 		CreatedBy:    cfg.CreatedBy,
-		SampleData:   cfg.SampleData,
 		Users:        cfg.Users,
 	}
 	wr, err := w.RunSetupWizard(ctx, tenantID, wizCfg)

@@ -207,7 +207,14 @@ function detectCountryFromBrowser(): string {
   if (typeof navigator === "undefined") {
     return "";
   }
-  const candidates = [navigator.language, ...(navigator.languages ?? [])];
+  // navigator.languages already begins with navigator.language (per
+  // the HTML spec), so prefer it outright and only fall back to the
+  // singular navigator.language when languages is empty/unavailable.
+  // This avoids scanning the most-preferred tag twice.
+  const candidates =
+    navigator.languages && navigator.languages.length > 0
+      ? navigator.languages
+      : [navigator.language];
   for (const tag of candidates) {
     if (!tag) continue;
     const parts = tag.split(/[-_]/);

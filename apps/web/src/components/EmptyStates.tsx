@@ -153,6 +153,12 @@ export interface RecordEmptyStateProps {
   onCreate: () => void;
   /** Optional secondary "import" CTA. */
   onImport?: () => void;
+  /** When true, the list is empty because an active saved-view filter
+   *  matched nothing — not because the module itself is empty. Renders
+   *  a message-only "no matches" state and suppresses the create/import
+   *  CTAs, which would be misleading ("No deals yet — create your first
+   *  deal" is wrong when deals exist but none match the filter). */
+  filterActive?: boolean;
 }
 
 // RecordEmptyState renders the contextual empty state for a KType list.
@@ -160,14 +166,28 @@ export interface RecordEmptyStateProps {
 // a sensible generic message from the KType display name so every list
 // page — even modules without a tailored entry — gets a real CTA
 // instead of a dead-end "No records found".
+//
+// When filterActive is set the module CTA is intentionally dropped in
+// favour of a filter-specific message: an empty *filtered* result means
+// "nothing matches this view", which is a different state from a
+// brand-new, genuinely empty module.
 export function RecordEmptyState({
   ktype,
   ktypeName,
   onCreate,
   onImport,
+  filterActive,
 }: RecordEmptyStateProps) {
-  const preset = MODULE_EMPTY_STATES[ktype];
   const name = ktypeName?.trim() || "records";
+  if (filterActive) {
+    return (
+      <EmptyState
+        title="No matches for this view"
+        description={`No ${name.toLowerCase()} match the current saved view's filters. Adjust or clear the filter to see everything.`}
+      />
+    );
+  }
+  const preset = MODULE_EMPTY_STATES[ktype];
   const copy: EmptyStateCopy = preset ?? {
     title: `No ${name.toLowerCase()} yet`,
     description: `You haven't created any ${name.toLowerCase()} yet. Create the first one to get started.`,

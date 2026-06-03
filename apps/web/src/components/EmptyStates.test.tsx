@@ -62,4 +62,21 @@ describe("RecordEmptyState", () => {
     await userEvent.click(screen.getByRole("button", { name: /Import data/i }));
     expect(onImport).toHaveBeenCalledTimes(1);
   });
+
+  it("renders a message-only filter state and suppresses the module CTA when filterActive", () => {
+    render(
+      <RecordEmptyState
+        ktype="crm.deal"
+        ktypeName="Deal"
+        filterActive
+        onCreate={vi.fn()}
+        onImport={vi.fn()}
+      />,
+    );
+    // Filter-specific copy, not the misleading "No deals yet" CTA.
+    expect(screen.getByText(/No matches for this view/i)).toBeInTheDocument();
+    expect(screen.queryByText(/No deals yet/i)).not.toBeInTheDocument();
+    // No create/import buttons in the filtered-empty state.
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
 });

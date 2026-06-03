@@ -1475,10 +1475,15 @@ func (d *CommandDispatcher) gettingStarted(ctx context.Context, req CommandReque
 		return CommandResponse{Text: "/getting-started: record store not configured for this deployment"}, nil
 	}
 
-	tasks, err := d.records.List(ctx, req.TenantID, record.ListFilter{
+	// Filter server-side on data->>'onboarding' == "checklist" — the
+	// same predicate seedGettingStartedChecklist uses for its
+	// idempotency lookup (internal/tenant/wizard.go). This targets the
+	// single checklist record directly instead of scanning the first
+	// 100 tasks.task rows, so the card is found even in tenants with
+	// thousands of tasks.
+	tasks, err := d.records.ListByField(ctx, req.TenantID, record.ListFilter{
 		KType: "tasks.task",
-		Limit: 100,
-	})
+	}, "onboarding", "checklist")
 	if err != nil {
 		return CommandResponse{}, err
 	}
@@ -1489,6 +1494,8 @@ func (d *CommandDispatcher) gettingStarted(ctx context.Context, req CommandReque
 		if err := json.Unmarshal(tasks[i].Data, &data); err != nil {
 			continue
 		}
+		// Defensive: the server-side filter already guarantees this,
+		// but re-check after unmarshal so a malformed row never wins.
 		if data.Onboarding == "checklist" {
 			checklist = &data
 			break
