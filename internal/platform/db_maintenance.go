@@ -156,12 +156,24 @@ func DefaultDBMaintenanceConfig() DBMaintenanceConfig {
 // that field (matching the getenv* helper semantics used elsewhere in this
 // package).
 func LoadDBMaintenanceConfig() DBMaintenanceConfig {
-	cfg := DefaultDBMaintenanceConfig()
+	def := DefaultDBMaintenanceConfig()
+	cfg := def
 	cfg.PartitionTargetCount = getenvInt("KAPP_DBM_PARTITION_TARGET", cfg.PartitionTargetCount)
 	cfg.PartitionCapacity = int64(getenvInt("KAPP_DBM_PARTITION_CAPACITY", int(cfg.PartitionCapacity)))
 	cfg.ReindexInterval = getenvDuration("KAPP_DBM_REINDEX_INTERVAL", cfg.ReindexInterval)
+	// getenvFloat — unlike getenvInt / getenvDuration — does not reject
+	// non-positive values, so the ratios are guarded here to honor the
+	// "non-positive keeps the default" contract above. A zero/negative
+	// ChurnRatio would make AnalyzeNeeded fire on every table on every
+	// sweep; a non-positive BloatWarnRatio would warn unconditionally.
 	cfg.ChurnRatio = getenvFloat("KAPP_DBM_CHURN_RATIO", cfg.ChurnRatio)
+	if cfg.ChurnRatio <= 0 {
+		cfg.ChurnRatio = def.ChurnRatio
+	}
 	cfg.BloatWarnRatio = getenvFloat("KAPP_DBM_BLOAT_WARN_RATIO", cfg.BloatWarnRatio)
+	if cfg.BloatWarnRatio <= 0 {
+		cfg.BloatWarnRatio = def.BloatWarnRatio
+	}
 	cfg.VacuumDeadTuples = int64(getenvInt("KAPP_DBM_VACUUM_DEAD_TUPLES", int(cfg.VacuumDeadTuples)))
 	if raw := getenv("KAPP_DBM_REINDEX_TARGETS", ""); raw != "" {
 		cfg.HighChurnIndexes = parseIndexList(raw)

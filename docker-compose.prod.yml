@@ -117,8 +117,13 @@ services:
         # bash shebang and so executes as a child process. Only *exported*
         # variables are inherited by that child, so without `export` the
         # script would see empty POSTGRES_PASSWORD / ZK_FABRIC_* and the dump
-        # + upload would fail every night.
-        env | grep -E '^(POSTGRES_|ZK_FABRIC_|BACKUP_)' | sed 's/^/export /' > /etc/kapp-backup.env
+        # + upload would fail every night. Only the POSTGRES_ / ZK_FABRIC_
+        # values (no spaces) are exported — BACKUP_CRON is deliberately
+        # excluded: its value (`0 3 * * *`) contains spaces and globs, so
+        # `export BACKUP_CRON=0 3 * * *` would be malformed when sourced. It
+        # is consumed only at container start to render the cron schedule
+        # above, never inside kapp-backup.sh.
+        env | grep -E '^(POSTGRES_|ZK_FABRIC_)' | sed 's/^/export /' > /etc/kapp-backup.env
         chmod 0644 /etc/cron.d/kapp-backup
         touch /var/log/kapp-backup.log
         cron && tail -F /var/log/kapp-backup.log
@@ -249,6 +254,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      zk-fabric:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/healthz || exit 1"]
       interval: 10s
@@ -286,6 +293,8 @@ services:
       nats:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      zk-fabric:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://localhost:9090/healthz || exit 1"]
