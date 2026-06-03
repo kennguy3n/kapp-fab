@@ -354,18 +354,35 @@ func (s *SSOService) Refresh(ctx context.Context, refreshToken string) (*Exchang
 	// scoped token (SessionID + jti present); the legacy local-dev
 	// path without a store returns the presented token unchanged so
 	// `make dev` flows keep working.
-	//
-	// RotateRefresh is a compare-and-swap on the session's refresh_jti.
-	// A replayed token — one whose jti was already rotated away by an
-	// earlier (legitimate or attacker) refresh — matches no live row
-	// and returns ErrRefreshReuse. That is the reuse signal: we revoke
-	// the entire session family so BOTH the attacker's stolen token
-	// and the legitimate client's current token stop working, forcing
-	// a fresh login. Because rotation chains forward within a single
-	// session row, that row IS the family and Revoke() neutralises it.
 	refreshOut := refreshToken
 	if s.sessions != nil && claims.SessionID != uuid.Nil && claims.JWTID != "" {
+		// Mint the new refresh token BEFORE the compare-and-swap. The
+		// new jti is a freshly generated UUID nobody else knows, and
+		// the token is useless until RotateRefresh commits that jti to
+		// the session row — so minting first opens no reuse window. It
+		// does close a correctness gap: if we swapped first and then
+		// IssueRefresh failed (e.g. a transient RS256 rand.Reader
+		// error), the DB would already hold the new jti while the
+		// caller still held the old one, stranding the session with no
+		// usable refresh token. Minting first means a signing failure
+		// leaves refresh_jti untouched and the presented token valid.
 		newJTI := uuid.NewString()
+		refreshClaims := base
+		refreshClaims.JWTID = newJTI
+		rotated, err := s.signer.IssueRefresh(refreshClaims)
+		if err != nil {
+			return nil, err
+		}
+
+		// RotateRefresh is a compare-and-swap on the session's
+		// refresh_jti. A replayed token — one whose jti was already
+		// rotated away by an earlier (legitimate or attacker) refresh —
+		// matches no live row and returns ErrRefreshReuse. That is the
+		// reuse signal: we revoke the entire session family so BOTH the
+		// attacker's stolen token and the legitimate client's current
+		// token stop working, forcing a fresh login. Because rotation
+		// chains forward within a single session row, that row IS the
+		// family and Revoke() neutralises it.
 		if err := s.sessions.RotateRefresh(ctx, claims.TenantID, claims.SessionID, claims.JWTID, newJTI); err != nil {
 			if errors.Is(err, ErrRefreshReuse) {
 				if rerr := s.sessions.Revoke(ctx, claims.TenantID, claims.SessionID); rerr != nil {
@@ -381,12 +398,6 @@ func (s *SSOService) Refresh(ctx context.Context, refreshToken string) (*Exchang
 					slog.String("session_id", claims.SessionID.String()),
 				)
 			}
-			return nil, err
-		}
-		refreshClaims := base
-		refreshClaims.JWTID = newJTI
-		rotated, err := s.signer.IssueRefresh(refreshClaims)
-		if err != nil {
 			return nil, err
 		}
 		refreshOut = rotated

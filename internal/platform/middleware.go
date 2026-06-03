@@ -39,9 +39,15 @@ const (
 // hole. Development (KAPP_ENV unset / dev) keeps the header path so local
 // docker-compose flows that predate JWT continue to work.
 func TenantMiddleware(svc TenantLookup) func(http.Handler) http.Handler {
+	// Capture the deployment posture once, at construction (boot) time,
+	// rather than calling IsProductionEnv() — which reads os.Getenv
+	// under a lock — on every request. KAPP_ENV does not change after
+	// boot, so the single read is authoritative and avoids per-request
+	// overhead and env-mutation races in tests.
+	productionFailClosed := IsProductionEnv()
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if IsProductionEnv() {
+			if productionFailClosed {
 				http.Error(w, "X-Tenant-ID header tenant scoping is disabled in production; use JWT authentication", http.StatusForbidden)
 				return
 			}

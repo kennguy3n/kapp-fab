@@ -626,7 +626,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("KAPP_ENV=%s requires these env vars to be set; missing: %s", c.Env, strings.Join(missing, ", "))
 	}
 	if c.RequireRedis && c.RedisURL == "" {
-		return errors.New("KAPP_REQUIRE_REDIS=1 but REDIS_URL is empty; set REDIS_URL or unset KAPP_REQUIRE_REDIS to permit in-process fallback")
+		// Note the default flip: outside development KAPP_REQUIRE_REDIS
+		// now defaults to true, so an operator can hit this without
+		// ever having SET the var. The message spells out both the
+		// explicit-set and defaulted cases and the exact opt-out.
+		return fmt.Errorf("REDIS_URL is empty but Redis is required (KAPP_REQUIRE_REDIS is true; it defaults to true when KAPP_ENV=%s is not a development environment); set REDIS_URL for distributed rate limiting, or set KAPP_REQUIRE_REDIS=0 to permit in-process per-pod fallback", c.Env)
 	}
 	// Round-5 inverted default: marketplace bundle uploads MUST
 	// be persistently backed by default. When uploads are enabled

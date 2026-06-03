@@ -1249,18 +1249,21 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	}
 
 	// RequireJWT fail-closed gate. With KAPP_REQUIRE_JWT defaulting to
-	// true, a production boot that ends up WITHOUT a working signer is
-	// a misconfiguration we refuse rather than serve. Booting anyway
-	// would leave the admin/control-plane chain answering 503 on every
-	// request (see adminChain below) — a silently broken deployment.
+	// true, a non-development boot that ends up WITHOUT a working
+	// signer is a misconfiguration we refuse rather than serve. Booting
+	// anyway would leave the admin/control-plane chain answering 503 on
+	// every request (see adminChain below) — a silently broken deploy.
 	// The missing-secret case is already caught earlier by
 	// platform.LoadConfig's production gate; this additionally covers
-	// the "secret present but signer construction failed" path. In
-	// development the signer stays optional so local flows that rely
+	// the "secret present but signer construction failed" path and
+	// extends the guard to staging/other non-dev postures (matching the
+	// RequireJWT doc and RequireRedis's non-dev default), so a
+	// pre-production deploy fails loudly at boot instead of degrading.
+	// In development the signer stays optional so local flows that rely
 	// on the legacy header path keep booting.
-	if cfg.RequireJWT && cfg.IsProduction() && authh.signer == nil {
+	if cfg.RequireJWT && cfg.IsNonDev() && authh.signer == nil {
 		runCleanups(cleanups)
-		return nil, nil, fmt.Errorf("api: KAPP_REQUIRE_JWT is set and KAPP_ENV=production but the JWT signer could not be initialised; refusing to boot with auth disabled")
+		return nil, nil, fmt.Errorf("api: KAPP_REQUIRE_JWT is set and KAPP_ENV=%s but the JWT signer could not be initialised; refusing to boot with auth disabled", cfg.Env)
 	}
 
 	// adminChain wraps a chi router with the JWT + IsPlatformAdmin

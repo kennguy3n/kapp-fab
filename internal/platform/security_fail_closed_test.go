@@ -248,10 +248,12 @@ func TestTenantMiddleware_ProductionRejectsHeaderPath(t *testing.T) {
 		reached = true
 		w.WriteHeader(http.StatusOK)
 	})
-	mw := TenantMiddleware(noopTenantLookup{})
 
 	t.Run("production rejects with 403", func(t *testing.T) {
+		// Posture is captured when TenantMiddleware is constructed, so
+		// build it AFTER setting the env to mirror a production boot.
 		t.Setenv("KAPP_ENV", "production")
+		mw := TenantMiddleware(noopTenantLookup{})
 		reached = false
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
@@ -267,6 +269,7 @@ func TestTenantMiddleware_ProductionRejectsHeaderPath(t *testing.T) {
 
 	t.Run("development still requires the header", func(t *testing.T) {
 		t.Setenv("KAPP_ENV", "development")
+		mw := TenantMiddleware(noopTenantLookup{})
 		reached = false
 		rec := httptest.NewRecorder()
 		// No header → 400 (the legacy dev behaviour), proving the
