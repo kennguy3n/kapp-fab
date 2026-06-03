@@ -513,11 +513,13 @@ func cmdDown(args []string) error {
 		return fmt.Errorf("down: read version: %w", vErr)
 	}
 	// Verify every rollback target has a .down.sql companion before we
-	// touch the DB.  We walk the actual applied versions downward via the
-	// source's Prev() rather than arithmetic on the version number, so the
-	// check stays correct even if migration numbering is ever allowed to
-	// have gaps.  This mirrors rollbackDown (the WS7 multi-cell path) so
-	// both rollback routines share one walking strategy.  Prev() failing
+	// touch the DB.  We walk the source's on-disk version chain downward
+	// via Prev() rather than arithmetic on the version number (the applied
+	// DB version is always a member of that chain, and Steps(-n) walks the
+	// same chain), so the check stays correct even if migration numbering
+	// is ever allowed to have gaps.  This mirrors rollbackDown (the WS7
+	// multi-cell path) so both rollback routines share one walking
+	// strategy.  Prev() failing
 	// before we have probed n targets means N exceeds the number of
 	// applied migrations, which we report up front instead of letting
 	// Steps(-n) surface a generic error.
