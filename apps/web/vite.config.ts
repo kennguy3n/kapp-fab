@@ -33,6 +33,20 @@ export default defineConfig({
           "vendor-query": ["@tanstack/react-query"],
           "vendor-recharts": ["recharts"],
         },
+        // Content-hashed filenames are the cache-busting contract that
+        // the edge/CDN caching layer depends on: bundles emitted under
+        // /assets/ are served `Cache-Control: public, max-age=31536000,
+        // immutable` (see Caddyfile.prod and
+        // internal/platform/cache_control.go), so the [hash] MUST change
+        // whenever the bytes change or clients would pin a stale bundle
+        // for a year. Vite hashes these by default; the patterns are
+        // pinned explicitly so the contract survives future config
+        // edits, and everything stays under assets/ to match the
+        // /assets/* cache rule (index.html is emitted at the root and
+        // intentionally left unhashed — it is served `no-cache`).
+        entryFileNames: "assets/[name]-[hash].js",
+        chunkFileNames: "assets/[name]-[hash].js",
+        assetFileNames: "assets/[name]-[hash][extname]",
       },
     },
     // The route-level chunks are small (~5-30KB each); the default
