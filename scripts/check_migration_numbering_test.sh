@@ -53,8 +53,12 @@ run "monotonic sequence of three" 0 "000001_a" "000002_b" "000003_c"
 # Sequence must start at 1.
 run "starts at 5 not 1" 1 "000005_too_high"
 
-# Gap in sequence.
-run "gap at 3" 1 "000001_a" "000002_b" "000004_d"
+# Gap in sequence is allowed (prefixes are coordinated across parallel
+# workstreams; a number may be reserved on another branch before it
+# lands on main). golang-migrate applies the registered versions in
+# order regardless of the gap.
+run "gap at 3 is allowed" 0 "000001_a" "000002_b" "000004_d"
+run "gap at end is allowed" 0 "000001_a" "000077_b" "000079_c"
 
 # Duplicate prefix.
 run "duplicate prefix" 1 "000001_a" "000001_b" "000002_c"

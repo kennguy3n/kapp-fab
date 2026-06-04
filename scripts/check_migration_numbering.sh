@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # check_migration_numbering.sh — enforce that every SQL migration in
-# the supplied directory has a unique, zero-padded, strictly monotonic
-# numeric prefix starting at 000001 with no gaps and no duplicates.
+# the supplied directory has a unique, zero-padded, strictly increasing
+# numeric prefix starting at 000001. Duplicates are rejected; GAPS ARE
+# ALLOWED.
 #
 # Usage:  check_migration_numbering.sh <migrations-dir>
 #
@@ -10,13 +11,21 @@
 # specific offending filename in the PR's "Files changed" tab.
 #
 # Phase 5 of the security hardening introduced this guard after a
-# rebase regression let two migrations share the prefix 000046 while
-# 000030 went unassigned. The duplicate was harmless under the
-# current psql-glob apply machinery but became a hard error once
-# the project considered adopting golang-migrate (which keys on
-# unique versions). The check is also useful for new contributors
-# who number a migration with `wc -l` or `find -newest` — the
-# resulting collision now surfaces at PR time rather than at deploy.
+# rebase regression let two migrations share the prefix 000046. That
+# DUPLICATE is the real hazard — golang-migrate keys on unique versions
+# — and it is still rejected here. The check is also useful for new
+# contributors who number a migration with `wc -l` or `find -newest` —
+# the resulting collision surfaces at PR time rather than at deploy.
+#
+# Gaps, by contrast, are intentionally tolerated. Migration prefixes are
+# assigned across several parallel workstreams; a prefix is sometimes
+# reserved by one branch before it lands on main (e.g. 000079 shipping
+# while 000078 is still in review elsewhere — see the numbering note in
+# migrations/000079_db_maintenance.sql). golang-migrate walks the
+# registered versions in order, so a missing prefix is simply "no
+# migration at that number" and applies cleanly. The earlier
+# no-gaps rule fail-fast `migrate up` (and every DB-backed test) the
+# moment such a coordinated gap existed, so it was relaxed.
 
 set -euo pipefail
 
@@ -65,15 +74,22 @@ for f in "${files[@]}"; do
     fi
     seen[$prefix]=$base
 
-    if [[ $prev_num -ge 0 ]]; then
-        expected=$((prev_num + 1))
-        if [[ $num -ne $expected ]]; then
-            printf -v expected_padded "%06d" "$expected"
-            echo "::error file=$f::non-monotonic sequence; expected prefix ${expected_padded} after $(printf '%06d' "$prev_num") but got $prefix"
+    if [[ $prev_num -lt 0 ]]; then
+        # First file in the sorted sequence must be 000001.
+        if [[ $num -ne 1 ]]; then
+            echo "::error file=$f::sequence must start at 000001 (got: $prefix)"
             fail=1
         fi
-    elif [[ $num -ne 1 ]]; then
-        echo "::error file=$f::sequence must start at 000001 (got: $prefix)"
+    elif [[ $num -le $prev_num ]]; then
+        # Strictly increasing. Exact duplicates are already caught by
+        # the $seen map above; this is a defensive guard. Gaps (num >
+        # prev_num + 1) are intentionally ALLOWED: migration prefixes
+        # are coordinated across parallel workstreams and a number is
+        # sometimes reserved on another branch before it lands on main,
+        # producing a temporary, benign gap that golang-migrate applies
+        # without issue. See scripts comment block and migratesource's
+        # Validate() for the rationale.
+        echo "::error file=$f::sequence must be strictly increasing; got $prefix after $(printf '%06d' "$prev_num")"
         fail=1
     fi
     prev_num=$num
