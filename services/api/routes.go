@@ -49,6 +49,19 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 	// SecurityHeadersConfigFromConfig) so the plain-HTTP dev listener
 	// does not pin browsers to HTTPS.
 	r.Use(platform.SecurityHeadersMiddleware(platform.SecurityHeadersConfigFromConfig(d.cfg)))
+	// Cache-Control defaults for the CDN/edge caching layer. Mounted
+	// alongside the security headers (top of chain) so every response
+	// carries an explicit caching policy before it reaches Caddy or a
+	// downstream CDN. The default rule set (platform.DefaultCacheControlRules)
+	// sets no-store on the tenant-scoped /api/ surface — the
+	// security-critical default that keeps RLS-isolated responses out
+	// of any shared cache — immutable on Vite's content-hashed /assets/
+	// bundles, and no-cache on the SPA shell. It is written as a DEFAULT:
+	// handlers that serve content-addressed, immutable payloads (the
+	// marketplace bundle download) or long-lived streams (SSE) override
+	// it with their own w.Header().Set, which wins because the header
+	// map is only flushed when the handler writes the response.
+	r.Use(platform.CacheControlMiddleware())
 	r.Use(platform.RequestIDMiddleware(logger))
 	// TracingMiddleware runs AFTER RequestIDMiddleware so the
 	// ctx-scoped logger already exists when the trace_id /

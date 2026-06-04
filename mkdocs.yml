@@ -117,6 +117,7 @@ nav:
     - Upgrade & rollback:      UPGRADE_RUNBOOK.md
     - Observability:            OBSERVABILITY_GUIDE.md
     - Performance tuning:      PERFORMANCE_TUNING.md
+    - CDN & edge caching:      CDN_SETUP.md
     - Troubleshooting:          TROUBLESHOOTING.md
     - Load testing:             LOAD_TESTING.md
     - Disaster recovery:        DR_RUNBOOK.md
