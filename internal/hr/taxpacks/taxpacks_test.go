@@ -228,6 +228,8 @@ func TestRegisteredCountriesIsStable(t *testing.T) {
 		"CZ", "HU", "RO", "GR",
 		// Phase N3: Africa + East Asia.
 		"ZA", "NG", "KE", "EG", "JP", "KR",
+		// Stream 7: China.
+		"CN",
 	}
 	for _, code := range want {
 		if !gotSet[code] {
