@@ -12,11 +12,13 @@ import type { TenantFeaturesResponse } from "@kapp/client";
 // notifications poll go through raw fetch and are answered by MSW.
 const listTenantFeatures = vi.fn();
 const getDashboardSummary = vi.fn();
+const searchRecords = vi.fn();
 
 vi.mock("./lib/api", () => ({
   api: {
     listTenantFeatures: (...a: unknown[]) => listTenantFeatures(...a),
     getDashboardSummary: (...a: unknown[]) => getDashboardSummary(...a),
+    searchRecords: (...a: unknown[]) => searchRecords(...a),
   },
 }));
 
@@ -57,7 +59,9 @@ describe("App shell", () => {
   beforeEach(() => {
     listTenantFeatures.mockReset();
     getDashboardSummary.mockReset();
+    searchRecords.mockReset();
     getDashboardSummary.mockResolvedValue(EMPTY_SUMMARY);
+    searchRecords.mockResolvedValue({ results: [] });
     localStorage.clear();
     localStorage.setItem("kapp.tenant", "acme");
   });
@@ -146,10 +150,25 @@ describe("App shell", () => {
       name: /global search/i,
     });
     await user.type(search, "acme corp{Enter}");
-    // SearchPage lazy-loads on the /search route; its query echo
-    // confirms the shell navigated with the encoded term.
+
+    // Submitting routes to /search?q=acme%20corp. SearchPage (lazy)
+    // renders its "Search" heading and seeds its input from the URL's
+    // ?q= param, so the echoed value proves the shell navigated with
+    // the term intact — MemoryRouter never touches window.location, so
+    // we assert on rendered route output instead.
+    expect(
+      await screen.findByRole("heading", { name: "Search" }),
+    ).toBeInTheDocument();
+    // SearchPage's own input (distinct from the shell search box) is
+    // seeded from the ?q= param.
+    expect(
+      screen.getByPlaceholderText(/Search records by name/i),
+    ).toHaveValue("acme corp");
+    // And the debounced query fires against the navigated term.
     await waitFor(() =>
-      expect(window.location.pathname + window.location.search).toBeDefined(),
+      expect(searchRecords).toHaveBeenCalledWith(
+        expect.objectContaining({ q: "acme corp" }),
+      ),
     );
   });
 
