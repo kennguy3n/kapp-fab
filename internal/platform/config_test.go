@@ -1,12 +1,14 @@
 package platform
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestLoadConfig_CacheSizeDefaults(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 	// Clear cache-size env vars to verify defaults. t.Setenv to ""
 	// is functionally equivalent to Unsetenv for the getenvInt
 	// fallback path (empty string == use default) AND registers
@@ -33,6 +35,7 @@ func TestLoadConfig_CacheSizeDefaults(t *testing.T) {
 
 func TestLoadConfig_CacheSizeFromEnv(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 	t.Setenv("KAPP_KTYPE_CACHE_SIZE", "2048")
 	t.Setenv("KAPP_AUTHZ_CACHE_SIZE", "1024")
 	t.Setenv("KAPP_TENANT_CACHE_SIZE", "512")
@@ -54,6 +57,7 @@ func TestLoadConfig_CacheSizeFromEnv(t *testing.T) {
 
 func TestLoadConfig_CacheSizeInvalidFallsBackToDefault(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 	t.Setenv("KAPP_KTYPE_CACHE_SIZE", "not-a-number")
 	t.Setenv("KAPP_AUTHZ_CACHE_SIZE", "0")
 	t.Setenv("KAPP_TENANT_CACHE_SIZE", "-1")
@@ -104,6 +108,14 @@ func TestLoadConfig_RequireRedisGate(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DB_URL", "postgres://localhost/test")
+			// Pin the deployment posture to development so the
+			// RequireRedis default (which is gated on envIsNonDev)
+			// is deterministic regardless of any KAPP_ENV inherited
+			// from the caller's shell or CI runner. Without this, a
+			// leaked KAPP_ENV=staging would flip the unset/opt-out
+			// cases to RequireRedis=true and fail on missing
+			// REDIS_URL.
+			t.Setenv("KAPP_ENV", "")
 			t.Setenv("KAPP_REQUIRE_REDIS", tc.requireRedis)
 			t.Setenv("REDIS_URL", tc.redisURL)
 			cfg, err := LoadConfig()
@@ -209,6 +221,7 @@ func TestLoadConfig_MarketplaceBundleStrictDefault(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DB_URL", "postgres://localhost/test")
+			t.Setenv("KAPP_ENV", "")
 			t.Setenv("KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR", tc.requireFlag)
 			t.Setenv("KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY", tc.allowFlag)
 			t.Setenv("KAPP_MARKETPLACE_BUNDLE_URL_BASE", tc.urlBase)
@@ -264,6 +277,7 @@ func TestLoadConfig_EnvAndLogDefaults(t *testing.T) {
 // output for weeks before noticing). LoadConfig surfaces it at boot.
 func TestLoadConfig_ValidateLogFormat(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 
 	cases := []struct {
 		name    string
@@ -299,6 +313,7 @@ func TestLoadConfig_ValidateLogFormat(t *testing.T) {
 // fallback to info would mask a debug-mode-in-production attempt.
 func TestLoadConfig_ValidateLogLevel(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 
 	cases := []struct {
 		name    string
@@ -334,6 +349,7 @@ func TestLoadConfig_ValidateLogLevel(t *testing.T) {
 // where a refactor of getenvInt accidentally accepts zero.
 func TestLoadConfig_ValidateCachePositive(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 	// All cache-size env vars cleared so they fall back to safe
 	// defaults; Validate should pass cleanly. Use t.Setenv to
 	// register cleanup with the test framework rather than
@@ -359,6 +375,7 @@ func TestLoadConfig_ValidateCachePositive(t *testing.T) {
 
 func TestLoadConfig_SecretsAndJWTDefaults(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 	for _, k := range []string{
 		"KAPP_SECRET_PROVIDER",
 		"KAPP_SECRETS_ENV_PREFIX",
@@ -415,6 +432,7 @@ func TestLoadConfig_SecretsAndJWTDefaults(t *testing.T) {
 
 func TestLoadConfig_SecretsAndJWTFromEnv(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 	t.Setenv("KAPP_SECRET_PROVIDER", "vault")
 	t.Setenv("KAPP_SECRETS_VAULT_ADDR", "https://vault.example.com")
 	t.Setenv("KAPP_SECRETS_VAULT_TOKEN", "test-token")
@@ -526,6 +544,7 @@ func TestGetenvDurationAllowZero(t *testing.T) {
 // allow-zero helper this would silently upgrade.
 func TestLoadConfig_JWTLeewayZeroHonoured(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 	t.Setenv("KAPP_JWT_LEEWAY", "0s")
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -533,5 +552,108 @@ func TestLoadConfig_JWTLeewayZeroHonoured(t *testing.T) {
 	}
 	if cfg.JWTLeeway != 0 {
 		t.Errorf("KAPP_JWT_LEEWAY=0s should resolve to 0, got %s", cfg.JWTLeeway)
+	}
+}
+
+// TestLoadConfig_CSRFCookieSecureDefault locks in the Workstream 6
+// hardening: KAPP_CSRF_COOKIE_SECURE now defaults to the deployment
+// posture instead of a flat false. In any non-development KAPP_ENV
+// (staging / production, all served over HTTPS) the unset default is
+// true so the CSRF cookie carries the Secure flag; in development it
+// stays false so local HTTP boots keep working without the operator
+// setting anything. The gating mirrors KAPP_REQUIRE_REDIS /
+// KAPP_REQUIRE_JWT (envIsNonDev) so staging is hardened too. An
+// explicit value always wins over the posture-derived default,
+// including an explicit false outside development (operator override
+// honoured — surfaced as a boot WARN, not a boot failure).
+//
+// Non-dev cases set the gates LoadConfig runs in Validate():
+// KAPP_REQUIRE_REDIS defaults true outside development so REDIS_URL
+// must be present, and production additionally requires
+// KAPP_JWT_SECRET / KAPP_MASTER_KEY. We satisfy those here so the test
+// reaches the CSRF default rather than tripping an unrelated gate.
+func TestLoadConfig_CSRFCookieSecureDefault(t *testing.T) {
+	cases := []struct {
+		name       string
+		env        string
+		explicit   string // KAPP_CSRF_COOKIE_SECURE; "" means unset
+		wantSecure bool
+	}{
+		{"production unset - defaults secure", "production", "", true},
+		{"prod alias unset - defaults secure", "prod", "", true},
+		{"staging unset - defaults secure (non-dev hardened)", "staging", "", true},
+		{"development unset - defaults insecure", "development", "", false},
+		{"dev unset - defaults insecure", "dev", "", false},
+		{"test env unset - defaults insecure", "test", "", false},
+		{"empty env unset - defaults insecure", "", "", false},
+		{"production explicit false - override honoured", "production", "false", false},
+		{"production explicit 0 - override honoured", "production", "0", false},
+		{"staging explicit false - override honoured", "staging", "false", false},
+		{"development explicit true - override honoured", "development", "true", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DB_URL", "postgres://localhost/test")
+			t.Setenv("KAPP_ENV", tc.env)
+			t.Setenv("KAPP_CSRF_COOKIE_SECURE", tc.explicit)
+			switch normalizeEnv(tc.env) {
+			case "production", "prod":
+				// Production fail-closed secret gate.
+				t.Setenv("KAPP_JWT_SECRET", "test-jwt-secret")
+				t.Setenv("KAPP_MASTER_KEY", "test-master-key")
+				t.Setenv("REDIS_URL", "redis://localhost:6379")
+			case "", "dev", "development", "local", "test":
+				// Development-class: no gates to satisfy.
+			default:
+				// Other non-dev postures (e.g. staging) default
+				// KAPP_REQUIRE_REDIS to true, so REDIS_URL must be set.
+				t.Setenv("REDIS_URL", "redis://localhost:6379")
+			}
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if cfg.CSRFCookieSecure != tc.wantSecure {
+				t.Errorf("CSRFCookieSecure = %v, want %v (env=%q explicit=%q)",
+					cfg.CSRFCookieSecure, tc.wantSecure, tc.env, tc.explicit)
+			}
+		})
+	}
+}
+
+// TestConfig_WarningsCSRFInsecure verifies the non-fatal advisory path
+// directly on the pure Warnings() helper (no env, no log capture): any
+// non-development posture (staging / production) with the CSRF cookie
+// Secure flag disabled emits exactly one advisory, while a secure
+// non-dev posture and any development posture emit none.
+func TestConfig_WarningsCSRFInsecure(t *testing.T) {
+	cases := []struct {
+		name        string
+		env         string
+		cookieSec   bool
+		wantWarning bool
+	}{
+		{"production insecure cookie warns", "production", false, true},
+		{"prod alias insecure cookie warns", "prod", false, true},
+		{"staging insecure cookie warns", "staging", false, true},
+		{"production secure cookie no warning", "production", true, false},
+		{"staging secure cookie no warning", "staging", true, false},
+		{"development insecure cookie no warning", "development", false, false},
+		{"empty env insecure cookie no warning", "", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{Env: tc.env, CSRFCookieSecure: tc.cookieSec}
+			var found bool
+			for _, w := range cfg.Warnings() {
+				if strings.Contains(w, "KAPP_CSRF_COOKIE_SECURE") {
+					found = true
+				}
+			}
+			if found != tc.wantWarning {
+				t.Errorf("Warnings() CSRF advisory present = %v, want %v (warnings=%v)",
+					found, tc.wantWarning, cfg.Warnings())
+			}
+		})
 	}
 }

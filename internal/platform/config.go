@@ -6,6 +6,7 @@ package platform
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -419,8 +420,14 @@ type Config struct {
 	CSRFCookieName string
 
 	// CSRFCookieSecure controls the Secure flag on the issued
-	// CSRF cookie. SHOULD be true in production (HTTPS); false
-	// only for local-dev HTTP. Sourced from KAPP_CSRF_COOKIE_SECURE.
+	// CSRF cookie. Sourced from KAPP_CSRF_COOKIE_SECURE; when that
+	// var is unset the default follows the deployment posture —
+	// true in any non-development KAPP_ENV (staging / production,
+	// served over HTTPS) and false in development (local-dev HTTP)
+	// — so a non-dev deploy that forgets the var does not ship a
+	// cookie replayable over cleartext. An explicit value overrides
+	// the posture default; an explicit false outside development is
+	// honoured but flagged by Warnings().
 	CSRFCookieSecure bool
 
 	// ReadReplicaURL is an optional libpq-style connection string
@@ -536,14 +543,14 @@ func LoadConfig() (*Config, error) {
 		AllowMarketplaceBundleMemory:   getenvBool("KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY", false),
 		RequireMarketplaceBundleDirRaw: os.Getenv("KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR"),
 
-		Env:              env,
-		LogFormat:        os.Getenv("KAPP_LOG_FORMAT"),
-		LogLevel:         os.Getenv("KAPP_LOG_LEVEL"),
-		MetricsAddr:      os.Getenv("KAPP_METRICS_ADDR"),
-		SSEAddr:          os.Getenv("KAPP_SSE_ADDR"),
-		GRPCAddr:         os.Getenv("KAPP_GRPC_ADDR"),
-		GRPCReflection:   getenvBool("KAPP_GRPC_REFLECTION", false),
-		GatewayMount:     os.Getenv("KAPP_GRPC_GATEWAY_MOUNT"),
+		Env:            env,
+		LogFormat:      os.Getenv("KAPP_LOG_FORMAT"),
+		LogLevel:       os.Getenv("KAPP_LOG_LEVEL"),
+		MetricsAddr:    os.Getenv("KAPP_METRICS_ADDR"),
+		SSEAddr:        os.Getenv("KAPP_SSE_ADDR"),
+		GRPCAddr:       os.Getenv("KAPP_GRPC_ADDR"),
+		GRPCReflection: getenvBool("KAPP_GRPC_REFLECTION", false),
+		GatewayMount:   os.Getenv("KAPP_GRPC_GATEWAY_MOUNT"),
 
 		SecretProvider:        os.Getenv("KAPP_SECRET_PROVIDER"),
 		SecretsEnvPrefix:      getenv("KAPP_SECRETS_ENV_PREFIX", "KAPP_"),
@@ -578,7 +585,22 @@ func LoadConfig() (*Config, error) {
 
 		CSRFAllowedOrigins: splitCSV(os.Getenv("KAPP_CSRF_ALLOWED_ORIGINS")),
 		CSRFCookieName:     os.Getenv("KAPP_CSRF_COOKIE_NAME"),
-		CSRFCookieSecure:   getenvBool("KAPP_CSRF_COOKIE_SECURE", false),
+		// Secure-by-default outside development: the CSRF cookie's
+		// Secure flag defaults to true in any non-development
+		// KAPP_ENV (staging / production, all served over HTTPS) and
+		// false only for development-class envs (local-dev HTTP). The
+		// default is gated on envIsNonDev to match the other
+		// security-hardening defaults in this file (RequireRedis at
+		// the top of this literal, RequireJWT) so staging is hardened
+		// too rather than silently shipping an insecure cookie. An
+		// operator can still pin either value explicitly via
+		// KAPP_CSRF_COOKIE_SECURE; the default only decides the unset
+		// case, so a non-dev deploy that forgets the var no longer
+		// ships a cookie browsers will replay over plain HTTP.
+		// envIsNonDev reads the env value already resolved above
+		// rather than re-touching os.Getenv, keeping LoadConfig the
+		// single env reader.
+		CSRFCookieSecure: getenvBool("KAPP_CSRF_COOKIE_SECURE", nonDev),
 
 		ReadReplicaURL:               os.Getenv("KAPP_READ_REPLICA_URL"),
 		ReadReplicaLagTolerance:      getenvDurationAllowZero("KAPP_READ_REPLICA_LAG_TOLERANCE", 1*time.Second),
@@ -588,6 +610,14 @@ func LoadConfig() (*Config, error) {
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
+	}
+	// Surface non-fatal advisories at boot. Validate stays a pure
+	// error-or-nil function (so the config-lint CLI and tests can
+	// re-run it without log side effects); LoadConfig is already the
+	// single env reader and boot entry point, so it is the natural
+	// place to emit the WARN lines for permitted-but-risky postures.
+	for _, w := range cfg.Warnings() {
+		slog.Default().Warn(w)
 	}
 	return cfg, nil
 }
@@ -807,6 +837,31 @@ func (c *Config) MissingProductionEnv() []string {
 		missing = append(missing, "REDIS_URL")
 	}
 	return missing
+}
+
+// Warnings returns non-fatal configuration advisories: postures that
+// are permitted (so they must not fail Validate) but are risky enough
+// that an operator should see them at boot. It is a pure function of
+// the struct — it reads no process env and logs nothing — so callers
+// (Validate, a future config-lint CLI, tests) can decide how to
+// surface the messages. The returned slice is nil when nothing is
+// noteworthy. Order is stable so the boot transcript reads
+// consistently.
+func (c *Config) Warnings() []string {
+	var warnings []string
+	// A non-development deploy (staging / production) with an
+	// explicitly-disabled CSRF cookie Secure flag
+	// (KAPP_CSRF_COOKIE_SECURE=false) ships a cookie browsers will
+	// replay over plain HTTP, defeating the double-submit defence
+	// behind any TLS-terminating proxy. The default is now
+	// secure-by-default for non-dev (true), so reaching this state
+	// requires an explicit operator override — worth a loud WARN.
+	// Gated on IsNonDev so staging is covered too, consistent with
+	// how the default itself is now resolved.
+	if c.IsNonDev() && !c.CSRFCookieSecure {
+		warnings = append(warnings, fmt.Sprintf("KAPP_CSRF_COOKIE_SECURE=false while KAPP_ENV=%s (non-development): the CSRF cookie omits the Secure flag and may be sent over plain HTTP; unset it to take the secure-by-default value (true) or set KAPP_CSRF_COOKIE_SECURE=1", c.Env))
+	}
+	return warnings
 }
 
 // IsProductionEnv reports whether the process environment names a
