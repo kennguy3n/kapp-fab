@@ -229,8 +229,8 @@ func (a *SageAdapter) loadConfig(raw json.RawMessage) (SageConfig, error) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return cfg, fmt.Errorf("sage: parse config: %w", err)
 	}
-	if cfg.AccessToken == "" && cfg.RefreshToken == "" {
-		return cfg, fmt.Errorf("sage: access_token or refresh_token required")
+	if err := validateOAuthCreds("sage", cfg.AccessToken, cfg.RefreshToken, cfg.ClientID, cfg.ClientSecret); err != nil {
+		return cfg, err
 	}
 	if len(cfg.Entities) == 0 {
 		cfg.Entities = defaultSageEntities()

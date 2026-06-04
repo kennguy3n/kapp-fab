@@ -285,8 +285,8 @@ func (a *QuickBooksAdapter) loadConfig(raw json.RawMessage) (QuickBooksConfig, e
 	if cfg.RealmID == "" {
 		return cfg, fmt.Errorf("quickbooks: realm_id required")
 	}
-	if cfg.AccessToken == "" && cfg.RefreshToken == "" {
-		return cfg, fmt.Errorf("quickbooks: access_token or refresh_token required")
+	if err := validateOAuthCreds("quickbooks", cfg.AccessToken, cfg.RefreshToken, cfg.ClientID, cfg.ClientSecret); err != nil {
+		return cfg, err
 	}
 	if len(cfg.Entities) == 0 {
 		cfg.Entities = defaultQuickBooksEntities()

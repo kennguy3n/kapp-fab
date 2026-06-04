@@ -206,6 +206,24 @@ func oauthCacheKey(cfg oauth2Config) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// validateOAuthCreds fails fast on incomplete credentials so an operator
+// gets a clear config error instead of an opaque HTTP 400 from the token
+// endpoint. A standalone access token is sufficient; otherwise a
+// refresh-token grant needs the refresh token plus client credentials.
+// provider prefixes the error (e.g. "quickbooks").
+func validateOAuthCreds(provider, accessToken, refreshToken, clientID, clientSecret string) error {
+	if accessToken != "" {
+		return nil
+	}
+	if refreshToken == "" {
+		return fmt.Errorf("%s: access_token or refresh_token required", provider)
+	}
+	if clientID == "" || clientSecret == "" {
+		return fmt.Errorf("%s: client_id and client_secret are required to use a refresh_token", provider)
+	}
+	return nil
+}
+
 // getJSON issues a GET against target with a bearer token plus any
 // extra headers, and decodes a successful response into out. It is the
 // single choke point for the cloud adapters' read calls so error

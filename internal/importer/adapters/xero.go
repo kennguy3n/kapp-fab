@@ -277,8 +277,8 @@ func (a *XeroAdapter) loadConfig(raw json.RawMessage) (XeroConfig, error) {
 	if cfg.XeroTenantID == "" {
 		return cfg, fmt.Errorf("xero: xero_tenant_id required")
 	}
-	if cfg.AccessToken == "" && cfg.RefreshToken == "" {
-		return cfg, fmt.Errorf("xero: access_token or refresh_token required")
+	if err := validateOAuthCreds("xero", cfg.AccessToken, cfg.RefreshToken, cfg.ClientID, cfg.ClientSecret); err != nil {
+		return cfg, err
 	}
 	if len(cfg.Entities) == 0 {
 		cfg.Entities = defaultXeroEntities()

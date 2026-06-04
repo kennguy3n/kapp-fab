@@ -209,9 +209,15 @@ func TestSageDeltaParam(t *testing.T) {
 
 func TestSageConfigValidation(t *testing.T) {
 	a := NewSageAdapter()
-	raw, _ := json.Marshal(SageConfig{})
-	if _, err := a.Discover(context.Background(), raw); err == nil {
-		t.Error("expected error when no credentials supplied")
+	cases := map[string]SageConfig{
+		"no credentials":         {},
+		"refresh without client": {RefreshToken: "r"},
+	}
+	for name, c := range cases {
+		raw, _ := json.Marshal(c)
+		if _, err := a.Discover(context.Background(), raw); err == nil {
+			t.Errorf("%s: expected error, got nil", name)
+		}
 	}
 }
 

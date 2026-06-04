@@ -232,9 +232,10 @@ func TestXeroSingleRefreshAcrossDiscoverExport(t *testing.T) {
 func TestXeroConfigValidation(t *testing.T) {
 	a := NewXeroAdapter()
 	cases := map[string]XeroConfig{
-		"missing tenant":      {AccessToken: "x"},
-		"missing credentials": {XeroTenantID: "org-1"},
-		"unsupported entity":  {XeroTenantID: "org-1", AccessToken: "x", Entities: []XeroEntity{{Name: "Nope"}}},
+		"missing tenant":         {AccessToken: "x"},
+		"missing credentials":    {XeroTenantID: "org-1"},
+		"refresh without client": {XeroTenantID: "org-1", RefreshToken: "r"},
+		"unsupported entity":     {XeroTenantID: "org-1", AccessToken: "x", Entities: []XeroEntity{{Name: "Nope"}}},
 	}
 	for name, c := range cases {
 		raw, _ := json.Marshal(c)

@@ -256,9 +256,10 @@ func TestQuickBooksDeltaFilter(t *testing.T) {
 func TestQuickBooksConfigValidation(t *testing.T) {
 	a := NewQuickBooksAdapter()
 	cases := map[string]QuickBooksConfig{
-		"missing realm":       {AccessToken: "x"},
-		"missing credentials": {RealmID: "1"},
-		"bad entity name":     {RealmID: "1", AccessToken: "x", Entities: []QuickBooksEntity{{Name: "Invoice; DROP"}}},
+		"missing realm":          {AccessToken: "x"},
+		"missing credentials":    {RealmID: "1"},
+		"refresh without client": {RealmID: "1", RefreshToken: "r"},
+		"bad entity name":        {RealmID: "1", AccessToken: "x", Entities: []QuickBooksEntity{{Name: "Invoice; DROP"}}},
 	}
 	for name, c := range cases {
 		raw, _ := json.Marshal(c)
