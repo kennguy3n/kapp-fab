@@ -93,6 +93,7 @@ const COA_TEMPLATES = [
   { value: "eg_basic", label: "Egypt — IFRS + PIT / Social Insurance / Stamp Duty / VAT" },
   { value: "jp_basic", label: "Japan — IFRS + Gensenchōshū / Shakai Hoken / Consumption Tax" },
   { value: "kr_basic", label: "South Korea — IFRS + Geunrosodeukse / NPS / NHI / EI / VAT" },
+  { value: "cn_basic", label: "China — CAS/IFRS + IIT / Social Insurance / Housing Fund / VAT" },
   // SCAFFOLD: cmd/new-tax-pack inserts new COA_TEMPLATES entries above this line.
 ];
 
@@ -175,6 +176,7 @@ const COUNTRY_COA_DEFAULTS: Record<string, string> = {
   EG: "eg_basic",
   JP: "jp_basic",
   KR: "kr_basic",
+  CN: "cn_basic",
   // SCAFFOLD: cmd/new-tax-pack inserts new COUNTRY_COA_DEFAULTS entries above this line.
 };
 
