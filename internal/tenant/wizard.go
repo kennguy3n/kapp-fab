@@ -312,6 +312,8 @@ func DefaultCoATemplateForCountry(country string) string {
 		return "jp_basic"
 	case "KR":
 		return "kr_basic"
+	case "CN":
+		return "cn_basic"
 	// SCAFFOLD: cmd/new-tax-pack inserts new DefaultCoATemplateForCountry cases above this line.
 	default:
 		return "ifrs_basic"
@@ -556,6 +558,9 @@ var coaJPBasic []byte
 //go:embed coa_templates/kr_basic.json
 var coaKRBasic []byte
 
+//go:embed coa_templates/cn_basic.json
+var coaCNBasic []byte
+
 // SCAFFOLD: cmd/new-tax-pack inserts new //go:embed directives + var decls above this line.
 
 // chartOfAccountsTemplates maps the wizard's template name to the
@@ -619,6 +624,7 @@ var chartOfAccountsTemplates = map[string][]byte{
 	"eg_basic": coaEGBasic,
 	"jp_basic": coaJPBasic,
 	"kr_basic": coaKRBasic,
+	"cn_basic": coaCNBasic,
 	// SCAFFOLD: cmd/new-tax-pack inserts new chartOfAccountsTemplates entries above this line.
 }
 
