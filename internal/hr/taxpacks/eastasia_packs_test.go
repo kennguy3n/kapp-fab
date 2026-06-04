@@ -157,6 +157,26 @@ func TestCNPackMidYearStarterMonthCount(t *testing.T) {
 	if iit := findDeduction(fallback, "CN_IIT").Amount; !iit.Equal(dec("97.14")) {
 		t.Fatalf("CN_IIT (April, calendar-month fallback): got %s, want 97.14", iit.String())
 	}
+
+	// A tax year has at most 12 months: an out-of-range
+	// MonthsEmployedYTD (e.g. a data-entry error) is clamped to 12 so
+	// it cannot over-credit the standard deduction and under-withhold.
+	// Use a high cumulative base so the IIT is solidly positive and
+	// the 13-vs-12 comparison is meaningful (not both clamped to zero).
+	twelve, _ := pack.ComputeWithholding(context.Background(),
+		EmployeeInfo{MonthsEmployedYTD: 12, YTDGross: decimal.NewFromInt(550000)},
+		decimal.NewFromInt(50000), cnMonthEnding(time.December))
+	thirteen, _ := pack.ComputeWithholding(context.Background(),
+		EmployeeInfo{MonthsEmployedYTD: 13, YTDGross: decimal.NewFromInt(550000)},
+		decimal.NewFromInt(50000), cnMonthEnding(time.December))
+	iit12 := findDeduction(twelve, "CN_IIT").Amount
+	iit13 := findDeduction(thirteen, "CN_IIT").Amount
+	if !iit12.IsPositive() {
+		t.Fatalf("CN_IIT (12 months) should be positive for the clamp comparison, got %s", iit12.String())
+	}
+	if !iit13.Equal(iit12) {
+		t.Fatalf("CN_IIT should clamp MonthsEmployedYTD>12 to 12: got %s for 13, want %s (==12)", iit13.String(), iit12.String())
+	}
 }
 
 // TestCNPackBelowThresholdNoIIT: a low ¥5,500 January slip. After the
