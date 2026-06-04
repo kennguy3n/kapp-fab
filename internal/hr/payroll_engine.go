@@ -303,6 +303,11 @@ func (e *PayrollEngine) GeneratePayslips(
 				Province:  ed.Province,
 				CPPExempt: ed.CPPExempt,
 				EIExempt:  ed.EIExempt,
+
+				// Cumulative-withholding month count for the CN
+				// pack. Zero (pre-existing KRecord) → the pack
+				// falls back to the pay-period end month.
+				MonthsEmployedYTD: ed.MonthsEmployedYTD,
 			}
 			extraLines, err := pack.ComputeWithholding(ctx, info, gross, period)
 			if err != nil {
@@ -971,6 +976,13 @@ type employeeData struct {
 	Province  string `json:"province,omitempty"`
 	CPPExempt bool   `json:"cpp_exempt,omitempty"`
 	EIExempt  bool   `json:"ei_exempt,omitempty"`
+
+	// Cumulative-withholding input. Number of months the employee
+	// has received employment income this calendar year, including
+	// the slip's own month. Read by the CN pack for its 累计预扣预缴
+	// month index; `omitempty` keeps pre-existing KRecords intact
+	// and the pack falls back to the pay-period end month when 0.
+	MonthsEmployedYTD int `json:"months_employed_ytd,omitempty"`
 }
 
 type structureData struct {

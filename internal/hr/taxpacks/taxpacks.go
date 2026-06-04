@@ -142,6 +142,20 @@ type EmployeeInfo struct {
 	// or a non-arm's-length related person who isn't
 	// insurable employment under EI Act s.5(2).
 	EIExempt bool
+
+	// MonthsEmployedYTD is the number of months the employee has
+	// received employment income in the current calendar year,
+	// INCLUDING the slip's own month (so a full-year employee's
+	// March slip carries 3, an April starter's first slip carries
+	// 1). It drives China's 累计预扣预缴 cumulative-withholding
+	// month index: per 国税发〔2018〕61号 the ¥5,000 standard
+	// deduction accrues from the first month of employment income,
+	// not from January, so a mid-year starter must not be credited
+	// the calendar month's worth of deductions. Zero means
+	// "unknown" — the CN pack falls back to the pay-period end
+	// month, which is correct for the common full-year employee and
+	// keeps pre-existing KRecords producing the same slips.
+	MonthsEmployedYTD int
 }
 
 // Deduction is one withholding line a pack appends to the slip's
