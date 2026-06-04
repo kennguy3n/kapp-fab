@@ -76,12 +76,6 @@ export function RoutingPage() {
     return m;
   }, [itemsQ.data]);
 
-  const wcLabel = useMemo(() => {
-    const m = new Map<string, string>();
-    (workCentersQ.data ?? []).forEach((wc: WorkCenter) => m.set(wc.id, wc.name));
-    return m;
-  }, [workCentersQ.data]);
-
   return (
     <section style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
       <div>
@@ -218,7 +212,6 @@ export function RoutingPage() {
         <RoutingForm
           items={itemsQ.data ?? []}
           workCenters={workCentersQ.data ?? []}
-          wcLabel={wcLabel}
         />
       </div>
     </section>
@@ -347,7 +340,6 @@ function WorkCenterForm() {
 interface RoutingFormProps {
   items: InventoryItem[];
   workCenters: WorkCenter[];
-  wcLabel: Map<string, string>;
 }
 
 function RoutingForm({ items, workCenters }: RoutingFormProps) {

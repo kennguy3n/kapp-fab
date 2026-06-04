@@ -248,6 +248,25 @@ func (s *PGStore) CompleteJobCard(ctx context.Context, tenantID, jobCardID uuid.
 		}
 		woID = jc.WorkOrderID
 
+		// Serialise all card completions for the same work order by
+		// locking its row before the open-card COUNT below. Without
+		// this, two operators completing the last two open cards
+		// concurrently would each (under READ COMMITTED) miss the
+		// other's uncommitted completion, both observe openRemaining
+		// == 1, and neither would fire the work-order auto-completion —
+		// leaving the order stuck released/in_progress with its
+		// inventory moves never emitted. The lock is taken AFTER
+		// lockJobCard (which orders on the card row); both completions
+		// touch distinct card rows but the same work-order row, so the
+		// second to arrive blocks here until the first commits and then
+		// sees the up-to-date count.
+		if _, err := tx.Exec(ctx,
+			`SELECT 1 FROM work_orders WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+			tenantID, woID,
+		); err != nil {
+			return fmt.Errorf("manufacturing: lock work order for card completion: %w", err)
+		}
+
 		if jc.Status != JobCardStatusCompleted {
 			// First completion: flip status, stamp actuals and
 			// the reported yield. A re-completion (idempotent

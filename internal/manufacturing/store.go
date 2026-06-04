@@ -710,8 +710,11 @@ func (s *PGStore) CreateWorkCenter(ctx context.Context, tenantID, actorID uuid.U
 	if eff.IsZero() {
 		eff = decimal.NewFromInt(100)
 	}
-	if eff.IsNegative() {
-		return nil, fmt.Errorf("%w: efficiency_percent must be > 0", ErrInvalidInput)
+	if eff.IsNegative() || eff.GreaterThan(decimal.NewFromInt(1000)) {
+		// Mirror the SQL CHECK (efficiency_percent > 0 AND <= 1000) so an
+		// out-of-range value is rejected as a typed ErrInvalidInput (→ 422)
+		// rather than tripping the DB constraint and surfacing as a raw 500.
+		return nil, fmt.Errorf("%w: efficiency_percent must be in (0, 1000]", ErrInvalidInput)
 	}
 
 	now := s.now()
