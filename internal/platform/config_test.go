@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -533,5 +534,97 @@ func TestLoadConfig_JWTLeewayZeroHonoured(t *testing.T) {
 	}
 	if cfg.JWTLeeway != 0 {
 		t.Errorf("KAPP_JWT_LEEWAY=0s should resolve to 0, got %s", cfg.JWTLeeway)
+	}
+}
+
+// TestLoadConfig_CSRFCookieSecureDefault locks in the Workstream 6
+// hardening: KAPP_CSRF_COOKIE_SECURE now defaults to the deployment
+// posture instead of a flat false. In production the unset default is
+// true (the CSRF cookie is served over HTTPS and must carry the Secure
+// flag); in development it stays false so local HTTP boots keep working
+// without the operator setting anything. An explicit value always wins
+// over the posture-derived default, including an explicit false in
+// production (operator override honoured — surfaced as a Validate WARN,
+// not a boot failure).
+//
+// The production cases also set the production secret gate
+// (KAPP_JWT_SECRET / KAPP_MASTER_KEY / REDIS_URL) because LoadConfig
+// runs Validate() and KAPP_ENV=production fails boot loudly when those
+// are missing; here we want to reach the CSRF default, not the secret
+// gate.
+func TestLoadConfig_CSRFCookieSecureDefault(t *testing.T) {
+	cases := []struct {
+		name       string
+		env        string
+		explicit   string // KAPP_CSRF_COOKIE_SECURE; "" means unset
+		production bool   // set the prod secret gate so LoadConfig passes
+		wantSecure bool
+	}{
+		{"production unset - defaults secure", "production", "", true, true},
+		{"prod alias unset - defaults secure", "prod", "", true, true},
+		{"development unset - defaults insecure", "development", "", false, false},
+		{"dev unset - defaults insecure", "dev", "", false, false},
+		{"empty env unset - defaults insecure", "", "", false, false},
+		{"production explicit false - override honoured", "production", "false", true, false},
+		{"production explicit 0 - override honoured", "production", "0", true, false},
+		{"development explicit true - override honoured", "development", "true", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DB_URL", "postgres://localhost/test")
+			t.Setenv("KAPP_ENV", tc.env)
+			t.Setenv("KAPP_CSRF_COOKIE_SECURE", tc.explicit)
+			if tc.production {
+				// Satisfy the production fail-closed secret gate so
+				// LoadConfig reaches the CSRF default rather than
+				// erroring on missing secrets.
+				t.Setenv("KAPP_JWT_SECRET", "test-jwt-secret")
+				t.Setenv("KAPP_MASTER_KEY", "test-master-key")
+				t.Setenv("REDIS_URL", "redis://localhost:6379")
+			}
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if cfg.CSRFCookieSecure != tc.wantSecure {
+				t.Errorf("CSRFCookieSecure = %v, want %v (env=%q explicit=%q)",
+					cfg.CSRFCookieSecure, tc.wantSecure, tc.env, tc.explicit)
+			}
+		})
+	}
+}
+
+// TestConfig_WarningsCSRFInsecureProduction verifies the non-fatal
+// advisory path directly on the pure Warnings() helper (no env, no log
+// capture): a production posture with the CSRF cookie Secure flag
+// disabled emits exactly one advisory, while a secure production
+// posture and any development posture emit none.
+func TestConfig_WarningsCSRFInsecureProduction(t *testing.T) {
+	cases := []struct {
+		name        string
+		env         string
+		cookieSec   bool
+		wantWarning bool
+	}{
+		{"production insecure cookie warns", "production", false, true},
+		{"prod alias insecure cookie warns", "prod", false, true},
+		{"production secure cookie no warning", "production", true, false},
+		{"development insecure cookie no warning", "development", false, false},
+		{"empty env insecure cookie no warning", "", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{Env: tc.env, CSRFCookieSecure: tc.cookieSec}
+			var found bool
+			for _, w := range cfg.Warnings() {
+				if strings.Contains(w, "KAPP_CSRF_COOKIE_SECURE") {
+					found = true
+				}
+			}
+			if found != tc.wantWarning {
+				t.Errorf("Warnings() CSRF advisory present = %v, want %v (warnings=%v)",
+					found, tc.wantWarning, cfg.Warnings())
+			}
+		})
 	}
 }
