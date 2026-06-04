@@ -66,20 +66,18 @@ export default defineConfig({
         "src/lib/mock-data.ts",
       ],
       // Global floors, set a few points below the suite's current
-      // measured coverage (statements/lines ~29.7%, branches ~71.7%,
-      // functions ~52.2%) so an unrelated edit that drops a covered
+      // measured coverage (statements/lines ~50.6%, branches ~74%,
+      // functions ~61%) so an unrelated edit that drops a covered
       // line trips the gate, without making the threshold so tight
-      // that day-to-day churn fails CI. Statement/line coverage is
-      // modest because the unit suite deliberately prioritises breadth
-      // of meaningful page/component behaviour over blanketing every
-      // large page module; the Playwright E2E suite covers the
-      // remaining end-to-end flows. Raise these as coverage grows;
-      // never lower them to make a red build pass.
+      // that day-to-day churn fails CI. The unit suite prioritises
+      // breadth of meaningful page/component behaviour; the Playwright
+      // E2E suite covers the remaining end-to-end flows. Raise these
+      // as coverage grows; never lower them to make a red build pass.
       thresholds: {
-        statements: 28,
-        branches: 68,
-        functions: 50,
-        lines: 28,
+        statements: 45,
+        branches: 72,
+        functions: 55,
+        lines: 45,
       },
     },
   },
