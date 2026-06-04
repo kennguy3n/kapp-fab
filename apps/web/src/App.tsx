@@ -150,6 +150,18 @@ const WorkOrdersPage = lazyNamed(
   () => import("./pages/WorkOrdersPage"),
   "WorkOrdersPage",
 );
+const RoutingPage = lazyNamed(
+  () => import("./pages/RoutingPage"),
+  "RoutingPage",
+);
+const CapacityPlanningPage = lazyNamed(
+  () => import("./pages/CapacityPlanningPage"),
+  "CapacityPlanningPage",
+);
+const JobCardPage = lazyNamed(
+  () => import("./pages/JobCardPage"),
+  "JobCardPage",
+);
 const LandedCostPage = lazyNamed(
   () => import("./pages/LandedCostPage"),
   "LandedCostPage",
@@ -488,6 +500,9 @@ const navSections: NavSection[] = [
     links: [
       { to: "/manufacturing/boms", label: "Bills of Materials" },
       { to: "/manufacturing/work-orders", label: "Work Orders" },
+      { to: "/manufacturing/routings", label: "Routings & Work Centers" },
+      { to: "/manufacturing/capacity", label: "Capacity Planning" },
+      { to: "/manufacturing/job-cards", label: "Job Cards" },
     ],
   },
   {
@@ -945,6 +960,18 @@ function AppShell() {
               <Route
                 path="/manufacturing/work-orders"
                 element={<WorkOrdersPage />}
+              />
+              <Route
+                path="/manufacturing/routings"
+                element={<RoutingPage />}
+              />
+              <Route
+                path="/manufacturing/capacity"
+                element={<CapacityPlanningPage />}
+              />
+              <Route
+                path="/manufacturing/job-cards"
+                element={<JobCardPage />}
               />
               <Route
                 path="/inventory/landed-costs"

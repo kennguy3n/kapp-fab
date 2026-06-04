@@ -1193,6 +1193,96 @@ export class ApiClient {
     });
   }
 
+  // --- Manufacturing depth: routings, work centers, capacity, job cards (Stream 2) ---
+
+  listWorkCenters(status?: string): Promise<WorkCenter[]> {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+    return this.request(`/manufacturing/work-centers${qs}`);
+  }
+
+  getWorkCenter(id: string): Promise<WorkCenter> {
+    return this.request(`/manufacturing/work-centers/${encodeURIComponent(id)}`);
+  }
+
+  createWorkCenter(input: CreateWorkCenterInput): Promise<WorkCenter> {
+    return this.request("/manufacturing/work-centers", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  setWorkCenterStatus(id: string, status: string): Promise<WorkCenter> {
+    return this.request(`/manufacturing/work-centers/${encodeURIComponent(id)}/status`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ status }),
+    });
+  }
+
+  listRoutings(status?: string): Promise<Routing[]> {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+    return this.request(`/manufacturing/routings${qs}`);
+  }
+
+  getRouting(id: string): Promise<Routing> {
+    return this.request(`/manufacturing/routings/${encodeURIComponent(id)}`);
+  }
+
+  createRouting(input: CreateRoutingInput): Promise<Routing> {
+    return this.request("/manufacturing/routings", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  setRoutingStatus(id: string, status: string): Promise<Routing> {
+    return this.request(`/manufacturing/routings/${encodeURIComponent(id)}/status`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ status }),
+    });
+  }
+
+  /** Finite-capacity utilisation grid. start / end are YYYY-MM-DD; both
+   *  default server-side to today (a single-day grid) when omitted. */
+  capacityPlan(params?: { start?: string; end?: string }): Promise<CapacityPlan> {
+    const qs = new URLSearchParams();
+    if (params?.start) qs.set("start", params.start);
+    if (params?.end) qs.set("end", params.end);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return this.request(`/manufacturing/capacity${suffix}`);
+  }
+
+  listJobCards(workOrderId: string): Promise<JobCard[]> {
+    return this.request(
+      `/manufacturing/work-orders/${encodeURIComponent(workOrderId)}/job-cards`,
+    );
+  }
+
+  getJobCard(id: string): Promise<JobCard> {
+    return this.request(`/manufacturing/job-cards/${encodeURIComponent(id)}`);
+  }
+
+  startJobCard(id: string): Promise<JobCard> {
+    return this.request(`/manufacturing/job-cards/${encodeURIComponent(id)}/start`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  }
+
+  completeJobCard(
+    id: string,
+    input?: { qty_produced?: string; qty_rejected?: string; notes?: string },
+  ): Promise<JobCard> {
+    return this.request(`/manufacturing/job-cards/${encodeURIComponent(id)}/complete`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: input ? JSON.stringify(input) : undefined,
+    });
+  }
+
   // --- Saved views (Phase G) -------------------------------------------
 
   /** List saved views for the caller, scoped to a KType. Returns the
@@ -2656,6 +2746,10 @@ export interface WorkOrder {
   id: string;
   item_id: string;
   bom_id?: string | null;
+  // routing_id is snapshotted alongside bom_id when the work order is
+  // released. NULL for BOM-only items (no active routing), in which case
+  // no job cards are generated.
+  routing_id?: string | null;
   warehouse_id: string;
   planned_qty: string;
   actual_qty?: string | null;
@@ -2677,6 +2771,116 @@ export interface CreateWorkOrderInput {
   scheduled_start?: string;
   scheduled_end?: string;
   notes?: string;
+}
+
+// --- Manufacturing depth: routings, work centers, capacity, job cards (Stream 2) ---
+
+export type WorkCenterStatus = "active" | "maintenance" | "retired";
+
+export interface WorkCenter {
+  tenant_id: string;
+  id: string;
+  name: string;
+  capacity_per_hour: string;
+  operating_hours_per_day: string;
+  efficiency_percent: string;
+  status: WorkCenterStatus;
+  notes?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateWorkCenterInput {
+  name: string;
+  capacity_per_hour: string;
+  operating_hours_per_day: string;
+  efficiency_percent: string;
+  notes?: string;
+}
+
+export type RoutingStatus = "draft" | "active" | "obsolete";
+
+export interface RoutingOperation {
+  routing_id: string;
+  sequence: number;
+  operation_name: string;
+  work_center_id: string;
+  setup_time_minutes: string;
+  cycle_time_minutes: string;
+  description?: string;
+}
+
+export interface Routing {
+  tenant_id: string;
+  id: string;
+  item_id: string;
+  version: string;
+  status: RoutingStatus;
+  notes?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+  operations?: RoutingOperation[];
+}
+
+export interface CreateRoutingInput {
+  item_id: string;
+  version: string;
+  notes?: string;
+  // Operation ordering is implicit in array position — the server
+  // assigns sequence = (index + 1) on insert, so this shape
+  // intentionally omits a sequence field.
+  operations: Array<{
+    operation_name: string;
+    work_center_id: string;
+    setup_time_minutes: string;
+    cycle_time_minutes: string;
+    description?: string;
+  }>;
+  activate?: boolean;
+}
+
+export type JobCardStatus = "pending" | "in_progress" | "completed";
+
+export interface JobCard {
+  tenant_id: string;
+  id: string;
+  work_order_id: string;
+  routing_operation_seq: number;
+  work_center_id: string;
+  status: JobCardStatus;
+  planned_start?: string | null;
+  planned_end?: string | null;
+  actual_start?: string | null;
+  actual_end?: string | null;
+  operator_id?: string | null;
+  qty_produced: string;
+  qty_rejected: string;
+  notes?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CapacityDayLoad {
+  date: string;
+  scheduled_minutes: string;
+  available_minutes: string;
+  utilization_percent: string;
+  overloaded: boolean;
+}
+
+export interface WorkCenterSchedule {
+  work_center_id: string;
+  work_center_name: string;
+  status: WorkCenterStatus;
+  days: CapacityDayLoad[];
+}
+
+export interface CapacityPlan {
+  start: string;
+  end: string;
+  rows: WorkCenterSchedule[];
 }
 
 export interface InventoryValuationRow {

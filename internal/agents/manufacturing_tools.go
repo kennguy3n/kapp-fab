@@ -24,6 +24,12 @@ func RegisterManufacturingTools(x *Executor, store *manufacturing.PGStore) {
 	x.Register(&createWorkOrderTool{store: store})
 	x.Register(&completeWorkOrderTool{store: store})
 	x.Register(&releaseWorkOrderTool{store: store})
+	// Stream 2 — Manufacturing Depth.
+	x.Register(&createWorkCenterTool{store: store})
+	x.Register(&createRoutingTool{store: store})
+	x.Register(&activateRoutingTool{store: store})
+	x.Register(&startJobCardTool{store: store})
+	x.Register(&completeJobCardTool{store: store})
 }
 
 // ----- manufacturing.create_work_order -----
@@ -214,6 +220,298 @@ func (t *completeWorkOrderTool) Invoke(ctx context.Context, inv Invocation) (*Re
 		Summary: fmt.Sprintf("Completed work order %s (actual %s)", wo.ID, actual),
 		Preview: body,
 		Extra:   map[string]any{"work_order_id": wo.ID.String(), "status": wo.Status, "actual_qty": actual},
+	}, nil
+}
+
+// ----- manufacturing.create_work_center -----
+
+type createWorkCenterToolInput struct {
+	Name                 string          `json:"name"`
+	CapacityPerHour      decimal.Decimal `json:"capacity_per_hour,omitempty"`
+	OperatingHoursPerDay decimal.Decimal `json:"operating_hours_per_day,omitempty"`
+	EfficiencyPercent    decimal.Decimal `json:"efficiency_percent,omitempty"`
+	Notes                string          `json:"notes,omitempty"`
+}
+
+type createWorkCenterTool struct {
+	store *manufacturing.PGStore
+}
+
+func (t *createWorkCenterTool) Name() string { return "manufacturing.create_work_center" }
+
+// RequiresConfirmation is false — a work center is reference data and
+// changes no inventory or financial state.
+func (t *createWorkCenterTool) RequiresConfirmation() bool { return false }
+
+func (t *createWorkCenterTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in createWorkCenterToolInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.Name == "" {
+		return nil, errors.New("manufacturing.create_work_center: name required")
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(in)
+		return &Result{
+			Summary: fmt.Sprintf("Would create work center %q", in.Name),
+			Preview: preview,
+		}, nil
+	}
+	if t.store == nil {
+		return nil, errors.New("manufacturing.create_work_center: manufacturing store not configured")
+	}
+	wc, err := t.store.CreateWorkCenter(ctx, inv.TenantID, inv.ActorID, manufacturing.CreateWorkCenterInput{
+		Name:                 in.Name,
+		CapacityPerHour:      in.CapacityPerHour,
+		OperatingHoursPerDay: in.OperatingHoursPerDay,
+		EfficiencyPercent:    in.EfficiencyPercent,
+		Notes:                in.Notes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	body, _ := json.Marshal(wc)
+	return &Result{
+		Summary: fmt.Sprintf("Created work center %s (%s)", wc.Name, wc.ID),
+		Preview: body,
+		Extra:   map[string]any{"work_center_id": wc.ID.String(), "status": wc.Status},
+	}, nil
+}
+
+// ----- manufacturing.create_routing -----
+
+type createRoutingToolOperation struct {
+	OperationName    string          `json:"operation_name"`
+	WorkCenterID     uuid.UUID       `json:"work_center_id"`
+	SetupTimeMinutes decimal.Decimal `json:"setup_time_minutes,omitempty"`
+	CycleTimeMinutes decimal.Decimal `json:"cycle_time_minutes,omitempty"`
+	Description      string          `json:"description,omitempty"`
+}
+
+type createRoutingToolInput struct {
+	ItemID     uuid.UUID                    `json:"item_id"`
+	Version    string                       `json:"version"`
+	Notes      string                       `json:"notes,omitempty"`
+	Operations []createRoutingToolOperation `json:"operations"`
+	Activate   bool                         `json:"activate,omitempty"`
+}
+
+type createRoutingTool struct {
+	store *manufacturing.PGStore
+}
+
+func (t *createRoutingTool) Name() string { return "manufacturing.create_routing" }
+
+// RequiresConfirmation is false — authoring a routing (even an active
+// one) changes no inventory; it only defines how future work orders
+// generate job cards.
+func (t *createRoutingTool) RequiresConfirmation() bool { return false }
+
+func (t *createRoutingTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in createRoutingToolInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.ItemID == uuid.Nil {
+		return nil, errors.New("manufacturing.create_routing: item_id required")
+	}
+	if in.Version == "" {
+		return nil, errors.New("manufacturing.create_routing: version required")
+	}
+	if len(in.Operations) == 0 {
+		return nil, errors.New("manufacturing.create_routing: at least one operation required")
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(in)
+		return &Result{
+			Summary: fmt.Sprintf("Would create routing %s for item %s (%d operations)", in.Version, in.ItemID, len(in.Operations)),
+			Preview: preview,
+		}, nil
+	}
+	if t.store == nil {
+		return nil, errors.New("manufacturing.create_routing: manufacturing store not configured")
+	}
+	storeIn := manufacturing.CreateRoutingInput{
+		ItemID:   in.ItemID,
+		Version:  in.Version,
+		Notes:    in.Notes,
+		Activate: in.Activate,
+	}
+	for _, op := range in.Operations {
+		storeIn.Operations = append(storeIn.Operations, manufacturing.RoutingOperationInput{
+			OperationName:    op.OperationName,
+			WorkCenterID:     op.WorkCenterID,
+			SetupTimeMinutes: op.SetupTimeMinutes,
+			CycleTimeMinutes: op.CycleTimeMinutes,
+			Description:      op.Description,
+		})
+	}
+	routing, err := t.store.CreateRouting(ctx, inv.TenantID, inv.ActorID, storeIn)
+	if err != nil {
+		return nil, err
+	}
+	body, _ := json.Marshal(routing)
+	return &Result{
+		Summary: fmt.Sprintf("Created routing %s for item %s (%s)", routing.Version, routing.ItemID, routing.Status),
+		Preview: body,
+		Extra:   map[string]any{"routing_id": routing.ID.String(), "status": routing.Status},
+	}, nil
+}
+
+// ----- manufacturing.activate_routing -----
+
+type activateRoutingInput struct {
+	RoutingID uuid.UUID `json:"routing_id"`
+}
+
+type activateRoutingTool struct {
+	store *manufacturing.PGStore
+}
+
+func (t *activateRoutingTool) Name() string { return "manufacturing.activate_routing" }
+
+// RequiresConfirmation is false — activation demotes any previously
+// active routing for the item but moves no stock. The next work-order
+// release picks up the newly active routing for its job cards.
+func (t *activateRoutingTool) RequiresConfirmation() bool { return false }
+
+func (t *activateRoutingTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in activateRoutingInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.RoutingID == uuid.Nil {
+		return nil, errors.New("manufacturing.activate_routing: routing_id required")
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(in)
+		return &Result{
+			Summary: fmt.Sprintf("Would activate routing %s", in.RoutingID),
+			Preview: preview,
+		}, nil
+	}
+	if t.store == nil {
+		return nil, errors.New("manufacturing.activate_routing: manufacturing store not configured")
+	}
+	if err := t.store.SetRoutingStatus(ctx, inv.TenantID, in.RoutingID, manufacturing.RoutingStatusActive); err != nil {
+		return nil, err
+	}
+	routing, err := t.store.GetRouting(ctx, inv.TenantID, in.RoutingID)
+	if err != nil {
+		return nil, err
+	}
+	body, _ := json.Marshal(routing)
+	return &Result{
+		Summary: fmt.Sprintf("Activated routing %s for item %s", routing.Version, routing.ItemID),
+		Preview: body,
+		Extra:   map[string]any{"routing_id": routing.ID.String(), "status": routing.Status},
+	}, nil
+}
+
+// ----- manufacturing.start_job_card -----
+
+type startJobCardInput struct {
+	JobCardID uuid.UUID `json:"job_card_id"`
+}
+
+type startJobCardTool struct {
+	store *manufacturing.PGStore
+}
+
+func (t *startJobCardTool) Name() string { return "manufacturing.start_job_card" }
+
+// RequiresConfirmation is false — starting a card only stamps
+// actual_start and the operator; no inventory moves.
+func (t *startJobCardTool) RequiresConfirmation() bool { return false }
+
+func (t *startJobCardTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in startJobCardInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.JobCardID == uuid.Nil {
+		return nil, errors.New("manufacturing.start_job_card: job_card_id required")
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(in)
+		return &Result{
+			Summary: fmt.Sprintf("Would start job card %s", in.JobCardID),
+			Preview: preview,
+		}, nil
+	}
+	if t.store == nil {
+		return nil, errors.New("manufacturing.start_job_card: manufacturing store not configured")
+	}
+	jc, err := t.store.StartJobCard(ctx, inv.TenantID, in.JobCardID, inv.ActorID)
+	if err != nil {
+		return nil, err
+	}
+	body, _ := json.Marshal(jc)
+	return &Result{
+		Summary: fmt.Sprintf("Started job card %s (op %d)", jc.ID, jc.RoutingOperationSeq),
+		Preview: body,
+		Extra:   map[string]any{"job_card_id": jc.ID.String(), "status": jc.Status},
+	}, nil
+}
+
+// ----- manufacturing.complete_job_card -----
+//
+// Completing the LAST open card on a work order triggers the work
+// order's completion flow, which emits the consumption + finished-goods
+// inventory moves — so this tool requires confirmation.
+
+type completeJobCardToolInput struct {
+	JobCardID   uuid.UUID       `json:"job_card_id"`
+	QtyProduced decimal.Decimal `json:"qty_produced,omitempty"`
+	QtyRejected decimal.Decimal `json:"qty_rejected,omitempty"`
+	Notes       string          `json:"notes,omitempty"`
+}
+
+type completeJobCardTool struct {
+	store *manufacturing.PGStore
+}
+
+func (t *completeJobCardTool) Name() string { return "manufacturing.complete_job_card" }
+
+// RequiresConfirmation returns true: completing the final job card on a
+// work order auto-completes the work order, which debits component
+// stock and credits finished goods — the same ledger-moving step that
+// makes complete_work_order require confirmation.
+func (t *completeJobCardTool) RequiresConfirmation() bool { return true }
+
+func (t *completeJobCardTool) Invoke(ctx context.Context, inv Invocation) (*Result, error) {
+	var in completeJobCardToolInput
+	if err := decodeInputs(inv, &in); err != nil {
+		return nil, err
+	}
+	if in.JobCardID == uuid.Nil {
+		return nil, errors.New("manufacturing.complete_job_card: job_card_id required")
+	}
+	if inv.Mode == ModeDryRun {
+		preview, _ := json.Marshal(in)
+		return &Result{
+			Summary: fmt.Sprintf("Would complete job card %s", in.JobCardID),
+			Preview: preview,
+		}, nil
+	}
+	if t.store == nil {
+		return nil, errors.New("manufacturing.complete_job_card: manufacturing store not configured")
+	}
+	jc, err := t.store.CompleteJobCard(ctx, inv.TenantID, in.JobCardID, manufacturing.CompleteJobCardInput{
+		OperatorID:  inv.ActorID,
+		QtyProduced: in.QtyProduced,
+		QtyRejected: in.QtyRejected,
+		Notes:       in.Notes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	body, _ := json.Marshal(jc)
+	return &Result{
+		Summary: fmt.Sprintf("Completed job card %s (op %d)", jc.ID, jc.RoutingOperationSeq),
+		Preview: body,
+		Extra:   map[string]any{"job_card_id": jc.ID.String(), "status": jc.Status},
 	}, nil
 }
 

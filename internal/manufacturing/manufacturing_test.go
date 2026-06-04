@@ -138,14 +138,14 @@ func TestBOMCanTransitionTo(t *testing.T) {
 // the locally-constructed slice that All() exposes.
 func TestAllKTypesShape(t *testing.T) {
 	got := All()
-	if len(got) != 2 {
-		t.Fatalf("All() returned %d KTypes, want 2", len(got))
+	if len(got) != 5 {
+		t.Fatalf("All() returned %d KTypes, want 5", len(got))
 	}
 	names := map[string]bool{}
 	for _, kt := range got {
 		names[kt.Name] = true
 	}
-	for _, expected := range []string{KTypeBOM, KTypeWorkOrder} {
+	for _, expected := range []string{KTypeBOM, KTypeWorkOrder, KTypeRouting, KTypeWorkCenter, KTypeJobCard} {
 		if !names[expected] {
 			t.Errorf("All() missing KType %s; have %v", expected, names)
 		}

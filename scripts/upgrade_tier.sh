@@ -67,6 +67,7 @@ TABLES=(
   budgets budget_lines
   inventory_warehouses inventory_items inventory_batches inventory_moves
   boms bom_components work_orders
+  work_centers routings routing_operations job_cards
   leave_ledger lesson_progress
   files base_tables base_rows docs_documents docs_document_versions
   forms import_jobs import_staging

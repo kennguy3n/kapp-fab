@@ -196,6 +196,8 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.assignBatch(ctx, req)
 	case "work-order", "workorder", "wo":
 		return d.workOrder(ctx, req)
+	case "job-card", "jobcard", "jc":
+		return d.jobCard(ctx, req)
 	case "bom":
 		return d.bomList(ctx, req)
 	case "certificate":
@@ -240,7 +242,7 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.landedCostCmd(ctx, req)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /project, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /return, /requisition, /stock, /reverse-stock-move, /batch, /work-order (also /wo, /workorder), /bom, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /shift, /cycle-count, /budget, /landed-cost, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /project, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /return, /requisition, /stock, /reverse-stock-move, /batch, /work-order (also /wo, /workorder), /job-card (also /jc), /bom, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /shift, /cycle-count, /budget, /landed-cost, /help",
 		}, nil
 	default:
 		return CommandResponse{
@@ -668,6 +670,7 @@ func (d *CommandDispatcher) assignBatch(ctx context.Context, req CommandRequest)
 //	/work-order complete <id> [actual_qty] — emit moves, flip to completed
 //	/work-order cancel   <id>              — flip status to cancelled
 //	/work-order close    <id>              — flip status to closed (terminal)
+//	/work-order job-cards <id>             — list the shop-floor job cards generated at release
 func (d *CommandDispatcher) workOrder(ctx context.Context, req CommandRequest) (CommandResponse, error) {
 	if d.manufacturing == nil {
 		return CommandResponse{Text: "manufacturing not configured"}, nil
@@ -769,8 +772,103 @@ func (d *CommandDispatcher) workOrder(ctx context.Context, req CommandRequest) (
 			yieldStr = wo.ActualQty.String()
 		}
 		return CommandResponse{Text: fmt.Sprintf("Work order %s completed (yield %s) — inventory moves emitted", wo.ID, yieldStr)}, nil
+	case "job-cards", "jobcards":
+		if len(rest) < 1 {
+			return CommandResponse{Text: "Usage: /work-order job-cards <work_order_id>"}, nil
+		}
+		id, err := uuid.Parse(rest[0])
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("invalid work order id: %v", err)}, nil
+		}
+		cards, err := d.manufacturing.ListJobCards(ctx, req.TenantID, id)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/work-order job-cards failed: %v", err)}, nil
+		}
+		if len(cards) == 0 {
+			return CommandResponse{Text: "No job cards for this work order (the item has no active routing)"}, nil
+		}
+		lines := make([]string, 0, len(cards))
+		for i := range cards {
+			jc := &cards[i]
+			lines = append(lines, fmt.Sprintf("%s | seq=%d | %s | work_center=%s",
+				jc.ID, jc.RoutingOperationSeq, jc.Status, jc.WorkCenterID))
+		}
+		return CommandResponse{Text: "Job cards\n" + strings.Join(lines, "\n")}, nil
 	default:
-		return CommandResponse{Text: fmt.Sprintf("Unknown /work-order subcommand %q (list|get|release|start|complete|cancel|close)", sub)}, nil
+		return CommandResponse{Text: fmt.Sprintf("Unknown /work-order subcommand %q (list|get|release|start|complete|cancel|close|job-cards)", sub)}, nil
+	}
+}
+
+// jobCard implements `/job-card <subcommand> ...`, the Stream 2
+// shop-floor surface:
+//
+//	/job-card get      <id>                          — fetch a single job card
+//	/job-card start    <id>                          — operator starts the operation (→ in_progress)
+//	/job-card complete <id> [qty_produced] [qty_rejected] — finish the operation (→ completed)
+//
+// Completing the last open card on a work order auto-triggers the
+// existing CompleteWorkOrder inventory-move flow.
+func (d *CommandDispatcher) jobCard(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.manufacturing == nil {
+		return CommandResponse{Text: "manufacturing not configured"}, nil
+	}
+	if req.TenantID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id required"}, nil
+	}
+	if len(req.Args) == 0 {
+		return CommandResponse{Text: "Usage: /job-card <get|start|complete> <job_card_id> ..."}, nil
+	}
+	sub := strings.ToLower(req.Args[0])
+	rest := req.Args[1:]
+	if len(rest) < 1 {
+		return CommandResponse{Text: fmt.Sprintf("Usage: /job-card %s <job_card_id>", sub)}, nil
+	}
+	id, err := uuid.Parse(rest[0])
+	if err != nil {
+		return CommandResponse{Text: fmt.Sprintf("invalid job card id: %v", err)}, nil
+	}
+	switch sub {
+	case "get":
+		jc, err := d.manufacturing.GetJobCard(ctx, req.TenantID, id)
+		if err != nil {
+			if errors.Is(err, manufacturing.ErrJobCardNotFound) {
+				return CommandResponse{Text: fmt.Sprintf("job card %s not found", id)}, nil
+			}
+			return CommandResponse{Text: fmt.Sprintf("/job-card get failed: %v", err)}, nil
+		}
+		body, _ := json.MarshalIndent(jc, "", "  ")
+		return CommandResponse{Text: "```\n" + string(body) + "\n```"}, nil
+	case "start":
+		jc, err := d.manufacturing.StartJobCard(ctx, req.TenantID, id, req.UserID)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/job-card start failed: %v", err)}, nil
+		}
+		return CommandResponse{Text: fmt.Sprintf("Job card %s → %s", jc.ID, jc.Status)}, nil
+	case "complete":
+		var produced, rejected decimal.Decimal
+		if len(rest) >= 2 {
+			produced, err = decimal.NewFromString(rest[1])
+			if err != nil {
+				return CommandResponse{Text: fmt.Sprintf("invalid qty_produced %q: %v", rest[1], err)}, nil
+			}
+		}
+		if len(rest) >= 3 {
+			rejected, err = decimal.NewFromString(rest[2])
+			if err != nil {
+				return CommandResponse{Text: fmt.Sprintf("invalid qty_rejected %q: %v", rest[2], err)}, nil
+			}
+		}
+		jc, err := d.manufacturing.CompleteJobCard(ctx, req.TenantID, id, manufacturing.CompleteJobCardInput{
+			OperatorID:  req.UserID,
+			QtyProduced: produced,
+			QtyRejected: rejected,
+		})
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/job-card complete failed: %v", err)}, nil
+		}
+		return CommandResponse{Text: fmt.Sprintf("Job card %s → %s (produced %s, rejected %s)", jc.ID, jc.Status, jc.QtyProduced.String(), jc.QtyRejected.String())}, nil
+	default:
+		return CommandResponse{Text: fmt.Sprintf("Unknown /job-card subcommand %q (get|start|complete)", sub)}, nil
 	}
 }
 

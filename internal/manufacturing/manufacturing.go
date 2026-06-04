@@ -157,17 +157,17 @@ var (
 // status='active' at any time (enforced by the boms_active_per_item_uniq
 // partial unique index).
 type BOM struct {
-	TenantID  uuid.UUID `json:"tenant_id"`
-	ID        uuid.UUID `json:"id"`
-	ItemID    uuid.UUID `json:"item_id"`
-	Version   string    `json:"version"`
-	Status    string    `json:"status"`
+	TenantID  uuid.UUID       `json:"tenant_id"`
+	ID        uuid.UUID       `json:"id"`
+	ItemID    uuid.UUID       `json:"item_id"`
+	Version   string          `json:"version"`
+	Status    string          `json:"status"`
 	OutputQty decimal.Decimal `json:"output_qty"`
-	UOM       string    `json:"uom"`
-	Notes     string    `json:"notes,omitempty"`
-	CreatedBy uuid.UUID `json:"created_by,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	UOM       string          `json:"uom"`
+	Notes     string          `json:"notes,omitempty"`
+	CreatedBy uuid.UUID       `json:"created_by,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
 
 	// Components is loaded by GetBOM and the work-order
 	// completion engine. Empty for partial fetches (e.g.
@@ -251,22 +251,27 @@ func (c BOMComponent) EffectiveQty() decimal.Decimal {
 // WorkOrder is a single production run against a BOM. The state
 // machine in store.go enforces the legal transitions.
 type WorkOrder struct {
-	TenantID        uuid.UUID        `json:"tenant_id"`
-	ID              uuid.UUID        `json:"id"`
-	ItemID          uuid.UUID        `json:"item_id"`
-	BOMID           *uuid.UUID       `json:"bom_id,omitempty"`
-	WarehouseID     uuid.UUID        `json:"warehouse_id"`
-	PlannedQty      decimal.Decimal  `json:"planned_qty"`
-	ActualQty       *decimal.Decimal `json:"actual_qty,omitempty"`
-	Status          string           `json:"status"`
-	ScheduledStart  *time.Time       `json:"scheduled_start,omitempty"`
-	ScheduledEnd    *time.Time       `json:"scheduled_end,omitempty"`
-	StartedAt       *time.Time       `json:"started_at,omitempty"`
-	CompletedAt     *time.Time       `json:"completed_at,omitempty"`
-	Notes           string           `json:"notes,omitempty"`
-	CreatedBy       uuid.UUID        `json:"created_by,omitempty"`
-	CreatedAt       time.Time        `json:"created_at"`
-	UpdatedAt       time.Time        `json:"updated_at"`
+	TenantID uuid.UUID  `json:"tenant_id"`
+	ID       uuid.UUID  `json:"id"`
+	ItemID   uuid.UUID  `json:"item_id"`
+	BOMID    *uuid.UUID `json:"bom_id,omitempty"`
+	// RoutingID is the active routing snapshotted onto the work
+	// order at release time (mirrors BOMID). NULL for work orders
+	// against items with no routing — the BOM-only light path keeps
+	// working unchanged and generates no job cards.
+	RoutingID      *uuid.UUID       `json:"routing_id,omitempty"`
+	WarehouseID    uuid.UUID        `json:"warehouse_id"`
+	PlannedQty     decimal.Decimal  `json:"planned_qty"`
+	ActualQty      *decimal.Decimal `json:"actual_qty,omitempty"`
+	Status         string           `json:"status"`
+	ScheduledStart *time.Time       `json:"scheduled_start,omitempty"`
+	ScheduledEnd   *time.Time       `json:"scheduled_end,omitempty"`
+	StartedAt      *time.Time       `json:"started_at,omitempty"`
+	CompletedAt    *time.Time       `json:"completed_at,omitempty"`
+	Notes          string           `json:"notes,omitempty"`
+	CreatedBy      uuid.UUID        `json:"created_by,omitempty"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
 }
 
 // CanTransitionTo reports whether the receiver may move to the

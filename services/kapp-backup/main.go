@@ -94,6 +94,17 @@ var TenantScopedTables = []string{
 	"boms",
 	"bom_components",
 	"work_orders",
+	// Manufacturing depth (Stream 2) — routings, operations, work
+	// centers, and shop-floor job cards. Ordered so FKs resolve on
+	// restore: work_centers and routings have no FK to the others;
+	// routing_operations FKs (tenant_id, routing_id) so routings must
+	// land first; job_cards FKs work_orders (already listed above) and
+	// references routings. routing_operations has the non-standard PK
+	// (tenant_id, routing_id, sequence) — declared in tableConflictKeys.
+	"work_centers",
+	"routings",
+	"routing_operations",
+	"job_cards",
 	// HR / LMS
 	"leave_ledger",
 	"lesson_progress",
@@ -637,6 +648,14 @@ var tableConflictKeys = map[string][]string{
 	// PK. boms and work_orders use the standard (tenant_id, id) PK and
 	// fall through to the default path.
 	"bom_components": {"tenant_id", "bom_id", "component_item_id"},
+	// Manufacturing depth (Stream 2) — routing_operations has no
+	// surrogate `id`; its PK is the natural composite (tenant_id,
+	// routing_id, sequence), so the (tenant_id, id) fallback would
+	// degrade to ON CONFLICT DO NOTHING and a corrective re-restore
+	// would not update an operation's work center / times on existing
+	// rows. work_centers, routings, and job_cards use the standard
+	// (tenant_id, id) PK and fall through to the default path.
+	"routing_operations": {"tenant_id", "routing_id", "sequence"},
 	// Phase A2 — tenant_record_counts has PK (tenant_id) with no
 	// `id` column, so the default upsert path would degrade to
 	// ON CONFLICT DO NOTHING and a re-restore would leave a stale

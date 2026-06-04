@@ -549,7 +549,7 @@ func (s *PGStore) GetWorkOrder(ctx context.Context, tenantID, woID uuid.UUID) (*
 	var wo WorkOrder
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return scanWorkOrder(tx.QueryRow(ctx,
-			`SELECT tenant_id, id, item_id, bom_id, warehouse_id, planned_qty, actual_qty, status,
+			`SELECT tenant_id, id, item_id, bom_id, routing_id, warehouse_id, planned_qty, actual_qty, status,
 			        scheduled_start, scheduled_end, started_at, completed_at,
 			        COALESCE(notes, ''), COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid),
 			        created_at, updated_at
@@ -573,7 +573,7 @@ func (s *PGStore) ListWorkOrders(ctx context.Context, tenantID uuid.UUID, status
 	// when there are no rows.
 	out := make([]WorkOrder, 0)
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		q := `SELECT tenant_id, id, item_id, bom_id, warehouse_id, planned_qty, actual_qty, status,
+		q := `SELECT tenant_id, id, item_id, bom_id, routing_id, warehouse_id, planned_qty, actual_qty, status,
 		             scheduled_start, scheduled_end, started_at, completed_at,
 		             COALESCE(notes, ''), COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid),
 		             created_at, updated_at
@@ -611,9 +611,10 @@ type pgxScanner interface {
 
 func scanWorkOrder(r pgxScanner, wo *WorkOrder) error {
 	var bomID *uuid.UUID
+	var routingID *uuid.UUID
 	var actualQty *decimal.Decimal
 	if err := r.Scan(
-		&wo.TenantID, &wo.ID, &wo.ItemID, &bomID, &wo.WarehouseID, &wo.PlannedQty, &actualQty, &wo.Status,
+		&wo.TenantID, &wo.ID, &wo.ItemID, &bomID, &routingID, &wo.WarehouseID, &wo.PlannedQty, &actualQty, &wo.Status,
 		&wo.ScheduledStart, &wo.ScheduledEnd, &wo.StartedAt, &wo.CompletedAt,
 		&wo.Notes, &wo.CreatedBy, &wo.CreatedAt, &wo.UpdatedAt,
 	); err != nil {
@@ -623,12 +624,13 @@ func scanWorkOrder(r pgxScanner, wo *WorkOrder) error {
 		return fmt.Errorf("manufacturing: scan work order: %w", err)
 	}
 	wo.BOMID = bomID
+	wo.RoutingID = routingID
 	wo.ActualQty = actualQty
 	return nil
 }
 
 // nullableString returns nil for empty strings so the SQL driver
-// writes NULL instead of '' — preserves the "is the column unset?"
+// writes NULL instead of ” — preserves the "is the column unset?"
 // signal on read paths.
 func nullableString(s string) any {
 	if s == "" {
@@ -644,4 +646,531 @@ func nullableUUID(u uuid.UUID) any {
 		return nil
 	}
 	return u
+}
+
+// isUniqueViolation returns true iff err is a Postgres
+// unique-constraint violation (SQLSTATE 23505). Used to convert a raw
+// 23505 into a typed domain error so the HTTP layer can map it to 409.
+func isUniqueViolation(err error) bool {
+	var pgErr interface{ SQLState() string }
+	if errors.As(err, &pgErr) {
+		return pgErr.SQLState() == "23505"
+	}
+	return false
+}
+
+// isForeignKeyViolation returns true iff err is a Postgres
+// foreign-key-constraint violation (SQLSTATE 23503). A routing
+// operation referencing a non-existent work center trips this.
+func isForeignKeyViolation(err error) bool {
+	var pgErr interface{ SQLState() string }
+	if errors.As(err, &pgErr) {
+		return pgErr.SQLState() == "23503"
+	}
+	return false
+}
+
+// ===========================================================================
+// Work centers (Stream 2 — manufacturing depth)
+// ===========================================================================
+
+// CreateWorkCenterInput is the canonical input for CreateWorkCenter.
+// OperatingHoursPerDay and EfficiencyPercent fall back to sensible
+// defaults (8h, 100%) when left zero so a caller can stand up a work
+// center with just a name.
+type CreateWorkCenterInput struct {
+	Name                 string
+	CapacityPerHour      decimal.Decimal
+	OperatingHoursPerDay decimal.Decimal
+	EfficiencyPercent    decimal.Decimal
+	Notes                string
+}
+
+// CreateWorkCenter inserts an active work center. Returns
+// ErrWorkCenterDuplicateName when the (tenant_id, name) unique
+// constraint is violated.
+func (s *PGStore) CreateWorkCenter(ctx context.Context, tenantID, actorID uuid.UUID, in CreateWorkCenterInput) (*WorkCenter, error) {
+	if tenantID == uuid.Nil {
+		return nil, errors.New("manufacturing: tenant id required")
+	}
+	if in.Name == "" {
+		return nil, fmt.Errorf("%w: work center name required", ErrInvalidInput)
+	}
+	if in.CapacityPerHour.IsNegative() {
+		return nil, fmt.Errorf("%w: capacity_per_hour must be >= 0", ErrInvalidInput)
+	}
+	hours := in.OperatingHoursPerDay
+	if hours.IsZero() {
+		hours = decimal.NewFromInt(8)
+	}
+	if hours.IsNegative() || hours.GreaterThan(decimal.NewFromInt(24)) {
+		return nil, fmt.Errorf("%w: operating_hours_per_day must be in (0, 24]", ErrInvalidInput)
+	}
+	eff := in.EfficiencyPercent
+	if eff.IsZero() {
+		eff = decimal.NewFromInt(100)
+	}
+	if eff.IsNegative() {
+		return nil, fmt.Errorf("%w: efficiency_percent must be > 0", ErrInvalidInput)
+	}
+
+	now := s.now()
+	wc := &WorkCenter{
+		TenantID:             tenantID,
+		ID:                   uuid.New(),
+		Name:                 in.Name,
+		CapacityPerHour:      in.CapacityPerHour,
+		OperatingHoursPerDay: hours,
+		EfficiencyPercent:    eff,
+		Status:               WorkCenterStatusActive,
+		Notes:                in.Notes,
+		CreatedBy:            actorID,
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO work_centers
+			     (tenant_id, id, name, capacity_per_hour, operating_hours_per_day,
+			      efficiency_percent, status, notes, created_by, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)`,
+			wc.TenantID, wc.ID, wc.Name, wc.CapacityPerHour, wc.OperatingHoursPerDay,
+			wc.EfficiencyPercent, wc.Status, nullableString(wc.Notes), nullableUUID(wc.CreatedBy), wc.CreatedAt,
+		)
+		if err != nil {
+			if isUniqueViolation(err) {
+				return fmt.Errorf("%w: %s", ErrWorkCenterDuplicateName, wc.Name)
+			}
+			return fmt.Errorf("manufacturing: insert work center: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return wc, nil
+}
+
+// GetWorkCenter fetches a single work center.
+func (s *PGStore) GetWorkCenter(ctx context.Context, tenantID, id uuid.UUID) (*WorkCenter, error) {
+	if tenantID == uuid.Nil || id == uuid.Nil {
+		return nil, errors.New("manufacturing: tenant id and work center id required")
+	}
+	var wc WorkCenter
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return scanWorkCenter(tx.QueryRow(ctx, workCenterSelectColumns+
+			` FROM work_centers WHERE tenant_id = $1 AND id = $2`, tenantID, id), &wc)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &wc, nil
+}
+
+// ListWorkCenters returns the tenant's work centers, optionally
+// filtered by status, ordered by name.
+func (s *PGStore) ListWorkCenters(ctx context.Context, tenantID uuid.UUID, status string) ([]WorkCenter, error) {
+	if tenantID == uuid.Nil {
+		return nil, errors.New("manufacturing: tenant id required")
+	}
+	out := make([]WorkCenter, 0)
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		q := workCenterSelectColumns + ` FROM work_centers WHERE tenant_id = $1`
+		args := []any{tenantID}
+		if status != "" {
+			q += " AND status = $2"
+			args = append(args, status)
+		}
+		q += " ORDER BY name"
+		rows, err := tx.Query(ctx, q, args...)
+		if err != nil {
+			return fmt.Errorf("manufacturing: list work centers: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var wc WorkCenter
+			if err := scanWorkCenter(rows, &wc); err != nil {
+				return err
+			}
+			out = append(out, wc)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+// SetWorkCenterStatus flips a work center between active / maintenance
+// / retired. Any of the three is reachable from any other (unlike the
+// monotone BOM / routing lifecycles) — a center comes back from
+// maintenance, and a retired center can be reinstated — so there is no
+// transition matrix to enforce beyond validating the enum.
+func (s *PGStore) SetWorkCenterStatus(ctx context.Context, tenantID, id uuid.UUID, status string) error {
+	switch status {
+	case WorkCenterStatusActive, WorkCenterStatusMaintenance, WorkCenterStatusRetired:
+	default:
+		return fmt.Errorf("%w: invalid work center status %q", ErrInvalidInput, status)
+	}
+	if tenantID == uuid.Nil || id == uuid.Nil {
+		return errors.New("manufacturing: tenant id and work center id required")
+	}
+	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`UPDATE work_centers SET status = $3, updated_at = $4
+			  WHERE tenant_id = $1 AND id = $2`,
+			tenantID, id, status, s.now(),
+		)
+		if err != nil {
+			return fmt.Errorf("manufacturing: update work center status: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrWorkCenterNotFound
+		}
+		return nil
+	})
+}
+
+const workCenterSelectColumns = `SELECT tenant_id, id, name, capacity_per_hour, operating_hours_per_day,
+        efficiency_percent, status, COALESCE(notes, ''),
+        COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid),
+        created_at, updated_at`
+
+func scanWorkCenter(r pgxScanner, wc *WorkCenter) error {
+	if err := r.Scan(
+		&wc.TenantID, &wc.ID, &wc.Name, &wc.CapacityPerHour, &wc.OperatingHoursPerDay,
+		&wc.EfficiencyPercent, &wc.Status, &wc.Notes, &wc.CreatedBy, &wc.CreatedAt, &wc.UpdatedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrWorkCenterNotFound
+		}
+		return fmt.Errorf("manufacturing: scan work center: %w", err)
+	}
+	return nil
+}
+
+// ===========================================================================
+// Routings (Stream 2 — manufacturing depth)
+// ===========================================================================
+
+// RoutingOperationInput is one step on a CreateRouting call. Sequence
+// is derived from the array position (1-based) — the store assigns it,
+// mirroring the BOM-component contract — so the input intentionally
+// omits a sequence field.
+type RoutingOperationInput struct {
+	OperationName    string
+	WorkCenterID     uuid.UUID
+	SetupTimeMinutes decimal.Decimal
+	CycleTimeMinutes decimal.Decimal
+	Description      string
+}
+
+// CreateRoutingInput is the canonical input for CreateRouting.
+type CreateRoutingInput struct {
+	ItemID     uuid.UUID
+	Version    string
+	Notes      string
+	Operations []RoutingOperationInput
+	// Activate, when true, flips the freshly-created routing from
+	// draft to active in the same transaction (auto-demoting any
+	// previously-active routing for the item), the same convenience
+	// CreateBOM offers.
+	Activate bool
+}
+
+// CreateRouting inserts a routing and its operations. The operation
+// order in the input slice IS the routing's execution order — the
+// store assigns sequence = (index + 1). A routing with zero operations
+// is rejected (ErrRoutingHasNoOperations) because it would generate no
+// job cards and carry no capacity load.
+func (s *PGStore) CreateRouting(ctx context.Context, tenantID, actorID uuid.UUID, in CreateRoutingInput) (*Routing, error) {
+	if tenantID == uuid.Nil {
+		return nil, errors.New("manufacturing: tenant id required")
+	}
+	if in.ItemID == uuid.Nil {
+		return nil, fmt.Errorf("%w: item_id required", ErrInvalidInput)
+	}
+	if in.Version == "" {
+		return nil, fmt.Errorf("%w: version required", ErrInvalidInput)
+	}
+	if len(in.Operations) == 0 {
+		return nil, ErrRoutingHasNoOperations
+	}
+	for i, op := range in.Operations {
+		if op.OperationName == "" {
+			return nil, fmt.Errorf("%w: operation %d missing operation_name", ErrInvalidInput, i+1)
+		}
+		if op.WorkCenterID == uuid.Nil {
+			return nil, fmt.Errorf("%w: operation %d missing work_center_id", ErrInvalidInput, i+1)
+		}
+		if op.SetupTimeMinutes.IsNegative() || op.CycleTimeMinutes.IsNegative() {
+			return nil, fmt.Errorf("%w: operation %d times must be >= 0", ErrInvalidInput, i+1)
+		}
+	}
+
+	now := s.now()
+	routing := &Routing{
+		TenantID:  tenantID,
+		ID:        uuid.New(),
+		ItemID:    in.ItemID,
+		Version:   in.Version,
+		Status:    RoutingStatusDraft,
+		Notes:     in.Notes,
+		CreatedBy: actorID,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO routings
+			     (tenant_id, id, item_id, version, status, notes, created_by, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`,
+			routing.TenantID, routing.ID, routing.ItemID, routing.Version, routing.Status,
+			nullableString(routing.Notes), nullableUUID(routing.CreatedBy), routing.CreatedAt,
+		); err != nil {
+			if isUniqueViolation(err) {
+				return fmt.Errorf("%w: routing version %q already exists for item", ErrInvalidInput, routing.Version)
+			}
+			return fmt.Errorf("manufacturing: insert routing: %w", err)
+		}
+		for i, op := range in.Operations {
+			seq := i + 1
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO routing_operations
+				     (tenant_id, routing_id, sequence, operation_name, work_center_id,
+				      setup_time_minutes, cycle_time_minutes, description)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+				tenantID, routing.ID, seq, op.OperationName, op.WorkCenterID,
+				op.SetupTimeMinutes, op.CycleTimeMinutes, nullableString(op.Description),
+			); err != nil {
+				if isForeignKeyViolation(err) {
+					return fmt.Errorf("%w: operation %d references a work center that does not exist", ErrInvalidInput, seq)
+				}
+				return fmt.Errorf("manufacturing: insert routing operation %d: %w", seq, err)
+			}
+			routing.Operations = append(routing.Operations, RoutingOperation{
+				RoutingID:        routing.ID,
+				Sequence:         seq,
+				OperationName:    op.OperationName,
+				WorkCenterID:     op.WorkCenterID,
+				SetupTimeMinutes: op.SetupTimeMinutes,
+				CycleTimeMinutes: op.CycleTimeMinutes,
+				Description:      op.Description,
+			})
+		}
+		if in.Activate {
+			if err := activateRoutingInTx(ctx, tx, tenantID, routing.ID, routing.ItemID, s.now); err != nil {
+				return err
+			}
+			routing.Status = RoutingStatusActive
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return routing, nil
+}
+
+// activateRoutingInTx serialises routing activations against the
+// routings_active_per_item_uniq invariant inside an existing
+// transaction, mirroring activateBOMInTx. The advisory lock is keyed
+// on a "routing:" prefix so it can't collide with the BOM activation
+// lock for the same (tenant, item).
+func activateRoutingInTx(ctx context.Context, tx pgx.Tx, tenantID, routingID, itemID uuid.UUID, now func() time.Time) error {
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(
+		            hashtextextended('routing:' || $1::text || ':' || $2::text, 0))`,
+		tenantID, itemID,
+	); err != nil {
+		return fmt.Errorf("manufacturing: acquire routing activation lock: %w", err)
+	}
+	ts := now()
+	if _, err := tx.Exec(ctx,
+		`UPDATE routings
+		    SET status = 'obsolete', updated_at = $3
+		  WHERE tenant_id = $1 AND item_id = $2
+		    AND status = 'active' AND id <> $4`,
+		tenantID, itemID, ts, routingID,
+	); err != nil {
+		return fmt.Errorf("manufacturing: demote previous active routing: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE routings SET status = 'active', updated_at = $3
+		  WHERE tenant_id = $1 AND id = $2`,
+		tenantID, routingID, ts,
+	); err != nil {
+		return fmt.Errorf("manufacturing: update routing status: %w", err)
+	}
+	return nil
+}
+
+// GetRouting fetches a routing and its operations.
+func (s *PGStore) GetRouting(ctx context.Context, tenantID, id uuid.UUID) (*Routing, error) {
+	if tenantID == uuid.Nil || id == uuid.Nil {
+		return nil, errors.New("manufacturing: tenant id and routing id required")
+	}
+	var routing Routing
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := scanRouting(tx.QueryRow(ctx, routingSelectColumns+
+			` FROM routings WHERE tenant_id = $1 AND id = $2`, tenantID, id), &routing); err != nil {
+			return err
+		}
+		ops, err := loadRoutingOperations(ctx, tx, tenantID, id)
+		if err != nil {
+			return err
+		}
+		routing.Operations = ops
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &routing, nil
+}
+
+// ListRoutings returns routing headers for a tenant, optionally
+// filtered by status. Operations are NOT loaded; callers that need the
+// steps follow up with GetRouting.
+func (s *PGStore) ListRoutings(ctx context.Context, tenantID uuid.UUID, status string) ([]Routing, error) {
+	if tenantID == uuid.Nil {
+		return nil, errors.New("manufacturing: tenant id required")
+	}
+	out := make([]Routing, 0)
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		q := routingSelectColumns + ` FROM routings WHERE tenant_id = $1`
+		args := []any{tenantID}
+		if status != "" {
+			q += " AND status = $2"
+			args = append(args, status)
+		}
+		q += " ORDER BY item_id, version"
+		rows, err := tx.Query(ctx, q, args...)
+		if err != nil {
+			return fmt.Errorf("manufacturing: list routings: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r Routing
+			if err := scanRouting(rows, &r); err != nil {
+				return err
+			}
+			out = append(out, r)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+// SetRoutingStatus transitions a routing between draft / active /
+// obsolete. Activating auto-demotes any other active routing for the
+// same item (so routings_active_per_item_uniq never collides) and
+// requires the routing to have at least one operation. Illegal
+// transitions return ErrRoutingInvalidTransition.
+func (s *PGStore) SetRoutingStatus(ctx context.Context, tenantID, id uuid.UUID, status string) error {
+	switch status {
+	case RoutingStatusDraft, RoutingStatusActive, RoutingStatusObsolete:
+	default:
+		return fmt.Errorf("%w: invalid routing status %q", ErrInvalidInput, status)
+	}
+	if tenantID == uuid.Nil || id == uuid.Nil {
+		return errors.New("manufacturing: tenant id and routing id required")
+	}
+	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var current Routing
+		if err := scanRouting(tx.QueryRow(ctx, routingSelectColumns+
+			` FROM routings WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, tenantID, id), &current); err != nil {
+			return err
+		}
+		if !current.CanTransitionTo(status) {
+			return fmt.Errorf("%w: %s → %s", ErrRoutingInvalidTransition, current.Status, status)
+		}
+		if current.Status == status {
+			return nil
+		}
+		if status == RoutingStatusActive {
+			var opCount int
+			if err := tx.QueryRow(ctx,
+				`SELECT count(*) FROM routing_operations WHERE tenant_id = $1 AND routing_id = $2`,
+				tenantID, id,
+			).Scan(&opCount); err != nil {
+				return fmt.Errorf("manufacturing: count routing operations: %w", err)
+			}
+			if opCount == 0 {
+				return ErrRoutingHasNoOperations
+			}
+			return activateRoutingInTx(ctx, tx, tenantID, id, current.ItemID, s.now)
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE routings SET status = $1, updated_at = $4 WHERE tenant_id = $2 AND id = $3`,
+			status, tenantID, id, s.now(),
+		); err != nil {
+			return fmt.Errorf("manufacturing: update routing status: %w", err)
+		}
+		return nil
+	})
+}
+
+// activeRoutingForItem returns the unique active routing for an item
+// with its operations loaded. Returns ErrRoutingNotActive when the item
+// has no active routing — ReleaseWorkOrder treats that as "BOM-only,
+// generate no job cards" rather than a hard error.
+func (s *PGStore) activeRoutingForItem(ctx context.Context, tx pgx.Tx, tenantID, itemID uuid.UUID) (*Routing, error) {
+	var routing Routing
+	if err := scanRouting(tx.QueryRow(ctx, routingSelectColumns+
+		` FROM routings WHERE tenant_id = $1 AND item_id = $2 AND status = 'active'`,
+		tenantID, itemID), &routing); err != nil {
+		if errors.Is(err, ErrRoutingNotFound) {
+			return nil, ErrRoutingNotActive
+		}
+		return nil, err
+	}
+	ops, err := loadRoutingOperations(ctx, tx, tenantID, routing.ID)
+	if err != nil {
+		return nil, err
+	}
+	routing.Operations = ops
+	return &routing, nil
+}
+
+// loadRoutingOperations reads a routing's operations ordered by
+// sequence. Shared between GetRouting and activeRoutingForItem.
+func loadRoutingOperations(ctx context.Context, tx pgx.Tx, tenantID, routingID uuid.UUID) ([]RoutingOperation, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT routing_id, sequence, operation_name, work_center_id,
+		        setup_time_minutes, cycle_time_minutes, COALESCE(description, '')
+		   FROM routing_operations
+		  WHERE tenant_id = $1 AND routing_id = $2
+		  ORDER BY sequence`,
+		tenantID, routingID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("manufacturing: select routing operations: %w", err)
+	}
+	defer rows.Close()
+	ops := make([]RoutingOperation, 0)
+	for rows.Next() {
+		var op RoutingOperation
+		if err := rows.Scan(&op.RoutingID, &op.Sequence, &op.OperationName, &op.WorkCenterID,
+			&op.SetupTimeMinutes, &op.CycleTimeMinutes, &op.Description); err != nil {
+			return nil, fmt.Errorf("manufacturing: scan routing operation: %w", err)
+		}
+		ops = append(ops, op)
+	}
+	return ops, rows.Err()
+}
+
+const routingSelectColumns = `SELECT tenant_id, id, item_id, version, status, COALESCE(notes, ''),
+        COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid),
+        created_at, updated_at`
+
+func scanRouting(r pgxScanner, routing *Routing) error {
+	if err := r.Scan(
+		&routing.TenantID, &routing.ID, &routing.ItemID, &routing.Version, &routing.Status,
+		&routing.Notes, &routing.CreatedBy, &routing.CreatedAt, &routing.UpdatedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrRoutingNotFound
+		}
+		return fmt.Errorf("manufacturing: scan routing: %w", err)
+	}
+	return nil
 }
