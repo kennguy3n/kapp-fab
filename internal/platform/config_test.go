@@ -8,6 +8,7 @@ import (
 
 func TestLoadConfig_CacheSizeDefaults(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 	// Clear cache-size env vars to verify defaults. t.Setenv to ""
 	// is functionally equivalent to Unsetenv for the getenvInt
 	// fallback path (empty string == use default) AND registers
@@ -34,6 +35,7 @@ func TestLoadConfig_CacheSizeDefaults(t *testing.T) {
 
 func TestLoadConfig_CacheSizeFromEnv(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 	t.Setenv("KAPP_KTYPE_CACHE_SIZE", "2048")
 	t.Setenv("KAPP_AUTHZ_CACHE_SIZE", "1024")
 	t.Setenv("KAPP_TENANT_CACHE_SIZE", "512")
@@ -55,6 +57,7 @@ func TestLoadConfig_CacheSizeFromEnv(t *testing.T) {
 
 func TestLoadConfig_CacheSizeInvalidFallsBackToDefault(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 	t.Setenv("KAPP_KTYPE_CACHE_SIZE", "not-a-number")
 	t.Setenv("KAPP_AUTHZ_CACHE_SIZE", "0")
 	t.Setenv("KAPP_TENANT_CACHE_SIZE", "-1")
@@ -105,6 +108,14 @@ func TestLoadConfig_RequireRedisGate(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DB_URL", "postgres://localhost/test")
+			// Pin the deployment posture to development so the
+			// RequireRedis default (which is gated on envIsNonDev)
+			// is deterministic regardless of any KAPP_ENV inherited
+			// from the caller's shell or CI runner. Without this, a
+			// leaked KAPP_ENV=staging would flip the unset/opt-out
+			// cases to RequireRedis=true and fail on missing
+			// REDIS_URL.
+			t.Setenv("KAPP_ENV", "")
 			t.Setenv("KAPP_REQUIRE_REDIS", tc.requireRedis)
 			t.Setenv("REDIS_URL", tc.redisURL)
 			cfg, err := LoadConfig()
@@ -210,6 +221,7 @@ func TestLoadConfig_MarketplaceBundleStrictDefault(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DB_URL", "postgres://localhost/test")
+			t.Setenv("KAPP_ENV", "")
 			t.Setenv("KAPP_REQUIRE_MARKETPLACE_BUNDLE_DIR", tc.requireFlag)
 			t.Setenv("KAPP_ALLOW_MARKETPLACE_BUNDLE_MEMORY", tc.allowFlag)
 			t.Setenv("KAPP_MARKETPLACE_BUNDLE_URL_BASE", tc.urlBase)
@@ -265,6 +277,7 @@ func TestLoadConfig_EnvAndLogDefaults(t *testing.T) {
 // output for weeks before noticing). LoadConfig surfaces it at boot.
 func TestLoadConfig_ValidateLogFormat(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 
 	cases := []struct {
 		name    string
@@ -300,6 +313,7 @@ func TestLoadConfig_ValidateLogFormat(t *testing.T) {
 // fallback to info would mask a debug-mode-in-production attempt.
 func TestLoadConfig_ValidateLogLevel(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 
 	cases := []struct {
 		name    string
@@ -335,6 +349,7 @@ func TestLoadConfig_ValidateLogLevel(t *testing.T) {
 // where a refactor of getenvInt accidentally accepts zero.
 func TestLoadConfig_ValidateCachePositive(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 	// All cache-size env vars cleared so they fall back to safe
 	// defaults; Validate should pass cleanly. Use t.Setenv to
 	// register cleanup with the test framework rather than
@@ -360,6 +375,7 @@ func TestLoadConfig_ValidateCachePositive(t *testing.T) {
 
 func TestLoadConfig_SecretsAndJWTDefaults(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 	for _, k := range []string{
 		"KAPP_SECRET_PROVIDER",
 		"KAPP_SECRETS_ENV_PREFIX",
@@ -416,6 +432,7 @@ func TestLoadConfig_SecretsAndJWTDefaults(t *testing.T) {
 
 func TestLoadConfig_SecretsAndJWTFromEnv(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 	t.Setenv("KAPP_SECRET_PROVIDER", "vault")
 	t.Setenv("KAPP_SECRETS_VAULT_ADDR", "https://vault.example.com")
 	t.Setenv("KAPP_SECRETS_VAULT_TOKEN", "test-token")
@@ -527,6 +544,7 @@ func TestGetenvDurationAllowZero(t *testing.T) {
 // allow-zero helper this would silently upgrade.
 func TestLoadConfig_JWTLeewayZeroHonoured(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
+	t.Setenv("KAPP_ENV", "")
 	t.Setenv("KAPP_JWT_LEEWAY", "0s")
 	cfg, err := LoadConfig()
 	if err != nil {
