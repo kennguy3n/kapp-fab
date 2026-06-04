@@ -409,13 +409,27 @@ const maxDrainPerTick = 500
 // only invoked when provisioning is enabled and a provisioner is wired.
 // Every provider interaction is best-effort: failures are logged and
 // the loop continues so one bad cell cannot wedge the others.
+//
+// snapshots is shared (and mutated) across every drain in the tick: as a
+// drain places tenants on a sibling, that sibling's TenantCount in
+// snapshots is bumped so a later drain in the same region sees the
+// reduced headroom and cannot collectively overfill it past max_tenants.
+// draining holds every cell scheduled for teardown this tick so none of
+// them is ever chosen as a drain target (a cell being deprovisioned must
+// not receive tenants, even if its stale snapshot still shows capacity).
 func (e *AutoscaleEngine) actuate(ctx context.Context, snapshots []CellSnapshot, decisions []Decision) {
+	draining := make(map[string]bool, len(decisions))
+	for i := range decisions {
+		if decisions[i].EventType == CellEventScaleDown {
+			draining[decisions[i].CellID] = true
+		}
+	}
 	for i := range decisions {
 		switch decisions[i].EventType {
 		case CellEventScaleUp:
 			e.provisionForScaleUp(ctx, decisions[i])
 		case CellEventScaleDown:
-			e.drainAndDeprovision(ctx, decisions[i], snapshots)
+			e.drainAndDeprovision(ctx, decisions[i], snapshots, draining)
 		}
 	}
 }
@@ -437,7 +451,7 @@ func (e *AutoscaleEngine) provisionForScaleUp(ctx context.Context, d Decision) {
 // drainAndDeprovision empties a cell of its tenants (migrating them onto
 // sibling cells in the same region) and then deprovisions it. A cell is
 // only torn down once it is empty, so tenants are never stranded.
-func (e *AutoscaleEngine) drainAndDeprovision(ctx context.Context, d Decision, snapshots []CellSnapshot) {
+func (e *AutoscaleEngine) drainAndDeprovision(ctx context.Context, d Decision, snapshots []CellSnapshot, draining map[string]bool) {
 	// The implicit 'default' cell is never deprovisioned: legacy and
 	// NULL-cell tenants are accounted to it and it is the placement of
 	// last resort.
@@ -451,7 +465,7 @@ func (e *AutoscaleEngine) drainAndDeprovision(ctx context.Context, d Decision, s
 				"cell_id", d.CellID, "tenants", d.Snapshot.TenantCount)
 			return
 		}
-		drained, err := e.drainCell(ctx, d, snapshots)
+		drained, err := e.drainCell(ctx, d, snapshots, draining)
 		if err != nil {
 			e.logger.Error("autoscale: drain cell", "cell_id", d.CellID, "err", err)
 			return
@@ -470,19 +484,22 @@ func (e *AutoscaleEngine) drainAndDeprovision(ctx context.Context, d Decision, s
 }
 
 // drainTarget is a candidate destination cell with its remaining
-// headroom, mutated as tenants are assigned to it within one tick so we
-// never overfill a target.
+// headroom. remaining is mutated as tenants are assigned to it so we
+// never overfill a target; snap points back into the shared snapshots
+// slice so the same placement is reflected for any other cell drained
+// later in the same tick (see actuate).
 type drainTarget struct {
 	id        string
 	remaining int
+	snap      *CellSnapshot
 }
 
 // drainCell migrates every tenant off d.CellID onto sibling cells in the
 // same region, returning true when the cell ends up empty. It returns
 // false (no error) when there is insufficient sibling capacity — the
 // caller then declines to deprovision so no tenant is stranded.
-func (e *AutoscaleEngine) drainCell(ctx context.Context, d Decision, snapshots []CellSnapshot) (bool, error) {
-	targets := e.drainTargets(d, snapshots)
+func (e *AutoscaleEngine) drainCell(ctx context.Context, d Decision, snapshots []CellSnapshot, draining map[string]bool) (bool, error) {
+	targets := e.drainTargets(d, snapshots, draining)
 	if len(targets) == 0 {
 		return false, nil
 	}
@@ -509,6 +526,11 @@ func (e *AutoscaleEngine) drainCell(ctx context.Context, d Decision, snapshots [
 			return false, err
 		}
 		tgt.remaining--
+		// Reflect the placement in the shared snapshot so a later drain
+		// in this same tick sees the reduced headroom on this target.
+		if tgt.snap != nil {
+			tgt.snap.TenantCount++
+		}
 		migrated++
 	}
 	return true, nil
@@ -519,11 +541,16 @@ func (e *AutoscaleEngine) drainCell(ctx context.Context, d Decision, snapshots [
 // Cross-region moves are deliberately excluded — relocating a tenant to
 // another region changes its data residency and must be an explicit
 // operator decision, never an automatic side effect of autoscaling.
-func (e *AutoscaleEngine) drainTargets(d Decision, snapshots []CellSnapshot) []*drainTarget {
+func (e *AutoscaleEngine) drainTargets(d Decision, snapshots []CellSnapshot, draining map[string]bool) []*drainTarget {
 	out := make([]*drainTarget, 0, len(snapshots))
 	for i := range snapshots {
 		s := &snapshots[i]
 		if s.ID == d.CellID || s.Region != d.Snapshot.Region {
+			continue
+		}
+		// A cell that is itself being torn down this tick must never
+		// receive tenants, even if its (stale) snapshot shows headroom.
+		if draining[s.ID] {
 			continue
 		}
 		capacity := s.MaxTenants
@@ -531,7 +558,7 @@ func (e *AutoscaleEngine) drainTargets(d Decision, snapshots []CellSnapshot) []*
 			capacity = e.policy.MaxTenantsPerCell
 		}
 		if remaining := capacity - s.TenantCount; remaining > 0 {
-			out = append(out, &drainTarget{id: s.ID, remaining: remaining})
+			out = append(out, &drainTarget{id: s.ID, remaining: remaining, snap: s})
 		}
 	}
 	return out

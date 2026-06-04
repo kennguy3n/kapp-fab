@@ -54,7 +54,7 @@ func TestDrainAndDeprovision_EmptyCell(t *testing.T) {
 	prov := &fakeProvisioner{}
 	e := newActuateEngine(prov)
 	d := Decision{CellID: "c-empty", EventType: CellEventScaleDown, Snapshot: CellSnapshot{ID: "c-empty", TenantCount: 0}}
-	e.drainAndDeprovision(context.Background(), d, nil)
+	e.drainAndDeprovision(context.Background(), d, nil, nil)
 	if len(prov.deprovisioned) != 1 || prov.deprovisioned[0] != "c-empty" {
 		t.Fatalf("empty cell should deprovision directly, got %v", prov.deprovisioned)
 	}
@@ -64,7 +64,7 @@ func TestDrainAndDeprovision_SkipsDefaultCell(t *testing.T) {
 	prov := &fakeProvisioner{}
 	e := newActuateEngine(prov)
 	d := Decision{CellID: DefaultCellID, EventType: CellEventScaleDown, Snapshot: CellSnapshot{ID: DefaultCellID, TenantCount: 0}}
-	e.drainAndDeprovision(context.Background(), d, nil)
+	e.drainAndDeprovision(context.Background(), d, nil, nil)
 	if len(prov.deprovisioned) != 0 {
 		t.Fatalf("default cell must never be deprovisioned, got %v", prov.deprovisioned)
 	}
@@ -75,7 +75,7 @@ func TestDrainAndDeprovision_NonEmptyNoRebalancer(t *testing.T) {
 	// No rebalancer wired: a populated cell must NOT be torn down.
 	e := NewAutoscaleEngine(nil, DefaultAutoscalePolicy(), nil).WithProvisioning(prov, nil, true)
 	d := Decision{CellID: "c-busy", EventType: CellEventScaleDown, Snapshot: CellSnapshot{ID: "c-busy", TenantCount: 5}}
-	e.drainAndDeprovision(context.Background(), d, nil)
+	e.drainAndDeprovision(context.Background(), d, nil, nil)
 	if len(prov.deprovisioned) != 0 {
 		t.Fatalf("non-empty cell without rebalancer must not deprovision, got %v", prov.deprovisioned)
 	}
@@ -90,7 +90,7 @@ func TestDrainTargets_SameRegionWithHeadroom(t *testing.T) {
 		{ID: "sibling-full", Region: "eu-west-1", MaxTenants: 1000, TenantCount: 1000},
 		{ID: "other-region", Region: "us-east-1", MaxTenants: 1000, TenantCount: 0},
 	}
-	targets := e.drainTargets(d, snapshots)
+	targets := e.drainTargets(d, snapshots, nil)
 	if len(targets) != 1 {
 		t.Fatalf("want exactly 1 target (same region, has headroom), got %d: %+v", len(targets), targets)
 	}
@@ -99,6 +99,53 @@ func TestDrainTargets_SameRegionWithHeadroom(t *testing.T) {
 	}
 	if targets[0].remaining != 800 {
 		t.Errorf("remaining = %d, want 800", targets[0].remaining)
+	}
+}
+
+func TestDrainTargets_ExcludesCellsBeingTornDown(t *testing.T) {
+	// A sibling that is itself scheduled for scale_down this tick must
+	// never be offered as a drain target, even with ample headroom.
+	e := NewAutoscaleEngine(nil, DefaultAutoscalePolicy(), nil)
+	d := Decision{CellID: "src", Snapshot: CellSnapshot{ID: "src", Region: "eu-west-1"}}
+	snapshots := []CellSnapshot{
+		{ID: "src", Region: "eu-west-1", MaxTenants: 1000, TenantCount: 50},
+		{ID: "sibling-draining", Region: "eu-west-1", MaxTenants: 1000, TenantCount: 0},
+		{ID: "sibling-ok", Region: "eu-west-1", MaxTenants: 1000, TenantCount: 0},
+	}
+	draining := map[string]bool{"src": true, "sibling-draining": true}
+	targets := e.drainTargets(d, snapshots, draining)
+	if len(targets) != 1 || targets[0].id != "sibling-ok" {
+		t.Fatalf("want only sibling-ok as target, got %+v", targets)
+	}
+}
+
+func TestDrainTargets_ReflectsPriorPlacementsSameTick(t *testing.T) {
+	// Simulates the cross-drain accounting actuate relies on: once a
+	// drain places tenants on a sibling (bumping its TenantCount in the
+	// shared snapshot), a later drain must see the reduced headroom so
+	// the two drains cannot collectively overfill the sibling.
+	e := NewAutoscaleEngine(nil, DefaultAutoscalePolicy(), nil)
+	snapshots := []CellSnapshot{
+		{ID: "a", Region: "eu-west-1", MaxTenants: 1000, TenantCount: 0},
+		{ID: "b", Region: "eu-west-1", MaxTenants: 1000, TenantCount: 0},
+		{ID: "shared", Region: "eu-west-1", MaxTenants: 1000, TenantCount: 900},
+	}
+	da := Decision{CellID: "a", Snapshot: CellSnapshot{ID: "a", Region: "eu-west-1"}}
+	draining := map[string]bool{"a": true, "b": true}
+	tgtA := e.drainTargets(da, snapshots, draining)
+	if len(tgtA) != 1 || tgtA[0].id != "shared" || tgtA[0].remaining != 100 {
+		t.Fatalf("drain a: want shared remaining=100, got %+v", tgtA)
+	}
+	// Emulate a placing 100 tenants on shared (what drainCell does).
+	for i := 0; i < 100; i++ {
+		tgtA[0].remaining--
+		tgtA[0].snap.TenantCount++
+	}
+	// b now drains and must see shared as full (remaining 0 -> no target).
+	db := Decision{CellID: "b", Snapshot: CellSnapshot{ID: "b", Region: "eu-west-1"}}
+	tgtB := e.drainTargets(db, snapshots, draining)
+	if len(tgtB) != 0 {
+		t.Fatalf("drain b: shared is full, want no targets, got %+v", tgtB)
 	}
 }
 
