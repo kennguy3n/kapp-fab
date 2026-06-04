@@ -169,3 +169,14 @@ func TestSageConfigValidation(t *testing.T) {
 		t.Error("expected error when no credentials supplied")
 	}
 }
+
+func TestSageRejectsInvalidEntityName(t *testing.T) {
+	a := NewSageAdapter()
+	raw, _ := json.Marshal(SageConfig{
+		AccessToken: "sage-tok",
+		Entities:    []SageEntity{{Name: "../../other"}},
+	})
+	if _, err := a.Discover(context.Background(), raw); err == nil {
+		t.Error("expected error for path-traversal entity name")
+	}
+}

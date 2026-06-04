@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // This file holds the small amount of HTTP/OAuth2 plumbing shared by
@@ -86,12 +87,12 @@ func refreshOAuth2Token(ctx context.Context, client *http.Client, cfg oauth2Conf
 		return oauth2Token{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
+	body, err := readCappedBody(resp.Body)
 	if err != nil {
 		return oauth2Token{}, err
 	}
 	if resp.StatusCode >= 400 {
-		return oauth2Token{}, fmt.Errorf("oauth2: token refresh failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return oauth2Token{}, fmt.Errorf("oauth2: token refresh failed: HTTP %d: %s", resp.StatusCode, truncateBody(body))
 	}
 	var tok oauth2Token
 	if err := json.Unmarshal(body, &tok); err != nil {
@@ -124,7 +125,7 @@ func getJSON(ctx context.Context, client *http.Client, target, bearer string, he
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
+	body, err := readCappedBody(resp.Body)
 	if err != nil {
 		return err
 	}
@@ -137,16 +138,43 @@ func getJSON(ctx context.Context, client *http.Client, target, bearer string, he
 	return json.Unmarshal(body, out)
 }
 
+// maxResponseBytes caps how much of a response body the cloud adapters
+// buffer in memory. It guards against a misconfigured or hostile
+// endpoint (reachable when an operator overrides base_url/token_url)
+// streaming an unbounded body and exhausting memory; the 60s client
+// timeout only bounds time, not size.
+const maxResponseBytes = 64 << 20 // 64 MiB
+
+// readCappedBody reads at most maxResponseBytes from r, returning an
+// error rather than buffering an oversized body. It reads one byte past
+// the cap so an exactly-at-limit body is still accepted.
+func readCappedBody(r io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxResponseBytes {
+		return nil, fmt.Errorf("response body exceeds %d byte limit", maxResponseBytes)
+	}
+	return body, nil
+}
+
 // truncateBody bounds an error-path response body so a multi-megabyte
 // HTML error page from a misconfigured gateway does not end up in a
 // job's error blob verbatim.
 func truncateBody(b []byte) string {
 	const maxLen = 512
 	s := strings.TrimSpace(string(b))
-	if len(s) > maxLen {
-		return s[:maxLen] + "…"
+	if len(s) <= maxLen {
+		return s
 	}
-	return s
+	// Back off to a UTF-8 rune boundary so a multi-byte character is not
+	// split mid-sequence, which would leave an invalid trailing byte.
+	cut := maxLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 // mergeFieldMaps layers per-entity operator overrides on top of an

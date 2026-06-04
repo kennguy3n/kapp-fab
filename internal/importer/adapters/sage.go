@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"time"
 
 	"github.com/kennguy3n/kapp-fab/internal/importer"
@@ -80,6 +81,13 @@ type sageList struct {
 // sageEntityIDField names the source-id field per entity; Sage uses a
 // stable string "id" on every resource.
 const sageEntityIDField = "id"
+
+// sageEntityName validates an entity name before it is used as a URL
+// path segment (joinURL(baseURL, entity)). Sage resource collections
+// are lowercase snake_case (contacts, sales_invoices, …); restricting
+// to [a-z_]+ rejects path traversal ("../") or stray query characters,
+// matching the validation the QuickBooks and Xero adapters already do.
+var sageEntityName = regexp.MustCompile(`^[a-z_]+$`)
 
 // SageAdapter mirrors collections from a Sage Business Cloud Accounting
 // company into the importer staging table.
@@ -225,6 +233,11 @@ func (a *SageAdapter) loadConfig(raw json.RawMessage) (SageConfig, error) {
 	}
 	if len(cfg.Entities) == 0 {
 		cfg.Entities = defaultSageEntities()
+	}
+	for _, ent := range cfg.Entities {
+		if !sageEntityName.MatchString(ent.Name) {
+			return cfg, fmt.Errorf("sage: invalid entity name %q (expected lowercase snake_case)", ent.Name)
+		}
 	}
 	return cfg, nil
 }
