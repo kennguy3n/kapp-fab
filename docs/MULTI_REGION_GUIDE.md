@@ -182,6 +182,39 @@ moved across a region boundary automatically (that would change their
 data residency; see §4). Draining is capped per tick (`maxDrainPerTick`)
 and resumes on subsequent ticks.
 
+When several cells in the **same region** scale_down in one tick, capacity
+accounting is shared across all of their drains: as one drain places
+tenants on a sibling, that sibling's headroom is decremented for the
+remaining drains, so two concurrent drains can never collectively push a
+sibling past its `max_tenants`. A cell that is itself being torn down this
+tick is also excluded as a drain target, so tenants are never moved onto a
+cell that is about to be deprovisioned.
+
+### 3.5 Who owns the `cells.status` lifecycle
+
+The persisted `cells.status` column (`active` → `provisioning` /
+`draining` → `deprovisioned`) is owned by the **provisioner / cell-row
+manager**, not the autoscaler. The autoscaler deliberately does **not**
+write `cells.status` during a drain, for two reasons:
+
+- The snapshot query only evaluates `active` cells. If the autoscaler
+  flipped a cell to `draining` mid-flight, a drain that is deferred to a
+  later tick (because of `maxDrainPerTick` or temporary capacity
+  shortage) would never be re-evaluated and its remaining tenants would
+  be stranded. Leaving the row `active` until teardown completes keeps the
+  drain resumable.
+- With the `noop` provisioner (dry-run mode) nothing is actually torn
+  down, so writing a lifecycle transition would mutate real control-plane
+  state during what is meant to be an observe-only run.
+
+A real `script` / `webhook` provisioner therefore transitions the row
+(`draining` once it starts emptying a cell, `deprovisioned` once teardown
+succeeds) as part of its infrastructure work — at which point the next
+tick's `status = 'active'` filter naturally stops evaluating it and the
+cell-router stops placing new tenants on it. Within a single tick the
+autoscaler's in-memory `draining` set (above) provides the same guarantee
+for drain-target selection without depending on a DB write landing first.
+
 ---
 
 ## 4. Data residency: region assignment at signup
@@ -388,10 +421,17 @@ provisioner:
   JSON (including `endpoint`) on its last stdout line.
 - **`webhook`** — a small service receives the POST and triggers a
   Terraform Cloud / Atlantis run, then returns the cell JSON.
+- **`noop`** — the default dry-run: it logs a synthetic cell and inserts
+  **nothing**. Because no row is created and no load is shed, an
+  overloaded cell keeps tripping the threshold; the per-cell cooldown
+  (`MinHoldBetweenScales`, default 10 min) bounds how often that repeats,
+  so you get a periodic decision in the logs (every ~10 min while the cell
+  stays hot), not a burst every tick. This is expected for a dry run —
+  switch to `script`/`webhook` to actually add capacity.
 
-Either way, the provisioner is responsible for **inserting the new cell
-row** into the `cells` table so the next autoscaler tick (and the
-cell-router) can see it.
+For `script`/`webhook`, the provisioner is responsible for **inserting the
+new cell row** into the `cells` table (and maintaining its `status`; see
+§3.5) so the next autoscaler tick (and the cell-router) can see it.
 
 ---
 
