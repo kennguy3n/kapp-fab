@@ -34,10 +34,13 @@
 # parse error.
 
 {$KAPP_DOMAIN:localhost} {
-	# Negotiate response compression. zstd is preferred by clients
-	# that advertise it; gzip is the universal fallback. Caddy skips
+	# Negotiate response compression. The encoder order is the server's
+	# preference when a client advertises several with equal q-values
+	# (modern browsers send `gzip, zstd` with no weights), so zstd is
+	# listed first to prefer its better ratio / faster decode; gzip is
+	# the universal fallback for older clients. Caddy skips
 	# already-compressed content types (images, video) automatically.
-	encode gzip zstd
+	encode zstd gzip
 
 	# Vite emits content-hashed bundles under /assets/ (e.g.
 	# index-a1b2c3d4.js). The hash IS the cache key, so these can be
@@ -46,16 +49,25 @@
 	@assets path /assets/*
 	header @assets Cache-Control "public, max-age=31536000, immutable"
 
-	# The SPA shell (index.html, served at /) must revalidate on every
-	# navigation so a new deploy — which rewrites index.html to point at
-	# the new hashed bundles — is picked up immediately instead of being
-	# pinned by a stale cached document.
-	header / Cache-Control "no-cache"
+	# The SPA shell must revalidate on every navigation so a new deploy —
+	# which rewrites index.html to point at the new hashed bundles — is
+	# picked up immediately instead of being pinned by a stale cached
+	# document. The shell is served not just at `/` but for every client
+	# routed deep-link (e.g. /dashboard, /settings) via the SPA fallback,
+	# so the matcher must cover all of those. We express it as "anything
+	# that is not a hashed asset and not the API": a bare `header /` would
+	# be an EXACT match on the root path only (Caddy treats a path with no
+	# wildcard as exact), leaving deep-links with no edge cache policy.
+	@spa {
+		not path /assets/*
+		not path /api/*
+	}
+	header @spa Cache-Control "no-cache"
 
 	# Everything (SPA shell, hashed assets, and the dynamic /api/v1
 	# surface) is proxied to the origin. The origin sets no-store on
 	# /api/v1 responses (tenant-scoped, RLS-isolated — must never be
-	# cached); Caddy leaves those headers untouched because the matchers
-	# above only cover /assets/* and the exact / path.
+	# cached); the @spa matcher deliberately excludes /api/* so Caddy
+	# never weakens that no-store to no-cache at the edge.
 	reverse_proxy api:8080
 }

@@ -346,17 +346,20 @@ services:
     <<: *production
     image: caddy:2-alpine
     # Automatic HTTPS via Let's Encrypt. Caddy obtains and renews the
-    # certificate for ${KAPP_DOMAIN}; ${ACME_EMAIL} receives expiry
-    # notices. The previous inline `caddy reverse-proxy` command is
-    # replaced by the committed Caddyfile.prod (mounted read-only below)
-    # so the edge can also set per-path Cache-Control headers and
-    # negotiate gzip/zstd compression. The caddy:2-alpine entrypoint
-    # runs `caddy run --config /etc/caddy/Caddyfile` by default, so no
+    # certificate for ${KAPP_DOMAIN} with no further configuration. The
+    # previous inline `caddy reverse-proxy` command is replaced by the
+    # committed Caddyfile.prod (mounted read-only below) so the edge can
+    # also set per-path Cache-Control headers and negotiate gzip/zstd
+    # compression. The caddy:2-alpine entrypoint runs
+    # `caddy run --config /etc/caddy/Caddyfile` by default, so no
     # explicit command is needed once the Caddyfile is in place.
+    #
+    # To receive certificate-expiry notices, add a global `email` block
+    # to Caddyfile.prod (see its header comment) — it is intentionally
+    # not wired through an env var because an empty value is a Caddyfile
+    # parse error in the localhost / internal-CA case.
     environment:
-      ACME_AGREE: "true"
-      ACME_EMAIL: ${ACME_EMAIL:-}
-      # Consumed by Caddyfile.prod via {$KAPP_DOMAIN} / {$ACME_EMAIL}.
+      # The only value Caddyfile.prod consumes: it is the site address.
       KAPP_DOMAIN: ${KAPP_DOMAIN:-localhost}
     ports:
       - "80:80"
@@ -377,8 +380,10 @@ services:
       # Caddy is perfectly healthy. curl without -L treats the 308 as a
       # successful response (-f only fails on >=400), and when the domain is
       # localhost the proxied 200 passes the same check. curl ships in
-      # caddy:2-alpine; the admin API is not enabled in reverse-proxy mode,
-      # so the public listener is the right liveness signal.
+      # caddy:2-alpine. We probe the public :80 listener rather than the
+      # admin API (localhost:2019, enabled by default in Caddyfile mode)
+      # because only the public listener proves the site is actually
+      # serving end to end.
       test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:80 || exit 1"]
       interval: 30s
       timeout: 5s
