@@ -93,17 +93,18 @@ var TenantScopedTables = []string{
 	// Manufacturing (Phase N6)
 	"boms",
 	"bom_components",
-	"work_orders",
-	// Manufacturing depth (Stream 2) — routings, operations, work
-	// centers, and shop-floor job cards. Ordered so FKs resolve on
-	// restore: work_centers and routings have no FK to the others;
-	// routing_operations FKs (tenant_id, routing_id) so routings must
-	// land first; job_cards FKs work_orders (already listed above) and
-	// references routings. routing_operations has the non-standard PK
+	// Manufacturing depth (Stream 2). Ordering is FK-driven for restore:
+	// work_orders.routing_id FKs routings (work_orders_routing_fk,
+	// migration 000080), so work_centers / routings / routing_operations
+	// must all land BEFORE work_orders. routing_operations FKs both
+	// routings (tenant_id, routing_id) and work_centers, so it follows
+	// them. job_cards FKs work_orders and work_centers, so it comes after
+	// work_orders. routing_operations has the non-standard PK
 	// (tenant_id, routing_id, sequence) — declared in tableConflictKeys.
 	"work_centers",
 	"routings",
 	"routing_operations",
+	"work_orders",
 	"job_cards",
 	// HR / LMS
 	"leave_ledger",

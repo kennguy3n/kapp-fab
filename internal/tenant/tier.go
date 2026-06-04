@@ -48,8 +48,11 @@ var TenantScopedTables = []string{
 	"tax_codes", "cost_centers", "bank_accounts", "bank_transactions",
 	"budgets", "budget_lines",
 	"inventory_warehouses", "inventory_items", "inventory_batches", "inventory_moves",
-	"boms", "bom_components", "work_orders",
-	"work_centers", "routings", "routing_operations", "job_cards",
+	"boms", "bom_components",
+	// work_centers/routings/routing_operations precede work_orders:
+	// work_orders.routing_id FKs routings (migration 000080). job_cards
+	// FKs work_orders + work_centers, so it trails them.
+	"work_centers", "routings", "routing_operations", "work_orders", "job_cards",
 	"leave_ledger", "lesson_progress",
 	"files", "base_tables", "base_rows", "docs_documents", "docs_document_versions",
 	"forms", "import_jobs", "import_staging",

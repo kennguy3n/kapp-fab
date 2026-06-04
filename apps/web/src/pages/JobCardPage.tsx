@@ -48,7 +48,14 @@ export function JobCardPage() {
   });
   const completeMut = useMutation({
     mutationFn: (id: string) => api.completeJobCard(id),
-    onSuccess: invalidateCards,
+    onSuccess: () => {
+      invalidateCards();
+      // Completing the last open card auto-completes the work order
+      // server-side, moving it out of released/in_progress. Refresh the
+      // selector queries so the finished order stops showing in the
+      // dropdown instead of lingering until the next background refetch.
+      qc.invalidateQueries({ queryKey: ["mfg", "work-orders"] });
+    },
   });
 
   return (
