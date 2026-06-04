@@ -166,7 +166,7 @@ func (a *XeroAdapter) Export(ctx context.Context, raw json.RawMessage, emit func
 		spec := xeroEntitySpecs[ent.Name]
 		mapping := mergeFieldMaps(defaultXeroFieldMap[ent.Name], cfg.ConceptMap[ent.Name])
 		err := a.eachRow(ctx, cfg, token, ent.Name, spec, false, func(row map[string]any) error {
-			sourceID, _ := row[spec.idField].(string)
+			sourceID := stringID(row[spec.idField])
 			return emit(importer.NormalizedRow{
 				Entity:   ent.Name,
 				SourceID: sourceID,

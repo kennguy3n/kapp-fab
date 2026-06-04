@@ -149,6 +149,40 @@ func TestXeroIfModifiedSinceHeader(t *testing.T) {
 	}
 }
 
+// TestXeroNotModifiedYieldsNoRows exercises the real incremental-sync
+// path: when nothing has changed since LastSyncAt, Xero answers the
+// If-Modified-Since request with HTTP 304 and an empty body. Export must
+// treat that as zero rows, not fail trying to decode an empty payload.
+func TestXeroNotModifiedYieldsNoRows(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-Modified-Since") == "" {
+			t.Errorf("expected If-Modified-Since header on incremental sync")
+		}
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv.Close()
+
+	cfg, _ := json.Marshal(XeroConfig{
+		BaseURL:      srv.URL,
+		XeroTenantID: "org-1",
+		AccessToken:  "xero-tok",
+		Entities:     []XeroEntity{{Name: "Contacts"}},
+		LastSyncAt:   time.Date(2024, 5, 6, 7, 8, 9, 0, time.UTC),
+	})
+	a := NewXeroAdapter().WithHTTPClient(srv.Client())
+
+	rows := 0
+	if err := a.Export(context.Background(), cfg, func(importer.NormalizedRow) error {
+		rows++
+		return nil
+	}); err != nil {
+		t.Fatalf("Export on 304: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("expected 0 rows on 304 Not Modified, got %d", rows)
+	}
+}
+
 func TestXeroRefreshTokenGrant(t *testing.T) {
 	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if user, _, ok := r.BasicAuth(); !ok || user != "cid" {

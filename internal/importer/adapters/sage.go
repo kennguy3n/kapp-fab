@@ -162,7 +162,7 @@ func (a *SageAdapter) Export(ctx context.Context, raw json.RawMessage, emit func
 				return fmt.Errorf("export %s: %w", ent.Name, err)
 			}
 			for _, row := range list.Items {
-				sourceID, _ := row[sageEntityIDField].(string)
+				sourceID := stringID(row[sageEntityIDField])
 				if err := emit(importer.NormalizedRow{
 					Entity:   ent.Name,
 					SourceID: sourceID,

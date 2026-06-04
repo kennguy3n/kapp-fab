@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -90,6 +91,44 @@ func TestOAuthTokenCacheSingleflight(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&grants); got != 1 {
 		t.Fatalf("expected exactly 1 token grant under concurrency, got %d", got)
+	}
+}
+
+// TestGetJSONNotModified verifies a 304 (Xero's "nothing changed" reply
+// to If-Modified-Since) is not treated as an error and leaves out
+// untouched rather than failing on an empty-body JSON decode.
+func TestGetJSONNotModified(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv.Close()
+
+	out := map[string]any{"sentinel": true}
+	if err := getJSON(context.Background(), srv.Client(), srv.URL, "tok", nil, &out); err != nil {
+		t.Fatalf("getJSON on 304: %v", err)
+	}
+	if out["sentinel"] != true {
+		t.Errorf("expected out untouched on 304, got %v", out)
+	}
+}
+
+// TestStringID checks identifier coercion handles string ids, numeric ids
+// (JSON numbers decode to float64), and missing/foreign types.
+func TestStringID(t *testing.T) {
+	cases := []struct {
+		in   any
+		want string
+	}{
+		{in: "abc", want: "abc"},
+		{in: float64(12345678), want: "12345678"},
+		{in: json.Number("42"), want: "42"},
+		{in: nil, want: ""},
+		{in: true, want: ""},
+	}
+	for _, c := range cases {
+		if got := stringID(c.in); got != c.want {
+			t.Errorf("stringID(%#v) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 

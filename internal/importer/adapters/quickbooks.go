@@ -180,7 +180,7 @@ func (a *QuickBooksAdapter) Export(ctx context.Context, raw json.RawMessage, emi
 				break
 			}
 			for _, row := range rows {
-				sourceID, _ := row["Id"].(string)
+				sourceID := stringID(row["Id"])
 				if err := emit(importer.NormalizedRow{
 					Entity:   ent.Name,
 					SourceID: sourceID,

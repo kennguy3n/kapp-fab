@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -309,7 +310,11 @@ func getJSON(ctx context.Context, client *http.Client, target, bearer string, he
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("GET %s: HTTP %d: %s", target, resp.StatusCode, truncateBody(body))
 	}
-	if out == nil {
+	// A 304 Not Modified (Xero's incremental-sync "nothing changed"
+	// response to If-Modified-Since) carries no body, as does any other
+	// empty success. Leaving out untouched lets the caller observe zero
+	// rows instead of failing on an "unexpected end of JSON input" decode.
+	if out == nil || resp.StatusCode == http.StatusNotModified || len(body) == 0 {
 		return nil
 	}
 	return json.Unmarshal(body, out)
@@ -368,6 +373,25 @@ func mergeFieldMaps(defaults, overrides map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// stringID coerces a source record's identifier to a string. The cloud
+// providers here all return string ids today, but json.Unmarshal into
+// map[string]any decodes a JSON number as float64, so a bare
+// `v.(string)` would silently yield "" for a numeric id and leave the
+// row with an empty SourceID — breaking reconciliation/dedup. Coercing
+// numbers keeps the id stable regardless of how the provider encodes it.
+func stringID(v any) string {
+	switch id := v.(type) {
+	case string:
+		return id
+	case json.Number:
+		return id.String()
+	case float64:
+		return strconv.FormatFloat(id, 'f', -1, 64)
+	default:
+		return ""
+	}
 }
 
 // defaultHTTPTimeout matches the Frappe adapter's 60s ceiling. Cloud
