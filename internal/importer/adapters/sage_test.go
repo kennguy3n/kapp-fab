@@ -137,6 +137,51 @@ func TestSageRefreshTokenGrantBodyCreds(t *testing.T) {
 	}
 }
 
+// TestSageSingleRefreshAcrossDiscoverExport guards BUG-0001 for Sage,
+// which (like QuickBooks) rotates the refresh token on every grant. A
+// second grant during Export with the original (now-stale) refresh token
+// would be rejected, so the adapter must reuse Discover's access token.
+func TestSageSingleRefreshAcrossDiscoverExport(t *testing.T) {
+	var tokenHits int
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenHits++
+		if r.FormValue("refresh_token") != "r1" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(oauth2Token{AccessToken: "sage-tok", RefreshToken: "r2", ExpiresIn: 3600})
+	}))
+	defer tokenSrv.Close()
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer sage-tok" {
+			t.Errorf("missing/incorrect bearer: %q", r.Header.Get("Authorization"))
+		}
+		_ = json.NewEncoder(w).Encode(sageList{Total: 1, Items: sageItems(1, 0)})
+	}))
+	defer apiSrv.Close()
+
+	cfg, _ := json.Marshal(SageConfig{
+		BaseURL:      apiSrv.URL,
+		RefreshToken: "r1",
+		ClientID:     "cid",
+		ClientSecret: "csecret",
+		TokenURL:     tokenSrv.URL,
+		Entities:     []SageEntity{{Name: "products"}},
+	})
+	a := NewSageAdapter().WithHTTPClient(apiSrv.Client())
+
+	if _, err := a.Discover(context.Background(), cfg); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if err := a.Export(context.Background(), cfg, func(importer.NormalizedRow) error { return nil }); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if tokenHits != 1 {
+		t.Errorf("token endpoint hit %d times, want 1 (Export should reuse Discover's token)", tokenHits)
+	}
+}
+
 func TestSageDeltaParam(t *testing.T) {
 	var sawSince bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -170,6 +170,63 @@ func TestQuickBooksRefreshTokenGrant(t *testing.T) {
 	}
 }
 
+// TestQuickBooksSingleRefreshAcrossDiscoverExport guards BUG-0001: the
+// pipeline drives Discover then Export on the same adapter instance with
+// the same refresh-token-only config. QuickBooks rotates the refresh
+// token on every grant, so a second grant with the now-stale token would
+// fail. The adapter must mint the access token once and reuse it.
+func TestQuickBooksSingleRefreshAcrossDiscoverExport(t *testing.T) {
+	var tokenHits int
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenHits++
+		if r.FormValue("refresh_token") != "refresh-abc" {
+			// A real provider would reject the rotated-away token; mimic
+			// that so a regression (double refresh) surfaces as a failure.
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(oauth2Token{
+			AccessToken:  "access-123",
+			RefreshToken: "refresh-rotated",
+			TokenType:    "bearer",
+			ExpiresIn:    3600,
+		})
+	}))
+	defer tokenSrv.Close()
+
+	apiSrv := qboServer(t, map[string][]map[string]any{"Item": {{"Id": "10", "Name": "Widget"}}})
+	defer apiSrv.Close()
+
+	cfg, _ := json.Marshal(QuickBooksConfig{
+		BaseURL:      apiSrv.URL,
+		RealmID:      "9999",
+		RefreshToken: "refresh-abc",
+		ClientID:     "client-id",
+		ClientSecret: "client-secret",
+		TokenURL:     tokenSrv.URL,
+		Entities:     []QuickBooksEntity{{Name: "Item"}},
+	})
+	a := NewQuickBooksAdapter().WithHTTPClient(apiSrv.Client())
+
+	if _, err := a.Discover(context.Background(), cfg); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	var rows int
+	if err := a.Export(context.Background(), cfg, func(importer.NormalizedRow) error {
+		rows++
+		return nil
+	}); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("exported %d rows, want 1", rows)
+	}
+	if tokenHits != 1 {
+		t.Errorf("token endpoint hit %d times, want 1 (Export should reuse Discover's token)", tokenHits)
+	}
+}
+
 func TestQuickBooksDeltaFilter(t *testing.T) {
 	var sawWhere bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

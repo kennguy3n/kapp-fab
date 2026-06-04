@@ -95,6 +95,7 @@ var xeroEntitySpecs = map[string]xeroEntitySpec{
 // importer staging table.
 type XeroAdapter struct {
 	client *http.Client
+	tokens oauthTokenCache
 }
 
 // NewXeroAdapter returns the Xero source adapter wired with a bounded
@@ -249,7 +250,7 @@ func (a *XeroAdapter) resolveToken(ctx context.Context, cfg XeroConfig) (token s
 	if cfg.AccessToken != "" {
 		return cfg.AccessToken, nil, nil
 	}
-	tok, err := refreshOAuth2Token(ctx, a.client, oauth2Config{
+	token, rotated, err := a.tokens.resolve(ctx, a.client, oauth2Config{
 		TokenURL:     a.tokenURL(cfg),
 		ClientID:     cfg.ClientID,
 		ClientSecret: cfg.ClientSecret,
@@ -259,10 +260,10 @@ func (a *XeroAdapter) resolveToken(ctx context.Context, cfg XeroConfig) (token s
 	if err != nil {
 		return "", nil, fmt.Errorf("xero: %w", err)
 	}
-	if tok.RefreshToken != "" && tok.RefreshToken != cfg.RefreshToken {
+	if rotated {
 		notes = append(notes, "xero: refresh token rotated; persist the new refresh_token for the next run")
 	}
-	return tok.AccessToken, notes, nil
+	return token, notes, nil
 }
 
 func (a *XeroAdapter) loadConfig(raw json.RawMessage) (XeroConfig, error) {

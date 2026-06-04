@@ -105,6 +105,7 @@ var quickBooksEntityName = regexp.MustCompile(`^[A-Za-z]+$`)
 // into the importer staging table via the QBO v3 query API.
 type QuickBooksAdapter struct {
 	client *http.Client
+	tokens oauthTokenCache
 }
 
 // NewQuickBooksAdapter returns the QuickBooks Online source adapter
@@ -257,7 +258,7 @@ func (a *QuickBooksAdapter) resolveToken(ctx context.Context, cfg QuickBooksConf
 	if cfg.AccessToken != "" {
 		return cfg.AccessToken, nil, nil
 	}
-	tok, err := refreshOAuth2Token(ctx, a.client, oauth2Config{
+	token, rotated, err := a.tokens.resolve(ctx, a.client, oauth2Config{
 		TokenURL:     a.tokenURL(cfg),
 		ClientID:     cfg.ClientID,
 		ClientSecret: cfg.ClientSecret,
@@ -267,10 +268,10 @@ func (a *QuickBooksAdapter) resolveToken(ctx context.Context, cfg QuickBooksConf
 	if err != nil {
 		return "", nil, fmt.Errorf("quickbooks: %w", err)
 	}
-	if tok.RefreshToken != "" && tok.RefreshToken != cfg.RefreshToken {
+	if rotated {
 		notes = append(notes, "quickbooks: refresh token rotated; persist the new refresh_token for the next run")
 	}
-	return tok.AccessToken, notes, nil
+	return token, notes, nil
 }
 
 func (a *QuickBooksAdapter) loadConfig(raw json.RawMessage) (QuickBooksConfig, error) {

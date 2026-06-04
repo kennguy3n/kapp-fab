@@ -2,12 +2,15 @@ package adapters
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -102,6 +105,105 @@ func refreshOAuth2Token(ctx context.Context, client *http.Client, cfg oauth2Conf
 		return oauth2Token{}, fmt.Errorf("oauth2: token response had no access_token")
 	}
 	return tok, nil
+}
+
+// oauthTokenCache memoizes access tokens minted via the refresh-token
+// grant so a single import run performs at most one grant per
+// connection.
+//
+// The pipeline drives an import as Discover then Export on the *same*
+// adapter instance, passing the same immutable job config to both.
+// Without memoization each phase independently runs a refresh-token
+// grant; because QuickBooks and Sage rotate the refresh token on every
+// exchange, Discover's grant invalidates the refresh token still sitting
+// in the config, so Export's grant is rejected and the refresh-token-only
+// flow never completes. Reusing Discover's freshly-minted (and still
+// valid) access token for Export sidesteps the second grant entirely.
+//
+// Entries are keyed by a hash of the connection's secret material
+// (token_url + client_id + refresh_token), so a cached access token is
+// never handed to a different connection/tenant. Access tokens are
+// short-lived; entries carry the provider-reported expiry and expired
+// entries are dropped on the next access, bounding the cache to roughly
+// the set of actively-importing connections.
+type oauthTokenCache struct {
+	mu      sync.Mutex
+	entries map[string]oauthCacheEntry
+}
+
+// oauthCacheEntry is one memoized access token and the instant after
+// which it must no longer be reused.
+type oauthCacheEntry struct {
+	accessToken string
+	expiresAt   time.Time
+}
+
+// oauthTokenExpirySkew is shaved off the provider-reported lifetime so a
+// token is never reused right up to its expiry instant.
+const oauthTokenExpirySkew = 30 * time.Second
+
+// oauthBridgeTTL is the fallback lifetime used when the token endpoint
+// does not advertise expires_in. It only needs to outlast the gap
+// between Discover and Export within one run; every real provider here
+// reports a lifetime well above this.
+const oauthBridgeTTL = 60 * time.Second
+
+// resolve returns a bearer token for cfg, reusing a still-valid access
+// token minted earlier in the same run and otherwise performing a
+// refresh-token grant. rotated reports whether this call performed a
+// grant that returned a new refresh token, so the caller can surface a
+// "persist the new refresh_token" note; a cache hit never rotates.
+func (c *oauthTokenCache) resolve(ctx context.Context, client *http.Client, cfg oauth2Config) (token string, rotated bool, err error) {
+	key := oauthCacheKey(cfg)
+	now := time.Now()
+
+	c.mu.Lock()
+	if entry, ok := c.entries[key]; ok {
+		if now.Before(entry.expiresAt) {
+			c.mu.Unlock()
+			return entry.accessToken, false, nil
+		}
+		delete(c.entries, key)
+	}
+	c.mu.Unlock()
+
+	tok, err := refreshOAuth2Token(ctx, client, cfg)
+	if err != nil {
+		return "", false, err
+	}
+
+	ttl := time.Duration(tok.ExpiresIn) * time.Second
+	switch {
+	case ttl <= 0:
+		ttl = oauthBridgeTTL
+	case ttl > oauthTokenExpirySkew:
+		ttl -= oauthTokenExpirySkew
+	}
+
+	c.mu.Lock()
+	if c.entries == nil {
+		c.entries = make(map[string]oauthCacheEntry)
+	}
+	// Opportunistically evict expired entries so a long-lived process
+	// importing many distinct connections does not accumulate them.
+	for k, e := range c.entries {
+		if !now.Before(e.expiresAt) {
+			delete(c.entries, k)
+		}
+	}
+	c.entries[key] = oauthCacheEntry{accessToken: tok.AccessToken, expiresAt: now.Add(ttl)}
+	c.mu.Unlock()
+
+	rotated = tok.RefreshToken != "" && tok.RefreshToken != cfg.RefreshToken
+	return tok.AccessToken, rotated, nil
+}
+
+// oauthCacheKey derives a non-reversible cache key from the connection's
+// secret material so refresh tokens are not retained verbatim as map
+// keys.
+func oauthCacheKey(cfg oauth2Config) string {
+	sum := sha256.Sum256([]byte(cfg.TokenURL + "\x00" + cfg.ClientID + "\x00" + cfg.RefreshToken))
+	return hex.EncodeToString(sum[:])
 }
 
 // getJSON issues a GET against target with a bearer token plus any

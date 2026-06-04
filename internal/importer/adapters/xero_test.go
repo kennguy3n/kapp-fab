@@ -180,6 +180,55 @@ func TestXeroRefreshTokenGrant(t *testing.T) {
 	}
 }
 
+// TestXeroSingleRefreshAcrossDiscoverExport guards BUG-0001 for Xero.
+// Xero rotates refresh tokens when sliding-window refresh is enabled, so
+// the adapter must resolve the access token once and reuse it across the
+// Discover→Export sequence rather than performing a second grant with the
+// original refresh token.
+func TestXeroSingleRefreshAcrossDiscoverExport(t *testing.T) {
+	var tokenHits int
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenHits++
+		if r.FormValue("refresh_token") != "r1" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(oauth2Token{AccessToken: "xero-tok", RefreshToken: "r2", ExpiresIn: 1800})
+	}))
+	defer tokenSrv.Close()
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer xero-tok" {
+			t.Errorf("bearer not propagated: %q", r.Header.Get("Authorization"))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"Items": []map[string]any{
+			{"ItemID": "i-1", "Code": "SKU1", "Name": "Widget"},
+		}})
+	}))
+	defer apiSrv.Close()
+
+	cfg, _ := json.Marshal(XeroConfig{
+		BaseURL:      apiSrv.URL,
+		XeroTenantID: "org-1",
+		RefreshToken: "r1",
+		ClientID:     "cid",
+		ClientSecret: "csecret",
+		TokenURL:     tokenSrv.URL,
+		Entities:     []XeroEntity{{Name: "Items"}},
+	})
+	a := NewXeroAdapter().WithHTTPClient(apiSrv.Client())
+
+	if _, err := a.Discover(context.Background(), cfg); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if err := a.Export(context.Background(), cfg, func(importer.NormalizedRow) error { return nil }); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if tokenHits != 1 {
+		t.Errorf("token endpoint hit %d times, want 1 (Export should reuse Discover's token)", tokenHits)
+	}
+}
+
 func TestXeroConfigValidation(t *testing.T) {
 	a := NewXeroAdapter()
 	cases := map[string]XeroConfig{

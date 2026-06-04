@@ -93,6 +93,7 @@ var sageEntityName = regexp.MustCompile(`^[a-z_]+$`)
 // company into the importer staging table.
 type SageAdapter struct {
 	client *http.Client
+	tokens oauthTokenCache
 }
 
 // NewSageAdapter returns the Sage source adapter wired with a bounded
@@ -204,7 +205,7 @@ func (a *SageAdapter) resolveToken(ctx context.Context, cfg SageConfig) (token s
 	if cfg.AccessToken != "" {
 		return cfg.AccessToken, nil, nil
 	}
-	tok, err := refreshOAuth2Token(ctx, a.client, oauth2Config{
+	token, rotated, err := a.tokens.resolve(ctx, a.client, oauth2Config{
 		TokenURL:     a.tokenURL(cfg),
 		ClientID:     cfg.ClientID,
 		ClientSecret: cfg.ClientSecret,
@@ -214,10 +215,10 @@ func (a *SageAdapter) resolveToken(ctx context.Context, cfg SageConfig) (token s
 	if err != nil {
 		return "", nil, fmt.Errorf("sage: %w", err)
 	}
-	if tok.RefreshToken != "" && tok.RefreshToken != cfg.RefreshToken {
+	if rotated {
 		notes = append(notes, "sage: refresh token rotated; persist the new refresh_token for the next run")
 	}
-	return tok.AccessToken, notes, nil
+	return token, notes, nil
 }
 
 func (a *SageAdapter) loadConfig(raw json.RawMessage) (SageConfig, error) {
