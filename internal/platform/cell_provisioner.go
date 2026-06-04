@@ -32,9 +32,15 @@ import (
 // autoscaler never blocks the rest of its tick on a slow provider:
 // provisioning is best-effort and failures are logged, not fatal.
 
-// CellProvisionState enumerates the lifecycle states a provisioner can
-// report for a cell. It mirrors the `status` column added to the cells
-// table in migrations/000081_cell_region_metadata.sql.
+// CellProvisionState is the transient runtime health a provisioner
+// observes for a cell and returns from Status(). It is a probe result
+// (e.g. the script provisioner reports "ready" when containers are up,
+// "failed" when they are not), NOT the persisted lifecycle of the cell.
+//
+// It is deliberately DISTINCT from the cells.status column added in
+// migrations/000081_cell_region_metadata.sql (see CellStatus* below).
+// These values must never be written into cells.status — only the
+// CellStatus* lifecycle values satisfy that column's CHECK constraint.
 type CellProvisionState string
 
 const (
@@ -52,6 +58,26 @@ const (
 	// CellStateUnknown — the provisioner cannot determine the state
 	// (e.g. the NoopProvisioner, which keeps no records).
 	CellStateUnknown CellProvisionState = "unknown"
+)
+
+// CellStatus* are the canonical values of the persisted cells.status
+// column. They mirror EXACTLY the CHECK constraint defined in
+// migrations/000081_cell_region_metadata.sql, so any code that reads or
+// writes cells.status should use these constants rather than string
+// literals. Unlike CellProvisionState (a transient health probe), this
+// is the durable lifecycle of a cell row in the control plane.
+const (
+	// CellStatusActive — the cell is serving tenants. Default for every
+	// row and the only status the autoscaler evaluates.
+	CellStatusActive = "active"
+	// CellStatusProvisioning — a provisioner is standing the cell up; it
+	// is not yet serving traffic and must not be a placement/drain target.
+	CellStatusProvisioning = "provisioning"
+	// CellStatusDraining — the cell is being emptied ahead of teardown.
+	CellStatusDraining = "draining"
+	// CellStatusDeprovisioned — the cell has been torn down and is
+	// retained only for audit/history.
+	CellStatusDeprovisioned = "deprovisioned"
 )
 
 // Cell is the control-plane view of a provisioned cell returned by a

@@ -145,15 +145,24 @@ All three satisfy the `CellProvisioner` interface
 
 - **`scale_up`** — calls `Provision(region, spec)` for the region of the
   cell that tripped the threshold. `spec.MaxTenants` comes from the
-  policy.
+  policy. Each overloaded cell's decision is independent, so if **N**
+  cells in a region trip `scale_up` in the same tick the loop issues
+  **N** `Provision` calls (one per trigger cell). This is intentional —
+  each is a genuinely overloaded cell — but operators sizing a region
+  should be aware a single tick can add several cells.
 - **`scale_down`** — drains the cell first, then deprovisions it (§3.4).
 - **`hold`** — nothing.
 
 Every provider interaction is **best-effort**: a failure is logged and
 the loop continues to the next cell. A slow or broken provider can never
-wedge the autoscaler. The decision is always persisted to
-`platform_scale_events` *before* actuation, so the audit trail reflects
-what the policy decided regardless of provider outcome.
+wedge the autoscaler. The decision is persisted to `platform_scale_events`
+*before* actuation, and **only decisions whose audit row was written are
+actuated** — so the audit trail is the authoritative record of what the
+autoscaler acted on (no infrastructure change happens without a
+corresponding `platform_scale_events` row). The autoscaler also only ever
+evaluates cells whose `status = 'active'`; cells still `provisioning`,
+`draining`, or already `deprovisioned` are skipped (and never chosen as
+drain targets).
 
 ### 3.4 Safe scale-down: drain before teardown
 

@@ -247,8 +247,13 @@ func (e *AutoscaleEngine) Evaluate(ctx context.Context) ([]Decision, error) {
 		return nil, err
 	}
 	out := make([]Decision, 0, len(snapshots))
-	for _, s := range snapshots {
-		d := Decide(s, e.policy)
+	// actuatable holds only the decisions whose audit row was written.
+	// We never actuate a decision we failed to record, so
+	// platform_scale_events stays the authoritative log of what the
+	// autoscaler acted on (no infrastructure change without an audit row).
+	actuatable := make([]Decision, 0, len(snapshots))
+	for i := range snapshots {
+		d := Decide(snapshots[i], e.policy)
 		out = append(out, d)
 		if err := e.persistDecision(ctx, d); err != nil {
 			// Persisting one decision must not block the rest of
@@ -257,6 +262,7 @@ func (e *AutoscaleEngine) Evaluate(ctx context.Context) ([]Decision, error) {
 				"cell_id", d.CellID, "event_type", d.EventType, "err", err)
 			continue
 		}
+		actuatable = append(actuatable, d)
 		switch d.EventType {
 		case CellEventScaleUp, CellEventScaleDown:
 			e.logger.Info("autoscale: scale event",
@@ -272,10 +278,11 @@ func (e *AutoscaleEngine) Evaluate(ctx context.Context) ([]Decision, error) {
 	// Actuate the decisions against infrastructure when provisioning
 	// is enabled. Done after the persist loop so platform_scale_events
 	// always records what the policy decided even if the provider call
-	// later fails. snapshots is threaded through so scale_down can pick
-	// a drain target from sibling cells.
+	// later fails. Only decisions whose audit row persisted are actuated
+	// (see actuatable). snapshots is threaded through so scale_down can
+	// pick a drain target from sibling cells.
 	if e.provisionEnabled && e.provisioner != nil {
-		e.actuate(ctx, snapshots, out)
+		e.actuate(ctx, snapshots, actuatable)
 	}
 	return out, nil
 }
@@ -302,7 +309,13 @@ func (e *AutoscaleEngine) snapshotCells(ctx context.Context) ([]CellSnapshot, er
 		        ORDER BY e.created_at DESC
 		        LIMIT 1
 		   ) last_event ON TRUE
+		  -- Only evaluate cells that are serving tenants. Cells still
+		  -- provisioning, draining, or already deprovisioned must not
+		  -- generate scale decisions or be chosen as drain targets.
+		  -- Uses the cells_region_status_idx added in migration 000081.
+		  WHERE COALESCE(c.status, $1) = $1
 		  ORDER BY c.id`,
+		CellStatusActive,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("autoscale: query cells: %w", err)
