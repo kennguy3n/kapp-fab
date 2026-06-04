@@ -42,23 +42,49 @@ func TestCacheControlMiddleware_DefaultPolicy(t *testing.T) {
 	}
 }
 
-// TestCacheControlMiddleware_UnmatchedPathLeavesHeaderUnset verifies
-// that a path with no matching rule (e.g. an operational endpoint or
-// SPA deep-link route) does not receive a Cache-Control header from the
-// middleware, leaving the decision to the handler or the edge.
-func TestCacheControlMiddleware_UnmatchedPathLeavesHeaderUnset(t *testing.T) {
+// TestCacheControlMiddleware_CatchAllDefaultsToNoCache verifies that any
+// path which is neither a hashed asset nor the API — SPA deep-link
+// routes (/dashboard, /settings/users) served as index.html by the SPA
+// fallback, and any other origin path — defaults to no-cache. This is
+// the catch-all that makes the origin mirror the edge so deep-links
+// still revalidate even if the API is exposed without Caddy in front.
+func TestCacheControlMiddleware_CatchAllDefaultsToNoCache(t *testing.T) {
 	mw := CacheControlMiddleware()
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	for _, path := range []string{"/healthz", "/metrics", "/dashboard"} {
+	for _, path := range []string{"/dashboard", "/settings/users", "/healthz", "/favicon.ico"} {
 		req := httptest.NewRequest(http.MethodGet, path, http.NoBody)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 
-		if got := rec.Header().Get(headerCacheControl); got != "" {
-			t.Errorf("path %q: expected no Cache-Control header, got %q", path, got)
+		if got := rec.Header().Get(headerCacheControl); got != CacheControlNoCache {
+			t.Errorf("path %q: want Cache-Control %q, got %q", path, CacheControlNoCache, got)
+		}
+	}
+}
+
+// TestCacheControlMiddleware_CatchAllDoesNotWeakenAPIorAssets guards the
+// rule ordering: the trailing "/" catch-all must not override the more
+// specific /api/ (no-store) and /assets/ (immutable) rules, which are
+// listed first and therefore win.
+func TestCacheControlMiddleware_CatchAllDoesNotWeakenAPIorAssets(t *testing.T) {
+	mw := CacheControlMiddleware()
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	cases := map[string]string{
+		"/api/v1/records":    CacheControlNoStore,
+		"/assets/app-abc.js": CacheControlImmutable,
+	}
+	for path, want := range cases {
+		req := httptest.NewRequest(http.MethodGet, path, http.NoBody)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if got := rec.Header().Get(headerCacheControl); got != want {
+			t.Errorf("path %q: want %q, got %q", path, want, got)
 		}
 	}
 }
@@ -111,16 +137,25 @@ func TestCacheControlMiddleware_CustomRulesFirstMatchWins(t *testing.T) {
 }
 
 // TestMatchCacheControl_ExactVsPrefix guards the matcher's exact/prefix
-// distinction: an exact "/" rule must not swallow every path the way a
-// "/" prefix rule would.
+// distinction on a custom rule set: an Exact rule matches only its exact
+// path, while a non-Exact rule matches any path with that prefix. (The
+// default rules use prefix matching, so this exercises the Exact branch
+// that custom callers rely on.)
 func TestMatchCacheControl_ExactVsPrefix(t *testing.T) {
-	rules := DefaultCacheControlRules()
-
-	if v, ok := matchCacheControl(rules, "/"); !ok || v != CacheControlNoCache {
-		t.Errorf("exact root: want (%q,true), got (%q,%v)", CacheControlNoCache, v, ok)
+	rules := []CacheControlRule{
+		{Path: "/exact", Exact: true, Value: CacheControlNoStore},
+		{Path: "/prefix", Value: CacheControlNoCache},
 	}
-	// "/about" must NOT match the exact "/" rule.
-	if v, ok := matchCacheControl(rules, "/about"); ok {
-		t.Errorf("exact root must not match /about, got %q", v)
+
+	if v, ok := matchCacheControl(rules, "/exact"); !ok || v != CacheControlNoStore {
+		t.Errorf("exact path: want (%q,true), got (%q,%v)", CacheControlNoStore, v, ok)
+	}
+	// An exact rule must NOT match a longer path that merely shares the prefix.
+	if v, ok := matchCacheControl(rules, "/exact/child"); ok {
+		t.Errorf("exact rule must not match /exact/child, got %q", v)
+	}
+	// A non-Exact rule matches any path under its prefix.
+	if v, ok := matchCacheControl(rules, "/prefix/deep/path"); !ok || v != CacheControlNoCache {
+		t.Errorf("prefix path: want (%q,true), got (%q,%v)", CacheControlNoCache, v, ok)
 	}
 }

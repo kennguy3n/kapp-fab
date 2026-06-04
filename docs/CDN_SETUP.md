@@ -32,14 +32,18 @@ misconfigured:
 
 1. **Origin** — `internal/platform/cache_control.go`
    (`CacheControlMiddleware`) sets the authoritative `Cache-Control`
-   header on every response as a default. Handlers that serve
+   header on every response as a default: `no-store` for `/api/*`,
+   `immutable` for `/assets/*`, and `no-cache` for everything else (a
+   catch-all covering the SPA shell at `/` and its client-routed
+   deep-links such as `/dashboard`). Handlers that serve
    content-addressed payloads (the marketplace bundle download, which is
    `immutable` + `ETag`) or long-lived streams (SSE, `no-cache`)
    override it.
-2. **Edge** — `Caddyfile.prod` mirrors the policy for `/assets/*` and
-   `/` and negotiates `gzip`/`zstd` compression. It proxies everything
-   to the origin and leaves `/api/*` headers untouched (so the origin's
-   `no-store` wins).
+2. **Edge** — `Caddyfile.prod` mirrors the policy: `immutable` for
+   `/assets/*` and `no-cache` for every non-API path (an `@spa` matcher
+   covering the shell and deep-links), and negotiates `gzip`/`zstd`
+   compression. It proxies everything to the origin and leaves `/api/*`
+   headers untouched (so the origin's `no-store` wins).
 3. **CDN** — optional, configured per the sections below.
 
 ### ETag / conditional requests

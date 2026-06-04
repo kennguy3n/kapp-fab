@@ -57,18 +57,25 @@ type CacheControlRule struct {
 //
 //   - /assets/* → immutable (Vite content-hashed bundles)
 //   - /api/*    → no-store  (dynamic, tenant-scoped, must never cache)
-//   - /         → no-cache  (SPA shell, revalidate to pick up deploys)
-//   - /index.html → no-cache (same shell, when requested by name)
+//   - /*        → no-cache  (everything else: the SPA shell at "/",
+//     client-routed deep-links like /dashboard, and any other path)
 //
-// The /assets/ and /api/ rules are disjoint, and the SPA-shell rules
-// are exact matches, so ordering is unambiguous; the explicit order
-// also documents the intended precedence for anyone adding rules.
+// The trailing rule is a prefix match on "/", so it matches every path
+// that the earlier, more specific /assets/ and /api/ rules did not.
+// That deliberate catch-all is what makes no-cache the origin's answer
+// for the SPA shell AND its deep-link routes (e.g. /dashboard), not just
+// the exact root: the SPA fallback serves index.html for arbitrary
+// paths, so each of them must revalidate to pick up a new deploy. It
+// also means this origin policy genuinely mirrors the edge (Caddy's
+// @spa matcher), so the no-cache contract holds even if the API is ever
+// exposed without Caddy in front. Because earlier rules win, /api keeps
+// no-store and /assets keeps immutable — the catch-all never weakens
+// them.
 func DefaultCacheControlRules() []CacheControlRule {
 	return []CacheControlRule{
 		{Path: "/assets/", Value: CacheControlImmutable},
 		{Path: "/api/", Value: CacheControlNoStore},
-		{Path: "/", Exact: true, Value: CacheControlNoCache},
-		{Path: "/index.html", Exact: true, Value: CacheControlNoCache},
+		{Path: "/", Value: CacheControlNoCache},
 	}
 }
 
