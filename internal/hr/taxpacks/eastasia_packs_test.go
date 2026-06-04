@@ -117,6 +117,68 @@ func TestCNPackCumulativeBandCrossing(t *testing.T) {
 	}
 }
 
+// TestCNPackMidYearStarterMonthCount pins the cumulative month index
+// to EmployeeInfo.MonthsEmployedYTD rather than the calendar month.
+// An employee hired in April whose first ¥30,000 slip falls in April
+// (calendar month 4) has only received one month of income, so the
+// cumulative standard deduction must be a single ¥5,000 — yielding
+// exactly the same IIT as any other first-paid-month slip (547.41,
+// per TestCNPackFirstMonthNominal). Without the field the pack would
+// fall back to calendar month 4, credit four months of standard
+// deduction, and under-withhold (97.14). The fallback is asserted too
+// so pre-existing KRecords (MonthsEmployedYTD == 0) keep their prior
+// calendar-month behaviour.
+//
+//	MonthsEmployedYTD = 1 (April starter, first paid month):
+//	  cum taxable = 30,000 − (5,000 × 1) − (30,000 × 22.5% + 3 × 1)
+//	              = 30,000 − 5,000 − 6,753 = 18,247
+//	  IIT         = 18,247 × 0.03 = 547.41
+//
+//	MonthsEmployedYTD = 0 (unset → fallback to calendar month 4):
+//	  cum taxable = 30,000 − (5,000 × 4) − (30,000 × 22.5% + 3 × 4)
+//	              = 30,000 − 20,000 − 6,762 = 3,238
+//	  IIT         = 3,238 × 0.03 = 97.14
+func TestCNPackMidYearStarterMonthCount(t *testing.T) {
+	pack, _ := Lookup("CN")
+
+	// MonthsEmployedYTD pins the first paid month regardless of the
+	// calendar month the slip falls in.
+	corrected, _ := pack.ComputeWithholding(context.Background(),
+		EmployeeInfo{MonthsEmployedYTD: 1},
+		decimal.NewFromInt(30000), cnMonthEnding(time.April))
+	if iit := findDeduction(corrected, "CN_IIT").Amount; !iit.Equal(dec("547.41")) {
+		t.Fatalf("CN_IIT (April starter, MonthsEmployedYTD=1): got %s, want 547.41", iit.String())
+	}
+
+	// Unset (pre-existing KRecord) falls back to the calendar month.
+	fallback, _ := pack.ComputeWithholding(context.Background(),
+		EmployeeInfo{},
+		decimal.NewFromInt(30000), cnMonthEnding(time.April))
+	if iit := findDeduction(fallback, "CN_IIT").Amount; !iit.Equal(dec("97.14")) {
+		t.Fatalf("CN_IIT (April, calendar-month fallback): got %s, want 97.14", iit.String())
+	}
+
+	// A tax year has at most 12 months: an out-of-range
+	// MonthsEmployedYTD (e.g. a data-entry error) is clamped to 12 so
+	// it cannot over-credit the standard deduction and under-withhold.
+	// Use a high cumulative base so the IIT is solidly positive and
+	// the 13-vs-12 comparison is meaningful (not both clamped to zero).
+	twelve, _ := pack.ComputeWithholding(context.Background(),
+		EmployeeInfo{MonthsEmployedYTD: 12, YTDGross: decimal.NewFromInt(550000)},
+		decimal.NewFromInt(50000), cnMonthEnding(time.December))
+	thirteen, _ := pack.ComputeWithholding(context.Background(),
+		EmployeeInfo{MonthsEmployedYTD: 13, YTDGross: decimal.NewFromInt(550000)},
+		decimal.NewFromInt(50000), cnMonthEnding(time.December))
+	iit12 := findDeduction(twelve, "CN_IIT").Amount
+	iit13 := findDeduction(thirteen, "CN_IIT").Amount
+	if !iit12.IsPositive() {
+		t.Fatalf("CN_IIT (12 months) should be positive for the clamp comparison, got %s", iit12.String())
+	}
+	if !iit13.Equal(iit12) {
+		t.Fatalf("CN_IIT should clamp MonthsEmployedYTD>12 to 12: got %s for 13, want %s (==12)", iit13.String(), iit12.String())
+	}
+}
+
 // TestCNPackBelowThresholdNoIIT: a low ¥5,500 January slip. After the
 // ¥5,000 standard deduction and the employee statutory contributions
 // the cumulative taxable base is negative, so no CN_IIT line is

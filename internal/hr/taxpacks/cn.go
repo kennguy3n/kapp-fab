@@ -66,9 +66,15 @@ import (
 //     scope for the baseline withholding pack, so omitting them
 //     over-withholds rather than under-withholds.
 //   - The cumulative method assumes monthly payroll (the norm for
-//     Chinese IIT): the cumulative month index is the pay-period end
-//     month, and the ¥5,000 standard deduction accrues once per
-//     month.
+//     Chinese IIT) and accrues the ¥5,000 standard deduction once per
+//     month. The cumulative month index is EmployeeInfo.MonthsEmployedYTD
+//     (the count of months the employee has received income this year,
+//     including the slip's own month) so mid-year starters are handled
+//     correctly; when that field is unset (0) the pack falls back to
+//     the pay-period end month, which is correct for a full-year
+//     employee. The index is clamped to 12 (a tax year has at most
+//     twelve months) so a bad input cannot over-credit the standard
+//     deduction and under-withhold.
 //
 // References:
 //
@@ -234,10 +240,29 @@ func (cnPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 	}
 	cumGrossNow := cumGrossPrior.Add(gross)
 
-	// The cumulative month index is the pay-period end month
-	// (monthly payroll is the norm for Chinese IIT). The prior
-	// cumulative figure is taken through the previous month.
-	monthsElapsed := decimal.NewFromInt(int64(period.End.Month()))
+	// The cumulative month index is the number of months the
+	// employee has received employment income this year, including
+	// the current slip's month. Per 国税发〔2018〕61号 the ¥5,000
+	// standard deduction accrues from the first month of employment
+	// income, not from January, so a mid-year starter must not be
+	// credited the calendar month's worth of deductions.
+	// EmployeeInfo.MonthsEmployedYTD carries that count; when it is
+	// unset (0, e.g. a pre-existing KRecord) the pack falls back to
+	// the pay-period end month, which is correct for the common
+	// full-year employee (monthly payroll is the norm for Chinese
+	// IIT). The prior cumulative figure is taken through the
+	// previous month.
+	monthIndex := int64(employee.MonthsEmployedYTD)
+	if monthIndex <= 0 {
+		monthIndex = int64(period.End.Month())
+	}
+	// A tax year has at most twelve months; clamp so a bad input
+	// (data-entry error) cannot over-credit the ¥5,000/month standard
+	// deduction and silently under-withhold.
+	if monthIndex > 12 {
+		monthIndex = 12
+	}
+	monthsElapsed := decimal.NewFromInt(monthIndex)
 	monthsPrior := monthsElapsed.Sub(decimal.NewFromInt(1))
 
 	cumTaxableNow := cnCumulativeTaxable(cumGrossNow, deductibleRate, monthsElapsed)
