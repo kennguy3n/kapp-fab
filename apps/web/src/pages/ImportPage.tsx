@@ -287,12 +287,33 @@ function Stepper({ current }: { current: 1 | 2 | 3 | 4 | 5 }) {
   );
 }
 
+type SourceType =
+  | "csv"
+  | "json"
+  | "frappe"
+  | "quickbooks"
+  | "xero"
+  | "tally"
+  | "sage";
+
+// OAuth2-backed cloud-accounting sources share a common credential
+// block (access token, or refresh token + client credentials).
+const OAUTH_SOURCES: SourceType[] = ["quickbooks", "xero", "sage"];
+
+// pruneEmpty drops blank string fields so optional credentials are
+// omitted from the submitted config rather than sent as "".
+function pruneEmpty(obj: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(obj).filter(([, v]) => v.trim() !== ""),
+  );
+}
+
 function StepSource({
   onCreate,
 }: {
   onCreate: (body: { source_type: string; config: unknown }) => void;
 }) {
-  const [sourceType, setSourceType] = useState<"csv" | "json" | "frappe">("csv");
+  const [sourceType, setSourceType] = useState<SourceType>("csv");
   const [csvPayload, setCsvPayload] = useState("");
   const [csvEntity, setCsvEntity] = useState("");
   const [csvKType, setCsvKType] = useState("");
@@ -300,34 +321,79 @@ function StepSource({
   const [frappeKey, setFrappeKey] = useState("");
   const [frappeSecret, setFrappeSecret] = useState("");
   const [frappeDocTypes, setFrappeDocTypes] = useState("Customer,Sales Invoice");
+  // Shared OAuth2 credentials for QuickBooks / Xero / Sage.
+  const [accessToken, setAccessToken] = useState("");
+  const [refreshToken, setRefreshToken] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  // Provider-specific identifiers.
+  const [qbRealmId, setQbRealmId] = useState("");
+  const [xeroTenantId, setXeroTenantId] = useState("");
+  // Tally file import.
+  const [tallyFormat, setTallyFormat] = useState<"xml" | "json">("xml");
+  const [tallyPayload, setTallyPayload] = useState("");
+
+  const oauthConfig = () =>
+    pruneEmpty({
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      client_id: clientId,
+      client_secret: clientSecret,
+    });
 
   const submit = () => {
-    if (sourceType === "frappe") {
-      onCreate({
-        source_type: "frappe",
-        config: {
-          base_url: frappeURL,
-          api_key: frappeKey,
-          api_secret: frappeSecret,
-          doctypes: frappeDocTypes
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean)
-            .map((name) => ({ name })),
-        },
-      });
-      return;
+    switch (sourceType) {
+      case "frappe":
+        onCreate({
+          source_type: "frappe",
+          config: {
+            base_url: frappeURL,
+            api_key: frappeKey,
+            api_secret: frappeSecret,
+            doctypes: frappeDocTypes
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean)
+              .map((name) => ({ name })),
+          },
+        });
+        return;
+      case "quickbooks":
+        onCreate({
+          source_type: "quickbooks",
+          config: { realm_id: qbRealmId, ...oauthConfig() },
+        });
+        return;
+      case "xero":
+        onCreate({
+          source_type: "xero",
+          config: { xero_tenant_id: xeroTenantId, ...oauthConfig() },
+        });
+        return;
+      case "sage":
+        onCreate({ source_type: "sage", config: oauthConfig() });
+        return;
+      case "tally":
+        onCreate({
+          source_type: "tally",
+          config: { format: tallyFormat, payload: tallyPayload },
+        });
+        return;
+      default:
+        onCreate({
+          source_type: sourceType,
+          config: {
+            format: sourceType,
+            entity: csvEntity,
+            target_ktype: csvKType,
+            payload: csvPayload,
+          },
+        });
     }
-    onCreate({
-      source_type: sourceType,
-      config: {
-        format: sourceType,
-        entity: csvEntity,
-        target_ktype: csvKType,
-        payload: csvPayload,
-      },
-    });
   };
+
+  const isFileSource = sourceType === "csv" || sourceType === "json";
+  const isOAuthSource = OAUTH_SOURCES.includes(sourceType);
 
   return (
     <div>
@@ -336,17 +402,19 @@ function StepSource({
         Source type
         <select
           value={sourceType}
-          onChange={(e) =>
-            setSourceType(e.target.value as "csv" | "json" | "frappe")
-          }
+          onChange={(e) => setSourceType(e.target.value as SourceType)}
           style={{ marginLeft: 8 }}
         >
           <option value="csv">CSV</option>
           <option value="json">JSON</option>
           <option value="frappe">Frappe REST</option>
+          <option value="quickbooks">QuickBooks Online</option>
+          <option value="xero">Xero</option>
+          <option value="tally">Tally Prime (file)</option>
+          <option value="sage">Sage Business Cloud</option>
         </select>
       </label>
-      {sourceType !== "frappe" && (
+      {isFileSource && (
         <>
           <label style={{ display: "block", marginBottom: 8 }}>
             Entity (source table/sheet)
@@ -410,6 +478,95 @@ function StepSource({
               value={frappeDocTypes}
               onChange={(e) => setFrappeDocTypes(e.target.value)}
               style={{ marginLeft: 8, width: 400 }}
+            />
+          </label>
+        </>
+      )}
+      {sourceType === "quickbooks" && (
+        <label style={{ display: "block", marginBottom: 8 }}>
+          Realm ID (company)
+          <input
+            value={qbRealmId}
+            onChange={(e) => setQbRealmId(e.target.value)}
+            placeholder="1234567890"
+            style={{ marginLeft: 8, width: 240 }}
+          />
+        </label>
+      )}
+      {sourceType === "xero" && (
+        <label style={{ display: "block", marginBottom: 8 }}>
+          Xero tenant ID
+          <input
+            value={xeroTenantId}
+            onChange={(e) => setXeroTenantId(e.target.value)}
+            placeholder="organisation uuid"
+            style={{ marginLeft: 8, width: 320 }}
+          />
+        </label>
+      )}
+      {isOAuthSource && (
+        <>
+          <p style={{ color: "#6b7280", marginBottom: 8 }}>
+            Provide an access token, or a refresh token plus client
+            credentials to mint one.
+          </p>
+          <label style={{ display: "block", marginBottom: 8 }}>
+            Access token
+            <input
+              type="password"
+              value={accessToken}
+              onChange={(e) => setAccessToken(e.target.value)}
+              style={{ marginLeft: 8, width: 320 }}
+            />
+          </label>
+          <label style={{ display: "block", marginBottom: 8 }}>
+            Refresh token
+            <input
+              type="password"
+              value={refreshToken}
+              onChange={(e) => setRefreshToken(e.target.value)}
+              style={{ marginLeft: 8, width: 320 }}
+            />
+          </label>
+          <label style={{ display: "block", marginBottom: 8 }}>
+            Client ID
+            <input
+              value={clientId}
+              onChange={(e) => setClientId(e.target.value)}
+              style={{ marginLeft: 8, width: 240 }}
+            />
+          </label>
+          <label style={{ display: "block", marginBottom: 8 }}>
+            Client secret
+            <input
+              type="password"
+              value={clientSecret}
+              onChange={(e) => setClientSecret(e.target.value)}
+              style={{ marginLeft: 8, width: 240 }}
+            />
+          </label>
+        </>
+      )}
+      {sourceType === "tally" && (
+        <>
+          <label style={{ display: "block", marginBottom: 8 }}>
+            Export format
+            <select
+              value={tallyFormat}
+              onChange={(e) => setTallyFormat(e.target.value as "xml" | "json")}
+              style={{ marginLeft: 8 }}
+            >
+              <option value="xml">XML</option>
+              <option value="json">JSON</option>
+            </select>
+          </label>
+          <label style={{ display: "block" }}>
+            Tally export payload (masters + vouchers)
+            <textarea
+              value={tallyPayload}
+              onChange={(e) => setTallyPayload(e.target.value)}
+              rows={12}
+              style={{ display: "block", width: "100%", fontFamily: "monospace" }}
             />
           </label>
         </>

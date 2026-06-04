@@ -114,6 +114,13 @@ func run() error {
 	// reachable without a second implementation.
 	pipeline.RegisterAdapter(adapters.NewJSONAdapter())
 	pipeline.RegisterAdapter(adapters.NewFrappeAdapter())
+	// Cloud-accounting + Tally source adapters (importer stream 1).
+	// QuickBooks/Xero/Sage speak OAuth2 REST APIs; Tally imports an
+	// inline XML/JSON export file like the CSV adapter.
+	pipeline.RegisterAdapter(adapters.NewQuickBooksAdapter())
+	pipeline.RegisterAdapter(adapters.NewXeroAdapter())
+	pipeline.RegisterAdapter(adapters.NewTallyAdapter())
+	pipeline.RegisterAdapter(adapters.NewSageAdapter())
 
 	h := &importHandlers{pipeline: pipeline, jobs: jobStore, staging: stagingStore}
 
