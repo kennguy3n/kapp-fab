@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // This file holds the small amount of HTTP/OAuth2 plumbing shared by
@@ -129,6 +131,16 @@ func refreshOAuth2Token(ctx context.Context, client *http.Client, cfg oauth2Conf
 type oauthTokenCache struct {
 	mu      sync.Mutex
 	entries map[string]oauthCacheEntry
+	// group collapses concurrent grants for the same connection into a
+	// single refresh-token exchange (see resolve).
+	group singleflight.Group
+}
+
+// oauthResolveResult is the shared payload singleflight hands to every
+// caller that joined one grant.
+type oauthResolveResult struct {
+	token   string
+	rotated bool
 }
 
 // oauthCacheEntry is one memoized access token and the instant after
@@ -150,52 +162,97 @@ const oauthBridgeTTL = 60 * time.Second
 
 // resolve returns a bearer token for cfg, reusing a still-valid access
 // token minted earlier in the same run and otherwise performing a
-// refresh-token grant. rotated reports whether this call performed a
-// grant that returned a new refresh token, so the caller can surface a
-// "persist the new refresh_token" note; a cache hit never rotates.
+// refresh-token grant. rotated reports whether the underlying grant
+// returned a new refresh token, so the caller can surface a "persist the
+// new refresh_token" note; a cache hit never rotates.
+//
+// Concurrent calls for the same connection are collapsed via singleflight
+// so only one grant runs: a naive check-then-refresh has a window where two
+// goroutines both miss the cache and both exchange the refresh token, and
+// because QuickBooks/Sage rotate it on every exchange the second grant
+// fails with invalid_grant. The leader performs the grant and populates the
+// cache; every joiner shares that result.
 func (c *oauthTokenCache) resolve(ctx context.Context, client *http.Client, cfg oauth2Config) (token string, rotated bool, err error) {
 	key := oauthCacheKey(cfg)
-	now := time.Now()
-
-	c.mu.Lock()
-	if entry, ok := c.entries[key]; ok {
-		if now.Before(entry.expiresAt) {
-			c.mu.Unlock()
-			return entry.accessToken, false, nil
-		}
-		delete(c.entries, key)
+	if tok, ok := c.lookup(key, time.Now()); ok {
+		return tok, false, nil
 	}
-	c.mu.Unlock()
 
-	tok, err := refreshOAuth2Token(ctx, client, cfg)
+	v, err, _ := c.group.Do(key, func() (any, error) {
+		// A concurrent leader may have populated the cache while we
+		// queued behind it; reuse its token instead of granting again.
+		if tok, ok := c.lookup(key, time.Now()); ok {
+			return oauthResolveResult{token: tok}, nil
+		}
+		tok, err := refreshOAuth2Token(ctx, client, cfg)
+		if err != nil {
+			return nil, err
+		}
+		now := time.Now()
+		c.store(key, tok.AccessToken, now.Add(oauthCacheTTL(tok)), now)
+		return oauthResolveResult{
+			token:   tok.AccessToken,
+			rotated: tok.RefreshToken != "" && tok.RefreshToken != cfg.RefreshToken,
+		}, nil
+	})
 	if err != nil {
 		return "", false, err
 	}
-
-	ttl := time.Duration(tok.ExpiresIn) * time.Second
-	switch {
-	case ttl <= 0:
-		ttl = oauthBridgeTTL
-	case ttl > oauthTokenExpirySkew:
-		ttl -= oauthTokenExpirySkew
+	res, ok := v.(oauthResolveResult)
+	if !ok {
+		return "", false, fmt.Errorf("oauth2: unexpected token cache result type %T", v)
 	}
+	return res.token, res.rotated, nil
+}
 
+// lookup returns a cached access token for key when one is present and not
+// yet expired, evicting it otherwise.
+func (c *oauthTokenCache) lookup(key string, now time.Time) (string, bool) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok {
+		return "", false
+	}
+	if !now.Before(entry.expiresAt) {
+		delete(c.entries, key)
+		return "", false
+	}
+	return entry.accessToken, true
+}
+
+// store records an access token under key with the given expiry, first
+// dropping any other expired entries so a long-lived process importing many
+// distinct connections does not accumulate them.
+func (c *oauthTokenCache) store(key, accessToken string, expiresAt, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.entries == nil {
 		c.entries = make(map[string]oauthCacheEntry)
 	}
-	// Opportunistically evict expired entries so a long-lived process
-	// importing many distinct connections does not accumulate them.
 	for k, e := range c.entries {
 		if !now.Before(e.expiresAt) {
 			delete(c.entries, k)
 		}
 	}
-	c.entries[key] = oauthCacheEntry{accessToken: tok.AccessToken, expiresAt: now.Add(ttl)}
-	c.mu.Unlock()
+	c.entries[key] = oauthCacheEntry{accessToken: accessToken, expiresAt: expiresAt}
+}
 
-	rotated = tok.RefreshToken != "" && tok.RefreshToken != cfg.RefreshToken
-	return tok.AccessToken, rotated, nil
+// oauthCacheTTL converts a token's reported lifetime into a safe cache
+// duration. A skew is shaved off so a token is never served right up to its
+// expiry; for short-lived tokens the skew is capped at half the lifetime so
+// the cached duration stays positive while still leaving a margin. When no
+// lifetime is advertised, a short fallback bridges the Discover->Export gap.
+func oauthCacheTTL(tok oauth2Token) time.Duration {
+	ttl := time.Duration(tok.ExpiresIn) * time.Second
+	if ttl <= 0 {
+		return oauthBridgeTTL
+	}
+	skew := oauthTokenExpirySkew
+	if skew > ttl/2 {
+		skew = ttl / 2
+	}
+	return ttl - skew
 }
 
 // oauthCacheKey derives a non-reversible cache key from the connection's
