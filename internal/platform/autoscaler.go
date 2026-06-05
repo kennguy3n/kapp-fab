@@ -223,6 +223,15 @@ type AutoscaleEngine struct {
 	// infrastructure: the NoopProvisioner opts out (observeOnly) so a
 	// dry run still touches no control-plane rows.
 	manageCellLifecycle bool
+	// observeOnly is true when the wired provisioner declares itself a
+	// dry run (the NoopProvisioner does). In that mode the engine still
+	// snapshots, decides, and records to platform_scale_events, but it
+	// performs NO real mutation: no provider Provision/Deprovision with
+	// side effects, no cells.status write, and — critically — no tenant
+	// migration via the rebalancer. It is the single gate that keeps the
+	// documented "noop mutates nothing" guarantee from leaking through the
+	// drain path, which holds a real pool even in dry-run wiring.
+	observeOnly bool
 }
 
 // NewAutoscaleEngine binds a policy to a pool. Pass nil logger to
@@ -249,8 +258,11 @@ func (e *AutoscaleEngine) WithProvisioning(provisioner CellProvisioner, rebalanc
 	// opt out (the noop dry-run does) so enabling provisioning with it
 	// still mutates nothing — neither infra nor control-plane rows.
 	e.manageCellLifecycle = enabled && provisioner != nil
+	e.observeOnly = false
 	if oo, ok := provisioner.(interface{ observeOnly() bool }); ok && oo.observeOnly() {
+		// Dry-run provisioner: record and log decisions but mutate nothing.
 		e.manageCellLifecycle = false
+		e.observeOnly = enabled
 	}
 	return e
 }
@@ -488,6 +500,17 @@ func (e *AutoscaleEngine) drainAndDeprovision(ctx context.Context, d Decision, s
 	// last resort.
 	if d.CellID == DefaultCellID {
 		e.logger.Debug("autoscale: skip deprovision of default cell", "cell_id", d.CellID)
+		return
+	}
+	if e.observeOnly {
+		// Dry run (observe-only provisioner, e.g. noop): report the teardown
+		// the policy chose but mutate nothing. In particular do NOT enter the
+		// drain path — the rebalancer holds a real pool even in dry-run
+		// wiring, so calling it would run a real UPDATE tenants SET cell_id
+		// and break the documented guarantee that the noop provisioner
+		// changes neither infrastructure nor control-plane rows.
+		e.logger.Info("autoscale: dry-run scale_down (observe-only provisioner); cell left active, no tenants migrated",
+			"cell_id", d.CellID, "tenants", d.Snapshot.TenantCount, "region", d.Snapshot.Region)
 		return
 	}
 	if d.Snapshot.TenantCount > 0 && e.rebalancer == nil {

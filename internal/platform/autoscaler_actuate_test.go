@@ -99,6 +99,32 @@ func TestDrainAndDeprovision_VerifiesLiveEmptinessBeforeTeardown(t *testing.T) {
 	}
 }
 
+func TestDrainAndDeprovision_ObserveOnlyDoesNotMigrate(t *testing.T) {
+	// Regression: enabling provisioning with the noop (observe-only)
+	// provisioner is a documented dry run and must mutate nothing. A
+	// scale_down on a populated cell must NOT migrate tenants via the
+	// rebalancer, even though a rebalancer is wired — the worker always
+	// wires one (holding a real pool) when provisioning is enabled,
+	// regardless of provisioner type. Before the observeOnly gate this
+	// path ran a real UPDATE tenants SET cell_id in "dry-run" mode.
+	repo := &fakeTenantCellRepo{moved: true}
+	rb := newTestRebalancer(repo)
+	e := NewAutoscaleEngine(nil, DefaultAutoscalePolicy(), nil).
+		WithProvisioning(NewNoopProvisioner(nil), rb, true)
+	if !e.observeOnly {
+		t.Fatal("noop provisioner must put the engine in observe-only mode")
+	}
+	d := Decision{CellID: "c-busy", EventType: CellEventScaleDown, Snapshot: CellSnapshot{ID: "c-busy", Region: "eu-west-1", TenantCount: 5}}
+	snapshots := []CellSnapshot{
+		{ID: "c-busy", Region: "eu-west-1", MaxTenants: 1000, TenantCount: 5},
+		{ID: "sibling", Region: "eu-west-1", MaxTenants: 1000, TenantCount: 0},
+	}
+	e.drainAndDeprovision(context.Background(), d, snapshots, map[string]bool{"c-busy": true})
+	if repo.calls != 0 {
+		t.Fatalf("observe-only dry run must not migrate tenants, got %d rebalancer call(s)", repo.calls)
+	}
+}
+
 func TestDrainTargets_SameRegionWithHeadroom(t *testing.T) {
 	e := NewAutoscaleEngine(nil, DefaultAutoscalePolicy(), nil)
 	d := Decision{CellID: "src", Snapshot: CellSnapshot{ID: "src", Region: "eu-west-1"}}

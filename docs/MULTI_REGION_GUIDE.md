@@ -188,6 +188,14 @@ moved across a region boundary automatically (that would change their
 data residency; see §4). Draining is capped per tick (`maxDrainPerTick`)
 and resumes on subsequent ticks.
 
+Under the `noop` (observe-only) provisioner this whole `scale_down`
+actuation is short-circuited: the loop logs the teardown it *would* run
+and returns before any drain, so a dry run migrates **no** tenants and
+writes **no** `cells.status` row (the rebalancer holds a real pool even in
+dry-run wiring, so the engine — not the wiring — is what guarantees the
+no-mutation contract). Switch to `script`/`webhook` to actually drain and
+tear down.
+
 Before any tenant is moved, a cell committed to teardown is marked
 `status = 'draining'` (§3.5) so the cell-router stops placing new tenants
 on it and it drops out of the `active` drain-target pool immediately.
