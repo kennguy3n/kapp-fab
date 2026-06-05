@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -221,12 +220,16 @@ func (a *FrappeAdapter) doJSON(ctx context.Context, cfg FrappeConfig, method, ta
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
+	// Cap the buffered body so a misconfigured or hostile endpoint
+	// (reachable when an operator overrides base_url) cannot exhaust
+	// memory; the client timeout only bounds time, not size. Mirrors
+	// the cloud adapters' readCappedBody usage.
+	body, err := readCappedBody(resp.Body)
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("frappe: %s %s: HTTP %d: %s", method, target, resp.StatusCode, string(body))
+		return fmt.Errorf("frappe: %s %s: HTTP %d: %s", method, target, resp.StatusCode, truncateBody(body))
 	}
 	if out == nil {
 		return nil
