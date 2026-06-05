@@ -119,6 +119,23 @@ func TestDrainTargets_ExcludesCellsBeingTornDown(t *testing.T) {
 	}
 }
 
+func TestDrainTargets_ExcludesDrainingStatusCells(t *testing.T) {
+	// A sibling whose persisted status is already 'draining' (a teardown
+	// in flight from an earlier tick) must not be offered as a target,
+	// even when it is not in this tick's in-memory draining set.
+	e := NewAutoscaleEngine(nil, DefaultAutoscalePolicy(), nil)
+	d := Decision{CellID: "src", Snapshot: CellSnapshot{ID: "src", Region: "eu-west-1"}}
+	snapshots := []CellSnapshot{
+		{ID: "src", Region: "eu-west-1", MaxTenants: 1000, TenantCount: 50, Status: CellStatusActive},
+		{ID: "sibling-draining", Region: "eu-west-1", MaxTenants: 1000, TenantCount: 0, Status: CellStatusDraining},
+		{ID: "sibling-ok", Region: "eu-west-1", MaxTenants: 1000, TenantCount: 0, Status: CellStatusActive},
+	}
+	targets := e.drainTargets(d, snapshots, nil)
+	if len(targets) != 1 || targets[0].id != "sibling-ok" {
+		t.Fatalf("want only sibling-ok as target, got %+v", targets)
+	}
+}
+
 func TestDrainTargets_ReflectsPriorPlacementsSameTick(t *testing.T) {
 	// Simulates the cross-drain accounting actuate relies on: once a
 	// drain places tenants on a sibling (bumping its TenantCount in the

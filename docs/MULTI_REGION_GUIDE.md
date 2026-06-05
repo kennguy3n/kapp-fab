@@ -159,10 +159,11 @@ wedge the autoscaler. The decision is persisted to `platform_scale_events`
 *before* actuation, and **only decisions whose audit row was written are
 actuated** — so the audit trail is the authoritative record of what the
 autoscaler acted on (no infrastructure change happens without a
-corresponding `platform_scale_events` row). The autoscaler also only ever
-evaluates cells whose `status = 'active'`; cells still `provisioning`,
-`draining`, or already `deprovisioned` are skipped (and never chosen as
-drain targets).
+corresponding `platform_scale_events` row). The autoscaler evaluates
+cells whose `status` is `active` **or** `draining` — the latter so a
+teardown that was deferred to a later tick resumes (§3.5); cells still
+`provisioning` or already `deprovisioned` are skipped, and a `draining`
+cell is never chosen as a drain target.
 
 ### 3.4 Safe scale-down: drain before teardown
 
@@ -182,38 +183,53 @@ moved across a region boundary automatically (that would change their
 data residency; see §4). Draining is capped per tick (`maxDrainPerTick`)
 and resumes on subsequent ticks.
 
+Before any tenant is moved, a cell committed to teardown is marked
+`status = 'draining'` (§3.5) so the cell-router stops placing new tenants
+on it and it drops out of the `active` drain-target pool immediately.
+
 When several cells in the **same region** scale_down in one tick, capacity
 accounting is shared across all of their drains: as one drain places
 tenants on a sibling, that sibling's headroom is decremented for the
 remaining drains, so two concurrent drains can never collectively push a
-sibling past its `max_tenants`. A cell that is itself being torn down this
-tick is also excluded as a drain target, so tenants are never moved onto a
-cell that is about to be deprovisioned.
+sibling past its `max_tenants`. A cell that is itself being torn down — in
+this tick (in-memory) or already persisted as `draining` from an earlier
+tick — is also excluded as a drain target, so tenants are never moved onto
+a cell that is about to be deprovisioned.
 
 ### 3.5 Who owns the `cells.status` lifecycle
 
-The persisted `cells.status` column (`active` → `provisioning` /
-`draining` → `deprovisioned`) is owned by the **provisioner / cell-row
-manager**, not the autoscaler. The autoscaler deliberately does **not**
-write `cells.status` during a drain, for two reasons:
+The **autoscaler** owns the control-plane `cells.status` lifecycle
+(`active` → `draining` → `deprovisioned`); the **provisioner** owns only
+the matching *infrastructure* work (creating/destroying the cell's VMs,
+containers, DNS, etc.). The split is deliberate: control-plane state and
+the physical resource have different failure modes, and keeping the DB
+transition in the orchestrator is what makes a multi-tick teardown
+resumable.
 
-- The snapshot query only evaluates `active` cells. If the autoscaler
-  flipped a cell to `draining` mid-flight, a drain that is deferred to a
-  later tick (because of `maxDrainPerTick` or temporary capacity
-  shortage) would never be re-evaluated and its remaining tenants would
-  be stranded. Leaving the row `active` until teardown completes keeps the
-  drain resumable.
-- With the `noop` provisioner (dry-run mode) nothing is actually torn
-  down, so writing a lifecycle transition would mutate real control-plane
-  state during what is meant to be an observe-only run.
+On a `scale_down` the engine:
 
-A real `script` / `webhook` provisioner therefore transitions the row
-(`draining` once it starts emptying a cell, `deprovisioned` once teardown
-succeeds) as part of its infrastructure work — at which point the next
-tick's `status = 'active'` filter naturally stops evaluating it and the
-cell-router stops placing new tenants on it. Within a single tick the
-autoscaler's in-memory `draining` set (above) provides the same guarantee
-for drain-target selection without depending on a DB write landing first.
+1. Marks the cell `draining` **before** it moves a single tenant. From
+   that moment the cell-router stops placing new tenants on it, and the
+   next tick's snapshot filter no longer treats it as a normal `active`
+   cell or a drain target.
+2. Drains it (capped at `maxDrainPerTick`). If the drain has to be
+   deferred — tick cap reached, transient sibling-capacity shortage, or a
+   migration error — the row **stays `draining`**. Because the snapshot
+   query surfaces `draining` cells too, the next `Evaluate` re-selects it
+   and forces a `scale_down` (regardless of its current metrics) so the
+   teardown picks up exactly where it left off. No tenant is stranded.
+3. Marks the cell `deprovisioned` only **after** `Deprovision` succeeds,
+   at which point it drops out of evaluation entirely. If `Deprovision`
+   fails the row stays `draining` and the next tick retries.
+
+**Dry-run safety.** The `noop` provisioner opts out of these writes
+(`observeOnly`), so running with `KAPP_AUTOSCALE_PROVISION=true` and the
+`noop` provisioner still mutates **nothing** — neither infrastructure nor
+the `cells.status` row. Lifecycle writes happen only when provisioning is
+enabled with a provisioner that actually changes infrastructure
+(`script` / `webhook`). A custom provisioner that prefers to manage the
+row itself can do the same by implementing `observeOnly() bool { return
+true }`.
 
 ---
 
@@ -430,8 +446,12 @@ provisioner:
   switch to `script`/`webhook` to actually add capacity.
 
 For `script`/`webhook`, the provisioner is responsible for **inserting the
-new cell row** into the `cells` table (and maintaining its `status`; see
-§3.5) so the next autoscaler tick (and the cell-router) can see it.
+new cell row** into the `cells` table on `Provision` (region, endpoint,
+and an initial `status` of `active`/`provisioning`) so the next autoscaler
+tick and the cell-router can see it. The teardown side of the lifecycle
+(`draining` → `deprovisioned`) is driven by the **autoscaler**, not the
+provisioner (see §3.5); `Deprovision` only has to tear down the
+infrastructure and be idempotent.
 
 ---
 
@@ -441,8 +461,9 @@ new cell row** into the `cells` table (and maintaining its `status`; see
       (otherwise a region has no drain target and scale-down is a no-op).
 - [ ] `KAPP_AUTOSCALE_PROVISION` starts `false`; enable with provisioner
       `noop` first to dry-run the decisions in logs.
-- [ ] The provisioner inserts/updates the `cells` row (region, endpoint,
-      status) so routing and the next tick observe the change.
+- [ ] On scale_up the provisioner inserts the `cells` row (region,
+      endpoint, initial `status`) so routing and the next tick observe the
+      new cell; the autoscaler then owns the teardown status transitions.
 - [ ] Cross-region tenant moves are performed by an operator with a
       paired data migration — never left to the autoscaler.
 - [ ] PG streaming replicas exist for every cell that hosts

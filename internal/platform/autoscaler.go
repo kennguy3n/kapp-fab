@@ -109,6 +109,11 @@ type CellSnapshot struct {
 	TenantCount        int       `json:"tenant_count"`
 	LastScaleEventAt   time.Time `json:"last_scale_event_at,omitempty"`
 	LastScaleEventType string    `json:"last_scale_event_type,omitempty"`
+	// Status is the persisted cells.status lifecycle value (active or
+	// draining; provisioning/deprovisioned cells are not snapshotted).
+	// A cell already 'draining' is driven to finish teardown regardless
+	// of its current metrics (see Evaluate).
+	Status string `json:"status,omitempty"`
 }
 
 // Decision is what Decide returns for a single cell snapshot. The
@@ -211,6 +216,13 @@ type AutoscaleEngine struct {
 	provisioner      CellProvisioner
 	rebalancer       *Rebalancer
 	provisionEnabled bool
+	// manageCellLifecycle is true when the engine should own the
+	// persisted cells.status transitions (active -> draining ->
+	// deprovisioned) as it tears a cell down. It is false unless
+	// provisioning is enabled with a provisioner that actually mutates
+	// infrastructure: the NoopProvisioner opts out (observeOnly) so a
+	// dry run still touches no control-plane rows.
+	manageCellLifecycle bool
 }
 
 // NewAutoscaleEngine binds a policy to a pool. Pass nil logger to
@@ -232,6 +244,14 @@ func (e *AutoscaleEngine) WithProvisioning(provisioner CellProvisioner, rebalanc
 	e.provisioner = provisioner
 	e.rebalancer = rebalancer
 	e.provisionEnabled = enabled
+	// Own the cells.status lifecycle only when we are actuating against a
+	// provisioner that really changes infrastructure. A provisioner can
+	// opt out (the noop dry-run does) so enabling provisioning with it
+	// still mutates nothing — neither infra nor control-plane rows.
+	e.manageCellLifecycle = enabled && provisioner != nil
+	if oo, ok := provisioner.(interface{ observeOnly() bool }); ok && oo.observeOnly() {
+		e.manageCellLifecycle = false
+	}
 	return e
 }
 
@@ -254,6 +274,14 @@ func (e *AutoscaleEngine) Evaluate(ctx context.Context) ([]Decision, error) {
 	actuatable := make([]Decision, 0, len(snapshots))
 	for i := range snapshots {
 		d := Decide(snapshots[i], e.policy)
+		// A cell already marked 'draining' is mid-teardown: drive it to
+		// finish regardless of its current metrics, otherwise a drain
+		// deferred to a later tick (maxDrainPerTick / transient capacity
+		// shortage) would never resume and its tenants would be stranded.
+		if e.provisionEnabled && snapshots[i].Status == CellStatusDraining && d.EventType != CellEventScaleDown {
+			d.EventType = CellEventScaleDown
+			d.Reason = "resuming teardown (cell already draining)"
+		}
 		out = append(out, d)
 		if err := e.persistDecision(ctx, d); err != nil {
 			// Persisting one decision must not block the rest of
@@ -299,7 +327,8 @@ func (e *AutoscaleEngine) snapshotCells(ctx context.Context) ([]CellSnapshot, er
 		            WHERE COALESCE(t.cell_id, 'default') = c.id
 		        ), 0)::int AS tenant_count,
 		        COALESCE(last_event.created_at, 'epoch'::timestamptz) AS last_event_at,
-		        COALESCE(last_event.event_type, '')               AS last_event_type
+		        COALESCE(last_event.event_type, '')               AS last_event_type,
+		        COALESCE(c.status, $1)                            AS status
 		   FROM cells c
 		   LEFT JOIN LATERAL (
 		       SELECT created_at, event_type
@@ -309,13 +338,15 @@ func (e *AutoscaleEngine) snapshotCells(ctx context.Context) ([]CellSnapshot, er
 		        ORDER BY e.created_at DESC
 		        LIMIT 1
 		   ) last_event ON TRUE
-		  -- Only evaluate cells that are serving tenants. Cells still
-		  -- provisioning, draining, or already deprovisioned must not
-		  -- generate scale decisions or be chosen as drain targets.
-		  -- Uses the cells_region_status_idx added in migration 000081.
-		  WHERE COALESCE(c.status, $1) = $1
+		  -- Evaluate cells that are serving tenants ('active') plus cells
+		  -- mid-teardown ('draining') so a deferred drain resumes. Cells
+		  -- still 'provisioning' or already 'deprovisioned' are skipped and
+		  -- never chosen as drain targets. Uses cells_region_status_idx
+		  -- (migration 000081). A 'draining' cell is never a drain target
+		  -- (filtered in drainTargets by its Status).
+		  WHERE COALESCE(c.status, $1) IN ($1, $2)
 		  ORDER BY c.id`,
-		CellStatusActive,
+		CellStatusActive, CellStatusDraining,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("autoscale: query cells: %w", err)
@@ -327,7 +358,7 @@ func (e *AutoscaleEngine) snapshotCells(ctx context.Context) ([]CellSnapshot, er
 		if err := rows.Scan(
 			&s.ID, &s.Region, &s.MaxTenants, &s.CPUPct, &s.MemoryPct,
 			&s.ConnSaturationPct, &s.ObservedAt, &s.TenantCount,
-			&s.LastScaleEventAt, &s.LastScaleEventType,
+			&s.LastScaleEventAt, &s.LastScaleEventType, &s.Status,
 		); err != nil {
 			return nil, fmt.Errorf("autoscale: scan cell: %w", err)
 		}
@@ -459,14 +490,23 @@ func (e *AutoscaleEngine) drainAndDeprovision(ctx context.Context, d Decision, s
 		e.logger.Debug("autoscale: skip deprovision of default cell", "cell_id", d.CellID)
 		return
 	}
+	if d.Snapshot.TenantCount > 0 && e.rebalancer == nil {
+		// Cannot empty it and we must not strand tenants: leave the cell
+		// 'active' and serving. Deliberately NOT marked 'draining'.
+		e.logger.Warn("autoscale: scale_down not actuated; cell not empty and no rebalancer wired",
+			"cell_id", d.CellID, "tenants", d.Snapshot.TenantCount)
+		return
+	}
+	// Committed to tearing this cell down. Mark it 'draining' up front so
+	// the cell-router stops placing new tenants on it, it is excluded as a
+	// drain target, and — if the drain has to be deferred across ticks —
+	// the next Evaluate re-surfaces it and resumes the teardown. The mark
+	// is best-effort and idempotent; a no-op for the noop provisioner.
+	e.markCellStatus(ctx, d.CellID, CellStatusDraining)
 	if d.Snapshot.TenantCount > 0 {
-		if e.rebalancer == nil {
-			e.logger.Warn("autoscale: scale_down not actuated; cell not empty and no rebalancer wired",
-				"cell_id", d.CellID, "tenants", d.Snapshot.TenantCount)
-			return
-		}
 		drained, err := e.drainCell(ctx, d, snapshots, draining)
 		if err != nil {
+			// Stays 'draining'; the next tick resumes from where we left off.
 			e.logger.Error("autoscale: drain cell", "cell_id", d.CellID, "err", err)
 			return
 		}
@@ -477,10 +517,26 @@ func (e *AutoscaleEngine) drainAndDeprovision(ctx context.Context, d Decision, s
 		}
 	}
 	if err := e.provisioner.Deprovision(ctx, d.CellID); err != nil {
+		// Stays 'draining' (empty); the next tick retries the deprovision.
 		e.logger.Error("autoscale: deprovision cell", "cell_id", d.CellID, "err", err)
 		return
 	}
+	e.markCellStatus(ctx, d.CellID, CellStatusDeprovisioned)
 	e.logger.Info("autoscale: deprovisioned cell", "cell_id", d.CellID)
+}
+
+// markCellStatus transitions a cell's persisted lifecycle status. It is
+// a best-effort control-plane write (logged, never fatal to the tick)
+// and a no-op when the engine does not own the lifecycle (provisioning
+// disabled, or a dry-run/noop provisioner) or has no pool wired.
+func (e *AutoscaleEngine) markCellStatus(ctx context.Context, cellID, status string) {
+	if !e.manageCellLifecycle || e.pool == nil {
+		return
+	}
+	if _, err := e.pool.Exec(ctx, `UPDATE cells SET status = $2 WHERE id = $1`, cellID, status); err != nil {
+		e.logger.Error("autoscale: update cell status",
+			"cell_id", cellID, "status", status, "err", err)
+	}
 }
 
 // drainTarget is a candidate destination cell with its remaining
@@ -548,9 +604,11 @@ func (e *AutoscaleEngine) drainTargets(d Decision, snapshots []CellSnapshot, dra
 		if s.ID == d.CellID || s.Region != d.Snapshot.Region {
 			continue
 		}
-		// A cell that is itself being torn down this tick must never
-		// receive tenants, even if its (stale) snapshot shows headroom.
-		if draining[s.ID] {
+		// A cell that is itself being torn down must never receive
+		// tenants, even if its snapshot shows headroom — whether it is
+		// already persisted as 'draining' (a prior/in-flight teardown) or
+		// is scheduled for scale_down in this same tick.
+		if s.Status == CellStatusDraining || draining[s.ID] {
 			continue
 		}
 		capacity := s.MaxTenants

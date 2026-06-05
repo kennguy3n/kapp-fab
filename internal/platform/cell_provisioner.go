@@ -218,6 +218,12 @@ func (p *NoopProvisioner) Status(_ context.Context, cellID string) (CellProvisio
 	}, nil
 }
 
+// observeOnly opts the noop provisioner out of autoscaler-managed
+// cells.status writes. The engine checks for this so that enabling
+// KAPP_AUTOSCALE_PROVISION with the noop provisioner remains a true dry
+// run: no infrastructure AND no control-plane row is mutated.
+func (p *NoopProvisioner) observeOnly() bool { return true }
+
 // ---------------------------------------------------------------------------
 // ScriptProvisioner — shells out to scripts/provision-cell.sh.
 // ---------------------------------------------------------------------------
