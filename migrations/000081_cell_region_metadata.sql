@@ -46,11 +46,18 @@ ALTER TABLE cells
 
 -- Constrain status to the known lifecycle states. Added separately and
 -- guarded so the migration is idempotent (ADD CONSTRAINT has no
--- IF NOT EXISTS before PostgreSQL 17).
+-- IF NOT EXISTS before PostgreSQL 17). The guard is scoped to the `cells`
+-- table via conrelid (not conname alone): constraint names are unique only
+-- per-table in PostgreSQL, and this platform provisions per-tenant schemas
+-- on tier upgrade, so a bare conname match could be satisfied by a
+-- like-named constraint on a different table/schema and wrongly skip
+-- creating ours here.
 DO $$
 BEGIN
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'cells_status_check'
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'cells_status_check'
+           AND conrelid = 'cells'::regclass
     ) THEN
         ALTER TABLE cells
             ADD CONSTRAINT cells_status_check
