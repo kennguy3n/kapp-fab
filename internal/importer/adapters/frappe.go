@@ -207,7 +207,7 @@ func (a *FrappeAdapter) listPage(ctx context.Context, cfg FrappeConfig, dt Frapp
 // `out`. The token header works on every Frappe deployment we care
 // about (frappe, erpnext, hrms, crm, lms).
 func (a *FrappeAdapter) doJSON(ctx context.Context, cfg FrappeConfig, method, target string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, target, nil)
+	req, err := http.NewRequestWithContext(ctx, method, target, http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -344,8 +344,8 @@ func mergeDeltaFilter(existing string, since time.Time) string {
 		// Frappe's dict syntax or some other form we do not parse.
 		return existing
 	}
-	merged := append(parsed, deltaClause...)
-	b, _ := json.Marshal(merged)
+	parsed = append(parsed, deltaClause...)
+	b, _ := json.Marshal(parsed)
 	return string(b)
 }
 
