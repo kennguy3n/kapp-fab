@@ -569,10 +569,17 @@ func (e *AutoscaleEngine) drainAndDeprovision(ctx context.Context, d Decision, s
 		if len(liveIDs) > 0 {
 			if e.rebalancer == nil {
 				// A tenant landed after the snapshot and we have no way to
-				// move it. Leave the cell 'draining' (the router already
-				// avoids it) so a later tick with a rebalancer finishes the
-				// teardown; never strand a tenant by deprovisioning under it.
-				e.logger.Warn("autoscale: deprovision deferred; tenant arrived after snapshot and no rebalancer wired",
+				// move it. We must not deprovision under it, but we also must
+				// not leave the cell parked in 'draining': with no rebalancer
+				// the teardown can never complete, and a 'draining' cell is
+				// re-forced to scale_down every tick by the override in
+				// decideForCell — bypassing the cooldown and spamming
+				// platform_scale_events indefinitely with no progress. Revert
+				// to 'active' (mirroring the snapshot-based bail above) so the
+				// cell keeps serving and returns to normal cooldown-governed
+				// evaluation; if a rebalancer is later wired it is drained then.
+				e.markCellStatus(ctx, d.CellID, CellStatusActive)
+				e.logger.Warn("autoscale: deprovision aborted; tenant arrived after snapshot and no rebalancer wired (cell left active)",
 					"cell_id", d.CellID, "tenants", len(liveIDs))
 				return
 			}
