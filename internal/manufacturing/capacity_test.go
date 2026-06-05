@@ -223,6 +223,22 @@ func TestForwardSchedule(t *testing.T) {
 			wantByWC: map[uuid.UUID]map[string]string{wcDead: {day(0): "200"}},
 		},
 		{
+			// A zero-capacity op can't be spread, so it neither advances
+			// the cursor nor leaves room on its day; two in a row stack
+			// their whole loads on the same (overloaded) day.
+			name: "consecutive zero-capacity ops stack on the same day",
+			days: 5,
+			wo: &woOperations{
+				plannedQty:     decimal.NewFromInt(50),
+				scheduledStart: ptrTime(base),
+				ops: []RoutingOperation{
+					{Sequence: 1, WorkCenterID: wcDead, CycleTimeMinutes: decimal.NewFromInt(1)}, // load 50 against zero capacity
+					{Sequence: 2, WorkCenterID: wcDead, CycleTimeMinutes: decimal.NewFromInt(2)}, // load 100 against zero capacity, same day
+				},
+			},
+			wantByWC: map[uuid.UUID]map[string]string{wcDead: {day(0): "150"}},
+		},
+		{
 			name: "load past window end is dropped",
 			days: 2, // only day 0 and day 1
 			wo: &woOperations{

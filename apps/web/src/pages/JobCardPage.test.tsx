@@ -98,6 +98,32 @@ describe("JobCardPage", () => {
     expect(startButtons[1]).toBeEnabled();
   });
 
+  it("keeps the first card disabled when a second card's mutation is fired while the first is still in flight", async () => {
+    listJobCards.mockResolvedValue([
+      card({ id: "card-1", routing_operation_seq: 1 }),
+      card({ id: "card-2", routing_operation_seq: 2 }),
+    ]);
+    // Both requests hang, so both mutations stay in flight at once.
+    startJobCard.mockReturnValue(new Promise(() => {}));
+
+    const user = userEvent.setup();
+    await selectWorkOrder(user);
+
+    const startButtons = await screen.findAllByRole("button", { name: "Start" });
+    expect(startButtons).toHaveLength(2);
+
+    await user.click(startButtons[0]);
+    await waitFor(() => expect(startButtons[0]).toBeDisabled());
+
+    // Firing the second card's mutation must NOT re-enable the first.
+    // (A single shared useMutation would, since its `variables` would now
+    // point at card-2; per-row mutations keep each card's state isolated.)
+    await user.click(startButtons[1]);
+    await waitFor(() => expect(startButtons[1]).toBeDisabled());
+    expect(startButtons[0]).toBeDisabled();
+    expect(startJobCard).toHaveBeenCalledTimes(2);
+  });
+
   it("disables only the clicked card's Complete button while its mutation is in flight", async () => {
     listJobCards.mockResolvedValue([
       card({ id: "card-1", routing_operation_seq: 1, status: "in_progress" }),
