@@ -30,7 +30,13 @@ function isoDate(d: Date): string {
  */
 export function CapacityPlanningPage() {
   const today = new Date();
-  const weekOut = new Date(today.getTime() + 6 * 24 * 60 * 60 * 1000);
+  // Advance by calendar days rather than adding 6*24h of milliseconds:
+  // setDate normalises across DST transitions, so the default window is
+  // always exactly 7 calendar days. Millisecond arithmetic would land an
+  // hour off on a DST boundary and, for a user near midnight, isoDate
+  // could then read the previous local day — a 6-day window.
+  const weekOut = new Date(today);
+  weekOut.setDate(weekOut.getDate() + 6);
   const [start, setStart] = useState(isoDate(today));
   const [end, setEnd] = useState(isoDate(weekOut));
 
