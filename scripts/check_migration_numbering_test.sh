@@ -60,8 +60,21 @@ run "starts at 5 not 1" 1 "000005_too_high"
 run "gap at 3 is allowed" 0 "000001_a" "000002_b" "000004_d"
 run "gap at end is allowed" 0 "000001_a" "000077_b" "000079_c"
 
-# Duplicate prefix.
+# Duplicate prefix (two different slugs at the same version → conflict).
 run "duplicate prefix" 1 "000001_a" "000001_b" "000002_c"
+
+# Direction-aware up/down companions (NNNNNN_slug.up.sql /
+# NNNNNN_slug.down.sql) collapse into one version, matching the Go
+# source driver. The "run" helper appends ".sql", so "000002_b.up"
+# materialises as "000002_b.up.sql".
+run "up/down companions are one version" 0 "000001_a" "000002_b.up" "000002_b.down"
+run "plain .sql plus .down companion" 0 "000001_a" "000001_a.down"
+# A down file with no up companion is malformed.
+run "down without up is rejected" 1 "000001_a" "000002_b.down"
+# Two up files for the same version (plain + .up) is a duplicate.
+run "duplicate up (plain + .up)" 1 "000001_a" "000001_a.up"
+# up/down companions with mismatched slugs at one version conflict.
+run "conflicting slugs across companions" 1 "000001_a" "000002_b.up" "000002_c.down"
 
 # Bad filename format.
 run "missing prefix" 1 "initial_no_prefix"
