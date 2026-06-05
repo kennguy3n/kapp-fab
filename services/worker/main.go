@@ -410,6 +410,29 @@ func run() error {
 
 	exportWorker := NewExportWorker(exporter.NewStore(pool, adminPool), recordStore, 5*time.Second)
 	autoscaleEngine := platform.NewAutoscaleEngine(pool, platform.DefaultAutoscalePolicy(), nil)
+	// Optional cell auto-provisioning. Off unless KAPP_AUTOSCALE_PROVISION=true,
+	// preserving the historic observe-only behaviour (decisions are still
+	// recorded in platform_scale_events either way). When enabled, the
+	// provisioner selected by KAPP_AUTOSCALE_PROVISIONER (script|webhook|noop)
+	// actuates scale_up / scale_down, and the rebalancer drains a cell's
+	// tenants onto sibling cells before the cell is torn down.
+	if platform.AutoscaleProvisioningEnabled() {
+		provisioner, perr := platform.ProvisionerFromEnv(slog.Default())
+		if perr != nil {
+			return fmt.Errorf("autoscale provisioner: %w", perr)
+		}
+		// No WithCacheInvalidator here on purpose: that hook only drops a
+		// stale entry from an in-process tenant cache, and this worker keeps
+		// no tenant→cell routing cache (the API replicas do, and they rely on
+		// that cache's short TTL — the hook is process-local and cannot reach
+		// them). If the worker ever gains a tenant-routing cache, wire its
+		// invalidator here so a drained tenant is not routed to a torn-down
+		// cell until the TTL lapses.
+		rebalancer := platform.NewRebalancer(pool, auditor, slog.Default())
+		autoscaleEngine = autoscaleEngine.WithProvisioning(provisioner, rebalancer, true)
+		slog.Default().Info("autoscale provisioning enabled",
+			slog.String("provisioner", os.Getenv("KAPP_AUTOSCALE_PROVISIONER")))
+	}
 	autoscaleLoop := platform.NewAutoscaleLoop(autoscaleEngine, 60*time.Second)
 
 	// Platform-scoped daily database maintenance (Workstream 4). Like the
