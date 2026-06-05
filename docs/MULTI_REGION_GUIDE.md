@@ -175,7 +175,12 @@ A cell is **never** torn down while it still hosts tenants. On
 2. If the cell is non-empty and a rebalancer is wired, **drains** it:
    migrates every tenant onto sibling cells **in the same region** that
    have spare capacity, spreading load onto the emptiest sibling first.
-3. Only once the cell is empty does it call `Deprovision`.
+3. Re-checks the **live** tenant count (a fresh query, not the tick-old
+   snapshot) and only calls `Deprovision` once the cell is genuinely
+   empty. This closes the window where a tenant could be placed between
+   the snapshot and teardown: such a late arrival is drained first (or,
+   with no rebalancer, the cell is left `draining` for a later tick)
+   rather than stranded on a cell about to be removed.
 
 If there is insufficient sibling capacity in the region, the drain stops
 and the cell is **left in place** — tenants are never stranded and never

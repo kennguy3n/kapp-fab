@@ -81,6 +81,24 @@ func TestDrainAndDeprovision_NonEmptyNoRebalancer(t *testing.T) {
 	}
 }
 
+func TestDrainAndDeprovision_VerifiesLiveEmptinessBeforeTeardown(t *testing.T) {
+	// Regression for the TOCTOU window: even when the tick-old snapshot
+	// reports zero tenants, the engine must re-check the LIVE tenant count
+	// before deprovisioning so a tenant placed after the snapshot is not
+	// stranded. Here the live verification query fails (pool points at an
+	// unreachable host), so the engine must NOT deprovision — it leaves the
+	// cell 'draining' for the next tick to retry, rather than tearing down a
+	// cell whose emptiness it could not confirm.
+	prov := &fakeProvisioner{}
+	e := NewAutoscaleEngine(dummyPool(t), DefaultAutoscalePolicy(), nil).
+		WithProvisioning(prov, nil, true)
+	d := Decision{CellID: "c-maybe-empty", EventType: CellEventScaleDown, Snapshot: CellSnapshot{ID: "c-maybe-empty", TenantCount: 0}}
+	e.drainAndDeprovision(context.Background(), d, nil, nil)
+	if len(prov.deprovisioned) != 0 {
+		t.Fatalf("must not deprovision when live emptiness is unverified, got %v", prov.deprovisioned)
+	}
+}
+
 func TestDrainTargets_SameRegionWithHeadroom(t *testing.T) {
 	e := NewAutoscaleEngine(nil, DefaultAutoscalePolicy(), nil)
 	d := Decision{CellID: "src", Snapshot: CellSnapshot{ID: "src", Region: "eu-west-1"}}

@@ -503,7 +503,36 @@ func (e *AutoscaleEngine) drainAndDeprovision(ctx context.Context, d Decision, s
 	// the next Evaluate re-surfaces it and resumes the teardown. The mark
 	// is best-effort and idempotent; a no-op for the noop provisioner.
 	e.markCellStatus(ctx, d.CellID, CellStatusDraining)
-	if d.Snapshot.TenantCount > 0 {
+	// Verify the cell is actually empty before tearing it down, using a
+	// LIVE query rather than trusting d.Snapshot.TenantCount (captured by
+	// snapshotCells at the START of the tick). This closes the TOCTOU
+	// window where a tenant is placed — or an in-flight placement commits
+	// — between the snapshot and teardown: such a tenant would otherwise
+	// be stranded on a cell we are about to deprovision. (Skipped when no
+	// pool is wired, e.g. unit tests: there is nothing to query.)
+	needsDrain := d.Snapshot.TenantCount > 0
+	if !needsDrain && e.pool != nil {
+		liveIDs, err := e.tenantsOnCell(ctx, d.CellID)
+		if err != nil {
+			// Stays 'draining'; the next tick re-verifies and retries.
+			e.logger.Error("autoscale: verify cell empty before deprovision",
+				"cell_id", d.CellID, "err", err)
+			return
+		}
+		if len(liveIDs) > 0 {
+			if e.rebalancer == nil {
+				// A tenant landed after the snapshot and we have no way to
+				// move it. Leave the cell 'draining' (the router already
+				// avoids it) so a later tick with a rebalancer finishes the
+				// teardown; never strand a tenant by deprovisioning under it.
+				e.logger.Warn("autoscale: deprovision deferred; tenant arrived after snapshot and no rebalancer wired",
+					"cell_id", d.CellID, "tenants", len(liveIDs))
+				return
+			}
+			needsDrain = true
+		}
+	}
+	if needsDrain {
 		drained, err := e.drainCell(ctx, d, snapshots, draining)
 		if err != nil {
 			// Stays 'draining'; the next tick resumes from where we left off.
