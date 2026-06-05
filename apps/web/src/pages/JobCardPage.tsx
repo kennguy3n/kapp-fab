@@ -120,7 +120,7 @@ export function JobCardPage() {
                   {jc.status === "pending" && (
                     <button
                       onClick={() => startMut.mutate(jc.id)}
-                      disabled={startMut.isPending}
+                      disabled={startMut.isPending && startMut.variables === jc.id}
                     >
                       Start
                     </button>
@@ -128,7 +128,9 @@ export function JobCardPage() {
                   {jc.status !== "completed" && (
                     <button
                       onClick={() => completeMut.mutate(jc.id)}
-                      disabled={completeMut.isPending}
+                      disabled={
+                        completeMut.isPending && completeMut.variables === jc.id
+                      }
                       style={{ marginLeft: 8 }}
                     >
                       Complete

@@ -3,10 +3,19 @@ import { useQuery } from "@tanstack/react-query";
 import type { CapacityDayLoad, WorkCenterSchedule } from "@kapp/client";
 import { api } from "../lib/api";
 
-// isoDate formats a Date as YYYY-MM-DD in UTC, matching the format the
-// capacity endpoint expects for its start / end query parameters.
+// isoDate formats a Date as YYYY-MM-DD using its LOCAL calendar date,
+// matching the format the capacity endpoint expects for its start / end
+// query parameters. Local (not UTC) so the default window opens on the
+// user's "today": toISOString() would render the UTC date, which for a
+// user east of UTC shortly after local midnight is still yesterday,
+// defaulting the picker to the wrong day. The server treats the date
+// string as a calendar day (truncated to midnight UTC), so the grid the
+// user sees lines up with the date they picked.
 function isoDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 /**
