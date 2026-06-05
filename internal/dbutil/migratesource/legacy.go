@@ -273,12 +273,24 @@ func (l *LegacySource) HasDown(version uint) bool {
 // can exercise the checks.  Rules:
 //
 //  1. At least one migration must exist.
-//  2. Versions must form a contiguous sequence starting at 1.
-//  3. No duplicate versions.
-//  4. Every version must have an up file.
+//  2. Versions must start at 1 and be strictly increasing (no
+//     duplicates).
+//  3. Every version must have an up file.
 //
-// (Duplicates are already prevented at NewFromDir; we re-check here
-// because the rules contract is the source of truth.)
+// Gaps in the sequence are PERMITTED.  Migration prefixes are assigned
+// across several parallel workstreams, and a prefix is sometimes
+// reserved by one branch before it lands on main (e.g. 000079 shipping
+// while 000078 is still in review on another branch — see the numbering
+// note in migrations/000079_db_maintenance.sql).  golang-migrate keys
+// on the unique version integer and walks the registered set in order
+// via First/Next, so a missing prefix is applied as "there is simply no
+// migration at that number" — it is benign.  Enforcing strict
+// contiguity here used to fail-fast `migrate up` (and therefore every
+// DB-backed test) the moment such a coordinated gap existed, which is
+// why the contiguity requirement was relaxed to gap-tolerant.  The
+// genuinely dangerous case the guard was added for — a DUPLICATE prefix
+// (two files sharing a number) — is still rejected, both here and
+// structurally at NewFromDir, which fails before Validate even runs.
 //
 // Post-conditions for callers that observe a nil return:
 //
@@ -299,13 +311,16 @@ func (l *LegacySource) Validate() error {
 		return fmt.Errorf("migratesource: sequence must start at 000001 (got %06d)", versions[0])
 	}
 	for i := 1; i < len(versions); i++ {
-		if versions[i] == versions[i-1] {
-			return fmt.Errorf("migratesource: duplicate version %06d", versions[i])
-		}
-		if versions[i] != versions[i-1]+1 {
+		// Strictly increasing (duplicates rejected).  Gaps are allowed:
+		// versions[i] > versions[i-1] is sufficient; we do NOT require
+		// versions[i] == versions[i-1]+1.  Versions() is derived from
+		// unique map keys sorted ascending, so a non-increasing pair is
+		// unreachable today and this is a defensive guard against a
+		// future change to Versions() or the file index.
+		if versions[i] <= versions[i-1] {
 			return fmt.Errorf(
-				"migratesource: non-monotonic sequence; expected %06d after %06d, got %06d",
-				versions[i-1]+1, versions[i-1], versions[i],
+				"migratesource: versions must be strictly increasing; got %06d after %06d",
+				versions[i], versions[i-1],
 			)
 		}
 	}

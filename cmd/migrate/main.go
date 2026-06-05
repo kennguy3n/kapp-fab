@@ -17,9 +17,12 @@
 //	migrate version           Print the current applied version and
 //	                          whether the schema_migrations row is
 //	                          marked dirty.
-//	migrate validate          Check that the migrations directory has
-//	                          a contiguous sequence starting at 000001
-//	                          with no gaps or duplicates.
+//	migrate validate          Check that the migrations directory is
+//	                          well-formed: starts at 000001, strictly
+//	                          increasing, no duplicate prefixes, every
+//	                          version has an up file.  Gaps are allowed
+//	                          (prefixes are coordinated across parallel
+//	                          workstreams; see migratesource.Validate).
 //	migrate bootstrap [V]     Initialize schema_migrations on a legacy
 //	                          DB that already has Kapp tables but no
 //	                          tracking table.  V defaults to the highest
@@ -456,36 +459,46 @@ func cmdDown(args []string) error {
 	if vErr != nil {
 		return fmt.Errorf("down: read version: %w", vErr)
 	}
-	// Bounds check: refuse up front when n exceeds the number of
-	// applied migrations.  golang-migrate's Steps(-n) would surface a
-	// generic error in that case; this gives operators a clear
-	// message and lets the HasDown loop below assume probe>=1 so its
-	// arithmetic is straightforward.
-	//
-	// uint(n) is safe here: n is checked >= 1 above so the cast does
-	// not wrap, and current is a uint so the comparison is exact.
-	nu := uint(n) //nolint:gosec // n is bounded >=1 above; no sign change
-	if nu > current {
+	// Locate the current DB version within the registered set.  We
+	// walk the actual sorted version list (gap-tolerant) rather than
+	// computing positions arithmetically: migration prefixes may
+	// contain gaps (see migratesource.LegacySource.Validate), so
+	// version current-1 is not guaranteed to exist on disk.  Under
+	// golang-migrate's in-order apply, the DB version always
+	// corresponds to a registered on-disk migration, and every
+	// registered version at or below it has been applied — so the
+	// index of `current` in the sorted list is the count of applied
+	// migrations minus one.
+	versions := src.Versions()
+	curIdx := -1
+	for i, v := range versions {
+		if v == current {
+			curIdx = i
+			break
+		}
+	}
+	if curIdx < 0 {
 		return fmt.Errorf(
-			"down: N=%d exceeds current version %06d (only %d migration(s) applied)",
-			n, current, current,
+			"down: current DB version %06d has no matching migration file on disk",
+			current,
 		)
 	}
-	// Probe every rollback target's HasDown.  We walk i in [0, n)
-	// using the bounded uint computed above, so the loop counter is
-	// always representable and there is no dead overflow guard.
-	//
-	// Coupling note: this arithmetic (probe := current - step)
-	// assumes migration versions are strictly contiguous starting at
-	// 000001.  That invariant is enforced by
-	// migratesource.LegacySource.Validate(), which the
-	// openSourceValidated() call above runs before we get here.  If
-	// the contiguity rule is ever relaxed (e.g. allowing gaps in the
-	// numbering), this loop must be reworked to walk the sorted
-	// applied-versions list returned by golang-migrate instead of
-	// computing positions arithmetically.
-	for step := uint(0); step < nu; step++ {
-		probe := current - step
+	applied := curIdx + 1
+	// Bounds check: refuse up front when n exceeds the number of
+	// applied migrations.  golang-migrate's Steps(-n) would surface a
+	// generic error in that case; this gives operators a clear message.
+	if n > applied {
+		return fmt.Errorf(
+			"down: N=%d exceeds the %d migration(s) applied (current version %06d)",
+			n, applied, current,
+		)
+	}
+	// Probe every rollback target's HasDown, walking the n highest
+	// applied versions downward through the actual sequence so a gap
+	// in the numbering does not produce a phantom "forward-only"
+	// error for a prefix that simply never existed.
+	for step := 0; step < n; step++ {
+		probe := versions[curIdx-step]
 		if !src.HasDown(probe) {
 			return fmt.Errorf(
 				"down: version %06d is forward-only (no .down.sql companion); "+

@@ -234,8 +234,15 @@ kubectl -n kapp annotate ingress/kapp-api-canary \
 Every migration PR must pass this list. CI enforces the ones tagged
 **[ci]**.
 
-- [ ] **[ci]** Migration file numbered contiguously from the previous
-      (gap check via `scripts/check_migration_numbering.sh`).
+- [ ] **[ci]** Migration prefix is unique and strictly greater than the
+      previous one (numbering check via
+      `scripts/check_migration_numbering.sh`). Gaps are **allowed** —
+      prefixes are coordinated across parallel workstreams, so a number
+      can be reserved on another branch before it lands (e.g. `main`
+      shipping `000079` while `000078` is still in review). Duplicates
+      are still rejected. See the **gap-fill caveat** below before
+      landing a migration whose prefix is *lower* than one already
+      deployed.
 - [ ] **[ci]** Tenant-scoped tables enable RLS and define
       `tenant_isolation` policies.
 - [ ] Migration is **idempotent** (`IF NOT EXISTS`,
@@ -263,3 +270,39 @@ A migration that fails any of these in production triggers
 `KappMigrationFailed` (see
 [ONCALL_PLAYBOOK.md §4.6](./ONCALL_PLAYBOOK.md#46-additional-alerts-to-document))
 and blocks further deploys until resolved.
+
+### Gap-fill caveat (landing a reserved lower-numbered migration)
+
+`schema_migrations` tracks a **single high-water-mark version**, not a
+per-migration ledger. golang-migrate only applies versions *strictly
+greater* than the recorded version. This is normally invisible, but it
+matters when a gap is *filled* after the higher number has already been
+deployed:
+
+1. A DB applies up to `000079` (recorded version = `79`) while `000078`
+   is still reserved on another branch.
+2. `000078_<name>.sql` later merges to `main`.
+3. On that already-migrated DB, `go run ./cmd/migrate up` is a **no-op**
+   for `000078`: `78 < 79`, so golang-migrate never runs it. The column
+   the gap migration was supposed to add is silently absent.
+
+Fresh databases (CI, new cells) are unaffected — they apply the full
+`000001…000079` set in order. Only databases that were migrated *during*
+the gap window need attention.
+
+When you land a migration whose prefix is lower than a version already
+deployed anywhere, you MUST apply it out-of-band on those databases, e.g.:
+
+```bash
+# Apply the gap migration's SQL directly (it is idempotent), then leave
+# schema_migrations at the existing high-water mark — do NOT `force` to
+# the lower number, which would make migrate re-run everything above it.
+psql "$KAPP_ADMIN_DB_URL" -f migrations/000078_<name>.sql
+```
+
+Prefer to avoid the situation entirely: coordinate so the lower-numbered
+migration lands on `main` before the higher one is deployed to any
+long-lived database. `cmd/migrate`'s `down` walks the actual on-disk
+version list (not `current - 1` arithmetic), so rollback already handles
+gaps correctly; this caveat is specifically about *forward* application
+of a back-filled number.

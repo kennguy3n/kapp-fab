@@ -133,19 +133,28 @@ func TestNewFromDir_IgnoresUnrelatedFiles(t *testing.T) {
 	}
 }
 
-func TestValidate_RejectsGap(t *testing.T) {
+func TestValidate_AllowsGap(t *testing.T) {
+	// Gaps are intentionally permitted: migration prefixes are
+	// coordinated across parallel workstreams, so a number may be
+	// reserved on another branch before it lands on main (e.g. main
+	// has 000077 then 000079 while 000078 is in review elsewhere).
+	// golang-migrate applies the registered versions in order
+	// regardless of the gap, so Validate must not reject it.
 	dir := t.TempDir()
 	writeFile(t, dir, "000001_init.sql", "SELECT 1;")
-	writeFile(t, dir, "000003_extend.sql", "SELECT 3;")
+	writeFile(t, dir, "000002_extend.sql", "SELECT 2;")
+	writeFile(t, dir, "000004_more.sql", "SELECT 4;") // gap at 000003
 
 	src, err := NewFromDir(dir)
 	if err != nil {
 		t.Fatalf("NewFromDir: %v", err)
 	}
-	if err := src.Validate(); err == nil {
-		t.Fatalf("expected gap error, got nil")
-	} else if !strings.Contains(err.Error(), "non-monotonic") {
-		t.Fatalf("unexpected error: %v", err)
+	if err := src.Validate(); err != nil {
+		t.Fatalf("Validate should allow gaps, got: %v", err)
+	}
+	// Sanity: First/Next walk the registered set across the gap.
+	if v, err := src.Next(2); err != nil || v != 4 {
+		t.Fatalf("Next(2) across gap: v=%d err=%v (want 4)", v, err)
 	}
 }
 
