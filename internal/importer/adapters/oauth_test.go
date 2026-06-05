@@ -94,6 +94,34 @@ func TestOAuthTokenCacheSingleflight(t *testing.T) {
 	}
 }
 
+// TestOAuthResolveDetachesGrantContext verifies the refresh-token grant is
+// not bound to the calling goroutine's cancellation. Under singleflight a
+// joiner shares the leader's call, so the leader cancelling its own context
+// must not fail the grant for joiners whose contexts are still valid. A
+// cancelled context that still resolves successfully exercises that
+// detachment directly (a bare ctx would fail on client.Do).
+func TestOAuthResolveDetachesGrantContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"tok-1","expires_in":3600}`))
+	}))
+	defer srv.Close()
+
+	cache := &oauthTokenCache{}
+	cfg := oauth2Config{TokenURL: srv.URL, ClientID: "cid", ClientSecret: "secret", RefreshToken: "refresh-abc"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before the grant runs
+
+	tok, _, err := cache.resolve(ctx, srv.Client(), cfg)
+	if err != nil {
+		t.Fatalf("resolve with cancelled caller context: %v", err)
+	}
+	if tok != "tok-1" {
+		t.Fatalf("got token %q, want tok-1", tok)
+	}
+}
+
 // TestGetJSONNotModified verifies a 304 (Xero's "nothing changed" reply
 // to If-Modified-Since) is not treated as an error and leaves out
 // untouched rather than failing on an empty-body JSON decode.

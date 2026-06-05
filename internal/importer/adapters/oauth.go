@@ -185,7 +185,13 @@ func (c *oauthTokenCache) resolve(ctx context.Context, client *http.Client, cfg 
 		if tok, ok := c.lookup(key, time.Now()); ok {
 			return oauthResolveResult{token: tok}, nil
 		}
-		tok, err := refreshOAuth2Token(ctx, client, cfg)
+		// Detach the grant from the leader's cancellation. Under
+		// singleflight every joiner shares the leader's single call, so a
+		// bare ctx would let the leader's cancellation fail all joiners
+		// whose own contexts are still valid. WithoutCancel preserves
+		// request-scoped values (tracing) while dropping cancellation and
+		// deadline; the http.Client's timeout still bounds the exchange.
+		tok, err := refreshOAuth2Token(context.WithoutCancel(ctx), client, cfg)
 		if err != nil {
 			return nil, err
 		}
