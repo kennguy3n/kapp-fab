@@ -238,6 +238,17 @@ func (s *PGStore) CompleteJobCard(ctx context.Context, tenantID, jobCardID uuid.
 	var woID uuid.UUID
 	var woStatus string
 	var openRemaining int
+	// Actual yield to credit the work order on auto-completion. It is
+	// the qty_produced of the FINAL routing operation (highest
+	// routing_operation_seq), not in.QtyProduced — cards may be
+	// completed out of sequence order (CanTransitionTo permits any
+	// pending/in_progress → completed), so the card being completed now
+	// is not necessarily the last production step. Only the final
+	// operation's output is the work order's finished-goods quantity;
+	// upstream operations yield work-in-progress. Left zero when the
+	// final card reported no qty, so CompleteWorkOrder falls back to the
+	// work order's planned_qty exactly as the BOM-only path does.
+	var finalOpQty decimal.Decimal
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		jc, err := lockJobCard(ctx, tx, tenantID, jobCardID)
 		if err != nil {
@@ -313,6 +324,23 @@ func (s *PGStore) CompleteJobCard(ctx context.Context, tenantID, jobCardID uuid.
 			}
 			return fmt.Errorf("manufacturing: lookup work order for job card: %w", err)
 		}
+
+		// When this completion closes out the last open card, read the
+		// final routing operation's reported yield to credit the work
+		// order. Done inside the tx while the work-order row is locked, so
+		// no concurrent completion can change a card's qty_produced
+		// between this read and the CompleteWorkOrder call below.
+		if openRemaining == 0 {
+			if err := tx.QueryRow(ctx,
+				`SELECT qty_produced FROM job_cards
+				  WHERE tenant_id = $1 AND work_order_id = $2
+				  ORDER BY routing_operation_seq DESC
+				  LIMIT 1`,
+				tenantID, woID,
+			).Scan(&finalOpQty); err != nil {
+				return fmt.Errorf("manufacturing: read final operation yield: %w", err)
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -327,7 +355,7 @@ func (s *PGStore) CompleteJobCard(ctx context.Context, tenantID, jobCardID uuid.
 	if openRemaining == 0 &&
 		(woStatus == WorkOrderStatusReleased || woStatus == WorkOrderStatusInProgress) {
 		if _, err := s.CompleteWorkOrder(ctx, tenantID, woID, in.OperatorID, CompleteWorkOrderInput{
-			ActualQty: in.QtyProduced,
+			ActualQty: finalOpQty,
 		}); err != nil {
 			return nil, fmt.Errorf("manufacturing: auto-complete work order %s from final job card: %w", woID, err)
 		}
