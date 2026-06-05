@@ -285,15 +285,7 @@ func (e *AutoscaleEngine) Evaluate(ctx context.Context) ([]Decision, error) {
 	// autoscaler acted on (no infrastructure change without an audit row).
 	actuatable := make([]Decision, 0, len(snapshots))
 	for i := range snapshots {
-		d := Decide(snapshots[i], e.policy)
-		// A cell already marked 'draining' is mid-teardown: drive it to
-		// finish regardless of its current metrics, otherwise a drain
-		// deferred to a later tick (maxDrainPerTick / transient capacity
-		// shortage) would never resume and its tenants would be stranded.
-		if e.provisionEnabled && e.provisioner != nil && snapshots[i].Status == CellStatusDraining && d.EventType != CellEventScaleDown {
-			d.EventType = CellEventScaleDown
-			d.Reason = "resuming teardown (cell already draining)"
-		}
+		d := e.decideForCell(snapshots[i])
 		out = append(out, d)
 		if err := e.persistDecision(ctx, d); err != nil {
 			// Persisting one decision must not block the rest of
@@ -325,6 +317,31 @@ func (e *AutoscaleEngine) Evaluate(ctx context.Context) ([]Decision, error) {
 		e.actuate(ctx, snapshots, actuatable)
 	}
 	return out, nil
+}
+
+// decideForCell applies the pure policy to a snapshot and then layers on
+// the lifecycle override: a cell already persisted as 'draining' is
+// mid-teardown, so it is driven to finish (forced scale_down) regardless
+// of its current metrics — otherwise a drain deferred to a later tick
+// (maxDrainPerTick / transient capacity shortage) would never resume and
+// its tenants would be stranded.
+//
+// The override is suppressed in observe-only mode (the noop dry-run).
+// There, markCellStatus never writes 'draining' in the first place, so a
+// 'draining' cell can only be a leftover from a prior real-provisioner
+// run; forcing scale_down on it every tick would persist a
+// platform_scale_events row every 60s while drainAndDeprovision does
+// nothing (it returns early under observeOnly), accumulating unbounded
+// audit noise with no progress. A dry run reports the cell's natural
+// policy decision instead.
+func (e *AutoscaleEngine) decideForCell(s CellSnapshot) Decision {
+	d := Decide(s, e.policy)
+	if e.provisionEnabled && e.provisioner != nil && !e.observeOnly &&
+		s.Status == CellStatusDraining && d.EventType != CellEventScaleDown {
+		d.EventType = CellEventScaleDown
+		d.Reason = "resuming teardown (cell already draining)"
+	}
+	return d
 }
 
 // snapshotCells reads every cell's last observed metrics plus the
@@ -470,6 +487,13 @@ func (e *AutoscaleEngine) actuate(ctx context.Context, snapshots []CellSnapshot,
 	for i := range decisions {
 		switch decisions[i].EventType {
 		case CellEventScaleUp:
+			// Deliberately NOT gated on e.observeOnly (unlike the
+			// scale_down path below): provisionForScaleUp only calls
+			// provisioner.Provision, and an observe-only provisioner's
+			// Provision is itself a side-effect-free logger (the noop one
+			// just logs a synthetic cell). The scale_down path needs the
+			// guard because it reaches the rebalancer, which holds a real
+			// DB pool and would run a real UPDATE even in dry-run wiring.
 			e.provisionForScaleUp(ctx, decisions[i])
 		case CellEventScaleDown:
 			e.drainAndDeprovision(ctx, decisions[i], snapshots, draining)

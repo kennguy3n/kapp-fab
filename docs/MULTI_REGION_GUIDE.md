@@ -194,7 +194,11 @@ and returns before any drain, so a dry run migrates **no** tenants and
 writes **no** `cells.status` row (the rebalancer holds a real pool even in
 dry-run wiring, so the engine — not the wiring — is what guarantees the
 no-mutation contract). Switch to `script`/`webhook` to actually drain and
-tear down.
+tear down. The draining-resume override (§3.5) is likewise suppressed under
+`noop`: a cell left `draining` by a prior real-provisioner run is reported
+with its natural policy decision rather than being forced to `scale_down`
+every tick, so a dry run does not accumulate per-tick `platform_scale_events`
+rows for a teardown it will never actuate.
 
 Before any tenant is moved, a cell committed to teardown is marked
 `status = 'draining'` (§3.5) so the cell-router stops placing new tenants

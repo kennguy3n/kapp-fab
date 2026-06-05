@@ -125,6 +125,47 @@ func TestDrainAndDeprovision_ObserveOnlyDoesNotMigrate(t *testing.T) {
 	}
 }
 
+func TestDecideForCell_DrainingOverrideForcesScaleDown(t *testing.T) {
+	// A cell persisted as 'draining' (a teardown in flight from an earlier
+	// tick) must be driven to finish even when its current metrics would
+	// otherwise yield a hold — otherwise a deferred drain never resumes.
+	prov := &fakeProvisioner{}
+	e := NewAutoscaleEngine(nil, DefaultAutoscalePolicy(), nil).
+		WithProvisioning(prov, nil, true)
+	// 500 tenants (between the 0.30 scale-down floor of 300 and the max of
+	// 1000) with comfortable utilisation → the pure policy holds; only the
+	// draining override should flip it to scale_down.
+	s := CellSnapshot{ID: "c-draining", Region: "eu-west-1", MaxTenants: 1000, TenantCount: 500, Status: CellStatusDraining}
+	if natural := Decide(s, e.policy); natural.EventType != CellEventHold {
+		t.Fatalf("precondition: want natural hold, got %q", natural.EventType)
+	}
+	if got := e.decideForCell(s); got.EventType != CellEventScaleDown {
+		t.Fatalf("draining cell must be forced to scale_down, got %q", got.EventType)
+	}
+}
+
+func TestDecideForCell_ObserveOnlySuppressesDrainingOverride(t *testing.T) {
+	// Regression: in observe-only (noop) mode the engine never writes
+	// 'draining' itself, so a 'draining' cell is a leftover from a prior
+	// real-provisioner run. Forcing scale_down on it every tick would spam
+	// platform_scale_events with no progress (drainAndDeprovision returns
+	// early under observeOnly). The override must be suppressed so the cell
+	// follows its natural policy decision.
+	e := NewAutoscaleEngine(nil, DefaultAutoscalePolicy(), nil).
+		WithProvisioning(NewNoopProvisioner(nil), nil, true)
+	if !e.observeOnly {
+		t.Fatal("noop provisioner must put the engine in observe-only mode")
+	}
+	s := CellSnapshot{ID: "c-draining", Region: "eu-west-1", MaxTenants: 1000, TenantCount: 500, Status: CellStatusDraining}
+	want := Decide(s, e.policy)
+	if want.EventType != CellEventHold {
+		t.Fatalf("precondition: want natural hold, got %q", want.EventType)
+	}
+	if got := e.decideForCell(s); got.EventType != want.EventType {
+		t.Fatalf("observe-only must not override a draining cell: got %q, want natural %q", got.EventType, want.EventType)
+	}
+}
+
 func TestDrainTargets_SameRegionWithHeadroom(t *testing.T) {
 	e := NewAutoscaleEngine(nil, DefaultAutoscalePolicy(), nil)
 	d := Decision{CellID: "src", Snapshot: CellSnapshot{ID: "src", Region: "eu-west-1"}}
