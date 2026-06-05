@@ -421,6 +421,13 @@ func run() error {
 		if perr != nil {
 			return fmt.Errorf("autoscale provisioner: %w", perr)
 		}
+		// No WithCacheInvalidator here on purpose: that hook only drops a
+		// stale entry from an in-process tenant cache, and this worker keeps
+		// no tenant→cell routing cache (the API replicas do, and they rely on
+		// that cache's short TTL — the hook is process-local and cannot reach
+		// them). If the worker ever gains a tenant-routing cache, wire its
+		// invalidator here so a drained tenant is not routed to a torn-down
+		// cell until the TTL lapses.
 		rebalancer := platform.NewRebalancer(pool, auditor, slog.Default())
 		autoscaleEngine = autoscaleEngine.WithProvisioning(provisioner, rebalancer, true)
 		slog.Default().Info("autoscale provisioning enabled",

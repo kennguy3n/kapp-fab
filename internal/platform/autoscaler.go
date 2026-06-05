@@ -278,7 +278,7 @@ func (e *AutoscaleEngine) Evaluate(ctx context.Context) ([]Decision, error) {
 		// finish regardless of its current metrics, otherwise a drain
 		// deferred to a later tick (maxDrainPerTick / transient capacity
 		// shortage) would never resume and its tenants would be stranded.
-		if e.provisionEnabled && snapshots[i].Status == CellStatusDraining && d.EventType != CellEventScaleDown {
+		if e.provisionEnabled && e.provisioner != nil && snapshots[i].Status == CellStatusDraining && d.EventType != CellEventScaleDown {
 			d.EventType = CellEventScaleDown
 			d.Reason = "resuming teardown (cell already draining)"
 		}

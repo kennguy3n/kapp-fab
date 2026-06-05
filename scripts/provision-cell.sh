@@ -36,6 +36,12 @@ set -euo pipefail
 
 # json_escape prints its argument as a JSON-safe string fragment
 # (without surrounding quotes), escaping backslashes and double quotes.
+# It does NOT escape control characters (newlines, tabs, U+0000–U+001F):
+# the values passed here (region/provider/zone/endpoint) come from operator
+# configuration and must not contain them. If you extend this template to
+# emit dynamic values that could include control characters, escape them
+# too (or pipe through `jq -Rs .`), otherwise the JSON the Go-side
+# parseCellJSON reads will be malformed.
 json_escape() {
     local s=${1-}
     s=${s//\\/\\\\}

@@ -17,8 +17,10 @@
 --                  cell (e.g. an internal URL or host:port).
 --   * status     — provisioning lifecycle: 'active' (default, serving
 --                  tenants), 'provisioning', 'draining' (being emptied
---                  ahead of teardown), or 'deprovisioned'. Mirrors
---                  CellProvisionState in cell_provisioner.go.
+--                  ahead of teardown), or 'deprovisioned'. These are the
+--                  CellStatus* constants in cell_provisioner.go (the
+--                  persisted lifecycle), NOT the CellProvisionState probe
+--                  result returned by a provisioner's Status() call.
 --   * provisioner — which provisioner created the cell ('script',
 --                  'webhook', 'noop', or '' for manually-seeded cells).
 --   * metadata   — provider-specific bag (VPC id, RDS arn, …) kept as
