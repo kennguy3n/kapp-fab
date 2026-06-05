@@ -98,15 +98,26 @@ type operationLoad struct {
 // range. It joins every released / in-progress work order to its
 // snapshotted routing's operations, computes the load minutes each
 // operation places on its work center (setup + cycle * planned_qty),
-// and buckets that load onto the work order's scheduled-start day. Work
-// orders whose scheduled start falls outside the window are ignored;
-// orders with no scheduled start are bucketed on the window's first day
-// so their load is never silently dropped.
+// and forward-schedules those operations across the window.
+//
+// Scheduling model (v1 finite forward-scheduling): within a work order
+// the operations are serial — operation N+1 cannot begin until
+// operation N has finished. Starting from the work order's anchor day
+// (its scheduled_start, or the window's first day when scheduled_start
+// is NULL), each operation's load is laid down on consecutive days,
+// with each day absorbing at most that operation's work center's
+// available minutes. The next operation resumes on the day the previous
+// one finished. This spreads a multi-step or long-running routing across
+// the days it actually occupies instead of piling the whole work
+// order's load onto its start day. Load that would land beyond the
+// window's end is outside this grid and dropped; a work order whose
+// scheduled_start itself falls outside the window is ignored entirely.
 //
 // Every work center in the tenant appears in the grid (even with zero
 // load) so the UI can render available capacity, and a center that is
 // in maintenance / retired but still carries scheduled load surfaces as
-// overloaded (its available minutes are zero).
+// overloaded (its available minutes are zero, so its load cannot be
+// spread and lands on a single day).
 func (p *CapacityPlanner) Plan(ctx context.Context, tenantID uuid.UUID, r DateRange) (*CapacityPlan, error) {
 	if tenantID == uuid.Nil {
 		return nil, errors.New("manufacturing: tenant id required")
@@ -121,23 +132,30 @@ func (p *CapacityPlanner) Plan(ctx context.Context, tenantID uuid.UUID, r DateRa
 		return nil, fmt.Errorf("%w: window of %d days exceeds the %d-day maximum", ErrCapacityRangeInvalid, days, maxCapacityWindowDays)
 	}
 
-	// Ordered list of day keys spanning the window, plus a set for
-	// O(1) "is this day in range?" checks while bucketing load.
+	// Ordered list of day keys spanning the window, plus a key→index
+	// map for O(1) "is this day in range, and where?" lookups while
+	// forward-scheduling load.
 	dayKeys := make([]string, 0, days)
-	inRange := make(map[string]struct{}, days)
+	dayIndex := make(map[string]int, days)
 	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
 		key := d.Format("2006-01-02")
+		dayIndex[key] = len(dayKeys)
 		dayKeys = append(dayKeys, key)
-		inRange[key] = struct{}{}
 	}
-	firstDay := dayKeys[0]
 
 	workCenters, err := p.store.ListWorkCenters(ctx, tenantID, "")
 	if err != nil {
 		return nil, err
 	}
 
-	loads, err := p.scheduledLoads(ctx, tenantID, firstDay, inRange)
+	// Per-work-center daily capacity, used as the per-day chunk size
+	// when spreading an operation's load across consecutive days.
+	capacity := make(map[uuid.UUID]decimal.Decimal, len(workCenters))
+	for i := range workCenters {
+		capacity[workCenters[i].ID] = workCenters[i].AvailableMinutesPerDay()
+	}
+
+	loads, err := p.scheduledLoads(ctx, tenantID, dayKeys, dayIndex, capacity)
 	if err != nil {
 		return nil, err
 	}
@@ -200,66 +218,167 @@ func buildDayLoad(day string, scheduled, available decimal.Decimal) DayLoad {
 	}
 }
 
+// woOperations holds one released / in-progress work order's scheduling
+// inputs plus its routing operations in sequence order, ready for
+// forward-scheduling.
+type woOperations struct {
+	plannedQty     decimal.Decimal
+	scheduledStart *time.Time
+	ops            []RoutingOperation
+}
+
 // scheduledLoads joins released / in-progress work orders to their
-// snapshotted routing operations and returns the per-operation load
-// bucketed onto a calendar day. Bucketing rule: the work order's
-// scheduled_start day when set and inside the window; the window's first
-// day when scheduled_start is NULL; skipped entirely when scheduled_start
-// falls outside the window.
+// snapshotted routing operations and forward-schedules each work order's
+// operations across the window, returning per-(work center, day) load
+// chunks. See Plan for the scheduling model. Anchor rule: the work
+// order's scheduled_start day when set and inside the window; the
+// window's first day when scheduled_start is NULL; the work order is
+// skipped entirely when scheduled_start falls outside the window.
 func (p *CapacityPlanner) scheduledLoads(
 	ctx context.Context,
 	tenantID uuid.UUID,
-	firstDay string,
-	inRange map[string]struct{},
+	dayKeys []string,
+	dayIndex map[string]int,
+	capacity map[uuid.UUID]decimal.Decimal,
 ) ([]operationLoad, error) {
 	out := make([]operationLoad, 0)
 	err := dbutil.WithTenantTx(ctx, p.store.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// Ordered by work order then operation sequence so each work
+		// order's rows arrive contiguously and in execution order,
+		// letting us group and forward-schedule them in a single pass.
 		rows, err := tx.Query(ctx,
-			`SELECT wo.planned_qty, wo.scheduled_start,
-			        ro.work_center_id, ro.setup_time_minutes, ro.cycle_time_minutes
+			`SELECT wo.id, wo.planned_qty, wo.scheduled_start,
+			        ro.sequence, ro.work_center_id,
+			        ro.setup_time_minutes, ro.cycle_time_minutes
 			   FROM work_orders wo
 			   JOIN routing_operations ro
 			     ON ro.tenant_id = wo.tenant_id AND ro.routing_id = wo.routing_id
 			  WHERE wo.tenant_id = $1
 			    AND wo.routing_id IS NOT NULL
-			    AND wo.status IN ('released', 'in_progress')`,
+			    AND wo.status IN ('released', 'in_progress')
+			  ORDER BY wo.id, ro.sequence`,
 			tenantID,
 		)
 		if err != nil {
 			return fmt.Errorf("manufacturing: query capacity load: %w", err)
 		}
 		defer rows.Close()
+
+		var (
+			curWO uuid.UUID
+			group *woOperations
+		)
+		flush := func() {
+			if group != nil {
+				out = forwardSchedule(out, group, dayKeys, dayIndex, capacity)
+			}
+		}
 		for rows.Next() {
 			var (
+				woID           uuid.UUID
 				plannedQty     decimal.Decimal
 				scheduledStart *time.Time
 				op             RoutingOperation
 			)
-			if err := rows.Scan(&plannedQty, &scheduledStart,
-				&op.WorkCenterID, &op.SetupTimeMinutes, &op.CycleTimeMinutes); err != nil {
+			if err := rows.Scan(&woID, &plannedQty, &scheduledStart,
+				&op.Sequence, &op.WorkCenterID,
+				&op.SetupTimeMinutes, &op.CycleTimeMinutes); err != nil {
 				return fmt.Errorf("manufacturing: scan capacity load: %w", err)
 			}
-
-			day := firstDay
-			if scheduledStart != nil {
-				key := scheduledStart.UTC().Truncate(24 * time.Hour).Format("2006-01-02")
-				if _, ok := inRange[key]; !ok {
-					// Scheduled outside the planning window — its
-					// load belongs to a different grid.
-					continue
-				}
-				day = key
+			if group == nil || woID != curWO {
+				flush()
+				curWO = woID
+				group = &woOperations{plannedQty: plannedQty, scheduledStart: scheduledStart}
 			}
-			out = append(out, operationLoad{
-				workCenterID: op.WorkCenterID,
-				day:          day,
-				minutes:      op.LoadMinutes(plannedQty),
-			})
+			group.ops = append(group.ops, op)
 		}
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		flush()
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// forwardSchedule lays a single work order's operations onto the day
+// grid and appends the resulting per-(work center, day) load chunks to
+// dst. Operations are serial: each begins on the day the previous one
+// finished, starting from the work order's anchor day. An operation's
+// load is spread across consecutive days, each day taking at most the
+// operation's work center's available minutes; a center with zero
+// available minutes can't be spread, so its whole load lands on one day
+// (surfacing as overloaded). Load that runs past the window's end is
+// outside the grid and dropped — and because time only moves forward,
+// once an operation passes the end the rest of the work order is too, so
+// scheduling stops. A work order whose anchor falls outside the window
+// contributes nothing.
+func forwardSchedule(
+	dst []operationLoad,
+	wo *woOperations,
+	dayKeys []string,
+	dayIndex map[string]int,
+	capacity map[uuid.UUID]decimal.Decimal,
+) []operationLoad {
+	cursor := 0 // anchor = window's first day when scheduled_start is NULL
+	if wo.scheduledStart != nil {
+		key := wo.scheduledStart.UTC().Truncate(24 * time.Hour).Format("2006-01-02")
+		idx, ok := dayIndex[key]
+		if !ok {
+			// Anchored outside the planning window — its load belongs
+			// to a different grid.
+			return dst
+		}
+		cursor = idx
+	}
+
+	lastIdx := len(dayKeys) - 1
+	for i := range wo.ops {
+		op := wo.ops[i]
+		if cursor > lastIdx {
+			// Past the window end; every later operation is later
+			// still, so nothing more of this work order fits.
+			break
+		}
+		remaining := op.LoadMinutes(wo.plannedQty)
+		if remaining.LessThanOrEqual(decimal.Zero) {
+			// A zero-load operation occupies no time; the next
+			// operation starts on the same day.
+			continue
+		}
+		perDay := capacity[op.WorkCenterID]
+		if perDay.LessThanOrEqual(decimal.Zero) {
+			// No schedulable capacity (maintenance / retired / zero
+			// hours): can't spread, so the whole load lands on the
+			// cursor day and the operation finishes there.
+			dst = append(dst, operationLoad{
+				workCenterID: op.WorkCenterID,
+				day:          dayKeys[cursor],
+				minutes:      remaining,
+			})
+			continue
+		}
+		for remaining.IsPositive() {
+			if cursor > lastIdx {
+				break // remainder spills past the window — dropped
+			}
+			chunk := remaining
+			if chunk.GreaterThan(perDay) {
+				chunk = perDay
+			}
+			dst = append(dst, operationLoad{
+				workCenterID: op.WorkCenterID,
+				day:          dayKeys[cursor],
+				minutes:      chunk,
+			})
+			remaining = remaining.Sub(chunk)
+			if remaining.IsPositive() {
+				cursor++ // operation continues onto the next day
+			}
+		}
+	}
+	return dst
 }

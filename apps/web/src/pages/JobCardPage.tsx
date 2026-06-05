@@ -42,21 +42,15 @@ export function JobCardPage() {
   const invalidateCards = () =>
     qc.invalidateQueries({ queryKey: ["mfg", "job-cards", workOrderID] });
 
-  const startMut = useMutation({
-    mutationFn: (id: string) => api.startJobCard(id),
-    onSuccess: invalidateCards,
-  });
-  const completeMut = useMutation({
-    mutationFn: (id: string) => api.completeJobCard(id),
-    onSuccess: () => {
-      invalidateCards();
-      // Completing the last open card auto-completes the work order
-      // server-side, moving it out of released/in_progress. Refresh the
-      // selector queries so the finished order stops showing in the
-      // dropdown instead of lingering until the next background refetch.
-      qc.invalidateQueries({ queryKey: ["mfg", "work-orders"] });
-    },
-  });
+  const onStarted = invalidateCards;
+  const onCompleted = () => {
+    invalidateCards();
+    // Completing the last open card auto-completes the work order
+    // server-side, moving it out of released/in_progress. Refresh the
+    // selector queries so the finished order stops showing in the
+    // dropdown instead of lingering until the next background refetch.
+    qc.invalidateQueries({ queryKey: ["mfg", "work-orders"] });
+  };
 
   return (
     <section>
@@ -107,45 +101,79 @@ export function JobCardPage() {
           </thead>
           <tbody>
             {cardsQ.data.map((jc: JobCard) => (
-              <tr key={jc.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                <td>{jc.routing_operation_seq}</td>
-                <td>
-                  <StatusPill status={jc.status} />
-                </td>
-                <td>{jc.qty_produced}</td>
-                <td>{jc.qty_rejected}</td>
-                <td>{jc.actual_start ? jc.actual_start.slice(0, 16) : "—"}</td>
-                <td>{jc.actual_end ? jc.actual_end.slice(0, 16) : "—"}</td>
-                <td>
-                  {jc.status === "pending" && (
-                    <button
-                      onClick={() => startMut.mutate(jc.id)}
-                      disabled={startMut.isPending}
-                    >
-                      Start
-                    </button>
-                  )}
-                  {jc.status !== "completed" && (
-                    <button
-                      onClick={() => completeMut.mutate(jc.id)}
-                      disabled={completeMut.isPending}
-                      style={{ marginLeft: 8 }}
-                    >
-                      Complete
-                    </button>
-                  )}
-                </td>
-              </tr>
+              <JobCardRow
+                key={jc.id}
+                jc={jc}
+                onStarted={onStarted}
+                onCompleted={onCompleted}
+              />
             ))}
           </tbody>
         </table>
       )}
-      {(startMut.isError || completeMut.isError) && (
-        <p style={{ color: "#dc2626" }}>
-          {String(startMut.error ?? completeMut.error)}
-        </p>
-      )}
     </section>
+  );
+}
+
+/**
+ * JobCardRow renders one job card and owns its own start / complete
+ * mutations. Each row holding its own useMutation is what makes the
+ * disabled state per-card: a single shared mutation only tracks the
+ * latest mutate() call, so clicking a second card mid-flight would
+ * re-enable the first card's button and allow a duplicate submit. With
+ * per-row mutations, isPending reflects only this card's request and
+ * several cards can be in flight independently.
+ */
+function JobCardRow({
+  jc,
+  onStarted,
+  onCompleted,
+}: {
+  jc: JobCard;
+  onStarted: () => void;
+  onCompleted: () => void;
+}) {
+  const startMut = useMutation({
+    mutationFn: () => api.startJobCard(jc.id),
+    onSuccess: onStarted,
+  });
+  const completeMut = useMutation({
+    mutationFn: () => api.completeJobCard(jc.id),
+    onSuccess: onCompleted,
+  });
+
+  return (
+    <tr style={{ borderBottom: "1px solid #f3f4f6" }}>
+      <td>{jc.routing_operation_seq}</td>
+      <td>
+        <StatusPill status={jc.status} />
+      </td>
+      <td>{jc.qty_produced}</td>
+      <td>{jc.qty_rejected}</td>
+      <td>{jc.actual_start ? jc.actual_start.slice(0, 16) : "—"}</td>
+      <td>{jc.actual_end ? jc.actual_end.slice(0, 16) : "—"}</td>
+      <td>
+        {jc.status === "pending" && (
+          <button onClick={() => startMut.mutate()} disabled={startMut.isPending}>
+            Start
+          </button>
+        )}
+        {jc.status !== "completed" && (
+          <button
+            onClick={() => completeMut.mutate()}
+            disabled={completeMut.isPending}
+            style={{ marginLeft: 8 }}
+          >
+            Complete
+          </button>
+        )}
+        {(startMut.isError || completeMut.isError) && (
+          <div style={{ color: "#dc2626", fontSize: 12, marginTop: 4 }}>
+            {String(startMut.error ?? completeMut.error)}
+          </div>
+        )}
+      </td>
+    </tr>
   );
 }
 

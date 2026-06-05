@@ -3,10 +3,19 @@ import { useQuery } from "@tanstack/react-query";
 import type { CapacityDayLoad, WorkCenterSchedule } from "@kapp/client";
 import { api } from "../lib/api";
 
-// isoDate formats a Date as YYYY-MM-DD in UTC, matching the format the
-// capacity endpoint expects for its start / end query parameters.
+// isoDate formats a Date as YYYY-MM-DD using its LOCAL calendar date,
+// matching the format the capacity endpoint expects for its start / end
+// query parameters. Local (not UTC) so the default window opens on the
+// user's "today": toISOString() would render the UTC date, which for a
+// user east of UTC shortly after local midnight is still yesterday,
+// defaulting the picker to the wrong day. The server treats the date
+// string as a calendar day (truncated to midnight UTC), so the grid the
+// user sees lines up with the date they picked.
 function isoDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 /**
@@ -21,7 +30,13 @@ function isoDate(d: Date): string {
  */
 export function CapacityPlanningPage() {
   const today = new Date();
-  const weekOut = new Date(today.getTime() + 6 * 24 * 60 * 60 * 1000);
+  // Advance by calendar days rather than adding 6*24h of milliseconds:
+  // setDate normalises across DST transitions, so the default window is
+  // always exactly 7 calendar days. Millisecond arithmetic would land an
+  // hour off on a DST boundary and, for a user near midnight, isoDate
+  // could then read the previous local day — a 6-day window.
+  const weekOut = new Date(today);
+  weekOut.setDate(weekOut.getDate() + 6);
   const [start, setStart] = useState(isoDate(today));
   const [end, setEnd] = useState(isoDate(weekOut));
 
