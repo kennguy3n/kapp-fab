@@ -31,7 +31,7 @@ func (s *PGStore) ReleaseWorkOrder(ctx context.Context, tenantID, woID uuid.UUID
 		// Lock the row so a concurrent release / cancel
 		// can't race the state-machine guard below.
 		if err := scanWorkOrder(tx.QueryRow(ctx,
-			`SELECT tenant_id, id, item_id, bom_id, warehouse_id, planned_qty, actual_qty, status,
+			`SELECT tenant_id, id, item_id, bom_id, routing_id, warehouse_id, planned_qty, actual_qty, status,
 			        scheduled_start, scheduled_end, started_at, completed_at,
 			        COALESCE(notes, ''), COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid),
 			        created_at, updated_at
@@ -55,13 +55,41 @@ func (s *PGStore) ReleaseWorkOrder(ctx context.Context, tenantID, woID uuid.UUID
 			return err
 		}
 
+		// Snapshot the active routing (if any) onto the work order
+		// alongside the BOM. A missing routing is not an error: the
+		// item may be BOM-only (light manufacturing), in which case
+		// no job cards are generated and the shop-floor surface is
+		// simply unused for this order.
+		var routingID any
+		routing, rerr := s.activeRoutingForItem(ctx, tx, tenantID, out.ItemID)
+		switch {
+		case rerr == nil:
+			routingID = routing.ID
+		case errors.Is(rerr, ErrRoutingNotActive):
+			routingID = nil
+		default:
+			return rerr
+		}
+
 		if _, err := tx.Exec(ctx,
 			`UPDATE work_orders
-			    SET status = 'released', bom_id = $1, updated_at = now()
-			  WHERE tenant_id = $2 AND id = $3`,
-			bom.ID, tenantID, woID,
+			    SET status = 'released', bom_id = $1, routing_id = $2, updated_at = now()
+			  WHERE tenant_id = $3 AND id = $4`,
+			bom.ID, routingID, tenantID, woID,
 		); err != nil {
 			return fmt.Errorf("manufacturing: release work order: %w", err)
+		}
+
+		// Generate one job card per routing operation so the
+		// shop-floor surface has work to track the moment the order
+		// is released. Idempotent on the (work_order, seq) unique
+		// constraint. out carries the scheduled window used to seed
+		// the cards' planned_start / planned_end.
+		if routing != nil {
+			out.RoutingID = &routing.ID
+			if err := s.createJobCardsForWorkOrderTx(ctx, tx, tenantID, &out, routing); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -116,7 +144,7 @@ func (s *PGStore) transitionStatus(
 	var out WorkOrder
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if err := scanWorkOrder(tx.QueryRow(ctx,
-			`SELECT tenant_id, id, item_id, bom_id, warehouse_id, planned_qty, actual_qty, status,
+			`SELECT tenant_id, id, item_id, bom_id, routing_id, warehouse_id, planned_qty, actual_qty, status,
 			        scheduled_start, scheduled_end, started_at, completed_at,
 			        COALESCE(notes, ''), COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid),
 			        created_at, updated_at
@@ -220,7 +248,7 @@ func (s *PGStore) CompleteWorkOrder(ctx context.Context, tenantID, woID, actorID
 	var wo WorkOrder
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if err := scanWorkOrder(tx.QueryRow(ctx,
-			`SELECT tenant_id, id, item_id, bom_id, warehouse_id, planned_qty, actual_qty, status,
+			`SELECT tenant_id, id, item_id, bom_id, routing_id, warehouse_id, planned_qty, actual_qty, status,
 			        scheduled_start, scheduled_end, started_at, completed_at,
 			        COALESCE(notes, ''), COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid),
 			        created_at, updated_at

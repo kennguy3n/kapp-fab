@@ -372,8 +372,16 @@ func (h *manufacturingHandlers) closeWorkOrder(w http.ResponseWriter, r *http.Re
 func writeManufacturingError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, manufacturing.ErrBOMNotFound),
-		errors.Is(err, manufacturing.ErrWorkOrderNotFound):
+		errors.Is(err, manufacturing.ErrWorkOrderNotFound),
+		errors.Is(err, manufacturing.ErrRoutingNotFound),
+		errors.Is(err, manufacturing.ErrWorkCenterNotFound),
+		errors.Is(err, manufacturing.ErrJobCardNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, manufacturing.ErrWorkCenterDuplicateName):
+		// Duplicate (tenant_id, name) — a conflict the client can
+		// resolve by renaming, so 409 rather than the 422 used for
+		// malformed input.
+		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, manufacturing.ErrBOMNotActive),
 		errors.Is(err, manufacturing.ErrBOMHasNoComponents),
 		errors.Is(err, manufacturing.ErrBOMSelfReference),
@@ -381,6 +389,12 @@ func writeManufacturingError(w http.ResponseWriter, err error) {
 		errors.Is(err, manufacturing.ErrBOMInvalidTransition),
 		errors.Is(err, manufacturing.ErrWorkOrderInvalidTransition),
 		errors.Is(err, manufacturing.ErrWorkOrderInsufficientStock),
+		errors.Is(err, manufacturing.ErrRoutingNotActive),
+		errors.Is(err, manufacturing.ErrRoutingHasNoOperations),
+		errors.Is(err, manufacturing.ErrRoutingInvalidTransition),
+		errors.Is(err, manufacturing.ErrRoutingDuplicateSequence),
+		errors.Is(err, manufacturing.ErrJobCardInvalidTransition),
+		errors.Is(err, manufacturing.ErrCapacityRangeInvalid),
 		// ErrInvalidInput is the umbrella sentinel for client-supplied
 		// validation failures (empty / zero / out-of-range fields on
 		// the create/update endpoints — invalid bom status, negative
@@ -394,4 +408,380 @@ func writeManufacturingError(w http.ResponseWriter, err error) {
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Work centers
+// ---------------------------------------------------------------------------
+
+type createWorkCenterRequest struct {
+	Name                 string          `json:"name"`
+	CapacityPerHour      decimal.Decimal `json:"capacity_per_hour"`
+	OperatingHoursPerDay decimal.Decimal `json:"operating_hours_per_day"`
+	EfficiencyPercent    decimal.Decimal `json:"efficiency_percent"`
+	Notes                string          `json:"notes,omitempty"`
+}
+
+func (h *manufacturingHandlers) createWorkCenter(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	actor := actorOrDefault(r.Context())
+	var req createWorkCenterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	wc, err := h.store.CreateWorkCenter(r.Context(), t.ID, actor, manufacturing.CreateWorkCenterInput{
+		Name:                 req.Name,
+		CapacityPerHour:      req.CapacityPerHour,
+		OperatingHoursPerDay: req.OperatingHoursPerDay,
+		EfficiencyPercent:    req.EfficiencyPercent,
+		Notes:                req.Notes,
+	})
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, wc)
+}
+
+func (h *manufacturingHandlers) listWorkCenters(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	out, err := h.store.ListWorkCenters(r.Context(), t.ID, r.URL.Query().Get("status"))
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *manufacturingHandlers) getWorkCenter(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid work center id", http.StatusBadRequest)
+		return
+	}
+	wc, err := h.store.GetWorkCenter(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, wc)
+}
+
+type setWorkCenterStatusRequest struct {
+	Status string `json:"status"`
+}
+
+func (h *manufacturingHandlers) setWorkCenterStatus(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid work center id", http.StatusBadRequest)
+		return
+	}
+	var req setWorkCenterStatusRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if err := h.store.SetWorkCenterStatus(r.Context(), t.ID, id, req.Status); err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	wc, err := h.store.GetWorkCenter(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, wc)
+}
+
+// ---------------------------------------------------------------------------
+// Routings
+// ---------------------------------------------------------------------------
+
+// routingOperationRequest is one step on a createRouting call. As with
+// bomComponentRequest, the array position IS the operation's sequence —
+// the store assigns sequence = (index + 1) — so the request omits a
+// sequence field.
+type routingOperationRequest struct {
+	OperationName    string          `json:"operation_name"`
+	WorkCenterID     uuid.UUID       `json:"work_center_id"`
+	SetupTimeMinutes decimal.Decimal `json:"setup_time_minutes"`
+	CycleTimeMinutes decimal.Decimal `json:"cycle_time_minutes"`
+	Description      string          `json:"description,omitempty"`
+}
+
+type createRoutingRequest struct {
+	ItemID     uuid.UUID                 `json:"item_id"`
+	Version    string                    `json:"version"`
+	Notes      string                    `json:"notes,omitempty"`
+	Operations []routingOperationRequest `json:"operations"`
+	Activate   bool                      `json:"activate,omitempty"`
+}
+
+func (h *manufacturingHandlers) createRouting(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	actor := actorOrDefault(r.Context())
+	var req createRoutingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	in := manufacturing.CreateRoutingInput{
+		ItemID:   req.ItemID,
+		Version:  req.Version,
+		Notes:    req.Notes,
+		Activate: req.Activate,
+	}
+	for _, op := range req.Operations {
+		in.Operations = append(in.Operations, manufacturing.RoutingOperationInput{
+			OperationName:    op.OperationName,
+			WorkCenterID:     op.WorkCenterID,
+			SetupTimeMinutes: op.SetupTimeMinutes,
+			CycleTimeMinutes: op.CycleTimeMinutes,
+			Description:      op.Description,
+		})
+	}
+	routing, err := h.store.CreateRouting(r.Context(), t.ID, actor, in)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, routing)
+}
+
+func (h *manufacturingHandlers) listRoutings(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	out, err := h.store.ListRoutings(r.Context(), t.ID, r.URL.Query().Get("status"))
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *manufacturingHandlers) getRouting(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid routing id", http.StatusBadRequest)
+		return
+	}
+	routing, err := h.store.GetRouting(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, routing)
+}
+
+type setRoutingStatusRequest struct {
+	Status string `json:"status"`
+}
+
+func (h *manufacturingHandlers) setRoutingStatus(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid routing id", http.StatusBadRequest)
+		return
+	}
+	var req setRoutingStatusRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if err := h.store.SetRoutingStatus(r.Context(), t.ID, id, req.Status); err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	routing, err := h.store.GetRouting(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, routing)
+}
+
+// ---------------------------------------------------------------------------
+// Capacity planning
+// ---------------------------------------------------------------------------
+
+// capacityPlan computes the finite-capacity utilisation grid for a date
+// window. The window is supplied via ?start=YYYY-MM-DD&end=YYYY-MM-DD;
+// both default to today (a single-day grid) when omitted.
+func (h *manufacturingHandlers) capacityPlan(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	start, err := parseDateParam(r.URL.Query().Get("start"), today)
+	if err != nil {
+		http.Error(w, "invalid start date (want YYYY-MM-DD)", http.StatusBadRequest)
+		return
+	}
+	end, err := parseDateParam(r.URL.Query().Get("end"), start)
+	if err != nil {
+		http.Error(w, "invalid end date (want YYYY-MM-DD)", http.StatusBadRequest)
+		return
+	}
+	plan, err := manufacturing.NewCapacityPlanner(h.store).Plan(r.Context(), t.ID, manufacturing.DateRange{
+		Start: start,
+		End:   end,
+	})
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
+// parseDateParam parses a YYYY-MM-DD query parameter, returning fallback
+// when the parameter is empty.
+func parseDateParam(s string, fallback time.Time) (time.Time, error) {
+	if s == "" {
+		return fallback, nil
+	}
+	return time.Parse("2006-01-02", s)
+}
+
+// ---------------------------------------------------------------------------
+// Job cards (shop floor)
+// ---------------------------------------------------------------------------
+
+func (h *manufacturingHandlers) listJobCards(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	woID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid work order id", http.StatusBadRequest)
+		return
+	}
+	out, err := h.store.ListJobCards(r.Context(), t.ID, woID)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *manufacturingHandlers) getJobCard(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "jid"))
+	if err != nil {
+		http.Error(w, "invalid job card id", http.StatusBadRequest)
+		return
+	}
+	jc, err := h.store.GetJobCard(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, jc)
+}
+
+func (h *manufacturingHandlers) startJobCard(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "jid"))
+	if err != nil {
+		http.Error(w, "invalid job card id", http.StatusBadRequest)
+		return
+	}
+	jc, err := h.store.StartJobCard(r.Context(), t.ID, id, actorOrDefault(r.Context()))
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, jc)
+}
+
+// completeJobCardRequest is the operator-reported yield for a single
+// shop-floor operation. An empty body completes the card with zero
+// reported quantities (the card still flips to completed and, if it is
+// the last open card, triggers the work-order completion with the
+// work order's nominal yield).
+type completeJobCardRequest struct {
+	QtyProduced decimal.Decimal `json:"qty_produced,omitempty"`
+	QtyRejected decimal.Decimal `json:"qty_rejected,omitempty"`
+	Notes       string          `json:"notes,omitempty"`
+}
+
+func (h *manufacturingHandlers) completeJobCard(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "jid"))
+	if err != nil {
+		http.Error(w, "invalid job card id", http.StatusBadRequest)
+		return
+	}
+	var req completeJobCardRequest
+	// Body optional — see completeWorkOrder for the chunked-encoding
+	// rationale behind the ContentLength != 0 guard.
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+	}
+	jc, err := h.store.CompleteJobCard(r.Context(), t.ID, id, manufacturing.CompleteJobCardInput{
+		OperatorID:  actorOrDefault(r.Context()),
+		QtyProduced: req.QtyProduced,
+		QtyRejected: req.QtyRejected,
+		Notes:       req.Notes,
+	})
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, jc)
 }

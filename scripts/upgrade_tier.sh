@@ -66,7 +66,11 @@ TABLES=(
   cost_centers bank_accounts bank_transactions
   budgets budget_lines
   inventory_warehouses inventory_items inventory_batches inventory_moves
-  boms bom_components work_orders
+  boms bom_components
+  # work_centers/routings/routing_operations come before work_orders
+  # because work_orders.routing_id FKs routings in migration 000080;
+  # job_cards trails work_orders since it FKs work_order_id + work_center_id.
+  work_centers routings routing_operations work_orders job_cards
   leave_ledger lesson_progress
   files base_tables base_rows docs_documents docs_document_versions
   forms import_jobs import_staging

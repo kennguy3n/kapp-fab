@@ -1303,6 +1303,28 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Post("/work-orders/{id}/complete", d.mfgh.completeWorkOrder)
 			r.Post("/work-orders/{id}/cancel", d.mfgh.cancelWorkOrder)
 			r.Post("/work-orders/{id}/close", d.mfgh.closeWorkOrder)
+
+			// Stream 2 — Manufacturing Depth: work centers,
+			// routings, capacity planning, and shop-floor job
+			// cards. Same authz scope as the BOM / work-order
+			// surface above (manufacturing operators inherit the
+			// inventory namespace's read/admin gates for a small
+			// SME). Job cards are released automatically with the
+			// work order; the start / complete endpoints let the
+			// shop floor walk each card.
+			r.Post("/work-centers", d.mfgh.createWorkCenter)
+			r.Get("/work-centers", d.mfgh.listWorkCenters)
+			r.Get("/work-centers/{id}", d.mfgh.getWorkCenter)
+			r.Post("/work-centers/{id}/status", d.mfgh.setWorkCenterStatus)
+			r.Post("/routings", d.mfgh.createRouting)
+			r.Get("/routings", d.mfgh.listRoutings)
+			r.Get("/routings/{id}", d.mfgh.getRouting)
+			r.Post("/routings/{id}/status", d.mfgh.setRoutingStatus)
+			r.Get("/capacity", d.mfgh.capacityPlan)
+			r.Get("/work-orders/{id}/job-cards", d.mfgh.listJobCards)
+			r.Get("/job-cards/{jid}", d.mfgh.getJobCard)
+			r.Post("/job-cards/{jid}/start", d.mfgh.startJobCard)
+			r.Post("/job-cards/{jid}/complete", d.mfgh.completeJobCard)
 		})
 
 		// Forms KApp. Creation and tenant-scoped lookups go through the

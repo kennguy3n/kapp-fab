@@ -73,13 +73,117 @@ var workOrderSchema = []byte(`{
   "agent_tools": ["manufacturing.create_work_order", "manufacturing.complete_work_order"]
 }`)
 
-// All returns every Phase N6 manufacturing KType as a freshly-
-// constructed slice. Order matches the registration order in
-// RegisterKTypes.
+// workCenterSchema — A machine or workstation with a finite hourly
+// capacity. The authoritative store is the `work_centers` table; the
+// KType is registered so generic record views and agent tools can
+// reference the type by name. status is active/maintenance/retired —
+// only active centers contribute available minutes to the capacity
+// grid (see capacity.go).
+var workCenterSchema = []byte(`{
+  "name": "manufacturing.work_center",
+  "version": 1,
+  "fields": [
+    {"name": "name", "type": "string", "required": true, "max_length": 128},
+    {"name": "capacity_per_hour", "type": "number", "default": 0, "min": 0},
+    {"name": "operating_hours_per_day", "type": "number", "default": 8, "min": 0, "max": 24},
+    {"name": "efficiency_percent", "type": "number", "default": 100, "min": 0},
+    {"name": "status", "type": "enum", "values": ["active", "maintenance", "retired"], "default": "active"},
+    {"name": "notes", "type": "text"}
+  ],
+  "views": {
+    "list": {"columns": ["name", "status", "capacity_per_hour", "operating_hours_per_day", "efficiency_percent"]},
+    "form": {"sections": [
+      {"title": "Work Center", "fields": ["name", "status"]},
+      {"title": "Capacity", "fields": ["capacity_per_hour", "operating_hours_per_day", "efficiency_percent"]},
+      {"title": "Notes", "fields": ["notes"]}
+    ]}
+  },
+  "cards": {"summary": "{{name}} ({{status}})"},
+  "permissions": {"read": ["tenant.member"], "write": ["manufacturing.admin", "tenant.admin"]},
+  "agent_tools": ["manufacturing.create_work_center"]
+}`)
+
+// routingSchema — A versioned, ordered sequence of operations for
+// producing an item. The operations live on the `routing_operations`
+// table (one row per step); the "operations" array field documents the
+// nested shape for generic form rendering and agent-tool payloads. The
+// lifecycle (draft → active → obsolete) mirrors the BOM; only one
+// active routing per item is snapshotted onto a work order at release.
+var routingSchema = []byte(`{
+  "name": "manufacturing.routing",
+  "version": 1,
+  "fields": [
+    {"name": "item_id", "type": "ref", "ktype": "inventory.item", "required": true},
+    {"name": "version", "type": "string", "required": true, "max_length": 32},
+    {"name": "status", "type": "enum", "values": ["draft", "active", "obsolete"], "default": "draft"},
+    {"name": "operations", "type": "array", "item_type": "object", "item_fields": [
+      {"name": "sequence", "type": "integer", "min": 1},
+      {"name": "operation_name", "type": "string", "required": true, "max_length": 128},
+      {"name": "work_center_id", "type": "ref", "ktype": "manufacturing.work_center", "required": true},
+      {"name": "setup_time_minutes", "type": "number", "default": 0, "min": 0},
+      {"name": "cycle_time_minutes", "type": "number", "default": 0, "min": 0},
+      {"name": "description", "type": "text"}
+    ]},
+    {"name": "notes", "type": "text"}
+  ],
+  "views": {
+    "list": {"columns": ["item_id", "version", "status"]},
+    "form": {"sections": [
+      {"title": "Header", "fields": ["item_id", "version", "status"]},
+      {"title": "Operations", "fields": ["operations"]},
+      {"title": "Notes", "fields": ["notes"]}
+    ]}
+  },
+  "cards": {"summary": "Routing {{version}} for {{item_id}} ({{status}})"},
+  "permissions": {"read": ["tenant.member"], "write": ["manufacturing.admin", "tenant.admin"]},
+  "agent_tools": ["manufacturing.create_routing", "manufacturing.activate_routing"]
+}`)
+
+// jobCardSchema — Shop-floor execution record, one per routing
+// operation per work order. Created automatically when a work order is
+// released; status walks pending → in_progress → completed. The
+// authoritative store is the `job_cards` table.
+var jobCardSchema = []byte(`{
+  "name": "manufacturing.job_card",
+  "version": 1,
+  "fields": [
+    {"name": "work_order_id", "type": "ref", "ktype": "manufacturing.work_order", "required": true},
+    {"name": "routing_operation_seq", "type": "integer", "required": true, "min": 1},
+    {"name": "work_center_id", "type": "ref", "ktype": "manufacturing.work_center", "required": true},
+    {"name": "status", "type": "enum", "values": ["pending", "in_progress", "completed"], "default": "pending"},
+    {"name": "planned_start", "type": "datetime"},
+    {"name": "planned_end", "type": "datetime"},
+    {"name": "actual_start", "type": "datetime"},
+    {"name": "actual_end", "type": "datetime"},
+    {"name": "operator_id", "type": "ref", "ktype": "tenant.user"},
+    {"name": "qty_produced", "type": "number", "default": 0, "min": 0},
+    {"name": "qty_rejected", "type": "number", "default": 0, "min": 0},
+    {"name": "notes", "type": "text"}
+  ],
+  "views": {
+    "list": {"columns": ["work_order_id", "routing_operation_seq", "work_center_id", "status", "qty_produced"]},
+    "form": {"sections": [
+      {"title": "Card", "fields": ["work_order_id", "routing_operation_seq", "work_center_id", "status"]},
+      {"title": "Schedule", "fields": ["planned_start", "planned_end", "actual_start", "actual_end"]},
+      {"title": "Yield", "fields": ["operator_id", "qty_produced", "qty_rejected", "notes"]}
+    ]}
+  },
+  "cards": {"summary": "Job card op {{routing_operation_seq}} ({{status}})"},
+  "permissions": {"read": ["tenant.member"], "write": ["manufacturing.operator", "manufacturing.admin", "tenant.admin"]},
+  "agent_tools": ["manufacturing.start_job_card", "manufacturing.complete_job_card"]
+}`)
+
+// All returns every manufacturing KType as a freshly-constructed
+// slice. Order matches the registration order in RegisterKTypes —
+// work_center precedes routing because a routing operation references a
+// work center, and routing precedes job_card for the same reason.
 func All() []ktype.KType {
 	return []ktype.KType{
 		{Name: KTypeBOM, Version: 1, Schema: bomSchema},
 		{Name: KTypeWorkOrder, Version: 1, Schema: workOrderSchema},
+		{Name: KTypeWorkCenter, Version: 1, Schema: workCenterSchema},
+		{Name: KTypeRouting, Version: 1, Schema: routingSchema},
+		{Name: KTypeJobCard, Version: 1, Schema: jobCardSchema},
 	}
 }
 
