@@ -1,4 +1,13 @@
-import { lazy, Suspense, type ComponentType } from "react";
+import {
+  Fragment,
+  lazy,
+  Suspense,
+  useEffect,
+  useMemo,
+  useState,
+  type ComponentType,
+  type ReactNode,
+} from "react";
 import {
   Link,
   NavLink,
@@ -12,8 +21,15 @@ import {
   Avatar,
   AvatarFallback,
   Badge,
+  Breadcrumb,
+  BreadcrumbList,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
   Card,
   CardContent,
+  CommandPalette,
   Input,
   Sidebar,
   SidebarBody,
@@ -22,9 +38,86 @@ import {
   SidebarHeader,
   SidebarItem,
   SidebarToggle,
+  Spinner,
+  Toaster,
   TooltipProvider,
   initials,
+  type CommandGroup,
 } from "@kapp/ui";
+import {
+  Activity,
+  Archive,
+  ArrowLeftRight,
+  Banknote,
+  BookOpen,
+  BookText,
+  BookUser,
+  Boxes,
+  Building,
+  Building2,
+  Calendar,
+  CalendarClock,
+  CheckSquare,
+  ClipboardCheck,
+  ClipboardList,
+  Clock,
+  Combine,
+  Contact,
+  CreditCard,
+  Database,
+  Factory,
+  FileBarChart,
+  FileMinus,
+  FileSpreadsheet,
+  FileText,
+  FolderKanban,
+  GanttChart,
+  Gauge,
+  GraduationCap,
+  Handshake,
+  Headphones,
+  HeartPulse,
+  HelpCircle,
+  Landmark,
+  Layers,
+  LayoutDashboard,
+  LayoutGrid,
+  LifeBuoy,
+  MapPin,
+  Milestone,
+  Network,
+  Package,
+  PackageSearch,
+  PiggyBank,
+  PieChart,
+  Plus,
+  Puzzle,
+  Receipt,
+  ReceiptText,
+  Repeat,
+  Route as RouteIcon,
+  Scale,
+  ScanLine,
+  ScrollText,
+  Search,
+  Settings,
+  Shield,
+  ShoppingCart,
+  Stamp,
+  Store,
+  Tags,
+  ToggleLeft,
+  TrendingUp,
+  Truck,
+  Undo2,
+  Upload,
+  UserCog,
+  UserPlus,
+  UserSquare,
+  Users,
+  Warehouse,
+  Webhook,
+} from "lucide-react";
 import { api } from "./lib/api";
 import { NotificationBell } from "./components/NotificationBell";
 import { LocaleSwitcher } from "./components/LocaleSwitcher";
@@ -381,6 +474,10 @@ const featureFromSection: Record<string, string> = {
 interface NavLink {
   to: string;
   label: string;
+  // Icon rendered in the sidebar item's icon slot (and reused as
+  // the command-palette entry glyph).  A lucide-react element sized
+  // to the 16px slot via `h-4 w-4`.
+  icon?: ReactNode;
   // Optional additional feature gates that must ALL be enabled
   // for this link to render, beyond the section-level gate.  Used
   // when a single surface depends on more than one tenant plan
@@ -399,168 +496,514 @@ interface NavSection {
   links: NavLink[];
 }
 
+// Sidebar icons are sized to the 16px SidebarItem slot.  Defined
+// once so every nav entry, and the command-palette mirror, share
+// the same glyph dimensions.
+const navIcon = (Icon: ComponentType<{ className?: string }>): ReactNode => (
+  <Icon className="h-4 w-4" />
+);
+
 const navSections: NavSection[] = [
   {
     title: "Overview",
-    links: [{ to: "/", label: "Dashboard" }],
+    links: [{ to: "/", label: "Dashboard", icon: navIcon(LayoutDashboard) }],
   },
   {
     title: "CRM",
     links: [
-      { to: "/records/crm.lead", label: "Leads" },
-      { to: "/records/crm.contact", label: "Contacts" },
-      { to: "/records/crm.organization", label: "Organizations" },
-      { to: "/records/crm.deal", label: "Deals" },
-      { to: "/records/crm.activity", label: "Activities" },
-      { to: "/records/crm.quote", label: "Quotes" },
+      { to: "/records/crm.lead", label: "Leads", icon: navIcon(Users) },
+      {
+        to: "/records/crm.contact",
+        label: "Contacts",
+        icon: navIcon(Contact),
+      },
+      {
+        to: "/records/crm.organization",
+        label: "Organizations",
+        icon: navIcon(Building2),
+      },
+      { to: "/records/crm.deal", label: "Deals", icon: navIcon(Handshake) },
+      {
+        to: "/records/crm.activity",
+        label: "Activities",
+        icon: navIcon(CalendarClock),
+      },
+      { to: "/records/crm.quote", label: "Quotes", icon: navIcon(FileText) },
     ],
   },
   {
     title: "Work",
     links: [
-      { to: "/records/tasks.task", label: "Tasks" },
-      { to: "/approvals", label: "Approvals" },
+      {
+        to: "/records/tasks.task",
+        label: "Tasks",
+        icon: navIcon(CheckSquare),
+      },
+      { to: "/approvals", label: "Approvals", icon: navIcon(Stamp) },
     ],
   },
   {
     title: "Projects",
     links: [
-      { to: "/projects/gantt", label: "Gantt" },
-      { to: "/records/projects.project", label: "Projects" },
-      { to: "/records/projects.milestone", label: "Milestones" },
+      { to: "/projects/gantt", label: "Gantt", icon: navIcon(GanttChart) },
+      {
+        to: "/records/projects.project",
+        label: "Projects",
+        icon: navIcon(FolderKanban),
+      },
+      {
+        to: "/records/projects.milestone",
+        label: "Milestones",
+        icon: navIcon(Milestone),
+      },
     ],
   },
   {
     title: "Finance",
     links: [
-      { to: "/records/finance.ar_invoice", label: "Invoices" },
-      { to: "/records/finance.ap_bill", label: "Bills" },
-      { to: "/records/finance.credit_note", label: "Credit Notes" },
-      { to: "/records/finance.debit_note", label: "Debit Notes" },
-      { to: "/records/finance.recurring_invoice", label: "Recurring Invoices" },
-      { to: "/records/finance.payment_terms", label: "Payment Terms" },
-      { to: "/finance/accounts", label: "Chart of Accounts" },
-      { to: "/finance/journal", label: "Journal Entries" },
-      { to: "/finance/reports/trial-balance", label: "Trial Balance" },
-      { to: "/finance/reports/income-statement", label: "Income Statement" },
-      { to: "/finance/ar-subledger", label: "AR Subledger" },
-      { to: "/finance/ap-subledger", label: "AP Subledger" },
-      { to: "/finance/cost-centers", label: "Cost Centers" },
-      { to: "/finance/bank-reconciliation", label: "Bank Reconciliation" },
-      { to: "/finance/exchange-rates", label: "Exchange Rates" },
-      { to: "/finance/budgets", label: "Budgets" },
-      { to: "/reports", label: "Report Builder" },
+      {
+        to: "/records/finance.ar_invoice",
+        label: "Invoices",
+        icon: navIcon(Receipt),
+      },
+      {
+        to: "/records/finance.ap_bill",
+        label: "Bills",
+        icon: navIcon(FileSpreadsheet),
+      },
+      {
+        to: "/records/finance.credit_note",
+        label: "Credit Notes",
+        icon: navIcon(CreditCard),
+      },
+      {
+        to: "/records/finance.debit_note",
+        label: "Debit Notes",
+        icon: navIcon(FileMinus),
+      },
+      {
+        to: "/records/finance.recurring_invoice",
+        label: "Recurring Invoices",
+        icon: navIcon(Repeat),
+      },
+      {
+        to: "/records/finance.payment_terms",
+        label: "Payment Terms",
+        icon: navIcon(CalendarClock),
+      },
+      {
+        to: "/finance/accounts",
+        label: "Chart of Accounts",
+        icon: navIcon(BookOpen),
+      },
+      {
+        to: "/finance/journal",
+        label: "Journal Entries",
+        icon: navIcon(BookText),
+      },
+      {
+        to: "/finance/reports/trial-balance",
+        label: "Trial Balance",
+        icon: navIcon(Scale),
+      },
+      {
+        to: "/finance/reports/income-statement",
+        label: "Income Statement",
+        icon: navIcon(TrendingUp),
+      },
+      {
+        to: "/finance/ar-subledger",
+        label: "AR Subledger",
+        icon: navIcon(BookUser),
+      },
+      {
+        to: "/finance/ap-subledger",
+        label: "AP Subledger",
+        icon: navIcon(BookUser),
+      },
+      {
+        to: "/finance/cost-centers",
+        label: "Cost Centers",
+        icon: navIcon(Building),
+      },
+      {
+        to: "/finance/bank-reconciliation",
+        label: "Bank Reconciliation",
+        icon: navIcon(Landmark),
+      },
+      {
+        to: "/finance/exchange-rates",
+        label: "Exchange Rates",
+        icon: navIcon(ArrowLeftRight),
+      },
+      { to: "/finance/budgets", label: "Budgets", icon: navIcon(PiggyBank) },
+      {
+        to: "/reports",
+        label: "Report Builder",
+        icon: navIcon(FileBarChart),
+      },
     ],
   },
   {
     title: "Helpdesk",
     links: [
-      { to: "/records/helpdesk.ticket", label: "Tickets" },
-      { to: "/helpdesk", label: "SLA + Triage" },
+      {
+        to: "/records/helpdesk.ticket",
+        label: "Tickets",
+        icon: navIcon(Headphones),
+      },
+      { to: "/helpdesk", label: "SLA + Triage", icon: navIcon(LifeBuoy) },
     ],
   },
   {
     title: "Sales",
     links: [
-      { to: "/sales/orders", label: "Sales Orders" },
-      { to: "/sales/returns", label: "Returns" },
-      { to: "/sales/price-lists", label: "Price Lists" },
-      { to: "/procurement/purchase-orders", label: "Purchase Orders" },
-      { to: "/procurement/requisitions", label: "Requisitions" },
+      {
+        to: "/sales/orders",
+        label: "Sales Orders",
+        icon: navIcon(ShoppingCart),
+      },
+      { to: "/sales/returns", label: "Returns", icon: navIcon(Undo2) },
+      {
+        to: "/sales/price-lists",
+        label: "Price Lists",
+        icon: navIcon(Tags),
+      },
+      {
+        to: "/procurement/purchase-orders",
+        label: "Purchase Orders",
+        icon: navIcon(ClipboardList),
+      },
+      {
+        to: "/procurement/requisitions",
+        label: "Requisitions",
+        icon: navIcon(ClipboardCheck),
+      },
     ],
   },
   {
     title: "POS",
     links: [
-      { to: "/pos", label: "Register" },
-      { to: "/records/sales.pos_profile", label: "Profiles" },
-      { to: "/records/sales.pos_invoice", label: "Receipts" },
+      { to: "/pos", label: "Register", icon: navIcon(ScanLine) },
+      {
+        to: "/records/sales.pos_profile",
+        label: "Profiles",
+        icon: navIcon(UserSquare),
+      },
+      {
+        to: "/records/sales.pos_invoice",
+        label: "Receipts",
+        icon: navIcon(ReceiptText),
+      },
     ],
   },
   {
     title: "Inventory",
     links: [
-      { to: "/records/inventory.item", label: "Items" },
-      { to: "/records/inventory.warehouse", label: "Warehouses" },
-      { to: "/inventory/stock-levels", label: "Stock Levels" },
-      { to: "/inventory/reports/valuation", label: "Valuation" },
+      { to: "/records/inventory.item", label: "Items", icon: navIcon(Package) },
+      {
+        to: "/records/inventory.warehouse",
+        label: "Warehouses",
+        icon: navIcon(Warehouse),
+      },
+      {
+        to: "/inventory/stock-levels",
+        label: "Stock Levels",
+        icon: navIcon(Boxes),
+      },
+      {
+        to: "/inventory/reports/valuation",
+        label: "Valuation",
+        icon: navIcon(PackageSearch),
+      },
       // Landed costs writes inventory_moves AND posts a ledger
       // JE so the backend route is gated on FeatureInventory
       // (section gate) AND FeatureFinance (per-link gate).
       {
         to: "/inventory/landed-costs",
         label: "Landed Costs",
+        icon: navIcon(Truck),
         requires: ["finance"],
       },
-      { to: "/inventory/cycle-counts", label: "Cycle Counts" },
+      {
+        to: "/inventory/cycle-counts",
+        label: "Cycle Counts",
+        icon: navIcon(ClipboardList),
+      },
     ],
   },
   {
     title: "Manufacturing",
     links: [
-      { to: "/manufacturing/boms", label: "Bills of Materials" },
-      { to: "/manufacturing/work-orders", label: "Work Orders" },
-      { to: "/manufacturing/routings", label: "Routings & Work Centers" },
-      { to: "/manufacturing/capacity", label: "Capacity Planning" },
-      { to: "/manufacturing/job-cards", label: "Job Cards" },
+      {
+        to: "/manufacturing/boms",
+        label: "Bills of Materials",
+        icon: navIcon(Layers),
+      },
+      {
+        to: "/manufacturing/work-orders",
+        label: "Work Orders",
+        icon: navIcon(Factory),
+      },
+      {
+        to: "/manufacturing/routings",
+        label: "Routings & Work Centers",
+        icon: navIcon(RouteIcon),
+      },
+      {
+        to: "/manufacturing/capacity",
+        label: "Capacity Planning",
+        icon: navIcon(Gauge),
+      },
+      {
+        to: "/manufacturing/job-cards",
+        label: "Job Cards",
+        icon: navIcon(ClipboardList),
+      },
     ],
   },
   {
     title: "HR",
     links: [
-      { to: "/records/hr.employee", label: "Employees" },
-      { to: "/hr/org-chart", label: "Org Chart" },
-      { to: "/records/hr.leave_request", label: "Leave Requests" },
-      { to: "/records/hr.attendance", label: "Attendance" },
-      { to: "/records/hr.expense_claim", label: "Expense Claims" },
-      { to: "/hr/payroll", label: "Payroll" },
-      { to: "/hr/shifts", label: "Shift Schedule" },
+      {
+        to: "/records/hr.employee",
+        label: "Employees",
+        icon: navIcon(UserCog),
+      },
+      { to: "/hr/org-chart", label: "Org Chart", icon: navIcon(Network) },
+      {
+        to: "/records/hr.leave_request",
+        label: "Leave Requests",
+        icon: navIcon(Calendar),
+      },
+      {
+        to: "/records/hr.attendance",
+        label: "Attendance",
+        icon: navIcon(Clock),
+      },
+      {
+        to: "/records/hr.expense_claim",
+        label: "Expense Claims",
+        icon: navIcon(Receipt),
+      },
+      { to: "/hr/payroll", label: "Payroll", icon: navIcon(Banknote) },
+      {
+        to: "/hr/shifts",
+        label: "Shift Schedule",
+        icon: navIcon(CalendarClock),
+      },
     ],
   },
   {
     title: "LMS",
     links: [
-      { to: "/records/lms.course", label: "Courses" },
-      { to: "/records/lms.module", label: "Modules" },
-      { to: "/records/lms.lesson", label: "Lessons" },
-      { to: "/records/lms.enrollment", label: "Enrollments" },
-      { to: "/records/lms.quiz", label: "Quizzes" },
-      { to: "/records/lms.assignment", label: "Assignments" },
-      { to: "/lms/progress", label: "Learner Progress" },
+      {
+        to: "/records/lms.course",
+        label: "Courses",
+        icon: navIcon(GraduationCap),
+      },
+      { to: "/records/lms.module", label: "Modules", icon: navIcon(BookOpen) },
+      {
+        to: "/records/lms.lesson",
+        label: "Lessons",
+        icon: navIcon(BookText),
+      },
+      {
+        to: "/records/lms.enrollment",
+        label: "Enrollments",
+        icon: navIcon(UserPlus),
+      },
+      {
+        to: "/records/lms.quiz",
+        label: "Quizzes",
+        icon: navIcon(HelpCircle),
+      },
+      {
+        to: "/records/lms.assignment",
+        label: "Assignments",
+        icon: navIcon(ClipboardList),
+      },
+      {
+        to: "/lms/progress",
+        label: "Learner Progress",
+        icon: navIcon(TrendingUp),
+      },
     ],
   },
   {
     title: "Insights",
     links: [
-      { to: "/insights/queries", label: "Query Builder" },
-      { to: "/insights/dashboards", label: "Dashboards" },
+      {
+        to: "/insights/queries",
+        label: "Query Builder",
+        icon: navIcon(LayoutGrid),
+      },
+      {
+        to: "/insights/dashboards",
+        label: "Dashboards",
+        icon: navIcon(PieChart),
+      },
     ],
   },
   {
     title: "Marketplace",
     links: [
-      { to: "/marketplace", label: "Browse" },
-      { to: "/marketplace/installed", label: "Installed" },
+      { to: "/marketplace", label: "Browse", icon: navIcon(Store) },
+      {
+        to: "/marketplace/installed",
+        label: "Installed",
+        icon: navIcon(Puzzle),
+      },
     ],
   },
   {
     title: "Admin",
     links: [
-      { to: "/admin/tenants", label: "Tenants" },
-      { to: "/admin/features", label: "Features" },
-      { to: "/admin/placement", label: "Placement Policy" },
-      { to: "/admin/retention", label: "Retention" },
-      { to: "/admin/usage", label: "Usage" },
-      { to: "/admin/health", label: "System Health" },
-      { to: "/admin/audit", label: "Audit Log" },
-      { to: "/admin/roles", label: "Roles" },
-      { to: "/admin/webhooks", label: "Webhooks" },
-      { to: "/admin/consolidation", label: "Consolidation" },
-      { to: "/admin/ktypes/builder", label: "KType Builder" },
-      { to: "/imports", label: "Imports" },
+      { to: "/admin/tenants", label: "Tenants", icon: navIcon(Building2) },
+      { to: "/admin/features", label: "Features", icon: navIcon(ToggleLeft) },
+      {
+        to: "/admin/placement",
+        label: "Placement Policy",
+        icon: navIcon(MapPin),
+      },
+      { to: "/admin/retention", label: "Retention", icon: navIcon(Archive) },
+      { to: "/admin/usage", label: "Usage", icon: navIcon(Activity) },
+      {
+        to: "/admin/health",
+        label: "System Health",
+        icon: navIcon(HeartPulse),
+      },
+      { to: "/admin/audit", label: "Audit Log", icon: navIcon(ScrollText) },
+      { to: "/admin/roles", label: "Roles", icon: navIcon(Shield) },
+      { to: "/admin/webhooks", label: "Webhooks", icon: navIcon(Webhook) },
+      {
+        to: "/admin/consolidation",
+        label: "Consolidation",
+        icon: navIcon(Combine),
+      },
+      {
+        to: "/admin/ktypes/builder",
+        label: "KType Builder",
+        icon: navIcon(Database),
+      },
+      { to: "/imports", label: "Imports", icon: navIcon(Upload) },
     ],
   },
 ];
+
+/**
+ * Flattened view of every nav link with its owning section.  Used
+ * by the breadcrumb builder, the recent-pages tracker, and the
+ * command palette so all three stay in lock-step with `navSections`
+ * (single source of truth for nav destinations and their labels).
+ */
+interface FlatNav {
+  to: string;
+  label: string;
+  section: string;
+  icon?: ReactNode;
+}
+
+const flatNav: FlatNav[] = navSections.flatMap((s) =>
+  s.links.map((l) => ({
+    to: l.to,
+    label: l.label,
+    section: s.title,
+    icon: l.icon,
+  })),
+);
+
+/**
+ * Longest-prefix nav match for a pathname.  `/records/crm.lead/new`
+ * resolves to the "Leads" link (not "Dashboard") because the most
+ * specific `to` wins.
+ */
+function bestNavMatch(pathname: string): FlatNav | undefined {
+  if (pathname === "/") return flatNav.find((n) => n.to === "/");
+  let match: FlatNav | undefined;
+  for (const n of flatNav) {
+    if (n.to === "/") continue;
+    if (pathname === n.to || pathname.startsWith(`${n.to}/`)) {
+      if (!match || n.to.length > match.to.length) match = n;
+    }
+  }
+  return match;
+}
+
+/** Turn a raw path segment ("crm.lead", "bank-reconciliation") into
+ * a human label ("Lead", "Bank Reconciliation"). */
+function humanizeSegment(seg: string): string {
+  const decoded = decodeURIComponent(seg);
+  const base = decoded.includes(".")
+    ? (decoded.split(".").pop() ?? decoded)
+    : decoded;
+  return base.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+interface Crumb {
+  label: string;
+  to?: string;
+}
+
+/**
+ * Build the breadcrumb trail for a pathname.  Anchors on the
+ * matched nav link (Home → Section → Page) and appends any trailing
+ * segments (e.g. `/new`, a record id) as non-link crumbs.  Falls
+ * back to humanized path segments for routes with no nav entry.
+ */
+function buildBreadcrumbs(pathname: string): Crumb[] {
+  if (pathname === "/") return [{ label: "Dashboard" }];
+  const match = bestNavMatch(pathname);
+  const crumbs: Crumb[] = [{ label: "Home", to: "/" }];
+  if (match) {
+    crumbs.push({ label: match.section });
+    crumbs.push({ label: match.label, to: match.to });
+    pathname
+      .slice(match.to.length)
+      .split("/")
+      .filter(Boolean)
+      .forEach((seg) => crumbs.push({ label: humanizeSegment(seg) }));
+  } else {
+    pathname
+      .split("/")
+      .filter(Boolean)
+      .forEach((seg) => crumbs.push({ label: humanizeSegment(seg) }));
+  }
+  return crumbs;
+}
+
+/** Light singularization for "Create new {ktype}" command labels. */
+function singularizeLabel(label: string): string {
+  if (label.endsWith("ies")) return `${label.slice(0, -3)}y`;
+  if (label.endsWith("ses")) return label.slice(0, -2);
+  if (label.endsWith("s")) return label.slice(0, -1);
+  return label;
+}
+
+const RECENT_PAGES_KEY = "kapp:recent-pages";
+
+interface RecentPage {
+  to: string;
+  label: string;
+}
+
+function readRecentPages(): RecentPage[] {
+  try {
+    const raw = localStorage.getItem(RECENT_PAGES_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (p): p is RecentPage =>
+        typeof p === "object" &&
+        p !== null &&
+        typeof (p as RecentPage).to === "string" &&
+        typeof (p as RecentPage).label === "string",
+    );
+  } catch {
+    return [];
+  }
+}
 
 /**
  * ShellRouteFallback is what users see in the gap between clicking
@@ -581,11 +1024,7 @@ function ShellRouteFallback() {
   return (
     <Card className="border-dashed">
       <CardContent className="flex items-center gap-3 py-12 text-fg-muted">
-        <div
-          role="status"
-          aria-live="polite"
-          className="inline-flex h-4 w-4 animate-spin rounded-full border-2 border-current border-r-transparent"
-        />
+        <Spinner size="sm" label="Loading page" />
         <span className="text-sm">Loading…</span>
       </CardContent>
     </Card>
@@ -603,13 +1042,8 @@ function ShellRouteFallback() {
  */
 function PublicRouteFallback() {
   return (
-    <div
-      role="status"
-      aria-live="polite"
-      className="flex h-screen w-screen items-center justify-center bg-bg text-fg-muted"
-    >
-      <div className="inline-flex h-6 w-6 animate-spin rounded-full border-2 border-current border-r-transparent" />
-      <span className="sr-only">Loading…</span>
+    <div className="flex h-screen w-screen items-center justify-center bg-bg text-fg-muted">
+      <Spinner size="lg" />
     </div>
   );
 }
@@ -618,6 +1052,10 @@ export function App() {
   return (
     <LocaleProvider>
       <TooltipProvider delayDuration={300}>
+        {/* App-wide toast overlay.  A single Toaster at the root is
+            the sink every `toast.*()` call renders into (see
+            @kapp/ui Toast). */}
+        <Toaster />
         <Suspense fallback={<PublicRouteFallback />}>
         <Routes>
           {/* Public form route lives outside the app shell so anonymous
@@ -717,7 +1155,15 @@ function GlobalSearchBox() {
  * re-resolving the active state when only the parent's query
  * cache updated.
  */
-function AppNavLink({ to, label }: { to: string; label: string }) {
+function AppNavLink({
+  to,
+  label,
+  icon,
+}: {
+  to: string;
+  label: string;
+  icon?: ReactNode;
+}) {
   // Render-prop bridge so `<NavLink>` controls the href + active
   // state but SidebarItem still owns the chrome (icon slot,
   // collapsed-mode tooltip, badge) AND owns the class
@@ -731,6 +1177,7 @@ function AppNavLink({ to, label }: { to: string; label: string }) {
   return (
     <SidebarItem
       label={label}
+      icon={icon}
       renderAnchor={({ getClassName, ref, children }) => (
         <NavLink
           ref={ref}
@@ -747,6 +1194,44 @@ function AppNavLink({ to, label }: { to: string; label: string }) {
 
 function AppShell() {
   const location = useLocation();
+  const navigate = useNavigate();
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [recent, setRecent] = useState<RecentPage[]>(() => readRecentPages());
+
+  // Cmd/Ctrl+K toggles the command palette from anywhere in the
+  // shell.  Bound once on mount.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Record each visited nav destination (most-recent-first, capped
+  // at 10) so the palette can surface a "Recent" group.  Persisted
+  // to localStorage so it survives reloads.
+  useEffect(() => {
+    const match = bestNavMatch(location.pathname);
+    if (!match || match.to === "/") return;
+    setRecent((prev) => {
+      const next = [
+        { to: match.to, label: match.label },
+        ...prev.filter((p) => p.to !== match.to),
+      ].slice(0, 10);
+      try {
+        localStorage.setItem(RECENT_PAGES_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore quota / disabled-storage errors — recents are a
+        // best-effort convenience, never load-bearing.
+      }
+      return next;
+    });
+  }, [location.pathname]);
+
   const featuresQuery = useQuery({
     queryKey: ["tenant-features", tenantKey()],
     queryFn: () => api.listTenantFeatures(tenantKey()),
@@ -811,6 +1296,77 @@ function AppShell() {
     }
   }
 
+  const crumbs = buildBreadcrumbs(location.pathname);
+
+  // Command-palette groups, rebuilt when the visible nav or the
+  // recent list changes.  Mirrors the sidebar (navigation), offers
+  // a "Create new X" for every record KType, a few fixed shortcuts,
+  // and the recent-pages list.
+  const commandGroups: CommandGroup[] = useMemo(() => {
+    const navItems = visible.flatMap((s) =>
+      s.links.map((l) => ({
+        id: `nav:${l.to}`,
+        label: l.label,
+        hint: s.title,
+        icon: l.icon,
+        keywords: [s.title],
+        onSelect: () => navigate(l.to),
+      })),
+    );
+    const createItems = visible.flatMap((s) =>
+      s.links
+        .filter((l) => l.to.startsWith("/records/"))
+        .map((l) => ({
+          id: `create:${l.to}`,
+          label: `Create new ${singularizeLabel(l.label)}`,
+          hint: s.title,
+          icon: <Plus className="h-4 w-4" />,
+          keywords: ["new", "create", "add", l.label],
+          onSelect: () => navigate(`${l.to}/new`),
+        })),
+    );
+    const quickItems = [
+      {
+        id: "quick:search",
+        label: "Search records…",
+        icon: <Search className="h-4 w-4" />,
+        keywords: ["find", "lookup"],
+        onSelect: () => navigate("/search"),
+      },
+      {
+        id: "quick:admin",
+        label: "Go to admin",
+        icon: <Settings className="h-4 w-4" />,
+        keywords: ["settings", "administration"],
+        onSelect: () => navigate("/admin/tenants"),
+      },
+      {
+        id: "quick:health",
+        label: "Go to system health",
+        icon: <HeartPulse className="h-4 w-4" />,
+        keywords: ["status", "monitoring"],
+        onSelect: () => navigate("/admin/health"),
+      },
+    ];
+    const recentItems = recent
+      .filter((r) => r.to !== location.pathname)
+      .map((r) => ({
+        id: `recent:${r.to}`,
+        label: r.label,
+        hint: "Recent",
+        onSelect: () => navigate(r.to),
+      }));
+
+    const groups: CommandGroup[] = [];
+    if (recentItems.length > 0)
+      groups.push({ heading: "Recent", items: recentItems });
+    groups.push({ heading: "Navigation", items: navItems });
+    if (createItems.length > 0)
+      groups.push({ heading: "Create", items: createItems });
+    groups.push({ heading: "Quick actions", items: quickItems });
+    return groups;
+  }, [visible, recent, navigate, location.pathname]);
+
   return (
     <div className="flex min-h-screen bg-bg">
       <Sidebar defaultCollapsed={false}>
@@ -829,7 +1385,12 @@ function AppShell() {
           {visible.map((section) => (
             <SidebarGroup key={section.title} title={section.title}>
               {section.links.map((link) => (
-                <AppNavLink key={link.to} to={link.to} label={link.label} />
+                <AppNavLink
+                  key={link.to}
+                  to={link.to}
+                  label={link.label}
+                  icon={link.icon}
+                />
               ))}
             </SidebarGroup>
           ))}
@@ -848,8 +1409,42 @@ function AppShell() {
       </Sidebar>
       <main className="flex-1 flex flex-col min-w-0">
         <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-bg-elevated px-6">
+          <Breadcrumb className="hidden min-w-0 lg:block">
+            <BreadcrumbList className="flex-nowrap">
+              {crumbs.map((crumb, i) => {
+                const last = i === crumbs.length - 1;
+                return (
+                  <Fragment key={`${crumb.label}-${i}`}>
+                    <BreadcrumbItem className="min-w-0">
+                      {last ? (
+                        <BreadcrumbPage className="truncate">
+                          {crumb.label}
+                        </BreadcrumbPage>
+                      ) : crumb.to ? (
+                        <BreadcrumbLink asChild>
+                          <Link to={crumb.to}>{crumb.label}</Link>
+                        </BreadcrumbLink>
+                      ) : (
+                        <span className="text-fg-subtle">{crumb.label}</span>
+                      )}
+                    </BreadcrumbItem>
+                    {!last && <BreadcrumbSeparator />}
+                  </Fragment>
+                );
+              })}
+            </BreadcrumbList>
+          </Breadcrumb>
           <GlobalSearchBox />
           <div className="ms-auto flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setPaletteOpen(true)}
+              aria-label="Open command palette"
+              className="hidden items-center gap-1.5 rounded-md border border-border bg-bg px-2 py-1.5 text-xs text-fg-subtle transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring) md:inline-flex"
+            >
+              <Search className="h-3.5 w-3.5" />
+              <span className="font-medium">⌘K</span>
+            </button>
             {activeLabel && (
               <Badge variant="outline" className="hidden md:inline-flex">
                 {activeLabel}
@@ -859,7 +1454,18 @@ function AppShell() {
             <NotificationBell />
           </div>
         </header>
+        <CommandPalette
+          open={paletteOpen}
+          onOpenChange={setPaletteOpen}
+          groups={commandGroups}
+        />
         <div className="flex-1 p-6 overflow-auto">
+          {/* `key` on the pathname re-mounts the fade wrapper on every
+              navigation so the enter transition replays per route. */}
+          <div
+            key={location.pathname}
+            className="animate-in fade-in duration-200"
+          >
           <Suspense fallback={<ShellRouteFallback />}>
             <Routes>
               <Route path="/" element={<DashboardPage />} />
@@ -1039,6 +1645,7 @@ function AppShell() {
               />
             </Routes>
           </Suspense>
+          </div>
         </div>
       </main>
     </div>
