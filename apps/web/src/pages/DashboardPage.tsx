@@ -1,6 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import type { DashboardSummary } from "@kapp/client";
+import {
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  EmptyState,
+  Skeleton,
+  StatCard,
+} from "@kapp/ui";
+import { AlertTriangle } from "lucide-react";
 import { api } from "../lib/api";
 import { useFormatter } from "../lib/i18n";
 
@@ -23,135 +34,192 @@ export function DashboardPage() {
   // still the tenant's base currency reported by the API.
   const fmt = useFormatter();
 
-  if (q.isLoading) return <p>Loading…</p>;
-  if (q.isError) {
-    return (
-      <p style={{ color: "#b91c1c" }}>
-        Failed to load dashboard: {(q.error as Error).message}
+  return (
+    <section className="flex flex-col gap-6">
+      <DashboardGreeting />
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Key metrics</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {q.isLoading ? (
+            <DashboardSkeleton />
+          ) : q.isError ? (
+            <EmptyState
+              icon={<AlertTriangle />}
+              title="Couldn't load the dashboard"
+              description={`Failed to load dashboard: ${(q.error as Error).message}`}
+              action={
+                <Button
+                  variant="secondary"
+                  onClick={() => void q.refetch()}
+                  disabled={q.isFetching}
+                >
+                  Retry
+                </Button>
+              }
+            />
+          ) : q.data ? (
+            <DashboardGrid summary={q.data} formatter={fmt} />
+          ) : null}
+        </CardContent>
+      </Card>
+    </section>
+  );
+}
+
+/**
+ * Time-of-day greeting header.  The tenant key stands in for the
+ * signed-in user (the web app has no per-user identity surface yet),
+ * title-cased so "acme-corp" reads as "Acme Corp".
+ */
+function DashboardGreeting() {
+  const now = new Date();
+  const hour = now.getHours();
+  const part =
+    hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  const tenant = localStorage.getItem("kapp.tenant") ?? "there";
+  const name = tenant
+    .replace(/[-_]/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+  const dateLabel = now.toLocaleDateString(undefined, {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+  return (
+    <header className="flex flex-col gap-1">
+      <h1 className="text-2xl font-semibold tracking-tight text-fg">
+        {part}, {name}
+      </h1>
+      <p className="text-sm text-fg-muted">
+        {dateLabel} · At-a-glance KPIs. Each tile links to the underlying
+        worklist.
       </p>
-    );
-  }
-  const s = q.data!;
+    </header>
+  );
+}
+
+type Formatter = ReturnType<typeof useFormatter>;
+
+interface WidgetSpec {
+  label: string;
+  value: string | number;
+  sub?: string;
+  to: string;
+}
+
+function DashboardGrid({
+  summary,
+  formatter,
+}: {
+  summary: DashboardSummary;
+  formatter: Formatter;
+}) {
+  const s = summary;
   // Bind the formatter into a closure that mirrors the prior
-  // formatAmount(value, currency?) signature so the JSX below
-  // stays unchanged. When the API doesn't surface a currency
-  // code (older payloads) we fall back to a plain locale-aware
-  // number — Intl.NumberFormat without style:"currency" still
-  // honours grouping and decimal conventions.
+  // formatAmount(value, currency?) signature. When the API doesn't
+  // surface a currency code (older payloads) we fall back to a plain
+  // locale-aware number — Intl.NumberFormat without style:"currency"
+  // still honours grouping and decimal conventions.
   const formatAmount = (value: number, currency?: string): string => {
     if (currency) {
       try {
-        return fmt.currency(value, currency, { maximumFractionDigits: 0 });
+        return formatter.currency(value, currency, {
+          maximumFractionDigits: 0,
+        });
       } catch {
         // fall through to bare-number formatting (synthetic ISO
         // codes the runtime rejects on construction)
       }
     }
-    return fmt.number(value, { maximumFractionDigits: 0 });
+    return formatter.number(value, { maximumFractionDigits: 0 });
   };
 
-  return (
-    <section>
-      <h1>Dashboard</h1>
-      <p style={{ color: "#6b7280" }}>
-        At-a-glance KPIs. Each tile links to the underlying worklist.
-      </p>
+  const widgets: WidgetSpec[] = [
+    {
+      label: "Open deals",
+      value: s.open_deals_count,
+      sub: `Pipeline ${formatAmount(s.pipeline_value, s.base_currency)}`,
+      to: "/records/crm.deal",
+    },
+    {
+      label: "Outstanding AR",
+      value: formatAmount(s.outstanding_ar, s.base_currency),
+      sub: `in ${s.base_currency}`,
+      to: "/records/finance.ar_invoice",
+    },
+    {
+      label: "Outstanding AP",
+      value: formatAmount(s.outstanding_ap, s.base_currency),
+      sub: `in ${s.base_currency}`,
+      to: "/records/finance.ap_bill",
+    },
+    {
+      label: "Low-stock items",
+      value: s.low_stock_items_count,
+      to: "/inventory/stock-levels",
+    },
+    {
+      label: "Pending approvals",
+      value: s.pending_approvals,
+      to: "/approvals",
+    },
+    {
+      label: "Open tickets",
+      value: s.open_tickets_count,
+      sub: `${s.overdue_tickets_count} overdue`,
+      to: "/helpdesk",
+    },
+    {
+      label: "Present today",
+      value: s.present_today ?? 0,
+      sub: "hr.attendance — UTC day",
+      to: "/records/hr.attendance",
+    },
+    {
+      label: "Pending reviews",
+      value: s.pending_reviews ?? 0,
+      sub: "submitted + reviewed",
+      to: "/records/hr.appraisal",
+    },
+  ];
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
-          gap: 12,
-          marginTop: 16,
-        }}
-      >
-        <Widget
-          label="Open deals"
-          value={s.open_deals_count}
-          sub={`Pipeline ${formatAmount(s.pipeline_value, s.base_currency)}`}
-          to="/records/crm.deal"
+  return (
+    <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3">
+      {widgets.map((w) => (
+        <StatCard
+          key={w.to + w.label}
+          label={w.label}
+          value={w.value}
+          sub={w.sub}
+          renderContainer={({ className, children }) => (
+            <Link to={w.to} className={className}>
+              {children}
+            </Link>
+          )}
         />
-        <Widget
-          label="Outstanding AR"
-          value={formatAmount(s.outstanding_ar, s.base_currency)}
-          sub={`in ${s.base_currency}`}
-          to="/records/finance.ar_invoice"
-        />
-        <Widget
-          label="Outstanding AP"
-          value={formatAmount(s.outstanding_ap, s.base_currency)}
-          sub={`in ${s.base_currency}`}
-          to="/records/finance.ap_bill"
-        />
-        <Widget
-          label="Low-stock items"
-          value={s.low_stock_items_count}
-          to="/inventory/stock-levels"
-        />
-        <Widget
-          label="Pending approvals"
-          value={s.pending_approvals}
-          to="/approvals"
-        />
-        <Widget
-          label="Open tickets"
-          value={s.open_tickets_count}
-          sub={`${s.overdue_tickets_count} overdue`}
-          to="/helpdesk"
-        />
-        <Widget
-          label="Present today"
-          value={s.present_today ?? 0}
-          sub="hr.attendance — UTC day"
-          to="/records/hr.attendance"
-        />
-        <Widget
-          label="Pending reviews"
-          value={s.pending_reviews ?? 0}
-          sub="submitted + reviewed"
-          to="/records/hr.appraisal"
-        />
-      </div>
-    </section>
+      ))}
+    </div>
   );
 }
 
-function Widget({
-  label,
-  value,
-  sub,
-  to,
-}: {
-  label: string;
-  value: string | number;
-  sub?: string;
-  to: string;
-}) {
+/** Loading placeholder matching the eight-tile KPI grid. */
+function DashboardSkeleton() {
   return (
-    <Link
-      to={to}
-      style={{
-        display: "block",
-        padding: 16,
-        border: "1px solid #e5e7eb",
-        borderRadius: 8,
-        textDecoration: "none",
-        color: "inherit",
-        background: "#fafafa",
-      }}
-    >
-      <div style={{ fontSize: 12, color: "#6b7280", textTransform: "uppercase" }}>
-        {label}
-      </div>
-      <div style={{ fontSize: 26, fontWeight: 600, marginTop: 4 }}>{value}</div>
-      {sub && <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>{sub}</div>}
-    </Link>
+    <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3">
+      {Array.from({ length: 8 }).map((_, i) => (
+        <div
+          key={i}
+          className="rounded-lg border border-border bg-bg-elevated p-4"
+        >
+          <Skeleton variant="text" className="w-24" />
+          <Skeleton className="mt-3 h-7 w-16" />
+          <Skeleton variant="text" className="mt-3 w-28" />
+        </div>
+      ))}
+    </div>
   );
 }
-
-// formatAmount used to live here as a standalone helper hardcoded to
-// "en-US" digit grouping. PR-2d (Americas tax pack rollout) lifted it
-// into the DashboardPage component body so it can close over the
-// useFormatter() hook from ../lib/i18n — the formatter now resolves
-// against the active LocaleContext tag, so a pt-BR / es / fr-CA tenant
-// sees CLDR-correct currency placement and digit grouping.

@@ -64,13 +64,26 @@ describe("DashboardPage", () => {
     });
     renderPage();
 
-    expect(await screen.findByRole("heading", { name: /Dashboard/i })).toBeInTheDocument();
+    // The page leads with a time-of-day greeting header (the
+    // tenant key stands in for the user) instead of a literal
+    // "Dashboard" title; match the greeting so the assertion is
+    // stable across the hour the suite runs.
+    expect(
+      await screen.findByRole("heading", {
+        name: /Good (morning|afternoon|evening)/i,
+      }),
+    ).toBeInTheDocument();
 
+    // The greeting header renders synchronously (it's not gated on
+    // the query), so the heading assertion above resolves before the
+    // summary loads.  Wait on a data-dependent node here so the
+    // remaining synchronous assertions see the loaded tiles.
+    //
     // The pipeline value sits inside the "Pipeline $145,000"
     // subtitle string, so match with a regex; the AR/AP tiles
     // render the formatted amount as the sole value text so an
     // exact match is fine there.
-    expect(screen.getByText(/Pipeline \$145,000/)).toBeInTheDocument();
+    expect(await screen.findByText(/Pipeline \$145,000/)).toBeInTheDocument();
     expect(screen.getByText("$23,500")).toBeInTheDocument();
     expect(screen.getByText("$8,100")).toBeInTheDocument();
 
