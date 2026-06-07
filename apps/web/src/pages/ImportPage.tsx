@@ -1,6 +1,18 @@
 import { useState, useMemo } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  Button,
+  Input,
+  Select,
+  Stepper,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 
 /**
  * ImportPage drives the Phase F import wizard. Five steps:
@@ -88,48 +100,48 @@ function ImportIndex() {
 
   return (
     <section>
-      <div style={{ display: "flex", justifyContent: "space-between" }}>
+      <div className="flex justify-between">
         <h1>Imports</h1>
-        <Link to="/imports/new">
-          <button>New import</button>
-        </Link>
+        <Button asChild>
+          <Link to="/imports/new">New import</Link>
+        </Button>
       </div>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Phase F data onboarding pipeline. Supports CSV, JSON, and Frappe
         REST sources (ERPNext, HRMS, CRM, LMS).
       </p>
       {jobs.isLoading && <p>Loading…</p>}
       {jobs.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load jobs: {(jobs.error as Error).message}
         </p>
       )}
       {jobs.data && jobs.data.length === 0 && (
-        <p style={{ color: "#6b7280" }}>No imports yet.</p>
+        <p className="text-fg-muted">No imports yet.</p>
       )}
       {jobs.data && jobs.data.length > 0 && (
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-          <thead>
-            <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-              <th style={{ padding: "6px 8px" }}>Job</th>
-              <th style={{ padding: "6px 8px" }}>Source</th>
-              <th style={{ padding: "6px 8px" }}>Status</th>
-              <th style={{ padding: "6px 8px" }}>Updated</th>
-            </tr>
-          </thead>
-          <tbody>
+        <Table className="text-[13px]">
+          <TableHeader>
+            <TableRow>
+              <TableHead>Job</TableHead>
+              <TableHead>Source</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Updated</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {jobs.data.map((j) => (
-              <tr key={j.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                <td style={{ padding: "6px 8px" }}>
+              <TableRow key={j.id}>
+                <TableCell>
                   <Link to={`/imports/${j.id}`}>{j.id.slice(0, 8)}…</Link>
-                </td>
-                <td style={{ padding: "6px 8px" }}>{j.source_type}</td>
-                <td style={{ padding: "6px 8px" }}>{j.status}</td>
-                <td style={{ padding: "6px 8px" }}>{j.updated_at}</td>
-              </tr>
+                </TableCell>
+                <TableCell>{j.source_type}</TableCell>
+                <TableCell>{j.status}</TableCell>
+                <TableCell>{j.updated_at}</TableCell>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       )}
     </section>
   );
@@ -195,11 +207,21 @@ function ImportWizard({ jobId }: { jobId: string | undefined }) {
 
   return (
     <section>
-      <div style={{ marginBottom: 8 }}>
+      <div className="mb-2">
         <Link to="/imports">← All imports</Link>
       </div>
       <h1>Import {jobId ? jobId.slice(0, 8) + "…" : ""}</h1>
-      <Stepper current={currentStep} />
+      <Stepper
+        className="my-3"
+        current={currentStep - 1}
+        steps={[
+          { label: "Source" },
+          { label: "Mapping" },
+          { label: "Validate" },
+          { label: "Review" },
+          { label: "Complete" },
+        ]}
+      />
       {!jobId && <StepSource onCreate={(body) => createJob.mutate(body)} />}
       {jobId && jobQ.isLoading && <p>Loading…</p>}
       {jobId && jobQ.data && currentStep === 2 && (
@@ -250,41 +272,6 @@ function stepForStatus(status: string | undefined): 1 | 2 | 3 | 4 | 5 {
     default:
       return 1;
   }
-}
-
-function Stepper({ current }: { current: 1 | 2 | 3 | 4 | 5 }) {
-  const labels = ["Source", "Mapping", "Validate", "Review", "Complete"];
-  return (
-    <ol
-      style={{
-        display: "flex",
-        listStyle: "none",
-        padding: 0,
-        margin: "8px 0 16px",
-        gap: 12,
-      }}
-    >
-      {labels.map((label, i) => {
-        const n = (i + 1) as 1 | 2 | 3 | 4 | 5;
-        const active = n === current;
-        const done = n < current;
-        return (
-          <li
-            key={label}
-            style={{
-              padding: "4px 10px",
-              borderRadius: 12,
-              background: active ? "#2563eb" : done ? "#bfdbfe" : "#e5e7eb",
-              color: active ? "white" : "#111827",
-              fontSize: 12,
-            }}
-          >
-            {n}. {label}
-          </li>
-        );
-      })}
-    </ol>
-  );
 }
 
 type SourceType =
@@ -396,14 +383,14 @@ function StepSource({
   const isOAuthSource = OAUTH_SOURCES.includes(sourceType);
 
   return (
-    <div>
+    <div className="max-w-2xl">
       <h2>Step 1. Source</h2>
-      <label style={{ display: "block", marginBottom: 12 }}>
+      <label className="mb-3 block text-sm">
         Source type
-        <select
+        <Select
+          className="mt-1"
           value={sourceType}
           onChange={(e) => setSourceType(e.target.value as SourceType)}
-          style={{ marginLeft: 8 }}
         >
           <option value="csv">CSV</option>
           <option value="json">JSON</option>
@@ -412,167 +399,167 @@ function StepSource({
           <option value="xero">Xero</option>
           <option value="tally">Tally Prime (file)</option>
           <option value="sage">Sage Business Cloud</option>
-        </select>
+        </Select>
       </label>
       {isFileSource && (
         <>
-          <label style={{ display: "block", marginBottom: 8 }}>
+          <label className="mb-2 block text-sm">
             Entity (source table/sheet)
-            <input
+            <Input
+              className="mt-1"
               value={csvEntity}
               onChange={(e) => setCsvEntity(e.target.value)}
-              style={{ marginLeft: 8, width: 240 }}
             />
           </label>
-          <label style={{ display: "block", marginBottom: 8 }}>
+          <label className="mb-2 block text-sm">
             Target KType (default for this entity)
-            <input
+            <Input
+              className="mt-1"
               value={csvKType}
               onChange={(e) => setCsvKType(e.target.value)}
               placeholder="crm.lead"
-              style={{ marginLeft: 8, width: 240 }}
             />
           </label>
-          <label style={{ display: "block" }}>
+          <label className="block text-sm">
             Payload ({sourceType})
             <textarea
               value={csvPayload}
               onChange={(e) => setCsvPayload(e.target.value)}
               rows={12}
-              style={{ display: "block", width: "100%", fontFamily: "monospace" }}
+              className="mt-1 block w-full rounded-md border border-border bg-bg-elevated p-2 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
             />
           </label>
         </>
       )}
       {sourceType === "frappe" && (
         <>
-          <label style={{ display: "block", marginBottom: 8 }}>
+          <label className="mb-2 block text-sm">
             Frappe base URL
-            <input
+            <Input
+              className="mt-1"
               value={frappeURL}
               onChange={(e) => setFrappeURL(e.target.value)}
               placeholder="https://erp.example.com"
-              style={{ marginLeft: 8, width: 320 }}
             />
           </label>
-          <label style={{ display: "block", marginBottom: 8 }}>
+          <label className="mb-2 block text-sm">
             API key
-            <input
+            <Input
+              className="mt-1"
               value={frappeKey}
               onChange={(e) => setFrappeKey(e.target.value)}
-              style={{ marginLeft: 8, width: 240 }}
             />
           </label>
-          <label style={{ display: "block", marginBottom: 8 }}>
+          <label className="mb-2 block text-sm">
             API secret
-            <input
+            <Input
               type="password"
+              className="mt-1"
               value={frappeSecret}
               onChange={(e) => setFrappeSecret(e.target.value)}
-              style={{ marginLeft: 8, width: 240 }}
             />
           </label>
-          <label style={{ display: "block" }}>
+          <label className="block text-sm">
             DocTypes (comma-separated)
-            <input
+            <Input
+              className="mt-1"
               value={frappeDocTypes}
               onChange={(e) => setFrappeDocTypes(e.target.value)}
-              style={{ marginLeft: 8, width: 400 }}
             />
           </label>
         </>
       )}
       {sourceType === "quickbooks" && (
-        <label style={{ display: "block", marginBottom: 8 }}>
+        <label className="mb-2 block text-sm">
           Realm ID (company)
-          <input
+          <Input
+            className="mt-1"
             value={qbRealmId}
             onChange={(e) => setQbRealmId(e.target.value)}
             placeholder="1234567890"
-            style={{ marginLeft: 8, width: 240 }}
           />
         </label>
       )}
       {sourceType === "xero" && (
-        <label style={{ display: "block", marginBottom: 8 }}>
+        <label className="mb-2 block text-sm">
           Xero tenant ID
-          <input
+          <Input
+            className="mt-1"
             value={xeroTenantId}
             onChange={(e) => setXeroTenantId(e.target.value)}
             placeholder="organisation uuid"
-            style={{ marginLeft: 8, width: 320 }}
           />
         </label>
       )}
       {isOAuthSource && (
         <>
-          <p style={{ color: "#6b7280", marginBottom: 8 }}>
+          <p className="mb-2 text-fg-muted">
             Provide an access token, or a refresh token plus client
             credentials to mint one.
           </p>
-          <label style={{ display: "block", marginBottom: 8 }}>
+          <label className="mb-2 block text-sm">
             Access token
-            <input
+            <Input
               type="password"
+              className="mt-1"
               value={accessToken}
               onChange={(e) => setAccessToken(e.target.value)}
-              style={{ marginLeft: 8, width: 320 }}
             />
           </label>
-          <label style={{ display: "block", marginBottom: 8 }}>
+          <label className="mb-2 block text-sm">
             Refresh token
-            <input
+            <Input
               type="password"
+              className="mt-1"
               value={refreshToken}
               onChange={(e) => setRefreshToken(e.target.value)}
-              style={{ marginLeft: 8, width: 320 }}
             />
           </label>
-          <label style={{ display: "block", marginBottom: 8 }}>
+          <label className="mb-2 block text-sm">
             Client ID
-            <input
+            <Input
+              className="mt-1"
               value={clientId}
               onChange={(e) => setClientId(e.target.value)}
-              style={{ marginLeft: 8, width: 240 }}
             />
           </label>
-          <label style={{ display: "block", marginBottom: 8 }}>
+          <label className="mb-2 block text-sm">
             Client secret
-            <input
+            <Input
               type="password"
+              className="mt-1"
               value={clientSecret}
               onChange={(e) => setClientSecret(e.target.value)}
-              style={{ marginLeft: 8, width: 240 }}
             />
           </label>
         </>
       )}
       {sourceType === "tally" && (
         <>
-          <label style={{ display: "block", marginBottom: 8 }}>
+          <label className="mb-2 block text-sm">
             Export format
-            <select
+            <Select
+              className="mt-1"
               value={tallyFormat}
               onChange={(e) => setTallyFormat(e.target.value as "xml" | "json")}
-              style={{ marginLeft: 8 }}
             >
               <option value="xml">XML</option>
               <option value="json">JSON</option>
-            </select>
+            </Select>
           </label>
-          <label style={{ display: "block" }}>
+          <label className="block text-sm">
             Tally export payload (masters + vouchers)
             <textarea
               value={tallyPayload}
               onChange={(e) => setTallyPayload(e.target.value)}
               rows={12}
-              style={{ display: "block", width: "100%", fontFamily: "monospace" }}
+              className="mt-1 block w-full rounded-md border border-border bg-bg-elevated p-2 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
             />
           </label>
         </>
       )}
-      <div style={{ marginTop: 16 }}>
-        <button onClick={submit}>Create job + stage rows</button>
+      <div className="mt-4">
+        <Button onClick={submit}>Create job + stage rows</Button>
       </div>
     </div>
   );
@@ -601,28 +588,28 @@ function StepMapping({
   return (
     <div>
       <h2>Step 2. Mapping</h2>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Set the target KType for each discovered source entity. Per-field
         renames happen automatically via the built-in concept map
         (PROPOSAL §5.3).
       </p>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-        <thead>
-          <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-            <th style={{ padding: "6px 8px" }}>Source entity</th>
-            <th style={{ padding: "6px 8px" }}>Source rows</th>
-            <th style={{ padding: "6px 8px" }}>Target KType</th>
-          </tr>
-        </thead>
-        <tbody>
+      <Table className="text-[13px]">
+        <TableHeader>
+          <TableRow>
+            <TableHead>Source entity</TableHead>
+            <TableHead>Source rows</TableHead>
+            <TableHead>Target KType</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {entities.map((e) => (
-            <tr key={e.name} style={{ borderBottom: "1px solid #f3f4f6" }}>
-              <td style={{ padding: "6px 8px" }}>{e.name}</td>
-              <td style={{ padding: "6px 8px" }}>
+            <TableRow key={e.name}>
+              <TableCell>{e.name}</TableCell>
+              <TableCell>
                 {((e as unknown as { row_count?: number }).row_count) ?? "—"}
-              </td>
-              <td style={{ padding: "6px 8px" }}>
-                <input
+              </TableCell>
+              <TableCell>
+                <Input
                   value={mapping[e.name]?.target_ktype ?? ""}
                   onChange={(ev) =>
                     setMapping((m) => ({
@@ -632,14 +619,16 @@ function StepMapping({
                   }
                   placeholder="crm.lead"
                 />
-              </td>
-            </tr>
+              </TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
-      <div style={{ marginTop: 16 }}>
-        <button onClick={() => onSubmit({ entities: mapping })}>Save mapping</button>
-        <Link to={`/imports/${job.id}/mapping`} style={{ marginLeft: 12 }}>
+        </TableBody>
+      </Table>
+      <div className="mt-4 flex items-center">
+        <Button onClick={() => onSubmit({ entities: mapping })}>
+          Save mapping
+        </Button>
+        <Link to={`/imports/${job.id}/mapping`} className="ml-3">
           Advanced field mapping →
         </Link>
       </div>
@@ -661,31 +650,31 @@ function StepValidate({
   return (
     <div>
       <h2>Step 3. Validate</h2>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Runs schema + referential integrity checks over every staged row
         and returns the per-row error report.
       </p>
-      <button onClick={onRun} disabled={pending}>
+      <Button onClick={onRun} disabled={pending}>
         {pending ? "Validating…" : "Run validation"}
-      </button>
+      </Button>
       {errors.length > 0 && (
         <>
-          <h3 style={{ marginTop: 16 }}>{errors.length} invalid rows</h3>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead>
-              <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-                <th style={{ padding: "6px 8px" }}>Source ID</th>
-                <th style={{ padding: "6px 8px" }}>Target KType</th>
-                <th style={{ padding: "6px 8px" }}>Errors</th>
-              </tr>
-            </thead>
-            <tbody>
+          <h3 className="mt-4">{errors.length} invalid rows</h3>
+          <Table className="text-[13px]">
+            <TableHeader>
+              <TableRow>
+                <TableHead>Source ID</TableHead>
+                <TableHead>Target KType</TableHead>
+                <TableHead>Errors</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {errors.map((row) => (
-                <tr key={row.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                  <td style={{ padding: "6px 8px" }}>{row.source_id ?? ""}</td>
-                  <td style={{ padding: "6px 8px" }}>{row.target_ktype}</td>
-                  <td style={{ padding: "6px 8px" }}>
-                    <ul style={{ margin: 0, paddingLeft: 16 }}>
+                <TableRow key={row.id}>
+                  <TableCell>{row.source_id ?? ""}</TableCell>
+                  <TableCell>{row.target_ktype}</TableCell>
+                  <TableCell>
+                    <ul className="m-0 pl-4">
                       {(row.validation_errors ?? []).map((e, i) => (
                         <li key={i}>
                           <code>{e.code}</code>
@@ -693,15 +682,15 @@ function StepValidate({
                         </li>
                       ))}
                     </ul>
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         </>
       )}
       {job.status === "reconciling" && errors.length === 0 && (
-        <p style={{ marginTop: 12, color: "#065f46" }}>
+        <p className="mt-3 text-success">
           All rows valid — proceed to review.
         </p>
       )}
@@ -730,7 +719,7 @@ function StepReview({
   return (
     <div>
       <h2>Step 4. Review &amp; Accept</h2>
-      <dl style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "4px 16px" }}>
+      <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
         <dt>Source count</dt>
         <dd>{rec.source_count ?? "—"}</dd>
         <dt>Staged count</dt>
@@ -741,7 +730,7 @@ function StepReview({
         <dd>{rec.invalid_count ?? "—"}</dd>
       </dl>
       {rec.discrepancies && rec.discrepancies.length > 0 && (
-        <div style={{ marginTop: 12, color: "#b91c1c" }}>
+        <div className="mt-3 text-danger">
           <strong>Discrepancies:</strong>
           <ul>
             {rec.discrepancies.map((d) => (
@@ -750,11 +739,15 @@ function StepReview({
           </ul>
         </div>
       )}
-      <button onClick={onAccept} disabled={pending} style={{ marginTop: 16 }}>
-        {pending ? "Importing…" : `Accept & cutover (${rec.valid_count ?? 0} rows)`}
-      </button>
+      <div className="mt-4">
+        <Button onClick={onAccept} disabled={pending}>
+          {pending
+            ? "Importing…"
+            : `Accept & cutover (${rec.valid_count ?? 0} rows)`}
+        </Button>
+      </div>
       {errors.length > 0 && (
-        <p style={{ marginTop: 8, color: "#6b7280", fontSize: 12 }}>
+        <p className="mt-2 text-xs text-fg-muted">
           {errors.length} invalid rows will be skipped. Fix the source and
           re-import them later.
         </p>
