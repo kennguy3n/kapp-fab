@@ -2,6 +2,18 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import type { KRecord, SLAPolicy, UpsertSLAPolicyInput } from "@kapp/client";
+import {
+  Button,
+  Input,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  cn,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 const TICKET_KTYPE = "helpdesk.ticket";
@@ -57,75 +69,78 @@ export function HelpdeskPage() {
   });
 
   return (
-    <section>
-      <h1>Helpdesk</h1>
-      <p style={{ color: "#6b7280" }}>
+    <section className="flex flex-col gap-2">
+      <h1 className="text-2xl font-semibold tracking-tight text-fg">Helpdesk</h1>
+      <p className="text-sm text-fg-muted">
         Tickets + SLA policies. Breaches are logged to ticket_sla_log
         and can be charted via the report builder.
       </p>
 
-      <h2 style={{ marginTop: 24, fontSize: 16 }}>Open Tickets</h2>
-      {tickets.isLoading && <p>Loading…</p>}
+      <h2 className="mt-6 text-base font-semibold text-fg">Open Tickets</h2>
+      {tickets.isLoading && <p className="text-sm text-fg-muted">Loading…</p>}
       {tickets.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-sm text-danger">
           Failed to load tickets: {(tickets.error as Error).message}
         </p>
       )}
       {!tickets.isLoading && openTickets.length === 0 && (
-        <p style={{ color: "#9ca3af", fontStyle: "italic" }}>
-          No open tickets.
-        </p>
+        <p className="text-sm italic text-fg-subtle">No open tickets.</p>
       )}
       {openTickets.length > 0 && (
-        <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-              <th>Subject</th>
-              <th>Status</th>
-              <th>Priority</th>
-              <th>Channel</th>
-              <th>Due</th>
-            </tr>
-          </thead>
-          <tbody>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Subject</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Priority</TableHead>
+              <TableHead>Channel</TableHead>
+              <TableHead>Due</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {openTickets.map((r) => {
               const d = r.data as unknown as TicketData;
               const overdue =
                 d.sla_resolution_by != null &&
                 new Date(d.sla_resolution_by).getTime() < Date.now();
               return (
-                <tr key={r.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                  <td>
-                    <Link to={`/records/${TICKET_KTYPE}/${r.id}`}>
+                <TableRow key={r.id}>
+                  <TableCell>
+                    <Link
+                      to={`/records/${TICKET_KTYPE}/${r.id}`}
+                      className="text-accent hover:underline"
+                    >
                       {d.subject ?? r.id}
                     </Link>
-                  </td>
-                  <td>{d.status ?? ""}</td>
-                  <td>{d.priority ?? ""}</td>
-                  <td>{d.channel ?? ""}</td>
-                  <td style={{ color: overdue ? "#b91c1c" : "inherit" }}>
+                  </TableCell>
+                  <TableCell>{d.status ?? ""}</TableCell>
+                  <TableCell>{d.priority ?? ""}</TableCell>
+                  <TableCell>{d.channel ?? ""}</TableCell>
+                  <TableCell className={cn(overdue && "text-danger")}>
                     {d.sla_resolution_by?.slice(0, 16).replace("T", " ")}
                     {overdue ? " ⚠" : ""}
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               );
             })}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       )}
 
-      <h2 style={{ marginTop: 32, fontSize: 16 }}>SLA Policies</h2>
+      <h2 className="mt-8 text-base font-semibold text-fg">SLA Policies</h2>
       <form
         onSubmit={submit}
-        style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "12px 0", fontSize: 13 }}
+        className="my-3 flex flex-wrap items-center gap-2"
       >
-        <input
+        <Input
           placeholder="name"
           value={form.name}
           onChange={(e) => setForm({ ...form, name: e.target.value })}
           required
+          className="w-40"
         />
-        <select
+        <Select
+          className="w-auto"
           value={form.priority}
           onChange={(e) =>
             setForm({ ...form, priority: e.target.value as UpsertSLAPolicyInput["priority"] })
@@ -135,8 +150,8 @@ export function HelpdeskPage() {
           <option value="medium">medium</option>
           <option value="high">high</option>
           <option value="urgent">urgent</option>
-        </select>
-        <input
+        </Select>
+        <Input
           type="number"
           placeholder="response min"
           value={form.response_minutes}
@@ -144,9 +159,9 @@ export function HelpdeskPage() {
             setForm({ ...form, response_minutes: Number(e.target.value) })
           }
           required
-          style={{ width: 120 }}
+          className="w-32"
         />
-        <input
+        <Input
           type="number"
           placeholder="resolution min"
           value={form.resolution_minutes}
@@ -154,44 +169,45 @@ export function HelpdeskPage() {
             setForm({ ...form, resolution_minutes: Number(e.target.value) })
           }
           required
-          style={{ width: 140 }}
+          className="w-36"
         />
-        <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+        <label className="flex items-center gap-1.5 text-sm text-fg">
           <input
             type="checkbox"
             checked={form.active ?? true}
             onChange={(e) => setForm({ ...form, active: e.target.checked })}
+            className="size-4 rounded border-border text-accent focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
           />
           active
         </label>
-        <button type="submit" disabled={upsert.isPending}>
+        <Button type="submit" disabled={upsert.isPending}>
           {upsert.isPending ? "Saving…" : "Save policy"}
-        </button>
+        </Button>
       </form>
 
       {(policies.data?.policies ?? []).length > 0 && (
-        <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-              <th>Name</th>
-              <th>Priority</th>
-              <th style={{ textAlign: "right" }}>Response (min)</th>
-              <th style={{ textAlign: "right" }}>Resolution (min)</th>
-              <th>Active</th>
-            </tr>
-          </thead>
-          <tbody>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Name</TableHead>
+              <TableHead>Priority</TableHead>
+              <TableHead className="text-right">Response (min)</TableHead>
+              <TableHead className="text-right">Resolution (min)</TableHead>
+              <TableHead>Active</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {(policies.data?.policies ?? []).map((p) => (
-              <tr key={p.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                <td>{p.name}</td>
-                <td>{p.priority}</td>
-                <td style={{ textAlign: "right" }}>{p.response_minutes}</td>
-                <td style={{ textAlign: "right" }}>{p.resolution_minutes}</td>
-                <td>{p.active ? "yes" : "no"}</td>
-              </tr>
+              <TableRow key={p.id}>
+                <TableCell>{p.name}</TableCell>
+                <TableCell>{p.priority}</TableCell>
+                <TableCell className="text-right">{p.response_minutes}</TableCell>
+                <TableCell className="text-right">{p.resolution_minutes}</TableCell>
+                <TableCell>{p.active ? "yes" : "no"}</TableCell>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       )}
     </section>
   );
