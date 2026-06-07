@@ -1,5 +1,15 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import {
+  Input,
+  Table,
+  TableBody,
+  TableCell,
+  TableFooter,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -20,85 +30,68 @@ export function TrialBalancePage() {
   return (
     <section>
       <h1>Trial Balance</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Account-level summary of debits and credits as of the selected date.
       </p>
 
-      <div style={{ margin: "12px 0", fontSize: 13 }}>
-        <label style={{ marginRight: 8 }}>As of:</label>
-        <input
+      <div className="my-3 flex items-center gap-2 text-[13px]">
+        <label>As of:</label>
+        <Input
           type="date"
           value={asOf}
           onChange={(e) => setAsOf(e.target.value)}
+          className="w-auto"
         />
       </div>
 
       {q.isLoading && <p>Loading…</p>}
       {q.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load report: {(q.error as Error).message}
         </p>
       )}
 
       {report && (
-        <>
-          <table
-            style={{
-              width: "100%",
-              borderCollapse: "collapse",
-              marginTop: 12,
-              fontSize: 13,
-            }}
-          >
-            <thead>
-              <tr style={{ textAlign: "left", color: "#6b7280" }}>
-                <Th>Code</Th>
-                <Th>Account</Th>
-                <Th>Type</Th>
-                <Th style={{ textAlign: "right" }}>Debit</Th>
-                <Th style={{ textAlign: "right" }}>Credit</Th>
-                <Th style={{ textAlign: "right" }}>Balance</Th>
-              </tr>
-            </thead>
-            <tbody>
-              {report.rows.map((r) => (
-                <tr
-                  key={r.account_code}
-                  style={{ borderTop: "1px solid #e5e7eb" }}
-                >
-                  <Td>
-                    <code>{r.account_code}</code>
-                  </Td>
-                  <Td>{r.account_name}</Td>
-                  <Td>{r.type}</Td>
-                  <Td style={{ textAlign: "right" }}>{fmt(r.debit)}</Td>
-                  <Td style={{ textAlign: "right" }}>{fmt(r.credit)}</Td>
-                  <Td style={{ textAlign: "right" }}>{fmt(r.balance)}</Td>
-                </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr
-                style={{
-                  borderTop: "2px solid #d1d5db",
-                  fontWeight: 600,
-                }}
+        <Table className="mt-3 text-[13px]">
+          <TableHeader>
+            <TableRow>
+              <TableHead>Code</TableHead>
+              <TableHead>Account</TableHead>
+              <TableHead>Type</TableHead>
+              <TableHead className="text-right">Debit</TableHead>
+              <TableHead className="text-right">Credit</TableHead>
+              <TableHead className="text-right">Balance</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {report.rows.map((r) => (
+              <TableRow key={r.account_code}>
+                <TableCell>
+                  <code>{r.account_code}</code>
+                </TableCell>
+                <TableCell>{r.account_name}</TableCell>
+                <TableCell>{r.type}</TableCell>
+                <TableCell className="text-right">{fmt(r.debit)}</TableCell>
+                <TableCell className="text-right">{fmt(r.credit)}</TableCell>
+                <TableCell className="text-right">{fmt(r.balance)}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+          <TableFooter>
+            <TableRow className="font-semibold">
+              <TableCell colSpan={3}>Totals</TableCell>
+              <TableCell className="text-right">{fmt(report.total_debit)}</TableCell>
+              <TableCell className="text-right">{fmt(report.total_credit)}</TableCell>
+              <TableCell
+                className={`text-right ${
+                  isBalanced(report.residual) ? "text-success" : "text-danger"
+                }`}
               >
-                <Td colSpan={3}>Totals</Td>
-                <Td style={{ textAlign: "right" }}>{fmt(report.total_debit)}</Td>
-                <Td style={{ textAlign: "right" }}>{fmt(report.total_credit)}</Td>
-                <Td
-                  style={{
-                    textAlign: "right",
-                    color: isBalanced(report.residual) ? "#059669" : "#b91c1c",
-                  }}
-                >
-                  {isBalanced(report.residual) ? "balanced" : "OUT OF BALANCE"}
-                </Td>
-              </tr>
-            </tfoot>
-          </table>
-        </>
+                {isBalanced(report.residual) ? "balanced" : "OUT OF BALANCE"}
+              </TableCell>
+            </TableRow>
+          </TableFooter>
+        </Table>
       )}
     </section>
   );
@@ -126,32 +119,4 @@ function fmt(v: string | number): string {
   return n.toFixed(2);
 }
 
-function Th({
-  children,
-  style,
-}: {
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-}) {
-  return (
-    <th style={{ padding: "6px 8px", fontWeight: 500, fontSize: 12, ...style }}>
-      {children}
-    </th>
-  );
-}
 
-function Td({
-  children,
-  style,
-  colSpan,
-}: {
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-  colSpan?: number;
-}) {
-  return (
-    <td style={{ padding: "8px", ...style }} colSpan={colSpan}>
-      {children}
-    </td>
-  );
-}

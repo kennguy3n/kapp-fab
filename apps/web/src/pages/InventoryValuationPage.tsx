@@ -1,5 +1,15 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import {
+  Input,
+  Table,
+  TableBody,
+  TableCell,
+  TableFooter,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 const todayLocalISO = (() => {
@@ -25,61 +35,53 @@ export function InventoryValuationPage() {
   return (
     <section>
       <h1>Inventory Valuation</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Qty × unit cost per (item, warehouse) as of the selected date.
       </p>
-      <div style={{ margin: "12px 0", fontSize: 13 }}>
-        <label style={{ marginRight: 8 }}>As of:</label>
-        <input
+      <div className="my-3 flex items-center gap-2 text-[13px]">
+        <label>As of:</label>
+        <Input
           type="date"
           value={asOf}
           onChange={(e) => setAsOf(e.target.value)}
+          className="w-auto"
         />
       </div>
       {q.isLoading && <p>Loading…</p>}
       {q.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load report: {(q.error as Error).message}
         </p>
       )}
       {report && (
-        <>
-          <table
-            style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginTop: 12 }}
-          >
-            <thead>
-              <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-                <th style={{ padding: "6px 8px" }}>SKU</th>
-                <th style={{ padding: "6px 8px" }}>Item</th>
-                <th style={{ padding: "6px 8px", textAlign: "right" }}>Qty</th>
-                <th style={{ padding: "6px 8px", textAlign: "right" }}>Value</th>
-              </tr>
-            </thead>
-            <tbody>
-              {report.rows.map((r) => (
-                <tr
-                  key={r.item_id}
-                  style={{ borderBottom: "1px solid #f3f4f6" }}
-                >
-                  <td style={{ padding: "6px 8px" }}>{r.sku}</td>
-                  <td style={{ padding: "6px 8px" }}>{r.name}</td>
-                  <td style={{ padding: "6px 8px", textAlign: "right" }}>{r.qty}</td>
-                  <td style={{ padding: "6px 8px", textAlign: "right" }}>{r.value_cost}</td>
-                </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr style={{ borderTop: "1px solid #e5e7eb", fontWeight: 600 }}>
-                <td colSpan={3} style={{ padding: "6px 8px", textAlign: "right" }}>
-                  Total
-                </td>
-                <td style={{ padding: "6px 8px", textAlign: "right" }}>
-                  {report.total_value}
-                </td>
-              </tr>
-            </tfoot>
-          </table>
-        </>
+        <Table className="mt-3 text-[13px]">
+          <TableHeader>
+            <TableRow>
+              <TableHead>SKU</TableHead>
+              <TableHead>Item</TableHead>
+              <TableHead className="text-right">Qty</TableHead>
+              <TableHead className="text-right">Value</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {report.rows.map((r) => (
+              <TableRow key={r.item_id}>
+                <TableCell>{r.sku}</TableCell>
+                <TableCell>{r.name}</TableCell>
+                <TableCell className="text-right">{r.qty}</TableCell>
+                <TableCell className="text-right">{r.value_cost}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+          <TableFooter>
+            <TableRow className="font-semibold">
+              <TableCell colSpan={3} className="text-right">
+                Total
+              </TableCell>
+              <TableCell className="text-right">{report.total_value}</TableCell>
+            </TableRow>
+          </TableFooter>
+        </Table>
       )}
     </section>
   );
