@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import type { DashboardSummary } from "@kapp/client";
@@ -75,20 +76,32 @@ export function DashboardPage() {
  * title-cased so "acme-corp" reads as "Acme Corp".
  */
 function DashboardGreeting() {
-  const now = new Date();
-  const hour = now.getHours();
-  const part =
-    hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
-  const tenant = localStorage.getItem("kapp.tenant") ?? "there";
-  const name = tenant
-    .replace(/[-_]/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
-  const dateLabel = now.toLocaleDateString(undefined, {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
+  // Snapshot the clock and tenant once per mount so the heading is
+  // deterministic across re-renders (a fresh `new Date()` each render
+  // could otherwise flip the greeting at an hour boundary and read
+  // localStorage on every paint).
+  const { part, name, dateLabel } = useMemo(() => {
+    const now = new Date();
+    const hour = now.getHours();
+    const tenant = localStorage.getItem("kapp.tenant") ?? "there";
+    return {
+      part:
+        hour < 12
+          ? "Good morning"
+          : hour < 18
+            ? "Good afternoon"
+            : "Good evening",
+      name: tenant
+        .replace(/[-_]/g, " ")
+        .replace(/\b\w/g, (c) => c.toUpperCase()),
+      dateLabel: now.toLocaleDateString(undefined, {
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      }),
+    };
+  }, []);
   return (
     <header className="flex flex-col gap-1">
       <h1 className="text-2xl font-semibold tracking-tight text-fg">

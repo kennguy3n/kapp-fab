@@ -146,7 +146,11 @@ describe("App shell", () => {
     const user = userEvent.setup();
     renderApp();
 
-    const search = await screen.findByRole("searchbox", {
+    // The shell search box now follows the ARIA combobox pattern: it
+    // controls a popup listbox (recent searches / quick results) via
+    // aria-expanded + aria-controls, so its role is combobox rather
+    // than the plain searchbox it was before the G5 dropdown landed.
+    const search = await screen.findByRole("combobox", {
       name: /global search/i,
     });
     await user.type(search, "acme corp{Enter}");

@@ -395,7 +395,11 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
           {!hasRecords ? (
             <EmptyState
               icon={<Inbox />}
-              title={`No ${kt.name} records yet`}
+              title={
+                activeView
+                  ? `No matching ${kt.name} records`
+                  : `No ${kt.name} records yet`
+              }
               description={
                 activeView
                   ? "No records match this view's filters."

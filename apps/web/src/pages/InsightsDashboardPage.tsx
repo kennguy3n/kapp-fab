@@ -115,6 +115,10 @@ export function InsightsDashboardPage() {
       qc.invalidateQueries({ queryKey: ["insights-dashboards"] });
     },
     onError: (err: Error) => setError(err.message),
+    // Await-mutation pattern (mirrors the delete flow): keep the
+    // prompt open showing "Working…" until the create settles, then
+    // close regardless of outcome (errors surface in the banner).
+    onSettled: () => setNewOpen(false),
   });
 
   const updateDashboardMut = useMutation({
@@ -332,13 +336,17 @@ export function InsightsDashboardPage() {
 
       <PromptDialog
         open={newOpen}
-        onOpenChange={setNewOpen}
+        onOpenChange={(open) => {
+          if (!open && createDashboardMut.isPending) return;
+          setNewOpen(open);
+        }}
         title="New dashboard"
         label="Dashboard name"
         placeholder="e.g. Sales overview"
+        loading={createDashboardMut.isPending}
         onSubmit={(name) => {
-          if (name.trim()) createDashboardMut.mutate(name.trim());
-          setNewOpen(false);
+          const trimmed = name.trim();
+          if (trimmed) createDashboardMut.mutate(trimmed);
         }}
       />
 

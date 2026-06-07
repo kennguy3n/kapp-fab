@@ -4,6 +4,7 @@ import {
   Suspense,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ComponentType,
   type ReactNode,
@@ -118,6 +119,7 @@ import {
   Warehouse,
   Webhook,
 } from "lucide-react";
+import type { SearchResult } from "@kapp/client";
 import { api } from "./lib/api";
 import { NotificationBell } from "./components/NotificationBell";
 import { LocaleSwitcher } from "./components/LocaleSwitcher";
@@ -1128,47 +1130,261 @@ export function App() {
   );
 }
 
+// Recent global searches are persisted in localStorage so the
+// dropdown can offer one-tap re-runs across reloads and tabs. Capped
+// at MAX_RECENT_SEARCHES newest-first; the store survives a malformed
+// payload by falling back to an empty list rather than throwing.
+const RECENT_SEARCHES_KEY = "kapp.recent_searches";
+const MAX_RECENT_SEARCHES = 5;
+
+function loadRecentSearches(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_SEARCHES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((x): x is string => typeof x === "string")
+      .slice(0, MAX_RECENT_SEARCHES);
+  } catch {
+    return [];
+  }
+}
+
+function pushRecentSearch(query: string): string[] {
+  const trimmed = query.trim();
+  if (!trimmed) return loadRecentSearches();
+  const next = [trimmed, ...loadRecentSearches().filter((x) => x !== trimmed)].slice(
+    0,
+    MAX_RECENT_SEARCHES,
+  );
+  try {
+    localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(next));
+  } catch {
+    // Storage may be disabled / over quota; the in-memory list still
+    // updates so the current session keeps working.
+  }
+  return next;
+}
+
+// quickResultLabel mirrors SearchPage.summaryOf: it picks the most
+// human-meaningful top-level field so the dropdown row reads as a
+// record name rather than a raw uuid, falling back to the id.
+function quickResultLabel(r: SearchResult): string {
+  const d = (r.data ?? {}) as Record<string, unknown>;
+  for (const k of ["name", "title", "subject", "sku", "code", "email", "reference"]) {
+    const v = d[k];
+    if (typeof v === "string" && v.trim().length > 0) return v;
+  }
+  return r.id;
+}
+
+type SearchOption =
+  | { kind: "recent"; query: string }
+  | { kind: "result"; result: SearchResult };
+
 /**
- * GlobalSearchBox — the shell-level search input.  Submitting routes
- * to /search?q=... which SearchPage debounces and executes via the
- * /api/v1/search endpoint.  The input is the @kapp/ui `Input`
- * primitive so it inherits the same chrome and focus ring as every
- * other form field.
+ * GlobalSearchBox — the shell-level search input. It expands on focus
+ * and drops a panel that shows recent searches (empty query) or live
+ * quick results (debounced /api/v1/search, capped at 6). Selecting a
+ * result jumps straight to the record; submitting routes to
+ * /search?q=... for the full results page. Keyboard: ↑/↓ move the
+ * active row, Enter opens it (or runs the typed query), Esc closes.
  */
 function GlobalSearchBox() {
   const nav = useNavigate();
-  return (
-    <form
-      onSubmit={(e) => {
+  const [value, setValue] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const [open, setOpen] = useState(false);
+  const [recent, setRecent] = useState<string[]>(() => loadRecentSearches());
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Debounce edits into a trailing 200ms window so quick-result
+  // fetches don't fire on every keystroke.
+  useEffect(() => {
+    const id = window.setTimeout(() => setDebounced(value.trim()), 200);
+    return () => window.clearTimeout(id);
+  }, [value]);
+
+  // Reset the keyboard cursor whenever the option set changes shape.
+  useEffect(() => {
+    setActiveIndex(-1);
+  }, [debounced, open]);
+
+  // Close on outside pointer-down so the panel doesn't linger when
+  // the user clicks elsewhere in the shell.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(e.target as Node)
+      ) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const resultsQuery = useQuery({
+    queryKey: ["global-search", debounced],
+    queryFn: () => api.searchRecords({ q: debounced, limit: 6 }),
+    enabled: open && debounced.length > 0,
+  });
+
+  const showRecent = debounced.length === 0;
+  const quickResults = resultsQuery.data?.results ?? [];
+  const options: SearchOption[] = showRecent
+    ? recent.map((query) => ({ kind: "recent", query }))
+    : quickResults.map((result) => ({ kind: "result", result }));
+
+  const submitSearch = (query: string) => {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+    setRecent(pushRecentSearch(trimmed));
+    setOpen(false);
+    setValue("");
+    nav(`/search?q=${encodeURIComponent(trimmed)}`);
+  };
+
+  const openRecord = (result: SearchResult) => {
+    setOpen(false);
+    setValue("");
+    nav(`/records/${result.ktype}/${result.id}`);
+  };
+
+  const selectOption = (opt: SearchOption) => {
+    if (opt.kind === "recent") submitSearch(opt.query);
+    else openRecord(opt.result);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setOpen(true);
+      setActiveIndex((i) => Math.min(i + 1, options.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveIndex((i) => Math.max(i - 1, -1));
+    } else if (e.key === "Escape") {
+      setOpen(false);
+    } else if (e.key === "Enter") {
+      if (activeIndex >= 0 && options[activeIndex]) {
         e.preventDefault();
-        const v = new FormData(e.currentTarget).get("q");
-        const trimmed = (typeof v === "string" ? v : "").trim();
-        if (!trimmed) return;
-        nav(`/search?q=${encodeURIComponent(trimmed)}`);
-      }}
-      className="flex-1 max-w-md"
+        selectOption(options[activeIndex]);
+      }
+      // Otherwise let the form submit handler run the typed query.
+    }
+  };
+
+  const showPanel =
+    open && (options.length > 0 || (!showRecent && debounced.length > 0));
+
+  return (
+    <div
+      ref={containerRef}
+      className={`relative flex-1 transition-all duration-200 ${
+        open ? "max-w-xl" : "max-w-md"
+      }`}
     >
-      <Input
-        type="search"
-        name="q"
-        placeholder="Search records…"
-        aria-label="Global search"
-        leadingAddon={
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="h-4 w-4"
-          >
-            <circle cx="11" cy="11" r="8" />
-            <line x1="21" y1="21" x2="16.65" y2="16.65" />
-          </svg>
-        }
-      />
-    </form>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          submitSearch(value);
+        }}
+      >
+        <Input
+          type="search"
+          name="q"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onFocus={() => setOpen(true)}
+          onKeyDown={onKeyDown}
+          autoComplete="off"
+          placeholder="Search records…"
+          aria-label="Global search"
+          aria-expanded={showPanel}
+          role="combobox"
+          aria-controls="global-search-listbox"
+          leadingAddon={<Search className="h-4 w-4" aria-hidden />}
+        />
+      </form>
+
+      {showPanel && (
+        <div
+          id="global-search-listbox"
+          role="listbox"
+          className="absolute left-0 right-0 top-full z-50 mt-1 overflow-hidden rounded-md border border-border bg-bg-elevated shadow-lg animate-in fade-in-0 slide-in-from-top-2 duration-150"
+        >
+          {showRecent ? (
+            <div className="py-1">
+              <div className="px-3 py-1 text-xs font-medium uppercase tracking-wide text-fg-subtle">
+                Recent searches
+              </div>
+              {options.map((opt, i) =>
+                opt.kind === "recent" ? (
+                  <button
+                    key={opt.query}
+                    type="button"
+                    role="option"
+                    aria-selected={i === activeIndex}
+                    onMouseEnter={() => setActiveIndex(i)}
+                    onClick={() => selectOption(opt)}
+                    className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm ${
+                      i === activeIndex ? "bg-bg-muted" : "hover:bg-bg-subtle"
+                    }`}
+                  >
+                    <Clock className="h-4 w-4 shrink-0 text-fg-subtle" aria-hidden />
+                    <span className="truncate">{opt.query}</span>
+                  </button>
+                ) : null,
+              )}
+            </div>
+          ) : (
+            <div className="py-1">
+              {resultsQuery.isLoading && (
+                <div className="px-3 py-2 text-sm text-fg-muted">Searching…</div>
+              )}
+              {!resultsQuery.isLoading && options.length === 0 && (
+                <div className="px-3 py-2 text-sm text-fg-muted">
+                  No quick results.
+                </div>
+              )}
+              {options.map((opt, i) =>
+                opt.kind === "result" ? (
+                  <button
+                    key={`${opt.result.ktype}:${opt.result.id}`}
+                    type="button"
+                    role="option"
+                    aria-selected={i === activeIndex}
+                    onMouseEnter={() => setActiveIndex(i)}
+                    onClick={() => selectOption(opt)}
+                    className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm ${
+                      i === activeIndex ? "bg-bg-muted" : "hover:bg-bg-subtle"
+                    }`}
+                  >
+                    <span className="truncate">{quickResultLabel(opt.result)}</span>
+                    <Badge variant="outline" className="shrink-0">
+                      {opt.result.ktype}
+                    </Badge>
+                  </button>
+                ) : null,
+              )}
+              <button
+                type="button"
+                onClick={() => submitSearch(value)}
+                className="flex w-full items-center gap-2 border-t border-border px-3 py-2 text-left text-sm text-accent hover:bg-bg-subtle"
+              >
+                <Search className="h-4 w-4 shrink-0" aria-hidden />
+                Search for “{debounced}”
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1243,25 +1459,33 @@ function AppShell() {
   }, []);
 
   // Record each visited nav destination (most-recent-first, capped
-  // at 10) so the palette can surface a "Recent" group.  Persisted
-  // to localStorage so it survives reloads.
+  // at 10) so the palette can surface a "Recent" group.  The updater
+  // stays pure (no side effects) — React Strict Mode double-invokes
+  // updaters in dev — and bails out when the route is already at the
+  // top so an idempotent revisit doesn't churn state.
   useEffect(() => {
     const match = bestNavMatch(location.pathname);
     if (!match || match.to === "/") return;
     setRecent((prev) => {
-      const next = [
+      if (prev[0]?.to === match.to) return prev;
+      return [
         { to: match.to, label: match.label },
         ...prev.filter((p) => p.to !== match.to),
       ].slice(0, 10);
-      try {
-        localStorage.setItem(RECENT_PAGES_KEY, JSON.stringify(next));
-      } catch {
-        // Ignore quota / disabled-storage errors — recents are a
-        // best-effort convenience, never load-bearing.
-      }
-      return next;
     });
   }, [location.pathname]);
+
+  // Persist recents whenever they change.  Kept separate from the
+  // state updater above so the write is a render-commit side effect
+  // rather than smuggled into a (should-be-pure) updater function.
+  useEffect(() => {
+    try {
+      localStorage.setItem(RECENT_PAGES_KEY, JSON.stringify(recent));
+    } catch {
+      // Ignore quota / disabled-storage errors — recents are a
+      // best-effort convenience, never load-bearing.
+    }
+  }, [recent]);
 
   const featuresQuery = useQuery({
     queryKey: ["tenant-features", tenantKey()],
