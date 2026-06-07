@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
+import { Button } from "@kapp/ui";
 import { api } from "../lib/api";
 
 const KTYPE = "procurement.purchase_requisition";
@@ -128,19 +129,13 @@ export function PurchaseRequisitionsPage() {
 
   return (
     <section>
-      <header
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
+      <header className="flex items-center justify-between">
         <h1>Purchase Requisitions</h1>
-        <button onClick={() => nav(`/records/${KTYPE}/new`)}>
+        <Button onClick={() => nav(`/records/${KTYPE}/new`)}>
           New Requisition
-        </button>
+        </Button>
       </header>
-      <p style={{ color: "#6b7280", marginTop: 4, fontSize: 13 }}>
+      <p className="mt-1 text-[13px] text-fg-muted">
         Internal purchase requests pending approval. Drag a card into
         Approved → Ordered to advance through the lifecycle. The
         Ordered column allocates a procurement.purchase_order
@@ -149,35 +144,26 @@ export function PurchaseRequisitionsPage() {
       </p>
       {q.isLoading && <p>Loading…</p>}
       {q.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load requisitions: {(q.error as Error).message}
         </p>
       )}
       {error && (
-        <p style={{ color: "#b91c1c", marginTop: 6 }} role="alert">
+        <p className="mt-1.5 text-danger" role="alert">
           {error}
         </p>
       )}
-      <div
-        style={{
-          display: "flex",
-          gap: 12,
-          marginTop: 12,
-          overflowX: "auto",
-        }}
-      >
+      <div className="mt-3 flex gap-3 overflow-x-auto">
         {allStages.map((s) => {
           const isUnknown = unknownStages.has(s);
           return (
           <div
             key={s}
-            style={{
-              minWidth: 240,
-              background: isUnknown ? "#fef3c7" : "#f9fafb",
-              border: isUnknown ? "1px dashed #d97706" : "1px solid #e5e7eb",
-              borderRadius: 6,
-              padding: 8,
-            }}
+            className={`min-w-[240px] rounded-md p-2 ${
+              isUnknown
+                ? "border border-dashed border-warning bg-warning/15"
+                : "border border-border bg-bg-subtle"
+            }`}
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {
               const id = e.dataTransfer.getData("text/plain");
@@ -196,12 +182,9 @@ export function PurchaseRequisitionsPage() {
             }}
           >
             <div
-              style={{
-                textTransform: "capitalize",
-                fontSize: 12,
-                color: isUnknown ? "#92400e" : "#6b7280",
-                fontWeight: isUnknown ? 600 : 400,
-              }}
+              className={`text-xs capitalize ${
+                isUnknown ? "font-semibold text-warning" : "text-fg-muted"
+              }`}
               title={
                 isUnknown
                   ? `"${s}" is not a known requisition status. The backend may have added a new state; update STAGES in PurchaseRequisitionsPage.tsx so this column gets the canonical styling.`
@@ -221,34 +204,24 @@ export function PurchaseRequisitionsPage() {
                     e.dataTransfer.setData("text/plain", r.id)
                   }
                   onClick={() => nav(`/records/${KTYPE}/${r.id}`)}
-                  style={{
-                    marginTop: 6,
-                    padding: 8,
-                    background: "white",
-                    borderRadius: 4,
-                    border: "1px solid #e5e7eb",
-                    cursor: "pointer",
-                    fontSize: 13,
-                  }}
+                  className="mt-1.5 cursor-pointer rounded border border-border bg-bg-elevated p-2 text-[13px]"
                 >
-                  <div style={{ fontWeight: 500 }}>
+                  <div className="font-medium">
                     {d.requisition_number ?? r.id.slice(0, 8)}
                   </div>
-                  <div style={{ color: "#6b7280", fontSize: 12 }}>
+                  <div className="text-xs text-fg-muted">
                     Requested by: {d.requested_by ?? "—"}
                   </div>
                   {d.department && (
-                    <div style={{ color: "#6b7280", fontSize: 12 }}>
+                    <div className="text-xs text-fg-muted">
                       Dept: {d.department}
                     </div>
                   )}
-                  <div style={{ marginTop: 4, fontSize: 12 }}>
+                  <div className="mt-1 text-xs">
                     {d.subtotal ?? 0} {d.currency ?? "USD"}
                   </div>
                   {d.po_id && (
-                    <div
-                      style={{ marginTop: 4, fontSize: 11, color: "#6b7280" }}
-                    >
+                    <div className="mt-1 text-[11px] text-fg-muted">
                       PO: {d.po_id.slice(0, 8)}
                     </div>
                   )}

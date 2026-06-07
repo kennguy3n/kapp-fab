@@ -1,6 +1,17 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ConsolidatedTrialBalance, ConsolidationGroup } from "@kapp/client";
+import {
+  Button,
+  Input,
+  Table,
+  TableBody,
+  TableCell,
+  TableFooter,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -48,134 +59,125 @@ export function ConsolidationPage() {
   return (
     <section>
       <h1>Consolidation</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Roll up trial balances across child tenants into a single presentation
         currency, eliminating inter-company balances. Admin only.
       </p>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
+      <div className="grid grid-cols-2 gap-6">
         <fieldset>
           <legend>Create group</legend>
-          <div style={{ display: "grid", gap: 8 }}>
-            <label>
+          <div className="grid gap-2">
+            <label className="flex flex-col gap-1">
               Name
-              <input value={name} onChange={(e) => setName(e.target.value)} />
+              <Input value={name} onChange={(e) => setName(e.target.value)} />
             </label>
-            <label>
+            <label className="flex flex-col gap-1">
               Presentation currency
-              <input
+              <Input
                 value={currency}
                 onChange={(e) => setCurrency(e.target.value.toUpperCase())}
                 maxLength={3}
               />
             </label>
-            <label>
+            <label className="flex flex-col gap-1">
               Member tenant IDs (comma-separated)
               <textarea
                 value={members}
                 onChange={(e) => setMembers(e.target.value)}
                 rows={3}
+                className="rounded-md border border-border bg-bg px-3 py-2 text-sm"
               />
             </label>
-            <button onClick={() => createMut.mutate()} disabled={createMut.isPending}>
+            <Button onClick={() => createMut.mutate()} disabled={createMut.isPending}>
               {createMut.isPending ? "Creating…" : "Create group"}
-            </button>
+            </Button>
             {createMut.error && (
-              <span style={{ color: "#b91c1c" }}>{(createMut.error as Error).message}</span>
+              <span className="text-danger">{(createMut.error as Error).message}</span>
             )}
           </div>
         </fieldset>
 
         <fieldset>
           <legend>Run consolidation</legend>
-          <div style={{ display: "grid", gap: 8 }}>
-            <label>
+          <div className="grid gap-2">
+            <label className="flex flex-col gap-1">
               Group ID
-              <input value={runGroup} onChange={(e) => setRunGroup(e.target.value)} />
+              <Input value={runGroup} onChange={(e) => setRunGroup(e.target.value)} />
             </label>
-            <button
+            <Button
               onClick={() => runMut.mutate(runGroup)}
               disabled={!runGroup || runMut.isPending}
             >
               {runMut.isPending ? "Running…" : "Run"}
-            </button>
+            </Button>
             {runMut.error && (
-              <span style={{ color: "#b91c1c" }}>{(runMut.error as Error).message}</span>
+              <span className="text-danger">{(runMut.error as Error).message}</span>
             )}
           </div>
         </fieldset>
       </div>
 
       {result && (
-        <div style={{ marginTop: 24 }}>
+        <div className="mt-6">
           <h2>
             Consolidated trial balance — {result.presentation_currency} as of{" "}
             {new Date(result.as_of).toLocaleString()}
           </h2>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-            <thead>
-              <tr style={{ background: "#f3f4f6" }}>
-                <th style={th()}>Account</th>
-                <th style={th()}>Debit</th>
-                <th style={th()}>Credit</th>
-                <th style={th()}>Balance</th>
-              </tr>
-            </thead>
-            <tbody>
+          <Table className="text-sm">
+            <TableHeader>
+              <TableRow>
+                <TableHead>Account</TableHead>
+                <TableHead>Debit</TableHead>
+                <TableHead>Credit</TableHead>
+                <TableHead>Balance</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {result.rows.map((row) => (
-                <tr key={row.account_code}>
-                  <td style={td()}>{row.account_code}</td>
-                  <td style={tdRight()}>{row.debit}</td>
-                  <td style={tdRight()}>{row.credit}</td>
-                  <td style={tdRight()}>{row.balance}</td>
-                </tr>
+                <TableRow key={row.account_code}>
+                  <TableCell>{row.account_code}</TableCell>
+                  <TableCell className="text-right tabular-nums">{row.debit}</TableCell>
+                  <TableCell className="text-right tabular-nums">{row.credit}</TableCell>
+                  <TableCell className="text-right tabular-nums">{row.balance}</TableCell>
+                </TableRow>
               ))}
-            </tbody>
-            <tfoot>
-              <tr style={{ fontWeight: 600 }}>
-                <td style={td()}>Total</td>
-                <td style={tdRight()}>{result.total_debit}</td>
-                <td style={tdRight()}>{result.total_credit}</td>
-                <td style={tdRight()}></td>
-              </tr>
-            </tfoot>
-          </table>
+            </TableBody>
+            <TableFooter>
+              <TableRow className="font-semibold">
+                <TableCell>Total</TableCell>
+                <TableCell className="text-right tabular-nums">{result.total_debit}</TableCell>
+                <TableCell className="text-right tabular-nums">{result.total_credit}</TableCell>
+                <TableCell className="text-right tabular-nums"></TableCell>
+              </TableRow>
+            </TableFooter>
+          </Table>
 
           {result.eliminated.length > 0 && (
-            <div style={{ marginTop: 16 }}>
+            <div className="mt-4">
               <h3>Eliminated (inter-company)</h3>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-                <thead>
-                  <tr style={{ background: "#fef3c7" }}>
-                    <th style={th()}>Account</th>
-                    <th style={th()}>Debit</th>
-                    <th style={th()}>Credit</th>
-                  </tr>
-                </thead>
-                <tbody>
+              <Table className="text-sm">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Account</TableHead>
+                    <TableHead>Debit</TableHead>
+                    <TableHead>Credit</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
                   {result.eliminated.map((row) => (
-                    <tr key={row.account_code}>
-                      <td style={td()}>{row.account_code}</td>
-                      <td style={tdRight()}>{row.debit}</td>
-                      <td style={tdRight()}>{row.credit}</td>
-                    </tr>
+                    <TableRow key={row.account_code}>
+                      <TableCell>{row.account_code}</TableCell>
+                      <TableCell className="text-right tabular-nums">{row.debit}</TableCell>
+                      <TableCell className="text-right tabular-nums">{row.credit}</TableCell>
+                    </TableRow>
                   ))}
-                </tbody>
-              </table>
+                </TableBody>
+              </Table>
             </div>
           )}
         </div>
       )}
     </section>
   );
-}
-
-function th(): React.CSSProperties {
-  return { textAlign: "left", padding: 6, borderBottom: "1px solid #e5e7eb" };
-}
-function td(): React.CSSProperties {
-  return { padding: 6, borderBottom: "1px solid #f3f4f6" };
-}
-function tdRight(): React.CSSProperties {
-  return { ...td(), textAlign: "right", fontVariantNumeric: "tabular-nums" };
 }

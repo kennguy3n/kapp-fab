@@ -1,6 +1,15 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
+import {
+  Button,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -50,27 +59,13 @@ export function JournalEntriesPage() {
   return (
     <section>
       <h1>Journal Entries</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Posted double-entry journal transactions. Every entry is balanced
         (total debits equal total credits).
       </p>
 
       {hasFilter && (
-        <div
-          style={{
-            background: "#fef3c7",
-            border: "1px solid #fcd34d",
-            color: "#78350f",
-            padding: "8px 12px",
-            borderRadius: 4,
-            fontSize: 13,
-            marginBottom: 12,
-            display: "flex",
-            gap: 12,
-            alignItems: "center",
-            flexWrap: "wrap",
-          }}
-        >
+        <div className="mb-3 flex flex-wrap items-center gap-3 rounded border border-warning bg-warning/15 px-3 py-2 text-[13px] text-warning">
           <strong>Filtered:</strong>
           {filter.account_code && (
             <span>
@@ -92,33 +87,27 @@ export function JournalEntriesPage() {
               source <code>{filter.source_ktype}</code>
             </span>
           )}
-          <button
+          <Button
             type="button"
+            size="sm"
+            variant="outline"
             onClick={() => setSearchParams({})}
-            style={{
-              marginLeft: "auto",
-              padding: "4px 10px",
-              border: "1px solid #fcd34d",
-              background: "#fde68a",
-              borderRadius: 4,
-              cursor: "pointer",
-              fontSize: 12,
-            }}
+            className="ml-auto"
           >
             Clear filters
-          </button>
+          </Button>
         </div>
       )}
 
       {q.isLoading && <p>Loading…</p>}
       {q.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load entries: {(q.error as Error).message}
         </p>
       )}
 
       {q.data && entries.length === 0 && (
-        <p style={{ color: "#9ca3af", fontStyle: "italic" }}>
+        <p className="italic text-fg-subtle">
           {hasFilter
             ? "No journal entries match the current filters."
             : "No journal entries yet."}
@@ -128,25 +117,13 @@ export function JournalEntriesPage() {
       {entries.map((e) => (
         <div
           key={e.id}
-          style={{
-            marginTop: 16,
-            padding: 12,
-            border: "1px solid #e5e7eb",
-            borderRadius: 4,
-          }}
+          className="mt-4 rounded border border-border p-3"
         >
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              marginBottom: 6,
-              fontSize: 13,
-            }}
-          >
+          <div className="mb-1.5 flex justify-between text-[13px]">
             <div>
               <code>{e.id.slice(0, 8)}</code> — {e.memo || "(no memo)"}
             </div>
-            <div style={{ color: "#6b7280" }}>
+            <div className="text-fg-muted">
               {e.source_ktype ? (
                 <>
                   src: <code>{e.source_ktype}</code>
@@ -157,43 +134,39 @@ export function JournalEntriesPage() {
               · {formatDate(e.posted_at)}
             </div>
           </div>
-          <table
-            style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
-          >
-            <thead>
-              <tr style={{ textAlign: "left", color: "#6b7280" }}>
-                <Th>Account</Th>
-                <Th>Debit</Th>
-                <Th>Credit</Th>
-                <Th>Memo</Th>
-              </tr>
-            </thead>
-            <tbody>
+          <Table className="text-xs">
+            <TableHeader>
+              <TableRow>
+                <TableHead>Account</TableHead>
+                <TableHead>Debit</TableHead>
+                <TableHead>Credit</TableHead>
+                <TableHead>Memo</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {e.lines.map((l) => (
-                <tr
+                <TableRow
                   key={l.id}
-                  style={{
-                    borderTop: "1px solid #f3f4f6",
-                    // Highlight the line(s) that match the
-                    // active account_code filter so the user can
-                    // immediately see why the entry surfaced.
-                    background:
-                      filter.account_code &&
-                      l.account_code === filter.account_code
-                        ? "#fef3c7"
-                        : undefined,
-                  }}
+                  // Highlight the line(s) that match the active
+                  // account_code filter so the user can immediately
+                  // see why the entry surfaced.
+                  className={
+                    filter.account_code &&
+                    l.account_code === filter.account_code
+                      ? "bg-warning/15"
+                      : undefined
+                  }
                 >
-                  <Td>
+                  <TableCell>
                     <code>{l.account_code}</code>
-                  </Td>
-                  <Td>{amount(l.debit, l.currency)}</Td>
-                  <Td>{amount(l.credit, l.currency)}</Td>
-                  <Td>{l.memo || "—"}</Td>
-                </tr>
+                  </TableCell>
+                  <TableCell>{amount(l.debit, l.currency)}</TableCell>
+                  <TableCell>{amount(l.credit, l.currency)}</TableCell>
+                  <TableCell>{l.memo || "—"}</TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         </div>
       ))}
     </section>
@@ -210,12 +183,4 @@ function formatDate(iso: string): string {
   return iso.slice(0, 10);
 }
 
-function Th({ children }: { children: React.ReactNode }) {
-  return (
-    <th style={{ padding: "6px 8px", fontWeight: 500 }}>{children}</th>
-  );
-}
 
-function Td({ children }: { children: React.ReactNode }) {
-  return <td style={{ padding: "6px 8px" }}>{children}</td>;
-}

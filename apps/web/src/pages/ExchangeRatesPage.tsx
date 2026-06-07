@@ -1,6 +1,16 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ExchangeRate, UpsertExchangeRateInput } from "@kapp/client";
+import {
+  Button,
+  Input,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -44,7 +54,7 @@ export function ExchangeRatesPage() {
   return (
     <section>
       <h1>Exchange Rates</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Per-tenant daily FX quotes. The posting engine looks up the
         effective rate for a journal entry using the latest row on or
         before the entry date.
@@ -52,93 +62,94 @@ export function ExchangeRatesPage() {
 
       <form
         onSubmit={submit}
-        style={{ display: "flex", gap: 8, margin: "12px 0", fontSize: 13, flexWrap: "wrap" }}
+        className="my-3 flex flex-wrap gap-2 text-[13px]"
       >
-        <input
+        <Input
           placeholder="from"
           value={form.from_currency}
           onChange={(e) => setForm({ ...form, from_currency: e.target.value })}
           maxLength={3}
           required
-          style={{ width: 60 }}
+          className="w-16"
         />
-        <input
+        <Input
           placeholder="to"
           value={form.to_currency}
           onChange={(e) => setForm({ ...form, to_currency: e.target.value })}
           maxLength={3}
           required
-          style={{ width: 60 }}
+          className="w-16"
         />
-        <input
+        <Input
           type="date"
           value={form.rate_date}
           onChange={(e) => setForm({ ...form, rate_date: e.target.value })}
           required
+          className="w-auto"
         />
-        <input
+        <Input
           placeholder="rate"
           value={form.rate}
           onChange={(e) => setForm({ ...form, rate: e.target.value })}
           required
-          style={{ width: 100 }}
+          className="w-[100px]"
         />
-        <input
+        <Input
           placeholder="provider (optional)"
           value={form.provider ?? ""}
           onChange={(e) => setForm({ ...form, provider: e.target.value })}
+          className="w-auto"
         />
-        <button type="submit" disabled={upsert.isPending}>
+        <Button type="submit" disabled={upsert.isPending}>
           {upsert.isPending ? "Saving…" : "Save rate"}
-        </button>
+        </Button>
       </form>
 
       {upsert.isError && (
-        <p style={{ color: "#b91c1c", fontSize: 13 }}>
+        <p className="text-[13px] text-danger">
           {(upsert.error as Error).message}
         </p>
       )}
 
       {q.isLoading && <p>Loading…</p>}
       {q.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load rates: {(q.error as Error).message}
         </p>
       )}
       {!q.isLoading && !q.isError && rates.length === 0 && (
-        <p style={{ color: "#9ca3af", fontStyle: "italic" }}>
+        <p className="italic text-fg-subtle">
           No exchange rates yet.
         </p>
       )}
 
       {rates.length > 0 && (
-        <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-              <th>Date</th>
-              <th>Pair</th>
-              <th style={{ textAlign: "right" }}>Rate</th>
-              <th>Provider</th>
-            </tr>
-          </thead>
-          <tbody>
+        <Table className="text-[13px]">
+          <TableHeader>
+            <TableRow>
+              <TableHead>Date</TableHead>
+              <TableHead>Pair</TableHead>
+              <TableHead className="text-right">Rate</TableHead>
+              <TableHead>Provider</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {rates.map((r) => (
-              <tr
+              <TableRow
                 key={`${r.from_currency}-${r.to_currency}-${r.rate_date}`}
-                style={{ borderBottom: "1px solid #f3f4f6" }}
               >
-                <td>{r.rate_date.slice(0, 10)}</td>
-                <td>
+                <TableCell>{r.rate_date.slice(0, 10)}</TableCell>
+                <TableCell>
                   <code>
                     {r.from_currency} → {r.to_currency}
                   </code>
-                </td>
-                <td style={{ textAlign: "right" }}>{r.rate}</td>
-                <td>{r.provider ?? ""}</td>
-              </tr>
+                </TableCell>
+                <TableCell className="text-right">{r.rate}</TableCell>
+                <TableCell>{r.provider ?? ""}</TableCell>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       )}
     </section>
   );
