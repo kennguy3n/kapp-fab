@@ -1,6 +1,16 @@
 import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
+import {
+  Badge,
+  Button,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -64,21 +74,13 @@ export function SubledgerPage({ variant }: { variant: "ar" | "ap" }) {
   return (
     <section>
       <h1>{cfg.title}</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         {variant === "ar"
           ? "Posted sales invoices and drafts awaiting post. Outstanding totals exclude cancelled and paid rows."
           : "Posted purchase bills and drafts awaiting post. Outstanding totals exclude cancelled and paid rows."}
       </p>
 
-      <div
-        style={{
-          display: "flex",
-          gap: 24,
-          marginBottom: 12,
-          fontSize: 13,
-          color: "#374151",
-        }}
-      >
+      <div className="mb-3 flex gap-6 text-[13px] text-fg">
         <Metric label="Rows" value={String(rows.length)} />
         <Metric
           label="Outstanding"
@@ -89,38 +91,31 @@ export function SubledgerPage({ variant }: { variant: "ar" | "ap" }) {
 
       {records.isLoading && <p>Loading…</p>}
       {records.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load subledger: {(records.error as Error).message}
         </p>
       )}
 
       {records.data && rows.length === 0 && (
-        <p style={{ color: "#9ca3af", fontStyle: "italic" }}>
+        <p className="italic text-fg-subtle">
           No {variant === "ar" ? "invoices" : "bills"} yet.
         </p>
       )}
 
       {rows.length > 0 && (
-        <table
-          style={{
-            width: "100%",
-            borderCollapse: "collapse",
-            marginTop: 12,
-            fontSize: 13,
-          }}
-        >
-          <thead>
-            <tr style={{ textAlign: "left", color: "#6b7280" }}>
-              <Th>{cfg.numberLabel}</Th>
-              <Th>{cfg.counterpartyLabel}</Th>
-              <Th>Due</Th>
-              <Th>Total</Th>
-              <Th>Status</Th>
-              <Th>Journal Entry</Th>
-              <Th>Actions</Th>
-            </tr>
-          </thead>
-          <tbody>
+        <Table className="mt-3 text-[13px]">
+          <TableHeader>
+            <TableRow>
+              <TableHead>{cfg.numberLabel}</TableHead>
+              <TableHead>{cfg.counterpartyLabel}</TableHead>
+              <TableHead>Due</TableHead>
+              <TableHead>Total</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Journal Entry</TableHead>
+              <TableHead>Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {rows.map((r) => (
               <SubledgerRow
                 key={r.id}
@@ -131,12 +126,12 @@ export function SubledgerPage({ variant }: { variant: "ar" | "ap" }) {
                 onPost={() => post.mutate(r.id)}
               />
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       )}
 
       {post.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Post failed: {(post.error as Error).message}
         </p>
       )}
@@ -167,27 +162,27 @@ function SubledgerRow({
   const canPost = status === "draft" || status === "pending_approval";
 
   return (
-    <tr style={{ borderTop: "1px solid #e5e7eb" }}>
-      <Td>{number}</Td>
-      <Td>
+    <TableRow>
+      <TableCell>{number}</TableCell>
+      <TableCell>
         <code>{truncateID(counterparty)}</code>
-      </Td>
-      <Td>{dueDate || "—"}</Td>
-      <Td>
+      </TableCell>
+      <TableCell>{dueDate || "—"}</TableCell>
+      <TableCell>
         {total} {currency}
-      </Td>
-      <Td>
+      </TableCell>
+      <TableCell>
         <StatusBadge status={status} />
-      </Td>
-      <Td>{journalID ? <code>{truncateID(journalID)}</code> : "—"}</Td>
-      <Td>
+      </TableCell>
+      <TableCell>{journalID ? <code>{truncateID(journalID)}</code> : "—"}</TableCell>
+      <TableCell>
         {canPost && (
-          <button disabled={pending} onClick={onPost}>
+          <Button size="sm" variant="outline" disabled={pending} onClick={onPost}>
             Post
-          </button>
+          </Button>
         )}
-      </Td>
-    </tr>
+      </TableCell>
+    </TableRow>
   );
 }
 
@@ -211,37 +206,25 @@ function Metric({
 }) {
   return (
     <div>
-      <div style={{ fontSize: 11, textTransform: "uppercase", color: "#6b7280" }}>
+      <div className="text-[11px] uppercase text-fg-muted">
         {label}
       </div>
-      <div style={{ fontSize: 16, fontWeight: 600 }}>{value}</div>
-      {hint && <div style={{ fontSize: 11, color: "#9ca3af" }}>{hint}</div>}
+      <div className="text-base font-semibold">{value}</div>
+      {hint && <div className="text-[11px] text-fg-subtle">{hint}</div>}
     </div>
   );
 }
 
 function StatusBadge({ status }: { status: string }) {
-  const color =
+  const variant =
     status === "posted"
-      ? "#059669"
+      ? "success"
       : status === "paid"
-        ? "#2563eb"
+        ? "info"
         : status === "cancelled"
-          ? "#9ca3af"
+          ? "outline"
           : status === "pending_approval"
-            ? "#d97706"
-            : "#6b7280";
-  return <span style={{ color, fontWeight: 500 }}>{status}</span>;
-}
-
-function Th({ children }: { children: React.ReactNode }) {
-  return (
-    <th style={{ padding: "6px 8px", fontWeight: 500, fontSize: 12 }}>
-      {children}
-    </th>
-  );
-}
-
-function Td({ children }: { children: React.ReactNode }) {
-  return <td style={{ padding: "8px" }}>{children}</td>;
+            ? "warning"
+            : "default";
+  return <Badge variant={variant}>{status}</Badge>;
 }
