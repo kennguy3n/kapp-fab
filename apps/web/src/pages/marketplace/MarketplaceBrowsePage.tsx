@@ -71,30 +71,23 @@ export function MarketplaceBrowsePage() {
 
   return (
     <section>
-      <header style={{ marginBottom: 16 }}>
-        <h1 style={{ marginBottom: 4 }}>Marketplace</h1>
-        <p style={{ color: "#6b7280" }}>
+      <header className="mb-4">
+        <h1 className="mb-1">Marketplace</h1>
+        <p className="text-fg-muted">
           Browse and install extensions for this tenant. Visit{" "}
           <Link to="/marketplace/installed">Installed extensions</Link> to
           manage what's already running.
         </p>
       </header>
 
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 12,
-          marginBottom: 16,
-        }}
-      >
+      <div className="mb-4 flex flex-wrap gap-3">
         <Input
           type="search"
           placeholder="Search extensions…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           aria-label="Search marketplace extensions"
-          style={{ minWidth: 240, flex: 1 }}
+          className="min-w-[240px] flex-1"
         />
         <Input
           type="text"
@@ -102,21 +95,21 @@ export function MarketplaceBrowsePage() {
           value={publisherFilter}
           onChange={(e) => setPublisherFilter(e.target.value)}
           aria-label="Filter by publisher slug"
-          style={{ minWidth: 200 }}
+          className="min-w-[200px]"
         />
       </div>
 
       {q.isLoading && <p>Loading…</p>}
       {q.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load marketplace: {(q.error as Error).message}
         </p>
       )}
 
       {q.isSuccess && items.length === 0 && (
         <Card>
-          <CardContent style={{ padding: 32, textAlign: "center" }}>
-            <p style={{ color: "#6b7280" }}>
+          <CardContent className="p-8 text-center">
+            <p className="text-fg-muted">
               {hasFilter
                 ? "No extensions match your filter."
                 : "No extensions are currently published in the marketplace."}
@@ -126,13 +119,7 @@ export function MarketplaceBrowsePage() {
       )}
 
       {q.isSuccess && items.length > 0 && (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
-            gap: 16,
-          }}
-        >
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-4">
           {items.map((ext) => (
             <ExtensionCard key={ext.id} ext={ext} />
           ))}
@@ -146,67 +133,34 @@ function ExtensionCard({ ext }: { ext: MarketplaceExtension }) {
   return (
     <Link
       to={`/marketplace/extensions/${ext.id}`}
-      style={{ textDecoration: "none", color: "inherit" }}
+      className="text-inherit no-underline"
       data-testid={`extension-card-${ext.id}`}
     >
-      <Card style={{ height: "100%", cursor: "pointer" }}>
-        <CardContent style={{ padding: 16 }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "flex-start",
-              gap: 12,
-              marginBottom: 12,
-            }}
-          >
+      <Card className="h-full cursor-pointer">
+        <CardContent className="pt-4">
+          <div className="mb-3 flex items-start gap-3">
             <ExtensionIcon ext={ext} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  flexWrap: "wrap",
-                }}
-              >
-                <strong style={{ fontSize: 16 }}>{ext.display_name}</strong>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <strong className="text-base">{ext.display_name}</strong>
                 <Badge variant={extensionStatusVariant(ext.status)}>
                   {extensionStatusLabel(ext.status)}
                 </Badge>
               </div>
-              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
+              <div className="mt-0.5 text-xs text-fg-muted">
                 {ext.name}
                 {ext.listed_version ? ` · v${ext.listed_version}` : ""}
               </div>
             </div>
           </div>
-          <p
-            style={{
-              fontSize: 14,
-              color: "#374151",
-              margin: 0,
-              display: "-webkit-box",
-              WebkitLineClamp: 3,
-              WebkitBoxOrient: "vertical",
-              overflow: "hidden",
-            }}
-          >
+          <p className="m-0 line-clamp-3 text-sm text-fg">
             {ext.description || (
-              <span style={{ color: "#9ca3af", fontStyle: "italic" }}>
+              <span className="italic text-fg-subtle">
                 No description provided.
               </span>
             )}
           </p>
-          <div
-            style={{
-              marginTop: 12,
-              display: "flex",
-              gap: 12,
-              fontSize: 12,
-              color: "#6b7280",
-              flexWrap: "wrap",
-            }}
-          >
+          <div className="mt-3 flex flex-wrap gap-3 text-xs text-fg-muted">
             {ext.author && <span>By {ext.author}</span>}
             {ext.license && <span>· {ext.license}</span>}
             <span>· Updated {formatTimestamp(ext.updated_at)}</span>
@@ -225,11 +179,7 @@ function ExtensionIcon({ ext }: { ext: MarketplaceExtension }) {
         alt=""
         width={40}
         height={40}
-        style={{
-          borderRadius: 8,
-          objectFit: "cover",
-          background: "#f3f4f6",
-        }}
+        className="rounded-lg bg-bg-muted object-cover"
         // Manifest validation pins this URL but the browser may
         // still 404 (asset deleted post-publish). Falling back
         // to a hidden state lets the layout collapse to text-
@@ -252,19 +202,8 @@ function ExtensionIcon({ ext }: { ext: MarketplaceExtension }) {
   return (
     <div
       aria-hidden
-      style={{
-        width: 40,
-        height: 40,
-        borderRadius: 8,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: `hsl(${hue}, 60%, 45%)`,
-        color: "white",
-        fontWeight: 600,
-        fontSize: 18,
-        flexShrink: 0,
-      }}
+      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-lg font-semibold text-white"
+      style={{ background: `hsl(${hue}, 60%, 45%)` }}
     >
       {letter}
     </div>
