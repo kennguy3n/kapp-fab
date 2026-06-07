@@ -8,6 +8,18 @@ import type {
   BudgetVarianceRow,
   CreateBudgetInput,
 } from "@kapp/client";
+import {
+  Badge,
+  Button,
+  Input,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -26,9 +38,11 @@ import { api } from "../lib/api";
  *      inline. Drill-down to the underlying journal entries is
  *      driven by the period link on each row.
  *
- * The layout uses inline styles to stay consistent with the rest of
- * the apps/web pages (which intentionally avoid a CSS-in-JS library
- * for build-time simplicity).
+ * The layout uses the @kapp/ui design system (Button, Input, Select,
+ * Table, Badge) with semantic token classes. The only remaining
+ * inline styles are the data-driven variance bar widths/colours,
+ * which are computed per row and reference design tokens via CSS
+ * custom properties rather than hardcoded hex.
  */
 const MONTH_LABELS = [
   "Jan",
@@ -92,28 +106,20 @@ const normalizeOptionalDecimal = (raw: string | undefined): string | undefined =
   return trimmed === "" ? undefined : trimmed;
 };
 
-const statusBadge = (status: Budget["status"]) => {
-  const colours: Record<Budget["status"], string> = {
-    draft: "#9ca3af",
-    active: "#16a34a",
-    closed: "#6b7280",
-  };
-  return (
-    <span
-      style={{
-        display: "inline-block",
-        padding: "2px 8px",
-        fontSize: 11,
-        borderRadius: 4,
-        background: colours[status],
-        color: "white",
-        textTransform: "uppercase",
-      }}
-    >
-      {status}
-    </span>
-  );
+const STATUS_VARIANT: Record<
+  Budget["status"],
+  "default" | "success" | "warning"
+> = {
+  draft: "warning",
+  active: "success",
+  closed: "default",
 };
+
+const statusBadge = (status: Budget["status"]) => (
+  <Badge variant={STATUS_VARIANT[status]} className="uppercase">
+    {status}
+  </Badge>
+);
 
 export function BudgetPage() {
   const qc = useQueryClient();
@@ -214,7 +220,7 @@ export function BudgetPage() {
   return (
     <section>
       <h1>Budgets</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Annual finance plans, with monthly line items by account and
         cost centre. The variance dashboard compares posted journal
         entries against plan and emits alerts when variance crosses
@@ -222,25 +228,27 @@ export function BudgetPage() {
       </p>
 
       {/* ---------- Budget list + create form ----------- */}
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 24 }}>
-        <div style={{ flex: "1 1 320px" }}>
-          <h2 style={{ fontSize: 16 }}>Budgets</h2>
-          <button
+      <div className="flex items-start gap-6">
+        <div className="flex-[1_1_320px]">
+          <h2 className="text-base">Budgets</h2>
+          <Button
             type="button"
+            variant="outline"
+            size="sm"
+            className="mb-2"
             onClick={() => setCreating((c) => !c)}
-            style={{ marginBottom: 8 }}
           >
             {creating ? "Cancel" : "+ New budget"}
-          </button>
+          </Button>
           {creating && (
             <form
               onSubmit={(e) => {
                 e.preventDefault();
                 createBudget.mutate(newBudget);
               }}
-              style={{ display: "grid", gap: 6, marginBottom: 12 }}
+              className="mb-3 grid gap-1.5"
             >
-              <input
+              <Input
                 placeholder="Name (e.g. Marketing FY26)"
                 value={newBudget.name}
                 onChange={(e) =>
@@ -248,7 +256,7 @@ export function BudgetPage() {
                 }
                 required
               />
-              <input
+              <Input
                 type="number"
                 placeholder="Fiscal year"
                 value={newBudget.fiscal_year}
@@ -260,7 +268,7 @@ export function BudgetPage() {
                 }
                 required
               />
-              <select
+              <Select
                 value={newBudget.status ?? "draft"}
                 onChange={(e) =>
                   setNewBudget({
@@ -272,15 +280,15 @@ export function BudgetPage() {
                 <option value="draft">Draft</option>
                 <option value="active">Active</option>
                 <option value="closed">Closed</option>
-              </select>
-              <input
+              </Select>
+              <Input
                 placeholder="Default cost centre (optional)"
                 value={newBudget.cost_center ?? ""}
                 onChange={(e) =>
                   setNewBudget({ ...newBudget, cost_center: e.target.value })
                 }
               />
-              <input
+              <Input
                 type="number"
                 step="0.001"
                 placeholder="Variance threshold (e.g. 0.10 = 10%)"
@@ -292,11 +300,11 @@ export function BudgetPage() {
                   })
                 }
               />
-              <button type="submit" disabled={createBudget.isPending}>
+              <Button type="submit" disabled={createBudget.isPending}>
                 {createBudget.isPending ? "Saving…" : "Create budget"}
-              </button>
+              </Button>
               {createBudget.isError && (
-                <p style={{ color: "#b91c1c", fontSize: 12 }}>
+                <p className="text-xs text-danger">
                   {(createBudget.error as Error).message}
                 </p>
               )}
@@ -304,49 +312,37 @@ export function BudgetPage() {
           )}
           {budgetsQ.isLoading && <p>Loading…</p>}
           {budgetsQ.isError && (
-            <p style={{ color: "#b91c1c" }}>
+            <p className="text-danger">
               {(budgetsQ.error as Error).message}
             </p>
           )}
           {!budgetsQ.isLoading && budgets.length === 0 && (
-            <p style={{ color: "#9ca3af", fontStyle: "italic" }}>
+            <p className="italic text-fg-subtle">
               No budgets yet. Create one to get started.
             </p>
           )}
-          <ul style={{ listStyle: "none", padding: 0 }}>
+          <ul className="list-none p-0">
             {budgets.map((b) => {
               const isSelected = b.id === selectedId;
               return (
-                <li key={b.id} style={{ marginBottom: 4 }}>
-                  <button
+                <li key={b.id} className="mb-1">
+                  <Button
                     type="button"
+                    variant={isSelected ? "secondary" : "outline"}
                     onClick={() => setSelectedId(b.id)}
-                    style={{
-                      width: "100%",
-                      textAlign: "left",
-                      padding: 8,
-                      background: isSelected ? "#eef2ff" : "transparent",
-                      border: isSelected
-                        ? "1px solid #6366f1"
-                        : "1px solid #e5e7eb",
-                      borderRadius: 4,
-                      cursor: "pointer",
-                    }}
+                    className={`h-auto w-full flex-col items-stretch justify-start whitespace-normal py-2 text-left${
+                      isSelected ? " border-accent" : ""
+                    }`}
                   >
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                      }}
-                    >
+                    <div className="flex justify-between">
                       <strong>{b.name}</strong>
                       {statusBadge(b.status)}
                     </div>
-                    <div style={{ fontSize: 12, color: "#6b7280" }}>
+                    <div className="text-xs text-fg-muted">
                       FY{b.fiscal_year}
                       {b.cost_center ? ` · CC ${b.cost_center}` : ""}
                     </div>
-                  </button>
+                  </Button>
                 </li>
               );
             })}
@@ -354,17 +350,15 @@ export function BudgetPage() {
         </div>
 
         {/* ---------- Selected budget: lines + variance ----------- */}
-        <div style={{ flex: "2 1 700px" }}>
+        <div className="flex-[2_1_700px]">
           {!selectedBudget && (
-            <p style={{ color: "#9ca3af", fontStyle: "italic" }}>
+            <p className="italic text-fg-subtle">
               Select a budget from the list to edit lines and view variance.
             </p>
           )}
           {selectedBudget && (
             <>
-              <h2 style={{ fontSize: 16 }}>
-                {selectedBudget.name} — Lines
-              </h2>
+              <h2 className="text-base">{selectedBudget.name} — Lines</h2>
 
               {/* Line editor */}
               <form
@@ -372,43 +366,30 @@ export function BudgetPage() {
                   e.preventDefault();
                   upsertLine.mutate(draft);
                 }}
-                style={{ marginBottom: 16 }}
+                className="mb-4"
               >
-                <div
-                  style={{
-                    display: "flex",
-                    gap: 6,
-                    flexWrap: "wrap",
-                    alignItems: "center",
-                    fontSize: 12,
-                  }}
-                >
-                  <input
+                <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                  <Input
                     placeholder="Account code"
                     value={draft.account_code}
                     onChange={(e) =>
                       setDraft({ ...draft, account_code: e.target.value })
                     }
                     required
-                    style={{ width: 110 }}
+                    className="w-[110px]"
                   />
-                  <input
+                  <Input
                     placeholder="Cost centre (optional)"
                     value={draft.cost_center}
                     onChange={(e) =>
                       setDraft({ ...draft, cost_center: e.target.value })
                     }
-                    style={{ width: 130 }}
+                    className="w-[130px]"
                   />
                   {MONTH_LABELS.map((label, idx) => (
-                    <label
-                      key={label}
-                      style={{ display: "flex", flexDirection: "column" }}
-                    >
-                      <span style={{ fontSize: 10, color: "#6b7280" }}>
-                        {label}
-                      </span>
-                      <input
+                    <label key={label} className="flex flex-col">
+                      <span className="text-[10px] text-fg-muted">{label}</span>
+                      <Input
                         type="number"
                         step="0.01"
                         value={draft.months[idx]}
@@ -417,82 +398,74 @@ export function BudgetPage() {
                           next[idx] = e.target.value;
                           setDraft({ ...draft, months: next });
                         }}
-                        style={{ width: 70 }}
+                        className="w-[70px]"
                       />
                     </label>
                   ))}
-                  <div style={{ marginLeft: 8 }}>
+                  <div className="ml-2">
                     Annual: <strong>{draftTotal}</strong>
                   </div>
-                  <button type="submit" disabled={upsertLine.isPending}>
+                  <Button type="submit" size="sm" disabled={upsertLine.isPending}>
                     {upsertLine.isPending ? "Saving…" : "Save line"}
-                  </button>
+                  </Button>
                 </div>
               </form>
 
               {linesQ.isLoading && <p>Loading…</p>}
               {linesQ.data && linesQ.data.length === 0 && (
-                <p style={{ color: "#9ca3af", fontStyle: "italic" }}>
+                <p className="italic text-fg-subtle">
                   No lines on this budget yet.
                 </p>
               )}
               {linesQ.data && linesQ.data.length > 0 && (
-                <table
-                  style={{
-                    width: "100%",
-                    fontSize: 12,
-                    borderCollapse: "collapse",
-                    marginBottom: 16,
-                  }}
-                >
-                  <thead>
-                    <tr
-                      style={{
-                        textAlign: "right",
-                        borderBottom: "1px solid #e5e7eb",
-                      }}
-                    >
-                      <th style={{ textAlign: "left" }}>Account</th>
-                      <th style={{ textAlign: "left" }}>CC</th>
+                <Table className="mb-4 text-xs">
+                  <TableHeader>
+                    <TableRow className="text-right">
+                      <TableHead className="text-left">Account</TableHead>
+                      <TableHead className="text-left">CC</TableHead>
                       {MONTH_LABELS.map((m) => (
-                        <th key={m}>{m}</th>
+                        <TableHead key={m} className="text-right">
+                          {m}
+                        </TableHead>
                       ))}
-                      <th>Annual</th>
-                      <th />
-                    </tr>
-                  </thead>
-                  <tbody>
+                      <TableHead className="text-right">Annual</TableHead>
+                      <TableHead />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
                     {linesQ.data.map((line) => (
-                      <tr key={line.id} style={{ textAlign: "right" }}>
-                        <td style={{ textAlign: "left" }}>
+                      <TableRow key={line.id} className="text-right">
+                        <TableCell className="text-left">
                           {line.account_code}
-                        </td>
-                        <td style={{ textAlign: "left" }}>
+                        </TableCell>
+                        <TableCell className="text-left">
                           {line.cost_center ?? ""}
-                        </td>
+                        </TableCell>
                         {line.months.map((m, i) => (
-                          <td key={i}>{fmtNumber(m)}</td>
+                          <TableCell key={i}>{fmtNumber(m)}</TableCell>
                         ))}
-                        <td>
+                        <TableCell>
                           <strong>{fmtNumber(line.annual_total)}</strong>
-                        </td>
-                        <td>
-                          <button
+                        </TableCell>
+                        <TableCell>
+                          <Button
                             type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="text-danger"
                             onClick={() => deleteLine.mutate(line.id)}
-                            style={{ color: "#b91c1c", fontSize: 11 }}
                           >
                             Delete
-                          </button>
-                        </td>
-                      </tr>
+                          </Button>
+                        </TableCell>
+                      </TableRow>
                     ))}
-                  </tbody>
-                </table>
+                  </TableBody>
+                </Table>
               )}
 
               {/* Variance dashboard */}
-              <h2 style={{ fontSize: 16 }}>Variance — plan vs. actual</h2>
+              <h2 className="text-base">Variance — plan vs. actual</h2>
               {varianceQ.isLoading && <p>Computing…</p>}
               {varianceQ.data && (
                 <VarianceTable report={varianceQ.data} />
@@ -511,61 +484,65 @@ function VarianceTable({ report }: { report: BudgetVarianceReport }) {
     ...report.rows.map((r) => Math.abs(Number(r.variance) || 0)),
   );
   return (
-    <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
-      <thead>
-        <tr style={{ textAlign: "right", borderBottom: "1px solid #e5e7eb" }}>
-          <th style={{ textAlign: "left" }}>Account</th>
-          <th style={{ textAlign: "left" }}>CC</th>
-          <th style={{ textAlign: "left" }}>Period</th>
-          <th>Plan</th>
-          <th>Actual</th>
-          <th>Variance</th>
-          <th>%</th>
-          <th>Chart</th>
-        </tr>
-      </thead>
-      <tbody>
+    <Table className="text-xs">
+      <TableHeader>
+        <TableRow className="text-right">
+          <TableHead className="text-left">Account</TableHead>
+          <TableHead className="text-left">CC</TableHead>
+          <TableHead className="text-left">Period</TableHead>
+          <TableHead className="text-right">Plan</TableHead>
+          <TableHead className="text-right">Actual</TableHead>
+          <TableHead className="text-right">Variance</TableHead>
+          <TableHead className="text-right">%</TableHead>
+          <TableHead className="text-right">Chart</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
         {report.rows.map((row) => (
           <VarianceRowRender key={row.account_code + row.period + row.cost_center} row={row} maxAbs={maxAbs} />
         ))}
-        <tr style={{ fontWeight: "bold", borderTop: "1px solid #e5e7eb" }}>
-          <td colSpan={3} style={{ textAlign: "left" }}>
+        <TableRow className="font-bold">
+          <TableCell colSpan={3} className="text-left">
             Total
-          </td>
-          <td style={{ textAlign: "right" }}>{fmtNumber(report.total_budgeted)}</td>
-          <td style={{ textAlign: "right" }}>{fmtNumber(report.total_actual)}</td>
-          <td style={{ textAlign: "right" }}>{fmtNumber(report.total_variance)}</td>
-          <td />
-          <td />
-        </tr>
-        <tr style={{ fontSize: 11, color: COLOUR_FAVOURABLE }}>
-          <td colSpan={5} style={{ textAlign: "right", paddingTop: 4 }}>
+          </TableCell>
+          <TableCell className="text-right">{fmtNumber(report.total_budgeted)}</TableCell>
+          <TableCell className="text-right">{fmtNumber(report.total_actual)}</TableCell>
+          <TableCell className="text-right">{fmtNumber(report.total_variance)}</TableCell>
+          <TableCell />
+          <TableCell />
+        </TableRow>
+        <TableRow className="text-[11px] text-success">
+          <TableCell colSpan={5} className="pt-1 text-right">
             Favourable variance (better than plan)
-          </td>
-          <td style={{ textAlign: "right", paddingTop: 4 }}>
+          </TableCell>
+          <TableCell className="pt-1 text-right">
             +{fmtNumber(report.total_favourable_variance)}
-          </td>
-          <td />
-          <td />
-        </tr>
-        <tr style={{ fontSize: 11, color: COLOUR_UNFAVOURABLE }}>
-          <td colSpan={5} style={{ textAlign: "right" }}>
+          </TableCell>
+          <TableCell />
+          <TableCell />
+        </TableRow>
+        <TableRow className="text-[11px] text-danger">
+          <TableCell colSpan={5} className="text-right">
             Unfavourable variance (worse than plan)
-          </td>
-          <td style={{ textAlign: "right" }}>
+          </TableCell>
+          <TableCell className="text-right">
             −{fmtNumber(report.total_unfavourable_variance)}
-          </td>
-          <td />
-          <td />
-        </tr>
-      </tbody>
-    </table>
+          </TableCell>
+          <TableCell />
+          <TableCell />
+        </TableRow>
+      </TableBody>
+    </Table>
   );
 }
 
-const COLOUR_UNFAVOURABLE = "#dc2626";
-const COLOUR_FAVOURABLE = "#16a34a";
-const COLOUR_NEUTRAL = "#6b7280";
+// Variance colours reference the design-system semantic tokens via
+// CSS custom properties so the data-driven inline `color`/`background`
+// on each variance row/bar stays in sync with the oklch palette
+// instead of hardcoding hex literals.
+const COLOUR_UNFAVOURABLE = "var(--danger)";
+const COLOUR_FAVOURABLE = "var(--success)";
+const COLOUR_NEUTRAL = "var(--fg-muted)";
 
 // varianceColour picks the row's red/green colour from the
 // backend-stamped `favourable` flag rather than re-deriving the
@@ -645,39 +622,29 @@ function VarianceRowRender({
     ? `${row.account_code} — ${row.account_name}`
     : row.account_code;
   return (
-    <tr style={{ textAlign: "right" }}>
-      <td style={{ textAlign: "left" }}>{accountLabel}</td>
-      <td style={{ textAlign: "left" }}>{row.cost_center ?? ""}</td>
-      <td style={{ textAlign: "left" }}>
+    <TableRow className="text-right">
+      <TableCell className="text-left">{accountLabel}</TableCell>
+      <TableCell className="text-left">{row.cost_center ?? ""}</TableCell>
+      <TableCell className="text-left">
         <Link to={periodHref}>{row.period}</Link>
-      </td>
-      <td>{fmtNumber(row.budgeted)}</td>
-      <td>{fmtNumber(row.actual)}</td>
-      <td style={{ color: colour }}>{fmtNumber(row.variance)}</td>
-      <td style={{ color: colour }}>
+      </TableCell>
+      <TableCell>{fmtNumber(row.budgeted)}</TableCell>
+      <TableCell>{fmtNumber(row.actual)}</TableCell>
+      <TableCell style={{ color: colour }}>{fmtNumber(row.variance)}</TableCell>
+      <TableCell style={{ color: colour }}>
         {row.unplanned
           ? "—"
           : `${(pct * 100).toLocaleString(undefined, { maximumFractionDigits: 1 })}%`}
-      </td>
-      <td style={{ width: 200 }}>
-        <div
-          style={{
-            height: 8,
-            background: "#f3f4f6",
-            borderRadius: 4,
-            overflow: "hidden",
-          }}
-        >
+      </TableCell>
+      <TableCell className="w-[200px]">
+        <div className="h-2 overflow-hidden rounded bg-bg-muted">
           <div
-            style={{
-              width: `${widthPct}%`,
-              height: "100%",
-              background: colour,
-            }}
+            className="h-full"
+            style={{ width: `${widthPct}%`, background: colour }}
           />
         </div>
-      </td>
-    </tr>
+      </TableCell>
+    </TableRow>
   );
 }
 
