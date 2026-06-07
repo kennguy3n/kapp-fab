@@ -62,7 +62,12 @@ describe("ImportPage", () => {
     renderImports("/imports");
     expect(await screen.findByText("frappe")).toBeInTheDocument();
     expect(screen.getByText("completed")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "New import" })).toBeInTheDocument();
+    // "New import" is a navigation control, so it renders as a Button
+    // styled link (`<Button asChild><Link>`) — a single anchor with
+    // role="link", replacing main's invalid <button>-inside-<a> nest.
+    expect(
+      screen.getByRole("link", { name: "New import" }),
+    ).toBeInTheDocument();
   });
 
   it("shows the empty state when there are no jobs", async () => {
