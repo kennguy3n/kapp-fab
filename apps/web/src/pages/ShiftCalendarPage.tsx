@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
+import { Button, Input, Select, cn } from "@kapp/ui";
 import { api } from "../lib/api";
 
 const KTYPE_SHIFT_TYPE = "hr.shift_type";
@@ -89,36 +90,48 @@ export function ShiftCalendarPage() {
   const dates = useMemo(() => buildDateRange(anchor, view), [anchor, view]);
 
   return (
-    <section>
-      <h1>Shift Schedule</h1>
-      <p style={{ color: "#6b7280" }}>
+    <section className="flex flex-col gap-2">
+      <h1 className="text-2xl font-semibold tracking-tight text-fg">
+        Shift Schedule
+      </h1>
+      <p className="text-sm text-fg-muted">
         Phase M shift calendar. Rows are employees, columns are dates,
         cells render any matching hr.shift_assignment for that
         (employee, date) tuple. Click an empty cell to schedule.
       </p>
-      <header style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-        <button onClick={() => setView("week")} disabled={view === "week"}>
+      <header className="mb-3 flex items-center gap-2">
+        <Button
+          size="sm"
+          variant={view === "week" ? "primary" : "outline"}
+          onClick={() => setView("week")}
+          disabled={view === "week"}
+        >
           Week
-        </button>
-        <button onClick={() => setView("month")} disabled={view === "month"}>
+        </Button>
+        <Button
+          size="sm"
+          variant={view === "month" ? "primary" : "outline"}
+          onClick={() => setView("month")}
+          disabled={view === "month"}
+        >
           Month
-        </button>
-        <input
+        </Button>
+        <Input
           type="date"
           value={anchor}
           onChange={(e) => setAnchor(e.target.value)}
-          style={{ marginLeft: 12 }}
+          className="ml-3 w-auto"
         />
-        <span style={{ color: "#6b7280", marginLeft: 12 }}>
+        <span className="ml-3 text-sm text-fg-muted">
           {dates[0]} → {dates[dates.length - 1]}
         </span>
       </header>
       <ScheduleForm shiftTypes={Array.from(shiftTypes.values())} employees={employees} />
       {(employeesQ.isLoading || shiftTypesQ.isLoading || assignmentsQ.isLoading) && (
-        <p>Loading…</p>
+        <p className="text-sm text-fg-muted">Loading…</p>
       )}
       {employees.length === 0 ? (
-        <p style={{ color: "#6b7280" }}>No employees yet.</p>
+        <p className="text-sm text-fg-muted">No employees yet.</p>
       ) : (
         <ScheduleGrid
           dates={dates}
@@ -143,13 +156,13 @@ function ScheduleGrid({
   assignmentsByCell: Map<string, KRecord[]>;
 }) {
   return (
-    <div style={{ overflowX: "auto" }}>
-      <table style={{ borderCollapse: "collapse", minWidth: "100%" }}>
+    <div className="overflow-x-auto">
+      <table className="min-w-full border-collapse">
         <thead>
           <tr>
-            <th style={th()}>Employee</th>
+            <th className={TH}>Employee</th>
             {dates.map((d) => (
-              <th key={d} style={th()}>
+              <th key={d} className={TH}>
                 {shortDate(d)}
               </th>
             ))}
@@ -158,14 +171,15 @@ function ScheduleGrid({
         <tbody>
           {employees.map((e) => (
             <tr key={e.id}>
-              <td style={td()}>{e.name ?? "(unnamed)"}</td>
+              <td className={TD}>{e.name ?? "(unnamed)"}</td>
               {dates.map((d) => {
                 const key = cellKey(e.id, d);
                 const recs = assignmentsByCell.get(key) ?? [];
-                if (recs.length === 0) return <td key={key} style={tdEmpty()} />;
+                if (recs.length === 0)
+                  return <td key={key} className={cn(TD, "bg-bg-subtle")} />;
                 return (
-                  <td key={key} style={tdStacked()}>
-                    <div style={badgeStack()}>
+                  <td key={key} className={TD}>
+                    <div className="flex flex-col gap-1">
                       {recs.map((rec) => {
                         const data = rec.data as ShiftAssignmentData;
                         const st = data.shift_type_id
@@ -176,7 +190,7 @@ function ScheduleGrid({
                             key={rec.id}
                             label={st?.name ?? "shift"}
                             time={st ? `${st.start_time ?? ""}–${st.end_time ?? ""}` : ""}
-                            color={st?.color ?? "#dbeafe"}
+                            color={st?.color}
                             status={data.status ?? "scheduled"}
                           />
                         );
@@ -201,23 +215,24 @@ function ShiftBadge({
 }: {
   label: string;
   time: string;
-  color: string;
+  color?: string;
   status: string;
 }) {
+  // `color` is tenant-defined per shift_type (free-form hex stored on
+  // the record), so it stays an inline background; everything else is
+  // driven by design tokens. Fall back to the info tint when unset.
   return (
     <div
-      style={{
-        background: color,
-        padding: "4px 6px",
-        borderRadius: 4,
-        fontSize: 12,
-        lineHeight: 1.3,
-      }}
+      className={cn(
+        "rounded px-1.5 py-1 text-xs leading-tight",
+        !color && "bg-info/15",
+      )}
+      style={color ? { background: color } : undefined}
     >
-      <div style={{ fontWeight: 600 }}>{label}</div>
-      {time && <div style={{ color: "#374151" }}>{time}</div>}
+      <div className="font-semibold">{label}</div>
+      {time && <div className="text-fg-muted">{time}</div>}
       {status !== "scheduled" && (
-        <div style={{ color: "#6b7280", fontSize: 10 }}>{status}</div>
+        <div className="text-[10px] text-fg-subtle">{status}</div>
       )}
     </div>
   );
@@ -263,33 +278,42 @@ function ScheduleForm({
         }
         create.mutate();
       }}
-      style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}
+      className="mb-3 flex flex-wrap items-center gap-2"
     >
-      <select value={employeeId} onChange={(e) => setEmployeeId(e.target.value)}>
+      <Select
+        className="w-auto"
+        value={employeeId}
+        onChange={(e) => setEmployeeId(e.target.value)}
+      >
         <option value="">Select employee…</option>
         {employees.map((e) => (
           <option key={e.id} value={e.id}>
             {e.name ?? e.id}
           </option>
         ))}
-      </select>
-      <select value={shiftTypeId} onChange={(e) => setShiftTypeId(e.target.value)}>
+      </Select>
+      <Select
+        className="w-auto"
+        value={shiftTypeId}
+        onChange={(e) => setShiftTypeId(e.target.value)}
+      >
         <option value="">Select shift type…</option>
         {shiftTypes.map((s) => (
           <option key={s.id} value={s.id}>
             {s.name ?? s.id}
           </option>
         ))}
-      </select>
-      <input
+      </Select>
+      <Input
         type="date"
         value={shiftDate}
         onChange={(e) => setShiftDate(e.target.value)}
+        className="w-auto"
       />
-      <button type="submit" disabled={create.isPending}>
+      <Button type="submit" disabled={create.isPending}>
         {create.isPending ? "Scheduling…" : "Schedule"}
-      </button>
-      {error && <span style={{ color: "#b91c1c" }}>{error}</span>}
+      </Button>
+      {error && <span className="text-sm text-danger">{error}</span>}
     </form>
   );
 }
@@ -372,51 +396,11 @@ function buildDateRange(anchor: string, view: View): string[] {
   return out;
 }
 
-function th(): React.CSSProperties {
-  return {
-    textAlign: "left",
-    borderBottom: "1px solid #d1d5db",
-    padding: "6px 8px",
-    background: "#f9fafb",
-    fontSize: 12,
-    fontWeight: 600,
-    whiteSpace: "nowrap",
-  };
-}
-
-function td(): React.CSSProperties {
-  return {
-    borderBottom: "1px solid #e5e7eb",
-    borderRight: "1px solid #f3f4f6",
-    padding: "4px 6px",
-    verticalAlign: "top",
-    minWidth: 90,
-  };
-}
-
-function tdEmpty(): React.CSSProperties {
-  return {
-    ...td(),
-    background: "#fafafa",
-  };
-}
-
-function tdStacked(): React.CSSProperties {
-  // Keep the <td> as the default `display: table-cell` so it
-  // participates in the table's column-width and row-height
-  // layout the same way `tdEmpty()` siblings do — putting
-  // `display: flex` on the cell itself would break alignment in
-  // any row that mixes filled and empty cells, which is the
-  // common case once any employee has a partial schedule. The
-  // flex stack lives one DOM level deeper via `badgeStack()`
-  // below.
-  return { ...td() };
-}
-
-function badgeStack(): React.CSSProperties {
-  return {
-    display: "flex",
-    flexDirection: "column",
-    gap: 4,
-  };
-}
+// Shared cell classes for the bespoke employee × date grid. This grid
+// has custom column-width / sticky-header needs that the generic
+// @kapp/ui Table doesn't model, so it stays a raw <table> — but every
+// border/spacing/colour is a design token rather than an inline hex.
+const TH =
+  "whitespace-nowrap border-b border-border bg-bg-subtle px-2 py-1.5 text-left text-xs font-semibold text-fg";
+const TD =
+  "min-w-[90px] border-b border-r border-border px-1.5 py-1 align-top";
