@@ -32,7 +32,9 @@ export interface ToastOptions {
   id?: string;
 }
 
-type Listener = (toasts: ToastItem[]) => void;
+// useSyncExternalStore invokes the subscribed callback with no
+// arguments and reads data via getSnapshot, so the listener takes none.
+type Listener = () => void;
 
 const DEFAULT_DURATION = 4000;
 
@@ -48,7 +50,7 @@ class ToastStore {
   getSnapshot = (): ToastItem[] => this.toasts;
 
   private emit() {
-    for (const l of this.listeners) l(this.toasts);
+    for (const l of this.listeners) l();
   }
 
   add(variant: ToastVariant, title: ReactNode, options?: ToastOptions): string {

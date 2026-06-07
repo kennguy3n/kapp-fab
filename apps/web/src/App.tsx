@@ -972,13 +972,32 @@ function buildBreadcrumbs(pathname: string): Crumb[] {
   return crumbs;
 }
 
+// A handful of nav labels don't follow the regular -s/-ies plural
+// rules, so they get an explicit singular form.
+const SINGULAR_OVERRIDES: Record<string, string> = {
+  Quizzes: "Quiz",
+};
+
 /** Light singularization for "Create new {ktype}" command labels. */
 function singularizeLabel(label: string): string {
+  const override = SINGULAR_OVERRIDES[label];
+  if (override) return override;
   if (label.endsWith("ies")) return `${label.slice(0, -3)}y`;
-  if (label.endsWith("ses")) return label.slice(0, -2);
+  // Only words whose singular truly ends in "s" double up to "sses"
+  // (e.g. "addresses" -> "address"). A bare "-ses" like "Warehouses"
+  // or "Courses" is a normal plural and just drops the trailing "s".
+  if (label.endsWith("sses")) return label.slice(0, -2);
   if (label.endsWith("s")) return label.slice(0, -1);
   return label;
 }
+
+// Platform-aware label for the command-palette shortcut. The keydown
+// handler binds both metaKey and ctrlKey, so the hint should match the
+// user's OS: ⌘K on Mac, Ctrl K elsewhere.
+const isMacPlatform =
+  typeof navigator !== "undefined" &&
+  /mac|iphone|ipad|ipod/i.test(navigator.platform || navigator.userAgent);
+const commandShortcutLabel = isMacPlatform ? "⌘K" : "Ctrl K";
 
 const RECENT_PAGES_KEY = "kapp:recent-pages";
 
@@ -1238,41 +1257,42 @@ function AppShell() {
     retry: false,
     staleTime: 60_000,
   });
-  const features = featuresQuery.data?.features ?? {};
   // Fail-open: when the features API is unreachable we still show
-  // every nav item rather than hiding the entire app on a
-  // transient network blip.  The backend will 403 disabled
-  // sections if the user actually navigates to them.
-  // Returns true if every key in `keys` is enabled in the tenant's
-  // features map.  Fail-open when features data hasn't loaded yet
-  // — the backend will still 403 if the user actually clicks the
-  // link, so this only governs visibility, not authorization.
-  const allEnabled = (keys: string[]): boolean => {
-    if (!featuresQuery.data) return true;
-    return keys.every((k) => features[k] !== false);
-  };
-  const visible = navSections
-    .filter((s) => {
-      const key = featureFromSection[s.title];
-      if (!key) return true;
-      if (!featuresQuery.data) return true;
-      return features[key] !== false;
-    })
-    .map((s) => ({
-      ...s,
-      // Per-link filter so a section can stay visible while a
-      // single link inside it is gated on additional features
-      // (e.g. Landed Costs requires `finance` on top of the
-      // section's `inventory` gate).
-      links: s.links.filter((link) =>
-        link.requires && link.requires.length > 0
-          ? allEnabled(link.requires)
-          : true,
-      ),
-    }))
-    // Drop sections whose every link was filtered out so the
-    // sidebar doesn't render an empty group header.
-    .filter((s) => s.links.length > 0);
+  // every nav item rather than hiding the entire app on a transient
+  // network blip. The backend will 403 disabled sections if the user
+  // actually navigates to them, so this only governs visibility, not
+  // authorization.
+  // Memoized on the features payload so its reference is stable
+  // between renders; downstream memos (e.g. `commandGroups`) that
+  // depend on it then actually memoize instead of recomputing every
+  // render off a fresh array literal.
+  const visible = useMemo(() => {
+    const data = featuresQuery.data;
+    const map = data?.features ?? {};
+    // Fail-open while features haven't loaded: show everything and
+    // let the backend 403 on actual navigation.
+    const linkEnabled = (link: NavLink) =>
+      !data || !link.requires || link.requires.length === 0
+        ? true
+        : link.requires.every((k) => map[k] !== false);
+    return navSections
+      .filter((s) => {
+        const key = featureFromSection[s.title];
+        if (!key || !data) return true;
+        return map[key] !== false;
+      })
+      .map((s) => ({
+        ...s,
+        // Per-link filter so a section can stay visible while a
+        // single link inside it is gated on additional features
+        // (e.g. Landed Costs requires `finance` on top of the
+        // section's `inventory` gate).
+        links: s.links.filter(linkEnabled),
+      }))
+      // Drop sections whose every link was filtered out so the
+      // sidebar doesn't render an empty group header.
+      .filter((s) => s.links.length > 0);
+  }, [featuresQuery.data]);
 
   // Heuristic label for the active route — shown in the header to
   // confirm to the user which page they're on (especially valuable
@@ -1443,7 +1463,7 @@ function AppShell() {
               className="hidden items-center gap-1.5 rounded-md border border-border bg-bg px-2 py-1.5 text-xs text-fg-subtle transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring) md:inline-flex"
             >
               <Search className="h-3.5 w-3.5" />
-              <span className="font-medium">⌘K</span>
+              <span className="font-medium">{commandShortcutLabel}</span>
             </button>
             {activeLabel && (
               <Badge variant="outline" className="hidden md:inline-flex">

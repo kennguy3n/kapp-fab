@@ -188,6 +188,10 @@ const REGION_BY_TEMPLATE: Record<string, CoaRegion> = {
   ng_basic: "Africa",
   ke_basic: "Africa",
   eg_basic: "Africa",
+  // SCAFFOLD: cmd/new-tax-pack must also add the new template's region
+  // here, alongside its COA_TEMPLATES entry. A missing entry is not a
+  // crash — regionForTemplate() falls back to "General" — but the chart
+  // will be grouped under the wrong region in the wizard.
 };
 
 function regionForTemplate(value: string): CoaRegion {

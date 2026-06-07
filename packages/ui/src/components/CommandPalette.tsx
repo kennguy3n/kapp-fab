@@ -65,17 +65,23 @@ export function CommandPalette({
 
   // Filtered groups + a parallel flat list so keyboard nav can move
   // across group boundaries with a single index.
-  const { visibleGroups, flatItems } = useMemo(() => {
+  const { visibleGroups, flatItems, indexById } = useMemo(() => {
     const vg: CommandGroup[] = [];
     const flat: CommandItem[] = [];
+    // Stable id -> flat index map so keyboard nav and the active-row
+    // highlight share one ordering without a mutable render counter.
+    const idx = new Map<string, number>();
     for (const group of groups) {
       const items = group.items.filter((it) => matches(it, query));
       if (items.length > 0) {
         vg.push({ heading: group.heading, items });
-        flat.push(...items);
+        for (const it of items) {
+          idx.set(it.id, flat.length);
+          flat.push(it);
+        }
       }
     }
-    return { visibleGroups: vg, flatItems: flat };
+    return { visibleGroups: vg, flatItems: flat, indexById: idx };
   }, [groups, query]);
 
   // Reset query + selection each time the palette opens.
@@ -119,10 +125,6 @@ export function CommandPalette({
       if (item) run(item);
     }
   };
-
-  // Track a running offset so each item gets a stable flat index
-  // across groups for the active-row comparison.
-  let runningIndex = -1;
 
   return (
     <Modal open={open} onOpenChange={onOpenChange}>
@@ -169,8 +171,7 @@ export function CommandPalette({
                   </p>
                 )}
                 {group.items.map((item) => {
-                  runningIndex += 1;
-                  const index = runningIndex;
+                  const index = indexById.get(item.id) ?? 0;
                   const active = index === activeIndex;
                   return (
                     <button
