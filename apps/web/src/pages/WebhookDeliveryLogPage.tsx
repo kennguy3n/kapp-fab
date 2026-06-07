@@ -2,6 +2,15 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
 import type { WebhookDelivery } from "@kapp/client";
+import {
+  Button,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 // WebhookDeliveryLogPage is the per-webhook delivery audit surface.
@@ -51,7 +60,7 @@ export function WebhookDeliveryLogPage() {
     <section>
       <h1>Webhook delivery log</h1>
       {hookQuery.data && (
-        <div style={{ marginBottom: 16, fontSize: 13, color: "#475569" }}>
+        <div className="mb-4 text-[13px] text-fg-muted">
           <div>
             <strong>{hookQuery.data.url}</strong>{" "}
             {hookQuery.data.active ? "(active)" : "(disabled)"}
@@ -63,52 +72,47 @@ export function WebhookDeliveryLogPage() {
         </div>
       )}
 
-      <div style={{ marginBottom: 8, display: "flex", gap: 8 }}>
+      <div className="mb-2 flex items-center gap-2">
         {(["all", "delivered", "pending", "failed"] as const).map((f) => (
-          <button
+          <Button
             key={f}
+            size="sm"
+            variant={filter === f ? "primary" : "secondary"}
             onClick={() => setFilter(f)}
-            style={{
-              padding: "4px 10px",
-              background: filter === f ? "#1d4ed8" : "#e5e7eb",
-              color: filter === f ? "white" : "black",
-              border: "none",
-              borderRadius: 4,
-            }}
           >
             {f}
-          </button>
+          </Button>
         ))}
-        <span style={{ marginLeft: "auto", color: "#64748b", fontSize: 12 }}>
+        <span className="ml-auto text-xs text-fg-muted">
           {visible.length} of {grouped.length} events shown
         </span>
       </div>
 
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead>
-          <tr>
-            <th style={th}>Event</th>
-            <th style={th}>Type</th>
-            <th style={th}>Attempts</th>
-            <th style={th}>Last status</th>
-            <th style={th}>Delivered</th>
-            <th style={th}>Next retry</th>
-            <th style={th}>Last error</th>
-          </tr>
-        </thead>
-        <tbody>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Event</TableHead>
+            <TableHead>Type</TableHead>
+            <TableHead>Attempts</TableHead>
+            <TableHead>Last status</TableHead>
+            <TableHead>Delivered</TableHead>
+            <TableHead>Next retry</TableHead>
+            <TableHead>Last error</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {visible.map((g) => (
             <EventGroupRow key={g.eventId} group={g} />
           ))}
           {visible.length === 0 && (
-            <tr>
-              <td colSpan={7} style={{ ...td, color: "#64748b" }}>
+            <TableRow>
+              <TableCell colSpan={7} className="text-fg-muted">
                 No deliveries match the current filter.
-              </td>
-            </tr>
+              </TableCell>
+            </TableRow>
           )}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
     </section>
   );
 }
@@ -162,75 +166,63 @@ function EventGroupRow({ group }: { group: EventGroup }) {
   const [expanded, setExpanded] = useState(false);
   return (
     <>
-      <tr style={{ cursor: "pointer" }} onClick={() => setExpanded((e) => !e)}>
-        <td style={td}>
-          <code style={{ fontSize: 11 }}>{group.eventId.slice(0, 8)}</code>
-        </td>
-        <td style={td}>{group.eventType}</td>
-        <td style={td}>{group.attempts.length}</td>
-        <td style={td}>{group.lastStatus ?? "-"}</td>
-        <td style={td}>{group.delivered ? "yes" : "no"}</td>
-        <td style={td}>
+      <TableRow className="cursor-pointer" onClick={() => setExpanded((e) => !e)}>
+        <TableCell>
+          <code className="text-[11px]">{group.eventId.slice(0, 8)}</code>
+        </TableCell>
+        <TableCell>{group.eventType}</TableCell>
+        <TableCell>{group.attempts.length}</TableCell>
+        <TableCell>{group.lastStatus ?? "-"}</TableCell>
+        <TableCell>{group.delivered ? "yes" : "no"}</TableCell>
+        <TableCell>
           {group.nextRetryAt
             ? new Date(group.nextRetryAt).toLocaleString()
             : "-"}
-        </td>
-        <td style={td}>{group.lastError ?? ""}</td>
-      </tr>
+        </TableCell>
+        <TableCell>{group.lastError ?? ""}</TableCell>
+      </TableRow>
       {expanded && (
-        <tr>
-          <td colSpan={7} style={{ ...td, background: "#f8fafc" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  <th style={th}>Attempt</th>
-                  <th style={th}>When</th>
-                  <th style={th}>Status</th>
-                  <th style={th}>Delivered</th>
-                  <th style={th}>Next retry</th>
-                  <th style={th}>Error</th>
-                  <th style={th}>Response</th>
-                </tr>
-              </thead>
-              <tbody>
+        <TableRow>
+          <TableCell colSpan={7} className="bg-bg-subtle">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Attempt</TableHead>
+                  <TableHead>When</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Delivered</TableHead>
+                  <TableHead>Next retry</TableHead>
+                  <TableHead>Error</TableHead>
+                  <TableHead>Response</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {group.attempts.map((a) => (
-                  <tr key={a.id}>
-                    <td style={td}>{a.attempt}</td>
-                    <td style={td}>
+                  <TableRow key={a.id}>
+                    <TableCell>{a.attempt}</TableCell>
+                    <TableCell>
                       {new Date(a.created_at).toLocaleString()}
-                    </td>
-                    <td style={td}>{a.status_code ?? "-"}</td>
-                    <td style={td}>{a.delivered ? "yes" : "no"}</td>
-                    <td style={td}>
+                    </TableCell>
+                    <TableCell>{a.status_code ?? "-"}</TableCell>
+                    <TableCell>{a.delivered ? "yes" : "no"}</TableCell>
+                    <TableCell>
                       {a.next_retry_at
                         ? new Date(a.next_retry_at).toLocaleString()
                         : "-"}
-                    </td>
-                    <td style={td}>{a.error ?? ""}</td>
-                    <td style={td}>
-                      <code style={{ fontSize: 11 }}>
+                    </TableCell>
+                    <TableCell>{a.error ?? ""}</TableCell>
+                    <TableCell>
+                      <code className="text-[11px]">
                         {(a.response_body ?? "").slice(0, 120)}
                       </code>
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
-          </td>
-        </tr>
+              </TableBody>
+            </Table>
+          </TableCell>
+        </TableRow>
       )}
     </>
   );
-}
-
-const th: React.CSSProperties = {
-  textAlign: "left",
-  borderBottom: "1px solid #e5e7eb",
-  padding: "4px 6px",
-  fontSize: 12,
-};
-const td: React.CSSProperties = {
-  padding: "4px 6px",
-  borderBottom: "1px solid #f3f4f6",
-  fontSize: 13,
 };
