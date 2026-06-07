@@ -1,6 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
+import {
+  Button,
+  Input,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 const KTYPE_PROFILE = "sales.pos_profile";
@@ -222,13 +233,16 @@ export function POSPage() {
   };
 
   return (
-    <section style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16 }}>
+    <section className="grid grid-cols-[2fr_1fr] gap-4">
       <div>
-        <h1>Point of Sale</h1>
-        <div style={{ marginBottom: 12 }}>
-          <label>
-            Profile:&nbsp;
-            <select
+        <h1 className="text-2xl font-semibold tracking-tight text-fg">
+          Point of Sale
+        </h1>
+        <div className="mt-3 mb-3">
+          <label className="flex items-center gap-2 text-sm text-fg">
+            Profile:
+            <Select
+              className="w-auto"
               value={profileId || profile?.id || ""}
               onChange={(e) => setProfileId(e.target.value)}
             >
@@ -237,37 +251,37 @@ export function POSPage() {
                   {(p.data as ProfileData)?.name ?? p.id}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
         </div>
 
-        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-          <input
+        <div className="mb-3 flex gap-2">
+          <Input
             placeholder="Scan or type barcode/SKU…"
             value={barcode}
             onChange={(e) => setBarcode(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") addByBarcode();
             }}
-            style={{ flex: 1, padding: 8, fontSize: 16 }}
+            className="flex-1"
           />
-          <button onClick={addByBarcode} style={btnPrimary()}>
-            Add
-          </button>
+          <Button onClick={addByBarcode}>Add</Button>
         </div>
 
-        <div style={itemGrid()}>
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-2">
           {(itemsQ.data ?? []).slice(0, 24).map((rec) => {
             const data = (rec.data as ItemData) ?? {};
             return (
               <button
                 key={rec.id}
                 onClick={() => addToCart(rec)}
-                style={itemTile()}
+                className="flex min-h-20 flex-col rounded-md border border-border bg-bg-elevated p-3 text-left transition-colors hover:bg-bg-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
               >
-                <div style={{ fontWeight: 600 }}>{data.name ?? rec.id}</div>
-                <div style={{ fontSize: 12, color: "#6b7280" }}>{data.sku}</div>
-                <div style={{ marginTop: 4 }}>
+                <div className="font-semibold text-fg">
+                  {data.name ?? rec.id}
+                </div>
+                <div className="text-xs text-fg-muted">{data.sku}</div>
+                <div className="mt-1 text-fg">
                   {currency} {Number(data.default_price ?? 0).toFixed(2)}
                 </div>
               </button>
@@ -276,92 +290,60 @@ export function POSPage() {
         </div>
       </div>
 
-      <aside style={{ borderLeft: "1px solid #e5e7eb", paddingLeft: 16 }}>
-        <h2>Cart</h2>
+      <aside className="border-l border-border pl-4">
+        <h2 className="text-lg font-semibold text-fg">Cart</h2>
         {cart.length === 0 ? (
-          <p style={{ color: "#6b7280" }}>Empty.</p>
+          <p className="text-fg-muted">Empty.</p>
         ) : (
-          <table style={{ width: "100%", fontSize: 14 }}>
-            <thead>
-              <tr>
-                <th style={{ textAlign: "left" }}>Item</th>
-                <th>Qty</th>
-                <th>Price</th>
-              </tr>
-            </thead>
-            <tbody>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Item</TableHead>
+                <TableHead className="text-center">Qty</TableHead>
+                <TableHead className="text-right">Price</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {cart.map((l) => (
-                <tr key={l.itemId}>
-                  <td>{l.itemName}</td>
-                  <td style={{ textAlign: "center" }}>{l.qty}</td>
-                  <td style={{ textAlign: "right" }}>
+                <TableRow key={l.itemId}>
+                  <TableCell>{l.itemName}</TableCell>
+                  <TableCell className="text-center">{l.qty}</TableCell>
+                  <TableCell className="text-right">
                     {(l.qty * l.unitPrice).toFixed(2)}
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         )}
-        <div style={{ marginTop: 12, fontSize: 18 }}>
+        <div className="mt-3 text-lg text-fg">
           Total: {currency} {total.toFixed(2)}
         </div>
-        <div style={{ marginTop: 8 }}>
-          <label>
-            Tendered:&nbsp;
-            <input
+        <div className="mt-2">
+          <label className="flex items-center gap-2 text-sm text-fg">
+            Tendered:
+            <Input
               value={tendered}
               onChange={(e) => setTendered(e.target.value)}
-              style={{ width: 100 }}
+              className="w-28"
             />
           </label>
         </div>
-        <button onClick={finalize} style={{ ...btnPrimary(), marginTop: 12, width: "100%", padding: "12px 16px", fontSize: 16 }}>
+        <Button onClick={finalize} className="mt-3 w-full" size="lg">
           Finalize
-        </button>
+        </Button>
 
         {queue.length > 0 && (
-          <div style={{ marginTop: 16, padding: 8, background: "#fef3c7", borderRadius: 4 }}>
+          <div className="mt-4 rounded-md bg-warning/15 p-2 text-sm text-fg">
             <strong>Offline queue:</strong> {queue.length} pending
           </div>
         )}
         {status && (
-          <div style={{ marginTop: 16, fontSize: 13, color: "#6b7280" }}>{status}</div>
+          <div className="mt-4 text-sm text-fg-muted">{status}</div>
         )}
       </aside>
     </section>
   );
-}
-
-function btnPrimary(): React.CSSProperties {
-  return {
-    padding: "8px 16px",
-    background: "#2563eb",
-    color: "white",
-    border: "none",
-    borderRadius: 4,
-    cursor: "pointer",
-    fontSize: 14,
-  };
-}
-
-function itemGrid(): React.CSSProperties {
-  return {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
-    gap: 8,
-  };
-}
-
-function itemTile(): React.CSSProperties {
-  return {
-    padding: 12,
-    border: "1px solid #e5e7eb",
-    borderRadius: 6,
-    background: "white",
-    cursor: "pointer",
-    textAlign: "left",
-    minHeight: 80,
-  };
 }
 
 function loadQueue(): QueuedInvoice[] {
