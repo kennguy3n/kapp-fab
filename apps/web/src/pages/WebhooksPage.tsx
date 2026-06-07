@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import type { Webhook } from "@kapp/client";
+import { ConfirmDialog } from "@kapp/ui";
 import { api } from "../lib/api";
 
 // WebhooksPage is the tenant admin surface for outbound webhook
@@ -15,6 +16,7 @@ export function WebhooksPage() {
     queryFn: () => api.listWebhooks(),
   });
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
 
   const [url, setUrl] = useState("");
   const [secret, setSecret] = useState("");
@@ -205,9 +207,7 @@ export function WebhooksPage() {
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (window.confirm("Delete webhook?")) {
-                      deleteMut.mutate(h.id);
-                    }
+                    setDeleteId(h.id);
                   }}
                 >
                   delete
@@ -219,6 +219,19 @@ export function WebhooksPage() {
       </table>
 
       {selectedId && <DeliveryLog webhookId={selectedId} />}
+
+      <ConfirmDialog
+        open={deleteId !== null}
+        onOpenChange={(o) => !o && setDeleteId(null)}
+        title="Delete webhook?"
+        description="This permanently removes the webhook subscription and its delivery history."
+        confirmLabel="Delete"
+        destructive
+        onConfirm={() => {
+          if (deleteId) deleteMut.mutate(deleteId);
+          setDeleteId(null);
+        }}
+      />
     </section>
   );
 }

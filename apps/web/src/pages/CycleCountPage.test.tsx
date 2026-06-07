@@ -126,13 +126,14 @@ describe("CycleCountPage", () => {
   it("posts variance moves from a reconciled session after confirmation", async () => {
     getCycleCountSession.mockResolvedValue({ session: session({ status: "reconciled" }), lines: [] });
     postCycleCountSession.mockResolvedValue({});
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const user = userEvent.setup();
     renderWithProviders(<CycleCountPage />);
 
     await user.click(await screen.findByRole("button", { name: /CC-2024-01/ }));
     await user.click(await screen.findByRole("button", { name: "Post variance moves" }));
+    // The action now routes through the ConfirmDialog rather than
+    // window.confirm; confirm it in the modal.
+    await user.click(await screen.findByRole("button", { name: "Post" }));
     await waitFor(() => expect(postCycleCountSession).toHaveBeenCalledWith("ccs-1"));
-    confirmSpy.mockRestore();
   });
 });

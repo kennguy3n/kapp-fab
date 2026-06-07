@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ConfirmDialog } from "@kapp/ui";
 import { api } from "../lib/api";
 import type {
   CycleCountLine,
@@ -280,6 +281,16 @@ function SessionDetailPanel(props: {
   // guard would clear the Add line form (see below) with no feedback.
   // NewSessionBuilder uses the same `setError(e.message)` pattern.
   const [error, setError] = useState<string | null>(null);
+  // A single confirm modal drives the reversible state-machine
+  // transitions (back-to-draft, reopen, post). Each button stages its
+  // copy + action here rather than calling window.confirm.
+  const [confirmState, setConfirmState] = useState<{
+    title: string;
+    description: string;
+    confirmLabel: string;
+    destructive?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
 
   const invalidate = () => {
     setError(null);
@@ -433,22 +444,22 @@ function SessionDetailPanel(props: {
                 operator who created a session by mistake (wrong
                 warehouse, typo in code, etc.) has to drop to the
                 API to back out before they can delete it. The
-                window.confirm matches the Reopen / Post buttons —
+                confirm modal matches the Reopen / Post buttons —
                 this transition is reversible (operator can always
                 advance back to counting) but worth a quick pause so
                 a misclick doesn't undo work already entered. */}
             <button
               type="button"
               disabled={anyActionPending}
-              onClick={() => {
-                if (
-                  window.confirm(
-                    "Back to draft will undo the counting transition and re-allow warehouse/code edits. Counted quantities are preserved. Continue?"
-                  )
-                ) {
-                  advance.mutate("draft");
-                }
-              }}
+              onClick={() =>
+                setConfirmState({
+                  title: "Back to draft?",
+                  description:
+                    "This undoes the counting transition and re-allows warehouse/code edits. Counted quantities are preserved.",
+                  confirmLabel: "Back to draft",
+                  onConfirm: () => advance.mutate("draft"),
+                })
+              }
             >
               {advancingTo === "draft" ? "Reverting…" : "Back to draft"}
             </button>
@@ -459,15 +470,16 @@ function SessionDetailPanel(props: {
             <button
               type="button"
               disabled={anyActionPending}
-              onClick={() => {
-                if (
-                  window.confirm(
-                    "Posting will write variance inventory moves and lock the session. Continue?"
-                  )
-                ) {
-                  post.mutate();
-                }
-              }}
+              onClick={() =>
+                setConfirmState({
+                  title: "Post variance moves?",
+                  description:
+                    "Posting writes variance inventory moves and locks the session. This cannot be undone.",
+                  confirmLabel: "Post",
+                  destructive: true,
+                  onConfirm: () => post.mutate(),
+                })
+              }
             >
               {post.isPending ? "Posting…" : "Post variance moves"}
             </button>
@@ -481,15 +493,15 @@ function SessionDetailPanel(props: {
             <button
               type="button"
               disabled={anyActionPending}
-              onClick={() => {
-                if (
-                  window.confirm(
-                    "Reopening will unlock lines for editing and require re-marking reconciled before post. Continue?"
-                  )
-                ) {
-                  advance.mutate("counting");
-                }
-              }}
+              onClick={() =>
+                setConfirmState({
+                  title: "Reopen to counting?",
+                  description:
+                    "Reopening unlocks lines for editing and requires re-marking reconciled before post.",
+                  confirmLabel: "Reopen",
+                  onConfirm: () => advance.mutate("counting"),
+                })
+              }
             >
               {advancingTo === "counting" ? "Reopening…" : "Reopen to counting"}
             </button>
@@ -510,6 +522,19 @@ function SessionDetailPanel(props: {
         onUpsertAsync={(input) => upsert.mutateAsync(input)}
         onDelete={(id) => delLine.mutate(id)}
         itemName={itemName}
+      />
+
+      <ConfirmDialog
+        open={confirmState !== null}
+        onOpenChange={(o) => !o && setConfirmState(null)}
+        title={confirmState?.title ?? ""}
+        description={confirmState?.description}
+        confirmLabel={confirmState?.confirmLabel ?? "Confirm"}
+        destructive={confirmState?.destructive}
+        onConfirm={() => {
+          confirmState?.onConfirm();
+          setConfirmState(null);
+        }}
       />
     </div>
   );

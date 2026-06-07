@@ -18,6 +18,7 @@ import type {
   InsightsDataSource,
   InsightsDataSourceInput,
 } from "@kapp/client";
+import { ConfirmDialog } from "@kapp/ui";
 import { api } from "../lib/api";
 
 const DEFAULT_INPUT: InsightsDataSourceInput = {
@@ -37,6 +38,10 @@ export function InsightsDataSourcesPage() {
   const [draft, setDraft] = useState<InsightsDataSourceInput>(DEFAULT_INPUT);
   const [editing, setEditing] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<Record<string, string>>({});
+  const [deleteTarget, setDeleteTarget] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
 
   const upsert = useMutation({
     mutationFn: (input: InsightsDataSourceInput) =>
@@ -217,11 +222,9 @@ export function InsightsDataSourcesPage() {
                       <button
                         type="button"
                         className="text-sm text-red-600 border px-2 py-1 rounded"
-                        onClick={() => {
-                          if (window.confirm(`Delete ${ds.name}?`)) {
-                            remove.mutate(ds.id);
-                          }
-                        }}
+                        onClick={() =>
+                          setDeleteTarget({ id: ds.id, name: ds.name })
+                        }
                       >
                         Delete
                       </button>
@@ -233,6 +236,23 @@ export function InsightsDataSourcesPage() {
           </table>
         )}
       </section>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(o) => !o && setDeleteTarget(null)}
+        title={
+          deleteTarget
+            ? `Delete ${deleteTarget.name}?`
+            : "Delete data source?"
+        }
+        description="This removes the data source and its stored connection credential. Saved queries that reference it will stop running."
+        confirmLabel="Delete"
+        destructive
+        onConfirm={() => {
+          if (deleteTarget) remove.mutate(deleteTarget.id);
+          setDeleteTarget(null);
+        }}
+      />
     </div>
   );
 }

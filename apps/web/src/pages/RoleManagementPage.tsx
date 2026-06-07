@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { ConfirmDialog } from "@kapp/ui";
 
 /**
  * RoleManagementPage is the tenant-admin surface for the per-tenant
@@ -67,6 +68,7 @@ export function RoleManagementPage() {
   const [newPermAction, setNewPermAction] = useState("");
   const [newPermKType, setNewPermKType] = useState("");
   const [newPermConditions, setNewPermConditions] = useState("{}");
+  const [deleteName, setDeleteName] = useState<string | null>(null);
 
   const loadRoles = () => {
     setLoading(true);
@@ -123,7 +125,6 @@ export function RoleManagementPage() {
   };
 
   const deleteRole = async (name: string) => {
-    if (!confirm(`Delete role "${name}"?`)) return;
     try {
       await jsonFetch(`/api/v1/roles/${encodeURIComponent(name)}`, {
         method: "DELETE",
@@ -232,7 +233,9 @@ export function RoleManagementPage() {
                   </td>
                   <td>
                     {r.name !== "owner" && (
-                      <button onClick={() => deleteRole(r.name)}>Delete</button>
+                      <button onClick={() => setDeleteName(r.name)}>
+                        Delete
+                      </button>
                     )}
                   </td>
                 </tr>
@@ -323,6 +326,19 @@ export function RoleManagementPage() {
           )}
         </div>
       </div>
+
+      <ConfirmDialog
+        open={deleteName !== null}
+        onOpenChange={(o) => !o && setDeleteName(null)}
+        title={deleteName ? `Delete role "${deleteName}"?` : "Delete role?"}
+        description="This removes the role and its permission grants. Users assigned to it lose the associated access."
+        confirmLabel="Delete"
+        destructive
+        onConfirm={() => {
+          if (deleteName) deleteRole(deleteName);
+          setDeleteName(null);
+        }}
+      />
     </section>
   );
 }
