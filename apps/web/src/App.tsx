@@ -1729,13 +1729,17 @@ function AppShell() {
           groups={commandGroups}
         />
         <div className="flex-1 p-6 overflow-auto">
-          {/* `key` on the pathname re-mounts the fade wrapper on every
-              navigation so the enter transition replays per route. */}
-          <div
-            key={location.pathname}
-            className="animate-in fade-in duration-200"
-          >
+          {/* Suspense lives OUTSIDE the pathname-keyed wrapper so the
+              boundary stays mounted across navigations: switching to an
+              already-loaded route no longer flashes the fallback, and an
+              in-flight lazy chunk isn't discarded and refetched. The
+              keyed wrapper sits inside, so it still re-mounts per route
+              and replays the fade-in once the route's content commits. */}
           <Suspense fallback={<ShellRouteFallback />}>
+            <div
+              key={location.pathname}
+              className="animate-in fade-in duration-200"
+            >
             <Routes>
               <Route path="/" element={<DashboardPage />} />
               <Route path="/admin/tenants" element={<TenantListPage />} />
@@ -1913,8 +1917,8 @@ function AppShell() {
                 element={<RecordListPage defaultMode="kanban" />}
               />
             </Routes>
+            </div>
           </Suspense>
-          </div>
         </div>
       </main>
     </div>
