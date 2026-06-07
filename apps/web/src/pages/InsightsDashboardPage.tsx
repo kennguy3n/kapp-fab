@@ -150,6 +150,10 @@ export function InsightsDashboardPage() {
       qc.invalidateQueries({ queryKey: ["insights-dashboards"] });
     },
     onError: (err: Error) => setError(err.message),
+    // Await-mutation pattern: the dialog stays open showing "Working…"
+    // until the delete settles, then closes regardless of outcome
+    // (an error surfaces in the page-level error banner).
+    onSettled: () => setDeleteOpen(false),
   });
 
   const upsertWidgetMut = useMutation({
@@ -341,14 +345,15 @@ export function InsightsDashboardPage() {
       {dashboard && (
         <ConfirmDialog
           open={deleteOpen}
-          onOpenChange={setDeleteOpen}
+          onOpenChange={(open) => {
+            if (!open && deleteDashboardMut.isPending) return;
+            setDeleteOpen(open);
+          }}
           title={`Delete dashboard "${dashboard.name}"?`}
           description="This permanently removes the dashboard and its widgets."
           destructive
-          onConfirm={() => {
-            deleteDashboardMut.mutate(dashboard.id);
-            setDeleteOpen(false);
-          }}
+          loading={deleteDashboardMut.isPending}
+          onConfirm={() => deleteDashboardMut.mutate(dashboard.id)}
         />
       )}
 

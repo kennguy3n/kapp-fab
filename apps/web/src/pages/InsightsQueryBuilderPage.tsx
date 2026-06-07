@@ -242,6 +242,10 @@ export function InsightsQueryBuilderPage() {
       qc.invalidateQueries({ queryKey: ["insights-queries"] });
     },
     onError: (err: Error) => setError(err.message),
+    // Await-mutation pattern: keep the dialog open showing "Working…"
+    // until the delete settles, then close it regardless of outcome
+    // (errors surface in the page-level error banner).
+    onSettled: () => setDeleteOpen(false),
   });
 
   const onSave = () => {
@@ -832,13 +836,16 @@ export function InsightsQueryBuilderPage() {
 
       <ConfirmDialog
         open={deleteOpen}
-        onOpenChange={setDeleteOpen}
+        onOpenChange={(open) => {
+          if (!open && deleteMut.isPending) return;
+          setDeleteOpen(open);
+        }}
         title="Delete this query?"
         description="This permanently removes the saved query."
         destructive
+        loading={deleteMut.isPending}
         onConfirm={() => {
           if (selectedId) deleteMut.mutate(selectedId);
-          setDeleteOpen(false);
         }}
       />
 

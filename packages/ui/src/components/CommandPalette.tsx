@@ -168,7 +168,12 @@ export function CommandPalette({
             className="h-12 w-full bg-transparent text-sm text-fg outline-none placeholder:text-fg-subtle"
           />
         </div>
-        <div ref={listRef} className="max-h-80 overflow-y-auto p-2">
+        <div
+          ref={listRef}
+          role="listbox"
+          aria-label="Commands"
+          className="max-h-80 overflow-y-auto p-2"
+        >
           {flatItems.length === 0 ? (
             <p className="px-3 py-6 text-center text-sm text-fg-muted">
               {emptyMessage}
