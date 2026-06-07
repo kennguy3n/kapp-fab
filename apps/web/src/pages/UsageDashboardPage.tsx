@@ -1,4 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 import type { PlanLimits } from "@kapp/client";
 
@@ -44,44 +52,34 @@ export function UsageDashboardPage() {
   return (
     <section>
       <h1>Usage</h1>
-      <p style={{ color: "#6b7280", fontSize: 13 }}>
+      <p className="text-[13px] text-fg-muted">
         Plan: <strong>{data.plan}</strong> &middot; Period starting{" "}
         {new Date(data.period_start).toLocaleDateString()}
       </p>
-      <div style={{ marginTop: 24 }}>
+      <div className="mt-6">
         {METRIC_ORDER.map(({ key, label, format }) => {
           const value = data.usage[key] ?? 0;
           const limit = (data.limits as PlanLimits)[key] ?? 0;
           const pct = limit > 0 ? Math.min(100, (value / limit) * 100) : 0;
           const over = limit > 0 && value > limit;
           return (
-            <div key={key} style={{ marginBottom: 18 }}>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  marginBottom: 4,
-                }}
-              >
+            <div key={key} className="mb-[18px]">
+              <div className="mb-1 flex justify-between">
                 <strong>{label}</strong>
-                <span style={{ fontVariantNumeric: "tabular-nums" }}>
+                <span className="tabular-nums">
                   {format(value)} {limit > 0 ? `/ ${format(limit)}` : ""}
                 </span>
               </div>
-              <div
-                style={{
-                  background: "#f3f4f6",
-                  height: 14,
-                  borderRadius: 6,
-                  overflow: "hidden",
-                }}
-              >
+              <div className="h-3.5 overflow-hidden rounded-md bg-bg-muted">
                 <div
+                  className="h-full transition-all duration-200"
                   style={{
                     width: `${pct}%`,
-                    height: "100%",
-                    background: over ? "#dc2626" : pct > 80 ? "#f59e0b" : "#10b981",
-                    transition: "width 200ms ease",
+                    background: over
+                      ? "var(--danger)"
+                      : pct > 80
+                        ? "var(--warning)"
+                        : "var(--success)",
                   }}
                 />
               </div>
@@ -90,50 +88,42 @@ export function UsageDashboardPage() {
         })}
       </div>
       {historyQuery.data && historyQuery.data.rows.length > 0 && (
-        <section style={{ marginTop: 32 }}>
-          <h2 style={{ fontSize: 16 }}>Last 6 months</h2>
+        <section className="mt-8">
+          <h2 className="text-base">Last 6 months</h2>
           <UsageHistoryChart rows={historyQuery.data.rows} />
         </section>
       )}
       {plansQuery.data && (
-        <section style={{ marginTop: 32 }}>
-          <h2 style={{ fontSize: 16 }}>Available plans</h2>
-          <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 8 }}>
-            <thead>
-              <tr>
-                <th style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb", padding: "6px 4px" }}>
-                  Name
-                </th>
-                <th style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb", padding: "6px 4px" }}>
-                  API Calls
-                </th>
-                <th style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb", padding: "6px 4px" }}>
-                  Storage
-                </th>
-                <th style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb", padding: "6px 4px" }}>
-                  Seats
-                </th>
-              </tr>
-            </thead>
-            <tbody>
+        <section className="mt-8">
+          <h2 className="text-base">Available plans</h2>
+          <Table className="mt-2">
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>API Calls</TableHead>
+                <TableHead>Storage</TableHead>
+                <TableHead>Seats</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {plansQuery.data.plans.map((p) => (
-                <tr key={p.name} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                  <td style={{ padding: "6px 4px" }}>
+                <TableRow key={p.name}>
+                  <TableCell>
                     {p.display_name} {p.name === data.plan ? " (current)" : ""}
-                  </td>
-                  <td style={{ padding: "6px 4px" }}>
+                  </TableCell>
+                  <TableCell>
                     {(p.limits.api_calls ?? 0).toLocaleString()}
-                  </td>
-                  <td style={{ padding: "6px 4px" }}>
+                  </TableCell>
+                  <TableCell>
                     {((p.limits.storage_bytes ?? 0) / (1024 * 1024 * 1024)).toFixed(1)} GB
-                  </td>
-                  <td style={{ padding: "6px 4px" }}>
+                  </TableCell>
+                  <TableCell>
                     {(p.limits.user_seats ?? 0).toLocaleString()}
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         </section>
       )}
     </section>
@@ -164,18 +154,11 @@ function UsageHistoryChart({
         const values = periods.map((p) => byPeriod.get(p)?.get(m) ?? 0);
         const max = Math.max(...values, 1);
         return (
-          <div key={m} style={{ marginBottom: 18 }}>
-            <div
-              style={{
-                fontSize: 12,
-                color: "#374151",
-                marginBottom: 4,
-                textTransform: "uppercase",
-              }}
-            >
+          <div key={m} className="mb-[18px]">
+            <div className="mb-1 text-xs uppercase text-fg">
               {m.replaceAll("_", " ")}
             </div>
-            <div style={{ display: "flex", gap: 4, alignItems: "flex-end", height: 80 }}>
+            <div className="flex h-20 items-end gap-1">
               {periods.map((p, i) => {
                 const v = values[i];
                 const h = (v / max) * 100;
@@ -183,20 +166,18 @@ function UsageHistoryChart({
                   <div
                     key={p}
                     title={`${new Date(p).toLocaleDateString()} — ${v}`}
+                    className="flex-1 rounded-t bg-accent"
                     style={{
-                      flex: 1,
-                      background: "#3b82f6",
                       height: `${h}%`,
                       minHeight: v > 0 ? 4 : 0,
-                      borderRadius: "4px 4px 0 0",
                     }}
                   />
                 );
               })}
             </div>
-            <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+            <div className="mt-1 flex gap-1">
               {periods.map((p) => (
-                <div key={p} style={{ flex: 1, fontSize: 10, textAlign: "center", color: "#6b7280" }}>
+                <div key={p} className="flex-1 text-center text-[10px] text-fg-muted">
                   {new Date(p).toLocaleDateString(undefined, { month: "short" })}
                 </div>
               ))}
