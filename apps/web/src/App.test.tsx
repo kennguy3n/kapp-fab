@@ -22,7 +22,36 @@ vi.mock("./lib/api", () => ({
   },
 }));
 
-import { App } from "./App";
+import { App, singularizeLabel } from "./App";
+
+describe("singularizeLabel", () => {
+  it("singularizes single-noun plurals", () => {
+    expect(singularizeLabel("Leads")).toBe("Lead");
+    expect(singularizeLabel("Activities")).toBe("Activity");
+    expect(singularizeLabel("Warehouses")).toBe("Warehouse");
+    expect(singularizeLabel("Quizzes")).toBe("Quiz");
+  });
+
+  it("singularizes the final word of a multi-word phrase", () => {
+    expect(singularizeLabel("Credit Notes")).toBe("Credit Note");
+    expect(singularizeLabel("Leave Requests")).toBe("Leave Request");
+    expect(singularizeLabel("Recurring Invoices")).toBe("Recurring Invoice");
+  });
+
+  it("singularizes the head noun in an 'X of Y' phrase", () => {
+    expect(singularizeLabel("Bills of Materials")).toBe("Bill of Materials");
+  });
+
+  it("singularizes each side of an 'A & B' coordinated phrase", () => {
+    expect(singularizeLabel("Routings & Work Centers")).toBe(
+      "Routing & Work Center",
+    );
+  });
+
+  it("leaves a non-plural label untouched", () => {
+    expect(singularizeLabel("Attendance")).toBe("Attendance");
+  });
+});
 
 function features(map: Record<string, boolean>): TenantFeaturesResponse {
   return { features: map } as TenantFeaturesResponse;

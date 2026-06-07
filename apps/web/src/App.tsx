@@ -974,23 +974,57 @@ function buildBreadcrumbs(pathname: string): Crumb[] {
   return crumbs;
 }
 
-// A handful of nav labels don't follow the regular -s/-ies plural
-// rules, so they get an explicit singular form.
+// A handful of words don't follow the regular -s/-ies plural rules, so
+// they get an explicit singular form.
 const SINGULAR_OVERRIDES: Record<string, string> = {
   Quizzes: "Quiz",
 };
 
-/** Light singularization for "Create new {ktype}" command labels. */
-function singularizeLabel(label: string): string {
-  const override = SINGULAR_OVERRIDES[label];
+/** Singularize a single word using the override map + suffix rules. */
+function singularizeWord(word: string): string {
+  const override = SINGULAR_OVERRIDES[word];
   if (override) return override;
-  if (label.endsWith("ies")) return `${label.slice(0, -3)}y`;
+  if (word.endsWith("ies")) return `${word.slice(0, -3)}y`;
   // Only words whose singular truly ends in "s" double up to "sses"
   // (e.g. "addresses" -> "address"). A bare "-ses" like "Warehouses"
   // or "Courses" is a normal plural and just drops the trailing "s".
-  if (label.endsWith("sses")) return label.slice(0, -2);
-  if (label.endsWith("s")) return label.slice(0, -1);
-  return label;
+  if (word.endsWith("sses")) return word.slice(0, -2);
+  if (word.endsWith("s")) return word.slice(0, -1);
+  return word;
+}
+
+/**
+ * Light singularization for "Create new {ktype}" command labels. Handles
+ * phrase labels, not just single nouns:
+ *   - "X of Y"  — the head noun precedes "of", so singularize that and
+ *     keep the qualifier ("Bills of Materials" -> "Bill of Materials").
+ *   - "A & B"   — two coordinated nouns, singularize each side's final
+ *     word ("Routings & Work Centers" -> "Routing & Work Center").
+ *   - otherwise singularize the final word ("Credit Notes" -> "Credit
+ *     Note", "Leads" -> "Lead").
+ */
+export function singularizeLabel(label: string): string {
+  const override = SINGULAR_OVERRIDES[label];
+  if (override) return override;
+
+  const ofIndex = label.indexOf(" of ");
+  if (ofIndex !== -1) {
+    return singularizeWord(label.slice(0, ofIndex)) + label.slice(ofIndex);
+  }
+
+  if (label.includes(" & ")) {
+    return label.split(" & ").map(singularizeFinalWord).join(" & ");
+  }
+
+  return singularizeFinalWord(label);
+}
+
+/** Singularize only the last whitespace-delimited word of a phrase. */
+function singularizeFinalWord(phrase: string): string {
+  const words = phrase.split(" ");
+  const last = words.length - 1;
+  words[last] = singularizeWord(words[last]);
+  return words.join(" ");
 }
 
 // Platform-aware label for the command-palette shortcut. The keydown
