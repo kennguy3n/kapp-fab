@@ -296,16 +296,16 @@ export function InstallExtensionDialog({
       onClose={requestClose}
       title={`Install ${extension.display_name} v${version.version}`}
     >
-      <div style={{ display: "grid", gap: 16, padding: "8px 0" }}>
+      <div className="grid gap-4 py-2">
         <div>
-          <p style={{ marginTop: 0, color: "#4b5563" }}>
+          <p className="mt-0 text-fg-muted">
             Review what {extension.display_name} will request, then confirm to
             install it for this tenant.
           </p>
         </div>
 
         <section>
-          <h4 style={{ margin: "0 0 8px" }}>Version</h4>
+          <h4 className="mb-2 mt-0">Version</h4>
           <DetailRow label="Version" value={`v${version.version}`} />
           <DetailRow
             label="Published"
@@ -332,10 +332,10 @@ export function InstallExtensionDialog({
         {(version.features_required.length > 0 ||
           version.permissions_required.length > 0) && (
           <section>
-            <h4 style={{ margin: "0 0 8px" }}>Required access</h4>
+            <h4 className="mb-2 mt-0">Required access</h4>
             {version.features_required.length > 0 && (
-              <div style={{ marginBottom: 8 }}>
-                <div style={{ fontSize: 12, color: "#6b7280" }}>
+              <div className="mb-2">
+                <div className="text-xs text-fg-muted">
                   Tenant feature flags
                 </div>
                 <PermissionRow items={version.features_required} />
@@ -343,7 +343,7 @@ export function InstallExtensionDialog({
             )}
             {version.permissions_required.length > 0 && (
               <div>
-                <div style={{ fontSize: 12, color: "#6b7280" }}>
+                <div className="text-xs text-fg-muted">
                   Platform permissions
                 </div>
                 <PermissionRow items={version.permissions_required} />
@@ -353,7 +353,7 @@ export function InstallExtensionDialog({
         )}
 
         <section>
-          <h4 style={{ margin: "0 0 8px" }}>Webhook base URL</h4>
+          <h4 className="mb-2 mt-0">Webhook base URL</h4>
           <Input
             type="url"
             value={webhookBase}
@@ -362,13 +362,7 @@ export function InstallExtensionDialog({
             disabled={install.isPending}
             aria-label="Webhook base URL"
           />
-          <p
-            style={{
-              margin: "4px 0 0",
-              fontSize: 12,
-              color: "#6b7280",
-            }}
-          >
+          <p className="mt-1 text-xs text-fg-muted">
             Outbound webhooks the extension dispatches are POSTed under this
             origin. Defaults to the current window origin; override only if you
             terminate webhooks elsewhere.
@@ -376,7 +370,7 @@ export function InstallExtensionDialog({
         </section>
 
         <section>
-          <h4 style={{ margin: "0 0 8px" }}>Settings</h4>
+          <h4 className="mb-2 mt-0">Settings</h4>
           {/*
            * Round-6 ANALYSIS_0001: key the SettingsForm subtree on
            * version.id so that if the dialog's lifecycle ever
@@ -400,13 +394,7 @@ export function InstallExtensionDialog({
             disabled={install.isPending}
           />
           {!settingsFormValid && (
-            <p
-              style={{
-                margin: "4px 0 0",
-                fontSize: 12,
-                color: "#b91c1c",
-              }}
-            >
+            <p className="mt-1 text-xs text-danger">
               Resolve the JSON parse error above before installing — the
               install will use the text currently on screen.
             </p>
@@ -414,15 +402,15 @@ export function InstallExtensionDialog({
         </section>
 
         {validationError && (
-          <p style={{ color: "#b91c1c", margin: 0 }}>{validationError}</p>
+          <p className="m-0 text-danger">{validationError}</p>
         )}
         {install.isError && (
-          <p style={{ color: "#b91c1c", margin: 0 }}>
+          <p className="m-0 text-danger">
             Install failed: {(install.error as Error).message}
           </p>
         )}
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <div className="flex justify-end gap-2">
           <Button
             variant="outline"
             onClick={requestClose}
@@ -451,14 +439,7 @@ export function InstallExtensionDialog({
 
 function PermissionRow({ items }: { items: string[] }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        flexWrap: "wrap",
-        gap: 6,
-        marginTop: 4,
-      }}
-    >
+    <div className="mt-1 flex flex-wrap gap-1.5">
       {items.map((p) => (
         <Badge key={p} variant="default">
           {p}
@@ -476,16 +457,8 @@ function DetailRow({
   value: React.ReactNode;
 }) {
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "140px 1fr",
-        gap: 8,
-        padding: "4px 0",
-        fontSize: 14,
-      }}
-    >
-      <span style={{ color: "#6b7280" }}>{label}</span>
+    <div className="grid grid-cols-[140px_1fr] gap-2 py-1 text-sm">
+      <span className="text-fg-muted">{label}</span>
       <span>{value}</span>
     </div>
   );

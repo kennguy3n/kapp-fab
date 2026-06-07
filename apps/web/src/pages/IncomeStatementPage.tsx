@@ -1,5 +1,15 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import {
+  Input,
+  Table,
+  TableBody,
+  TableCell,
+  TableFooter,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -22,53 +32,48 @@ export function IncomeStatementPage() {
   return (
     <section>
       <h1>Income Statement</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Revenue minus expenses for the selected period.
       </p>
 
-      <div style={{ margin: "12px 0", fontSize: 13, display: "flex", gap: 12 }}>
-        <label>
-          From:{" "}
-          <input
+      <div className="my-3 flex items-center gap-3 text-[13px]">
+        <label className="flex items-center gap-2">
+          From:
+          <Input
             type="date"
             value={from}
             onChange={(e) => setFrom(e.target.value)}
+            className="w-auto"
           />
         </label>
-        <label>
-          To:{" "}
-          <input
+        <label className="flex items-center gap-2">
+          To:
+          <Input
             type="date"
             value={to}
             onChange={(e) => setTo(e.target.value)}
+            className="w-auto"
           />
         </label>
       </div>
 
       {q.isLoading && <p>Loading…</p>}
       {q.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load report: {(q.error as Error).message}
         </p>
       )}
 
       {report && (
-        <div style={{ marginTop: 12, fontSize: 13 }}>
-          <h2 style={{ fontSize: 14 }}>Revenue</h2>
+        <div className="mt-3 text-[13px]">
+          <h2 className="text-sm">Revenue</h2>
           <LineTable lines={report.revenue} total={report.total_revenue} />
-          <h2 style={{ fontSize: 14, marginTop: 16 }}>Expenses</h2>
+          <h2 className="mt-4 text-sm">Expenses</h2>
           <LineTable lines={report.expense} total={report.total_expense} />
           <div
-            style={{
-              marginTop: 16,
-              padding: "12px",
-              borderTop: "2px solid #d1d5db",
-              fontWeight: 600,
-              fontSize: 14,
-              display: "flex",
-              justifyContent: "space-between",
-              color: Number(report.net_income) >= 0 ? "#059669" : "#b91c1c",
-            }}
+            className={`mt-4 flex justify-between border-t-2 border-border p-3 text-sm font-semibold ${
+              Number(report.net_income) >= 0 ? "text-success" : "text-danger"
+            }`}
           >
             <span>Net income</span>
             <span>{fmt(report.net_income)}</span>
@@ -87,42 +92,39 @@ function LineTable({
   total: string;
 }) {
   return (
-    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-      <thead>
-        <tr style={{ textAlign: "left", color: "#6b7280" }}>
-          <Th>Code</Th>
-          <Th>Account</Th>
-          <Th style={{ textAlign: "right" }}>Amount</Th>
-        </tr>
-      </thead>
-      <tbody>
+    <Table className="text-[13px]">
+      <TableHeader>
+        <TableRow>
+          <TableHead>Code</TableHead>
+          <TableHead>Account</TableHead>
+          <TableHead className="text-right">Amount</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
         {lines.map((l) => (
-          <tr
-            key={l.account_code}
-            style={{ borderTop: "1px solid #e5e7eb" }}
-          >
-            <Td>
+          <TableRow key={l.account_code}>
+            <TableCell>
               <code>{l.account_code}</code>
-            </Td>
-            <Td>{l.account_name}</Td>
-            <Td style={{ textAlign: "right" }}>{fmt(l.amount)}</Td>
-          </tr>
+            </TableCell>
+            <TableCell>{l.account_name}</TableCell>
+            <TableCell className="text-right">{fmt(l.amount)}</TableCell>
+          </TableRow>
         ))}
         {lines.length === 0 && (
-          <tr>
-            <Td colSpan={3}>
-              <em style={{ color: "#9ca3af" }}>No entries in this range.</em>
-            </Td>
-          </tr>
+          <TableRow>
+            <TableCell colSpan={3}>
+              <em className="text-fg-subtle">No entries in this range.</em>
+            </TableCell>
+          </TableRow>
         )}
-      </tbody>
-      <tfoot>
-        <tr style={{ borderTop: "2px solid #d1d5db", fontWeight: 600 }}>
-          <Td colSpan={2}>Total</Td>
-          <Td style={{ textAlign: "right" }}>{fmt(total)}</Td>
-        </tr>
-      </tfoot>
-    </table>
+      </TableBody>
+      <TableFooter>
+        <TableRow className="font-semibold">
+          <TableCell colSpan={2}>Total</TableCell>
+          <TableCell className="text-right">{fmt(total)}</TableCell>
+        </TableRow>
+      </TableFooter>
+    </Table>
   );
 }
 
@@ -145,32 +147,4 @@ function fmt(v: string | number): string {
   return n.toFixed(2);
 }
 
-function Th({
-  children,
-  style,
-}: {
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-}) {
-  return (
-    <th style={{ padding: "6px 8px", fontWeight: 500, fontSize: 12, ...style }}>
-      {children}
-    </th>
-  );
-}
 
-function Td({
-  children,
-  style,
-  colSpan,
-}: {
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-  colSpan?: number;
-}) {
-  return (
-    <td style={{ padding: "8px", ...style }} colSpan={colSpan}>
-      {children}
-    </td>
-  );
-}
