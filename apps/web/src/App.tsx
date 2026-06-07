@@ -994,9 +994,21 @@ function singularizeLabel(label: string): string {
 // Platform-aware label for the command-palette shortcut. The keydown
 // handler binds both metaKey and ctrlKey, so the hint should match the
 // user's OS: ⌘K on Mac, Ctrl K elsewhere.
-const isMacPlatform =
-  typeof navigator !== "undefined" &&
-  /mac|iphone|ipad|ipod/i.test(navigator.platform || navigator.userAgent);
+//
+// Prefer the modern `navigator.userAgentData.platform` (a high-entropy
+// hint) and fall back to the deprecated `navigator.platform` then the
+// UA string, since `platform` is empty in some newer browsers.
+function detectMacPlatform(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const uaData = (
+    navigator as Navigator & { userAgentData?: { platform?: string } }
+  ).userAgentData;
+  const source =
+    uaData?.platform || navigator.platform || navigator.userAgent || "";
+  return /mac|iphone|ipad|ipod/i.test(source);
+}
+
+const isMacPlatform = detectMacPlatform();
 const commandShortcutLabel = isMacPlatform ? "⌘K" : "Ctrl K";
 
 const RECENT_PAGES_KEY = "kapp:recent-pages";

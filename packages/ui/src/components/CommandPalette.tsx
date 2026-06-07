@@ -5,7 +5,12 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Modal, ModalContent, ModalTitle } from "./Modal";
+import {
+  Modal,
+  ModalContent,
+  ModalTitle,
+  ModalDescription,
+} from "./Modal";
 import { cn } from "../lib/cn";
 
 /**
@@ -134,6 +139,12 @@ export function CommandPalette({
         aria-label="Command palette"
       >
         <ModalTitle className="sr-only">Command palette</ModalTitle>
+        {/* Visually-hidden description satisfies Radix Dialog's
+            aria-describedby expectation and silences its dev-mode
+            "Missing Description" console warning. */}
+        <ModalDescription className="sr-only">
+          Search and run commands, navigate to pages, or create records.
+        </ModalDescription>
         <div className="flex items-center gap-2 border-b border-border px-4">
           <svg
             viewBox="0 0 24 24"

@@ -82,16 +82,29 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
     return filtered;
   }, [recordsQuery.data, activeView]);
 
+  // Dialog visibility for the prompt/confirm flows that previously
+  // used window.prompt / window.confirm. The host owns the open flag;
+  // each dialog hands its value/confirmation back through a callback
+  // and stays open (showing the `loading` pending state) until the
+  // mutation settles, at which point onSuccess/onError closes it.
+  const [statusPromptOpen, setStatusPromptOpen] = useState(false);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [saveViewOpen, setSaveViewOpen] = useState(false);
+  const [deleteViewOpen, setDeleteViewOpen] = useState(false);
+
   const createViewMutation = useMutation({
     mutationFn: (input: { name: string; filters: Record<string, unknown>; sort: string }) =>
       api.createView({ ktype: ktype!, ...input }),
     onSuccess: (v) => {
       qc.invalidateQueries({ queryKey: ["views", ktype] });
       setSelectedViewId(v.id);
+      setSaveViewOpen(false);
       toast.success("View saved", { description: v.name });
     },
-    onError: (err) =>
-      toast.error("Couldn't save view", { description: (err as Error).message }),
+    onError: (err) => {
+      setSaveViewOpen(false);
+      toast.error("Couldn't save view", { description: (err as Error).message });
+    },
   });
 
   const deleteViewMutation = useMutation({
@@ -99,12 +112,15 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["views", ktype] });
       setSelectedViewId(NEW_VIEW_ID);
+      setDeleteViewOpen(false);
       toast.success("View deleted");
     },
-    onError: (err) =>
+    onError: (err) => {
+      setDeleteViewOpen(false);
       toast.error("Couldn't delete view", {
         description: (err as Error).message,
-      }),
+      });
+    },
   });
 
   const [selected, setSelected] = useState<KRecord | null>(null);
@@ -143,12 +159,15 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
     onSuccess: (_data, { ids }) => {
       qc.invalidateQueries({ queryKey: ["records", ktype] });
       setSelectedIds(new Set());
+      setStatusPromptOpen(false);
       toast.success(`Updated ${ids.length} record(s)`);
     },
-    onError: (err) =>
+    onError: (err) => {
+      setStatusPromptOpen(false);
       toast.error("Bulk update failed", {
         description: (err as Error).message,
-      }),
+      });
+    },
   });
 
   const bulkDeleteMutation = useMutation({
@@ -157,30 +176,25 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
     onSuccess: (_data, ids) => {
       qc.invalidateQueries({ queryKey: ["records", ktype] });
       setSelectedIds(new Set());
+      setBulkDeleteOpen(false);
       toast.success(`Deleted ${ids.length} record(s)`);
     },
-    onError: (err) =>
+    onError: (err) => {
+      setBulkDeleteOpen(false);
       toast.error("Bulk delete failed", {
         description: (err as Error).message,
-      }),
+      });
+    },
   });
 
-  // Dialog visibility for the prompt/confirm flows that previously
-  // used window.prompt / window.confirm. The host owns the open flag;
-  // each dialog hands its value/confirmation back through a callback.
-  const [statusPromptOpen, setStatusPromptOpen] = useState(false);
-  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
-  const [saveViewOpen, setSaveViewOpen] = useState(false);
-  const [deleteViewOpen, setDeleteViewOpen] = useState(false);
-
+  // Keep the dialog open while the mutation runs so its `loading`
+  // pending state is visible; onSuccess/onError closes it.
   const submitBulkStatus = (status: string) => {
     bulkStatusMutation.mutate({ ids: [...selectedIds], status });
-    setStatusPromptOpen(false);
   };
 
   const confirmBulkDelete = () => {
     bulkDeleteMutation.mutate([...selectedIds]);
-    setBulkDeleteOpen(false);
   };
 
   const handleBulkExport = async () => {
@@ -251,13 +265,11 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
     // later is a PATCH. The server treats {} as "match everything"
     // so saving "all records" is the zero-effort default.
     createViewMutation.mutate({ name, filters: {}, sort: "" });
-    setSaveViewOpen(false);
   };
 
   const confirmDeleteView = () => {
     if (!activeView) return;
     deleteViewMutation.mutate(activeView.id);
-    setDeleteViewOpen(false);
   };
 
   if (!ktype) return null;
@@ -470,7 +482,7 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
 
       <PromptDialog
         open={statusPromptOpen}
-        onOpenChange={setStatusPromptOpen}
+        onOpenChange={(o) => !bulkStatusMutation.isPending && setStatusPromptOpen(o)}
         title="Change status"
         description={`Apply a new status to ${selectedIds.size} record(s).`}
         label="New status"
@@ -481,7 +493,7 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
       />
       <ConfirmDialog
         open={bulkDeleteOpen}
-        onOpenChange={setBulkDeleteOpen}
+        onOpenChange={(o) => !bulkDeleteMutation.isPending && setBulkDeleteOpen(o)}
         destructive
         title={`Delete ${selectedIds.size} record(s)?`}
         description="This permanently removes the selected records. This action cannot be undone."
@@ -491,7 +503,7 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
       />
       <PromptDialog
         open={saveViewOpen}
-        onOpenChange={setSaveViewOpen}
+        onOpenChange={(o) => !createViewMutation.isPending && setSaveViewOpen(o)}
         title="Save view"
         description="Save the current filters and sort as a reusable view."
         label="View name"
@@ -502,7 +514,7 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
       />
       <ConfirmDialog
         open={deleteViewOpen}
-        onOpenChange={setDeleteViewOpen}
+        onOpenChange={(o) => !deleteViewMutation.isPending && setDeleteViewOpen(o)}
         destructive
         title={`Delete view "${activeView?.name ?? ""}"?`}
         description="This removes the saved view for you. Records are not affected."
