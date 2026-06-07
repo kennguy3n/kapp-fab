@@ -1,6 +1,18 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { BOM, BOMComponent, InventoryItem } from "@kapp/client";
+import {
+  Badge,
+  Button,
+  Input,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 // BOMComponentDraft is the in-form shape used while the user is
@@ -54,17 +66,15 @@ export function BOMPage() {
   }, [itemsQ.data]);
 
   return (
-    <section style={{ display: "grid", gridTemplateColumns: "2fr 3fr", gap: 24 }}>
+    <section className="grid grid-cols-[2fr_3fr] gap-6">
       <div>
         <h1>Bills of Materials</h1>
-        <p style={{ color: "#6b7280" }}>
+        <p className="text-fg-muted">
           One row per (item, version). Only one BOM per item may be active.
         </p>
-        <div style={{ marginBottom: 8 }}>
-          <label htmlFor="bom-filter" style={{ marginRight: 8 }}>
-            Status:
-          </label>
-          <select
+        <div className="mb-2 flex items-center gap-2">
+          <label htmlFor="bom-filter">Status:</label>
+          <Select
             id="bom-filter"
             value={filter}
             onChange={(e) =>
@@ -75,73 +85,74 @@ export function BOMPage() {
             <option value="draft">Draft</option>
             <option value="active">Active</option>
             <option value="obsolete">Obsolete</option>
-          </select>
+          </Select>
         </div>
         {bomsQ.isLoading && <p>Loading…</p>}
         {bomsQ.isError && (
-          <p style={{ color: "#dc2626" }}>{String(bomsQ.error)}</p>
+          <p className="text-danger">{String(bomsQ.error)}</p>
         )}
         {bomsQ.data && (
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-                <th>Item</th>
-                <th>Version</th>
-                <th>Status</th>
-                <th>Output</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Item</TableHead>
+                <TableHead>Version</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Output</TableHead>
+                <TableHead />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {bomsQ.data.map((b: BOM) => (
-                <tr key={b.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                  <td>{itemLabel.get(b.item_id) ?? b.item_id}</td>
-                  <td>{b.version}</td>
-                  <td>
-                    <span
-                      style={{
-                        padding: "2px 8px",
-                        borderRadius: 12,
-                        background:
-                          b.status === "active"
-                            ? "#dcfce7"
-                            : b.status === "obsolete"
-                              ? "#fee2e2"
-                              : "#e5e7eb",
-                      }}
+                <TableRow key={b.id}>
+                  <TableCell>{itemLabel.get(b.item_id) ?? b.item_id}</TableCell>
+                  <TableCell>{b.version}</TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={
+                        b.status === "active"
+                          ? "success"
+                          : b.status === "obsolete"
+                            ? "danger"
+                            : "default"
+                      }
                     >
                       {b.status}
-                    </span>
-                  </td>
-                  <td>
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
                     {b.output_qty} {b.uom}
-                  </td>
-                  <td>
+                  </TableCell>
+                  <TableCell>
                     {b.status === "draft" && (
-                      <button
+                      <Button
+                        size="sm"
+                        variant="outline"
                         onClick={() =>
                           setStatus.mutate({ id: b.id, status: "active" })
                         }
                         disabled={setStatus.isPending}
                       >
                         Activate
-                      </button>
+                      </Button>
                     )}
                     {b.status === "active" && (
-                      <button
+                      <Button
+                        size="sm"
+                        variant="outline"
                         onClick={() =>
                           setStatus.mutate({ id: b.id, status: "obsolete" })
                         }
                         disabled={setStatus.isPending}
                       >
                         Obsolete
-                      </button>
+                      </Button>
                     )}
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         )}
       </div>
       <BOMAuthoringForm items={itemsQ.data ?? []} itemLabel={itemLabel} />
@@ -220,21 +231,17 @@ function BOMAuthoringForm({ items, itemLabel }: BOMAuthoringFormProps) {
         e.preventDefault();
         createMut.mutate();
       }}
-      style={{
-        border: "1px solid #e5e7eb",
-        borderRadius: 8,
-        padding: 16,
-      }}
+      className="rounded-lg border border-border p-4"
     >
-      <h2 style={{ marginTop: 0 }}>Author BOM</h2>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+      <h2 className="mt-0">Author BOM</h2>
+      <div className="grid grid-cols-2 gap-2">
         <label>
           Finished good
-          <select
+          <Select
             value={itemID}
             onChange={(e) => setItemID(e.target.value)}
             required
-            style={{ width: "100%" }}
+            className="w-full"
           >
             <option value="">Select item…</option>
             {items.map((it) => (
@@ -242,63 +249,63 @@ function BOMAuthoringForm({ items, itemLabel }: BOMAuthoringFormProps) {
                 {it.sku} — {it.name}
               </option>
             ))}
-          </select>
+          </Select>
         </label>
         <label>
           Version
-          <input
+          <Input
             value={version}
             onChange={(e) => setVersion(e.target.value)}
             required
-            style={{ width: "100%" }}
+            className="w-full"
           />
         </label>
         <label>
           Output qty
-          <input
+          <Input
             type="number"
             step="0.01"
             value={outputQty}
             onChange={(e) => setOutputQty(e.target.value)}
             required
-            style={{ width: "100%" }}
+            className="w-full"
           />
         </label>
         <label>
           UOM
-          <input
+          <Input
             value={uom}
             onChange={(e) => setUOM(e.target.value)}
             required
-            style={{ width: "100%" }}
+            className="w-full"
           />
         </label>
       </div>
-      <label style={{ display: "block", marginTop: 8 }}>
+      <label className="mt-2 block">
         Notes
         <textarea
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
-          style={{ width: "100%" }}
+          className="w-full rounded-md border border-border bg-bg px-2 py-1.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
         />
       </label>
 
       <h3>Components</h3>
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead>
-          <tr>
-            <th>Item</th>
-            <th>Qty</th>
-            <th>UOM</th>
-            <th>Scrap %</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Item</TableHead>
+            <TableHead>Qty</TableHead>
+            <TableHead>UOM</TableHead>
+            <TableHead>Scrap %</TableHead>
+            <TableHead />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {components.map((c, i) => (
-            <tr key={i}>
-              <td>
-                <select
+            <TableRow key={i}>
+              <TableCell>
+                <Select
                   value={c.component_item_id}
                   onChange={(e) =>
                     updateComponent(i, { component_item_id: e.target.value })
@@ -313,28 +320,28 @@ function BOMAuthoringForm({ items, itemLabel }: BOMAuthoringFormProps) {
                         {itemLabel.get(it.id) ?? it.sku}
                       </option>
                     ))}
-                </select>
-              </td>
-              <td>
-                <input
+                </Select>
+              </TableCell>
+              <TableCell>
+                <Input
                   type="number"
                   step="0.001"
                   value={c.qty}
                   onChange={(e) => updateComponent(i, { qty: e.target.value })}
                   required
-                  style={{ width: 80 }}
+                  className="w-20"
                 />
-              </td>
-              <td>
-                <input
+              </TableCell>
+              <TableCell>
+                <Input
                   value={c.uom}
                   onChange={(e) => updateComponent(i, { uom: e.target.value })}
                   required
-                  style={{ width: 60 }}
+                  className="w-16"
                 />
-              </td>
-              <td>
-                <input
+              </TableCell>
+              <TableCell>
+                <Input
                   type="number"
                   step="0.01"
                   value={c.scrap_percent ?? ""}
@@ -343,12 +350,14 @@ function BOMAuthoringForm({ items, itemLabel }: BOMAuthoringFormProps) {
                       scrap_percent: e.target.value || undefined,
                     })
                   }
-                  style={{ width: 80 }}
+                  className="w-20"
                 />
-              </td>
-              <td>
-                <button
+              </TableCell>
+              <TableCell>
+                <Button
                   type="button"
+                  size="sm"
+                  variant="outline"
                   onClick={() =>
                     setComponents((prev) => prev.filter((_, j) => j !== i))
                   }
@@ -356,14 +365,17 @@ function BOMAuthoringForm({ items, itemLabel }: BOMAuthoringFormProps) {
                   aria-label="remove component"
                 >
                   ×
-                </button>
-              </td>
-            </tr>
+                </Button>
+              </TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
-      <button
+        </TableBody>
+      </Table>
+      <Button
         type="button"
+        variant="outline"
+        size="sm"
+        className="mt-2"
         onClick={() =>
           setComponents((prev) => [
             ...prev,
@@ -372,9 +384,9 @@ function BOMAuthoringForm({ items, itemLabel }: BOMAuthoringFormProps) {
         }
       >
         + Add component
-      </button>
+      </Button>
 
-      <div style={{ marginTop: 12 }}>
+      <div className="mt-3">
         <label>
           <input
             type="checkbox"
@@ -385,12 +397,12 @@ function BOMAuthoringForm({ items, itemLabel }: BOMAuthoringFormProps) {
         </label>
       </div>
 
-      <div style={{ marginTop: 12 }}>
-        <button type="submit" disabled={createMut.isPending || !itemID}>
+      <div className="mt-3 flex items-center">
+        <Button type="submit" disabled={createMut.isPending || !itemID}>
           {createMut.isPending ? "Creating…" : "Create BOM"}
-        </button>
+        </Button>
         {createMut.isError && (
-          <span style={{ color: "#dc2626", marginLeft: 12 }}>
+          <span className="ml-3 text-danger">
             {String(createMut.error)}
           </span>
         )}
