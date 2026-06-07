@@ -176,6 +176,40 @@ describe("App shell", () => {
     );
   });
 
+  it("highlights the first search option on the first ArrowDown after the panel was closed", async () => {
+    // Regression: the cursor-reset effect used to key off both
+    // `debounced` and `open`, so it fired on the same commit as the
+    // ArrowDown handler (which opens the panel and advances the cursor
+    // in one event) and reset activeIndex back to -1 — meaning the
+    // first ArrowDown after a close reopened the panel but highlighted
+    // nothing. Seed a recent search so the empty-query panel has an
+    // option to navigate to.
+    listTenantFeatures.mockResolvedValue(features({ crm: true }));
+    localStorage.setItem(
+      "kapp.recent_searches",
+      JSON.stringify(["acme corp"]),
+    );
+    const user = userEvent.setup();
+    renderApp();
+
+    const search = await screen.findByRole("combobox", {
+      name: /global search/i,
+    });
+
+    // Focus opens the panel (recent searches), then Escape closes it.
+    await user.click(search);
+    expect(
+      await screen.findByRole("option", { name: /acme corp/i }),
+    ).toHaveAttribute("aria-selected", "false");
+    await user.keyboard("{Escape}");
+
+    // A single ArrowDown must reopen and highlight the first option.
+    await user.keyboard("{ArrowDown}");
+    expect(
+      await screen.findByRole("option", { name: /acme corp/i }),
+    ).toHaveAttribute("aria-selected", "true");
+  });
+
   it("renders the public login route without the tenant shell", async () => {
     renderApp("/login");
 

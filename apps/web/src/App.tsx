@@ -1207,10 +1207,23 @@ function GlobalSearchBox() {
     return () => window.clearTimeout(id);
   }, [value]);
 
-  // Reset the keyboard cursor whenever the option set changes shape.
+  // Reset the keyboard cursor when the option set changes shape (the
+  // recent ⇄ results swap, or a new result list). Deliberately keyed
+  // off `debounced` alone: keying off `open` too would let this fire
+  // on the same commit as the ArrowDown handler (which opens the panel
+  // and advances the cursor in one event), clobbering its selection so
+  // the first ArrowDown after a close failed to highlight anything.
   useEffect(() => {
     setActiveIndex(-1);
-  }, [debounced, open]);
+  }, [debounced]);
+
+  // Reset the cursor when the panel closes so a later reopen starts
+  // fresh rather than restoring a stale highlight. Guarded on `!open`
+  // so reopening (false → true) leaves the cursor untouched, keeping
+  // the ArrowDown-from-closed case working.
+  useEffect(() => {
+    if (!open) setActiveIndex(-1);
+  }, [open]);
 
   // Close on outside pointer-down so the panel doesn't linger when
   // the user clicks elsewhere in the shell.
