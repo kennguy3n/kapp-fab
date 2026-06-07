@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Button, Input } from "@kapp/ui";
 import {
   portalApi,
   PORTAL_EMAIL_KEY,
@@ -54,47 +55,26 @@ export function PortalLoginPage() {
   };
 
   return (
-    <main style={wrap}>
+    <main className="mx-auto mt-16 max-w-[420px] p-4">
       <h1>Customer portal</h1>
       <p>
         Enter your email to receive a sign-in link. We'll email you a
         one-time link valid for 15 minutes.
       </p>
-      <form onSubmit={onSubmit} style={{ display: "grid", gap: 8 }}>
-        <input
+      <form onSubmit={onSubmit} className="grid gap-2">
+        <Input
           type="email"
           required
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           placeholder="you@example.com"
-          style={inp}
         />
-        <button type="submit" style={btn}>
+        <Button type="submit" className="justify-self-start">
           Send sign-in link
-        </button>
+        </Button>
       </form>
-      {status && <p style={{ color: "#065f46" }}>{status}</p>}
-      {err && <p style={{ color: "#991b1b" }}>{err}</p>}
+      {status && <p className="text-success">{status}</p>}
+      {err && <p className="text-danger">{err}</p>}
     </main>
   );
 }
-
-const wrap: React.CSSProperties = {
-  maxWidth: 420,
-  margin: "64px auto",
-  fontFamily: "system-ui, sans-serif",
-  padding: 16,
-};
-const inp: React.CSSProperties = {
-  padding: 8,
-  border: "1px solid #d1d5db",
-  borderRadius: 6,
-};
-const btn: React.CSSProperties = {
-  padding: "8px 14px",
-  background: "#111827",
-  color: "white",
-  border: 0,
-  borderRadius: 6,
-  cursor: "pointer",
-};

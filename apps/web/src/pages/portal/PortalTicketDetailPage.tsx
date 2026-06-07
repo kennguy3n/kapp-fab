@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
+import { Button } from "@kapp/ui";
 import { portalApi } from "../../lib/portalApi";
 
 interface Reply {
@@ -36,33 +37,32 @@ export function PortalTicketDetailPage() {
   const replies = Array.isArray(d.replies) ? (d.replies as Reply[]) : [];
 
   return (
-    <main style={{ maxWidth: 720, margin: "32px auto", padding: 16 }}>
+    <main className="mx-auto mt-8 max-w-[720px] p-4">
       <h1>{(d.subject as string) ?? q.data.id}</h1>
-      <div style={{ color: "#555" }}>
+      <div className="text-fg-muted">
         Status: {(d.status as string) ?? q.data.status} · priority{" "}
         {(d.priority as string) ?? "medium"}
       </div>
-      <p style={{ whiteSpace: "pre-wrap", marginTop: 12 }}>
+      <p className="mt-3 whitespace-pre-wrap">
         {(d.description as string) ?? ""}
       </p>
 
-      <h2 style={{ fontSize: 16, marginTop: 20 }}>Conversation</h2>
+      <h2 className="mt-5 text-base">Conversation</h2>
       {replies.map((rep, i) => (
         <div
           key={i}
+          className="mb-2 border-l-4 bg-bg-subtle p-2"
+          // Data-driven accent: customer replies read as info
+          // (blue), agent replies as success (green).
           style={{
-            marginBottom: 8,
-            padding: 8,
-            borderLeft: `4px solid ${
-              rep.kind === "customer" ? "#3b82f6" : "#16a34a"
-            }`,
-            background: "#f9fafb",
+            borderLeftColor:
+              rep.kind === "customer" ? "var(--info)" : "var(--success)",
           }}
         >
-          <div style={{ fontSize: 12, color: "#6b7280" }}>
+          <div className="text-xs text-fg-muted">
             {rep.from} · {rep.kind}
           </div>
-          <div style={{ whiteSpace: "pre-wrap" }}>{rep.body}</div>
+          <div className="whitespace-pre-wrap">{rep.body}</div>
         </div>
       ))}
 
@@ -72,18 +72,18 @@ export function PortalTicketDetailPage() {
           if (!reply.trim()) return;
           replyMut.mutate();
         }}
-        style={{ marginTop: 16, display: "grid", gap: 8 }}
+        className="mt-4 grid gap-2"
       >
         <textarea
           value={reply}
           onChange={(e) => setReply(e.target.value)}
           rows={4}
           placeholder="Add a reply…"
-          style={{ padding: 8, border: "1px solid #d1d5db", borderRadius: 6 }}
+          className="w-full rounded-md border border-border bg-bg p-2 text-fg"
         />
-        <button type="submit" disabled={replyMut.isPending}>
+        <Button type="submit" disabled={replyMut.isPending} className="justify-self-start">
           Send reply
-        </button>
+        </Button>
       </form>
     </main>
   );
