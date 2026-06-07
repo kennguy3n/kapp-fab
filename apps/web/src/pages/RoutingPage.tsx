@@ -6,6 +6,18 @@ import type {
   Routing,
   WorkCenter,
 } from "@kapp/client";
+import {
+  Badge,
+  Button,
+  Input,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 // OperationDraft is the in-form shape used while authoring routing
@@ -77,40 +89,40 @@ export function RoutingPage() {
   }, [itemsQ.data]);
 
   return (
-    <section style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
+    <section className="grid grid-cols-2 gap-6">
       <div>
         <h1>Work Centers</h1>
-        <p style={{ color: "#6b7280" }}>
+        <p className="text-fg-muted">
           Machines / workstations with finite hourly capacity. Only active
           centers contribute schedulable minutes to the capacity plan.
         </p>
         {workCentersQ.isLoading && <p>Loading…</p>}
         {workCentersQ.isError && (
-          <p style={{ color: "#dc2626" }}>{String(workCentersQ.error)}</p>
+          <p className="text-danger">{String(workCentersQ.error)}</p>
         )}
         {workCentersQ.data && (
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-                <th>Name</th>
-                <th>Hrs/day</th>
-                <th>Eff %</th>
-                <th>Status</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Hrs/day</TableHead>
+                <TableHead>Eff %</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {workCentersQ.data.map((wc: WorkCenter) => (
-                <tr key={wc.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                  <td>{wc.name}</td>
-                  <td>{wc.operating_hours_per_day}</td>
-                  <td>{wc.efficiency_percent}</td>
-                  <td>
+                <TableRow key={wc.id}>
+                  <TableCell>{wc.name}</TableCell>
+                  <TableCell>{wc.operating_hours_per_day}</TableCell>
+                  <TableCell>{wc.efficiency_percent}</TableCell>
+                  <TableCell>
                     <StatusPill status={wc.status} />
-                  </td>
-                  <td>
+                  </TableCell>
+                  <TableCell>
                     {wc.status !== "retired" && (
-                      <select
+                      <Select
                         aria-label={`Set status for ${wc.name}`}
                         value={wc.status}
                         onChange={(e) =>
@@ -121,28 +133,26 @@ export function RoutingPage() {
                         <option value="active">active</option>
                         <option value="maintenance">maintenance</option>
                         <option value="retired">retired</option>
-                      </select>
+                      </Select>
                     )}
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         )}
         <WorkCenterForm />
       </div>
 
       <div>
         <h1>Routings</h1>
-        <p style={{ color: "#6b7280" }}>
+        <p className="text-fg-muted">
           Ordered operations for producing an item. Only one routing per item
           may be active at a time.
         </p>
-        <div style={{ marginBottom: 8 }}>
-          <label htmlFor="routing-filter" style={{ marginRight: 8 }}>
-            Status:
-          </label>
-          <select
+        <div className="mb-2 flex items-center gap-2">
+          <label htmlFor="routing-filter">Status:</label>
+          <Select
             id="routing-filter"
             value={routingFilter}
             onChange={(e) =>
@@ -155,43 +165,47 @@ export function RoutingPage() {
             <option value="draft">Draft</option>
             <option value="active">Active</option>
             <option value="obsolete">Obsolete</option>
-          </select>
+          </Select>
         </div>
         {routingsQ.isLoading && <p>Loading…</p>}
         {routingsQ.isError && (
-          <p style={{ color: "#dc2626" }}>{String(routingsQ.error)}</p>
+          <p className="text-danger">{String(routingsQ.error)}</p>
         )}
         {routingsQ.data && (
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-                <th>Item</th>
-                <th>Version</th>
-                <th>Status</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Item</TableHead>
+                <TableHead>Version</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {routingsQ.data.map((r: Routing) => (
-                <tr key={r.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                  <td>{itemLabel.get(r.item_id) ?? r.item_id}</td>
-                  <td>{r.version}</td>
-                  <td>
+                <TableRow key={r.id}>
+                  <TableCell>{itemLabel.get(r.item_id) ?? r.item_id}</TableCell>
+                  <TableCell>{r.version}</TableCell>
+                  <TableCell>
                     <StatusPill status={r.status} />
-                  </td>
-                  <td>
+                  </TableCell>
+                  <TableCell>
                     {r.status === "draft" && (
-                      <button
+                      <Button
+                        size="sm"
+                        variant="outline"
                         onClick={() =>
                           setRoutingStatus.mutate({ id: r.id, status: "active" })
                         }
                         disabled={setRoutingStatus.isPending}
                       >
                         Activate
-                      </button>
+                      </Button>
                     )}
                     {r.status === "active" && (
-                      <button
+                      <Button
+                        size="sm"
+                        variant="outline"
                         onClick={() =>
                           setRoutingStatus.mutate({
                             id: r.id,
@@ -201,13 +215,13 @@ export function RoutingPage() {
                         disabled={setRoutingStatus.isPending}
                       >
                         Obsolete
-                      </button>
+                      </Button>
                     )}
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         )}
         <RoutingForm
           items={itemsQ.data ?? []}
@@ -219,19 +233,15 @@ export function RoutingPage() {
 }
 
 function StatusPill({ status }: { status: string }) {
-  const background =
+  const variant =
     status === "active"
-      ? "#dcfce7"
+      ? "success"
       : status === "obsolete" || status === "retired"
-        ? "#fee2e2"
+        ? "danger"
         : status === "maintenance"
-          ? "#fef9c3"
-          : "#e5e7eb";
-  return (
-    <span style={{ padding: "2px 8px", borderRadius: 12, background }}>
-      {status}
-    </span>
-  );
+          ? "warning"
+          : "default";
+  return <Badge variant={variant}>{status}</Badge>;
 }
 
 function WorkCenterForm() {
@@ -267,72 +277,67 @@ function WorkCenterForm() {
         e.preventDefault();
         createMut.mutate();
       }}
-      style={{
-        border: "1px solid #e5e7eb",
-        borderRadius: 8,
-        padding: 16,
-        marginTop: 16,
-      }}
+      className="mt-4 rounded-lg border border-border p-4"
     >
-      <h2 style={{ marginTop: 0 }}>Add Work Center</h2>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+      <h2 className="mt-0">Add Work Center</h2>
+      <div className="grid grid-cols-2 gap-2">
         <label>
           Name
-          <input
+          <Input
             value={name}
             onChange={(e) => setName(e.target.value)}
             required
-            style={{ width: "100%" }}
+            className="w-full"
           />
         </label>
         <label>
           Capacity / hour
-          <input
+          <Input
             type="number"
             step="0.01"
             value={capacityPerHour}
             onChange={(e) => setCapacityPerHour(e.target.value)}
             required
-            style={{ width: "100%" }}
+            className="w-full"
           />
         </label>
         <label>
           Operating hrs / day
-          <input
+          <Input
             type="number"
             step="0.01"
             value={hoursPerDay}
             onChange={(e) => setHoursPerDay(e.target.value)}
             required
-            style={{ width: "100%" }}
+            className="w-full"
           />
         </label>
         <label>
           Efficiency %
-          <input
+          <Input
             type="number"
             step="0.01"
             value={efficiency}
             onChange={(e) => setEfficiency(e.target.value)}
             required
-            style={{ width: "100%" }}
+            className="w-full"
           />
         </label>
       </div>
-      <label style={{ display: "block", marginTop: 8 }}>
+      <label className="mt-2 block">
         Notes
         <textarea
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
-          style={{ width: "100%" }}
+          className="w-full rounded-md border border-border bg-bg px-2 py-1.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
         />
       </label>
       {createMut.isError && (
-        <p style={{ color: "#dc2626" }}>{String(createMut.error)}</p>
+        <p className="text-danger">{String(createMut.error)}</p>
       )}
-      <button type="submit" disabled={createMut.isPending} style={{ marginTop: 8 }}>
+      <Button type="submit" disabled={createMut.isPending} className="mt-2">
         {createMut.isPending ? "Saving…" : "Create work center"}
-      </button>
+      </Button>
     </form>
   );
 }
@@ -409,22 +414,17 @@ function RoutingForm({ items, workCenters }: RoutingFormProps) {
         e.preventDefault();
         createMut.mutate();
       }}
-      style={{
-        border: "1px solid #e5e7eb",
-        borderRadius: 8,
-        padding: 16,
-        marginTop: 16,
-      }}
+      className="mt-4 rounded-lg border border-border p-4"
     >
-      <h2 style={{ marginTop: 0 }}>Author Routing</h2>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+      <h2 className="mt-0">Author Routing</h2>
+      <div className="grid grid-cols-2 gap-2">
         <label>
           Item
-          <select
+          <Select
             value={itemID}
             onChange={(e) => setItemID(e.target.value)}
             required
-            style={{ width: "100%" }}
+            className="w-full"
           >
             <option value="">Select item…</option>
             {items.map((it) => (
@@ -432,54 +432,54 @@ function RoutingForm({ items, workCenters }: RoutingFormProps) {
                 {it.sku} — {it.name}
               </option>
             ))}
-          </select>
+          </Select>
         </label>
         <label>
           Version
-          <input
+          <Input
             value={version}
             onChange={(e) => setVersion(e.target.value)}
             required
-            style={{ width: "100%" }}
+            className="w-full"
           />
         </label>
       </div>
-      <label style={{ display: "block", marginTop: 8 }}>
+      <label className="mt-2 block">
         Notes
         <textarea
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
-          style={{ width: "100%" }}
+          className="w-full rounded-md border border-border bg-bg px-2 py-1.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
         />
       </label>
 
       <h3>Operations</h3>
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead>
-          <tr>
-            <th>Seq</th>
-            <th>Operation</th>
-            <th>Work center</th>
-            <th>Setup (min)</th>
-            <th>Cycle (min)</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Seq</TableHead>
+            <TableHead>Operation</TableHead>
+            <TableHead>Work center</TableHead>
+            <TableHead>Setup (min)</TableHead>
+            <TableHead>Cycle (min)</TableHead>
+            <TableHead />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {operations.map((op, idx) => (
-            <tr key={idx}>
-              <td>{idx + 1}</td>
-              <td>
-                <input
+            <TableRow key={idx}>
+              <TableCell>{idx + 1}</TableCell>
+              <TableCell>
+                <Input
                   value={op.operation_name}
                   onChange={(e) =>
                     updateOperation(idx, { operation_name: e.target.value })
                   }
                   placeholder="e.g. Cut"
                 />
-              </td>
-              <td>
-                <select
+              </TableCell>
+              <TableCell>
+                <Select
                   value={op.work_center_id}
                   onChange={(e) =>
                     updateOperation(idx, { work_center_id: e.target.value })
@@ -491,47 +491,51 @@ function RoutingForm({ items, workCenters }: RoutingFormProps) {
                       {wc.name}
                     </option>
                   ))}
-                </select>
-              </td>
-              <td>
-                <input
+                </Select>
+              </TableCell>
+              <TableCell>
+                <Input
                   type="number"
                   step="0.01"
                   value={op.setup_time_minutes}
                   onChange={(e) =>
                     updateOperation(idx, { setup_time_minutes: e.target.value })
                   }
-                  style={{ width: 80 }}
+                  className="w-20"
                 />
-              </td>
-              <td>
-                <input
+              </TableCell>
+              <TableCell>
+                <Input
                   type="number"
                   step="0.01"
                   value={op.cycle_time_minutes}
                   onChange={(e) =>
                     updateOperation(idx, { cycle_time_minutes: e.target.value })
                   }
-                  style={{ width: 80 }}
+                  className="w-20"
                 />
-              </td>
-              <td>
-                <button
+              </TableCell>
+              <TableCell>
+                <Button
                   type="button"
+                  size="sm"
+                  variant="outline"
                   onClick={() =>
                     setOperations((prev) => prev.filter((_, i) => i !== idx))
                   }
                   disabled={operations.length === 1}
                 >
                   ✕
-                </button>
-              </td>
-            </tr>
+                </Button>
+              </TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
-      <button
+        </TableBody>
+      </Table>
+      <Button
         type="button"
+        variant="outline"
+        size="sm"
         onClick={() =>
           setOperations((prev) => [
             ...prev,
@@ -543,12 +547,12 @@ function RoutingForm({ items, workCenters }: RoutingFormProps) {
             },
           ])
         }
-        style={{ marginTop: 8 }}
+        className="mt-2"
       >
         + Add operation
-      </button>
+      </Button>
 
-      <label style={{ display: "block", marginTop: 12 }}>
+      <label className="mt-3 block">
         <input
           type="checkbox"
           checked={activate}
@@ -557,11 +561,11 @@ function RoutingForm({ items, workCenters }: RoutingFormProps) {
         Activate on create (obsoletes any currently-active routing for this item)
       </label>
       {createMut.isError && (
-        <p style={{ color: "#dc2626" }}>{String(createMut.error)}</p>
+        <p className="text-danger">{String(createMut.error)}</p>
       )}
-      <button type="submit" disabled={createMut.isPending} style={{ marginTop: 8 }}>
+      <Button type="submit" disabled={createMut.isPending} className="mt-2">
         {createMut.isPending ? "Saving…" : "Create routing"}
-      </button>
+      </Button>
     </form>
   );
 }

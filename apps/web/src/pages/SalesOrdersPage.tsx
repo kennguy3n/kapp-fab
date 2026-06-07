@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
+import { Button } from "@kapp/ui";
 import { api } from "../lib/api";
 
 const KTYPE = "sales.order";
@@ -61,27 +62,21 @@ export function SalesOrdersPage() {
 
   return (
     <section>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <header className="flex items-center justify-between">
         <h1>Sales Orders</h1>
-        <button onClick={() => nav(`/records/${KTYPE}/new`)}>New order</button>
+        <Button onClick={() => nav(`/records/${KTYPE}/new`)}>New order</Button>
       </header>
       {q.isLoading && <p>Loading…</p>}
       {q.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load orders: {(q.error as Error).message}
         </p>
       )}
-      <div style={{ display: "flex", gap: 12, marginTop: 12, overflowX: "auto" }}>
+      <div className="mt-3 flex gap-3 overflow-x-auto">
         {STAGES.map((s) => (
           <div
             key={s}
-            style={{
-              minWidth: 240,
-              background: "#f9fafb",
-              border: "1px solid #e5e7eb",
-              borderRadius: 6,
-              padding: 8,
-            }}
+            className="min-w-[240px] rounded-md border border-border bg-bg-subtle p-2"
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {
               const id = e.dataTransfer.getData("text/plain");
@@ -89,7 +84,7 @@ export function SalesOrdersPage() {
               if (r) moveMutation.mutate({ r, to: s });
             }}
           >
-            <div style={{ textTransform: "capitalize", fontSize: 12, color: "#6b7280" }}>
+            <div className="text-xs capitalize text-fg-muted">
               {s} · {(columns.get(s) ?? []).length}
             </div>
             {(columns.get(s) ?? []).map((r) => {
@@ -100,23 +95,15 @@ export function SalesOrdersPage() {
                   draggable
                   onDragStart={(e) => e.dataTransfer.setData("text/plain", r.id)}
                   onClick={() => nav(`/records/${KTYPE}/${r.id}`)}
-                  style={{
-                    marginTop: 6,
-                    padding: 8,
-                    background: "white",
-                    borderRadius: 4,
-                    border: "1px solid #e5e7eb",
-                    cursor: "pointer",
-                    fontSize: 13,
-                  }}
+                  className="mt-1.5 cursor-pointer rounded border border-border bg-bg-elevated p-2 text-[13px]"
                 >
-                  <div style={{ fontWeight: 500 }}>
+                  <div className="font-medium">
                     {d.order_number ?? r.id.slice(0, 8)}
                   </div>
-                  <div style={{ color: "#6b7280", fontSize: 12 }}>
+                  <div className="text-xs text-fg-muted">
                     {d.customer_id ?? "—"}
                   </div>
-                  <div style={{ marginTop: 4, fontSize: 12 }}>
+                  <div className="mt-1 text-xs">
                     {d.total ?? 0} {d.currency ?? "USD"}
                   </div>
                 </div>

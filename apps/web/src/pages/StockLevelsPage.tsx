@@ -1,6 +1,14 @@
 import { useMemo } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import type { InventoryBatch } from "@kapp/client";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -73,40 +81,38 @@ export function StockLevelsPage() {
   return (
     <section>
       <h1>Stock Levels</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Live SUM(qty) from the append-only inventory_moves ledger.
       </p>
       {levelsQ.isLoading && <p>Loading…</p>}
       {levelsQ.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load stock levels: {(levelsQ.error as Error).message}
         </p>
       )}
       {levelsQ.data && (
-        <table
-          style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginTop: 12 }}
-        >
-          <thead>
-            <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-              <th style={{ padding: "6px 8px" }}>Item</th>
-              <th style={{ padding: "6px 8px" }}>Warehouse</th>
-              <th style={{ padding: "6px 8px", textAlign: "right" }}>Qty</th>
-              <th style={{ padding: "6px 8px" }}>Batches</th>
-            </tr>
-          </thead>
-          <tbody>
+        <Table className="mt-3 text-[13px]">
+          <TableHeader>
+            <TableRow>
+              <TableHead>Item</TableHead>
+              <TableHead>Warehouse</TableHead>
+              <TableHead className="text-right">Qty</TableHead>
+              <TableHead>Batches</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {levelsQ.data.map((r) => {
               const batches = batchesByItem.get(r.item_id) ?? [];
               return (
-                <tr key={`${r.item_id}:${r.warehouse_id}`} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                  <td style={{ padding: "6px 8px" }}>
+                <TableRow key={`${r.item_id}:${r.warehouse_id}`}>
+                  <TableCell>
                     {itemLabel.get(r.item_id) ?? r.item_id}
-                  </td>
-                  <td style={{ padding: "6px 8px" }}>
+                  </TableCell>
+                  <TableCell>
                     {whLabel.get(r.warehouse_id) ?? r.warehouse_id}
-                  </td>
-                  <td style={{ padding: "6px 8px", textAlign: "right" }}>{r.qty}</td>
-                  <td style={{ padding: "6px 8px", color: batches.length === 0 ? "#9ca3af" : undefined }}>
+                  </TableCell>
+                  <TableCell className="text-right">{r.qty}</TableCell>
+                  <TableCell className={batches.length === 0 ? "text-fg-subtle" : undefined}>
                     {batches.length === 0
                       ? "—"
                       : batches
@@ -117,12 +123,12 @@ export function StockLevelsPage() {
                               : b.batch_no,
                           )
                           .join(", ") + (batches.length > 3 ? `, +${batches.length - 3}` : "")}
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               );
             })}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       )}
     </section>
   );

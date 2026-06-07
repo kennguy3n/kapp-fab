@@ -2,6 +2,25 @@ import { useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import {
+  Button,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  Input,
+  Select,
+  Stepper,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  cn,
+} from "@kapp/ui";
+import { Check, ChevronDown, Plus, Search } from "lucide-react";
+import {
   SupportedLocales,
   bestSupportedLocaleForCountry,
   localeInfo,
@@ -96,6 +115,88 @@ const COA_TEMPLATES = [
   { value: "cn_basic", label: "China — CAS/IFRS + IIT / Social Insurance / Housing Fund / VAT" },
   // SCAFFOLD: cmd/new-tax-pack inserts new COA_TEMPLATES entries above this line.
 ];
+
+// CoA templates are grouped by region in the wizard so the 50+
+// country charts are navigable.  Each region owns the explicit set
+// of template values that belong to it; anything unmatched (e.g. the
+// generic IFRS / US GAAP base charts) falls into "General".  The
+// order of REGION_ORDER is the on-screen section order.
+const REGION_ORDER = [
+  "General",
+  "Americas",
+  "Europe",
+  "Middle East",
+  "Asia-Pacific",
+  "Africa",
+] as const;
+type CoaRegion = (typeof REGION_ORDER)[number];
+
+const REGION_BY_TEMPLATE: Record<string, CoaRegion> = {
+  // General base charts (not country-specific).
+  ifrs_basic: "General",
+  us_gaap_basic: "Americas",
+  // Americas.
+  ca_aspe_basic: "Americas",
+  br_cpc_basic: "Americas",
+  mx_nif_basic: "Americas",
+  ar_rtfacpce_basic: "Americas",
+  cl_ifrs_basic: "Americas",
+  latam_ifrs_basic: "Americas",
+  // Europe.
+  ch_basic: "Europe",
+  gb_basic: "Europe",
+  de_basic: "Europe",
+  fr_basic: "Europe",
+  es_basic: "Europe",
+  it_basic: "Europe",
+  nl_basic: "Europe",
+  be_basic: "Europe",
+  ie_basic: "Europe",
+  at_basic: "Europe",
+  pt_basic: "Europe",
+  pl_basic: "Europe",
+  se_basic: "Europe",
+  no_basic: "Europe",
+  dk_basic: "Europe",
+  fi_basic: "Europe",
+  cz_basic: "Europe",
+  hu_basic: "Europe",
+  ro_basic: "Europe",
+  gr_basic: "Europe",
+  // Middle East (GCC).
+  ae_basic: "Middle East",
+  sa_basic: "Middle East",
+  qa_basic: "Middle East",
+  kw_basic: "Middle East",
+  bh_basic: "Middle East",
+  om_basic: "Middle East",
+  // Asia-Pacific.
+  sg_basic: "Asia-Pacific",
+  my_basic: "Asia-Pacific",
+  th_basic: "Asia-Pacific",
+  id_basic: "Asia-Pacific",
+  vn_basic: "Asia-Pacific",
+  ph_basic: "Asia-Pacific",
+  nz_basic: "Asia-Pacific",
+  in_basic: "Asia-Pacific",
+  au_basic: "Asia-Pacific",
+  jp_basic: "Asia-Pacific",
+  kr_basic: "Asia-Pacific",
+  cn_basic: "Asia-Pacific",
+  // Africa.
+  za_basic: "Africa",
+  ng_basic: "Africa",
+  ke_basic: "Africa",
+  eg_basic: "Africa",
+  // SCAFFOLD: cmd/new-tax-pack must also add the new template's region
+  // here, alongside its COA_TEMPLATES entry. A missing entry is not a
+  // crash — regionForTemplate() falls back to "General" — but the chart
+  // will be grouped under the wrong region in the wizard.
+};
+
+function regionForTemplate(value: string): CoaRegion {
+  return REGION_BY_TEMPLATE[value] ?? "General";
+}
 
 // defaultCoATemplateForCountry mirrors
 // tenant.DefaultCoATemplateForCountry in internal/tenant/wizard.go so
@@ -275,9 +376,44 @@ export function SetupWizardPage() {
   const [users, setUsers] = useState<InitialUser[]>([
     { email: "", display_name: "", role: "tenant.admin", roles: ["tenant.admin"] },
   ]);
+  // Step-1 CoA picker UX: a free-text filter plus a set of
+  // collapsed region sections.  Regions default to expanded (the
+  // set holds the ones the user has *collapsed*) so every template
+  // is reachable without a click; an active search overrides
+  // collapse so matches are never hidden.
+  const [coaQuery, setCoaQuery] = useState("");
+  const [collapsedRegions, setCollapsedRegions] = useState<Set<CoaRegion>>(
+    () => new Set(),
+  );
 
   const effectiveCoaTemplate =
     coaTemplate || defaultCoATemplateForCountry(country);
+
+  // Templates grouped into their on-screen region sections, filtered
+  // by the current search query (matches label or value).  Empty
+  // regions are dropped so a search that matches nothing in a region
+  // hides its header too.
+  const coaRegions = useMemo(() => {
+    const q = coaQuery.trim().toLowerCase();
+    const byRegion = new Map<CoaRegion, typeof COA_TEMPLATES>();
+    for (const tpl of COA_TEMPLATES) {
+      if (
+        q &&
+        !tpl.label.toLowerCase().includes(q) &&
+        !tpl.value.toLowerCase().includes(q)
+      ) {
+        continue;
+      }
+      const region = regionForTemplate(tpl.value);
+      const list = byRegion.get(region) ?? [];
+      list.push(tpl);
+      byRegion.set(region, list);
+    }
+    return REGION_ORDER.map((region) => ({
+      region,
+      templates: byRegion.get(region) ?? [],
+    })).filter((g) => g.templates.length > 0);
+  }, [coaQuery]);
   // effectiveLocale is the tag the wizard will both submit to the
   // backend AND apply to the live UI. The three-stage fallback
   // mirrors the precedence the user expects:
@@ -427,339 +563,463 @@ export function SetupWizardPage() {
 
   if (!tenantId) {
     return (
-      <section>
-        <h1>Tenant Setup</h1>
-        <p style={{ color: "#b91c1c" }}>
+      <section className="mx-auto flex max-w-2xl flex-col gap-4">
+        <h1 className="text-2xl font-semibold tracking-tight text-fg">
+          Tenant Setup
+        </h1>
+        <div
+          role="alert"
+          className="rounded-md border border-border border-s-2 border-s-danger bg-bg-subtle px-3 py-2 text-sm text-danger"
+        >
           Missing tenant id in route. Expected <code>/setup/:id</code>.
-        </p>
+        </div>
       </section>
     );
   }
 
   return (
-    <section style={{ maxWidth: 640 }}>
-      <h1>Tenant Setup</h1>
-      <p style={{ color: "#6b7280" }}>
-        Seeds the chart of accounts, default roles, and invites your
-        starting team. You can edit every value after setup from the
-        admin pages.
-      </p>
-      <ol
-        style={{
-          display: "flex",
-          gap: 16,
-          listStyle: "none",
-          padding: 0,
-          margin: "16px 0",
-          fontSize: 13,
-        }}
-      >
-        {[
-          { stepId: "company", label: t("wizard.step.company") },
-          { stepId: "coa", label: t("wizard.step.coa") },
-          { stepId: "users", label: t("wizard.step.users") },
-          { stepId: "done", label: t("wizard.step.done") },
-        ].map(({ stepId, label }, i) => (
-          // The React key is the stable step identifier ("company"
-          // / "coa" / "users" / "done") rather than the translated
-          // label so a locale whose translations collide (e.g.
-          // an abbreviation that maps two step names to the same
-          // string) doesn't trigger a duplicate-key warning or
-          // reorder during reconciliation.  The field is named
-          // `stepId` (not `id`) to avoid shadowing the `id` from
-          // `useParams` higher up in the component — both are
-          // string-typed and a future contributor copy-pasting
-          // markup between the outer and inner scopes could miss
-          // that they refer to different values otherwise.
-          <li
-            key={stepId}
-            style={{
-              color: i === step ? "#111827" : "#9ca3af",
-              fontWeight: i === step ? 600 : 400,
-            }}
-          >
-            {i + 1}. {label}
-          </li>
-        ))}
-      </ol>
+    <section className="mx-auto flex max-w-2xl flex-col gap-6">
+      <header className="flex flex-col gap-1">
+        <h1 className="text-2xl font-semibold tracking-tight text-fg">
+          Tenant Setup
+        </h1>
+        <p className="text-sm text-fg-muted">
+          Seeds the chart of accounts, default roles, and invites your
+          starting team. You can edit every value after setup from the
+          admin pages.
+        </p>
+      </header>
+      {/* Stepper marks indices < current as completed (check marker)
+          and index === current as active, tracking the company → CoA
+          → users → done progression. */}
+      <Stepper
+        current={step}
+        steps={[
+          { label: t("wizard.step.company") },
+          { label: t("wizard.step.coa") },
+          { label: t("wizard.step.users") },
+          { label: t("wizard.step.done") },
+        ]}
+      />
 
       {step === 0 && (
-        <div style={{ display: "grid", gap: 12 }}>
-          <label style={{ display: "grid", gap: 4 }}>
-            Company name
-            <input
-              value={companyName}
-              onChange={(e) => setCompanyName(e.target.value)}
-              required
-            />
-          </label>
-          <label style={{ display: "grid", gap: 4 }}>
-            Industry
-            <input
-              value={industry}
-              onChange={(e) => setIndustry(e.target.value)}
-              placeholder="e.g. Software, Retail"
-            />
-          </label>
-          <label style={{ display: "grid", gap: 4 }}>
-            Country
-            <input
-              value={country}
-              onChange={(e) => setCountry(e.target.value)}
-              placeholder="ISO country code or name"
-            />
-          </label>
-          <label style={{ display: "grid", gap: 4 }}>
-            {t("common.language")}
-            <select
-              value={effectiveLocale}
-              onChange={(e) => setLocaleState(e.target.value)}
-              aria-label={t("common.language")}
-            >
-              {SupportedLocales.map((info) => (
-                <option key={info.tag} value={info.tag}>
-                  {info.name}
-                </option>
-              ))}
-            </select>
-            <span style={{ color: "#6b7280", fontSize: 12 }}>
-              {locale
-                ? // The user has picked explicitly. Show which country
-                  // would have selected the same locale (or note that
-                  // they're overriding the country-derived default).
-                  country &&
-                  effectiveLocale !== bestSupportedLocaleForCountry(country)
-                  ? t("wizard.locale.override_hint", {
-                      country: country.trim().toUpperCase(),
-                      default: localeInfo(
-                        bestSupportedLocaleForCountry(country),
-                      ).name,
-                    })
-                  : t("wizard.locale.explicit_hint")
-                : country
-                  ? t("wizard.locale.country_hint", {
-                      country: country.trim().toUpperCase(),
-                    })
-                  : // No explicit pick AND no country — the dropdown
-                    // shows the LocaleProvider's current value (the
-                    // navigator / cookie / localStorage resolution),
-                    // so the "browser's preferred language" hint copy
-                    // accurately describes what's about to be
-                    // persisted.
-                    t("wizard.locale.browser_hint")}
-            </span>
-          </label>
-          <div>
-            <button
-              type="button"
-              disabled={!canAdvanceCompany}
-              onClick={advancePastCompany}
-            >
-              {t("common.next")}
-            </button>
-          </div>
-        </div>
+        <Card>
+          <CardHeader>
+            <CardTitle>{t("wizard.step.company")}</CardTitle>
+            <CardDescription>
+              Tell us who you are. These details seed the company profile
+              and drive the country-specific defaults on the next step.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-fg">Company name</span>
+              <Input
+                value={companyName}
+                onChange={(e) => setCompanyName(e.target.value)}
+                required
+              />
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-fg">Industry</span>
+              <Input
+                value={industry}
+                onChange={(e) => setIndustry(e.target.value)}
+                placeholder="e.g. Software, Retail"
+              />
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-fg">Country</span>
+              <Input
+                value={country}
+                onChange={(e) => setCountry(e.target.value)}
+                placeholder="ISO country code or name"
+              />
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-fg">
+                {t("common.language")}
+              </span>
+              <Select
+                value={effectiveLocale}
+                onChange={(e) => setLocaleState(e.target.value)}
+                aria-label={t("common.language")}
+              >
+                {SupportedLocales.map((info) => (
+                  <option key={info.tag} value={info.tag}>
+                    {info.name}
+                  </option>
+                ))}
+              </Select>
+              {/* Hint copy reflects the locale-resolution precedence:
+                  an explicit pick wins, else a country-derived locale,
+                  else the LocaleProvider's navigator/cookie value. */}
+              <span className="text-xs font-normal text-fg-muted">
+                {locale
+                  ? country &&
+                    effectiveLocale !== bestSupportedLocaleForCountry(country)
+                    ? t("wizard.locale.override_hint", {
+                        country: country.trim().toUpperCase(),
+                        default: localeInfo(
+                          bestSupportedLocaleForCountry(country),
+                        ).name,
+                      })
+                    : t("wizard.locale.explicit_hint")
+                  : country
+                    ? t("wizard.locale.country_hint", {
+                        country: country.trim().toUpperCase(),
+                      })
+                    : t("wizard.locale.browser_hint")}
+              </span>
+            </label>
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                disabled={!canAdvanceCompany}
+                onClick={advancePastCompany}
+              >
+                {t("common.next")}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {step === 1 && (
-        <div style={{ display: "grid", gap: 12 }}>
-          <fieldset style={{ border: "1px solid #e5e7eb", padding: 12 }}>
-            <legend>Chart of Accounts template</legend>
-            {COA_TEMPLATES.map((tpl) => (
-              <label
-                key={tpl.value}
-                style={{ display: "block", padding: "4px 0" }}
+        <Card>
+          <CardHeader>
+            <CardTitle>{t("wizard.step.coa")}</CardTitle>
+            <CardDescription>
+              Pick the chart of accounts for your statutory jurisdiction.
+              Selecting a country on the previous step pre-selects the
+              matching chart; search or browse by region to change it.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            <Input
+              type="search"
+              value={coaQuery}
+              onChange={(e) => setCoaQuery(e.target.value)}
+              placeholder="Search templates…"
+              aria-label="Search chart of accounts templates"
+              leadingAddon={<Search className="h-4 w-4" />}
+            />
+            <div
+              role="radiogroup"
+              aria-label="Chart of Accounts template"
+              className="flex flex-col gap-2"
+            >
+              {coaRegions.length === 0 ? (
+                <p className="px-1 py-6 text-center text-sm text-fg-muted">
+                  No templates match “{coaQuery.trim()}”.
+                </p>
+              ) : (
+                coaRegions.map(({ region, templates }) => {
+                  // A region is collapsed only when the user collapsed
+                  // it AND there's no active search (search always
+                  // reveals matches so nothing is hidden behind a
+                  // collapsed header).
+                  const collapsed =
+                    !coaQuery.trim() && collapsedRegions.has(region);
+                  return (
+                    <div
+                      key={region}
+                      className="overflow-hidden rounded-md border border-border"
+                    >
+                      <button
+                        type="button"
+                        aria-expanded={!collapsed}
+                        onClick={() =>
+                          setCollapsedRegions((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(region)) next.delete(region);
+                            else next.add(region);
+                            return next;
+                          })
+                        }
+                        className="flex w-full items-center justify-between gap-2 bg-bg-subtle px-3 py-2 text-left text-sm font-semibold text-fg transition-colors hover:bg-bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
+                      >
+                        <span>{region}</span>
+                        <span className="flex items-center gap-2 text-xs font-normal text-fg-subtle">
+                          {templates.length}
+                          <ChevronDown
+                            className={cn(
+                              "h-4 w-4 transition-transform",
+                              collapsed && "-rotate-90",
+                            )}
+                          />
+                        </span>
+                      </button>
+                      {!collapsed && (
+                        <div className="flex flex-col border-t border-border">
+                          {templates.map((tpl) => {
+                            const checked = effectiveCoaTemplate === tpl.value;
+                            return (
+                              <label
+                                key={tpl.value}
+                                className={cn(
+                                  "flex cursor-pointer items-start gap-2.5 px-3 py-2 text-sm transition-colors hover:bg-bg-subtle",
+                                  checked && "bg-bg-subtle font-medium",
+                                )}
+                              >
+                                <input
+                                  type="radio"
+                                  name="coa"
+                                  value={tpl.value}
+                                  checked={checked}
+                                  onChange={(e) =>
+                                    setCoaTemplate(e.target.value)
+                                  }
+                                  className="mt-0.5 accent-[var(--accent)]"
+                                />
+                                <span className="text-fg">{tpl.label}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+            <p className="text-xs text-fg-muted">
+              Templates live in{" "}
+              <code>internal/tenant/coa_templates/</code>. Every account is
+              inserted with{" "}
+              <code>ON CONFLICT (tenant_id, code) DO NOTHING</code> so the
+              step is safe to re-run.
+            </p>
+            <div className="flex justify-between">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => setStep(0)}
               >
-                <input
-                  type="radio"
-                  name="coa"
-                  value={tpl.value}
-                  checked={effectiveCoaTemplate === tpl.value}
-                  onChange={(e) => setCoaTemplate(e.target.value)}
-                />{" "}
-                {tpl.label}
-              </label>
-            ))}
-          </fieldset>
-          <p style={{ color: "#6b7280", fontSize: 12 }}>
-            Templates live in <code>internal/tenant/coa_templates/</code>.
-            Every account is inserted with{" "}
-            <code>ON CONFLICT (tenant_id, code) DO NOTHING</code> so the
-            step is safe to re-run.
-          </p>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" onClick={() => setStep(0)}>
-              {t("common.back")}
-            </button>
-            <button type="button" onClick={() => setStep(2)}>
-              {t("common.next")}
-            </button>
-          </div>
-        </div>
+                {t("common.back")}
+              </Button>
+              <Button type="button" onClick={() => setStep(2)}>
+                {t("common.next")}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {step === 2 && (
-        <div style={{ display: "grid", gap: 12 }}>
-          <p style={{ fontSize: 13, color: "#6b7280" }}>
-            Invite initial team members. Each user is seeded into the{" "}
-            <code>users</code> table and added to the tenant via{" "}
-            <code>user_tenants</code> with the selected role.
-          </p>
-          <table style={{ width: "100%", fontSize: 13 }}>
-            <thead>
-              <tr>
-                <th style={{ textAlign: "left" }}>Email</th>
-                <th style={{ textAlign: "left" }}>Display name</th>
-                <th style={{ textAlign: "left" }}>Role</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {users.map((u, i) => (
-                <tr key={i}>
-                  <td>
-                    <input
-                      value={u.email}
-                      onChange={(e) =>
-                        setUsers((prev) =>
-                          prev.map((row, j) =>
-                            j === i ? { ...row, email: e.target.value } : row,
-                          ),
-                        )
-                      }
-                      type="email"
-                      placeholder="name@example.com"
-                    />
-                  </td>
-                  <td>
-                    <input
-                      value={u.display_name}
-                      onChange={(e) =>
-                        setUsers((prev) =>
-                          prev.map((row, j) =>
-                            j === i
-                              ? { ...row, display_name: e.target.value }
-                              : row,
-                          ),
-                        )
-                      }
-                    />
-                  </td>
-                  <td>
-                    <select
-                      multiple
-                      size={Math.min(6, AVAILABLE_ROLES.length)}
-                      value={u.roles}
-                      onChange={(e) => {
-                        const next = Array.from(e.target.selectedOptions).map(
-                          (o) => o.value,
-                        );
-                        setUsers((prev) =>
-                          prev.map((row, j) =>
-                            j === i
-                              ? {
-                                  ...row,
-                                  // Keep `role` aligned with the first
-                                  // selection so the legacy single-role
-                                  // back-end column stays populated.
-                                  role: next[0] ?? row.role,
-                                  roles: next,
-                                }
-                              : row,
-                          ),
-                        );
-                      }}
-                    >
-                      {AVAILABLE_ROLES.map((role) => (
-                        <option key={role} value={role}>
-                          {role}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setUsers((prev) => prev.filter((_, j) => j !== i))
-                      }
-                      disabled={users.length <= 1}
-                    >
-                      Remove
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div>
-            <button
-              type="button"
-              onClick={() =>
-                setUsers((prev) => [
-                  ...prev,
-                  {
-                    email: "",
-                    display_name: "",
-                    role: "tenant.member",
-                    roles: ["tenant.member"],
-                  },
-                ])
-              }
-            >
-              Add another user
-            </button>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" onClick={() => setStep(1)}>
-              {t("common.back")}
-            </button>
-            <button
-              type="button"
-              onClick={submitWizard}
-              disabled={submit.isPending}
-            >
-              {submit.isPending ? "Running setup…" : "Finish setup"}
-            </button>
-          </div>
-          {submit.isError && (
-            <p style={{ color: "#b91c1c" }}>
-              Setup failed: {submit.error.message}
-            </p>
-          )}
-        </div>
+        <Card>
+          <CardHeader>
+            <CardTitle>{t("wizard.step.users")}</CardTitle>
+            <CardDescription>
+              Invite initial team members. Each user is seeded into the{" "}
+              <code>users</code> table and added to the tenant via{" "}
+              <code>user_tenants</code> with the selected roles.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Email</TableHead>
+                  <TableHead>Display name</TableHead>
+                  <TableHead>Roles</TableHead>
+                  <TableHead>
+                    <span className="sr-only">Actions</span>
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {users.map((u, i) => (
+                  <TableRow key={i}>
+                    <TableCell>
+                      <Input
+                        value={u.email}
+                        onChange={(e) =>
+                          setUsers((prev) =>
+                            prev.map((row, j) =>
+                              j === i
+                                ? { ...row, email: e.target.value }
+                                : row,
+                            ),
+                          )
+                        }
+                        type="email"
+                        placeholder="name@example.com"
+                        aria-label={`Email for user ${i + 1}`}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Input
+                        value={u.display_name}
+                        onChange={(e) =>
+                          setUsers((prev) =>
+                            prev.map((row, j) =>
+                              j === i
+                                ? { ...row, display_name: e.target.value }
+                                : row,
+                            ),
+                          )
+                        }
+                        aria-label={`Display name for user ${i + 1}`}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      {/* The Select primitive is single-select by
+                          design, so roles render as a checkbox group.
+                          `role` mirrors the first checked role to keep
+                          the legacy single-role back-end column
+                          populated. */}
+                      <fieldset
+                        className="flex flex-col gap-1"
+                        aria-label={`Roles for user ${i + 1}`}
+                      >
+                        {AVAILABLE_ROLES.map((role) => (
+                          <label
+                            key={role}
+                            className="flex items-center gap-2 text-sm text-fg"
+                          >
+                            <input
+                              type="checkbox"
+                              value={role}
+                              checked={u.roles.includes(role)}
+                              className="accent-[var(--accent)]"
+                              onChange={(e) =>
+                                setUsers((prev) =>
+                                  prev.map((row, j) => {
+                                    if (j !== i) return row;
+                                    const nextRoles = e.target.checked
+                                      ? [...row.roles, role]
+                                      : row.roles.filter((r) => r !== role);
+                                    return {
+                                      ...row,
+                                      role: nextRoles[0] ?? row.role,
+                                      roles: nextRoles,
+                                    };
+                                  }),
+                                )
+                              }
+                            />
+                            {role}
+                          </label>
+                        ))}
+                      </fieldset>
+                    </TableCell>
+                    <TableCell>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          setUsers((prev) => prev.filter((_, j) => j !== i))
+                        }
+                        disabled={users.length <= 1}
+                      >
+                        Remove
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+            <div>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                leadingIcon={<Plus className="h-4 w-4" />}
+                onClick={() =>
+                  setUsers((prev) => [
+                    ...prev,
+                    {
+                      email: "",
+                      display_name: "",
+                      role: "tenant.member",
+                      roles: ["tenant.member"],
+                    },
+                  ])
+                }
+              >
+                Add another user
+              </Button>
+            </div>
+            {submit.isError && (
+              <div
+                role="alert"
+                className="rounded-md border border-border border-s-2 border-s-danger bg-bg-subtle px-3 py-2 text-sm text-danger"
+              >
+                Setup failed: {submit.error.message}
+              </div>
+            )}
+            <div className="flex justify-between">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => setStep(1)}
+              >
+                {t("common.back")}
+              </Button>
+              <Button
+                type="button"
+                onClick={submitWizard}
+                disabled={submit.isPending}
+              >
+                {submit.isPending ? "Running setup…" : "Finish setup"}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {step === 3 && submit.data && (
-        <div style={{ display: "grid", gap: 12 }}>
-          <h2>Setup complete</h2>
-          <ul style={{ fontSize: 13 }}>
-            <li>
-              CoA template: <code>{submit.data.coa_template_used}</code>
-            </li>
-            <li>
+        <Card>
+          <CardContent className="flex flex-col items-center gap-5 py-10 text-center">
+            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-success text-success-fg animate-in zoom-in-50 duration-300">
+              <Check className="h-7 w-7" strokeWidth={2.5} />
+            </div>
+            <div className="flex flex-col gap-1">
+              <h2 className="text-xl font-semibold tracking-tight text-fg">
+                Setup complete
+              </h2>
+              <p className="text-sm text-fg-muted">
+                Your tenant is ready. Here's what we seeded.
+              </p>
+            </div>
+            <dl className="grid w-full max-w-sm grid-cols-2 gap-x-4 gap-y-2 text-left text-sm">
+              <dt className="text-fg-muted">CoA template</dt>
+              <dd className="text-end font-medium text-fg">
+                <code>{submit.data.coa_template_used}</code>
+              </dd>
               {/* locale_used reflects the locale the backend persisted
                   after its resolver downgrade. May differ from the
-                  effectiveLocale the wizard rendered with (e.g. the
-                  user picked "hi" in step 0 but the backend
-                  downgraded to "en" because hi.json doesn't ship).
-                  Showing the persisted value is the source of truth
-                  for what subsequent sessions will render against. */}
-              {t("wizard.complete.locale_used", {
-                locale: localeInfo(submit.data.locale_used).name,
-                tag: submit.data.locale_used,
-              })}
-            </li>
-            <li>Accounts seeded: {submit.data.accounts_inserted}</li>
-            <li>Roles seeded: {submit.data.roles_inserted}</li>
-            <li>Users invited: {submit.data.users_inserted}</li>
-          </ul>
-          <div>
-            <button type="button" onClick={() => navigate("/")}>
+                  effectiveLocale the wizard rendered with (e.g. the user
+                  picked "hi" but the backend downgraded to "en" because
+                  hi.json doesn't ship). The persisted value is the
+                  source of truth for subsequent sessions. */}
+              <dt className="text-fg-muted">Locale</dt>
+              <dd className="text-end font-medium text-fg">
+                {t("wizard.complete.locale_used", {
+                  locale: localeInfo(submit.data.locale_used).name,
+                  tag: submit.data.locale_used,
+                })}
+              </dd>
+              <dt className="text-fg-muted">Accounts seeded</dt>
+              <dd className="text-end font-medium text-fg">
+                {submit.data.accounts_inserted}
+              </dd>
+              <dt className="text-fg-muted">Roles seeded</dt>
+              <dd className="text-end font-medium text-fg">
+                {submit.data.roles_inserted}
+              </dd>
+              <dt className="text-fg-muted">Users invited</dt>
+              <dd className="text-end font-medium text-fg">
+                {submit.data.users_inserted}
+              </dd>
+            </dl>
+            <Button type="button" onClick={() => navigate("/")}>
               Go to tenant home
-            </button>
-          </div>
-        </div>
+            </Button>
+          </CardContent>
+        </Card>
       )}
     </section>
   );

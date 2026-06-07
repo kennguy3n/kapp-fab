@@ -2,6 +2,14 @@ import { useMemo } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -55,40 +63,31 @@ function LearnerProgressIndex() {
   return (
     <section>
       <h1>Learner Progress</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         One row per enrollment. Click through for per-lesson completion
         and scores.
       </p>
       {enrollmentsQ.isLoading && <p>Loading…</p>}
       {enrollmentsQ.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load enrollments: {(enrollmentsQ.error as Error).message}
         </p>
       )}
       {enrollmentsQ.data && enrollmentsQ.data.length === 0 && (
-        <p style={{ color: "#6b7280" }}>No enrollments yet.</p>
+        <p className="text-fg-muted">No enrollments yet.</p>
       )}
       {enrollmentsQ.data && enrollmentsQ.data.length > 0 && (
-        <table
-          style={{
-            width: "100%",
-            borderCollapse: "collapse",
-            fontSize: 13,
-            marginTop: 12,
-          }}
-        >
-          <thead>
-            <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-              <th style={{ padding: "6px 8px" }}>Enrollment</th>
-              <th style={{ padding: "6px 8px" }}>Course</th>
-              <th style={{ padding: "6px 8px" }}>Learner</th>
-              <th style={{ padding: "6px 8px" }}>Status</th>
-              <th style={{ padding: "6px 8px", textAlign: "right" }}>
-                Completed
-              </th>
-            </tr>
-          </thead>
-          <tbody>
+        <Table className="mt-3 text-[13px]">
+          <TableHeader>
+            <TableRow className="text-left">
+              <TableHead>Enrollment</TableHead>
+              <TableHead>Course</TableHead>
+              <TableHead>Learner</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead className="text-right">Completed</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {enrollmentsQ.data.map((e) => {
               const d = e.data as Record<string, unknown>;
               const courseId =
@@ -100,26 +99,21 @@ function LearnerProgressIndex() {
                 progressQ.data ?? [],
               );
               return (
-                <tr
-                  key={e.id}
-                  style={{ borderBottom: "1px solid #f3f4f6" }}
-                >
-                  <td style={{ padding: "6px 8px" }}>
+                <TableRow key={e.id}>
+                  <TableCell>
                     <Link to={`/lms/progress/${e.id}`}>{e.id.slice(0, 8)}…</Link>
-                  </td>
-                  <td style={{ padding: "6px 8px" }}>
+                  </TableCell>
+                  <TableCell>
                     {courseTitleById.get(courseId) ?? courseId}
-                  </td>
-                  <td style={{ padding: "6px 8px" }}>{userId}</td>
-                  <td style={{ padding: "6px 8px" }}>{status}</td>
-                  <td style={{ padding: "6px 8px", textAlign: "right" }}>
-                    {prog.completed}
-                  </td>
-                </tr>
+                  </TableCell>
+                  <TableCell>{userId}</TableCell>
+                  <TableCell>{status}</TableCell>
+                  <TableCell className="text-right">{prog.completed}</TableCell>
+                </TableRow>
               );
             })}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       )}
     </section>
   );
@@ -192,69 +186,50 @@ function LearnerProgressDetail({ enrollmentId }: { enrollmentId: string }) {
 
   return (
     <section>
-      <div style={{ marginBottom: 8 }}>
+      <div className="mb-2">
         <Link to="/lms/progress">← All enrollments</Link>
       </div>
       <h1>Learner Progress</h1>
       {loading && <p>Loading…</p>}
       {!loading && !enrollment && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Enrollment {enrollmentId} not found.
         </p>
       )}
       {!loading && enrollment && (
         <>
-          <dl
-            style={{
-              display: "grid",
-              gridTemplateColumns: "max-content 1fr",
-              gap: "4px 16px",
-              fontSize: 13,
-              marginBottom: 16,
-            }}
-          >
-            <dt style={{ color: "#6b7280" }}>Enrollment</dt>
-            <dd style={{ margin: 0 }}>{enrollment.id}</dd>
-            <dt style={{ color: "#6b7280" }}>Course</dt>
-            <dd style={{ margin: 0 }}>{courseTitle}</dd>
-            <dt style={{ color: "#6b7280" }}>Learner</dt>
-            <dd style={{ margin: 0 }}>
+          <dl className="mb-4 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-[13px]">
+            <dt className="text-fg-muted">Enrollment</dt>
+            <dd className="m-0">{enrollment.id}</dd>
+            <dt className="text-fg-muted">Course</dt>
+            <dd className="m-0">{courseTitle}</dd>
+            <dt className="text-fg-muted">Learner</dt>
+            <dd className="m-0">
               {stringOr(enrollmentData.user_id, "(unknown)")}
             </dd>
-            <dt style={{ color: "#6b7280" }}>Status</dt>
-            <dd style={{ margin: 0 }}>
+            <dt className="text-fg-muted">Status</dt>
+            <dd className="m-0">
               {stringOr(enrollmentData.status, "")}
             </dd>
           </dl>
 
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
+          <div className="mb-4">
+            <div className="flex justify-between">
               <strong>Overall</strong>
               <span>
                 {completedCount} / {totalCount} lessons ({percent}%)
               </span>
             </div>
-            <div
-              style={{
-                height: 8,
-                background: "#e5e7eb",
-                borderRadius: 4,
-                marginTop: 4,
-                overflow: "hidden",
-              }}
-            >
+            <div className="mt-1 h-2 overflow-hidden rounded bg-bg-muted">
               <div
-                style={{
-                  width: `${percent}%`,
-                  height: "100%",
-                  background: "#2563eb",
-                }}
+                className="h-full bg-accent"
+                style={{ width: `${percent}%` }}
               />
             </div>
           </div>
 
           {courseModules.length === 0 && (
-            <p style={{ color: "#6b7280" }}>
+            <p className="text-fg-muted">
               This course has no modules yet.
             </p>
           )}
@@ -266,37 +241,24 @@ function LearnerProgressDetail({ enrollmentId }: { enrollmentId: string }) {
                 ? ((m.data as Record<string, unknown>).title as string)
                 : "(untitled module)";
             return (
-              <div key={m.id} style={{ marginBottom: 16 }}>
-                <h3 style={{ margin: "8px 0" }}>{moduleTitle}</h3>
+              <div key={m.id} className="mb-4">
+                <h3 className="my-2">{moduleTitle}</h3>
                 {moduleLessons.length === 0 ? (
-                  <p style={{ color: "#6b7280", fontSize: 13 }}>
+                  <p className="text-[13px] text-fg-muted">
                     No lessons in this module.
                   </p>
                 ) : (
-                  <table
-                    style={{
-                      width: "100%",
-                      borderCollapse: "collapse",
-                      fontSize: 13,
-                    }}
-                  >
-                    <thead>
-                      <tr
-                        style={{
-                          textAlign: "left",
-                          borderBottom: "1px solid #e5e7eb",
-                        }}
-                      >
-                        <th style={{ padding: "6px 8px" }}>Lesson</th>
-                        <th style={{ padding: "6px 8px" }}>Type</th>
-                        <th style={{ padding: "6px 8px" }}>Status</th>
-                        <th style={{ padding: "6px 8px", textAlign: "right" }}>
-                          Score
-                        </th>
-                        <th style={{ padding: "6px 8px" }}>Completed</th>
-                      </tr>
-                    </thead>
-                    <tbody>
+                  <Table className="text-[13px]">
+                    <TableHeader>
+                      <TableRow className="text-left">
+                        <TableHead>Lesson</TableHead>
+                        <TableHead>Type</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead className="text-right">Score</TableHead>
+                        <TableHead>Completed</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
                       {moduleLessons.map((l) => {
                         const ld = l.data as Record<string, unknown>;
                         const title = stringOr(ld.title, "(untitled)");
@@ -306,28 +268,23 @@ function LearnerProgressDetail({ enrollmentId }: { enrollmentId: string }) {
                           (prog?.data as Record<string, unknown> | undefined) ??
                           {};
                         return (
-                          <tr
-                            key={l.id}
-                            style={{ borderBottom: "1px solid #f3f4f6" }}
-                          >
-                            <td style={{ padding: "6px 8px" }}>{title}</td>
-                            <td style={{ padding: "6px 8px" }}>{type}</td>
-                            <td style={{ padding: "6px 8px" }}>
+                          <TableRow key={l.id}>
+                            <TableCell>{title}</TableCell>
+                            <TableCell>{type}</TableCell>
+                            <TableCell>
                               {stringOr(progData.status, "not_started")}
-                            </td>
-                            <td
-                              style={{ padding: "6px 8px", textAlign: "right" }}
-                            >
+                            </TableCell>
+                            <TableCell className="text-right">
                               {numberOr(progData.score, "—")}
-                            </td>
-                            <td style={{ padding: "6px 8px" }}>
+                            </TableCell>
+                            <TableCell>
                               {stringOr(progData.completed_at, "")}
-                            </td>
-                          </tr>
+                            </TableCell>
+                          </TableRow>
                         );
                       })}
-                    </tbody>
-                  </table>
+                    </TableBody>
+                  </Table>
                 )}
               </div>
             );

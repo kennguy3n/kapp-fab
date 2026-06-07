@@ -1,5 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import {
+  Button,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 const tenantKey = (): string =>
@@ -40,41 +49,37 @@ export function TenantFeaturesPage() {
   return (
     <section>
       <h1>Features</h1>
-      <p style={{ color: "#6b7280", fontSize: 13 }}>
+      <p className="text-[13px] text-fg-muted">
         Toggle optional capabilities for the current tenant. Disabled features
         return 403 from the API and are hidden from the navigation sidebar.
       </p>
-      <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 16 }}>
-        <thead>
-          <tr>
-            <th style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb", padding: "6px 4px" }}>
-              Feature
-            </th>
-            <th style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb", padding: "6px 4px" }}>
-              Enabled
-            </th>
-          </tr>
-        </thead>
-        <tbody>
+      <Table className="mt-4">
+        <TableHeader>
+          <TableRow>
+            <TableHead>Feature</TableHead>
+            <TableHead>Enabled</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {keys.map((k) => (
-            <tr key={k} style={{ borderBottom: "1px solid #f3f4f6" }}>
-              <td style={{ padding: "6px 4px", textTransform: "capitalize" }}>{k}</td>
-              <td style={{ padding: "6px 4px" }}>
-                <label style={{ cursor: "pointer" }}>
+            <TableRow key={k}>
+              <TableCell className="capitalize">{k}</TableCell>
+              <TableCell>
+                <label className="flex cursor-pointer items-center gap-1.5">
                   <input
                     type="checkbox"
                     checked={!!current[k]}
                     onChange={() => toggle(k)}
                   />
-                  <span style={{ marginLeft: 6 }}>{current[k] ? "on" : "off"}</span>
+                  <span>{current[k] ? "on" : "off"}</span>
                 </label>
-              </td>
-            </tr>
+              </TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
-      <div style={{ marginTop: 16, display: "flex", gap: 8 }}>
-        <button
+        </TableBody>
+      </Table>
+      <div className="mt-4 flex gap-2">
+        <Button
           type="button"
           disabled={!dirty || update.isPending}
           onClick={() => {
@@ -82,17 +87,18 @@ export function TenantFeaturesPage() {
           }}
         >
           {update.isPending ? "Saving…" : "Save"}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          variant="outline"
           disabled={!dirty || update.isPending}
           onClick={() => setPending(null)}
         >
           Reset
-        </button>
+        </Button>
       </div>
       {plansQuery.data && (
-        <p style={{ marginTop: 24, fontSize: 12, color: "#6b7280" }}>
+        <p className="mt-6 text-xs text-fg-muted">
           Plans on file: {plansQuery.data.plans.map((p) => p.name).join(", ")}
         </p>
       )}

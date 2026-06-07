@@ -2,6 +2,16 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord, SavedView } from "@kapp/client";
+import {
+  Button,
+  ConfirmDialog,
+  EmptyState,
+  PromptDialog,
+  Select,
+  Skeleton,
+  toast,
+} from "@kapp/ui";
+import { AlertTriangle, Inbox, Plus } from "lucide-react";
 import { api } from "../lib/api";
 import { KTypeList } from "../components/KTypeList";
 import { KanbanView } from "../components/KanbanView";
@@ -72,12 +82,28 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
     return filtered;
   }, [recordsQuery.data, activeView]);
 
+  // Dialog visibility for the prompt/confirm flows that previously
+  // used window.prompt / window.confirm. The host owns the open flag;
+  // each dialog hands its value/confirmation back through a callback
+  // and stays open (showing the `loading` pending state) until the
+  // mutation settles, at which point onSuccess/onError closes it.
+  const [statusPromptOpen, setStatusPromptOpen] = useState(false);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [saveViewOpen, setSaveViewOpen] = useState(false);
+  const [deleteViewOpen, setDeleteViewOpen] = useState(false);
+
   const createViewMutation = useMutation({
     mutationFn: (input: { name: string; filters: Record<string, unknown>; sort: string }) =>
       api.createView({ ktype: ktype!, ...input }),
     onSuccess: (v) => {
       qc.invalidateQueries({ queryKey: ["views", ktype] });
       setSelectedViewId(v.id);
+      setSaveViewOpen(false);
+      toast.success("View saved", { description: v.name });
+    },
+    onError: (err) => {
+      setSaveViewOpen(false);
+      toast.error("Couldn't save view", { description: (err as Error).message });
     },
   });
 
@@ -86,6 +112,14 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["views", ktype] });
       setSelectedViewId(NEW_VIEW_ID);
+      setDeleteViewOpen(false);
+      toast.success("View deleted");
+    },
+    onError: (err) => {
+      setDeleteViewOpen(false);
+      toast.error("Couldn't delete view", {
+        description: (err as Error).message,
+      });
     },
   });
 
@@ -122,29 +156,44 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
         action: "status_change",
         payload: { status },
       }),
-    onSuccess: () => {
+    onSuccess: (_data, { ids }) => {
       qc.invalidateQueries({ queryKey: ["records", ktype] });
       setSelectedIds(new Set());
+      setStatusPromptOpen(false);
+      toast.success(`Updated ${ids.length} record(s)`);
+    },
+    onError: (err) => {
+      setStatusPromptOpen(false);
+      toast.error("Bulk update failed", {
+        description: (err as Error).message,
+      });
     },
   });
 
   const bulkDeleteMutation = useMutation({
     mutationFn: async (ids: string[]) =>
       api.bulkRecords(ktype!, { ids, action: "delete" }),
-    onSuccess: () => {
+    onSuccess: (_data, ids) => {
       qc.invalidateQueries({ queryKey: ["records", ktype] });
       setSelectedIds(new Set());
+      setBulkDeleteOpen(false);
+      toast.success(`Deleted ${ids.length} record(s)`);
+    },
+    onError: (err) => {
+      setBulkDeleteOpen(false);
+      toast.error("Bulk delete failed", {
+        description: (err as Error).message,
+      });
     },
   });
 
-  const handleBulkStatus = () => {
-    const status = window.prompt("New status");
-    if (!status) return;
+  // Keep the dialog open while the mutation runs so its `loading`
+  // pending state is visible; onSuccess/onError closes it.
+  const submitBulkStatus = (status: string) => {
     bulkStatusMutation.mutate({ ids: [...selectedIds], status });
   };
 
-  const handleBulkDelete = () => {
-    if (!window.confirm(`Delete ${selectedIds.size} record(s)?`)) return;
+  const confirmBulkDelete = () => {
     bulkDeleteMutation.mutate([...selectedIds]);
   };
 
@@ -165,8 +214,11 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      toast.success("Export complete", { description: `${ktype}.csv` });
     } catch (err) {
-      window.alert((err as Error).message ?? "Export failed");
+      toast.error("Export failed", {
+        description: (err as Error).message,
+      });
     }
   };
 
@@ -207,9 +259,7 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
     },
   });
 
-  const handleSaveView = () => {
-    const name = window.prompt("Name this view");
-    if (!name) return;
+  const submitSaveView = (name: string) => {
     // Without an in-page filter editor we seed new views with an
     // empty predicate; toggling columns/sort from list headers
     // later is a PATCH. The server treats {} as "match everything"
@@ -217,39 +267,72 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
     createViewMutation.mutate({ name, filters: {}, sort: "" });
   };
 
-  const handleDeleteView = () => {
+  const confirmDeleteView = () => {
     if (!activeView) return;
-    if (!window.confirm(`Delete view "${activeView.name}"?`)) return;
     deleteViewMutation.mutate(activeView.id);
   };
 
   if (!ktype) return null;
-  if (ktypeQuery.isLoading || recordsQuery.isLoading) return <div>Loading…</div>;
-  if (ktypeQuery.error) return <div>Error loading KType.</div>;
-  if (!ktypeQuery.data) return <div>KType not found.</div>;
+  if (ktypeQuery.isLoading || recordsQuery.isLoading) {
+    return (
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center justify-between gap-3">
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-8 w-32" />
+        </div>
+        <div className="flex flex-col gap-2">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-11 w-full" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (ktypeQuery.error) {
+    return (
+      <EmptyState
+        icon={<AlertTriangle />}
+        title="Couldn't load this list"
+        description={(ktypeQuery.error as Error).message}
+        action={
+          <Button variant="secondary" onClick={() => ktypeQuery.refetch()}>
+            Retry
+          </Button>
+        }
+      />
+    );
+  }
+  if (!ktypeQuery.data) {
+    return (
+      <EmptyState
+        icon={<AlertTriangle />}
+        title="KType not found"
+        description="This record type doesn't exist or you don't have access to it."
+      />
+    );
+  }
 
   const kt = ktypeQuery.data;
   const views = viewsQuery.data ?? [];
 
+  const hasRecords = records.length > 0;
+
   return (
-    <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
-      <section style={{ flex: 1, minWidth: 0 }}>
-        <header
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: 12,
-          }}
-        >
-          <h1>{kt.name}</h1>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <label style={{ display: "flex", gap: 4, alignItems: "center" }}>
+    <div className="flex items-start gap-4">
+      <section className="min-w-0 flex-1">
+        <header className="flex flex-wrap items-center justify-between gap-3">
+          <h1 className="text-2xl font-semibold tracking-tight text-fg">
+            {kt.name}
+          </h1>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-2 text-sm text-fg-muted">
               View:
-              <select
+              <Select
+                size="sm"
                 aria-label="Saved view"
                 value={activeView?.id ?? NEW_VIEW_ID}
                 onChange={(e) => setSelectedViewId(e.target.value)}
+                className="w-auto"
               >
                 <option value={NEW_VIEW_ID}>All records</option>
                 {views.map((v) => (
@@ -259,84 +342,133 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
                     {v.shared ? " — shared" : ""}
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
-            <button onClick={handleSaveView} disabled={createViewMutation.isPending}>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setSaveViewOpen(true)}
+              disabled={createViewMutation.isPending}
+            >
               Save view
-            </button>
+            </Button>
             {activeView && (
-              <button onClick={handleDeleteView} disabled={deleteViewMutation.isPending}>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setDeleteViewOpen(true)}
+                disabled={deleteViewMutation.isPending}
+              >
                 Delete view
-              </button>
+              </Button>
             )}
             {hasKanban && (
-              <div role="tablist" style={{ display: "flex", gap: 4 }}>
-                <button
+              <div role="tablist" className="flex gap-1">
+                <Button
+                  size="sm"
+                  variant={mode === "list" ? "primary" : "outline"}
                   onClick={() => setModeOverride("list")}
                   aria-pressed={mode === "list"}
                 >
                   List
-                </button>
-                <button
+                </Button>
+                <Button
+                  size="sm"
+                  variant={mode === "kanban" ? "primary" : "outline"}
                   onClick={() => setModeOverride("kanban")}
                   aria-pressed={mode === "kanban"}
                 >
                   Kanban
-                </button>
+                </Button>
               </div>
             )}
-            <button onClick={() => navigate(`/records/${ktype}/new`)}>
+            <Button
+              size="sm"
+              leadingIcon={<Plus className="h-4 w-4" />}
+              onClick={() => navigate(`/records/${ktype}/new`)}
+            >
               New
-            </button>
+            </Button>
           </div>
         </header>
-        {mode === "kanban" && hasKanban ? (
-          <KanbanView
-            ktype={kt}
-            records={records}
-            onCardClick={(r) => setSelected(r)}
-            onMove={(record, toStage) =>
-              moveMutation.mutate({ record, toStage })
-            }
-          />
-        ) : (
-          <KTypeList
-            ktype={kt}
-            records={records}
-            onRowClick={(r) => setSelected(r)}
-            selectedIds={selectedIds}
-            onToggleSelect={toggleSelect}
-            onToggleAll={(checked) => toggleSelectAll(checked, records)}
-          />
-        )}
+        <div className="mt-4">
+          {!hasRecords ? (
+            <EmptyState
+              icon={<Inbox />}
+              title={
+                activeView
+                  ? `No matching ${kt.name} records`
+                  : `No ${kt.name} records yet`
+              }
+              description={
+                activeView
+                  ? "No records match this view's filters."
+                  : "Create your first one to get started."
+              }
+              action={
+                <Button
+                  leadingIcon={<Plus className="h-4 w-4" />}
+                  onClick={() => navigate(`/records/${ktype}/new`)}
+                >
+                  New {kt.name}
+                </Button>
+              }
+            />
+          ) : mode === "kanban" && hasKanban ? (
+            <KanbanView
+              ktype={kt}
+              records={records}
+              onCardClick={(r) => setSelected(r)}
+              onMove={(record, toStage) =>
+                moveMutation.mutate({ record, toStage })
+              }
+            />
+          ) : (
+            <KTypeList
+              ktype={kt}
+              records={records}
+              onRowClick={(r) => setSelected(r)}
+              selectedIds={selectedIds}
+              onToggleSelect={toggleSelect}
+              onToggleAll={(checked) => toggleSelectAll(checked, records)}
+            />
+          )}
+        </div>
         {selectedIds.size > 0 && (
           <div
             role="toolbar"
             aria-label="Bulk actions"
-            style={{
-              position: "sticky",
-              bottom: 16,
-              marginTop: 12,
-              display: "flex",
-              gap: 8,
-              alignItems: "center",
-              background: "#111827",
-              color: "#f9fafb",
-              padding: "8px 12px",
-              borderRadius: 8,
-              boxShadow: "0 4px 12px rgba(0,0,0,0.2)",
-              zIndex: 2,
-            }}
+            className="sticky bottom-4 z-10 mt-3 flex items-center gap-2 rounded-lg border border-border bg-bg-elevated px-3 py-2 shadow-lg"
           >
-            <span>{selectedIds.size} selected</span>
-            <button onClick={handleBulkStatus} disabled={bulkStatusMutation.isPending}>
+            <span className="text-sm font-medium text-fg">
+              {selectedIds.size} selected
+            </span>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setStatusPromptOpen(true)}
+              disabled={bulkStatusMutation.isPending}
+            >
               Change Status
-            </button>
-            <button onClick={handleBulkDelete} disabled={bulkDeleteMutation.isPending}>
+            </Button>
+            <Button
+              size="sm"
+              variant="destructive"
+              onClick={() => setBulkDeleteOpen(true)}
+              disabled={bulkDeleteMutation.isPending}
+            >
               Delete
-            </button>
-            <button onClick={handleBulkExport}>Export CSV</button>
-            <button onClick={() => setSelectedIds(new Set())}>Clear</button>
+            </Button>
+            <Button size="sm" variant="secondary" onClick={handleBulkExport}>
+              Export CSV
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setSelectedIds(new Set())}
+            >
+              Clear
+            </Button>
           </div>
         )}
       </section>
@@ -351,6 +483,49 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
           }}
         />
       )}
+
+      <PromptDialog
+        open={statusPromptOpen}
+        onOpenChange={(o) => !bulkStatusMutation.isPending && setStatusPromptOpen(o)}
+        title="Change status"
+        description={`Apply a new status to ${selectedIds.size} record(s).`}
+        label="New status"
+        placeholder="e.g. won, lost, on_hold"
+        confirmLabel="Apply"
+        loading={bulkStatusMutation.isPending}
+        onSubmit={submitBulkStatus}
+      />
+      <ConfirmDialog
+        open={bulkDeleteOpen}
+        onOpenChange={(o) => !bulkDeleteMutation.isPending && setBulkDeleteOpen(o)}
+        destructive
+        title={`Delete ${selectedIds.size} record(s)?`}
+        description="This permanently removes the selected records. This action cannot be undone."
+        confirmLabel="Delete"
+        loading={bulkDeleteMutation.isPending}
+        onConfirm={confirmBulkDelete}
+      />
+      <PromptDialog
+        open={saveViewOpen}
+        onOpenChange={(o) => !createViewMutation.isPending && setSaveViewOpen(o)}
+        title="Save view"
+        description="Save the current filters and sort as a reusable view."
+        label="View name"
+        placeholder="e.g. Open deals"
+        confirmLabel="Save"
+        loading={createViewMutation.isPending}
+        onSubmit={submitSaveView}
+      />
+      <ConfirmDialog
+        open={deleteViewOpen}
+        onOpenChange={(o) => !deleteViewMutation.isPending && setDeleteViewOpen(o)}
+        destructive
+        title={`Delete view "${activeView?.name ?? ""}"?`}
+        description="This removes the saved view for you. Records are not affected."
+        confirmLabel="Delete view"
+        loading={deleteViewMutation.isPending}
+        onConfirm={confirmDeleteView}
+      />
     </div>
   );
 }

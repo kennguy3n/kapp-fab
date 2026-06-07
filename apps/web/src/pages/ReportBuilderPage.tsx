@@ -1,6 +1,16 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReportDefinition, ReportResult, SavedReport } from "@kapp/client";
+import {
+  Button,
+  Input,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 const BLANK_DEFINITION: ReportDefinition = {
@@ -78,113 +88,102 @@ export function ReportBuilderPage() {
   return (
     <section>
       <h1>Report Builder</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Define a report with columns / filters / group-by / aggregations
         over any KType or ledger table. Hit Run to preview, Save to
         persist the definition for dashboards and scheduled exports.
       </p>
 
-      <div style={{ display: "flex", gap: 16 }}>
-        <aside style={{ flex: "0 0 220px" }}>
-          <h3 style={{ fontSize: 14 }}>Saved reports</h3>
+      <div className="flex gap-4">
+        <aside className="flex-[0_0_220px]">
+          <h3 className="text-sm">Saved reports</h3>
           {saved.isLoading && <p>Loading…</p>}
           {(saved.data?.reports ?? []).length === 0 && !saved.isLoading && (
-            <p style={{ color: "#9ca3af", fontStyle: "italic", fontSize: 13 }}>
+            <p className="text-[13px] italic text-fg-subtle">
               No saved reports yet.
             </p>
           )}
-          <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: 13 }}>
+          <ul className="m-0 list-none p-0 text-[13px]">
             {(saved.data?.reports ?? []).map((r) => (
-              <li key={r.id} style={{ padding: "4px 0" }}>
-                <button
+              <li key={r.id} className="py-1">
+                <Button
+                  variant="link"
+                  size="sm"
+                  className="h-auto p-0"
                   onClick={() => loadSaved(r)}
-                  style={{
-                    background: "none",
-                    border: "none",
-                    color: "#2563eb",
-                    cursor: "pointer",
-                    padding: 0,
-                  }}
                 >
                   {r.name}
-                </button>
+                </Button>
               </li>
             ))}
           </ul>
         </aside>
 
-        <div style={{ flex: 1 }}>
-          <div style={{ display: "flex", gap: 8, marginBottom: 8, fontSize: 13 }}>
-            <input
+        <div className="flex-1">
+          <div className="mb-2 flex gap-2 text-[13px]">
+            <Input
               placeholder="report name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              style={{ flex: 1 }}
+              className="flex-1"
             />
-            <input
+            <Input
               placeholder="description (optional)"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              style={{ flex: 2 }}
+              className="flex-[2]"
             />
           </div>
           <textarea
             value={rawDef}
             onChange={(e) => setRawDef(e.target.value)}
             spellCheck={false}
-            style={{
-              width: "100%",
-              minHeight: 240,
-              fontFamily: "monospace",
-              fontSize: 12,
-              padding: 8,
-            }}
+            className="min-h-60 w-full rounded-md border border-border bg-bg p-2 font-mono text-xs text-fg outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
           />
-          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-            <button onClick={run} disabled={runMutation.isPending}>
+          <div className="mt-2 flex gap-2">
+            <Button onClick={run} disabled={runMutation.isPending}>
               {runMutation.isPending ? "Running…" : "Run"}
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="outline"
               onClick={() => createMutation.mutate()}
               disabled={!name || createMutation.isPending}
             >
               {createMutation.isPending ? "Saving…" : "Save report"}
-            </button>
+            </Button>
           </div>
           {error && (
-            <p style={{ color: "#b91c1c", fontSize: 13, marginTop: 8 }}>
+            <p className="mt-2 text-[13px] text-danger">
               {error}
             </p>
           )}
 
           {result && (
-            <div style={{ marginTop: 16 }}>
-              <h3 style={{ fontSize: 14 }}>
+            <div className="mt-4">
+              <h3 className="text-sm">
                 Result ({result.rows.length} rows)
               </h3>
-              <div style={{ overflow: "auto", maxHeight: 360 }}>
-                <table style={{ fontSize: 12, borderCollapse: "collapse" }}>
-                  <thead>
-                    <tr style={{ borderBottom: "1px solid #e5e7eb" }}>
+              <div className="max-h-90 overflow-auto">
+                <Table className="text-xs">
+                  <TableHeader>
+                    <TableRow>
                       {result.columns.map((c) => (
-                        <th key={c} style={{ padding: "2px 8px", textAlign: "left" }}>
-                          {c}
-                        </th>
+                        <TableHead key={c}>{c}</TableHead>
                       ))}
-                    </tr>
-                  </thead>
-                  <tbody>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
                     {result.rows.slice(0, 500).map((row, i) => (
-                      <tr key={i} style={{ borderBottom: "1px solid #f3f4f6" }}>
+                      <TableRow key={i}>
                         {result.columns.map((col) => (
-                          <td key={col} style={{ padding: "2px 8px" }}>
+                          <TableCell key={col}>
                             {formatCell(row[col])}
-                          </td>
+                          </TableCell>
                         ))}
-                      </tr>
+                      </TableRow>
                     ))}
-                  </tbody>
-                </table>
+                  </TableBody>
+                </Table>
               </div>
             </div>
           )}

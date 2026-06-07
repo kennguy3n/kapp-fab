@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { Button, Input } from "@kapp/ui";
 
 // LoginPage drives the Phase H JWT auth flow. The dev path still
 // accepts a hand-pasted tenant slug + token for local work, but the
@@ -68,29 +69,29 @@ export function LoginPage() {
   };
 
   return (
-    <form onSubmit={submit} style={{ maxWidth: 360 }}>
+    <form onSubmit={submit} className="flex max-w-[360px] flex-col gap-3">
       <h1>Sign in</h1>
       <p>
         <a href="/api/v1/auth/kchat/start">Sign in with KChat</a>
       </p>
-      <label>
+      <label className="flex flex-col gap-1">
         KChat auth code
-        <input value={code} onChange={(e) => setCode(e.target.value)} />
+        <Input value={code} onChange={(e) => setCode(e.target.value)} />
       </label>
       <hr />
-      <p style={{ color: "#666", fontSize: 12 }}>Dev mode (tenant + token)</p>
-      <label>
+      <p className="text-xs text-fg-muted">Dev mode (tenant + token)</p>
+      <label className="flex flex-col gap-1">
         Tenant
-        <input value={tenant} onChange={(e) => setTenant(e.target.value)} />
+        <Input value={tenant} onChange={(e) => setTenant(e.target.value)} />
       </label>
-      <label>
+      <label className="flex flex-col gap-1">
         Token (optional)
-        <input value={token} onChange={(e) => setToken(e.target.value)} />
+        <Input value={token} onChange={(e) => setToken(e.target.value)} />
       </label>
-      <button type="submit" disabled={busy}>
+      <Button type="submit" disabled={busy} className="self-start">
         {busy ? "Signing in…" : "Continue"}
-      </button>
-      {err && <p style={{ color: "red" }}>{err}</p>}
+      </Button>
+      {err && <p className="text-danger">{err}</p>}
     </form>
   );
 }

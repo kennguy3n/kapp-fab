@@ -1,6 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import type { RetentionPolicy } from "@kapp/client";
+import {
+  Button,
+  Input,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 const tenantKey = (): string =>
@@ -96,33 +106,31 @@ export function RetentionPoliciesPage() {
   return (
     <section>
       <h1>Data retention</h1>
-      <p style={{ color: "#6b7280", fontSize: 13 }}>
+      <p className="text-[13px] text-fg-muted">
         Configure how long the platform keeps each category of operational
         data. The daily sweep deletes rows older than the chosen retention
         window per tenant. Disable a category to skip the sweep without
         losing the configured days.
       </p>
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead>
-          <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-            <th style={{ padding: "8px 4px" }}>Category</th>
-            <th style={{ padding: "8px 4px" }}>Days</th>
-            <th style={{ padding: "8px 4px" }}>Enabled</th>
-            <th style={{ padding: "8px 4px" }}>Last updated</th>
-            <th style={{ padding: "8px 4px" }}></th>
-          </tr>
-        </thead>
-        <tbody>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Category</TableHead>
+            <TableHead>Days</TableHead>
+            <TableHead>Enabled</TableHead>
+            <TableHead>Last updated</TableHead>
+            <TableHead></TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {CATEGORIES.map((c) => {
             const row = effective[c];
             const updated = policyByCat[c]?.updated_at;
             return (
-              <tr key={c} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                <td style={{ padding: "8px 4px", fontFamily: "monospace" }}>
-                  {c}
-                </td>
-                <td style={{ padding: "8px 4px" }}>
-                  <input
+              <TableRow key={c}>
+                <TableCell className="font-mono">{c}</TableCell>
+                <TableCell>
+                  <Input
                     type="number"
                     min={1}
                     max={3650}
@@ -132,10 +140,10 @@ export function RetentionPoliciesPage() {
                         retention_days: Number(e.target.value),
                       })
                     }
-                    style={{ width: 80 }}
+                    className="w-20"
                   />
-                </td>
-                <td style={{ padding: "8px 4px" }}>
+                </TableCell>
+                <TableCell>
                   <input
                     type="checkbox"
                     checked={row.enabled}
@@ -143,26 +151,28 @@ export function RetentionPoliciesPage() {
                       updateField(c, { enabled: e.target.checked })
                     }
                   />
-                </td>
-                <td style={{ padding: "8px 4px", color: "#6b7280", fontSize: 12 }}>
+                </TableCell>
+                <TableCell className="text-xs text-fg-muted">
                   {updated ?? "—"}
-                </td>
-                <td style={{ padding: "8px 4px" }}>
-                  <button
+                </TableCell>
+                <TableCell>
+                  <Button
                     type="button"
+                    size="sm"
+                    variant="outline"
                     disabled={!isDirty(c) || mutation.isPending}
                     onClick={() => mutation.mutate(row)}
                   >
                     {mutation.isPending ? "Saving…" : "Save"}
-                  </button>
-                </td>
-              </tr>
+                  </Button>
+                </TableCell>
+              </TableRow>
             );
           })}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
       {mutation.error && (
-        <p style={{ color: "#dc2626", marginTop: 12, fontSize: 13 }}>
+        <p className="mt-3 text-[13px] text-danger">
           {mutation.error instanceof Error
             ? mutation.error.message
             : String(mutation.error)}

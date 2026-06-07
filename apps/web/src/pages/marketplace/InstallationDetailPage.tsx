@@ -10,6 +10,7 @@ import {
   Button,
   Card,
   CardContent,
+  ConfirmDialog,
   ControlledModal,
 } from "@kapp/ui";
 import { api } from "../../lib/api";
@@ -311,7 +312,7 @@ export function InstallationDetailPage() {
   if (install.isLoading) return <p>Loading…</p>;
   if (install.isError) {
     return (
-      <p style={{ color: "#b91c1c" }}>
+      <p className="text-danger">
         Failed to load installation: {(install.error as Error).message}
       </p>
     );
@@ -450,40 +451,32 @@ export function InstallationDetailPage() {
 
   return (
     <section>
-      <div style={{ marginBottom: 12 }}>
+      <div className="mb-3">
         <Link
           to="/marketplace/installed"
-          style={{ fontSize: 13, color: "#6b7280" }}
+          className="text-[13px] text-fg-muted"
         >
           ← Installed extensions
         </Link>
       </div>
 
-      <header
-        style={{
-          display: "flex",
-          gap: 12,
-          alignItems: "flex-start",
-          marginBottom: 16,
-          flexWrap: "wrap",
-        }}
-      >
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <h1 style={{ margin: 0 }}>
+      <header className="mb-4 flex flex-wrap items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <h1 className="m-0">
             {extension ? extension.display_name : row.extension_id}
           </h1>
-          <div style={{ color: "#6b7280", fontSize: 14, marginTop: 4 }}>
+          <div className="mt-1 text-sm text-fg-muted">
             {extension && (
               <Link to={`/marketplace/extensions/${extension.id}`}>
                 {extension.name}
               </Link>
             )}
             {installedVersion && (
-              <span style={{ marginLeft: 8 }}>· v{installedVersion.version}</span>
+              <span className="ml-2">· v{installedVersion.version}</span>
             )}
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div className="flex gap-2">
           <Badge variant={installStatusVariant(row.status)} size="md">
             {installStatusLabel(row.status)}
           </Badge>
@@ -491,25 +484,23 @@ export function InstallationDetailPage() {
       </header>
 
       {row.failure_reason && (
-        <Card style={{ marginBottom: 16, borderColor: "#fca5a5" }}>
-          <CardContent style={{ padding: 12 }}>
-            <strong style={{ color: "#b91c1c" }}>Last failure:</strong>{" "}
-            <span style={{ fontFamily: "monospace", fontSize: 13 }}>
+        <Card className="mb-4 border-danger/40">
+          <CardContent className="p-3">
+            <strong className="text-danger">Last failure:</strong>{" "}
+            <span className="font-mono text-[13px]">
               {row.failure_reason}
             </span>
           </CardContent>
         </Card>
       )}
 
-      <div style={{ display: "grid", gap: 16 }}>
+      <div className="grid gap-4">
         <Card>
-          <CardContent style={{ padding: 16 }}>
-            <h3 style={{ marginTop: 0 }}>Installation details</h3>
+          <CardContent className="p-4">
+            <h3 className="mt-0">Installation details</h3>
             <DetailRow
               label="Install ID"
-              value={
-                <code style={{ fontSize: 12 }}>{row.id}</code>
-              }
+              value={<code className="text-xs">{row.id}</code>}
             />
             <DetailRow
               label="Installed at"
@@ -540,9 +531,9 @@ export function InstallationDetailPage() {
         </Card>
 
         <Card>
-          <CardContent style={{ padding: 16 }}>
-            <h3 style={{ marginTop: 0 }}>Settings</h3>
-            <p style={{ color: "#6b7280", fontSize: 13, marginTop: 0 }}>
+          <CardContent className="p-4">
+            <h3 className="mt-0">Settings</h3>
+            <p className="mt-0 text-[13px] text-fg-muted">
               The extension's runtime reads these settings every time it
               dispatches a webhook or evaluates a hook. Changes go live
               immediately after saving.
@@ -563,36 +554,17 @@ export function InstallationDetailPage() {
               disabled={settingsMutation.isPending}
             />
             {settingsError && (
-              <p
-                style={{
-                  color: "#b91c1c",
-                  margin: "8px 0 0",
-                  fontSize: 13,
-                }}
-              >
+              <p className="mt-2 text-[13px] text-danger">
                 {settingsError}
               </p>
             )}
             {settingsMutation.isError && (
-              <p
-                style={{
-                  color: "#b91c1c",
-                  margin: "8px 0 0",
-                  fontSize: 13,
-                }}
-              >
+              <p className="mt-2 text-[13px] text-danger">
                 Save failed:{" "}
                 {(settingsMutation.error as Error).message}
               </p>
             )}
-            <div
-              style={{
-                marginTop: 12,
-                display: "flex",
-                gap: 8,
-                justifyContent: "flex-end",
-              }}
-            >
+            <div className="mt-3 flex justify-end gap-2">
               <Button
                 variant="outline"
                 disabled={!settingsTouched || settingsMutation.isPending}
@@ -667,9 +639,9 @@ export function InstallationDetailPage() {
           // installations have no upgrade path by definition.
           row.status !== "uninstalled" && installedVersion ? (
             <Card>
-              <CardContent style={{ padding: 16 }}>
-                <h3 style={{ marginTop: 0 }}>Upgrade</h3>
-                <p style={{ color: "#6b7280", fontSize: 13, marginTop: 0 }}>
+              <CardContent className="p-4">
+                <h3 className="mt-0">Upgrade</h3>
+                <p className="mt-0 text-[13px] text-fg-muted">
                   You are already on the latest approved version
                   (v{installedVersion.version}, published{" "}
                   {formatTimestamp(installedVersion.published_at)}). New
@@ -680,45 +652,34 @@ export function InstallationDetailPage() {
           ) : null
         ) : (
           <Card>
-            <CardContent style={{ padding: 16 }}>
-              <h3 style={{ marginTop: 0 }}>Upgrade</h3>
-              <p style={{ color: "#6b7280", fontSize: 13, marginTop: 0 }}>
+            <CardContent className="p-4">
+              <h3 className="mt-0">Upgrade</h3>
+              <p className="mt-0 text-[13px] text-fg-muted">
                 A newer version is available. Upgrades preserve settings by
                 default; you'll be prompted to migrate the document if the
                 new version requires it.
               </p>
-              <table
-                style={{
-                  width: "100%",
-                  borderCollapse: "collapse",
-                  fontSize: 14,
-                }}
-              >
+              <table className="w-full border-collapse text-sm">
                 <tbody>
                   {upgradableVersions.slice(0, 5).map((v) => (
-                    <tr
-                      key={v.id}
-                      style={{ borderTop: "1px solid #e5e7eb" }}
-                    >
-                      <td style={{ padding: "8px 0" }}>
+                    <tr key={v.id} className="border-t border-border">
+                      <td className="py-2">
                         <strong>v{v.version}</strong>
                         {extension?.listed_version === v.version && (
                           <Badge
                             variant="success"
                             size="xs"
-                            style={{ marginLeft: 6 }}
+                            className="ml-1.5"
                           >
                             DEFAULT
                           </Badge>
                         )}
-                        <div style={{ fontSize: 12, color: "#6b7280" }}>
+                        <div className="text-xs text-fg-muted">
                           Published {formatTimestamp(v.published_at)} ·{" "}
                           {formatBundleSize(v.bundle_size_bytes)}
                         </div>
                       </td>
-                      <td
-                        style={{ padding: "8px 0", textAlign: "right" }}
-                      >
+                      <td className="py-2 text-right">
                         <Button
                           variant="outline"
                           size="sm"
@@ -736,9 +697,9 @@ export function InstallationDetailPage() {
         )}
 
         <Card>
-          <CardContent style={{ padding: 16 }}>
-            <h3 style={{ marginTop: 0, color: "#b91c1c" }}>Uninstall</h3>
-            <p style={{ fontSize: 13, color: "#6b7280" }}>
+          <CardContent className="p-4">
+            <h3 className="mt-0 text-danger">Uninstall</h3>
+            <p className="text-[13px] text-fg-muted">
               Removes the registry rows the extension installed and tears
               down its webhook subscriptions. The install row is preserved
               for audit purposes (status flips to <code>uninstalled</code>).
@@ -754,13 +715,7 @@ export function InstallationDetailPage() {
               Uninstall extension
             </Button>
             {uninstallMutation.isError && (
-              <p
-                style={{
-                  color: "#b91c1c",
-                  marginTop: 8,
-                  fontSize: 13,
-                }}
-              >
+              <p className="mt-2 text-[13px] text-danger">
                 Uninstall failed:{" "}
                 {(uninstallMutation.error as Error).message}
               </p>
@@ -769,40 +724,19 @@ export function InstallationDetailPage() {
         </Card>
       </div>
 
-      {confirmUninstall && (
-        <ControlledModal
-          open
-          onClose={() => {
-            if (uninstallMutation.isPending) return;
-            setConfirmUninstall(false);
-          }}
-          title="Uninstall extension?"
-        >
-          <p>
-            This will tear down the extension's webhook subscriptions and
-            mark the install row as uninstalled. The action cannot be
-            undone — reinstalling will start with default settings.
-          </p>
-          <div
-            style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}
-          >
-            <Button
-              variant="outline"
-              onClick={() => setConfirmUninstall(false)}
-              disabled={uninstallMutation.isPending}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => uninstallMutation.mutate()}
-              disabled={uninstallMutation.isPending}
-            >
-              {uninstallMutation.isPending ? "Uninstalling…" : "Uninstall"}
-            </Button>
-          </div>
-        </ControlledModal>
-      )}
+      <ConfirmDialog
+        open={confirmUninstall}
+        onOpenChange={(open) => {
+          if (!open && uninstallMutation.isPending) return;
+          setConfirmUninstall(open);
+        }}
+        title="Uninstall extension?"
+        description="This will tear down the extension's webhook subscriptions and mark the install row as uninstalled. The action cannot be undone — reinstalling will start with default settings."
+        confirmLabel="Uninstall"
+        destructive
+        loading={uninstallMutation.isPending}
+        onConfirm={() => uninstallMutation.mutate()}
+      />
 
       {upgradeTarget && installedVersion && (
         <UpgradeDialog
@@ -854,8 +788,8 @@ function UpgradeDialog({
       onClose={onClose}
       title={`Upgrade v${installed.version} → v${target.version}`}
     >
-      <div style={{ display: "grid", gap: 12 }}>
-        <p style={{ margin: 0, color: "#4b5563" }}>
+      <div className="grid gap-3">
+        <p className="m-0 text-fg-muted">
           Settings are preserved by default. If the new version requires a
           migrated settings document, cancel and follow the publisher's
           migration guide before re-running this upgrade.
@@ -870,32 +804,24 @@ function UpgradeDialog({
           <div>
             <strong>New requirements in v{target.version}:</strong>
             {addedFeatures.length > 0 && (
-              <div style={{ marginTop: 4 }}>
-                <span style={{ color: "#6b7280", fontSize: 12 }}>
+              <div className="mt-1">
+                <span className="text-xs text-fg-muted">
                   Tenant features:
                 </span>{" "}
                 {addedFeatures.map((f) => (
-                  <Badge
-                    key={f}
-                    variant="warning"
-                    style={{ marginLeft: 4 }}
-                  >
+                  <Badge key={f} variant="warning" className="ml-1">
                     {f}
                   </Badge>
                 ))}
               </div>
             )}
             {addedPerms.length > 0 && (
-              <div style={{ marginTop: 4 }}>
-                <span style={{ color: "#6b7280", fontSize: 12 }}>
+              <div className="mt-1">
+                <span className="text-xs text-fg-muted">
                   Platform permissions:
                 </span>{" "}
                 {addedPerms.map((p) => (
-                  <Badge
-                    key={p}
-                    variant="warning"
-                    style={{ marginLeft: 4 }}
-                  >
+                  <Badge key={p} variant="warning" className="ml-1">
                     {p}
                   </Badge>
                 ))}
@@ -904,13 +830,11 @@ function UpgradeDialog({
           </div>
         )}
         {error && (
-          <p style={{ color: "#b91c1c", margin: 0, fontSize: 13 }}>
+          <p className="m-0 text-[13px] text-danger">
             Upgrade failed: {error.message}
           </p>
         )}
-        <div
-          style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}
-        >
+        <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={onClose} disabled={isPending}>
             Cancel
           </Button>
@@ -935,16 +859,8 @@ function DetailRow({
   value: React.ReactNode;
 }) {
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "160px 1fr",
-        gap: 8,
-        padding: "6px 0",
-        fontSize: 14,
-      }}
-    >
-      <span style={{ color: "#6b7280" }}>{label}</span>
+    <div className="grid grid-cols-[160px_1fr] gap-2 py-1.5 text-sm">
+      <span className="text-fg-muted">{label}</span>
       <span>{value}</span>
     </div>
   );

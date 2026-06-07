@@ -1,5 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Button,
+  ConfirmDialog,
+  Input,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 import type {
   CycleCountLine,
@@ -49,12 +61,12 @@ export function CycleCountPage() {
   return (
     <section>
       <h1>Cycle Counts</h1>
-      <p style={{ color: "#6b7280", marginBottom: 12 }}>
+      <p className="mb-3 text-fg-muted">
         Spot-check on-hand stock by warehouse. Posting writes a
         variance inventory move for every line where the counted
         quantity diverges from the expected snapshot.
       </p>
-      <div style={{ display: "flex", gap: 24, alignItems: "flex-start" }}>
+      <div className="flex items-start gap-6">
         <SessionListPanel
           sessions={list.data ?? []}
           selectedId={selectedId}
@@ -64,7 +76,7 @@ export function CycleCountPage() {
           statusFilter={statusFilter}
           onStatusFilterChange={setStatusFilter}
         />
-        <div style={{ flex: 1 }}>
+        <div className="flex-1">
           {!selectedId && (
             <NewSessionBuilder
               warehouses={warehouses.data ?? []}
@@ -79,28 +91,23 @@ export function CycleCountPage() {
               panel briefly goes blank on every detail switch, and
               a network failure silently swallows the click. */}
           {selectedId && detail.isLoading && (
-            <p style={{ color: "#6b7280" }}>Loading session…</p>
+            <p className="text-fg-muted">Loading session…</p>
           )}
           {selectedId && detail.error && (
             <div
               role="alert"
-              style={{
-                background: "#fee2e2",
-                color: "#991b1b",
-                border: "1px solid #fecaca",
-                padding: "8px 12px",
-                borderRadius: 4,
-                fontSize: 13,
-              }}
+              className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-[13px] text-danger"
             >
               Failed to load session: {(detail.error as Error).message}{" "}
-              <button
+              <Button
                 type="button"
+                size="sm"
+                variant="outline"
+                className="ml-2"
                 onClick={() => setSelectedId(null)}
-                style={{ marginLeft: 8 }}
               >
                 Back to list
-              </button>
+              </Button>
             </div>
           )}
           {selectedId && detail.data && (
@@ -128,10 +135,11 @@ function SessionListPanel(props: {
   onStatusFilterChange: (s: string) => void;
 }) {
   return (
-    <div style={{ width: 320, borderRight: "1px solid #e5e7eb", paddingRight: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <label style={{ fontSize: 13 }}>Status:</label>
-        <select
+    <div className="w-80 border-r border-border pr-4">
+      <div className="flex items-center gap-2">
+        <label className="text-[13px]">Status:</label>
+        <Select
+          size="sm"
           value={props.statusFilter}
           onChange={(e) => props.onStatusFilterChange(e.target.value)}
         >
@@ -140,42 +148,33 @@ function SessionListPanel(props: {
           <option value="counting">counting</option>
           <option value="reconciled">reconciled</option>
           <option value="posted">posted</option>
-        </select>
+        </Select>
       </div>
       {props.loading && <p>Loading…</p>}
       {props.error && (
-        <p style={{ color: "#b91c1c" }}>Failed: {props.error.message}</p>
+        <p className="text-danger">Failed: {props.error.message}</p>
       )}
-      <ul style={{ listStyle: "none", padding: 0, marginTop: 12 }}>
+      <ul className="mt-3 list-none p-0">
         {props.sessions.map((s) => {
           const selected = props.selectedId === s.id;
           return (
             <li key={s.id}>
-              <button
+              <Button
                 type="button"
+                variant={selected ? "secondary" : "outline"}
                 onClick={() => props.onSelect(s.id)}
-                style={{
-                  display: "block",
-                  width: "100%",
-                  padding: "8px 10px",
-                  margin: "4px 0",
-                  textAlign: "left",
-                  background: selected ? "#dbeafe" : "transparent",
-                  border: "1px solid #e5e7eb",
-                  borderRadius: 4,
-                  cursor: "pointer",
-                }}
+                className="my-1 h-auto w-full flex-col items-start justify-start whitespace-normal py-2 text-left"
               >
-                <div style={{ fontWeight: 600 }}>{s.code}</div>
-                <div style={{ fontSize: 12, color: "#6b7280" }}>
+                <div className="font-semibold">{s.code}</div>
+                <div className="text-xs text-fg-muted">
                   {s.status} · {s.warehouse_id.slice(0, 8)}…
                 </div>
-              </button>
+              </Button>
             </li>
           );
         })}
         {props.sessions.length === 0 && !props.loading && (
-          <li style={{ fontSize: 13, color: "#6b7280" }}>No sessions.</li>
+          <li className="text-[13px] text-fg-muted">No sessions.</li>
         )}
       </ul>
     </div>
@@ -217,32 +216,29 @@ function NewSessionBuilder(props: {
 
   return (
     <div>
-      <h2 style={{ marginTop: 0 }}>New cycle-count session</h2>
-      <div style={{ display: "grid", gap: 8, maxWidth: 400 }}>
-        <label>
+      <h2 className="mt-0">New cycle-count session</h2>
+      <div className="grid max-w-[400px] gap-2">
+        <label className="grid gap-1 text-sm">
           Code
-          <input
+          <Input
             type="text"
             value={code}
             onChange={(e) => setCode(e.target.value)}
-            style={{ width: "100%" }}
           />
         </label>
-        <label>
+        <label className="grid gap-1 text-sm">
           Description
-          <input
+          <Input
             type="text"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            style={{ width: "100%" }}
           />
         </label>
-        <label>
+        <label className="grid gap-1 text-sm">
           Warehouse
-          <select
+          <Select
             value={warehouseId}
             onChange={(e) => setWarehouseId(e.target.value)}
-            style={{ width: "100%" }}
           >
             <option value="">— pick —</option>
             {props.warehouses.map((w) => (
@@ -250,16 +246,18 @@ function NewSessionBuilder(props: {
                 {w.code} — {w.name}
               </option>
             ))}
-          </select>
+          </Select>
         </label>
-        {error && <p style={{ color: "#b91c1c" }}>{error}</p>}
-        <button
-          type="button"
-          disabled={!code || !warehouseId || create.isPending}
-          onClick={() => create.mutate()}
-        >
-          {create.isPending ? "Creating…" : "Create draft session"}
-        </button>
+        {error && <p className="text-danger">{error}</p>}
+        <div>
+          <Button
+            type="button"
+            disabled={!code || !warehouseId || create.isPending}
+            onClick={() => create.mutate()}
+          >
+            {create.isPending ? "Creating…" : "Create draft session"}
+          </Button>
+        </div>
       </div>
     </div>
   );
@@ -280,6 +278,16 @@ function SessionDetailPanel(props: {
   // guard would clear the Add line form (see below) with no feedback.
   // NewSessionBuilder uses the same `setError(e.message)` pattern.
   const [error, setError] = useState<string | null>(null);
+  // A single confirm modal drives the reversible state-machine
+  // transitions (back-to-draft, reopen, post). Each button stages its
+  // copy + action here rather than calling window.confirm.
+  const [confirmState, setConfirmState] = useState<{
+    title: string;
+    description: string;
+    confirmLabel: string;
+    destructive?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
 
   const invalidate = () => {
     setError(null);
@@ -305,11 +313,13 @@ function SessionDetailPanel(props: {
       }),
     onSuccess: invalidate,
     onError,
+    onSettled: () => setConfirmState(null),
   });
   const post = useMutation({
     mutationFn: () => api.postCycleCountSession(sessionId),
     onSuccess: invalidate,
     onError,
+    onSettled: () => setConfirmState(null),
   });
 
   const upsert = useMutation({
@@ -375,57 +385,60 @@ function SessionDetailPanel(props: {
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h2 style={{ margin: 0 }}>{props.session.code}</h2>
-        <button type="button" onClick={props.onDeselect}>
+      <div className="flex items-center justify-between">
+        <h2 className="m-0">{props.session.code}</h2>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={props.onDeselect}
+        >
           Back to list
-        </button>
+        </Button>
       </div>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Status: <strong>{status}</strong> · Warehouse: {props.session.warehouse_id}
       </p>
       {error && (
         <div
           role="alert"
-          style={{
-            background: "#fee2e2",
-            color: "#991b1b",
-            border: "1px solid #fecaca",
-            padding: "8px 12px",
-            borderRadius: 4,
-            marginBottom: 8,
-            fontSize: 13,
-          }}
+          className="mb-2 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-[13px] text-danger"
         >
           {error}
         </div>
       )}
-      <div style={{ display: "flex", gap: 8, margin: "12px 0" }}>
-        <button
+      <div className="my-3 flex gap-2">
+        <Button
           type="button"
+          variant="outline"
+          size="sm"
           disabled={isLocked || anyActionPending}
           onClick={() => seed.mutate()}
         >
           {seed.isPending ? "Seeding…" : "Seed from stock"}
-        </button>
+        </Button>
         {status === "draft" && (
-          <button
+          <Button
             type="button"
+            variant="outline"
+            size="sm"
             disabled={anyActionPending}
             onClick={() => advance.mutate("counting")}
           >
             {advancingTo === "counting" ? "Starting…" : "Start counting"}
-          </button>
+          </Button>
         )}
         {status === "counting" && (
           <>
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="sm"
               disabled={anyActionPending}
               onClick={() => advance.mutate("reconciled")}
             >
               {advancingTo === "reconciled" ? "Reconciling…" : "Mark reconciled"}
-            </button>
+            </Button>
             {/* Back-to-draft path: the backend state machine allows
                 counting → draft (canTransitionCycleCount in
                 internal/inventory/cycle_count.go), and DeleteSession
@@ -433,44 +446,49 @@ function SessionDetailPanel(props: {
                 operator who created a session by mistake (wrong
                 warehouse, typo in code, etc.) has to drop to the
                 API to back out before they can delete it. The
-                window.confirm matches the Reopen / Post buttons —
+                confirm modal matches the Reopen / Post buttons —
                 this transition is reversible (operator can always
                 advance back to counting) but worth a quick pause so
                 a misclick doesn't undo work already entered. */}
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="sm"
               disabled={anyActionPending}
-              onClick={() => {
-                if (
-                  window.confirm(
-                    "Back to draft will undo the counting transition and re-allow warehouse/code edits. Counted quantities are preserved. Continue?"
-                  )
-                ) {
-                  advance.mutate("draft");
-                }
-              }}
+              onClick={() =>
+                setConfirmState({
+                  title: "Back to draft?",
+                  description:
+                    "This undoes the counting transition and re-allows warehouse/code edits. Counted quantities are preserved.",
+                  confirmLabel: "Back to draft",
+                  onConfirm: () => advance.mutate("draft"),
+                })
+              }
             >
               {advancingTo === "draft" ? "Reverting…" : "Back to draft"}
-            </button>
+            </Button>
           </>
         )}
         {status === "reconciled" && (
           <>
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="sm"
               disabled={anyActionPending}
-              onClick={() => {
-                if (
-                  window.confirm(
-                    "Posting will write variance inventory moves and lock the session. Continue?"
-                  )
-                ) {
-                  post.mutate();
-                }
-              }}
+              onClick={() =>
+                setConfirmState({
+                  title: "Post variance moves?",
+                  description:
+                    "Posting writes variance inventory moves and locks the session. This cannot be undone.",
+                  confirmLabel: "Post",
+                  destructive: true,
+                  onConfirm: () => post.mutate(),
+                })
+              }
             >
               {post.isPending ? "Posting…" : "Post variance moves"}
-            </button>
+            </Button>
             {/* Reopen path: the backend state machine allows
                 reconciled → counting (canTransitionCycleCount in
                 internal/inventory/cycle_count.go), so an operator
@@ -478,21 +496,23 @@ function SessionDetailPanel(props: {
                 affordance to unlock its lines without dropping to
                 the API directly. Confirmation matches the post
                 button — a reopen is rare and worth pausing on. */}
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="sm"
               disabled={anyActionPending}
-              onClick={() => {
-                if (
-                  window.confirm(
-                    "Reopening will unlock lines for editing and require re-marking reconciled before post. Continue?"
-                  )
-                ) {
-                  advance.mutate("counting");
-                }
-              }}
+              onClick={() =>
+                setConfirmState({
+                  title: "Reopen to counting?",
+                  description:
+                    "Reopening unlocks lines for editing and requires re-marking reconciled before post.",
+                  confirmLabel: "Reopen",
+                  onConfirm: () => advance.mutate("counting"),
+                })
+              }
             >
               {advancingTo === "counting" ? "Reopening…" : "Reopen to counting"}
-            </button>
+            </Button>
           </>
         )}
       </div>
@@ -510,6 +530,20 @@ function SessionDetailPanel(props: {
         onUpsertAsync={(input) => upsert.mutateAsync(input)}
         onDelete={(id) => delLine.mutate(id)}
         itemName={itemName}
+      />
+
+      <ConfirmDialog
+        open={confirmState !== null}
+        onOpenChange={(o) => {
+          if (!o && !(post.isPending || advance.isPending))
+            setConfirmState(null);
+        }}
+        title={confirmState?.title ?? ""}
+        description={confirmState?.description}
+        confirmLabel={confirmState?.confirmLabel ?? "Confirm"}
+        destructive={confirmState?.destructive}
+        loading={post.isPending || advance.isPending}
+        onConfirm={() => confirmState?.onConfirm()}
       />
     </div>
   );
@@ -545,18 +579,18 @@ function LineEditor(props: {
   return (
     <div>
       <h3>Lines ({props.lines.length})</h3>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-        <thead>
-          <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-            <th style={{ padding: "6px 8px" }}>Item</th>
-            <th style={{ padding: "6px 8px", textAlign: "right" }}>Expected</th>
-            <th style={{ padding: "6px 8px", textAlign: "right" }}>Counted</th>
-            <th style={{ padding: "6px 8px", textAlign: "right" }}>Variance</th>
-            <th style={{ padding: "6px 8px" }}>Notes</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
+      <Table className="text-[13px]">
+        <TableHeader>
+          <TableRow>
+            <TableHead>Item</TableHead>
+            <TableHead className="text-right">Expected</TableHead>
+            <TableHead className="text-right">Counted</TableHead>
+            <TableHead className="text-right">Variance</TableHead>
+            <TableHead>Notes</TableHead>
+            <TableHead />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {props.lines.map((ln) => (
             <LineRow
               key={ln.id}
@@ -572,42 +606,42 @@ function LineEditor(props: {
               itemName={props.itemName}
             />
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
 
       {!props.isLocked && (
-        <div style={{ marginTop: 16, padding: 12, border: "1px solid #e5e7eb", borderRadius: 4 }}>
-          <h4 style={{ marginTop: 0 }}>Add line</h4>
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 2fr auto", gap: 8 }}>
-            <select value={newItem} onChange={(e) => setNewItem(e.target.value)}>
+        <div className="mt-4 rounded border border-border p-3">
+          <h4 className="mt-0">Add line</h4>
+          <div className="grid grid-cols-[2fr_1fr_1fr_2fr_auto] items-center gap-2">
+            <Select value={newItem} onChange={(e) => setNewItem(e.target.value)}>
               <option value="">— item —</option>
               {props.items.map((it) => (
                 <option key={it.id} value={it.id}>
                   {it.sku} — {it.name}
                 </option>
               ))}
-            </select>
-            <input
+            </Select>
+            <Input
               type="number"
               step="0.0001"
               placeholder="expected"
               value={newExpected}
               onChange={(e) => setNewExpected(e.target.value)}
             />
-            <input
+            <Input
               type="number"
               step="0.0001"
               placeholder="counted"
               value={newCounted}
               onChange={(e) => setNewCounted(e.target.value)}
             />
-            <input
+            <Input
               type="text"
               placeholder="notes"
               value={newNotes}
               onChange={(e) => setNewNotes(e.target.value)}
             />
-            <button
+            <Button
               type="button"
               disabled={
                 adding || !newItem || newExpected === "" || newCounted === ""
@@ -638,7 +672,7 @@ function LineEditor(props: {
               }}
             >
               {adding ? "Adding…" : "Add"}
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -706,24 +740,22 @@ function LineRow(props: {
   }, [props.line.updated_at, props.line.counted_qty, props.line.notes]);
 
   const variance = props.line.variance;
-  const varianceColour =
+  const varianceClass =
     Number(variance) === 0
-      ? "#6b7280"
+      ? "text-fg-muted"
       : Number(variance) > 0
-      ? "#16a34a"
-      : "#b91c1c";
+        ? "text-success"
+        : "text-danger";
 
   return (
-    <tr style={{ borderBottom: "1px solid #f3f4f6" }}>
-      <td style={{ padding: "6px 8px" }}>{props.itemName(props.line.item_id)}</td>
-      <td style={{ padding: "6px 8px", textAlign: "right" }}>
-        {props.line.expected_qty}
-      </td>
-      <td style={{ padding: "6px 8px", textAlign: "right" }}>
+    <TableRow>
+      <TableCell>{props.itemName(props.line.item_id)}</TableCell>
+      <TableCell className="text-right">{props.line.expected_qty}</TableCell>
+      <TableCell className="text-right">
         {props.isLocked ? (
           counted
         ) : (
-          <input
+          <Input
             type="number"
             step="0.0001"
             value={counted}
@@ -747,25 +779,18 @@ function LineRow(props: {
                 });
               }
             }}
-            style={{ width: 90, textAlign: "right" }}
+            className="w-[90px] text-right"
           />
         )}
-      </td>
-      <td
-        style={{
-          padding: "6px 8px",
-          textAlign: "right",
-          color: varianceColour,
-          fontWeight: 500,
-        }}
-      >
+      </TableCell>
+      <TableCell className={`text-right font-medium ${varianceClass}`}>
         {variance}
-      </td>
-      <td style={{ padding: "6px 8px" }}>
+      </TableCell>
+      <TableCell>
         {props.isLocked ? (
           notes
         ) : (
-          <input
+          <Input
             type="text"
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
@@ -784,17 +809,21 @@ function LineRow(props: {
                 });
               }
             }}
-            style={{ width: "100%" }}
           />
         )}
-      </td>
-      <td style={{ padding: "6px 8px" }}>
+      </TableCell>
+      <TableCell>
         {!props.isLocked && (
-          <button type="button" onClick={() => props.onDelete(props.line.id)}>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() => props.onDelete(props.line.id)}
+          >
             ×
-          </button>
+          </Button>
         )}
-      </td>
-    </tr>
+      </TableCell>
+    </TableRow>
   );
 }

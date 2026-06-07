@@ -6,6 +6,12 @@ import {
   Button,
   Card,
   CardContent,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
   Tabs,
   TabsContent,
   TabsList,
@@ -76,7 +82,7 @@ export function MarketplaceExtensionDetailPage() {
   }
   if (detail.isError) {
     return (
-      <p style={{ color: "#b91c1c" }}>
+      <p className="text-danger">
         Failed to load extension: {(detail.error as Error).message}
       </p>
     );
@@ -114,30 +120,16 @@ export function MarketplaceExtensionDetailPage() {
 
   return (
     <section>
-      <div style={{ marginBottom: 12 }}>
-        <Link to="/marketplace" style={{ fontSize: 13, color: "#6b7280" }}>
+      <div className="mb-3">
+        <Link to="/marketplace" className="text-[13px] text-fg-muted">
           ← Marketplace
         </Link>
       </div>
-      <header
-        style={{
-          display: "flex",
-          alignItems: "flex-start",
-          gap: 16,
-          marginBottom: 16,
-        }}
-      >
+      <header className="mb-4 flex items-start gap-4">
         <DetailIcon iconUrl={ext.icon_url} fallback={ext.display_name} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div
-            style={{
-              display: "flex",
-              gap: 10,
-              alignItems: "center",
-              flexWrap: "wrap",
-            }}
-          >
-            <h1 style={{ margin: 0 }}>{ext.display_name}</h1>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="m-0">{ext.display_name}</h1>
             <Badge variant={extensionStatusVariant(ext.status)}>
               {extensionStatusLabel(ext.status)}
             </Badge>
@@ -147,13 +139,13 @@ export function MarketplaceExtensionDetailPage() {
               </Badge>
             )}
           </div>
-          <div style={{ color: "#6b7280", fontSize: 14, marginTop: 4 }}>
+          <div className="mt-1 text-sm text-fg-muted">
             {ext.name}
             {ext.author && ` · By ${ext.author}`}
             {ext.license && ` · ${ext.license}`}
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div className="flex gap-2">
           {installRow ? (
             <Button
               variant="outline"
@@ -272,7 +264,7 @@ function DetailIcon({
         alt=""
         width={64}
         height={64}
-        style={{ borderRadius: 12, objectFit: "cover", background: "#f3f4f6" }}
+        className="rounded-xl bg-bg-muted object-cover"
         onError={(e) => {
           (e.currentTarget as HTMLImageElement).style.visibility = "hidden";
         }}
@@ -282,18 +274,7 @@ function DetailIcon({
   return (
     <div
       aria-hidden
-      style={{
-        width: 64,
-        height: 64,
-        borderRadius: 12,
-        background: "#e5e7eb",
-        color: "#374151",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        fontWeight: 700,
-        fontSize: 28,
-      }}
+      className="flex h-16 w-16 items-center justify-center rounded-xl bg-bg-muted text-[28px] font-bold text-fg"
     >
       {fallback.charAt(0).toUpperCase()}
     </div>
@@ -308,22 +289,22 @@ function OverviewTab({
   listedVersion: MarketplaceExtensionVersion | null;
 }) {
   return (
-    <div style={{ display: "grid", gap: 16, marginTop: 16 }}>
+    <div className="mt-4 grid gap-4">
       <Card>
-        <CardContent style={{ padding: 16 }}>
-          <h3 style={{ marginTop: 0 }}>About</h3>
+        <CardContent className="pt-4">
+          <h3 className="mt-0">About</h3>
           {ext.description ? (
-            <p style={{ whiteSpace: "pre-wrap" }}>{ext.description}</p>
+            <p className="whitespace-pre-wrap">{ext.description}</p>
           ) : (
-            <p style={{ color: "#9ca3af", fontStyle: "italic" }}>
+            <p className="italic text-fg-subtle">
               No description provided.
             </p>
           )}
         </CardContent>
       </Card>
       <Card>
-        <CardContent style={{ padding: 16 }}>
-          <h3 style={{ marginTop: 0 }}>Publisher</h3>
+        <CardContent className="pt-4">
+          <h3 className="mt-0">Publisher</h3>
           <DetailRow label="Name" value={ext.publisher} />
           <DetailRow label="Author" value={ext.author || "—"} />
           <DetailRow label="License" value={ext.license || "—"} />
@@ -349,10 +330,10 @@ function OverviewTab({
       </Card>
       {listedVersion && (
         <Card>
-          <CardContent style={{ padding: 16 }}>
-            <h3 style={{ marginTop: 0 }}>
+          <CardContent className="pt-4">
+            <h3 className="mt-0">
               Default version{" "}
-              <span style={{ color: "#6b7280", fontWeight: 400 }}>
+              <span className="font-normal text-fg-muted">
                 v{listedVersion.version}
               </span>
             </h3>
@@ -407,47 +388,41 @@ function VersionsTab({
 }) {
   if (versions.length === 0) {
     return (
-      <p style={{ marginTop: 16, color: "#6b7280" }}>
+      <p className="mt-4 text-fg-muted">
         No approved versions are available.
       </p>
     );
   }
   return (
-    <div style={{ marginTop: 16 }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-        <thead>
-          <tr style={{ textAlign: "left", color: "#6b7280" }}>
-            <Th>Version</Th>
-            <Th>Published</Th>
-            <Th>Size</Th>
-            <Th>Manifest</Th>
-            <Th>Status</Th>
-            <Th>{""}</Th>
-          </tr>
-        </thead>
-        <tbody>
+    <div className="mt-4">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Version</TableHead>
+            <TableHead>Published</TableHead>
+            <TableHead>Size</TableHead>
+            <TableHead>Manifest</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>{""}</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {versions.map((v) => (
-            <tr key={v.id} style={{ borderTop: "1px solid #e5e7eb" }}>
-              <Td>
+            <TableRow key={v.id}>
+              <TableCell>
                 <strong>v{v.version}</strong>
                 {ext.listed_version === v.version && (
-                  <span
-                    style={{
-                      marginLeft: 6,
-                      fontSize: 11,
-                      color: "#059669",
-                    }}
-                  >
+                  <span className="ml-1.5 text-[11px] text-success">
                     DEFAULT
                   </span>
                 )}
-              </Td>
-              <Td>{formatTimestamp(v.published_at)}</Td>
-              <Td>{formatBundleSize(v.bundle_size_bytes)}</Td>
-              <Td>
+              </TableCell>
+              <TableCell>{formatTimestamp(v.published_at)}</TableCell>
+              <TableCell>{formatBundleSize(v.bundle_size_bytes)}</TableCell>
+              <TableCell>
                 <ManifestCounts version={v} />
-              </Td>
-              <Td>
+              </TableCell>
+              <TableCell>
                 {v.yanked ? (
                   <Badge variant="danger" title={v.yanked_reason}>
                     Yanked
@@ -457,8 +432,8 @@ function VersionsTab({
                 ) : (
                   <Badge variant="outline">Unsigned</Badge>
                 )}
-              </Td>
-              <Td>
+              </TableCell>
+              <TableCell>
                 {canInstallVersions && !v.yanked && (
                   <Button
                     variant="outline"
@@ -468,11 +443,11 @@ function VersionsTab({
                     Install
                   </Button>
                 )}
-              </Td>
-            </tr>
+              </TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
     </div>
   );
 }
@@ -486,11 +461,11 @@ function ManifestCounts({ version }: { version: MarketplaceExtensionVersion }) {
     ["Webhooks", version.webhooks_count],
   ];
   const nonZero = counts.filter(([, n]) => n > 0);
-  if (nonZero.length === 0) return <span style={{ color: "#9ca3af" }}>—</span>;
+  if (nonZero.length === 0) return <span className="text-fg-subtle">—</span>;
   return (
-    <span style={{ display: "inline-flex", gap: 8, flexWrap: "wrap" }}>
+    <span className="inline-flex flex-wrap gap-2">
       {nonZero.map(([label, n]) => (
-        <span key={label} style={{ fontSize: 12, color: "#374151" }}>
+        <span key={label} className="text-xs text-fg">
           {label}: <strong>{n}</strong>
         </span>
       ))}
@@ -505,16 +480,16 @@ function PermissionsTab({
 }) {
   if (!listedVersion) {
     return (
-      <p style={{ marginTop: 16, color: "#6b7280" }}>
+      <p className="mt-4 text-fg-muted">
         No version is available to inspect permissions for.
       </p>
     );
   }
   return (
-    <div style={{ display: "grid", gap: 16, marginTop: 16 }}>
+    <div className="mt-4 grid gap-4">
       <Card>
-        <CardContent style={{ padding: 16 }}>
-          <h3 style={{ marginTop: 0 }}>Required tenant features</h3>
+        <CardContent className="pt-4">
+          <h3 className="mt-0">Required tenant features</h3>
           <PermissionList
             items={listedVersion.features_required}
             empty="This extension does not require any tenant feature flags."
@@ -522,19 +497,13 @@ function PermissionsTab({
         </CardContent>
       </Card>
       <Card>
-        <CardContent style={{ padding: 16 }}>
-          <h3 style={{ marginTop: 0 }}>Required platform permissions</h3>
+        <CardContent className="pt-4">
+          <h3 className="mt-0">Required platform permissions</h3>
           <PermissionList
             items={listedVersion.permissions_required}
             empty="This extension does not request any platform permissions."
           />
-          <p
-            style={{
-              marginTop: 12,
-              fontSize: 12,
-              color: "#6b7280",
-            }}
-          >
+          <p className="mt-3 text-xs text-fg-muted">
             Installing will grant the extension these permissions for this
             tenant. Permissions are pinned per version: an upgrade that adds
             permissions surfaces them in the upgrade dialog.
@@ -547,12 +516,12 @@ function PermissionsTab({
 
 function PermissionList({ items, empty }: { items: string[]; empty: string }) {
   if (!items || items.length === 0) {
-    return <p style={{ color: "#9ca3af", fontStyle: "italic" }}>{empty}</p>;
+    return <p className="italic text-fg-subtle">{empty}</p>;
   }
   return (
-    <ul style={{ paddingLeft: 18, margin: 0 }}>
+    <ul className="m-0 pl-[18px]">
       {items.map((p) => (
-        <li key={p} style={{ fontFamily: "monospace", fontSize: 13 }}>
+        <li key={p} className="font-mono text-[13px]">
           {p}
         </li>
       ))}
@@ -568,38 +537,9 @@ function DetailRow({
   value: React.ReactNode;
 }) {
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "160px 1fr",
-        gap: 8,
-        padding: "6px 0",
-        fontSize: 14,
-      }}
-    >
-      <span style={{ color: "#6b7280" }}>{label}</span>
+    <div className="grid grid-cols-[160px_1fr] gap-2 py-1.5 text-sm">
+      <span className="text-fg-muted">{label}</span>
       <span>{value}</span>
     </div>
   );
-}
-
-function Th({ children }: { children: React.ReactNode }) {
-  return (
-    <th
-      style={{
-        textAlign: "left",
-        padding: "8px 12px",
-        fontWeight: 500,
-        fontSize: 12,
-        textTransform: "uppercase",
-        letterSpacing: 0.4,
-      }}
-    >
-      {children}
-    </th>
-  );
-}
-
-function Td({ children }: { children: React.ReactNode }) {
-  return <td style={{ padding: "12px" }}>{children}</td>;
 }

@@ -246,7 +246,7 @@ describe("RecordListPage", () => {
     );
   });
 
-  it("Save view prompts for a name and POSTs through api.createView", async () => {
+  it("Save view opens a prompt dialog and POSTs through api.createView", async () => {
     getKType.mockResolvedValue(FIXTURE_KTYPE);
     listRecords.mockResolvedValue([row("r1", "Acme", "open", 100)]);
     listViews.mockResolvedValue([]);
@@ -259,17 +259,21 @@ describe("RecordListPage", () => {
       is_default: false,
       shared: false,
     });
-    const promptSpy = vi.spyOn(window, "prompt").mockReturnValueOnce("Mine");
     renderPage();
     await screen.findByText("Acme");
 
     const user = userEvent.setup();
+    // The header "Save view" button opens a PromptDialog (the
+    // accessible replacement for window.prompt); the operator types
+    // the name into the dialog's labelled input and confirms.
     await user.click(screen.getByRole("button", { name: /Save view/i }));
+    const nameInput = await screen.findByLabelText(/View name/i);
+    await user.type(nameInput, "Mine");
+    await user.click(screen.getByRole("button", { name: /^Save$/i }));
+
     await waitFor(() => expect(createView).toHaveBeenCalledTimes(1));
     expect(createView).toHaveBeenCalledWith(
       expect.objectContaining({ ktype: "crm.deal", name: "Mine" }),
     );
-    expect(promptSpy).toHaveBeenCalled();
-    promptSpy.mockRestore();
   });
 });

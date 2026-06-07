@@ -2,6 +2,16 @@ import { useState, useMemo, useEffect } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { KType } from "@kapp/client";
+import {
+  Button,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -122,13 +132,13 @@ export function ImportMappingPage() {
 
   return (
     <section>
-      <div style={{ marginBottom: 8 }}>
+      <div className="mb-2">
         <Link to={`/imports/${id}`}>← Back to wizard</Link>
       </div>
       <h1>Field mapping</h1>
       {jobQ.isLoading && <p>Loading…</p>}
       {jobQ.data && entities.length === 0 && (
-        <p style={{ color: "#6b7280" }}>
+        <p className="text-fg-muted">
           No discovered entities yet — re-run discovery from the wizard.
         </p>
       )}
@@ -140,22 +150,17 @@ export function ImportMappingPage() {
         return (
           <div
             key={e.name}
-            style={{
-              border: "1px solid #e5e7eb",
-              borderRadius: 4,
-              padding: 12,
-              marginBottom: 16,
-            }}
+            className="mb-4 rounded border border-border p-3"
           >
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <h3 style={{ margin: 0 }}>{e.name}</h3>
-              <span style={{ fontSize: 12, color: "#6b7280" }}>
+            <div className="flex justify-between">
+              <h3 className="m-0">{e.name}</h3>
+              <span className="text-xs text-fg-muted">
                 {e.row_count ?? 0} rows
               </span>
             </div>
-            <label style={{ display: "block", marginTop: 8 }}>
+            <label className="mt-2 flex items-center gap-2">
               Target KType
-              <select
+              <Select
                 value={em.target_ktype}
                 onChange={(ev) => {
                   const v = ev.target.value;
@@ -164,7 +169,7 @@ export function ImportMappingPage() {
                     [e.name]: { target_ktype: v, fields: m[e.name]?.fields ?? {} },
                   }));
                 }}
-                style={{ marginLeft: 8 }}
+                className="w-auto"
               >
                 <option value="">(select)</option>
                 {(ktypesQ.data ?? []).map((k) => (
@@ -172,29 +177,22 @@ export function ImportMappingPage() {
                     {k.name}
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
             {sourceFields.length > 0 && (
-              <table
-                style={{
-                  width: "100%",
-                  borderCollapse: "collapse",
-                  fontSize: 13,
-                  marginTop: 8,
-                }}
-              >
-                <thead>
-                  <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-                    <th style={{ padding: "4px 6px" }}>Source field</th>
-                    <th style={{ padding: "4px 6px" }}>Target field</th>
-                  </tr>
-                </thead>
-                <tbody>
+              <Table className="mt-2 text-[13px]">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Source field</TableHead>
+                    <TableHead>Target field</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
                   {sourceFields.map((sf) => (
-                    <tr key={sf} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                      <td style={{ padding: "4px 6px" }}>{sf}</td>
-                      <td style={{ padding: "4px 6px" }}>
-                        <select
+                    <TableRow key={sf}>
+                      <TableCell>{sf}</TableCell>
+                      <TableCell>
+                        <Select
                           value={em.fields[sf] ?? ""}
                           onChange={(ev) => {
                             const v = ev.target.value;
@@ -219,20 +217,20 @@ export function ImportMappingPage() {
                               {tf}
                             </option>
                           ))}
-                        </select>
-                      </td>
-                    </tr>
+                        </Select>
+                      </TableCell>
+                    </TableRow>
                   ))}
-                </tbody>
-              </table>
+                </TableBody>
+              </Table>
             )}
           </div>
         );
       })}
       <div>
-        <button onClick={() => save.mutate()} disabled={save.isPending}>
+        <Button onClick={() => save.mutate()} disabled={save.isPending}>
           {save.isPending ? "Saving…" : "Save mapping"}
-        </button>
+        </Button>
       </div>
     </section>
   );

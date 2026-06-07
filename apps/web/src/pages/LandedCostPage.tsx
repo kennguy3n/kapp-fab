@@ -8,6 +8,19 @@ import type {
   UpsertLandedCostTargetInput,
   UpsertLandedCostVoucherInput,
 } from "@kapp/client";
+import {
+  Badge,
+  Button,
+  Input,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  type BadgeProps,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -79,7 +92,7 @@ export function LandedCostPage() {
   return (
     <section>
       <h1>Landed Cost Vouchers</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Allocate freight, duty, insurance and other landed costs across
         receipt lines. Draft vouchers may be edited; allocating freezes the
         share preview and a posted voucher writes inventory_moves +
@@ -93,24 +106,24 @@ export function LandedCostPage() {
         }}
       />
 
-      <div style={{ display: "flex", gap: 24, marginTop: 24 }}>
-        <div style={{ width: 360 }}>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-            <label style={{ fontSize: 12, color: "#374151" }}>Status</label>
-            <select
+      <div className="mt-6 flex gap-6">
+        <div className="w-[360px]">
+          <div className="mb-2 flex items-center gap-2">
+            <label className="text-xs text-fg">Status</label>
+            <Select
+              size="sm"
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
-              style={{ fontSize: 12 }}
             >
               <option value="">All</option>
               <option value="draft">Draft</option>
               <option value="allocated">Allocated</option>
               <option value="posted">Posted</option>
-            </select>
+            </Select>
           </div>
           {listQ.isLoading && <p>Loading…</p>}
           {listQ.isError && (
-            <p style={{ color: "#b91c1c" }}>
+            <p className="text-danger">
               Failed to load vouchers: {(listQ.error as Error).message}
             </p>
           )}
@@ -123,13 +136,13 @@ export function LandedCostPage() {
           )}
         </div>
 
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="min-w-0 flex-1">
           {!selectedId && (
-            <p style={{ color: "#9ca3af" }}>Select a voucher from the list.</p>
+            <p className="text-fg-subtle">Select a voucher from the list.</p>
           )}
           {selectedId && detailQ.isLoading && <p>Loading detail…</p>}
           {selectedId && detailQ.isError && (
-            <p style={{ color: "#b91c1c" }}>
+            <p className="text-danger">
               Failed to load detail: {(detailQ.error as Error).message}
             </p>
           )}
@@ -187,42 +200,37 @@ function CreateVoucherForm(props: {
   });
 
   return (
-    <div
-      style={{
-        marginTop: 12,
-        padding: 12,
-        border: "1px solid #e5e7eb",
-        borderRadius: 6,
-      }}
-    >
-      <strong style={{ fontSize: 13 }}>Create voucher</strong>
-      <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-        <input
+    <div className="mt-3 rounded-md border border-border p-3">
+      <strong className="text-sm">Create voucher</strong>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <Input
+          size="sm"
           placeholder="Voucher number"
           value={voucherNumber}
           onChange={(e) => setVoucherNumber(e.target.value)}
-          style={{ fontSize: 12 }}
         />
-        <input
+        <Input
+          size="sm"
+          className="flex-1"
           placeholder="Description (optional)"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          style={{ fontSize: 12, flex: 1 }}
         />
-        <select
+        <Select
+          size="sm"
           value={allocationMethod}
           onChange={(e) =>
             setAllocationMethod(
               e.target.value as "by_qty" | "by_amount" | "by_weight",
             )
           }
-          style={{ fontSize: 12 }}
         >
           <option value="by_qty">by_qty</option>
           <option value="by_amount">by_amount</option>
           <option value="by_weight">by_weight</option>
-        </select>
-        <button
+        </Select>
+        <Button
+          size="sm"
           disabled={createMut.isPending || voucherNumber.trim() === ""}
           onClick={() =>
             createMut.mutate({
@@ -231,13 +239,12 @@ function CreateVoucherForm(props: {
               allocation_method: allocationMethod,
             })
           }
-          style={{ fontSize: 12 }}
         >
           Create
-        </button>
+        </Button>
       </div>
       {createMut.isError ? (
-        <p style={{ color: "#b91c1c", fontSize: 12, marginTop: 6 }}>
+        <p className="mt-1.5 text-xs text-danger">
           Create failed: {(createMut.error as Error).message}
         </p>
       ) : null}
@@ -251,64 +258,56 @@ function VoucherList(props: {
   onSelect: (id: string) => void;
 }) {
   return (
-    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-      <thead>
-        <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-          <th style={{ padding: "6px 8px" }}>Voucher</th>
-          <th style={{ padding: "6px 8px" }}>Method</th>
-          <th style={{ padding: "6px 8px" }}>Status</th>
-        </tr>
-      </thead>
-      <tbody>
+    <Table className="text-xs">
+      <TableHeader>
+        <TableRow>
+          <TableHead>Voucher</TableHead>
+          <TableHead>Method</TableHead>
+          <TableHead>Status</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
         {props.vouchers.map((v) => (
-          <tr
+          <TableRow
             key={v.id}
             onClick={() => props.onSelect(v.id)}
-            style={{
-              cursor: "pointer",
-              borderBottom: "1px solid #f3f4f6",
-              background: v.id === props.selectedId ? "#eff6ff" : undefined,
-            }}
+            className={
+              v.id === props.selectedId
+                ? "cursor-pointer bg-bg-muted"
+                : "cursor-pointer"
+            }
           >
-            <td style={{ padding: "6px 8px" }}>{v.voucher_number}</td>
-            <td style={{ padding: "6px 8px" }}>{v.allocation_method}</td>
-            <td style={{ padding: "6px 8px" }}>
+            <TableCell>{v.voucher_number}</TableCell>
+            <TableCell>{v.allocation_method}</TableCell>
+            <TableCell>
               <StatusBadge status={v.status} />
-            </td>
-          </tr>
+            </TableCell>
+          </TableRow>
         ))}
         {props.vouchers.length === 0 && (
-          <tr>
-            <td colSpan={3} style={{ padding: "6px 8px", color: "#9ca3af" }}>
+          <TableRow>
+            <TableCell colSpan={3} className="text-fg-subtle">
               No vouchers.
-            </td>
-          </tr>
+            </TableCell>
+          </TableRow>
         )}
-      </tbody>
-    </table>
+      </TableBody>
+    </Table>
   );
 }
 
 function StatusBadge({ status }: { status: string }) {
-  const palette: Record<string, { bg: string; fg: string }> = {
-    draft: { bg: "#f3f4f6", fg: "#374151" },
-    allocated: { bg: "#dbeafe", fg: "#1e40af" },
-    posted: { bg: "#dcfce7", fg: "#166534" },
-  };
-  const c = palette[status] ?? { bg: "#fee2e2", fg: "#b91c1c" };
-  return (
-    <span
-      style={{
-        background: c.bg,
-        color: c.fg,
-        padding: "2px 8px",
-        borderRadius: 12,
-        fontSize: 11,
-      }}
-    >
-      {status}
-    </span>
-  );
+  // Map the voucher lifecycle to the design-system's semantic Badge
+  // variants so the colour meaning survives light/dark themes.
+  const variant: BadgeProps["variant"] =
+    status === "draft"
+      ? "default"
+      : status === "allocated"
+        ? "info"
+        : status === "posted"
+          ? "success"
+          : "danger";
+  return <Badge variant={variant}>{status}</Badge>;
 }
 
 function VoucherDetail(props: {
@@ -340,45 +339,40 @@ function VoucherDetail(props: {
 
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <h2 style={{ margin: 0 }}>{props.voucher.voucher_number}</h2>
+      <div className="flex items-center gap-3">
+        <h2 className="m-0">{props.voucher.voucher_number}</h2>
         <StatusBadge status={props.voucher.status} />
-        <span style={{ color: "#6b7280", fontSize: 12 }}>
+        <span className="text-xs text-fg-muted">
           {props.voucher.allocation_method}
         </span>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-          <button
+        <div className="ms-auto flex gap-2">
+          <Button
+            size="sm"
+            variant="outline"
             disabled={isPosted || props.isAllocating}
             onClick={props.onAllocate}
-            style={{ fontSize: 12 }}
           >
             {props.isAllocating ? "Allocating…" : "Allocate"}
-          </button>
-          <button
+          </Button>
+          <Button
+            size="sm"
             disabled={!isAllocated || props.isPosting}
             onClick={props.onPost}
-            style={{
-              fontSize: 12,
-              background: isAllocated ? "#16a34a" : undefined,
-              color: isAllocated ? "white" : undefined,
-            }}
           >
             {props.isPosting ? "Posting…" : "Post"}
-          </button>
+          </Button>
         </div>
       </div>
       {props.voucher.description && (
-        <p style={{ color: "#6b7280", marginTop: 4 }}>
-          {props.voucher.description}
-        </p>
+        <p className="mt-1 text-fg-muted">{props.voucher.description}</p>
       )}
       {props.allocateError ? (
-        <p style={{ color: "#b91c1c", fontSize: 12 }}>
+        <p className="text-xs text-danger">
           Allocate failed: {(props.allocateError as Error).message}
         </p>
       ) : null}
       {props.postError ? (
-        <p style={{ color: "#b91c1c", fontSize: 12 }}>
+        <p className="text-xs text-danger">
           Post failed: {(props.postError as Error).message}
         </p>
       ) : null}
@@ -433,73 +427,76 @@ function ChargesSection(props: {
   });
 
   return (
-    <div style={{ marginTop: 16 }}>
-      <h3 style={{ fontSize: 14, margin: "8px 0" }}>Charges</h3>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-        <thead>
-          <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-            <th style={{ padding: "6px 8px" }}>Description</th>
-            <th style={{ padding: "6px 8px", textAlign: "right" }}>Amount</th>
-            <th style={{ padding: "6px 8px" }}>Account</th>
-            <th style={{ padding: "6px 8px" }} />
-          </tr>
-        </thead>
-        <tbody>
+    <div className="mt-4">
+      <h3 className="my-2 text-sm">Charges</h3>
+      <Table className="text-xs">
+        <TableHeader>
+          <TableRow>
+            <TableHead>Description</TableHead>
+            <TableHead className="text-right">Amount</TableHead>
+            <TableHead>Account</TableHead>
+            <TableHead />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {props.charges.map((c) => (
-            <tr key={c.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
-              <td style={{ padding: "6px 8px" }}>{c.description}</td>
-              <td style={{ padding: "6px 8px", textAlign: "right" }}>
-                {c.amount}
-              </td>
-              <td style={{ padding: "6px 8px" }}>
+            <TableRow key={c.id}>
+              <TableCell>{c.description}</TableCell>
+              <TableCell className="text-right">{c.amount}</TableCell>
+              <TableCell>
                 {c.account_code ?? <em>(default)</em>}
-              </td>
-              <td style={{ padding: "6px 8px", textAlign: "right" }}>
+              </TableCell>
+              <TableCell className="text-right">
                 {props.editable && (
-                  <button
+                  <Button
+                    size="sm"
+                    variant="ghost"
                     onClick={() => deleteMut.mutate(c.id)}
-                    style={{ fontSize: 11 }}
                   >
                     Delete
-                  </button>
+                  </Button>
                 )}
-              </td>
-            </tr>
+              </TableCell>
+            </TableRow>
           ))}
-          <tr>
-            <td style={{ padding: "6px 8px", textAlign: "right" }}>
+          <TableRow>
+            <TableCell className="text-right">
               <strong>Total</strong>
-            </td>
-            <td style={{ padding: "6px 8px", textAlign: "right" }}>
+            </TableCell>
+            <TableCell className="text-right">
               <strong>{props.totalCharges.toFixed(2)}</strong>
-            </td>
-            <td />
-            <td />
-          </tr>
-        </tbody>
-      </table>
+            </TableCell>
+            <TableCell />
+            <TableCell />
+          </TableRow>
+        </TableBody>
+      </Table>
       {props.editable && (
-        <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-          <input
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Input
+            size="sm"
+            className="flex-1"
             placeholder="Description"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            style={{ fontSize: 12, flex: 1 }}
           />
-          <input
+          <Input
+            size="sm"
+            className="w-[100px]"
             placeholder="Amount"
             type="number"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
-            style={{ fontSize: 12, width: 100 }}
           />
-          <input
+          <Input
+            size="sm"
+            className="w-[140px]"
             placeholder="Account code (optional)"
             value={accountCode}
             onChange={(e) => setAccountCode(e.target.value)}
-            style={{ fontSize: 12, width: 140 }}
           />
-          <button
+          <Button
+            size="sm"
             disabled={
               upsertMut.isPending ||
               description.trim() === "" ||
@@ -512,19 +509,18 @@ function ChargesSection(props: {
                 account_code: accountCode.trim() || undefined,
               });
             }}
-            style={{ fontSize: 12 }}
           >
             Add charge
-          </button>
+          </Button>
         </div>
       )}
       {upsertMut.isError ? (
-        <p style={{ color: "#b91c1c", fontSize: 12, marginTop: 6 }}>
+        <p className="mt-1.5 text-xs text-danger">
           Add charge failed: {(upsertMut.error as Error).message}
         </p>
       ) : null}
       {deleteMut.isError ? (
-        <p style={{ color: "#b91c1c", fontSize: 12, marginTop: 6 }}>
+        <p className="mt-1.5 text-xs text-danger">
           Delete charge failed: {(deleteMut.error as Error).message}
         </p>
       ) : null}
@@ -580,131 +576,122 @@ function TargetsSection(props: {
   const reconcileMismatch = Math.abs(reconcile) >= 0.005;
 
   return (
-    <div style={{ marginTop: 16 }}>
-      <h3 style={{ fontSize: 14, margin: "8px 0" }}>Targets</h3>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-        <thead>
-          <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-            <th style={{ padding: "6px 8px" }}>Source</th>
-            <th style={{ padding: "6px 8px" }}>Item</th>
-            <th style={{ padding: "6px 8px" }}>Warehouse</th>
-            <th style={{ padding: "6px 8px", textAlign: "right" }}>Qty</th>
-            <th style={{ padding: "6px 8px", textAlign: "right" }}>Unit cost</th>
-            <th style={{ padding: "6px 8px", textAlign: "right" }}>Weight</th>
-            <th style={{ padding: "6px 8px", textAlign: "right" }}>Allocated</th>
-            <th style={{ padding: "6px 8px" }}>Applied</th>
-            <th style={{ padding: "6px 8px" }} />
-          </tr>
-        </thead>
-        <tbody>
+    <div className="mt-4">
+      <h3 className="my-2 text-sm">Targets</h3>
+      <Table className="text-xs">
+        <TableHeader>
+          <TableRow>
+            <TableHead>Source</TableHead>
+            <TableHead>Item</TableHead>
+            <TableHead>Warehouse</TableHead>
+            <TableHead className="text-right">Qty</TableHead>
+            <TableHead className="text-right">Unit cost</TableHead>
+            <TableHead className="text-right">Weight</TableHead>
+            <TableHead className="text-right">Allocated</TableHead>
+            <TableHead>Applied</TableHead>
+            <TableHead />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {props.targets.map((t) => (
-            <tr key={t.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
-              <td style={{ padding: "6px 8px", color: "#6b7280" }}>
+            <TableRow key={t.id}>
+              <TableCell className="text-fg-muted">
                 {t.source_ktype}
-              </td>
-              <td style={{ padding: "6px 8px", fontFamily: "monospace" }}>
+              </TableCell>
+              <TableCell className="font-mono">
                 {t.item_id.slice(0, 8)}…
-              </td>
-              <td style={{ padding: "6px 8px", fontFamily: "monospace" }}>
+              </TableCell>
+              <TableCell className="font-mono">
                 {t.warehouse_id.slice(0, 8)}…
-              </td>
-              <td style={{ padding: "6px 8px", textAlign: "right" }}>{t.qty}</td>
-              <td style={{ padding: "6px 8px", textAlign: "right" }}>
-                {t.unit_cost}
-              </td>
-              <td style={{ padding: "6px 8px", textAlign: "right" }}>
-                {t.weight}
-              </td>
-              <td style={{ padding: "6px 8px", textAlign: "right" }}>
+              </TableCell>
+              <TableCell className="text-right">{t.qty}</TableCell>
+              <TableCell className="text-right">{t.unit_cost}</TableCell>
+              <TableCell className="text-right">{t.weight}</TableCell>
+              <TableCell className="text-right">
                 {t.allocated_amount}
-              </td>
-              <td style={{ padding: "6px 8px" }}>{t.applied ? "✓" : "—"}</td>
-              <td style={{ padding: "6px 8px", textAlign: "right" }}>
+              </TableCell>
+              <TableCell>{t.applied ? "✓" : "—"}</TableCell>
+              <TableCell className="text-right">
                 {props.editable && (
-                  <button
+                  <Button
+                    size="sm"
+                    variant="ghost"
                     onClick={() => deleteMut.mutate(t.id)}
-                    style={{ fontSize: 11 }}
                   >
                     Delete
-                  </button>
+                  </Button>
                 )}
-              </td>
-            </tr>
+              </TableCell>
+            </TableRow>
           ))}
-          <tr>
-            <td colSpan={6} style={{ padding: "6px 8px", textAlign: "right" }}>
+          <TableRow>
+            <TableCell colSpan={6} className="text-right">
               <strong>Total allocated</strong>
-            </td>
-            <td style={{ padding: "6px 8px", textAlign: "right" }}>
+            </TableCell>
+            <TableCell className="text-right">
               <strong>{props.totalAllocated.toFixed(2)}</strong>
-            </td>
-            <td colSpan={2} style={{ padding: "6px 8px" }}>
+            </TableCell>
+            <TableCell colSpan={2}>
               {reconcileMismatch && props.totalAllocated > 0 && (
-                <span style={{ color: "#b91c1c" }}>
+                <span className="text-danger">
                   Δ {reconcile.toFixed(2)}
                 </span>
               )}
-            </td>
-          </tr>
-        </tbody>
-      </table>
+            </TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
       {props.editable && (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(4, 1fr) auto",
-            gap: 6,
-            marginTop: 8,
-          }}
-        >
-          <input
+        <div className="mt-2 grid grid-cols-[repeat(4,1fr)_auto] gap-1.5">
+          <Input
+            size="sm"
             placeholder="Source ktype"
             value={sourceKType}
             onChange={(e) => setSourceKType(e.target.value)}
-            style={{ fontSize: 12 }}
           />
-          <input
+          <Input
+            size="sm"
             placeholder="Source id (UUID)"
             value={sourceID}
             onChange={(e) => setSourceID(e.target.value)}
-            style={{ fontSize: 12 }}
           />
-          <input
+          <Input
+            size="sm"
             placeholder="Item id (UUID)"
             value={itemID}
             onChange={(e) => setItemID(e.target.value)}
-            style={{ fontSize: 12 }}
           />
-          <input
+          <Input
+            size="sm"
             placeholder="Warehouse id (UUID)"
             value={warehouseID}
             onChange={(e) => setWarehouseID(e.target.value)}
-            style={{ fontSize: 12 }}
           />
           <span />
-          <input
+          <Input
+            size="sm"
             placeholder="Qty"
             type="number"
             value={qty}
             onChange={(e) => setQty(e.target.value)}
-            style={{ fontSize: 12 }}
           />
-          <input
+          <Input
+            size="sm"
             placeholder="Unit cost"
             type="number"
             value={unitCost}
             onChange={(e) => setUnitCost(e.target.value)}
-            style={{ fontSize: 12 }}
           />
-          <input
+          <Input
+            size="sm"
             placeholder="Weight (optional)"
             type="number"
             value={weight}
             onChange={(e) => setWeight(e.target.value)}
-            style={{ fontSize: 12 }}
           />
           <span />
-          <button
+          <Button
+            size="sm"
             disabled={
               upsertMut.isPending ||
               sourceID.trim() === "" ||
@@ -724,19 +711,18 @@ function TargetsSection(props: {
                 weight: weight.trim() || undefined,
               });
             }}
-            style={{ fontSize: 12 }}
           >
             Add target
-          </button>
+          </Button>
         </div>
       )}
       {upsertMut.isError ? (
-        <p style={{ color: "#b91c1c", fontSize: 12, marginTop: 6 }}>
+        <p className="mt-1.5 text-xs text-danger">
           Add target failed: {(upsertMut.error as Error).message}
         </p>
       ) : null}
       {deleteMut.isError ? (
-        <p style={{ color: "#b91c1c", fontSize: 12, marginTop: 6 }}>
+        <p className="mt-1.5 text-xs text-danger">
           Delete target failed: {(deleteMut.error as Error).message}
         </p>
       ) : null}

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
+import { Button, Input, Select } from "@kapp/ui";
 import { portalApi } from "../../lib/portalApi";
 
 export function PortalNewTicketPage() {
@@ -14,7 +15,7 @@ export function PortalNewTicketPage() {
     onSuccess: (t) => nav(`/portal/${tenant_slug}/tickets/${t.id}`),
   });
   return (
-    <main style={{ maxWidth: 640, margin: "32px auto", padding: 16 }}>
+    <main className="mx-auto mt-8 max-w-[640px] p-4">
       <h1>New ticket</h1>
       <form
         onSubmit={(e) => {
@@ -22,53 +23,44 @@ export function PortalNewTicketPage() {
           if (!subject.trim()) return;
           mut.mutate();
         }}
-        style={{ display: "grid", gap: 8 }}
+        className="grid gap-2"
       >
-        <label>
+        <label className="flex flex-col gap-1">
           Subject
-          <input
+          <Input
             required
             value={subject}
             onChange={(e) => setSubject(e.target.value)}
-            style={inp}
           />
         </label>
-        <label>
+        <label className="flex flex-col gap-1">
           Description
           <textarea
             rows={6}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            style={inp}
+            className="w-full rounded-md border border-border bg-bg p-2 text-fg"
           />
         </label>
-        <label>
+        <label className="flex flex-col gap-1">
           Priority
-          <select
+          <Select
             value={priority}
             onChange={(e) => setPriority(e.target.value)}
-            style={inp}
           >
             <option value="low">low</option>
             <option value="medium">medium</option>
             <option value="high">high</option>
             <option value="urgent">urgent</option>
-          </select>
+          </Select>
         </label>
-        <button type="submit" disabled={mut.isPending}>
+        <Button type="submit" disabled={mut.isPending} className="justify-self-start">
           Submit
-        </button>
+        </Button>
         {mut.error && (
-          <div style={{ color: "#991b1b" }}>{(mut.error as Error).message}</div>
+          <div className="text-danger">{(mut.error as Error).message}</div>
         )}
       </form>
     </main>
   );
 }
-
-const inp: React.CSSProperties = {
-  padding: 8,
-  border: "1px solid #d1d5db",
-  borderRadius: 6,
-  width: "100%",
-};

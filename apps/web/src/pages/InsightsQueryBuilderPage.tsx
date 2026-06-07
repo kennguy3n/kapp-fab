@@ -25,6 +25,13 @@ import type {
   ReportFilter,
   ReportSort,
 } from "@kapp/client";
+import {
+  Button,
+  ConfirmDialog,
+  Input,
+  Select,
+  cn,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 import { Viz } from "../components/insights/Charts";
 import { ShareModal } from "../components/insights/ShareModal";
@@ -159,6 +166,7 @@ export function InsightsQueryBuilderPage() {
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<InsightsRunResult | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   // When a saved query is picked from the sidebar, hydrate the form
   // from it. Re-runs preview for live cache-aware result.
@@ -234,6 +242,10 @@ export function InsightsQueryBuilderPage() {
       qc.invalidateQueries({ queryKey: ["insights-queries"] });
     },
     onError: (err: Error) => setError(err.message),
+    // Await-mutation pattern: keep the dialog open showing "Working…"
+    // until the delete settles, then close it regardless of outcome
+    // (errors surface in the page-level error banner).
+    onSettled: () => setDeleteOpen(false),
   });
 
   const onSave = () => {
@@ -267,49 +279,45 @@ export function InsightsQueryBuilderPage() {
 
   return (
     <section>
-      <h1>Insights — Query Builder</h1>
-      <p style={{ color: "#6b7280" }}>
+      <h1 className="text-2xl font-semibold tracking-tight text-fg">
+        Insights — Query Builder
+      </h1>
+      <p className="text-fg-muted">
         Compose a saved query over a KType or ledger table. Filters,
         group-by, aggregations and calculated columns are validated
         server-side before SQL is emitted.
       </p>
 
-      <div style={{ display: "flex", gap: 16 }}>
-        <aside style={{ flex: "0 0 220px" }}>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
-          >
-            <h3 style={{ fontSize: 14 }}>Saved queries</h3>
-            <button
+      <div className="flex gap-4">
+        <aside className="flex-[0_0_220px]">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-fg">Saved queries</h3>
+            <Button
+              size="sm"
+              variant="ghost"
               onClick={() => {
                 setSelectedId(null);
                 setForm(blankForm());
                 setPreview(null);
               }}
-              style={{ fontSize: 12 }}
             >
               + New
-            </button>
+            </Button>
           </div>
-          {queriesQuery.isLoading && <p>Loading…</p>}
-          <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: 13 }}>
+          {queriesQuery.isLoading && (
+            <p className="text-sm text-fg-muted">Loading…</p>
+          )}
+          <ul className="m-0 list-none p-0 text-sm">
             {(queriesQuery.data?.queries ?? []).map((q) => (
-              <li key={q.id} style={{ padding: "4px 0" }}>
+              <li key={q.id} className="py-1">
                 <button
                   onClick={() => setSelectedId(q.id)}
-                  style={{
-                    background: "none",
-                    border: "none",
-                    color:
-                      selectedId === q.id ? "#111" : "#2563eb",
-                    fontWeight: selectedId === q.id ? 600 : 400,
-                    cursor: "pointer",
-                    padding: 0,
-                  }}
+                  className={cn(
+                    "cursor-pointer rounded text-left transition-colors hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)",
+                    selectedId === q.id
+                      ? "font-semibold text-fg"
+                      : "text-accent",
+                  )}
                 >
                   {q.name}
                 </button>
@@ -318,39 +326,46 @@ export function InsightsQueryBuilderPage() {
           </ul>
         </aside>
 
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input
+        <div className="flex flex-1 flex-col gap-3">
+          <div className="flex gap-2">
+            <Input
               placeholder="query name"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
-              style={{ flex: 1 }}
+              className="flex-1"
             />
-            <input
+            <Input
               placeholder="description (optional)"
               value={form.description}
               onChange={(e) =>
                 setForm({ ...form, description: e.target.value })
               }
-              style={{ flex: 2 }}
+              className="flex-[2]"
             />
-            <button onClick={onSave} disabled={createMut.isPending || updateMut.isPending}>
+            <Button
+              onClick={onSave}
+              disabled={createMut.isPending || updateMut.isPending}
+            >
               {selectedId ? "Update" : "Save"}
-            </button>
+            </Button>
             {selectedId && (
               <>
-                <button onClick={onRun} disabled={runMut.isPending}>
+                <Button
+                  variant="secondary"
+                  onClick={onRun}
+                  disabled={runMut.isPending}
+                >
                   {runMut.isPending ? "Running…" : "Run"}
-                </button>
-                <button onClick={() => setShareOpen(true)}>Share…</button>
-                <button
-                  onClick={() => {
-                    if (confirm("Delete this query?")) deleteMut.mutate(selectedId);
-                  }}
-                  style={{ color: "#dc2626" }}
+                </Button>
+                <Button variant="outline" onClick={() => setShareOpen(true)}>
+                  Share…
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => setDeleteOpen(true)}
                 >
                   Delete
-                </button>
+                </Button>
               </>
             )}
           </div>
@@ -362,7 +377,7 @@ export function InsightsQueryBuilderPage() {
               tries to run, not when it switches tabs. */}
           <div
             role="tablist"
-            style={{ display: "flex", gap: 4, borderBottom: "1px solid #e5e7eb" }}
+            className="flex gap-1 border-b border-border"
           >
             <TabButton
               active={form.mode === "visual"}
@@ -380,7 +395,7 @@ export function InsightsQueryBuilderPage() {
 
           {form.mode === "sql" && (
             <Section title="SQL (parameterised)">
-              <p style={{ fontSize: 12, color: "#6b7280", marginTop: 0 }}>
+              <p className="mt-0 text-xs text-fg-muted">
                 Runs under the per-tenant <code>app.tenant_id</code> GUC
                 with <code>SET LOCAL statement_timeout</code>. RLS pins
                 every read to your tenant. Use <code>$1</code>,{" "}
@@ -414,16 +429,7 @@ export function InsightsQueryBuilderPage() {
                 placeholder="SELECT id, name FROM crm_deals WHERE stage = $1"
                 rows={14}
                 spellCheck={false}
-                style={{
-                  width: "100%",
-                  fontFamily:
-                    "ui-monospace, SFMono-Regular, Menlo, monospace",
-                  fontSize: 13,
-                  border: "1px solid #d1d5db",
-                  borderRadius: 4,
-                  padding: 8,
-                  resize: "vertical",
-                }}
+                className="w-full resize-y rounded-md border border-border bg-bg px-2 py-2 font-mono text-sm text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
               />
             </Section>
           )}
@@ -431,21 +437,20 @@ export function InsightsQueryBuilderPage() {
           {form.mode === "visual" && (
           <>
           <Section title="Source">
-            <select
+            <Select
               value={form.source}
               onChange={(e) => setForm({ ...form, source: e.target.value })}
-              style={{ width: "100%" }}
             >
               {sourceOptions.map((s) => (
                 <option key={s} value={s}>
                   {s}
                 </option>
               ))}
-            </select>
+            </Select>
           </Section>
 
           <Section title="Columns (drag to reorder)">
-            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            <ul className="m-0 list-none p-0">
               {form.columns.map((c, i) => (
                 <li
                   key={`${c}-${i}`}
@@ -459,60 +464,67 @@ export function InsightsQueryBuilderPage() {
                     const from = Number(e.dataTransfer.getData("text/plain"));
                     moveColumn(from, i);
                   }}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    padding: 4,
-                    border: "1px solid #e5e7eb",
-                    marginBottom: 4,
-                    background: "#f9fafb",
-                    cursor: "grab",
-                  }}
+                  className="mb-1 flex cursor-grab items-center gap-2 border border-border bg-bg-subtle p-1"
                 >
-                  <span style={{ color: "#9ca3af" }}>⋮⋮</span>
-                  <input
+                  <span className="text-fg-subtle">⋮⋮</span>
+                  <Input
                     value={c}
                     onChange={(e) => {
                       const next = [...form.columns];
                       next[i] = e.target.value;
                       setForm({ ...form, columns: next });
                     }}
-                    style={{ flex: 1 }}
+                    className="flex-1"
                   />
-                  <button onClick={() => moveColumn(i, i - 1)}>↑</button>
-                  <button onClick={() => moveColumn(i, i + 1)}>↓</button>
-                  <button
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-label="Move column up"
+                    onClick={() => moveColumn(i, i - 1)}
+                  >
+                    ↑
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-label="Move column down"
+                    onClick={() => moveColumn(i, i + 1)}
+                  >
+                    ↓
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-danger"
+                    aria-label="Remove column"
                     onClick={() =>
                       setForm({
                         ...form,
                         columns: form.columns.filter((_, j) => j !== i),
                       })
                     }
-                    style={{ color: "#dc2626" }}
                   >
                     ✕
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>
-            <button
+            <Button
+              size="sm"
+              variant="outline"
               onClick={() =>
                 setForm({ ...form, columns: [...form.columns, "new_column"] })
               }
             >
               + Add column
-            </button>
+            </Button>
           </Section>
 
           <Section title="Filters">
-            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            <ul className="m-0 list-none p-0">
               {form.filters.map((f, i) => (
-                <li
-                  key={i}
-                  style={{ display: "flex", gap: 6, marginBottom: 4 }}
-                >
-                  <input
+                <li key={i} className="mb-1 flex gap-1.5">
+                  <Input
                     placeholder="column"
                     value={f.column}
                     onChange={(e) => {
@@ -520,9 +532,9 @@ export function InsightsQueryBuilderPage() {
                       next[i] = { ...f, column: e.target.value };
                       setForm({ ...form, filters: next });
                     }}
-                    style={{ flex: 2 }}
+                    className="flex-[2]"
                   />
-                  <select
+                  <Select
                     value={f.op}
                     onChange={(e) => {
                       const next = [...form.filters];
@@ -535,8 +547,8 @@ export function InsightsQueryBuilderPage() {
                         {op}
                       </option>
                     ))}
-                  </select>
-                  <input
+                  </Select>
+                  <Input
                     placeholder="value"
                     value={
                       f.value === undefined || f.value === null
@@ -548,23 +560,28 @@ export function InsightsQueryBuilderPage() {
                       next[i] = { ...f, value: e.target.value };
                       setForm({ ...form, filters: next });
                     }}
-                    style={{ flex: 2 }}
+                    className="flex-[2]"
                   />
-                  <button
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-danger"
+                    aria-label="Remove filter"
                     onClick={() =>
                       setForm({
                         ...form,
                         filters: form.filters.filter((_, j) => j !== i),
                       })
                     }
-                    style={{ color: "#dc2626" }}
                   >
                     ✕
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>
-            <button
+            <Button
+              size="sm"
+              variant="outline"
               onClick={() =>
                 setForm({
                   ...form,
@@ -576,11 +593,11 @@ export function InsightsQueryBuilderPage() {
               }
             >
               + Add filter
-            </button>
+            </Button>
           </Section>
 
           <Section title="Group by">
-            <input
+            <Input
               placeholder="comma-separated columns"
               value={form.group_by.join(", ")}
               onChange={(e) =>
@@ -592,18 +609,14 @@ export function InsightsQueryBuilderPage() {
                     .filter(Boolean),
                 })
               }
-              style={{ width: "100%" }}
             />
           </Section>
 
           <Section title="Aggregations">
-            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            <ul className="m-0 list-none p-0">
               {form.aggregations.map((agg, i) => (
-                <li
-                  key={i}
-                  style={{ display: "flex", gap: 6, marginBottom: 4 }}
-                >
-                  <select
+                <li key={i} className="mb-1 flex gap-1.5">
+                  <Select
                     value={agg.op}
                     onChange={(e) => {
                       const next = [...form.aggregations];
@@ -619,8 +632,8 @@ export function InsightsQueryBuilderPage() {
                         {op}
                       </option>
                     ))}
-                  </select>
-                  <input
+                  </Select>
+                  <Input
                     placeholder="column"
                     value={agg.column ?? ""}
                     onChange={(e) => {
@@ -628,9 +641,9 @@ export function InsightsQueryBuilderPage() {
                       next[i] = { ...agg, column: e.target.value };
                       setForm({ ...form, aggregations: next });
                     }}
-                    style={{ flex: 1 }}
+                    className="flex-1"
                   />
-                  <input
+                  <Input
                     placeholder="alias"
                     value={agg.alias ?? ""}
                     onChange={(e) => {
@@ -638,9 +651,13 @@ export function InsightsQueryBuilderPage() {
                       next[i] = { ...agg, alias: e.target.value };
                       setForm({ ...form, aggregations: next });
                     }}
-                    style={{ flex: 1 }}
+                    className="flex-1"
                   />
-                  <button
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-danger"
+                    aria-label="Remove aggregation"
                     onClick={() =>
                       setForm({
                         ...form,
@@ -649,14 +666,15 @@ export function InsightsQueryBuilderPage() {
                         ),
                       })
                     }
-                    style={{ color: "#dc2626" }}
                   >
                     ✕
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>
-            <button
+            <Button
+              size="sm"
+              variant="outline"
               onClick={() =>
                 setForm({
                   ...form,
@@ -668,17 +686,14 @@ export function InsightsQueryBuilderPage() {
               }
             >
               + Add aggregation
-            </button>
+            </Button>
           </Section>
 
           <Section title="Calculated columns">
-            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            <ul className="m-0 list-none p-0">
               {form.calculated_columns.map((c, i) => (
-                <li
-                  key={i}
-                  style={{ display: "flex", gap: 6, marginBottom: 4 }}
-                >
-                  <input
+                <li key={i} className="mb-1 flex gap-1.5">
+                  <Input
                     placeholder="name"
                     value={c.name}
                     onChange={(e) => {
@@ -686,9 +701,9 @@ export function InsightsQueryBuilderPage() {
                       next[i] = { ...c, name: e.target.value };
                       setForm({ ...form, calculated_columns: next });
                     }}
-                    style={{ flex: 1 }}
+                    className="flex-1"
                   />
-                  <input
+                  <Input
                     placeholder="expression e.g. price * qty"
                     value={c.expression}
                     onChange={(e) => {
@@ -696,9 +711,13 @@ export function InsightsQueryBuilderPage() {
                       next[i] = { ...c, expression: e.target.value };
                       setForm({ ...form, calculated_columns: next });
                     }}
-                    style={{ flex: 3 }}
+                    className="flex-[3]"
                   />
-                  <button
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-danger"
+                    aria-label="Remove calculated column"
                     onClick={() =>
                       setForm({
                         ...form,
@@ -707,14 +726,15 @@ export function InsightsQueryBuilderPage() {
                         ),
                       })
                     }
-                    style={{ color: "#dc2626" }}
                   >
                     ✕
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>
-            <button
+            <Button
+              size="sm"
+              variant="outline"
               onClick={() =>
                 setForm({
                   ...form,
@@ -726,14 +746,15 @@ export function InsightsQueryBuilderPage() {
               }
             >
               + Add calculated column
-            </button>
+            </Button>
           </Section>
 
           <Section title="Sort + limit + cache">
-            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              <label>Sort:</label>
-              <input
+            <div className="flex flex-wrap items-center gap-1.5">
+              <label className="text-sm text-fg">Sort:</label>
+              <Input
                 placeholder="column"
+                className="w-auto"
                 value={form.sort[0]?.column ?? ""}
                 onChange={(e) => {
                   const next: ReportSort[] = e.target.value
@@ -742,7 +763,8 @@ export function InsightsQueryBuilderPage() {
                   setForm({ ...form, sort: next });
                 }}
               />
-              <select
+              <Select
+                className="w-auto"
                 value={form.sort[0]?.direction ?? "asc"}
                 onChange={(e) => {
                   if (form.sort.length === 0) return;
@@ -756,18 +778,18 @@ export function InsightsQueryBuilderPage() {
               >
                 <option value="asc">asc</option>
                 <option value="desc">desc</option>
-              </select>
-              <label style={{ marginLeft: 12 }}>Limit:</label>
-              <input
+              </Select>
+              <label className="ml-3 text-sm text-fg">Limit:</label>
+              <Input
                 type="number"
                 value={form.limit}
                 onChange={(e) =>
                   setForm({ ...form, limit: Number(e.target.value) })
                 }
-                style={{ width: 80 }}
+                className="w-20"
               />
-              <label style={{ marginLeft: 12 }}>Cache TTL (s):</label>
-              <input
+              <label className="ml-3 text-sm text-fg">Cache TTL (s):</label>
+              <Input
                 type="number"
                 value={form.cache_ttl_seconds}
                 onChange={(e) =>
@@ -776,22 +798,21 @@ export function InsightsQueryBuilderPage() {
                     cache_ttl_seconds: Number(e.target.value),
                   })
                 }
-                style={{ width: 80 }}
+                className="w-20"
               />
             </div>
           </Section>
           </>
           )}
 
-          {error && (
-            <div style={{ color: "#dc2626", fontSize: 13 }}>{error}</div>
-          )}
+          {error && <div className="text-sm text-danger">{error}</div>}
 
           {preview && (
             <Section title={`Preview (${preview.cache_hit ? "cache" : "live"})`}>
-              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                <label>Visualisation:</label>
-                <select
+              <div className="mb-2 flex items-center gap-2">
+                <label className="text-sm text-fg">Visualisation:</label>
+                <Select
+                  className="w-auto"
                   value={previewVizType}
                   onChange={(e) =>
                     setPreviewVizType(e.target.value as InsightsVizType)
@@ -802,8 +823,8 @@ export function InsightsQueryBuilderPage() {
                       {v}
                     </option>
                   ))}
-                </select>
-                <span style={{ color: "#6b7280", marginLeft: "auto" }}>
+                </Select>
+                <span className="ml-auto text-fg-muted">
                   {preview.result.rows.length} rows
                 </span>
               </div>
@@ -812,6 +833,21 @@ export function InsightsQueryBuilderPage() {
           )}
         </div>
       </div>
+
+      <ConfirmDialog
+        open={deleteOpen}
+        onOpenChange={(open) => {
+          if (!open && deleteMut.isPending) return;
+          setDeleteOpen(open);
+        }}
+        title="Delete this query?"
+        description="This permanently removes the saved query."
+        destructive
+        loading={deleteMut.isPending}
+        onConfirm={() => {
+          if (selectedId) deleteMut.mutate(selectedId);
+        }}
+      />
 
       {shareOpen && selectedId && (
         <ShareModal
@@ -840,16 +876,12 @@ function TabButton({
       role="tab"
       aria-selected={active}
       onClick={onClick}
-      style={{
-        background: "none",
-        border: "none",
-        borderBottom: active ? "2px solid #2563eb" : "2px solid transparent",
-        color: active ? "#111" : "#6b7280",
-        fontWeight: active ? 600 : 400,
-        fontSize: 13,
-        padding: "8px 12px",
-        cursor: "pointer",
-      }}
+      className={cn(
+        "-mb-px cursor-pointer border-b-2 px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)",
+        active
+          ? "border-accent font-semibold text-fg"
+          : "border-transparent text-fg-muted hover:text-fg",
+      )}
     >
       {children}
     </button>
@@ -864,14 +896,8 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <fieldset
-      style={{
-        border: "1px solid #e5e7eb",
-        borderRadius: 6,
-        padding: 12,
-      }}
-    >
-      <legend style={{ fontSize: 13, fontWeight: 600, padding: "0 6px" }}>
+    <fieldset className="rounded-md border border-border p-3">
+      <legend className="px-1.5 text-sm font-semibold text-fg">
         {title}
       </legend>
       {children}

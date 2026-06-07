@@ -1,5 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import type { FinanceAccount } from "@kapp/client";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -18,55 +26,49 @@ export function ChartOfAccountsPage() {
   return (
     <section>
       <h1>Chart of Accounts</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Per-tenant account registry used for double-entry postings.
       </p>
 
       {q.isLoading && <p>Loading…</p>}
       {q.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load accounts: {(q.error as Error).message}
         </p>
       )}
 
       {q.data && q.data.length === 0 && (
-        <p style={{ color: "#9ca3af", fontStyle: "italic" }}>
+        <p className="italic text-fg-subtle">
           No accounts yet. Create one via the finance.account KType.
         </p>
       )}
 
       {q.data &&
         (Object.keys(byType) as (keyof typeof byType)[]).map((type) => (
-          <div key={type} style={{ marginTop: 16 }}>
-            <h2 style={{ fontSize: 14, textTransform: "capitalize" }}>{type}</h2>
-            <table
-              style={{
-                width: "100%",
-                borderCollapse: "collapse",
-                fontSize: 13,
-              }}
-            >
-              <thead>
-                <tr style={{ textAlign: "left", color: "#6b7280" }}>
-                  <Th>Code</Th>
-                  <Th>Name</Th>
-                  <Th>Parent</Th>
-                  <Th>Active</Th>
-                </tr>
-              </thead>
-              <tbody>
+          <div key={type} className="mt-4">
+            <h2 className="text-sm capitalize">{type}</h2>
+            <Table className="text-[13px]">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Code</TableHead>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Parent</TableHead>
+                  <TableHead>Active</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {byType[type].map((a) => (
-                  <tr key={a.code} style={{ borderTop: "1px solid #e5e7eb" }}>
-                    <Td>
+                  <TableRow key={a.code}>
+                    <TableCell>
                       <code>{a.code}</code>
-                    </Td>
-                    <Td>{a.name}</Td>
-                    <Td>{a.parent_code ?? "—"}</Td>
-                    <Td>{a.active ? "yes" : "no"}</Td>
-                  </tr>
+                    </TableCell>
+                    <TableCell>{a.name}</TableCell>
+                    <TableCell>{a.parent_code ?? "—"}</TableCell>
+                    <TableCell>{a.active ? "yes" : "no"}</TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
           </div>
         ))}
     </section>
@@ -84,14 +86,3 @@ function groupByType(accounts: FinanceAccount[]): Record<string, FinanceAccount[
   return out;
 }
 
-function Th({ children }: { children: React.ReactNode }) {
-  return (
-    <th style={{ padding: "6px 8px", fontWeight: 500, fontSize: 12 }}>
-      {children}
-    </th>
-  );
-}
-
-function Td({ children }: { children: React.ReactNode }) {
-  return <td style={{ padding: "8px" }}>{children}</td>;
-}

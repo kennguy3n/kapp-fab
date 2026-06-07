@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { FieldSpec } from "@kapp/client";
+import { Button, Input, Select } from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -50,22 +51,19 @@ export function FormPage() {
 
   if (status === "submitted") {
     return (
-      <div style={{ maxWidth: 540, margin: "48px auto", padding: 24 }}>
+      <div className="mx-auto my-12 max-w-[540px] p-6">
         <h2>Thanks — your submission was received.</h2>
       </div>
     );
   }
 
   return (
-    <form
-      onSubmit={onSubmit}
-      style={{ maxWidth: 540, margin: "48px auto", padding: 24 }}
-    >
+    <form onSubmit={onSubmit} className="mx-auto my-12 max-w-[540px] p-6">
       <h1>{form.config?.title || schema.name}</h1>
       {form.config?.description && (
-        <p style={{ color: "#4b5563" }}>{form.config.description}</p>
+        <p className="text-fg-muted">{form.config.description}</p>
       )}
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div className="flex flex-col gap-3">
         {fields.map((f) => (
           <FormField
             key={f.name}
@@ -75,14 +73,10 @@ export function FormPage() {
           />
         ))}
       </div>
-      {error && <div style={{ color: "#b91c1c", marginTop: 12 }}>{error}</div>}
-      <button
-        type="submit"
-        disabled={status === "submitting"}
-        style={{ marginTop: 16 }}
-      >
+      {error && <div className="mt-3 text-danger">{error}</div>}
+      <Button type="submit" disabled={status === "submitting"} className="mt-4">
         {status === "submitting" ? "Submitting…" : "Submit"}
-      </button>
+      </Button>
     </form>
   );
 }
@@ -95,7 +89,7 @@ interface FormFieldProps {
 
 function FormField({ field, value, onChange }: FormFieldProps) {
   const label = (
-    <label style={{ display: "block", fontWeight: 500, marginBottom: 4 }}>
+    <label className="mb-1 block font-medium">
       {field.name}
       {field.required ? " *" : ""}
     </label>
@@ -104,7 +98,7 @@ function FormField({ field, value, onChange }: FormFieldProps) {
     return (
       <div>
         {label}
-        <select
+        <Select
           value={(value as string) ?? ""}
           onChange={(e) => onChange(e.target.value)}
           required={field.required}
@@ -115,7 +109,7 @@ function FormField({ field, value, onChange }: FormFieldProps) {
               {v}
             </option>
           ))}
-        </select>
+        </Select>
       </div>
     );
   }
@@ -128,7 +122,7 @@ function FormField({ field, value, onChange }: FormFieldProps) {
           onChange={(e) => onChange(e.target.value)}
           required={field.required}
           rows={4}
-          style={{ width: "100%" }}
+          className="w-full rounded-md border border-border bg-bg px-3 py-2 text-sm"
         />
       </div>
     );
@@ -141,7 +135,7 @@ function FormField({ field, value, onChange }: FormFieldProps) {
   return (
     <div>
       {label}
-      <input
+      <Input
         type={inputType}
         value={(value as string) ?? ""}
         onChange={(e) =>
@@ -149,7 +143,7 @@ function FormField({ field, value, onChange }: FormFieldProps) {
         }
         required={field.required}
         maxLength={field.max_length}
-        style={{ width: "100%" }}
+        className="w-full"
       />
     </div>
   );

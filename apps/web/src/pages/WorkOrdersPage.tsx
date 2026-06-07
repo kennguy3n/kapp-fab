@@ -5,6 +5,7 @@ import type {
   InventoryWarehouse,
   WorkOrder,
 } from "@kapp/client";
+import { Button, Input, Select } from "@kapp/ui";
 import { api } from "../lib/api";
 
 // COLUMNS lists the always-visible kanban lanes. `closed` is
@@ -20,11 +21,11 @@ const COLUMNS: Array<{
   label: string;
   accent: string;
 }> = [
-  { status: "draft", label: "Draft", accent: "#e5e7eb" },
-  { status: "released", label: "Released", accent: "#dbeafe" },
-  { status: "in_progress", label: "In Progress", accent: "#fde68a" },
-  { status: "completed", label: "Completed", accent: "#dcfce7" },
-  { status: "cancelled", label: "Cancelled", accent: "#fecaca" },
+  { status: "draft", label: "Draft", accent: "bg-bg-muted" },
+  { status: "released", label: "Released", accent: "bg-info/15" },
+  { status: "in_progress", label: "In Progress", accent: "bg-warning/25" },
+  { status: "completed", label: "Completed", accent: "bg-success/15" },
+  { status: "cancelled", label: "Cancelled", accent: "bg-danger/15" },
 ];
 
 // CLOSED_COLUMN is the on-demand sixth lane, conditionally
@@ -34,7 +35,7 @@ const COLUMNS: Array<{
 const CLOSED_COLUMN: (typeof COLUMNS)[number] = {
   status: "closed",
   label: "Closed",
-  accent: "#e0e7ff",
+  accent: "bg-accent/15",
 };
 
 /**
@@ -129,7 +130,7 @@ export function WorkOrdersPage() {
   return (
     <section>
       <h1>Work Orders</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Kanban of production runs. Completing a work order emits the
         consumption + receipt inventory moves atomically.
       </p>
@@ -141,51 +142,32 @@ export function WorkOrdersPage() {
 
       {wosQ.isLoading && <p>Loading…</p>}
       {wosQ.isError && (
-        <p style={{ color: "#dc2626" }}>{String(wosQ.error)}</p>
+        <p className="text-danger">{String(wosQ.error)}</p>
       )}
-      <div style={{ marginTop: 12 }}>
-        <button
+      <div className="mt-3">
+        <Button
           type="button"
+          size="sm"
+          variant={showClosed ? "secondary" : "outline"}
           onClick={() => setShowClosed((v) => !v)}
           aria-pressed={showClosed}
-          style={{
-            fontSize: 12,
-            padding: "4px 10px",
-            background: showClosed ? "#e0e7ff" : "#f3f4f6",
-            border: "1px solid #d1d5db",
-            borderRadius: 4,
-            cursor: "pointer",
-          }}
         >
           {showClosed ? "Hide" : "Show"} closed ({closedCount})
-        </button>
+        </Button>
       </div>
       <div
+        className="mt-4 grid gap-3"
         style={{
-          display: "grid",
           gridTemplateColumns: `repeat(${visibleColumns.length}, 1fr)`,
-          gap: 12,
-          marginTop: 16,
         }}
       >
         {visibleColumns.map((col) => (
           <div
             key={col.status}
-            style={{
-              borderRadius: 8,
-              padding: 8,
-              background: "#f9fafb",
-              minHeight: 200,
-            }}
+            className="min-h-[200px] rounded-lg bg-bg-subtle p-2"
           >
             <div
-              style={{
-                fontWeight: 600,
-                marginBottom: 8,
-                background: col.accent,
-                padding: "4px 8px",
-                borderRadius: 4,
-              }}
+              className={`mb-2 rounded px-2 py-1 font-semibold ${col.accent}`}
             >
               {col.label} ({(grouped.get(col.status) ?? []).length})
             </div>
@@ -228,66 +210,57 @@ function WorkOrderCard({
 }: WorkOrderCardProps) {
   const [actual, setActual] = useState(wo.planned_qty);
   return (
-    <div
-      style={{
-        background: "white",
-        border: "1px solid #e5e7eb",
-        borderRadius: 6,
-        padding: 8,
-        marginBottom: 8,
-        fontSize: 13,
-      }}
-    >
-      <div style={{ fontWeight: 600 }}>
+    <div className="mb-2 rounded-md border border-border bg-bg-elevated p-2 text-[13px]">
+      <div className="font-semibold">
         {itemLabel.get(wo.item_id) ?? wo.item_id}
       </div>
-      <div style={{ color: "#6b7280" }}>{whLabel.get(wo.warehouse_id)}</div>
+      <div className="text-fg-muted">{whLabel.get(wo.warehouse_id)}</div>
       <div>
         Planned: {wo.planned_qty}
         {wo.actual_qty ? <> · Actual: {wo.actual_qty}</> : null}
       </div>
-      <div style={{ display: "flex", gap: 4, marginTop: 8, flexWrap: "wrap" }}>
+      <div className="mt-2 flex flex-wrap items-center gap-1">
         {wo.status === "draft" && (
-          <button onClick={() => onTransition("release")} disabled={disabled}>
+          <Button size="sm" variant="outline" onClick={() => onTransition("release")} disabled={disabled}>
             Release
-          </button>
+          </Button>
         )}
         {wo.status === "released" && (
-          <>
-            <button onClick={() => onTransition("start")} disabled={disabled}>
-              Start
-            </button>
-          </>
+          <Button size="sm" variant="outline" onClick={() => onTransition("start")} disabled={disabled}>
+            Start
+          </Button>
         )}
         {(wo.status === "released" || wo.status === "in_progress") && (
           <>
-            <input
+            <Input
               aria-label="actual qty"
               type="number"
               step="0.01"
               value={actual}
               onChange={(e) => setActual(e.target.value)}
-              style={{ width: 60 }}
+              className="w-16"
             />
-            <button
+            <Button
+              size="sm"
+              variant="outline"
               onClick={() => onTransition("complete", actual)}
               disabled={disabled}
             >
               Complete
-            </button>
+            </Button>
           </>
         )}
         {(wo.status === "draft" ||
           wo.status === "released" ||
           wo.status === "in_progress") && (
-          <button onClick={() => onTransition("cancel")} disabled={disabled}>
+          <Button size="sm" variant="outline" onClick={() => onTransition("cancel")} disabled={disabled}>
             Cancel
-          </button>
+          </Button>
         )}
         {wo.status === "completed" && (
-          <button onClick={() => onTransition("close")} disabled={disabled}>
+          <Button size="sm" variant="outline" onClick={() => onTransition("close")} disabled={disabled}>
             Close
-          </button>
+          </Button>
         )}
       </div>
     </div>
@@ -325,18 +298,11 @@ function CreateWorkOrderForm({ items, warehouses }: CreateFormProps) {
         e.preventDefault();
         createMut.mutate();
       }}
-      style={{
-        display: "flex",
-        gap: 8,
-        alignItems: "flex-end",
-        padding: 12,
-        background: "#f9fafb",
-        borderRadius: 6,
-      }}
+      className="flex items-end gap-2 rounded-md bg-bg-subtle p-3"
     >
-      <label>
+      <label className="flex flex-col gap-1 text-[13px]">
         Item
-        <select
+        <Select
           value={itemID}
           onChange={(e) => setItemID(e.target.value)}
           required
@@ -347,11 +313,11 @@ function CreateWorkOrderForm({ items, warehouses }: CreateFormProps) {
               {it.sku} — {it.name}
             </option>
           ))}
-        </select>
+        </Select>
       </label>
-      <label>
+      <label className="flex flex-col gap-1 text-[13px]">
         Warehouse
-        <select
+        <Select
           value={whID}
           onChange={(e) => setWhID(e.target.value)}
           required
@@ -362,24 +328,24 @@ function CreateWorkOrderForm({ items, warehouses }: CreateFormProps) {
               {w.code} — {w.name}
             </option>
           ))}
-        </select>
+        </Select>
       </label>
-      <label>
+      <label className="flex flex-col gap-1 text-[13px]">
         Planned qty
-        <input
+        <Input
           type="number"
           step="0.01"
           value={plannedQty}
           onChange={(e) => setPlannedQty(e.target.value)}
           required
-          style={{ width: 100 }}
+          className="w-[100px]"
         />
       </label>
-      <button type="submit" disabled={createMut.isPending}>
+      <Button type="submit" disabled={createMut.isPending}>
         {createMut.isPending ? "Creating…" : "Create work order"}
-      </button>
+      </Button>
       {createMut.isError && (
-        <span style={{ color: "#dc2626" }}>{String(createMut.error)}</span>
+        <span className="text-danger">{String(createMut.error)}</span>
       )}
     </form>
   );

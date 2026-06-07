@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
+import { Badge } from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -25,19 +26,19 @@ export function OrgChartPage() {
   return (
     <section>
       <h1>Org Chart</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Reporting hierarchy derived from the hr.employee `reporting_to`
         field. Employees with no manager (or whose manager is outside
         this tenant) appear as roots.
       </p>
       {employeesQ.isLoading && <p>Loading…</p>}
       {employeesQ.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load employees: {(employeesQ.error as Error).message}
         </p>
       )}
       {employeesQ.data && tree.roots.length === 0 && (
-        <p style={{ color: "#6b7280" }}>No employees yet.</p>
+        <p className="text-fg-muted">No employees yet.</p>
       )}
       {employeesQ.data && tree.roots.length > 0 && (
         <TreeList nodes={tree.roots} childrenByParent={tree.childrenByParent} />
@@ -111,7 +112,7 @@ function TreeList({
   childrenByParent: Map<string, EmployeeNode[]>;
 }) {
   return (
-    <ul style={{ listStyle: "none", paddingLeft: 0, marginTop: 12 }}>
+    <ul className="mt-3 list-none pl-0">
       {nodes.map((n) => (
         <TreeNode key={n.id} node={n} childrenByParent={childrenByParent} />
       ))}
@@ -128,45 +129,30 @@ function TreeNode({
 }) {
   const kids = childrenByParent.get(node.id) ?? [];
   return (
-    <li
-      style={{
-        borderLeft: "2px solid #e5e7eb",
-        paddingLeft: 12,
-        marginLeft: 4,
-        marginBottom: 6,
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+    <li className="mb-1.5 ml-1 border-l-2 border-border pl-3">
+      <div className="flex items-baseline gap-2">
         <strong>{node.name}</strong>
         {node.designation && (
-          <span style={{ color: "#4b5563", fontSize: 13 }}>
+          <span className="text-[13px] text-fg-muted">
             — {node.designation}
           </span>
         )}
         {node.department && (
-          <span style={{ color: "#6b7280", fontSize: 12 }}>
+          <span className="text-xs text-fg-muted">
             ({node.department})
           </span>
         )}
         {node.status && node.status !== "active" && (
-          <span
-            style={{
-              fontSize: 11,
-              color: "#92400e",
-              background: "#fef3c7",
-              padding: "1px 6px",
-              borderRadius: 3,
-            }}
-          >
+          <Badge variant="warning" size="sm">
             {node.status}
-          </span>
+          </Badge>
         )}
       </div>
       {node.email && (
-        <div style={{ color: "#6b7280", fontSize: 12 }}>{node.email}</div>
+        <div className="text-xs text-fg-muted">{node.email}</div>
       )}
       {kids.length > 0 && (
-        <ul style={{ listStyle: "none", paddingLeft: 12, marginTop: 6 }}>
+        <ul className="mt-1.5 list-none pl-3">
           {kids.map((c) => (
             <TreeNode key={c.id} node={c} childrenByParent={childrenByParent} />
           ))}

@@ -2,6 +2,17 @@ import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
+import {
+  Badge as UIBadge,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  cn,
+  type BadgeProps,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 const KTYPE_PROJECT = "projects.project";
@@ -23,15 +34,23 @@ interface MilestoneData {
   status?: string;
 }
 
-const STATUS_COLOR: Record<string, string> = {
-  planning: "#9ca3af",
-  active: "#2563eb",
-  completed: "#16a34a",
-  archived: "#6b7280",
-  planned: "#9ca3af",
-  in_progress: "#2563eb",
-  cancelled: "#dc2626",
+// Map the project / milestone status vocabulary onto the semantic
+// design-token palette. `variant` drives the Badge pill; `bar` is the
+// Tailwind background class used for the Gantt bar and milestone
+// markers so both stay on the oklch token system.
+const STATUS_META: Record<string, { variant: BadgeProps["variant"]; bar: string }> = {
+  planning: { variant: "default", bar: "bg-fg-subtle" },
+  active: { variant: "info", bar: "bg-info" },
+  completed: { variant: "success", bar: "bg-success" },
+  archived: { variant: "default", bar: "bg-fg-subtle" },
+  planned: { variant: "default", bar: "bg-fg-subtle" },
+  in_progress: { variant: "info", bar: "bg-info" },
+  cancelled: { variant: "danger", bar: "bg-danger" },
 };
+
+function statusMeta(status: string): { variant: BadgeProps["variant"]; bar: string } {
+  return STATUS_META[status] ?? { variant: "default", bar: "bg-fg-subtle" };
+}
 
 /**
  * ProjectGanttPage renders a lightweight Gantt strip per project,
@@ -75,10 +94,11 @@ export function ProjectGanttPage() {
     return { rangeStart: min, rangeEnd: max };
   }, [projectsQ.data]);
 
-  if (projectsQ.isLoading || milestonesQ.isLoading) return <p>Loading…</p>;
+  if (projectsQ.isLoading || milestonesQ.isLoading)
+    return <p className="text-sm text-fg-muted">Loading…</p>;
   if (projectsQ.isError) {
     return (
-      <p style={{ color: "#b91c1c" }}>
+      <p className="text-sm text-danger">
         Failed to load projects: {(projectsQ.error as Error).message}
       </p>
     );
@@ -104,93 +124,102 @@ export function ProjectGanttPage() {
   );
 
   return (
-    <section>
-      <h1>Projects</h1>
-      <p style={{ color: "#6b7280" }}>
+    <section className="flex flex-col gap-2">
+      <h1 className="text-2xl font-semibold tracking-tight text-fg">Projects</h1>
+      <p className="text-sm text-fg-muted">
         Gantt strip per project. Bar extent = start_date → end_date; markers
         are milestone due dates coloured by status.
       </p>
 
       {projects.length === 0 ? (
-        <p style={{ color: "#6b7280", marginTop: 16 }}>
+        <p className="mt-4 text-sm text-fg-muted">
           No projects yet. Create one via{" "}
-          <Link to="/records/projects.project">the records list</Link> or the
-          KChat <code>/project</code> command.
+          <Link
+            to="/records/projects.project"
+            className="text-accent hover:underline"
+          >
+            the records list
+          </Link>{" "}
+          or the KChat <code>/project</code> command.
         </p>
       ) : (
-        <table style={{ width: "100%", marginTop: 16, borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              <th style={th()}>Project</th>
-              <th style={th()}>Status</th>
-              <th style={th()}>
-                Timeline ({rangeStart.toISOString().slice(0, 10)} →{" "}
-                {rangeEnd.toISOString().slice(0, 10)})
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {projects.map((p) => {
-              const data = (p.data as ProjectData) ?? {};
-              const start = data.start_date ? new Date(data.start_date) : rangeStart;
-              const end = data.end_date ? new Date(data.end_date) : rangeEnd;
-              const left = pct(start, rangeStart, totalDays);
-              const width = Math.max(
-                1,
-                pct(end, rangeStart, totalDays) - left,
-              );
-              const ms = milestonesByProject.get(p.id) ?? [];
-              return (
-                <tr key={p.id} style={{ borderTop: "1px solid #e5e7eb" }}>
-                  <td style={td()}>
-                    <Link to={`/records/${KTYPE_PROJECT}/${p.id}`}>
-                      {data.name ?? p.id}
-                    </Link>
-                    {data.code && (
-                      <div style={{ fontSize: 11, color: "#6b7280" }}>
-                        {data.code}
+        <div className="mt-4">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Project</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>
+                  Timeline ({rangeStart.toISOString().slice(0, 10)} →{" "}
+                  {rangeEnd.toISOString().slice(0, 10)})
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {projects.map((p) => {
+                const data = (p.data as ProjectData) ?? {};
+                const start = data.start_date ? new Date(data.start_date) : rangeStart;
+                const end = data.end_date ? new Date(data.end_date) : rangeEnd;
+                const left = pct(start, rangeStart, totalDays);
+                const width = Math.max(
+                  1,
+                  pct(end, rangeStart, totalDays) - left,
+                );
+                const ms = milestonesByProject.get(p.id) ?? [];
+                return (
+                  <TableRow key={p.id}>
+                    <TableCell>
+                      <Link
+                        to={`/records/${KTYPE_PROJECT}/${p.id}`}
+                        className="text-accent hover:underline"
+                      >
+                        {data.name ?? p.id}
+                      </Link>
+                      {data.code && (
+                        <div className="text-[11px] text-fg-muted">
+                          {data.code}
+                        </div>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <UIBadge variant={statusMeta(data.status ?? "planning").variant}>
+                        {data.status ?? "planning"}
+                      </UIBadge>
+                    </TableCell>
+                    <TableCell className="py-2">
+                      <div className="relative h-[18px] rounded bg-bg-muted">
+                        <div
+                          className={cn(
+                            "absolute top-1 h-2.5 min-w-1 rounded",
+                            statusMeta(data.status ?? "planning").bar,
+                          )}
+                          style={{ left: `${left}%`, width: `${width}%` }}
+                          title={`${data.start_date ?? "?"} → ${data.end_date ?? "?"}`}
+                        />
+                        {ms.map((m) => {
+                          const md = (m.data as MilestoneData) ?? {};
+                          if (!md.due_date) return null;
+                          const x = pct(new Date(md.due_date), rangeStart, totalDays);
+                          return (
+                            <div
+                              key={m.id}
+                              className={cn(
+                                "absolute top-0 h-[18px] w-1 rounded-[1px]",
+                                statusMeta(md.status ?? "planned").bar,
+                              )}
+                              style={{ left: `${x}%` }}
+                              title={`${md.name ?? m.id} — ${md.due_date} (${md.status ?? ""})`}
+                            />
+                          );
+                        })}
                       </div>
-                    )}
-                  </td>
-                  <td style={td()}>
-                    <Badge status={data.status ?? "planning"} />
-                  </td>
-                  <td style={{ ...td(), padding: "8px 0" }}>
-                    <div style={ganttRow()}>
-                      <div
-                        style={{
-                          ...ganttBar(),
-                          left: `${left}%`,
-                          width: `${width}%`,
-                          background:
-                            STATUS_COLOR[data.status ?? "planning"] ?? "#9ca3af",
-                        }}
-                        title={`${data.start_date ?? "?"} → ${data.end_date ?? "?"}`}
-                      />
-                      {ms.map((m) => {
-                        const md = (m.data as MilestoneData) ?? {};
-                        if (!md.due_date) return null;
-                        const x = pct(new Date(md.due_date), rangeStart, totalDays);
-                        return (
-                          <div
-                            key={m.id}
-                            style={{
-                              ...ganttMarker(),
-                              left: `${x}%`,
-                              background:
-                                STATUS_COLOR[md.status ?? "planned"] ?? "#9ca3af",
-                            }}
-                            title={`${md.name ?? m.id} — ${md.due_date} (${md.status ?? ""})`}
-                          />
-                        );
-                      })}
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
       )}
     </section>
   );
@@ -202,65 +231,4 @@ function pct(d: Date, start: Date, totalDays: number): number {
     Math.floor((d.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)),
   );
   return Math.min(100, (days / totalDays) * 100);
-}
-
-function Badge({ status }: { status: string }) {
-  return (
-    <span
-      style={{
-        display: "inline-block",
-        padding: "2px 8px",
-        borderRadius: 4,
-        fontSize: 11,
-        background: STATUS_COLOR[status] ?? "#9ca3af",
-        color: "white",
-      }}
-    >
-      {status}
-    </span>
-  );
-}
-
-function th(): React.CSSProperties {
-  return {
-    textAlign: "left",
-    padding: 8,
-    fontSize: 12,
-    color: "#6b7280",
-    textTransform: "uppercase",
-    borderBottom: "1px solid #e5e7eb",
-  };
-}
-
-function td(): React.CSSProperties {
-  return { padding: 8, verticalAlign: "middle" };
-}
-
-function ganttRow(): React.CSSProperties {
-  return {
-    position: "relative",
-    height: 18,
-    background: "#f3f4f6",
-    borderRadius: 4,
-  };
-}
-
-function ganttBar(): React.CSSProperties {
-  return {
-    position: "absolute",
-    top: 4,
-    height: 10,
-    borderRadius: 4,
-    minWidth: 4,
-  };
-}
-
-function ganttMarker(): React.CSSProperties {
-  return {
-    position: "absolute",
-    top: 0,
-    width: 4,
-    height: 18,
-    borderRadius: 1,
-  };
 }

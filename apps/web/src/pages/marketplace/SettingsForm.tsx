@@ -208,7 +208,7 @@ export function SettingsForm({
   const required = new Set(schema.required ?? []);
   const props = schema.properties;
   return (
-    <div style={{ display: "grid", gap: 12 }}>
+    <div className="grid gap-3">
       {Object.entries(props).map(([key, prop]) => (
         <SettingsField
           key={key}
@@ -261,25 +261,13 @@ function SettingsField({
   });
   return (
     <div>
-      <label
-        htmlFor={id}
-        style={{
-          display: "block",
-          fontSize: 13,
-          fontWeight: 500,
-          marginBottom: 4,
-        }}
-      >
+      <label htmlFor={id} className="mb-1 block text-[13px] font-medium">
         {label}
-        {required && (
-          <span style={{ color: "#dc2626", marginLeft: 4 }}>*</span>
-        )}
+        {required && <span className="ml-1 text-danger">*</span>}
       </label>
       {control}
       {description && (
-        <p style={{ margin: "4px 0 0", fontSize: 12, color: "#6b7280" }}>
-          {description}
-        </p>
+        <p className="mt-1 text-xs text-fg-muted">{description}</p>
       )}
     </div>
   );
@@ -630,17 +618,10 @@ function NestedJsonEditor({
             setError((err as Error).message);
           }
         }}
-        style={{
-          width: "100%",
-          fontFamily: "monospace",
-          fontSize: 13,
-          padding: 8,
-          border: "1px solid #d1d5db",
-          borderRadius: 6,
-        }}
+        className="w-full rounded-md border border-border bg-bg p-2 font-mono text-[13px] text-fg"
       />
       {error && (
-        <p style={{ color: "#b91c1c", fontSize: 12, margin: "4px 0 0" }}>
+        <p className="mt-1 text-xs text-danger">
           {error}
         </p>
       )}
@@ -727,7 +708,7 @@ function FreeformJsonEditor({
   useValiditySignal(FREEFORM_VALIDITY_KEY, error, onValidityChange);
   return (
     <div>
-      <p style={{ margin: "0 0 6px", fontSize: 12, color: "#6b7280" }}>
+      <p className="mb-1.5 text-xs text-fg-muted">
         This extension does not declare a settings schema. Provide a JSON
         object with any keys the extension expects, or leave empty.
       </p>
@@ -791,17 +772,10 @@ function FreeformJsonEditor({
             setError((err as Error).message);
           }
         }}
-        style={{
-          width: "100%",
-          fontFamily: "monospace",
-          fontSize: 13,
-          padding: 8,
-          border: "1px solid #d1d5db",
-          borderRadius: 6,
-        }}
+        className="w-full rounded-md border border-border bg-bg p-2 font-mono text-[13px] text-fg"
       />
       {error && (
-        <p style={{ color: "#b91c1c", fontSize: 12, margin: "4px 0 0" }}>
+        <p className="mt-1 text-xs text-danger">
           {error}
         </p>
       )}

@@ -2,6 +2,17 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import type { Webhook } from "@kapp/client";
+import {
+  Button,
+  ConfirmDialog,
+  Input,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 // WebhooksPage is the tenant admin surface for outbound webhook
@@ -15,6 +26,7 @@ export function WebhooksPage() {
     queryFn: () => api.listWebhooks(),
   });
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
 
   const [url, setUrl] = useState("");
   const [secret, setSecret] = useState("");
@@ -67,10 +79,16 @@ export function WebhooksPage() {
 
   const deleteMut = useMutation({
     mutationFn: (id: string) => api.deleteWebhook(id),
+    // Keep the confirm dialog open (showing its `loading` state) until
+    // the delete settles, then close it — matching the await-mutation
+    // pattern used by RecordListPage so destructive actions give
+    // consistent "Working…" feedback across the app.
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["webhooks"] });
       setSelectedId(null);
+      setDeleteId(null);
     },
+    onError: () => setDeleteId(null),
   });
 
   const hooks = hooksQuery.data?.webhooks ?? [];
@@ -84,154 +102,155 @@ export function WebhooksPage() {
           if (!url || !secret) return;
           createMut.mutate();
         }}
-        style={{ marginBottom: 24, display: "grid", gap: 8, maxWidth: 520 }}
+        className="mb-6 grid max-w-[520px] gap-2"
       >
-        <label>
+        <label className="grid gap-1 text-sm">
           URL
-          <input
+          <Input
             type="url"
             required
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="https://example.com/hooks/kapp"
-            style={{ width: "100%", padding: 6 }}
           />
         </label>
-        <label>
+        <label className="grid gap-1 text-sm">
           Signing secret
-          <input
+          <Input
             type="text"
             required
             value={secret}
             onChange={(e) => setSecret(e.target.value)}
             placeholder="shared HMAC secret"
-            style={{ width: "100%", padding: 6 }}
           />
         </label>
-        <label>
+        <label className="grid gap-1 text-sm">
           Event filters (comma-separated, trailing * = prefix)
-          <input
+          <Input
             type="text"
             value={filters}
             onChange={(e) => setFilters(e.target.value)}
             placeholder="krecord.*, workflow.completed"
-            style={{ width: "100%", padding: 6 }}
           />
         </label>
-        <label>
+        <label className="grid gap-1 text-sm">
           Conditions (JSON; matches against event payload — see docs)
           <textarea
             value={conditions}
             onChange={(e) => setConditions(e.target.value)}
             placeholder='{"ktype":"helpdesk.ticket","data.status":{"$in":["open","pending"]}}'
-            style={{ width: "100%", padding: 6, fontFamily: "monospace", minHeight: 64 }}
+            className="min-h-16 w-full rounded-md border border-border bg-bg-elevated p-1.5 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
           />
         </label>
-        <div style={{ display: "flex", gap: 12 }}>
-          <label style={{ flex: 1 }}>
+        <div className="flex gap-3">
+          <label className="grid flex-1 gap-1 text-sm">
             Max retries
-            <input
+            <Input
               type="number"
               min={1}
               max={20}
               value={maxRetries}
               onChange={(e) => setMaxRetries(parseInt(e.target.value, 10) || 5)}
-              style={{ width: "100%", padding: 6 }}
             />
           </label>
-          <label style={{ flex: 1 }}>
+          <label className="grid flex-1 gap-1 text-sm">
             Backoff base (seconds)
-            <input
+            <Input
               type="number"
               min={1}
               value={backoffBase}
               onChange={(e) => setBackoffBase(parseInt(e.target.value, 10) || 10)}
-              style={{ width: "100%", padding: 6 }}
             />
           </label>
         </div>
-        <button type="submit" disabled={createMut.isPending}>
-          Register webhook
-        </button>
+        <div>
+          <Button type="submit" disabled={createMut.isPending}>
+            Register webhook
+          </Button>
+        </div>
         {createMut.error instanceof Error && (
-          <div style={{ color: "#b91c1c", fontSize: 12 }}>
-            {createMut.error.message}
-          </div>
+          <div className="text-xs text-danger">{createMut.error.message}</div>
         )}
       </form>
 
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead>
-          <tr>
-            <th style={th}>URL</th>
-            <th style={th}>Filters</th>
-            <th style={th}>Active</th>
-            <th style={th}>Created</th>
-            <th style={th}></th>
-          </tr>
-        </thead>
-        <tbody>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>URL</TableHead>
+            <TableHead>Filters</TableHead>
+            <TableHead>Active</TableHead>
+            <TableHead>Created</TableHead>
+            <TableHead />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {hooks.map((h) => (
-            <tr
+            <TableRow
               key={h.id}
               onClick={() => setSelectedId(h.id)}
-              style={{
-                cursor: "pointer",
-                background: h.id === selectedId ? "#eef2ff" : undefined,
-              }}
+              className={
+                h.id === selectedId ? "cursor-pointer bg-bg-muted" : "cursor-pointer"
+              }
             >
-              <td style={td}>{h.url}</td>
-              <td style={td}>
+              <TableCell>{h.url}</TableCell>
+              <TableCell>
                 {(h.event_filters ?? []).join(", ") || <em>all</em>}
-              </td>
-              <td style={td}>
-                <button
+              </TableCell>
+              <TableCell>
+                <Button
+                  size="sm"
+                  variant="outline"
                   onClick={(e) => {
                     e.stopPropagation();
                     toggleMut.mutate(h);
                   }}
                 >
                   {h.active ? "on" : "off"}
-                </button>
-              </td>
-              <td style={td}>{new Date(h.created_at).toLocaleString()}</td>
-              <td style={td}>
+                </Button>
+              </TableCell>
+              <TableCell>{new Date(h.created_at).toLocaleString()}</TableCell>
+              <TableCell>
                 <Link
                   to={`/admin/webhooks/${h.id}/deliveries`}
                   onClick={(e) => e.stopPropagation()}
                 >
                   log
                 </Link>{" "}
-                <button
+                <Button
+                  size="sm"
+                  variant="ghost"
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (window.confirm("Delete webhook?")) {
-                      deleteMut.mutate(h.id);
-                    }
+                    setDeleteId(h.id);
                   }}
                 >
                   delete
-                </button>
-              </td>
-            </tr>
+                </Button>
+              </TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
 
       {selectedId && <DeliveryLog webhookId={selectedId} />}
+
+      <ConfirmDialog
+        open={deleteId !== null}
+        onOpenChange={(o) => {
+          if (!o && !deleteMut.isPending) setDeleteId(null);
+        }}
+        title="Delete webhook?"
+        description="This permanently removes the webhook subscription and its delivery history."
+        confirmLabel="Delete"
+        destructive
+        loading={deleteMut.isPending}
+        onConfirm={() => {
+          if (deleteId) deleteMut.mutate(deleteId);
+        }}
+      />
     </section>
   );
 }
-
-const th: React.CSSProperties = {
-  textAlign: "left",
-  borderBottom: "1px solid #e5e7eb",
-  padding: "4px 6px",
-};
-const td: React.CSSProperties = {
-  padding: "4px 6px",
-  borderBottom: "1px solid #f3f4f6",
-};
 
 function DeliveryLog({ webhookId }: { webhookId: string }) {
   const delivQuery = useQuery({
@@ -241,34 +260,34 @@ function DeliveryLog({ webhookId }: { webhookId: string }) {
   });
   const rows = delivQuery.data?.deliveries ?? [];
   return (
-    <div style={{ marginTop: 24 }}>
-      <h2 style={{ fontSize: 16 }}>Delivery log</h2>
+    <div className="mt-6">
+      <h2 className="text-base">Delivery log</h2>
       {rows.length === 0 && <div>No deliveries yet.</div>}
       {rows.length > 0 && (
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              <th style={th}>When</th>
-              <th style={th}>Event</th>
-              <th style={th}>Attempt</th>
-              <th style={th}>Status</th>
-              <th style={th}>Delivered</th>
-              <th style={th}>Error</th>
-            </tr>
-          </thead>
-          <tbody>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>When</TableHead>
+              <TableHead>Event</TableHead>
+              <TableHead>Attempt</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Delivered</TableHead>
+              <TableHead>Error</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {rows.map((d) => (
-              <tr key={d.id}>
-                <td style={td}>{new Date(d.created_at).toLocaleString()}</td>
-                <td style={td}>{d.event_type}</td>
-                <td style={td}>{d.attempt}</td>
-                <td style={td}>{d.status_code ?? "-"}</td>
-                <td style={td}>{d.delivered ? "yes" : "no"}</td>
-                <td style={td}>{d.error ?? ""}</td>
-              </tr>
+              <TableRow key={d.id}>
+                <TableCell>{new Date(d.created_at).toLocaleString()}</TableCell>
+                <TableCell>{d.event_type}</TableCell>
+                <TableCell>{d.attempt}</TableCell>
+                <TableCell>{d.status_code ?? "-"}</TableCell>
+                <TableCell>{d.delivered ? "yes" : "no"}</TableCell>
+                <TableCell>{d.error ?? ""}</TableCell>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       )}
     </div>
   );

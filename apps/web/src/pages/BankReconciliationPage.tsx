@@ -1,6 +1,16 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
+import {
+  Button,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  cn,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 const KTYPE_ACCOUNT = "finance.bank_account";
@@ -54,97 +64,110 @@ export function BankReconciliationPage() {
   }, [txns.data, selected]);
 
   return (
-    <section style={{ display: "flex", gap: 16 }}>
-      <div style={{ flex: "0 0 260px" }}>
-        <h1>Bank Reconciliation</h1>
-        <p style={{ color: "#6b7280", fontSize: 13 }}>
+    <section className="flex gap-4">
+      <div className="flex-[0_0_260px]">
+        <h1 className="text-2xl font-semibold tracking-tight text-fg">
+          Bank Reconciliation
+        </h1>
+        <p className="mt-1 text-sm text-fg-muted">
           Import statement lines via CSV, then match against journal entries.
         </p>
-        <h2 style={{ fontSize: 14 }}>Accounts</h2>
-        {accounts.isLoading && <p>Loading…</p>}
-        <ul style={{ listStyle: "none", padding: 0, fontSize: 13 }}>
+        <h2 className="mt-4 text-sm font-semibold text-fg">Accounts</h2>
+        {accounts.isLoading && (
+          <p className="text-sm text-fg-muted">Loading…</p>
+        )}
+        <ul className="mt-2 flex list-none flex-col gap-1 p-0">
           {(accounts.data ?? []).map((r) => {
             const d = r.data as unknown as BankAccountData;
             const active = selected === r.id;
             return (
-              <li
-                key={r.id}
-                onClick={() => setSelected(r.id)}
-                style={{
-                  padding: "6px 8px",
-                  cursor: "pointer",
-                  background: active ? "#eef2ff" : "transparent",
-                  borderRadius: 4,
-                }}
-              >
-                <div style={{ fontWeight: 500 }}>{d.name ?? "(unnamed)"}</div>
-                <div style={{ color: "#6b7280", fontSize: 12 }}>
-                  {d.currency ?? ""} {d.account_number ?? ""}
-                </div>
+              <li key={r.id}>
+                <button
+                  type="button"
+                  onClick={() => setSelected(r.id)}
+                  className={cn(
+                    "w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-bg-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)",
+                    active && "bg-accent/10",
+                  )}
+                >
+                  <div className="font-medium text-fg">
+                    {d.name ?? "(unnamed)"}
+                  </div>
+                  <div className="text-xs text-fg-muted">
+                    {d.currency ?? ""} {d.account_number ?? ""}
+                  </div>
+                </button>
               </li>
             );
           })}
         </ul>
       </div>
 
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div className="min-w-0 flex-1">
         {!selected ? (
-          <p style={{ color: "#6b7280" }}>Select a bank account.</p>
+          <p className="text-sm text-fg-muted">Select a bank account.</p>
         ) : (
           <>
-            <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <h2 style={{ fontSize: 16 }}>Transactions</h2>
+            <header className="flex items-center justify-between">
+              <h2 className="text-base font-semibold text-fg">Transactions</h2>
               <CSVUploader bankAccountId={selected} />
             </header>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginTop: 8 }}>
-              <thead>
-                <tr style={{ textAlign: "left", color: "#6b7280" }}>
-                  <Th>Date</Th>
-                  <Th>Description</Th>
-                  <Th style={{ textAlign: "right" }}>Amount</Th>
-                  <Th>Status</Th>
-                  <Th>Match</Th>
-                  <Th>{""}</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {visible.map((r) => {
-                  const d = r.data as unknown as BankTxnData;
-                  return (
-                    <tr key={r.id} style={{ borderTop: "1px solid #e5e7eb" }}>
-                      <Td>{d.value_date ?? ""}</Td>
-                      <Td>{d.description ?? ""}</Td>
-                      <Td style={{ textAlign: "right" }}>
-                        {d.amount ?? 0} {d.currency ?? ""}
-                      </Td>
-                      <Td>{d.status ?? "unreconciled"}</Td>
-                      <Td>{d.matched_entry_id ?? "—"}</Td>
-                      <Td>
-                        {(d.status ?? "unreconciled") === "unreconciled" && (
-                          <button
-                            onClick={() =>
-                              updateTxn.mutate({
-                                ...r,
-                                data: { ...r.data, status: "ignored" },
-                              })
-                            }
-                          >
-                            Mark ignored
-                          </button>
-                        )}
-                      </Td>
-                    </tr>
-                  );
-                })}
-                {visible.length === 0 && (
-                  <tr>
-                    <Td colSpan={6} style={{ padding: 12, color: "#6b7280" }}>
-                      No transactions yet.
-                    </Td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+            <div className="mt-2">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Date</TableHead>
+                    <TableHead>Description</TableHead>
+                    <TableHead className="text-right">Amount</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Match</TableHead>
+                    <TableHead>
+                      <span className="sr-only">Actions</span>
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {visible.map((r) => {
+                    const d = r.data as unknown as BankTxnData;
+                    return (
+                      <TableRow key={r.id}>
+                        <TableCell>{d.value_date ?? ""}</TableCell>
+                        <TableCell>{d.description ?? ""}</TableCell>
+                        <TableCell className="text-right">
+                          {d.amount ?? 0} {d.currency ?? ""}
+                        </TableCell>
+                        <TableCell>{d.status ?? "unreconciled"}</TableCell>
+                        <TableCell>{d.matched_entry_id ?? "—"}</TableCell>
+                        <TableCell>
+                          {(d.status ?? "unreconciled") ===
+                            "unreconciled" && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() =>
+                                updateTxn.mutate({
+                                  ...r,
+                                  data: { ...r.data, status: "ignored" },
+                                })
+                              }
+                            >
+                              Mark ignored
+                            </Button>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                  {visible.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={6} className="text-fg-muted">
+                        No transactions yet.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
           </>
         )}
       </div>
@@ -185,7 +208,7 @@ function CSVUploader({ bankAccountId }: { bankAccountId: string }) {
   };
 
   return (
-    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+    <div className="flex items-center gap-2">
       <input
         type="file"
         accept=".csv,text/csv"
@@ -194,9 +217,10 @@ function CSVUploader({ bankAccountId }: { bankAccountId: string }) {
           const f = e.target.files?.[0];
           if (f) handleFile(f);
         }}
+        className="text-sm text-fg-muted file:mr-2 file:rounded-md file:border file:border-border file:bg-bg-subtle file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-fg hover:file:bg-bg-muted"
       />
-      {busy && <span style={{ fontSize: 12 }}>Uploading…</span>}
-      {err && <span style={{ fontSize: 12, color: "#b91c1c" }}>{err}</span>}
+      {busy && <span className="text-xs text-fg-muted">Uploading…</span>}
+      {err && <span className="text-xs text-danger">{err}</span>}
     </div>
   );
 }
@@ -234,16 +258,4 @@ function parseCSV(text: string): CSVRow[] {
     });
   }
   return out;
-}
-
-function Th({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
-  return <th style={{ padding: "6px 8px", fontWeight: 500, fontSize: 12, ...style }}>{children}</th>;
-}
-
-function Td({ children, style, colSpan }: { children: React.ReactNode; style?: React.CSSProperties; colSpan?: number }) {
-  return (
-    <td style={{ padding: "8px", ...style }} colSpan={colSpan}>
-      {children}
-    </td>
-  );
 }

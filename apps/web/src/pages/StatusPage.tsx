@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { Badge } from "@kapp/ui";
 
 // StatusPage is the PUBLIC, unauthenticated status page backed by
 // GET /api/v1/health. It deliberately talks to the endpoint with a
@@ -36,13 +37,26 @@ async function fetchPublicHealth(): Promise<PublicHealth> {
   return (await res.json()) as PublicHealth;
 }
 
-// STATUS_META centralises the human label + colour for each status so
-// the banner, the per-component pills, and any future surface stay
-// visually consistent.
-const STATUS_META: Record<HealthStatus, { label: string; color: string; bg: string }> = {
-  operational: { label: "Operational", color: "#065f46", bg: "#d1fae5" },
-  degraded: { label: "Degraded", color: "#92400e", bg: "#fef3c7" },
-  down: { label: "Down", color: "#991b1b", bg: "#fee2e2" },
+// STATUS_META centralises the human label + design-system colour
+// mapping for each status so the banner, the per-component pills, and
+// any future surface stay visually consistent. `badge` selects the
+// Badge variant; `banner` is the Tailwind token class pair for the
+// large headline banner.
+const STATUS_META: Record<
+  HealthStatus,
+  { label: string; badge: "success" | "warning" | "danger"; banner: string }
+> = {
+  operational: {
+    label: "Operational",
+    badge: "success",
+    banner: "bg-success text-success-fg",
+  },
+  degraded: {
+    label: "Degraded",
+    badge: "warning",
+    banner: "bg-warning text-warning-fg",
+  },
+  down: { label: "Down", badge: "danger", banner: "bg-danger text-danger-fg" },
 };
 
 // COMPONENT_LABELS maps the public API's generic component names onto
@@ -64,21 +78,7 @@ const COMPONENT_LABELS: Record<string, string> = {
 
 function StatusPill({ status }: { status: HealthStatus }) {
   const meta = STATUS_META[status];
-  return (
-    <span
-      style={{
-        display: "inline-block",
-        padding: "2px 10px",
-        borderRadius: 999,
-        fontSize: 12,
-        fontWeight: 600,
-        color: meta.color,
-        background: meta.bg,
-      }}
-    >
-      {meta.label}
-    </span>
-  );
+  return <Badge variant={meta.badge}>{meta.label}</Badge>;
 }
 
 export function StatusPage() {
@@ -91,11 +91,11 @@ export function StatusPage() {
   });
 
   if (healthQuery.isLoading) {
-    return <div style={{ padding: 32 }}>Loading status…</div>;
+    return <div className="p-8">Loading status…</div>;
   }
   if (healthQuery.error || !healthQuery.data) {
     return (
-      <div style={{ padding: 32, color: "#991b1b" }}>
+      <div className="p-8 text-danger">
         Unable to load platform status. Please try again shortly.
       </div>
     );
@@ -105,37 +105,29 @@ export function StatusPage() {
   const meta = STATUS_META[data.status];
 
   return (
-    <div style={{ maxWidth: 720, margin: "0 auto", padding: "32px 16px" }}>
-      <h1 style={{ fontSize: 24, marginBottom: 4 }}>Platform Status</h1>
-      <p style={{ color: "#6b7280", fontSize: 13, marginTop: 0 }}>
+    <div className="mx-auto max-w-[720px] px-4 py-8">
+      <h1 className="mb-1 text-2xl">Platform Status</h1>
+      <p className="mt-0 text-[13px] text-fg-muted">
         Last checked {new Date(data.checked_at).toLocaleString()}
       </p>
 
-      <div
-        style={{
-          marginTop: 16,
-          padding: 20,
-          borderRadius: 10,
-          background: meta.bg,
-          color: meta.color,
-        }}
-      >
-        <div style={{ fontSize: 18, fontWeight: 700 }}>
+      <div className={`mt-4 rounded-[10px] p-5 ${meta.banner}`}>
+        <div className="text-lg font-bold">
           {data.status === "operational"
             ? "All systems operational"
             : data.status === "degraded"
               ? "Some systems degraded"
               : "Major outage"}
         </div>
-        <div style={{ fontSize: 13, marginTop: 4 }}>
+        <div className="mt-1 text-[13px]">
           {data.component_availability_percent.toFixed(0)}% of components
           operational
         </div>
       </div>
 
-      <section style={{ marginTop: 32 }}>
-        <h2 style={{ fontSize: 16 }}>Components</h2>
-        <div style={{ marginTop: 8 }}>
+      <section className="mt-8">
+        <h2 className="text-base">Components</h2>
+        <div className="mt-2">
           {data.components.map((c, i) => (
             <div
               // Index-suffixed: the public API collapses any unmapped
@@ -143,25 +135,13 @@ export function StatusPage() {
               // not guaranteed unique — keying on name alone could
               // collide if two unmapped probes ever co-exist.
               key={`${c.name}-${i}`}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "10px 0",
-                borderBottom: "1px solid #f3f4f6",
-              }}
+              className="flex items-center justify-between border-b border-border py-2.5"
             >
-              <span style={{ fontWeight: 500 }}>
+              <span className="font-medium">
                 {COMPONENT_LABELS[c.name] ?? c.name}
               </span>
-              <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <span
-                  style={{
-                    color: "#9ca3af",
-                    fontSize: 12,
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
+              <span className="flex items-center gap-3">
+                <span className="text-xs tabular-nums text-fg-subtle">
                   {c.latency_ms.toFixed(0)} ms
                 </span>
                 <StatusPill status={c.status} />
@@ -171,24 +151,20 @@ export function StatusPage() {
         </div>
       </section>
 
-      <section style={{ marginTop: 32 }}>
-        <h2 style={{ fontSize: 16 }}>Recent capacity changes</h2>
+      <section className="mt-8">
+        <h2 className="text-base">Recent capacity changes</h2>
         {data.incidents.length === 0 ? (
-          <p style={{ color: "#6b7280", fontSize: 13 }}>
+          <p className="text-[13px] text-fg-muted">
             No capacity changes in the recent window.
           </p>
         ) : (
-          <ul style={{ listStyle: "none", padding: 0, marginTop: 8 }}>
+          <ul className="mt-2 list-none p-0">
             {data.incidents.map((incident, i) => (
               <li
                 key={`${incident.at}-${i}`}
-                style={{
-                  padding: "8px 0",
-                  borderBottom: "1px solid #f3f4f6",
-                  fontSize: 13,
-                }}
+                className="border-b border-border py-2 text-[13px]"
               >
-                <span style={{ color: "#6b7280", marginRight: 8 }}>
+                <span className="mr-2 text-fg-muted">
                   {new Date(incident.at).toLocaleString()}
                 </span>
                 {incident.summary}

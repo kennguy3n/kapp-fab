@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { SearchResult } from "@kapp/client";
+import { Input } from "@kapp/ui";
 import { api } from "../lib/api";
 
 // SearchPage renders the /search route. The query is sourced from the
@@ -61,23 +62,16 @@ export function SearchPage() {
   return (
     <section>
       <h1>Search</h1>
-      <input
+      <Input
         autoFocus
         value={input}
         onChange={(e) => setInput(e.target.value)}
         placeholder="Search records by name, title, description, sku, email…"
-        style={{
-          width: "100%",
-          padding: "8px 12px",
-          fontSize: 16,
-          border: "1px solid #d1d5db",
-          borderRadius: 6,
-          marginBottom: 16,
-        }}
+        className="mb-4 w-full text-base"
       />
       {debounced && searchQuery.isLoading && <div>Searching…</div>}
       {debounced && searchQuery.error && (
-        <div style={{ color: "#b91c1c" }}>
+        <div className="text-danger">
           Search failed: {(searchQuery.error as Error).message}
         </div>
       )}
@@ -85,20 +79,17 @@ export function SearchPage() {
         <div>No results for "{debounced}".</div>
       )}
       {grouped.map(([ktype, rows]) => (
-        <div key={ktype} style={{ marginBottom: 24 }}>
-          <h2 style={{ fontSize: 14, textTransform: "uppercase", color: "#374151" }}>
+        <div key={ktype} className="mb-6">
+          <h2 className="text-sm uppercase text-fg-muted">
             {ktype} ({rows.length})
           </h2>
-          <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+          <ul className="m-0 list-none p-0">
             {rows.map((r) => (
-              <li
-                key={r.id}
-                style={{ padding: "6px 0", borderBottom: "1px solid #f3f4f6" }}
-              >
+              <li key={r.id} className="border-b border-border py-1.5">
                 <Link to={`/records/${ktype}/${r.id}`}>
                   {summaryOf(r)}
                 </Link>{" "}
-                <span style={{ color: "#9ca3af", fontSize: 11 }}>
+                <span className="text-[11px] text-fg-subtle">
                   rank {r.rank.toFixed(3)}
                 </span>
               </li>

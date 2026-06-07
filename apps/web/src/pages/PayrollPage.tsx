@@ -2,6 +2,16 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord, PayslipGenerateResult } from "@kapp/client";
+import {
+  Button,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  cn,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 const KTYPE_COMPONENT = "hr.salary_component";
@@ -65,28 +75,49 @@ export function PayrollPage() {
   const [tab, setTab] = useState<Tab>("components");
 
   return (
-    <section>
-      <h1>Payroll</h1>
-      <div style={{ display: "flex", gap: 8, marginTop: 8, marginBottom: 12 }}>
-        <button aria-pressed={tab === "components"} onClick={() => setTab("components")}>
+    <section className="flex flex-col gap-3">
+      <h1 className="text-2xl font-semibold tracking-tight text-fg">Payroll</h1>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant={tab === "components" ? "primary" : "outline"}
+          aria-pressed={tab === "components"}
+          onClick={() => setTab("components")}
+        >
           Components
-        </button>
-        <button aria-pressed={tab === "structures"} onClick={() => setTab("structures")}>
+        </Button>
+        <Button
+          size="sm"
+          variant={tab === "structures" ? "primary" : "outline"}
+          aria-pressed={tab === "structures"}
+          onClick={() => setTab("structures")}
+        >
           Structures
-        </button>
-        <button aria-pressed={tab === "runs"} onClick={() => setTab("runs")}>
+        </Button>
+        <Button
+          size="sm"
+          variant={tab === "runs" ? "primary" : "outline"}
+          aria-pressed={tab === "runs"}
+          onClick={() => setTab("runs")}
+        >
           Pay Runs
-        </button>
-        <button
-          style={{ marginLeft: "auto" }}
+        </Button>
+        <Button
+          size="sm"
+          className="ms-auto"
           onClick={() => {
             if (tab === "components") nav(`/records/${KTYPE_COMPONENT}/new`);
             else if (tab === "structures") nav(`/records/${KTYPE_STRUCTURE}/new`);
             else nav(`/records/${KTYPE_PAYRUN}/new`);
           }}
         >
-          New {tab === "components" ? "component" : tab === "structures" ? "structure" : "pay run"}
-        </button>
+          New{" "}
+          {tab === "components"
+            ? "component"
+            : tab === "structures"
+              ? "structure"
+              : "pay run"}
+        </Button>
       </div>
 
       {tab === "components" && <ComponentsTable />}
@@ -104,42 +135,44 @@ function ComponentsTable() {
   });
   return (
     <>
-      {q.isLoading && <p>Loading…</p>}
-      {q.isError && <p style={{ color: "#b91c1c" }}>Failed to load.</p>}
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-        <thead>
-          <tr style={{ textAlign: "left", color: "#6b7280" }}>
-            <Th>Code</Th>
-            <Th>Name</Th>
-            <Th>Type</Th>
-            <Th>Amount</Th>
-            <Th>Currency</Th>
-            <Th>Active</Th>
-          </tr>
-        </thead>
-        <tbody>
+      {q.isLoading && <p className="text-sm text-fg-muted">Loading…</p>}
+      {q.isError && <p className="text-sm text-danger">Failed to load.</p>}
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Code</TableHead>
+            <TableHead>Name</TableHead>
+            <TableHead>Type</TableHead>
+            <TableHead>Amount</TableHead>
+            <TableHead>Currency</TableHead>
+            <TableHead>Active</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {(q.data ?? []).map((r) => {
             const d = r.data as unknown as SalaryComponentData;
             return (
-              <tr
+              <TableRow
                 key={r.id}
-                style={{ borderTop: "1px solid #e5e7eb", cursor: "pointer" }}
+                className="cursor-pointer"
                 onClick={() => nav(`/records/${KTYPE_COMPONENT}/${r.id}`)}
               >
-                <Td><code>{d.code ?? ""}</code></Td>
-                <Td>{d.name ?? ""}</Td>
-                <Td>{d.type ?? ""}</Td>
-                <Td>
+                <TableCell>
+                  <code>{d.code ?? ""}</code>
+                </TableCell>
+                <TableCell>{d.name ?? ""}</TableCell>
+                <TableCell>{d.type ?? ""}</TableCell>
+                <TableCell>
                   {d.amount ?? 0}
                   {d.amount_type === "percentage" ? " %" : ""}
-                </Td>
-                <Td>{d.currency ?? "USD"}</Td>
-                <Td>{d.active === false ? "no" : "yes"}</Td>
-              </tr>
+                </TableCell>
+                <TableCell>{d.currency ?? "USD"}</TableCell>
+                <TableCell>{d.active === false ? "no" : "yes"}</TableCell>
+              </TableRow>
             );
           })}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
     </>
   );
 }
@@ -152,49 +185,41 @@ function StructuresTable() {
   });
   return (
     <>
-      {q.isLoading && <p>Loading…</p>}
-      {q.isError && <p style={{ color: "#b91c1c" }}>Failed to load.</p>}
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-        <thead>
-          <tr style={{ textAlign: "left", color: "#6b7280" }}>
-            <Th>Employee</Th>
-            <Th>Effective from</Th>
-            <Th>Base salary</Th>
-            <Th>Currency</Th>
-            <Th>Frequency</Th>
-            <Th>Status</Th>
-          </tr>
-        </thead>
-        <tbody>
+      {q.isLoading && <p className="text-sm text-fg-muted">Loading…</p>}
+      {q.isError && <p className="text-sm text-danger">Failed to load.</p>}
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Employee</TableHead>
+            <TableHead>Effective from</TableHead>
+            <TableHead>Base salary</TableHead>
+            <TableHead>Currency</TableHead>
+            <TableHead>Frequency</TableHead>
+            <TableHead>Status</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {(q.data ?? []).map((r) => {
             const d = r.data as unknown as SalaryStructureData;
             return (
-              <tr
+              <TableRow
                 key={r.id}
-                style={{ borderTop: "1px solid #e5e7eb", cursor: "pointer" }}
+                className="cursor-pointer"
                 onClick={() => nav(`/records/${KTYPE_STRUCTURE}/${r.id}`)}
               >
-                <Td>{d.employee_id ?? ""}</Td>
-                <Td>{d.effective_from ?? ""}</Td>
-                <Td>{d.base_salary ?? 0}</Td>
-                <Td>{d.currency ?? "USD"}</Td>
-                <Td>{d.payment_frequency ?? ""}</Td>
-                <Td>{d.status ?? ""}</Td>
-              </tr>
+                <TableCell>{d.employee_id ?? ""}</TableCell>
+                <TableCell>{d.effective_from ?? ""}</TableCell>
+                <TableCell>{d.base_salary ?? 0}</TableCell>
+                <TableCell>{d.currency ?? "USD"}</TableCell>
+                <TableCell>{d.payment_frequency ?? ""}</TableCell>
+                <TableCell>{d.status ?? ""}</TableCell>
+              </TableRow>
             );
           })}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
     </>
   );
-}
-
-function Th({ children }: { children: React.ReactNode }) {
-  return <th style={{ padding: "6px 8px", fontWeight: 500, fontSize: 12 }}>{children}</th>;
-}
-
-function Td({ children }: { children: React.ReactNode }) {
-  return <td style={{ padding: "8px" }}>{children}</td>;
 }
 
 /**
@@ -240,22 +265,22 @@ function PayRunsTable() {
 
   return (
     <>
-      {runs.isLoading && <p>Loading…</p>}
-      {runs.isError && <p style={{ color: "#b91c1c" }}>Failed to load.</p>}
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-        <thead>
-          <tr style={{ textAlign: "left", color: "#6b7280" }}>
-            <Th>Name</Th>
-            <Th>Period</Th>
-            <Th>Department</Th>
-            <Th>Slips</Th>
-            <Th>Total Gross</Th>
-            <Th>Total Net</Th>
-            <Th>Status</Th>
-            <Th>Actions</Th>
-          </tr>
-        </thead>
-        <tbody>
+      {runs.isLoading && <p className="text-sm text-fg-muted">Loading…</p>}
+      {runs.isError && <p className="text-sm text-danger">Failed to load.</p>}
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Name</TableHead>
+            <TableHead>Period</TableHead>
+            <TableHead>Department</TableHead>
+            <TableHead>Slips</TableHead>
+            <TableHead>Total Gross</TableHead>
+            <TableHead>Total Net</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Actions</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {(runs.data ?? []).map((r) => {
             const d = r.data as unknown as PayRunData;
             const isSelected = selectedRunId === r.id;
@@ -263,70 +288,74 @@ function PayRunsTable() {
               (generate.isPending && generate.variables === r.id) ||
               (post.isPending && post.variables === r.id);
             return (
-              <tr
+              <TableRow
                 key={r.id}
-                style={{
-                  borderTop: "1px solid #e5e7eb",
-                  background: isSelected ? "#f3f4f6" : undefined,
-                }}
+                className={cn(isSelected && "bg-bg-subtle")}
               >
-                <Td>
-                  <button
-                    style={{
-                      background: "none",
-                      border: 0,
-                      padding: 0,
-                      color: "#2563eb",
-                      cursor: "pointer",
-                    }}
+                <TableCell>
+                  <Button
+                    variant="link"
+                    size="sm"
                     onClick={() => nav(`/records/${KTYPE_PAYRUN}/${r.id}`)}
                   >
                     {d.name ?? r.id}
-                  </button>
-                </Td>
-                <Td>
+                  </Button>
+                </TableCell>
+                <TableCell>
                   {d.pay_period_start ?? "?"} → {d.pay_period_end ?? "?"}
-                </Td>
-                <Td>{d.department ?? ""}</Td>
-                <Td>{d.payslip_count ?? 0}</Td>
-                <Td>
+                </TableCell>
+                <TableCell>{d.department ?? ""}</TableCell>
+                <TableCell>{d.payslip_count ?? 0}</TableCell>
+                <TableCell>
                   {d.total_gross ?? 0} {d.currency ?? ""}
-                </Td>
-                <Td>
+                </TableCell>
+                <TableCell>
                   {d.total_net ?? 0} {d.currency ?? ""}
-                </Td>
-                <Td>{d.status ?? "draft"}</Td>
-                <Td>
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    <button
-                      disabled={busy || (d.status === "paid")}
+                </TableCell>
+                <TableCell>{d.status ?? "draft"}</TableCell>
+                <TableCell>
+                  <div className="flex flex-wrap gap-1.5">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={busy || d.status === "paid"}
                       onClick={() => generate.mutate(r.id)}
                       title="Generate draft payslips for eligible employees"
                     >
                       Generate
-                    </button>
-                    <button
-                      disabled={busy || (d.status === "paid")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={busy || d.status === "paid"}
                       onClick={() => post.mutate(r.id)}
                       title="Post approved payslips as a journal entry"
                     >
                       Post
-                    </button>
-                    <button onClick={() => setSelectedRunId(isSelected ? null : r.id)}>
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() =>
+                        setSelectedRunId(isSelected ? null : r.id)
+                      }
+                    >
                       {isSelected ? "Hide slips" : "View slips"}
-                    </button>
+                    </Button>
                   </div>
-                </Td>
-              </tr>
+                </TableCell>
+              </TableRow>
             );
           })}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
       {generate.isError && (
-        <p style={{ color: "#b91c1c" }}>Generate failed: {String(generate.error)}</p>
+        <p className="text-sm text-danger">
+          Generate failed: {String(generate.error)}
+        </p>
       )}
       {post.isError && (
-        <p style={{ color: "#b91c1c" }}>Post failed: {String(post.error)}</p>
+        <p className="text-sm text-danger">Post failed: {String(post.error)}</p>
       )}
       {generate.isSuccess && generate.data && (
         <GenerateSummary summary={generate.data} />
@@ -338,10 +367,10 @@ function PayRunsTable() {
 
 function GenerateSummary({ summary }: { summary: PayslipGenerateResult }) {
   return (
-    <p style={{ fontSize: 12, color: "#374151", marginTop: 12 }}>
+    <p className="mt-3 text-xs text-fg-muted">
       Created {summary.created_count} slip(s); skipped{" "}
-      {summary.skipped_existing} existing, {summary.skipped_no_structure} without a salary
-      structure.
+      {summary.skipped_existing} existing, {summary.skipped_no_structure} without
+      a salary structure.
     </p>
   );
 }
@@ -357,37 +386,41 @@ function PayslipsForRun({ payRunId }: { payRunId: string }) {
     queryFn: () => api.listPayRunPayslips(payRunId),
   });
   return (
-    <section style={{ marginTop: 16 }}>
-      <h3 style={{ fontSize: 14 }}>Payslips</h3>
-      {slips.isLoading && <p>Loading slips…</p>}
-      {slips.isError && <p style={{ color: "#b91c1c" }}>Failed to load slips.</p>}
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-        <thead>
-          <tr style={{ textAlign: "left", color: "#6b7280" }}>
-            <Th>Employee</Th>
-            <Th>Gross</Th>
-            <Th>Deductions</Th>
-            <Th>Net</Th>
-            <Th>Currency</Th>
-            <Th>Status</Th>
-          </tr>
-        </thead>
-        <tbody>
+    <section className="mt-4 flex flex-col gap-2">
+      <h3 className="text-sm font-semibold text-fg">Payslips</h3>
+      {slips.isLoading && (
+        <p className="text-sm text-fg-muted">Loading slips…</p>
+      )}
+      {slips.isError && (
+        <p className="text-sm text-danger">Failed to load slips.</p>
+      )}
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Employee</TableHead>
+            <TableHead>Gross</TableHead>
+            <TableHead>Deductions</TableHead>
+            <TableHead>Net</TableHead>
+            <TableHead>Currency</TableHead>
+            <TableHead>Status</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {(slips.data ?? []).map((r) => {
             const d = r.data as unknown as PayslipData;
             return (
-              <tr key={r.id} style={{ borderTop: "1px solid #e5e7eb" }}>
-                <Td>{d.employee_id ?? ""}</Td>
-                <Td>{d.gross_pay ?? 0}</Td>
-                <Td>{d.total_deductions ?? 0}</Td>
-                <Td>{d.net_pay ?? 0}</Td>
-                <Td>{d.currency ?? ""}</Td>
-                <Td>{d.status ?? "draft"}</Td>
-              </tr>
+              <TableRow key={r.id}>
+                <TableCell>{d.employee_id ?? ""}</TableCell>
+                <TableCell>{d.gross_pay ?? 0}</TableCell>
+                <TableCell>{d.total_deductions ?? 0}</TableCell>
+                <TableCell>{d.net_pay ?? 0}</TableCell>
+                <TableCell>{d.currency ?? ""}</TableCell>
+                <TableCell>{d.status ?? "draft"}</TableCell>
+              </TableRow>
             );
           })}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
     </section>
   );
 }

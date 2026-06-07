@@ -1,6 +1,15 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { CapacityDayLoad, WorkCenterSchedule } from "@kapp/client";
+import {
+  Input,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 // isoDate formats a Date as YYYY-MM-DD using its LOCAL calendar date,
@@ -55,84 +64,78 @@ export function CapacityPlanningPage() {
   return (
     <section>
       <h1>Capacity Planning</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Finite-capacity utilisation from released / in-progress work orders.
         Overloaded cells are flagged; the planner does not auto-reschedule.
       </p>
 
-      <div style={{ display: "flex", gap: 16, alignItems: "end", marginBottom: 16 }}>
-        <label>
+      <div className="mb-4 flex items-end gap-4">
+        <label className="flex flex-col gap-1">
           Start
-          <input
+          <Input
             type="date"
             value={start}
             onChange={(e) => setStart(e.target.value)}
-            style={{ display: "block" }}
+            className="w-auto"
           />
         </label>
-        <label>
+        <label className="flex flex-col gap-1">
           End
-          <input
+          <Input
             type="date"
             value={end}
             onChange={(e) => setEnd(e.target.value)}
-            style={{ display: "block" }}
+            className="w-auto"
           />
         </label>
       </div>
 
       {planQ.isLoading && <p>Loading…</p>}
-      {planQ.isError && <p style={{ color: "#dc2626" }}>{String(planQ.error)}</p>}
+      {planQ.isError && <p className="text-danger">{String(planQ.error)}</p>}
       {planQ.data && planQ.data.rows.length === 0 && (
         <p>No work centers defined yet.</p>
       )}
       {planQ.data && planQ.data.rows.length > 0 && (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ borderCollapse: "collapse", minWidth: "100%" }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid #e5e7eb" }}>
-                <th style={{ textAlign: "left", padding: "4px 8px" }}>
-                  Work center
-                </th>
+        <div className="overflow-x-auto">
+          <Table className="min-w-full">
+            <TableHeader>
+              <TableRow>
+                <TableHead>Work center</TableHead>
                 {dayHeaders.map((d) => (
-                  <th key={d} style={{ padding: "4px 8px", whiteSpace: "nowrap" }}>
+                  <TableHead key={d} className="whitespace-nowrap text-center">
                     {d.slice(5)}
-                  </th>
+                  </TableHead>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {planQ.data.rows.map((row: WorkCenterSchedule) => (
-                <tr key={row.work_center_id} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                  <td style={{ padding: "4px 8px", whiteSpace: "nowrap" }}>
+                <TableRow key={row.work_center_id}>
+                  <TableCell className="whitespace-nowrap">
                     {row.work_center_name}
                     {row.status !== "active" && (
-                      <span style={{ color: "#b45309" }}> ({row.status})</span>
+                      <span className="text-warning"> ({row.status})</span>
                     )}
-                  </td>
+                  </TableCell>
                   {row.days.map((day: CapacityDayLoad) => (
-                    <td
+                    <TableCell
                       key={day.date}
                       title={`${day.scheduled_minutes} / ${day.available_minutes} min`}
-                      style={{
-                        padding: "4px 8px",
-                        textAlign: "center",
-                        background: day.overloaded
-                          ? "#fee2e2"
+                      className={`text-center ${
+                        day.overloaded
+                          ? "bg-danger/15 font-semibold text-danger"
                           : Number(day.utilization_percent) > 0
-                            ? "#dcfce7"
-                            : "transparent",
-                        color: day.overloaded ? "#991b1b" : "#111827",
-                        fontWeight: day.overloaded ? 600 : 400,
-                      }}
+                            ? "bg-success/15"
+                            : ""
+                      }`}
                     >
                       {day.utilization_percent}%
-                    </td>
+                    </TableCell>
                   ))}
-                </tr>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         </div>
       )}
     </section>

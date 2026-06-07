@@ -1,5 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Approval } from "@kapp/client";
+import {
+  Button,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -29,44 +38,37 @@ export function ApprovalsPage() {
   return (
     <section>
       <h1>Approvals</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Pending approvals for the current user appear here. Use the Approve /
         Reject buttons or run <code>/approve &lt;id&gt; approve</code> in KChat.
       </p>
 
       {approvals.isLoading && <p>Loading…</p>}
       {approvals.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load approvals: {(approvals.error as Error).message}
         </p>
       )}
 
       {approvals.data && approvals.data.length === 0 && (
-        <p style={{ color: "#9ca3af", fontStyle: "italic" }}>
+        <p className="italic text-fg-subtle">
           No pending approvals. You're all caught up.
         </p>
       )}
 
       {approvals.data && approvals.data.length > 0 && (
-        <table
-          style={{
-            width: "100%",
-            borderCollapse: "collapse",
-            marginTop: 12,
-            fontSize: 14,
-          }}
-        >
-          <thead>
-            <tr style={{ textAlign: "left", color: "#6b7280" }}>
-              <Th>Record</Th>
-              <Th>Record ID</Th>
-              <Th>State</Th>
-              <Th>Step</Th>
-              <Th>Requested</Th>
-              <Th>Actions</Th>
-            </tr>
-          </thead>
-          <tbody>
+        <Table className="mt-3 text-sm">
+          <TableHeader>
+            <TableRow>
+              <TableHead>Record</TableHead>
+              <TableHead>Record ID</TableHead>
+              <TableHead>State</TableHead>
+              <TableHead>Step</TableHead>
+              <TableHead>Requested</TableHead>
+              <TableHead>Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {approvals.data.map((a) => (
               <ApprovalRow
                 key={a.id}
@@ -75,12 +77,12 @@ export function ApprovalsPage() {
                 onDecide={(decision) => decide.mutate({ id: a.id, decision })}
               />
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       )}
 
       {decide.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Decision failed: {(decide.error as Error).message}
         </p>
       )}
@@ -99,34 +101,24 @@ function ApprovalRow({
 }) {
   const stepLabel = `${approval.chain.current_step + 1} / ${approval.chain.steps.length}`;
   return (
-    <tr style={{ borderTop: "1px solid #e5e7eb" }}>
-      <Td>{approval.record_ktype}</Td>
-      <Td>
+    <TableRow>
+      <TableCell>{approval.record_ktype}</TableCell>
+      <TableCell>
         <code>{approval.record_id.slice(0, 8)}</code>
-      </Td>
-      <Td>{approval.state}</Td>
-      <Td>{stepLabel}</Td>
-      <Td>{new Date(approval.created_at).toLocaleString()}</Td>
-      <Td>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button disabled={pending} onClick={() => onDecide("approve")}>
+      </TableCell>
+      <TableCell>{approval.state}</TableCell>
+      <TableCell>{stepLabel}</TableCell>
+      <TableCell>{new Date(approval.created_at).toLocaleString()}</TableCell>
+      <TableCell>
+        <div className="flex gap-2">
+          <Button size="sm" disabled={pending} onClick={() => onDecide("approve")}>
             Approve
-          </button>
-          <button disabled={pending} onClick={() => onDecide("reject")}>
+          </Button>
+          <Button size="sm" variant="destructive" disabled={pending} onClick={() => onDecide("reject")}>
             Reject
-          </button>
+          </Button>
         </div>
-      </Td>
-    </tr>
+      </TableCell>
+    </TableRow>
   );
-}
-
-function Th({ children }: { children: React.ReactNode }) {
-  return (
-    <th style={{ padding: "6px 8px", fontWeight: 500, fontSize: 12 }}>{children}</th>
-  );
-}
-
-function Td({ children }: { children: React.ReactNode }) {
-  return <td style={{ padding: "8px" }}>{children}</td>;
 }

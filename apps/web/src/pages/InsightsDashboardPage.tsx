@@ -23,6 +23,14 @@ import type {
   InsightsWidget,
   InsightsWidgetConfig,
 } from "@kapp/client";
+import {
+  Button,
+  ConfirmDialog,
+  Input,
+  PromptDialog,
+  Select,
+  cn,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 import { Viz } from "../components/insights/Charts";
 import { ShareModal } from "../components/insights/ShareModal";
@@ -57,6 +65,8 @@ export function InsightsDashboardPage() {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
+  const [newOpen, setNewOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [linkedFilters, setLinkedFilters] = useState<LinkedFilterValues>({});
   const [error, setError] = useState<string | null>(null);
 
@@ -105,6 +115,10 @@ export function InsightsDashboardPage() {
       qc.invalidateQueries({ queryKey: ["insights-dashboards"] });
     },
     onError: (err: Error) => setError(err.message),
+    // Await-mutation pattern (mirrors the delete flow): keep the
+    // prompt open showing "Working…" until the create settles, then
+    // close regardless of outcome (errors surface in the banner).
+    onSettled: () => setNewOpen(false),
   });
 
   const updateDashboardMut = useMutation({
@@ -140,6 +154,10 @@ export function InsightsDashboardPage() {
       qc.invalidateQueries({ queryKey: ["insights-dashboards"] });
     },
     onError: (err: Error) => setError(err.message),
+    // Await-mutation pattern: the dialog stays open showing "Working…"
+    // until the delete settles, then closes regardless of outcome
+    // (an error surfaces in the page-level error banner).
+    onSettled: () => setDeleteOpen(false),
   });
 
   const upsertWidgetMut = useMutation({
@@ -220,43 +238,33 @@ export function InsightsDashboardPage() {
   }, [dashboard]);
 
   return (
-    <section>
-      <h1>Insights — Dashboards</h1>
+    <section className="flex flex-col gap-4">
+      <h1 className="text-2xl font-semibold tracking-tight text-fg">
+        Insights — Dashboards
+      </h1>
 
-      <div style={{ display: "flex", gap: 16 }}>
-        <aside style={{ flex: "0 0 220px" }}>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
-          >
-            <h3 style={{ fontSize: 14 }}>Dashboards</h3>
-            <button
-              onClick={() => {
-                const name = prompt("New dashboard name");
-                if (name) createDashboardMut.mutate(name);
-              }}
-              style={{ fontSize: 12 }}
-            >
+      <div className="flex gap-4">
+        <aside className="flex-[0_0_220px]">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-fg">Dashboards</h3>
+            <Button size="sm" variant="ghost" onClick={() => setNewOpen(true)}>
               + New
-            </button>
+            </Button>
           </div>
-          {dashboardsQuery.isLoading && <p>Loading…</p>}
-          <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: 13 }}>
+          {dashboardsQuery.isLoading && (
+            <p className="text-sm text-fg-muted">Loading…</p>
+          )}
+          <ul className="m-0 list-none p-0 text-sm">
             {(dashboardsQuery.data?.dashboards ?? []).map((d) => (
-              <li key={d.id} style={{ padding: "4px 0" }}>
+              <li key={d.id} className="py-1">
                 <button
                   onClick={() => setSelectedId(d.id)}
-                  style={{
-                    background: "none",
-                    border: "none",
-                    color: selectedId === d.id ? "#111" : "#2563eb",
-                    fontWeight: selectedId === d.id ? 600 : 400,
-                    cursor: "pointer",
-                    padding: 0,
-                  }}
+                  className={cn(
+                    "cursor-pointer rounded text-left transition-colors hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)",
+                    selectedId === d.id
+                      ? "font-semibold text-fg"
+                      : "text-accent",
+                  )}
                 >
                   {d.name}
                 </button>
@@ -265,9 +273,9 @@ export function InsightsDashboardPage() {
           </ul>
         </aside>
 
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
+        <div className="flex flex-1 flex-col gap-3">
           {!dashboard && (
-            <p style={{ color: "#9ca3af" }}>
+            <p className="text-sm text-fg-muted">
               Select or create a dashboard to start adding widgets.
             </p>
           )}
@@ -277,34 +285,24 @@ export function InsightsDashboardPage() {
               <DashboardHeader
                 dashboard={dashboard}
                 onUpdate={(input) => updateDashboardMut.mutate(input)}
-                onDelete={() => {
-                  if (confirm(`Delete dashboard "${dashboard.name}"?`)) {
-                    deleteDashboardMut.mutate(dashboard.id);
-                  }
-                }}
+                onDelete={() => setDeleteOpen(true)}
                 onShare={() => setShareOpen(true)}
               />
 
               {linkedFilterKeys.length > 0 && (
-                <fieldset
-                  style={{
-                    border: "1px solid #e5e7eb",
-                    borderRadius: 6,
-                    padding: 8,
-                    fontSize: 13,
-                  }}
-                >
-                  <legend style={{ padding: "0 6px", fontWeight: 600 }}>
+                <fieldset className="rounded-md border border-border p-2 text-sm">
+                  <legend className="px-1.5 font-semibold text-fg">
                     Linked filters
                   </legend>
-                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                  <div className="flex flex-wrap gap-3">
                     {linkedFilterKeys.map((k) => (
                       <label
                         key={k}
-                        style={{ display: "flex", gap: 6, alignItems: "center" }}
+                        className="flex items-center gap-1.5 text-fg"
                       >
                         {k}:
-                        <input
+                        <Input
+                          className="w-auto"
                           value={String(linkedFilters[k] ?? "")}
                           onChange={(e) => {
                             const next = {
@@ -332,11 +330,40 @@ export function InsightsDashboardPage() {
             </>
           )}
 
-          {error && (
-            <div style={{ color: "#dc2626", fontSize: 13 }}>{error}</div>
-          )}
+          {error && <div className="text-sm text-danger">{error}</div>}
         </div>
       </div>
+
+      <PromptDialog
+        open={newOpen}
+        onOpenChange={(open) => {
+          if (!open && createDashboardMut.isPending) return;
+          setNewOpen(open);
+        }}
+        title="New dashboard"
+        label="Dashboard name"
+        placeholder="e.g. Sales overview"
+        loading={createDashboardMut.isPending}
+        onSubmit={(name) => {
+          const trimmed = name.trim();
+          if (trimmed) createDashboardMut.mutate(trimmed);
+        }}
+      />
+
+      {dashboard && (
+        <ConfirmDialog
+          open={deleteOpen}
+          onOpenChange={(open) => {
+            if (!open && deleteDashboardMut.isPending) return;
+            setDeleteOpen(open);
+          }}
+          title={`Delete dashboard "${dashboard.name}"?`}
+          description="This permanently removes the dashboard and its widgets."
+          destructive
+          loading={deleteDashboardMut.isPending}
+          onConfirm={() => deleteDashboardMut.mutate(dashboard.id)}
+        />
+      )}
 
       {shareOpen && dashboard && (
         <ShareModal
@@ -374,24 +401,18 @@ function DashboardHeader({
   }, [dashboard.id, dashboard.name, dashboard.auto_refresh_seconds]);
 
   return (
-    <div
-      style={{
-        display: "flex",
-        gap: 8,
-        alignItems: "center",
-      }}
-    >
-      <input
+    <div className="flex items-center gap-2">
+      <Input
         value={name}
         onChange={(e) => setName(e.target.value)}
         onBlur={() => {
           if (name !== dashboard.name) onUpdate({ name });
         }}
-        style={{ flex: 1, fontSize: 16, fontWeight: 600 }}
+        className="flex-1 text-base font-semibold"
       />
-      <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}>
+      <label className="flex items-center gap-1.5 text-xs text-fg-muted">
         Auto-refresh (s):
-        <input
+        <Input
           type="number"
           value={autoRefresh}
           onChange={(e) => setAutoRefresh(Number(e.target.value))}
@@ -400,13 +421,15 @@ function DashboardHeader({
               onUpdate({ auto_refresh_seconds: autoRefresh });
             }
           }}
-          style={{ width: 80 }}
+          className="w-20"
         />
       </label>
-      <button onClick={onShare}>Share…</button>
-      <button onClick={onDelete} style={{ color: "#dc2626" }}>
+      <Button variant="outline" size="sm" onClick={onShare}>
+        Share…
+      </Button>
+      <Button variant="destructive" size="sm" onClick={onDelete}>
         Delete
-      </button>
+      </Button>
     </div>
   );
 }
@@ -443,17 +466,12 @@ function WidgetGrid({
 
   return (
     <div>
-      <div style={{ marginBottom: 8 }}>
-        <button onClick={addWidget}>+ Add widget</button>
+      <div className="mb-2">
+        <Button size="sm" variant="outline" onClick={addWidget}>
+          + Add widget
+        </Button>
       </div>
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(12, 1fr)",
-          gap: 12,
-          gridAutoRows: "70px",
-        }}
-      >
+      <div className="grid auto-rows-[70px] grid-cols-12 gap-3">
         {widgets.map((w) => {
           const pos = w.position ?? {};
           const x = (pos.x ?? 0) + 1;
@@ -462,16 +480,10 @@ function WidgetGrid({
           return (
             <div
               key={w.id}
+              className="flex flex-col overflow-hidden rounded-md border border-border bg-bg-elevated p-3"
               style={{
                 gridColumn: `${x} / span ${w_}`,
                 gridRow: `span ${h}`,
-                border: "1px solid #e5e7eb",
-                borderRadius: 6,
-                padding: 12,
-                background: "white",
-                overflow: "hidden",
-                display: "flex",
-                flexDirection: "column",
               }}
             >
               <WidgetView
@@ -505,26 +517,25 @@ function WidgetView({
   const [editing, setEditing] = useState(false);
   return (
     <>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginBottom: 6,
-        }}
-      >
-        <strong style={{ fontSize: 14 }}>
+      <div className="mb-1.5 flex items-center justify-between">
+        <strong className="text-sm text-fg">
           {widget.config.title ??
             queries.find((q) => q.id === widget.query_id)?.name ??
             "Untitled widget"}
         </strong>
-        <span>
-          <button onClick={() => setEditing((v) => !v)}>
+        <span className="flex items-center gap-1">
+          <Button size="sm" variant="ghost" onClick={() => setEditing((v) => !v)}>
             {editing ? "Done" : "Edit"}
-          </button>
-          <button onClick={onDelete} style={{ color: "#dc2626" }}>
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="text-danger"
+            aria-label="Delete widget"
+            onClick={onDelete}
+          >
             ✕
-          </button>
+          </Button>
         </span>
       </div>
       {editing ? (
@@ -537,7 +548,7 @@ function WidgetView({
           }}
         />
       ) : result ? (
-        <div style={{ flex: 1, minHeight: 0 }}>
+        <div className="min-h-0 flex-1">
           <Viz
             vizType={widget.viz_type}
             result={result.result}
@@ -546,9 +557,9 @@ function WidgetView({
           />
         </div>
       ) : widget.query_id ? (
-        <p style={{ color: "#9ca3af", fontSize: 13 }}>Loading…</p>
+        <p className="text-sm text-fg-subtle">Loading…</p>
       ) : (
-        <p style={{ color: "#9ca3af", fontSize: 13 }}>
+        <p className="text-sm text-fg-subtle">
           Bind this widget to a saved query.
         </p>
       )}
@@ -571,13 +582,12 @@ function WidgetConfigPanel({
   const [position, setPosition] = useState(widget.position);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 13 }}>
-      <label>
+    <div className="flex flex-col gap-1.5 text-sm">
+      <label className="flex flex-col gap-1 text-fg">
         Saved query:
-        <select
+        <Select
           value={queryId ?? ""}
           onChange={(e) => setQueryId(e.target.value || null)}
-          style={{ width: "100%" }}
         >
           <option value="">— choose —</option>
           {queries.map((q) => (
@@ -585,11 +595,11 @@ function WidgetConfigPanel({
               {q.name}
             </option>
           ))}
-        </select>
+        </Select>
       </label>
-      <label>
+      <label className="flex flex-col gap-1 text-fg">
         Visualisation:
-        <select
+        <Select
           value={vizType}
           onChange={(e) => setVizType(e.target.value as InsightsVizType)}
         >
@@ -598,28 +608,28 @@ function WidgetConfigPanel({
               {v}
             </option>
           ))}
-        </select>
+        </Select>
       </label>
-      <label>
+      <label className="flex flex-col gap-1 text-fg">
         Title:
-        <input
+        <Input
           value={config.title ?? ""}
           onChange={(e) => setConfig({ ...config, title: e.target.value })}
         />
       </label>
-      <div style={{ display: "flex", gap: 6 }}>
-        <label style={{ flex: 1 }}>
+      <div className="flex gap-1.5">
+        <label className="flex flex-1 flex-col gap-1 text-fg">
           X:
-          <input
+          <Input
             value={config.x_column ?? ""}
             onChange={(e) =>
               setConfig({ ...config, x_column: e.target.value })
             }
           />
         </label>
-        <label style={{ flex: 1 }}>
+        <label className="flex flex-1 flex-col gap-1 text-fg">
           Y / value:
-          <input
+          <Input
             value={config.y_column ?? config.value_column ?? ""}
             onChange={(e) =>
               setConfig({ ...config, y_column: e.target.value })
@@ -627,10 +637,10 @@ function WidgetConfigPanel({
           />
         </label>
       </div>
-      <div style={{ display: "flex", gap: 6 }}>
-        <label style={{ flex: 1 }}>
+      <div className="flex gap-1.5">
+        <label className="flex flex-1 flex-col gap-1 text-fg">
           Linked filter key:
-          <input
+          <Input
             value={config.linked_filter_key ?? ""}
             onChange={(e) =>
               setConfig({
@@ -640,9 +650,9 @@ function WidgetConfigPanel({
             }
           />
         </label>
-        <label style={{ flex: 1 }}>
+        <label className="flex flex-1 flex-col gap-1 text-fg">
           → column:
-          <input
+          <Input
             value={config.linked_filter_column ?? ""}
             onChange={(e) =>
               setConfig({
@@ -653,42 +663,43 @@ function WidgetConfigPanel({
           />
         </label>
       </div>
-      <div style={{ display: "flex", gap: 6 }}>
-        <label>
+      <div className="flex gap-1.5">
+        <label className="flex flex-col gap-1 text-fg">
           x:
-          <input
+          <Input
             type="number"
             value={position.x ?? 0}
             onChange={(e) =>
               setPosition({ ...position, x: Number(e.target.value) })
             }
-            style={{ width: 60 }}
+            className="w-16"
           />
         </label>
-        <label>
+        <label className="flex flex-col gap-1 text-fg">
           w:
-          <input
+          <Input
             type="number"
             value={position.w ?? 6}
             onChange={(e) =>
               setPosition({ ...position, w: Number(e.target.value) })
             }
-            style={{ width: 60 }}
+            className="w-16"
           />
         </label>
-        <label>
+        <label className="flex flex-col gap-1 text-fg">
           h:
-          <input
+          <Input
             type="number"
             value={position.h ?? 4}
             onChange={(e) =>
               setPosition({ ...position, h: Number(e.target.value) })
             }
-            style={{ width: 60 }}
+            className="w-16"
           />
         </label>
       </div>
-      <button
+      <Button
+        size="sm"
         onClick={() =>
           onSave({
             ...widget,
@@ -700,7 +711,7 @@ function WidgetConfigPanel({
         }
       >
         Save widget
-      </button>
+      </Button>
     </div>
   );
 }

@@ -22,7 +22,36 @@ vi.mock("./lib/api", () => ({
   },
 }));
 
-import { App } from "./App";
+import { App, singularizeLabel } from "./App";
+
+describe("singularizeLabel", () => {
+  it("singularizes single-noun plurals", () => {
+    expect(singularizeLabel("Leads")).toBe("Lead");
+    expect(singularizeLabel("Activities")).toBe("Activity");
+    expect(singularizeLabel("Warehouses")).toBe("Warehouse");
+    expect(singularizeLabel("Quizzes")).toBe("Quiz");
+  });
+
+  it("singularizes the final word of a multi-word phrase", () => {
+    expect(singularizeLabel("Credit Notes")).toBe("Credit Note");
+    expect(singularizeLabel("Leave Requests")).toBe("Leave Request");
+    expect(singularizeLabel("Recurring Invoices")).toBe("Recurring Invoice");
+  });
+
+  it("singularizes the head noun in an 'X of Y' phrase", () => {
+    expect(singularizeLabel("Bills of Materials")).toBe("Bill of Materials");
+  });
+
+  it("singularizes each side of an 'A & B' coordinated phrase", () => {
+    expect(singularizeLabel("Routings & Work Centers")).toBe(
+      "Routing & Work Center",
+    );
+  });
+
+  it("leaves a non-plural label untouched", () => {
+    expect(singularizeLabel("Attendance")).toBe("Attendance");
+  });
+});
 
 function features(map: Record<string, boolean>): TenantFeaturesResponse {
   return { features: map } as TenantFeaturesResponse;
@@ -146,7 +175,11 @@ describe("App shell", () => {
     const user = userEvent.setup();
     renderApp();
 
-    const search = await screen.findByRole("searchbox", {
+    // The shell search box now follows the ARIA combobox pattern: it
+    // controls a popup listbox (recent searches / quick results) via
+    // aria-expanded + aria-controls, so its role is combobox rather
+    // than the plain searchbox it was before the G5 dropdown landed.
+    const search = await screen.findByRole("combobox", {
       name: /global search/i,
     });
     await user.type(search, "acme corp{Enter}");
@@ -170,6 +203,40 @@ describe("App shell", () => {
         expect.objectContaining({ q: "acme corp" }),
       ),
     );
+  });
+
+  it("highlights the first search option on the first ArrowDown after the panel was closed", async () => {
+    // Regression: the cursor-reset effect used to key off both
+    // `debounced` and `open`, so it fired on the same commit as the
+    // ArrowDown handler (which opens the panel and advances the cursor
+    // in one event) and reset activeIndex back to -1 — meaning the
+    // first ArrowDown after a close reopened the panel but highlighted
+    // nothing. Seed a recent search so the empty-query panel has an
+    // option to navigate to.
+    listTenantFeatures.mockResolvedValue(features({ crm: true }));
+    localStorage.setItem(
+      "kapp.recent_searches",
+      JSON.stringify(["acme corp"]),
+    );
+    const user = userEvent.setup();
+    renderApp();
+
+    const search = await screen.findByRole("combobox", {
+      name: /global search/i,
+    });
+
+    // Focus opens the panel (recent searches), then Escape closes it.
+    await user.click(search);
+    expect(
+      await screen.findByRole("option", { name: /acme corp/i }),
+    ).toHaveAttribute("aria-selected", "false");
+    await user.keyboard("{Escape}");
+
+    // A single ArrowDown must reopen and highlight the first option.
+    await user.keyboard("{ArrowDown}");
+    expect(
+      await screen.findByRole("option", { name: /acme corp/i }),
+    ).toHaveAttribute("aria-selected", "true");
   });
 
   it("renders the public login route without the tenant shell", async () => {

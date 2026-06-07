@@ -1,6 +1,17 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { JobCard, WorkOrder } from "@kapp/client";
+import {
+  Badge,
+  Button,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -55,18 +66,18 @@ export function JobCardPage() {
   return (
     <section>
       <h1>Job Cards</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Shop-floor execution cards generated when a work order is released — one
         per routing operation. Completing the last card emits the work order's
         inventory moves.
       </p>
 
-      <label style={{ display: "block", marginBottom: 16 }}>
+      <label className="mb-4 flex flex-col gap-1">
         Work order
-        <select
+        <Select
           value={workOrderID}
           onChange={(e) => setWorkOrderID(e.target.value)}
-          style={{ display: "block", minWidth: 360 }}
+          className="min-w-[360px]"
         >
           <option value="">Select a released / in-progress work order…</option>
           {workOrders.map((wo) => (
@@ -74,12 +85,12 @@ export function JobCardPage() {
               {wo.id.slice(0, 8)} — {wo.status} — qty {wo.planned_qty}
             </option>
           ))}
-        </select>
+        </Select>
       </label>
 
       {workOrderID === "" && <p>Select a work order to view its job cards.</p>}
       {cardsQ.isLoading && <p>Loading…</p>}
-      {cardsQ.isError && <p style={{ color: "#dc2626" }}>{String(cardsQ.error)}</p>}
+      {cardsQ.isError && <p className="text-danger">{String(cardsQ.error)}</p>}
       {cardsQ.data && cardsQ.data.length === 0 && (
         <p>
           No job cards for this work order. The item likely had no active routing
@@ -87,19 +98,19 @@ export function JobCardPage() {
         </p>
       )}
       {cardsQ.data && cardsQ.data.length > 0 && (
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-              <th>Seq</th>
-              <th>Status</th>
-              <th>Produced</th>
-              <th>Rejected</th>
-              <th>Actual start</th>
-              <th>Actual end</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Seq</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Produced</TableHead>
+              <TableHead>Rejected</TableHead>
+              <TableHead>Actual start</TableHead>
+              <TableHead>Actual end</TableHead>
+              <TableHead />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {cardsQ.data.map((jc: JobCard) => (
               <JobCardRow
                 key={jc.id}
@@ -108,8 +119,8 @@ export function JobCardPage() {
                 onCompleted={onCompleted}
               />
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
       )}
     </section>
   );
@@ -143,50 +154,49 @@ function JobCardRow({
   });
 
   return (
-    <tr style={{ borderBottom: "1px solid #f3f4f6" }}>
-      <td>{jc.routing_operation_seq}</td>
-      <td>
+    <TableRow>
+      <TableCell>{jc.routing_operation_seq}</TableCell>
+      <TableCell>
         <StatusPill status={jc.status} />
-      </td>
-      <td>{jc.qty_produced}</td>
-      <td>{jc.qty_rejected}</td>
-      <td>{jc.actual_start ? jc.actual_start.slice(0, 16) : "—"}</td>
-      <td>{jc.actual_end ? jc.actual_end.slice(0, 16) : "—"}</td>
-      <td>
-        {jc.status === "pending" && (
-          <button onClick={() => startMut.mutate()} disabled={startMut.isPending}>
-            Start
-          </button>
-        )}
-        {jc.status !== "completed" && (
-          <button
-            onClick={() => completeMut.mutate()}
-            disabled={completeMut.isPending}
-            style={{ marginLeft: 8 }}
-          >
-            Complete
-          </button>
-        )}
+      </TableCell>
+      <TableCell>{jc.qty_produced}</TableCell>
+      <TableCell>{jc.qty_rejected}</TableCell>
+      <TableCell>{jc.actual_start ? jc.actual_start.slice(0, 16) : "—"}</TableCell>
+      <TableCell>{jc.actual_end ? jc.actual_end.slice(0, 16) : "—"}</TableCell>
+      <TableCell>
+        <div className="flex items-center gap-2">
+          {jc.status === "pending" && (
+            <Button size="sm" variant="outline" onClick={() => startMut.mutate()} disabled={startMut.isPending}>
+              Start
+            </Button>
+          )}
+          {jc.status !== "completed" && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => completeMut.mutate()}
+              disabled={completeMut.isPending}
+            >
+              Complete
+            </Button>
+          )}
+        </div>
         {(startMut.isError || completeMut.isError) && (
-          <div style={{ color: "#dc2626", fontSize: 12, marginTop: 4 }}>
+          <div className="mt-1 text-xs text-danger">
             {String(startMut.error ?? completeMut.error)}
           </div>
         )}
-      </td>
-    </tr>
+      </TableCell>
+    </TableRow>
   );
 }
 
 function StatusPill({ status }: { status: string }) {
-  const background =
+  const variant =
     status === "completed"
-      ? "#dcfce7"
+      ? "success"
       : status === "in_progress"
-        ? "#dbeafe"
-        : "#e5e7eb";
-  return (
-    <span style={{ padding: "2px 8px", borderRadius: 12, background }}>
-      {status}
-    </span>
-  );
+        ? "info"
+        : "default";
+  return <Badge variant={variant}>{status}</Badge>;
 }
