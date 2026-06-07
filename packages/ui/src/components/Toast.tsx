@@ -74,6 +74,11 @@ class ToastStore {
     this.toasts = this.toasts.filter((t) => t.id !== id);
     this.emit();
   }
+
+  clear() {
+    this.toasts = [];
+    this.emit();
+  }
 }
 
 const store = new ToastStore();
@@ -94,6 +99,14 @@ export const toast = {
   info: (title: ReactNode, options?: ToastOptions) =>
     store.add("info", title, options),
   dismiss: (id: string) => store.dismiss(id),
+  /**
+   * Test-only escape hatch. The store is a module-level singleton, so a
+   * suite that fires toasts without mounting a `<Toaster>` (whose timers
+   * would otherwise clear them) can leak items across files. Call this in
+   * test teardown to drain the store. Prefixed with `__` to signal it is
+   * not part of the public runtime API.
+   */
+  __reset: () => store.clear(),
 };
 
 /** Hook form for components that prefer dependency-injected access. */
