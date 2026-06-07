@@ -1391,7 +1391,7 @@ function GlobalSearchBox() {
                 className="flex w-full items-center gap-2 border-t border-border px-3 py-2 text-left text-sm text-accent hover:bg-bg-subtle"
               >
                 <Search className="h-4 w-4 shrink-0" aria-hidden />
-                Search for “{debounced}”
+                Search for “{value.trim()}”
               </button>
             </div>
           )}
