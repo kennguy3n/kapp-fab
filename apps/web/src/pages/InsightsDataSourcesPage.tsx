@@ -18,7 +18,17 @@ import type {
   InsightsDataSource,
   InsightsDataSourceInput,
 } from "@kapp/client";
-import { ConfirmDialog } from "@kapp/ui";
+import {
+  Button,
+  ConfirmDialog,
+  Input,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 const DEFAULT_INPUT: InsightsDataSourceInput = {
@@ -57,8 +67,11 @@ export function InsightsDataSourcesPage() {
 
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteInsightsDataSource(id),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ["insights", "data-sources"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["insights", "data-sources"] });
+      setDeleteTarget(null);
+    },
+    onError: () => setDeleteTarget(null),
   });
 
   const test = useMutation({
@@ -78,13 +91,13 @@ export function InsightsDataSourcesPage() {
   return (
     <div className="p-6">
       <h1 className="text-2xl font-semibold mb-4">Data sources</h1>
-      <p className="text-sm text-gray-600 mb-4">
+      <p className="text-sm text-fg-muted mb-4">
         Read-only Postgres connections that can be queried from saved
         queries via <code>source: "external:&lt;id&gt;"</code>. Connection
         strings are encrypted at rest with the per-tenant HKDF key.
       </p>
 
-      <section className="mb-8 border rounded p-4">
+      <section className="mb-8 border border-border rounded p-4">
         <h2 className="text-lg font-medium mb-2">
           {editing ? "Edit data source" : "Add data source"}
         </h2>
@@ -95,8 +108,7 @@ export function InsightsDataSourcesPage() {
           }}
           className="grid grid-cols-1 md:grid-cols-2 gap-3"
         >
-          <input
-            className="border p-2 rounded"
+          <Input
             placeholder="Name"
             value={draft.name}
             onChange={(e) =>
@@ -104,16 +116,15 @@ export function InsightsDataSourcesPage() {
             }
             required
           />
-          <input
-            className="border p-2 rounded"
+          <Input
             placeholder="Description"
             value={draft.description ?? ""}
             onChange={(e) =>
               setDraft({ ...draft, description: e.target.value })
             }
           />
-          <input
-            className="border p-2 rounded col-span-full"
+          <Input
+            className="col-span-full"
             placeholder="postgres://user:password@host:5432/dbname"
             value={draft.connection_string ?? ""}
             onChange={(e) =>
@@ -131,28 +142,24 @@ export function InsightsDataSourcesPage() {
             <span>Enabled</span>
           </label>
           <div className="col-span-full flex gap-2">
-            <button
-              type="submit"
-              className="bg-blue-600 text-white px-4 py-2 rounded"
-              disabled={upsert.isPending}
-            >
+            <Button type="submit" disabled={upsert.isPending}>
               {editing ? "Save changes" : "Create data source"}
-            </button>
+            </Button>
             {editing && (
-              <button
+              <Button
                 type="button"
-                className="border px-4 py-2 rounded"
+                variant="outline"
                 onClick={() => {
                   setEditing(null);
                   setDraft(DEFAULT_INPUT);
                 }}
               >
                 Cancel
-              </button>
+              </Button>
             )}
           </div>
           {upsert.isError && (
-            <p className="col-span-full text-red-600 text-sm">
+            <p className="col-span-full text-danger text-sm">
               {(upsert.error as Error).message}
             </p>
           )}
@@ -164,45 +171,46 @@ export function InsightsDataSourcesPage() {
         {list.isLoading ? (
           <p>Loading…</p>
         ) : list.error ? (
-          <p className="text-red-600">{(list.error as Error).message}</p>
+          <p className="text-danger">{(list.error as Error).message}</p>
         ) : (
-          <table className="w-full border-collapse">
-            <thead>
-              <tr className="text-left border-b">
-                <th className="py-2">Name</th>
-                <th className="py-2">Dialect</th>
-                <th className="py-2">Enabled</th>
-                <th className="py-2">Test</th>
-                <th className="py-2">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Dialect</TableHead>
+                <TableHead>Enabled</TableHead>
+                <TableHead>Test</TableHead>
+                <TableHead>Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {(list.data?.data_sources ?? []).map(
                 (ds: InsightsDataSource) => (
-                  <tr key={ds.id} className="border-b">
-                    <td className="py-2">{ds.name}</td>
-                    <td className="py-2">{ds.dialect}</td>
-                    <td className="py-2">
-                      {ds.enabled ? "yes" : "no"}
-                    </td>
-                    <td className="py-2">
-                      <button
+                  <TableRow key={ds.id}>
+                    <TableCell>{ds.name}</TableCell>
+                    <TableCell>{ds.dialect}</TableCell>
+                    <TableCell>{ds.enabled ? "yes" : "no"}</TableCell>
+                    <TableCell>
+                      <Button
                         type="button"
-                        className="text-sm border px-2 py-1 rounded"
+                        size="sm"
+                        variant="outline"
                         onClick={() => test.mutate(ds.id)}
                       >
                         Test
-                      </button>
+                      </Button>
                       {testResult[ds.id] && (
-                        <span className="ml-2 text-xs text-gray-600">
+                        <span className="ml-2 text-xs text-fg-muted">
                           {testResult[ds.id]}
                         </span>
                       )}
-                    </td>
-                    <td className="py-2">
-                      <button
+                    </TableCell>
+                    <TableCell>
+                      <Button
                         type="button"
-                        className="text-sm border px-2 py-1 rounded mr-2"
+                        size="sm"
+                        variant="outline"
+                        className="mr-2"
                         onClick={() => {
                           setEditing(ds.id);
                           setDraft({
@@ -218,28 +226,31 @@ export function InsightsDataSourcesPage() {
                         }}
                       >
                         Edit
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         type="button"
-                        className="text-sm text-red-600 border px-2 py-1 rounded"
+                        size="sm"
+                        variant="ghost"
                         onClick={() =>
                           setDeleteTarget({ id: ds.id, name: ds.name })
                         }
                       >
                         Delete
-                      </button>
-                    </td>
-                  </tr>
+                      </Button>
+                    </TableCell>
+                  </TableRow>
                 )
               )}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         )}
       </section>
 
       <ConfirmDialog
         open={deleteTarget !== null}
-        onOpenChange={(o) => !o && setDeleteTarget(null)}
+        onOpenChange={(o) => {
+          if (!o && !remove.isPending) setDeleteTarget(null);
+        }}
         title={
           deleteTarget
             ? `Delete ${deleteTarget.name}?`
@@ -248,9 +259,9 @@ export function InsightsDataSourcesPage() {
         description="This removes the data source and its stored connection credential. Saved queries that reference it will stop running."
         confirmLabel="Delete"
         destructive
+        loading={remove.isPending}
         onConfirm={() => {
           if (deleteTarget) remove.mutate(deleteTarget.id);
-          setDeleteTarget(null);
         }}
       />
     </div>

@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
-import { ConfirmDialog } from "@kapp/ui";
+import {
+  Button,
+  ConfirmDialog,
+  Input,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 
 /**
  * RoleManagementPage is the tenant-admin surface for the per-tenant
@@ -69,6 +79,7 @@ export function RoleManagementPage() {
   const [newPermKType, setNewPermKType] = useState("");
   const [newPermConditions, setNewPermConditions] = useState("{}");
   const [deleteName, setDeleteName] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const loadRoles = () => {
     setLoading(true);
@@ -124,7 +135,13 @@ export function RoleManagementPage() {
     }
   };
 
+  // Keep the confirm dialog open (showing its `loading` state) until
+  // the delete settles, then close it — matching the await-mutation
+  // pattern used elsewhere so destructive actions give consistent
+  // "Working…" feedback. This page uses imperative fetch rather than
+  // React Query, so a local `deleting` flag stands in for isPending.
   const deleteRole = async (name: string) => {
+    setDeleting(true);
     try {
       await jsonFetch(`/api/v1/roles/${encodeURIComponent(name)}`, {
         method: "DELETE",
@@ -133,6 +150,9 @@ export function RoleManagementPage() {
       loadRoles();
     } catch (err) {
       setError(String((err as Error).message ?? err));
+    } finally {
+      setDeleting(false);
+      setDeleteName(null);
     }
   };
 
@@ -177,7 +197,7 @@ export function RoleManagementPage() {
   return (
     <section>
       <h1>Role Management</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Manage tenant-scoped roles, their permission grants, and the
         parent-role hierarchy. Mutations require the{" "}
         <code>tenant.admin</code> permission and invalidate the
@@ -185,72 +205,66 @@ export function RoleManagementPage() {
         request.
       </p>
       {error && (
-        <div
-          style={{
-            color: "#b91c1c",
-            background: "#fee2e2",
-            padding: 8,
-            borderRadius: 4,
-            margin: "8px 0",
-          }}
-        >
+        <div className="my-2 rounded border border-danger/30 bg-danger/10 p-2 text-danger">
           {error}
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 24, alignItems: "flex-start" }}>
-        <div style={{ flex: 1 }}>
+      <div className="flex items-start gap-6">
+        <div className="flex-1">
           <h2>Roles</h2>
           {loading && <p>Loading…</p>}
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ textAlign: "left" }}>
-                <th>Name</th>
-                <th>Parent</th>
-                <th>Permissions</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Parent</TableHead>
+                <TableHead>Permissions</TableHead>
+                <TableHead />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {sortedRoles.map((r) => (
-                <tr
+                <TableRow
                   key={r.name}
-                  style={{
-                    background: selected === r.name ? "#eef2ff" : undefined,
-                  }}
+                  className={selected === r.name ? "bg-bg-muted" : undefined}
                 >
-                  <td
-                    style={{ cursor: "pointer", padding: "4px 8px" }}
+                  <TableCell
+                    className="cursor-pointer"
                     onClick={() => setSelected(r.name)}
                   >
                     {r.name}
-                  </td>
-                  <td>{r.parent_role ?? ""}</td>
-                  <td>
-                    <code style={{ fontSize: 12 }}>
+                  </TableCell>
+                  <TableCell>{r.parent_role ?? ""}</TableCell>
+                  <TableCell>
+                    <code className="text-xs">
                       {JSON.stringify(r.permissions)}
                     </code>
-                  </td>
-                  <td>
+                  </TableCell>
+                  <TableCell>
                     {r.name !== "owner" && (
-                      <button onClick={() => setDeleteName(r.name)}>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setDeleteName(r.name)}
+                      >
                         Delete
-                      </button>
+                      </Button>
                     )}
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
 
-          <h3 style={{ marginTop: 24 }}>Create role</h3>
-          <div style={{ display: "grid", gap: 8, maxWidth: 400 }}>
-            <input
+          <h3 className="mt-6">Create role</h3>
+          <div className="grid max-w-[400px] gap-2">
+            <Input
               placeholder="role.name"
               value={newRoleName}
               onChange={(e) => setNewRoleName(e.target.value)}
             />
-            <input
+            <Input
               placeholder='Parent role (e.g. "tenant.member")'
               value={newRoleParent}
               onChange={(e) => setNewRoleParent(e.target.value)}
@@ -260,54 +274,61 @@ export function RoleManagementPage() {
               value={newRolePerms}
               onChange={(e) => setNewRolePerms(e.target.value)}
               rows={3}
+              className="w-full rounded-md border border-border bg-bg-elevated p-1.5 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
             />
-            <button onClick={createRole} disabled={!newRoleName}>
-              Create
-            </button>
+            <div>
+              <Button onClick={createRole} disabled={!newRoleName}>
+                Create
+              </Button>
+            </div>
           </div>
         </div>
 
-        <div style={{ flex: 1 }}>
+        <div className="flex-1">
           <h2>{selected ? `Permissions: ${selected}` : "Select a role"}</h2>
           {selected && (
             <>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr style={{ textAlign: "left" }}>
-                    <th>Action</th>
-                    <th>KType</th>
-                    <th>Conditions</th>
-                    <th />
-                  </tr>
-                </thead>
-                <tbody>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Action</TableHead>
+                    <TableHead>KType</TableHead>
+                    <TableHead>Conditions</TableHead>
+                    <TableHead />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
                   {permissions.map((p) => (
-                    <tr key={p.id}>
-                      <td>{p.action}</td>
-                      <td>{p.ktype}</td>
-                      <td>
-                        <code style={{ fontSize: 12 }}>
+                    <TableRow key={p.id}>
+                      <TableCell>{p.action}</TableCell>
+                      <TableCell>{p.ktype}</TableCell>
+                      <TableCell>
+                        <code className="text-xs">
                           {JSON.stringify(p.conditions)}
                         </code>
-                      </td>
-                      <td>
-                        <button onClick={() => revokePermission(p.id)}>
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => revokePermission(p.id)}
+                        >
                           Revoke
-                        </button>
-                      </td>
-                    </tr>
+                        </Button>
+                      </TableCell>
+                    </TableRow>
                   ))}
-                </tbody>
-              </table>
+                </TableBody>
+              </Table>
 
-              <h3 style={{ marginTop: 24 }}>Grant permission</h3>
-              <div style={{ display: "grid", gap: 8, maxWidth: 400 }}>
-                <input
+              <h3 className="mt-6">Grant permission</h3>
+              <div className="grid max-w-[400px] gap-2">
+                <Input
                   placeholder="action (e.g. finance.invoice.write)"
                   value={newPermAction}
                   onChange={(e) => setNewPermAction(e.target.value)}
                 />
-                <input
+                <Input
                   placeholder="ktype (optional)"
                   value={newPermKType}
                   onChange={(e) => setNewPermKType(e.target.value)}
@@ -317,10 +338,13 @@ export function RoleManagementPage() {
                   value={newPermConditions}
                   onChange={(e) => setNewPermConditions(e.target.value)}
                   rows={3}
+                  className="w-full rounded-md border border-border bg-bg-elevated p-1.5 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
                 />
-                <button onClick={grantPermission} disabled={!newPermAction}>
-                  Grant
-                </button>
+                <div>
+                  <Button onClick={grantPermission} disabled={!newPermAction}>
+                    Grant
+                  </Button>
+                </div>
               </div>
             </>
           )}
@@ -329,14 +353,16 @@ export function RoleManagementPage() {
 
       <ConfirmDialog
         open={deleteName !== null}
-        onOpenChange={(o) => !o && setDeleteName(null)}
+        onOpenChange={(o) => {
+          if (!o && !deleting) setDeleteName(null);
+        }}
         title={deleteName ? `Delete role "${deleteName}"?` : "Delete role?"}
         description="This removes the role and its permission grants. Users assigned to it lose the associated access."
         confirmLabel="Delete"
         destructive
+        loading={deleting}
         onConfirm={() => {
           if (deleteName) deleteRole(deleteName);
-          setDeleteName(null);
         }}
       />
     </section>
