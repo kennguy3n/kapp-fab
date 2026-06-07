@@ -1,6 +1,16 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
+import {
+  Button,
+  Input,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 const KTYPE = "sales.price_list";
@@ -46,11 +56,11 @@ export function PriceListsPage() {
   });
 
   return (
-    <section style={{ display: "flex", gap: 16 }}>
-      <div style={{ flex: "0 0 300px" }}>
+    <section className="flex gap-4">
+      <div className="flex-[0_0_300px]">
         <h1>Price Lists</h1>
         {q.isLoading && <p>Loading…</p>}
-        <ul style={{ listStyle: "none", padding: 0, fontSize: 13 }}>
+        <ul className="list-none p-0 text-[13px]">
           {(q.data ?? []).map((r) => {
             const d = r.data as unknown as PriceListData;
             const isSel = selectedId === r.id;
@@ -58,15 +68,12 @@ export function PriceListsPage() {
               <li
                 key={r.id}
                 onClick={() => setSelectedId(r.id)}
-                style={{
-                  padding: "6px 8px",
-                  cursor: "pointer",
-                  background: isSel ? "#eef2ff" : "transparent",
-                  borderRadius: 4,
-                }}
+                className={`cursor-pointer rounded px-2 py-1.5 ${
+                  isSel ? "bg-bg-muted" : "bg-transparent"
+                }`}
               >
-                <div style={{ fontWeight: 500 }}>{d.name ?? "(unnamed)"}</div>
-                <div style={{ color: "#6b7280", fontSize: 12 }}>
+                <div className="font-medium">{d.name ?? "(unnamed)"}</div>
+                <div className="text-xs text-fg-muted">
                   {d.currency ?? "—"} · {d.customer_id ?? "all customers"}
                 </div>
               </li>
@@ -74,7 +81,7 @@ export function PriceListsPage() {
           })}
         </ul>
       </div>
-      <div style={{ flex: 1 }}>
+      <div className="flex-1">
         {selected ? (
           <PriceListEditor
             key={selected.id}
@@ -83,7 +90,7 @@ export function PriceListsPage() {
             saving={updateMutation.isPending}
           />
         ) : (
-          <p style={{ color: "#6b7280" }}>
+          <p className="text-fg-muted">
             Select a price list to edit its item matrix.
           </p>
         )}
@@ -122,62 +129,66 @@ function PriceListEditor({
   return (
     <div>
       <h2>{initial.name}</h2>
-      <div style={{ color: "#6b7280", fontSize: 13 }}>
+      <div className="text-[13px] text-fg-muted">
         {initial.currency ?? "—"} · valid {initial.valid_from ?? "—"} to {initial.valid_until ?? "—"}
       </div>
 
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginTop: 12 }}>
-        <thead>
-          <tr style={{ textAlign: "left", color: "#6b7280" }}>
-            <th style={{ padding: 6 }}>Item</th>
-            <th style={{ padding: 6 }}>Price</th>
-            <th style={{ padding: 6 }}>Discount %</th>
-            <th style={{ padding: 6 }}>Min qty</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
+      <Table className="mt-3 text-[13px]">
+        <TableHeader>
+          <TableRow>
+            <TableHead>Item</TableHead>
+            <TableHead>Price</TableHead>
+            <TableHead>Discount %</TableHead>
+            <TableHead>Min qty</TableHead>
+            <TableHead />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {items.map((r, i) => (
-            <tr key={i} style={{ borderTop: "1px solid #e5e7eb" }}>
-              <td style={{ padding: 6 }}>
-                <input
+            <TableRow key={i}>
+              <TableCell>
+                <Input
                   value={r.item_id}
                   onChange={(e) => updateRow(i, { item_id: e.target.value })}
                 />
-              </td>
-              <td style={{ padding: 6 }}>
-                <input
+              </TableCell>
+              <TableCell>
+                <Input
                   type="number"
                   value={String(r.price)}
                   onChange={(e) => updateRow(i, { price: Number(e.target.value) })}
                 />
-              </td>
-              <td style={{ padding: 6 }}>
-                <input
+              </TableCell>
+              <TableCell>
+                <Input
                   type="number"
                   value={String(r.discount_percent ?? 0)}
                   onChange={(e) => updateRow(i, { discount_percent: Number(e.target.value) })}
                 />
-              </td>
-              <td style={{ padding: 6 }}>
-                <input
+              </TableCell>
+              <TableCell>
+                <Input
                   type="number"
                   value={String(r.min_qty ?? 0)}
                   onChange={(e) => updateRow(i, { min_qty: Number(e.target.value) })}
                 />
-              </td>
-              <td style={{ padding: 6 }}>
-                <button onClick={() => removeRow(i)}>Remove</button>
-              </td>
-            </tr>
+              </TableCell>
+              <TableCell>
+                <Button size="sm" variant="outline" onClick={() => removeRow(i)}>
+                  Remove
+                </Button>
+              </TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
-      <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-        <button onClick={addRow}>Add row</button>
-        <button onClick={save} disabled={saving}>
+        </TableBody>
+      </Table>
+      <div className="mt-2 flex gap-2">
+        <Button variant="outline" onClick={addRow}>
+          Add row
+        </Button>
+        <Button onClick={save} disabled={saving}>
           {saving ? "Saving…" : "Save"}
-        </button>
+        </Button>
       </div>
     </div>
   );
