@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Button } from "@kapp/ui";
 import { api } from "../lib/api";
 import { KTypeForm } from "../components/KTypeForm";
 
@@ -93,23 +94,27 @@ export function RecordFormPage() {
         {id ? "Edit" : "New"} {ktypeQuery.data.name}
       </h1>
       {id && (
-        <div style={{ marginBottom: 12, display: "flex", gap: 8, alignItems: "center" }}>
-          <button
+        <div className="mb-3 flex items-center gap-2">
+          <Button
             type="button"
+            variant="outline"
+            size="sm"
             onClick={() => runPrint("pdf")}
             disabled={printing !== null}
           >
             {printing === "pdf" ? "Preparing PDF…" : "Download PDF"}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="outline"
+            size="sm"
             onClick={() => runPrint("html")}
             disabled={printing !== null}
           >
             {printing === "html" ? "Preparing preview…" : "Print preview (HTML)"}
-          </button>
+          </Button>
           {printError && (
-            <span style={{ color: "#b91c1c", fontSize: 12 }}>{printError}</span>
+            <span className="text-xs text-danger">{printError}</span>
           )}
         </div>
       )}
