@@ -4,7 +4,17 @@ import { useQueries, useQuery } from "@tanstack/react-query";
 // useQuery is still used by the installations list above; we
 // deliberately dropped the per-row useQuery (was N+1 against
 // listMarketplaceVersions for data already in extQueries).
-import { Badge, Card, CardContent } from "@kapp/ui";
+import {
+  Badge,
+  Card,
+  CardContent,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../../lib/api";
 import type {
   MarketplaceExtension,
@@ -82,9 +92,9 @@ export function MarketplaceInstallationsPage() {
 
   return (
     <section>
-      <header style={{ marginBottom: 16 }}>
-        <h1 style={{ marginBottom: 4 }}>Installed extensions</h1>
-        <p style={{ color: "#6b7280" }}>
+      <header className="mb-4">
+        <h1 className="mb-1">Installed extensions</h1>
+        <p className="text-fg-muted">
           Marketplace extensions currently or previously installed for this
           tenant. <Link to="/marketplace">Browse the marketplace</Link> to
           add more.
@@ -93,7 +103,7 @@ export function MarketplaceInstallationsPage() {
 
       {installations.isLoading && <p>Loading…</p>}
       {installations.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load installations:{" "}
           {(installations.error as Error).message}
         </p>
@@ -102,8 +112,8 @@ export function MarketplaceInstallationsPage() {
       {installations.isSuccess &&
         (installations.data.items.length === 0 ? (
           <Card>
-            <CardContent style={{ padding: 32, textAlign: "center" }}>
-              <p style={{ color: "#6b7280" }}>
+            <CardContent className="p-8 text-center">
+              <p className="text-fg-muted">
                 No extensions are installed yet.{" "}
                 <Link to="/marketplace">Browse the marketplace</Link> to find
                 one.
@@ -111,24 +121,18 @@ export function MarketplaceInstallationsPage() {
             </CardContent>
           </Card>
         ) : (
-          <table
-            style={{
-              width: "100%",
-              borderCollapse: "collapse",
-              fontSize: 14,
-            }}
-          >
-            <thead>
-              <tr style={{ textAlign: "left", color: "#6b7280" }}>
-                <Th>Extension</Th>
-                <Th>Status</Th>
-                <Th>Version</Th>
-                <Th>Installed</Th>
-                <Th>Last health check</Th>
-                <Th>{""}</Th>
-              </tr>
-            </thead>
-            <tbody>
+          <Table className="text-sm">
+            <TableHeader>
+              <TableRow>
+                <TableHead>Extension</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Version</TableHead>
+                <TableHead>Installed</TableHead>
+                <TableHead>Last health check</TableHead>
+                <TableHead>{""}</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {installations.data.items.map((row) => (
                 <InstallationRow
                   key={row.id}
@@ -137,8 +141,8 @@ export function MarketplaceInstallationsPage() {
                   versions={versionsLookup[row.extension_id]}
                 />
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         ))}
     </section>
   );
@@ -154,60 +158,51 @@ function InstallationRow({
   versions: MarketplaceExtensionVersion[] | undefined;
 }) {
   return (
-    <tr style={{ borderTop: "1px solid #e5e7eb" }}>
-      <Td>
+    <TableRow>
+      <TableCell className="align-top">
         {ext ? (
           <Link to={`/marketplace/extensions/${ext.id}`}>
             <strong>{ext.display_name}</strong>
           </Link>
         ) : (
-          <span style={{ fontFamily: "monospace", fontSize: 12 }}>
+          <span className="font-mono text-xs">
             {row.extension_id}
           </span>
         )}
         {ext && (
-          <div style={{ fontSize: 12, color: "#6b7280" }}>{ext.name}</div>
+          <div className="text-xs text-fg-muted">{ext.name}</div>
         )}
-      </Td>
-      <Td>
+      </TableCell>
+      <TableCell className="align-top">
         <Badge variant={installStatusVariant(row.status)}>
           {installStatusLabel(row.status)}
         </Badge>
         {row.failure_reason && (
-          <div
-            style={{
-              fontSize: 12,
-              color: "#b91c1c",
-              marginTop: 4,
-              maxWidth: 280,
-            }}
-          >
+          <div className="mt-1 max-w-[280px] text-xs text-danger">
             {row.failure_reason}
           </div>
         )}
-      </Td>
-      <Td>{renderVersion(row, ext, versions)}</Td>
-      <Td>{formatTimestamp(row.installed_at)}</Td>
-      <Td>
+      </TableCell>
+      <TableCell className="align-top">{renderVersion(row, ext, versions)}</TableCell>
+      <TableCell className="align-top">{formatTimestamp(row.installed_at)}</TableCell>
+      <TableCell className="align-top">
         {row.last_health_check_at ? (
           <span>
             {formatTimestamp(row.last_health_check_at)}
             {row.last_health_check_status && (
-              <span
-                style={{ marginLeft: 6, color: "#6b7280", fontSize: 12 }}
-              >
+              <span className="ml-1.5 text-xs text-fg-muted">
                 · {row.last_health_check_status}
               </span>
             )}
           </span>
         ) : (
-          <span style={{ color: "#9ca3af" }}>—</span>
+          <span className="text-fg-subtle">—</span>
         )}
-      </Td>
-      <Td>
+      </TableCell>
+      <TableCell className="align-top">
         <Link to={`/marketplace/installed/${row.id}`}>Manage →</Link>
-      </Td>
-    </tr>
+      </TableCell>
+    </TableRow>
   );
 }
 
@@ -224,7 +219,7 @@ function renderVersion(
 ): React.ReactNode {
   if (!ext) {
     return (
-      <span style={{ fontFamily: "monospace", fontSize: 12 }}>
+      <span className="font-mono text-xs">
         {row.extension_version_id}
       </span>
     );
@@ -232,7 +227,7 @@ function renderVersion(
   const installed = versions?.find((v) => v.id === row.extension_version_id);
   if (!installed) {
     return (
-      <span style={{ fontFamily: "monospace", fontSize: 12 }}>
+      <span className="font-mono text-xs">
         {row.extension_version_id.slice(0, 8)}…
       </span>
     );
@@ -265,7 +260,7 @@ function renderVersion(
     <span>
       v{installed.version}
       {isBehind && (
-        <Badge variant="warning" style={{ marginLeft: 6 }}>
+        <Badge variant="warning" className="ml-1.5">
           Update available
         </Badge>
       )}
@@ -273,23 +268,4 @@ function renderVersion(
   );
 }
 
-function Th({ children }: { children: React.ReactNode }) {
-  return (
-    <th
-      style={{
-        textAlign: "left",
-        padding: "8px 12px",
-        fontWeight: 500,
-        fontSize: 12,
-        textTransform: "uppercase",
-        letterSpacing: 0.4,
-      }}
-    >
-      {children}
-    </th>
-  );
-}
 
-function Td({ children }: { children: React.ReactNode }) {
-  return <td style={{ padding: "12px", verticalAlign: "top" }}>{children}</td>;
-}
