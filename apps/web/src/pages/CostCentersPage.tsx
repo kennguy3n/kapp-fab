@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
+import { Button, Input } from "@kapp/ui";
 import { api } from "../lib/api";
 
 // KType for cost centres; mirrors the constant in
@@ -68,48 +69,48 @@ export function CostCentersPage() {
   return (
     <section>
       <h1>Cost Centers</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         GL posting tag used to partition reports. Hierarchy is flat
         pointer → tree.
       </p>
 
-      <form onSubmit={submit} style={{ margin: "12px 0", display: "flex", gap: 8, fontSize: 13 }}>
-        <input
+      <form onSubmit={submit} className="my-3 flex gap-2 text-[13px]">
+        <Input
           placeholder="code"
           value={form.code}
           onChange={(e) => setForm({ ...form, code: e.target.value })}
           required
         />
-        <input
+        <Input
           placeholder="name"
           value={form.name}
           onChange={(e) => setForm({ ...form, name: e.target.value })}
           required
         />
-        <input
+        <Input
           placeholder="parent_code (optional)"
           value={form.parent_code ?? ""}
           onChange={(e) => setForm({ ...form, parent_code: e.target.value })}
         />
-        <button type="submit" disabled={createMutation.isPending}>
+        <Button type="submit" disabled={createMutation.isPending}>
           {createMutation.isPending ? "Adding…" : "Add"}
-        </button>
+        </Button>
       </form>
 
       {q.isLoading && <p>Loading…</p>}
       {q.isError && (
-        <p style={{ color: "#b91c1c" }}>
+        <p className="text-danger">
           Failed to load cost centres: {(q.error as Error).message}
         </p>
       )}
 
       {records.length === 0 && !q.isLoading && (
-        <p style={{ color: "#9ca3af", fontStyle: "italic" }}>
+        <p className="italic text-fg-subtle">
           No cost centres yet.
         </p>
       )}
 
-      <ul style={{ listStyle: "none", padding: 0, marginTop: 12, fontSize: 13 }}>
+      <ul className="mt-3 list-none p-0 text-[13px]">
         {(tree.get("") ?? []).map((r) => (
           <CostCenterNode
             key={r.id}
@@ -138,18 +139,20 @@ function CostCenterNode({
   const d = node.data as unknown as CostCenterData;
   const kids = children.get(d.code) ?? [];
   return (
-    <li style={{ marginLeft: depth * 16, padding: "4px 0" }}>
-      <span style={{ color: d.active === false ? "#9ca3af" : "inherit" }}>
+    <li className="py-1" style={{ marginLeft: depth * 16 }}>
+      <span className={d.active === false ? "text-fg-subtle" : undefined}>
         <code>{d.code}</code> — {d.name}
       </span>
-      <button
-        style={{ marginLeft: 8, fontSize: 11 }}
+      <Button
+        variant="link"
+        size="sm"
+        className="ml-2 h-auto p-0 text-[11px]"
         onClick={() => onToggle(node)}
       >
         {d.active === false ? "Activate" : "Deactivate"}
-      </button>
+      </Button>
       {kids.length > 0 && (
-        <ul style={{ listStyle: "none", padding: 0 }}>
+        <ul className="list-none p-0">
           {kids.map((c) => (
             <CostCenterNode
               key={c.id}
