@@ -7,6 +7,7 @@ import type {
   TenantKTypeStatus,
   UpsertTenantKTypeInput,
 } from "@kapp/client";
+import { Badge, Button, Input, Select } from "@kapp/ui";
 import { api } from "../lib/api";
 
 /**
@@ -26,6 +27,12 @@ import { api } from "../lib/api";
  *   - Status transitions: draft → active → archived. Only `active`
  *     KTypes back record creates.
  */
+const STATUS_VARIANT: Record<TenantKTypeStatus, "success" | "default" | "warning"> = {
+  active: "success",
+  archived: "default",
+  draft: "warning",
+};
+
 const SAFE_TYPES: { value: string; label: string; help?: string }[] = [
   { value: "string", label: "Short text" },
   { value: "text", label: "Long text" },
@@ -273,9 +280,9 @@ export function KTypeBuilderPage() {
   }
 
   return (
-    <section style={{ maxWidth: 1100 }}>
+    <section className="max-w-[1100px]">
       <h1>Low-code KType Builder</h1>
-      <p style={{ color: "#6b7280" }}>
+      <p className="text-fg-muted">
         Define a custom business object for your tenant — an asset register,
         compliance checklist, custom approval form. The generated KType is
         scoped to your tenant only and lives in the <code>custom.*</code>{" "}
@@ -283,68 +290,42 @@ export function KTypeBuilderPage() {
         the definition.
       </p>
 
-      <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 16, alignItems: "start" }}>
+      <div className="grid grid-cols-[320px_1fr] items-start gap-4">
         {/* Sidebar: existing custom KTypes ------------------------- */}
-        <aside style={{ border: "1px solid #e5e7eb", borderRadius: 6, padding: 12 }}>
-          <header
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}
-          >
-            <h2 style={{ fontSize: 14, margin: 0 }}>Your custom KTypes</h2>
-            <button type="button" onClick={reset} style={{ fontSize: 12 }}>
+        <aside className="rounded-md border border-border p-3">
+          <header className="flex items-center justify-between">
+            <h2 className="m-0 text-sm">Your custom KTypes</h2>
+            <Button type="button" variant="ghost" size="sm" onClick={reset}>
               + New
-            </button>
+            </Button>
           </header>
-          {list.isLoading && <p style={{ fontSize: 12 }}>Loading…</p>}
+          {list.isLoading && <p className="text-xs">Loading…</p>}
           {items.length === 0 && !list.isLoading && (
-            <p style={{ fontSize: 12, color: "#6b7280" }}>
+            <p className="text-xs text-fg-muted">
               No custom KTypes yet. Define one on the right.
             </p>
           )}
-          <ul style={{ listStyle: "none", padding: 0, fontSize: 13 }}>
+          <ul className="m-0 list-none p-0 text-[13px]">
             {items.map((it) => (
               <li
                 key={`${it.name}@${it.version}`}
-                style={{ padding: "6px 0", borderTop: "1px solid #f3f4f6" }}
+                className="border-t border-border py-1.5"
               >
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <div className="flex justify-between">
                   <button
                     type="button"
                     onClick={() => loadInto(it)}
-                    style={{
-                      border: "none",
-                      background: "none",
-                      padding: 0,
-                      cursor: "pointer",
-                      textAlign: "start",
-                      color: "#1f2937",
-                    }}
+                    className="cursor-pointer border-none bg-transparent p-0 text-start text-fg"
                   >
                     <strong>{it.title}</strong>
                     <br />
-                    <code style={{ fontSize: 11, color: "#6b7280" }}>{it.name}</code>
+                    <code className="text-[11px] text-fg-muted">{it.name}</code>
                   </button>
-                  <span
-                    style={{
-                      fontSize: 11,
-                      padding: "2px 6px",
-                      borderRadius: 4,
-                      background:
-                        it.status === "active"
-                          ? "#dcfce7"
-                          : it.status === "archived"
-                            ? "#f3f4f6"
-                            : "#fef3c7",
-                      color: "#374151",
-                    }}
-                  >
+                  <Badge variant={STATUS_VARIANT[it.status]} size="xs">
                     {it.status}
-                  </span>
+                  </Badge>
                 </div>
-                <div style={{ marginTop: 4, display: "flex", gap: 4, flexWrap: "wrap" }}>
+                <div className="mt-1 flex flex-wrap gap-1">
                   {(["draft", "active", "archived"] as TenantKTypeStatus[])
                     .filter(
                       (s) =>
@@ -360,9 +341,11 @@ export function KTypeBuilderPage() {
                         canTransitionStatus(it.status, s),
                     )
                     .map((s) => (
-                      <button
+                      <Button
                         key={s}
                         type="button"
+                        variant="outline"
+                        size="sm"
                         onClick={() =>
                           setStatus.mutate({
                             name: it.name,
@@ -370,11 +353,10 @@ export function KTypeBuilderPage() {
                             status: s,
                           })
                         }
-                        style={{ fontSize: 11 }}
                         disabled={setStatus.isPending}
                       >
                         → {s}
-                      </button>
+                      </Button>
                     ))}
                 </div>
               </li>
@@ -383,43 +365,41 @@ export function KTypeBuilderPage() {
         </aside>
 
         {/* Editor ---------------------------------------------- */}
-        <form onSubmit={submit} style={{ display: "grid", gap: 12 }}>
-          <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+        <form onSubmit={submit} className="grid gap-3">
+          <label className="grid gap-1 text-[13px]">
             <span>Machine name</span>
-            <input
+            <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="custom.asset_register"
-              style={{ padding: 6 }}
             />
-            <span style={{ fontSize: 11, color: "#6b7280" }}>
+            <span className="text-[11px] text-fg-muted">
               Must start with <code>custom.</code> and use lowercase letters,
               digits, or underscores.
             </span>
           </label>
 
-          <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+          <label className="grid gap-1 text-[13px]">
             <span>Title</span>
-            <input
+            <Input
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Asset Register"
-              style={{ padding: 6 }}
             />
           </label>
 
-          <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+          <label className="grid gap-1 text-[13px]">
             <span>Description</span>
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={2}
-              style={{ padding: 6 }}
+              className="rounded-md border border-border bg-bg px-2 py-1.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
             />
           </label>
 
-          <fieldset style={{ border: "1px solid #e5e7eb", padding: 12 }}>
-            <legend style={{ fontSize: 13 }}>
+          <fieldset className="border border-border p-3">
+            <legend className="text-[13px]">
               Fields ({fields.length} / {fieldLimit})
             </legend>
             {rows.map((r, i) => (
@@ -434,24 +414,25 @@ export function KTypeBuilderPage() {
                 }
               />
             ))}
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="sm"
               onClick={() => setRows([...rows, emptyFieldRow()])}
               disabled={rows.length >= fieldLimit}
-              style={{ marginTop: 8 }}
+              className="mt-2"
             >
               + Add field
-            </button>
+            </Button>
           </fieldset>
 
-          <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+          <label className="grid gap-1 text-[13px]">
             <span>Status on save</span>
-            <select
+            <Select
               value={status}
               onChange={(e) =>
                 setLocalStatus(e.target.value as TenantKTypeStatus)
               }
-              style={{ padding: 6 }}
             >
               {/* Only show statuses the loaded row can transition
                   to (or every status when authoring a brand-new
@@ -470,42 +451,35 @@ export function KTypeBuilderPage() {
                         : "archived (frozen)"}
                   </option>
                 ))}
-            </select>
+            </Select>
           </label>
 
           {validationErrors.length > 0 && (
-            <ul style={{ color: "#b91c1c", fontSize: 12, paddingLeft: 16 }}>
+            <ul className="pl-4 text-xs text-danger">
               {validationErrors.map((e) => (
                 <li key={e}>{e}</li>
               ))}
             </ul>
           )}
           {upsert.isError && (
-            <p style={{ color: "#b91c1c", fontSize: 12 }}>
+            <p className="text-xs text-danger">
               {(upsert.error as Error).message}
             </p>
           )}
-          <div style={{ display: "flex", gap: 8 }}>
-            <button type="submit" disabled={!canSave}>
+          <div className="flex gap-2">
+            <Button type="submit" disabled={!canSave}>
               {upsert.isPending ? "Saving…" : "Save KType"}
-            </button>
-            <button type="button" onClick={reset}>
+            </Button>
+            <Button type="button" variant="outline" onClick={reset}>
               Reset
-            </button>
+            </Button>
           </div>
 
           <details>
-            <summary style={{ fontSize: 12, color: "#6b7280" }}>
+            <summary className="text-xs text-fg-muted">
               Live preview (JSON sent to API)
             </summary>
-            <pre
-              style={{
-                background: "#f3f4f6",
-                padding: 8,
-                fontSize: 11,
-                overflow: "auto",
-              }}
-            >
+            <pre className="overflow-auto bg-bg-muted p-2 text-[11px]">
               {JSON.stringify(preview, null, 2)}
             </pre>
           </details>
@@ -531,34 +505,23 @@ function FieldEditor({
   onRemove,
 }: FieldEditorProps) {
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "1fr 1fr auto auto auto auto",
-        gap: 6,
-        margin: "8px 0",
-        alignItems: "center",
-        fontSize: 13,
-      }}
-    >
-      <input
+    <div className="my-2 grid grid-cols-[1fr_1fr_auto_auto_auto_auto] items-center gap-1.5 text-[13px]">
+      <Input
         value={field.name}
         onChange={(e) => onChange({ name: e.target.value })}
         placeholder="field name"
-        style={{ padding: 4 }}
       />
-      <select
+      <Select
         value={field.type}
         onChange={(e) => onChange({ type: e.target.value })}
-        style={{ padding: 4 }}
       >
         {SAFE_TYPES.map((t) => (
           <option key={t.value} value={t.value}>
             {t.label}
           </option>
         ))}
-      </select>
-      <label style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 4 }}>
+      </Select>
+      <label className="flex items-center gap-1 text-[11px]">
         <input
           type="checkbox"
           checked={field.required ?? false}
@@ -566,17 +529,17 @@ function FieldEditor({
         />
         required
       </label>
-      <button type="button" onClick={onMoveUp} style={{ fontSize: 11 }}>
+      <Button type="button" variant="outline" size="sm" onClick={onMoveUp}>
         ↑
-      </button>
-      <button type="button" onClick={onMoveDown} style={{ fontSize: 11 }}>
+      </Button>
+      <Button type="button" variant="outline" size="sm" onClick={onMoveDown}>
         ↓
-      </button>
-      <button type="button" onClick={onRemove} style={{ fontSize: 11 }}>
+      </Button>
+      <Button type="button" variant="outline" size="sm" onClick={onRemove}>
         ✕
-      </button>
+      </Button>
       {field.type === "enum" && (
-        <input
+        <Input
           value={(field.values ?? []).join(",")}
           onChange={(e) =>
             onChange({
@@ -587,15 +550,15 @@ function FieldEditor({
             })
           }
           placeholder="comma,separated,values"
-          style={{ gridColumn: "1 / span 6", padding: 4 }}
+          className="col-span-6"
         />
       )}
       {field.type === "ref" && (
-        <input
+        <Input
           value={field.ref ?? field.ktype ?? ""}
           onChange={(e) => onChange({ ref: e.target.value })}
           placeholder="target ktype (e.g. crm.account)"
-          style={{ gridColumn: "1 / span 6", padding: 4 }}
+          className="col-span-6"
         />
       )}
     </div>
