@@ -1058,7 +1058,9 @@ function ShellRouteFallback() {
     <Card className="border-dashed">
       <CardContent className="flex items-center gap-3 py-12 text-fg-muted">
         <Spinner size="sm" label="Loading page" />
-        <span className="text-sm">Loading…</span>
+        <span className="text-sm" aria-hidden="true">
+          Loading…
+        </span>
       </CardContent>
     </Card>
   );
@@ -1320,7 +1322,7 @@ function GlobalSearchBox() {
           aria-label="Global search"
           aria-expanded={showPanel}
           role="combobox"
-          aria-controls="global-search-listbox"
+          aria-controls={showPanel ? "global-search-listbox" : undefined}
           leadingAddon={<Search className="h-4 w-4" aria-hidden />}
         />
       </form>
