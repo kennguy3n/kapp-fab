@@ -1,4 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@kapp/ui";
 import { api } from "../lib/api";
 
 export function TenantListPage() {
@@ -23,34 +31,26 @@ export function TenantListPage() {
   return (
     <section>
       <h1>Tenants</h1>
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead>
-          <tr>
-            <th style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-              Slug
-            </th>
-            <th style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-              Name
-            </th>
-            <th style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-              Plan
-            </th>
-            <th style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-              Status
-            </th>
-          </tr>
-        </thead>
-        <tbody>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Slug</TableHead>
+            <TableHead>Name</TableHead>
+            <TableHead>Plan</TableHead>
+            <TableHead>Status</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {tenants.map((t) => (
-            <tr key={t.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
-              <td style={{ padding: "6px 4px" }}>{t.slug}</td>
-              <td style={{ padding: "6px 4px" }}>{t.name}</td>
-              <td style={{ padding: "6px 4px" }}>{t.plan}</td>
-              <td style={{ padding: "6px 4px" }}>{t.status}</td>
-            </tr>
+            <TableRow key={t.id}>
+              <TableCell>{t.slug}</TableCell>
+              <TableCell>{t.name}</TableCell>
+              <TableCell>{t.plan}</TableCell>
+              <TableCell>{t.status}</TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
     </section>
   );
 }
