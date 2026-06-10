@@ -895,6 +895,12 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	agents.RegisterPayrollTools(executor, payrollEngine)
 	agents.RegisterLMSTools(executor, lmsStore)
 	agents.RegisterCertificateTool(executor, lms.NewCertificateIssuer(recordStore, pool))
+	// Session-17 learning-path store, shared between the agent tools
+	// (create / enroll / recommend) and the HTTP handlers below so a
+	// tool-driven and an HTTP-driven create/enroll hit the same audit +
+	// RLS path.
+	lmsPathStore := lms.NewLearningPathStore(pool, auditor)
+	agents.RegisterLearningPathTools(executor, lmsPathStore)
 	agents.RegisterHelpdeskTools(executor, helpdeskStore)
 	agents.RegisterInsightsTools(executor, insightsQueryStore, insightsDashboardStore, insightsRunner)
 	// Phase N9a — sales return state machine surfaced through the
@@ -1011,7 +1017,6 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// packages extract into the same per-tenant object store the files
 	// surface uses.
 	lmsAdapters := lmsRecordAdapters{records: recordStore}
-	lmsPathStore := lms.NewLearningPathStore(pool, auditor)
 	lmsh := &lmsHandlers{
 		paths:     lmsPathStore,
 		enroller:  lms.NewPathAutoEnroller(lmsPathStore),
