@@ -174,6 +174,16 @@ func DefaultLocaleForCountry(country string) string {
 		return "ro"
 	case "GR":
 		return "el"
+	// Expanded tax packs (Session 14) — MENA non-GCC. Jordan,
+	// Lebanon, Morocco and Tunisia default to the existing Arabic
+	// (ar) catalogue. Maghreb admins who run French-language books
+	// reset to fr from the admin surface. The South / South-East
+	// Asian packs added in the same batch (KH/MM/BD/LK/PK) and
+	// Ghana (GH) fall through to the English default below until
+	// their native catalogues ship, mirroring the IN→hi precedent
+	// of only mapping to a tag once its bundle exists.
+	case "JO", "LB", "MA", "TN":
+		return "ar"
 	// SCAFFOLD: cmd/new-tax-pack inserts new DefaultLocaleForCountry cases above this line.
 	default:
 		return "en"
@@ -314,6 +324,30 @@ func DefaultCoATemplateForCountry(country string) string {
 		return "kr_basic"
 	case "CN":
 		return "cn_basic"
+	case "HK":
+		return "hk_basic"
+	case "TW":
+		return "tw_basic"
+	case "KH":
+		return "kh_basic"
+	case "MM":
+		return "mm_basic"
+	case "BD":
+		return "bd_basic"
+	case "LK":
+		return "lk_basic"
+	case "PK":
+		return "pk_basic"
+	case "JO":
+		return "jo_basic"
+	case "LB":
+		return "lb_basic"
+	case "MA":
+		return "ma_basic"
+	case "TN":
+		return "tn_basic"
+	case "GH":
+		return "gh_basic"
 	// SCAFFOLD: cmd/new-tax-pack inserts new DefaultCoATemplateForCountry cases above this line.
 	default:
 		return "ifrs_basic"
@@ -561,6 +595,42 @@ var coaKRBasic []byte
 //go:embed coa_templates/cn_basic.json
 var coaCNBasic []byte
 
+//go:embed coa_templates/hk_basic.json
+var coaHKBasic []byte
+
+//go:embed coa_templates/tw_basic.json
+var coaTWBasic []byte
+
+//go:embed coa_templates/kh_basic.json
+var coaKHBasic []byte
+
+//go:embed coa_templates/mm_basic.json
+var coaMMBasic []byte
+
+//go:embed coa_templates/bd_basic.json
+var coaBDBasic []byte
+
+//go:embed coa_templates/lk_basic.json
+var coaLKBasic []byte
+
+//go:embed coa_templates/pk_basic.json
+var coaPKBasic []byte
+
+//go:embed coa_templates/jo_basic.json
+var coaJOBasic []byte
+
+//go:embed coa_templates/lb_basic.json
+var coaLBBasic []byte
+
+//go:embed coa_templates/ma_basic.json
+var coaMABasic []byte
+
+//go:embed coa_templates/tn_basic.json
+var coaTNBasic []byte
+
+//go:embed coa_templates/gh_basic.json
+var coaGHBasic []byte
+
 // SCAFFOLD: cmd/new-tax-pack inserts new //go:embed directives + var decls above this line.
 
 // chartOfAccountsTemplates maps the wizard's template name to the
@@ -625,6 +695,18 @@ var chartOfAccountsTemplates = map[string][]byte{
 	"jp_basic": coaJPBasic,
 	"kr_basic": coaKRBasic,
 	"cn_basic": coaCNBasic,
+	"hk_basic": coaHKBasic,
+	"tw_basic": coaTWBasic,
+	"kh_basic": coaKHBasic,
+	"mm_basic": coaMMBasic,
+	"bd_basic": coaBDBasic,
+	"lk_basic": coaLKBasic,
+	"pk_basic": coaPKBasic,
+	"jo_basic": coaJOBasic,
+	"lb_basic": coaLBBasic,
+	"ma_basic": coaMABasic,
+	"tn_basic": coaTNBasic,
+	"gh_basic": coaGHBasic,
 	// SCAFFOLD: cmd/new-tax-pack inserts new chartOfAccountsTemplates entries above this line.
 }
 

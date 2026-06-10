@@ -535,13 +535,14 @@ func TestIDPackNonResidentFlat20(t *testing.T) {
 // TestVNPackResidentNoDependents: a 30,000,000 VND / month slip
 // with no dependents. Hand-derivation against the Article 22
 // schedule:
-//   monthFraction = 31 / 30.4375 = 1.018503
-//   monthlyGross  = 30,000,000 / 1.018503 = 29,454,994
-//   personalDed   = 11,000,000
-//   taxable       = 18,454,994
-//   bracket       = 18M-32M (base 1,950,000, rate 20%)
-//   monthlyTax    = 1,950,000 + 0.20 × (18,454,994 - 18,000,000) = 2,040,999
-//   periodTax     = 2,040,999 × 1.018503 ≈ 2,078,765
+//
+//	monthFraction = 31 / 30.4375 = 1.018503
+//	monthlyGross  = 30,000,000 / 1.018503 = 29,454,994
+//	personalDed   = 11,000,000
+//	taxable       = 18,454,994
+//	bracket       = 18M-32M (base 1,950,000, rate 20%)
+//	monthlyTax    = 1,950,000 + 0.20 × (18,454,994 - 18,000,000) = 2,040,999
+//	periodTax     = 2,040,999 × 1.018503 ≈ 2,078,765
 //
 // SI/HI/UI on gross 30M (below all caps): 8% / 1.5% / 1%.
 func TestVNPackResidentNoDependents(t *testing.T) {
@@ -573,10 +574,11 @@ func TestVNPackResidentNoDependents(t *testing.T) {
 // TestVNPackWithDependents: same gross, two dependents → larger
 // personal deduction (11M + 2 × 4.4M = 19.8M) drops taxable into
 // the 5M-10M bracket and slashes PIT.
-//   taxable = monthlyGross - 19.8M = 29,454,994 - 19,800,000 = 9,654,994
-//   bracket = 5M-10M (base 250,000, rate 10%)
-//   monthlyTax = 250,000 + 0.10 × (9,654,994 - 5,000,000) = 715,499
-//   periodTax  = 715,499 × 1.018503 ≈ 728,743
+//
+//	taxable = monthlyGross - 19.8M = 29,454,994 - 19,800,000 = 9,654,994
+//	bracket = 5M-10M (base 250,000, rate 10%)
+//	monthlyTax = 250,000 + 0.10 × (9,654,994 - 5,000,000) = 715,499
+//	periodTax  = 715,499 × 1.018503 ≈ 728,743
 func TestVNPackWithDependents(t *testing.T) {
 	pack, _ := Lookup("VN")
 	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
@@ -636,11 +638,12 @@ func TestVNPackNonResidentFlat20(t *testing.T) {
 // personal = 99M VND total deduction at the cap).
 //
 // Slip: 200,000,000 VND / month, NumDependents = 10,000.
-//   With cap:   deduction = 11M + 20×4.4M = 99M VND → taxable
-//               monthly = 200M - 99M = 101M VND → progressive walk
-//               yields a positive VN_PIT line.
-//   Without:    deduction = 11M + 10000×4.4M = 44,011M VND → taxable
-//               clamped to zero → VN_PIT silently suppressed.
+//
+//	With cap:   deduction = 11M + 20×4.4M = 99M VND → taxable
+//	            monthly = 200M - 99M = 101M VND → progressive walk
+//	            yields a positive VN_PIT line.
+//	Without:    deduction = 11M + 10000×4.4M = 44,011M VND → taxable
+//	            clamped to zero → VN_PIT silently suppressed.
 func TestVNPackDependentCountClampedAtCeiling(t *testing.T) {
 	pack, _ := Lookup("VN")
 	out, err := pack.ComputeWithholding(context.Background(), EmployeeInfo{
@@ -665,11 +668,12 @@ func TestVNPackDependentCountClampedAtCeiling(t *testing.T) {
 
 // TestPHPackResidentWithholding: PHP 50,000 / month slip.
 // Hand-derivation against BIR RMO 23-2023:
-//   periodFraction = 31 / 365.25 = 0.084875
-//   annualGross    = 50,000 / 0.084875 ≈ 589,113
-//   bracket        = 400,000-800,000 (base 22,500, rate 20%)
-//   annualTax      = 22,500 + 0.20 × (589,113 - 400,000) = 60,322.60
-//   periodTax      = 60,322.60 × 0.084875 ≈ 5,119.88
+//
+//	periodFraction = 31 / 365.25 = 0.084875
+//	annualGross    = 50,000 / 0.084875 ≈ 589,113
+//	bracket        = 400,000-800,000 (base 22,500, rate 20%)
+//	annualTax      = 22,500 + 0.20 × (589,113 - 400,000) = 60,322.60
+//	periodTax      = 60,322.60 × 0.084875 ≈ 5,119.88
 //
 // SSS:   50k > MSC 30k ceiling → 30,000 × 5% = 1,500.00
 // PHIC:  in band (10k-100k) → 50,000 × 2.5% = 1,250.00
@@ -738,13 +742,17 @@ func TestPHPackNonResidentFlat25(t *testing.T) {
 
 // TestNZPackResidentPAYEAndACC: NZD 6,000 / month slip, KiwiSaver
 // at the default 3%. Hand-derivation against IR340 post-Budget-2024:
-//   periodFraction = 31 / 365.25 = 0.084875
-//   annualGross    = 6,000 / 0.084875 ≈ 70,694
-//   bracket        = 53,500-78,100 (base 8,270.50, rate 30%)
-//   annualTax      = 8,270.50 + 0.30 × (70,694 - 53,500) = 13,428.70
-//   periodTax      = 13,428.70 × 0.084875 ≈ 1,139.76
+//
+//	periodFraction = 31 / 365.25 = 0.084875
+//	annualGross    = 6,000 / 0.084875 ≈ 70,694
+//	bracket        = 53,500-78,100 (base 8,270.50, rate 30%)
+//	annualTax      = 8,270.50 + 0.30 × (70,694 - 53,500) = 13,428.70
+//	periodTax      = 13,428.70 × 0.084875 ≈ 1,139.76
+//
 // ACC: gross under period-pro-rated ceiling (142,283 × 0.084875 ≈
-//   12,076) → accBase = 6,000 → 6,000 × 1.6% = 96.00
+//
+//	12,076) → accBase = 6,000 → 6,000 × 1.6% = 96.00
+//
 // KiwiSaver: 6,000 × 3% = 180.00
 func TestNZPackResidentPAYEAndACC(t *testing.T) {
 	pack, err := Lookup("NZ")
@@ -780,8 +788,9 @@ func TestNZPackKiwiSaverOptOut(t *testing.T) {
 
 // TestNZPackTopBracket: NZD 20,000 / month → annualises to
 // ~235,649, into the 39% top bracket.
-//   annualTax = 49,277.50 + 0.39 × (235,649 - 180,000) = 70,980.61
-//   periodTax = 70,980.61 × 0.084875 ≈ 6,025.61
+//
+//	annualTax = 49,277.50 + 0.39 × (235,649 - 180,000) = 70,980.61
+//	periodTax = 70,980.61 × 0.084875 ≈ 6,025.61
 func TestNZPackTopBracket(t *testing.T) {
 	pack, _ := Lookup("NZ")
 	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
@@ -838,13 +847,14 @@ func TestNZPackNonResidentSamePAYEAndACC(t *testing.T) {
 
 // TestINPackNewRegimeMidBracket: INR 100,000 / month, no state
 // (no PT). Hand-derivation against Finance Act 2024:
-//   periodFraction = 31 / 365.25 = 0.084875
-//   annualGross    = 100,000 / 0.084875 ≈ 1,178,226
-//   taxableAnnual  = 1,178,226 - 75,000 = 1,103,226
-//   bracket        = 10L-12L (base 50,000, rate 15%)
-//   annualTax      = 50,000 + 0.15 × (1,103,226 - 1,000,000) = 65,483.90
-//   87A: taxableAnnual > 7L, no rebate
-//   periodTax      = 65,483.90 × 0.084875 ≈ 5,558.20
+//
+//	periodFraction = 31 / 365.25 = 0.084875
+//	annualGross    = 100,000 / 0.084875 ≈ 1,178,226
+//	taxableAnnual  = 1,178,226 - 75,000 = 1,103,226
+//	bracket        = 10L-12L (base 50,000, rate 15%)
+//	annualTax      = 50,000 + 0.15 × (1,103,226 - 1,000,000) = 65,483.90
+//	87A: taxableAnnual > 7L, no rebate
+//	periodTax      = 65,483.90 × 0.084875 ≈ 5,558.20
 //
 // EPF: min(100k, 15k) × 12% = 1,800.00
 // ESI: gross > 21k → no ESI
@@ -952,8 +962,9 @@ func TestINPackNewRegime87AAboveBreakeven(t *testing.T) {
 // TestINPackESIBelowThreshold: INR 15,000 / month → ESI applies
 // (≤ 21k floor) at 0.75%. TDS is zero (under 87A and under the
 // first taxable bracket).
-//   ESI = 15,000 × 0.75% = 112.50
-//   EPF = min(15k, 15k) × 12% = 1,800
+//
+//	ESI = 15,000 × 0.75% = 112.50
+//	EPF = min(15k, 15k) × 12% = 1,800
 func TestINPackESIBelowThreshold(t *testing.T) {
 	pack, _ := Lookup("IN")
 	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{
@@ -1256,4 +1267,425 @@ func TestBracketTablesAreContiguous(t *testing.T) {
 	t.Run("PH resident", func(t *testing.T) { checkRows(t, "PH", phRows) })
 	t.Run("NZ resident", func(t *testing.T) { checkRows(t, "NZ", nzRows) })
 	t.Run("IN new regime", func(t *testing.T) { checkRows(t, "IN", inRows) })
+}
+
+// =====================================================================
+// Session 14 — Expanded tax packs (APAC additions).
+//
+// All hand-derived expected values assume the shared monthPeriod()
+// (Jan 1-31 2026, 31 days). Annualised packs use
+// periodFraction = 31 / 365.25 = 0.08487337..., annualGross =
+// gross / periodFraction, walk the annual schedule, then prorate
+// periodTax = annualTax × periodFraction (rounded to 2dp). Monthly
+// packs (KH, MPF) apply their tables directly to the slip gross.
+// =====================================================================
+
+// ----- Hong Kong (MPF; no PAYE income tax) -----
+
+// TestHKPackBelowFloor: HK$5,000 < HK$7,100 minimum relevant income
+// → no employee mandatory contribution at all.
+func TestHKPackBelowFloor(t *testing.T) {
+	pack, err := Lookup("HK")
+	if err != nil {
+		t.Fatalf("lookup HK: %v", err)
+	}
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.NewFromInt(5000), monthPeriod())
+	if len(out) != 0 {
+		t.Fatalf("below floor should yield no deductions, got %+v", out)
+	}
+}
+
+// TestHKPackNominal: HK$20,000 × 5% = 1,000.00. No income-tax line
+// (Salaries Tax is assessed by the IRD, not withheld).
+func TestHKPackNominal(t *testing.T) {
+	pack, _ := Lookup("HK")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.NewFromInt(20000), monthPeriod())
+	if len(out) != 1 || out[0].Code != "HK_MPF_EMPLOYEE" {
+		t.Fatalf("unexpected deductions: %+v", out)
+	}
+	if !out[0].Amount.Equal(decimal.NewFromInt(1000)) {
+		t.Fatalf("MPF: got %s, want 1000.00", out[0].Amount)
+	}
+}
+
+// TestHKPackAtFloor: exactly HK$7,100 contributes (floor is
+// inclusive) → 7,100 × 5% = 355.00.
+func TestHKPackAtFloor(t *testing.T) {
+	pack, _ := Lookup("HK")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.NewFromInt(7100), monthPeriod())
+	if len(out) != 1 || !out[0].Amount.Equal(decimal.NewFromInt(355)) {
+		t.Fatalf("at floor: got %+v, want HK_MPF_EMPLOYEE=355.00", out)
+	}
+}
+
+// TestHKPackAboveCeiling: HK$40,000 caps at the HK$30,000 maximum
+// relevant income → 30,000 × 5% = 1,500.00.
+func TestHKPackAboveCeiling(t *testing.T) {
+	pack, _ := Lookup("HK")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.NewFromInt(40000), monthPeriod())
+	if len(out) != 1 || !out[0].Amount.Equal(decimal.NewFromInt(1500)) {
+		t.Fatalf("above ceiling: got %+v, want HK_MPF_EMPLOYEE=1500.00", out)
+	}
+}
+
+// TestHKPackZeroGross: empty-input edge case.
+func TestHKPackZeroGross(t *testing.T) {
+	pack, _ := Lookup("HK")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.Zero, monthPeriod())
+	if len(out) != 0 {
+		t.Fatalf("zero gross should yield no deductions, got %+v", out)
+	}
+}
+
+// ----- Taiwan (progressive income tax + LI + NHI) -----
+
+// TestTWPackNominalNoIncomeTax: NT$30,000 / month. annualGross ≈
+// 353,476; after exemptions (97,000 + 131,000 + 218,000 = 446,000)
+// taxable is negative → no income tax. LI: min(30000,45800) × 2.4% =
+// 720.00; NHI: 30000 × 1.551% = 465.30.
+func TestTWPackNominalNoIncomeTax(t *testing.T) {
+	pack, err := Lookup("TW")
+	if err != nil {
+		t.Fatalf("lookup TW: %v", err)
+	}
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.NewFromInt(30000), monthPeriod())
+	if d := findDeduction(out, "TW_INCOME_TAX"); !d.Amount.IsZero() {
+		t.Fatalf("expected no income tax at NT$30k, got %s", d.Amount)
+	}
+	if d := findDeduction(out, "TW_LABOR_INSURANCE"); !d.Amount.Equal(decimal.NewFromInt(720)) {
+		t.Fatalf("LI: got %s, want 720.00", d.Amount)
+	}
+	if d := findDeduction(out, "TW_NHI"); !d.Amount.Equal(decimal.RequireFromString("465.30")) {
+		t.Fatalf("NHI: got %s, want 465.30", d.Amount)
+	}
+}
+
+// TestTWPackHigherBracket: NT$80,000 / month. annualGross ≈ 942,581;
+// taxable ≈ 496,581 in the 5% band → annualTax ≈ 24,829; periodTax =
+// 2,107.32. LI: min(80000,45800) × 2.4% = 1,099.20; NHI: 80000 ×
+// 1.551% = 1,240.80.
+func TestTWPackHigherBracket(t *testing.T) {
+	pack, _ := Lookup("TW")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.NewFromInt(80000), monthPeriod())
+	if d := findDeduction(out, "TW_INCOME_TAX"); !d.Amount.Equal(decimal.RequireFromString("2107.32")) {
+		t.Fatalf("income tax: got %s, want 2107.32", d.Amount)
+	}
+	if d := findDeduction(out, "TW_LABOR_INSURANCE"); !d.Amount.Equal(decimal.RequireFromString("1099.20")) {
+		t.Fatalf("LI: got %s, want 1099.20", d.Amount)
+	}
+	if d := findDeduction(out, "TW_NHI"); !d.Amount.Equal(decimal.RequireFromString("1240.80")) {
+		t.Fatalf("NHI: got %s, want 1240.80", d.Amount)
+	}
+}
+
+// TestTWPackDependentsReduceTax: two dependents add 2 × 97,000 to the
+// exemptions, lowering taxable income → income tax drops to 1,284.05.
+func TestTWPackDependentsReduceTax(t *testing.T) {
+	pack, _ := Lookup("TW")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true, NumDependents: 2},
+		decimal.NewFromInt(80000), monthPeriod())
+	if d := findDeduction(out, "TW_INCOME_TAX"); !d.Amount.Equal(decimal.RequireFromString("1284.05")) {
+		t.Fatalf("income tax with deps: got %s, want 1284.05", d.Amount)
+	}
+}
+
+// TestTWPackNonResident: non-residents are taxed at a flat rate with
+// no LI/NHI. NT$30,000 ≤ NT$42,885 → 6% = 1,800.00; NT$50,000 >
+// threshold → 18% = 9,000.00.
+func TestTWPackNonResident(t *testing.T) {
+	pack, _ := Lookup("TW")
+	low, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: false},
+		decimal.NewFromInt(30000), monthPeriod())
+	if len(low) != 1 || low[0].Code != "TW_NONRESIDENT_TAX" || !low[0].Amount.Equal(decimal.NewFromInt(1800)) {
+		t.Fatalf("nonres low: got %+v, want TW_NONRESIDENT_TAX=1800.00", low)
+	}
+	high, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: false},
+		decimal.NewFromInt(50000), monthPeriod())
+	if len(high) != 1 || !high[0].Amount.Equal(decimal.NewFromInt(9000)) {
+		t.Fatalf("nonres high: got %+v, want TW_NONRESIDENT_TAX=9000.00", high)
+	}
+}
+
+// TestTWPackZeroGross: empty-input edge case.
+func TestTWPackZeroGross(t *testing.T) {
+	pack, _ := Lookup("TW")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.Zero, monthPeriod())
+	if len(out) != 0 {
+		t.Fatalf("zero gross should yield no deductions, got %+v", out)
+	}
+}
+
+// ----- Cambodia (monthly ToS + NSSF pension) -----
+
+// TestKHPackNominal: KHR 2,000,000 / month. Monthly ToS band
+// 1,500,000–2,000,000 @ 5%: (2,000,000 - 1,500,000) × 5% = 25,000.
+// NSSF pension: min(2,000,000, 1,200,000) × 2% = 24,000.
+func TestKHPackNominal(t *testing.T) {
+	pack, err := Lookup("KH")
+	if err != nil {
+		t.Fatalf("lookup KH: %v", err)
+	}
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.NewFromInt(2000000), monthPeriod())
+	if d := findDeduction(out, "KH_TOS"); !d.Amount.Equal(decimal.NewFromInt(25000)) {
+		t.Fatalf("ToS: got %s, want 25000.00", d.Amount)
+	}
+	if d := findDeduction(out, "KH_NSSF_PENSION"); !d.Amount.Equal(decimal.NewFromInt(24000)) {
+		t.Fatalf("NSSF: got %s, want 24000.00", d.Amount)
+	}
+}
+
+// TestKHPackTopBand: KHR 15,000,000 / month, top band (> 12,500,000
+// @ 20%): 1,275,000 + (15,000,000 - 12,500,000) × 20% = 1,775,000.
+// NSSF caps at the 1,200,000 contributory ceiling → 24,000.
+func TestKHPackTopBand(t *testing.T) {
+	pack, _ := Lookup("KH")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.NewFromInt(15000000), monthPeriod())
+	if d := findDeduction(out, "KH_TOS"); !d.Amount.Equal(decimal.NewFromInt(1775000)) {
+		t.Fatalf("ToS: got %s, want 1775000.00", d.Amount)
+	}
+	if d := findDeduction(out, "KH_NSSF_PENSION"); !d.Amount.Equal(decimal.NewFromInt(24000)) {
+		t.Fatalf("NSSF: got %s, want 24000.00", d.Amount)
+	}
+}
+
+// TestKHPackNonResident: non-residents pay a flat 20% with no NSSF.
+// 2,000,000 × 20% = 400,000.
+func TestKHPackNonResident(t *testing.T) {
+	pack, _ := Lookup("KH")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: false},
+		decimal.NewFromInt(2000000), monthPeriod())
+	if len(out) != 1 || out[0].Code != "KH_NONRESIDENT_TAX" || !out[0].Amount.Equal(decimal.NewFromInt(400000)) {
+		t.Fatalf("nonres: got %+v, want KH_NONRESIDENT_TAX=400000.00", out)
+	}
+}
+
+// TestKHPackZeroGross: empty-input edge case.
+func TestKHPackZeroGross(t *testing.T) {
+	pack, _ := Lookup("KH")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.Zero, monthPeriod())
+	if len(out) != 0 {
+		t.Fatalf("zero gross should yield no deductions, got %+v", out)
+	}
+}
+
+// ----- Myanmar (annualised progressive income tax + SSB) -----
+
+// TestMMPackNominal: MMK 1,000,000 / month. annualGross ≈ 11,781,026;
+// 20% relief (capped 10M) = 2,356,205; taxable ≈ 9,424,820 lands in
+// the 10% band → periodTax = 50,294.32. SSB: min(1,000,000, 300,000)
+// × 2% = 6,000.
+func TestMMPackNominal(t *testing.T) {
+	pack, err := Lookup("MM")
+	if err != nil {
+		t.Fatalf("lookup MM: %v", err)
+	}
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.NewFromInt(1000000), monthPeriod())
+	if d := findDeduction(out, "MM_INCOME_TAX"); !d.Amount.Equal(decimal.RequireFromString("50294.32")) {
+		t.Fatalf("income tax: got %s, want 50294.32", d.Amount)
+	}
+	if d := findDeduction(out, "MM_SSB"); !d.Amount.Equal(decimal.NewFromInt(6000)) {
+		t.Fatalf("SSB: got %s, want 6000.00", d.Amount)
+	}
+}
+
+// TestMMPackDependentsReduceTax: MMK 3,000,000 / month with two
+// dependents adds spouse (1,000,000) + 2 × child (500,000) relief →
+// periodTax = 289,034.91 (vs 322,984.26 with no deps).
+func TestMMPackDependentsReduceTax(t *testing.T) {
+	pack, _ := Lookup("MM")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true, NumDependents: 2},
+		decimal.NewFromInt(3000000), monthPeriod())
+	if d := findDeduction(out, "MM_INCOME_TAX"); !d.Amount.Equal(decimal.RequireFromString("289034.91")) {
+		t.Fatalf("income tax with deps: got %s, want 289034.91", d.Amount)
+	}
+}
+
+// TestMMPackNonResident: non-residents get the bracket walk with no
+// relief and no SSB. MMK 3,000,000 → periodTax = 465,674.20.
+func TestMMPackNonResident(t *testing.T) {
+	pack, _ := Lookup("MM")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: false},
+		decimal.NewFromInt(3000000), monthPeriod())
+	if len(out) != 1 || out[0].Code != "MM_INCOME_TAX" {
+		t.Fatalf("nonres should yield only income tax, got %+v", out)
+	}
+	if !out[0].Amount.Equal(decimal.RequireFromString("465674.20")) {
+		t.Fatalf("nonres tax: got %s, want 465674.20", out[0].Amount)
+	}
+}
+
+// TestMMPackZeroGross: empty-input edge case.
+func TestMMPackZeroGross(t *testing.T) {
+	pack, _ := Lookup("MM")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.Zero, monthPeriod())
+	if len(out) != 0 {
+		t.Fatalf("zero gross should yield no deductions, got %+v", out)
+	}
+}
+
+// ----- Bangladesh (annualised progressive income tax) -----
+
+// TestBDPackNominal: BDT 50,000 / month. annualGross ≈ 589,051;
+// brackets: first 350,000 tax-free, next 100,000 @ 5% = 5,000, then
+// (589,051 - 450,000) × 10% ≈ 13,905 → annualTax ≈ 18,905; periodTax
+// = 1,605.07.
+func TestBDPackNominal(t *testing.T) {
+	pack, err := Lookup("BD")
+	if err != nil {
+		t.Fatalf("lookup BD: %v", err)
+	}
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.NewFromInt(50000), monthPeriod())
+	if len(out) != 1 || out[0].Code != "BD_INCOME_TAX" {
+		t.Fatalf("unexpected deductions: %+v", out)
+	}
+	if !out[0].Amount.Equal(decimal.RequireFromString("1605.07")) {
+		t.Fatalf("income tax: got %s, want 1605.07", out[0].Amount)
+	}
+}
+
+// TestBDPackHigh: BDT 200,000 / month → periodTax = 29,418.21.
+func TestBDPackHigh(t *testing.T) {
+	pack, _ := Lookup("BD")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.NewFromInt(200000), monthPeriod())
+	if d := findDeduction(out, "BD_INCOME_TAX"); !d.Amount.Equal(decimal.RequireFromString("29418.21")) {
+		t.Fatalf("income tax: got %s, want 29418.21", d.Amount)
+	}
+}
+
+// TestBDPackNonResident: non-residents pay a flat 30%. 200,000 × 30%
+// = 60,000.
+func TestBDPackNonResident(t *testing.T) {
+	pack, _ := Lookup("BD")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: false},
+		decimal.NewFromInt(200000), monthPeriod())
+	if len(out) != 1 || out[0].Code != "BD_NONRESIDENT_TAX" || !out[0].Amount.Equal(decimal.NewFromInt(60000)) {
+		t.Fatalf("nonres: got %+v, want BD_NONRESIDENT_TAX=60000.00", out)
+	}
+}
+
+// TestBDPackZeroGross: empty-input edge case.
+func TestBDPackZeroGross(t *testing.T) {
+	pack, _ := Lookup("BD")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.Zero, monthPeriod())
+	if len(out) != 0 {
+		t.Fatalf("zero gross should yield no deductions, got %+v", out)
+	}
+}
+
+// ----- Sri Lanka (annualised APIT + EPF employee) -----
+
+// TestLKPackBelowTaxFree: LKR 100,000 / month. annualGross ≈
+// 1,178,103 < the 1,200,000 personal relief → no APIT. EPF: 100,000
+// × 8% = 8,000.
+func TestLKPackBelowTaxFree(t *testing.T) {
+	pack, err := Lookup("LK")
+	if err != nil {
+		t.Fatalf("lookup LK: %v", err)
+	}
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.NewFromInt(100000), monthPeriod())
+	if d := findDeduction(out, "LK_APIT"); !d.Amount.IsZero() {
+		t.Fatalf("expected no APIT below relief, got %s", d.Amount)
+	}
+	if d := findDeduction(out, "LK_EPF_EMPLOYEE"); !d.Amount.Equal(decimal.NewFromInt(8000)) {
+		t.Fatalf("EPF: got %s, want 8000.00", d.Amount)
+	}
+}
+
+// TestLKPackTaxed: LKR 400,000 / month → APIT = 69,141.68; EPF:
+// 400,000 × 8% = 32,000.
+func TestLKPackTaxed(t *testing.T) {
+	pack, _ := Lookup("LK")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.NewFromInt(400000), monthPeriod())
+	if d := findDeduction(out, "LK_APIT"); !d.Amount.Equal(decimal.RequireFromString("69141.68")) {
+		t.Fatalf("APIT: got %s, want 69141.68", d.Amount)
+	}
+	if d := findDeduction(out, "LK_EPF_EMPLOYEE"); !d.Amount.Equal(decimal.NewFromInt(32000)) {
+		t.Fatalf("EPF: got %s, want 32000.00", d.Amount)
+	}
+}
+
+// TestLKPackZeroGross: empty-input edge case.
+func TestLKPackZeroGross(t *testing.T) {
+	pack, _ := Lookup("LK")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.Zero, monthPeriod())
+	if len(out) != 0 {
+		t.Fatalf("zero gross should yield no deductions, got %+v", out)
+	}
+}
+
+// ----- Pakistan (annualised salaried slabs + EOBI) -----
+
+// TestPKPackBelowTaxFree: PKR 50,000 / month. annualGross ≈ 589,051
+// < the 600,000 tax-free slab → no income tax. EOBI: 37,000 × 1% ×
+// (31 / 30.4375) ≈ 376.84.
+func TestPKPackBelowTaxFree(t *testing.T) {
+	pack, err := Lookup("PK")
+	if err != nil {
+		t.Fatalf("lookup PK: %v", err)
+	}
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.NewFromInt(50000), monthPeriod())
+	if d := findDeduction(out, "PK_INCOME_TAX"); !d.Amount.IsZero() {
+		t.Fatalf("expected no income tax below slab, got %s", d.Amount)
+	}
+	if d := findDeduction(out, "PK_EOBI_EMPLOYEE"); !d.Amount.Equal(decimal.RequireFromString("376.84")) {
+		t.Fatalf("EOBI: got %s, want 376.84", d.Amount)
+	}
+}
+
+// TestPKPackTaxed: PKR 300,000 / month → income tax = 45,017.11;
+// EOBI = 376.84.
+func TestPKPackTaxed(t *testing.T) {
+	pack, _ := Lookup("PK")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.NewFromInt(300000), monthPeriod())
+	if d := findDeduction(out, "PK_INCOME_TAX"); !d.Amount.Equal(decimal.RequireFromString("45017.11")) {
+		t.Fatalf("income tax: got %s, want 45017.11", d.Amount)
+	}
+	if d := findDeduction(out, "PK_EOBI_EMPLOYEE"); !d.Amount.Equal(decimal.RequireFromString("376.84")) {
+		t.Fatalf("EOBI: got %s, want 376.84", d.Amount)
+	}
+}
+
+// TestPKPackNonResidentNoEOBI: non-residents pay income tax on the
+// same slabs but no EOBI (insurable-employment contribution).
+func TestPKPackNonResidentNoEOBI(t *testing.T) {
+	pack, _ := Lookup("PK")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: false},
+		decimal.NewFromInt(300000), monthPeriod())
+	if len(out) != 1 || out[0].Code != "PK_INCOME_TAX" {
+		t.Fatalf("nonres should yield only income tax, got %+v", out)
+	}
+	if !out[0].Amount.Equal(decimal.RequireFromString("45017.11")) {
+		t.Fatalf("nonres tax: got %s, want 45017.11", out[0].Amount)
+	}
+}
+
+// TestPKPackZeroGross: empty-input edge case.
+func TestPKPackZeroGross(t *testing.T) {
+	pack, _ := Lookup("PK")
+	out, _ := pack.ComputeWithholding(context.Background(), EmployeeInfo{Resident: true},
+		decimal.Zero, monthPeriod())
+	if len(out) != 0 {
+		t.Fatalf("zero gross should yield no deductions, got %+v", out)
+	}
 }

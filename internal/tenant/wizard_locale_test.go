@@ -47,6 +47,13 @@ func TestDefaultLocaleForCountry(t *testing.T) {
 		{"BH", "ar"},
 		{"OM", "ar"},
 
+		// Session 14 MENA non-GCC: Jordan, Lebanon, Morocco and
+		// Tunisia share the existing ar catalogue.
+		{"JO", "ar"},
+		{"LB", "ar"},
+		{"MA", "ar"},
+		{"TN", "ar"},
+
 		// Localised APAC defaults.
 		{"TH", "th"},
 		{"ID", "id"},
@@ -90,6 +97,16 @@ func TestDefaultLocaleForCountry(t *testing.T) {
 		{"GB", "en"},
 		{"CA", "en"}, // English-speaking majority; Québec admins reset to fr-CA.
 		{"TT", "en"}, // Trinidad & Tobago — English official language.
+		// Session 14 South / South-East Asia + Ghana: no native
+		// catalogue ships yet, so each falls back to English until
+		// its bundle is added (IN→hi precedent: only map once the
+		// catalogue exists).
+		{"KH", "en"},
+		{"MM", "en"},
+		{"BD", "en"},
+		{"LK", "en"},
+		{"PK", "en"},
+		{"GH", "en"},
 		{"", "en"},   // empty / unset country.
 		{"ZZ", "en"}, // unknown ISO code.
 	}
