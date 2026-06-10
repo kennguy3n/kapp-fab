@@ -436,3 +436,35 @@ maintainers should be aware of when refreshing rates.
 - **Annual refresh trigger:** NTS January announcement (income
   tax brackets), NHIS October circular (health / LTC rates),
   NPS July notification (NPS ceiling).
+
+## Session 14 Expanded packs (HK / TW / KH / MM / BD / LK / PK / JO / LB / MA / TN / GH)
+
+Session 14 adds twelve genuinely new jurisdictions spanning East / South-East / South Asia, the non-GCC Middle East, and North + West Africa. Every pack follows the standard checklist: rates sourced from the national revenue / social-security authority, period-fraction annualisation for monthly slips (`periodFraction = days / 365.25`) except where the statute is natively monthly (Hong Kong MPF, Cambodia ToS, Ghana PAYE), YTD-aware caps where the contribution has an annual ceiling, resident / non-resident split, and a regression matrix anchored on a hand-derived nominal salary plus threshold / cap crossings and the empty-input edge case.
+
+Tests live in `internal/hr/taxpacks/apac_packs_test.go` (HK / TW / KH / MM / BD / LK / PK) and `internal/hr/taxpacks/mena_nonGCC_packs_test.go` (JO / LB / MA / TN / GH). All CoA templates follow the IFRS hierarchy with country-specific payroll-liability accounts matching each pack's emitted `Deduction` codes.
+
+| Country | Pack file                    | CoA template    | Locale  | Key sources                                                                                                                                                                                  | Review cadence                         |
+| ------- | ---------------------------- | --------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| HK      | `internal/hr/taxpacks/hk.go` | `hk_basic.json` | zh-Hant | MPFA contribution rules (5% employee, HK$7,100 min / HK$30,000 max relevant income); Inland Revenue Ordinance Cap. 112 (Salaries Tax is *assessed* by the IRD, not withheld — no PAYE line).  | On MPFA relevant-income-level change   |
+| TW      | `internal/hr/taxpacks/tw.go` | `tw_basic.json` | zh-Hant | MOF income-tax brackets + personal exemption / standard / salary-special deductions; Bureau of Labor Insurance employee rate + insured-salary ceiling; NHI premium rate + grade ceiling.      | Annual (MOF December; BLI / NHI Q1)    |
+| KH      | `internal/hr/taxpacks/kh.go` | `kh_basic.json` | en      | General Department of Taxation monthly Tax on Salary table (KHR); NSSF pension 2% employee with 400,000–1,200,000 contributory wage band; flat 20% non-resident ToS.                          | Annual (GDT Prakas; NSSF sub-decree)   |
+| MM      | `internal/hr/taxpacks/mm.go` | `mm_basic.json` | en      | Internal Revenue Department income-tax brackets + 20% basic relief (cap 10M) + spouse / per-child relief; Social Security Board 2% employee (cap 300,000 wage).                               | Annual (Union Tax Law, October)        |
+| BD      | `internal/hr/taxpacks/bd.go` | `bd_basic.json` | en      | National Board of Revenue income-tax slabs (tax-free 350,000 + progressive bands); flat 30% non-resident; no mandatory employee social-insurance withholding.                                | Annual (NBR Finance Act, June)         |
+| LK      | `internal/hr/taxpacks/lk.go` | `lk_basic.json` | en      | Inland Revenue Department APIT tables (1,200,000 relief + 6%→36% bands); EPF employee 8%; ETF is employer-only.                                                                               | Annual (IRD; mid-year amendments)      |
+| PK      | `internal/hr/taxpacks/pk.go` | `pk_basic.json` | en      | Federal Board of Revenue salaried slabs (600,000 tax-free + progressive); EOBI employee 1% of the 37,000 insurable wage (residents only).                                                     | Annual (FBR Finance Act, June / July)  |
+| JO      | `internal/hr/taxpacks/jo.go` | `jo_basic.json` | ar      | Income and Sales Tax Department brackets (5%→30%) + 9,000 personal / 9,000 family exemptions + 1% national contribution; Social Security Corporation employee 7.5% capped at the 3,484 ceiling.| Annual (ISTD; SSC circular)            |
+| LB      | `internal/hr/taxpacks/lb.go` | `lb_basic.json` | ar      | Ministry of Finance R10 payroll-tax brackets (re-scaled for the lira) + personal exemption; NSSF sickness / maternity employee 3% capped at the contributory ceiling.                          | **High — every Budget Law + CNSS circular** |
+| MA      | `internal/hr/taxpacks/ma.go` | `ma_basic.json` | ar      | DGI Impôt sur le Revenu brackets (0%→37%) net of the 20% professional deduction (cap 30,000) + family reduction (500 / dependant, max 6); CNSS 4.48% capped at 6,000; AMO 2.26% uncapped.      | Annual (Loi de Finances, January)      |
+| TN      | `internal/hr/taxpacks/tn.go` | `tn_basic.json` | ar      | DGI IRPP brackets (0%→40%) computed net of CNSS and the 10% professional deduction (cap 2,000); CNSS employee 9.18% (deductible from the IRPP base).                                           | Annual (Loi de Finances, January)      |
+| GH      | `internal/hr/taxpacks/gh.go` | `gh_basic.json` | en      | Ghana Revenue Authority monthly PAYE table (tax-free band + 5%→35% bands); SSNIT first-tier employee 5.5%; flat 25% non-resident.                                                              | Annual (GRA; Budget amendments)        |
+
+### Cross-pack patterns (Session 14)
+
+- **Natively-monthly statutes apply the table to the slip gross directly** (no annualisation): Hong Kong MPF, Cambodia Tax on Salary, and Ghana PAYE all publish monthly schedules. The remaining packs annualise the slip, walk the annual schedule, then prorate back by `periodFraction`.
+- **No-PIT jurisdictions still emit social-insurance lines.** Hong Kong has no salaries-tax withholding but the pack still emits the mandatory MPF employee contribution.
+- **Resident / non-resident split.** KH, TW, BD, GH apply a flat non-resident withholding and suppress resident-only social-insurance contributions (e.g. PK suppresses EOBI for non-residents).
+- **Social-insurance interaction with the tax base.** Tunisia is the one pack where the employee social contribution (CNSS) is deductible from the income-tax (IRPP) base, so CNSS is computed first and netted before the IRPP bracket walk.
+
+### Lebanon (LB) — elevated review cadence
+
+Lebanon's R10 payroll-tax brackets and the NSSF contributory ceiling have been re-scaled repeatedly since 2019 because of the lira's collapse and successive Budget Laws. **Do not assume the bracket floors / ceilings remain valid across fiscal years** — re-verify against the most recent Ministry of Finance Budget Law and the latest CNSS circular on every review, not just annually.
