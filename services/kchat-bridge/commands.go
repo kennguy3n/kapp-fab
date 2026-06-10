@@ -75,6 +75,7 @@ type CommandDispatcher struct {
 	landedCost         *finance.LandedCostStore
 	cycleCounts        *inventory.CycleCountStore
 	lmsIssuer          *lms.CertificateIssuer
+	learningPaths      *lms.LearningPathStore
 	returns            *sales.ReturnPoster
 	requisitions       *sales.RequisitionPoster
 	cards              *CardRenderer
@@ -204,6 +205,8 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.issueCertificate(ctx, req)
 	case "learn":
 		return d.learnCourses(ctx, req)
+	case "learn-path", "learnpath":
+		return d.learnPath(ctx, req)
 	case "form":
 		return d.formLink(req)
 	case "ticket":
@@ -980,6 +983,80 @@ func (d *CommandDispatcher) learnCourses(ctx context.Context, req CommandRequest
 		return CommandResponse{Text: "/learn: no matching courses"}, nil
 	}
 	return CommandResponse{Text: "Courses\n" + strings.Join(lines, "\n")}, nil
+}
+
+// learnPath backs the /learn-path slash command (Deliverable 11):
+//
+//	/learn-path list                  — published learning paths
+//	/learn-path enroll <path_id>      — enroll the caller in a path
+//	/learn-path progress              — the caller's path enrollments
+//
+// Mutations (enroll) flow through the same LearningPathStore the HTTP
+// and agent surfaces use, so tenant RLS + audit are enforced uniformly.
+func (d *CommandDispatcher) learnPath(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.learningPaths == nil {
+		return CommandResponse{Text: "lms learning paths not configured"}, nil
+	}
+	if req.TenantID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id required"}, nil
+	}
+	sub := "list"
+	if len(req.Args) >= 1 {
+		sub = strings.ToLower(req.Args[0])
+	}
+	switch sub {
+	case "list":
+		paths, err := d.learningPaths.ListPaths(ctx, req.TenantID, lms.PathStatusPublished)
+		if err != nil {
+			return CommandResponse{}, err
+		}
+		if len(paths) == 0 {
+			return CommandResponse{Text: "/learn-path: no published learning paths"}, nil
+		}
+		lines := make([]string, 0, len(paths))
+		for _, p := range paths {
+			lines = append(lines, fmt.Sprintf("%s — %s (%s, %dh)", p.ID, p.Title, p.Difficulty, p.EstimatedDurationHours))
+		}
+		return CommandResponse{Text: "Learning paths\n" + strings.Join(lines, "\n")}, nil
+
+	case "enroll":
+		if len(req.Args) < 2 {
+			return CommandResponse{Text: "Usage: /learn-path enroll <path_id>"}, nil
+		}
+		if req.UserID == uuid.Nil {
+			return CommandResponse{Text: "/learn-path enroll: user_id required"}, nil
+		}
+		pathID, err := uuid.Parse(req.Args[1])
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/learn-path enroll: invalid path_id %q", req.Args[1])}, nil
+		}
+		actor := req.UserID
+		enr, err := d.learningPaths.Enroll(ctx, req.TenantID, pathID, req.UserID, lms.EnrollSourceManual, &actor)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/learn-path enroll: %v", err)}, nil
+		}
+		return CommandResponse{Text: fmt.Sprintf("Enrolled in learning path %s (status: %s)", enr.LearningPathID, enr.Status)}, nil
+
+	case "progress":
+		if req.UserID == uuid.Nil {
+			return CommandResponse{Text: "/learn-path progress: user_id required"}, nil
+		}
+		enrolls, err := d.learningPaths.ListEnrollmentsForUser(ctx, req.TenantID, req.UserID)
+		if err != nil {
+			return CommandResponse{}, err
+		}
+		if len(enrolls) == 0 {
+			return CommandResponse{Text: "/learn-path: you are not enrolled in any learning paths"}, nil
+		}
+		lines := make([]string, 0, len(enrolls))
+		for _, e := range enrolls {
+			lines = append(lines, fmt.Sprintf("%s — %s", e.LearningPathID, e.Status))
+		}
+		return CommandResponse{Text: "Your learning paths\n" + strings.Join(lines, "\n")}, nil
+
+	default:
+		return CommandResponse{Text: "Usage: /learn-path [list|enroll <path_id>|progress]"}, nil
+	}
 }
 
 // formLink returns a deep link the user can share to collect records via
