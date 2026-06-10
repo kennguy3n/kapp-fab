@@ -9,9 +9,10 @@ import type {
 import { Badge, Button, Select } from "@kapp/ui";
 import { api } from "../lib/api";
 
-// COLUMNS are the live pipeline lanes shown on the board. Terminal
-// states (rejected / withdrawn / hired) are surfaced via a toggle so
-// the active board stays focused on candidates still in flight.
+// COLUMNS are the live pipeline lanes shown on the board — hired is
+// always visible as the success endpoint. Rejected / withdrawn are
+// surfaced via a toggle (TERMINAL_COLUMNS) so the active board stays
+// focused on candidates still in flight.
 const COLUMNS: Array<{ status: ApplicationStatus; label: string; accent: string }> =
   [
     { status: "applied", label: "Applied", accent: "bg-bg-muted" },

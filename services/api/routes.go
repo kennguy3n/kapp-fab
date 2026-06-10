@@ -796,16 +796,26 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 
 		// Session 16 — Recruitment. Job openings, applications,
 		// interviews and offer letters live under
-		// /api/v1/hr/recruitment so the dynamic feature middleware
-		// (FeatureFromPath) gates the whole subtree on
-		// FeatureRecruitment rather than the parent FeatureHR — a
-		// tenant can run core HR without exposing the recruitment
-		// pipeline. Reads need hr.read, mutations need hr.admin;
-		// writes are idempotent via the standard Idempotency-Key
-		// middleware.
+		// /api/v1/hr/recruitment. The subtree is gated on BOTH
+		// FeatureHR and FeatureRecruitment:
+		//   - the dynamic feature middleware (FeatureFromPath) resolves
+		//     the path to FeatureRecruitment so recruitment can be
+		//     licensed/toggled independently of the rest of HR; and
+		//   - a static FeatureHR gate is layered on top because
+		//     recruitment is functionally a sub-module of HR — it
+		//     references hr.employee (hiring_manager_id), and a hire
+		//     auto-creates a draft hr.employee KRecord + triggers
+		//     onboarding. Enabling recruitment without HR would leave
+		//     those records unmanageable, so we require the parent
+		//     feature too. This matches the web nav, which renders the
+		//     entry under the HR section (FeatureHR) with an extra
+		//     requires:["recruitment"] guard.
+		// Reads need hr.read, mutations need hr.admin; writes are
+		// idempotent via the standard Idempotency-Key middleware.
 		r.Route("/api/v1/hr/recruitment", func(r chi.Router) {
 			d.tenantChain(r)
 			r.Use(d.apiCallMW)
+			r.Use(platform.FeatureMiddleware(d.featureStore, tenant.FeatureHR))
 			r.Use(d.featureMW)
 			r.Use(d.authzMethodGate("hr.read", "hr.admin", ""))
 			r.Use(platform.IdempotencyMiddleware(d.pool))
