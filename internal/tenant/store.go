@@ -33,6 +33,12 @@ var (
 	ErrNotFound          = errors.New("tenant: not found")
 	ErrSlugTaken         = errors.New("tenant: slug already taken")
 	ErrInvalidTransition = errors.New("tenant: invalid status transition")
+	// ErrIAMTenantAlreadyMapped is returned by SetIAMTenantID when the
+	// tenant already carries a DIFFERENT iam-core mapping. Re-pointing
+	// would orphan the kapp_tenant_id binding baked into every token
+	// iam-core already minted for the old tenant, so the store refuses
+	// it and the caller treats the existing mapping as authoritative.
+	ErrIAMTenantAlreadyMapped = errors.New("tenant: iam tenant id already mapped")
 )
 
 // PGStore is the PostgreSQL-backed implementation of Service. It operates on
@@ -151,10 +157,10 @@ func (s *PGStore) Create(ctx context.Context, input CreateInput) (*Tenant, error
 		 VALUES ($1, $2, $3, $4, 'active', $5, $6)
 		 RETURNING id, slug, name, cell, status, plan, quota, created_at, updated_at,
 		           zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD'),
-		           COALESCE(country, ''), COALESCE(locale, 'en')`,
+		           COALESCE(country, ''), COALESCE(locale, 'en'), COALESCE(iam_tenant_id, '')`,
 		id, input.Slug, input.Name, input.Cell, input.Plan, quota,
 	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country, &t.Locale)
+		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country, &t.Locale, &t.IAMTenantID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
@@ -184,10 +190,10 @@ func (s *PGStore) Get(ctx context.Context, id uuid.UUID) (*Tenant, error) {
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at,
 		        zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD'),
-		        COALESCE(country, ''), COALESCE(locale, 'en')
+		        COALESCE(country, ''), COALESCE(locale, 'en'), COALESCE(iam_tenant_id, '')
 		 FROM tenants WHERE id = $1`, id,
 	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country, &t.Locale)
+		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country, &t.Locale, &t.IAMTenantID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -580,6 +586,47 @@ func (s *PGStore) SetZKCredentials(ctx context.Context, id uuid.UUID, accessKey,
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	s.invalidateCache(id)
+	return nil
+}
+
+// SetIAMTenantID persists the iam-core tenant mapping on the tenants
+// row after onboarding provisions the tenant in iam-core. The write
+// is guarded so it only ever sets the mapping when it is currently
+// NULL — onboarding is idempotent and a second successful provision
+// for an already-mapped tenant must not silently repoint it at a
+// different iam-core tenant (which would orphan every previously
+// minted token's kapp_tenant_id binding). When the row already
+// carries a different mapping, ErrIAMTenantAlreadyMapped is returned;
+// re-setting it to the same value is benign and reported as success.
+func (s *PGStore) SetIAMTenantID(ctx context.Context, id uuid.UUID, iamTenantID string) error {
+	if iamTenantID == "" {
+		return errors.New("tenant: iam_tenant_id is required")
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE tenants
+		    SET iam_tenant_id = $1,
+		        updated_at    = now()
+		  WHERE id = $2
+		    AND iam_tenant_id IS NULL`,
+		iamTenantID, id,
+	)
+	if err != nil {
+		return fmt.Errorf("tenant: set iam tenant id: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Either the tenant does not exist or it already carries a
+		// mapping. Disambiguate so the caller gets an actionable
+		// error rather than a silent no-op.
+		existing, getErr := s.Get(ctx, id)
+		if getErr != nil {
+			return getErr
+		}
+		if existing.IAMTenantID == iamTenantID {
+			return nil // idempotent re-provision with the same id
+		}
+		return ErrIAMTenantAlreadyMapped
 	}
 	s.invalidateCache(id)
 	return nil

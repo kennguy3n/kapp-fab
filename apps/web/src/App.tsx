@@ -195,6 +195,10 @@ const RecordFormPage = lazyNamed(
   "RecordFormPage",
 );
 const LoginPage = lazyNamed(() => import("./pages/LoginPage"), "LoginPage");
+const CallbackPage = lazyNamed(
+  () => import("./pages/CallbackPage"),
+  "CallbackPage",
+);
 const TenantListPage = lazyNamed(
   () => import("./pages/TenantListPage"),
   "TenantListPage",
@@ -1131,6 +1135,10 @@ export function App() {
               visitors don't see tenant navigation. */}
           <Route path="/forms/:formId" element={<FormPage />} />
           <Route path="/login" element={<LoginPage />} />
+          {/* iam-core (OAuth2/OIDC) login completion. The backend
+              redirects here with tokens in the URL fragment after a
+              successful Authorization-Code exchange. */}
+          <Route path="/callback" element={<CallbackPage />} />
           {/* Helpdesk customer portal. Runs outside the authenticated
               AppShell — portal users never see the tenant's internal
               nav/data; only their own tickets. */}

@@ -373,6 +373,21 @@ type WizardResult struct {
 	CoATemplateUsed     string    `json:"coa_template_used"`
 	LocaleUsed          string    `json:"locale_used"`
 	ZKFabricProvisioned bool      `json:"zk_fabric_provisioned,omitempty"`
+	// IAMTenantID is the iam-core tenant this Kapp tenant was
+	// mirrored to during onboarding. Empty when the iam-core
+	// integration is disabled. IAMUsersSynced counts the
+	// wizard-seeded users that were mirrored into iam-core.
+	IAMTenantID    string `json:"iam_tenant_id,omitempty"`
+	IAMUsersSynced int    `json:"iam_users_synced,omitempty"`
+}
+
+// SeededUser identifies a user row the wizard created or updated so the
+// caller (and iam-core sync) can mirror it without re-querying. Email
+// is the natural key seedUsers upserts on; ID is the resolved users.id.
+type SeededUser struct {
+	ID          uuid.UUID
+	Email       string
+	DisplayName string
 }
 
 // ---------------------------------------------------------------------------
@@ -703,6 +718,11 @@ type Wizard struct {
 	// "en" — the resolver downgrades cleanly without rejecting
 	// the row). Nil leaves the wizard's derived tag unchanged.
 	localeResolver LocaleResolver
+	// iamSync mirrors the new tenant (and its seeded users) into
+	// iam-core after the seed tx. Nil when the iam-core integration
+	// is disabled (IAM_CORE_ISSUER unset) — the wizard then behaves
+	// exactly as the legacy KChat-only path.
+	iamSync *IAMSync
 }
 
 // ZKFabricProvisioner mints a new tenant + HMAC credential pair on
@@ -744,6 +764,15 @@ func NewWizard(pool *pgxpool.Pool) *Wizard {
 // wizard. Returns the wizard for fluent chaining.
 func (w *Wizard) WithZKFabricProvisioner(p ZKFabricProvisioner) *Wizard {
 	w.zkProvisioner = p
+	return w
+}
+
+// WithIAMSync attaches the iam-core sync orchestrator so the wizard
+// mirrors each new tenant (and its seeded users) into iam-core. Nil
+// (the default) leaves the integration dormant. Returns the wizard
+// for fluent chaining.
+func (w *Wizard) WithIAMSync(s *IAMSync) *Wizard {
+	w.iamSync = s
 	return w
 }
 
@@ -1037,12 +1066,14 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 		return nil, fmt.Errorf("tenant: wizard seed accounts/roles: %w", err)
 	}
 
+	var seededUsers []SeededUser
 	if len(cfg.Users) > 0 {
-		usersInserted, err := seedUsers(ctx, w.pool, tenantID, cfg.Users)
+		var err error
+		seededUsers, err = seedUsers(ctx, w.pool, tenantID, cfg.Users)
 		if err != nil {
 			return out, err
 		}
-		out.UsersInserted = usersInserted
+		out.UsersInserted = len(seededUsers)
 	}
 
 	// ZK Object Fabric provisioning runs after the tx so a failure
@@ -1080,6 +1111,40 @@ func (w *Wizard) RunSetupWizard(ctx context.Context, tenantID uuid.UUID, cfg Set
 				return out, fmt.Errorf("tenant: wizard persist placement policy: %w", err)
 			}
 			out.ZKFabricProvisioned = true
+		}
+	}
+
+	// iam-core provisioning runs last, after the seed tx and ZK
+	// fabric, for the same reason: it talks to an external service
+	// and we never want an iam-core outage to roll back a tenant's
+	// chart of accounts. When the integration is disabled (no
+	// provisioner wired) this is skipped entirely and the wizard
+	// behaves exactly as the legacy KChat-only path. Failures are
+	// surfaced via the returned error so the caller can retry —
+	// EnsureTenant is idempotent (it no-ops on an already-mapped
+	// tenant) so a retry after a partial failure is safe.
+	if w.iamSync != nil && w.store != nil {
+		t, err := w.store.Get(ctx, tenantID)
+		if err != nil {
+			return out, fmt.Errorf("tenant: wizard load tenant for iam-core provisioning: %w", err)
+		}
+		iamTenantID, err := w.iamSync.EnsureTenant(ctx, t)
+		if err != nil {
+			return out, fmt.Errorf("tenant: wizard iam-core provision tenant: %w", err)
+		}
+		out.IAMTenantID = iamTenantID
+		// Mirror the wizard-seeded users into iam-core under the
+		// freshly-provisioned tenant. Each sync is idempotent
+		// (SetIAMUserID only writes a NULL column) so a retry never
+		// double-creates. A per-user failure aborts with a wrapped
+		// error rather than silently dropping the user — the caller
+		// can re-run the wizard, which will skip the already-mapped
+		// tenant and resume user sync.
+		for _, su := range seededUsers {
+			if _, err := w.iamSync.SyncUser(ctx, iamTenantID, su.ID, su.Email, su.DisplayName); err != nil {
+				return out, fmt.Errorf("tenant: wizard iam-core provision user %s: %w", su.Email, err)
+			}
+			out.IAMUsersSynced++
 		}
 	}
 	return out, nil
@@ -1165,8 +1230,8 @@ func seedRoles(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, roles []Wizar
 // tenant-scoped tx so the RLS WITH CHECK clause on `user_tenants`
 // (migrations/000001_initial_schema.sql) is satisfied under
 // `kapp_app`.
-func seedUsers(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID, users []WizardUser) (int, error) {
-	inserted := 0
+func seedUsers(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID, users []WizardUser) ([]SeededUser, error) {
+	seeded := make([]SeededUser, 0, len(users))
 	for _, u := range users {
 		if u.Email == "" {
 			continue
@@ -1205,7 +1270,7 @@ func seedUsers(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID, user
 			uuid.New(), u.Email, u.DisplayName,
 		).Scan(&userID)
 		if err != nil {
-			return inserted, fmt.Errorf("tenant: seed user %s: %w", u.Email, err)
+			return seeded, fmt.Errorf("tenant: seed user %s: %w", u.Email, err)
 		}
 		if err := dbutil.WithTenantTx(ctx, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx,
@@ -1228,11 +1293,11 @@ func seedUsers(ctx context.Context, pool *pgxpool.Pool, tenantID uuid.UUID, user
 			}
 			return nil
 		}); err != nil {
-			return inserted, fmt.Errorf("tenant: seed user_tenants %s: %w", u.Email, err)
+			return seeded, fmt.Errorf("tenant: seed user_tenants %s: %w", u.Email, err)
 		}
-		inserted++
+		seeded = append(seeded, SeededUser{ID: userID, Email: u.Email, DisplayName: u.DisplayName})
 	}
-	return inserted, nil
+	return seeded, nil
 }
 
 // Default scheduled-action constants. Kept local — duplicating the

@@ -31,6 +31,26 @@ type portalHandlers struct {
 	records  *record.PGStore
 	mailer   portalMailer
 	features portalFeatureGate
+
+	// iam, when non-nil and provisioning-capable, delegates the
+	// portal passwordless flow (send + verify) to iam-core's
+	// Management passwordless API instead of Kapp's own SMTP magic
+	// link. It is only used for tenants that have been mirrored into
+	// iam-core (Tenant.HasIAMTenant); every other tenant keeps the
+	// legacy Kapp magic-link path, so the switch is per-tenant and
+	// fully backward compatible. Nil in a KChat-only deployment.
+	iam *auth.IAMCoreClient
+}
+
+// usesIAMPasswordless reports whether the portal should route a given
+// tenant's passwordless auth through iam-core. It requires the
+// integration to be wired with M2M provisioning (so the Management
+// passwordless API is reachable), an OAuth2 client (for the client_id
+// the flow runs under), and the tenant to carry an iam-core mapping.
+func (h *portalHandlers) usesIAMPasswordless(t *tenant.Tenant) bool {
+	return h.iam != nil &&
+		h.iam.PasswordlessClientID() != "" &&
+		t.HasIAMTenant()
 }
 
 // portalTenantLookup narrows the tenant surface to the methods the
@@ -167,10 +187,6 @@ type portalAuthRequest struct {
 // deployment (not specific to any tenant / email), so no
 // enumeration information leaks.
 func (h *portalHandlers) requestMagicLink(w http.ResponseWriter, r *http.Request) {
-	if h.mailer == nil || !h.mailer.Configured() {
-		http.Error(w, "portal email delivery not configured", http.StatusServiceUnavailable)
-		return
-	}
 	var in portalAuthRequest
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
@@ -180,6 +196,21 @@ func (h *portalHandlers) requestMagicLink(w http.ResponseWriter, r *http.Request
 	in.Email = strings.TrimSpace(in.Email)
 	if in.TenantSlug == "" || in.Email == "" {
 		http.Error(w, "tenant_slug and email required", http.StatusBadRequest)
+		return
+	}
+	// Fail-closed global gate (Devin Review FLAG_0006): when iam-core
+	// passwordless is NOT available as a delivery mechanism for this
+	// deployment at all, Kapp SMTP is the only way to deliver a magic
+	// link, so a globally-unconfigured mailer must surface as 503
+	// BEFORE any tenant lookup — otherwise a missing SMTP transport is
+	// indistinguishable from a successful drop (silent 204), and a nil
+	// mailer would panic downstream. When iam-core passwordless IS
+	// available, the deployment is configured: mixed-mode legacy
+	// tenants are still gated by the per-tenant SMTP check further
+	// down, after we know the tenant is on the legacy path.
+	iamPasswordlessAvailable := h.iam != nil && h.iam.PasswordlessClientID() != ""
+	if !iamPasswordlessAvailable && (h.mailer == nil || !h.mailer.Configured()) {
+		http.Error(w, "portal email delivery not configured", http.StatusServiceUnavailable)
 		return
 	}
 	t, err := h.tenants.GetBySlug(r.Context(), in.TenantSlug)
@@ -198,6 +229,28 @@ func (h *portalHandlers) requestMagicLink(w http.ResponseWriter, r *http.Request
 		return
 	} else if !ok {
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// iam-core path: delegate delivery (and rate limiting / anti-
+	// enumeration) to iam-core's passwordless API. iam-core owns its
+	// own mailer, so the Kapp SMTP gate does not apply here. Still
+	// always 204 so the response is identical to the legacy path and
+	// leaks nothing about whether the email exists.
+	if h.usesIAMPasswordless(t) {
+		if _, err := h.iam.SendPasswordless(r.Context(), t.IAMTenantID, h.iam.PasswordlessClientID(), in.Email, auth.PasswordlessEmailOTP); err != nil {
+			log.Printf("portal: iam-core passwordless send tenant=%s iam_tenant=%s: %v", t.ID, t.IAMTenantID, err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Legacy Kapp magic-link path. The SMTP gate stays here (not at
+	// the top of the handler) so a tenant on the iam-core path is not
+	// blocked by a missing Kapp SMTP config. 503 signals a global
+	// misconfiguration without leaking per-tenant/email state.
+	if h.mailer == nil || !h.mailer.Configured() {
+		http.Error(w, "portal email delivery not configured", http.StatusServiceUnavailable)
 		return
 	}
 	token, user, err := h.portal.IssueMagicLink(r.Context(), t.ID, in.Email)
@@ -253,7 +306,7 @@ func (h *portalHandlers) verifyMagicLink(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid link", http.StatusUnauthorized)
 		return
 	}
-	user, err := h.portal.VerifyMagicLink(r.Context(), t.ID, in.Email, in.Token)
+	user, err := h.verifyPortalCredential(r.Context(), t, in.Email, in.Token)
 	if err != nil {
 		http.Error(w, "invalid link", http.StatusUnauthorized)
 		return
@@ -268,6 +321,35 @@ func (h *portalHandlers) verifyMagicLink(w http.ResponseWriter, r *http.Request)
 		ExpiresAt: claims.ExpiresAt,
 		User:      user,
 	})
+}
+
+// verifyPortalCredential resolves the supplied (email, token) to a
+// verified portal user, taking the iam-core passwordless path for
+// tenants mirrored into iam-core and the legacy Kapp magic-link path
+// for everyone else. Both return a *auth.PortalUser the caller can
+// mint a portal-scoped JWT for; the iam-core path upserts the row
+// (the customer may have no local portal_users entry yet) after
+// iam-core confirms the code.
+func (h *portalHandlers) verifyPortalCredential(ctx context.Context, t *tenant.Tenant, email, token string) (*auth.PortalUser, error) {
+	if h.usesIAMPasswordless(t) {
+		res, err := h.iam.VerifyPasswordless(ctx, t.IAMTenantID, h.iam.PasswordlessClientID(), email, token, auth.PasswordlessEmailOTP)
+		if err != nil {
+			log.Printf("portal: iam-core passwordless verify tenant=%s iam_tenant=%s: %v", t.ID, t.IAMTenantID, err)
+			return nil, err
+		}
+		if !strings.EqualFold(res.Status, "verified") {
+			return nil, auth.ErrMagicLinkInvalid
+		}
+		// iam-core verified the code; ensure a portal_users row exists
+		// for this customer so the portal session token can be issued.
+		// Prefer the email iam-core echoes back (canonicalised there).
+		verifiedEmail := res.Email
+		if strings.TrimSpace(verifiedEmail) == "" {
+			verifiedEmail = email
+		}
+		return h.portal.EnsurePortalUser(ctx, t.ID, verifiedEmail)
+	}
+	return h.portal.VerifyMagicLink(ctx, t.ID, email, token)
 }
 
 // --- ticket endpoints --------------------------------------------------

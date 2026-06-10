@@ -69,6 +69,22 @@ type Claims struct {
 	// grant this claim — it is a property of the Kapp install, not
 	// of any single tenant.
 	IsPlatformAdmin bool `json:"platform_admin,omitempty"`
+	// OrgID is the iam-core organization identifier (the `org_id`
+	// claim). It is empty for legacy KChat-minted tokens, which have
+	// no concept of organizations, and is carried through so
+	// downstream handlers and audit logs can attribute an action to
+	// the iam-core org without a second lookup. It is NOT used for
+	// RLS scoping — TenantID remains the single load-bearing tenancy
+	// claim — so a forged or mismatched OrgID cannot widen access.
+	OrgID string `json:"org_id,omitempty"`
+	// Permissions is the flattened permission list mapped from
+	// iam-core's namespaced `{iss}/permissions` claim (falling back
+	// to a plain `permissions` claim). It is empty for legacy KChat
+	// tokens. Authorization decisions still run through the authz
+	// evaluator against Roles; Permissions is carried for handlers
+	// and policies that want fine-grained iam-core scopes without a
+	// Management API round-trip.
+	Permissions []string `json:"permissions,omitempty"`
 	// Standard JWT claims (subset we actually use).
 	Issuer    string `json:"iss,omitempty"`
 	Audience  string `json:"aud,omitempty"`
@@ -100,10 +116,18 @@ func (c *Claims) Valid(now time.Time, leeway time.Duration) error {
 	if c.TenantID == uuid.Nil {
 		return errors.New("auth: claim tid missing")
 	}
-	if c.ExpiresAt > 0 && now.Add(-leeway).Unix() >= c.ExpiresAt {
+	return validTimeWindow(now, leeway, c.ExpiresAt, c.NotBefore)
+}
+
+// validTimeWindow applies the exp/nbf checks with leeway in the same
+// directions documented on Claims.Valid. Extracted so the OIDC
+// id_token path (which does not build a full Claims) can reuse the
+// exact skew semantics rather than re-deriving them.
+func validTimeWindow(now time.Time, leeway time.Duration, exp, nbf int64) error {
+	if exp > 0 && now.Add(-leeway).Unix() >= exp {
 		return ErrTokenExpired
 	}
-	if c.NotBefore > 0 && now.Add(leeway).Unix() < c.NotBefore {
+	if nbf > 0 && now.Add(leeway).Unix() < nbf {
 		return errors.New("auth: token not yet valid")
 	}
 	return nil

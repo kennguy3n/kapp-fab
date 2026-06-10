@@ -168,6 +168,23 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Post("/sso", d.authh.sso)
 		})
 		r.Post("/refresh", d.authh.refresh)
+
+		// iam-core (OAuth2/OIDC) login surface. Registered
+		// unconditionally; each handler returns 503 when iam-core is
+		// not configured (d.authh.iam == nil), so the legacy
+		// KChat-only build advertises the routes but they stay inert.
+		// The existing /sso and /refresh above are untouched.
+		//
+		//   GET  /login    → 302 to iam-core authorize (PKCE, S256)
+		//   GET  /callback → code→token exchange, id_token verify, SPA redirect
+		//   POST /logout   → revoke refresh token, return end-session URL
+		//   GET  /userinfo → proxy OIDC userinfo with the caller's bearer
+		//   POST /oidc/refresh → rotate the httpOnly refresh cookie
+		r.Get("/login", d.authh.login)
+		r.Get("/callback", d.authh.callback)
+		r.Post("/logout", d.authh.logout)
+		r.Get("/userinfo", d.authh.userinfo)
+		r.Post("/oidc/refresh", d.authh.oidcRefresh)
 	})
 
 	// Captcha challenge endpoint for the PoW provider. The
@@ -248,6 +265,9 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 				records:  d.recordStore,
 				mailer:   pmailer,
 				features: d.featureStore,
+				// nil unless iam-core provisioning is wired; per-tenant
+				// gating happens in usesIAMPasswordless.
+				iam: d.iamClient,
 			}
 			r.Route("/api/v1/portal", func(r chi.Router) {
 				r.Route("/auth", func(r chi.Router) {
