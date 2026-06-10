@@ -1004,6 +1004,24 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	cch := &cycleCountHandlers{store: cycleCountStore}
 	oh := &openAPIHandler{registry: ktypeRegistry}
 	fileh := &filesHandlers{store: filesStore, meter: meteringBuffer}
+	// Session-17 LMS deep-enhancement handlers. The stores share the
+	// recordStore-backed adapters (analytics listers, xAPI actor +
+	// enrollment resolution, learning-path completion lookups) so the
+	// internal/lms package stays decoupled from the record store. SCORM
+	// packages extract into the same per-tenant object store the files
+	// surface uses.
+	lmsAdapters := lmsRecordAdapters{records: recordStore}
+	lmsPathStore := lms.NewLearningPathStore(pool, auditor)
+	lmsh := &lmsHandlers{
+		paths:     lmsPathStore,
+		enroller:  lms.NewPathAutoEnroller(lmsPathStore),
+		gamify:    lms.NewGamificationStore(pool, auditor),
+		discuss:   lms.NewDiscussionStore(pool, auditor),
+		scorm:     lms.NewScormStore(pool, objectStore, auditor),
+		xapi:      lms.NewXAPIStore(pool, auditor),
+		analytics: lms.NewAnalyticsStore(pool, lmsAdapters, lmsAdapters),
+		adapters:  lmsAdapters,
+	}
 	bh := &baseHandlers{store: baseStore}
 	dh := &docsHandlers{store: docsStore}
 	eh := &eventsHandlers{pool: pool}
@@ -1418,6 +1436,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		insdsh:                 insdsh,
 		insembh:                insembh,
 		hrh:                    hrh,
+		lmsh:                   lmsh,
 		inboundHandler:         inboundHandler,
 		mph:                    mph,
 		metrics:                metrics,

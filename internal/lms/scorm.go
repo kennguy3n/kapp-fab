@@ -374,6 +374,55 @@ func (s *ScormStore) WithClock(now func() time.Time) *ScormStore {
 	return s
 }
 
+// RuntimeState is the persisted SCORM runtime for one (enrollment,
+// lesson), shaped for the initialize handshake. The SCORM player
+// rehydrates cmi.core.* from these fields so a learner resumes exactly
+// where they left off (suspend_data + accumulated time).
+type RuntimeState struct {
+	Status           string           `json:"status"`
+	Score            *decimal.Decimal `json:"score,omitempty"`
+	TimeSpentSeconds int64            `json:"time_spent_seconds"`
+	SuspendData      string           `json:"suspend_data"`
+	Exists           bool             `json:"exists"`
+}
+
+// RuntimeState reads the current lesson_progress row for a SCORM
+// initialize call. Returns Exists=false (not an error) when the learner
+// has never launched the SCO, so the player starts a fresh attempt.
+func (s *ScormStore) RuntimeState(ctx context.Context, tenantID, enrollmentID, lessonID uuid.UUID) (*RuntimeState, error) {
+	if tenantID == uuid.Nil || enrollmentID == uuid.Nil || lessonID == uuid.Nil {
+		return nil, errors.New("lms: tenant_id, enrollment_id, lesson_id required")
+	}
+	out := &RuntimeState{}
+	err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var meta []byte
+		row := tx.QueryRow(ctx,
+			`SELECT status, score, time_spent_seconds, metadata
+			   FROM lesson_progress
+			  WHERE tenant_id = $1 AND enrollment_id = $2 AND lesson_id = $3`,
+			tenantID, enrollmentID, lessonID,
+		)
+		if err := row.Scan(&out.Status, &out.Score, &out.TimeSpentSeconds, &meta); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
+		out.Exists = true
+		if len(meta) > 0 {
+			var m map[string]string
+			if err := json.Unmarshal(meta, &m); err == nil {
+				out.SuspendData = m["suspend_data"]
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read scorm runtime: %w", err)
+	}
+	return out, nil
+}
+
 // ScormPackage is the result of extracting an uploaded ZIP: the storage
 // key prefix the files live under and the parsed manifest.
 type ScormPackage struct {

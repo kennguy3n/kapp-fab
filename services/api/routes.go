@@ -794,6 +794,66 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Get("/pay-runs/{id}/payslips", d.hrh.listPayRunPayslips)
 		})
 
+		// Session-17 LMS deep-enhancement surface. Course / module /
+		// lesson / enrollment KRecords keep using the generic
+		// /api/v1/records/lms.* CRUD path; this group adds the
+		// dedicated endpoints (learning paths, SCORM runtime, xAPI
+		// receiver, discussions, badges, instructor analytics) that
+		// don't fit the KRecord CRUD shape. The whole group is gated on
+		// FeatureLMS (derived from the "lms" path segment by
+		// DynamicFeatureMiddleware) so non-LMS plans get a clean 403,
+		// and runs under the standard mutation middleware stack —
+		// idempotency before rate-limit/quota so a replay returns the
+		// cached response even after the tenant hits a ceiling. The
+		// stores audit every mutation and enforce tenant RLS.
+		if d.lmsh != nil {
+			r.Route("/api/v1/lms", func(r chi.Router) {
+				d.tenantChain(r)
+				r.Use(d.apiCallMW)
+				r.Use(d.featureMW)
+				r.Use(platform.IdempotencyMiddleware(d.pool))
+				r.Use(d.rateLimitMW)
+				r.Use(platform.QuotaMiddleware(d.quotaEnforcer))
+
+				// Learning paths.
+				r.Post("/learning-paths", d.lmsh.createPath)
+				r.Get("/learning-paths", d.lmsh.listPaths)
+				r.Get("/learning-paths/{id}", d.lmsh.getPath)
+				r.Patch("/learning-paths/{id}", d.lmsh.updatePath)
+				r.Delete("/learning-paths/{id}", d.lmsh.deletePath)
+				r.Post("/learning-paths/{id}/courses", d.lmsh.addPathCourse)
+				r.Delete("/learning-paths/{id}/courses/{courseID}", d.lmsh.removePathCourse)
+				r.Post("/learning-paths/{id}/enroll", d.lmsh.enrollPath)
+				r.Post("/learning-paths/{id}/complete", d.lmsh.completePath)
+
+				// SCORM 1.2 / 2004 runtime.
+				r.Post("/scorm/upload", d.lmsh.scormUpload)
+				r.Post("/scorm/{lessonID}/initialize", d.lmsh.scormInitialize)
+				r.Post("/scorm/{lessonID}/commit", d.lmsh.scormCommit)
+				r.Post("/scorm/{lessonID}/terminate", d.lmsh.scormTerminate)
+
+				// xAPI (Tin Can) receiver.
+				r.Post("/xapi/statements", d.lmsh.xapiStatements)
+
+				// Discussion forums.
+				r.Post("/discussions", d.lmsh.createThread)
+				r.Get("/discussions", d.lmsh.listThreads)
+				r.Get("/discussions/{id}", d.lmsh.getThread)
+				r.Patch("/discussions/{id}", d.lmsh.updateThread)
+				r.Delete("/discussions/{id}", d.lmsh.deleteThread)
+				r.Post("/discussions/{id}/replies", d.lmsh.addReply)
+				r.Post("/discussions/{id}/replies/{replyID}/answer", d.lmsh.markAnswer)
+
+				// Gamification.
+				r.Post("/badges", d.lmsh.createBadge)
+				r.Get("/badges", d.lmsh.listBadges)
+				r.Get("/badges/awards", d.lmsh.listAwards)
+
+				// Instructor analytics.
+				r.Get("/courses/{id}/analytics", d.lmsh.courseAnalytics)
+			})
+		}
+
 		// Phase 2a B6 — marketplace HTTP surface. Three logical
 		// groups share a single handler bundle:
 		//
