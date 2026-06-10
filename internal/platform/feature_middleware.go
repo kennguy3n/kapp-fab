@@ -73,6 +73,22 @@ func FeatureFromPath(p string) string {
 		}
 		return featureFromKType(ktypeRest[:ktSlash])
 	}
+	// /api/v1/hr/recruitment/* — the Session 16 recruitment surface
+	// rides its own feature key so a tenant can run core HR (employees,
+	// leave, payroll) without exposing the recruitment pipeline, and so
+	// recruitment can be licensed independently. Matched before the
+	// generic "hr" → FeatureHR case below; everything else under /hr
+	// stays on FeatureHR.
+	if domain == "hr" && slash != len(rest) {
+		sub := rest[slash+1:]
+		subSlash := strings.IndexByte(sub, '/')
+		if subSlash == -1 {
+			subSlash = len(sub)
+		}
+		if sub[:subSlash] == "recruitment" {
+			return tenant.FeatureRecruitment
+		}
+	}
 	switch domain {
 	case "finance":
 		return tenant.FeatureFinance
@@ -140,6 +156,16 @@ func featureFromKType(ktype string) string {
 	switch ktype {
 	case "sales.pos_profile", "sales.pos_invoice":
 		return tenant.FeaturePOS
+	case "hr.job_opening", "hr.job_application", "hr.interview", "hr.offer_letter":
+		// Recruitment KTypes share the "hr" prefix with the HR
+		// feature gate, so they must be matched on the full ktype
+		// string before the prefix switch — otherwise a tenant with
+		// HR enabled but recruitment disabled would slip past the
+		// FeatureRecruitment gate via /api/v1/records/hr.job_opening
+		// (and the other three), reaching recruitment data the plan
+		// doesn't license. Mirrors the dedicated /api/v1/hr/recruitment/*
+		// route gate in services/api/routes.go.
+		return tenant.FeatureRecruitment
 	}
 	dot := strings.IndexByte(ktype, '.')
 	if dot == -1 {

@@ -814,6 +814,58 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Get("/pay-runs/{id}/payslips", d.hrh.listPayRunPayslips)
 		})
 
+		// Session 16 — Recruitment. Job openings, applications,
+		// interviews and offer letters live under
+		// /api/v1/hr/recruitment. The subtree is gated on BOTH
+		// FeatureHR and FeatureRecruitment:
+		//   - the dynamic feature middleware (FeatureFromPath) resolves
+		//     the path to FeatureRecruitment so recruitment can be
+		//     licensed/toggled independently of the rest of HR; and
+		//   - a static FeatureHR gate is layered on top because
+		//     recruitment is functionally a sub-module of HR — it
+		//     references hr.employee (hiring_manager_id), and a hire
+		//     auto-creates a draft hr.employee KRecord + triggers
+		//     onboarding. Enabling recruitment without HR would leave
+		//     those records unmanageable, so we require the parent
+		//     feature too. This matches the web nav, which renders the
+		//     entry under the HR section (FeatureHR) with an extra
+		//     requires:["recruitment"] guard.
+		// Reads need hr.read, mutations need hr.admin; writes are
+		// idempotent via the standard Idempotency-Key middleware.
+		r.Route("/api/v1/hr/recruitment", func(r chi.Router) {
+			d.tenantChain(r)
+			r.Use(d.apiCallMW)
+			r.Use(platform.FeatureMiddleware(d.featureStore, tenant.FeatureHR))
+			r.Use(d.featureMW)
+			r.Use(d.authzMethodGate("hr.read", "hr.admin", ""))
+			r.Use(platform.IdempotencyMiddleware(d.pool))
+			r.Use(d.rateLimitMW)
+			r.Use(platform.QuotaMiddleware(d.quotaEnforcer))
+
+			r.Post("/job-openings", d.rch.createJobOpening)
+			r.Get("/job-openings", d.rch.listJobOpenings)
+			r.Get("/job-openings/{id}", d.rch.getJobOpening)
+			r.Put("/job-openings/{id}", d.rch.updateJobOpening)
+			r.Post("/job-openings/{id}/publish", d.rch.publishJobOpening)
+			r.Post("/job-openings/{id}/close", d.rch.closeJobOpening)
+
+			r.Post("/applications", d.rch.createApplication)
+			r.Get("/applications", d.rch.listApplications)
+			r.Get("/applications/{id}", d.rch.getApplication)
+			r.Put("/applications/{id}", d.rch.updateApplication)
+			r.Post("/applications/{id}/advance", d.rch.advanceApplication)
+			r.Post("/applications/{id}/reject", d.rch.rejectApplication)
+
+			r.Post("/interviews", d.rch.createInterview)
+			r.Get("/interviews", d.rch.listInterviews)
+			r.Post("/interviews/{id}/complete", d.rch.completeInterview)
+
+			r.Post("/offer-letters", d.rch.createOfferLetter)
+			r.Get("/offer-letters", d.rch.listOfferLetters)
+			r.Post("/offer-letters/{id}/send", d.rch.sendOfferLetter)
+			r.Post("/offer-letters/{id}/respond", d.rch.respondOfferLetter)
+		})
+
 		// Phase 2a B6 — marketplace HTTP surface. Three logical
 		// groups share a single handler bundle:
 		//

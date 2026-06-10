@@ -885,6 +885,13 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	cycleCountStore := inventory.NewCycleCountStore(pool, inventoryStore)
 	agents.RegisterCycleCountTools(executor, cycleCountStore)
 	agents.RegisterHRTools(executor, hrStore)
+	// Session 16 — recruitment store + agent tools. Constructed here so
+	// the agent surface and the HTTP handler bundle (rch, below) share a
+	// single store wired to the same audit logger, event publisher,
+	// record store (hired→employee KRecord) and workflow engine (offer
+	// approval + onboarding enrolment).
+	recruitmentStore := hr.NewRecruitmentStore(pool, auditor, eventPublisher, recordStore, workflowEngine)
+	agents.RegisterRecruitmentTools(executor, recruitmentStore)
 	// Single payroll engine instance reused across the agent tool surface
 	// and the hrHandlers HTTP surface. The engine is stateless (it just
 	// composes recordStore + ledgerStore + a country resolver), so two
@@ -1074,6 +1081,11 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// shared with the agent tool surface so both expose identical
 	// posting / country-resolver behaviour.
 	hrh := &hrHandlers{engine: payrollEngine}
+
+	// Session 16 — recruitment HTTP handlers reuse the store constructed
+	// alongside the agent tools above so both surfaces share one audit /
+	// event / record / workflow wiring.
+	rch := &recruitmentHandlers{store: recruitmentStore}
 
 	// Phase H JWT auth. The signer is built from KAPP_JWT_SECRET; when
 	// the secret is absent we log and skip wiring the SSO endpoints so
@@ -1576,6 +1588,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		insdsh:                 insdsh,
 		insembh:                insembh,
 		hrh:                    hrh,
+		rch:                    rch,
 		inboundHandler:         inboundHandler,
 		mph:                    mph,
 		metrics:                metrics,

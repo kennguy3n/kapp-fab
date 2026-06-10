@@ -81,6 +81,14 @@ const (
 	// would orphan small-discrete-manufacturer tenants on the
 	// starter tier.
 	FeatureManufacturing = "manufacturing"
+	// FeatureRecruitment gates the Session 16 Recruitment module
+	// (job_openings, job_applications, interviews, offer_letters) and
+	// the /api/v1/hr/recruitment/* HTTP routes, plus the frontend
+	// Recruitment nav entry under HR. It is an HR sub-surface, so it is
+	// enabled on the same plans that ship HR (business / enterprise) and
+	// off on starter / free. Tenants can still toggle it independently
+	// of FeatureHR via the feature-flag admin surface.
+	FeatureRecruitment = "recruitment"
 )
 
 // AllFeatures is the canonical list of feature keys. Handlers that
@@ -107,6 +115,7 @@ var AllFeatures = []string{
 	FeaturePOS,
 	FeatureProjects,
 	FeatureManufacturing,
+	FeatureRecruitment,
 }
 
 // PlanLimits is the numeric ceiling each plan enforces per billing
@@ -273,6 +282,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeaturePOS:               false,
 			FeatureProjects:          true,
 			FeatureManufacturing:     true,
+			FeatureRecruitment:       false,
 		}
 	case PlanBusiness:
 		return map[string]bool{
@@ -295,6 +305,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeaturePOS:               true,
 			FeatureProjects:          true,
 			FeatureManufacturing:     true,
+			FeatureRecruitment:       true,
 		}
 	case PlanEnterprise:
 		return map[string]bool{
@@ -317,6 +328,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeaturePOS:               true,
 			FeatureProjects:          true,
 			FeatureManufacturing:     true,
+			FeatureRecruitment:       true,
 		}
 	default:
 		// Free plan — CRM only. Also the fallback when the plan
@@ -342,6 +354,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeaturePOS:               false,
 			FeatureProjects:          false,
 			FeatureManufacturing:     false,
+			FeatureRecruitment:       false,
 		}
 	}
 }
