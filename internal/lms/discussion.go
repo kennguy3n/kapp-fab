@@ -250,6 +250,12 @@ func (s *DiscussionStore) DeleteThread(ctx context.Context, tenantID, id uuid.UU
 // reply_count + updated_at in the same transaction so the denormalized
 // count never drifts. `source` is "web" or "kchat" (instructor reply
 // synced from KChat).
+//
+// Invariant: replies are add-only. There is no individual reply deletion
+// (replies are removed only via DeleteThread's FK CASCADE, which discards
+// the parent row and its count together), so reply_count only ever
+// increments. Any future DeleteReply MUST decrement reply_count in the
+// same transaction to preserve this invariant.
 func (s *DiscussionStore) AddReply(ctx context.Context, in DiscussionReply, actor *uuid.UUID) (*DiscussionReply, error) {
 	if in.TenantID == uuid.Nil || in.ThreadID == uuid.Nil || in.AuthorID == uuid.Nil {
 		return nil, fmt.Errorf("%w: tenant_id, thread_id, author_id required", ErrInvalidReply)

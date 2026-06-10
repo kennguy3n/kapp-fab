@@ -72,6 +72,13 @@ func NewStore(pool *pgxpool.Pool) *Store {
 // progress row. Status transitions clamp to the allowed set via the
 // DB CHECK constraint. `attempts` is incremented by one on every call
 // that provides a non-nil score (quiz submission / assignment grade).
+//
+// Completion is terminal: once a lesson is "completed", a later call
+// reporting a lower state (e.g. a revisit, an out-of-order grade, or an
+// agent tool re-running) must not regress it back to "in_progress".
+// Score and attempts still update so post-completion re-attempts are
+// recorded. This matches the SCORM CommitRuntime and xAPI projection
+// writers so completion behaves identically across every progress path.
 func (s *Store) UpsertProgress(ctx context.Context, p Progress) (*Progress, error) {
 	if p.TenantID == uuid.Nil || p.EnrollmentID == uuid.Nil || p.LessonID == uuid.Nil {
 		return nil, errors.New("lms: tenant_id, enrollment_id, lesson_id required")
@@ -92,7 +99,11 @@ func (s *Store) UpsertProgress(ctx context.Context, p Progress) (*Progress, erro
 			     attempts, started_at, completed_at, updated_at)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 			 ON CONFLICT (tenant_id, enrollment_id, lesson_id) DO UPDATE
-			    SET status       = EXCLUDED.status,
+			    SET status       = CASE
+			                          WHEN lesson_progress.status = 'completed'
+			                          THEN lesson_progress.status
+			                          ELSE EXCLUDED.status
+			                       END,
 			        score        = COALESCE(EXCLUDED.score, lesson_progress.score),
 			        attempts     = lesson_progress.attempts + $10,
 			        started_at   = COALESCE(lesson_progress.started_at, EXCLUDED.started_at),

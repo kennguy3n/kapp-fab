@@ -350,6 +350,50 @@ func TestScormCommitRuntime(t *testing.T) {
 	}
 }
 
+// TestUpsertProgressCompletionTerminal covers the generic Store writer
+// (used by quiz scoring, assignment grading agent tools, and the
+// integration suites) — like the SCORM and xAPI paths, a later in_progress
+// upsert must not regress an already-completed lesson, while score and
+// attempts still update.
+func TestUpsertProgressCompletionTerminal(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	store := NewStore(pool)
+	tenant := uuid.New()
+	enr := uuid.New()
+	lesson := uuid.New()
+	now := time.Now().UTC()
+
+	first := decimal.NewFromInt(90)
+	p, err := store.UpsertProgress(ctx, Progress{
+		TenantID: tenant, EnrollmentID: enr, LessonID: lesson,
+		Status: ProgressCompleted, Score: &first, StartedAt: &now, CompletedAt: &now,
+	})
+	if err != nil || p.Status != ProgressCompleted || p.CompletedAt == nil {
+		t.Fatalf("first upsert: err=%v p=%+v", err, p)
+	}
+
+	// Revisit reporting in_progress with a new score: status stays
+	// completed, completed_at survives, score updates, attempts increments.
+	second := decimal.NewFromInt(95)
+	p, err = store.UpsertProgress(ctx, Progress{
+		TenantID: tenant, EnrollmentID: enr, LessonID: lesson,
+		Status: ProgressInProgress, Score: &second,
+	})
+	if err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	if p.Status != ProgressCompleted || p.CompletedAt == nil {
+		t.Fatalf("revisit regressed completion: %+v", p)
+	}
+	if p.Score == nil || !p.Score.Equal(second) {
+		t.Fatalf("score = %v; want %s", p.Score, second)
+	}
+	if p.Attempts != 2 {
+		t.Fatalf("attempts = %d; want 2", p.Attempts)
+	}
+}
+
 type stubResolver struct{ id uuid.UUID }
 
 func (s stubResolver) ResolveActor(_ context.Context, _ uuid.UUID, _ string) (uuid.UUID, bool, error) {
@@ -397,6 +441,34 @@ func TestXAPIIngest(t *testing.T) {
 	list, err := store.ListStatements(ctx, tenant, &user, 10)
 	if err != nil || len(list) != 1 {
 		t.Fatalf("list statements: %v n=%d", err, len(list))
+	}
+
+	// A later "experienced" statement (maps to in_progress) arriving after
+	// completion must NOT regress the lesson's terminal "completed" status;
+	// completed_at must also survive. Mirrors the SCORM CommitRuntime guard.
+	regress := XAPIStatement{
+		Actor:  XAPIActor{Mbox: "mailto:jane@acme.test"},
+		Verb:   XAPIVerb{ID: "http://adlnet.gov/expapi/verbs/experienced"},
+		Object: XAPIObject{ID: "https://kapp/lessons/" + lesson.String()},
+	}
+	rres, err := store.Ingest(ctx, tenant, regress, stubResolver{user}, enrollmentFor, nil)
+	if err != nil {
+		t.Fatalf("ingest regress: %v", err)
+	}
+	if rres.ProgressStatus != ProgressCompleted {
+		t.Fatalf("xapi result regressed completion: %+v", rres)
+	}
+	var (
+		status2     string
+		completedAt *time.Time
+	)
+	err = platform.WithTenantTx(ctx, pool, tenant, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT status, completed_at FROM lesson_progress WHERE tenant_id=$1 AND enrollment_id=$2 AND lesson_id=$3`,
+			tenant, enr, lesson).Scan(&status2, &completedAt)
+	})
+	if err != nil || status2 != ProgressCompleted || completedAt == nil {
+		t.Fatalf("revisit regressed completion: err=%v status=%q completedAt=%v", err, status2, completedAt)
 	}
 }
 

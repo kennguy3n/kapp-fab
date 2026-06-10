@@ -328,10 +328,11 @@ func (s *XAPIStore) Ingest(
 		// Project onto lesson_progress when we have a full mapping.
 		if statusOK && enrollmentID != nil && lessonID != nil {
 			score := ScoreFromResult(st.Result)
-			if err := upsertProgressTx(ctx, tx, tenantID, *enrollmentID, *lessonID, status, score, s.now()); err != nil {
-				return err
+			persisted, perr := upsertProgressTx(ctx, tx, tenantID, *enrollmentID, *lessonID, status, score, s.now())
+			if perr != nil {
+				return perr
 			}
-			result.ProgressStatus = status
+			result.ProgressStatus = persisted
 			result.WroteProgress = true
 		}
 
@@ -397,27 +398,42 @@ func (s *XAPIStore) ListStatements(ctx context.Context, tenantID uuid.UUID, acto
 
 // upsertProgressTx writes a lesson_progress row inside an existing
 // transaction (shared by the xAPI projection and other in-tx writers).
-func upsertProgressTx(ctx context.Context, tx pgx.Tx, tenantID, enrollmentID, lessonID uuid.UUID, status string, scoreRaw *float64, now time.Time) error {
+// Completion is terminal: once a lesson is "completed", a later statement
+// (e.g. an xAPI "experienced"/"attempted" arriving out of order) must not
+// regress it back to "in_progress". Score and attempts still update so a
+// post-completion re-attempt is recorded without losing the completion.
+//
+// It returns the status actually persisted, which differs from the
+// requested status when the guard preserves an existing "completed" —
+// callers should report the returned value rather than the requested one
+// so the API never claims a regression the database refused to make.
+func upsertProgressTx(ctx context.Context, tx pgx.Tx, tenantID, enrollmentID, lessonID uuid.UUID, status string, scoreRaw *float64, now time.Time) (string, error) {
 	var completedAt *time.Time
 	if status == ProgressCompleted {
 		completedAt = &now
 	}
-	_, err := tx.Exec(ctx,
+	var persisted string
+	err := tx.QueryRow(ctx,
 		`INSERT INTO lesson_progress
 		    (tenant_id, enrollment_id, lesson_id, status, score, attempts,
 		     started_at, completed_at, updated_at)
 		 VALUES ($1,$2,$3,$4,$5,1,$6,$7,$6)
 		 ON CONFLICT (tenant_id, enrollment_id, lesson_id) DO UPDATE
-		    SET status       = EXCLUDED.status,
+		    SET status       = CASE
+		                          WHEN lesson_progress.status = 'completed'
+		                          THEN lesson_progress.status
+		                          ELSE EXCLUDED.status
+		                       END,
 		        score        = COALESCE(EXCLUDED.score, lesson_progress.score),
 		        attempts     = lesson_progress.attempts + 1,
 		        started_at   = COALESCE(lesson_progress.started_at, EXCLUDED.started_at),
 		        completed_at = COALESCE(lesson_progress.completed_at, EXCLUDED.completed_at),
-		        updated_at   = EXCLUDED.updated_at`,
+		        updated_at   = EXCLUDED.updated_at
+		 RETURNING status`,
 		tenantID, enrollmentID, lessonID, status, scoreRaw, now, completedAt,
-	)
+	).Scan(&persisted)
 	if err != nil {
-		return fmt.Errorf("project xapi to lesson_progress: %w", err)
+		return "", fmt.Errorf("project xapi to lesson_progress: %w", err)
 	}
-	return nil
+	return persisted, nil
 }

@@ -120,6 +120,16 @@ export function ScormPlayer({
   useEffect(() => {
     let cancelled = false;
     const store = storeRef.current;
+    // storeRef persists across effect re-runs, so when lessonId /
+    // enrollmentId / version change we must drop the previous lesson's CMI
+    // data — otherwise the new SCO's LMSGetValue would read stale values
+    // (e.g. the prior lesson's score) and projectCMI would commit them to
+    // the new lesson's row. Also re-gate the iframe until the new lesson's
+    // resume state has hydrated.
+    store.clear();
+    setHydrated(false);
+    setStatus("loading");
+    setError(null);
     let lastError = "0";
 
     const flush = async (terminate: boolean) => {
