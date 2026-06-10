@@ -14,6 +14,7 @@
 // krecords, so a hand-rolled transition table keeps the legal moves close
 // to the data and the error surface a typed error instead of a 404 for a
 // missing per-tenant workflow definition.
+
 package hr
 
 import (
@@ -928,12 +929,20 @@ func (s *RecruitmentStore) AdvanceApplication(ctx context.Context, tenantID, app
 		// max_positions) and flip it to 'filled' when the last slot is
 		// taken. Done in the same tx so the count can never drift from
 		// the set of hired applications.
+		//
+		// The auto-flip only fires when the opening is currently 'open':
+		// open→filled is the only legal move into 'filled' per
+		// openingTransitions, so a draft / on_hold / closed / already-
+		// filled opening keeps its status (its positions_filled still
+		// increments). This keeps the system-driven hire path from
+		// silently performing a transition the manual lifecycle would
+		// reject.
 		if newStatus == AppStatusHired {
 			if _, err := tx.Exec(ctx,
 				`UPDATE job_openings
 				    SET positions_filled = LEAST(positions_filled + 1, max_positions),
 				        status = CASE WHEN positions_filled + 1 >= max_positions
-				                      AND status NOT IN ('closed') THEN 'filled' ELSE status END,
+				                      AND status = 'open' THEN 'filled' ELSE status END,
 				        updated_at = now()
 				  WHERE tenant_id = $1 AND id = $2`,
 				tenantID, out.JobOpeningID); err != nil {
@@ -1568,20 +1577,34 @@ func (s *RecruitmentStore) reconcileHiredEmployee(ctx context.Context, tenantID,
 	if err != nil {
 		return uuid.Nil, err
 	}
-	// Pull designation / joining date from the most recent offer, if any.
+	// Pull designation / joining date for the employee prefill. The
+	// accepted offer's terms take precedence — the employee record must
+	// reflect what the candidate actually accepted, never a newer draft
+	// or sent offer that was superseded. Only when no offer was accepted
+	// do we fall back to a best-effort prefill from the most recent offer
+	// carrying each field (offers are newest-first).
 	var designation string
 	var joiningDate *time.Time
 	if offers, oerr := s.ListOfferLetters(ctx, tenantID, applicationID); oerr == nil {
+		var accepted *OfferLetter
 		for i := range offers {
-			o := &offers[i]
-			if o.Designation != "" {
-				designation = o.Designation
-			}
-			if o.JoiningDate != nil {
-				joiningDate = o.JoiningDate
-			}
-			if o.Status == OfferStatusAccepted {
+			if offers[i].Status == OfferStatusAccepted {
+				accepted = &offers[i]
 				break
+			}
+		}
+		if accepted != nil {
+			designation = accepted.Designation
+			joiningDate = accepted.JoiningDate
+		} else {
+			for i := range offers {
+				o := &offers[i]
+				if designation == "" && o.Designation != "" {
+					designation = o.Designation
+				}
+				if joiningDate == nil && o.JoiningDate != nil {
+					joiningDate = o.JoiningDate
+				}
 			}
 		}
 	}

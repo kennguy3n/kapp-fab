@@ -89,3 +89,31 @@ func TestOfferApprovalDispatcherGuards(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveDispatchActor verifies the offer dispatch is attributed to
+// the approver from the payload when present and parseable, and falls
+// back to the system actor for absent or malformed actor ids.
+func TestResolveDispatchActor(t *testing.T) {
+	t.Parallel()
+
+	approver := uuid.New()
+	cases := []struct {
+		name    string
+		actorID string
+		want    uuid.UUID
+	}{
+		{"valid approver", approver.String(), approver},
+		{"absent actor_id", "", workerSystemActor},
+		{"malformed actor_id", "not-a-uuid", workerSystemActor},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := resolveDispatchActor(approvalGrantedPayload{ActorID: c.actorID})
+			if got != c.want {
+				t.Errorf("resolveDispatchActor(%q) = %s, want %s", c.actorID, got, c.want)
+			}
+		})
+	}
+}

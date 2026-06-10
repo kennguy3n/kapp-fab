@@ -314,6 +314,22 @@ const ShiftCalendarPage = lazyNamed(
   () => import("./pages/ShiftCalendarPage"),
   "ShiftCalendarPage",
 );
+const RecruitmentDashboardPage = lazyNamed(
+  () => import("./pages/RecruitmentDashboardPage"),
+  "RecruitmentDashboardPage",
+);
+const JobOpeningsPage = lazyNamed(
+  () => import("./pages/JobOpeningsPage"),
+  "JobOpeningsPage",
+);
+const ApplicationsPage = lazyNamed(
+  () => import("./pages/ApplicationsPage"),
+  "ApplicationsPage",
+);
+const InterviewSchedulePage = lazyNamed(
+  () => import("./pages/InterviewSchedulePage"),
+  "InterviewSchedulePage",
+);
 const SetupWizardPage = lazyNamed(
   () => import("./pages/SetupWizardPage"),
   "SetupWizardPage",
@@ -793,6 +809,14 @@ const navSections: NavSection[] = [
         to: "/hr/shifts",
         label: "Shift Schedule",
         icon: navIcon(CalendarClock),
+      },
+      {
+        to: "/hr/recruitment",
+        label: "Recruitment",
+        icon: navIcon(UserPlus),
+        // Gated on FeatureRecruitment on top of the HR section gate,
+        // matching the backend's /api/v1/hr/recruitment/* routes.
+        requires: ["recruitment"],
       },
     ],
   },
@@ -1899,6 +1923,22 @@ function AppShell() {
               <Route path="/hr/org-chart" element={<OrgChartPage />} />
               <Route path="/hr/payroll" element={<PayrollPage />} />
               <Route path="/hr/shifts" element={<ShiftCalendarPage />} />
+              <Route
+                path="/hr/recruitment"
+                element={<RecruitmentDashboardPage />}
+              />
+              <Route
+                path="/hr/recruitment/job-openings"
+                element={<JobOpeningsPage />}
+              />
+              <Route
+                path="/hr/recruitment/applications"
+                element={<ApplicationsPage />}
+              />
+              <Route
+                path="/hr/recruitment/interviews"
+                element={<InterviewSchedulePage />}
+              />
               <Route path="/pos" element={<POSPage />} />
               <Route path="/projects/gantt" element={<ProjectGanttPage />} />
               <Route

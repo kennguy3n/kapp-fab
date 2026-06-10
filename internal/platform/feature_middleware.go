@@ -156,6 +156,16 @@ func featureFromKType(ktype string) string {
 	switch ktype {
 	case "sales.pos_profile", "sales.pos_invoice":
 		return tenant.FeaturePOS
+	case "hr.job_opening", "hr.job_application", "hr.interview", "hr.offer_letter":
+		// Recruitment KTypes share the "hr" prefix with the HR
+		// feature gate, so they must be matched on the full ktype
+		// string before the prefix switch — otherwise a tenant with
+		// HR enabled but recruitment disabled would slip past the
+		// FeatureRecruitment gate via /api/v1/records/hr.job_opening
+		// (and the other three), reaching recruitment data the plan
+		// doesn't license. Mirrors the dedicated /api/v1/hr/recruitment/*
+		// route gate in services/api/routes.go.
+		return tenant.FeatureRecruitment
 	}
 	dot := strings.IndexByte(ktype, '.')
 	if dot == -1 {

@@ -27,9 +27,13 @@ type offerApprovalDispatcher struct {
 
 // approvalGrantedPayload is the subset of the approval.granted event
 // payload (internal/workflow/approvals.go Decide) this dispatcher needs.
+// ActorID is the approver who granted the final step; forwarding it
+// attributes the offer dispatch to the hiring manager rather than the
+// system actor, giving the audit trail precise attribution.
 type approvalGrantedPayload struct {
 	RecordKType string `json:"record_ktype"`
 	RecordID    string `json:"record_id"`
+	ActorID     string `json:"actor_id"`
 }
 
 // handle dispatches the approved offer when e is an approval.granted
@@ -54,7 +58,20 @@ func (d *offerApprovalDispatcher) handle(ctx context.Context, e events.Event) {
 	if err != nil {
 		return
 	}
-	if _, err := d.store.DispatchApprovedOffer(ctx, e.TenantID, workerSystemActor, offerID); err != nil {
+	if _, err := d.store.DispatchApprovedOffer(ctx, e.TenantID, resolveDispatchActor(p), offerID); err != nil {
 		log.Printf("worker: dispatch approved offer tenant=%s offer=%s: %v", e.TenantID, offerID, err)
 	}
+}
+
+// resolveDispatchActor attributes the offer dispatch to the approver who
+// granted the offer when the payload carries a parseable actor_id, and
+// falls back to the system actor so a malformed/absent id never blocks
+// delivery.
+func resolveDispatchActor(p approvalGrantedPayload) uuid.UUID {
+	if p.ActorID != "" {
+		if approver, err := uuid.Parse(p.ActorID); err == nil {
+			return approver
+		}
+	}
+	return workerSystemActor
 }

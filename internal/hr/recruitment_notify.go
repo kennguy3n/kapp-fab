@@ -8,6 +8,7 @@
 // worker turns the envelope into an email best-effort. A missing
 // applicant email yields a nil envelope (no email channel), which the
 // router simply ignores.
+
 package hr
 
 import "fmt"

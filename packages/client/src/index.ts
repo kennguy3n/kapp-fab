@@ -325,6 +325,21 @@ async function buildApiError(res: Response): Promise<ApiError> {
   return new ApiError(res.status, res.statusText, parsed, message);
 }
 
+// buildQuery turns an optional filter object into a "?a=b&c=d" string,
+// skipping undefined / empty values and URL-encoding the rest. Returns
+// "" when no filters are set so callers can append it unconditionally.
+function buildQuery(
+  filter?: Record<string, string | undefined>
+): string {
+  if (!filter) return "";
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filter)) {
+    if (value !== undefined && value !== "") params.set(key, value);
+  }
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
+
 export class ApiClient {
   constructor(private readonly cfg: ClientConfig) {}
 
@@ -999,6 +1014,189 @@ export class ApiClient {
   listPayRunPayslips(payRunId: string): Promise<KRecord[]> {
     return this.request(
       `/hr/pay-runs/${encodeURIComponent(payRunId)}/payslips`
+    );
+  }
+
+  // --- Recruitment (Session 16) ----------------------------------------
+  //
+  // The recruitment surface lives behind the FeatureRecruitment flag and
+  // is served by dedicated typed tables (not the generic KRecord route),
+  // so these methods target /hr/recruitment/* and return the typed rows
+  // the Go store emits. All mutating calls carry an Idempotency-Key per
+  // the platform middleware contract.
+
+  listJobOpenings(filter?: {
+    status?: string;
+    department?: string;
+  }): Promise<JobOpening[]> {
+    const qs = buildQuery(filter);
+    return this.request(`/hr/recruitment/job-openings${qs}`);
+  }
+
+  getJobOpening(id: string): Promise<JobOpening> {
+    return this.request(
+      `/hr/recruitment/job-openings/${encodeURIComponent(id)}`
+    );
+  }
+
+  createJobOpening(input: JobOpeningInput): Promise<JobOpening> {
+    return this.request("/hr/recruitment/job-openings", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateJobOpening(id: string, input: JobOpeningInput): Promise<JobOpening> {
+    return this.request(
+      `/hr/recruitment/job-openings/${encodeURIComponent(id)}`,
+      {
+        method: "PUT",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(input),
+      }
+    );
+  }
+
+  publishJobOpening(id: string): Promise<JobOpening> {
+    return this.request(
+      `/hr/recruitment/job-openings/${encodeURIComponent(id)}/publish`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+
+  closeJobOpening(id: string): Promise<JobOpening> {
+    return this.request(
+      `/hr/recruitment/job-openings/${encodeURIComponent(id)}/close`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+
+  listApplications(filter?: {
+    job_opening_id?: string;
+    status?: string;
+  }): Promise<JobApplication[]> {
+    const qs = buildQuery(filter);
+    return this.request(`/hr/recruitment/applications${qs}`);
+  }
+
+  getApplication(id: string): Promise<JobApplication> {
+    return this.request(
+      `/hr/recruitment/applications/${encodeURIComponent(id)}`
+    );
+  }
+
+  createApplication(input: CreateApplicationInput): Promise<JobApplication> {
+    return this.request("/hr/recruitment/applications", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateApplication(
+    id: string,
+    input: UpdateApplicationInput
+  ): Promise<JobApplication> {
+    return this.request(
+      `/hr/recruitment/applications/${encodeURIComponent(id)}`,
+      {
+        method: "PUT",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(input),
+      }
+    );
+  }
+
+  advanceApplication(id: string, status: string): Promise<JobApplication> {
+    return this.request(
+      `/hr/recruitment/applications/${encodeURIComponent(id)}/advance`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ status }),
+      }
+    );
+  }
+
+  rejectApplication(id: string, reason?: string): Promise<JobApplication> {
+    return this.request(
+      `/hr/recruitment/applications/${encodeURIComponent(id)}/reject`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ reason: reason ?? "" }),
+      }
+    );
+  }
+
+  listInterviews(filter?: {
+    application_id?: string;
+    status?: string;
+  }): Promise<Interview[]> {
+    const qs = buildQuery(filter);
+    return this.request(`/hr/recruitment/interviews${qs}`);
+  }
+
+  createInterview(input: CreateInterviewInput): Promise<Interview> {
+    return this.request("/hr/recruitment/interviews", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  completeInterview(
+    id: string,
+    input: CompleteInterviewInput
+  ): Promise<Interview> {
+    return this.request(
+      `/hr/recruitment/interviews/${encodeURIComponent(id)}/complete`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(input),
+      }
+    );
+  }
+
+  listOfferLetters(applicationId?: string): Promise<OfferLetter[]> {
+    const qs = buildQuery({ application_id: applicationId });
+    return this.request(`/hr/recruitment/offer-letters${qs}`);
+  }
+
+  createOfferLetter(input: CreateOfferLetterInput): Promise<OfferLetter> {
+    return this.request("/hr/recruitment/offer-letters", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  sendOfferLetter(id: string): Promise<SendOfferLetterResponse> {
+    return this.request(
+      `/hr/recruitment/offer-letters/${encodeURIComponent(id)}/send`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+
+  respondOfferLetter(id: string, response: string): Promise<OfferLetter> {
+    return this.request(
+      `/hr/recruitment/offer-letters/${encodeURIComponent(id)}/respond`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ response }),
+      }
     );
   }
 
@@ -2694,6 +2892,227 @@ export interface InventoryBatch {
   created_by: string;
   created_at: string;
   updated_at: string;
+}
+
+// --- Recruitment (Session 16) ------------------------------------------
+//
+// These mirror the Go domain structs in internal/hr/recruitment_store.go.
+// Money fields arrive as JSON strings (decimal.Decimal marshals to a
+// quoted number) and timestamps as RFC3339 strings, matching the rest
+// of the SDK.
+
+export type JobOpeningStatus =
+  | "draft"
+  | "open"
+  | "on_hold"
+  | "closed"
+  | "filled";
+
+export type EmploymentType =
+  | "full_time"
+  | "part_time"
+  | "contract"
+  | "intern";
+
+export interface JobOpening {
+  id: string;
+  tenant_id: string;
+  title: string;
+  department?: string;
+  description?: string;
+  requirements?: string;
+  employment_type: EmploymentType | string;
+  location?: string;
+  salary_range_min?: string | null;
+  salary_range_max?: string | null;
+  currency: string;
+  status: JobOpeningStatus;
+  hiring_manager_id?: string | null;
+  max_positions: number;
+  positions_filled: number;
+  published_at?: string | null;
+  closes_at?: string | null;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface JobOpeningInput {
+  title: string;
+  department?: string;
+  description?: string;
+  requirements?: string;
+  employment_type?: EmploymentType | string;
+  location?: string;
+  salary_range_min?: string;
+  salary_range_max?: string;
+  currency?: string;
+  hiring_manager_id?: string;
+  max_positions?: number;
+  closes_at?: string;
+}
+
+export type ApplicationStatus =
+  | "applied"
+  | "screening"
+  | "shortlisted"
+  | "interview"
+  | "offered"
+  | "hired"
+  | "rejected"
+  | "withdrawn";
+
+export type ApplicationSource =
+  | "website"
+  | "referral"
+  | "linkedin"
+  | "agency"
+  | "other";
+
+export interface JobApplication {
+  id: string;
+  tenant_id: string;
+  job_opening_id: string;
+  applicant_name: string;
+  applicant_email?: string;
+  phone?: string;
+  resume_file_id?: string | null;
+  cover_letter?: string;
+  source: ApplicationSource | string;
+  referrer_employee_id?: string | null;
+  status: ApplicationStatus;
+  rating?: number | null;
+  notes?: string;
+  hired_employee_id?: string | null;
+  applied_at: string;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateApplicationInput {
+  job_opening_id: string;
+  applicant_name: string;
+  applicant_email?: string;
+  phone?: string;
+  resume_file_id?: string;
+  cover_letter?: string;
+  source?: ApplicationSource | string;
+  referrer_employee_id?: string;
+  rating?: number;
+  notes?: string;
+}
+
+export type UpdateApplicationInput = Omit<
+  CreateApplicationInput,
+  "job_opening_id"
+>;
+
+export type InterviewType =
+  | "phone"
+  | "video"
+  | "in_person"
+  | "panel"
+  | "technical"
+  | "cultural";
+
+export type InterviewStatus =
+  | "scheduled"
+  | "completed"
+  | "cancelled"
+  | "no_show";
+
+export type InterviewRecommendation =
+  | "strong_yes"
+  | "yes"
+  | "neutral"
+  | "no"
+  | "strong_no";
+
+export interface Interview {
+  id: string;
+  tenant_id: string;
+  application_id: string;
+  interviewer_id?: string | null;
+  interview_type: InterviewType | string;
+  scheduled_at?: string | null;
+  duration_minutes: number;
+  location?: string;
+  meeting_link?: string;
+  status: InterviewStatus;
+  rating?: number | null;
+  feedback?: string;
+  recommendation?: InterviewRecommendation | string;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateInterviewInput {
+  application_id: string;
+  interviewer_id?: string;
+  interview_type?: InterviewType | string;
+  scheduled_at?: string;
+  duration_minutes?: number;
+  location?: string;
+  meeting_link?: string;
+}
+
+export interface CompleteInterviewInput {
+  rating?: number;
+  feedback?: string;
+  recommendation?: InterviewRecommendation | string;
+}
+
+export type OfferLetterStatus =
+  | "draft"
+  | "sent"
+  | "accepted"
+  | "rejected"
+  | "expired"
+  | "withdrawn";
+
+export interface OfferLetter {
+  id: string;
+  tenant_id: string;
+  application_id: string;
+  employee_template_id?: string | null;
+  designation?: string;
+  department?: string;
+  salary?: string | null;
+  currency: string;
+  joining_date?: string | null;
+  probation_months: number;
+  benefits?: unknown;
+  status: OfferLetterStatus;
+  approval_id?: string | null;
+  sent_at?: string | null;
+  responded_at?: string | null;
+  valid_until?: string | null;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateOfferLetterInput {
+  application_id: string;
+  employee_template_id?: string;
+  designation?: string;
+  department?: string;
+  salary?: string;
+  currency?: string;
+  joining_date?: string;
+  probation_months?: number;
+  benefits?: unknown;
+  valid_until?: string;
+}
+
+// sendOfferLetter returns the (possibly still-draft) offer plus the
+// approval that gates dispatch: when `approval` is present the offer
+// stays in 'draft' until the hiring manager grants it.
+export interface SendOfferLetterResponse {
+  offer: OfferLetter;
+  approval?: unknown;
 }
 
 export interface BOM {

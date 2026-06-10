@@ -14,6 +14,7 @@
 // KRecords (krecords table), not a typed table, so those columns are bare
 // UUIDs with no SQL foreign key — the same way the rest of the HR module
 // links to employees.
+
 package hr
 
 import (
