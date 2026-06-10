@@ -49,7 +49,9 @@ import {
   Activity,
   Archive,
   ArrowLeftRight,
+  Award,
   Banknote,
+  BarChart3,
   BookOpen,
   BookText,
   BookUser,
@@ -85,6 +87,7 @@ import {
   LayoutGrid,
   LifeBuoy,
   MapPin,
+  MessageSquare,
   Milestone,
   Network,
   Package,
@@ -273,6 +276,19 @@ const LearnerProgressPage = lazyNamed(
   () => import("./pages/LearnerProgressPage"),
   "LearnerProgressPage",
 );
+const LearningPathsPage = lazyNamed(
+  () => import("./pages/LearningPathsPage"),
+  "LearningPathsPage",
+);
+const InstructorDashboardPage = lazyNamed(
+  () => import("./pages/InstructorDashboardPage"),
+  "InstructorDashboardPage",
+);
+const DiscussionsPage = lazyNamed(
+  () => import("./pages/DiscussionsPage"),
+  "DiscussionsPage",
+);
+const BadgesPage = lazyNamed(() => import("./pages/BadgesPage"), "BadgesPage");
 const ImportPage = lazyNamed(() => import("./pages/ImportPage"), "ImportPage");
 const ImportMappingPage = lazyNamed(
   () => import("./pages/ImportMappingPage"),
@@ -829,6 +845,26 @@ const navSections: NavSection[] = [
         to: "/lms/progress",
         label: "Learner Progress",
         icon: navIcon(TrendingUp),
+      },
+      {
+        to: "/lms/learning-paths",
+        label: "Learning Paths",
+        icon: navIcon(Milestone),
+      },
+      {
+        to: "/lms/instructor",
+        label: "Instructor Dashboard",
+        icon: navIcon(BarChart3),
+      },
+      {
+        to: "/lms/discussions",
+        label: "Discussions",
+        icon: navIcon(MessageSquare),
+      },
+      {
+        to: "/lms/badges",
+        label: "Badges",
+        icon: navIcon(Award),
       },
     ],
   },
@@ -1935,6 +1971,16 @@ function AppShell() {
                 path="/lms/progress/:enrollmentId"
                 element={<LearnerProgressPage />}
               />
+              <Route
+                path="/lms/learning-paths"
+                element={<LearningPathsPage />}
+              />
+              <Route
+                path="/lms/instructor"
+                element={<InstructorDashboardPage />}
+              />
+              <Route path="/lms/discussions" element={<DiscussionsPage />} />
+              <Route path="/lms/badges" element={<BadgesPage />} />
               <Route path="/records/:ktype" element={<RecordListPage />} />
               <Route
                 path="/records/:ktype/new"

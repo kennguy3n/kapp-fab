@@ -97,6 +97,124 @@ export interface KRecord {
   updated_at: string;
 }
 
+// --- LMS deep-enhancement (Session 17) -------------------------------
+export interface LearningPath {
+  tenant_id: string;
+  id: string;
+  title: string;
+  description: string;
+  status: "draft" | "published" | "archived";
+  target_roles: string[] | null;
+  estimated_duration_hours: number;
+  difficulty: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LearningPathCourse {
+  tenant_id: string;
+  id: string;
+  learning_path_id: string;
+  course_id: string;
+  sequence_order: number;
+  is_mandatory: boolean;
+  prerequisite_course_ids: string[] | null;
+}
+
+export interface Badge {
+  tenant_id: string;
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  criteria_type: string;
+  criteria_value: Record<string, unknown>;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BadgeAward {
+  tenant_id: string;
+  id: string;
+  user_id: string;
+  badge_id: string;
+  earned_at: string;
+}
+
+export interface DiscussionThread {
+  tenant_id: string;
+  id: string;
+  course_id: string;
+  lesson_id?: string;
+  author_id: string;
+  title: string;
+  body: string;
+  status: "open" | "resolved" | "closed";
+  pinned: boolean;
+  reply_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DiscussionReply {
+  tenant_id: string;
+  id: string;
+  thread_id: string;
+  author_id: string;
+  body: string;
+  is_answer: boolean;
+  source: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScormCMIData {
+  version: string;
+  lesson_status?: string;
+  completion_status?: string;
+  success_status?: string;
+  score_raw?: number;
+  score_scaled?: number;
+  session_time?: string;
+  suspend_data?: string;
+}
+
+export interface ScormRuntimeState {
+  status: string;
+  score?: string;
+  time_spent_seconds: number;
+  suspend_data: string;
+  exists: boolean;
+}
+
+export interface LessonDropOff {
+  lesson_id: string;
+  reached: number;
+  completed: number;
+  drop_off_rate: number;
+}
+
+export interface LearnerProgressRow {
+  user_id: string;
+  enrollment_id: string;
+  status: string;
+  lessons_completed: number;
+  lessons_total: number;
+  average_score?: string;
+}
+
+export interface CourseAnalytics {
+  course_id: string;
+  enrollment_count: number;
+  completed_count: number;
+  completion_rate: number;
+  average_score?: string;
+  lesson_drop_off: LessonDropOff[];
+  per_learner: LearnerProgressRow[];
+}
+
 export interface Tenant {
   id: string;
   slug: string;
@@ -533,6 +651,137 @@ export class ApiClient {
   // --- KRecord CRUD ------------------------------------------------------
   listRecords(ktype: string): Promise<KRecord[]> {
     return this.request(`/records/${encodeURIComponent(ktype)}`);
+  }
+
+  // --- LMS deep-enhancement (Session 17) ------------------------------
+  // All routes live under /api/v1/lms and are gated behind FeatureLMS;
+  // a tenant without the flag receives 403 and the calling page renders
+  // its "not available on your plan" empty state.
+  listLearningPaths(status?: string): Promise<{ learning_paths: LearningPath[] }> {
+    const q = status ? `?status=${encodeURIComponent(status)}` : "";
+    return this.request(`/lms/learning-paths${q}`);
+  }
+
+  getLearningPath(
+    id: string,
+  ): Promise<{ learning_path: LearningPath; courses: LearningPathCourse[] }> {
+    return this.request(`/lms/learning-paths/${encodeURIComponent(id)}`);
+  }
+
+  createLearningPath(input: {
+    title: string;
+    description?: string;
+    status?: string;
+    target_roles?: string[];
+    estimated_duration_hours?: number;
+    difficulty?: string;
+  }): Promise<LearningPath> {
+    return this.request(`/lms/learning-paths`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  enrollInLearningPath(
+    id: string,
+    userId?: string,
+  ): Promise<KRecord> {
+    return this.request(`/lms/learning-paths/${encodeURIComponent(id)}/enroll`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(userId ? { user_id: userId } : {}),
+    });
+  }
+
+  listBadges(): Promise<{ badges: Badge[] }> {
+    return this.request(`/lms/badges`);
+  }
+
+  listBadgeAwards(): Promise<{ awards: BadgeAward[] }> {
+    return this.request(`/lms/badges/awards`);
+  }
+
+  listDiscussions(courseId?: string): Promise<{ threads: DiscussionThread[] }> {
+    const q = courseId ? `?course_id=${encodeURIComponent(courseId)}` : "";
+    return this.request(`/lms/discussions${q}`);
+  }
+
+  getDiscussion(
+    id: string,
+  ): Promise<{ thread: DiscussionThread; replies: DiscussionReply[] }> {
+    return this.request(`/lms/discussions/${encodeURIComponent(id)}`);
+  }
+
+  createDiscussion(input: {
+    course_id: string;
+    lesson_id?: string;
+    title: string;
+    body: string;
+  }): Promise<DiscussionThread> {
+    return this.request(`/lms/discussions`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  replyToDiscussion(
+    id: string,
+    body: string,
+  ): Promise<DiscussionReply> {
+    return this.request(
+      `/lms/discussions/${encodeURIComponent(id)}/replies`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ body }),
+      },
+    );
+  }
+
+  getCourseAnalytics(courseId: string): Promise<CourseAnalytics> {
+    return this.request(
+      `/lms/courses/${encodeURIComponent(courseId)}/analytics`,
+    );
+  }
+
+  scormInitialize(
+    lessonId: string,
+    enrollmentId: string,
+  ): Promise<ScormRuntimeState> {
+    return this.request(
+      `/lms/scorm/${encodeURIComponent(lessonId)}/initialize`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ enrollment_id: enrollmentId }),
+      },
+    );
+  }
+
+  scormCommit(
+    lessonId: string,
+    enrollmentId: string,
+    cmi: ScormCMIData,
+  ): Promise<KRecord> {
+    return this.request(`/lms/scorm/${encodeURIComponent(lessonId)}/commit`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ enrollment_id: enrollmentId, cmi }),
+    });
+  }
+
+  scormTerminate(
+    lessonId: string,
+    enrollmentId: string,
+    cmi: ScormCMIData,
+  ): Promise<KRecord> {
+    return this.request(`/lms/scorm/${encodeURIComponent(lessonId)}/terminate`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ enrollment_id: enrollmentId, cmi }),
+    });
   }
 
   /** Finalize a sales.pos_invoice. Reuses the standard
