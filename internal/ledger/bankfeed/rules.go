@@ -203,7 +203,10 @@ func (s *RuleStore) UpsertRule(ctx context.Context, r Rule) (*Rule, error) {
 	now := s.now()
 	out := r
 	err := dbutil.WithTenantTx(ctx, s.pool, r.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
+		// RETURNING created_at/updated_at so the update path reports the
+		// true persisted created_at (the DB keeps the original; it is not
+		// in the SET clause) rather than the current time.
+		if err := tx.QueryRow(ctx,
 			`INSERT INTO bank_reconciliation_rules
 			     (tenant_id, id, priority, condition_type, condition_value,
 			      target_account_code, target_cost_center, auto_approve,
@@ -218,11 +221,12 @@ func (s *RuleStore) UpsertRule(ctx context.Context, r Rule) (*Rule, error) {
 			     auto_approve        = EXCLUDED.auto_approve,
 			     bank_account_id     = EXCLUDED.bank_account_id,
 			     enabled             = EXCLUDED.enabled,
-			     updated_at          = EXCLUDED.updated_at`,
+			     updated_at          = EXCLUDED.updated_at
+			 RETURNING created_at, updated_at`,
 			r.TenantID, r.ID, r.Priority, r.ConditionType, r.ConditionValue,
 			nullIfEmpty(r.TargetAccountCode), nullIfEmpty(r.TargetCostCenter), r.AutoApprove,
 			r.BankAccountID, r.Enabled, now,
-		); err != nil {
+		).Scan(&out.CreatedAt, &out.UpdatedAt); err != nil {
 			return fmt.Errorf("bankfeed: upsert rule: %w", err)
 		}
 		return s.auditRule(ctx, tx, r, "finance.bank_feed.rule.upsert")
@@ -230,8 +234,6 @@ func (s *RuleStore) UpsertRule(ctx context.Context, r Rule) (*Rule, error) {
 	if err != nil {
 		return nil, err
 	}
-	out.CreatedAt = now
-	out.UpdatedAt = now
 	return &out, nil
 }
 

@@ -141,6 +141,29 @@ func TestConnectionStoreCRUDEncryptsAndIsolates(t *testing.T) {
 		t.Fatalf("cursor/last_sync not advanced: %+v", after)
 	}
 
+	// A credential refresh via UpsertConnection (LastSyncAt left nil) must
+	// NOT clobber the established sync position: COALESCE preserves it.
+	refreshed, err := store.UpsertConnection(ctx, Connection{
+		TenantID:      tenantID,
+		ID:            conn.ID,
+		BankAccountID: acctID,
+		Provider:      ProviderPlaid,
+		AccessToken:   "access-secret-rotated",
+		ExternalID:    "item-1",
+		Status:        StatusActive,
+		// LastSyncAt intentionally nil (caller updated credentials only).
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection (refresh): %v", err)
+	}
+	if refreshed.LastSyncAt == nil || !refreshed.LastSyncAt.Equal(*after.LastSyncAt) {
+		t.Fatalf("last_sync_at not preserved across credential refresh: got %v want %v",
+			refreshed.LastSyncAt, after.LastSyncAt)
+	}
+	if reread, _ := store.GetConnection(ctx, tenantID, conn.ID); reread.LastSyncAt == nil {
+		t.Fatal("last_sync_at nulled at rest after credential refresh")
+	}
+
 	// Active listing includes it; MarkError + SetStatus drive lifecycle.
 	active, err := store.ListActiveConnections(ctx, tenantID)
 	if err != nil || len(active) != 1 {

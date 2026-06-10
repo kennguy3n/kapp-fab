@@ -3,6 +3,7 @@ package bankfeed
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -163,6 +164,60 @@ func TestSyncOneDedupesOnResync(t *testing.T) {
 	}
 	if second.Inserted != 0 {
 		t.Fatalf("second inserted = %d; want 0 (deduped)", second.Inserted)
+	}
+}
+
+func TestSyncOneSkipsPendingLines(t *testing.T) {
+	tn := uuid.New()
+	conn := &Connection{ID: uuid.New(), TenantID: tn, BankAccountID: uuid.New(), Provider: "fake"}
+	settled := rawTxn("e1", "Coffee", "-4.50", time.Now())
+	pending := rawTxn("e2", "Pending auth", "-9.99", time.Now())
+	pending.Pending = true
+	prov := &fakeProvider{name: "fake", cursor: "c", raw: []RawTransaction{settled, pending}}
+	store := &fakeStore{}
+	h := newSyncHandlerForTest(&fakeConns{}, &fakeRules{}, NewRegistry(prov), store, nil)
+
+	res, err := h.SyncOne(context.Background(), tn, conn)
+	if err != nil {
+		t.Fatalf("SyncOne: %v", err)
+	}
+	if res.Fetched != 2 || res.Inserted != 1 || res.Skipped != 1 {
+		t.Fatalf("res = %+v; want fetched=2 inserted=1 skipped=1", res)
+	}
+	// The pending external_ref must not have been ingested, so the later
+	// settled version is free to land.
+	if store.seen["e2"] {
+		t.Error("pending line e2 should not be ingested")
+	}
+	if !store.seen["e1"] {
+		t.Error("settled line e1 should be ingested")
+	}
+}
+
+func TestSyncOneContentHashFallbackForEmptyExternalID(t *testing.T) {
+	tn := uuid.New()
+	conn := &Connection{ID: uuid.New(), TenantID: tn, BankAccountID: uuid.New(), Provider: "fake"}
+	// Provider supplies no stable id; the handler must synthesize a stable
+	// content hash so the line ingests and re-sync dedupes.
+	noID := rawTxn("", "Bank fee", "-2.00", time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC))
+	prov := &fakeProvider{name: "fake", cursor: "c", raw: []RawTransaction{noID}}
+	store := &fakeStore{}
+	h := newSyncHandlerForTest(&fakeConns{}, &fakeRules{}, NewRegistry(prov), store, nil)
+
+	first, err := h.SyncOne(context.Background(), tn, conn)
+	if err != nil {
+		t.Fatalf("SyncOne: %v", err)
+	}
+	if first.Inserted != 1 {
+		t.Fatalf("first inserted = %d; want 1 (content-hash ref)", first.Inserted)
+	}
+	if len(store.gotLines) != 1 || !strings.HasPrefix(store.gotLines[0].ExternalRef, "ch:") {
+		t.Fatalf("expected a ch:-prefixed external_ref; got %+v", store.gotLines)
+	}
+	// Same content re-fetched dedupes via the synthesized ref.
+	second, _ := h.SyncOne(context.Background(), tn, conn)
+	if second.Inserted != 0 {
+		t.Fatalf("second inserted = %d; want 0 (content-hash dedupe)", second.Inserted)
 	}
 }
 

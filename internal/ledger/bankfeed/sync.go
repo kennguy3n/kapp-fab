@@ -2,9 +2,12 @@ package bankfeed
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -167,6 +170,7 @@ func (h *SyncHandler) Handle(ctx context.Context, tenantID uuid.UUID, _ schedule
 // directly (the manual "Sync now" route reuses this).
 type SyncResult struct {
 	Fetched     int
+	Skipped     int // pending/unsettled lines deferred to a later sync
 	Inserted    int
 	Suggested   int
 	AutoMatched int
@@ -198,14 +202,31 @@ func (h *SyncHandler) SyncOne(ctx context.Context, tenantID uuid.UUID, conn *Con
 	res := &SyncResult{Fetched: len(raw), Cursor: cursor}
 
 	lines := make([]ledger.BankTransaction, 0, len(raw))
-	for _, rt := range raw {
+	for i := range raw {
+		rt := raw[i]
+		// Skip not-yet-settled lines: a pending authorization carries a
+		// provisional amount and a later sync delivers the settled version.
+		// Ingesting the pending row would also burn its ExternalID in the
+		// dedup index and block the settled line from ever landing.
+		if rt.Pending {
+			res.Skipped++
+			continue
+		}
+		ref := rt.ExternalID
+		if ref == "" {
+			// Provider supplies no stable id (per RawTransaction.ExternalID):
+			// fall back to a deterministic content hash so the same row
+			// re-fetched on a later sync dedupes via the unique external_ref
+			// index instead of duplicating.
+			ref = contentHashRef(conn.BankAccountID, rt)
+		}
 		lines = append(lines, ledger.BankTransaction{
 			BankAccountID: conn.BankAccountID,
 			ValueDate:     rt.ValueDate,
 			Description:   rt.Description,
 			Amount:        rt.Amount,
 			Currency:      rt.Currency,
-			ExternalRef:   rt.ExternalID,
+			ExternalRef:   ref,
 		})
 	}
 	inserted, err := h.store.SyncBankTransactions(ctx, tenantID, conn.BankAccountID, lines)
@@ -260,6 +281,23 @@ func (h *SyncHandler) SyncOne(ctx context.Context, tenantID uuid.UUID, conn *Con
 		return nil, fmt.Errorf("bankfeed: advance cursor: %w", err)
 	}
 	return res, nil
+}
+
+// contentHashRef derives a stable dedup key for a provider line that
+// carries no native id (RawTransaction.ExternalID empty). It hashes the
+// line's natural fields so the same statement row re-fetched on a later
+// sync collapses via the unique external_ref index rather than
+// duplicating. The "ch:" prefix keeps it from colliding with a real
+// provider id namespace.
+func contentHashRef(bankAccountID uuid.UUID, rt RawTransaction) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		bankAccountID.String(),
+		rt.ValueDate.UTC().Format(time.RFC3339),
+		rt.Amount.String(),
+		rt.Currency,
+		rt.Description,
+	}, "\x1f")))
+	return "ch:" + hex.EncodeToString(sum[:])
 }
 
 // sanitizeErr trims an error to a bounded, credential-free message for

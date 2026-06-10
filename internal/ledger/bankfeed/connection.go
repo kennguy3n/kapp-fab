@@ -139,14 +139,20 @@ func (s *ConnectionStore) UpsertConnection(ctx context.Context, c Connection) (*
 			     cursor            = EXCLUDED.cursor,
 			     external_id       = EXCLUDED.external_id,
 			     status            = EXCLUDED.status,
-			     last_sync_at      = EXCLUDED.last_sync_at,
+			     -- Preserve an established sync position across a
+			     -- credential refresh / re-link: a caller updating
+			     -- credentials may not repopulate last_sync_at, and
+			     -- clobbering it with NULL would make the next sync
+			     -- re-pull the full lookback window. COALESCE keeps the
+			     -- existing timestamp when the incoming value is NULL.
+			     last_sync_at      = COALESCE(EXCLUDED.last_sync_at, bank_feed_connections.last_sync_at),
 			     last_error        = EXCLUDED.last_error,
 			     updated_at        = EXCLUDED.updated_at
-			 RETURNING created_at, updated_at`,
+			 RETURNING created_at, updated_at, last_sync_at`,
 			c.TenantID, c.ID, c.BankAccountID, c.Provider, accessEnc,
 			refreshEnc, nullIfEmpty(c.Cursor), nullIfEmpty(c.ExternalID), c.Status,
 			c.LastSyncAt, nullIfEmpty(c.LastError), now,
-		).Scan(&out.CreatedAt, &out.UpdatedAt); err != nil {
+		).Scan(&out.CreatedAt, &out.UpdatedAt, &out.LastSyncAt); err != nil {
 			return fmt.Errorf("bankfeed: upsert connection: %w", err)
 		}
 		return s.auditConnection(ctx, tx, c, "finance.bank_feed.connection.upsert")
