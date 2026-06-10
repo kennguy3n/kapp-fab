@@ -228,7 +228,11 @@ func TestTierUpgradeTablesMatchBackupSourceList(t *testing.T) {
 		t.Fatalf("kapp-backup main.go: marker %q not found", marker)
 	}
 	rest := src[idx+len(marker):]
-	end := strings.Index(rest, "}")
+	// The slice literal's closing brace sits on its own line at column
+	// zero ("\n}"); searching for a bare "}" would stop early at any
+	// brace inside a comment (e.g. the `{id}` conflict-target note in
+	// the marketplace block), truncating the parsed list.
+	end := strings.Index(rest, "\n}")
 	if end == -1 {
 		t.Fatalf("kapp-backup main.go: closing brace not found")
 	}
