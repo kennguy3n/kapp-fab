@@ -19,7 +19,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
 
+	"github.com/kennguy3n/kapp-fab/internal/audit"
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
+	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 )
 
@@ -220,6 +222,99 @@ func (s *PGStore) ImportBankStatement(ctx context.Context, tenantID, bankAccount
 		return nil, err
 	}
 	return out, nil
+}
+
+// SyncBankTransactions ingests a batch of feed-sourced statement lines,
+// deduplicating on the provider's external reference so the hourly
+// scheduler's overlapping re-fetch is idempotent. Only the rows that
+// were genuinely new (inserted, not conflict-skipped) are returned, so
+// the caller runs rules/matcher on fresh lines exactly once. A single
+// finance.bank_transaction.synced outbox event carries the per-sync
+// counts. The whole batch is one tenant-scoped transaction.
+//
+// Lines must already carry ExternalRef (empty refs are rejected — the
+// CSV import path uses ImportBankStatement instead). Currency/status
+// defaults mirror ImportBankStatement.
+func (s *PGStore) SyncBankTransactions(ctx context.Context, tenantID, bankAccountID uuid.UUID, lines []BankTransaction) ([]BankTransaction, error) {
+	if tenantID == uuid.Nil || bankAccountID == uuid.Nil {
+		return nil, errors.New("ledger: tenant_id and bank_account_id required")
+	}
+	if len(lines) == 0 {
+		return nil, nil
+	}
+	inserted := make([]BankTransaction, 0, len(lines))
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		for i := range lines {
+			ln := lines[i]
+			if ln.ExternalRef == "" {
+				return errors.New("ledger: SyncBankTransactions requires external_ref on every line")
+			}
+			if ln.ID == uuid.Nil {
+				ln.ID = uuid.New()
+			}
+			ln.TenantID = tenantID
+			ln.BankAccountID = bankAccountID
+			if ln.Status == "" {
+				ln.Status = BankTxnUnreconciled
+			}
+			var insertedID uuid.UUID
+			err := tx.QueryRow(ctx,
+				`INSERT INTO bank_transactions
+				     (id, tenant_id, bank_account_id, value_date, description,
+				      amount, currency, status, matched_entry_id, external_ref)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				 ON CONFLICT (tenant_id, bank_account_id, external_ref)
+				     WHERE external_ref IS NOT NULL AND external_ref <> ''
+				 DO NOTHING
+				 RETURNING id`,
+				ln.ID, ln.TenantID, ln.BankAccountID, ln.ValueDate,
+				nullIfEmpty(ln.Description), ln.Amount, ln.Currency, ln.Status,
+				ln.MatchedEntryID, ln.ExternalRef,
+			).Scan(&insertedID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue // duplicate — already ingested on a prior sync
+			}
+			if err != nil {
+				return fmt.Errorf("ledger: sync bank_transaction: %w", err)
+			}
+			inserted = append(inserted, ln)
+		}
+		if len(inserted) > 0 && s.publisher != nil {
+			payload, _ := json.Marshal(map[string]any{
+				"bank_account_id": bankAccountID,
+				"count":           len(inserted),
+				"synced_at":       s.now(),
+			})
+			if err := s.publisher.EmitTx(ctx, tx, events.Event{
+				TenantID: tenantID,
+				Type:     "finance.bank_transaction.synced",
+				Payload:  payload,
+			}); err != nil {
+				return fmt.Errorf("ledger: emit synced event: %w", err)
+			}
+		}
+		if s.auditor != nil && len(inserted) > 0 {
+			after, _ := json.Marshal(map[string]any{
+				"bank_account_id": bankAccountID,
+				"count":           len(inserted),
+			})
+			if err := s.auditor.LogTx(ctx, tx, audit.Entry{
+				TenantID:    tenantID,
+				ActorKind:   audit.ActorSystem,
+				Action:      "finance.bank_feed.transactions.synced",
+				TargetKType: KTypeBankAccount,
+				TargetID:    &bankAccountID,
+				After:       after,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return inserted, nil
 }
 
 // ReconcileTransaction searches for a journal entry whose total

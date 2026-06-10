@@ -503,6 +503,44 @@ type Config struct {
 	// KAPP_READ_REPLICA_MAX_CONNS and KAPP_READ_REPLICA_MIN_CONNS.
 	ReadReplicaMaxConns int32
 	ReadReplicaMinConns int32
+
+	// ---- Bank feed providers (Session 15) ----------------------------
+	// Live bank-feed integrations are opt-in: a provider activates only
+	// when its credentials are configured, so a deployment that does not
+	// use bank feeds carries zero attack surface. When a provider IS
+	// partially configured in production (e.g. a client id without its
+	// secret) Validate fails closed — a half-set credential pair almost
+	// always means a deploy mistake, and silently disabling the feed
+	// would strand tenants who expect it.
+
+	// PlaidClientID / PlaidSecret authenticate to the Plaid API (US/CA
+	// coverage). PlaidEnv selects the host: sandbox | development |
+	// production. The secret is never logged and is treated as
+	// security-critical in production.
+	PlaidClientID string
+	PlaidSecret   string
+	PlaidEnv      string
+
+	// GoCardlessSecretID / GoCardlessSecretKey authenticate to the
+	// GoCardless Bank Account Data API (EU/UK Open Banking).
+	GoCardlessSecretID  string
+	GoCardlessSecretKey string
+	// GoCardlessInstitutionID is the default bank to link when the
+	// connect flow does not specify one. Optional.
+	GoCardlessInstitutionID string
+}
+
+// PlaidConfigured reports whether a complete Plaid credential pair is
+// present. The registry builder uses this to decide whether to register
+// the Plaid provider.
+func (c *Config) PlaidConfigured() bool {
+	return c.PlaidClientID != "" && c.PlaidSecret != ""
+}
+
+// GoCardlessConfigured reports whether a complete GoCardless credential
+// pair is present.
+func (c *Config) GoCardlessConfigured() bool {
+	return c.GoCardlessSecretID != "" && c.GoCardlessSecretKey != ""
 }
 
 // LoadConfig reads configuration from environment variables and returns a
@@ -607,6 +645,14 @@ func LoadConfig() (*Config, error) {
 		ReadReplicaLagSampleInterval: getenvDurationAllowZero("KAPP_READ_REPLICA_LAG_SAMPLE_INTERVAL", 5*time.Second),
 		ReadReplicaMaxConns:          int32(getenvInt("KAPP_READ_REPLICA_MAX_CONNS", 0)),
 		ReadReplicaMinConns:          int32(getenvInt("KAPP_READ_REPLICA_MIN_CONNS", 0)),
+
+		PlaidClientID: os.Getenv("KAPP_PLAID_CLIENT_ID"),
+		PlaidSecret:   os.Getenv("KAPP_PLAID_SECRET"),
+		PlaidEnv:      getenv("KAPP_PLAID_ENV", "sandbox"),
+
+		GoCardlessSecretID:      os.Getenv("KAPP_GOCARDLESS_SECRET_ID"),
+		GoCardlessSecretKey:     os.Getenv("KAPP_GOCARDLESS_SECRET_KEY"),
+		GoCardlessInstitutionID: os.Getenv("KAPP_GOCARDLESS_INSTITUTION_ID"),
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -727,6 +773,26 @@ func (c *Config) Validate() error {
 		case "debug", "info", "warn", "warning", "error", "err":
 		default:
 			return fmt.Errorf("KAPP_LOG_LEVEL=%q is not a recognised value; expected one of: debug, info, warn, error", c.LogLevel)
+		}
+	}
+	// Bank-feed credentials must be all-or-nothing. A half-configured
+	// provider (one of the pair set) is almost always a deploy mistake;
+	// in production we fail closed rather than silently disabling the
+	// feed and stranding tenants who rely on it. Outside production we
+	// only warn (via Warnings) so local experimentation stays ergonomic.
+	if c.IsProduction() {
+		if (c.PlaidClientID != "") != (c.PlaidSecret != "") {
+			return errors.New("KAPP_PLAID_CLIENT_ID and KAPP_PLAID_SECRET must both be set (or both unset); one without the other half-configures the Plaid feed")
+		}
+		if c.PlaidConfigured() {
+			switch c.PlaidEnv {
+			case "sandbox", "development", "production":
+			default:
+				return fmt.Errorf("KAPP_PLAID_ENV=%q is not recognised; expected one of: sandbox, development, production", c.PlaidEnv)
+			}
+		}
+		if (c.GoCardlessSecretID != "") != (c.GoCardlessSecretKey != "") {
+			return errors.New("KAPP_GOCARDLESS_SECRET_ID and KAPP_GOCARDLESS_SECRET_KEY must both be set (or both unset); one without the other half-configures the GoCardless feed")
 		}
 	}
 	return nil
@@ -860,6 +926,18 @@ func (c *Config) Warnings() []string {
 	// how the default itself is now resolved.
 	if c.IsNonDev() && !c.CSRFCookieSecure {
 		warnings = append(warnings, fmt.Sprintf("KAPP_CSRF_COOKIE_SECURE=false while KAPP_ENV=%s (non-development): the CSRF cookie omits the Secure flag and may be sent over plain HTTP; unset it to take the secure-by-default value (true) or set KAPP_CSRF_COOKIE_SECURE=1", c.Env))
+	}
+	// Bank-feed credentials are all-or-nothing. Production fails closed in
+	// Validate; outside production we surface a half-configured pair as a
+	// WARN so the operator sees the misconfiguration without blocking a
+	// local/staging boot (the provider simply stays unregistered).
+	if !c.IsProduction() {
+		if (c.PlaidClientID != "") != (c.PlaidSecret != "") {
+			warnings = append(warnings, "KAPP_PLAID_CLIENT_ID / KAPP_PLAID_SECRET are half-configured (one set, one empty); the Plaid feed will stay disabled until both are set")
+		}
+		if (c.GoCardlessSecretID != "") != (c.GoCardlessSecretKey != "") {
+			warnings = append(warnings, "KAPP_GOCARDLESS_SECRET_ID / KAPP_GOCARDLESS_SECRET_KEY are half-configured (one set, one empty); the GoCardless feed will stay disabled until both are set")
+		}
 	}
 	return warnings
 }
