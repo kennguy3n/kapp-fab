@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"time"
+	"unicode/utf8"
 )
 
 // defaultHTTPClient is the shared client used by live providers when a
@@ -135,8 +136,15 @@ var sensitiveJSONField = regexp.MustCompile(`(?i)"(access_token|refresh_token|pu
 func snippet(b []byte) string {
 	const maxLen = 512
 	s := sensitiveJSONField.ReplaceAllString(string(b), `"$1":"[REDACTED]"`)
-	if len(s) > maxLen {
-		return s[:maxLen] + "…"
+	if len(s) <= maxLen {
+		return s
 	}
-	return s
+	// Truncate on a rune boundary so a non-ASCII provider error message
+	// (common in EU banking APIs) is never sliced mid-codepoint into
+	// invalid UTF-8. Back up from the byte cap to the last full rune.
+	cut := maxLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }

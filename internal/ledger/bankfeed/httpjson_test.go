@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // roundTripFunc lets a test serve canned HTTP responses without a
@@ -117,6 +118,20 @@ func TestSnippetBounds(t *testing.T) {
 	}
 	if s := snippet([]byte("short")); s != "short" {
 		t.Errorf("short snippet = %q; want unchanged", s)
+	}
+}
+
+func TestSnippetTruncatesOnRuneBoundary(t *testing.T) {
+	// Force truncation to land mid-multi-byte-rune: 511 ASCII bytes then a
+	// 3-byte rune crosses the 512-byte cap. A byte slice would emit invalid
+	// UTF-8; the rune-aware cut must back up and stay valid.
+	body := strings.Repeat("a", 511) + "界" + strings.Repeat("b", 50)
+	got := snippet([]byte(body))
+	if !utf8.ValidString(got) {
+		t.Fatalf("snippet produced invalid UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("expected truncation ellipsis: %q", got)
 	}
 }
 

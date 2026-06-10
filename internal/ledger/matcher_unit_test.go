@@ -64,6 +64,20 @@ func TestDescriptionSimilarity(t *testing.T) {
 	}
 }
 
+func TestLevenshteinRatioUsesRuneLength(t *testing.T) {
+	// "café" vs "cafe" differ by a single rune substitution (é→e). The
+	// rune length of both is 4, so the ratio must be 1 - 1/4 = 0.75. A
+	// byte-length denominator would use 5 ("café" is 5 bytes) and wrongly
+	// report 0.8, inflating similarity for accented EU/UK counterparties.
+	if got := levenshteinRatio("café", "cafe"); got < 0.749 || got > 0.751 {
+		t.Errorf("levenshteinRatio(café,cafe) = %v; want ~0.75 (rune-based)", got)
+	}
+	// Two identical multi-byte strings stay exactly 1.
+	if got := levenshteinRatio("Société Générale", "Société Générale"); got != 1 {
+		t.Errorf("identical accented => %v; want 1", got)
+	}
+}
+
 func TestTokenOverlap(t *testing.T) {
 	if o := tokenOverlap("aa bb cc", "aa bb cc"); o != 1 {
 		t.Errorf("identical token sets => %v; want 1", o)

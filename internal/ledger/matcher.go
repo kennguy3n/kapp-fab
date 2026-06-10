@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -705,9 +706,13 @@ func DescriptionSimilarity(a, b string) float64 {
 // levenshteinRatio is 1 - distance/maxLen, clamped to [0,1].
 func levenshteinRatio(a, b string) float64 {
 	d := levenshtein(a, b)
-	maxLen := len(a)
-	if len(b) > maxLen {
-		maxLen = len(b)
+	// Measure the denominator in runes, not bytes: levenshtein counts edits
+	// over []rune, so a byte length would inflate the ratio for non-ASCII
+	// descriptions (e.g. EU/UK counterparties like "Société Générale"),
+	// spuriously boosting description similarity in the confidence score.
+	maxLen := utf8.RuneCountInString(a)
+	if rb := utf8.RuneCountInString(b); rb > maxLen {
+		maxLen = rb
 	}
 	if maxLen == 0 {
 		return 1

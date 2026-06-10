@@ -162,10 +162,17 @@ func (p *GoCardlessProvider) CompleteConnect(ctx context.Context, tenantID uuid.
 	if len(out.Accounts) == 0 {
 		return nil, fmt.Errorf("bankfeed: gocardless requisition %s has no linked accounts (status %s)", code, out.Status)
 	}
+	// Provider asymmetry worth flagging: for Plaid, AccessToken holds an
+	// actual secret OAuth token. For GoCardless the per-request bearer is
+	// derived from the secret pair and cached in-memory (never persisted),
+	// so what we store here is the *account resource id* — a non-secret
+	// public identifier, not a credential. It rides the encrypted
+	// AccessToken column purely so FetchTransactions has one field to read;
+	// the encryption is harmless defense-in-depth rather than a requirement.
 	return &Connection{
 		TenantID:    tenantID,
 		Provider:    ProviderGoCardless,
-		AccessToken: out.Accounts[0], // GC account resource id
+		AccessToken: out.Accounts[0], // GC account resource id (not a secret)
 		ExternalID:  code,            // requisition id, for Disconnect
 		Status:      StatusActive,
 	}, nil

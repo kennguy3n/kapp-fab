@@ -262,10 +262,20 @@ func (h *SyncHandler) SyncOne(ctx context.Context, tenantID uuid.UUID, conn *Con
 				continue
 			}
 			res.Suggested += len(suggestions)
+			// Only match.AutoApprove is consumed here by design. The rule's
+			// TargetAccountCode / TargetCostCenter are categorization targets
+			// for auto-*posting* a journal entry against an as-yet-unmatched
+			// line — a separate, financially-sensitive capability (tax
+			// treatment, posting idempotency, reversal) that is deliberately
+			// out of scope for this reconciliation pipeline, which only pairs
+			// lines with journal entries that already exist and never
+			// fabricates one. The target fields remain first-class, validated,
+			// audited rule configuration consumed by that follow-up poster.
+			//
 			// An auto_approve rule auto-accepts the top suggestion when it
 			// clears the confidence bar, collapsing the common "known
 			// payee" case to zero clicks while still gating on a real
-			// ledger match (we never fabricate a journal entry).
+			// ledger match.
 			if hasRule && match.AutoApprove && len(suggestions) > 0 &&
 				suggestions[0].Confidence >= AutoAcceptThreshold {
 				if _, err := h.matcher.AcceptSuggestion(ctx, tenantID, suggestions[0].ID, uuid.Nil); err != nil {
