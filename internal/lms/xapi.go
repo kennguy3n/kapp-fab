@@ -26,9 +26,9 @@ const (
 	VerbExperienced = "experienced"
 )
 
-var (
-	ErrInvalidStatement = errors.New("lms: invalid xapi statement")
-)
+// ErrInvalidStatement is returned when an xAPI statement fails
+// validation (missing actor, verb, or object).
+var ErrInvalidStatement = errors.New("lms: invalid xapi statement")
 
 // XAPIStatement is the subset of the xAPI statement schema we accept
 // and persist. The full statement is retained verbatim in the store's

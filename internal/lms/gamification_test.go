@@ -8,8 +8,6 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-func intptr(v int) *int { return &v }
-
 func TestBadgeQualifies(t *testing.T) {
 	score := decimal.NewFromFloat(0.8)
 	days := 7

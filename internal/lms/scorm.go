@@ -42,7 +42,11 @@ const (
 )
 
 var (
-	ErrInvalidScormPackage  = errors.New("lms: invalid scorm package")
+	// ErrInvalidScormPackage is returned when an uploaded SCORM archive
+	// is not a readable ZIP or is otherwise structurally invalid.
+	ErrInvalidScormPackage = errors.New("lms: invalid scorm package")
+	// ErrScormManifestMissing is returned when a SCORM archive does not
+	// contain the mandatory imsmanifest.xml at its root.
 	ErrScormManifestMissing = errors.New("lms: imsmanifest.xml not found in package")
 )
 
@@ -311,7 +315,7 @@ type manifestXML struct {
 func ParseScormManifest(data []byte) (*ScormManifest, error) {
 	var m manifestXML
 	if err := xml.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidScormPackage, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidScormPackage, err)
 	}
 	var launch string
 	for _, r := range m.Resources.Resource {
@@ -433,7 +437,10 @@ type ScormPackage struct {
 
 // ExtractPackage unzips a SCORM package, validates it carries an
 // imsmanifest.xml, and stores every entry under
-// "scorm/{lessonID}/..." in the tenant object store. Returns the parsed
+// "scorm/{tenantID}/{lessonID}/..." in the tenant object store. The
+// tenant id is part of the key (in addition to any per-tenant routing
+// the object store performs) so packages stay isolated even on a shared
+// fallback bucket. Returns the parsed
 // manifest with the launch href rewritten to the stored prefix. The
 // object store is content-addressed/idempotent so re-uploading the same
 // package is safe.
@@ -443,9 +450,9 @@ func (s *ScormStore) ExtractPackage(ctx context.Context, tenantID, lessonID uuid
 	}
 	zr, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidScormPackage, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidScormPackage, err)
 	}
-	keyPrefix := fmt.Sprintf("scorm/%s", lessonID)
+	keyPrefix := fmt.Sprintf("scorm/%s/%s", tenantID, lessonID)
 	var manifest *ScormManifest
 	fileCount := 0
 	for _, f := range zr.File {
@@ -460,12 +467,14 @@ func (s *ScormStore) ExtractPackage(ctx context.Context, tenantID, lessonID uuid
 		}
 		rc, err := f.Open()
 		if err != nil {
-			return nil, fmt.Errorf("%w: open %s: %v", ErrInvalidScormPackage, f.Name, err)
+			return nil, fmt.Errorf("%w: open %s: %w", ErrInvalidScormPackage, f.Name, err)
 		}
 		content, err := io.ReadAll(io.LimitReader(rc, maxScormFileBytes+1))
-		rc.Close()
+		// The entry is fully read above; a read-only zip entry closer has
+		// no buffered writes to flush, so a Close error is not actionable.
+		_ = rc.Close()
 		if err != nil {
-			return nil, fmt.Errorf("%w: read %s: %v", ErrInvalidScormPackage, f.Name, err)
+			return nil, fmt.Errorf("%w: read %s: %w", ErrInvalidScormPackage, f.Name, err)
 		}
 		if int64(len(content)) > maxScormFileBytes {
 			return nil, fmt.Errorf("%w: %s exceeds %d bytes", ErrInvalidScormPackage, f.Name, maxScormFileBytes)

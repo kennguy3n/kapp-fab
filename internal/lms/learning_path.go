@@ -126,7 +126,8 @@ type CompletionResult struct {
 // auto-completing every enrollee.
 func EvaluateCompletion(courses []LearningPathCourse, completed map[uuid.UUID]bool) CompletionResult {
 	res := CompletionResult{TotalCourses: len(courses)}
-	for _, c := range courses {
+	for i := range courses {
+		c := &courses[i]
 		done := completed[c.CourseID]
 		if done {
 			res.CompletedTotal++
@@ -149,7 +150,8 @@ func EvaluateCompletion(courses []LearningPathCourse, completed map[uuid.UUID]bo
 // pure logic so the gating is testable without a database.
 func UnlockedCourseIDs(courses []LearningPathCourse, completed map[uuid.UUID]bool) []uuid.UUID {
 	out := make([]uuid.UUID, 0, len(courses))
-	for _, c := range courses {
+	for i := range courses {
+		c := &courses[i]
 		unlocked := true
 		for _, pre := range c.PrerequisiteCourseIDs {
 			if !completed[pre] {
@@ -621,7 +623,7 @@ func (s *LearningPathStore) RecomputeCompletion(ctx context.Context, tenantID, p
 		}
 		res = EvaluateCompletion(courses, completedCourseIDs)
 		newStatus := before.Status
-		var completedAt *time.Time = before.CompletedAt
+		completedAt := before.CompletedAt
 		switch {
 		case res.Complete:
 			newStatus = PathEnrollmentCompleted
@@ -731,11 +733,12 @@ func (a *PathAutoEnroller) OnRolesAssigned(ctx context.Context, tenantID, userID
 		return nil, err
 	}
 	enrolled := make([]uuid.UUID, 0, len(paths))
-	for _, p := range paths {
-		if _, err := a.store.Enroll(ctx, tenantID, p.ID, userID, EnrollSourceAuto, nil); err != nil {
-			return enrolled, fmt.Errorf("auto-enroll path %s: %w", p.ID, err)
+	for i := range paths {
+		pathID := paths[i].ID
+		if _, err := a.store.Enroll(ctx, tenantID, pathID, userID, EnrollSourceAuto, nil); err != nil {
+			return enrolled, fmt.Errorf("auto-enroll path %s: %w", pathID, err)
 		}
-		enrolled = append(enrolled, p.ID)
+		enrolled = append(enrolled, pathID)
 	}
 	return enrolled, nil
 }

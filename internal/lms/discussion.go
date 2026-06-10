@@ -35,9 +35,15 @@ const (
 )
 
 var (
-	ErrInvalidThread  = errors.New("lms: invalid discussion thread")
+	// ErrInvalidThread is returned when a discussion thread fails
+	// validation (e.g. missing course id, title, or body).
+	ErrInvalidThread = errors.New("lms: invalid discussion thread")
+	// ErrThreadNotFound is returned when a thread id does not resolve
+	// within the tenant.
 	ErrThreadNotFound = errors.New("lms: discussion thread not found")
-	ErrInvalidReply   = errors.New("lms: invalid discussion reply")
+	// ErrInvalidReply is returned when a discussion reply fails
+	// validation (e.g. empty body).
+	ErrInvalidReply = errors.New("lms: invalid discussion reply")
 )
 
 // DiscussionThread is an lms_discussion_threads row.

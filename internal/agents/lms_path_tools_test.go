@@ -68,8 +68,8 @@ func TestRecommendPaths(t *testing.T) {
 
 func titles(ps []lms.LearningPath) []string {
 	out := make([]string, len(ps))
-	for i, p := range ps {
-		out[i] = p.Title
+	for i := range ps {
+		out[i] = ps[i].Title
 	}
 	return out
 }

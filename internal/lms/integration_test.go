@@ -521,7 +521,7 @@ func TestScormExtractPackage(t *testing.T) {
 	if pkg.FileCount != 3 {
 		t.Fatalf("file count = %d, want 3", pkg.FileCount)
 	}
-	wantPrefix := "scorm/" + lesson.String()
+	wantPrefix := "scorm/" + tenant.String() + "/" + lesson.String()
 	if pkg.Manifest.LaunchHref != wantPrefix+"/index.html" {
 		t.Fatalf("launch href = %q", pkg.Manifest.LaunchHref)
 	}

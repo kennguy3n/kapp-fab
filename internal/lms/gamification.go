@@ -33,7 +33,11 @@ const (
 )
 
 var (
-	ErrInvalidBadge  = errors.New("lms: invalid badge")
+	// ErrInvalidBadge is returned when a badge definition fails
+	// validation (missing name or unknown criteria type).
+	ErrInvalidBadge = errors.New("lms: invalid badge")
+	// ErrBadgeNotFound is returned when a badge id does not resolve
+	// within the tenant.
 	ErrBadgeNotFound = errors.New("lms: badge not found")
 )
 
@@ -99,12 +103,12 @@ func BadgeQualifies(b Badge, m Milestone) bool {
 		if m.QuizScore == nil {
 			return false
 		}
-		min := b.CriteriaValue.MinScore
-		if min == nil {
+		threshold := b.CriteriaValue.MinScore
+		if threshold == nil {
 			// No threshold configured: any scored quiz qualifies.
 			return true
 		}
-		return m.QuizScore.GreaterThanOrEqual(*min)
+		return m.QuizScore.GreaterThanOrEqual(*threshold)
 	case CriteriaStreak:
 		days := b.CriteriaValue.Days
 		if days == nil {
