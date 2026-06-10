@@ -134,6 +134,14 @@ func (p *PlaidProvider) CompleteConnect(ctx context.Context, tenantID uuid.UUID,
 }
 
 // plaidSyncResponse mirrors the subset of /transactions/sync we consume.
+//
+// We deliberately decode only `added` (and advance past `modified`/`removed`
+// via next_cursor). Applying modified/removed means mutating or voiding a
+// bank_transaction that may already be reconciled against a journal entry —
+// a financially-sensitive operation needing an update/void path, audit, and
+// reconciliation-state unwinding that the INSERT-on-conflict-do-nothing ingest
+// here intentionally does not perform. Tracked as a follow-up alongside the
+// rule-driven auto-poster; the cursor still advances so no page is re-walked.
 type plaidSyncResponse struct {
 	Added []struct {
 		TransactionID string  `json:"transaction_id"`
