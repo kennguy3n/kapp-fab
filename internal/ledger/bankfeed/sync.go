@@ -44,6 +44,15 @@ type txStore interface {
 	SyncBankTransactions(ctx context.Context, tenantID, bankAccountID uuid.UUID, lines []ledger.BankTransaction) ([]ledger.BankTransaction, error)
 }
 
+// mutationApplier is the optional capability a txStore exposes when it can
+// apply a provider's `modified`/`removed` deltas (update in place / void
+// with reconciliation unwind + audit). *ledger.PGStore satisfies it. The
+// sync handler type-asserts for it so a feed-only store without the
+// capability simply skips mutation application.
+type mutationApplier interface {
+	ApplyBankTransactionMutations(ctx context.Context, tenantID, bankAccountID uuid.UUID, modified []ledger.BankTxnMutation, removed []string) (*ledger.MutationResult, error)
+}
+
 // connStore is the connection-lifecycle subset the handler drives.
 type connStore interface {
 	ListActiveConnections(ctx context.Context, tenantID uuid.UUID) ([]Connection, error)
@@ -80,6 +89,11 @@ type SyncHandler struct {
 	matcher  suggester
 	now      func() time.Time
 	lookback time.Duration
+	// applyMutations gates the provider modified/removed path (Plaid
+	// /transactions/sync). It defaults on; operators can disable it via
+	// WithApplyMutations(false) (wired from KAPP_BANKFEED_APPLY_MUTATIONS)
+	// as a kill-switch, leaving the feed at added-only ingest.
+	applyMutations bool
 }
 
 // NewSyncHandler wires the handler. All collaborators are required
@@ -101,13 +115,14 @@ func NewSyncHandler(conns *ConnectionStore, rules *RuleStore, registry *Registry
 		c = conns
 	}
 	return &SyncHandler{
-		conns:    c,
-		rules:    r,
-		registry: registry,
-		store:    store,
-		matcher:  m,
-		now:      func() time.Time { return time.Now().UTC() },
-		lookback: DefaultSyncLookback,
+		conns:          c,
+		rules:          r,
+		registry:       registry,
+		store:          store,
+		matcher:        m,
+		now:            func() time.Time { return time.Now().UTC() },
+		lookback:       DefaultSyncLookback,
+		applyMutations: true,
 	}
 }
 
@@ -115,14 +130,23 @@ func NewSyncHandler(conns *ConnectionStore, rules *RuleStore, registry *Registry
 // tests can inject in-memory fakes. Production code uses NewSyncHandler.
 func newSyncHandlerForTest(conns connStore, rules ruleLister, registry *Registry, store txStore, matcher suggester) *SyncHandler {
 	return &SyncHandler{
-		conns:    conns,
-		rules:    rules,
-		registry: registry,
-		store:    store,
-		matcher:  matcher,
-		now:      func() time.Time { return time.Now().UTC() },
-		lookback: DefaultSyncLookback,
+		conns:          conns,
+		rules:          rules,
+		registry:       registry,
+		store:          store,
+		matcher:        matcher,
+		now:            func() time.Time { return time.Now().UTC() },
+		lookback:       DefaultSyncLookback,
+		applyMutations: true,
 	}
+}
+
+// WithApplyMutations toggles the provider modified/removed mutation path.
+// Defaults on; pass false as an operator kill-switch to keep the feed at
+// added-only ingest (e.g. wired from KAPP_BANKFEED_APPLY_MUTATIONS).
+func (h *SyncHandler) WithApplyMutations(on bool) *SyncHandler {
+	h.applyMutations = on
+	return h
 }
 
 // WithClock pins the clock for deterministic tests.
@@ -172,9 +196,20 @@ type SyncResult struct {
 	Fetched     int
 	Skipped     int // pending/unsettled lines deferred to a later sync
 	Inserted    int
+	Updated     int // modified lines applied in place
+	Voided      int // removed lines soft-deleted (status=voided)
+	Unwound     int // reconciliations reverted by a modify/void
 	Suggested   int
 	AutoMatched int
 	Cursor      string
+}
+
+// matchTarget is a statement line that the rules + matcher pass should
+// run against: freshly-ingested additions, modified lines re-opened by a
+// mutation, and previously-missed lines a modify surfaced as new.
+type matchTarget struct {
+	id  uuid.UUID
+	ref string
 }
 
 // syncConnection runs the full pipeline for one connection.
@@ -195,21 +230,24 @@ func (h *SyncHandler) SyncOne(ctx context.Context, tenantID uuid.UUID, conn *Con
 	if conn.LastSyncAt != nil && conn.LastSyncAt.After(since) {
 		since = *conn.LastSyncAt
 	}
-	raw, cursor, err := provider.FetchTransactions(ctx, conn, since)
+	delta, err := fetchDelta(ctx, provider, conn, since)
 	if err != nil {
 		return nil, fmt.Errorf("bankfeed: fetch transactions: %w", err)
 	}
-	res := &SyncResult{Fetched: len(raw), Cursor: cursor}
+	cursor := delta.Cursor
+	res := &SyncResult{Fetched: len(delta.Added), Cursor: cursor}
 
-	lines := make([]ledger.BankTransaction, 0, len(raw))
-	// Keep each settled line's original RawTransaction keyed by its resolved
+	lines := make([]ledger.BankTransaction, 0, len(delta.Added))
+	// Keep each line's original RawTransaction keyed by its resolved
 	// external ref. bank_transactions has no Counterparty column, so rule
 	// evaluation below must read it from here rather than reconstructing it
 	// from the stored row (which would drop Counterparty and make
-	// counterparty rules fall back to coarse Description matching).
-	byRef := make(map[string]RawTransaction, len(raw))
-	for i := range raw {
-		rt := raw[i]
+	// counterparty rules fall back to coarse Description matching). It holds
+	// both added lines and modified lines (the latter may be ingested as new
+	// when no prior row exists, or re-matched in place after an unwind).
+	byRef := make(map[string]RawTransaction, len(delta.Added)+len(delta.Modified))
+	for i := range delta.Added {
+		rt := delta.Added[i]
 		// Skip not-yet-settled lines: a pending authorization carries a
 		// provisional amount and a later sync delivers the settled version.
 		// Ingesting the pending row would also burn its ExternalID in the
@@ -228,20 +266,84 @@ func (h *SyncHandler) SyncOne(ctx context.Context, tenantID uuid.UUID, conn *Con
 		}
 		rt.ExternalID = ref
 		byRef[ref] = rt
-		lines = append(lines, ledger.BankTransaction{
-			BankAccountID: conn.BankAccountID,
-			ValueDate:     rt.ValueDate,
-			Description:   rt.Description,
-			Amount:        rt.Amount,
-			Currency:      rt.Currency,
-			ExternalRef:   ref,
-		})
+		lines = append(lines, bankLineFromRaw(conn.BankAccountID, rt, ref))
 	}
 	inserted, err := h.store.SyncBankTransactions(ctx, tenantID, conn.BankAccountID, lines)
 	if err != nil {
 		return nil, fmt.Errorf("bankfeed: ingest transactions: %w", err)
 	}
 	res.Inserted = len(inserted)
+
+	// Targets for the rules + matcher pass: start with the fresh additions,
+	// then fold in lines surfaced/re-opened by the mutation path below.
+	targets := make([]matchTarget, 0, len(inserted))
+	for i := range inserted {
+		targets = append(targets, matchTarget{id: inserted[i].ID, ref: inserted[i].ExternalRef})
+	}
+
+	// Apply the provider's modified/removed deltas (Plaid /transactions/sync).
+	// Gated behind the operator kill-switch and the store's optional
+	// mutation capability, so a feed-only store or a disabled flag leaves
+	// the pipeline at added-only ingest.
+	if h.applyMutations {
+		if applier, ok := h.store.(mutationApplier); ok && (len(delta.Modified) > 0 || len(delta.Removed) > 0) {
+			mods := make([]ledger.BankTxnMutation, 0, len(delta.Modified))
+			for i := range delta.Modified {
+				rt := delta.Modified[i]
+				// A modified line with no stable id can't be addressed to an
+				// existing row; a pending modify carries a provisional amount.
+				// Defer both, mirroring the added path.
+				if rt.ExternalID == "" {
+					continue
+				}
+				if rt.Pending {
+					res.Skipped++
+					continue
+				}
+				byRef[rt.ExternalID] = rt
+				mods = append(mods, ledger.BankTxnMutation{
+					ExternalRef: rt.ExternalID,
+					ValueDate:   rt.ValueDate,
+					Description: rt.Description,
+					Amount:      rt.Amount,
+					Currency:    rt.Currency,
+				})
+			}
+			mres, err := applier.ApplyBankTransactionMutations(ctx, tenantID, conn.BankAccountID, mods, delta.Removed)
+			if err != nil {
+				return nil, fmt.Errorf("bankfeed: apply mutations: %w", err)
+			}
+			res.Updated = mres.Updated
+			res.Voided = mres.Voided
+			res.Unwound = mres.Unwound
+
+			// A modified line we never ingested is a real settled transaction
+			// we missed — ingest it as an addition so no statement data is
+			// lost, then match it like any new line.
+			if len(mres.ModifiedMissing) > 0 {
+				missing := make([]ledger.BankTransaction, 0, len(mres.ModifiedMissing))
+				for _, ref := range mres.ModifiedMissing {
+					if rt, ok := byRef[ref]; ok {
+						missing = append(missing, bankLineFromRaw(conn.BankAccountID, rt, ref))
+					}
+				}
+				ins, err := h.store.SyncBankTransactions(ctx, tenantID, conn.BankAccountID, missing)
+				if err != nil {
+					return nil, fmt.Errorf("bankfeed: ingest modified-as-new: %w", err)
+				}
+				res.Inserted += len(ins)
+				for i := range ins {
+					targets = append(targets, matchTarget{id: ins[i].ID, ref: ins[i].ExternalRef})
+				}
+			}
+			// Modified lines left unreconciled (their old pairing unwound, or
+			// already unreconciled) need fresh suggestions against the new
+			// values.
+			for _, ml := range mres.Rematch {
+				targets = append(targets, matchTarget{id: ml.ID, ref: ml.ExternalRef})
+			}
+		}
+	}
 
 	// Load applicable rules once per connection (account-scoped + tenant-
 	// wide), already priority-ordered.
@@ -254,26 +356,19 @@ func (h *SyncHandler) SyncOne(ctx context.Context, tenantID uuid.UUID, conn *Con
 	}
 
 	if h.matcher != nil {
-		for i := range inserted {
-			ln := &inserted[i]
+		for _, tgt := range targets {
 			// Prefer the original fetched line so counterparty rules see the
-			// provider-supplied Counterparty (not persisted on the row). Fall
-			// back to reconstructing from the stored line only if the ref is
-			// somehow absent from the map.
-			rawTxn, ok := byRef[ln.ExternalRef]
+			// provider-supplied Counterparty (not persisted on the row). The
+			// ref is always present in byRef for targets we enqueue; the
+			// fallback is defensive only.
+			rawTxn, ok := byRef[tgt.ref]
 			if !ok {
-				rawTxn = RawTransaction{
-					ExternalID:  ln.ExternalRef,
-					ValueDate:   ln.ValueDate,
-					Description: ln.Description,
-					Amount:      ln.Amount,
-					Currency:    ln.Currency,
-				}
+				rawTxn = RawTransaction{ExternalID: tgt.ref}
 			}
 			match, hasRule := Evaluate(rules, rawTxn)
-			suggestions, err := h.matcher.SuggestMatches(ctx, tenantID, ln.ID, ledger.MatchOptions{})
+			suggestions, err := h.matcher.SuggestMatches(ctx, tenantID, tgt.id, ledger.MatchOptions{})
 			if err != nil {
-				log.Printf("bankfeed: suggest tenant=%s txn=%s: %v", tenantID, ln.ID, err)
+				log.Printf("bankfeed: suggest tenant=%s txn=%s: %v", tenantID, tgt.id, err)
 				continue
 			}
 			res.Suggested += len(suggestions)
@@ -306,6 +401,35 @@ func (h *SyncHandler) SyncOne(ctx context.Context, tenantID uuid.UUID, conn *Con
 		return nil, fmt.Errorf("bankfeed: advance cursor: %w", err)
 	}
 	return res, nil
+}
+
+// fetchDelta returns the provider's full incremental delta. Providers
+// that implement ChangeFetcher (Plaid) surface modified/removed lines;
+// the rest expose only additions via FetchTransactions, which this wraps
+// into a FetchDelta so SyncOne has a single code path.
+func fetchDelta(ctx context.Context, provider Provider, conn *Connection, since time.Time) (FetchDelta, error) {
+	if cf, ok := provider.(ChangeFetcher); ok {
+		return cf.FetchChanges(ctx, conn, since)
+	}
+	raw, cursor, err := provider.FetchTransactions(ctx, conn, since)
+	if err != nil {
+		return FetchDelta{}, err
+	}
+	return FetchDelta{Added: raw, Cursor: cursor}, nil
+}
+
+// bankLineFromRaw maps a resolved RawTransaction onto the typed ingest
+// row. ref is the already-resolved external reference (native id or
+// content hash).
+func bankLineFromRaw(bankAccountID uuid.UUID, rt RawTransaction, ref string) ledger.BankTransaction {
+	return ledger.BankTransaction{
+		BankAccountID: bankAccountID,
+		ValueDate:     rt.ValueDate,
+		Description:   rt.Description,
+		Amount:        rt.Amount,
+		Currency:      rt.Currency,
+		ExternalRef:   ref,
+	}
 }
 
 // contentHashRef derives a stable dedup key for a provider line that

@@ -69,7 +69,7 @@ var bankTransactionSchema = []byte(`{
     {"name": "description", "type": "text"},
     {"name": "amount", "type": "number", "required": true},
     {"name": "currency", "type": "string", "pattern": "^[A-Z]{3}$", "required": true},
-    {"name": "status", "type": "enum", "values": ["unreconciled", "matched", "ignored"], "default": "unreconciled"},
+    {"name": "status", "type": "enum", "values": ["unreconciled", "matched", "ignored", "voided"], "default": "unreconciled"},
     {"name": "matched_entry_id", "type": "string"},
     {"name": "external_ref", "type": "string", "max_length": 128}
   ],
@@ -118,6 +118,12 @@ const (
 	BankTxnUnreconciled = "unreconciled"
 	BankTxnMatched      = "matched"
 	BankTxnIgnored      = "ignored"
+	// BankTxnVoided marks a line the upstream provider retracted (Plaid
+	// /transactions/sync `removed`). It is a soft-delete: the row stays
+	// for the audit trail and any suggestion FK, but is excluded from
+	// reconciliation. Distinct from BankTxnIgnored, which is a human's
+	// choice to skip a line that genuinely exists on the statement.
+	BankTxnVoided = "voided"
 )
 
 // MatchWindow is the date window the default matcher uses to accept a
@@ -315,6 +321,279 @@ func (s *PGStore) SyncBankTransactions(ctx context.Context, tenantID, bankAccoun
 		return nil, err
 	}
 	return inserted, nil
+}
+
+// BankTxnMutation carries a provider's revised field values for a
+// previously-synced statement line, addressed by its external reference.
+// It is the input to ApplyBankTransactionMutations for feeds that emit
+// post-hoc edits (Plaid /transactions/sync `modified`).
+type BankTxnMutation struct {
+	ExternalRef string
+	ValueDate   time.Time
+	Description string
+	Amount      decimal.Decimal
+	Currency    string
+}
+
+// MutatedLine identifies a statement line that a mutation left in the
+// ledger and unreconciled, so the caller can re-run the matcher against
+// its new values.
+type MutatedLine struct {
+	ID          uuid.UUID
+	ExternalRef string
+}
+
+// MutationResult reports the outcome of ApplyBankTransactionMutations.
+type MutationResult struct {
+	// Updated counts modified lines whose fields changed in place.
+	Updated int
+	// Voided counts removed lines soft-deleted (status=voided).
+	Voided int
+	// Unwound counts lines (modified or voided) whose prior reconciliation
+	// pairing was reverted because the upstream change invalidated it.
+	Unwound int
+	// Rematch lists modified lines still present and unreconciled — the
+	// caller re-runs the matcher on them with their updated values.
+	Rematch []MutatedLine
+	// ModifiedMissing lists modified external refs with no existing row
+	// (e.g. a line skipped while pending). The caller ingests them as
+	// fresh additions so no statement data is lost.
+	ModifiedMissing []string
+}
+
+// ApplyBankTransactionMutations applies a provider's `modified` and
+// `removed` deltas to already-synced statement lines, inside a single
+// tenant-scoped transaction.
+//
+// For each modified line the fields are updated in place; if the line was
+// reconciled (status=matched) the change invalidates that pairing, so the
+// bank-side reconciliation is unwound (status→unreconciled,
+// matched_entry_id→NULL). The immutable journal entry is never touched —
+// unwinding only re-opens the statement line for re-matching. Any open
+// suggestions are rejected because they were scored on stale values.
+//
+// For each removed ref the line is soft-deleted (status=voided) and any
+// reconciliation unwound, keeping the row for the audit trail and the
+// bank_match_suggestions FK rather than hard-deleting.
+//
+// Every mutation emits a per-line audit entry (before/after) and the
+// method is idempotent: an unchanged modify or a re-removed line is a
+// no-op. Lines the provider references but that were never ingested are
+// reported (ModifiedMissing) so the caller can ingest them as additions.
+func (s *PGStore) ApplyBankTransactionMutations(ctx context.Context, tenantID, bankAccountID uuid.UUID, modified []BankTxnMutation, removed []string) (*MutationResult, error) {
+	if tenantID == uuid.Nil || bankAccountID == uuid.Nil {
+		return nil, errors.New("ledger: tenant_id and bank_account_id required")
+	}
+	res := &MutationResult{}
+	if len(modified) == 0 && len(removed) == 0 {
+		return res, nil
+	}
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		for i := range modified {
+			m := modified[i]
+			if m.ExternalRef == "" {
+				continue
+			}
+			cur, found, err := loadBankTxnByRef(ctx, tx, tenantID, bankAccountID, m.ExternalRef)
+			if err != nil {
+				return err
+			}
+			if !found {
+				res.ModifiedMissing = append(res.ModifiedMissing, m.ExternalRef)
+				continue
+			}
+			if cur.status == BankTxnVoided {
+				continue // already retracted; a late modify is a no-op
+			}
+			// No-op when the provider re-sends an unchanged line: avoids
+			// audit noise and pointless re-matching.
+			if cur.amount.Equal(m.Amount) && cur.valueDate.Equal(m.ValueDate) &&
+				cur.description == m.Description && cur.currency == m.Currency {
+				continue
+			}
+			unwound := cur.status == BankTxnMatched
+			newStatus := cur.status
+			if unwound {
+				newStatus = BankTxnUnreconciled
+				res.Unwound++
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE bank_transactions
+				    SET value_date = $4, description = $5, amount = $6, currency = $7,
+				        status = $8,
+				        matched_entry_id = CASE WHEN $9 THEN NULL ELSE matched_entry_id END
+				  WHERE tenant_id = $1 AND bank_account_id = $2 AND id = $3`,
+				tenantID, bankAccountID, cur.id, m.ValueDate, nullIfEmpty(m.Description),
+				m.Amount, m.Currency, newStatus, unwound,
+			); err != nil {
+				return fmt.Errorf("ledger: apply modified bank_transaction: %w", err)
+			}
+			if err := rejectStaleSuggestionsTx(ctx, tx, tenantID, cur.id, s.now(), unwound); err != nil {
+				return err
+			}
+			res.Updated++
+			if newStatus == BankTxnUnreconciled {
+				res.Rematch = append(res.Rematch, MutatedLine{ID: cur.id, ExternalRef: m.ExternalRef})
+			}
+			afterMatched := cur.matchedEntryID
+			if unwound {
+				afterMatched = nil
+			}
+			if err := s.auditBankTxnMutationTx(ctx, tx, tenantID, cur.id,
+				"finance.bank_feed.transaction.modified",
+				bankTxnSnapshot(cur.amount, cur.valueDate, cur.description, cur.currency, cur.status, cur.matchedEntryID),
+				bankTxnSnapshot(m.Amount, m.ValueDate, m.Description, m.Currency, newStatus, afterMatched),
+			); err != nil {
+				return err
+			}
+		}
+		for _, ref := range removed {
+			if ref == "" {
+				continue
+			}
+			cur, found, err := loadBankTxnByRef(ctx, tx, tenantID, bankAccountID, ref)
+			if err != nil {
+				return err
+			}
+			if !found || cur.status == BankTxnVoided {
+				continue // never ingested, or already retracted: idempotent no-op
+			}
+			unwound := cur.status == BankTxnMatched
+			if unwound {
+				res.Unwound++
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE bank_transactions SET status = $4, matched_entry_id = NULL
+				  WHERE tenant_id = $1 AND bank_account_id = $2 AND id = $3`,
+				tenantID, bankAccountID, cur.id, BankTxnVoided,
+			); err != nil {
+				return fmt.Errorf("ledger: void bank_transaction: %w", err)
+			}
+			if err := rejectStaleSuggestionsTx(ctx, tx, tenantID, cur.id, s.now(), unwound); err != nil {
+				return err
+			}
+			res.Voided++
+			if err := s.auditBankTxnMutationTx(ctx, tx, tenantID, cur.id,
+				"finance.bank_feed.transaction.voided",
+				bankTxnSnapshot(cur.amount, cur.valueDate, cur.description, cur.currency, cur.status, cur.matchedEntryID),
+				bankTxnSnapshot(cur.amount, cur.valueDate, cur.description, cur.currency, BankTxnVoided, nil),
+			); err != nil {
+				return err
+			}
+		}
+		if s.publisher != nil && (res.Updated > 0 || res.Voided > 0) {
+			payload, _ := json.Marshal(map[string]any{
+				"bank_account_id": bankAccountID,
+				"updated":         res.Updated,
+				"voided":          res.Voided,
+				"unwound":         res.Unwound,
+				"mutated_at":      s.now(),
+			})
+			if err := s.publisher.EmitTx(ctx, tx, events.Event{
+				TenantID: tenantID,
+				Type:     "finance.bank_transaction.mutated",
+				Payload:  payload,
+			}); err != nil {
+				return fmt.Errorf("ledger: emit mutated event: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// bankTxnRow is the minimal current state of a statement line the
+// mutation path reads before applying a change.
+type bankTxnRow struct {
+	id             uuid.UUID
+	status         string
+	matchedEntryID *uuid.UUID
+	amount         decimal.Decimal
+	valueDate      time.Time
+	description    string
+	currency       string
+}
+
+// loadBankTxnByRef reads the current state of a statement line by its
+// external reference. found is false (with nil error) when no row exists.
+func loadBankTxnByRef(ctx context.Context, tx pgx.Tx, tenantID, bankAccountID uuid.UUID, ref string) (bankTxnRow, bool, error) {
+	var r bankTxnRow
+	err := tx.QueryRow(ctx,
+		`SELECT id, status, matched_entry_id, amount, value_date, COALESCE(description, ''), currency
+		   FROM bank_transactions
+		  WHERE tenant_id = $1 AND bank_account_id = $2 AND external_ref = $3`,
+		tenantID, bankAccountID, ref,
+	).Scan(&r.id, &r.status, &r.matchedEntryID, &r.amount, &r.valueDate, &r.description, &r.currency)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return bankTxnRow{}, false, nil
+	}
+	if err != nil {
+		return bankTxnRow{}, false, fmt.Errorf("ledger: load bank_transaction by ref: %w", err)
+	}
+	return r, true, nil
+}
+
+// rejectStaleSuggestionsTx rejects suggestions for a line whose values a
+// mutation just changed, so the matcher re-suggests on the next pass with
+// the new values. Open (suggested) candidates are always rejected because
+// they were scored on stale values. When includeAccepted is set (the line
+// was reconciled and is being unwound) the accepted suggestion that
+// recorded the now-reverted pairing is rejected too, so it no longer
+// implies a live match against an unreconciled line. Already-rejected rows
+// are left untouched.
+func rejectStaleSuggestionsTx(ctx context.Context, tx pgx.Tx, tenantID, txnID uuid.UUID, now time.Time, includeAccepted bool) error {
+	if includeAccepted {
+		if _, err := tx.Exec(ctx,
+			`UPDATE bank_match_suggestions SET status = $3, updated_at = $4
+			  WHERE tenant_id = $1 AND transaction_id = $2 AND status <> $3`,
+			tenantID, txnID, SuggestionRejected, now,
+		); err != nil {
+			return fmt.Errorf("ledger: reject stale suggestions: %w", err)
+		}
+		return nil
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE bank_match_suggestions SET status = $3, updated_at = $4
+		  WHERE tenant_id = $1 AND transaction_id = $2 AND status = $5`,
+		tenantID, txnID, SuggestionRejected, now, SuggestionSuggested,
+	); err != nil {
+		return fmt.Errorf("ledger: reject stale suggestions: %w", err)
+	}
+	return nil
+}
+
+// bankTxnSnapshot renders an audit before/after view of a statement line.
+func bankTxnSnapshot(amount decimal.Decimal, valueDate time.Time, description, currency, status string, matched *uuid.UUID) json.RawMessage {
+	b, _ := json.Marshal(map[string]any{
+		"amount":           amount.String(),
+		"value_date":       valueDate.UTC().Format("2006-01-02"),
+		"description":      description,
+		"currency":         currency,
+		"status":           status,
+		"matched_entry_id": matched,
+	})
+	return b
+}
+
+// auditBankTxnMutationTx records a system-actor audit entry for a single
+// statement-line mutation, inside the caller's transaction.
+func (s *PGStore) auditBankTxnMutationTx(ctx context.Context, tx pgx.Tx, tenantID, id uuid.UUID, action string, before, after json.RawMessage) error {
+	if s.auditor == nil {
+		return nil
+	}
+	target := id
+	return s.auditor.LogTx(ctx, tx, audit.Entry{
+		TenantID:    tenantID,
+		ActorKind:   audit.ActorSystem,
+		Action:      action,
+		TargetKType: KTypeBankTransaction,
+		TargetID:    &target,
+		Before:      before,
+		After:       after,
+	})
 }
 
 // ReconcileTransaction searches for a journal entry whose total

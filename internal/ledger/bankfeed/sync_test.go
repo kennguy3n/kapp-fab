@@ -96,9 +96,11 @@ type fakeMatcher struct {
 	// suggestions returned per transaction id, in order.
 	byTxn    map[uuid.UUID][]ledger.Suggestion
 	accepted []uuid.UUID
+	queried  []uuid.UUID // txn ids SuggestMatches was called with, in order
 }
 
 func (m *fakeMatcher) SuggestMatches(_ context.Context, _, txnID uuid.UUID, _ ledger.MatchOptions) ([]ledger.Suggestion, error) {
+	m.queried = append(m.queried, txnID)
 	return m.byTxn[txnID], nil
 }
 func (m *fakeMatcher) AcceptSuggestion(_ context.Context, _, sugID, _ uuid.UUID) (*ledger.Suggestion, error) {

@@ -120,6 +120,65 @@ func TestPlaidFetchTransactionsPaginatesAndNegates(t *testing.T) {
 	}
 }
 
+func TestPlaidFetchChangesDecodesModifiedAndRemoved(t *testing.T) {
+	page := 0
+	doer := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		page++
+		if page == 1 {
+			return jsonResponse(200, `{
+				"added":[{"transaction_id":"a1","date":"2024-01-15","name":"Coffee","amount":4.50,"iso_currency_code":"USD"}],
+				"modified":[{"transaction_id":"m1","date":"2024-01-10","name":"Returned payment","amount":-12.00,"iso_currency_code":"USD"}],
+				"removed":[{"transaction_id":"r1"}],
+				"next_cursor":"c2","has_more":true}`), nil
+		}
+		return jsonResponse(200, `{
+			"added":[],
+			"removed":[{"transaction_id":"r2"},{"transaction_id":""}],
+			"next_cursor":"c3","has_more":false}`), nil
+	})
+	p := NewPlaidProvider(PlaidConfig{ClientID: "id", Secret: "s", BaseURL: "https://x"}, doer)
+	d, err := p.FetchChanges(context.Background(), &Connection{AccessToken: "a"}, time.Time{})
+	if err != nil {
+		t.Fatalf("FetchChanges: %v", err)
+	}
+	if d.Cursor != "c3" {
+		t.Fatalf("cursor = %q; want c3", d.Cursor)
+	}
+	if len(d.Added) != 1 || d.Added[0].ExternalID != "a1" {
+		t.Fatalf("added = %+v; want one (a1)", d.Added)
+	}
+	if len(d.Modified) != 1 || d.Modified[0].ExternalID != "m1" {
+		t.Fatalf("modified = %+v; want one (m1)", d.Modified)
+	}
+	// Modified line negates like added (Plaid -12 money-in becomes +12).
+	if !d.Modified[0].Amount.Equal(decimal.RequireFromString("12")) {
+		t.Errorf("modified amount = %s; want 12", d.Modified[0].Amount)
+	}
+	// Two real removed ids across pages; the empty id is dropped.
+	if len(d.Removed) != 2 || d.Removed[0] != "r1" || d.Removed[1] != "r2" {
+		t.Fatalf("removed = %+v; want [r1 r2]", d.Removed)
+	}
+}
+
+func TestPlaidFetchTransactionsDelegatesToFetchChanges(t *testing.T) {
+	doer := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return jsonResponse(200, `{
+			"added":[{"transaction_id":"a1","date":"2024-01-15","name":"Coffee","amount":4.50,"iso_currency_code":"USD"}],
+			"modified":[{"transaction_id":"m1","date":"2024-01-10","name":"x","amount":1,"iso_currency_code":"USD"}],
+			"next_cursor":"c2","has_more":false}`), nil
+	})
+	p := NewPlaidProvider(PlaidConfig{ClientID: "id", Secret: "s", BaseURL: "https://x"}, doer)
+	txns, cursor, err := p.FetchTransactions(context.Background(), &Connection{AccessToken: "a"}, time.Time{})
+	if err != nil {
+		t.Fatalf("FetchTransactions: %v", err)
+	}
+	// FetchTransactions returns only the added lines (modified are dropped
+	// from this view; the sync handler consumes them via FetchChanges).
+	if len(txns) != 1 || txns[0].ExternalID != "a1" || cursor != "c2" {
+		t.Fatalf("txns=%+v cursor=%q; want one added (a1) and cursor c2", txns, cursor)
+	}
+}
+
 func TestPlaidFetchNilConnection(t *testing.T) {
 	p := NewPlaidProvider(PlaidConfig{ClientID: "id", Secret: "s", BaseURL: "https://x"}, nil)
 	if _, _, err := p.FetchTransactions(context.Background(), nil, time.Time{}); err == nil {

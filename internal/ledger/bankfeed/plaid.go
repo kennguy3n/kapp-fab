@@ -133,40 +133,80 @@ func (p *PlaidProvider) CompleteConnect(ctx context.Context, tenantID uuid.UUID,
 	}, nil
 }
 
+// plaidTxn is one transaction object as it appears in the `added` and
+// `modified` arrays of /transactions/sync.
+type plaidTxn struct {
+	TransactionID string  `json:"transaction_id"`
+	Date          string  `json:"date"`
+	Name          string  `json:"name"`
+	MerchantName  string  `json:"merchant_name"`
+	Amount        float64 `json:"amount"`
+	ISOCurrency   string  `json:"iso_currency_code"`
+	Pending       bool    `json:"pending"`
+}
+
+// toRaw maps a Plaid transaction onto our provider-neutral shape. Plaid's
+// amount sign convention is the inverse of ours (Plaid: positive = money
+// out), so we negate. An unparseable date falls back to now() rather than
+// dropping the line.
+func (t plaidTxn) toRaw() RawTransaction {
+	vd, err := time.Parse("2006-01-02", t.Date)
+	if err != nil {
+		vd = time.Now().UTC()
+	}
+	desc := t.Name
+	if desc == "" {
+		desc = t.MerchantName
+	}
+	return RawTransaction{
+		ExternalID:   t.TransactionID,
+		ValueDate:    vd.UTC(),
+		Description:  desc,
+		Amount:       decimal.NewFromFloat(t.Amount).Neg(),
+		Currency:     t.ISOCurrency,
+		Counterparty: t.MerchantName,
+		Pending:      t.Pending,
+	}
+}
+
 // plaidSyncResponse mirrors the subset of /transactions/sync we consume.
-//
-// We deliberately decode only `added` (and advance past `modified`/`removed`
-// via next_cursor). Applying modified/removed means mutating or voiding a
-// bank_transaction that may already be reconciled against a journal entry —
-// a financially-sensitive operation needing an update/void path, audit, and
-// reconciliation-state unwinding that the INSERT-on-conflict-do-nothing ingest
-// here intentionally does not perform. Tracked as a follow-up alongside the
-// rule-driven auto-poster; the cursor still advances so no page is re-walked.
+// Plaid returns three deltas per page: `added` (new lines), `modified`
+// (a posted line whose amount/date/name changed after first posting, e.g.
+// a returned payment) and `removed` (lines the provider retracted). All
+// three are surfaced via FetchChanges so the sync handler can ingest,
+// update and void respectively; the cursor advances past every page.
 type plaidSyncResponse struct {
-	Added []struct {
-		TransactionID string  `json:"transaction_id"`
-		Date          string  `json:"date"`
-		Name          string  `json:"name"`
-		MerchantName  string  `json:"merchant_name"`
-		Amount        float64 `json:"amount"`
-		ISOCurrency   string  `json:"iso_currency_code"`
-		Pending       bool    `json:"pending"`
-	} `json:"added"`
+	Added    []plaidTxn `json:"added"`
+	Modified []plaidTxn `json:"modified"`
+	Removed  []struct {
+		TransactionID string `json:"transaction_id"`
+	} `json:"removed"`
 	NextCursor string `json:"next_cursor"`
 	HasMore    bool   `json:"has_more"`
 }
 
-// FetchTransactions walks /transactions/sync from the connection cursor
-// until has_more is false, accumulating added lines. Plaid's amount sign
-// convention is the inverse of ours (Plaid: positive = money out), so we
-// negate. Pending lines are passed through with the Pending flag set; the
-// sync handler decides to skip them.
-func (p *PlaidProvider) FetchTransactions(ctx context.Context, conn *Connection, _ time.Time) ([]RawTransaction, string, error) {
+// FetchTransactions returns the added lines and advanced cursor. It
+// delegates to FetchChanges so the page-walk logic lives in one place;
+// the modified/removed deltas are dropped here and consumed by callers
+// that use FetchChanges directly (the sync handler).
+func (p *PlaidProvider) FetchTransactions(ctx context.Context, conn *Connection, since time.Time) ([]RawTransaction, string, error) {
+	d, err := p.FetchChanges(ctx, conn, since)
+	if err != nil {
+		return nil, "", err
+	}
+	return d.Added, d.Cursor, nil
+}
+
+// FetchChanges walks /transactions/sync from the connection cursor until
+// has_more is false, accumulating the added, modified and removed deltas.
+// Pending lines are passed through (in Added/Modified) with the Pending
+// flag set; the sync handler decides to skip them.
+func (p *PlaidProvider) FetchChanges(ctx context.Context, conn *Connection, _ time.Time) (FetchDelta, error) {
 	if conn == nil {
-		return nil, "", fmt.Errorf("bankfeed: nil connection")
+		return FetchDelta{}, fmt.Errorf("bankfeed: nil connection")
 	}
 	cursor := conn.Cursor
-	var out []RawTransaction
+	var d FetchDelta
 	// Bound the page walk so a pathological has_more loop cannot run
 	// unbounded inside a sync tick.
 	for page := 0; page < 50; page++ {
@@ -177,33 +217,26 @@ func (p *PlaidProvider) FetchTransactions(ctx context.Context, conn *Connection,
 		}
 		var resp plaidSyncResponse
 		if err := postJSON(ctx, p.client, p.baseURL()+"/transactions/sync", nil, body, &resp); err != nil {
-			return nil, "", err
+			return FetchDelta{}, err
 		}
 		for _, a := range resp.Added {
-			vd, err := time.Parse("2006-01-02", a.Date)
-			if err != nil {
-				vd = time.Now().UTC()
+			d.Added = append(d.Added, a.toRaw())
+		}
+		for _, m := range resp.Modified {
+			d.Modified = append(d.Modified, m.toRaw())
+		}
+		for _, r := range resp.Removed {
+			if r.TransactionID != "" {
+				d.Removed = append(d.Removed, r.TransactionID)
 			}
-			desc := a.Name
-			if desc == "" {
-				desc = a.MerchantName
-			}
-			out = append(out, RawTransaction{
-				ExternalID:   a.TransactionID,
-				ValueDate:    vd.UTC(),
-				Description:  desc,
-				Amount:       decimal.NewFromFloat(a.Amount).Neg(),
-				Currency:     a.ISOCurrency,
-				Counterparty: a.MerchantName,
-				Pending:      a.Pending,
-			})
 		}
 		cursor = resp.NextCursor
 		if !resp.HasMore {
 			break
 		}
 	}
-	return out, cursor, nil
+	d.Cursor = cursor
+	return d, nil
 }
 
 // Disconnect removes the Item at Plaid so the access_token stops billing

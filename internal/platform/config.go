@@ -528,6 +528,13 @@ type Config struct {
 	// GoCardlessInstitutionID is the default bank to link when the
 	// connect flow does not specify one. Optional.
 	GoCardlessInstitutionID string
+
+	// BankFeedApplyMutations gates the provider modified/removed path
+	// (Plaid /transactions/sync). It defaults true so the feed stays
+	// consistent with upstream; set KAPP_BANKFEED_APPLY_MUTATIONS=false
+	// as an operator kill-switch to fall back to added-only ingest
+	// without touching already-reconciled lines.
+	BankFeedApplyMutations bool
 }
 
 // PlaidConfigured reports whether a complete Plaid credential pair is
@@ -653,6 +660,8 @@ func LoadConfig() (*Config, error) {
 		GoCardlessSecretID:      os.Getenv("KAPP_GOCARDLESS_SECRET_ID"),
 		GoCardlessSecretKey:     os.Getenv("KAPP_GOCARDLESS_SECRET_KEY"),
 		GoCardlessInstitutionID: os.Getenv("KAPP_GOCARDLESS_INSTITUTION_ID"),
+
+		BankFeedApplyMutations: getenvBool("KAPP_BANKFEED_APPLY_MUTATIONS", true),
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err

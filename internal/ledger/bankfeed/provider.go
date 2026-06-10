@@ -127,6 +127,35 @@ type Provider interface {
 	Disconnect(ctx context.Context, conn *Connection) error
 }
 
+// FetchDelta is the full incremental result of one provider sync walk:
+// new lines plus, for feeds that express post-hoc edits, the lines whose
+// content changed (Modified) and the external ids the provider retracted
+// (Removed). Cursor is the advanced incremental marker the caller
+// persists. Added carries RawTransactions; Modified carries the revised
+// values for already-synced lines (matched by ExternalID); Removed lists
+// the ExternalIDs to void.
+type FetchDelta struct {
+	Added    []RawTransaction
+	Modified []RawTransaction
+	Removed  []string
+	Cursor   string
+}
+
+// ChangeFetcher is the optional capability a Provider implements when its
+// incremental feed delivers post-hoc mutations beyond plain additions.
+// Plaid satisfies it (the modified/removed arrays of /transactions/sync);
+// GoCardless and CSV do not (their feeds are append-only from our view),
+// so the sync handler falls back to FetchTransactions for them. Keeping
+// it optional avoids widening the core Provider contract for providers
+// that have nothing to mutate.
+//
+// FetchChanges must return the same Added/Cursor that FetchTransactions
+// would (so a ChangeFetcher's FetchTransactions can delegate to it),
+// plus the Modified/Removed deltas the caller applies after ingest.
+type ChangeFetcher interface {
+	FetchChanges(ctx context.Context, conn *Connection, since time.Time) (FetchDelta, error)
+}
+
 // Sentinel errors shared across providers and the HTTP/agent layers.
 var (
 	// ErrProviderNotConfigured is returned when a provider is selected
