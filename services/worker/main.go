@@ -33,6 +33,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk"
 	"github.com/kennguy3n/kapp-fab/internal/helpdesk/imap/goimap"
+	"github.com/kennguy3n/kapp-fab/internal/hr"
 	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
@@ -48,6 +49,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/reporting"
 	"github.com/kennguy3n/kapp-fab/internal/scheduler"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
+	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
 
 const (
@@ -260,6 +262,16 @@ func run() error {
 	ktypeCache := platform.NewLRUCache(cfg.KTypeCacheSize, 5*time.Minute)
 	ktypeRegistry := ktype.NewPGRegistry(pool, ktypeCache)
 	recordStore := record.NewPGStoreWithRouter(dbRouter, ktypeRegistry, publisher, auditor)
+
+	// Session 16 — offer-letter approval dispatcher. Reacts to
+	// approval.granted events for hr.offer_letter records by sending the
+	// now-approved offer (draft→sent + applicant email). Shares the
+	// platform's publisher/auditor/recordStore wiring; its workflow
+	// engine instance is stateless so a fresh one here is equivalent to
+	// the API's.
+	offerDispatcher := &offerApprovalDispatcher{
+		store: hr.NewRecruitmentStore(pool, auditor, publisher, recordStore, workflow.NewEngine(pool, publisher, auditor)),
+	}
 
 	// Per-tenant field-level encryption: mirrors services/api/deps_build.go
 	// initialisation so the worker can decrypt marketplace_extension_installations.
@@ -616,6 +628,7 @@ func run() error {
 			batcher:           batcher,
 			nc:                nc,
 			bridge:            bridge,
+			offerDispatcher:   offerDispatcher,
 			helpdeskIMAP:      helpdeskIMAP,
 			drainHistogram:    drainDur,
 			drainCounter:      drainEvents,
@@ -678,6 +691,10 @@ type leaderState struct {
 	batcher           *AdaptiveBatcher
 	nc                *nats.Conn
 	bridge            *kchatBridgeNotifier
+	// offerDispatcher sends approved offer letters when their
+	// hiring-manager approval is granted (Session 16). nil disables the
+	// side-effect.
+	offerDispatcher *offerApprovalDispatcher
 
 	// marketplaceRouter fans drained outbox events out to
 	// marketplace_webhook_subscriptions registered at install time
@@ -779,7 +796,7 @@ func drainLoop(ctx context.Context, s leaderState) error {
 		}
 	}()
 
-	deliverFn := deliver(s.nc, s.bridge, s.router, s.marketplaceRouter)
+	deliverFn := deliver(s.nc, s.bridge, s.router, s.marketplaceRouter, s.offerDispatcher)
 	for {
 		waitCtx, waitCancel := context.WithTimeout(ctx, tickInterval)
 		_, waitErr := listenConn.WaitForNotification(waitCtx)
@@ -919,7 +936,7 @@ func acquireListenConn(ctx context.Context, connString string) (*pgx.Conn, error
 // Side-effect failures (bridge, router) are logged but do NOT fail the batch —
 // the event is already durably on NATS, so a flapping sidecar never blocks
 // forward progress of the outbox.
-func deliver(nc *nats.Conn, bridge *kchatBridgeNotifier, router *notificationRouter, mktRouter *eventrouter.Router) func(ctx context.Context, batch []events.Event) error {
+func deliver(nc *nats.Conn, bridge *kchatBridgeNotifier, router *notificationRouter, mktRouter *eventrouter.Router, offerDispatcher *offerApprovalDispatcher) func(ctx context.Context, batch []events.Event) error {
 	return func(ctx context.Context, batch []events.Event) error {
 		g, ctx := errgroup.WithContext(ctx)
 		g.SetLimit(8)
@@ -946,6 +963,10 @@ func deliver(nc *nats.Conn, bridge *kchatBridgeNotifier, router *notificationRou
 				if router != nil {
 					router.route(ctx, e)
 				}
+				// Session 16: dispatch an approved offer letter once
+				// its hiring-manager approval is granted. Best-effort
+				// and idempotent — same contract as the router fan-out.
+				offerDispatcher.handle(ctx, e)
 				// Marketplace event router (B4). Best-effort side-
 				// effect alongside NATS publish + kchat-bridge —
 				// route errors (including subscription-lookup DB

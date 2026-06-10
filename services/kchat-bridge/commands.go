@@ -64,14 +64,18 @@ type CommandResponse struct {
 // commands; the dispatcher is the single funnel through which every
 // KChat user action reaches the platform services.
 type CommandDispatcher struct {
-	registry           *ktype.PGRegistry
-	records            *record.PGStore
-	workflow           *workflow.Engine
-	approvals          *workflow.Engine
-	ledger             *ledger.PGStore
-	poster             *ledger.InvoicePoster
-	inventory          *inventory.PGStore
-	manufacturing      *manufacturing.PGStore
+	registry      *ktype.PGRegistry
+	records       *record.PGStore
+	workflow      *workflow.Engine
+	approvals     *workflow.Engine
+	ledger        *ledger.PGStore
+	poster        *ledger.InvoicePoster
+	inventory     *inventory.PGStore
+	manufacturing *manufacturing.PGStore
+	// recruitment backs the /recruit command (Session 16). Optional:
+	// when nil the command answers with an informational message so the
+	// bridge still runs on plans without the recruitment feature.
+	recruitment        *hr.RecruitmentStore
 	landedCost         *finance.LandedCostStore
 	cycleCounts        *inventory.CycleCountStore
 	lmsIssuer          *lms.CertificateIssuer
@@ -200,6 +204,8 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.jobCard(ctx, req)
 	case "bom":
 		return d.bomList(ctx, req)
+	case "recruit":
+		return d.recruit(ctx, req)
 	case "certificate":
 		return d.issueCertificate(ctx, req)
 	case "learn":
@@ -898,6 +904,118 @@ func (d *CommandDispatcher) bomList(ctx context.Context, req CommandRequest) (Co
 		lines = append(lines, fmt.Sprintf("%s | item=%s | v%s | %s | out=%s %s", b.ID, b.ItemID, b.Version, b.Status, b.OutputQty.String(), b.UOM))
 	}
 	return CommandResponse{Text: "BOMs\n" + strings.Join(lines, "\n")}, nil
+}
+
+// recruit implements the Session 16 `/recruit` command family:
+//
+//	/recruit list                                       — open requisitions
+//	/recruit applications <job_opening_id>              — pipeline for an opening
+//	/recruit advance <application_id> <status>          — move a candidate
+//	/recruit schedule <application_id> <interviewer> <datetime[RFC3339]>
+//
+// Each sub-command surfaces store errors inline (Text only) so a bad
+// argument is a friendly chat reply rather than a 500.
+func (d *CommandDispatcher) recruit(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.recruitment == nil {
+		return CommandResponse{Text: "recruitment not configured"}, nil
+	}
+	if req.TenantID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id required"}, nil
+	}
+	sub := "list"
+	rest := req.Args
+	if len(req.Args) > 0 {
+		sub = strings.ToLower(req.Args[0])
+		rest = req.Args[1:]
+	}
+	switch sub {
+	case "list":
+		openings, err := d.recruitment.ListJobOpenings(ctx, req.TenantID, hr.JobOpeningFilter{})
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/recruit list failed: %v", err)}, nil
+		}
+		if len(openings) == 0 {
+			return CommandResponse{Text: "No job openings"}, nil
+		}
+		lines := make([]string, 0, len(openings))
+		for i := range openings {
+			o := &openings[i]
+			lines = append(lines, fmt.Sprintf("%s | %s | %s | %d/%d filled",
+				o.ID, o.Title, o.Status, o.PositionsFilled, o.MaxPositions))
+		}
+		return CommandResponse{Text: "Job openings\n" + strings.Join(lines, "\n")}, nil
+
+	case "applications", "apps":
+		if len(rest) < 1 {
+			return CommandResponse{Text: "Usage: /recruit applications <job_opening_id>"}, nil
+		}
+		openingID, err := uuid.Parse(rest[0])
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("invalid job_opening_id: %v", err)}, nil
+		}
+		apps, err := d.recruitment.ListApplications(ctx, req.TenantID, hr.ApplicationFilter{JobOpeningID: openingID})
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/recruit applications failed: %v", err)}, nil
+		}
+		if len(apps) == 0 {
+			return CommandResponse{Text: "No applications for that opening"}, nil
+		}
+		lines := make([]string, 0, len(apps))
+		for i := range apps {
+			a := &apps[i]
+			rating := "—"
+			if a.Rating != nil {
+				rating = fmt.Sprintf("%d", *a.Rating)
+			}
+			lines = append(lines, fmt.Sprintf("%s | %s | %s | rating=%s",
+				a.ID, a.ApplicantName, a.Status, rating))
+		}
+		return CommandResponse{Text: "Applications\n" + strings.Join(lines, "\n")}, nil
+
+	case "advance":
+		if len(rest) < 2 {
+			return CommandResponse{Text: "Usage: /recruit advance <application_id> <status>"}, nil
+		}
+		appID, err := uuid.Parse(rest[0])
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("invalid application_id: %v", err)}, nil
+		}
+		app, err := d.recruitment.AdvanceApplication(ctx, req.TenantID, appID, strings.ToLower(rest[1]), req.UserID)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/recruit advance failed: %v", err)}, nil
+		}
+		return CommandResponse{Text: fmt.Sprintf("Application %s → %s", app.ID, app.Status)}, nil
+
+	case "schedule":
+		if len(rest) < 3 {
+			return CommandResponse{Text: "Usage: /recruit schedule <application_id> <interviewer_id> <datetime RFC3339>"}, nil
+		}
+		appID, err := uuid.Parse(rest[0])
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("invalid application_id: %v", err)}, nil
+		}
+		interviewerID, err := uuid.Parse(rest[1])
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("invalid interviewer_id: %v", err)}, nil
+		}
+		when, err := time.Parse(time.RFC3339, rest[2])
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("invalid datetime %q (want RFC3339, e.g. 2026-01-02T15:04:05Z): %v", rest[2], err)}, nil
+		}
+		iv, err := d.recruitment.CreateInterview(ctx, req.TenantID, req.UserID, hr.CreateInterviewInput{
+			ApplicationID: appID,
+			InterviewerID: &interviewerID,
+			ScheduledAt:   &when,
+		})
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/recruit schedule failed: %v", err)}, nil
+		}
+		return CommandResponse{Text: fmt.Sprintf("Scheduled %s interview %s at %s",
+			iv.InterviewType, iv.ID, when.Format(time.RFC3339))}, nil
+
+	default:
+		return CommandResponse{Text: "Usage: /recruit list | applications <job_opening_id> | advance <application_id> <status> | schedule <application_id> <interviewer_id> <datetime>"}, nil
+	}
 }
 
 // issueCertificate implements `/certificate <enrollment_id>`. Issues

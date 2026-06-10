@@ -141,14 +141,18 @@ var expenseClaimSchema = []byte(`{
   }
 }`)
 
-// All returns every Phase E HR KType as a freshly-constructed slice.
+// All returns every HR KType as a freshly-constructed slice: the Phase E
+// core (employee, leave_request, attendance, expense_claim) plus the
+// Session 16 recruitment surface (job_opening, job_application,
+// interview, offer_letter).
 func All() []ktype.KType {
-	return []ktype.KType{
+	core := []ktype.KType{
 		{Name: KTypeEmployee, Version: 1, Schema: employeeSchema},
 		{Name: KTypeLeaveRequest, Version: 1, Schema: leaveRequestSchema},
 		{Name: KTypeAttendance, Version: 1, Schema: attendanceSchema},
 		{Name: KTypeExpenseClaim, Version: 1, Schema: expenseClaimSchema},
 	}
+	return append(core, RecruitmentKTypes()...)
 }
 
 func init() {

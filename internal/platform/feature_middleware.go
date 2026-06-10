@@ -73,6 +73,22 @@ func FeatureFromPath(p string) string {
 		}
 		return featureFromKType(ktypeRest[:ktSlash])
 	}
+	// /api/v1/hr/recruitment/* — the Session 16 recruitment surface
+	// rides its own feature key so a tenant can run core HR (employees,
+	// leave, payroll) without exposing the recruitment pipeline, and so
+	// recruitment can be licensed independently. Matched before the
+	// generic "hr" → FeatureHR case below; everything else under /hr
+	// stays on FeatureHR.
+	if domain == "hr" && slash != len(rest) {
+		sub := rest[slash+1:]
+		subSlash := strings.IndexByte(sub, '/')
+		if subSlash == -1 {
+			subSlash = len(sub)
+		}
+		if sub[:subSlash] == "recruitment" {
+			return tenant.FeatureRecruitment
+		}
+	}
 	switch domain {
 	case "finance":
 		return tenant.FeatureFinance

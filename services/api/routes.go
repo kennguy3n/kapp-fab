@@ -794,6 +794,48 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Get("/pay-runs/{id}/payslips", d.hrh.listPayRunPayslips)
 		})
 
+		// Session 16 — Recruitment. Job openings, applications,
+		// interviews and offer letters live under
+		// /api/v1/hr/recruitment so the dynamic feature middleware
+		// (FeatureFromPath) gates the whole subtree on
+		// FeatureRecruitment rather than the parent FeatureHR — a
+		// tenant can run core HR without exposing the recruitment
+		// pipeline. Reads need hr.read, mutations need hr.admin;
+		// writes are idempotent via the standard Idempotency-Key
+		// middleware.
+		r.Route("/api/v1/hr/recruitment", func(r chi.Router) {
+			d.tenantChain(r)
+			r.Use(d.apiCallMW)
+			r.Use(d.featureMW)
+			r.Use(d.authzMethodGate("hr.read", "hr.admin", ""))
+			r.Use(platform.IdempotencyMiddleware(d.pool))
+			r.Use(d.rateLimitMW)
+			r.Use(platform.QuotaMiddleware(d.quotaEnforcer))
+
+			r.Post("/job-openings", d.rch.createJobOpening)
+			r.Get("/job-openings", d.rch.listJobOpenings)
+			r.Get("/job-openings/{id}", d.rch.getJobOpening)
+			r.Put("/job-openings/{id}", d.rch.updateJobOpening)
+			r.Post("/job-openings/{id}/publish", d.rch.publishJobOpening)
+			r.Post("/job-openings/{id}/close", d.rch.closeJobOpening)
+
+			r.Post("/applications", d.rch.createApplication)
+			r.Get("/applications", d.rch.listApplications)
+			r.Get("/applications/{id}", d.rch.getApplication)
+			r.Put("/applications/{id}", d.rch.updateApplication)
+			r.Post("/applications/{id}/advance", d.rch.advanceApplication)
+			r.Post("/applications/{id}/reject", d.rch.rejectApplication)
+
+			r.Post("/interviews", d.rch.createInterview)
+			r.Get("/interviews", d.rch.listInterviews)
+			r.Post("/interviews/{id}/complete", d.rch.completeInterview)
+
+			r.Post("/offer-letters", d.rch.createOfferLetter)
+			r.Get("/offer-letters", d.rch.listOfferLetters)
+			r.Post("/offer-letters/{id}/send", d.rch.sendOfferLetter)
+			r.Post("/offer-letters/{id}/respond", d.rch.respondOfferLetter)
+		})
+
 		// Phase 2a B6 — marketplace HTTP surface. Three logical
 		// groups share a single handler bundle:
 		//
