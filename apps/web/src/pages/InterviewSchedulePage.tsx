@@ -153,7 +153,7 @@ export function InterviewSchedulePage() {
           aria-pressed={tab === "completed"}
           onClick={() => setTab("completed")}
         >
-          Completed ({completed.length})
+          Past ({completed.length})
         </Button>
       </div>
 
@@ -197,7 +197,7 @@ export function InterviewSchedulePage() {
           </div>
         )
       ) : completed.length === 0 ? (
-        <p className="text-sm text-fg-muted">No completed interviews.</p>
+        <p className="text-sm text-fg-muted">No past interviews.</p>
       ) : (
         <div className="flex flex-col gap-2">
           {completed.map((i) => (

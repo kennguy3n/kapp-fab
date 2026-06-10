@@ -263,7 +263,14 @@ function ApplicationCard({
   disabled,
 }: ApplicationCardProps) {
   const next = ADVANCE_TARGETS[app.status as ApplicationStatus];
-  const terminal = app.status === "rejected" || app.status === "withdrawn";
+  // Terminal states have no legal transitions out in the server's
+  // applicationTransitions table, so hide the action row entirely — this
+  // includes 'hired' (which lives in its own board lane), otherwise the
+  // Reject button would call AdvanceApplication(…, "rejected") and 409.
+  const terminal =
+    app.status === "rejected" ||
+    app.status === "withdrawn" ||
+    app.status === "hired";
   return (
     <div
       className="mb-2 cursor-grab rounded-md border border-border bg-bg-elevated p-2 text-[13px] active:cursor-grabbing"
