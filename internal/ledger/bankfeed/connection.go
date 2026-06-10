@@ -120,7 +120,12 @@ func (s *ConnectionStore) UpsertConnection(ctx context.Context, c Connection) (*
 	now := s.now()
 	out := c
 	err = dbutil.WithTenantTx(ctx, s.pool, c.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
+		// RETURNING created_at/updated_at so the caller gets the true
+		// persisted timestamps. On the ON CONFLICT update path the DB keeps
+		// the original created_at (it is not in the SET clause), so reading
+		// it back avoids reporting a fresh created_at for a connection that
+		// was actually first established earlier.
+		if err := tx.QueryRow(ctx,
 			`INSERT INTO bank_feed_connections
 			     (tenant_id, id, bank_account_id, provider, access_token_enc,
 			      refresh_token_enc, cursor, external_id, status, last_sync_at,
@@ -136,11 +141,12 @@ func (s *ConnectionStore) UpsertConnection(ctx context.Context, c Connection) (*
 			     status            = EXCLUDED.status,
 			     last_sync_at      = EXCLUDED.last_sync_at,
 			     last_error        = EXCLUDED.last_error,
-			     updated_at        = EXCLUDED.updated_at`,
+			     updated_at        = EXCLUDED.updated_at
+			 RETURNING created_at, updated_at`,
 			c.TenantID, c.ID, c.BankAccountID, c.Provider, accessEnc,
 			refreshEnc, nullIfEmpty(c.Cursor), nullIfEmpty(c.ExternalID), c.Status,
 			c.LastSyncAt, nullIfEmpty(c.LastError), now,
-		); err != nil {
+		).Scan(&out.CreatedAt, &out.UpdatedAt); err != nil {
 			return fmt.Errorf("bankfeed: upsert connection: %w", err)
 		}
 		return s.auditConnection(ctx, tx, c, "finance.bank_feed.connection.upsert")
@@ -148,8 +154,6 @@ func (s *ConnectionStore) UpsertConnection(ctx context.Context, c Connection) (*
 	if err != nil {
 		return nil, err
 	}
-	out.CreatedAt = now
-	out.UpdatedAt = now
 	return &out, nil
 }
 

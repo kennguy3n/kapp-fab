@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
@@ -59,6 +60,11 @@ func TestCSVIngest(t *testing.T) {
 	if txns[1].Currency != "GBP" {
 		t.Errorf("currency = %q; want default GBP", txns[1].Currency)
 	}
+	// Slash dates are day-first: 01/02/2024 is 1 Feb 2024, not 2 Jan.
+	want := time.Date(2024, time.February, 1, 0, 0, 0, 0, time.UTC)
+	if !txns[1].ValueDate.Equal(want) {
+		t.Errorf("value_date = %s; want %s (day-first DD/MM)", txns[1].ValueDate, want)
+	}
 }
 
 func TestCSVIngestMissingColumns(t *testing.T) {
@@ -88,9 +94,22 @@ func TestCSVIngestBadAmount(t *testing.T) {
 }
 
 func TestParseCSVDateFormats(t *testing.T) {
-	for _, s := range []string{"2024-01-15", "15/01/2024", "2024/01/15"} {
-		if _, err := parseCSVDate(s); err != nil {
+	cases := map[string]time.Time{
+		"2024-01-15": time.Date(2024, time.January, 15, 0, 0, 0, 0, time.UTC),
+		"2024/01/15": time.Date(2024, time.January, 15, 0, 0, 0, 0, time.UTC),
+		"15/01/2024": time.Date(2024, time.January, 15, 0, 0, 0, 0, time.UTC),
+		// Ambiguous (both <= 12): must resolve day-first, so 3 Apr — never 4 Mar.
+		"03/04/2024":           time.Date(2024, time.April, 3, 0, 0, 0, 0, time.UTC),
+		"2024-01-15T00:00:00Z": time.Date(2024, time.January, 15, 0, 0, 0, 0, time.UTC),
+	}
+	for s, want := range cases {
+		got, err := parseCSVDate(s)
+		if err != nil {
 			t.Errorf("parseCSVDate(%q): %v", s, err)
+			continue
+		}
+		if !got.Equal(want) {
+			t.Errorf("parseCSVDate(%q) = %s; want %s", s, got, want)
 		}
 	}
 	if _, err := parseCSVDate("nonsense"); err == nil {

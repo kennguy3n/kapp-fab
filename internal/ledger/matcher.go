@@ -182,6 +182,13 @@ func (m *SmartMatcher) SuggestMatches(ctx context.Context, tenantID, txnID uuid.
 func (m *SmartMatcher) loadCandidates(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, amount decimal.Decimal, valueDate time.Time, currency string, opts MatchOptions) ([]candidate, error) {
 	abs := amount.Abs()
 	lo := abs.Sub(opts.AmountTolerance.Abs())
+	// Clamp at zero: journal line amounts are non-negative, so a negative
+	// lower bound (tolerance exceeding a tiny statement amount) would widen
+	// the BETWEEN to match every small debit/credit rather than the intended
+	// near-amount band. Zero keeps the band correct without spurious hits.
+	if lo.IsNegative() {
+		lo = decimal.Zero
+	}
 	hi := abs.Add(opts.AmountTolerance.Abs())
 	w := opts.window()
 	rows, err := tx.Query(ctx,

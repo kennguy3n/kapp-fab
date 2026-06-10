@@ -119,3 +119,20 @@ func TestSnippetBounds(t *testing.T) {
 		t.Errorf("short snippet = %q; want unchanged", s)
 	}
 }
+
+func TestSnippetRedactsCredentials(t *testing.T) {
+	body := `{"error":"bad","access_token":"access-sandbox-abc123","secret":"sssh","client_id":"cid-9","note":"keep me"}`
+	got := snippet([]byte(body))
+	for _, leaked := range []string{"access-sandbox-abc123", "sssh", "cid-9"} {
+		if strings.Contains(got, leaked) {
+			t.Errorf("snippet leaked secret %q: %s", leaked, got)
+		}
+	}
+	if !strings.Contains(got, "[REDACTED]") {
+		t.Errorf("snippet should mark redactions: %s", got)
+	}
+	// Non-sensitive fields are preserved for diagnosability.
+	if !strings.Contains(got, "keep me") {
+		t.Errorf("snippet dropped non-sensitive field: %s", got)
+	}
+}

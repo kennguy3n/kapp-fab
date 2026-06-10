@@ -139,12 +139,23 @@ func (p *CSVProvider) Ingest(r io.Reader, defaultCurrency string) ([]RawTransact
 
 // parseCSVDate accepts the common statement date formats so an operator
 // does not have to pre-massage their export.
+//
+// Slash-separated dates are interpreted as day-first (DD/MM/YYYY), the
+// international / ISO-adjacent convention used across the EU/UK where the
+// GoCardless Open Banking feed is focused. We deliberately do NOT also try
+// month-first (MM/DD/YYYY): for any date whose day and month are both ≤ 12
+// (e.g. 03/04/2024) the two are indistinguishable, so accepting both would
+// silently misread roughly a third of US-formatted exports — shifting a
+// statement line by weeks and breaking reconciliation against the ±7-day
+// match window. Callers that must ingest month-first exports should
+// normalise to ISO 8601 (YYYY-MM-DD) before upload, which is always
+// unambiguous and accepted here.
 func parseCSVDate(s string) (time.Time, error) {
-	layouts := []string{"2006-01-02", "02/01/2006", "01/02/2006", "2006/01/02", time.RFC3339}
+	layouts := []string{"2006-01-02", "2006/01/02", "02/01/2006", time.RFC3339}
 	for _, l := range layouts {
 		if t, err := time.Parse(l, s); err == nil {
 			return t.UTC(), nil
 		}
 	}
-	return time.Time{}, fmt.Errorf("unrecognized date format")
+	return time.Time{}, fmt.Errorf("unrecognized date format (use ISO 8601 YYYY-MM-DD, or day-first DD/MM/YYYY)")
 }

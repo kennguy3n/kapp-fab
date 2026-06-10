@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"time"
 )
 
@@ -121,11 +122,21 @@ func deleteResource(ctx context.Context, client httpDoer, url string, headers ma
 	return nil
 }
 
-// snippet bounds a response body for safe inclusion in an error message.
+// sensitiveJSONField matches a JSON string field whose value is credential
+// material. We redact these before a provider's error body is folded into an
+// error string (which may then be logged), so that if a provider ever echoes
+// request fields back in an error response the secret never reaches a log.
+// This is defense-in-depth: we only ever pass the *response* body here, never
+// the request body that carries our credentials.
+var sensitiveJSONField = regexp.MustCompile(`(?i)"(access_token|refresh_token|public_token|client_secret|secret_key|secret_id|client_id|secret|password|authorization|api_key)"\s*:\s*"[^"]*"`)
+
+// snippet bounds a response body for safe inclusion in an error message,
+// redacting any credential-like fields first.
 func snippet(b []byte) string {
 	const maxLen = 512
-	if len(b) > maxLen {
-		return string(b[:maxLen]) + "…"
+	s := sensitiveJSONField.ReplaceAllString(string(b), `"$1":"[REDACTED]"`)
+	if len(s) > maxLen {
+		return s[:maxLen] + "…"
 	}
-	return string(b)
+	return s
 }
