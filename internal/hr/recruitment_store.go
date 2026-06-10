@@ -902,7 +902,6 @@ func (s *RecruitmentStore) AdvanceApplication(ctx context.Context, tenantID, app
 		return nil, fmt.Errorf("%w: %q", ErrInvalidStatus, newStatus)
 	}
 	var out JobApplication
-	noop := false
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var before JobApplication
 		if err := scanJobApplication(tx.QueryRow(ctx,
@@ -912,7 +911,6 @@ func (s *RecruitmentStore) AdvanceApplication(ctx context.Context, tenantID, app
 		}
 		if before.Status == newStatus {
 			out = before
-			noop = true
 			return nil
 		}
 		if !canAdvanceApplication(before.Status, newStatus) {
@@ -925,22 +923,42 @@ func (s *RecruitmentStore) AdvanceApplication(ctx context.Context, tenantID, app
 			tenantID, applicationID, newStatus), &out); err != nil {
 			return err
 		}
-		// On hire, bump the opening's positions_filled (capped at
-		// max_positions) and flip it to 'filled' when the last slot is
-		// taken. Done in the same tx so the count can never drift from
-		// the set of hired applications.
+		// On hire, reserve a slot on the opening: lock the row, reject the
+		// hire when there is no remaining capacity (ErrOpeningFull → 409),
+		// otherwise bump positions_filled and flip the opening to 'filled'
+		// when the last slot is taken. Done in the same tx so the count can
+		// never drift from the set of hired applications.
+		//
+		// The capacity check is the enforcement point for max_positions:
+		// without it an over-hire (e.g. a 5th hire against a 2-position
+		// opening) would be silently swallowed by a LEAST() cap, leaving
+		// positions_filled inconsistent with the set of 'hired' applications.
+		// The FOR UPDATE serialises concurrent hires of different
+		// applications for the same opening (each tx already holds its own
+		// application-row lock first, so the lock order is stable), so the
+		// second hire sees the committed count and is rejected when full.
 		//
 		// The auto-flip only fires when the opening is currently 'open':
 		// open→filled is the only legal move into 'filled' per
-		// openingTransitions, so a draft / on_hold / closed / already-
-		// filled opening keeps its status (its positions_filled still
-		// increments). This keeps the system-driven hire path from
-		// silently performing a transition the manual lifecycle would
-		// reject.
+		// openingTransitions, so a draft / on_hold / closed opening keeps
+		// its status while still counting the hire.
 		if newStatus == AppStatusHired {
+			var posFilled, maxPos int
+			if err := tx.QueryRow(ctx,
+				`SELECT positions_filled, max_positions FROM job_openings
+				  WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+				tenantID, out.JobOpeningID).Scan(&posFilled, &maxPos); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrRecruitNotFound
+				}
+				return fmt.Errorf("recruitment: lock job opening: %w", err)
+			}
+			if posFilled >= maxPos {
+				return fmt.Errorf("%w: %d/%d filled", ErrOpeningFull, posFilled, maxPos)
+			}
 			if _, err := tx.Exec(ctx,
 				`UPDATE job_openings
-				    SET positions_filled = LEAST(positions_filled + 1, max_positions),
+				    SET positions_filled = positions_filled + 1,
 				        status = CASE WHEN positions_filled + 1 >= max_positions
 				                      AND status = 'open' THEN 'filled' ELSE status END,
 				        updated_at = now()
@@ -974,7 +992,6 @@ func (s *RecruitmentStore) AdvanceApplication(ctx context.Context, tenantID, app
 			out = *refreshed
 		}
 	}
-	_ = noop
 	return &out, nil
 }
 
