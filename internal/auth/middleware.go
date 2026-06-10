@@ -23,19 +23,36 @@ const (
 	ctxKeyRecoveryBypass
 )
 
-// Middleware validates a Bearer JWT against the supplied Signer and
+// Verifier is the narrow contract the middleware needs to turn a
+// bearer token into Claims. *Signer satisfies it (legacy HS256/RS256
+// Kapp tokens), as does *JWKSValidator (iam-core RS256/ES256 tokens)
+// and *MultiVerifier (dual-issuer routing across both). Accepting the
+// interface rather than a concrete *Signer is what lets a deployment
+// opt into iam-core without changing the middleware or any downstream
+// handler — both paths yield the same Claims on the request context.
+type Verifier interface {
+	Verify(tok string) (*Claims, error)
+}
+
+// Middleware validates a Bearer JWT against the supplied Verifier and
 // stores the decoded Claims on the request context. It ALSO fulfils
 // the contract platform.TenantMiddleware used to provide — when the
 // tenant lookup succeeds, the active tenant is placed on the context
 // so downstream handlers can call platform.TenantFromContext and
 // platform.UserIDFromContext without a second round-trip.
 //
+// The Verifier may be a single-issuer *Signer (legacy KChat-only
+// deployments) or a *MultiVerifier that routes by the token's `iss`
+// claim across the legacy signer and an iam-core JWKS validator. The
+// middleware itself is issuer-agnostic: it only sees the resulting
+// Claims.
+//
 // Sessions (when configured) are revalidated on every request: a
 // revoked or expired row fails the request with 401 even if the JWT
 // itself has not expired yet. This lets operators force-logout a user
 // by deleting their session rows without waiting for JWT TTL.
 func Middleware(
-	signer *Signer,
+	verifier Verifier,
 	tenantSvc TenantResolver,
 	sessions SessionStore,
 ) func(http.Handler) http.Handler {
@@ -46,7 +63,7 @@ func Middleware(
 				http.Error(w, err.Error(), http.StatusUnauthorized)
 				return
 			}
-			claims, err := signer.Verify(tok)
+			claims, err := verifier.Verify(tok)
 			if err != nil {
 				http.Error(w, "invalid token", http.StatusUnauthorized)
 				return

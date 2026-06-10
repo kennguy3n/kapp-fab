@@ -18,6 +18,25 @@ import (
 type authHandlers struct {
 	svc    *auth.SSOService
 	signer *auth.Signer
+
+	// iam-core (OAuth2/OIDC) login surface. All nil unless
+	// IAM_CORE_ISSUER is configured; the /login, /callback, /logout,
+	// and /userinfo handlers 503 when iam is nil so the routes can be
+	// registered unconditionally. stateCodec seals the short-lived
+	// PKCE/state/nonce cookie between /login and /callback.
+	iam        *auth.IAMCoreClient
+	stateCodec *auth.OIDCStateCodec
+	// postLoginRedirect overrides the SPA route the callback delivers
+	// the token fragment to. It must point at the front-end page that
+	// reads the fragment; defaults to "/callback" when empty so a
+	// zero-config deployment works. postLogoutRedirect is the absolute
+	// URL iam-core returns to after end-session; defaults to "/" when
+	// empty.
+	postLoginRedirect  string
+	postLogoutRedirect string
+	// secureCookies sets the Secure attribute on the login-state and
+	// refresh cookies. True in production / behind HTTPS.
+	secureCookies bool
 }
 
 // ssoRequest is the JSON payload POST /api/v1/auth/sso accepts.

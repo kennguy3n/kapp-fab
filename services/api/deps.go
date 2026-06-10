@@ -58,6 +58,22 @@ type apiDeps struct {
 	quotaEnforcer *platform.QuotaEnforcer
 	portalStore   *auth.PortalStore
 
+	// iam-core (OAuth2/OIDC) integration. Both are nil unless
+	// IAM_CORE_ISSUER is configured (cfg.IAMCoreEnabled). When set:
+	//
+	//   - jwksValidator validates iam-core RS256/ES256 access tokens.
+	//     It is folded into the request auth.Verifier alongside the
+	//     legacy HS256 signer via auth.MultiVerifier so both token
+	//     types resolve to the same Claims on the request context.
+	//   - iamClient is the umbrella facade (OAuth2 login client + M2M
+	//     Management API client + the same validator) the auth routes
+	//     and tenant onboarding drive.
+	//
+	// Leaving them nil is the backward-compatible default: the API
+	// behaves exactly as the legacy KChat-only build.
+	iamClient     *auth.IAMCoreClient
+	jwksValidator *auth.JWKSValidator
+
 	// Domain stores shared across multiple route groups.
 	recordStore      *record.PGStore
 	ledgerStore      *ledger.PGStore

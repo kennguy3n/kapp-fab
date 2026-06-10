@@ -71,6 +71,17 @@ export function LoginPage() {
   return (
     <form onSubmit={submit} className="flex max-w-[360px] flex-col gap-3">
       <h1>Sign in</h1>
+      {/* iam-core Universal Login (OAuth2/OIDC). The backend's
+          GET /api/v1/auth/login starts the PKCE Authorization-Code
+          flow and redirects to iam-core; on return the /callback
+          route stores the tokens. When iam-core is not configured the
+          backend responds 503 and this link is a no-op, so the KChat
+          path below remains the default. A full-page navigation (not
+          fetch) is required so the browser follows the 302 to the
+          identity provider. */}
+      <p>
+        <a href="/api/v1/auth/login">Sign in with SSO (MFA, passkeys, social)</a>
+      </p>
       <p>
         <a href="/api/v1/auth/kchat/start">Sign in with KChat</a>
       </p>
