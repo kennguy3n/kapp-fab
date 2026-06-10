@@ -48,6 +48,32 @@ declare global {
   }
 }
 
+// LMS lesson_progress.status vocabulary ("not_started" | "in_progress" |
+// "completed") is NOT valid SCORM CMI status vocabulary. When hydrating
+// resume state we must translate it into the version-appropriate SCORM
+// value, otherwise the SCO receives an unrecognized status string.
+export function lmsStatusToScorm(
+  lmsStatus: string | undefined,
+  version: ScormVersion,
+): string {
+  switch (lmsStatus) {
+    case "completed":
+      return "completed";
+    case "in_progress":
+      return "incomplete";
+    case "not_started":
+    case "":
+    case undefined:
+      // Both SCORM 1.2 (lesson_status) and 2004 (completion_status)
+      // accept "not attempted".
+      return "not attempted";
+    default:
+      // Unknown LMS value: fall back to the version's neutral default
+      // rather than leaking it verbatim into the CMI model.
+      return version === "scorm_12" ? "incomplete" : "unknown";
+  }
+}
+
 function projectCMI(store: Store, version: ScormVersion): ScormCMIData {
   const cmi: ScormCMIData = {
     version: version === "scorm_12" ? "scorm_12" : "scorm_2004",
@@ -78,8 +104,18 @@ export function ScormPlayer({
   onProgress,
 }: ScormPlayerProps) {
   const [status, setStatus] = useState<string>("loading");
+  const [hydrated, setHydrated] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const storeRef = useRef<Store>(new Map());
+
+  // Keep the latest onProgress in a ref so the RTE-install effect does NOT
+  // depend on its identity. A non-memoized callback from the parent would
+  // otherwise re-run the effect on every parent render, tearing down and
+  // re-installing window.API mid-session (breaking in-flight SCO calls).
+  const onProgressRef = useRef(onProgress);
+  useEffect(() => {
+    onProgressRef.current = onProgress;
+  }, [onProgress]);
 
   useEffect(() => {
     let cancelled = false;
@@ -94,7 +130,7 @@ export function ScormPlayer({
         } else {
           await api.scormCommit(lessonId, enrollmentId, cmi);
         }
-        onProgress?.();
+        onProgressRef.current?.();
       } catch (e) {
         lastError = "101"; // general exception
         setError((e as Error).message);
@@ -120,6 +156,19 @@ export function ScormPlayer({
       return "true";
     };
     const getLastError = (): string => lastError;
+
+    // The SCORM RTE lives on global singletons (window.API /
+    // window.API_1484_11); the spec assumes a single active SCO. Warn if a
+    // sibling player already installed one so a double-mount (two SCOs on
+    // one page) is diagnosable rather than silently clobbering each other.
+    const existing =
+      version === "scorm_12" ? window.API : window.API_1484_11;
+    if (existing) {
+      console.warn(
+        "ScormPlayer: a SCORM RTE is already installed on this window; " +
+          "only one SCO can be active at a time.",
+      );
+    }
 
     // SCORM 1.2 and 2004 expose the same semantics under different
     // method names; we install whichever the requested version needs.
@@ -155,14 +204,19 @@ export function ScormPlayer({
         if (cancelled) return;
         if (rt.exists) {
           store.set("cmi.suspend_data", rt.suspend_data ?? "");
+          const scormStatus = lmsStatusToScorm(rt.status, version);
           if (version === "scorm_12") {
-            store.set("cmi.core.lesson_status", rt.status || "incomplete");
+            store.set("cmi.core.lesson_status", scormStatus);
             if (rt.score) store.set("cmi.core.score.raw", rt.score);
           } else {
-            store.set("cmi.completion_status", rt.status || "incomplete");
+            store.set("cmi.completion_status", scormStatus);
             if (rt.score) store.set("cmi.score.raw", rt.score);
           }
         }
+        // Only now (resume state populated) do we allow the iframe to load,
+        // so the SCO's first LMSGetValue("cmi.suspend_data") cannot race
+        // ahead of hydration and read an empty store.
+        setHydrated(true);
         setStatus("ready");
       })
       .catch((e) => {
@@ -174,7 +228,7 @@ export function ScormPlayer({
       if (version === "scorm_12") delete window.API;
       else delete window.API_1484_11;
     };
-  }, [lessonId, enrollmentId, version, onProgress]);
+  }, [lessonId, enrollmentId, version]);
 
   return (
     <div className="flex flex-col gap-2">
@@ -188,12 +242,18 @@ export function ScormPlayer({
           SCORM error: {error}
         </p>
       )}
-      <iframe
-        title="SCORM content"
-        src={contentUrl}
-        className="h-[640px] w-full rounded-lg border border-border bg-bg"
-        sandbox="allow-scripts allow-same-origin allow-forms"
-      />
+      {hydrated ? (
+        <iframe
+          title="SCORM content"
+          src={contentUrl}
+          className="h-[640px] w-full rounded-lg border border-border bg-bg"
+          sandbox="allow-scripts allow-same-origin allow-forms"
+        />
+      ) : (
+        <div className="flex h-[640px] w-full items-center justify-center rounded-lg border border-border bg-bg text-[12px] text-fg-muted">
+          Loading SCORM content…
+        </div>
+      )}
     </div>
   );
 }

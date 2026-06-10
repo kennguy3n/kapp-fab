@@ -191,7 +191,7 @@ func (a lmsRecordAdapters) CompletedCoursesForUser(ctx context.Context, tenantID
 		if err := json.Unmarshal(enrolls[i].Data, &ef); err != nil {
 			continue
 		}
-		if ef.Status != lms.ProgressCompleted {
+		if ef.Status != lms.EnrollmentCompleted {
 			continue
 		}
 		if cid, err := uuid.Parse(ef.CourseID); err == nil {

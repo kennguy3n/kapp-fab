@@ -685,11 +685,23 @@ func (h *lmsHandlers) listAwards(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	userID, err := uuid.Parse(r.URL.Query().Get("user_id"))
-	if err != nil {
-		userID = actorOrDefault(r.Context())
+	// With an explicit user_id this is a single-learner lookup; without
+	// one it is the tenant-wide award history that the BadgesPage table
+	// renders (per-learner rows). RLS scopes either path to the tenant.
+	var (
+		awards []lms.UserBadge
+		err    error
+	)
+	if raw := r.URL.Query().Get("user_id"); raw != "" {
+		userID, perr := uuid.Parse(raw)
+		if perr != nil {
+			http.Error(w, "invalid user_id", http.StatusBadRequest)
+			return
+		}
+		awards, err = h.gamify.ListUserBadges(r.Context(), tenantID, userID)
+	} else {
+		awards, err = h.gamify.ListAwards(r.Context(), tenantID, 0)
 	}
-	awards, err := h.gamify.ListUserBadges(r.Context(), tenantID, userID)
 	if err != nil {
 		writeLMSError(w, err)
 		return

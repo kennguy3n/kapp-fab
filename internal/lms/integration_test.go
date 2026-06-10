@@ -16,6 +16,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -228,6 +230,29 @@ func TestGamificationStore(t *testing.T) {
 	if err != nil || counts[user] != 1 {
 		t.Fatalf("counts: %v %+v", err, counts)
 	}
+
+	// A second learner earns the same badge; the tenant-wide award
+	// history must surface awards across all learners (not just one).
+	user2 := uuid.New()
+	if _, awarded3, err := store.AwardBadge(ctx, tenant, user2, badge.ID, json.RawMessage(`{"course_id":"y"}`), nil); err != nil || !awarded3 {
+		t.Fatalf("award user2: %v awarded=%v", err, awarded3)
+	}
+	all, err := store.ListAwards(ctx, tenant, 0)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("list awards (tenant-wide): %v n=%d", err, len(all))
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, a := range all {
+		seen[a.UserID] = true
+	}
+	if !seen[user] || !seen[user2] {
+		t.Fatalf("award history missing a learner: %+v", seen)
+	}
+	// A different tenant sees none of these awards (RLS isolation).
+	other, err := store.ListAwards(ctx, uuid.New(), 0)
+	if err != nil || len(other) != 0 {
+		t.Fatalf("cross-tenant award leak: %v n=%d", err, len(other))
+	}
 }
 
 func TestDiscussionStore(t *testing.T) {
@@ -310,6 +335,18 @@ func TestScormCommitRuntime(t *testing.T) {
 	json.Unmarshal(meta, &m)
 	if m["suspend_data"] != "s2" {
 		t.Fatalf("suspend_data = %q, want s2", m["suspend_data"])
+	}
+
+	// Third commit: a revisit re-reporting "incomplete" must NOT regress
+	// the already-completed status (completion is terminal).
+	p, err = store.CommitRuntime(ctx, tenant, enr, lesson, CMIData{
+		Version: ContentTypeScorm12, LessonStatus: "incomplete", SessionTime: "00:01:00", SuspendData: "s3",
+	}, nil)
+	if err != nil {
+		t.Fatalf("commit3: %v", err)
+	}
+	if p.Status != ProgressCompleted || p.CompletedAt == nil {
+		t.Fatalf("revisit regressed completion: %+v", p)
 	}
 }
 
@@ -537,6 +574,20 @@ func TestScormExtractRejectsMissingManifest(t *testing.T) {
 	zipBytes := buildScormZip(t, map[string]string{"index.html": "<html></html>"})
 	if _, err := store.ExtractPackage(context.Background(), uuid.New(), uuid.New(), zipBytes); err == nil {
 		t.Fatal("expected error for missing manifest")
+	}
+}
+
+func TestScormExtractRejectsTooManyFiles(t *testing.T) {
+	pool := testPool(t)
+	store := NewScormStore(pool, files.NewMemoryStore(), audit.NewPGLogger(pool))
+	entries := map[string]string{"imsmanifest.xml": sampleManifest12}
+	for i := 0; i <= maxScormFiles; i++ { // exceed the entry-count cap
+		entries[fmt.Sprintf("f%d.txt", i)] = "x"
+	}
+	zipBytes := buildScormZip(t, entries)
+	_, err := store.ExtractPackage(context.Background(), uuid.New(), uuid.New(), zipBytes)
+	if !errors.Is(err, ErrInvalidScormPackage) {
+		t.Fatalf("expected ErrInvalidScormPackage for entry-count bomb, got %v", err)
 	}
 }
 

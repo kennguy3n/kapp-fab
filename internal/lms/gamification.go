@@ -32,6 +32,10 @@ const (
 	CriteriaStreak         = "streak"
 )
 
+// maxAwardHistory bounds the tenant-wide award history listing so the
+// instructor view cannot pull an unbounded result set on large tenants.
+const maxAwardHistory = 500
+
 var (
 	// ErrInvalidBadge is returned when a badge definition fails
 	// validation (missing name or unknown criteria type).
@@ -288,6 +292,41 @@ func (s *GamificationStore) ListUserBadges(ctx context.Context, tenantID, userID
 			  WHERE tenant_id = $1 AND user_id = $2
 			  ORDER BY earned_at DESC, id`,
 			tenantID, userID,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var ub UserBadge
+			if err := rows.Scan(&ub.TenantID, &ub.ID, &ub.UserID, &ub.BadgeID, &ub.EarnedAt, &ub.Context); err != nil {
+				return err
+			}
+			out = append(out, ub)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+// ListAwards returns awards across all learners in the tenant, newest
+// first, capped at limit rows. It backs the instructor-facing "award
+// history" view (which renders the learner per row); RLS confines the
+// result to the caller's tenant. A non-positive or oversized limit is
+// clamped to maxAwardHistory.
+func (s *GamificationStore) ListAwards(ctx context.Context, tenantID uuid.UUID, limit int) ([]UserBadge, error) {
+	if limit <= 0 || limit > maxAwardHistory {
+		limit = maxAwardHistory
+	}
+	var out []UserBadge
+	err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT tenant_id, id, user_id, badge_id, earned_at, context
+			   FROM lms_user_badges
+			  WHERE tenant_id = $1
+			  ORDER BY earned_at DESC, id
+			  LIMIT $2`,
+			tenantID, limit,
 		)
 		if err != nil {
 			return err

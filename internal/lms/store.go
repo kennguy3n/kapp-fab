@@ -21,6 +21,18 @@ const (
 	ProgressCompleted  = "completed"
 )
 
+// EnrollmentStatus captures course-enrollment lifecycle state for the
+// lms.enrollment KType. These are deliberately distinct from
+// ProgressStatus (even though several string values coincide today) so
+// the lesson-progress and enrollment vocabularies can diverge without
+// silently breaking callers that compare across the two.
+const (
+	EnrollmentEnrolled   = "enrolled"
+	EnrollmentInProgress = "in_progress"
+	EnrollmentCompleted  = "completed"
+	EnrollmentDropped    = "dropped"
+)
+
 // Progress is one row in `lesson_progress`. Identity is
 // (tenant_id, enrollment_id, lesson_id). Score is optional — only
 // lessons with a quiz or assignment carry one.

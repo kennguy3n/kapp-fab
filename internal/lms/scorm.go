@@ -452,9 +452,17 @@ func (s *ScormStore) ExtractPackage(ctx context.Context, tenantID, lessonID uuid
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidScormPackage, err)
 	}
+	// Decompression-bomb defence: bound the entry count up front (the zip
+	// central directory is cheap to inspect) and the cumulative extracted
+	// size as we read, in addition to the per-file cap below. Together
+	// these stop a small archive from exhausting object-store capacity.
+	if len(zr.File) > maxScormFiles {
+		return nil, fmt.Errorf("%w: %d entries exceeds limit of %d", ErrInvalidScormPackage, len(zr.File), maxScormFiles)
+	}
 	keyPrefix := fmt.Sprintf("scorm/%s/%s", tenantID, lessonID)
 	var manifest *ScormManifest
 	fileCount := 0
+	var totalBytes int64
 	for _, f := range zr.File {
 		if f.FileInfo().IsDir() {
 			continue
@@ -479,6 +487,10 @@ func (s *ScormStore) ExtractPackage(ctx context.Context, tenantID, lessonID uuid
 		if int64(len(content)) > maxScormFileBytes {
 			return nil, fmt.Errorf("%w: %s exceeds %d bytes", ErrInvalidScormPackage, f.Name, maxScormFileBytes)
 		}
+		totalBytes += int64(len(content))
+		if totalBytes > maxScormTotalBytes {
+			return nil, fmt.Errorf("%w: total extracted size exceeds %d bytes", ErrInvalidScormPackage, maxScormTotalBytes)
+		}
 		if path.Base(clean) == "imsmanifest.xml" && path.Dir(clean) == "." {
 			parsed, perr := ParseScormManifest(content)
 			if perr != nil {
@@ -501,9 +513,19 @@ func (s *ScormStore) ExtractPackage(ctx context.Context, tenantID, lessonID uuid
 	return &ScormPackage{KeyPrefix: keyPrefix, Manifest: *manifest, FileCount: fileCount}, nil
 }
 
-// maxScormFileBytes caps a single entry in a SCORM package (50 MiB),
-// bounding memory + storage from a hostile or accidental huge upload.
-const maxScormFileBytes = 50 << 20
+// SCORM package extraction limits — defence-in-depth against
+// decompression bombs and accidental oversized uploads.
+const (
+	// maxScormFileBytes caps a single entry in a SCORM package (50 MiB),
+	// bounding memory + storage from a hostile or accidental huge upload.
+	maxScormFileBytes = 50 << 20
+	// maxScormFiles caps the number of entries in a package, stopping an
+	// archive of millions of tiny files from exhausting write capacity.
+	maxScormFiles = 10000
+	// maxScormTotalBytes caps the cumulative extracted size across all
+	// entries (512 MiB), independent of the per-file and upload caps.
+	maxScormTotalBytes = 512 << 20
+)
 
 func contentTypeFor(name string) string {
 	switch strings.ToLower(path.Ext(name)) {
@@ -559,7 +581,15 @@ func (s *ScormStore) CommitRuntime(ctx context.Context, tenantID, enrollmentID, 
 			     started_at, completed_at, updated_at, time_spent_seconds, metadata)
 			 VALUES ($1,$2,$3,$4,$5,1,$6,$7,$6,$8,$9)
 			 ON CONFLICT (tenant_id, enrollment_id, lesson_id) DO UPDATE
-			    SET status             = EXCLUDED.status,
+			    -- Completion is terminal: a learner revisiting a finished
+			    -- lesson (SCO re-commits 'in_progress'/'incomplete') must
+			    -- not regress a 'completed' row, which would leave status
+			    -- inconsistent with the preserved completed_at below.
+			    SET status             = CASE
+			                                 WHEN lesson_progress.status = 'completed'
+			                                 THEN lesson_progress.status
+			                                 ELSE EXCLUDED.status
+			                             END,
 			        score              = COALESCE(EXCLUDED.score, lesson_progress.score),
 			        started_at         = COALESCE(lesson_progress.started_at, EXCLUDED.started_at),
 			        completed_at       = COALESCE(lesson_progress.completed_at, EXCLUDED.completed_at),
