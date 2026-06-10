@@ -202,6 +202,12 @@ func (h *SyncHandler) SyncOne(ctx context.Context, tenantID uuid.UUID, conn *Con
 	res := &SyncResult{Fetched: len(raw), Cursor: cursor}
 
 	lines := make([]ledger.BankTransaction, 0, len(raw))
+	// Keep each settled line's original RawTransaction keyed by its resolved
+	// external ref. bank_transactions has no Counterparty column, so rule
+	// evaluation below must read it from here rather than reconstructing it
+	// from the stored row (which would drop Counterparty and make
+	// counterparty rules fall back to coarse Description matching).
+	byRef := make(map[string]RawTransaction, len(raw))
 	for i := range raw {
 		rt := raw[i]
 		// Skip not-yet-settled lines: a pending authorization carries a
@@ -220,6 +226,8 @@ func (h *SyncHandler) SyncOne(ctx context.Context, tenantID uuid.UUID, conn *Con
 			// index instead of duplicating.
 			ref = contentHashRef(conn.BankAccountID, rt)
 		}
+		rt.ExternalID = ref
+		byRef[ref] = rt
 		lines = append(lines, ledger.BankTransaction{
 			BankAccountID: conn.BankAccountID,
 			ValueDate:     rt.ValueDate,
@@ -248,12 +256,19 @@ func (h *SyncHandler) SyncOne(ctx context.Context, tenantID uuid.UUID, conn *Con
 	if h.matcher != nil {
 		for i := range inserted {
 			ln := &inserted[i]
-			rawTxn := RawTransaction{
-				ExternalID:  ln.ExternalRef,
-				ValueDate:   ln.ValueDate,
-				Description: ln.Description,
-				Amount:      ln.Amount,
-				Currency:    ln.Currency,
+			// Prefer the original fetched line so counterparty rules see the
+			// provider-supplied Counterparty (not persisted on the row). Fall
+			// back to reconstructing from the stored line only if the ref is
+			// somehow absent from the map.
+			rawTxn, ok := byRef[ln.ExternalRef]
+			if !ok {
+				rawTxn = RawTransaction{
+					ExternalID:  ln.ExternalRef,
+					ValueDate:   ln.ValueDate,
+					Description: ln.Description,
+					Amount:      ln.Amount,
+					Currency:    ln.Currency,
+				}
 			}
 			match, hasRule := Evaluate(rules, rawTxn)
 			suggestions, err := h.matcher.SuggestMatches(ctx, tenantID, ln.ID, ledger.MatchOptions{})
@@ -316,9 +331,10 @@ func contentHashRef(bankAccountID uuid.UUID, rt RawTransaction) string {
 // bloat the column.
 func sanitizeErr(err error) string {
 	const maxLen = 500
-	s := err.Error()
-	if len(s) > maxLen {
-		return s[:maxLen] + "…"
-	}
-	return s
+	// Rune-safe truncation: the error string can embed a snippet of a
+	// non-ASCII provider response, and this value is persisted to the
+	// last_error TEXT column. Splitting a multi-byte rune would produce
+	// invalid UTF-8 that Postgres rejects, dropping the MarkError write and
+	// hiding the sync failure from operators.
+	return truncateRunes(err.Error(), maxLen)
 }

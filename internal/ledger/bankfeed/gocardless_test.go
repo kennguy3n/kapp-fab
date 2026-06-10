@@ -125,11 +125,40 @@ func TestGoCardlessFetchTransactions(t *testing.T) {
 	if !txns[0].Amount.Equal(decimal.RequireFromString("-12.34")) {
 		t.Errorf("amount = %s", txns[0].Amount)
 	}
-	// Cursor is the max booking date among successfully-ingested rows; the
-	// malformed g2 (2024-02-09) is skipped so the cursor never advances
-	// past an un-ingested line (re-fetched next tick instead of lost).
-	if cursor != "2024-02-03" {
-		t.Errorf("cursor = %q; want max ingested booking date 2024-02-03", cursor)
+	// The cursor advances to the max *well-formed* booking date across all
+	// booked lines — including g2 (2024-02-09), which is skipped for its bad
+	// amount but still has a valid date. This stops a permanently-malformed
+	// latest line from pinning the cursor and re-pulling the whole window
+	// every tick; g2 still sits within the inclusive next date_from, so a
+	// later provider amount fix is picked up.
+	if cursor != "2024-02-09" {
+		t.Errorf("cursor = %q; want max booking date 2024-02-09 (advances past skipped line)", cursor)
+	}
+}
+
+// TestGoCardlessCursorIgnoresMalformedDate verifies the cursor only advances
+// from a well-formed ISO date, so a garbage date string on a skipped line
+// cannot corrupt the cursor (which would fail to parse next sync and reset
+// incrementality back to the full lookback window).
+func TestGoCardlessCursorIgnoresMalformedDate(t *testing.T) {
+	calls := 0
+	doer := gcDoer(t, &calls, func(_ *http.Request) (*http.Response, error) {
+		return jsonResponse(200, `{"transactions":{"booked":[
+			{"transactionId":"h1","bookingDate":"2024-03-05","transactionAmount":{"amount":"10.00","currency":"GBP"},"remittanceInformationUnstructured":"OK"},
+			{"transactionId":"h2","bookingDate":"not-a-date","transactionAmount":{"amount":"bad"},"remittanceInformationUnstructured":"skip"}
+		]}}`), nil
+	})
+	p := NewGoCardlessProvider(GoCardlessConfig{SecretID: "i", SecretKey: "k", BaseURL: "https://x"}, doer)
+	p.now = func() time.Time { return time.Date(2024, 3, 6, 0, 0, 0, 0, time.UTC) }
+	txns, cursor, err := p.FetchTransactions(context.Background(), &Connection{AccessToken: "acc-9"}, time.Time{})
+	if err != nil {
+		t.Fatalf("FetchTransactions: %v", err)
+	}
+	if len(txns) != 1 {
+		t.Fatalf("got %d txns; want 1 (bad amount+date skipped)", len(txns))
+	}
+	if cursor != "2024-03-05" {
+		t.Errorf("cursor = %q; want 2024-03-05 (malformed date ignored for cursor)", cursor)
 	}
 }
 

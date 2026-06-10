@@ -231,16 +231,28 @@ func (p *GoCardlessProvider) FetchTransactions(ctx context.Context, conn *Connec
 	maxDate := conn.Cursor
 	for i := range resp.Transactions.Booked {
 		t := &resp.Transactions.Booked[i]
-		amt, err := decimal.NewFromString(t.TransactionAmount.Amount)
-		if err != nil {
-			continue // skip malformed amount rather than fail the whole sync
-		}
 		dateStr := t.BookingDate
 		if dateStr == "" {
 			dateStr = t.ValueDate
 		}
-		vd, err := time.Parse("2006-01-02", dateStr)
+		vd, dateErr := time.Parse("2006-01-02", dateStr)
+		// Advance the cursor watermark from any well-formed booking date —
+		// even for a line we skip below for a bad amount. Otherwise a single
+		// permanently-malformed latest line pins the cursor at the prior max
+		// and forces a full re-pull of the window on every hourly tick. The
+		// skipped line still falls within the inclusive next date_from, so a
+		// provider-side amount fix is still picked up. Guarding on a clean
+		// parse also ensures a garbage date string can never corrupt the
+		// cursor (it would otherwise fail to parse on the next sync and reset
+		// incrementality).
+		if dateErr == nil && dateStr > maxDate {
+			maxDate = dateStr
+		}
+		amt, err := decimal.NewFromString(t.TransactionAmount.Amount)
 		if err != nil {
+			continue // skip malformed amount rather than fail the whole sync
+		}
+		if dateErr != nil {
 			vd = p.now()
 		}
 		counterparty := t.CreditorName
@@ -255,9 +267,6 @@ func (p *GoCardlessProvider) FetchTransactions(ctx context.Context, conn *Connec
 			Currency:     t.TransactionAmount.Currency,
 			Counterparty: counterparty,
 		})
-		if dateStr > maxDate {
-			maxDate = dateStr
-		}
 	}
 	return out, maxDate, nil
 }

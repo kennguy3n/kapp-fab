@@ -255,6 +255,41 @@ func TestSyncOneAutoAcceptsWhenRuleAndConfidenceClear(t *testing.T) {
 	}
 }
 
+// TestSyncOneCounterpartyRuleMatchesViaRawTransaction proves the provider-
+// supplied Counterparty survives to rule evaluation. The Description here does
+// NOT contain the counterparty value, so a CondCounterparty rule can only fire
+// if Counterparty is preserved (it is not stored on bank_transactions). Before
+// the byRef fix the reconstructed RawTransaction dropped Counterparty and this
+// rule would silently never match.
+func TestSyncOneCounterpartyRuleMatchesViaRawTransaction(t *testing.T) {
+	tn := uuid.New()
+	acct := uuid.New()
+	conn := &Connection{ID: uuid.New(), TenantID: tn, BankAccountID: acct, Provider: "fake"}
+	rt := RawTransaction{
+		ExternalID:   "e1",
+		ValueDate:    time.Now(),
+		Description:  "POS 8841 REF99", // deliberately omits "uber eats"
+		Amount:       decimal.RequireFromString("-20"),
+		Currency:     "USD",
+		Counterparty: "Uber Eats",
+	}
+	prov := &fakeProvider{name: "fake", cursor: "c", raw: []RawTransaction{rt}}
+	matcher := &fakeMatcher{byTxn: map[uuid.UUID][]ledger.Suggestion{}}
+	store := &primingFakeStore{inner: &fakeStore{}, matcher: matcher}
+	rules := &fakeRules{rules: []Rule{
+		ruleWith(CondCounterparty, "uber eats", func(r *Rule) { r.AutoApprove = true }),
+	}}
+	h := newSyncHandlerForTest(&fakeConns{}, rules, NewRegistry(prov), store, matcher)
+
+	res, err := h.SyncOne(context.Background(), tn, conn)
+	if err != nil {
+		t.Fatalf("SyncOne: %v", err)
+	}
+	if res.AutoMatched != 1 {
+		t.Fatalf("AutoMatched = %d; want 1 (counterparty rule must match on Counterparty, not Description)", res.AutoMatched)
+	}
+}
+
 // primingFakeStore wraps fakeStore so each inserted line gets a
 // high-confidence suggestion registered under its generated id.
 type primingFakeStore struct {
