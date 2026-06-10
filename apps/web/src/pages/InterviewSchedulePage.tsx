@@ -91,9 +91,18 @@ export function InterviewSchedulePage() {
       qc.invalidateQueries({ queryKey: ["recruitment", "interviews"] }),
   });
 
-  const interviews = interviewsQ.data ?? [];
-  const scheduled = interviews.filter((i) => i.status === "scheduled");
-  const completed = interviews.filter((i) => i.status !== "scheduled");
+  // Memoize so scheduled/completed (and the byDay calendar below) keep a
+  // stable reference across unrelated re-renders — toggling the feedback
+  // form or switching tabs no longer recomputes the sort + group-by-day.
+  const interviews = useMemo(() => interviewsQ.data ?? [], [interviewsQ.data]);
+  const scheduled = useMemo(
+    () => interviews.filter((i) => i.status === "scheduled"),
+    [interviews],
+  );
+  const completed = useMemo(
+    () => interviews.filter((i) => i.status !== "scheduled"),
+    [interviews],
+  );
 
   // byDay buckets scheduled interviews into ISO-date groups, sorted
   // ascending so the soonest day leads — the lightweight "calendar".
@@ -425,7 +434,20 @@ function ScheduleInterviewForm({
         </Select>
         <Select
           value={form.interview_type}
-          onChange={(e) => setForm({ ...form, interview_type: e.target.value })}
+          onChange={(e) => {
+            const interview_type = e.target.value;
+            // In-person interviews carry a physical location; remote ones
+            // carry a meeting link. Clear the field that no longer applies
+            // so we never persist both (which would make the applicant
+            // email render a location as a clickable "Join link").
+            setForm({
+              ...form,
+              interview_type,
+              ...(interview_type === "in_person"
+                ? { meeting_link: undefined }
+                : { location: undefined }),
+            });
+          }}
         >
           {INTERVIEW_TYPES.map((t) => (
             <option key={t.value} value={t.value}>
@@ -464,11 +486,19 @@ function ScheduleInterviewForm({
             })
           }
         />
-        <Input
-          placeholder="Meeting link or location"
-          value={form.meeting_link ?? ""}
-          onChange={(e) => setForm({ ...form, meeting_link: e.target.value })}
-        />
+        {form.interview_type === "in_person" ? (
+          <Input
+            placeholder="Location (e.g. Room 4B)"
+            value={form.location ?? ""}
+            onChange={(e) => setForm({ ...form, location: e.target.value })}
+          />
+        ) : (
+          <Input
+            placeholder="Meeting link"
+            value={form.meeting_link ?? ""}
+            onChange={(e) => setForm({ ...form, meeting_link: e.target.value })}
+          />
+        )}
       </div>
       {error && <p className="text-sm text-danger">{error}</p>}
       <div className="flex gap-2">

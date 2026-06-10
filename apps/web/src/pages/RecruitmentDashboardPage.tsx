@@ -17,10 +17,14 @@ const FUNNEL_STAGES: Array<{ status: ApplicationStatus; label: string }> = [
   { status: "hired", label: "Hired" },
 ];
 
-// STAGE_RANK lets us count an application toward every stage it has
-// reached or passed. Since the pipeline is linear, an application in
+// STAGE_RANK lets us count an application toward every forward stage it
+// has reached or passed. Since the pipeline is linear, an application in
 // 'interview' has necessarily cleared applied/screening/shortlisted, so
 // the funnel reflects cumulative reach rather than current occupancy.
+// Note: only currently-active applications are ranked — rejected and
+// withdrawn carry no rank and drop out of every bar, even ones they
+// previously cleared. The funnel therefore measures cumulative reach of
+// still-live candidates (progression), deliberately not attrition.
 const STAGE_RANK: Record<string, number> = {
   applied: 0,
   screening: 1,
