@@ -68,6 +68,7 @@ type iamTenantStore interface {
 
 // iamUserStore is the slice of *UserStore the sync needs.
 type iamUserStore interface {
+	GetUser(ctx context.Context, id uuid.UUID) (*User, error)
 	SetIAMUserID(ctx context.Context, id uuid.UUID, iamUserID string) error
 }
 
@@ -201,11 +202,22 @@ func (s *IAMSync) SyncUser(ctx context.Context, iamTenantID string, userID uuid.
 
 	if err := s.users.SetIAMUserID(ctx, userID, iamUserID); err != nil {
 		if errors.Is(err, ErrIAMUserAlreadyMapped) {
+			// A concurrent run won the race and mapped a different
+			// iam-core user. Mirror EnsureTenant's handling: treat the
+			// winner's mapping as authoritative and return it so the
+			// caller (wizard) does not abort onboarding. The user
+			// iam-core just created for us is an orphan an operator can
+			// reap; re-pointing would orphan the winner's identity.
+			existing, getErr := s.users.GetUser(ctx, userID)
+			if getErr != nil {
+				return "", fmt.Errorf("tenant: iam sync reload after user mapping race: %w", getErr)
+			}
 			s.logger.WarnContext(ctx, "iam-core user provisioning raced; keeping existing mapping",
 				"kapp_user_id", userID.String(),
+				"kept_iam_user_id", existing.IAMUserID,
 				"orphaned_iam_user_id", iamUserID,
 			)
-			return "", err
+			return existing.IAMUserID, nil
 		}
 		return "", fmt.Errorf("tenant: iam sync persist user mapping: %w", err)
 	}

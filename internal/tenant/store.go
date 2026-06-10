@@ -243,10 +243,10 @@ func (s *PGStore) GetBySlug(ctx context.Context, slug string) (*Tenant, error) {
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at,
 		        zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD'),
-		        COALESCE(country, ''), COALESCE(locale, 'en')
+		        COALESCE(country, ''), COALESCE(locale, 'en'), COALESCE(iam_tenant_id, '')
 		 FROM tenants WHERE slug = $1`, slug,
 	).Scan(&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status, &t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country, &t.Locale)
+		&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country, &t.Locale, &t.IAMTenantID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -264,7 +264,7 @@ func (s *PGStore) List(ctx context.Context) ([]Tenant, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, slug, name, cell, status, plan, quota, created_at, updated_at,
 		        zk_access_key, zk_secret_key, zk_bucket, COALESCE(base_currency, 'USD'),
-		        COALESCE(country, ''), COALESCE(locale, 'en')
+		        COALESCE(country, ''), COALESCE(locale, 'en'), COALESCE(iam_tenant_id, '')
 		 FROM tenants
 		 ORDER BY slug ASC`)
 	if err != nil {
@@ -281,7 +281,7 @@ func (s *PGStore) List(ctx context.Context) ([]Tenant, error) {
 		if err := rows.Scan(
 			&t.ID, &t.Slug, &t.Name, &t.Cell, &t.Status,
 			&t.Plan, &t.Quota, &t.CreatedAt, &t.UpdatedAt,
-			&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country, &t.Locale,
+			&zkAccess, &zkSecret, &zkBucket, &t.BaseCurrency, &t.Country, &t.Locale, &t.IAMTenantID,
 		); err != nil {
 			return nil, fmt.Errorf("tenant: list scan: %w", err)
 		}

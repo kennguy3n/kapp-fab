@@ -118,9 +118,9 @@ func (s *UserStore) GetUserByKChatID(ctx context.Context, kchatUserID string) (*
 	}
 	var u User
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, kchat_user_id, COALESCE(email, ''), COALESCE(display_name, '')
+		`SELECT id, kchat_user_id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(iam_user_id, '')
 		 FROM users WHERE kchat_user_id = $1`, kchatUserID,
-	).Scan(&u.ID, &u.KChatUserID, &u.Email, &u.DisplayName)
+	).Scan(&u.ID, &u.KChatUserID, &u.Email, &u.DisplayName, &u.IAMUserID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound

@@ -60,11 +60,16 @@ export function CallbackPage() {
       );
     }
 
-    // Strip the tokens from the address bar so they are not bookmarked,
-    // shared, or left in browser history.
+    // The backend forwards the user's intended landing path as a
+    // same-site ?return_to=; navigate there once tokens are stored, or
+    // fall back to the app root. Validated to reject open redirects.
+    const dest = safeReturnTo(query.get("return_to"));
+
+    // Strip the tokens (and the return_to query) from the address bar so
+    // they are not bookmarked, shared, or left in browser history.
     window.history.replaceState(null, "", window.location.pathname);
 
-    navigate("/", { replace: true });
+    navigate(dest, { replace: true });
   }, [navigate]);
 
   if (err) {
@@ -101,6 +106,17 @@ function tenantFromJWT(token: string): string {
   } catch {
     return "";
   }
+}
+
+// safeReturnTo accepts only a same-site absolute path ("/foo/bar"),
+// mirroring the backend's sanitizeReturnTo, so a crafted return_to
+// cannot turn the post-login navigation into an open redirect. Returns
+// "/" for any missing or unsafe value.
+function safeReturnTo(p: string | null): string {
+  if (!p) return "/";
+  if (!p.startsWith("/") || p.startsWith("//")) return "/";
+  if (p.includes("\\")) return "/";
+  return p;
 }
 
 function base64UrlToBase64(s: string): string {

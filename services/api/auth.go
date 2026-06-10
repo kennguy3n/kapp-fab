@@ -26,10 +26,12 @@ type authHandlers struct {
 	// PKCE/state/nonce cookie between /login and /callback.
 	iam        *auth.IAMCoreClient
 	stateCodec *auth.OIDCStateCodec
-	// postLoginRedirect is the app-relative path /callback sends the
-	// browser to on success (tokens in the URL fragment). Defaults to
-	// "/" when empty. postLogoutRedirect is the absolute URL iam-core
-	// returns to after end-session; defaults to "/" when empty.
+	// postLoginRedirect overrides the SPA route the callback delivers
+	// the token fragment to. It must point at the front-end page that
+	// reads the fragment; defaults to "/callback" when empty so a
+	// zero-config deployment works. postLogoutRedirect is the absolute
+	// URL iam-core returns to after end-session; defaults to "/" when
+	// empty.
 	postLoginRedirect  string
 	postLogoutRedirect string
 	// secureCookies sets the Secure attribute on the login-state and

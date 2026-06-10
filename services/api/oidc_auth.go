@@ -189,7 +189,21 @@ func (h *authHandlers) callback(w http.ResponseWriter, r *http.Request) {
 	if tok.IDToken != "" {
 		frag.Set("id_token", tok.IDToken)
 	}
-	dest := h.loginRedirectTarget(st.ReturnTo) + "#" + frag.Encode()
+	// The access token rides in the URL *fragment*, which only the SPA
+	// callback page knows how to read — so the fragment must always be
+	// delivered to that page, never to the user's final destination
+	// (which would silently drop the tokens). The user's intended
+	// landing path (ReturnTo) is forwarded as a same-site query param
+	// the SPA callback navigates to once it has persisted the tokens.
+	dest := h.spaCallbackPath()
+	if rt := sanitizeReturnTo(st.ReturnTo); rt != "" {
+		sep := "?"
+		if strings.Contains(dest, "?") {
+			sep = "&"
+		}
+		dest += sep + "return_to=" + url.QueryEscape(rt)
+	}
+	dest += "#" + frag.Encode()
 	http.Redirect(w, r, dest, http.StatusFound)
 }
 
@@ -315,17 +329,19 @@ func (h *authHandlers) clearCookie(w http.ResponseWriter, name, path string) {
 	})
 }
 
-// loginRedirectTarget returns the absolute-or-relative URL the callback
-// redirects to. A validated same-site returnTo wins; otherwise the
-// configured post-login path; otherwise "/".
-func (h *authHandlers) loginRedirectTarget(returnTo string) string {
-	if returnTo != "" {
-		return returnTo
-	}
+// spaCallbackPath is the front-end route that parses the login token
+// fragment (access_token/id_token in location.hash) and persists it
+// into the SPA's storage. The callback redirect must always target
+// this page; pointing it elsewhere drops the tokens because no other
+// route reads the fragment. It defaults to "/callback" so a zero-config
+// deployment works out of the box, and stays overridable via
+// IAM_CORE_POST_LOGIN_REDIRECT for SPAs that mount the handler on a
+// different path.
+func (h *authHandlers) spaCallbackPath() string {
 	if p := sanitizeReturnTo(h.postLoginRedirect); p != "" {
 		return p
 	}
-	return "/"
+	return "/callback"
 }
 
 func (h *authHandlers) logoutRedirectTarget() string {
