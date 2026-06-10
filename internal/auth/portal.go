@@ -178,6 +178,41 @@ func (s *PortalStore) GetByEmail(ctx context.Context, tenantID uuid.UUID, email 
 	return &user, nil
 }
 
+// EnsurePortalUser upserts a portal_users row for a customer whose
+// passwordless login was verified out-of-band (e.g. by iam-core's
+// passwordless API) and returns the row. Unlike VerifyMagicLink it
+// touches no magic-link token state — verification already happened
+// elsewhere — it only guarantees a portal_users row exists so a
+// portal-scoped JWT can be minted, and stamps email_verified +
+// last_login_at to mirror a successful local verify.
+func (s *PortalStore) EnsurePortalUser(ctx context.Context, tenantID uuid.UUID, email string) (*PortalUser, error) {
+	email = normaliseEmail(email)
+	if email == "" {
+		return nil, errors.New("auth: portal email required")
+	}
+	var user PortalUser
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			INSERT INTO portal_users (id, tenant_id, email, email_verified, last_login_at)
+			VALUES ($1, $2, $3, TRUE, now())
+			ON CONFLICT (tenant_id, lower(email))
+			DO UPDATE SET email_verified = TRUE,
+			              last_login_at = now(),
+			              updated_at = now()
+			RETURNING id, tenant_id, email, display_name, email_verified, last_login_at, created_at, updated_at`,
+			uuid.New(), tenantID, email,
+		).Scan(
+			&user.ID, &user.TenantID, &user.Email, &user.DisplayName,
+			&user.EmailVerified, &user.LastLoginAt,
+			&user.CreatedAt, &user.UpdatedAt,
+		)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("auth: ensure portal user: %w", err)
+	}
+	return &user, nil
+}
+
 // IssuePortalToken mints the JWT for a verified portal user. It
 // reuses the platform's Signer under the hood so rotation /
 // revocation surfaces work the same as for standard user tokens,

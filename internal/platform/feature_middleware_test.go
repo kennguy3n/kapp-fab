@@ -32,6 +32,20 @@ func TestFeatureFromPathRecordsKType(t *testing.T) {
 		{"/api/v1/records/sales.pos_invoice/abc-123", tenant.FeaturePOS},
 		{"/api/v1/records/hr.employee", tenant.FeatureHR},
 		{"/api/v1/records/payroll.run", tenant.FeatureHR},
+		// Recruitment KTypes share the "hr" prefix but ride their own
+		// FeatureRecruitment gate so a tenant with HR enabled but
+		// recruitment disabled cannot CRUD them through /records,
+		// matching the dedicated /api/v1/hr/recruitment/* route gate.
+		{"/api/v1/records/hr.job_opening", tenant.FeatureRecruitment},
+		{"/api/v1/records/hr.job_application", tenant.FeatureRecruitment},
+		{"/api/v1/records/hr.job_application/abc-123", tenant.FeatureRecruitment},
+		{"/api/v1/records/hr.interview", tenant.FeatureRecruitment},
+		{"/api/v1/records/hr.offer_letter", tenant.FeatureRecruitment},
+		// Dedicated recruitment subtree also gates on FeatureRecruitment.
+		{"/api/v1/hr/recruitment/job-openings", tenant.FeatureRecruitment},
+		{"/api/v1/hr/recruitment/applications/abc/advance", tenant.FeatureRecruitment},
+		// Core HR routes stay on FeatureHR.
+		{"/api/v1/hr/payroll", tenant.FeatureHR},
 		{"/api/v1/records/lms.course", tenant.FeatureLMS},
 		{"/api/v1/records/helpdesk.ticket", tenant.FeatureHelpdesk},
 		// Manufacturing KTypes — BOMs and work orders ride the

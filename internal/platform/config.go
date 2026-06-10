@@ -347,6 +347,55 @@ type Config struct {
 	JWTLeeway                 time.Duration
 	JWTKeyringRefreshInterval time.Duration
 
+	// iam-core (OAuth2/OIDC Authorization Server) integration.
+	//
+	// IAMCoreIssuer is the master switch: when empty, the entire
+	// integration is dormant and Kapp behaves exactly as before
+	// (KChat SSO + HS256 JWT only). When set, it is the iam-core base
+	// URL (no trailing slash) used to derive the JWKS, authorize,
+	// token, userinfo, and Management API endpoints.
+	//
+	// The remaining fields configure the interactive Authorization-
+	// Code client (ClientID/Secret/RedirectURI/Audience) and the
+	// machine-to-machine client used for Management API calls
+	// (M2MClientID/M2MClientSecret). They are validated as a group:
+	// in production, enabling IAMCoreIssuer requires the interactive
+	// client trio (client id, secret, redirect uri) to be present so
+	// the login flow cannot silently 500 at runtime. The M2M
+	// credentials are only required when tenant/user provisioning is
+	// actually used, so they are validated lazily by the provisioning
+	// path rather than gating boot — a deployment that only validates
+	// iam-core tokens (no auto-provisioning) need not configure them.
+	IAMCoreIssuer          string
+	IAMCoreClientID        string
+	IAMCoreClientSecret    string
+	IAMCoreRedirectURI     string
+	IAMCoreAudience        string
+	IAMCoreM2MClientID     string
+	IAMCoreM2MClientSecret string
+	// IAMCoreJWKSRefreshInterval tunes how often the JWKS cache is
+	// refreshed. Zero selects auth.DefaultJWKSRefreshInterval (5m).
+	IAMCoreJWKSRefreshInterval time.Duration
+	// IAMCoreCookieKey is the base64-encoded 32-byte AES-256 key that
+	// seals the short-lived OAuth login-state cookie (PKCE verifier +
+	// state + nonce) between /login and /callback. It MUST be shared
+	// across replicas — a per-instance key breaks the flow when the
+	// callback lands on a different replica than the login. When
+	// empty, the API derives a stable key from KAPP_JWT_SECRET if set
+	// (zero-ops reuse of an already-managed secret), and otherwise (dev
+	// only) falls back to an ephemeral random key. In production with
+	// no KAPP_JWT_SECRET this is required when iam-core is enabled.
+	IAMCoreCookieKey string
+	// IAMCorePostLoginRedirect is the app-relative path the callback
+	// redirects the browser to after a successful login, carrying the
+	// tokens in the URL fragment for the SPA to consume. Must be a
+	// same-site absolute path (leading "/"). Zero selects "/".
+	IAMCorePostLoginRedirect string
+	// IAMCorePostLogoutRedirect is the absolute URL iam-core returns
+	// the browser to after clearing its session on logout. Zero
+	// selects the API's own origin "/".
+	IAMCorePostLogoutRedirect string
+
 	// CaptchaProvider selects the bot-resistance backend wired in
 	// front of unauthenticated public POST endpoints (form submit,
 	// portal magic-link request, SSO bootstrap). One of:
@@ -575,6 +624,18 @@ func LoadConfig() (*Config, error) {
 		JWTRefreshTTL:             getenvDuration("KAPP_JWT_REFRESH_TTL", 24*time.Hour),
 		JWTLeeway:                 getenvDurationAllowZero("KAPP_JWT_LEEWAY", 30*time.Second),
 		JWTKeyringRefreshInterval: getenvDuration("KAPP_JWT_KEYRING_REFRESH_INTERVAL", 60*time.Second),
+
+		IAMCoreIssuer:              strings.TrimRight(strings.TrimSpace(os.Getenv("IAM_CORE_ISSUER")), "/"),
+		IAMCoreClientID:            os.Getenv("IAM_CORE_CLIENT_ID"),
+		IAMCoreClientSecret:        os.Getenv("IAM_CORE_CLIENT_SECRET"),
+		IAMCoreRedirectURI:         os.Getenv("IAM_CORE_REDIRECT_URI"),
+		IAMCoreAudience:            os.Getenv("IAM_CORE_AUDIENCE"),
+		IAMCoreM2MClientID:         os.Getenv("IAM_CORE_M2M_CLIENT_ID"),
+		IAMCoreM2MClientSecret:     os.Getenv("IAM_CORE_M2M_CLIENT_SECRET"),
+		IAMCoreJWKSRefreshInterval: getenvDuration("IAM_CORE_JWKS_REFRESH_INTERVAL", 0),
+		IAMCoreCookieKey:           os.Getenv("IAM_CORE_COOKIE_KEY"),
+		IAMCorePostLoginRedirect:   os.Getenv("IAM_CORE_POST_LOGIN_REDIRECT"),
+		IAMCorePostLogoutRedirect:  os.Getenv("IAM_CORE_POST_LOGOUT_REDIRECT"),
 
 		CaptchaProvider:         os.Getenv("KAPP_CAPTCHA_PROVIDER"),
 		CaptchaSecret:           os.Getenv("KAPP_CAPTCHA_SECRET"),
@@ -836,7 +897,55 @@ func (c *Config) MissingProductionEnv() []string {
 	if c.RedisURL == "" {
 		missing = append(missing, "REDIS_URL")
 	}
+	// iam-core fail-closed gate: enabling the integration in
+	// production (IAM_CORE_ISSUER set) means the interactive login
+	// flow is live, so the confidential-client trio must be present
+	// or /api/v1/auth/login and /callback would 500 at runtime. We
+	// validate them as a group here rather than at first request so a
+	// misconfigured deploy fails loudly at boot. The M2M credentials
+	// are deliberately NOT gated here: provisioning is an opt-in code
+	// path (tenant onboarding) that validates its own prerequisites,
+	// and a token-validation-only deployment legitimately runs
+	// without them.
+	if c.IAMCoreIssuer != "" {
+		if c.IAMCoreClientID == "" {
+			missing = append(missing, "IAM_CORE_CLIENT_ID")
+		}
+		if c.IAMCoreClientSecret == "" {
+			missing = append(missing, "IAM_CORE_CLIENT_SECRET")
+		}
+		if c.IAMCoreRedirectURI == "" {
+			missing = append(missing, "IAM_CORE_REDIRECT_URI")
+		}
+		// The login-state cookie key must be stable across replicas.
+		// When neither a dedicated IAM_CORE_COOKIE_KEY nor a
+		// KAPP_JWT_SECRET (which the API can derive the key from) is
+		// available in production, the only remaining fallback is an
+		// ephemeral per-instance key — which silently breaks the login
+		// flow behind a load balancer. Require an explicit key rather
+		// than degrade to that.
+		if c.IAMCoreCookieKey == "" && !c.JWTSecretPresent {
+			missing = append(missing, "IAM_CORE_COOKIE_KEY")
+		}
+	}
 	return missing
+}
+
+// IAMCoreEnabled reports whether the iam-core integration is switched
+// on (the issuer is configured). It is the single predicate the boot
+// wiring and the auth routes consult so the "is iam-core active?"
+// decision is made in exactly one place.
+func (c *Config) IAMCoreEnabled() bool {
+	return c.IAMCoreIssuer != ""
+}
+
+// IAMCoreProvisioningEnabled reports whether tenant/user provisioning
+// into iam-core can run — it requires both the issuer and the M2M
+// credentials. Tenant onboarding consults this to decide whether to
+// attempt iam-core provisioning or skip it (the latter is valid for a
+// validation-only deployment).
+func (c *Config) IAMCoreProvisioningEnabled() bool {
+	return c.IAMCoreEnabled() && c.IAMCoreM2MClientID != "" && c.IAMCoreM2MClientSecret != ""
 }
 
 // Warnings returns non-fatal configuration advisories: postures that

@@ -28,6 +28,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/events"
 	"github.com/kennguy3n/kapp-fab/internal/finance"
 	"github.com/kennguy3n/kapp-fab/internal/financeadapters"
+	"github.com/kennguy3n/kapp-fab/internal/hr"
 	"github.com/kennguy3n/kapp-fab/internal/insights"
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
@@ -173,6 +174,7 @@ func run() error {
 		poster:             invoicePoster,
 		inventory:          inventoryStore,
 		manufacturing:      manufacturing.NewPGStore(pool, inventoryStore),
+		recruitment:        hr.NewRecruitmentStore(pool, auditor, eventPublisher, recordStore, workflowEngine),
 		landedCost:         landedCostStore,
 		cycleCounts:        cycleCountStore,
 		lmsIssuer:          lms.NewCertificateIssuer(recordStore, pool),

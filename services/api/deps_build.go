@@ -885,6 +885,13 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	cycleCountStore := inventory.NewCycleCountStore(pool, inventoryStore)
 	agents.RegisterCycleCountTools(executor, cycleCountStore)
 	agents.RegisterHRTools(executor, hrStore)
+	// Session 16 — recruitment store + agent tools. Constructed here so
+	// the agent surface and the HTTP handler bundle (rch, below) share a
+	// single store wired to the same audit logger, event publisher,
+	// record store (hired→employee KRecord) and workflow engine (offer
+	// approval + onboarding enrolment).
+	recruitmentStore := hr.NewRecruitmentStore(pool, auditor, eventPublisher, recordStore, workflowEngine)
+	agents.RegisterRecruitmentTools(executor, recruitmentStore)
 	// Single payroll engine instance reused across the agent tool surface
 	// and the hrHandlers HTTP surface. The engine is stateless (it just
 	// composes recordStore + ledgerStore + a country resolver), so two
@@ -1098,6 +1105,11 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// posting / country-resolver behaviour.
 	hrh := &hrHandlers{engine: payrollEngine}
 
+	// Session 16 — recruitment HTTP handlers reuse the store constructed
+	// alongside the agent tools above so both surfaces share one audit /
+	// event / record / workflow wiring.
+	rch := &recruitmentHandlers{store: recruitmentStore}
+
 	// Phase H JWT auth. The signer is built from KAPP_JWT_SECRET; when
 	// the secret is absent we log and skip wiring the SSO endpoints so
 	// local dev that still relies on the X-Tenant-ID header keeps
@@ -1271,6 +1283,162 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		}
 	}
 
+	// iam-core (OAuth2/OIDC) integration. Dormant unless
+	// IAM_CORE_ISSUER is configured. When enabled we build:
+	//
+	//   - a JWKSValidator that validates iam-core RS256/ES256 access
+	//     tokens (folded into the request verifier below);
+	//   - an OAuth2 confidential client for the interactive
+	//     Authorization-Code login flow (auth routes);
+	//   - an M2M client_credentials client for Management API calls,
+	//     wired only when the M2M credentials are present
+	//     (cfg.IAMCoreProvisioningEnabled);
+	//   - the IAMCoreClient facade bundling the three, plus the
+	//     tenant-onboarding sync that mirrors new tenants/users into
+	//     iam-core.
+	//
+	// Every sub-step degrades independently: a validator-only
+	// deployment (no M2M creds) still validates tokens and serves
+	// login, it just cannot auto-provision. Construction failures here
+	// are fatal in production via the IAMCoreEnabled gate in
+	// platform.LoadConfig (the confidential-client trio is already
+	// validated there), so a NewJWKSValidator/NewOAuth2Client error
+	// past that gate is a genuine bug we refuse to boot with.
+	var jwksValidator *auth.JWKSValidator
+	var iamClient *auth.IAMCoreClient
+	if cfg.IAMCoreEnabled() {
+		iamHTTP := &http.Client{Timeout: 15 * time.Second}
+		validator, verr := auth.NewJWKSValidator(auth.JWKSValidatorConfig{
+			Issuer:          cfg.IAMCoreIssuer,
+			Audience:        cfg.IAMCoreAudience,
+			RefreshInterval: cfg.IAMCoreJWKSRefreshInterval,
+			Leeway:          cfg.JWTLeeway,
+			HTTPClient:      iamHTTP,
+			Logger:          logger,
+		})
+		if verr != nil {
+			runCleanups(cleanups)
+			return nil, nil, fmt.Errorf("api: iam-core JWKS validator init: %w", verr)
+		}
+		jwksValidator = validator
+		// Eagerly warm the key cache and launch the background
+		// refresher so the first inbound iam-core token does not pay a
+		// synchronous JWKS fetch. Start returns immediately; the
+		// goroutine exits when the build ctx is cancelled at shutdown.
+		jwksValidator.Start(ctx)
+
+		oauth2Client, oerr := auth.NewOAuth2Client(auth.OAuth2Config{
+			Issuer:       cfg.IAMCoreIssuer,
+			ClientID:     cfg.IAMCoreClientID,
+			ClientSecret: cfg.IAMCoreClientSecret,
+			RedirectURI:  cfg.IAMCoreRedirectURI,
+			Audience:     cfg.IAMCoreAudience,
+			HTTPClient:   iamHTTP,
+		}, jwksValidator)
+		if oerr != nil {
+			runCleanups(cleanups)
+			return nil, nil, fmt.Errorf("api: iam-core OAuth2 client init: %w", oerr)
+		}
+
+		// The M2M client is only built when its credentials are
+		// configured. Without it the IAMCoreClient still serves token
+		// validation and interactive login; Management API calls
+		// (tenant/user provisioning) return an error instead.
+		var m2mClient *auth.M2MClient
+		if cfg.IAMCoreProvisioningEnabled() {
+			m2m, merr := auth.NewM2MClient(auth.M2MConfig{
+				Issuer:       cfg.IAMCoreIssuer,
+				ClientID:     cfg.IAMCoreM2MClientID,
+				ClientSecret: cfg.IAMCoreM2MClientSecret,
+				Audience:     cfg.IAMCoreAudience,
+				HTTPClient:   iamHTTP,
+			})
+			if merr != nil {
+				runCleanups(cleanups)
+				return nil, nil, fmt.Errorf("api: iam-core M2M client init: %w", merr)
+			}
+			m2mClient = m2m
+		}
+
+		client, cerr := auth.NewIAMCoreClient(auth.IAMCoreClientConfig{
+			Issuer:     cfg.IAMCoreIssuer,
+			OAuth2:     oauth2Client,
+			M2M:        m2mClient,
+			Validator:  jwksValidator,
+			HTTPClient: iamHTTP,
+			Logger:     logger,
+		})
+		if cerr != nil {
+			runCleanups(cleanups)
+			return nil, nil, fmt.Errorf("api: iam-core client init: %w", cerr)
+		}
+		iamClient = client
+
+		// Build the AEAD codec that seals the short-lived login-state
+		// cookie (PKCE verifier + state + nonce) between /login and
+		// /callback. Key resolution, in order: an explicit
+		// IAM_CORE_COOKIE_KEY (base64 32 bytes); else a stable key
+		// derived from KAPP_JWT_SECRET so a deployment that already
+		// manages that secret needs no new config; else (dev only) an
+		// ephemeral random key. Production with neither is rejected at
+		// config load (MissingProductionEnv), so the ephemeral branch
+		// is unreachable outside dev.
+		stateKey, kerr := resolveOIDCStateKey(cfg)
+		if kerr != nil {
+			runCleanups(cleanups)
+			return nil, nil, fmt.Errorf("api: iam-core login-state key: %w", kerr)
+		}
+		stateCodec, scerr := auth.NewOIDCStateCodec(stateKey, oidcLoginStateTTL)
+		if scerr != nil {
+			runCleanups(cleanups)
+			return nil, nil, fmt.Errorf("api: iam-core login-state codec: %w", scerr)
+		}
+		authh.iam = iamClient
+		authh.stateCodec = stateCodec
+		authh.postLoginRedirect = cfg.IAMCorePostLoginRedirect
+		authh.postLogoutRedirect = cfg.IAMCorePostLogoutRedirect
+		// Secure cookies everywhere except a plain-HTTP dev box; the
+		// production posture mirrors the rest of the platform's
+		// cookie hardening.
+		authh.secureCookies = cfg.IsProduction() || envIsHTTPS(cfg.IAMCoreRedirectURI)
+
+		// Wire tenant onboarding → iam-core. Only when provisioning is
+		// enabled (M2M present) does the wizard mirror tenants/users;
+		// otherwise EnsureTenant has nothing to call and we leave the
+		// wizard's sync dormant.
+		if prov := iamClient.TenantProvisioner(auth.TenantProvisionerConfig{}); prov != nil {
+			// `users` is a global (non-RLS) table; the store's
+			// SetIAMUserID write runs on the shared pool directly.
+			userStore := tenant.NewUserStore(pool)
+			iamSync, serr := tenant.NewIAMSync(prov, tenantSvc, userStore, logger)
+			if serr != nil {
+				runCleanups(cleanups)
+				return nil, nil, fmt.Errorf("api: iam-core tenant sync init: %w", serr)
+			}
+			wizard.WithIAMSync(iamSync)
+			log.Printf("api: iam-core tenant/user provisioning enabled")
+		}
+		log.Printf("api: iam-core integration enabled (issuer=%s, provisioning=%t)", cfg.IAMCoreIssuer, cfg.IAMCoreProvisioningEnabled())
+	}
+
+	// authVerifier is what auth.Middleware uses to turn a bearer token
+	// into Claims. It folds the legacy HS256 signer and the iam-core
+	// JWKS validator into a single dual-issuer verifier when both are
+	// present (routing by the token's `iss` claim), falls back to
+	// whichever one exists, and is nil only when neither is configured
+	// (dev without auth). Keeping the nil-ness aligned with "no auth
+	// configured" preserves the existing 503 short-circuit semantics
+	// on the admin/tenant chains.
+	var authVerifier auth.Verifier
+	switch {
+	case authh.signer != nil && jwksValidator != nil:
+		authVerifier = auth.NewMultiVerifier(authh.signer, jwksValidator)
+	case authh.signer != nil:
+		authVerifier = authh.signer
+	case jwksValidator != nil:
+		authVerifier = jwksValidator
+	}
+
 	// RequireJWT fail-closed gate. With KAPP_REQUIRE_JWT defaulting to
 	// true, a non-development boot that ends up WITHOUT a working
 	// signer is a misconfiguration we refuse rather than serve. Booting
@@ -1328,15 +1496,15 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// platform.TenantFromContext under adminChain is by design a
 	// nil return.
 	adminChain := func(r chi.Router) {
-		if authh.signer == nil {
+		if authVerifier == nil {
 			r.Use(func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-					http.Error(w, "admin routes require JWT auth; set KAPP_JWT_SECRET", http.StatusServiceUnavailable)
+					http.Error(w, "admin routes require JWT auth; set KAPP_JWT_SECRET or IAM_CORE_ISSUER", http.StatusServiceUnavailable)
 				})
 			})
 			return
 		}
-		r.Use(auth.Middleware(authh.signer, tenantSvc, sessionStore))
+		r.Use(auth.Middleware(authVerifier, tenantSvc, sessionStore))
 		r.Use(auth.AdminMiddleware())
 	}
 
@@ -1356,15 +1524,15 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// adminChain, which intentionally omits the guard. See the
 	// long coupling note in deps.go for the full rationale.
 	tenantChain := func(r chi.Router) {
-		if authh.signer == nil {
+		if authVerifier == nil {
 			r.Use(func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-					http.Error(w, "tenant routes require JWT auth; set KAPP_JWT_SECRET", http.StatusServiceUnavailable)
+					http.Error(w, "tenant routes require JWT auth; set KAPP_JWT_SECRET or IAM_CORE_ISSUER", http.StatusServiceUnavailable)
 				})
 			})
 			return
 		}
-		r.Use(auth.Middleware(authh.signer, tenantSvc, sessionStore))
+		r.Use(auth.Middleware(authVerifier, tenantSvc, sessionStore))
 		r.Use(auth.RequireActiveHomeTenant())
 	}
 
@@ -1376,6 +1544,8 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		featureStore:           featureStore,
 		quotaEnforcer:          quotaEnforcer,
 		portalStore:            portalStore,
+		iamClient:              iamClient,
+		jwksValidator:          jwksValidator,
 		recordStore:            recordStore,
 		ledgerStore:            ledgerStore,
 		invoicePoster:          invoicePoster,
@@ -1442,6 +1612,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		insembh:                insembh,
 		hrh:                    hrh,
 		lmsh:                   lmsh,
+		rch:                    rch,
 		inboundHandler:         inboundHandler,
 		mph:                    mph,
 		metrics:                metrics,

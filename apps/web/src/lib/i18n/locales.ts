@@ -248,6 +248,15 @@ const COUNTRY_LOCALE_DEFAULTS: Record<string, string> = {
   HU: "hu",
   RO: "ro",
   GR: "el",
+  // Session 14: MENA non-GCC. Jordan, Lebanon, Morocco and Tunisia
+  // share the existing ar catalogue (Maghreb admins running French
+  // books reset from the locale switcher). The South / South-East
+  // Asian packs (KH/MM/BD/LK/PK) and Ghana fall through to the
+  // English default until their native catalogues ship.
+  JO: "ar",
+  LB: "ar",
+  MA: "ar",
+  TN: "ar",
   // SCAFFOLD: cmd/new-tax-pack inserts new COUNTRY_LOCALE_DEFAULTS entries above this line.
 };
 

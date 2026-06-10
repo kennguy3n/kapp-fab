@@ -21,6 +21,14 @@ type User struct {
 	KChatUserID string    `json:"kchat_user_id"`
 	Email       string    `json:"email"`
 	DisplayName string    `json:"display_name"`
+
+	// IAMUserID is the iam-core user identifier this Kapp user is
+	// mirrored to, populated by user sync when the iam-core
+	// integration is enabled (migration 000082). Empty for users
+	// that predate the integration, were never synced, or in
+	// deployments that never enable iam-core. Nothing in the legacy
+	// KChat path reads it.
+	IAMUserID string `json:"iam_user_id,omitempty"`
 }
 
 // UserTenant mirrors a row in the `user_tenants` table, binding a user to a
@@ -110,9 +118,9 @@ func (s *UserStore) GetUserByKChatID(ctx context.Context, kchatUserID string) (*
 	}
 	var u User
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, kchat_user_id, COALESCE(email, ''), COALESCE(display_name, '')
+		`SELECT id, kchat_user_id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(iam_user_id, '')
 		 FROM users WHERE kchat_user_id = $1`, kchatUserID,
-	).Scan(&u.ID, &u.KChatUserID, &u.Email, &u.DisplayName)
+	).Scan(&u.ID, &u.KChatUserID, &u.Email, &u.DisplayName, &u.IAMUserID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -126,9 +134,9 @@ func (s *UserStore) GetUserByKChatID(ctx context.Context, kchatUserID string) (*
 func (s *UserStore) GetUser(ctx context.Context, id uuid.UUID) (*User, error) {
 	var u User
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, kchat_user_id, COALESCE(email, ''), COALESCE(display_name, '')
+		`SELECT id, kchat_user_id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(iam_user_id, '')
 		 FROM users WHERE id = $1`, id,
-	).Scan(&u.ID, &u.KChatUserID, &u.Email, &u.DisplayName)
+	).Scan(&u.ID, &u.KChatUserID, &u.Email, &u.DisplayName, &u.IAMUserID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -136,6 +144,44 @@ func (s *UserStore) GetUser(ctx context.Context, id uuid.UUID) (*User, error) {
 		return nil, fmt.Errorf("tenant: get user: %w", err)
 	}
 	return &u, nil
+}
+
+// SetIAMUserID persists the iam-core user mapping on the users row
+// after user sync provisions the user in iam-core. Like
+// PGStore.SetIAMTenantID it only writes when the column is currently
+// NULL so a re-sync never repoints an already-mapped user at a
+// different iam-core identity; re-setting the same value is a benign
+// success and a conflicting value returns ErrIAMUserAlreadyMapped.
+// `users` is a global (non-RLS) table so the write runs on the shared
+// pool directly.
+func (s *UserStore) SetIAMUserID(ctx context.Context, id uuid.UUID, iamUserID string) error {
+	if id == uuid.Nil {
+		return errors.New("tenant: user id required")
+	}
+	if iamUserID == "" {
+		return errors.New("tenant: iam_user_id is required")
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE users
+		    SET iam_user_id = $1
+		  WHERE id = $2
+		    AND iam_user_id IS NULL`,
+		iamUserID, id,
+	)
+	if err != nil {
+		return fmt.Errorf("tenant: set iam user id: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		existing, getErr := s.GetUser(ctx, id)
+		if getErr != nil {
+			return getErr
+		}
+		if existing.IAMUserID == iamUserID {
+			return nil
+		}
+		return ErrIAMUserAlreadyMapped
+	}
+	return nil
 }
 
 // nullIfEmpty returns nil for an empty string so that NULL is stored for
@@ -261,4 +307,8 @@ func scanMemberships(rows pgx.Rows) ([]UserTenant, error) {
 var (
 	ErrKChatUserIDTaken = errors.New("tenant: kchat_user_id already taken")
 	ErrMembershipExists = errors.New("tenant: user is already a member of this tenant")
+	// ErrIAMUserAlreadyMapped is returned by SetIAMUserID when the
+	// user already carries a DIFFERENT iam-core mapping (mirror of
+	// ErrIAMTenantAlreadyMapped on the tenant side).
+	ErrIAMUserAlreadyMapped = errors.New("tenant: iam user id already mapped")
 )

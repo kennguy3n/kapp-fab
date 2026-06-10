@@ -198,6 +198,10 @@ const RecordFormPage = lazyNamed(
   "RecordFormPage",
 );
 const LoginPage = lazyNamed(() => import("./pages/LoginPage"), "LoginPage");
+const CallbackPage = lazyNamed(
+  () => import("./pages/CallbackPage"),
+  "CallbackPage",
+);
 const TenantListPage = lazyNamed(
   () => import("./pages/TenantListPage"),
   "TenantListPage",
@@ -329,6 +333,22 @@ const PayrollPage = lazyNamed(
 const ShiftCalendarPage = lazyNamed(
   () => import("./pages/ShiftCalendarPage"),
   "ShiftCalendarPage",
+);
+const RecruitmentDashboardPage = lazyNamed(
+  () => import("./pages/RecruitmentDashboardPage"),
+  "RecruitmentDashboardPage",
+);
+const JobOpeningsPage = lazyNamed(
+  () => import("./pages/JobOpeningsPage"),
+  "JobOpeningsPage",
+);
+const ApplicationsPage = lazyNamed(
+  () => import("./pages/ApplicationsPage"),
+  "ApplicationsPage",
+);
+const InterviewSchedulePage = lazyNamed(
+  () => import("./pages/InterviewSchedulePage"),
+  "InterviewSchedulePage",
 );
 const SetupWizardPage = lazyNamed(
   () => import("./pages/SetupWizardPage"),
@@ -810,6 +830,14 @@ const navSections: NavSection[] = [
         label: "Shift Schedule",
         icon: navIcon(CalendarClock),
       },
+      {
+        to: "/hr/recruitment",
+        label: "Recruitment",
+        icon: navIcon(UserPlus),
+        // Gated on FeatureRecruitment on top of the HR section gate,
+        // matching the backend's /api/v1/hr/recruitment/* routes.
+        requires: ["recruitment"],
+      },
     ],
   },
   {
@@ -1167,6 +1195,10 @@ export function App() {
               visitors don't see tenant navigation. */}
           <Route path="/forms/:formId" element={<FormPage />} />
           <Route path="/login" element={<LoginPage />} />
+          {/* iam-core (OAuth2/OIDC) login completion. The backend
+              redirects here with tokens in the URL fragment after a
+              successful Authorization-Code exchange. */}
+          <Route path="/callback" element={<CallbackPage />} />
           {/* Helpdesk customer portal. Runs outside the authenticated
               AppShell — portal users never see the tenant's internal
               nav/data; only their own tickets. */}
@@ -1935,6 +1967,22 @@ function AppShell() {
               <Route path="/hr/org-chart" element={<OrgChartPage />} />
               <Route path="/hr/payroll" element={<PayrollPage />} />
               <Route path="/hr/shifts" element={<ShiftCalendarPage />} />
+              <Route
+                path="/hr/recruitment"
+                element={<RecruitmentDashboardPage />}
+              />
+              <Route
+                path="/hr/recruitment/job-openings"
+                element={<JobOpeningsPage />}
+              />
+              <Route
+                path="/hr/recruitment/applications"
+                element={<ApplicationsPage />}
+              />
+              <Route
+                path="/hr/recruitment/interviews"
+                element={<InterviewSchedulePage />}
+              />
               <Route path="/pos" element={<POSPage />} />
               <Route path="/projects/gantt" element={<ProjectGanttPage />} />
               <Route

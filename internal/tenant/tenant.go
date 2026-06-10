@@ -82,6 +82,24 @@ type Tenant struct {
 	// internal/i18n for the bundle whitelist that PGStore.SetLocale
 	// enforces.
 	Locale string `json:"locale,omitempty"`
+
+	// IAMTenantID is the iam-core tenant identifier this Kapp tenant
+	// is mirrored to, set during onboarding when the iam-core
+	// integration is enabled (migration 000082). Empty on tenants
+	// that predate the integration or in deployments that never
+	// enable it. It is the X-Tenant-ID value the Management API
+	// client scopes user-sync / revocation calls to, and the marker
+	// the onboarding path checks for idempotent re-provisioning.
+	IAMTenantID string `json:"iam_tenant_id,omitempty"`
+}
+
+// HasIAMTenant reports whether the tenant has been mirrored into
+// iam-core (its iam_tenant_id column is populated). Used by the
+// onboarding path to stay idempotent — a re-run never double-
+// provisions — and by user sync to decide whether an iam-core tenant
+// exists to attach users to.
+func (t *Tenant) HasIAMTenant() bool {
+	return t != nil && t.IAMTenantID != ""
 }
 
 // HasZKFabric reports whether the tenant has been provisioned with

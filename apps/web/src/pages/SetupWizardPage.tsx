@@ -113,6 +113,18 @@ const COA_TEMPLATES = [
   { value: "jp_basic", label: "Japan — IFRS + Gensenchōshū / Shakai Hoken / Consumption Tax" },
   { value: "kr_basic", label: "South Korea — IFRS + Geunrosodeukse / NPS / NHI / EI / VAT" },
   { value: "cn_basic", label: "China — CAS/IFRS + IIT / Social Insurance / Housing Fund / VAT" },
+  { value: "hk_basic", label: "Hong Kong — IFRS + MPF (mandatory provident fund)" },
+  { value: "tw_basic", label: "Taiwan — IFRS + Income Tax / Labor Insurance / NHI" },
+  { value: "kh_basic", label: "Cambodia — IFRS + Tax on Salary / NSSF" },
+  { value: "mm_basic", label: "Myanmar — IFRS + Income Tax / Social Security Board" },
+  { value: "bd_basic", label: "Bangladesh — IFRS + Income Tax (TDS)" },
+  { value: "lk_basic", label: "Sri Lanka — IFRS + APIT / EPF / ETF" },
+  { value: "pk_basic", label: "Pakistan — IFRS + Income Tax / EOBI" },
+  { value: "jo_basic", label: "Jordan — IFRS + Income Tax / Social Security" },
+  { value: "lb_basic", label: "Lebanon — IFRS + Payroll Tax (R10) / NSSF" },
+  { value: "ma_basic", label: "Morocco — IFRS + IR / CNSS / AMO" },
+  { value: "tn_basic", label: "Tunisia — IFRS + IRPP / CNSS" },
+  { value: "gh_basic", label: "Ghana — IFRS + PAYE / SSNIT" },
   // SCAFFOLD: cmd/new-tax-pack inserts new COA_TEMPLATES entries above this line.
 ];
 
@@ -183,11 +195,26 @@ const REGION_BY_TEMPLATE: Record<string, CoaRegion> = {
   jp_basic: "Asia-Pacific",
   kr_basic: "Asia-Pacific",
   cn_basic: "Asia-Pacific",
+  // Session 14 Asia-Pacific additions.
+  hk_basic: "Asia-Pacific",
+  tw_basic: "Asia-Pacific",
+  kh_basic: "Asia-Pacific",
+  mm_basic: "Asia-Pacific",
+  bd_basic: "Asia-Pacific",
+  lk_basic: "Asia-Pacific",
+  pk_basic: "Asia-Pacific",
+  // Session 14 Middle East (non-GCC) additions.
+  jo_basic: "Middle East",
+  lb_basic: "Middle East",
   // Africa.
   za_basic: "Africa",
   ng_basic: "Africa",
   ke_basic: "Africa",
   eg_basic: "Africa",
+  // Session 14 Africa additions (North + West).
+  ma_basic: "Africa",
+  tn_basic: "Africa",
+  gh_basic: "Africa",
   // SCAFFOLD: cmd/new-tax-pack must also add the new template's region
   // here, alongside its COA_TEMPLATES entry. A missing entry is not a
   // crash — regionForTemplate() falls back to "General" — but the chart
@@ -278,6 +305,18 @@ const COUNTRY_COA_DEFAULTS: Record<string, string> = {
   JP: "jp_basic",
   KR: "kr_basic",
   CN: "cn_basic",
+  HK: "hk_basic",
+  TW: "tw_basic",
+  KH: "kh_basic",
+  MM: "mm_basic",
+  BD: "bd_basic",
+  LK: "lk_basic",
+  PK: "pk_basic",
+  JO: "jo_basic",
+  LB: "lb_basic",
+  MA: "ma_basic",
+  TN: "tn_basic",
+  GH: "gh_basic",
   // SCAFFOLD: cmd/new-tax-pack inserts new COUNTRY_COA_DEFAULTS entries above this line.
 };
 
