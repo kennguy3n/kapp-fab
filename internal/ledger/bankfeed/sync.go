@@ -222,11 +222,13 @@ func (h *SyncHandler) syncConnection(ctx context.Context, tenantID uuid.UUID, co
 // connection's transactions and advances its cursor. Exposed so the
 // manual sync route can call it and surface counts to the operator.
 func (h *SyncHandler) SyncOne(ctx context.Context, tenantID uuid.UUID, conn *Connection) (*SyncResult, error) {
-	// Mirror Handle's wiring guard: SyncOne is reachable from the manual
-	// "Sync now" route and the agent tool, so a partially-constructed
-	// handler must fail with a descriptive error rather than panic on a
-	// nil registry (provider lookup) or nil store (ingestDelta writes).
-	if h == nil || h.registry == nil || h.store == nil {
+	// Mirror Handle's wiring guard exactly: SyncOne is reachable from the
+	// manual "Sync now" route and the agent tool, so a partially-
+	// constructed handler must fail with a descriptive error rather than
+	// panic. It needs the registry (provider lookup), the store and conns
+	// (both dereferenced by ingestDelta: store for the transaction write,
+	// conns for the cursor advance).
+	if h == nil || h.conns == nil || h.registry == nil || h.store == nil {
 		return nil, errors.New("bankfeed: sync handler not wired")
 	}
 	if conn == nil {
@@ -262,9 +264,11 @@ func (h *SyncHandler) SyncOne(ctx context.Context, tenantID uuid.UUID, conn *Con
 func (h *SyncHandler) IngestRaw(ctx context.Context, tenantID uuid.UUID, conn *Connection, raw []RawTransaction) (*SyncResult, error) {
 	// Mirror Handle's wiring guard: IngestRaw is the CSV-upload entry
 	// point, so a partially-constructed handler must fail with a
-	// descriptive error rather than panic on a nil store inside
-	// ingestDelta.
-	if h == nil || h.store == nil {
+	// descriptive error rather than panic inside ingestDelta, which
+	// dereferences both the store (transaction write) and conns (cursor
+	// advance). It does not consult the registry, so that check is
+	// intentionally omitted.
+	if h == nil || h.conns == nil || h.store == nil {
 		return nil, errors.New("bankfeed: sync handler not wired")
 	}
 	if conn == nil {

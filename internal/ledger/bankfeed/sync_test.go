@@ -457,6 +457,17 @@ func TestSyncOneAndIngestRawGuardAgainstUnwiredHandler(t *testing.T) {
 		t.Error("IngestRaw with nil store: expected error, got nil")
 	}
 
+	// Registry and store present but conns nil: both entry points must
+	// reject before ingestDelta dereferences h.conns for the cursor
+	// advance (the case the symmetric guard must also cover).
+	noConns := &SyncHandler{registry: NewRegistry(NewCSVProvider()), store: &fakeStore{}}
+	if _, err := noConns.SyncOne(context.Background(), tn, conn); err == nil {
+		t.Error("SyncOne with nil conns: expected error, got nil")
+	}
+	if _, err := noConns.IngestRaw(context.Background(), tn, conn, nil); err == nil {
+		t.Error("IngestRaw with nil conns: expected error, got nil")
+	}
+
 	// A nil connection must also be rejected rather than dereferenced.
 	wired := newSyncHandlerForTest(&fakeConns{}, &fakeRules{}, NewRegistry(NewCSVProvider()), &fakeStore{}, nil)
 	if _, err := wired.SyncOne(context.Background(), tn, nil); err == nil {
