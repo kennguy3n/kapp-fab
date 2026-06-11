@@ -204,13 +204,12 @@ func consolidate(entities []entityTrialBalance, pairs []EliminationPair, ctaCode
 }
 
 // sumRows totals debit and credit across a combined-row map.
-func sumRows(combined map[string]*ConsolidatedRow) (decimal.Decimal, decimal.Decimal) {
-	d, c := decimal.Zero, decimal.Zero
+func sumRows(combined map[string]*ConsolidatedRow) (totalDebit, totalCredit decimal.Decimal) {
 	for _, row := range combined {
-		d = d.Add(row.Debit)
-		c = c.Add(row.Credit)
+		totalDebit = totalDebit.Add(row.Debit)
+		totalCredit = totalCredit.Add(row.Credit)
 	}
-	return d, c
+	return totalDebit, totalCredit
 }
 
 // sortRows orders rows by account code so the report (and its

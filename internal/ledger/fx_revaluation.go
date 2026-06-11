@@ -150,7 +150,7 @@ func allowListParam(allowList []string) any {
 // (account, currency) pair, and posts a single balanced revaluation
 // entry per pair to the configured gain/loss account. A missing rate
 // for one currency skips that pair rather than aborting the sweep.
-func runFXRevaluation(ctx context.Context, ledger *PGStore, rates *ExchangeRateStore, systemActor uuid.UUID, tenantID uuid.UUID, asOf time.Time, cfg RevaluationConfig) (*RevaluationResult, error) {
+func runFXRevaluation(ctx context.Context, ledger *PGStore, rates *ExchangeRateStore, systemActor, tenantID uuid.UUID, asOf time.Time, cfg RevaluationConfig) (*RevaluationResult, error) {
 	if tenantID == uuid.Nil {
 		return nil, errors.New("fx revaluation: tenant id required")
 	}
