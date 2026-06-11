@@ -89,6 +89,19 @@ const (
 	// off on starter / free. Tenants can still toggle it independently
 	// of FeatureHR via the feature-flag admin surface.
 	FeatureRecruitment = "recruitment"
+	// FeatureBankFeed gates the Session 15 bank-feed + smart-
+	// reconciliation module (bank_feed_connections,
+	// bank_reconciliation_rules, bank_match_suggestions) and the
+	// /api/v1/finance/bank-feeds/* HTTP routes, the hourly
+	// bankfeed_sync scheduled action, the agent + KChat surfaces, and
+	// the frontend Bank Feeds nav entry under Finance. It is a Finance
+	// sub-surface (it ingests statement lines and pairs them with
+	// journal entries), so it is enabled on the same richer plans that
+	// ship the advanced finance tooling (business / enterprise) and off
+	// on starter / free. Tenants can still toggle it independently of
+	// FeatureFinance via the feature-flag admin surface, so it stays
+	// dark-launchable.
+	FeatureBankFeed = "bankfeed"
 )
 
 // AllFeatures is the canonical list of feature keys. Handlers that
@@ -116,6 +129,7 @@ var AllFeatures = []string{
 	FeatureProjects,
 	FeatureManufacturing,
 	FeatureRecruitment,
+	FeatureBankFeed,
 }
 
 // PlanLimits is the numeric ceiling each plan enforces per billing
@@ -283,6 +297,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureProjects:          true,
 			FeatureManufacturing:     true,
 			FeatureRecruitment:       false,
+			FeatureBankFeed:          false,
 		}
 	case PlanBusiness:
 		return map[string]bool{
@@ -306,6 +321,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureProjects:          true,
 			FeatureManufacturing:     true,
 			FeatureRecruitment:       true,
+			FeatureBankFeed:          true,
 		}
 	case PlanEnterprise:
 		return map[string]bool{
@@ -329,6 +345,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureProjects:          true,
 			FeatureManufacturing:     true,
 			FeatureRecruitment:       true,
+			FeatureBankFeed:          true,
 		}
 	default:
 		// Free plan — CRM only. Also the fallback when the plan
@@ -355,6 +372,7 @@ func DefaultFeaturesForPlan(plan string) map[string]bool {
 			FeatureProjects:          false,
 			FeatureManufacturing:     false,
 			FeatureRecruitment:       false,
+			FeatureBankFeed:          false,
 		}
 	}
 }

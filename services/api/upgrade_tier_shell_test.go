@@ -46,16 +46,21 @@ func TestUpgradeTierShellTablesMatchGoList(t *testing.T) {
 		t.Fatalf("%s: marker %q not found; did the bash array name change?", path, marker)
 	}
 	rest := src[idx+len(marker):]
+
+	// Strip line comments (`#…`) BEFORE locating the closing paren.
+	// Operator notes inside the array routinely contain parentheses
+	// (e.g. a migration reference like "(000084)"); stripping them
+	// first ensures the first remaining ")" is the array's own close
+	// rather than one buried in a comment — otherwise the block would
+	// be truncated mid-array and silently mask drift in the tail.
+	commentRE := regexp.MustCompile(`(?m)#.*$`)
+	rest = commentRE.ReplaceAllString(rest, "")
+
 	end := strings.Index(rest, ")")
 	if end == -1 {
 		t.Fatalf("%s: closing %q for TABLES=(...) not found", path, ")")
 	}
 	block := rest[:end]
-
-	// Strip line comments (`#…`) so that future operator notes inside
-	// the array body don't confuse the tokenizer.
-	commentRE := regexp.MustCompile(`(?m)#.*$`)
-	block = commentRE.ReplaceAllString(block, "")
 
 	// Tokenize on any whitespace. Bash arrays accept space- or
 	// newline-separated identifiers, and the canonical layout in

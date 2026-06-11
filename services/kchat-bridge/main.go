@@ -33,6 +33,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
+	"github.com/kennguy3n/kapp-fab/internal/ledger/bankfeed"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
 	"github.com/kennguy3n/kapp-fab/internal/manufacturing"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
@@ -165,6 +166,44 @@ func run() error {
 	// post time so variance moves go through the canonical
 	// RecordMove path (audit + outbox events fire).
 	cycleCountStore := inventory.NewCycleCountStore(pool, inventoryStore)
+
+	// Session 15 — bank-feed command family (`/bankfeed`). The KChat
+	// bridge needs the per-tenant KeyManager so a connection read
+	// decrypts the stored credentials with the same key the API / worker
+	// sealed them under; without it a production-encrypted token would
+	// scan as garbage. A missing / short master key keeps the bridge on
+	// the plaintext dev path, mirroring the worker. The provider registry
+	// is built from the same config so an unconfigured live provider is
+	// fail-closed, and the matcher reuses the ledger store so accept /
+	// reject from chat ride the same audit + RLS path as the API.
+	var bankFeedEncryptor bankfeed.Encryptor
+	if masterKey, mkErr := tenant.LoadMasterKey(); mkErr == nil {
+		prevKey, perr := tenant.LoadPrevMasterKey()
+		if perr != nil {
+			return perr
+		}
+		km, kmErr := tenant.NewKeyManagerWithPrev(masterKey, prevKey, time.Hour)
+		if kmErr != nil {
+			return kmErr
+		}
+		bankFeedEncryptor = km
+	} else if !errors.Is(mkErr, tenant.ErrMasterKeyMissing) {
+		return mkErr
+	}
+	bankFeedRegistry := bankfeed.BuildRegistry(bankfeed.RegistryConfig{
+		PlaidClientID:           cfg.PlaidClientID,
+		PlaidSecret:             cfg.PlaidSecret,
+		PlaidEnv:                cfg.PlaidEnv,
+		GoCardlessSecretID:      cfg.GoCardlessSecretID,
+		GoCardlessSecretKey:     cfg.GoCardlessSecretKey,
+		GoCardlessInstitutionID: cfg.GoCardlessInstitutionID,
+	})
+	bankFeedConns := bankfeed.NewConnectionStore(pool, bankFeedEncryptor, auditor)
+	bankFeedRules := bankfeed.NewRuleStore(pool, auditor)
+	bankFeedMatcher := ledger.NewSmartMatcher(ledgerStore)
+	bankFeedSync := bankfeed.NewSyncHandler(bankFeedConns, bankFeedRules, bankFeedRegistry, ledgerStore, bankFeedMatcher).
+		WithApplyMutations(cfg.BankFeedApplyMutations)
+
 	commands := &CommandDispatcher{
 		registry:           registry,
 		records:            recordStore,
@@ -188,6 +227,9 @@ func run() error {
 		insightsRunner:     insightsRunner,
 		budgets:            finance.NewBudgetStore(pool),
 		dashboardBase:      os.Getenv("KAPP_DASHBOARD_BASE_URL"),
+		bankConns:          bankFeedConns,
+		bankMatcher:        bankFeedMatcher,
+		bankSync:           bankFeedSync,
 	}
 
 	// Presence webhook + supporting stores. The user store reuses the

@@ -38,6 +38,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
+	"github.com/kennguy3n/kapp-fab/internal/ledger/bankfeed"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace/eventrouter"
@@ -337,6 +338,37 @@ func run() error {
 	schedRegistry.Register(
 		ledger.ActionTypeUnrealizedGainLoss,
 		ledger.NewUnrealizedGainLossJob(ledgerStore, exchangeRates, workerSystemActor),
+	)
+	// Session 15 — hourly bank-feed sync. Each tick walks the tenant's
+	// active connections, pulls the incremental delta from each provider
+	// (Plaid / GoCardless; CSV is push-only and a no-op here), ingests +
+	// auto-categorizes + match-scores the new lines, and advances the
+	// per-connection cursor. The registry is built from the same config
+	// the API uses so an unconfigured live provider is fail-closed
+	// (absent) and the connection store shares the per-tenant credential
+	// encryption. The matcher reuses the ledger store so the worker's
+	// suggestions land on the same RLS + audit path the API surface
+	// reads. The mutation kill-switch (KAPP_BANKFEED_APPLY_MUTATIONS)
+	// is honoured identically to the API build.
+	bankFeedRegistry := bankfeed.BuildRegistry(bankfeed.RegistryConfig{
+		PlaidClientID:           cfg.PlaidClientID,
+		PlaidSecret:             cfg.PlaidSecret,
+		PlaidEnv:                cfg.PlaidEnv,
+		GoCardlessSecretID:      cfg.GoCardlessSecretID,
+		GoCardlessSecretKey:     cfg.GoCardlessSecretKey,
+		GoCardlessInstitutionID: cfg.GoCardlessInstitutionID,
+	})
+	var bankFeedEncryptor bankfeed.Encryptor
+	if workerKeyManager != nil {
+		bankFeedEncryptor = workerKeyManager
+	}
+	bankFeedConns := bankfeed.NewConnectionStore(pool, bankFeedEncryptor, auditor)
+	bankFeedRules := bankfeed.NewRuleStore(pool, auditor)
+	bankFeedMatcher := ledger.NewSmartMatcher(ledgerStore)
+	schedRegistry.Register(
+		bankfeed.ActionTypeBankFeedSync,
+		bankfeed.NewSyncHandler(bankFeedConns, bankFeedRules, bankFeedRegistry, ledgerStore, bankFeedMatcher).
+			WithApplyMutations(cfg.BankFeedApplyMutations),
 	)
 	// Phase N5 — daily budget variance sweeper. Walks every active
 	// finance.budget for the tenant, recomputes MTD actuals against

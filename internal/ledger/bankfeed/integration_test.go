@@ -187,6 +187,48 @@ func TestConnectionStoreCRUDEncryptsAndIsolates(t *testing.T) {
 	}
 }
 
+// TestCSVConnectionDedupesUnderConcurrentCreate proves the deterministic
+// CSV id closes the ensureCSVConnection TOCTOU race: two UpsertConnection
+// calls with a nil id for the same (tenant, account) CSV feed — the shape
+// two concurrent first-time statement uploads produce — must converge on
+// a single row rather than inserting two.
+func TestCSVConnectionDedupesUnderConcurrentCreate(t *testing.T) {
+	pool := mustPool(t)
+	ctx := context.Background()
+	tenantID, acctID := seedTenantAndAccount(t, pool)
+	store := NewConnectionStore(pool, keyManager(t), audit.NewPGLogger(pool))
+
+	first, err := store.UpsertConnection(ctx, Connection{
+		TenantID: tenantID, BankAccountID: acctID, Provider: ProviderCSV, Status: StatusActive,
+	})
+	if err != nil {
+		t.Fatalf("first CSV upsert: %v", err)
+	}
+	second, err := store.UpsertConnection(ctx, Connection{
+		TenantID: tenantID, BankAccountID: acctID, Provider: ProviderCSV, Status: StatusActive,
+	})
+	if err != nil {
+		t.Fatalf("second CSV upsert: %v", err)
+	}
+	if first.ID != second.ID || first.ID != CSVConnectionID(tenantID, acctID) {
+		t.Fatalf("CSV ids diverged: %s vs %s (want deterministic %s)",
+			first.ID, second.ID, CSVConnectionID(tenantID, acctID))
+	}
+	conns, err := store.ListConnectionsByAccount(ctx, tenantID, acctID)
+	if err != nil {
+		t.Fatalf("ListConnectionsByAccount: %v", err)
+	}
+	csvCount := 0
+	for _, c := range conns {
+		if c.Provider == ProviderCSV {
+			csvCount++
+		}
+	}
+	if csvCount != 1 {
+		t.Fatalf("got %d CSV connections for the account; want exactly 1", csvCount)
+	}
+}
+
 func TestRuleStoreCRUDAndOrdering(t *testing.T) {
 	pool := mustPool(t)
 	ctx := context.Background()

@@ -1463,6 +1463,156 @@ export class ApiClient {
     );
   }
 
+  // --- Bank Feeds + Smart Reconciliation (Session 15) ------------------
+  //
+  // Served under /finance/bank-feeds behind FeatureBankFeed (on top of
+  // FeatureFinance). Connection responses never carry token material;
+  // mutating calls send an Idempotency-Key per the platform contract.
+
+  /** Provider names the registry was built with — CSV is always present;
+   *  Plaid / GoCardless appear only when their credentials are set. */
+  listBankFeedProviders(): Promise<{ providers: string[] }> {
+    return this.request("/finance/bank-feeds/providers");
+  }
+
+  /** Active connections, or every connection for one account when
+   *  bankAccountId is supplied. */
+  listBankFeedConnections(
+    bankAccountId?: string
+  ): Promise<BankFeedConnection[]> {
+    const qs = buildQuery({ bank_account_id: bankAccountId });
+    return this.request(`/finance/bank-feeds/connections${qs}`);
+  }
+
+  /** Start a provider link handshake; returns the link/token the widget
+   *  hands to the provider (empty for CSV). */
+  initiateBankFeedConnect(
+    input: BankFeedConnectInput
+  ): Promise<BankFeedConnectLink> {
+    return this.request("/finance/bank-feeds/connections/initiate-connect", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** Exchange the provider's post-consent code for durable credentials
+   *  and persist the connection (tokens field-encrypted server-side). */
+  completeBankFeedConnect(
+    input: BankFeedCompleteConnectInput
+  ): Promise<BankFeedConnection> {
+    return this.request("/finance/bank-feeds/connections/complete-connect", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  disconnectBankFeed(id: string): Promise<BankFeedDisconnectResponse> {
+    return this.request(
+      `/finance/bank-feeds/connections/${encodeURIComponent(id)}/disconnect`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+
+  /** Run an on-demand sync for one connection (same pipeline as the
+   *  hourly scheduler) and return the per-connection line counts. */
+  syncBankFeedConnection(id: string): Promise<BankFeedSyncResult> {
+    return this.request(
+      `/finance/bank-feeds/connections/${encodeURIComponent(id)}/sync`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+
+  /** Upload a CSV statement for a bank account. The body is the raw CSV
+   *  text (Content-Type text/csv); currency sets the default for rows
+   *  that omit one. Idempotent — re-uploads dedupe by content. */
+  uploadBankFeedCSV(
+    bankAccountId: string,
+    csv: string,
+    currency?: string
+  ): Promise<BankFeedSyncResult> {
+    const qs = buildQuery({ currency });
+    return this.request(
+      `/finance/bank-feeds/bank-accounts/${encodeURIComponent(
+        bankAccountId
+      )}/csv-upload${qs}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/csv",
+          "Idempotency-Key": crypto.randomUUID(),
+        },
+        body: csv,
+      }
+    );
+  }
+
+  listBankFeedRules(): Promise<BankFeedRule[]> {
+    return this.request("/finance/bank-feeds/rules");
+  }
+
+  createBankFeedRule(input: BankFeedRuleInput): Promise<BankFeedRule> {
+    return this.request("/finance/bank-feeds/rules", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateBankFeedRule(
+    id: string,
+    input: BankFeedRuleInput
+  ): Promise<BankFeedRule> {
+    return this.request(`/finance/bank-feeds/rules/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteBankFeedRule(id: string): Promise<void> {
+    return this.request(`/finance/bank-feeds/rules/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+  }
+
+  /** Open (status=suggested) match suggestions for a bank account,
+   *  highest confidence first — the reconciliation review inbox. */
+  listBankFeedSuggestions(
+    bankAccountId: string
+  ): Promise<BankFeedSuggestion[]> {
+    const qs = buildQuery({ bank_account_id: bankAccountId });
+    return this.request(`/finance/bank-feeds/suggestions${qs}`);
+  }
+
+  acceptBankFeedSuggestion(id: string): Promise<BankFeedSuggestion> {
+    return this.request(
+      `/finance/bank-feeds/suggestions/${encodeURIComponent(id)}/accept`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+
+  rejectBankFeedSuggestion(id: string): Promise<void> {
+    return this.request(
+      `/finance/bank-feeds/suggestions/${encodeURIComponent(id)}/reject`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      }
+    );
+  }
+
   /** Post a draft finance.credit_note KRecord. Reverses the AR posting
    *  of the referenced invoice (Dr Revenue, Cr AR). */
   postCreditNote(id: string): Promise<JournalEntry> {
@@ -3155,6 +3305,100 @@ export interface InventoryBatch {
   created_by: string;
   created_at: string;
   updated_at: string;
+}
+
+// --- Bank Feeds + Smart Reconciliation (Session 15) --------------------
+//
+// These mirror the API DTOs in services/api/bankfeed_handlers.go (the
+// credential-free connection / rule / sync-result projections) and the
+// ledger.Suggestion struct. Timestamps are RFC3339 strings.
+
+// Mirrors the Go status constants in internal/ledger/bankfeed/provider.go
+// (StatusActive/StatusExpired/StatusRevoked) and the SetStatus CHECK — these
+// are the only values the server ever persists.
+export type BankFeedConnectionStatus = "active" | "expired" | "revoked";
+
+export interface BankFeedConnection {
+  id: string;
+  bank_account_id: string;
+  provider: string;
+  status: BankFeedConnectionStatus | string;
+  cursor?: string;
+  external_id?: string;
+  last_sync_at?: string | null;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BankFeedConnectInput {
+  provider: string;
+  bank_account_id: string;
+  redirect_uri?: string;
+}
+
+export interface BankFeedConnectLink {
+  provider: string;
+  link: string;
+}
+
+export interface BankFeedCompleteConnectInput {
+  provider: string;
+  bank_account_id: string;
+  code?: string;
+}
+
+export interface BankFeedDisconnectResponse {
+  id: string;
+  status: string;
+  provider_warning?: string;
+}
+
+export interface BankFeedSyncResult {
+  fetched: number;
+  skipped: number;
+  inserted: number;
+  updated: number;
+  voided: number;
+  unwound: number;
+  suggested: number;
+  auto_matched: number;
+}
+
+export interface BankFeedRule {
+  id: string;
+  priority: number;
+  condition_type: string;
+  condition_value: string;
+  target_account_code?: string;
+  target_cost_center?: string;
+  auto_approve: boolean;
+  bank_account_id?: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BankFeedRuleInput {
+  priority: number;
+  condition_type: string;
+  condition_value: string;
+  target_account_code?: string;
+  target_cost_center?: string;
+  auto_approve: boolean;
+  bank_account_id?: string | null;
+  enabled: boolean;
+}
+
+export interface BankFeedSuggestion {
+  id: string;
+  tenant_id: string;
+  transaction_id: string;
+  journal_entry_id: string;
+  confidence: number;
+  match_reason: string;
+  status: string;
+  created_at: string;
 }
 
 // --- Recruitment (Session 16) ------------------------------------------

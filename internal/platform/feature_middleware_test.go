@@ -46,6 +46,12 @@ func TestFeatureFromPathRecordsKType(t *testing.T) {
 		{"/api/v1/hr/recruitment/applications/abc/advance", tenant.FeatureRecruitment},
 		// Core HR routes stay on FeatureHR.
 		{"/api/v1/hr/payroll", tenant.FeatureHR},
+		// Dedicated bank-feed subtree gates on FeatureBankFeed so it
+		// can be licensed/dark-launched independently of core finance.
+		{"/api/v1/finance/bank-feeds/connections", tenant.FeatureBankFeed},
+		{"/api/v1/finance/bank-feeds/suggestions/abc/accept", tenant.FeatureBankFeed},
+		// Core finance routes stay on FeatureFinance.
+		{"/api/v1/finance/journal-entries", tenant.FeatureFinance},
 		{"/api/v1/records/lms.course", tenant.FeatureLMS},
 		{"/api/v1/records/helpdesk.ticket", tenant.FeatureHelpdesk},
 		// Manufacturing KTypes — BOMs and work orders ride the

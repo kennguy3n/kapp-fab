@@ -43,6 +43,21 @@ const (
 	SuggestionRejected  = "rejected"
 )
 
+// Suggestion-lifecycle sentinels let the HTTP/agent layers map a routine
+// client condition to the right status code instead of a 500. A missing
+// suggestion id is a 404; acting on a suggestion that has already been
+// decided (or whose transaction is no longer unreconciled) is a 409
+// conflict, not a server fault — so neither pollutes the error log.
+var (
+	// ErrSuggestionNotFound is returned when the suggestion id does not
+	// exist under the tenant's RLS scope.
+	ErrSuggestionNotFound = errors.New("ledger: suggestion not found")
+	// ErrSuggestionConflict is returned when the suggestion exists but is
+	// no longer actionable (already accepted/rejected, or its transaction
+	// has since been reconciled by another path).
+	ErrSuggestionConflict = errors.New("ledger: suggestion no longer actionable")
+)
+
 // DefaultMinConfidence is the floor below which a candidate is not worth
 // surfacing as a suggestion. 0.5 keeps the queue signal-rich (an exact
 // amount alone clears it; weak description-only coincidences do not).
@@ -417,10 +432,13 @@ func (m *SmartMatcher) AcceptSuggestion(ctx context.Context, tenantID, suggestio
 			   FROM bank_match_suggestions WHERE tenant_id = $1 AND id = $2`,
 			tenantID, suggestionID,
 		).Scan(&s.ID, &s.TenantID, &s.TransactionID, &s.JournalEntryID, &conf, &s.MatchReason, &s.Status, &s.CreatedAt); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("ledger: suggestion %s: %w", suggestionID, ErrSuggestionNotFound)
+			}
 			return fmt.Errorf("ledger: load suggestion: %w", err)
 		}
 		if s.Status != SuggestionSuggested {
-			return fmt.Errorf("ledger: suggestion already %s", s.Status)
+			return fmt.Errorf("ledger: suggestion already %s: %w", s.Status, ErrSuggestionConflict)
 		}
 		s.Confidence, _ = conf.Float64()
 
@@ -433,7 +451,7 @@ func (m *SmartMatcher) AcceptSuggestion(ctx context.Context, tenantID, suggestio
 		); err != nil {
 			return fmt.Errorf("ledger: reconcile via suggestion: %w", err)
 		} else if ct.RowsAffected() == 0 {
-			return fmt.Errorf("ledger: transaction no longer unreconciled")
+			return fmt.Errorf("ledger: transaction no longer unreconciled: %w", ErrSuggestionConflict)
 		}
 		// Mark this suggestion accepted and any sibling open suggestions
 		// rejected so the queue collapses to the decided state.
@@ -477,7 +495,20 @@ func (m *SmartMatcher) RejectSuggestion(ctx context.Context, tenantID, suggestio
 			return fmt.Errorf("ledger: reject suggestion: %w", err)
 		}
 		if ct.RowsAffected() == 0 {
-			return fmt.Errorf("ledger: suggestion not found or not open")
+			// The status-guarded UPDATE matched nothing: either the id is
+			// absent (→ 404) or it exists but is already decided (→ 409).
+			// A cheap existence probe disambiguates so the caller gets the
+			// correct status instead of a generic error.
+			var exists bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS(SELECT 1 FROM bank_match_suggestions WHERE tenant_id = $1 AND id = $2)`,
+				tenantID, suggestionID).Scan(&exists); err != nil {
+				return fmt.Errorf("ledger: reject suggestion probe: %w", err)
+			}
+			if exists {
+				return fmt.Errorf("ledger: suggestion %s already decided: %w", suggestionID, ErrSuggestionConflict)
+			}
+			return fmt.Errorf("ledger: suggestion %s: %w", suggestionID, ErrSuggestionNotFound)
 		}
 		id := suggestionID
 		return m.auditSuggestion(ctx, tx, tenantID, &actor,

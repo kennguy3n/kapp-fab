@@ -104,7 +104,17 @@ func (s *ConnectionStore) UpsertConnection(ctx context.Context, c Connection) (*
 		return nil, errors.New("bankfeed: provider required")
 	}
 	if c.ID == uuid.Nil {
-		c.ID = uuid.New()
+		if c.Provider == ProviderCSV {
+			// A CSV feed is push-based and unique per (tenant, account):
+			// derive a deterministic id so concurrent first-time uploads
+			// collide on the (tenant_id, id) PK and the ON CONFLICT clause
+			// below dedupes them into a single row rather than racing to
+			// insert two. Live providers (Plaid/GoCardless) can legitimately
+			// have multiple connections per account, so they keep a random id.
+			c.ID = CSVConnectionID(c.TenantID, c.BankAccountID)
+		} else {
+			c.ID = uuid.New()
+		}
 	}
 	if c.Status == "" {
 		c.Status = StatusActive
@@ -176,6 +186,9 @@ func (s *ConnectionStore) GetConnection(ctx context.Context, tenantID, id uuid.U
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("bankfeed: connection %s: %w", id, ErrNotFound)
+		}
 		return nil, err
 	}
 	return c, nil
@@ -212,7 +225,7 @@ func (s *ConnectionStore) AdvanceCursor(ctx context.Context, tenantID, id uuid.U
 			return fmt.Errorf("bankfeed: advance cursor: %w", err)
 		}
 		if ct.RowsAffected() == 0 {
-			return fmt.Errorf("bankfeed: connection %s not found", id)
+			return fmt.Errorf("bankfeed: connection %s: %w", id, ErrNotFound)
 		}
 		return nil
 	})
@@ -250,7 +263,7 @@ func (s *ConnectionStore) SetStatus(ctx context.Context, tenantID, id uuid.UUID,
 			return fmt.Errorf("bankfeed: set status: %w", err)
 		}
 		if ct.RowsAffected() == 0 {
-			return fmt.Errorf("bankfeed: connection %s not found", id)
+			return fmt.Errorf("bankfeed: connection %s: %w", id, ErrNotFound)
 		}
 		return s.auditConnection(ctx, tx, Connection{TenantID: tenantID, ID: id, Status: status},
 			"finance.bank_feed.connection.status")

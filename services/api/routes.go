@@ -961,6 +961,63 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Post("/offer-letters/{id}/respond", d.rch.respondOfferLetter)
 		})
 
+		// Session 15 — Bank Feeds + Smart Reconciliation. Provider
+		// connections, CSV statement upload, manual sync, auto-
+		// categorization rules and the match-suggestion review queue
+		// live under /api/v1/finance/bank-feeds. The subtree is a more-
+		// specific sibling of the /api/v1/finance route above (chi routes
+		// the most specific match), and is gated on BOTH FeatureFinance
+		// and FeatureBankFeed:
+		//   - the dynamic feature middleware (FeatureFromPath) resolves
+		//     this path to FeatureBankFeed so the bank-feed machinery can
+		//     be licensed / dark-launched independently of core finance;
+		//     and
+		//   - a static FeatureFinance gate is layered on top because the
+		//     feature ingests statement lines and pairs them with the
+		//     tenant's journal entries (a finance sub-module). Enabling
+		//     bank feeds without finance would leave matches pointing at a
+		//     ledger the tenant cannot use, so we require the parent
+		//     feature too — mirroring the web nav, which renders the entry
+		//     under the Finance section with an extra requires:["bankfeed"]
+		//     guard.
+		// Reads need finance.read, mutations need finance.admin; writes are
+		// idempotent via the standard Idempotency-Key middleware. Mounted
+		// only when the handler bundle constructed (DB + stores wired),
+		// matching the marketplace/iah nil-guard pattern.
+		if d.bfh != nil {
+			r.Route("/api/v1/finance/bank-feeds", func(r chi.Router) {
+				d.tenantChain(r)
+				r.Use(d.apiCallMW)
+				r.Use(platform.FeatureMiddleware(d.featureStore, tenant.FeatureFinance))
+				r.Use(d.featureMW)
+				r.Use(d.authzMethodGate("finance.read", "finance.admin", ""))
+				r.Use(platform.IdempotencyMiddleware(d.pool))
+				r.Use(d.rateLimitMW)
+				r.Use(platform.QuotaMiddleware(d.quotaEnforcer))
+
+				r.Get("/providers", d.bfh.listProviders)
+
+				r.Get("/connections", d.bfh.listConnections)
+				r.Post("/connections/initiate-connect", d.bfh.initiateConnect)
+				r.Post("/connections/complete-connect", d.bfh.completeConnect)
+				r.Post("/connections/{id}/disconnect", d.bfh.disconnect)
+				r.Post("/connections/{id}/sync", d.bfh.syncNow)
+
+				// CSV statement upload: raw text/csv body, ?currency=
+				// default. Idempotent — re-uploads dedupe via content hash.
+				r.Post("/bank-accounts/{bank_account_id}/csv-upload", d.bfh.uploadCSV)
+
+				r.Get("/rules", d.bfh.listRules)
+				r.Post("/rules", d.bfh.createRule)
+				r.Put("/rules/{id}", d.bfh.updateRule)
+				r.Delete("/rules/{id}", d.bfh.deleteRule)
+
+				r.Get("/suggestions", d.bfh.listSuggestions)
+				r.Post("/suggestions/{id}/accept", d.bfh.acceptSuggestion)
+				r.Post("/suggestions/{id}/reject", d.bfh.rejectSuggestion)
+			})
+		}
+
 		// Phase 2a B6 — marketplace HTTP surface. Three logical
 		// groups share a single handler bundle:
 		//

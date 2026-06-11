@@ -40,6 +40,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
+	"github.com/kennguy3n/kapp-fab/internal/ledger/bankfeed"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
 	"github.com/kennguy3n/kapp-fab/internal/manufacturing"
 	"github.com/kennguy3n/kapp-fab/internal/marketplace"
@@ -892,6 +893,34 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// approval + onboarding enrolment).
 	recruitmentStore := hr.NewRecruitmentStore(pool, auditor, eventPublisher, recordStore, workflowEngine)
 	agents.RegisterRecruitmentTools(executor, recruitmentStore)
+	// Session 15 — Bank Feeds + Smart Reconciliation. The provider
+	// registry is built from config: the CSV provider is always present
+	// and Plaid / GoCardless register only when their full credential
+	// pair is configured (fail-closed otherwise — an unconfigured live
+	// provider is simply absent from the registry). The connection store
+	// field-encrypts credentials with the per-tenant KeyManager; the
+	// SmartMatcher and SyncHandler reuse the ledger PGStore so the
+	// suggestion lifecycle and the ingest pipeline share one audit + RLS
+	// path. All four surfaces (HTTP bfh below, the worker scheduler, the
+	// agent tools, and the KChat bridge) consume these same instances.
+	bankFeedRegistry := bankfeed.BuildRegistry(bankfeed.RegistryConfig{
+		PlaidClientID:           cfg.PlaidClientID,
+		PlaidSecret:             cfg.PlaidSecret,
+		PlaidEnv:                cfg.PlaidEnv,
+		GoCardlessSecretID:      cfg.GoCardlessSecretID,
+		GoCardlessSecretKey:     cfg.GoCardlessSecretKey,
+		GoCardlessInstitutionID: cfg.GoCardlessInstitutionID,
+	})
+	var bankFeedEncryptor bankfeed.Encryptor
+	if keyManager != nil {
+		bankFeedEncryptor = keyManager
+	}
+	bankFeedConns := bankfeed.NewConnectionStore(pool, bankFeedEncryptor, auditor)
+	bankFeedRules := bankfeed.NewRuleStore(pool, auditor)
+	bankFeedMatcher := ledger.NewSmartMatcher(ledgerStore)
+	bankFeedSync := bankfeed.NewSyncHandler(bankFeedConns, bankFeedRules, bankFeedRegistry, ledgerStore, bankFeedMatcher).
+		WithApplyMutations(cfg.BankFeedApplyMutations)
+	agents.RegisterBankFeedTools(executor, bankFeedConns, bankFeedRules, bankFeedRegistry, bankFeedSync, bankFeedMatcher)
 	// Single payroll engine instance reused across the agent tool surface
 	// and the hrHandlers HTTP surface. The engine is stateless (it just
 	// composes recordStore + ledgerStore + a country resolver), so two
@@ -1109,6 +1138,19 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// alongside the agent tools above so both surfaces share one audit /
 	// event / record / workflow wiring.
 	rch := &recruitmentHandlers{store: recruitmentStore}
+
+	// Session 15 — bank-feed HTTP handlers reuse the stores / registry /
+	// sync handler / matcher constructed alongside the agent tools above
+	// so the HTTP, scheduler, agent and KChat surfaces all share one
+	// audit / RLS / encryption path.
+	bfh := &bankfeedHandlers{
+		conns:    bankFeedConns,
+		rules:    bankFeedRules,
+		registry: bankFeedRegistry,
+		sync:     bankFeedSync,
+		matcher:  bankFeedMatcher,
+		csv:      bankfeed.NewCSVProvider(),
+	}
 
 	// Phase H JWT auth. The signer is built from KAPP_JWT_SECRET; when
 	// the secret is absent we log and skip wiring the SSO endpoints so
@@ -1613,6 +1655,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		hrh:                    hrh,
 		lmsh:                   lmsh,
 		rch:                    rch,
+		bfh:                    bfh,
 		inboundHandler:         inboundHandler,
 		mph:                    mph,
 		metrics:                metrics,

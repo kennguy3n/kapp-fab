@@ -90,6 +90,7 @@ import {
   MessageSquare,
   Milestone,
   Network,
+  Rss,
   Package,
   PackageSearch,
   PiggyBank,
@@ -337,6 +338,10 @@ const ShiftCalendarPage = lazyNamed(
 const RecruitmentDashboardPage = lazyNamed(
   () => import("./pages/RecruitmentDashboardPage"),
   "RecruitmentDashboardPage",
+);
+const BankFeedsPage = lazyNamed(
+  () => import("./pages/BankFeedsPage"),
+  "BankFeedsPage",
 );
 const JobOpeningsPage = lazyNamed(
   () => import("./pages/JobOpeningsPage"),
@@ -668,6 +673,15 @@ const navSections: NavSection[] = [
         to: "/finance/bank-reconciliation",
         label: "Bank Reconciliation",
         icon: navIcon(Landmark),
+      },
+      {
+        to: "/finance/bank-feeds",
+        label: "Bank Feeds",
+        icon: navIcon(Rss),
+        // Gated on FeatureBankFeed on top of the Finance section gate,
+        // matching the backend's /api/v1/finance/bank-feeds/* routes
+        // (dynamic FeatureBankFeed + static FeatureFinance).
+        requires: ["bankfeed"],
       },
       {
         to: "/finance/exchange-rates",
@@ -1993,6 +2007,7 @@ function AppShell() {
                 path="/finance/bank-reconciliation"
                 element={<BankReconciliationPage />}
               />
+              <Route path="/finance/bank-feeds" element={<BankFeedsPage />} />
               <Route path="/sales/orders" element={<SalesOrdersPage />} />
               <Route path="/sales/returns" element={<SalesReturnsPage />} />
               <Route
