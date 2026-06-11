@@ -168,8 +168,13 @@ describe("KanbanView", () => {
       },
       getData: (k: string) => data[k] ?? "",
     };
-    // Locate the "done" column container (the header label's grid cell).
-    const doneColumn = screen.getByText("done").closest("div");
+    // The column root (the element carrying onDrop) is the <header>'s
+    // parent. Anchoring on <header> rather than the nearest <div> keeps
+    // this resilient if the header's inner markup later gains a wrapper
+    // div — otherwise the drop would fire on the wrong node and the test
+    // would pass without exercising the move.
+    const doneColumn = screen.getByText("done").closest("header")
+      ?.parentElement;
     expect(doneColumn).not.toBeNull();
 
     fireEvent.dragStart(cardEl as Element, { dataTransfer });
