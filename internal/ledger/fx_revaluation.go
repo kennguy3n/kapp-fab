@@ -64,13 +64,28 @@ type RevaluationLine struct {
 	EntryID         uuid.UUID       `json:"entry_id"`
 }
 
+// RevaluationSkip records an open foreign-currency balance the run
+// could not revalue because no rate was available for its currency as
+// of the run date. Surfacing these explicitly (rather than letting
+// the balance silently fall out of Lines) lets an operator see which
+// positions still need a rate before the period can close.
+type RevaluationSkip struct {
+	AccountCode  string          `json:"account_code"`
+	Currency     string          `json:"currency"`
+	BaseCurrency string          `json:"base_currency"`
+	ForeignNet   decimal.Decimal `json:"foreign_net"`
+	Reason       string          `json:"reason"`
+}
+
 // RevaluationResult is the envelope returned by a revaluation run and
 // persisted to fx_revaluation_runs. TotalGain/TotalLoss are
 // magnitudes (both non-negative); Net = TotalGain − TotalLoss.
+// Skipped lists balances left unrevalued for want of a rate.
 type RevaluationResult struct {
 	TenantID  uuid.UUID         `json:"tenant_id"`
 	AsOf      time.Time         `json:"as_of"`
 	Lines     []RevaluationLine `json:"lines"`
+	Skipped   []RevaluationSkip `json:"skipped"`
 	TotalGain decimal.Decimal   `json:"total_gain"`
 	TotalLoss decimal.Decimal   `json:"total_loss"`
 	Net       decimal.Decimal   `json:"net"`
@@ -162,10 +177,20 @@ func runFXRevaluation(ctx context.Context, ledger *PGStore, rates *ExchangeRateS
 	if err != nil {
 		return nil, err
 	}
-	res := &RevaluationResult{TenantID: tenantID, AsOf: asOf, Lines: []RevaluationLine{}}
+	res := &RevaluationResult{TenantID: tenantID, AsOf: asOf, Lines: []RevaluationLine{}, Skipped: []RevaluationSkip{}}
 	for _, b := range balances {
 		currentRate, err := rates.GetRate(ctx, tenantID, b.currency, b.base, asOf)
 		if err != nil {
+			// No rate for this currency as of the run date: record the
+			// untouched balance so the gap is visible to the operator
+			// rather than aborting the whole sweep.
+			res.Skipped = append(res.Skipped, RevaluationSkip{
+				AccountCode:  b.account,
+				Currency:     b.currency,
+				BaseCurrency: b.base,
+				ForeignNet:   b.foreignNet,
+				Reason:       fmt.Sprintf("no %s→%s rate as of %s", b.currency, b.base, asOf.Format("2006-01-02")),
+			})
 			continue
 		}
 		currentBase := b.foreignNet.Mul(currentRate)

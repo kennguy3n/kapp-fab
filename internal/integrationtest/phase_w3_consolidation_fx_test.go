@@ -176,6 +176,9 @@ func TestWorkstream3FXRevaluationRunner(t *testing.T) {
 	if !res.TotalLoss.Equal(decimal.NewFromInt(100)) || !res.Net.Equal(decimal.NewFromInt(-100)) {
 		t.Fatalf("totals: loss=%s net=%s; want 100/-100", res.TotalLoss, res.Net)
 	}
+	if len(res.Skipped) != 0 {
+		t.Fatalf("got %d skipped balances; want 0 (rate present)", len(res.Skipped))
+	}
 
 	// The run must be persisted under the tenant's RLS scope.
 	var persisted int
@@ -189,6 +192,61 @@ func TestWorkstream3FXRevaluationRunner(t *testing.T) {
 	}
 	if persisted != 1 {
 		t.Fatalf("persisted run count = %d; want 1", persisted)
+	}
+}
+
+// TestWorkstream3FXRevaluationSkipsMissingRate verifies the sweep
+// records — rather than silently drops — an open foreign-currency
+// balance whose currency has no rate as of the run date. Posting at a
+// date with a rate keeps the balance valid; revaluing as-of an earlier
+// date (before any rate is loaded) forces the missing-rate path.
+func TestWorkstream3FXRevaluationSkipsMissingRate(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	rates := ledger.NewExchangeRateStore(h.pool)
+	ledgerStore := ledger.NewPGStore(h.pool, h.publisher, h.auditor).WithExchangeRates(rates)
+
+	tn := newFXTenant(t, h, "w3-reval-skip", "EUR")
+	seedLedgerAccounts(t, ledgerStore,
+		ledger.Account{TenantID: tn.ID, Code: "1200", Name: "USD Bank", Type: ledger.AccountTypeAsset, Active: true},
+		ledger.Account{TenantID: tn.ID, Code: "4000", Name: "Revenue", Type: ledger.AccountTypeRevenue, Active: true},
+	)
+
+	postDate := time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)
+	if _, err := rates.UpsertRate(ctx, ledger.ExchangeRate{
+		TenantID: tn.ID, FromCurrency: "USD", ToCurrency: "EUR",
+		RateDate: postDate, Rate: decimal.NewFromFloat(0.9), Provider: "w3",
+	}); err != nil {
+		t.Fatalf("upsert USD→EUR: %v", err)
+	}
+	postJE(t, ledgerStore, tn.ID, postDate,
+		ledger.JournalLine{AccountCode: "1200", Debit: decimal.NewFromInt(1000), Currency: "USD"},
+		ledger.JournalLine{AccountCode: "4000", Credit: decimal.NewFromInt(1000), Currency: "USD"},
+	)
+
+	// Revalue as-of a date before any USD→EUR rate exists.
+	asOf := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	runner := ledger.NewRevaluationRunner(ledgerStore, rates, uuid.New(), ledger.RevaluationConfig{})
+	res, err := runner.Run(ctx, tn.ID, asOf, ledger.RevaluationConfig{})
+	if err != nil {
+		t.Fatalf("revaluation run: %v", err)
+	}
+	if len(res.Lines) != 0 {
+		t.Fatalf("got %d revaluation lines; want 0 (no rate)", len(res.Lines))
+	}
+	if len(res.Skipped) != 1 {
+		t.Fatalf("got %d skipped balances; want 1", len(res.Skipped))
+	}
+	skip := res.Skipped[0]
+	if skip.AccountCode != "1200" || skip.Currency != "USD" || skip.BaseCurrency != "EUR" {
+		t.Fatalf("skip = %+v; want 1200/USD/EUR", skip)
+	}
+	if !skip.ForeignNet.Equal(decimal.NewFromInt(1000)) {
+		t.Fatalf("skip foreign net = %s; want 1000", skip.ForeignNet)
+	}
+	if skip.Reason == "" {
+		t.Fatalf("skip reason should explain the missing rate")
 	}
 }
 
