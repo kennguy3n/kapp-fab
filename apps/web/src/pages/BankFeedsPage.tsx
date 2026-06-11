@@ -37,9 +37,10 @@ const CONNECTION_BADGE: Record<
   string,
   "default" | "accent" | "outline" | "success" | "warning" | "danger"
 > = {
+  // Keys mirror the server's StatusActive/StatusExpired/StatusRevoked
+  // constants — the only statuses bank_feed_connections ever holds.
   active: "success",
-  pending: "warning",
-  error: "danger",
+  expired: "warning",
   revoked: "default",
 };
 

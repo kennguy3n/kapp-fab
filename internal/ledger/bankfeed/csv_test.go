@@ -34,6 +34,28 @@ func TestCSVProviderConnectLifecycle(t *testing.T) {
 	}
 }
 
+// TestCSVConnectionIDDeterministic pins the dedup invariant that keeps a
+// bank account to a single CSV feed: the derived id is a pure function
+// of (tenant, account), so two concurrent first-time uploads compute the
+// same id and collide on the (tenant_id, id) PK instead of inserting two
+// rows. Distinct tenants/accounts must derive distinct ids.
+func TestCSVConnectionIDDeterministic(t *testing.T) {
+	tn, acct := uuid.New(), uuid.New()
+	got := CSVConnectionID(tn, acct)
+	if got == uuid.Nil {
+		t.Fatal("derived id is nil")
+	}
+	if again := CSVConnectionID(tn, acct); again != got {
+		t.Fatalf("not deterministic: %s != %s", again, got)
+	}
+	if other := CSVConnectionID(tn, uuid.New()); other == got {
+		t.Fatal("different account derived the same id")
+	}
+	if other := CSVConnectionID(uuid.New(), acct); other == got {
+		t.Fatal("different tenant derived the same id")
+	}
+}
+
 func TestCSVIngest(t *testing.T) {
 	csv := "value_date,description,amount,currency,counterparty\n" +
 		"2024-01-15,\"Coffee, large\",-4.50,USD,Cafe\n" +

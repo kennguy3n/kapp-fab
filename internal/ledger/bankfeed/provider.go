@@ -89,6 +89,25 @@ const (
 	StatusRevoked = "revoked"
 )
 
+// csvConnectionNamespace is a fixed, arbitrary UUID used purely as the
+// namespace for deriving deterministic CSV connection ids via
+// uuid.NewSHA1. It is hardcoded and must never change — rotating it
+// would re-id every existing CSV feed and orphan its history.
+var csvConnectionNamespace = uuid.MustParse("b6c1f3a2-8d54-4e7b-9a02-1c3e5f7a9b0d")
+
+// CSVConnectionID derives the deterministic identifier for a tenant's
+// CSV feed on a given bank account. A CSV feed is push-based and there
+// is exactly one per (tenant, bank account); deriving the id from that
+// pair (rather than a random UUID) means every creation path — a
+// statement upload or the connect handshake — lands on the same primary
+// key. Two concurrent first-time uploads therefore collide on
+// (tenant_id, id) and UpsertConnection's ON CONFLICT clause collapses
+// them into a single row instead of racing to insert two. It is a pure
+// function of its inputs.
+func CSVConnectionID(tenantID, bankAccountID uuid.UUID) uuid.UUID {
+	return uuid.NewSHA1(csvConnectionNamespace, []byte(tenantID.String()+"|"+bankAccountID.String()))
+}
+
 // Provider is the multi-provider abstraction. Implementations are
 // stateless and safe for concurrent use: all per-connection state lives
 // in the *Connection they are handed. InitiateConnect / CompleteConnect

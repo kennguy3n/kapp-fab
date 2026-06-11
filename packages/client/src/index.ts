@@ -3313,11 +3313,10 @@ export interface InventoryBatch {
 // credential-free connection / rule / sync-result projections) and the
 // ledger.Suggestion struct. Timestamps are RFC3339 strings.
 
-export type BankFeedConnectionStatus =
-  | "active"
-  | "error"
-  | "revoked"
-  | "pending";
+// Mirrors the Go status constants in internal/ledger/bankfeed/provider.go
+// (StatusActive/StatusExpired/StatusRevoked) and the SetStatus CHECK — these
+// are the only values the server ever persists.
+export type BankFeedConnectionStatus = "active" | "expired" | "revoked";
 
 export interface BankFeedConnection {
   id: string;

@@ -104,7 +104,17 @@ func (s *ConnectionStore) UpsertConnection(ctx context.Context, c Connection) (*
 		return nil, errors.New("bankfeed: provider required")
 	}
 	if c.ID == uuid.Nil {
-		c.ID = uuid.New()
+		if c.Provider == ProviderCSV {
+			// A CSV feed is push-based and unique per (tenant, account):
+			// derive a deterministic id so concurrent first-time uploads
+			// collide on the (tenant_id, id) PK and the ON CONFLICT clause
+			// below dedupes them into a single row rather than racing to
+			// insert two. Live providers (Plaid/GoCardless) can legitimately
+			// have multiple connections per account, so they keep a random id.
+			c.ID = CSVConnectionID(c.TenantID, c.BankAccountID)
+		} else {
+			c.ID = uuid.New()
+		}
 	}
 	if c.Status == "" {
 		c.Status = StatusActive
