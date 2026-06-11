@@ -1,4 +1,4 @@
--- Rollback for 000083_lms_deep.sql. Drops in reverse dependency order
+-- Rollback for 000087_lms_deep.sql. Drops in reverse dependency order
 -- so child tables (with composite FKs into their parents) go first.
 -- CASCADE on the FKs would also handle this, but explicit ordering
 -- keeps the intent obvious and avoids surprise drops.

@@ -15,8 +15,9 @@
 --                               for accept/reject.
 --
 -- Everything is tenant-scoped with RLS and uses the same (tenant_id, id)
--- PK convention + kapp_app grant as the rest of the schema. The latest
--- prior migration is 000081 (cell_region_metadata); this is 000082.
+-- PK convention + kapp_app grant as the rest of the schema. This is
+-- 000085 (renumbered from 000082 to resolve a parallel-merge version
+-- collision with 000082_iam_core_integration).
 
 -- ---------------------------------------------------------------------------
 -- Feed idempotency: dedupe synced statement lines by the provider's stable
