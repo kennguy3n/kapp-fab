@@ -103,6 +103,9 @@ var TenantScopedTables = []string{
 	"bank_reconciliation_rules",
 	"bank_match_suggestions",
 	"bank_learned_matches",
+	// Workstream 3 (000090) — FX revaluation run audit trail. Default
+	// (tenant_id, id) PK, no FK to other tenant-scoped tables.
+	"fx_revaluation_runs",
 }
 
 // SchemaName returns the canonical dedicated-schema name for a

@@ -121,6 +121,9 @@ TABLES=(
   bank_reconciliation_rules
   bank_match_suggestions
   bank_learned_matches
+  # Workstream 3 (000090) — FX revaluation run audit trail. Default
+  # (tenant_id, id) PK, no FK to other tenant-scoped tables.
+  fx_revaluation_runs
 )
 
 # Build a Postgres TEXT[] literal: ARRAY['t1','t2',...]

@@ -275,6 +275,12 @@ var TenantScopedTables = []string{
 	"bank_reconciliation_rules",
 	"bank_match_suggestions",
 	"bank_learned_matches",
+	// Workstream 3 (migration 000090) — on-demand FX revaluation run
+	// audit trail. Default (tenant_id, id) PK so the fallback ON
+	// CONFLICT path applies; no tableConflictKeys entry required. No
+	// FK to any other tenant-scoped table (it stores a self-contained
+	// result envelope), so restore ordering is irrelevant.
+	"fx_revaluation_runs",
 }
 
 // manifest is the first record in every dump file.
