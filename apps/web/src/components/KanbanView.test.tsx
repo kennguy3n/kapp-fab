@@ -168,17 +168,18 @@ describe("KanbanView", () => {
       },
       getData: (k: string) => data[k] ?? "",
     };
-    // The column root (the element carrying onDrop) is the <header>'s
-    // parent. Anchoring on <header> rather than the nearest <div> keeps
-    // this resilient if the header's inner markup later gains a wrapper
-    // div — otherwise the drop would fire on the wrong node and the test
-    // would pass without exercising the move.
-    const doneColumn = screen.getByText("done").closest("header")
-      ?.parentElement;
-    expect(doneColumn).not.toBeNull();
+    // Drop events bubble, and React invokes onDrop on whichever ancestor
+    // carries the handler along the propagation path. So we fire the drop
+    // on a known descendant of the "done" column (its header) and let it
+    // bubble to the drop-target root, rather than assuming the exact DOM
+    // nesting between the header and that root. Combined with the onMove
+    // assertion below, this exercises the real move regardless of any
+    // wrapper markup the column might gain in the future: if the drop ever
+    // failed to reach a handler, onMove would not fire and this test fails.
+    const doneHeader = screen.getByText("done");
 
     fireEvent.dragStart(cardEl as Element, { dataTransfer });
-    fireEvent.drop(doneColumn as Element, { dataTransfer });
+    fireEvent.drop(doneHeader, { dataTransfer });
     expect(onMove).toHaveBeenCalledWith(card, "done");
   });
 });
