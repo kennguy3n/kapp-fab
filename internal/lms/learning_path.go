@@ -343,7 +343,8 @@ func (s *LearningPathStore) GetPath(ctx context.Context, tenantID, id uuid.UUID)
 // When statusFilter is non-empty only paths in that status are returned
 // (e.g. "published" for the learner catalog).
 func (s *LearningPathStore) ListPaths(ctx context.Context, tenantID uuid.UUID, statusFilter string) ([]LearningPath, error) {
-	var out []LearningPath
+	// Non-nil so an empty result marshals as [] (not null) at the handler.
+	out := []LearningPath{}
 	err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT tenant_id, id, title, description, status, target_roles,

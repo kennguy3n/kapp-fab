@@ -21,7 +21,7 @@ type lmsRecordAdapters struct {
 	records *record.PGStore
 }
 
-// listFilterAll is the bounded full-scan filter the adapters use. The
+// listFilter is the bounded full-scan filter the adapters use. The
 // matching set per (course, field) is small for SME tenants — a course
 // has tens of modules/lessons and hundreds of enrollments — so a single
 // ListByField call stays well under record.ListAllMaxRows.

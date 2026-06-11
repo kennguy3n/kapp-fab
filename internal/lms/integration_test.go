@@ -296,7 +296,25 @@ func TestScormCommitRuntime(t *testing.T) {
 	enr := uuid.New()
 	lesson := uuid.New()
 
-	// First commit: in progress, accumulates 600s.
+	readTime := func() int64 {
+		t.Helper()
+		var secs int64
+		if err := platform.WithTenantTx(ctx, pool, tenant, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT time_spent_seconds FROM lesson_progress WHERE tenant_id=$1 AND enrollment_id=$2 AND lesson_id=$3`,
+				tenant, enr, lesson).Scan(&secs)
+		}); err != nil {
+			t.Fatalf("read time_spent: %v", err)
+		}
+		return secs
+	}
+
+	// session_time is the cumulative time spent in the SCO during the
+	// current session, so a SCO that auto-saves at 10 minutes then commits
+	// again at 15 minutes reports 00:10:00 then 00:15:00 — the increment
+	// is what counts, not the raw sum.
+	//
+	// First commit: in progress, 10 minutes into the session → 600s.
 	p, err := store.CommitRuntime(ctx, tenant, enr, lesson, CMIData{
 		Version: ContentTypeScorm12, LessonStatus: "incomplete", SessionTime: "00:10:00", SuspendData: "s1",
 	}, nil)
@@ -306,9 +324,14 @@ func TestScormCommitRuntime(t *testing.T) {
 	if p.Status != ProgressInProgress {
 		t.Fatalf("status %q", p.Status)
 	}
-	// Second commit: passed, adds 300s and completes.
+	if got := readTime(); got != 600 {
+		t.Fatalf("time_spent after commit1 = %d, want 600", got)
+	}
+
+	// Second commit: passed, now 15 minutes in → only the +300s increment
+	// is added (total 900s), and the lesson completes.
 	p, err = store.CommitRuntime(ctx, tenant, enr, lesson, CMIData{
-		Version: ContentTypeScorm12, LessonStatus: "passed", ScoreRaw: f64(95), SessionTime: "00:05:00", SuspendData: "s2",
+		Version: ContentTypeScorm12, LessonStatus: "passed", ScoreRaw: f64(95), SessionTime: "00:15:00", SuspendData: "s2",
 	}, nil)
 	if err != nil {
 		t.Fatalf("commit2: %v", err)
@@ -317,7 +340,6 @@ func TestScormCommitRuntime(t *testing.T) {
 		t.Fatalf("expected completed, got %+v", p)
 	}
 
-	// Verify accumulated time + suspend_data persisted.
 	var secs int64
 	var meta []byte
 	err = platform.WithTenantTx(ctx, pool, tenant, func(ctx context.Context, tx pgx.Tx) error {
@@ -337,8 +359,22 @@ func TestScormCommitRuntime(t *testing.T) {
 		t.Fatalf("suspend_data = %q, want s2", m["suspend_data"])
 	}
 
-	// Third commit: a revisit re-reporting "incomplete" must NOT regress
-	// the already-completed status (completion is terminal).
+	// LMSFinish re-reports the same cumulative 00:15:00 the preceding commit
+	// already sent. The increment is zero, so time_spent must stay 900 — a
+	// naive add would double-count the whole session to 1800.
+	if _, err = store.CommitRuntime(ctx, tenant, enr, lesson, CMIData{
+		Version: ContentTypeScorm12, LessonStatus: "passed", ScoreRaw: f64(95), SessionTime: "00:15:00", SuspendData: "s2",
+	}, nil); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+	if got := readTime(); got != 900 {
+		t.Fatalf("re-reported session_time double-counted: time_spent = %d, want 900", got)
+	}
+
+	// A later revisit re-launches the SCO: session_time resets to a fresh,
+	// lower value (00:01:00). That is a new session, so its full 60s is
+	// added (total 960s) and re-reporting "incomplete" must NOT regress the
+	// already-completed status (completion is terminal).
 	p, err = store.CommitRuntime(ctx, tenant, enr, lesson, CMIData{
 		Version: ContentTypeScorm12, LessonStatus: "incomplete", SessionTime: "00:01:00", SuspendData: "s3",
 	}, nil)
@@ -348,10 +384,13 @@ func TestScormCommitRuntime(t *testing.T) {
 	if p.Status != ProgressCompleted || p.CompletedAt == nil {
 		t.Fatalf("revisit regressed completion: %+v", p)
 	}
+	if got := readTime(); got != 960 {
+		t.Fatalf("revisit session not added: time_spent = %d, want 960", got)
+	}
 
-	// Fourth commit: a post-completion revisit reporting a LOWER score must
-	// not regress the recorded grade — score is a high-water mark once the
-	// lesson is completed (95 stays, 40 ignored).
+	// Same revisit reporting a LOWER score must not regress the recorded
+	// grade — score is a high-water mark once the lesson is completed (95
+	// stays, 40 ignored).
 	p, err = store.CommitRuntime(ctx, tenant, enr, lesson, CMIData{
 		Version: ContentTypeScorm12, LessonStatus: "incomplete", ScoreRaw: f64(40), SessionTime: "00:01:00", SuspendData: "s4",
 	}, nil)

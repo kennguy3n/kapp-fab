@@ -173,7 +173,8 @@ func (s *DiscussionStore) GetThread(ctx context.Context, tenantID, id uuid.UUID)
 // ListThreads returns the threads for a course, pinned first then most
 // recently active.
 func (s *DiscussionStore) ListThreads(ctx context.Context, tenantID, courseID uuid.UUID) ([]DiscussionThread, error) {
-	var out []DiscussionThread
+	// Non-nil so an empty result marshals as [] (not null) at the handler.
+	out := []DiscussionThread{}
 	err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT tenant_id, id, course_id, lesson_id, author_id, title, body, status, pinned, reply_count, created_at, updated_at

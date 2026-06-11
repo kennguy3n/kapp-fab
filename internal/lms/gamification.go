@@ -212,7 +212,8 @@ func (s *GamificationStore) CreateBadge(ctx context.Context, in Badge) (*Badge, 
 // ListBadges returns a tenant's badges. When activeOnly is true only
 // active badges are returned (the award engine's candidate set).
 func (s *GamificationStore) ListBadges(ctx context.Context, tenantID uuid.UUID, activeOnly bool) ([]Badge, error) {
-	var out []Badge
+	// Non-nil so an empty result marshals as [] (not null) at the handler.
+	out := []Badge{}
 	err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT tenant_id, id, name, description, icon, criteria_type, criteria_value, active, created_by, created_at, updated_at
@@ -284,7 +285,8 @@ func (s *GamificationStore) AwardBadge(ctx context.Context, tenantID, userID, ba
 
 // ListUserBadges returns the badges a user holds, newest first.
 func (s *GamificationStore) ListUserBadges(ctx context.Context, tenantID, userID uuid.UUID) ([]UserBadge, error) {
-	var out []UserBadge
+	// Non-nil so an empty result marshals as [] (not null) at the handler.
+	out := []UserBadge{}
 	err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT tenant_id, id, user_id, badge_id, earned_at, context
@@ -318,7 +320,8 @@ func (s *GamificationStore) ListAwards(ctx context.Context, tenantID uuid.UUID, 
 	if limit <= 0 || limit > maxAwardHistory {
 		limit = maxAwardHistory
 	}
-	var out []UserBadge
+	// Non-nil so an empty result marshals as [] (not null) at the handler.
+	out := []UserBadge{}
 	err := platform.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT tenant_id, id, user_id, badge_id, earned_at, context

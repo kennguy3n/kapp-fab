@@ -570,10 +570,19 @@ func contentTypeFor(name string) string {
 }
 
 // CommitRuntime applies a SCORM CMI commit to the lesson's progress row.
-// Session time is ADDED to the accumulated time_spent_seconds (each
-// commit reports the time since the last commit), suspend_data replaces
-// the stored blob, and status/score are projected via MapCMIToProgress.
-// Returns the resulting progress projection.
+//
+// Session time is accumulated as a DELTA, not a raw add. Per the SCORM
+// spec, cmi.core.session_time / cmi.session_time is the cumulative time
+// the learner has spent in the SCO during the *current* session, which a
+// SCO typically re-reports (unchanged) on both LMSCommit and LMSFinish.
+// Naively adding it on every commit double-counts (a 10-minute session
+// committed then finished would record 20 minutes). Instead we persist
+// the last cumulative value in metadata.last_session_seconds and add only
+// the increment since the previous commit; a value lower than the stored
+// one means the SCO re-launched (a new session reset its timer), so the
+// full new value is added. suspend_data replaces the stored blob, and
+// status/score are projected via MapCMIToProgress. Returns the resulting
+// progress projection.
 func (s *ScormStore) CommitRuntime(ctx context.Context, tenantID, enrollmentID, lessonID uuid.UUID, cmi CMIData, actor *uuid.UUID) (*Progress, error) {
 	if tenantID == uuid.Nil || enrollmentID == uuid.Nil || lessonID == uuid.Nil {
 		return nil, errors.New("lms: tenant_id, enrollment_id, lesson_id required")
@@ -589,7 +598,13 @@ func (s *ScormStore) CommitRuntime(ctx context.Context, tenantID, enrollmentID, 
 		if mapping.Completed {
 			completedAt = &now
 		}
-		meta, _ := json.Marshal(map[string]string{"suspend_data": mapping.SuspendData})
+		// last_session_seconds records the cumulative session_time this
+		// commit reported so the next commit can add only the increment
+		// (see the DELTA accumulation in the SQL below).
+		meta, _ := json.Marshal(map[string]string{
+			"suspend_data":         mapping.SuspendData,
+			"last_session_seconds": strconv.FormatInt(mapping.SessionSeconds, 10),
+		})
 		row := tx.QueryRow(ctx,
 			`INSERT INTO lesson_progress
 			    (tenant_id, enrollment_id, lesson_id, status, score, attempts,
@@ -631,7 +646,18 @@ func (s *ScormStore) CommitRuntime(ctx context.Context, tenantID, enrollmentID, 
 			        -- incrementing per commit would inflate the counter into a
 			        -- commit count rather than an attempt count. A new attempt
 			        -- is the SCO re-launch (LMSInitialize), tracked separately.
-			        time_spent_seconds = lesson_progress.time_spent_seconds + $8,
+			        -- Accumulate the DELTA of the cumulative session_time,
+			        -- not the raw value: a SCO re-reports the same session
+			        -- total on LMSCommit then LMSFinish, so adding $8 each
+			        -- time double-counts. Add ($8 - last_session_seconds)
+			        -- when the timer advanced; if $8 is lower the SCO
+			        -- re-launched (new session reset its timer) so add $8.
+			        time_spent_seconds = lesson_progress.time_spent_seconds +
+			            CASE
+			                WHEN $8 >= COALESCE((lesson_progress.metadata->>'last_session_seconds')::bigint, 0)
+			                THEN $8 - COALESCE((lesson_progress.metadata->>'last_session_seconds')::bigint, 0)
+			                ELSE $8
+			            END,
 			        metadata           = lesson_progress.metadata || EXCLUDED.metadata
 			 RETURNING tenant_id, enrollment_id, lesson_id, status, score,
 			           attempts, started_at, completed_at, updated_at`,

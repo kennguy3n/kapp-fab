@@ -158,10 +158,15 @@ export function ScormPlayer({
         } else {
           await api.scormCommit(lessonId, enrollmentId, cmi);
         }
-        onProgressRef.current?.();
+        if (!cancelled) onProgressRef.current?.();
       } catch (e) {
         lastError = "101"; // general exception
-        setError((e as Error).message);
+        // The effect cleanup flips `cancelled` and tears down this RTE; a
+        // flush kicked off by a prior LMSCommit/LMSFinish can still resolve
+        // afterwards. Skip the state update then so we don't set error on an
+        // unmounted (or superseded) player. lastError is always recorded so
+        // a still-live SCO sees the failure via LMSGetLastError.
+        if (!cancelled) setError((e as Error).message);
       }
     };
 
