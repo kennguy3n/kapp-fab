@@ -764,7 +764,11 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 		}
 		// Reverse the serial transitions the original move made and
 		// link the affected serials to the contra row so the trace
-		// stays complete.
+		// stays complete. Called unconditionally: it is keyed on the
+		// original move's inventory_move_serials rows, so an untracked
+		// or non-serial move (which has none) is a no-op — keeping
+		// ReverseMove a single path correct for tracked and untracked
+		// moves alike rather than branching on a tracking lookup.
 		if err := s.reverseMoveSerials(ctx, tx, tenantID, moveID, out.ID, origQty, origWh); err != nil {
 			return err
 		}
