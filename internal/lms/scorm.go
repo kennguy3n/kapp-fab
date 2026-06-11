@@ -599,7 +599,22 @@ func (s *ScormStore) CommitRuntime(ctx context.Context, tenantID, enrollmentID, 
 			                                 THEN lesson_progress.status
 			                                 ELSE EXCLUDED.status
 			                             END,
-			        score              = COALESCE(EXCLUDED.score, lesson_progress.score),
+			        -- Score is a high-water mark once a lesson is completed: a
+			        -- post-completion revisit that reports a lower score must not
+			        -- regress the recorded grade (gradebook semantics). While the
+			        -- lesson is still in progress the latest score wins, so a live
+			        -- SCO can revise its score downward mid-attempt. Gating on the
+			        -- existing row's 'completed' status mirrors the status guard
+			        -- above; GREATEST(COALESCE(...), COALESCE(...)) is null-safe
+			        -- (picks the non-null side when only one is present).
+			        score              = CASE
+			                                 WHEN lesson_progress.status = 'completed'
+			                                 THEN GREATEST(
+			                                          COALESCE(lesson_progress.score, EXCLUDED.score),
+			                                          COALESCE(EXCLUDED.score, lesson_progress.score)
+			                                      )
+			                                 ELSE COALESCE(EXCLUDED.score, lesson_progress.score)
+			                             END,
 			        started_at         = COALESCE(lesson_progress.started_at, EXCLUDED.started_at),
 			        completed_at       = COALESCE(lesson_progress.completed_at, EXCLUDED.completed_at),
 			        updated_at         = EXCLUDED.updated_at,

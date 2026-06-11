@@ -424,7 +424,18 @@ func upsertProgressTx(ctx context.Context, tx pgx.Tx, tenantID, enrollmentID, le
 		                          THEN lesson_progress.status
 		                          ELSE EXCLUDED.status
 		                       END,
-		        score        = COALESCE(EXCLUDED.score, lesson_progress.score),
+		        -- Score is a high-water mark once a lesson is completed: an
+		        -- out-of-order xAPI statement reporting a lower score must not
+		        -- regress the recorded grade. Latest score wins while the lesson
+		        -- is still in progress. GREATEST/COALESCE is null-safe.
+		        score        = CASE
+		                          WHEN lesson_progress.status = 'completed'
+		                          THEN GREATEST(
+		                                   COALESCE(lesson_progress.score, EXCLUDED.score),
+		                                   COALESCE(EXCLUDED.score, lesson_progress.score)
+		                               )
+		                          ELSE COALESCE(EXCLUDED.score, lesson_progress.score)
+		                       END,
 		        attempts     = lesson_progress.attempts + 1,
 		        started_at   = COALESCE(lesson_progress.started_at, EXCLUDED.started_at),
 		        completed_at = COALESCE(lesson_progress.completed_at, EXCLUDED.completed_at),

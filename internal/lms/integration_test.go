@@ -348,6 +348,19 @@ func TestScormCommitRuntime(t *testing.T) {
 	if p.Status != ProgressCompleted || p.CompletedAt == nil {
 		t.Fatalf("revisit regressed completion: %+v", p)
 	}
+
+	// Fourth commit: a post-completion revisit reporting a LOWER score must
+	// not regress the recorded grade — score is a high-water mark once the
+	// lesson is completed (95 stays, 40 ignored).
+	p, err = store.CommitRuntime(ctx, tenant, enr, lesson, CMIData{
+		Version: ContentTypeScorm12, LessonStatus: "incomplete", ScoreRaw: f64(40), SessionTime: "00:01:00", SuspendData: "s4",
+	}, nil)
+	if err != nil {
+		t.Fatalf("commit4: %v", err)
+	}
+	if p.Score == nil || !p.Score.Equal(decimal.NewFromInt(95)) {
+		t.Fatalf("post-completion lower score regressed grade: score = %v, want 95", p.Score)
+	}
 }
 
 // TestUpsertProgressCompletionTerminal covers the generic Store writer
@@ -391,6 +404,23 @@ func TestUpsertProgressCompletionTerminal(t *testing.T) {
 	}
 	if p.Attempts != 2 {
 		t.Fatalf("attempts = %d; want 2", p.Attempts)
+	}
+
+	// Score is a high-water mark once completed: a later revisit reporting a
+	// LOWER score must not regress the recorded grade (95 stays, 50 ignored).
+	lower := decimal.NewFromInt(50)
+	p, err = store.UpsertProgress(ctx, Progress{
+		TenantID: tenant, EnrollmentID: enr, LessonID: lesson,
+		Status: ProgressInProgress, Score: &lower,
+	})
+	if err != nil {
+		t.Fatalf("third upsert: %v", err)
+	}
+	if p.Score == nil || !p.Score.Equal(second) {
+		t.Fatalf("post-completion lower score regressed grade: score = %v; want %s", p.Score, second)
+	}
+	if p.Status != ProgressCompleted {
+		t.Fatalf("third revisit regressed completion: %+v", p)
 	}
 }
 
