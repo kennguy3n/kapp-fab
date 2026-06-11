@@ -253,6 +253,28 @@ var TenantScopedTables = []string{
 	"lms_user_badges",
 	"lms_discussion_threads",
 	"lms_discussion_replies",
+	// Recruitment (migration 000084). All carry the default
+	// (tenant_id, id) PK so the fallback ON CONFLICT path applies; no
+	// tableConflictKeys entries are required. Ordering is FK-driven for
+	// restore: job_applications FKs job_openings; interviews and
+	// offer_letters each FK job_applications — so the parent lands first.
+	"job_openings",
+	"job_applications",
+	"interviews",
+	"offer_letters",
+	// Bank feed + smart reconciliation (migrations 000085/000086).
+	// bank_feed_connections FKs bank_accounts and bank_match_suggestions
+	// FKs bank_transactions — both parents are listed earlier in the
+	// Finance block, so restore order is satisfied. bank_feed_connections,
+	// bank_reconciliation_rules and bank_match_suggestions use the default
+	// (tenant_id, id) PK. bank_learned_matches has the natural composite
+	// PK (tenant_id, bank_account_id, description_key, account_code) —
+	// declared in tableConflictKeys below so a re-restore upserts the
+	// hit_count/last_seen_at instead of degrading to DO NOTHING.
+	"bank_feed_connections",
+	"bank_reconciliation_rules",
+	"bank_match_suggestions",
+	"bank_learned_matches",
 }
 
 // manifest is the first record in every dump file.
@@ -718,6 +740,14 @@ var tableConflictKeys = map[string][]string{
 	"marketplace_extension_ktypes":      {"tenant_id", "installation_id", "ktype_name"},
 	"marketplace_extension_workflows":   {"tenant_id", "installation_id", "workflow_name"},
 	"marketplace_extension_agent_tools": {"tenant_id", "installation_id", "tool_name"},
+	// Bank feed (migration 000085) — bank_learned_matches has no
+	// surrogate `id`; its PK is the natural composite
+	// (tenant_id, bank_account_id, description_key, account_code), so the
+	// (tenant_id, id) fallback would degrade to ON CONFLICT DO NOTHING and
+	// a corrective re-restore would not refresh the learned hit_count /
+	// last_seen_at on existing rows. The other three bank-feed tables use
+	// the standard (tenant_id, id) PK and fall through to the default path.
+	"bank_learned_matches": {"tenant_id", "bank_account_id", "description_key", "account_code"},
 }
 
 // insertRow issues a parameterised INSERT that lists the columns from
