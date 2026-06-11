@@ -153,13 +153,27 @@ func buildConsolidatedBalanceSheet(tb *ConsolidatedTrialBalance, netIncome decim
 	}
 	// Net income lives in the P&L accounts, which are not on the
 	// balance sheet; surface it as retained earnings for the period
-	// so equity reconciles against assets.
+	// so equity reconciles against assets. If an entity's chart of
+	// accounts already carries a real equity account on
+	// CurrentPeriodEarningsCode, fold net income into that existing
+	// row instead of emitting a duplicate code (TotalEquity is the
+	// same either way; this just keeps one row per account code).
 	if !netIncome.IsZero() {
-		bs.Equity = append(bs.Equity, ConsolidatedStatementRow{
-			AccountCode: CurrentPeriodEarningsCode,
-			AccountName: "Current Period Earnings",
-			Amount:      netIncome,
-		})
+		merged := false
+		for i := range bs.Equity {
+			if bs.Equity[i].AccountCode == CurrentPeriodEarningsCode {
+				bs.Equity[i].Amount = bs.Equity[i].Amount.Add(netIncome)
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			bs.Equity = append(bs.Equity, ConsolidatedStatementRow{
+				AccountCode: CurrentPeriodEarningsCode,
+				AccountName: "Current Period Earnings",
+				Amount:      netIncome,
+			})
+		}
 		bs.TotalEquity = bs.TotalEquity.Add(netIncome)
 	}
 	bs.Difference = bs.TotalAssets.Sub(bs.TotalLiabilities.Add(bs.TotalEquity))

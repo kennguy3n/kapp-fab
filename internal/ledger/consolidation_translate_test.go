@@ -234,6 +234,45 @@ func TestBuildConsolidatedStatements(t *testing.T) {
 	}
 }
 
+// TestBuildConsolidatedBalanceSheetCurrentEarningsCollision covers the
+// edge case where an entity's chart of accounts already carries a real
+// equity account on CurrentPeriodEarningsCode. Net income must fold
+// into that existing row rather than emit a duplicate code, and the
+// totals must still reconcile.
+func TestBuildConsolidatedBalanceSheetCurrentEarningsCollision(t *testing.T) {
+	tb := &ConsolidatedTrialBalance{
+		Rows: []ConsolidatedRow{
+			{AccountCode: "1000", Type: AccountTypeAsset, Debit: dec("200")},
+			// A real equity account that happens to use the synthetic code.
+			{AccountCode: CurrentPeriodEarningsCode, Type: AccountTypeEquity, Credit: dec("80")},
+			{AccountCode: "4000", Type: AccountTypeRevenue, Credit: dec("120")},
+			{AccountCode: "5000", Type: AccountTypeExpense, Debit: dec("0")},
+		},
+	}
+	bs := buildConsolidatedBalanceSheet(tb, dec("120")) // net income 120
+
+	count := 0
+	var earnings ConsolidatedStatementRow
+	for _, r := range bs.Equity {
+		if r.AccountCode == CurrentPeriodEarningsCode {
+			count++
+			earnings = r
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one %s equity row, got %d", CurrentPeriodEarningsCode, count)
+	}
+	if !earnings.Amount.Equal(dec("200")) { // 80 booked + 120 current earnings
+		t.Fatalf("merged earnings amount = %s; want 200", earnings.Amount)
+	}
+	if !bs.TotalEquity.Equal(dec("200")) {
+		t.Fatalf("total equity = %s; want 200", bs.TotalEquity)
+	}
+	if !bs.TotalAssets.Equal(dec("200")) || !bs.Balanced {
+		t.Fatalf("balance sheet not balanced: assets %s equity %s diff %s", bs.TotalAssets, bs.TotalEquity, bs.Difference)
+	}
+}
+
 // TestRevaluationConfigDefaults: empty config falls back to the
 // package gain/loss accounts; explicit values are preserved.
 func TestRevaluationConfigDefaults(t *testing.T) {
