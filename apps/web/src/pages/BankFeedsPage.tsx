@@ -303,64 +303,67 @@ function ConnectionsPanel({
       {connectionsQ.isError && (
         <p className="text-sm text-danger">{String(connectionsQ.error)}</p>
       )}
-      {!connectionsQ.isLoading && connections.length === 0 ? (
-        <p className="text-sm text-fg-muted">No connections for this account.</p>
-      ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Provider</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Last sync</TableHead>
-              <TableHead className="text-end">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {connections.map((c: BankFeedConnection) => (
-              <TableRow key={c.id}>
-                <TableCell className="font-medium">{c.provider}</TableCell>
-                <TableCell>
-                  <Badge variant={CONNECTION_BADGE[c.status] ?? "default"}>
-                    {c.status}
-                  </Badge>
-                  {c.last_error && (
-                    <span className="ml-2 text-xs text-danger">
-                      {c.last_error}
-                    </span>
-                  )}
-                </TableCell>
-                <TableCell>
-                  {c.last_sync_at
-                    ? new Date(c.last_sync_at).toLocaleString()
-                    : "never"}
-                </TableCell>
-                <TableCell className="text-end">
-                  <div className="flex justify-end gap-1">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={syncMut.isPending || c.status === "revoked"}
-                      onClick={() => syncMut.mutate(c.id)}
-                    >
-                      Sync now
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={
-                        disconnectMut.isPending || c.status === "revoked"
-                      }
-                      onClick={() => disconnectMut.mutate(c.id)}
-                    >
-                      Disconnect
-                    </Button>
-                  </div>
-                </TableCell>
+      {!connectionsQ.isLoading &&
+        (connections.length === 0 ? (
+          <p className="text-sm text-fg-muted">
+            No connections for this account.
+          </p>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Provider</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Last sync</TableHead>
+                <TableHead className="text-end">Actions</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      )}
+            </TableHeader>
+            <TableBody>
+              {connections.map((c: BankFeedConnection) => (
+                <TableRow key={c.id}>
+                  <TableCell className="font-medium">{c.provider}</TableCell>
+                  <TableCell>
+                    <Badge variant={CONNECTION_BADGE[c.status] ?? "default"}>
+                      {c.status}
+                    </Badge>
+                    {c.last_error && (
+                      <span className="ml-2 text-xs text-danger">
+                        {c.last_error}
+                      </span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {c.last_sync_at
+                      ? new Date(c.last_sync_at).toLocaleString()
+                      : "never"}
+                  </TableCell>
+                  <TableCell className="text-end">
+                    <div className="flex justify-end gap-1">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={syncMut.isPending || c.status === "revoked"}
+                        onClick={() => syncMut.mutate(c.id)}
+                      >
+                        Sync now
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={
+                          disconnectMut.isPending || c.status === "revoked"
+                        }
+                        onClick={() => disconnectMut.mutate(c.id)}
+                      >
+                        Disconnect
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        ))}
     </div>
   );
 }
@@ -464,56 +467,57 @@ function SuggestionsPanel({ bankAccountId }: { bankAccountId: string }) {
       {suggestionsQ.isError && (
         <p className="text-sm text-danger">{String(suggestionsQ.error)}</p>
       )}
-      {!suggestionsQ.isLoading && suggestions.length === 0 ? (
-        <p className="text-sm text-fg-muted">No open suggestions.</p>
-      ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Transaction</TableHead>
-              <TableHead>Journal entry</TableHead>
-              <TableHead className="text-right">Confidence</TableHead>
-              <TableHead>Reason</TableHead>
-              <TableHead className="text-end">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {suggestions.map((s: BankFeedSuggestion) => (
-              <TableRow key={s.id}>
-                <TableCell className="font-mono text-xs">
-                  {s.transaction_id}
-                </TableCell>
-                <TableCell className="font-mono text-xs">
-                  {s.journal_entry_id}
-                </TableCell>
-                <TableCell className="text-right">
-                  {(s.confidence * 100).toFixed(0)}%
-                </TableCell>
-                <TableCell>{s.match_reason}</TableCell>
-                <TableCell className="text-end">
-                  <div className="flex justify-end gap-1">
-                    <Button
-                      size="sm"
-                      disabled={acceptMut.isPending}
-                      onClick={() => acceptMut.mutate(s.id)}
-                    >
-                      Accept
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={rejectMut.isPending}
-                      onClick={() => rejectMut.mutate(s.id)}
-                    >
-                      Reject
-                    </Button>
-                  </div>
-                </TableCell>
+      {!suggestionsQ.isLoading &&
+        (suggestions.length === 0 ? (
+          <p className="text-sm text-fg-muted">No open suggestions.</p>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Transaction</TableHead>
+                <TableHead>Journal entry</TableHead>
+                <TableHead className="text-right">Confidence</TableHead>
+                <TableHead>Reason</TableHead>
+                <TableHead className="text-end">Actions</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      )}
+            </TableHeader>
+            <TableBody>
+              {suggestions.map((s: BankFeedSuggestion) => (
+                <TableRow key={s.id}>
+                  <TableCell className="font-mono text-xs">
+                    {s.transaction_id}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {s.journal_entry_id}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {(s.confidence * 100).toFixed(0)}%
+                  </TableCell>
+                  <TableCell>{s.match_reason}</TableCell>
+                  <TableCell className="text-end">
+                    <div className="flex justify-end gap-1">
+                      <Button
+                        size="sm"
+                        disabled={acceptMut.isPending}
+                        onClick={() => acceptMut.mutate(s.id)}
+                      >
+                        Accept
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={rejectMut.isPending}
+                        onClick={() => rejectMut.mutate(s.id)}
+                      >
+                        Reject
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        ))}
     </div>
   );
 }
@@ -684,66 +688,67 @@ function RulesPanel() {
       </form>
 
       {rulesQ.isLoading && <p className="text-sm text-fg-muted">Loading…</p>}
-      {!rulesQ.isLoading && rules.length === 0 ? (
-        <p className="text-sm text-fg-muted">No rules configured.</p>
-      ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="text-right">Priority</TableHead>
-              <TableHead>Condition</TableHead>
-              <TableHead>Value</TableHead>
-              <TableHead>Account</TableHead>
-              <TableHead>Auto-approve</TableHead>
-              <TableHead>Enabled</TableHead>
-              <TableHead className="text-end">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rules.map((rule: BankFeedRule) => (
-              <TableRow key={rule.id}>
-                <TableCell className="text-right">{rule.priority}</TableCell>
-                <TableCell>{rule.condition_type}</TableCell>
-                <TableCell className="font-mono text-xs">
-                  {rule.condition_value}
-                </TableCell>
-                <TableCell>
-                  {rule.target_account_code || "—"}
-                  {rule.target_cost_center
-                    ? ` / ${rule.target_cost_center}`
-                    : ""}
-                </TableCell>
-                <TableCell>{rule.auto_approve ? "Yes" : "No"}</TableCell>
-                <TableCell>
-                  <Badge variant={rule.enabled ? "success" : "outline"}>
-                    {rule.enabled ? "enabled" : "disabled"}
-                  </Badge>
-                </TableCell>
-                <TableCell className="text-end">
-                  <div className="flex justify-end gap-1">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={toggleMut.isPending}
-                      onClick={() => toggleMut.mutate(rule)}
-                    >
-                      {rule.enabled ? "Disable" : "Enable"}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={deleteMut.isPending}
-                      onClick={() => deleteMut.mutate(rule.id)}
-                    >
-                      Delete
-                    </Button>
-                  </div>
-                </TableCell>
+      {!rulesQ.isLoading &&
+        (rules.length === 0 ? (
+          <p className="text-sm text-fg-muted">No rules configured.</p>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="text-right">Priority</TableHead>
+                <TableHead>Condition</TableHead>
+                <TableHead>Value</TableHead>
+                <TableHead>Account</TableHead>
+                <TableHead>Auto-approve</TableHead>
+                <TableHead>Enabled</TableHead>
+                <TableHead className="text-end">Actions</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      )}
+            </TableHeader>
+            <TableBody>
+              {rules.map((rule: BankFeedRule) => (
+                <TableRow key={rule.id}>
+                  <TableCell className="text-right">{rule.priority}</TableCell>
+                  <TableCell>{rule.condition_type}</TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {rule.condition_value}
+                  </TableCell>
+                  <TableCell>
+                    {rule.target_account_code || "—"}
+                    {rule.target_cost_center
+                      ? ` / ${rule.target_cost_center}`
+                      : ""}
+                  </TableCell>
+                  <TableCell>{rule.auto_approve ? "Yes" : "No"}</TableCell>
+                  <TableCell>
+                    <Badge variant={rule.enabled ? "success" : "outline"}>
+                      {rule.enabled ? "enabled" : "disabled"}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-end">
+                    <div className="flex justify-end gap-1">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={toggleMut.isPending}
+                        onClick={() => toggleMut.mutate(rule)}
+                      >
+                        {rule.enabled ? "Disable" : "Enable"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={deleteMut.isPending}
+                        onClick={() => deleteMut.mutate(rule.id)}
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        ))}
     </div>
   );
 }

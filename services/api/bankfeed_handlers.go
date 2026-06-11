@@ -119,7 +119,7 @@ func (h *bankfeedHandlers) listConnections(w http.ResponseWriter, r *http.Reques
 		}
 		conns, err := h.conns.ListConnectionsByAccount(r.Context(), t.ID, acct)
 		if err != nil {
-			writeBankFeedError(w, err)
+			writeBankFeedError(w, r, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, toConnectionResponses(conns))
@@ -127,7 +127,7 @@ func (h *bankfeedHandlers) listConnections(w http.ResponseWriter, r *http.Reques
 	}
 	conns, err := h.conns.ListActiveConnections(r.Context(), t.ID)
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toConnectionResponses(conns))
@@ -159,12 +159,12 @@ func (h *bankfeedHandlers) initiateConnect(w http.ResponseWriter, r *http.Reques
 	}
 	provider, err := h.registry.Get(req.Provider)
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	link, err := provider.InitiateConnect(r.Context(), t.ID, req.BankAccountID, req.RedirectURI)
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"provider": req.Provider, "link": link})
@@ -198,12 +198,12 @@ func (h *bankfeedHandlers) completeConnect(w http.ResponseWriter, r *http.Reques
 	}
 	provider, err := h.registry.Get(req.Provider)
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	conn, err := provider.CompleteConnect(r.Context(), t.ID, req.Code)
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	// The provider populates only the credential/cursor fields; the
@@ -213,7 +213,7 @@ func (h *bankfeedHandlers) completeConnect(w http.ResponseWriter, r *http.Reques
 	conn.BankAccountID = req.BankAccountID
 	saved, err := h.conns.UpsertConnection(r.Context(), *conn)
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, toConnectionResponse(saved))
@@ -235,7 +235,7 @@ func (h *bankfeedHandlers) disconnect(w http.ResponseWriter, r *http.Request) {
 	}
 	conn, err := h.conns.GetConnection(r.Context(), t.ID, id)
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	var providerErr string
@@ -247,7 +247,7 @@ func (h *bankfeedHandlers) disconnect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := h.conns.SetStatus(r.Context(), t.ID, id, bankfeed.StatusRevoked); err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	resp := map[string]any{"id": id, "status": bankfeed.StatusRevoked}
@@ -272,12 +272,12 @@ func (h *bankfeedHandlers) syncNow(w http.ResponseWriter, r *http.Request) {
 	}
 	conn, err := h.conns.GetConnection(r.Context(), t.ID, id)
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	res, err := h.sync.SyncOne(r.Context(), t.ID, conn)
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toSyncResultResponse(res))
@@ -342,12 +342,12 @@ func (h *bankfeedHandlers) uploadCSV(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := h.ensureCSVConnection(r, t.ID, acct)
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	res, err := h.sync.IngestRaw(r.Context(), t.ID, conn, raw)
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toSyncResultResponse(res))
@@ -439,7 +439,7 @@ func (h *bankfeedHandlers) listRules(w http.ResponseWriter, r *http.Request) {
 	}
 	rules, err := h.rules.ListAllRules(r.Context(), t.ID)
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toRuleResponses(rules))
@@ -468,7 +468,7 @@ func (h *bankfeedHandlers) createRule(w http.ResponseWriter, r *http.Request) {
 		Enabled:           req.Enabled,
 	})
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, toRuleResponse(out))
@@ -502,7 +502,7 @@ func (h *bankfeedHandlers) updateRule(w http.ResponseWriter, r *http.Request) {
 		Enabled:           req.Enabled,
 	})
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toRuleResponse(out))
@@ -519,7 +519,7 @@ func (h *bankfeedHandlers) deleteRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.rules.DeleteRule(r.Context(), t.ID, id); err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -550,7 +550,7 @@ func (h *bankfeedHandlers) listSuggestions(w http.ResponseWriter, r *http.Reques
 	}
 	sugs, err := h.matcher.ListSuggestions(r.Context(), t.ID, acct)
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	if sugs == nil {
@@ -574,7 +574,7 @@ func (h *bankfeedHandlers) acceptSuggestion(w http.ResponseWriter, r *http.Reque
 	}
 	out, err := h.matcher.AcceptSuggestion(r.Context(), t.ID, id, actorOrDefault(r.Context()))
 	if err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -593,7 +593,7 @@ func (h *bankfeedHandlers) rejectSuggestion(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err := h.matcher.RejectSuggestion(r.Context(), t.ID, id, actorOrDefault(r.Context())); err != nil {
-		writeBankFeedError(w, err)
+		writeBankFeedError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -601,8 +601,12 @@ func (h *bankfeedHandlers) rejectSuggestion(w http.ResponseWriter, r *http.Reque
 
 // writeBankFeedError maps the bankfeed / matcher errors to HTTP status
 // codes consistent with the rest of the API surface. Unknown / unconfigured
-// providers are a client-addressable 4xx; everything unrecognised is a 500.
-func writeBankFeedError(w http.ResponseWriter, err error) {
+// providers are a client-addressable 4xx whose sentinel message is safe to
+// echo. An unrecognised error is an internal fault: its detail (which may
+// embed SQL / connection strings) is logged server-side via the request
+// logger and the client receives only a generic message, so provider
+// internals can never leak to a tenant.
+func writeBankFeedError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, bankfeed.ErrUnknownProvider):
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -613,6 +617,7 @@ func writeBankFeedError(w http.ResponseWriter, err error) {
 	case errors.Is(err, bankfeed.ErrUnsupported):
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 	default:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		platform.LoggerFromContext(r.Context()).Error("bankfeed: internal error", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
 }

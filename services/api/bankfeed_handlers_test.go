@@ -26,22 +26,29 @@ func TestWriteBankFeedErrorMappings(t *testing.T) {
 		name   string
 		err    error
 		status int
+		// leakDetail, when non-empty, must NOT appear in the response body
+		// — it is internal error detail that should stay server-side.
+		leakDetail string
 	}{
-		{"unknown provider → 404", bankfeed.ErrUnknownProvider, http.StatusNotFound},
-		{"wrapped unknown provider → 404", fmt.Errorf("connect: %w", bankfeed.ErrUnknownProvider), http.StatusNotFound},
-		{"provider not configured → 503", bankfeed.ErrProviderNotConfigured, http.StatusServiceUnavailable},
-		{"wrapped not configured → 503", fmt.Errorf("plaid: %w", bankfeed.ErrProviderNotConfigured), http.StatusServiceUnavailable},
-		{"unsupported → 422", bankfeed.ErrUnsupported, http.StatusUnprocessableEntity},
-		{"unrelated → 500", errors.New("bankfeed: connection pool exhausted"), http.StatusInternalServerError},
+		{"unknown provider → 404", bankfeed.ErrUnknownProvider, http.StatusNotFound, ""},
+		{"wrapped unknown provider → 404", fmt.Errorf("connect: %w", bankfeed.ErrUnknownProvider), http.StatusNotFound, ""},
+		{"provider not configured → 503", bankfeed.ErrProviderNotConfigured, http.StatusServiceUnavailable, ""},
+		{"wrapped not configured → 503", fmt.Errorf("plaid: %w", bankfeed.ErrProviderNotConfigured), http.StatusServiceUnavailable, ""},
+		{"unsupported → 422", bankfeed.ErrUnsupported, http.StatusUnprocessableEntity, ""},
+		{"unrelated → 500 (detail not leaked)", errors.New("pgx: password=hunter2 host=10.0.0.1 pool exhausted"), http.StatusInternalServerError, "hunter2"},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rr := httptest.NewRecorder()
-			writeBankFeedError(rr, tc.err)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/finance/bank-feeds/connections", http.NoBody)
+			writeBankFeedError(rr, req, tc.err)
 			if rr.Code != tc.status {
 				t.Fatalf("status: want %d, got %d (body=%q)", tc.status, rr.Code, rr.Body.String())
+			}
+			if tc.leakDetail != "" && strings.Contains(rr.Body.String(), tc.leakDetail) {
+				t.Fatalf("internal error detail %q leaked to client body %q", tc.leakDetail, rr.Body.String())
 			}
 		})
 	}

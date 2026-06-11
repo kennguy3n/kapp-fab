@@ -264,7 +264,7 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.landedCostCmd(ctx, req)
 	case "help":
 		return CommandResponse{
-			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /project, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /return, /requisition, /stock, /reverse-stock-move, /batch, /work-order (also /wo, /workorder), /job-card (also /jc), /bom, /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /shift, /cycle-count, /budget, /landed-cost, /help",
+			Text: "Commands: /list-ktypes, /lead, /contact, /deal, /task, /project, /customer, /supplier, /invoice, /bill, /payment, /post-invoice, /post-bill, /return, /requisition, /stock, /reverse-stock-move, /batch, /work-order (also /wo, /workorder), /job-card (also /jc), /bom, /recruit, /bankfeed (also /bank-feed), /learn, /certificate, /approve, /ticket, /ticket-from-thread, /recurring-invoice, /form, /insight, /dashboard-digest, /shift, /cycle-count, /budget, /landed-cost, /help",
 		}, nil
 	default:
 		return CommandResponse{
