@@ -523,10 +523,13 @@ func (s *RuleStore) UpsertRule(ctx context.Context, r Rule) (*Rule, error) {
 		if err != nil {
 			return err
 		}
-		// A compound rule normalizes its match mode to MatchAll when the
-		// caller left it blank; a legacy rule stores the column default.
+		// Normalize a blank match mode to MatchAll for every rule, compound
+		// or legacy. The column is NOT NULL with a CHECK in ('all','any'),
+		// and the INSERT supplies condition_match explicitly (so the column
+		// DEFAULT never applies); passing "" would fail the constraint on a
+		// legacy single-condition rule, which leaves ConditionMatch unset.
 		condMatch := r.ConditionMatch
-		if len(r.Conditions) > 0 && condMatch == "" {
+		if condMatch == "" {
 			condMatch = MatchAll
 		}
 		if err := tx.QueryRow(ctx,
