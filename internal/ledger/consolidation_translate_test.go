@@ -186,6 +186,46 @@ func TestConsolidateEliminationFXMismatchFoldsToCTA(t *testing.T) {
 	}
 }
 
+// TestConsolidateEliminationCannotTargetCTA: a misconfigured pair that
+// names the CTA account as an elimination leg must be ignored, so the
+// per-entity translation adjustments survive and the sheet stays
+// balanced. Without the guard, eliminating the CTA contributions would
+// silently corrupt the CTA and unbalance the consolidated TB.
+func TestConsolidateEliminationCannotTargetCTA(t *testing.T) {
+	a, b := uuid.New(), uuid.New()
+	one := decimal.NewFromInt(1)
+	entities := []entityTrialBalance{
+		{
+			tenantID: a, baseCurrency: "USD", closingRate: one, averageRate: one,
+			rows: []TrialBalanceRow{
+				{AccountCode: "1000", Type: AccountTypeAsset, Debit: dec("100")},
+				{AccountCode: "4000", Type: AccountTypeRevenue, Credit: dec("100")},
+			},
+		},
+		{
+			// EUR sub: asset at closing 1.2 (120 debit), revenue at
+			// average 1.1 (110 credit) → a 10 per-entity CTA credit plug.
+			tenantID: b, baseCurrency: "EUR", closingRate: dec("1.2"), averageRate: dec("1.1"),
+			rows: []TrialBalanceRow{
+				{AccountCode: "1000", Type: AccountTypeAsset, Debit: dec("100")},
+				{AccountCode: "4000", Type: AccountTypeRevenue, Credit: dec("100")},
+			},
+		},
+	}
+	// Maliciously/mistakenly try to eliminate the CTA account itself.
+	pairs := []EliminationPair{{FromTenant: a, ToTenant: b, FromAccount: AccountCodeCTA, ToAccount: AccountCodeCTA}}
+	tb := consolidate(entities, pairs, AccountCodeCTA)
+
+	// The guard must keep the TB balanced and the CTA intact.
+	assertBalanced(t, tb)
+	if cta, ok := rowByCode(tb.Rows, AccountCodeCTA); !ok || cta.Credit.Sub(cta.Debit).IsZero() {
+		t.Fatalf("CTA row should survive elimination with a non-zero plug, got %+v (ok=%v)", cta, ok)
+	}
+	if _, ok := rowByCode(tb.Eliminated, AccountCodeCTA); ok {
+		t.Fatalf("CTA must never appear in the eliminated report")
+	}
+}
+
 // TestBuildConsolidatedStatements: the derived P&L and balance sheet
 // reconcile against a balanced consolidated trial balance.
 func TestBuildConsolidatedStatements(t *testing.T) {

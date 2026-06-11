@@ -130,6 +130,13 @@ func consolidate(entities []entityTrialBalance, pairs []EliminationPair, ctaCode
 		er.Contributions = append(er.Contributions, TenantBalanceRow{TenantID: tenant, Debit: d, Credit: c})
 	}
 	eliminateLeg := func(code string, tenant uuid.UUID) {
+		// The CTA account is a synthetic balancing plug, never a real
+		// intercompany balance. Refuse to eliminate it: doing so would
+		// discard the per-entity translation adjustments accumulated in
+		// step 1 and silently produce a wrong CTA / unbalanced sheet.
+		if code == ctaCode {
+			return
+		}
 		c := combined[code]
 		if c == nil {
 			return
