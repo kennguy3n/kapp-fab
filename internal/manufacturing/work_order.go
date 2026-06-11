@@ -581,6 +581,18 @@ func validateTrackedMove(
 		if !qty.Abs().Equal(decimal.NewFromInt(int64(len(serials)))) {
 			return fmt.Errorf("%w (item %s)", inventory.ErrSerialQtyMismatch, itemID)
 		}
+		// Catch duplicate serials here in Phase 1. The inventory layer
+		// rejects them too (applyMoveSerials → ErrDuplicateSerialInput),
+		// but that only fires in Phase 2 after the work order is flipped
+		// to completed; mirroring the check up front keeps the whole
+		// completion atomic on bad input.
+		seen := make(map[string]struct{}, len(serials))
+		for _, sn := range serials {
+			if _, dup := seen[sn]; dup {
+				return fmt.Errorf("%w (item %s, serial %s)", inventory.ErrDuplicateSerialInput, itemID, sn)
+			}
+			seen[sn] = struct{}{}
+		}
 	}
 	return nil
 }

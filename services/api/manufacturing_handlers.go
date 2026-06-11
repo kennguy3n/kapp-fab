@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
+	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/manufacturing"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 )
@@ -244,9 +245,24 @@ func (h *manufacturingHandlers) getWorkOrder(w http.ResponseWriter, r *http.Requ
 }
 
 // workOrderActionRequest is the JSON envelope for the status-change
-// endpoints. ActualQty is only consulted by /complete.
+// endpoints. Every field except ActualQty is consulted only by
+// /complete, and only when the finished good or a component is
+// lot/serial-tracked.
 type workOrderActionRequest struct {
 	ActualQty decimal.Decimal `json:"actual_qty,omitempty"`
+
+	// FinishedBatchID / FinishedSerials carry the lot and serials the
+	// finished-good receipt is booked into. Required when the output
+	// item is lot- / serial-tracked.
+	FinishedBatchID *uuid.UUID `json:"finished_batch_id,omitempty"`
+	FinishedSerials []string   `json:"finished_serials,omitempty"`
+
+	// ComponentBatches / ComponentSerials key off the component item id
+	// (a UUID string in JSON) and supply the lot / serials each
+	// consumption move draws down. Required for every lot- /
+	// serial-tracked component.
+	ComponentBatches map[uuid.UUID]uuid.UUID `json:"component_batches,omitempty"`
+	ComponentSerials map[uuid.UUID][]string  `json:"component_serials,omitempty"`
 }
 
 func (h *manufacturingHandlers) releaseWorkOrder(w http.ResponseWriter, r *http.Request) {
@@ -382,6 +398,30 @@ func writeManufacturingError(w http.ResponseWriter, err error) {
 		// resolve by renaming, so 409 rather than the 422 used for
 		// malformed input.
 		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, inventory.ErrInsufficientLotStock),
+		errors.Is(err, inventory.ErrSerialNotAvailable),
+		errors.Is(err, inventory.ErrSerialAlreadyInStock),
+		errors.Is(err, inventory.ErrDuplicateSourceMove):
+		// Lot/serial state conflicts surfaced by CompleteWorkOrder's
+		// Phase-2 inventory moves (over-issue of a lot, a serial that
+		// is no longer in stock / already in stock, or an idempotent
+		// replay). The client can resolve by correcting the lot/serial
+		// payload or retrying, so 409 rather than 422.
+		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, inventory.ErrLotRequired),
+		errors.Is(err, inventory.ErrSerialRequired),
+		errors.Is(err, inventory.ErrSerialUnsupported),
+		errors.Is(err, inventory.ErrSerialQtyMismatch),
+		errors.Is(err, inventory.ErrDuplicateSerialInput),
+		errors.Is(err, inventory.ErrBatchNotFound),
+		errors.Is(err, inventory.ErrBatchItemMismatch):
+		// The work order's lot/serial payload is malformed for the
+		// item's tracking contract (missing lot, wrong serial count,
+		// duplicate or unsupported serials, unknown/mismatched batch).
+		// validateTrackedMove raises these in Phase 1, before the
+		// status flip, so the completion is rejected as client input
+		// validation rather than a server fault.
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 	case errors.Is(err, manufacturing.ErrBOMNotActive),
 		errors.Is(err, manufacturing.ErrBOMHasNoComponents),
 		errors.Is(err, manufacturing.ErrBOMSelfReference),

@@ -259,6 +259,17 @@ type Transfer struct {
 	MovedAt       time.Time       `json:"moved_at,omitempty"`
 	CreatedBy     uuid.UUID       `json:"created_by"`
 	Memo          string          `json:"memo,omitempty"`
+
+	// BatchID is the lot being relocated. Required when the item is
+	// lot-tracked; both legs reference the same lot so the per-lot
+	// projection nets to zero across the transfer.
+	BatchID *uuid.UUID `json:"batch_id,omitempty"`
+	// SerialNos enumerates the serial units being relocated. Required
+	// (len == Qty) when the item is serial-tracked. Each serial is
+	// issued out of FromWarehouse and re-stocked at ToWarehouse inside
+	// the same transaction, so its registry warehouse_id tracks the
+	// move and stays consistent with the ledger.
+	SerialNos []string `json:"serial_nos,omitempty"`
 }
 
 // Sentinel errors the API layer translates into 4xx.

@@ -429,6 +429,123 @@ func TestWS2WorkOrderSerialThreading(t *testing.T) {
 	}
 }
 
+// TestWS2TransferLotSerialRelocation verifies that a warehouse
+// transfer of a lot/serial-tracked item relocates the serials in the
+// registry (issue-out of source, re-stock at destination) and keeps the
+// per-warehouse ledger and serial location consistent end-to-end.
+func TestWS2TransferLotSerialRelocation(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tn, _, _, inv, _, wh := newTenantForInventory(t, h)
+	actor := uuid.New()
+
+	item, err := inv.UpsertItem(ctx, inventory.Item{
+		TenantID: tn.ID, SKU: "WS2-XFER-SN", Name: "Transferable Serial", UOM: "each",
+		Active: true, LotTracked: true, SerialTracked: true,
+	})
+	if err != nil {
+		t.Fatalf("upsert item: %v", err)
+	}
+	wh2, err := inv.UpsertWarehouse(ctx, inventory.Warehouse{
+		TenantID: tn.ID, Code: "WH-DEST", Name: "Destination Warehouse",
+	})
+	if err != nil {
+		t.Fatalf("seed dest warehouse: %v", err)
+	}
+	batch, err := inv.CreateBatch(ctx, inventory.Batch{
+		TenantID: tn.ID, ItemID: item.ID, BatchNo: "XFER-LOT-1", CreatedBy: actor,
+	})
+	if err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+
+	// Receive 3 serials into the source warehouse.
+	if _, err := inv.RecordMove(ctx, inventory.Move{
+		TenantID: tn.ID, ItemID: item.ID, WarehouseID: wh.ID,
+		Qty: decimal.NewFromInt(3), BatchID: &batch.ID,
+		SerialNos:   []string{"T1", "T2", "T3"},
+		SourceKType: inventory.MoveSourceAdjustment, CreatedBy: actor,
+	}); err != nil {
+		t.Fatalf("receive serials: %v", err)
+	}
+
+	// A serial-tracked transfer with no serials is rejected up front.
+	if _, err := inv.RecordTransfer(ctx, inventory.Transfer{
+		TenantID: tn.ID, ItemID: item.ID, FromWarehouse: wh.ID, ToWarehouse: wh2.ID,
+		Qty: decimal.NewFromInt(1), BatchID: &batch.ID, CreatedBy: actor,
+	}); !errors.Is(err, inventory.ErrSerialRequired) {
+		t.Fatalf("transfer w/o serials: want ErrSerialRequired, got %v", err)
+	}
+
+	// Transferring a serial that isn't at the source warehouse is
+	// impossible: issueSerial guards on warehouse_id.
+	if _, err := inv.RecordTransfer(ctx, inventory.Transfer{
+		TenantID: tn.ID, ItemID: item.ID, FromWarehouse: wh2.ID, ToWarehouse: wh.ID,
+		Qty: decimal.NewFromInt(1), BatchID: &batch.ID, SerialNos: []string{"T1"}, CreatedBy: actor,
+	}); !errors.Is(err, inventory.ErrSerialNotAvailable) {
+		t.Fatalf("transfer from wrong wh: want ErrSerialNotAvailable, got %v", err)
+	}
+
+	// Relocate T1 and T2 to the destination warehouse.
+	if _, err := inv.RecordTransfer(ctx, inventory.Transfer{
+		TenantID: tn.ID, ItemID: item.ID, FromWarehouse: wh.ID, ToWarehouse: wh2.ID,
+		Qty: decimal.NewFromInt(2), BatchID: &batch.ID, SerialNos: []string{"T1", "T2"}, CreatedBy: actor,
+	}); err != nil {
+		t.Fatalf("transfer serials: %v", err)
+	}
+
+	// The lot's global qty_on_hand is conserved by the balanced legs.
+	assertLotQty(t, ctx, inv, tn.ID, batch.ID, "3")
+
+	// T1/T2 are now in stock at the destination; T3 stays at source.
+	for _, sn := range []string{"T1", "T2"} {
+		s, err := inv.GetSerial(ctx, tn.ID, item.ID, sn)
+		if err != nil {
+			t.Fatalf("get %s: %v", sn, err)
+		}
+		if s.Status != inventory.SerialStatusInStock || s.WarehouseID == nil || *s.WarehouseID != wh2.ID {
+			t.Fatalf("%s = %+v, want in_stock at dest warehouse", sn, s)
+		}
+	}
+	t3, err := inv.GetSerial(ctx, tn.ID, item.ID, "T3")
+	if err != nil {
+		t.Fatalf("get T3: %v", err)
+	}
+	if t3.WarehouseID == nil || *t3.WarehouseID != wh.ID {
+		t.Fatalf("T3 = %+v, want still at source warehouse", t3)
+	}
+
+	// The per-warehouse, per-lot projection reflects the relocation:
+	// source nets 1 unit, destination holds 2.
+	levels, err := inv.ListStockLevelsByBatch(ctx, tn.ID, &item.ID)
+	if err != nil {
+		t.Fatalf("list batch stock: %v", err)
+	}
+	byWh := map[uuid.UUID]decimal.Decimal{}
+	for _, l := range levels {
+		byWh[l.WarehouseID] = l.Qty
+	}
+	if got := byWh[wh.ID]; !got.Equal(decimal.NewFromInt(1)) {
+		t.Fatalf("source lot qty = %s, want 1", got)
+	}
+	if got := byWh[wh2.ID]; !got.Equal(decimal.NewFromInt(2)) {
+		t.Fatalf("dest lot qty = %s, want 2", got)
+	}
+
+	// T1's trace spans receipt → transfer-out → transfer-in.
+	trace, err := inv.TraceSerial(ctx, tn.ID, item.ID, "T1")
+	if err != nil {
+		t.Fatalf("trace T1: %v", err)
+	}
+	if len(trace.Events) != 3 {
+		t.Fatalf("T1 trace events = %d, want 3 (receipt + transfer out + in)", len(trace.Events))
+	}
+	if trace.Events[1].SourceKType != inventory.MoveSourceTransfer ||
+		trace.Events[2].SourceKType != inventory.MoveSourceTransfer {
+		t.Fatalf("T1 transfer legs mis-tagged: %+v", trace.Events)
+	}
+}
+
 func assertLotQty(t *testing.T, ctx context.Context, inv *inventory.PGStore, tenantID, batchID uuid.UUID, want string) {
 	t.Helper()
 	b, err := inv.GetBatch(ctx, tenantID, batchID)

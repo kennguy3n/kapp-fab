@@ -588,13 +588,20 @@ func (s *PGStore) RecordTransfer(ctx context.Context, t Transfer) ([]Move, error
 	if t.MovedAt.IsZero() {
 		t.MovedAt = s.now()
 	}
-	var unitCost any
-	if t.UnitCost.IsPositive() {
-		unitCost = t.UnitCost
-	}
 
 	out := make([]Move, 0, 2)
 	err := dbutil.WithTenantTx(ctx, s.pool, t.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// Both legs route through recordMoveInTx so a transfer honours
+		// the item's lot/serial contract exactly like a plain move:
+		// the lot's qty_on_hand nets to zero across the two legs, and
+		// each serial is issued out of FromWarehouse (negative leg)
+		// then re-stocked at ToWarehouse (positive leg), keeping the
+		// serial registry's warehouse_id consistent with the ledger.
+		// The legs share BatchID/SerialNos; ordering (neg then pos) is
+		// load-bearing for the serial round-trip, so they are emitted
+		// sequentially. issueSerial's in-stock-at-warehouse guard makes
+		// a transfer of a serial that isn't actually at the source
+		// warehouse fail with ErrSerialNotAvailable.
 		neg := Move{
 			TenantID:    t.TenantID,
 			ItemID:      t.ItemID,
@@ -604,6 +611,8 @@ func (s *PGStore) RecordTransfer(ctx context.Context, t Transfer) ([]Move, error
 			SourceKType: MoveSourceTransfer,
 			MovedAt:     t.MovedAt,
 			CreatedBy:   t.CreatedBy,
+			BatchID:     t.BatchID,
+			SerialNos:   t.SerialNos,
 		}
 		pos := Move{
 			TenantID:    t.TenantID,
@@ -614,25 +623,16 @@ func (s *PGStore) RecordTransfer(ctx context.Context, t Transfer) ([]Move, error
 			SourceKType: MoveSourceTransfer,
 			MovedAt:     t.MovedAt,
 			CreatedBy:   t.CreatedBy,
+			BatchID:     t.BatchID,
+			SerialNos:   t.SerialNos,
 		}
 		legs := []Move{neg, pos}
 		for i := range legs {
-			row := legs[i]
-			err := tx.QueryRow(ctx,
-				`INSERT INTO inventory_moves
-				     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, moved_at, created_by)
-				 VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8)
-				 RETURNING id`,
-				row.TenantID, row.ItemID, row.WarehouseID, row.Qty, unitCost, row.SourceKType, row.MovedAt,
-				nullableUUIDValue(row.CreatedBy),
-			).Scan(&row.ID)
+			rec, err := s.recordMoveInTx(ctx, tx, legs[i])
 			if err != nil {
-				return fmt.Errorf("inventory: insert transfer move: %w", err)
-			}
-			if err := s.emitMove(ctx, tx, row, "inventory.move.recorded"); err != nil {
 				return err
 			}
-			out = append(out, row)
+			out = append(out, *rec)
 		}
 		return nil
 	})

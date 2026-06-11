@@ -250,6 +250,11 @@ type recordTransferRequest struct {
 	UnitCost      decimal.Decimal `json:"unit_cost"`
 	MovedAt       *time.Time      `json:"moved_at,omitempty"`
 	Memo          string          `json:"memo,omitempty"`
+	// Lot/serial dimension for a transfer of a tracked item. BatchID
+	// is required for a lot-tracked item; SerialNos (len == Qty) for a
+	// serial-tracked item.
+	BatchID   *uuid.UUID `json:"batch_id,omitempty"`
+	SerialNos []string   `json:"serial_nos,omitempty"`
 }
 
 func (h *inventoryHandlers) recordTransfer(w http.ResponseWriter, r *http.Request) {
@@ -272,6 +277,8 @@ func (h *inventoryHandlers) recordTransfer(w http.ResponseWriter, r *http.Reques
 		UnitCost:      req.UnitCost,
 		Memo:          req.Memo,
 		CreatedBy:     actorOrDefault(r.Context()),
+		BatchID:       req.BatchID,
+		SerialNos:     req.SerialNos,
 	}
 	if req.MovedAt != nil {
 		tr.MovedAt = *req.MovedAt

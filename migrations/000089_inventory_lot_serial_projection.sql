@@ -9,8 +9,14 @@
 --   * stock_levels_by_batch — live per-(item, warehouse, lot) balance
 --     projected straight from the append-only inventory_moves ledger,
 --     mirroring the existing stock_levels view but with the batch
---     dimension. SECURITY INVOKER (PG15+ default) so RLS on
---     inventory_moves applies under the caller's tenant context.
+--     dimension. Declared WITH (security_invoker = true) so the view
+--     queries inventory_moves as the *invoking* role (kapp_app), not as
+--     the view owner (kapp, which also owns the table and would
+--     otherwise bypass RLS since the tables are not FORCE ROW LEVEL
+--     SECURITY). This makes the tenant_isolation policy on
+--     inventory_moves a hard backstop: an unset / wrong app.tenant_id
+--     GUC yields zero rows even though every Go caller also filters by
+--     tenant_id explicitly. Defence-in-depth for 5000-tenant isolation.
 --   * inventory_batches.qty_on_hand CHECK (>= 0) — a hard backstop:
 --     the Go layer rejects an over-issue with ErrInsufficientLotStock
 --     before it reaches the UPDATE, but if any path ever slips through,
@@ -22,7 +28,8 @@
 -- ---------------------------------------------------------------------------
 -- Per-lot stock projection.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE VIEW stock_levels_by_batch AS
+CREATE OR REPLACE VIEW stock_levels_by_batch
+    WITH (security_invoker = true) AS
     SELECT tenant_id,
            item_id,
            warehouse_id,
