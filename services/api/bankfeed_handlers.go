@@ -420,6 +420,44 @@ func toRuleResponses(rules []bankfeed.Rule) []ruleResponse {
 	return out
 }
 
+// suggestionResponse is the explicit wire projection of a
+// ledger.Suggestion. The domain struct already carries snake_case json
+// tags, but projecting through a dedicated DTO — as connections and rules
+// do — means a field added to ledger.Suggestion later (e.g. an internal
+// scoring detail) cannot silently leak to a tenant. The exposed set is
+// the current published contract.
+type suggestionResponse struct {
+	ID             uuid.UUID `json:"id"`
+	TenantID       uuid.UUID `json:"tenant_id"`
+	TransactionID  uuid.UUID `json:"transaction_id"`
+	JournalEntryID uuid.UUID `json:"journal_entry_id"`
+	Confidence     float64   `json:"confidence"`
+	MatchReason    string    `json:"match_reason"`
+	Status         string    `json:"status"`
+	CreatedAt      string    `json:"created_at"`
+}
+
+func toSuggestionResponse(s *ledger.Suggestion) suggestionResponse {
+	return suggestionResponse{
+		ID:             s.ID,
+		TenantID:       s.TenantID,
+		TransactionID:  s.TransactionID,
+		JournalEntryID: s.JournalEntryID,
+		Confidence:     s.Confidence,
+		MatchReason:    s.MatchReason,
+		Status:         s.Status,
+		CreatedAt:      s.CreatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
+	}
+}
+
+func toSuggestionResponses(sugs []ledger.Suggestion) []suggestionResponse {
+	out := make([]suggestionResponse, 0, len(sugs))
+	for i := range sugs {
+		out = append(out, toSuggestionResponse(&sugs[i]))
+	}
+	return out
+}
+
 type ruleRequest struct {
 	Priority          int        `json:"priority"`
 	ConditionType     string     `json:"condition_type"`
@@ -553,10 +591,7 @@ func (h *bankfeedHandlers) listSuggestions(w http.ResponseWriter, r *http.Reques
 		writeBankFeedError(w, r, err)
 		return
 	}
-	if sugs == nil {
-		sugs = []ledger.Suggestion{}
-	}
-	writeJSON(w, http.StatusOK, sugs)
+	writeJSON(w, http.StatusOK, toSuggestionResponses(sugs))
 }
 
 // acceptSuggestion reconciles the line against the suggested journal
@@ -577,7 +612,7 @@ func (h *bankfeedHandlers) acceptSuggestion(w http.ResponseWriter, r *http.Reque
 		writeBankFeedError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, toSuggestionResponse(out))
 }
 
 // rejectSuggestion marks a single suggestion rejected without touching

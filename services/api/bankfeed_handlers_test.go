@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/ledger/bankfeed"
 )
 
@@ -100,6 +101,48 @@ func TestConnectionResponseOmitsCredentials(t *testing.T) {
 	for _, want := range []string{`"bank_account_id"`, `"last_sync_at"`, `"provider":"csv"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("connection DTO missing %q: %s", want, out)
+		}
+	}
+}
+
+// TestSuggestionResponseProjectsExactContract pins the wire shape of the
+// match-suggestion surface to a dedicated DTO so a field added to the
+// domain ledger.Suggestion later (e.g. an internal scoring detail) cannot
+// silently leak to a tenant. The marshalled object must contain exactly
+// the published key set — no more, no fewer.
+func TestSuggestionResponseProjectsExactContract(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	s := ledger.Suggestion{
+		ID:             uuid.New(),
+		TenantID:       uuid.New(),
+		TransactionID:  uuid.New(),
+		JournalEntryID: uuid.New(),
+		Confidence:     0.92,
+		MatchReason:    "amount+date",
+		Status:         "pending",
+		CreatedAt:      now,
+	}
+	blob, err := json.Marshal(toSuggestionResponse(&s))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(blob, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := map[string]struct{}{
+		"id": {}, "tenant_id": {}, "transaction_id": {}, "journal_entry_id": {},
+		"confidence": {}, "match_reason": {}, "status": {}, "created_at": {},
+	}
+	for k := range got {
+		if _, ok := want[k]; !ok {
+			t.Errorf("suggestion DTO exposed unexpected key %q (possible leak): %s", k, blob)
+		}
+	}
+	for k := range want {
+		if _, ok := got[k]; !ok {
+			t.Errorf("suggestion DTO missing expected key %q: %s", k, blob)
 		}
 	}
 }
