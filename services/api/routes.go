@@ -1480,6 +1480,15 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Get("/items/{id}/batches", d.invh.listBatchesByItem)
 			r.Get("/reports/valuation", d.invh.valuation)
 
+			// Workstream 2 — lot/serial tracking + traceability.
+			// Serial registry, per-lot stock projection, and the
+			// forward/backward trace endpoints share the inventory
+			// authz gate and middleware stack above.
+			r.Get("/serials", d.invh.listSerials)
+			r.Get("/stock-levels-by-batch", d.invh.listStockLevelsByBatch)
+			r.Get("/items/{id}/serials/{serial_no}/trace", d.invh.traceSerial)
+			r.Get("/batches/{id}/trace", d.invh.traceLot)
+
 			// Phase N9d — cycle counts. Mounted under
 			// /api/v1/inventory/cycle-counts so they inherit
 			// the same authz gate, idempotency-key, rate-limit,

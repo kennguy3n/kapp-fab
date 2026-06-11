@@ -26,6 +26,19 @@ const (
 	KTypeMove       = "inventory.move"
 	KTypeStockLevel = "inventory.stock_level"
 	KTypeBatch      = "inventory.batch"
+	KTypeSerial     = "inventory.serial"
+)
+
+// Serial lifecycle statuses. A serial is born 'in_stock' at the
+// warehouse it was received into and ends in one of two terminal
+// states: 'consumed' (issued into a work order / written off) or
+// 'delivered' (shipped to a customer). Transfers keep the serial
+// 'in_stock' and only move its warehouse. The set is pinned by the
+// inventory_serials_status_valid CHECK in migration 000089.
+const (
+	SerialStatusInStock   = "in_stock"
+	SerialStatusConsumed  = "consumed"
+	SerialStatusDelivered = "delivered"
 )
 
 // Move source KTypes emitted by the ledger hook when a sales invoice or
@@ -52,6 +65,14 @@ type Item struct {
 	UOM          string          `json:"uom"`
 	Active       bool            `json:"active"`
 	ReorderLevel decimal.Decimal `json:"reorder_level"`
+	// LotTracked / SerialTracked configure how strictly the move
+	// ledger enforces traceability for this item. When LotTracked,
+	// every move must reference an inventory_batches row. When
+	// SerialTracked, every move must enumerate the exact serial
+	// numbers it touches (one per unit of |qty|). Both default false
+	// so untracked items behave exactly as before.
+	LotTracked    bool `json:"lot_tracked"`
+	SerialTracked bool `json:"serial_tracked"`
 }
 
 // Warehouse is a physical or logical stocking location. One row per
@@ -88,6 +109,19 @@ type Move struct {
 	// batch belongs to the same tenant; PGStore.RecordMove additionally
 	// rejects mismatched item ids before the INSERT.
 	BatchID *uuid.UUID `json:"batch_id,omitempty"`
+	// SerialNos enumerates the serial numbers this move affects. It is
+	// an input-only field (never populated when reading moves back):
+	//   * On a receipt (Qty > 0) each serial is created / re-stocked
+	//     at WarehouseID and linked to the move.
+	//   * On an issue (Qty < 0) each serial must currently be in stock
+	//     at (ItemID, WarehouseID); it is transitioned to a terminal
+	//     state and linked to the move.
+	// len(SerialNos) must equal |Qty| for serial-tracked items.
+	SerialNos []string `json:"serial_nos,omitempty"`
+	// SerialOutStatus picks the terminal state for serials on an issue
+	// move. Defaults to SerialStatusConsumed; sales deliveries pass
+	// SerialStatusDelivered. Ignored on receipts.
+	SerialOutStatus string `json:"serial_out_status,omitempty"`
 }
 
 // Batch is a per-tenant lot identifier for an inventory item. Batches
@@ -107,6 +141,78 @@ type Batch struct {
 	CreatedBy      uuid.UUID       `json:"created_by,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
 	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+// Serial is a single serialised unit of a serial-tracked item. One row
+// per (tenant_id, item_id, serial_no). WarehouseID is the current
+// location while Status == SerialStatusInStock and NULL once the unit
+// leaves stock (consumed / delivered). BatchID optionally ties the
+// serial to the lot it was produced/received in so a serialised unit
+// is also lot-traceable.
+type Serial struct {
+	TenantID    uuid.UUID  `json:"tenant_id"`
+	ID          uuid.UUID  `json:"id"`
+	ItemID      uuid.UUID  `json:"item_id"`
+	SerialNo    string     `json:"serial_no"`
+	Status      string     `json:"status"`
+	WarehouseID *uuid.UUID `json:"warehouse_id,omitempty"`
+	BatchID     *uuid.UUID `json:"batch_id,omitempty"`
+	CreatedBy   uuid.UUID  `json:"created_by,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// SerialFilter narrows a ListSerials call. All fields are optional.
+type SerialFilter struct {
+	ItemID      *uuid.UUID
+	WarehouseID *uuid.UUID
+	BatchID     *uuid.UUID
+	Status      string
+	Limit       int
+	Offset      int
+}
+
+// BatchStockLevel is one (item, warehouse, batch) balance read from the
+// stock_levels_by_batch projection — the per-lot analogue of
+// StockLevel, summed straight from the move ledger.
+type BatchStockLevel struct {
+	TenantID    uuid.UUID       `json:"tenant_id"`
+	ItemID      uuid.UUID       `json:"item_id"`
+	WarehouseID uuid.UUID       `json:"warehouse_id"`
+	BatchID     uuid.UUID       `json:"batch_id"`
+	Qty         decimal.Decimal `json:"qty"`
+}
+
+// TraceEvent is one move in a lot's or serial's history, joined to the
+// business document that drove it. The slice returned by the trace
+// queries is ordered oldest-first so the first inbound row is the
+// origin (receipt / production) and the last outbound row is where the
+// unit ultimately went (delivery / consumption).
+type TraceEvent struct {
+	MoveID      int64           `json:"move_id"`
+	ItemID      uuid.UUID       `json:"item_id"`
+	WarehouseID uuid.UUID       `json:"warehouse_id"`
+	Qty         decimal.Decimal `json:"qty"`
+	SourceKType string          `json:"source_ktype,omitempty"`
+	SourceID    *uuid.UUID      `json:"source_id,omitempty"`
+	BatchID     *uuid.UUID      `json:"batch_id,omitempty"`
+	MovedAt     time.Time       `json:"moved_at"`
+}
+
+// SerialTrace is the forward/backward traceability answer for a single
+// serial: the serial's current state plus every move that touched it,
+// oldest-first.
+type SerialTrace struct {
+	Serial Serial       `json:"serial"`
+	Events []TraceEvent `json:"events"`
+}
+
+// LotTrace is the traceability answer for a single lot: the batch plus
+// every move that referenced it, oldest-first. Inbound moves (qty > 0)
+// are the origins; outbound moves (qty < 0) are where the lot went.
+type LotTrace struct {
+	Batch  Batch        `json:"batch"`
+	Events []TraceEvent `json:"events"`
 }
 
 // StockLevel is a single (item, warehouse) quantity read from the
@@ -169,4 +275,34 @@ var (
 	ErrBatchItemMismatch   = errors.New("inventory: batch belongs to a different item")
 	ErrDuplicateBatch      = errors.New("inventory: batch number already exists for this item")
 	ErrBatchInvalid        = errors.New("inventory: invalid batch")
+	// ErrInsufficientLotStock is returned when an issue would drive a
+	// lot's qty_on_hand below zero. The decrement is rejected before
+	// the UPDATE so no partial state escapes.
+	ErrInsufficientLotStock = errors.New("inventory: insufficient lot quantity on hand")
+	// ErrLotRequired is returned when a lot-tracked item posts a move
+	// without a BatchID.
+	ErrLotRequired = errors.New("inventory: item is lot-tracked; batch_id required")
+	// ErrSerialRequired is returned when a serial-tracked item posts a
+	// move without the matching serial numbers.
+	ErrSerialRequired = errors.New("inventory: item is serial-tracked; serial numbers required")
+	// ErrSerialQtyMismatch is returned when len(SerialNos) does not
+	// equal |Qty| on a move.
+	ErrSerialQtyMismatch = errors.New("inventory: serial count must equal move quantity")
+	// ErrSerialNotAvailable is returned when an issue references a
+	// serial that is not currently in stock at the move's warehouse.
+	ErrSerialNotAvailable = errors.New("inventory: serial not available in stock at warehouse")
+	// ErrSerialAlreadyInStock is returned when a receipt references a
+	// serial that is already in stock (a duplicate intake).
+	ErrSerialAlreadyInStock = errors.New("inventory: serial already in stock")
+	// ErrSerialNotFound is returned when a serial lookup misses.
+	ErrSerialNotFound = errors.New("inventory: serial not found")
+	// ErrSerialItemMismatch is returned when a serial belongs to a
+	// different item than the move references.
+	ErrSerialItemMismatch = errors.New("inventory: serial belongs to a different item")
+	// ErrSerialUnsupported is returned when serial numbers are supplied
+	// on a move whose item is not serial-tracked.
+	ErrSerialUnsupported = errors.New("inventory: item is not serial-tracked")
+	// ErrDuplicateSerialInput is returned when the same serial number
+	// appears more than once in a single move's SerialNos.
+	ErrDuplicateSerialInput = errors.New("inventory: duplicate serial number in move")
 )

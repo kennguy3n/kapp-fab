@@ -30,11 +30,13 @@ type inventoryHandlers struct {
 // ---------------------------------------------------------------------------
 
 type upsertItemRequest struct {
-	ID     *uuid.UUID `json:"id,omitempty"`
-	SKU    string     `json:"sku"`
-	Name   string     `json:"name"`
-	UOM    string     `json:"uom"`
-	Active *bool      `json:"active"`
+	ID            *uuid.UUID `json:"id,omitempty"`
+	SKU           string     `json:"sku"`
+	Name          string     `json:"name"`
+	UOM           string     `json:"uom"`
+	Active        *bool      `json:"active"`
+	LotTracked    *bool      `json:"lot_tracked,omitempty"`
+	SerialTracked *bool      `json:"serial_tracked,omitempty"`
 }
 
 func (h *inventoryHandlers) upsertItem(w http.ResponseWriter, r *http.Request) {
@@ -70,6 +72,12 @@ func (h *inventoryHandlers) upsertItem(w http.ResponseWriter, r *http.Request) {
 		Name:     req.Name,
 		UOM:      req.UOM,
 		Active:   active,
+	}
+	if req.LotTracked != nil {
+		in.LotTracked = *req.LotTracked
+	}
+	if req.SerialTracked != nil {
+		in.SerialTracked = *req.SerialTracked
 	}
 	if req.ID != nil {
 		in.ID = *req.ID
@@ -187,13 +195,16 @@ func (h *inventoryHandlers) listWarehouses(w http.ResponseWriter, r *http.Reques
 // ---------------------------------------------------------------------------
 
 type recordMoveRequest struct {
-	ItemID      uuid.UUID       `json:"item_id"`
-	WarehouseID uuid.UUID       `json:"warehouse_id"`
-	Qty         decimal.Decimal `json:"qty"`
-	UnitCost    decimal.Decimal `json:"unit_cost"`
-	SourceKType string          `json:"source_ktype,omitempty"`
-	SourceID    *uuid.UUID      `json:"source_id,omitempty"`
-	MovedAt     *time.Time      `json:"moved_at,omitempty"`
+	ItemID          uuid.UUID       `json:"item_id"`
+	WarehouseID     uuid.UUID       `json:"warehouse_id"`
+	Qty             decimal.Decimal `json:"qty"`
+	UnitCost        decimal.Decimal `json:"unit_cost"`
+	SourceKType     string          `json:"source_ktype,omitempty"`
+	SourceID        *uuid.UUID      `json:"source_id,omitempty"`
+	MovedAt         *time.Time      `json:"moved_at,omitempty"`
+	BatchID         *uuid.UUID      `json:"batch_id,omitempty"`
+	SerialNos       []string        `json:"serial_nos,omitempty"`
+	SerialOutStatus string          `json:"serial_out_status,omitempty"`
 }
 
 func (h *inventoryHandlers) recordMove(w http.ResponseWriter, r *http.Request) {
@@ -208,14 +219,17 @@ func (h *inventoryHandlers) recordMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m := inventory.Move{
-		TenantID:    t.ID,
-		ItemID:      req.ItemID,
-		WarehouseID: req.WarehouseID,
-		Qty:         req.Qty,
-		UnitCost:    req.UnitCost,
-		SourceKType: req.SourceKType,
-		SourceID:    req.SourceID,
-		CreatedBy:   actorOrDefault(r.Context()),
+		TenantID:        t.ID,
+		ItemID:          req.ItemID,
+		WarehouseID:     req.WarehouseID,
+		Qty:             req.Qty,
+		UnitCost:        req.UnitCost,
+		SourceKType:     req.SourceKType,
+		SourceID:        req.SourceID,
+		CreatedBy:       actorOrDefault(r.Context()),
+		BatchID:         req.BatchID,
+		SerialNos:       req.SerialNos,
+		SerialOutStatus: req.SerialOutStatus,
 	}
 	if req.MovedAt != nil {
 		m.MovedAt = *req.MovedAt
@@ -402,17 +416,28 @@ func writeInventoryError(w http.ResponseWriter, err error) {
 	case errors.Is(err, inventory.ErrItemNotFound),
 		errors.Is(err, inventory.ErrWarehouseNotFound),
 		errors.Is(err, inventory.ErrMoveNotFound),
-		errors.Is(err, inventory.ErrBatchNotFound):
+		errors.Is(err, inventory.ErrBatchNotFound),
+		errors.Is(err, inventory.ErrSerialNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, inventory.ErrDuplicateSourceMove),
 		errors.Is(err, inventory.ErrAlreadyReversed),
-		errors.Is(err, inventory.ErrDuplicateBatch):
+		errors.Is(err, inventory.ErrDuplicateBatch),
+		errors.Is(err, inventory.ErrSerialAlreadyInStock):
 		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, inventory.ErrInsufficientLotStock),
+		errors.Is(err, inventory.ErrSerialNotAvailable):
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 	case errors.Is(err, inventory.ErrMoveInvalid),
 		errors.Is(err, inventory.ErrTransferUnbalanced),
 		errors.Is(err, inventory.ErrCannotReverseContra),
 		errors.Is(err, inventory.ErrBatchItemMismatch),
-		errors.Is(err, inventory.ErrBatchInvalid):
+		errors.Is(err, inventory.ErrBatchInvalid),
+		errors.Is(err, inventory.ErrLotRequired),
+		errors.Is(err, inventory.ErrSerialRequired),
+		errors.Is(err, inventory.ErrSerialQtyMismatch),
+		errors.Is(err, inventory.ErrSerialUnsupported),
+		errors.Is(err, inventory.ErrSerialItemMismatch),
+		errors.Is(err, inventory.ErrDuplicateSerialInput):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
 		writeRecordError(w, err)
@@ -494,6 +519,113 @@ func (h *inventoryHandlers) listBatchesByItem(w http.ResponseWriter, r *http.Req
 		return
 	}
 	out, err := h.store.ListBatchesForItem(r.Context(), t.ID, itemID)
+	if err != nil {
+		writeInventoryError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// ---------------------------------------------------------------------------
+// Serials + traceability (Workstream 2)
+// ---------------------------------------------------------------------------
+
+// listSerials returns serials for the tenant, narrowed by the
+// item_id / warehouse_id / batch_id / status query parameters.
+func (h *inventoryHandlers) listSerials(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	filter := inventory.SerialFilter{Limit: limit, Offset: offset, Status: r.URL.Query().Get("status")}
+	if raw := r.URL.Query().Get("item_id"); raw != "" {
+		if id, err := uuid.Parse(raw); err == nil {
+			filter.ItemID = &id
+		}
+	}
+	if raw := r.URL.Query().Get("warehouse_id"); raw != "" {
+		if id, err := uuid.Parse(raw); err == nil {
+			filter.WarehouseID = &id
+		}
+	}
+	if raw := r.URL.Query().Get("batch_id"); raw != "" {
+		if id, err := uuid.Parse(raw); err == nil {
+			filter.BatchID = &id
+		}
+	}
+	out, err := h.store.ListSerials(r.Context(), t.ID, filter)
+	if err != nil {
+		writeInventoryError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// listStockLevelsByBatch returns the per-lot balance projection,
+// optionally scoped to a single item via the item_id query parameter.
+func (h *inventoryHandlers) listStockLevelsByBatch(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	var itemID *uuid.UUID
+	if raw := r.URL.Query().Get("item_id"); raw != "" {
+		if id, err := uuid.Parse(raw); err == nil {
+			itemID = &id
+		}
+	}
+	out, err := h.store.ListStockLevelsByBatch(r.Context(), t.ID, itemID)
+	if err != nil {
+		writeInventoryError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// traceSerial answers forward/backward traceability for a single
+// serial: GET /items/{id}/serials/{serial_no}/trace.
+func (h *inventoryHandlers) traceSerial(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	itemID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid item id", http.StatusBadRequest)
+		return
+	}
+	serialNo := chi.URLParam(r, "serial_no")
+	if serialNo == "" {
+		http.Error(w, "serial_no is required", http.StatusBadRequest)
+		return
+	}
+	out, err := h.store.TraceSerial(r.Context(), t.ID, itemID, serialNo)
+	if err != nil {
+		writeInventoryError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// traceLot answers traceability for a single lot:
+// GET /batches/{id}/trace.
+func (h *inventoryHandlers) traceLot(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	batchID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid batch id", http.StatusBadRequest)
+		return
+	}
+	out, err := h.store.TraceLot(r.Context(), t.ID, batchID)
 	if err != nil {
 		writeInventoryError(w, err)
 		return

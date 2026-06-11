@@ -66,6 +66,10 @@ TABLES=(
   cost_centers bank_accounts bank_transactions
   budgets budget_lines
   inventory_warehouses inventory_items inventory_batches inventory_moves
+  # Lot/serial tracking (Workstream 2): serials FK items/warehouses/
+  # batches; the move<->serial junction FKs moves + serials, so it
+  # trails both.
+  inventory_serials inventory_move_serials
   boms bom_components
   # work_centers/routings/routing_operations come before work_orders
   # because work_orders.routing_id FKs routings in migration 000080;

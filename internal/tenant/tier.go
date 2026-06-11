@@ -48,6 +48,10 @@ var TenantScopedTables = []string{
 	"tax_codes", "cost_centers", "bank_accounts", "bank_transactions",
 	"budgets", "budget_lines",
 	"inventory_warehouses", "inventory_items", "inventory_batches", "inventory_moves",
+	// Lot/serial tracking (Workstream 2): inventory_serials FKs
+	// items/warehouses/batches; the move<->serial junction FKs
+	// inventory_moves + inventory_serials, so it trails both.
+	"inventory_serials", "inventory_move_serials",
 	"boms", "bom_components",
 	// work_centers/routings/routing_operations precede work_orders:
 	// work_orders.routing_id FKs routings (migration 000080). job_cards
