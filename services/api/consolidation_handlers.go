@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 )
@@ -101,25 +102,67 @@ func (h *consolidationHandlers) run(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+// consolidationStatementsRequest is the optional body for the
+// statements endpoint. Beyond the period-end override it carries the
+// per-currency average rates used to translate income-statement
+// accounts; without them every entity would translate P&L at the
+// closing rate and the Cumulative Translation Adjustment would
+// collapse to zero, defeating the IAS 21 / ASC 830 current-rate
+// method. average_rates is keyed by the member entity's base
+// currency (e.g. "EUR") and valued as the rate INTO the group's
+// presentation currency.
+type consolidationStatementsRequest struct {
+	AsOf         *time.Time                 `json:"as_of"`
+	AverageRates map[string]decimal.Decimal `json:"average_rates"`
+}
+
+// parseStatementsRequest decodes the optional statements body,
+// tolerating an absent or empty stream (chunked clients report
+// ContentLength == -1, so we attempt the decode whenever a body is
+// present and treat io.EOF as "no body").
+func parseStatementsRequest(r *http.Request) (consolidationStatementsRequest, error) {
+	var body consolidationStatementsRequest
+	if r.Body == nil || r.ContentLength == 0 {
+		return body, nil
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if errors.Is(err, io.EOF) {
+			return consolidationStatementsRequest{}, nil
+		}
+		return consolidationStatementsRequest{}, err
+	}
+	return body, nil
+}
+
 // statements returns the full consolidated statement pack — trial
 // balance, P&L, and balance sheet — for a group as-of an optional
 // period end. The run is not persisted (the bare /run endpoint owns
 // persistence); this is a read-style derivation over the same
 // translated, eliminated rows so all three statements are
-// internally consistent.
+// internally consistent. The body may supply average_rates so P&L
+// accounts translate at the period average rate (closing rate for
+// balance-sheet accounts), which is what produces a non-zero CTA.
 func (h *consolidationHandlers) statements(w http.ResponseWriter, r *http.Request) {
 	groupID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, "invalid group id", http.StatusBadRequest)
 		return
 	}
-	asOf, err := parseAsOf(r)
+	req, err := parseStatementsRequest(r)
 	if err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	asOf := time.Time{}
+	if req.AsOf != nil {
+		asOf = *req.AsOf
+	}
 	actor := actorOrDefault(r.Context())
-	out, err := h.store.RunStatements(r.Context(), groupID, actor, ledger.ConsolidationOptions{AsOf: asOf, Persist: false})
+	out, err := h.store.RunStatements(r.Context(), groupID, actor, ledger.ConsolidationOptions{
+		AsOf:         asOf,
+		AverageRates: req.AverageRates,
+		Persist:      false,
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
