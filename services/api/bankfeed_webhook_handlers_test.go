@@ -92,6 +92,22 @@ func TestWebhookReceiveMissingSignature(t *testing.T) {
 	}
 }
 
+// An oversize body is rejected with 413 before any signature check, so an
+// operator sees the real cause rather than a misleading "signature failed".
+func TestWebhookReceiveOversizeBodyRejected(t *testing.T) {
+	const secret = "whsec"
+	h := newWebhookHandlers(secret)
+	body := make([]byte, maxWebhookBytes+1)
+	for i := range body {
+		body[i] = 'a'
+	}
+	hdr := http.Header{"Plaid-Verification": {webhookSign(secret, body)}}
+	rr := postWebhook(t, h, "plaid", body, hdr)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d; want 413", rr.Code)
+	}
+}
+
 // A verified but non-sync event (e.g. an item ERROR) is acknowledged with
 // 202 and never reaches connection resolution.
 func TestWebhookReceiveVerifiedNonSyncEventAcks(t *testing.T) {

@@ -298,6 +298,8 @@ type syncResultResponse struct {
 	Unwound     int `json:"unwound"`
 	Suggested   int `json:"suggested"`
 	AutoMatched int `json:"auto_matched"`
+	Transfers   int `json:"transfers"`
+	Duplicates  int `json:"duplicates"`
 }
 
 func toSyncResultResponse(res *bankfeed.SyncResult) syncResultResponse {
@@ -310,6 +312,8 @@ func toSyncResultResponse(res *bankfeed.SyncResult) syncResultResponse {
 		Unwound:     res.Unwound,
 		Suggested:   res.Suggested,
 		AutoMatched: res.AutoMatched,
+		Transfers:   res.Transfers,
+		Duplicates:  res.Duplicates,
 	}
 }
 

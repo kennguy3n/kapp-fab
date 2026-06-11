@@ -77,9 +77,18 @@ func (h *bankfeedWebhookHandlers) receive(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBytes))
+	// Read one byte past the cap so an oversize body is reported honestly
+	// as 413 rather than being silently truncated — a truncated body would
+	// otherwise fail HMAC verification and surface as a misleading 401 with
+	// no operator signal as to the real cause.
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBytes+1))
 	if err != nil {
 		http.Error(w, "could not read request body", http.StatusBadRequest)
+		return
+	}
+	if len(body) > maxWebhookBytes {
+		log.Warn("bankfeed: webhook body exceeds limit", "provider", providerName, "limit_bytes", maxWebhookBytes)
+		http.Error(w, "webhook body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 

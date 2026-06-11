@@ -172,6 +172,8 @@ func TestSyncResultResponseOmitsCursor(t *testing.T) {
 		Unwound:     1,
 		Suggested:   3,
 		AutoMatched: 2,
+		Transfers:   4,
+		Duplicates:  5,
 		Cursor:      "provider-internal-cursor",
 	}
 	blob, err := json.Marshal(toSyncResultResponse(res))
@@ -182,7 +184,7 @@ func TestSyncResultResponseOmitsCursor(t *testing.T) {
 	if strings.Contains(out, "provider-internal-cursor") || strings.Contains(strings.ToLower(out), "cursor") {
 		t.Fatalf("sync DTO leaked cursor: %s", out)
 	}
-	for _, want := range []string{`"fetched":10`, `"inserted":7`, `"auto_matched":2`, `"suggested":3`} {
+	for _, want := range []string{`"fetched":10`, `"inserted":7`, `"auto_matched":2`, `"suggested":3`, `"transfers":4`, `"duplicates":5`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("sync DTO missing %q: %s", want, out)
 		}
