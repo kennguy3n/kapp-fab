@@ -16,7 +16,7 @@ import (
 )
 
 // Learning-path KType identifiers. These mirror the typed tables
-// added in migrations/000083_lms_deep.sql; the typed tables are the
+// added in migrations/000087_lms_deep.sql; the typed tables are the
 // source of truth (relational joins for sequencing / completion /
 // auto-enrollment), and the KType mirror exposes the same shape over
 // the metadata-driven UI, agent, and KChat surfaces — the same split

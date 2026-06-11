@@ -13,8 +13,9 @@
 -- This widens the bank_transactions.status CHECK (from migration 000011)
 -- with a dedicated 'voided' state. Widening a CHECK is backward
 -- compatible — every pre-existing row already satisfies the new, larger
--- set — and needs no data backfill. The latest prior migration is 000082
--- (bank_feed); this is 000083.
+-- set — and needs no data backfill. The prior bank-feed migration is
+-- 000085 (bank_feed); this is 000086 (renumbered from 000083 to resolve
+-- a parallel-merge version collision with 000083_lms_deep).
 
 ALTER TABLE bank_transactions
     DROP CONSTRAINT IF EXISTS bank_transactions_status_check;
