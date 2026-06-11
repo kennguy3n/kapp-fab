@@ -197,37 +197,36 @@ func TestWorkstream3FXRevaluationRunner(t *testing.T) {
 
 // TestWorkstream3FXRevaluationSkipsMissingRate verifies the sweep
 // records — rather than silently drops — an open foreign-currency
-// balance whose currency has no rate as of the run date. Posting at a
-// date with a rate keeps the balance valid; revaluing as-of an earlier
-// date (before any rate is loaded) forces the missing-rate path.
+// balance whose currency has no rate as of the run date. The balance
+// is posted through a store with no exchange-rate dependency wired, so
+// it lands with a NULL base_amount (the legacy / pre-conversion shape),
+// and the run uses a rate store that has no USD→EUR rate at all,
+// forcing the missing-rate path.
 func TestWorkstream3FXRevaluationSkipsMissingRate(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
 
+	// rates has no USD→EUR rate; ledgerNoRates posts foreign lines
+	// without converting (base_amount NULL), so posting needs no rate.
 	rates := ledger.NewExchangeRateStore(h.pool)
-	ledgerStore := ledger.NewPGStore(h.pool, h.publisher, h.auditor).WithExchangeRates(rates)
+	ledgerNoRates := ledger.NewPGStore(h.pool, h.publisher, h.auditor)
 
 	tn := newFXTenant(t, h, "w3-reval-skip", "EUR")
-	seedLedgerAccounts(t, ledgerStore,
+	seedLedgerAccounts(t, ledgerNoRates,
 		ledger.Account{TenantID: tn.ID, Code: "1200", Name: "USD Bank", Type: ledger.AccountTypeAsset, Active: true},
 		ledger.Account{TenantID: tn.ID, Code: "4000", Name: "Revenue", Type: ledger.AccountTypeRevenue, Active: true},
 	)
 
-	postDate := time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)
-	if _, err := rates.UpsertRate(ctx, ledger.ExchangeRate{
-		TenantID: tn.ID, FromCurrency: "USD", ToCurrency: "EUR",
-		RateDate: postDate, Rate: decimal.NewFromFloat(0.9), Provider: "w3",
-	}); err != nil {
-		t.Fatalf("upsert USD→EUR: %v", err)
-	}
-	postJE(t, ledgerStore, tn.ID, postDate,
+	// Open USD 1000 balance posted before the run date so the sweep's
+	// as-of-date filter includes it.
+	postDate := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	postJE(t, ledgerNoRates, tn.ID, postDate,
 		ledger.JournalLine{AccountCode: "1200", Debit: decimal.NewFromInt(1000), Currency: "USD"},
 		ledger.JournalLine{AccountCode: "4000", Credit: decimal.NewFromInt(1000), Currency: "USD"},
 	)
 
-	// Revalue as-of a date before any USD→EUR rate exists.
-	asOf := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	runner := ledger.NewRevaluationRunner(ledgerStore, rates, uuid.New(), ledger.RevaluationConfig{})
+	asOf := time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)
+	runner := ledger.NewRevaluationRunner(ledgerNoRates, rates, uuid.New(), ledger.RevaluationConfig{})
 	res, err := runner.Run(ctx, tn.ID, asOf, ledger.RevaluationConfig{})
 	if err != nil {
 		t.Fatalf("revaluation run: %v", err)
@@ -247,6 +246,50 @@ func TestWorkstream3FXRevaluationSkipsMissingRate(t *testing.T) {
 	}
 	if skip.Reason == "" {
 		t.Fatalf("skip reason should explain the missing rate")
+	}
+}
+
+// TestWorkstream3FXRevaluationAsOfExcludesLaterPostings verifies the
+// sweep is point-in-time: a balance posted after the run date is not
+// revalued, so a period-end run reflects the balance as it stood at
+// the period end rather than the current all-time balance.
+func TestWorkstream3FXRevaluationAsOfExcludesLaterPostings(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	rates := ledger.NewExchangeRateStore(h.pool)
+	ledgerStore := ledger.NewPGStore(h.pool, h.publisher, h.auditor).WithExchangeRates(rates)
+
+	tn := newFXTenant(t, h, "w3-reval-asof", "EUR")
+	seedLedgerAccounts(t, ledgerStore,
+		ledger.Account{TenantID: tn.ID, Code: "1200", Name: "USD Bank", Type: ledger.AccountTypeAsset, Active: true},
+		ledger.Account{TenantID: tn.ID, Code: "4000", Name: "Revenue", Type: ledger.AccountTypeRevenue, Active: true},
+		ledger.Account{TenantID: tn.ID, Code: ledger.AccountCodeUnrealizedFXGain, Name: "FX Gain", Type: ledger.AccountTypeRevenue, Active: true},
+		ledger.Account{TenantID: tn.ID, Code: ledger.AccountCodeUnrealizedFXLoss, Name: "FX Loss", Type: ledger.AccountTypeExpense, Active: true},
+	)
+
+	rateDate := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := rates.UpsertRate(ctx, ledger.ExchangeRate{
+		TenantID: tn.ID, FromCurrency: "USD", ToCurrency: "EUR",
+		RateDate: rateDate, Rate: decimal.NewFromFloat(0.9), Provider: "w3",
+	}); err != nil {
+		t.Fatalf("upsert USD→EUR: %v", err)
+	}
+
+	asOf := time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)
+	// Posted AFTER asOf: must be excluded from an asOf period-end run.
+	postJE(t, ledgerStore, tn.ID, time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC),
+		ledger.JournalLine{AccountCode: "1200", Debit: decimal.NewFromInt(1000), Currency: "USD"},
+		ledger.JournalLine{AccountCode: "4000", Credit: decimal.NewFromInt(1000), Currency: "USD"},
+	)
+
+	runner := ledger.NewRevaluationRunner(ledgerStore, rates, uuid.New(), ledger.RevaluationConfig{})
+	res, err := runner.Run(ctx, tn.ID, asOf, ledger.RevaluationConfig{})
+	if err != nil {
+		t.Fatalf("revaluation run: %v", err)
+	}
+	if len(res.Lines) != 0 || len(res.Skipped) != 0 {
+		t.Fatalf("post-asOf balance leaked into run: lines=%d skipped=%d", len(res.Lines), len(res.Skipped))
 	}
 }
 

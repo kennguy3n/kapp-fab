@@ -103,11 +103,14 @@ type fxBalance struct {
 }
 
 // gatherFXBalances reads every open foreign-currency asset/liability
-// balance for the tenant under its RLS context. The aggregation runs
-// in SQL so a tenant with thousands of open invoices does not ship
-// every row over the wire. When allowList is non-empty the sweep is
+// balance for the tenant as of asOf, under its RLS context. Only
+// journal lines whose entry posted on or before asOf are summed, so a
+// period-end run revalues the balance as it stood at the period end
+// rather than the current all-time balance. The aggregation runs in
+// SQL so a tenant with thousands of open invoices does not ship every
+// row over the wire. When allowList is non-empty the sweep is
 // restricted to those account codes.
-func gatherFXBalances(ctx context.Context, ledger *PGStore, tenantID uuid.UUID, allowList []string) ([]fxBalance, error) {
+func gatherFXBalances(ctx context.Context, ledger *PGStore, tenantID uuid.UUID, asOf time.Time, allowList []string) ([]fxBalance, error) {
 	var balances []fxBalance
 	err := dbutil.WithTenantTx(ctx, ledger.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var baseCurrency string
@@ -122,14 +125,16 @@ func gatherFXBalances(ctx context.Context, ledger *PGStore, tenantID uuid.UUID, 
 			        SUM(jl.debit - jl.credit) AS foreign_net,
 			        SUM(COALESCE(jl.base_amount, jl.debit - jl.credit)) AS base_net
 			   FROM journal_lines jl
+			   JOIN journal_entries je ON je.tenant_id = jl.tenant_id AND je.id = jl.entry_id
 			   JOIN accounts a ON a.tenant_id = jl.tenant_id AND a.code = jl.account_code
 			  WHERE jl.tenant_id = $1
 			    AND jl.currency <> $2
 			    AND a.type IN ('asset', 'liability')
-			    AND ($3::text[] IS NULL OR jl.account_code = ANY($3))
+			    AND je.posted_at <= $3
+			    AND ($4::text[] IS NULL OR jl.account_code = ANY($4))
 			  GROUP BY jl.account_code, jl.currency
 			  HAVING SUM(jl.debit - jl.credit) <> 0`,
-			tenantID, baseCurrency, allowListParam(allowList),
+			tenantID, baseCurrency, asOf, allowListParam(allowList),
 		)
 		if err != nil {
 			return fmt.Errorf("scan open fx balances: %w", err)
@@ -173,7 +178,7 @@ func runFXRevaluation(ctx context.Context, ledger *PGStore, rates *ExchangeRateS
 	if asOf.IsZero() {
 		asOf = time.Now().UTC()
 	}
-	balances, err := gatherFXBalances(ctx, ledger, tenantID, cfg.AccountAllowList)
+	balances, err := gatherFXBalances(ctx, ledger, tenantID, asOf, cfg.AccountAllowList)
 	if err != nil {
 		return nil, err
 	}
