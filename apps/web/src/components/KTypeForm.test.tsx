@@ -171,11 +171,13 @@ describe("KTypeForm", () => {
     });
   });
 
-  it("maps a cleared numeric input to undefined (never NaN) on submit", async () => {
-    // An empty number input yields `valueAsNumber === NaN`; KTypeForm maps
-    // that to `undefined` so cleared fields never submit NaN (which would
-    // JSON-serialize to null and write bad data backend-side). This pins
-    // the fix: the value must be undefined and must not be NaN.
+  it("maps a cleared numeric input to null (explicit clear), never NaN", async () => {
+    // An empty number input yields `valueAsNumber === NaN`. KTypeForm maps
+    // that to `null` rather than `undefined`: the edit flow PATCHes
+    // `JSON.stringify({ data })`, where `undefined` keys are dropped (the
+    // backend would read the omitted field as "leave unchanged" and the
+    // value could never be cleared). `null` survives serialization and is
+    // the explicit "clear this field" signal. NaN must never reach submit.
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     renderWithProviders(
@@ -187,8 +189,11 @@ describe("KTypeForm", () => {
     );
     await user.clear(screen.getByRole("spinbutton"));
     await user.click(screen.getByRole("button", { name: "Save" }));
-    const submitted = onSubmit.mock.calls[0][0] as { qty?: number };
-    expect(submitted.qty).toBeUndefined();
+    const submitted = onSubmit.mock.calls[0][0] as { qty: number | null };
+    expect(submitted).toHaveProperty("qty", null);
     expect(Number.isNaN(submitted.qty as unknown as number)).toBe(false);
+    // Guard the PATCH contract directly: the cleared field must survive
+    // JSON serialization as an explicit null, not be dropped.
+    expect(JSON.stringify({ data: submitted })).toBe('{"data":{"qty":null}}');
   });
 });
