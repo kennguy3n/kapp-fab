@@ -176,6 +176,9 @@ func (s *ConnectionStore) GetConnection(ctx context.Context, tenantID, id uuid.U
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("bankfeed: connection %s: %w", id, ErrNotFound)
+		}
 		return nil, err
 	}
 	return c, nil
@@ -212,7 +215,7 @@ func (s *ConnectionStore) AdvanceCursor(ctx context.Context, tenantID, id uuid.U
 			return fmt.Errorf("bankfeed: advance cursor: %w", err)
 		}
 		if ct.RowsAffected() == 0 {
-			return fmt.Errorf("bankfeed: connection %s not found", id)
+			return fmt.Errorf("bankfeed: connection %s: %w", id, ErrNotFound)
 		}
 		return nil
 	})
@@ -250,7 +253,7 @@ func (s *ConnectionStore) SetStatus(ctx context.Context, tenantID, id uuid.UUID,
 			return fmt.Errorf("bankfeed: set status: %w", err)
 		}
 		if ct.RowsAffected() == 0 {
-			return fmt.Errorf("bankfeed: connection %s not found", id)
+			return fmt.Errorf("bankfeed: connection %s: %w", id, ErrNotFound)
 		}
 		return s.auditConnection(ctx, tx, Connection{TenantID: tenantID, ID: id, Status: status},
 			"finance.bank_feed.connection.status")

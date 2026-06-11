@@ -356,15 +356,27 @@ func (h *bankfeedHandlers) uploadCSV(w http.ResponseWriter, r *http.Request) {
 // ensureCSVConnection returns the account's existing CSV connection or
 // creates one. Reusing the row keeps each account to a single CSV feed so
 // the cursor / last_synced_at telemetry stays coherent across uploads.
+// A CSV upload is push-based and an explicit re-activation intent, so if
+// the existing CSV feed was previously revoked/expired it is reactivated
+// here — otherwise the UI would show a revoked connection that is in fact
+// actively receiving data.
 func (h *bankfeedHandlers) ensureCSVConnection(r *http.Request, tenantID, bankAccountID uuid.UUID) (*bankfeed.Connection, error) {
 	existing, err := h.conns.ListConnectionsByAccount(r.Context(), tenantID, bankAccountID)
 	if err != nil {
 		return nil, err
 	}
 	for i := range existing {
-		if existing[i].Provider == bankfeed.ProviderCSV {
-			return &existing[i], nil
+		if existing[i].Provider != bankfeed.ProviderCSV {
+			continue
 		}
+		conn := &existing[i]
+		if conn.Status != bankfeed.StatusActive {
+			if err := h.conns.SetStatus(r.Context(), tenantID, conn.ID, bankfeed.StatusActive); err != nil {
+				return nil, err
+			}
+			conn.Status = bankfeed.StatusActive
+		}
+		return conn, nil
 	}
 	return h.conns.UpsertConnection(r.Context(), bankfeed.Connection{
 		TenantID:      tenantID,
@@ -645,6 +657,15 @@ func writeBankFeedError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, bankfeed.ErrUnknownProvider):
 		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, bankfeed.ErrNotFound), errors.Is(err, ledger.ErrSuggestionNotFound):
+		// A referenced connection / rule / suggestion does not exist under
+		// the tenant's scope — a routine 404, not a server fault, so it is
+		// not logged as an internal error.
+		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, ledger.ErrSuggestionConflict):
+		// The suggestion exists but is no longer actionable (already
+		// decided, or its transaction has since been reconciled). 409.
+		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, bankfeed.ErrProviderNotConfigured):
 		// Provider selected but credentials absent — the operator must
 		// configure it (or the deployment is fail-closed). 503-class.

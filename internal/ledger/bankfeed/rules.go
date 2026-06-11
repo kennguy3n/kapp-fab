@@ -247,7 +247,7 @@ func (s *RuleStore) DeleteRule(ctx context.Context, tenantID, id uuid.UUID) erro
 			return fmt.Errorf("bankfeed: delete rule: %w", err)
 		}
 		if ct.RowsAffected() == 0 {
-			return fmt.Errorf("bankfeed: rule %s not found", id)
+			return fmt.Errorf("bankfeed: rule %s: %w", id, ErrNotFound)
 		}
 		return s.auditRule(ctx, tx, Rule{TenantID: tenantID, ID: id}, "finance.bank_feed.rule.delete")
 	})

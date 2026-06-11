@@ -36,6 +36,12 @@ func TestWriteBankFeedErrorMappings(t *testing.T) {
 		{"provider not configured → 503", bankfeed.ErrProviderNotConfigured, http.StatusServiceUnavailable, ""},
 		{"wrapped not configured → 503", fmt.Errorf("plaid: %w", bankfeed.ErrProviderNotConfigured), http.StatusServiceUnavailable, ""},
 		{"unsupported → 422", bankfeed.ErrUnsupported, http.StatusUnprocessableEntity, ""},
+		{"not found → 404", bankfeed.ErrNotFound, http.StatusNotFound, ""},
+		{"wrapped connection not found → 404", fmt.Errorf("bankfeed: connection abc: %w", bankfeed.ErrNotFound), http.StatusNotFound, ""},
+		{"suggestion not found → 404", ledger.ErrSuggestionNotFound, http.StatusNotFound, ""},
+		{"wrapped suggestion not found → 404", fmt.Errorf("ledger: suggestion x: %w", ledger.ErrSuggestionNotFound), http.StatusNotFound, ""},
+		{"suggestion conflict → 409", ledger.ErrSuggestionConflict, http.StatusConflict, ""},
+		{"wrapped suggestion conflict → 409", fmt.Errorf("ledger: suggestion already accepted: %w", ledger.ErrSuggestionConflict), http.StatusConflict, ""},
 		{"unrelated → 500 (detail not leaked)", errors.New("pgx: password=hunter2 host=10.0.0.1 pool exhausted"), http.StatusInternalServerError, "hunter2"},
 	}
 	for _, tc := range cases {

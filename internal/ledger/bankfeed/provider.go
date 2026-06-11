@@ -169,6 +169,12 @@ var (
 	// ErrUnknownProvider is returned by the Registry when no provider is
 	// registered under the requested name.
 	ErrUnknownProvider = errors.New("bankfeed: unknown provider")
+	// ErrNotFound marks a connection / rule the tenant referenced by id
+	// that does not exist (or is not visible under their RLS scope). The
+	// stores wrap it so the HTTP layer can return a 404 rather than a 500,
+	// and so a routine missing-resource lookup does not pollute the error
+	// log as an internal fault.
+	ErrNotFound = errors.New("bankfeed: resource not found")
 )
 
 // Registry resolves a provider name to its implementation. It is built
