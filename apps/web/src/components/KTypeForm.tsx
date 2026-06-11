@@ -65,7 +65,10 @@ function FieldInput({ field, value, onChange }: FieldInputProps) {
         <Input
           type="number"
           value={(value as number | "") ?? ""}
-          onChange={(e) => onChange(e.target.valueAsNumber)}
+          onChange={(e) => {
+            const n = e.target.valueAsNumber;
+            onChange(Number.isNaN(n) ? undefined : n);
+          }}
         />
       );
     case "boolean":

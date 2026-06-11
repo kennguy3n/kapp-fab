@@ -171,12 +171,11 @@ describe("KTypeForm", () => {
     });
   });
 
-  it("documents that clearing a numeric input stores NaN (latent KTypeForm issue)", async () => {
-    // KTypeForm.tsx:68 stores `e.target.valueAsNumber`, which is NaN for an
-    // empty number input. This characterization test pins the CURRENT
-    // (suboptimal) behavior so a future fix in the form-owning workstream —
-    // e.g. mapping empty → undefined/null — is a deliberate, visible change
-    // that updates this assertion rather than silently altering payloads.
+  it("maps a cleared numeric input to undefined (never NaN) on submit", async () => {
+    // An empty number input yields `valueAsNumber === NaN`; KTypeForm maps
+    // that to `undefined` so cleared fields never submit NaN (which would
+    // JSON-serialize to null and write bad data backend-side). This pins
+    // the fix: the value must be undefined and must not be NaN.
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     renderWithProviders(
@@ -188,7 +187,8 @@ describe("KTypeForm", () => {
     );
     await user.clear(screen.getByRole("spinbutton"));
     await user.click(screen.getByRole("button", { name: "Save" }));
-    const submitted = onSubmit.mock.calls[0][0] as { qty: number };
-    expect(Number.isNaN(submitted.qty)).toBe(true);
+    const submitted = onSubmit.mock.calls[0][0] as { qty?: number };
+    expect(submitted.qty).toBeUndefined();
+    expect(Number.isNaN(submitted.qty as unknown as number)).toBe(false);
   });
 });
