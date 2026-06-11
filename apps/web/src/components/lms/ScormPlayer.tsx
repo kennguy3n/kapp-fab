@@ -83,22 +83,31 @@ export function cmiScoreRaw(score: number | undefined): string | undefined {
   return score != null ? String(score) : undefined;
 }
 
+// hasScore reports whether a persisted CMI score string represents an actual
+// value to project. Empty/undefined means "no score"; "0" is a real score.
+function hasScore(raw: string | undefined): raw is string {
+  return raw != null && raw !== "";
+}
+
 function projectCMI(store: Store, version: ScormVersion): ScormCMIData {
   const cmi: ScormCMIData = {
     version: version === "scorm_12" ? "scorm_12" : "scorm_2004",
   };
   if (version === "scorm_12") {
     cmi.lesson_status = store.get("cmi.core.lesson_status") ?? "";
+    // The store holds CMI values as strings; a missing score is undefined and
+    // an explicitly-zeroed score is "0". Guard on hasScore (not truthiness) so
+    // the intent matches cmiScoreRaw's `!= null` check and a 0 is preserved.
     const raw = store.get("cmi.core.score.raw");
-    if (raw) cmi.score_raw = Number(raw);
+    if (hasScore(raw)) cmi.score_raw = Number(raw);
     cmi.session_time = store.get("cmi.core.session_time") ?? "";
   } else {
     cmi.completion_status = store.get("cmi.completion_status") ?? "";
     cmi.success_status = store.get("cmi.success_status") ?? "";
     const raw = store.get("cmi.score.raw");
-    if (raw) cmi.score_raw = Number(raw);
+    if (hasScore(raw)) cmi.score_raw = Number(raw);
     const scaled = store.get("cmi.score.scaled");
-    if (scaled) cmi.score_scaled = Number(scaled);
+    if (hasScore(scaled)) cmi.score_scaled = Number(scaled);
     cmi.session_time = store.get("cmi.session_time") ?? "";
   }
   cmi.suspend_data = store.get("cmi.suspend_data") ?? "";

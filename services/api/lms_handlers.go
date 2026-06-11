@@ -121,6 +121,10 @@ func (h *lmsHandlers) createPath(w http.ResponseWriter, r *http.Request) {
 		TargetRoles:            req.TargetRoles,
 		EstimatedDurationHours: req.EstimatedDurationHours,
 		Difficulty:             req.Difficulty,
+		// CreatedBy drives both the created_by column and the audit actor
+		// in CreatePath; without it the row is NULL-attributed and the
+		// audit entry falls back to ActorSystem.
+		CreatedBy: h.actor(r),
 	})
 	if err != nil {
 		writeLMSError(w, err)
@@ -447,7 +451,6 @@ type createThreadRequest struct {
 	LessonID *uuid.UUID `json:"lesson_id,omitempty"`
 	Title    string     `json:"title"`
 	Body     string     `json:"body"`
-	Pinned   bool       `json:"pinned"`
 }
 
 func (h *lmsHandlers) createThread(w http.ResponseWriter, r *http.Request) {
@@ -459,6 +462,11 @@ func (h *lmsHandlers) createThread(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	// Pinning is an admin-only action: createThread is mounted in the
+	// learner tier (tenant.member), while toggling `pinned` lives on
+	// updateThread, which is gated behind lms.admin. New threads are
+	// therefore always created unpinned regardless of any client-supplied
+	// value, so a learner cannot self-pin a thread.
 	thread, err := h.discuss.CreateThread(r.Context(), lms.DiscussionThread{
 		TenantID: tenantID,
 		CourseID: req.CourseID,
@@ -466,7 +474,7 @@ func (h *lmsHandlers) createThread(w http.ResponseWriter, r *http.Request) {
 		AuthorID: actorOrDefault(r.Context()),
 		Title:    req.Title,
 		Body:     req.Body,
-		Pinned:   req.Pinned,
+		Pinned:   false,
 	})
 	if err != nil {
 		writeLMSError(w, err)
@@ -674,6 +682,10 @@ func (h *lmsHandlers) createBadge(w http.ResponseWriter, r *http.Request) {
 		CriteriaType:  req.CriteriaType,
 		CriteriaValue: req.CriteriaValue,
 		Active:        active,
+		// CreatedBy drives both the created_by column and the audit actor
+		// in CreateBadge; without it attribution is lost (NULL column,
+		// ActorSystem audit entry).
+		CreatedBy: h.actor(r),
 	})
 	if err != nil {
 		writeLMSError(w, err)
