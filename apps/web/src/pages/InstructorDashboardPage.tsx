@@ -87,7 +87,7 @@ export function InstructorDashboardPage() {
             />
             <Kpi
               label="Average score"
-              value={a.average_score ?? "—"}
+              value={a.average_score != null ? String(a.average_score) : "—"}
             />
           </div>
 

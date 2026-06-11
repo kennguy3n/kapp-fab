@@ -207,7 +207,11 @@ export interface LearnerProgressRow {
   status: string;
   lessons_completed: number;
   lessons_total: number;
-  average_score?: string;
+  // Go source `internal/lms.LearnerProgress.AverageScore` is a
+  // `*decimal.Decimal`, which shopspring/decimal marshals as an unquoted
+  // JSON number (e.g. `80`, not `"80"`) — so it is a `number` on the wire.
+  // Stringify before rendering where a string is required.
+  average_score?: number;
 }
 
 export interface CourseAnalytics {
@@ -215,7 +219,10 @@ export interface CourseAnalytics {
   enrollment_count: number;
   completed_count: number;
   completion_rate: number;
-  average_score?: string;
+  // Go source `internal/lms.CourseAnalytics.AverageScore` is a
+  // `*decimal.Decimal`, marshalled as an unquoted JSON number — a `number`
+  // on the wire, not a string. Stringify before rendering where required.
+  average_score?: number;
   lesson_drop_off: LessonDropOff[];
   per_learner: LearnerProgressRow[];
 }
