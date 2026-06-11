@@ -902,6 +902,12 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	agents.RegisterPayrollTools(executor, payrollEngine)
 	agents.RegisterLMSTools(executor, lmsStore)
 	agents.RegisterCertificateTool(executor, lms.NewCertificateIssuer(recordStore, pool))
+	// Session-17 learning-path store, shared between the agent tools
+	// (create / enroll / recommend) and the HTTP handlers below so a
+	// tool-driven and an HTTP-driven create/enroll hit the same audit +
+	// RLS path.
+	lmsPathStore := lms.NewLearningPathStore(pool, auditor)
+	agents.RegisterLearningPathTools(executor, lmsPathStore)
 	agents.RegisterHelpdeskTools(executor, helpdeskStore)
 	agents.RegisterInsightsTools(executor, insightsQueryStore, insightsDashboardStore, insightsRunner)
 	// Phase N9a — sales return state machine surfaced through the
@@ -1011,6 +1017,23 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	cch := &cycleCountHandlers{store: cycleCountStore}
 	oh := &openAPIHandler{registry: ktypeRegistry}
 	fileh := &filesHandlers{store: filesStore, meter: meteringBuffer}
+	// Session-17 LMS deep-enhancement handlers. The stores share the
+	// recordStore-backed adapters (analytics listers, xAPI actor +
+	// enrollment resolution, learning-path completion lookups) so the
+	// internal/lms package stays decoupled from the record store. SCORM
+	// packages extract into the same per-tenant object store the files
+	// surface uses.
+	lmsAdapters := lmsRecordAdapters{records: recordStore}
+	lmsh := &lmsHandlers{
+		paths:     lmsPathStore,
+		enroller:  lms.NewPathAutoEnroller(lmsPathStore),
+		gamify:    lms.NewGamificationStore(pool, auditor),
+		discuss:   lms.NewDiscussionStore(pool, auditor),
+		scorm:     lms.NewScormStore(pool, objectStore, auditor),
+		xapi:      lms.NewXAPIStore(pool, auditor),
+		analytics: lms.NewAnalyticsStore(pool, lmsAdapters, lmsAdapters),
+		adapters:  lmsAdapters,
+	}
 	bh := &baseHandlers{store: baseStore}
 	dh := &docsHandlers{store: docsStore}
 	eh := &eventsHandlers{pool: pool}
@@ -1588,6 +1611,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		insdsh:                 insdsh,
 		insembh:                insembh,
 		hrh:                    hrh,
+		lmsh:                   lmsh,
 		rch:                    rch,
 		inboundHandler:         inboundHandler,
 		mph:                    mph,

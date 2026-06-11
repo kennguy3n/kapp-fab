@@ -178,6 +178,7 @@ func run() error {
 		landedCost:         landedCostStore,
 		cycleCounts:        cycleCountStore,
 		lmsIssuer:          lms.NewCertificateIssuer(recordStore, pool),
+		learningPaths:      lms.NewLearningPathStore(pool, auditor),
 		returns:            sales.NewReturnPoster(recordStore, invoicePoster, inventoryStore, ledgerStore),
 		requisitions:       sales.NewRequisitionPoster(recordStore),
 		cards:              cards,

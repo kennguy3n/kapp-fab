@@ -4,7 +4,7 @@
 // offer_letter) follow the manufacturing module convention: the KType
 // schema is registered primarily so generic list / form / kanban views
 // and agent tools can reference the type by name, while the authoritative
-// store is the dedicated typed tables in migrations/000082_recruitment.sql
+// store is the dedicated typed tables in migrations/000084_recruitment.sql
 // (see internal/hr/recruitment_store.go). Keeping the lifecycle (status)
 // state machine in the Go store — rather than the KRecord workflow engine —
 // matches manufacturing work orders, whose draft→released→… lifecycle the

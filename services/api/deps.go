@@ -217,6 +217,7 @@ type apiDeps struct {
 	insdsh         *insightsDataSourceHandlers
 	insembh        *insightsEmbedHandlers
 	hrh            *hrHandlers
+	lmsh           *lmsHandlers
 	rch            *recruitmentHandlers
 	inboundHandler *helpdeskInboundHandlers
 	mph            *marketplaceHandlers

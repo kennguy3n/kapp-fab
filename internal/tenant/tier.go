@@ -76,6 +76,18 @@ var TenantScopedTables = []string{
 	"marketplace_extension_agent_tools",
 	"marketplace_webhook_subscriptions",
 	"marketplace_dispatch_log",
+	// Session 17 — LMS deep enhancement. Parents precede children so
+	// FKs resolve on restore: learning_paths before its courses /
+	// enrollments; lms_badges before lms_user_badges;
+	// lms_discussion_threads before lms_discussion_replies.
+	"learning_paths",
+	"learning_path_courses",
+	"learning_path_enrollments",
+	"lms_xapi_statements",
+	"lms_badges",
+	"lms_user_badges",
+	"lms_discussion_threads",
+	"lms_discussion_replies",
 }
 
 // SchemaName returns the canonical dedicated-schema name for a

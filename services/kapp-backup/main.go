@@ -239,6 +239,20 @@ var TenantScopedTables = []string{
 	"marketplace_extension_agent_tools",
 	"marketplace_webhook_subscriptions",
 	"marketplace_dispatch_log",
+	// Session 17 — LMS deep enhancement. All carry the default
+	// (tenant_id, id) PK so the fallback ON CONFLICT path applies; no
+	// tableConflictKeys entries are required. Ordering is FK-driven for
+	// restore: learning_path_courses and learning_path_enrollments FK
+	// learning_paths; lms_user_badges FKs lms_badges; lms_discussion_replies
+	// FKs lms_discussion_threads — each parent is listed before its child.
+	"learning_paths",
+	"learning_path_courses",
+	"learning_path_enrollments",
+	"lms_xapi_statements",
+	"lms_badges",
+	"lms_user_badges",
+	"lms_discussion_threads",
+	"lms_discussion_replies",
 }
 
 // manifest is the first record in every dump file.
