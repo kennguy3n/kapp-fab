@@ -88,6 +88,21 @@ var TenantScopedTables = []string{
 	"lms_user_badges",
 	"lms_discussion_threads",
 	"lms_discussion_replies",
+	// Recruitment (000084). job_applications FKs job_openings; interviews
+	// and offer_letters each FK job_applications, so the parent precedes
+	// its children in the FK-restore walk.
+	"job_openings",
+	"job_applications",
+	"interviews",
+	"offer_letters",
+	// Bank feed + smart reconciliation (000085/000086). bank_feed_connections
+	// FKs bank_accounts and bank_match_suggestions FKs bank_transactions —
+	// both parents appear earlier in this list. bank_learned_matches has no
+	// FK and carries a natural composite PK.
+	"bank_feed_connections",
+	"bank_reconciliation_rules",
+	"bank_match_suggestions",
+	"bank_learned_matches",
 }
 
 // SchemaName returns the canonical dedicated-schema name for a
