@@ -169,6 +169,61 @@ func TestSyncOneDedupesOnResync(t *testing.T) {
 	}
 }
 
+// TestIngestRawIngestsCSVLines drives the CSV-upload entrypoint: lines
+// arrive directly (no provider fetch) and must flow through the exact
+// same ingest path as SyncOne. The CSV provider has no incremental
+// cursor, so the connection cursor is advanced to empty.
+func TestIngestRawIngestsCSVLines(t *testing.T) {
+	tn := uuid.New()
+	conn := &Connection{ID: uuid.New(), TenantID: tn, BankAccountID: uuid.New(), Provider: ProviderCSV}
+	store := &fakeStore{}
+	conns := &fakeConns{}
+	// IngestRaw does not consult the registry/provider, but the handler
+	// still requires a non-nil registry to construct.
+	h := newSyncHandlerForTest(conns, &fakeRules{}, NewRegistry(), store, nil)
+
+	raw := []RawTransaction{
+		rawTxn("c1", "Stripe payout", "1200", time.Now()),
+		rawTxn("c2", "AWS", "-89.10", time.Now()),
+	}
+	res, err := h.IngestRaw(context.Background(), tn, conn, raw)
+	if err != nil {
+		t.Fatalf("IngestRaw: %v", err)
+	}
+	if res.Fetched != 2 || res.Inserted != 2 {
+		t.Fatalf("res = %+v; want fetched=2 inserted=2", res)
+	}
+	if _, ok := conns.advanced[conn.ID]; !ok {
+		t.Errorf("cursor/last_synced_at not advanced after CSV ingest")
+	}
+}
+
+// TestIngestRawDedupesOnReupload pins the idempotency contract for the
+// CSV route: re-uploading the same statement inserts nothing the second
+// time because each line dedupes on its external ref.
+func TestIngestRawDedupesOnReupload(t *testing.T) {
+	tn := uuid.New()
+	conn := &Connection{ID: uuid.New(), TenantID: tn, BankAccountID: uuid.New(), Provider: ProviderCSV}
+	store := &fakeStore{}
+	h := newSyncHandlerForTest(&fakeConns{}, &fakeRules{}, NewRegistry(), store, nil)
+
+	raw := []RawTransaction{rawTxn("dup", "X", "-1", time.Now())}
+	first, err := h.IngestRaw(context.Background(), tn, conn, raw)
+	if err != nil {
+		t.Fatalf("IngestRaw first: %v", err)
+	}
+	second, err := h.IngestRaw(context.Background(), tn, conn, raw)
+	if err != nil {
+		t.Fatalf("IngestRaw second: %v", err)
+	}
+	if first.Inserted != 1 {
+		t.Fatalf("first inserted = %d; want 1", first.Inserted)
+	}
+	if second.Inserted != 0 {
+		t.Fatalf("second inserted = %d; want 0 (deduped)", second.Inserted)
+	}
+}
+
 func TestSyncOneSkipsPendingLines(t *testing.T) {
 	tn := uuid.New()
 	conn := &Connection{ID: uuid.New(), TenantID: tn, BankAccountID: uuid.New(), Provider: "fake"}
