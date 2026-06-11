@@ -1015,6 +1015,31 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 				r.Get("/suggestions", d.bfh.listSuggestions)
 				r.Post("/suggestions/{id}/accept", d.bfh.acceptSuggestion)
 				r.Post("/suggestions/{id}/reject", d.bfh.rejectSuggestion)
+
+				// Rule "test/preview": evaluate the supplied rule (or rule
+				// set) against a sample line without persisting anything, so
+				// the editor can show which rule would fire before save.
+				// Idempotent read-style mutation gated as a write.
+				r.Post("/rules/preview", d.bfh.previewRule)
+			})
+		}
+
+		// Inbound provider-webhook ingress — the near-real-time
+		// counterpart to the hourly scheduled sync. It is a deliberate
+		// sibling of the bank-feeds subtree above rather than a child of
+		// it: a provider notification (Plaid SYNC_UPDATES_AVAILABLE,
+		// GoCardless requisition events) carries no Kapp session and no
+		// tenant header, so it cannot traverse tenantChain / FeatureMiddleware
+		// / authz the way the tenant-facing routes do. Authentication is the
+		// per-provider HMAC signature the handler verifies (a forged or
+		// unsigned payload is rejected before any sync), and the route is
+		// IP-rate-limited so an unverified flood cannot amplify into
+		// provider calls — mirroring the helpdesk inbound-email ingress.
+		// Nil-guarded like the other handler bundles.
+		if d.bfwh != nil {
+			r.Route("/api/v1/finance/bank-feeds/webhooks", func(r chi.Router) {
+				r.Use(d.publicWebhookIPLimit)
+				r.Post("/{provider}", d.bfwh.receive)
 			})
 		}
 

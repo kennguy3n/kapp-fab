@@ -569,6 +569,12 @@ type Config struct {
 	PlaidClientID string
 	PlaidSecret   string
 	PlaidEnv      string
+	// PlaidWebhookSecret is the shared secret the inbound webhook ingress
+	// uses to verify the HMAC-SHA256 of a Plaid notification body. Optional;
+	// when empty the Plaid webhook route fails closed (signature
+	// verification cannot succeed) and near-real-time sync falls back to the
+	// hourly scheduler.
+	PlaidWebhookSecret string
 
 	// GoCardlessSecretID / GoCardlessSecretKey authenticate to the
 	// GoCardless Bank Account Data API (EU/UK Open Banking).
@@ -577,6 +583,9 @@ type Config struct {
 	// GoCardlessInstitutionID is the default bank to link when the
 	// connect flow does not specify one. Optional.
 	GoCardlessInstitutionID string
+	// GoCardlessWebhookSecret is the shared secret used to verify inbound
+	// GoCardless webhook bodies. Optional; empty fails the webhook closed.
+	GoCardlessWebhookSecret string
 
 	// BankFeedApplyMutations gates the provider modified/removed path
 	// (Plaid /transactions/sync). It defaults true so the feed stays
@@ -714,13 +723,15 @@ func LoadConfig() (*Config, error) {
 		ReadReplicaMaxConns:          int32(getenvInt("KAPP_READ_REPLICA_MAX_CONNS", 0)),
 		ReadReplicaMinConns:          int32(getenvInt("KAPP_READ_REPLICA_MIN_CONNS", 0)),
 
-		PlaidClientID: os.Getenv("KAPP_PLAID_CLIENT_ID"),
-		PlaidSecret:   os.Getenv("KAPP_PLAID_SECRET"),
-		PlaidEnv:      getenv("KAPP_PLAID_ENV", "sandbox"),
+		PlaidClientID:      os.Getenv("KAPP_PLAID_CLIENT_ID"),
+		PlaidSecret:        os.Getenv("KAPP_PLAID_SECRET"),
+		PlaidEnv:           getenv("KAPP_PLAID_ENV", "sandbox"),
+		PlaidWebhookSecret: os.Getenv("KAPP_PLAID_WEBHOOK_SECRET"),
 
 		GoCardlessSecretID:      os.Getenv("KAPP_GOCARDLESS_SECRET_ID"),
 		GoCardlessSecretKey:     os.Getenv("KAPP_GOCARDLESS_SECRET_KEY"),
 		GoCardlessInstitutionID: os.Getenv("KAPP_GOCARDLESS_INSTITUTION_ID"),
+		GoCardlessWebhookSecret: os.Getenv("KAPP_GOCARDLESS_WEBHOOK_SECRET"),
 
 		BankFeedApplyMutations: getenvBool("KAPP_BANKFEED_APPLY_MUTATIONS", true),
 	}

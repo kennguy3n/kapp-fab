@@ -604,6 +604,15 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// without overshooting before the per-tenant inbound-quota
 	// downstream cuts in.
 	publicInboundIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, "inbound", 30, 10)
+	// /api/v1/finance/bank-feeds/webhooks/{provider} runs outside any
+	// tenant chain (an inbound provider notification carries no session —
+	// auth is the per-provider HMAC signature verified by the handler), so
+	// the tenant-scoped rateLimitMW would 500 on every request. A bank can
+	// fan out a burst of notifications when many accounts settle at once,
+	// but steady-state volume is low — 60/min with a burst of 20 absorbs a
+	// settlement burst while capping an unverified flood before it reaches
+	// signature verification.
+	publicWebhookIPLimit := platform.IPRateLimitMiddleware(ipRateBackend, "bankfeed_webhook", 60, 20)
 	// /api/v1/captcha/challenge is the only unauthenticated GET on
 	// the captcha sub-router; the handler issues a fresh PoW
 	// envelope per call (HMAC-SHA256 + crypto/rand + replay-cache
@@ -907,15 +916,22 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		PlaidClientID:           cfg.PlaidClientID,
 		PlaidSecret:             cfg.PlaidSecret,
 		PlaidEnv:                cfg.PlaidEnv,
+		PlaidWebhookSecret:      cfg.PlaidWebhookSecret,
 		GoCardlessSecretID:      cfg.GoCardlessSecretID,
 		GoCardlessSecretKey:     cfg.GoCardlessSecretKey,
 		GoCardlessInstitutionID: cfg.GoCardlessInstitutionID,
+		GoCardlessWebhookSecret: cfg.GoCardlessWebhookSecret,
 	})
 	var bankFeedEncryptor bankfeed.Encryptor
 	if keyManager != nil {
 		bankFeedEncryptor = keyManager
 	}
-	bankFeedConns := bankfeed.NewConnectionStore(pool, bankFeedEncryptor, auditor)
+	// The webhook ingress resolves a connection from a provider's external
+	// id without any tenant context, so the connection store needs the
+	// BYPASSRLS admin pool for that one cross-tenant lookup. Nil when
+	// ADMIN_DB_URL is unset, in which case the webhook route fails closed.
+	bankFeedConns := bankfeed.NewConnectionStore(pool, bankFeedEncryptor, auditor).
+		WithAdminPool(adminPool)
 	bankFeedRules := bankfeed.NewRuleStore(pool, auditor)
 	bankFeedMatcher := ledger.NewSmartMatcher(ledgerStore)
 	bankFeedSync := bankfeed.NewSyncHandler(bankFeedConns, bankFeedRules, bankFeedRegistry, ledgerStore, bankFeedMatcher).
@@ -1150,6 +1166,15 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		sync:     bankFeedSync,
 		matcher:  bankFeedMatcher,
 		csv:      bankfeed.NewCSVProvider(),
+	}
+	// Inbound provider-webhook ingress. Shares the same registry / conns /
+	// sync handler so a webhook-triggered sync is byte-for-byte the
+	// scheduler's pipeline. Mounted on its own signature-authenticated,
+	// IP-rate-limited route outside the tenant chain (see routes.go).
+	bfwh := &bankfeedWebhookHandlers{
+		registry: bankFeedRegistry,
+		conns:    bankFeedConns,
+		sync:     bankFeedSync,
 	}
 
 	// Phase H JWT auth. The signer is built from KAPP_JWT_SECRET; when
@@ -1605,6 +1630,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		publicFormIPLimit:      publicFormIPLimit,
 		publicEmbedIPLimit:     publicEmbedIPLimit,
 		publicInboundIPLimit:   publicInboundIPLimit,
+		publicWebhookIPLimit:   publicWebhookIPLimit,
 		publicChallengeIPLimit: publicChallengeIPLimit,
 		captchaMW:              captchaMW,
 		captchaVerifier:        captchaVerifier,
@@ -1656,6 +1682,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		lmsh:                   lmsh,
 		rch:                    rch,
 		bfh:                    bfh,
+		bfwh:                   bfwh,
 		inboundHandler:         inboundHandler,
 		mph:                    mph,
 		metrics:                metrics,
@@ -1733,17 +1760,23 @@ func clampPoWDifficulty(d int) uint8 {
 //   - the captcha middleware + a per-form honeypot check inside
 //     the handler. The CSRF Origin check would only add a fourth
 //     layer that is by design defeated by the embedding scenario.
-//   - Webhook receivers (mounted by future PRs) carry a provider-
-//     signed payload that the receiver re-validates server-side
-//     via HMAC. CSRF cannot meaningfully add to that guarantee.
+//   - POST /api/v1/finance/bank-feeds/webhooks/{provider} is a
+//     server-to-server provider notification (Plaid, GoCardless)
+//     that carries no Origin/Referer and no Bearer token, so the
+//     CSRF Origin check would reject every delivery in production.
+//     The receiver re-validates the provider's signed payload via
+//     HMAC before doing any work, so CSRF adds nothing here.
 //
 // The path patterns are matched with isPublicCSRFExempt, which
 // handles chi's {id} placeholders by checking literal prefix +
-// suffix against the request path.
+// suffix against the request path. An empty suffix matches a single
+// trailing segment (the {provider} of the webhook route).
 func publicCSRFExemptPathSet() [][2]string {
 	return [][2]string{
 		// {prefix, suffix}: POST /api/v1/forms/{id}/submit
 		{"/api/v1/forms/", "/submit"},
+		// {prefix, suffix}: POST /api/v1/finance/bank-feeds/webhooks/{provider}
+		{"/api/v1/finance/bank-feeds/webhooks/", ""},
 	}
 }
 

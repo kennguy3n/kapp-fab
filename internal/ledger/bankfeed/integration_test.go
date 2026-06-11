@@ -270,6 +270,14 @@ func TestRuleStoreCRUDAndOrdering(t *testing.T) {
 	if rules[0].Priority > rules[1].Priority || rules[1].Priority > rules[2].Priority {
 		t.Fatalf("rules not priority-ordered: %+v", rules)
 	}
+	// A legacy single-condition rule leaves ConditionMatch unset; it must
+	// persist as the column default 'all' (the NOT NULL CHECK would reject
+	// an empty string), so every read-back reports MatchAll.
+	for _, r := range rules {
+		if r.ConditionMatch != MatchAll {
+			t.Fatalf("legacy rule condition_match = %q; want %q", r.ConditionMatch, MatchAll)
+		}
+	}
 
 	// Delete the high-priority rule.
 	if err := store.DeleteRule(ctx, tenantID, high.ID); err != nil {

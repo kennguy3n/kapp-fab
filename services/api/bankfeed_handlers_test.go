@@ -172,6 +172,8 @@ func TestSyncResultResponseOmitsCursor(t *testing.T) {
 		Unwound:     1,
 		Suggested:   3,
 		AutoMatched: 2,
+		Transfers:   4,
+		Duplicates:  5,
 		Cursor:      "provider-internal-cursor",
 	}
 	blob, err := json.Marshal(toSyncResultResponse(res))
@@ -182,7 +184,7 @@ func TestSyncResultResponseOmitsCursor(t *testing.T) {
 	if strings.Contains(out, "provider-internal-cursor") || strings.Contains(strings.ToLower(out), "cursor") {
 		t.Fatalf("sync DTO leaked cursor: %s", out)
 	}
-	for _, want := range []string{`"fetched":10`, `"inserted":7`, `"auto_matched":2`, `"suggested":3`} {
+	for _, want := range []string{`"fetched":10`, `"inserted":7`, `"auto_matched":2`, `"suggested":3`, `"transfers":4`, `"duplicates":5`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("sync DTO missing %q: %s", want, out)
 		}
@@ -235,6 +237,62 @@ func TestRuleResponseShape(t *testing.T) {
 	}
 	if strings.Contains(string(blob), "bank_account_id") {
 		t.Fatalf("global rule should omit bank_account_id: %s", string(blob))
+	}
+}
+
+// TestPreviewRuleDefaultsEmptyAmountToZero guards the preview UX fix: an
+// operator drafting a purely textual rule (payee/reference/description)
+// supplies no amount, and the handler must treat an omitted sample.amount
+// as zero rather than 400-ing on "must be a decimal string". A non-text
+// rule path is unaffected because the rule here keys on description only.
+func TestPreviewRuleDefaultsEmptyAmountToZero(t *testing.T) {
+	t.Parallel()
+	h := &bankfeedHandlers{}
+
+	// Supplied rules path → no DB access. Empty Amount must default to 0.
+	body := `{"sample":{"description":"ACME PAYROLL"},"rules":[` +
+		`{"priority":1,"condition_type":"description_contains",` +
+		`"condition_value":"payroll","target_account_code":"6000"}]}`
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/finance/bank-feeds/rules/preview", strings.NewReader(body))
+	ctx := platform.WithTenant(req.Context(), &tenant.Tenant{ID: uuid.New()})
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	h.previewRule(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("empty amount preview: want 200, got %d (body=%q)", rr.Code, rr.Body.String())
+	}
+	var resp previewResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode preview response: %v", err)
+	}
+	if !resp.Matched {
+		t.Fatalf("text rule should fire on zero-amount sample: %+v", resp)
+	}
+	if resp.TargetAccountCode != "6000" {
+		t.Fatalf("TargetAccountCode = %q; want 6000", resp.TargetAccountCode)
+	}
+}
+
+// TestPreviewRuleRejectsNonDecimalAmount keeps the explicit-bad-value path:
+// a present but non-numeric amount is still a client 400, so the zero
+// default does not mask a genuine typo.
+func TestPreviewRuleRejectsNonDecimalAmount(t *testing.T) {
+	t.Parallel()
+	h := &bankfeedHandlers{}
+	body := `{"sample":{"description":"x","amount":"not-a-number"},"rules":[` +
+		`{"priority":1,"condition_type":"description_contains","condition_value":"x"}]}`
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/finance/bank-feeds/rules/preview", strings.NewReader(body))
+	ctx := platform.WithTenant(req.Context(), &tenant.Tenant{ID: uuid.New()})
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	h.previewRule(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("non-decimal amount: want 400, got %d (body=%q)", rr.Code, rr.Body.String())
 	}
 }
 

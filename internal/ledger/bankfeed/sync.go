@@ -65,10 +65,16 @@ type ruleLister interface {
 	ListRules(ctx context.Context, tenantID uuid.UUID, bankAccountID *uuid.UUID) ([]Rule, error)
 }
 
-// suggester is the matcher subset used during sync.
+// suggester is the matcher subset used during sync. Beyond scoring
+// journal-entry suggestions it also runs the two cross-line resolvers
+// that must execute before suggestion generation: duplicate flagging and
+// inter-account transfer pairing (a line resolved as either should not
+// also accrue match suggestions).
 type suggester interface {
 	SuggestMatches(ctx context.Context, tenantID, txnID uuid.UUID, opts ledger.MatchOptions) ([]ledger.Suggestion, error)
 	AcceptSuggestion(ctx context.Context, tenantID, suggestionID, actor uuid.UUID) (*ledger.Suggestion, error)
+	DetectDuplicate(ctx context.Context, tenantID, txnID uuid.UUID) (*uuid.UUID, error)
+	DetectTransfer(ctx context.Context, tenantID, txnID uuid.UUID) (*ledger.TransferPair, error)
 }
 
 // SyncHandler is the scheduler.ActionHandler that pulls new transactions
@@ -201,6 +207,8 @@ type SyncResult struct {
 	Unwound     int // reconciliations reverted by a modify/void
 	Suggested   int
 	AutoMatched int
+	Transfers   int // inter-account transfer pairs detected this sync
+	Duplicates  int // lines flagged as suspected duplicates this sync
 	Cursor      string
 }
 
@@ -417,6 +425,35 @@ func (h *SyncHandler) ingestDelta(ctx context.Context, tenantID uuid.UUID, conn 
 			if !ok {
 				rawTxn = RawTransaction{ExternalID: tgt.ref}
 			}
+
+			// Cross-line resolution runs before journal-entry suggestion so a
+			// line resolved as a duplicate or a transfer leg does not also
+			// accrue match suggestions. Duplicate flagging first: a suspected
+			// duplicate is not genuine activity to pair off as a transfer.
+			dupOf, err := h.matcher.DetectDuplicate(ctx, tenantID, tgt.id)
+			if err != nil {
+				log.Printf("bankfeed: duplicate-detect tenant=%s txn=%s: %v", tenantID, tgt.id, err)
+				continue
+			}
+			if dupOf != nil {
+				res.Duplicates++
+				// A flagged duplicate restates an earlier line; leave it
+				// flagged-and-unreconciled for the operator and skip
+				// suggestions/transfer pairing for it.
+				continue
+			}
+			pair, err := h.matcher.DetectTransfer(ctx, tenantID, tgt.id)
+			if err != nil {
+				log.Printf("bankfeed: transfer-detect tenant=%s txn=%s: %v", tenantID, tgt.id, err)
+				continue
+			}
+			if pair != nil {
+				res.Transfers++
+				// Both legs are now status='transfer' (internal money
+				// movement); they are resolved and need no suggestions.
+				continue
+			}
+
 			match, hasRule := Evaluate(rules, rawTxn)
 			suggestions, err := h.matcher.SuggestMatches(ctx, tenantID, tgt.id, ledger.MatchOptions{})
 			if err != nil {

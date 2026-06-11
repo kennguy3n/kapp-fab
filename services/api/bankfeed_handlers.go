@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/ledger/bankfeed"
@@ -297,6 +298,8 @@ type syncResultResponse struct {
 	Unwound     int `json:"unwound"`
 	Suggested   int `json:"suggested"`
 	AutoMatched int `json:"auto_matched"`
+	Transfers   int `json:"transfers"`
+	Duplicates  int `json:"duplicates"`
 }
 
 func toSyncResultResponse(res *bankfeed.SyncResult) syncResultResponse {
@@ -309,6 +312,8 @@ func toSyncResultResponse(res *bankfeed.SyncResult) syncResultResponse {
 		Unwound:     res.Unwound,
 		Suggested:   res.Suggested,
 		AutoMatched: res.AutoMatched,
+		Transfers:   res.Transfers,
+		Duplicates:  res.Duplicates,
 	}
 }
 
@@ -413,18 +418,49 @@ func (h *bankfeedHandlers) ensureCSVConnection(r *http.Request, tenantID, bankAc
 // domain struct carries no JSON tags (it predates this HTTP surface), so
 // a dedicated DTO keeps the wire contract consistent with the rest of
 // the API rather than leaking Go PascalCase field names to the client.
+type ruleConditionDTO struct {
+	Field string `json:"field"`
+	Op    string `json:"op"`
+	Value string `json:"value"`
+}
+
+func toRuleConditionDTOs(cs []bankfeed.RuleCondition) []ruleConditionDTO {
+	if len(cs) == 0 {
+		return nil
+	}
+	out := make([]ruleConditionDTO, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, ruleConditionDTO{Field: c.Field, Op: c.Op, Value: c.Value})
+	}
+	return out
+}
+
+func toRuleConditions(cs []ruleConditionDTO) []bankfeed.RuleCondition {
+	if len(cs) == 0 {
+		return nil
+	}
+	out := make([]bankfeed.RuleCondition, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, bankfeed.RuleCondition{Field: c.Field, Op: c.Op, Value: c.Value})
+	}
+	return out
+}
+
 type ruleResponse struct {
-	ID                uuid.UUID  `json:"id"`
-	Priority          int        `json:"priority"`
-	ConditionType     string     `json:"condition_type"`
-	ConditionValue    string     `json:"condition_value"`
-	TargetAccountCode string     `json:"target_account_code,omitempty"`
-	TargetCostCenter  string     `json:"target_cost_center,omitempty"`
-	AutoApprove       bool       `json:"auto_approve"`
-	BankAccountID     *uuid.UUID `json:"bank_account_id,omitempty"`
-	Enabled           bool       `json:"enabled"`
-	CreatedAt         string     `json:"created_at"`
-	UpdatedAt         string     `json:"updated_at"`
+	ID                uuid.UUID          `json:"id"`
+	Priority          int                `json:"priority"`
+	ConditionType     string             `json:"condition_type,omitempty"`
+	ConditionValue    string             `json:"condition_value,omitempty"`
+	Conditions        []ruleConditionDTO `json:"conditions,omitempty"`
+	ConditionMatch    string             `json:"condition_match,omitempty"`
+	TargetAccountCode string             `json:"target_account_code,omitempty"`
+	TargetCostCenter  string             `json:"target_cost_center,omitempty"`
+	TargetTaxCode     string             `json:"target_tax_code,omitempty"`
+	AutoApprove       bool               `json:"auto_approve"`
+	BankAccountID     *uuid.UUID         `json:"bank_account_id,omitempty"`
+	Enabled           bool               `json:"enabled"`
+	CreatedAt         string             `json:"created_at"`
+	UpdatedAt         string             `json:"updated_at"`
 }
 
 func toRuleResponse(rule *bankfeed.Rule) ruleResponse {
@@ -433,8 +469,11 @@ func toRuleResponse(rule *bankfeed.Rule) ruleResponse {
 		Priority:          rule.Priority,
 		ConditionType:     rule.ConditionType,
 		ConditionValue:    rule.ConditionValue,
+		Conditions:        toRuleConditionDTOs(rule.Conditions),
+		ConditionMatch:    rule.ConditionMatch,
 		TargetAccountCode: rule.TargetAccountCode,
 		TargetCostCenter:  rule.TargetCostCenter,
+		TargetTaxCode:     rule.TargetTaxCode,
 		AutoApprove:       rule.AutoApprove,
 		BankAccountID:     rule.BankAccountID,
 		Enabled:           rule.Enabled,
@@ -490,14 +529,38 @@ func toSuggestionResponses(sugs []ledger.Suggestion) []suggestionResponse {
 }
 
 type ruleRequest struct {
-	Priority          int        `json:"priority"`
-	ConditionType     string     `json:"condition_type"`
-	ConditionValue    string     `json:"condition_value"`
-	TargetAccountCode string     `json:"target_account_code,omitempty"`
-	TargetCostCenter  string     `json:"target_cost_center,omitempty"`
-	AutoApprove       bool       `json:"auto_approve"`
-	BankAccountID     *uuid.UUID `json:"bank_account_id,omitempty"`
-	Enabled           bool       `json:"enabled"`
+	Priority          int                `json:"priority"`
+	ConditionType     string             `json:"condition_type,omitempty"`
+	ConditionValue    string             `json:"condition_value,omitempty"`
+	Conditions        []ruleConditionDTO `json:"conditions,omitempty"`
+	ConditionMatch    string             `json:"condition_match,omitempty"`
+	TargetAccountCode string             `json:"target_account_code,omitempty"`
+	TargetCostCenter  string             `json:"target_cost_center,omitempty"`
+	TargetTaxCode     string             `json:"target_tax_code,omitempty"`
+	AutoApprove       bool               `json:"auto_approve"`
+	BankAccountID     *uuid.UUID         `json:"bank_account_id,omitempty"`
+	Enabled           bool               `json:"enabled"`
+}
+
+// toRule projects a rule request onto the domain Rule for the given
+// tenant / id. Shared by create, update and preview so the wire-to-domain
+// mapping (including the compound-condition fields) lives in one place.
+func (req ruleRequest) toRule(tenantID, id uuid.UUID) bankfeed.Rule {
+	return bankfeed.Rule{
+		ID:                id,
+		TenantID:          tenantID,
+		Priority:          req.Priority,
+		ConditionType:     req.ConditionType,
+		ConditionValue:    req.ConditionValue,
+		Conditions:        toRuleConditions(req.Conditions),
+		ConditionMatch:    req.ConditionMatch,
+		TargetAccountCode: req.TargetAccountCode,
+		TargetCostCenter:  req.TargetCostCenter,
+		TargetTaxCode:     req.TargetTaxCode,
+		AutoApprove:       req.AutoApprove,
+		BankAccountID:     req.BankAccountID,
+		Enabled:           req.Enabled,
+	}
 }
 
 func (h *bankfeedHandlers) listRules(w http.ResponseWriter, r *http.Request) {
@@ -525,17 +588,7 @@ func (h *bankfeedHandlers) createRule(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	out, err := h.rules.UpsertRule(r.Context(), bankfeed.Rule{
-		TenantID:          t.ID,
-		Priority:          req.Priority,
-		ConditionType:     req.ConditionType,
-		ConditionValue:    req.ConditionValue,
-		TargetAccountCode: req.TargetAccountCode,
-		TargetCostCenter:  req.TargetCostCenter,
-		AutoApprove:       req.AutoApprove,
-		BankAccountID:     req.BankAccountID,
-		Enabled:           req.Enabled,
-	})
+	out, err := h.rules.UpsertRule(r.Context(), req.toRule(t.ID, uuid.Nil))
 	if err != nil {
 		writeBankFeedError(w, r, err)
 		return
@@ -558,18 +611,7 @@ func (h *bankfeedHandlers) updateRule(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	out, err := h.rules.UpsertRule(r.Context(), bankfeed.Rule{
-		ID:                id,
-		TenantID:          t.ID,
-		Priority:          req.Priority,
-		ConditionType:     req.ConditionType,
-		ConditionValue:    req.ConditionValue,
-		TargetAccountCode: req.TargetAccountCode,
-		TargetCostCenter:  req.TargetCostCenter,
-		AutoApprove:       req.AutoApprove,
-		BankAccountID:     req.BankAccountID,
-		Enabled:           req.Enabled,
-	})
+	out, err := h.rules.UpsertRule(r.Context(), req.toRule(t.ID, id))
 	if err != nil {
 		writeBankFeedError(w, r, err)
 		return
@@ -592,6 +634,116 @@ func (h *bankfeedHandlers) deleteRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// previewSample is a synthetic statement line the operator supplies to
+// test a rule. It mirrors the rule-relevant subset of a RawTransaction;
+// amount is a decimal string so the wire value is exact (no float drift).
+type previewSample struct {
+	Description  string `json:"description,omitempty"`
+	Counterparty string `json:"counterparty,omitempty"`
+	Reference    string `json:"reference,omitempty"`
+	Amount       string `json:"amount"`
+	Currency     string `json:"currency,omitempty"`
+}
+
+// previewRequest tests rule evaluation against a sample line without
+// persisting anything. When Rules is non-empty those rules are evaluated
+// (in the given order) — the editor's "does this rule I'm drafting fire?"
+// path. When Rules is empty the tenant's stored rules applicable to
+// BankAccountID are used — the "which of my saved rules would fire?" path.
+type previewRequest struct {
+	Sample        previewSample `json:"sample"`
+	Rules         []ruleRequest `json:"rules,omitempty"`
+	BankAccountID *uuid.UUID    `json:"bank_account_id,omitempty"`
+}
+
+// previewResponse reports whether a rule fired and, if so, the action it
+// dictates and its position in the evaluated set, so the editor can show
+// "rule #2 would auto-allocate 4000 / VAT20".
+type previewResponse struct {
+	Matched           bool   `json:"matched"`
+	MatchedIndex      int    `json:"matched_index"`
+	MatchedRuleID     string `json:"matched_rule_id,omitempty"`
+	TargetAccountCode string `json:"target_account_code,omitempty"`
+	TargetCostCenter  string `json:"target_cost_center,omitempty"`
+	TargetTaxCode     string `json:"target_tax_code,omitempty"`
+	AutoApprove       bool   `json:"auto_approve"`
+}
+
+// previewRule evaluates a rule (or rule set, or the tenant's stored rules)
+// against a sample line and reports which rule would fire. It never writes:
+// the supplied rules are validated and evaluated in memory, so the editor
+// gets immediate feedback (including a 400 on an invalid regex / range)
+// before committing a rule.
+func (h *bankfeedHandlers) previewRule(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	var req previewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	// An omitted amount defaults to zero so an operator testing a purely
+	// text rule (payee/reference) need not invent a number; a non-empty
+	// value must still parse exactly.
+	amount := decimal.Zero
+	if s := strings.TrimSpace(req.Sample.Amount); s != "" {
+		parsed, err := decimal.NewFromString(s)
+		if err != nil {
+			http.Error(w, "sample.amount must be a decimal string", http.StatusBadRequest)
+			return
+		}
+		amount = parsed
+	}
+	sample := bankfeed.RawTransaction{
+		Description:  req.Sample.Description,
+		Counterparty: req.Sample.Counterparty,
+		Reference:    req.Sample.Reference,
+		Amount:       amount,
+		Currency:     req.Sample.Currency,
+	}
+
+	var rules []bankfeed.Rule
+	if len(req.Rules) > 0 {
+		// Validate the supplied rules so the editor sees the same error a
+		// save would raise; an invalid rule is a client 400, not a silent
+		// no-match. Preserve the caller's order (Evaluate is first-match).
+		rules = make([]bankfeed.Rule, 0, len(req.Rules))
+		for i := range req.Rules {
+			rule := req.Rules[i].toRule(t.ID, uuid.Nil)
+			if verr := rule.Validate(); verr != nil {
+				http.Error(w, verr.Error(), http.StatusBadRequest)
+				return
+			}
+			rules = append(rules, rule)
+		}
+	} else {
+		// No rules supplied: evaluate the tenant's stored, enabled rules
+		// applicable to the (optional) account — the live evaluation order.
+		stored, lerr := h.rules.ListRules(r.Context(), t.ID, req.BankAccountID)
+		if lerr != nil {
+			writeBankFeedError(w, r, lerr)
+			return
+		}
+		rules = stored
+	}
+
+	match, idx, ok := bankfeed.EvaluateIndexed(rules, sample)
+	resp := previewResponse{Matched: ok, MatchedIndex: idx}
+	if ok {
+		if match.Rule.ID != uuid.Nil {
+			resp.MatchedRuleID = match.Rule.ID.String()
+		}
+		resp.TargetAccountCode = match.TargetAccountCode
+		resp.TargetCostCenter = match.TargetCostCenter
+		resp.TargetTaxCode = match.TargetTaxCode
+		resp.AutoApprove = match.AutoApprove
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ---------------------------------------------------------------------------

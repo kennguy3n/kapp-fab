@@ -114,6 +114,7 @@ type apiDeps struct {
 	publicFormIPLimit      func(http.Handler) http.Handler
 	publicEmbedIPLimit     func(http.Handler) http.Handler
 	publicInboundIPLimit   func(http.Handler) http.Handler
+	publicWebhookIPLimit   func(http.Handler) http.Handler
 	publicChallengeIPLimit func(http.Handler) http.Handler
 
 	// captchaMW gates the unauthenticated public POST surface
@@ -220,6 +221,7 @@ type apiDeps struct {
 	lmsh           *lmsHandlers
 	rch            *recruitmentHandlers
 	bfh            *bankfeedHandlers
+	bfwh           *bankfeedWebhookHandlers
 	inboundHandler *helpdeskInboundHandlers
 	mph            *marketplaceHandlers
 

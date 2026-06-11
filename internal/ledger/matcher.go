@@ -869,3 +869,370 @@ func shortHash(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])[:16]
 }
+
+// ---------------------------------------------------------------------------
+// Inter-account transfer auto-pairing + duplicate detection
+// ---------------------------------------------------------------------------
+
+// BankTxnTransfer marks a statement line that the transfer detector has
+// paired with the opposite leg in another of the tenant's own accounts:
+// a resolved line that is internal money movement, not P&L activity, so
+// it drops out of the income/expense reconciliation surface. The value
+// matches the bank_transactions status CHECK widened in migration 000091.
+// Defined here (not bank.go) so the detector that owns the state also
+// owns its constant.
+const BankTxnTransfer = "transfer"
+
+// DefaultTransferWindow is the ± date window in which a debit in one
+// account and the equal-and-opposite credit in another are considered
+// the two legs of one transfer. Inter-account transfers (especially
+// cross-bank Faster Payments / SEPA) usually clear within a couple of
+// days; ±4d absorbs a weekend without pairing coincidentally-equal
+// amounts weeks apart.
+const DefaultTransferWindow = 4 * 24 * time.Hour
+
+// DefaultDuplicateWindow is the ± date window in which two lines in the
+// SAME account with identical signed amount and currency are considered
+// for duplicate flagging (the same real transaction ingested via two
+// overlapping feeds, e.g. a CSV upload plus a live Plaid feed). Tight by
+// design: a genuine recurring charge of the same amount is normally days
+// apart, so ±2d keeps precision high — and a false positive only ever
+// *flags* a line, never hides or deletes it.
+const DefaultDuplicateWindow = 2 * 24 * time.Hour
+
+// duplicateSimilarityFloor is the minimum description similarity for a
+// duplicate flag. Two feeds format the same transaction differently
+// (e.g. "TFL TRAVEL CH" vs "TFL.GOV.UK/CP TFL TRAVEL"), so this is a
+// floor, not equality — but high enough that two distinct same-amount
+// charges on the same day are not mistaken for one.
+const duplicateSimilarityFloor = 0.5
+
+// TransferPair is one detected inter-account transfer: a money-out line
+// (the debit leg, negative amount) in one account paired with the
+// money-in line (the credit leg, positive amount) in another.
+type TransferPair struct {
+	ID          uuid.UUID       `json:"id"`
+	TenantID    uuid.UUID       `json:"tenant_id"`
+	DebitTxnID  uuid.UUID       `json:"debit_txn_id"`
+	CreditTxnID uuid.UUID       `json:"credit_txn_id"`
+	Amount      decimal.Decimal `json:"amount"`
+	Currency    string          `json:"currency"`
+	Confidence  float64         `json:"confidence"`
+	DetectedAt  time.Time       `json:"detected_at"`
+}
+
+// DetectTransfer tries to pair a freshly-ingested line with the equal-
+// and-opposite leg in a different account of the same tenant, recording
+// the pair and marking both legs status='transfer'. It is conservative
+// and idempotent: it only ever pairs two currently-unreconciled,
+// non-duplicate lines of exactly opposite signed amount and equal
+// currency within DefaultTransferWindow, and the partial unique indexes
+// on bank_transfer_pairs make a concurrent or repeated attempt a no-op
+// rather than double-pairing a line. Returns the created pair, or nil
+// when no confident counter-leg exists (the common case).
+func (m *SmartMatcher) DetectTransfer(ctx context.Context, tenantID, txnID uuid.UUID) (*TransferPair, error) {
+	if tenantID == uuid.Nil || txnID == uuid.Nil {
+		return nil, errors.New("ledger: tenant_id and txn_id required")
+	}
+	var pair *TransferPair
+	err := dbutil.WithTenantTx(ctx, m.store.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var (
+			amount        decimal.Decimal
+			valueDate     time.Time
+			currency      string
+			status        string
+			description   string
+			bankAccountID uuid.UUID
+			dupOf         *uuid.UUID
+		)
+		if err := tx.QueryRow(ctx,
+			`SELECT amount, value_date, currency, status, COALESCE(description,''), bank_account_id, duplicate_of
+			   FROM bank_transactions WHERE tenant_id = $1 AND id = $2`,
+			tenantID, txnID,
+		).Scan(&amount, &valueDate, &currency, &status, &description, &bankAccountID, &dupOf); err != nil {
+			return fmt.Errorf("ledger: load bank_transaction: %w", err)
+		}
+		// Only pair a live, non-duplicate line. A zero amount cannot be a
+		// meaningful transfer and would pair spuriously with any other zero
+		// line, so skip it.
+		if status != BankTxnUnreconciled || dupOf != nil || amount.IsZero() {
+			return nil
+		}
+
+		// The counter-leg is the exact negation in a *different* account:
+		// same currency, opposite signed amount, unreconciled, not itself a
+		// duplicate, within the window, and not already half of a pair
+		// (guarded by the NOT EXISTS against both legs). Closest value_date
+		// first, breaking ties on id for determinism.
+		var (
+			otherID     uuid.UUID
+			otherDate   time.Time
+			otherDesc   string
+			otherAcctID uuid.UUID
+		)
+		err := tx.QueryRow(ctx,
+			`SELECT t.id, t.value_date, COALESCE(t.description,''), t.bank_account_id
+			   FROM bank_transactions t
+			  WHERE t.tenant_id = $1
+			    AND t.bank_account_id <> $2
+			    AND t.currency = $3
+			    AND t.amount = $4
+			    AND t.status = $5
+			    AND t.duplicate_of IS NULL
+			    AND t.value_date BETWEEN $6 AND $7
+			    AND NOT EXISTS (
+			        SELECT 1 FROM bank_transfer_pairs p
+			         WHERE p.tenant_id = t.tenant_id
+			           AND (p.debit_txn_id = t.id OR p.credit_txn_id = t.id))
+			  ORDER BY abs(t.value_date - $8::date) ASC, t.id ASC
+			  LIMIT 1`,
+			tenantID, bankAccountID, currency, amount.Neg(), BankTxnUnreconciled,
+			valueDate.Add(-DefaultTransferWindow), valueDate.Add(DefaultTransferWindow), valueDate,
+		).Scan(&otherID, &otherDate, &otherDesc, &otherAcctID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("ledger: find transfer counter-leg: %w", err)
+		}
+
+		// Orient the legs by sign: the negative amount is the debit (money
+		// out), the positive is the credit (money in).
+		debitID, creditID := txnID, otherID
+		if amount.IsPositive() {
+			debitID, creditID = otherID, txnID
+		}
+		magnitude := amount.Abs()
+		confidence := transferConfidence(valueDate, otherDate, description, otherDesc)
+
+		// Insert the pair. The partial unique indexes on (tenant_id,
+		// debit_txn_id) and (tenant_id, credit_txn_id) collapse a racing or
+		// repeated attempt to a no-op; a 0-row result means the line was
+		// paired concurrently, so leave both legs untouched.
+		pairID := uuid.New()
+		now := m.now()
+		ct, err := tx.Exec(ctx,
+			`INSERT INTO bank_transfer_pairs
+			        (tenant_id, id, debit_txn_id, credit_txn_id, amount, currency, confidence, detected_at, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+			 ON CONFLICT DO NOTHING`,
+			tenantID, pairID, debitID, creditID, magnitude, currency, confidence, now)
+		if err != nil {
+			return fmt.Errorf("ledger: insert transfer pair: %w", err)
+		}
+		if ct.RowsAffected() == 0 {
+			return nil
+		}
+
+		// Mark both legs as transfers, but only while still unreconciled so
+		// a leg matched to a journal entry by a concurrent path is never
+		// clobbered. If either guard misses, unwind the pair so we never
+		// leave a half-applied transfer.
+		ct1, err := tx.Exec(ctx,
+			`UPDATE bank_transactions SET status = $3
+			  WHERE tenant_id = $1 AND id = $2 AND status = $4`,
+			tenantID, debitID, BankTxnTransfer, BankTxnUnreconciled)
+		if err != nil {
+			return fmt.Errorf("ledger: mark debit leg transfer: %w", err)
+		}
+		ct2, err := tx.Exec(ctx,
+			`UPDATE bank_transactions SET status = $3
+			  WHERE tenant_id = $1 AND id = $2 AND status = $4`,
+			tenantID, creditID, BankTxnTransfer, BankTxnUnreconciled)
+		if err != nil {
+			return fmt.Errorf("ledger: mark credit leg transfer: %w", err)
+		}
+		if ct1.RowsAffected() == 0 || ct2.RowsAffected() == 0 {
+			return fmt.Errorf("ledger: transfer leg no longer unreconciled: %w", ErrSuggestionConflict)
+		}
+
+		pair = &TransferPair{
+			ID:          pairID,
+			TenantID:    tenantID,
+			DebitTxnID:  debitID,
+			CreditTxnID: creditID,
+			Amount:      magnitude,
+			Currency:    currency,
+			Confidence:  confidence,
+			DetectedAt:  now,
+		}
+		return m.auditTransfer(ctx, tx, tenantID, pairID, "finance.bank_feed.transfer.detect")
+	})
+	if err != nil {
+		return nil, err
+	}
+	return pair, nil
+}
+
+// transferConfidence scores a detected pair on date proximity (same day
+// is strongest, decaying linearly to the window edge) with a small bump
+// when either leg's description hints at a transfer. Amount/currency are
+// already exact by construction, so they are not re-scored.
+func transferConfidence(aDate, bDate time.Time, aDesc, bDesc string) float64 {
+	gap := aDate.Sub(bDate)
+	if gap < 0 {
+		gap = -gap
+	}
+	proximity := 1.0 - float64(gap)/float64(DefaultTransferWindow)
+	if proximity < 0 {
+		proximity = 0
+	}
+	// Base 0.6..0.9 from proximity so even a window-edge pair clears a
+	// review bar, with same-day pairs near-certain.
+	score := 0.6 + 0.3*proximity
+	if mentionsTransfer(aDesc) || mentionsTransfer(bDesc) {
+		score += 0.1
+	}
+	if score > 1 {
+		score = 1
+	}
+	return score
+}
+
+// mentionsTransfer reports whether a description carries a common
+// transfer cue. Lower-cased substring match keeps it cheap and is only a
+// confidence nudge, never a gate.
+func mentionsTransfer(desc string) bool {
+	d := strings.ToLower(desc)
+	for _, kw := range []string{"transfer", "xfer", "trf", "to savings", "from savings", "internal"} {
+		if strings.Contains(d, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// DetectDuplicate flags a freshly-ingested line as a suspected duplicate
+// of an earlier line in the SAME account when they share currency and
+// exact signed amount, fall within DefaultDuplicateWindow, and their
+// descriptions are similar enough — the signature of one real
+// transaction arriving via two overlapping feeds. It is a conservative
+// *flag* only (sets duplicate_of); the line is never hidden or deleted,
+// so a false positive can never drop a genuine statement line off the
+// books. Returns the id of the earlier line it was flagged against, or
+// nil when the line is not a duplicate. Idempotent: a line already
+// flagged returns its existing pointer.
+func (m *SmartMatcher) DetectDuplicate(ctx context.Context, tenantID, txnID uuid.UUID) (*uuid.UUID, error) {
+	if tenantID == uuid.Nil || txnID == uuid.Nil {
+		return nil, errors.New("ledger: tenant_id and txn_id required")
+	}
+	var flagged *uuid.UUID
+	err := dbutil.WithTenantTx(ctx, m.store.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var (
+			amount        decimal.Decimal
+			valueDate     time.Time
+			currency      string
+			status        string
+			description   string
+			externalRef   string
+			bankAccountID uuid.UUID
+			dupOf         *uuid.UUID
+		)
+		if err := tx.QueryRow(ctx,
+			`SELECT amount, value_date, currency, status, COALESCE(description,''),
+			        COALESCE(external_ref,''), bank_account_id, duplicate_of
+			   FROM bank_transactions WHERE tenant_id = $1 AND id = $2`,
+			tenantID, txnID,
+		).Scan(&amount, &valueDate, &currency, &status, &description, &externalRef, &bankAccountID, &dupOf); err != nil {
+			return fmt.Errorf("ledger: load bank_transaction: %w", err)
+		}
+		// Already flagged: idempotent return.
+		if dupOf != nil {
+			flagged = dupOf
+			return nil
+		}
+		// Only a live, unreconciled line is flaggable: a line already
+		// matched, voided, or resolved as a transfer leg must not be newly
+		// marked a duplicate (e.g. when the second leg of a just-paired
+		// transfer is revisited later in the same sync batch).
+		if status != BankTxnUnreconciled {
+			return nil
+		}
+
+		// Earlier lines in the same account with identical signed amount and
+		// currency, inside the window, that are not themselves a duplicate or
+		// voided, and carry a different external_ref (a same-ref re-fetch
+		// already dedupes via the unique index — that is not a duplicate, it
+		// is the same row). Oldest first: we flag the newer line at the
+		// canonical earlier one.
+		// Collect candidates fully before scoring: the rows cursor and the
+		// flagging UPDATE share one pooled connection, so the cursor must be
+		// drained and closed before any Exec on the same tx (otherwise pgx
+		// reports the connection busy).
+		type candidate struct {
+			id   uuid.UUID
+			desc string
+		}
+		rows, err := tx.Query(ctx,
+			`SELECT id, COALESCE(description,'')
+			   FROM bank_transactions
+			  WHERE tenant_id = $1
+			    AND bank_account_id = $2
+			    AND id <> $3
+			    AND currency = $4
+			    AND amount = $5
+			    AND status <> $6
+			    AND duplicate_of IS NULL
+			    AND external_ref IS DISTINCT FROM $7
+			    AND value_date BETWEEN $8 AND $9
+			  ORDER BY value_date ASC, created_at ASC, id ASC`,
+			tenantID, bankAccountID, txnID, currency, amount, BankTxnVoided, externalRef,
+			valueDate.Add(-DefaultDuplicateWindow), valueDate.Add(DefaultDuplicateWindow))
+		if err != nil {
+			return fmt.Errorf("ledger: scan duplicate candidates: %w", err)
+		}
+		candidates, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (candidate, error) {
+			var c candidate
+			return c, row.Scan(&c.id, &c.desc)
+		})
+		if err != nil {
+			return fmt.Errorf("ledger: scan duplicate candidates: %w", err)
+		}
+
+		// First candidate (already oldest-first) whose description is
+		// similar enough is the canonical line we flag against.
+		var canonical *uuid.UUID
+		for i := range candidates {
+			if DescriptionSimilarity(description, candidates[i].desc) >= duplicateSimilarityFloor {
+				id := candidates[i].id
+				canonical = &id
+				break
+			}
+		}
+		if canonical == nil {
+			return nil
+		}
+
+		if ct, err := tx.Exec(ctx,
+			`UPDATE bank_transactions SET duplicate_of = $3
+			  WHERE tenant_id = $1 AND id = $2 AND duplicate_of IS NULL`,
+			tenantID, txnID, *canonical); err != nil {
+			return fmt.Errorf("ledger: flag duplicate: %w", err)
+		} else if ct.RowsAffected() == 0 {
+			return nil
+		}
+		flagged = canonical
+		return m.auditTransfer(ctx, tx, tenantID, txnID, "finance.bank_feed.duplicate.flag")
+	})
+	if err != nil {
+		return nil, err
+	}
+	return flagged, nil
+}
+
+// auditTransfer emits an audit entry for a transfer-pair or duplicate
+// detection. targetID is the pair id (transfer) or the flagged line id
+// (duplicate); both are system-actor events from the sync pipeline.
+func (m *SmartMatcher) auditTransfer(ctx context.Context, tx pgx.Tx, tenantID, targetID uuid.UUID, action string) error {
+	if m.store.auditor == nil {
+		return nil
+	}
+	id := targetID
+	return m.store.auditor.LogTx(ctx, tx, audit.Entry{
+		TenantID:    tenantID,
+		ActorKind:   audit.ActorSystem,
+		Action:      action,
+		TargetKType: "finance.bank_transaction",
+		TargetID:    &id,
+	})
+}

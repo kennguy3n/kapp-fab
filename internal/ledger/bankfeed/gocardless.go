@@ -2,7 +2,9 @@ package bankfeed
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +25,11 @@ type GoCardlessConfig struct {
 	// bank). Optional; a real deployment resolves it from a picker.
 	InstitutionID string
 	BaseURL       string // override for tests; defaults to the GC prod host
+	// WebhookSecret is the shared secret the inbound webhook ingress uses
+	// to verify the HMAC-SHA256 of a GoCardless notification body (sourced
+	// from GoCardlessWebhookSecret in platform config). Empty disables
+	// webhook verification: VerifyAndParse then fails closed.
+	WebhookSecret string
 }
 
 // GoCardlessProvider implements Provider against the GoCardless Bank
@@ -195,6 +202,7 @@ type gcTxn struct {
 		Currency string `json:"currency"`
 	} `json:"transactionAmount"`
 	RemittanceInformationUnstructured string `json:"remittanceInformationUnstructured"`
+	RemittanceInformationStructured   string `json:"remittanceInformationStructured"`
 	CreditorName                      string `json:"creditorName"`
 	DebtorName                        string `json:"debtorName"`
 }
@@ -266,6 +274,7 @@ func (p *GoCardlessProvider) FetchTransactions(ctx context.Context, conn *Connec
 			Amount:       amt,
 			Currency:     t.TransactionAmount.Currency,
 			Counterparty: counterparty,
+			Reference:    t.RemittanceInformationStructured,
 		})
 	}
 	return out, maxDate, nil
@@ -281,4 +290,101 @@ func (p *GoCardlessProvider) Disconnect(ctx context.Context, conn *Connection) e
 		return err
 	}
 	return deleteResource(ctx, p.client, p.baseURL()+"/requisitions/"+conn.ExternalID+"/", hdr)
+}
+
+// gcWebhookBody is the subset of a GoCardless webhook we consume.
+// GoCardless delivers in one of two shapes depending on API surface /
+// version: a flat object keyed by the requisition id, or an envelope with
+// an "events" array (each entry naming its action and linking a
+// requisition). We accept both so a payload-shape change does not silently
+// drop notifications. The requisition id is persisted as the connection
+// external_id; a link/refresh event means new transactions can be pulled.
+type gcWebhookBody struct {
+	// Flat shape: { "requisition_id": "...", "event": "linked" }.
+	RequisitionID string `json:"requisition_id"`
+	ID            string `json:"id"` // some shapes nest the id under "id"
+	Event         string `json:"event"`
+	Type          string `json:"type"`
+	// Enveloped shape: { "events": [ { "action": "...", "links": {...} } ] }.
+	Events []gcWebhookEvent `json:"events"`
+}
+
+// gcWebhookEvent is one entry of an enveloped GoCardless webhook. The
+// requisition id arrives either directly on the event or under links.
+type gcWebhookEvent struct {
+	Action        string `json:"action"`
+	Event         string `json:"event"`
+	Type          string `json:"type"`
+	RequisitionID string `json:"requisition_id"`
+	Links         struct {
+		Requisition string `json:"requisition"`
+	} `json:"links"`
+}
+
+// gcSyncTriggers is the set of GoCardless event kinds (compared upper-cased)
+// that mean a requisition has fresh data and the connection should sync.
+var gcSyncTriggers = map[string]struct{}{
+	"LINKED":                 {},
+	"LN":                     {},
+	"UPDATED":                {},
+	"TRANSACTIONS_AVAILABLE": {},
+	"ACCOUNT_REFRESHED":      {},
+}
+
+func gcTriggersSync(kind string) bool {
+	_, ok := gcSyncTriggers[strings.ToUpper(kind)]
+	return ok
+}
+
+// VerifyAndParse implements WebhookVerifier for GoCardless. It verifies the
+// HMAC-SHA256 of the raw body (hex) supplied in the Webhook-Signature or
+// X-Webhook-Signature header against the configured webhook secret, then
+// classifies the event by requisition id. Account/requisition link/refresh
+// events set TriggerSync so the ingress pulls booked transactions; other
+// events parse cleanly with TriggerSync false. Both the flat and the
+// enveloped ("events" array) payload shapes are handled.
+func (p *GoCardlessProvider) VerifyAndParse(payload []byte, headers http.Header) (WebhookEvent, error) {
+	sig := firstHeader(headers, "Webhook-Signature", "X-Webhook-Signature", "GoCardless-Signature")
+	if err := verifyHMACSignature(p.cfg.WebhookSecret, payload, sig); err != nil {
+		return WebhookEvent{}, err
+	}
+	var body gcWebhookBody
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return WebhookEvent{}, fmt.Errorf("bankfeed: gocardless webhook decode: %w", err)
+	}
+
+	// Enveloped shape: return the first sync-worthy requisition; if none
+	// warrant a pull, ack against the first requisition id we saw so the
+	// provider stops retrying.
+	if len(body.Events) > 0 {
+		var firstID string
+		for i := range body.Events {
+			e := body.Events[i]
+			id := e.RequisitionID
+			if id == "" {
+				id = e.Links.Requisition
+			}
+			kind := firstNonEmpty(e.Action, e.Event, e.Type)
+			if firstID == "" && id != "" {
+				firstID = id
+			}
+			if id != "" && gcTriggersSync(kind) {
+				return WebhookEvent{
+					ExternalID:  id,
+					Kind:        strings.ToLower("requisition." + kind),
+					TriggerSync: true,
+				}, nil
+			}
+		}
+		return WebhookEvent{ExternalID: firstID, Kind: "requisition.event"}, nil
+	}
+
+	// Flat shape.
+	extID := firstNonEmpty(body.RequisitionID, body.ID)
+	kind := firstNonEmpty(body.Event, body.Type)
+	return WebhookEvent{
+		ExternalID:  extID,
+		Kind:        strings.ToLower("requisition." + kind),
+		TriggerSync: gcTriggersSync(kind),
+	}, nil
 }

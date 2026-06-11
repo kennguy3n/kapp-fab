@@ -97,6 +97,15 @@ type fakeMatcher struct {
 	byTxn    map[uuid.UUID][]ledger.Suggestion
 	accepted []uuid.UUID
 	queried  []uuid.UUID // txn ids SuggestMatches was called with, in order
+	// dupOf maps a txn id to the earlier line DetectDuplicate should
+	// report it as duplicating (nil/absent = not a duplicate).
+	dupOf map[uuid.UUID]uuid.UUID
+	// transferFor maps a txn id to the pair DetectTransfer should report
+	// (absent = no transfer). Lets a test drive the resolve-before-suggest
+	// pipeline without a database.
+	transferFor map[uuid.UUID]*ledger.TransferPair
+	dupQueried  []uuid.UUID
+	xferQueried []uuid.UUID
 }
 
 func (m *fakeMatcher) SuggestMatches(_ context.Context, _, txnID uuid.UUID, _ ledger.MatchOptions) ([]ledger.Suggestion, error) {
@@ -106,6 +115,17 @@ func (m *fakeMatcher) SuggestMatches(_ context.Context, _, txnID uuid.UUID, _ le
 func (m *fakeMatcher) AcceptSuggestion(_ context.Context, _, sugID, _ uuid.UUID) (*ledger.Suggestion, error) {
 	m.accepted = append(m.accepted, sugID)
 	return &ledger.Suggestion{ID: sugID, Status: ledger.SuggestionAccepted}, nil
+}
+func (m *fakeMatcher) DetectDuplicate(_ context.Context, _, txnID uuid.UUID) (*uuid.UUID, error) {
+	m.dupQueried = append(m.dupQueried, txnID)
+	if id, ok := m.dupOf[txnID]; ok {
+		return &id, nil
+	}
+	return nil, nil
+}
+func (m *fakeMatcher) DetectTransfer(_ context.Context, _, txnID uuid.UUID) (*ledger.TransferPair, error) {
+	m.xferQueried = append(m.xferQueried, txnID)
+	return m.transferFor[txnID], nil
 }
 
 type fakeRules struct{ rules []Rule }
@@ -408,6 +428,82 @@ func (s *primingLowConfStore) SyncBankTransactions(ctx context.Context, tenantID
 		s.matcher.byTxn[inserted[i].ID] = []ledger.Suggestion{{ID: uuid.New(), Confidence: 0.6}}
 	}
 	return inserted, nil
+}
+
+// resolverPrimingStore primes a high-confidence suggestion for every
+// inserted line and, by description prefix, registers a duplicate or a
+// transfer outcome on the matcher so the resolve-before-suggest pipeline
+// can be exercised end-to-end without a database.
+type resolverPrimingStore struct {
+	inner   *fakeStore
+	matcher *fakeMatcher
+}
+
+func (s *resolverPrimingStore) SyncBankTransactions(ctx context.Context, tenantID, acct uuid.UUID, lines []ledger.BankTransaction) ([]ledger.BankTransaction, error) {
+	inserted, err := s.inner.SyncBankTransactions(ctx, tenantID, acct, lines)
+	if err != nil {
+		return nil, err
+	}
+	for i := range inserted {
+		id := inserted[i].ID
+		s.matcher.byTxn[id] = []ledger.Suggestion{{ID: uuid.New(), Confidence: 0.95, Status: ledger.SuggestionSuggested}}
+		switch {
+		case strings.HasPrefix(inserted[i].Description, "DUP"):
+			s.matcher.dupOf[id] = uuid.New()
+		case strings.HasPrefix(inserted[i].Description, "XFER"):
+			s.matcher.transferFor[id] = &ledger.TransferPair{ID: uuid.New(), CreditTxnID: id}
+		}
+	}
+	return inserted, nil
+}
+
+// TestSyncOneResolvesDuplicatesAndTransfersBeforeSuggesting proves the
+// pipeline ordering: a line flagged a duplicate or paired as a transfer is
+// counted and removed from suggestion generation, while a normal line still
+// flows to SuggestMatches.
+func TestSyncOneResolvesDuplicatesAndTransfersBeforeSuggesting(t *testing.T) {
+	tn := uuid.New()
+	acct := uuid.New()
+	conn := &Connection{ID: uuid.New(), TenantID: tn, BankAccountID: acct, Provider: "fake"}
+	prov := &fakeProvider{name: "fake", cursor: "c", raw: []RawTransaction{
+		rawTxn("d1", "DUP duplicate line", "-12.50", time.Now()),
+		rawTxn("x1", "XFER to savings", "-500", time.Now()),
+		rawTxn("n1", "Normal coffee", "-4.50", time.Now()),
+	}}
+	matcher := &fakeMatcher{
+		byTxn:       map[uuid.UUID][]ledger.Suggestion{},
+		dupOf:       map[uuid.UUID]uuid.UUID{},
+		transferFor: map[uuid.UUID]*ledger.TransferPair{},
+	}
+	store := &resolverPrimingStore{inner: &fakeStore{}, matcher: matcher}
+	h := newSyncHandlerForTest(&fakeConns{}, &fakeRules{}, NewRegistry(prov), store, matcher)
+
+	res, err := h.SyncOne(context.Background(), tn, conn)
+	if err != nil {
+		t.Fatalf("SyncOne: %v", err)
+	}
+	if res.Duplicates != 1 {
+		t.Fatalf("Duplicates = %d; want 1", res.Duplicates)
+	}
+	if res.Transfers != 1 {
+		t.Fatalf("Transfers = %d; want 1", res.Transfers)
+	}
+	// Exactly the normal line reaches SuggestMatches; the duplicate and
+	// transfer legs are resolved earlier and skipped.
+	if len(matcher.queried) != 1 {
+		t.Fatalf("SuggestMatches called %d times; want 1 (only the normal line)", len(matcher.queried))
+	}
+	if res.Suggested != 1 {
+		t.Fatalf("Suggested = %d; want 1", res.Suggested)
+	}
+	// Every line is probed for duplicates; transfer detection runs only
+	// after the duplicate check clears (so the dup line is not probed).
+	if len(matcher.dupQueried) != 3 {
+		t.Fatalf("DetectDuplicate called %d times; want 3 (all lines)", len(matcher.dupQueried))
+	}
+	if len(matcher.xferQueried) != 2 {
+		t.Fatalf("DetectTransfer called %d times; want 2 (non-duplicate lines)", len(matcher.xferQueried))
+	}
 }
 
 func TestSyncOneProviderErrorPropagates(t *testing.T) {
