@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -320,7 +321,9 @@ func toSyncResultResponse(res *bankfeed.SyncResult) syncResultResponse {
 // the raw request body (Content-Type text/csv); ?currency= sets the
 // default currency for rows that omit one. A CSV connection for the
 // account is created on demand so re-uploads dedupe against the same row
-// and the upload is fully idempotent.
+// and the upload is fully idempotent. A body larger than
+// maxCSVUploadBytes is rejected with 413 rather than ingesting a
+// truncated prefix.
 func (h *bankfeedHandlers) uploadCSV(w http.ResponseWriter, r *http.Request) {
 	t := platform.TenantFromContext(r.Context())
 	if t == nil {
@@ -333,7 +336,23 @@ func (h *bankfeedHandlers) uploadCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	currency := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("currency")))
 
-	raw, err := h.csv.Ingest(io.LimitReader(r.Body, maxCSVUploadBytes), currency)
+	// Read at most one byte past the cap so an oversized body is rejected
+	// outright (413) instead of being silently truncated at the limit and
+	// ingesting only a prefix of the statement. Memory stays bounded to
+	// maxCSVUploadBytes+1 — the same ceiling the previous LimitReader
+	// enforced — because we stop reading as soon as the overflow byte
+	// arrives.
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxCSVUploadBytes+1))
+	if err != nil {
+		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		return
+	}
+	if int64(len(body)) > maxCSVUploadBytes {
+		http.Error(w, "CSV upload exceeds maximum size", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	raw, err := h.csv.Ingest(bytes.NewReader(body), currency)
 	if err != nil {
 		// Parse errors are the caller's bad input → 422.
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
