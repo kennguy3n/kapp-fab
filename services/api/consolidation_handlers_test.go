@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,33 @@ import (
 
 	"github.com/shopspring/decimal"
 )
+
+// TestCreateGroupRequestDecodesCTAAccount pins that the create-group
+// request exposes cta_account_code, so the per-group CTA override is
+// reachable over the API rather than always falling back to the
+// default. An absent field decodes to empty (NULL → default).
+func TestCreateGroupRequestDecodesCTAAccount(t *testing.T) {
+	t.Parallel()
+	t.Run("explicit_override", func(t *testing.T) {
+		var req createConsolidationGroupRequest
+		body := `{"name":"Group","presentation_currency":"USD","cta_account_code":"3905"}`
+		if err := json.Unmarshal([]byte(body), &req); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if req.CTAAccountCode != "3905" {
+			t.Fatalf("cta_account_code: got %q, want 3905", req.CTAAccountCode)
+		}
+	})
+	t.Run("absent_is_empty", func(t *testing.T) {
+		var req createConsolidationGroupRequest
+		if err := json.Unmarshal([]byte(`{"name":"Group","presentation_currency":"USD"}`), &req); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if req.CTAAccountCode != "" {
+			t.Fatalf("cta_account_code: got %q, want empty", req.CTAAccountCode)
+		}
+	})
+}
 
 // TestParseAsOfDecode covers the consolidation run-handler body
 // parsing path. Pinned in response to two Devin Review findings:

@@ -29,6 +29,10 @@ type createConsolidationGroupRequest struct {
 	PresentationCurrency string                   `json:"presentation_currency"`
 	MemberTenantIDs      []uuid.UUID              `json:"member_tenant_ids"`
 	EliminationPairs     []ledger.EliminationPair `json:"elimination_pairs"`
+	// CTAAccountCode optionally overrides the equity account that
+	// currency-translation differences are parked in. Empty stores
+	// NULL and the consolidation falls back to the default CTA code.
+	CTAAccountCode string `json:"cta_account_code"`
 }
 
 // createGroup persists a new consolidation_group.
@@ -43,6 +47,7 @@ func (h *consolidationHandlers) createGroup(w http.ResponseWriter, r *http.Reque
 		PresentationCurrency: req.PresentationCurrency,
 		MemberTenantIDs:      req.MemberTenantIDs,
 		EliminationPairs:     req.EliminationPairs,
+		CTAAccountCode:       req.CTAAccountCode,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

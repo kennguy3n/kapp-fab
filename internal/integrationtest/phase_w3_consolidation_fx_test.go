@@ -79,9 +79,17 @@ func TestWorkstream3ConsolidatedStatements(t *testing.T) {
 		Name:                 "W3 Group",
 		PresentationCurrency: "USD",
 		MemberTenantIDs:      []uuid.UUID{parent.ID, sub.ID},
+		CTAAccountCode:       "3905",
 	})
 	if err != nil {
 		t.Fatalf("CreateGroup: %v", err)
+	}
+	// The per-group CTA override must persist end-to-end, not silently
+	// fall back to the package default.
+	if got, err := store.GetGroup(ctx, g.ID); err != nil {
+		t.Fatalf("GetGroup: %v", err)
+	} else if got.CTAAccountCode != "3905" {
+		t.Fatalf("cta_account_code = %q; want 3905", got.CTAAccountCode)
 	}
 
 	// Average rate 1.1 (< closing 1.2) so the subsidiary's revenue
