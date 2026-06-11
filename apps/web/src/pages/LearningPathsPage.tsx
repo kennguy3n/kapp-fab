@@ -188,9 +188,15 @@ export function LearningPathsPage() {
                   <Button
                     variant="secondary"
                     onClick={() => enroll.mutate(p.id)}
-                    disabled={enroll.isPending}
+                    // Only disable the row being enrolled. enroll.variables
+                    // holds the path id of the in-flight mutation, so a single
+                    // shared mutation instance doesn't disable every row's
+                    // button at once.
+                    disabled={enroll.isPending && enroll.variables === p.id}
                   >
-                    Enroll
+                    {enroll.isPending && enroll.variables === p.id
+                      ? "Enrolling…"
+                      : "Enroll"}
                   </Button>
                 </TableCell>
               </TableRow>

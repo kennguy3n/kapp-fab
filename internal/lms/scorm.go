@@ -104,9 +104,18 @@ func MapCMIToProgress(cmi CMIData) (ProgressMapping, error) {
 		d := decimal.NewFromFloat(*cmi.ScoreRaw)
 		out.Score = &d
 	} else if cmi.ScoreScaled != nil {
-		// Scaled is -1..1; express as a 0..100 raw-equivalent so the
-		// single numeric score column is comparable across versions.
-		d := decimal.NewFromFloat(*cmi.ScoreScaled * 100)
+		// SCORM 2004 cmi.score.scaled is normalized to [-1,1]; express it
+		// as a percentage so the single numeric score column is comparable
+		// across versions. Clamp to [0,100]: the lesson_progress score is a
+		// percentage (the lms.lesson KType defines score with min 0), and a
+		// rare negative scaled score has no meaningful sub-zero percentage.
+		pct := *cmi.ScoreScaled * 100
+		if pct < 0 {
+			pct = 0
+		} else if pct > 100 {
+			pct = 100
+		}
+		d := decimal.NewFromFloat(pct)
 		out.Score = &d
 	}
 
@@ -594,6 +603,13 @@ func (s *ScormStore) CommitRuntime(ctx context.Context, tenantID, enrollmentID, 
 			        started_at         = COALESCE(lesson_progress.started_at, EXCLUDED.started_at),
 			        completed_at       = COALESCE(lesson_progress.completed_at, EXCLUDED.completed_at),
 			        updated_at         = EXCLUDED.updated_at,
+			        -- attempts is deliberately NOT incremented here (unlike
+			        -- xapi.upsertProgressTx / Store.UpsertProgress, which bump
+			        -- it per statement/upsert). A SCORM SCO calls LMSCommit
+			        -- repeatedly as an auto-save *within a single attempt*, so
+			        -- incrementing per commit would inflate the counter into a
+			        -- commit count rather than an attempt count. A new attempt
+			        -- is the SCO re-launch (LMSInitialize), tracked separately.
 			        time_spent_seconds = lesson_progress.time_spent_seconds + $8,
 			        metadata           = lesson_progress.metadata || EXCLUDED.metadata
 			 RETURNING tenant_id, enrollment_id, lesson_id, status, score,

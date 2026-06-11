@@ -717,8 +717,10 @@ export class ApiClient {
     return this.request(`/lms/badges/awards`);
   }
 
-  listDiscussions(courseId?: string): Promise<{ threads: DiscussionThread[] }> {
-    const q = courseId ? `?course_id=${encodeURIComponent(courseId)}` : "";
+  // course_id is required: the backend listThreads handler returns 400
+  // without it (discussions are always scoped to a course).
+  listDiscussions(courseId: string): Promise<{ threads: DiscussionThread[] }> {
+    const q = `?course_id=${encodeURIComponent(courseId)}`;
     return this.request(`/lms/discussions${q}`);
   }
 

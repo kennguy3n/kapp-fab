@@ -107,6 +107,18 @@ func TestMapCMIToProgress(t *testing.T) {
 			t.Fatalf("want 90, got %v", got.Score)
 		}
 	})
+	t.Run("2004 negative scaled score clamps to 0", func(t *testing.T) {
+		got, _ := MapCMIToProgress(CMIData{Version: ContentTypeScorm2004, CompletionStatus: "incomplete", ScoreScaled: f64(-0.5)})
+		if got.Score == nil || !got.Score.Equal(decimal.NewFromInt(0)) {
+			t.Fatalf("want 0 (clamped), got %v", got.Score)
+		}
+	})
+	t.Run("2004 scaled score above 1 clamps to 100", func(t *testing.T) {
+		got, _ := MapCMIToProgress(CMIData{Version: ContentTypeScorm2004, CompletionStatus: "completed", ScoreScaled: f64(1.5)})
+		if got.Score == nil || !got.Score.Equal(decimal.NewFromInt(100)) {
+			t.Fatalf("want 100 (clamped), got %v", got.Score)
+		}
+	})
 	t.Run("bad session time errors", func(t *testing.T) {
 		_, err := MapCMIToProgress(CMIData{Version: ContentTypeScorm12, LessonStatus: "passed", SessionTime: "bogus"})
 		if err == nil {
