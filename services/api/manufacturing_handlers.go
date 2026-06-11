@@ -265,6 +265,22 @@ type workOrderActionRequest struct {
 	ComponentSerials map[uuid.UUID][]string  `json:"component_serials,omitempty"`
 }
 
+// completeInput maps the decoded request onto the store input. It is a
+// single chokepoint for the lot/serial passthrough: the handler must
+// forward every tracking field, otherwise the store's Phase-1
+// validateTrackedMove sees nil/empty serials+batches and rejects the
+// completion of any tracked item with ErrSerialRequired/ErrLotRequired.
+// Kept as a pure method so the forwarding is unit-testable without a DB.
+func (req workOrderActionRequest) completeInput() manufacturing.CompleteWorkOrderInput {
+	return manufacturing.CompleteWorkOrderInput{
+		ActualQty:        req.ActualQty,
+		FinishedBatchID:  req.FinishedBatchID,
+		FinishedSerials:  req.FinishedSerials,
+		ComponentBatches: req.ComponentBatches,
+		ComponentSerials: req.ComponentSerials,
+	}
+}
+
 func (h *manufacturingHandlers) releaseWorkOrder(w http.ResponseWriter, r *http.Request) {
 	t := platform.TenantFromContext(r.Context())
 	if t == nil {
@@ -335,9 +351,7 @@ func (h *manufacturingHandlers) completeWorkOrder(w http.ResponseWriter, r *http
 			return
 		}
 	}
-	wo, err := h.store.CompleteWorkOrder(r.Context(), t.ID, id, actor, manufacturing.CompleteWorkOrderInput{
-		ActualQty: req.ActualQty,
-	})
+	wo, err := h.store.CompleteWorkOrder(r.Context(), t.ID, id, actor, req.completeInput())
 	if err != nil {
 		writeManufacturingError(w, err)
 		return
