@@ -219,6 +219,7 @@ type apiDeps struct {
 	hrh            *hrHandlers
 	lmsh           *lmsHandlers
 	rch            *recruitmentHandlers
+	bfh            *bankfeedHandlers
 	inboundHandler *helpdeskInboundHandlers
 	mph            *marketplaceHandlers
 

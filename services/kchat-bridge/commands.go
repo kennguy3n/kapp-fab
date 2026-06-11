@@ -21,6 +21,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/inventory"
 	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
+	"github.com/kennguy3n/kapp-fab/internal/ledger/bankfeed"
 	"github.com/kennguy3n/kapp-fab/internal/lms"
 	"github.com/kennguy3n/kapp-fab/internal/manufacturing"
 	"github.com/kennguy3n/kapp-fab/internal/projects"
@@ -92,6 +93,16 @@ type CommandDispatcher struct {
 	// crashing, so the bridge still runs on plans that don't
 	// include the finance feature.
 	budgets *finance.BudgetStore
+	// Session 15 — bank-feed / smart-reconciliation. All three are
+	// optional; when nil the `/bankfeed` command answers with an
+	// informational message rather than crashing, so the bridge still
+	// runs on plans without the bank-feed feature. bankConns lists
+	// connections (credential-free view), bankMatcher drives the match
+	// suggestion queue + accept/reject, and bankSync triggers an
+	// on-demand pull for a single connection.
+	bankConns   *bankfeed.ConnectionStore
+	bankMatcher *ledger.SmartMatcher
+	bankSync    *bankfeed.SyncHandler
 	// now returns the dispatcher's notion of the current time. It is
 	// injectable so command handlers that depend on "today" (e.g. the
 	// MTD window used by /budget variance) can be exercised against
@@ -207,6 +218,8 @@ func (d *CommandDispatcher) Dispatch(ctx context.Context, req CommandRequest) (C
 		return d.bomList(ctx, req)
 	case "recruit":
 		return d.recruit(ctx, req)
+	case "bankfeed", "bank-feed":
+		return d.bankFeed(ctx, req)
 	case "certificate":
 		return d.issueCertificate(ctx, req)
 	case "learn":
@@ -1018,6 +1031,143 @@ func (d *CommandDispatcher) recruit(ctx context.Context, req CommandRequest) (Co
 
 	default:
 		return CommandResponse{Text: "Usage: /recruit list | applications <job_opening_id> | advance <application_id> <status> | schedule <application_id> <interviewer_id> <datetime>"}, nil
+	}
+}
+
+// bankFeed implements the Session 15 `/bankfeed` command family:
+//
+//	/bankfeed connections [bank_account_id]   — active feeds (all, or one account)
+//	/bankfeed suggestions <bank_account_id>   — open match queue for an account
+//	/bankfeed accept <suggestion_id>          — reconcile a suggested line
+//	/bankfeed reject <suggestion_id>          — dismiss a suggestion
+//	/bankfeed sync <connection_id>            — pull a connection on demand
+//
+// Connections are rendered credential-free (provider + status + last
+// sync only); tokens are never surfaced to chat. Each sub-command
+// surfaces store errors inline (Text only) so a bad argument is a
+// friendly chat reply rather than a 500.
+func (d *CommandDispatcher) bankFeed(ctx context.Context, req CommandRequest) (CommandResponse, error) {
+	if d.bankConns == nil || d.bankMatcher == nil || d.bankSync == nil {
+		return CommandResponse{Text: "bank feeds not configured"}, nil
+	}
+	if req.TenantID == uuid.Nil {
+		return CommandResponse{Text: "tenant_id required"}, nil
+	}
+	sub := "connections"
+	rest := req.Args
+	if len(req.Args) > 0 {
+		sub = strings.ToLower(req.Args[0])
+		rest = req.Args[1:]
+	}
+	switch sub {
+	case "connections", "conns", "list":
+		var (
+			conns []bankfeed.Connection
+			err   error
+		)
+		if len(rest) > 0 {
+			acctID, perr := uuid.Parse(rest[0])
+			if perr != nil {
+				return CommandResponse{Text: fmt.Sprintf("invalid bank_account_id: %v", perr)}, nil
+			}
+			conns, err = d.bankConns.ListConnectionsByAccount(ctx, req.TenantID, acctID)
+		} else {
+			conns, err = d.bankConns.ListActiveConnections(ctx, req.TenantID)
+		}
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/bankfeed connections failed: %v", err)}, nil
+		}
+		if len(conns) == 0 {
+			return CommandResponse{Text: "No bank-feed connections"}, nil
+		}
+		lines := make([]string, 0, len(conns))
+		for i := range conns {
+			c := &conns[i]
+			last := "never"
+			if c.LastSyncAt != nil {
+				last = c.LastSyncAt.UTC().Format(time.RFC3339)
+			}
+			line := fmt.Sprintf("%s | acct=%s | %s | %s | last=%s",
+				c.ID, c.BankAccountID, c.Provider, c.Status, last)
+			if c.LastError != "" {
+				line += " | err=" + c.LastError
+			}
+			lines = append(lines, line)
+		}
+		return CommandResponse{Text: "Bank-feed connections\n" + strings.Join(lines, "\n")}, nil
+
+	case "suggestions", "suggest":
+		if len(rest) < 1 {
+			return CommandResponse{Text: "Usage: /bankfeed suggestions <bank_account_id>"}, nil
+		}
+		acctID, err := uuid.Parse(rest[0])
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("invalid bank_account_id: %v", err)}, nil
+		}
+		sugs, err := d.bankMatcher.ListSuggestions(ctx, req.TenantID, acctID)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/bankfeed suggestions failed: %v", err)}, nil
+		}
+		if len(sugs) == 0 {
+			return CommandResponse{Text: "No open match suggestions"}, nil
+		}
+		lines := make([]string, 0, len(sugs))
+		for i := range sugs {
+			s := &sugs[i]
+			lines = append(lines, fmt.Sprintf("%s | txn=%s | je=%s | conf=%.2f | %s",
+				s.ID, s.TransactionID, s.JournalEntryID, s.Confidence, s.MatchReason))
+		}
+		return CommandResponse{Text: "Match suggestions\n" + strings.Join(lines, "\n")}, nil
+
+	case "accept":
+		if len(rest) < 1 {
+			return CommandResponse{Text: "Usage: /bankfeed accept <suggestion_id>"}, nil
+		}
+		sugID, err := uuid.Parse(rest[0])
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("invalid suggestion_id: %v", err)}, nil
+		}
+		out, err := d.bankMatcher.AcceptSuggestion(ctx, req.TenantID, sugID, req.UserID)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/bankfeed accept failed: %v", err)}, nil
+		}
+		return CommandResponse{Text: fmt.Sprintf("Accepted suggestion %s (transaction %s reconciled)", out.ID, out.TransactionID)}, nil
+
+	case "reject":
+		if len(rest) < 1 {
+			return CommandResponse{Text: "Usage: /bankfeed reject <suggestion_id>"}, nil
+		}
+		sugID, err := uuid.Parse(rest[0])
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("invalid suggestion_id: %v", err)}, nil
+		}
+		if err := d.bankMatcher.RejectSuggestion(ctx, req.TenantID, sugID, req.UserID); err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/bankfeed reject failed: %v", err)}, nil
+		}
+		return CommandResponse{Text: fmt.Sprintf("Rejected suggestion %s", sugID)}, nil
+
+	case "sync":
+		if len(rest) < 1 {
+			return CommandResponse{Text: "Usage: /bankfeed sync <connection_id>"}, nil
+		}
+		connID, err := uuid.Parse(rest[0])
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("invalid connection_id: %v", err)}, nil
+		}
+		conn, err := d.bankConns.GetConnection(ctx, req.TenantID, connID)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/bankfeed sync failed: %v", err)}, nil
+		}
+		res, err := d.bankSync.SyncOne(ctx, req.TenantID, conn)
+		if err != nil {
+			return CommandResponse{Text: fmt.Sprintf("/bankfeed sync failed: %v", err)}, nil
+		}
+		return CommandResponse{Text: fmt.Sprintf(
+			"Synced %s: %d fetched, %d new, %d suggested, %d auto-matched",
+			connID, res.Fetched, res.Inserted, res.Suggested, res.AutoMatched)}, nil
+
+	default:
+		return CommandResponse{Text: "Usage: /bankfeed connections [bank_account_id] | suggestions <bank_account_id> | accept <suggestion_id> | reject <suggestion_id> | sync <connection_id>"}, nil
 	}
 }
 

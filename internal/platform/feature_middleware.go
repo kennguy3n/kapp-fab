@@ -89,6 +89,22 @@ func FeatureFromPath(p string) string {
 			return tenant.FeatureRecruitment
 		}
 	}
+	// /api/v1/finance/bank-feeds/* — the Session 15 bank-feed + smart-
+	// reconciliation surface rides its own feature key so a tenant can
+	// run core finance (ledger, invoicing, reports) without the live
+	// bank-feed/connection machinery, and so it can be dark-launched
+	// independently. Matched before the generic "finance" → FeatureFinance
+	// case below; everything else under /finance stays on FeatureFinance.
+	if domain == "finance" && slash != len(rest) {
+		sub := rest[slash+1:]
+		subSlash := strings.IndexByte(sub, '/')
+		if subSlash == -1 {
+			subSlash = len(sub)
+		}
+		if sub[:subSlash] == "bank-feeds" {
+			return tenant.FeatureBankFeed
+		}
+	}
 	switch domain {
 	case "finance":
 		return tenant.FeatureFinance

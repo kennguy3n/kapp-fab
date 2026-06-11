@@ -234,6 +234,34 @@ func (h *SyncHandler) SyncOne(ctx context.Context, tenantID uuid.UUID, conn *Con
 	if err != nil {
 		return nil, fmt.Errorf("bankfeed: fetch transactions: %w", err)
 	}
+	return h.ingestDelta(ctx, tenantID, conn, delta)
+}
+
+// IngestRaw runs the ingest → categorize → match pipeline against a
+// caller-supplied batch of raw lines instead of a provider fetch. It is
+// the entry point for push-based providers — specifically the CSV
+// statement upload route, where the lines arrive in the request body via
+// CSVProvider.Ingest rather than from a polled API. Dedup, rule
+// evaluation, suggestion generation, auto-accept and the cursor/
+// last_synced_at advance all reuse the exact same path SyncOne drives,
+// so an uploaded statement is reconciled identically to a fetched one,
+// and re-uploading the same file is an idempotent no-op (each line
+// dedupes via its content-hash external ref against the unique index).
+// The CSV provider carries no incremental cursor, so the delta is
+// added-only with an empty cursor.
+func (h *SyncHandler) IngestRaw(ctx context.Context, tenantID uuid.UUID, conn *Connection, raw []RawTransaction) (*SyncResult, error) {
+	return h.ingestDelta(ctx, tenantID, conn, FetchDelta{Added: raw})
+}
+
+// ingestDelta ingests an already-resolved delta: it dedups and inserts
+// the added lines, applies the provider's modified/removed mutations
+// (when the kill-switch is on and the store supports them), runs the
+// tenant rules + smart matcher over every fresh / re-opened line, and
+// finally advances the connection cursor + last_synced_at. It is shared
+// by SyncOne (provider fetch) and IngestRaw (CSV upload) so both paths
+// stay byte-for-byte identical in their ingest, audit and matching
+// behaviour.
+func (h *SyncHandler) ingestDelta(ctx context.Context, tenantID uuid.UUID, conn *Connection, delta FetchDelta) (*SyncResult, error) {
 	cursor := delta.Cursor
 	res := &SyncResult{Fetched: len(delta.Added), Cursor: cursor}
 

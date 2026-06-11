@@ -1460,6 +1460,19 @@ const (
 	defaultDataRetentionIntervalSeconds = 86400
 )
 
+// defaultBankFeedSyncActionType / defaultBankFeedSyncIntervalSeconds
+// drive the hourly bank-feed sync. Each tick pulls the incremental
+// delta from every active provider connection, ingests + auto-
+// categorizes + match-scores the new lines, and advances the cursor.
+// Mirrors bankfeed.ActionTypeBankFeedSync; duplicated here for the same
+// package-cycle reason as the SLA / reorder / FX constants above (the
+// tenant package must not import the ledger subtree). Only seeded for
+// plans that include the bank-feed feature.
+const (
+	defaultBankFeedSyncActionType      = "bankfeed_sync"
+	defaultBankFeedSyncIntervalSeconds = 3600
+)
+
 // defaultReportScheduleActionType / defaultReportScheduleIntervalSeconds
 // drive the per-tenant report dispatcher that iterates report_schedules
 // and emails the rendered output to the recipient list. Mirrors
@@ -1527,6 +1540,12 @@ func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 			actionType      string
 			intervalSeconds int
 		}{defaultInsightsCacheRefreshActionType, defaultInsightsCacheRefreshIntervalSeconds})
+	}
+	if DefaultFeaturesForPlan(plan)[FeatureBankFeed] {
+		defaults = append(defaults, struct {
+			actionType      string
+			intervalSeconds int
+		}{defaultBankFeedSyncActionType, defaultBankFeedSyncIntervalSeconds})
 	}
 	for _, d := range defaults {
 		if _, err := tx.Exec(ctx,
