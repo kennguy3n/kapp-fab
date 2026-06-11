@@ -2,6 +2,7 @@ package bankfeed
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -17,7 +18,10 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 )
 
-// Condition types, mirroring the bank_reconciliation_rules CHECK.
+// Condition types, mirroring the bank_reconciliation_rules CHECK. These
+// are the legacy single-condition kinds; a rule carrying a non-empty
+// Conditions slice uses the compound model below instead and leaves
+// ConditionType empty.
 const (
 	CondDescriptionContains = "description_contains"
 	CondDescriptionRegex    = "description_regex"
@@ -25,24 +29,84 @@ const (
 	CondCounterparty        = "counterparty"
 )
 
+// Condition fields for the compound model — the transaction attribute a
+// condition tests. Payee maps to Counterparty (falling back to
+// Description when the provider does not expose a counterparty); Reference
+// maps to the structured payment reference (falling back to Description).
+const (
+	FieldPayee       = "payee"
+	FieldReference   = "reference"
+	FieldDescription = "description"
+	FieldAmount      = "amount"
+)
+
+// Condition operators for the compound model. The string operators
+// (contains / equals / regex) apply to payee / reference / description;
+// the numeric operators (eq / gt / gte / lt / lte / range) apply to
+// amount. "regex" is a full RE2 pattern (Go regexp) — safe and linear, no
+// catastrophic backtracking — kept "lite" by being matched against a
+// single field value rather than the whole row.
+const (
+	OpContains = "contains"
+	OpEquals   = "equals"
+	OpRegex    = "regex"
+	OpEq       = "eq"
+	OpGt       = "gt"
+	OpGte      = "gte"
+	OpLt       = "lt"
+	OpLte      = "lte"
+	OpRange    = "range"
+)
+
+// Condition-combination modes for a compound rule.
+const (
+	MatchAll = "all"
+	MatchAny = "any"
+)
+
+// RuleCondition is one structured predicate in a compound rule: a Field
+// tested by an Op against a Value. Amount conditions parse Value as a
+// decimal (or, for OpRange, a "min:max" interval); string conditions treat
+// Value as the literal / pattern. The shape is persisted as a JSONB array
+// element on bank_reconciliation_rules.conditions, so the json tags are
+// part of the stored contract.
+type RuleCondition struct {
+	Field string `json:"field"`
+	Op    string `json:"op"`
+	Value string `json:"value"`
+}
+
 // Rule is one tenant-configurable auto-categorization rule. Rules are
 // evaluated in ascending priority order against each freshly-synced
 // transaction; the first match decides the target account / cost center
 // and whether the categorization auto-approves (skips the suggestion
 // queue). A nil BankAccountID applies the rule tenant-wide.
 type Rule struct {
-	ID                uuid.UUID
-	TenantID          uuid.UUID
-	Priority          int
-	ConditionType     string
-	ConditionValue    string
+	ID             uuid.UUID
+	TenantID       uuid.UUID
+	Priority       int
+	ConditionType  string
+	ConditionValue string
+	// Conditions is the compound, multi-field predicate set (Xero "bank
+	// rule" parity). When non-empty it supersedes the legacy
+	// ConditionType/ConditionValue pair; ConditionMatch decides whether all
+	// or any must hold. Empty means the rule uses the legacy single
+	// condition.
+	Conditions []RuleCondition
+	// ConditionMatch is MatchAll (default) or MatchAny — how Conditions
+	// combine. Ignored on the legacy single-condition path.
+	ConditionMatch    string
 	TargetAccountCode string
 	TargetCostCenter  string
-	AutoApprove       bool
-	BankAccountID     *uuid.UUID
-	Enabled           bool
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	// TargetTaxCode is the tax/VAT code the rule allocates alongside the
+	// account + cost-center. Advisory rule configuration consumed by the
+	// (separate) auto-posting path, not by the reconciliation matcher.
+	TargetTaxCode string
+	AutoApprove   bool
+	BankAccountID *uuid.UUID
+	Enabled       bool
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // RuleMatch is the outcome of evaluating the rule set against a
@@ -51,39 +115,109 @@ type RuleMatch struct {
 	Rule              Rule
 	TargetAccountCode string
 	TargetCostCenter  string
+	TargetTaxCode     string
 	AutoApprove       bool
 }
 
 // Validate checks a rule's structural correctness before persistence. A
 // regex condition is compiled here so an invalid pattern is rejected at
-// write time rather than silently never-matching at sync time.
+// write time rather than silently never-matching at sync time. A rule
+// carrying a non-empty Conditions slice is validated as a compound rule
+// (the legacy ConditionType is ignored and must be empty); otherwise the
+// legacy single-condition path is validated.
 func (r Rule) Validate() error {
-	switch r.ConditionType {
-	case CondDescriptionContains, CondCounterparty:
-		if strings.TrimSpace(r.ConditionValue) == "" {
-			return fmt.Errorf("bankfeed: %s rule requires a non-empty value", r.ConditionType)
+	if len(r.Conditions) > 0 {
+		if r.ConditionType != "" {
+			return errors.New("bankfeed: a compound rule must not also set condition_type")
 		}
-	case CondDescriptionRegex:
-		if _, err := regexp.Compile(r.ConditionValue); err != nil {
-			return fmt.Errorf("bankfeed: invalid regex %q: %w", r.ConditionValue, err)
-		}
-	case CondAmountRange:
-		if _, _, err := parseAmountRange(r.ConditionValue); err != nil {
+		if err := validateConditionMatch(r.ConditionMatch); err != nil {
 			return err
 		}
-	default:
-		return fmt.Errorf("bankfeed: unknown condition_type %q", r.ConditionType)
+		for i := range r.Conditions {
+			if err := r.Conditions[i].validate(); err != nil {
+				return err
+			}
+		}
+	} else {
+		switch r.ConditionType {
+		case CondDescriptionContains, CondCounterparty:
+			if strings.TrimSpace(r.ConditionValue) == "" {
+				return fmt.Errorf("bankfeed: %s rule requires a non-empty value", r.ConditionType)
+			}
+		case CondDescriptionRegex:
+			if _, err := regexp.Compile(r.ConditionValue); err != nil {
+				return fmt.Errorf("bankfeed: invalid regex %q: %w", r.ConditionValue, err)
+			}
+		case CondAmountRange:
+			if _, _, err := parseAmountRange(r.ConditionValue); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("bankfeed: unknown condition_type %q", r.ConditionType)
+		}
 	}
-	if r.TargetAccountCode == "" && r.TargetCostCenter == "" && !r.AutoApprove {
-		return errors.New("bankfeed: rule must set an account code, cost center, or auto_approve")
+	if r.TargetAccountCode == "" && r.TargetCostCenter == "" && r.TargetTaxCode == "" && !r.AutoApprove {
+		return errors.New("bankfeed: rule must set an account code, cost center, tax code, or auto_approve")
+	}
+	return nil
+}
+
+// validateConditionMatch accepts the empty string (normalized to MatchAll
+// at evaluation time) or one of the two explicit modes.
+func validateConditionMatch(m string) error {
+	switch m {
+	case "", MatchAll, MatchAny:
+		return nil
+	default:
+		return fmt.Errorf("bankfeed: condition_match must be %q or %q (got %q)", MatchAll, MatchAny, m)
+	}
+}
+
+// validate checks one compound condition: a known field, an operator
+// valid for that field's type, and a parseable value.
+func (c RuleCondition) validate() error {
+	switch c.Field {
+	case FieldPayee, FieldReference, FieldDescription:
+		switch c.Op {
+		case OpContains, OpEquals:
+			if strings.TrimSpace(c.Value) == "" {
+				return fmt.Errorf("bankfeed: %s %s condition requires a non-empty value", c.Field, c.Op)
+			}
+		case OpRegex:
+			if _, err := regexp.Compile(c.Value); err != nil {
+				return fmt.Errorf("bankfeed: invalid regex %q: %w", c.Value, err)
+			}
+		default:
+			return fmt.Errorf("bankfeed: operator %q is not valid for the text field %q", c.Op, c.Field)
+		}
+	case FieldAmount:
+		switch c.Op {
+		case OpEq, OpGt, OpGte, OpLt, OpLte:
+			if _, err := decimal.NewFromString(strings.TrimSpace(c.Value)); err != nil {
+				return fmt.Errorf("bankfeed: amount %s condition value %q: %w", c.Op, c.Value, err)
+			}
+		case OpRange:
+			if _, _, err := parseAmountRange(c.Value); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("bankfeed: operator %q is not valid for the amount field", c.Op)
+		}
+	default:
+		return fmt.Errorf("bankfeed: unknown condition field %q", c.Field)
 	}
 	return nil
 }
 
 // matches reports whether the rule's condition is satisfied by txn. The
 // account-scope filter is applied by the caller (the query) so this only
-// evaluates the condition itself.
+// evaluates the condition itself. A compound rule (non-empty Conditions)
+// combines its conditions per ConditionMatch; otherwise the legacy single
+// condition is evaluated.
 func (r Rule) matches(txn RawTransaction) bool {
+	if len(r.Conditions) > 0 {
+		return r.matchesCompound(txn)
+	}
 	switch r.ConditionType {
 	case CondDescriptionContains:
 		return strings.Contains(strings.ToLower(txn.Description), strings.ToLower(r.ConditionValue))
@@ -116,11 +250,123 @@ func (r Rule) matches(txn RawTransaction) bool {
 	}
 }
 
+// matchesCompound evaluates the compound Conditions per ConditionMatch:
+// MatchAny fires on the first condition that holds; MatchAll (the default,
+// including the empty string) requires every condition to hold. An empty
+// Conditions slice never reaches here (matches() routes to the legacy
+// path), so MatchAll over zero conditions is not a concern.
+func (r Rule) matchesCompound(txn RawTransaction) bool {
+	matchAny := r.ConditionMatch == MatchAny
+	for i := range r.Conditions {
+		ok := r.Conditions[i].matches(txn)
+		if matchAny && ok {
+			return true
+		}
+		if !matchAny && !ok {
+			return false
+		}
+	}
+	// MatchAny fell through with no hit -> false; MatchAll fell through with
+	// no miss -> true.
+	return !matchAny
+}
+
+// matches reports whether one compound condition holds for txn. An
+// unparseable amount / regex value returns false (it was rejected at write
+// time; this is defensive only).
+func (c RuleCondition) matches(txn RawTransaction) bool {
+	switch c.Field {
+	case FieldAmount:
+		return c.matchesAmount(txn.Amount)
+	case FieldPayee:
+		return c.matchesText(fallback(txn.Counterparty, txn.Description))
+	case FieldReference:
+		return c.matchesText(fallback(txn.Reference, txn.Description))
+	case FieldDescription:
+		return c.matchesText(txn.Description)
+	default:
+		return false
+	}
+}
+
+// matchesText applies a string operator case-insensitively. equals is a
+// full (trimmed) match; contains is a substring; regex is an RE2 search.
+func (c RuleCondition) matchesText(field string) bool {
+	switch c.Op {
+	case OpContains:
+		return strings.Contains(strings.ToLower(field), strings.ToLower(c.Value))
+	case OpEquals:
+		return strings.EqualFold(strings.TrimSpace(field), strings.TrimSpace(c.Value))
+	case OpRegex:
+		re, err := regexp.Compile(c.Value)
+		if err != nil {
+			return false
+		}
+		return re.MatchString(field)
+	default:
+		return false
+	}
+}
+
+// matchesAmount applies a numeric operator. The signed amount is compared
+// as-is so a rule can target money-out (negative) or money-in (positive)
+// explicitly; a range with both bounds matches the inclusive interval.
+func (c RuleCondition) matchesAmount(amount decimal.Decimal) bool {
+	if c.Op == OpRange {
+		lo, hi, err := parseAmountRange(c.Value)
+		if err != nil {
+			return false
+		}
+		if lo != nil && amount.LessThan(*lo) {
+			return false
+		}
+		if hi != nil && amount.GreaterThan(*hi) {
+			return false
+		}
+		return true
+	}
+	v, err := decimal.NewFromString(strings.TrimSpace(c.Value))
+	if err != nil {
+		return false
+	}
+	switch c.Op {
+	case OpEq:
+		return amount.Equal(v)
+	case OpGt:
+		return amount.GreaterThan(v)
+	case OpGte:
+		return amount.GreaterThanOrEqual(v)
+	case OpLt:
+		return amount.LessThan(v)
+	case OpLte:
+		return amount.LessThanOrEqual(v)
+	default:
+		return false
+	}
+}
+
+// fallback returns primary when non-empty, else secondary.
+func fallback(primary, secondary string) string {
+	if primary != "" {
+		return primary
+	}
+	return secondary
+}
+
 // Evaluate runs the (already priority-ordered) rules against txn and
 // returns the first match. The rules slice is assumed sorted ascending by
 // priority — RuleStore.ListRules guarantees this. Disabled rules must be
 // filtered by the caller (the query does).
 func Evaluate(rules []Rule, txn RawTransaction) (RuleMatch, bool) {
+	m, _, ok := EvaluateIndexed(rules, txn)
+	return m, ok
+}
+
+// EvaluateIndexed is Evaluate that also returns the zero-based position of
+// the matching rule in the slice (-1 when nothing matched), so the rule
+// preview surface can tell the operator which rule fired without
+// re-deriving it by (fragile) field comparison.
+func EvaluateIndexed(rules []Rule, txn RawTransaction) (RuleMatch, int, bool) {
 	for i := range rules {
 		r := &rules[i]
 		if r.matches(txn) {
@@ -128,11 +374,50 @@ func Evaluate(rules []Rule, txn RawTransaction) (RuleMatch, bool) {
 				Rule:              *r,
 				TargetAccountCode: r.TargetAccountCode,
 				TargetCostCenter:  r.TargetCostCenter,
+				TargetTaxCode:     r.TargetTaxCode,
 				AutoApprove:       r.AutoApprove,
-			}, true
+			}, i, true
 		}
 	}
-	return RuleMatch{}, false
+	return RuleMatch{}, -1, false
+}
+
+// ruleSelect is the column list shared by the rule reads. Column order is
+// the contract queryRules' scan relies on.
+const ruleSelect = `SELECT id, tenant_id, priority, condition_type, condition_value,
+	               conditions, condition_match, target_account_code,
+	               target_cost_center, target_tax_code, auto_approve,
+	               bank_account_id, enabled, created_at, updated_at
+	          FROM bank_reconciliation_rules`
+
+// marshalConditions serializes the compound conditions for the JSONB
+// column, returning a SQL NULL when there are none so a legacy rule's
+// column stays NULL rather than an empty-array literal.
+func marshalConditions(conds []RuleCondition) (any, error) {
+	if len(conds) == 0 {
+		return nil, nil
+	}
+	b, err := json.Marshal(conds)
+	if err != nil {
+		return nil, fmt.Errorf("bankfeed: marshal rule conditions: %w", err)
+	}
+	return b, nil
+}
+
+// unmarshalConditions parses the JSONB conditions column. A NULL / empty
+// column yields a nil slice (the legacy single-condition path).
+func unmarshalConditions(raw []byte) ([]RuleCondition, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var conds []RuleCondition
+	if err := json.Unmarshal(raw, &conds); err != nil {
+		return nil, fmt.Errorf("bankfeed: unmarshal rule conditions: %w", err)
+	}
+	if len(conds) == 0 {
+		return nil, nil
+	}
+	return conds, nil
 }
 
 // parseAmountRange parses a "min:max" condition value where either bound
@@ -206,25 +491,40 @@ func (s *RuleStore) UpsertRule(ctx context.Context, r Rule) (*Rule, error) {
 		// RETURNING created_at/updated_at so the update path reports the
 		// true persisted created_at (the DB keeps the original; it is not
 		// in the SET clause) rather than the current time.
+		conds, err := marshalConditions(r.Conditions)
+		if err != nil {
+			return err
+		}
+		// A compound rule normalizes its match mode to MatchAll when the
+		// caller left it blank; a legacy rule stores the column default.
+		condMatch := r.ConditionMatch
+		if len(r.Conditions) > 0 && condMatch == "" {
+			condMatch = MatchAll
+		}
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO bank_reconciliation_rules
 			     (tenant_id, id, priority, condition_type, condition_value,
-			      target_account_code, target_cost_center, auto_approve,
+			      conditions, condition_match, target_account_code,
+			      target_cost_center, target_tax_code, auto_approve,
 			      bank_account_id, enabled, created_at, updated_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)
 			 ON CONFLICT (tenant_id, id) DO UPDATE SET
 			     priority            = EXCLUDED.priority,
 			     condition_type      = EXCLUDED.condition_type,
 			     condition_value     = EXCLUDED.condition_value,
+			     conditions          = EXCLUDED.conditions,
+			     condition_match     = EXCLUDED.condition_match,
 			     target_account_code = EXCLUDED.target_account_code,
 			     target_cost_center  = EXCLUDED.target_cost_center,
+			     target_tax_code     = EXCLUDED.target_tax_code,
 			     auto_approve        = EXCLUDED.auto_approve,
 			     bank_account_id     = EXCLUDED.bank_account_id,
 			     enabled             = EXCLUDED.enabled,
 			     updated_at          = EXCLUDED.updated_at
 			 RETURNING created_at, updated_at`,
-			r.TenantID, r.ID, r.Priority, r.ConditionType, r.ConditionValue,
-			nullIfEmpty(r.TargetAccountCode), nullIfEmpty(r.TargetCostCenter), r.AutoApprove,
+			r.TenantID, r.ID, r.Priority, nullIfEmpty(r.ConditionType), nullIfEmpty(r.ConditionValue),
+			conds, condMatch, nullIfEmpty(r.TargetAccountCode),
+			nullIfEmpty(r.TargetCostCenter), nullIfEmpty(r.TargetTaxCode), r.AutoApprove,
 			r.BankAccountID, r.Enabled, now,
 		).Scan(&out.CreatedAt, &out.UpdatedAt); err != nil {
 			return fmt.Errorf("bankfeed: upsert rule: %w", err)
@@ -259,10 +559,7 @@ func (s *RuleStore) DeleteRule(ctx context.Context, tenantID, id uuid.UUID) erro
 // order Evaluate relies on; ties break by created_at so behaviour is
 // deterministic across syncs.
 func (s *RuleStore) ListRules(ctx context.Context, tenantID uuid.UUID, bankAccountID *uuid.UUID) ([]Rule, error) {
-	sql := `SELECT id, tenant_id, priority, condition_type, condition_value,
-	               target_account_code, target_cost_center, auto_approve,
-	               bank_account_id, enabled, created_at, updated_at
-	          FROM bank_reconciliation_rules
+	sql := ruleSelect + `
 	         WHERE tenant_id = $1 AND enabled
 	           AND (bank_account_id IS NULL OR bank_account_id = $2)
 	         ORDER BY priority ASC, created_at ASC`
@@ -272,10 +569,7 @@ func (s *RuleStore) ListRules(ctx context.Context, tenantID uuid.UUID, bankAccou
 // ListAllRules returns every rule (enabled or not) for the tenant, used
 // by the rule-editor UI. Priority ascending.
 func (s *RuleStore) ListAllRules(ctx context.Context, tenantID uuid.UUID) ([]Rule, error) {
-	sql := `SELECT id, tenant_id, priority, condition_type, condition_value,
-	               target_account_code, target_cost_center, auto_approve,
-	               bank_account_id, enabled, created_at, updated_at
-	          FROM bank_reconciliation_rules
+	sql := ruleSelect + `
 	         WHERE tenant_id = $1
 	         ORDER BY priority ASC, created_at ASC`
 	return s.queryRules(ctx, tenantID, sql, tenantID)
@@ -291,13 +585,27 @@ func (s *RuleStore) queryRules(ctx context.Context, tenantID uuid.UUID, sql stri
 		defer rows.Close()
 		for rows.Next() {
 			var (
-				r       Rule
-				acct    *string
-				cc      *string
-				account *uuid.UUID
+				r         Rule
+				condType  *string
+				condValue *string
+				conds     []byte
+				acct      *string
+				cc        *string
+				taxCode   *string
+				account   *uuid.UUID
 			)
-			if err := rows.Scan(&r.ID, &r.TenantID, &r.Priority, &r.ConditionType, &r.ConditionValue,
-				&acct, &cc, &r.AutoApprove, &account, &r.Enabled, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			if err := rows.Scan(&r.ID, &r.TenantID, &r.Priority, &condType, &condValue,
+				&conds, &r.ConditionMatch, &acct, &cc, &taxCode,
+				&r.AutoApprove, &account, &r.Enabled, &r.CreatedAt, &r.UpdatedAt); err != nil {
+				return err
+			}
+			if condType != nil {
+				r.ConditionType = *condType
+			}
+			if condValue != nil {
+				r.ConditionValue = *condValue
+			}
+			if r.Conditions, err = unmarshalConditions(conds); err != nil {
 				return err
 			}
 			if acct != nil {
@@ -305,6 +613,9 @@ func (s *RuleStore) queryRules(ctx context.Context, tenantID uuid.UUID, sql stri
 			}
 			if cc != nil {
 				r.TargetCostCenter = *cc
+			}
+			if taxCode != nil {
+				r.TargetTaxCode = *taxCode
 			}
 			r.BankAccountID = account
 			out = append(out, r)

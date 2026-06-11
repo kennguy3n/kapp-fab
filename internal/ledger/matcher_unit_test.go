@@ -232,3 +232,69 @@ func TestSuggestMatchesValidatesInput(t *testing.T) {
 		t.Error("expected error on nil txn")
 	}
 }
+
+func TestDetectTransferValidatesInput(t *testing.T) {
+	m := &SmartMatcher{}
+	if _, err := m.DetectTransfer(context.TODO(), uuid.Nil, uuid.New()); err == nil {
+		t.Error("expected error on nil tenant")
+	}
+	if _, err := m.DetectTransfer(context.TODO(), uuid.New(), uuid.Nil); err == nil {
+		t.Error("expected error on nil txn")
+	}
+}
+
+func TestDetectDuplicateValidatesInput(t *testing.T) {
+	m := &SmartMatcher{}
+	if _, err := m.DetectDuplicate(context.TODO(), uuid.Nil, uuid.New()); err == nil {
+		t.Error("expected error on nil tenant")
+	}
+	if _, err := m.DetectDuplicate(context.TODO(), uuid.New(), uuid.Nil); err == nil {
+		t.Error("expected error on nil txn")
+	}
+}
+
+func TestMentionsTransfer(t *testing.T) {
+	hits := []string{
+		"TRANSFER TO SAVINGS", "Internal xfer", "TRF 12345",
+		"Move to savings pot", "weekly INTERNAL sweep",
+	}
+	for _, s := range hits {
+		if !mentionsTransfer(s) {
+			t.Errorf("mentionsTransfer(%q) = false; want true", s)
+		}
+	}
+	misses := []string{"AMAZON WEB SERVICES", "TFL TRAVEL", "Salary", ""}
+	for _, s := range misses {
+		if mentionsTransfer(s) {
+			t.Errorf("mentionsTransfer(%q) = true; want false", s)
+		}
+	}
+}
+
+func TestTransferConfidence(t *testing.T) {
+	base := time.Date(2024, 1, 10, 0, 0, 0, 0, time.UTC)
+
+	// Same-day, no cue: base 0.6 + 0.3*1.0 = 0.9.
+	if got := transferConfidence(base, base, "ACME", "ACME"); got < 0.899 || got > 0.901 {
+		t.Errorf("same-day confidence = %v; want ~0.90", got)
+	}
+	// Same-day with a transfer cue: 0.9 + 0.1 ≈ 1.0 (never exceeds 1).
+	if got := transferConfidence(base, base, "TRANSFER OUT", "deposit"); got < 0.999 || got > 1 {
+		t.Errorf("same-day+cue confidence = %v; want ~1.0", got)
+	}
+	// Window edge (4 days): proximity 0 → base 0.6, no cue.
+	edge := base.Add(DefaultTransferWindow)
+	if got := transferConfidence(base, edge, "x", "y"); got < 0.599 || got > 0.601 {
+		t.Errorf("window-edge confidence = %v; want ~0.60", got)
+	}
+	// Sign of the gap must not matter (symmetric).
+	mid := base.Add(2 * 24 * time.Hour)
+	if a, b := transferConfidence(base, mid, "x", "y"), transferConfidence(mid, base, "x", "y"); a != b {
+		t.Errorf("confidence not symmetric: %v vs %v", a, b)
+	}
+	// Beyond the window proximity clamps at 0, never negative.
+	far := base.Add(10 * 24 * time.Hour)
+	if got := transferConfidence(base, far, "x", "y"); got < 0.599 || got > 0.601 {
+		t.Errorf("beyond-window confidence = %v; want ~0.60 (clamped)", got)
+	}
+}

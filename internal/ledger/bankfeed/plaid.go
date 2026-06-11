@@ -2,7 +2,9 @@ package bankfeed
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -23,6 +25,12 @@ type PlaidConfig struct {
 	// BaseURL overrides the env-derived host; used by tests to point at
 	// an httptest server. Empty resolves from Env.
 	BaseURL string
+	// WebhookSecret is the shared secret the inbound webhook ingress uses
+	// to verify the HMAC-SHA256 of a Plaid notification body (sourced from
+	// PlaidWebhookSecret in platform config). Empty disables webhook
+	// verification for Plaid: VerifyAndParse then fails closed so an
+	// unverifiable endpoint never triggers a sync.
+	WebhookSecret string
 }
 
 // PlaidProvider implements Provider against Plaid's REST API: Link token
@@ -248,4 +256,44 @@ func (p *PlaidProvider) Disconnect(ctx context.Context, conn *Connection) error 
 	body := p.auth()
 	body["access_token"] = conn.AccessToken
 	return postJSON(ctx, p.client, p.baseURL()+"/item/remove", nil, body, nil)
+}
+
+// plaidWebhookBody is the subset of a Plaid webhook payload we consume.
+// Transactions notifications carry webhook_type=TRANSACTIONS with a
+// webhook_code; SYNC_UPDATES_AVAILABLE (and the legacy *_UPDATE codes)
+// mean new transaction data is ready and the item should be synced.
+type plaidWebhookBody struct {
+	WebhookType string `json:"webhook_type"`
+	WebhookCode string `json:"webhook_code"`
+	ItemID      string `json:"item_id"`
+}
+
+// VerifyAndParse implements WebhookVerifier for Plaid. It verifies the
+// HMAC-SHA256 of the raw body (hex) supplied in the Plaid-Verification or
+// X-Webhook-Signature header against the configured webhook secret, then
+// classifies the event. Transactions update codes set TriggerSync so the
+// ingress runs an incremental /transactions/sync; other event types
+// (ERROR, PENDING_EXPIRATION, etc.) parse cleanly with TriggerSync false
+// so they are acknowledged without provider calls.
+func (p *PlaidProvider) VerifyAndParse(payload []byte, headers http.Header) (WebhookEvent, error) {
+	sig := firstHeader(headers, "Plaid-Verification", "X-Webhook-Signature", "Plaid-Signature")
+	if err := verifyHMACSignature(p.cfg.WebhookSecret, payload, sig); err != nil {
+		return WebhookEvent{}, err
+	}
+	var body plaidWebhookBody
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return WebhookEvent{}, fmt.Errorf("bankfeed: plaid webhook decode: %w", err)
+	}
+	ev := WebhookEvent{
+		ExternalID: body.ItemID,
+		Kind:       strings.ToLower(body.WebhookType + "." + body.WebhookCode),
+	}
+	if strings.EqualFold(body.WebhookType, "TRANSACTIONS") {
+		switch strings.ToUpper(body.WebhookCode) {
+		case "SYNC_UPDATES_AVAILABLE", "DEFAULT_UPDATE", "INITIAL_UPDATE",
+			"HISTORICAL_UPDATE", "TRANSACTIONS_REMOVED":
+			ev.TriggerSync = true
+		}
+	}
+	return ev, nil
 }

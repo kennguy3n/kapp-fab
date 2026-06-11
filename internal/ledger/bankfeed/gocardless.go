@@ -2,7 +2,9 @@ package bankfeed
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +25,11 @@ type GoCardlessConfig struct {
 	// bank). Optional; a real deployment resolves it from a picker.
 	InstitutionID string
 	BaseURL       string // override for tests; defaults to the GC prod host
+	// WebhookSecret is the shared secret the inbound webhook ingress uses
+	// to verify the HMAC-SHA256 of a GoCardless notification body (sourced
+	// from GoCardlessWebhookSecret in platform config). Empty disables
+	// webhook verification: VerifyAndParse then fails closed.
+	WebhookSecret string
 }
 
 // GoCardlessProvider implements Provider against the GoCardless Bank
@@ -195,6 +202,7 @@ type gcTxn struct {
 		Currency string `json:"currency"`
 	} `json:"transactionAmount"`
 	RemittanceInformationUnstructured string `json:"remittanceInformationUnstructured"`
+	RemittanceInformationStructured   string `json:"remittanceInformationStructured"`
 	CreditorName                      string `json:"creditorName"`
 	DebtorName                        string `json:"debtorName"`
 }
@@ -266,6 +274,7 @@ func (p *GoCardlessProvider) FetchTransactions(ctx context.Context, conn *Connec
 			Amount:       amt,
 			Currency:     t.TransactionAmount.Currency,
 			Counterparty: counterparty,
+			Reference:    t.RemittanceInformationStructured,
 		})
 	}
 	return out, maxDate, nil
@@ -281,4 +290,47 @@ func (p *GoCardlessProvider) Disconnect(ctx context.Context, conn *Connection) e
 		return err
 	}
 	return deleteResource(ctx, p.client, p.baseURL()+"/requisitions/"+conn.ExternalID+"/", hdr)
+}
+
+// gcWebhookBody is the subset of a GoCardless Bank Account Data webhook we
+// consume. Events are keyed by the requisition id (which we persist as the
+// connection external_id); a "linked"/"updated" event means consent is in
+// place and new transactions can be pulled.
+type gcWebhookBody struct {
+	RequisitionID string `json:"requisition_id"`
+	// Some payload shapes nest the id under "id"; accept either.
+	ID    string `json:"id"`
+	Event string `json:"event"`
+	Type  string `json:"type"`
+}
+
+// VerifyAndParse implements WebhookVerifier for GoCardless. It verifies the
+// HMAC-SHA256 of the raw body (hex) supplied in the Webhook-Signature or
+// X-Webhook-Signature header against the configured webhook secret, then
+// classifies the event by requisition id. Account/requisition link/refresh
+// events set TriggerSync so the ingress pulls booked transactions; other
+// events parse cleanly with TriggerSync false.
+func (p *GoCardlessProvider) VerifyAndParse(payload []byte, headers http.Header) (WebhookEvent, error) {
+	sig := firstHeader(headers, "Webhook-Signature", "X-Webhook-Signature", "GoCardless-Signature")
+	if err := verifyHMACSignature(p.cfg.WebhookSecret, payload, sig); err != nil {
+		return WebhookEvent{}, err
+	}
+	var body gcWebhookBody
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return WebhookEvent{}, fmt.Errorf("bankfeed: gocardless webhook decode: %w", err)
+	}
+	extID := body.RequisitionID
+	if extID == "" {
+		extID = body.ID
+	}
+	kind := body.Event
+	if kind == "" {
+		kind = body.Type
+	}
+	ev := WebhookEvent{ExternalID: extID, Kind: strings.ToLower("requisition." + kind)}
+	switch strings.ToUpper(kind) {
+	case "LINKED", "LN", "UPDATED", "TRANSACTIONS_AVAILABLE", "ACCOUNT_REFRESHED":
+		ev.TriggerSync = true
+	}
+	return ev, nil
 }

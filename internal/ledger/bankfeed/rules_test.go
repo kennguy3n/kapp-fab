@@ -143,3 +143,159 @@ func TestEvaluateNoMatch(t *testing.T) {
 		t.Fatal("expected no match")
 	}
 }
+
+// compoundRule builds a compound rule with the given match mode and an
+// account action so it passes validation.
+func compoundRule(match string, conds ...RuleCondition) Rule {
+	return Rule{
+		Conditions:        conds,
+		ConditionMatch:    match,
+		TargetAccountCode: "6000",
+	}
+}
+
+func TestCompoundRuleValidate(t *testing.T) {
+	cases := []struct {
+		name    string
+		rule    Rule
+		wantErr bool
+	}{
+		{"all text+amount ok", compoundRule(MatchAll,
+			RuleCondition{FieldPayee, OpContains, "amazon"},
+			RuleCondition{FieldAmount, OpGte, "100"}), false},
+		{"any ok", compoundRule(MatchAny,
+			RuleCondition{FieldReference, OpEquals, "INV-1"},
+			RuleCondition{FieldDescription, OpRegex, `(?i)refund`}), false},
+		{"empty match defaults ok", compoundRule("",
+			RuleCondition{FieldDescription, OpContains, "x"}), false},
+		{"bad match mode", compoundRule("most",
+			RuleCondition{FieldDescription, OpContains, "x"}), true},
+		{"text op on amount", compoundRule(MatchAll,
+			RuleCondition{FieldAmount, OpContains, "10"}), true},
+		{"amount op on text", compoundRule(MatchAll,
+			RuleCondition{FieldPayee, OpGt, "10"}), true},
+		{"bad regex", compoundRule(MatchAll,
+			RuleCondition{FieldDescription, OpRegex, `([`}), true},
+		{"bad amount range", compoundRule(MatchAll,
+			RuleCondition{FieldAmount, OpRange, "abc"}), true},
+		{"empty contains value", compoundRule(MatchAll,
+			RuleCondition{FieldPayee, OpContains, "  "}), true},
+		{"unknown field", compoundRule(MatchAll,
+			RuleCondition{"memo", OpContains, "x"}), true},
+		{"legacy type set with conditions", func() Rule {
+			r := compoundRule(MatchAll, RuleCondition{FieldDescription, OpContains, "x"})
+			r.ConditionType = CondDescriptionContains
+			return r
+		}(), true},
+		{"tax code is a valid sole action", func() Rule {
+			r := compoundRule(MatchAll, RuleCondition{FieldDescription, OpContains, "x"})
+			r.TargetAccountCode = ""
+			r.TargetTaxCode = "VAT20"
+			return r
+		}(), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.rule.Validate(); (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() err = %v; wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestCompoundRuleMatches(t *testing.T) {
+	txn := RawTransaction{
+		Description:  "AMAZON WEB SERVICES INV-4471",
+		Counterparty: "Amazon",
+		Reference:    "INV-4471",
+		Amount:       decimal.RequireFromString("-128.40"),
+	}
+	cases := []struct {
+		name string
+		rule Rule
+		want bool
+	}{
+		{"all hit: payee + amount", compoundRule(MatchAll,
+			RuleCondition{FieldPayee, OpContains, "amazon"},
+			RuleCondition{FieldAmount, OpLte, "-100"}), true},
+		{"all miss: one fails", compoundRule(MatchAll,
+			RuleCondition{FieldPayee, OpContains, "amazon"},
+			RuleCondition{FieldAmount, OpGt, "0"}), false},
+		{"any hit: second matches", compoundRule(MatchAny,
+			RuleCondition{FieldPayee, OpEquals, "stripe"},
+			RuleCondition{FieldReference, OpContains, "INV-4471"}), true},
+		{"any miss: none match", compoundRule(MatchAny,
+			RuleCondition{FieldPayee, OpEquals, "stripe"},
+			RuleCondition{FieldReference, OpEquals, "INV-0000"}), false},
+		{"amount eq", compoundRule(MatchAll,
+			RuleCondition{FieldAmount, OpEq, "-128.40"}), true},
+		{"amount range inclusive", compoundRule(MatchAll,
+			RuleCondition{FieldAmount, OpRange, "-200:-100"}), true},
+		{"reference regex", compoundRule(MatchAll,
+			RuleCondition{FieldReference, OpRegex, `^INV-\d+$`}), true},
+		{"default match mode is all (miss)", compoundRule("",
+			RuleCondition{FieldPayee, OpContains, "amazon"},
+			RuleCondition{FieldReference, OpEquals, "nope"}), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.rule.matches(txn); got != tc.want {
+				t.Fatalf("matches() = %v; want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCompoundReferenceFallsBackToDescription proves a reference/payee
+// condition matches the description when the provider exposes no
+// structured field, mirroring the legacy counterparty fallback.
+func TestCompoundReferenceFallsBackToDescription(t *testing.T) {
+	txn := RawTransaction{Description: "FPS REF ABC123"}
+	r := compoundRule(MatchAll, RuleCondition{FieldReference, OpContains, "abc123"})
+	if !r.matches(txn) {
+		t.Fatal("expected reference condition to fall back to description")
+	}
+}
+
+func TestEvaluateIndexedReturnsPosition(t *testing.T) {
+	rules := []Rule{
+		ruleWith(CondDescriptionContains, "zzz", func(r *Rule) { r.Priority = 1 }),
+		ruleWith(CondDescriptionContains, "uber", func(r *Rule) { r.Priority = 2; r.TargetTaxCode = "VAT20" }),
+	}
+	m, idx, ok := EvaluateIndexed(rules, RawTransaction{Description: "UBER trip"})
+	if !ok || idx != 1 {
+		t.Fatalf("EvaluateIndexed = idx %d ok %v; want idx 1 ok true", idx, ok)
+	}
+	if m.TargetTaxCode != "VAT20" {
+		t.Fatalf("tax code = %q; want VAT20", m.TargetTaxCode)
+	}
+	if _, idx, ok := EvaluateIndexed(rules, RawTransaction{Description: "grocery"}); ok || idx != -1 {
+		t.Fatalf("no-match EvaluateIndexed = idx %d ok %v; want idx -1 ok false", idx, ok)
+	}
+}
+
+func TestMarshalRoundTripConditions(t *testing.T) {
+	in := []RuleCondition{
+		{FieldPayee, OpContains, "amazon"},
+		{FieldAmount, OpRange, "10:100"},
+	}
+	raw, err := marshalConditions(in)
+	if err != nil {
+		t.Fatalf("marshalConditions: %v", err)
+	}
+	out, err := unmarshalConditions(raw.([]byte))
+	if err != nil {
+		t.Fatalf("unmarshalConditions: %v", err)
+	}
+	if len(out) != 2 || out[0] != in[0] || out[1] != in[1] {
+		t.Fatalf("round trip = %+v; want %+v", out, in)
+	}
+	// Empty marshals to a SQL NULL (nil any), and a nil/empty column
+	// unmarshals back to a nil slice (legacy path).
+	if v, _ := marshalConditions(nil); v != nil {
+		t.Fatalf("marshalConditions(nil) = %v; want nil", v)
+	}
+	if got, _ := unmarshalConditions(nil); got != nil {
+		t.Fatalf("unmarshalConditions(nil) = %v; want nil", got)
+	}
+}

@@ -52,6 +52,11 @@ type RawTransaction struct {
 	// exposes it separately from the free-text description. Empty when
 	// unavailable; rule evaluation falls back to Description.
 	Counterparty string
+	// Reference is the structured payment reference / remittance info
+	// when the provider exposes it separately (GoCardless
+	// remittanceInformation, a wire reference). Empty when unavailable;
+	// rule evaluation on the "reference" field falls back to Description.
+	Reference string
 	// Pending marks a not-yet-settled authorization. The sync handler
 	// skips pending lines so a later settled version (with a final
 	// amount) is the one that lands in the ledger.
@@ -194,6 +199,15 @@ var (
 	// and so a routine missing-resource lookup does not pollute the error
 	// log as an internal fault.
 	ErrNotFound = errors.New("bankfeed: resource not found")
+	// ErrWebhookSignature is returned by a WebhookVerifier when an inbound
+	// provider webhook fails signature verification. The HTTP webhook
+	// ingress maps it to 401 and never triggers a sync for an unverified
+	// payload, so a forged notification cannot drive provider calls.
+	ErrWebhookSignature = errors.New("bankfeed: webhook signature verification failed")
+	// ErrWebhookUnsupported is returned when a provider does not implement
+	// the WebhookVerifier capability (e.g. the CSV provider has no live
+	// push channel). The ingress maps it to 404.
+	ErrWebhookUnsupported = errors.New("bankfeed: provider does not support webhooks")
 )
 
 // Registry resolves a provider name to its implementation. It is built

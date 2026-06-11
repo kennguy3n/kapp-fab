@@ -5,13 +5,15 @@ package bankfeed
 // struct (rather than importing platform here) keeps the bankfeed package
 // free of an import cycle and trivially unit-testable.
 type RegistryConfig struct {
-	PlaidClientID string
-	PlaidSecret   string
-	PlaidEnv      string
+	PlaidClientID      string
+	PlaidSecret        string
+	PlaidEnv           string
+	PlaidWebhookSecret string
 
 	GoCardlessSecretID      string
 	GoCardlessSecretKey     string
 	GoCardlessInstitutionID string
+	GoCardlessWebhookSecret string
 }
 
 // BuildRegistry assembles the provider registry from configuration. The
@@ -25,9 +27,10 @@ func BuildRegistry(cfg RegistryConfig) *Registry {
 
 	if cfg.PlaidClientID != "" && cfg.PlaidSecret != "" {
 		if p := NewPlaidProvider(PlaidConfig{
-			ClientID: cfg.PlaidClientID,
-			Secret:   cfg.PlaidSecret,
-			Env:      cfg.PlaidEnv,
+			ClientID:      cfg.PlaidClientID,
+			Secret:        cfg.PlaidSecret,
+			Env:           cfg.PlaidEnv,
+			WebhookSecret: cfg.PlaidWebhookSecret,
 		}, nil); p != nil {
 			providers = append(providers, p)
 		}
@@ -38,6 +41,7 @@ func BuildRegistry(cfg RegistryConfig) *Registry {
 			SecretID:      cfg.GoCardlessSecretID,
 			SecretKey:     cfg.GoCardlessSecretKey,
 			InstitutionID: cfg.GoCardlessInstitutionID,
+			WebhookSecret: cfg.GoCardlessWebhookSecret,
 		}, nil); p != nil {
 			providers = append(providers, p)
 		}

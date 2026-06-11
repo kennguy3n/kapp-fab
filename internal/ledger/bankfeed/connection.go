@@ -34,6 +34,12 @@ type ConnectionStore struct {
 	enc     Encryptor
 	auditor audit.Logger
 	now     func() time.Time
+	// adminPool is an optional BYPASSRLS pool used only by the inbound
+	// webhook path to resolve a connection from a provider's external id
+	// without a tenant context (the notification carries no tenant). Nil
+	// in deployments without ADMIN_DB_URL, in which case webhook
+	// resolution fails closed.
+	adminPool *pgxpool.Pool
 }
 
 // NewConnectionStore wires a store. enc may be nil in development (the
@@ -55,6 +61,69 @@ func (s *ConnectionStore) WithClock(now func() time.Time) *ConnectionStore {
 		s.now = now
 	}
 	return s
+}
+
+// WithAdminPool sets the BYPASSRLS pool the webhook ingress uses for the
+// cross-tenant external-id → connection lookup. Returns the store for
+// chaining at wire time.
+func (s *ConnectionStore) WithAdminPool(adminPool *pgxpool.Pool) *ConnectionStore {
+	s.adminPool = adminPool
+	return s
+}
+
+// ResolveActiveByExternalID returns the active connection(s) for a
+// provider whose external_id matches handle (Plaid item_id, GoCardless
+// requisition id). It runs on the BYPASSRLS admin pool because an inbound
+// provider webhook carries no tenant context, so the row's own tenant_id
+// is what scopes every subsequent operation. A GoCardless requisition can
+// back several linked accounts (one connection each), so the result is a
+// slice; Plaid item ids resolve to one. Credentials are decrypted with the
+// row's tenant key. Fails closed (clear error) when no admin pool is
+// configured so an un-resolvable webhook never silently no-ops as "unknown
+// connection".
+func (s *ConnectionStore) ResolveActiveByExternalID(ctx context.Context, provider, handle string) ([]Connection, error) {
+	if s.adminPool == nil {
+		return nil, errors.New("bankfeed: webhook connection resolution requires an admin pool")
+	}
+	if provider == "" || handle == "" {
+		return nil, fmt.Errorf("bankfeed: resolve connection: provider and external id required")
+	}
+	// Defense-in-depth: confirm the pool's role actually has BYPASSRLS, so
+	// a misconfigured app pool returns a clear error rather than silently
+	// matching zero rows under default-deny RLS (which a caller would
+	// misread as "unknown connection" and drop the webhook).
+	var bypass bool
+	if err := s.adminPool.QueryRow(ctx,
+		`SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user`,
+	).Scan(&bypass); err != nil {
+		return nil, fmt.Errorf("bankfeed: verify admin pool role: %w", err)
+	}
+	if !bypass {
+		return nil, errors.New("bankfeed: ResolveActiveByExternalID requires a BYPASSRLS pool (got non-bypass role)")
+	}
+	rows, err := s.adminPool.Query(ctx,
+		connectionSelect+` WHERE provider = $1 AND external_id = $2 AND status = $3
+		   ORDER BY updated_at DESC`,
+		provider, handle, StatusActive)
+	if err != nil {
+		return nil, fmt.Errorf("bankfeed: resolve connection by external id: %w", err)
+	}
+	defer rows.Close()
+	var out []Connection
+	for rows.Next() {
+		c, err := s.scanConnectionCrossTenant(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("bankfeed: connection for %s/%s: %w", provider, handle, ErrNotFound)
+	}
+	return out, nil
 }
 
 // seal encrypts a credential, returning the BYTEA payload to persist.
@@ -300,6 +369,46 @@ func (s *ConnectionStore) scanConnection(tenantID uuid.UUID, row rowScanner) (*C
 		return nil, err
 	}
 	refresh, err := s.open(tenantID, refreshEnc)
+	if err != nil {
+		return nil, err
+	}
+	c.AccessToken = access
+	c.RefreshToken = refresh
+	if cursor != nil {
+		c.Cursor = *cursor
+	}
+	if externalID != nil {
+		c.ExternalID = *externalID
+	}
+	if lastErr != nil {
+		c.LastError = *lastErr
+	}
+	return &c, nil
+}
+
+// scanConnectionCrossTenant scans a connection row whose tenant is not
+// known in advance (the webhook external-id lookup). It reads tenant_id
+// from the row first, then decrypts the credentials with that tenant's
+// key. Used only on the admin-pool resolution path.
+func (s *ConnectionStore) scanConnectionCrossTenant(row rowScanner) (*Connection, error) {
+	var (
+		c          Connection
+		accessEnc  []byte
+		refreshEnc []byte
+		cursor     *string
+		externalID *string
+		lastErr    *string
+	)
+	if err := row.Scan(&c.TenantID, &c.ID, &c.BankAccountID, &c.Provider,
+		&accessEnc, &refreshEnc, &cursor, &externalID, &c.Status,
+		&c.LastSyncAt, &lastErr, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		return nil, err
+	}
+	access, err := s.open(c.TenantID, accessEnc)
+	if err != nil {
+		return nil, err
+	}
+	refresh, err := s.open(c.TenantID, refreshEnc)
 	if err != nil {
 		return nil, err
 	}
