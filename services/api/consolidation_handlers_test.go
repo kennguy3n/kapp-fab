@@ -2,13 +2,43 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
+
+// TestCreateGroupRequestDecodesCTAAccount pins that the create-group
+// request exposes cta_account_code, so the per-group CTA override is
+// reachable over the API rather than always falling back to the
+// default. An absent field decodes to empty (NULL → default).
+func TestCreateGroupRequestDecodesCTAAccount(t *testing.T) {
+	t.Parallel()
+	t.Run("explicit_override", func(t *testing.T) {
+		var req createConsolidationGroupRequest
+		body := `{"name":"Group","presentation_currency":"USD","cta_account_code":"3905"}`
+		if err := json.Unmarshal([]byte(body), &req); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if req.CTAAccountCode != "3905" {
+			t.Fatalf("cta_account_code: got %q, want 3905", req.CTAAccountCode)
+		}
+	})
+	t.Run("absent_is_empty", func(t *testing.T) {
+		var req createConsolidationGroupRequest
+		if err := json.Unmarshal([]byte(`{"name":"Group","presentation_currency":"USD"}`), &req); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if req.CTAAccountCode != "" {
+			t.Fatalf("cta_account_code: got %q, want empty", req.CTAAccountCode)
+		}
+	})
+}
 
 // TestParseAsOfDecode covers the consolidation run-handler body
 // parsing path. Pinned in response to two Devin Review findings:
@@ -87,4 +117,58 @@ func TestParseAsOfDecode(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestParseStatementsRequest pins the statements-handler body parsing.
+// The handler must forward average_rates into ConsolidationOptions —
+// without it income-statement accounts translate at the closing rate
+// and the CTA collapses to zero, so the closing-vs-average split that
+// the consolidation implements would be unreachable over HTTP. It also
+// shares parseAsOf's tolerance of empty / chunked bodies.
+func TestParseStatementsRequest(t *testing.T) {
+	t.Parallel()
+	ref := time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)
+	t.Run("average_rates_and_as_of", func(t *testing.T) {
+		body := `{"as_of":"2026-03-31T00:00:00Z","average_rates":{"EUR":"1.1","GBP":1.25}}`
+		req, err := parseStatementsRequest(httptest.NewRequest(http.MethodPost, "/statements", strings.NewReader(body)))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if req.AsOf == nil || !req.AsOf.Equal(ref) {
+			t.Fatalf("as_of: got %v, want %v", req.AsOf, ref)
+		}
+		if got := req.AverageRates["EUR"]; !got.Equal(decimal.RequireFromString("1.1")) {
+			t.Fatalf("EUR rate: got %s, want 1.1", got)
+		}
+		if got := req.AverageRates["GBP"]; !got.Equal(decimal.RequireFromString("1.25")) {
+			t.Fatalf("GBP rate: got %s, want 1.25", got)
+		}
+	})
+	t.Run("empty_body_is_no_overrides", func(t *testing.T) {
+		req, err := parseStatementsRequest(httptest.NewRequest(http.MethodPost, "/statements", strings.NewReader("")))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if req.AsOf != nil || req.AverageRates != nil {
+			t.Fatalf("want zero-value request, got %+v", req)
+		}
+	})
+	t.Run("chunked_body_is_parsed", func(t *testing.T) {
+		body := `{"average_rates":{"EUR":"1.1"}}`
+		r := httptest.NewRequest(http.MethodPost, "/statements", strings.NewReader(body))
+		r.Body = io.NopCloser(bytes.NewReader([]byte(body)))
+		r.ContentLength = -1
+		req, err := parseStatementsRequest(r)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := req.AverageRates["EUR"]; !got.Equal(decimal.RequireFromString("1.1")) {
+			t.Fatalf("EUR rate: got %s, want 1.1", got)
+		}
+	})
+	t.Run("malformed_json_errors", func(t *testing.T) {
+		if _, err := parseStatementsRequest(httptest.NewRequest(http.MethodPost, "/statements", strings.NewReader("{"))); err == nil {
+			t.Fatal("want error for malformed JSON, got nil")
+		}
+	})
 }

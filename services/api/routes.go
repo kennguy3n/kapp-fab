@@ -443,6 +443,14 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 					ch := &consolidationHandlers{store: consStore}
 					r.Post("/consolidation/groups", ch.createGroup)
 					r.Post("/consolidation/groups/{id}/run", ch.run)
+					// Workstream 3 (step 1) — consolidated statement
+					// pack (trial balance + P&L + balance sheet) and
+					// on-demand FX revaluation. Both reuse the stores
+					// already constructed above so rate translation and
+					// posting converge on the same in-process state.
+					r.Post("/consolidation/groups/{id}/statements", ch.statements)
+					fxh := &fxRevaluationHandlers{ledger: d.ledgerStore, rates: d.apiExchangeRates}
+					r.Post("/finance/fx-revaluation/run", fxh.run)
 				}
 			})
 		}

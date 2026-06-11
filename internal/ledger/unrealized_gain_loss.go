@@ -8,10 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/shopspring/decimal"
 
-	"github.com/kennguy3n/kapp-fab/internal/dbutil"
 	"github.com/kennguy3n/kapp-fab/internal/scheduler"
 )
 
@@ -64,128 +61,30 @@ func NewUnrealizedGainLossJob(ledger *PGStore, rates *ExchangeRateStore, systemA
 	return &UnrealizedGainLossJob{ledger: ledger, rates: rates, systemActor: systemActor}
 }
 
-// Handle implements scheduler.ActionHandler. The action.Payload is
-// reserved for future configuration (cadence is already encoded on
-// the scheduled_actions row); right now the job runs unconditionally
-// for the supplied tenant.
-func (j *UnrealizedGainLossJob) Handle(ctx context.Context, tenantID uuid.UUID, _ scheduler.ScheduledAction) error {
+// Handle implements scheduler.ActionHandler. It decodes the optional
+// account allow-list from the action payload and delegates to the
+// shared runFXRevaluation core (also used by the on-demand
+// RevaluationRunner), so the scheduled sweep and the API run share a
+// single, tested implementation. The scheduled path does not persist
+// a run row — the journal entries it posts are the durable record.
+func (j *UnrealizedGainLossJob) Handle(ctx context.Context, tenantID uuid.UUID, action scheduler.ScheduledAction) error {
 	if tenantID == uuid.Nil {
 		return errors.New("unrealized gain/loss: tenant id required")
 	}
-	asOf := time.Now().UTC()
-
-	// First pass: read all open foreign-currency balances under the
-	// tenant's RLS context. The aggregation is done in SQL so a
-	// tenant with thousands of open invoices does not need to ship
-	// every row over the wire.
-	type fxBalance struct {
-		currency string
-		base     string
-		account  string
-		// foreignNet is the unposted balance in the line currency
-		// (debits minus credits). Positive means the tenant owes
-		// (AP) or is owed (AR) — the direction is preserved in
-		// the post below by re-using net's sign on the dr/cr legs.
-		foreignNet decimal.Decimal
-		// recordedBaseNet is what the ledger currently holds for
-		// the same set of lines, in base currency. Subtracting
-		// (foreignNet × currentRate) − recordedBaseNet yields the
-		// revaluation delta we need to post.
-		recordedBaseNet decimal.Decimal
+	cfg := RevaluationConfig{}
+	if len(action.Payload) > 0 {
+		var p fxRevaluationPayload
+		if err := json.Unmarshal(action.Payload, &p); err != nil {
+			return fmt.Errorf("unrealized gain/loss: decode payload: %w", err)
+		}
+		cfg.AccountAllowList = p.AccountAllowList
 	}
-	var balances []fxBalance
-	err := dbutil.WithTenantTx(ctx, j.ledger.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var baseCurrency string
-		if err := tx.QueryRow(ctx,
-			`SELECT COALESCE(base_currency, 'USD') FROM tenants WHERE id = $1`,
-			tenantID,
-		).Scan(&baseCurrency); err != nil {
-			return fmt.Errorf("read base currency: %w", err)
-		}
-		rows, err := tx.Query(ctx,
-			`SELECT jl.account_code, jl.currency,
-			        SUM(jl.debit - jl.credit) AS foreign_net,
-			        SUM(COALESCE(jl.base_amount, jl.debit - jl.credit)) AS base_net
-			   FROM journal_lines jl
-			   JOIN accounts a ON a.tenant_id = jl.tenant_id AND a.code = jl.account_code
-			  WHERE jl.tenant_id = $1
-			    AND jl.currency <> $2
-			    AND a.type IN ('asset', 'liability')
-			  GROUP BY jl.account_code, jl.currency
-			  HAVING SUM(jl.debit - jl.credit) <> 0`,
-			tenantID, baseCurrency,
-		)
-		if err != nil {
-			return fmt.Errorf("scan open fx balances: %w", err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var b fxBalance
-			b.base = baseCurrency
-			if err := rows.Scan(&b.account, &b.currency, &b.foreignNet, &b.recordedBaseNet); err != nil {
-				return fmt.Errorf("scan fx row: %w", err)
-			}
-			balances = append(balances, b)
-		}
-		return rows.Err()
-	})
-	if err != nil {
-		return err
-	}
-	if len(balances) == 0 {
-		return nil
-	}
-
-	// Second pass: compute deltas and post a single revaluation
-	// entry per (account, currency) pair. Each entry has two legs:
-	// the open account itself for the delta in base currency, and
-	// the matching gain/loss adjustment account.
-	for _, b := range balances {
-		currentRate, err := j.rates.GetRate(ctx, tenantID, b.currency, b.base, asOf)
-		if err != nil {
-			// Skip this pair rather than abort the whole sweep —
-			// a missing rate for one currency should not stop
-			// revaluation of the others.
-			continue
-		}
-		currentBase := b.foreignNet.Mul(currentRate)
-		delta := currentBase.Sub(b.recordedBaseNet)
-		if delta.IsZero() {
-			continue
-		}
-		entry := JournalEntry{
-			TenantID:    tenantID,
-			PostedAt:    asOf,
-			Memo:        fmt.Sprintf("FX-REVAL %s %s→%s on %s", b.account, b.currency, b.base, asOf.Format("2006-01-02")),
-			SourceKType: "finance.fx_revaluation",
-			CreatedBy:   j.systemActor,
-		}
-		gainLossAccount := AccountCodeUnrealizedFXGain
-		if delta.IsNegative() {
-			gainLossAccount = AccountCodeUnrealizedFXLoss
-		}
-		abs := delta.Abs()
-		if delta.IsPositive() {
-			entry.Lines = []JournalLine{
-				{TenantID: tenantID, AccountCode: b.account, Debit: abs, Currency: b.base},
-				{TenantID: tenantID, AccountCode: gainLossAccount, Credit: abs, Currency: b.base},
-			}
-		} else {
-			entry.Lines = []JournalLine{
-				{TenantID: tenantID, AccountCode: gainLossAccount, Debit: abs, Currency: b.base},
-				{TenantID: tenantID, AccountCode: b.account, Credit: abs, Currency: b.base},
-			}
-		}
-		if _, err := j.ledger.PostJournalEntry(ctx, entry); err != nil {
-			return fmt.Errorf("post fx revaluation %s/%s: %w", b.account, b.currency, err)
-		}
-	}
-	return nil
+	_, err := runFXRevaluation(ctx, j.ledger, j.rates, j.systemActor, tenantID, time.Now().UTC(), cfg)
+	return err
 }
 
-// fxRevaluationPayload is the (currently empty) JSON shape stored on
-// the scheduled action row. Reserved so future iterations can ship
-// per-tenant overrides (e.g. account allow-list) without a schema
+// fxRevaluationPayload is the JSON shape stored on the scheduled
+// action row, allowing per-tenant overrides without a schema
 // migration.
 type fxRevaluationPayload struct {
 	// AccountAllowList optionally narrows the revaluation sweep to
