@@ -144,11 +144,17 @@ func scormStatusToProgress(cmi CMIData) string {
 		}
 		return ProgressInProgress
 	default: // SCORM 1.2
-		switch strings.ToLower(strings.TrimSpace(cmi.LessonStatus)) {
+		status := strings.ToLower(strings.TrimSpace(cmi.LessonStatus))
+		switch status {
 		case scormStatusPassed, scormStatusCompleted:
 			return ProgressCompleted
 		case scormStatusNotAttempt, "":
-			if cmi.LessonStatus == "" {
+			// A blank/whitespace-only lesson_status means the SCO has
+			// launched but not yet reported a state → in_progress. Test
+			// the trimmed value (not the raw field) so "   " behaves like
+			// "". The explicit "not attempted" token is the only value
+			// that maps to not_started.
+			if status == "" {
 				return ProgressInProgress
 			}
 			return ProgressNotStarted

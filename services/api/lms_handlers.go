@@ -215,9 +215,14 @@ func (h *lmsHandlers) deletePath(w http.ResponseWriter, r *http.Request) {
 }
 
 type addCourseRequest struct {
-	CourseID              uuid.UUID   `json:"course_id"`
-	SequenceOrder         int         `json:"sequence_order"`
-	IsMandatory           bool        `json:"is_mandatory"`
+	CourseID      uuid.UUID `json:"course_id"`
+	SequenceOrder int       `json:"sequence_order"`
+	// IsMandatory is a pointer so an omitted key is distinguishable from
+	// an explicit false. A plain bool would zero-value to false, silently
+	// contradicting the learning_path_courses SQL DEFAULT true and
+	// dropping the course out of the completion gate (EvaluateCompletion
+	// only counts mandatory courses).
+	IsMandatory           *bool       `json:"is_mandatory"`
 	PrerequisiteCourseIDs []uuid.UUID `json:"prerequisite_course_ids"`
 }
 
@@ -234,12 +239,19 @@ func (h *lmsHandlers) addPathCourse(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	// Default to mandatory when the client omits is_mandatory, matching
+	// the learning_path_courses SQL DEFAULT; only an explicit false makes
+	// the course optional.
+	isMandatory := true
+	if req.IsMandatory != nil {
+		isMandatory = *req.IsMandatory
+	}
 	course, err := h.paths.AddCourse(r.Context(), lms.LearningPathCourse{
 		TenantID:              tenantID,
 		LearningPathID:        pathID,
 		CourseID:              req.CourseID,
 		SequenceOrder:         req.SequenceOrder,
-		IsMandatory:           req.IsMandatory,
+		IsMandatory:           isMandatory,
 		PrerequisiteCourseIDs: req.PrerequisiteCourseIDs,
 	}, h.actor(r))
 	if err != nil {
@@ -593,8 +605,7 @@ func (h *lmsHandlers) deleteThread(w http.ResponseWriter, r *http.Request) {
 }
 
 type addReplyRequest struct {
-	Body   string `json:"body"`
-	Source string `json:"source"`
+	Body string `json:"body"`
 }
 
 func (h *lmsHandlers) addReply(w http.ResponseWriter, r *http.Request) {
@@ -610,16 +621,17 @@ func (h *lmsHandlers) addReply(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	source := req.Source
-	if source == "" {
-		source = lms.ReplySourceWeb
-	}
+	// Replies created through this learner-tier REST endpoint always
+	// originate from the web app, so the source is fixed server-side. The
+	// "kchat" source is reserved for replies the kchat-bridge writes via
+	// the store directly; accepting a client-supplied source here would let
+	// a learner spoof a kchat-originated reply.
 	reply, err := h.discuss.AddReply(r.Context(), lms.DiscussionReply{
 		TenantID: tenantID,
 		ThreadID: threadID,
 		AuthorID: actorOrDefault(r.Context()),
 		Body:     req.Body,
-		Source:   source,
+		Source:   lms.ReplySourceWeb,
 	}, h.actor(r))
 	if err != nil {
 		writeLMSError(w, err)

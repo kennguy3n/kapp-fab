@@ -1,6 +1,8 @@
 package lms
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -78,6 +80,18 @@ func TestComputeCourseAnalyticsEmpty(t *testing.T) {
 	a := ComputeCourseAnalytics(uuid.New(), nil, nil, nil)
 	if a.EnrollmentCount != 0 || a.CompletionRate != 0 || a.AverageScore != nil {
 		t.Fatalf("empty analytics wrong: %+v", a)
+	}
+	// The slice fields must be non-nil empty slices so they marshal as
+	// `[]` (not `null`) — the TS dashboard accesses `.length` directly.
+	if a.LessonDropOff == nil || a.PerLearner == nil {
+		t.Fatalf("slice fields must be non-nil: %+v", a)
+	}
+	b, err := json.Marshal(a)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if s := string(b); strings.Contains(s, `"lesson_drop_off":null`) || strings.Contains(s, `"per_learner":null`) {
+		t.Fatalf("empty analytics marshaled a null slice: %s", s)
 	}
 }
 

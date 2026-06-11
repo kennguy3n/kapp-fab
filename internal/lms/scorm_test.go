@@ -89,6 +89,12 @@ func TestMapCMIToProgress(t *testing.T) {
 			t.Fatalf("want in_progress, got %+v", got)
 		}
 	})
+	t.Run("1.2 whitespace-only status behaves like empty (in_progress)", func(t *testing.T) {
+		got, _ := MapCMIToProgress(CMIData{Version: ContentTypeScorm12, LessonStatus: "   "})
+		if got.Status != ProgressInProgress {
+			t.Fatalf("want in_progress, got %+v", got)
+		}
+	})
 	t.Run("2004 completion completed => complete", func(t *testing.T) {
 		got, _ := MapCMIToProgress(CMIData{Version: ContentTypeScorm2004, CompletionStatus: "completed", SuccessStatus: "unknown"})
 		if got.Status != ProgressCompleted {

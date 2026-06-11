@@ -74,7 +74,16 @@ type CourseAnalytics struct {
 // lessonIDs is the course's full lesson set so LessonsTotal and the
 // drop-off denominator reflect lessons with zero progress too.
 func ComputeCourseAnalytics(courseID uuid.UUID, enrollments []EnrollmentRow, progress []ProgressRow, lessonIDs []uuid.UUID) CourseAnalytics {
-	out := CourseAnalytics{CourseID: courseID, EnrollmentCount: len(enrollments)}
+	// Initialize the slice fields as empty (not nil) so json.Marshal emits
+	// `[]` rather than `null` for a course with no lessons/enrollments yet.
+	// The TS contract types these as arrays (CourseAnalytics.lesson_drop_off:
+	// LessonDropOff[]); a `null` would crash the dashboard on `.length`.
+	out := CourseAnalytics{
+		CourseID:        courseID,
+		EnrollmentCount: len(enrollments),
+		LessonDropOff:   []LessonDropOff{},
+		PerLearner:      []LearnerProgress{},
+	}
 
 	for _, e := range enrollments {
 		if e.Status == "completed" {
