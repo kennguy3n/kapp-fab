@@ -683,10 +683,17 @@ func (h *bankfeedHandlers) previewRule(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	amount, err := decimal.NewFromString(strings.TrimSpace(req.Sample.Amount))
-	if err != nil {
-		http.Error(w, "sample.amount must be a decimal string", http.StatusBadRequest)
-		return
+	// An omitted amount defaults to zero so an operator testing a purely
+	// text rule (payee/reference) need not invent a number; a non-empty
+	// value must still parse exactly.
+	amount := decimal.Zero
+	if s := strings.TrimSpace(req.Sample.Amount); s != "" {
+		parsed, err := decimal.NewFromString(s)
+		if err != nil {
+			http.Error(w, "sample.amount must be a decimal string", http.StatusBadRequest)
+			return
+		}
+		amount = parsed
 	}
 	sample := bankfeed.RawTransaction{
 		Description:  req.Sample.Description,

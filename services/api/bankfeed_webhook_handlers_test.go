@@ -138,3 +138,28 @@ func TestWebhookReceiveResponseBodyIsTerse(t *testing.T) {
 		t.Fatalf("202 body = %q; want empty", got)
 	}
 }
+
+// The webhook route must bypass the global CSRF middleware: a server-to-
+// server provider POST carries no Origin/Referer/Bearer, so without an
+// exemption it would be rejected with 403 in production (CSRFAllowedOrigins
+// set). Guards the fix that adds the path to publicCSRFExemptPathSet.
+func TestWebhookPathIsCSRFExempt(t *testing.T) {
+	patterns := publicCSRFExemptPathSet()
+	for _, provider := range []string{"plaid", "gocardless"} {
+		path := "/api/v1/finance/bank-feeds/webhooks/" + provider
+		r := httptest.NewRequest(http.MethodPost, path, http.NoBody)
+		if !isPublicCSRFExempt(r, patterns) {
+			t.Errorf("POST %s not CSRF-exempt; provider webhooks would 403 in prod", path)
+		}
+	}
+	// The bare subtree (no provider segment) and non-POST methods must NOT
+	// be exempt — the exemption is for the concrete signed-POST route only.
+	bare := httptest.NewRequest(http.MethodPost, "/api/v1/finance/bank-feeds/webhooks/", http.NoBody)
+	if isPublicCSRFExempt(bare, patterns) {
+		t.Error("bare webhooks/ path must not be CSRF-exempt")
+	}
+	get := httptest.NewRequest(http.MethodGet, "/api/v1/finance/bank-feeds/webhooks/plaid", http.NoBody)
+	if isPublicCSRFExempt(get, patterns) {
+		t.Error("GET on webhook path must not be CSRF-exempt")
+	}
+}

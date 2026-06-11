@@ -172,4 +172,31 @@ func TestGoCardlessVerifyAndParse(t *testing.T) {
 			t.Fatalf("err = %v; want ErrWebhookSignature", err)
 		}
 	})
+
+	t.Run("enveloped events array, requisition under links, triggers", func(t *testing.T) {
+		body := []byte(`{"events":[{"action":"linked","resource_type":"requisitions","links":{"requisition":"req-env"}}]}`)
+		h := http.Header{"Webhook-Signature": {sign(secret, body)}}
+		ev, err := p.VerifyAndParse(body, h)
+		if err != nil {
+			t.Fatalf("VerifyAndParse: %v", err)
+		}
+		if ev.ExternalID != "req-env" || !ev.TriggerSync {
+			t.Fatalf("enveloped event = %+v; want req-env + trigger", ev)
+		}
+	})
+
+	t.Run("enveloped events array with no sync-worthy action acks without trigger", func(t *testing.T) {
+		body := []byte(`{"events":[{"action":"expired","links":{"requisition":"req-exp"}}]}`)
+		h := http.Header{"Webhook-Signature": {sign(secret, body)}}
+		ev, err := p.VerifyAndParse(body, h)
+		if err != nil {
+			t.Fatalf("VerifyAndParse: %v", err)
+		}
+		if ev.TriggerSync {
+			t.Fatalf("expired enveloped event must not trigger: %+v", ev)
+		}
+		if ev.ExternalID != "req-exp" {
+			t.Fatalf("ExternalID = %q; want req-exp (first seen)", ev.ExternalID)
+		}
+	})
 }

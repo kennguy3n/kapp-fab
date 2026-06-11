@@ -100,3 +100,15 @@ func firstHeader(headers http.Header, names ...string) string {
 	}
 	return ""
 }
+
+// firstNonEmpty returns the first non-empty value among vals, or "" when all
+// are empty. Providers spell the same field under different keys across
+// payload shapes, so a verifier lists the keys in preference order.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}

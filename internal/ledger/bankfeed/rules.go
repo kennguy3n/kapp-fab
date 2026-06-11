@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -209,6 +210,33 @@ func (c RuleCondition) validate() error {
 	return nil
 }
 
+// regexCache memoizes compiled rule regexes. Rule values are validated at
+// write time, so a bounded set of patterns is re-evaluated against every
+// line of a sync batch (and across batches/tenants); compiling once per
+// distinct pattern avoids recompiling the same RE2 program hundreds of
+// times. Only successful compilations are stored — an invalid pattern is
+// rejected at write time, and the evaluation paths treat a compile error as
+// no-match — so the map size is bounded by the number of distinct valid
+// patterns, not by adversarial input.
+var regexCache sync.Map // map[string]*regexp.Regexp
+
+// compileRuleRegex returns a cached compiled regex for pattern, compiling
+// and memoizing on first use. Concurrency-safe; a benign duplicate compile
+// can occur under a race but both callers observe an equivalent program.
+func compileRuleRegex(pattern string) (*regexp.Regexp, error) {
+	if v, ok := regexCache.Load(pattern); ok {
+		if re, ok := v.(*regexp.Regexp); ok {
+			return re, nil
+		}
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	regexCache.Store(pattern, re)
+	return re, nil
+}
+
 // matches reports whether the rule's condition is satisfied by txn. The
 // account-scope filter is applied by the caller (the query) so this only
 // evaluates the condition itself. A compound rule (non-empty Conditions)
@@ -222,7 +250,7 @@ func (r Rule) matches(txn RawTransaction) bool {
 	case CondDescriptionContains:
 		return strings.Contains(strings.ToLower(txn.Description), strings.ToLower(r.ConditionValue))
 	case CondDescriptionRegex:
-		re, err := regexp.Compile(r.ConditionValue)
+		re, err := compileRuleRegex(r.ConditionValue)
 		if err != nil {
 			return false // already rejected at write time; defensive here
 		}
@@ -298,7 +326,7 @@ func (c RuleCondition) matchesText(field string) bool {
 	case OpEquals:
 		return strings.EqualFold(strings.TrimSpace(field), strings.TrimSpace(c.Value))
 	case OpRegex:
-		re, err := regexp.Compile(c.Value)
+		re, err := compileRuleRegex(c.Value)
 		if err != nil {
 			return false
 		}

@@ -238,6 +238,62 @@ func TestRuleResponseShape(t *testing.T) {
 	}
 }
 
+// TestPreviewRuleDefaultsEmptyAmountToZero guards the preview UX fix: an
+// operator drafting a purely textual rule (payee/reference/description)
+// supplies no amount, and the handler must treat an omitted sample.amount
+// as zero rather than 400-ing on "must be a decimal string". A non-text
+// rule path is unaffected because the rule here keys on description only.
+func TestPreviewRuleDefaultsEmptyAmountToZero(t *testing.T) {
+	t.Parallel()
+	h := &bankfeedHandlers{}
+
+	// Supplied rules path → no DB access. Empty Amount must default to 0.
+	body := `{"sample":{"description":"ACME PAYROLL"},"rules":[` +
+		`{"priority":1,"condition_type":"description_contains",` +
+		`"condition_value":"payroll","target_account_code":"6000"}]}`
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/finance/bank-feeds/rules/preview", strings.NewReader(body))
+	ctx := platform.WithTenant(req.Context(), &tenant.Tenant{ID: uuid.New()})
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	h.previewRule(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("empty amount preview: want 200, got %d (body=%q)", rr.Code, rr.Body.String())
+	}
+	var resp previewResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode preview response: %v", err)
+	}
+	if !resp.Matched {
+		t.Fatalf("text rule should fire on zero-amount sample: %+v", resp)
+	}
+	if resp.TargetAccountCode != "6000" {
+		t.Fatalf("TargetAccountCode = %q; want 6000", resp.TargetAccountCode)
+	}
+}
+
+// TestPreviewRuleRejectsNonDecimalAmount keeps the explicit-bad-value path:
+// a present but non-numeric amount is still a client 400, so the zero
+// default does not mask a genuine typo.
+func TestPreviewRuleRejectsNonDecimalAmount(t *testing.T) {
+	t.Parallel()
+	h := &bankfeedHandlers{}
+	body := `{"sample":{"description":"x","amount":"not-a-number"},"rules":[` +
+		`{"priority":1,"condition_type":"description_contains","condition_value":"x"}]}`
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/finance/bank-feeds/rules/preview", strings.NewReader(body))
+	ctx := platform.WithTenant(req.Context(), &tenant.Tenant{ID: uuid.New()})
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	h.previewRule(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("non-decimal amount: want 400, got %d (body=%q)", rr.Code, rr.Body.String())
+	}
+}
+
 // TestUploadCSVRejectsOversizeBody proves the statement-upload guard
 // returns 413 for a body past maxCSVUploadBytes instead of silently
 // ingesting a truncated prefix. The size check runs before any store or

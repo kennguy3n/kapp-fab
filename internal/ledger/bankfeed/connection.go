@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,6 +41,14 @@ type ConnectionStore struct {
 	// in deployments without ADMIN_DB_URL, in which case webhook
 	// resolution fails closed.
 	adminPool *pgxpool.Pool
+	// adminBypass{Mu,Verified} memoize the one-time confirmation that
+	// adminPool's role actually has BYPASSRLS. The attribute is immutable
+	// for the pool's lifetime, so once verified every later webhook skips
+	// the round-trip. Only a positive result is cached: a transient query
+	// error is returned without memoizing so the next webhook retries
+	// rather than failing closed forever on a blip.
+	adminBypassMu       sync.Mutex
+	adminBypassVerified bool
 }
 
 // NewConnectionStore wires a store. enc may be nil in development (the
@@ -91,15 +100,11 @@ func (s *ConnectionStore) ResolveActiveByExternalID(ctx context.Context, provide
 	// Defense-in-depth: confirm the pool's role actually has BYPASSRLS, so
 	// a misconfigured app pool returns a clear error rather than silently
 	// matching zero rows under default-deny RLS (which a caller would
-	// misread as "unknown connection" and drop the webhook).
-	var bypass bool
-	if err := s.adminPool.QueryRow(ctx,
-		`SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user`,
-	).Scan(&bypass); err != nil {
-		return nil, fmt.Errorf("bankfeed: verify admin pool role: %w", err)
-	}
-	if !bypass {
-		return nil, errors.New("bankfeed: ResolveActiveByExternalID requires a BYPASSRLS pool (got non-bypass role)")
+	// misread as "unknown connection" and drop the webhook). Memoized after
+	// the first success so a settlement-time burst of webhooks does not each
+	// pay the extra round-trip.
+	if err := s.verifyAdminBypass(ctx); err != nil {
+		return nil, err
 	}
 	rows, err := s.adminPool.Query(ctx,
 		connectionSelect+` WHERE provider = $1 AND external_id = $2 AND status = $3
@@ -124,6 +129,31 @@ func (s *ConnectionStore) ResolveActiveByExternalID(ctx context.Context, provide
 		return nil, fmt.Errorf("bankfeed: connection for %s/%s: %w", provider, handle, ErrNotFound)
 	}
 	return out, nil
+}
+
+// verifyAdminBypass confirms (once) that adminPool's role has BYPASSRLS.
+// The result is memoized only on success: the attribute cannot change
+// without an operational role change + restart, so a verified pool never
+// re-queries, while a transient error is propagated without caching so the
+// next call retries. A hard non-bypass misconfiguration returns an error
+// every call (a cheap catalog query) until the deployment is fixed.
+func (s *ConnectionStore) verifyAdminBypass(ctx context.Context) error {
+	s.adminBypassMu.Lock()
+	defer s.adminBypassMu.Unlock()
+	if s.adminBypassVerified {
+		return nil
+	}
+	var bypass bool
+	if err := s.adminPool.QueryRow(ctx,
+		`SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user`,
+	).Scan(&bypass); err != nil {
+		return fmt.Errorf("bankfeed: verify admin pool role: %w", err)
+	}
+	if !bypass {
+		return errors.New("bankfeed: ResolveActiveByExternalID requires a BYPASSRLS pool (got non-bypass role)")
+	}
+	s.adminBypassVerified = true
+	return nil
 }
 
 // seal encrypts a credential, returning the BYTEA payload to persist.

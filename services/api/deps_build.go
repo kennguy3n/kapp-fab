@@ -1760,17 +1760,23 @@ func clampPoWDifficulty(d int) uint8 {
 //   - the captcha middleware + a per-form honeypot check inside
 //     the handler. The CSRF Origin check would only add a fourth
 //     layer that is by design defeated by the embedding scenario.
-//   - Webhook receivers (mounted by future PRs) carry a provider-
-//     signed payload that the receiver re-validates server-side
-//     via HMAC. CSRF cannot meaningfully add to that guarantee.
+//   - POST /api/v1/finance/bank-feeds/webhooks/{provider} is a
+//     server-to-server provider notification (Plaid, GoCardless)
+//     that carries no Origin/Referer and no Bearer token, so the
+//     CSRF Origin check would reject every delivery in production.
+//     The receiver re-validates the provider's signed payload via
+//     HMAC before doing any work, so CSRF adds nothing here.
 //
 // The path patterns are matched with isPublicCSRFExempt, which
 // handles chi's {id} placeholders by checking literal prefix +
-// suffix against the request path.
+// suffix against the request path. An empty suffix matches a single
+// trailing segment (the {provider} of the webhook route).
 func publicCSRFExemptPathSet() [][2]string {
 	return [][2]string{
 		// {prefix, suffix}: POST /api/v1/forms/{id}/submit
 		{"/api/v1/forms/", "/submit"},
+		// {prefix, suffix}: POST /api/v1/finance/bank-feeds/webhooks/{provider}
+		{"/api/v1/finance/bank-feeds/webhooks/", ""},
 	}
 }
 
