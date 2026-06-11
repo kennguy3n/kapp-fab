@@ -515,11 +515,17 @@ func (h *lmsHandlers) getThread(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"thread": thread, "replies": replies})
 }
 
+// updateThreadRequest carries PATCH partial-update semantics: every
+// field is a pointer so an omitted key leaves the corresponding thread
+// attribute untouched, rather than zeroing it. This is what callers
+// expect from a PATCH (e.g. `{"status":"closed"}` must not blank the
+// title), and it avoids the spurious "title required" 400 a
+// full-replacement overlay would produce.
 type updateThreadRequest struct {
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-	Status string `json:"status"`
-	Pinned bool   `json:"pinned"`
+	Title  *string `json:"title"`
+	Body   *string `json:"body"`
+	Status *string `json:"status"`
+	Pinned *bool   `json:"pinned"`
 }
 
 func (h *lmsHandlers) updateThread(w http.ResponseWriter, r *http.Request) {
@@ -540,10 +546,20 @@ func (h *lmsHandlers) updateThread(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	existing.Title = req.Title
-	existing.Body = req.Body
-	existing.Status = req.Status
-	existing.Pinned = req.Pinned
+	// Apply only the fields the client actually sent; everything else
+	// retains its current persisted value.
+	if req.Title != nil {
+		existing.Title = *req.Title
+	}
+	if req.Body != nil {
+		existing.Body = *req.Body
+	}
+	if req.Status != nil {
+		existing.Status = *req.Status
+	}
+	if req.Pinned != nil {
+		existing.Pinned = *req.Pinned
+	}
 	updated, err := h.discuss.UpdateThread(r.Context(), *existing, h.actor(r))
 	if err != nil {
 		writeLMSError(w, err)

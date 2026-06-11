@@ -835,42 +835,77 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 				r.Use(d.rateLimitMW)
 				r.Use(platform.QuotaMiddleware(d.quotaEnforcer))
 
-				// Learning paths.
-				r.Post("/learning-paths", d.lmsh.createPath)
-				r.Get("/learning-paths", d.lmsh.listPaths)
-				r.Get("/learning-paths/{id}", d.lmsh.getPath)
-				r.Patch("/learning-paths/{id}", d.lmsh.updatePath)
-				r.Delete("/learning-paths/{id}", d.lmsh.deletePath)
-				r.Post("/learning-paths/{id}/courses", d.lmsh.addPathCourse)
-				r.Delete("/learning-paths/{id}/courses/{courseID}", d.lmsh.removePathCourse)
-				r.Post("/learning-paths/{id}/enroll", d.lmsh.enrollPath)
-				r.Post("/learning-paths/{id}/complete", d.lmsh.completePath)
+				// The LMS surface deliberately mixes two
+				// authorization tiers, so — unlike finance/HR which
+				// gate the whole group on one role — we split it into
+				// two sibling sub-groups (the same shape marketplace
+				// uses for its read vs admin split). A single
+				// authzMethodGate won't do: it would force every POST
+				// (including a learner enrolling themselves or a SCO
+				// committing runtime) through the admin role.
+				//
+				// The split mirrors the lms.* KType permission
+				// convention exactly — "read": ["tenant.member"],
+				// "write": ["lms.admin","tenant.admin"] — so the
+				// dedicated endpoints can't be used to bypass the RBAC
+				// the generic /api/v1/records/lms.* CRUD already
+				// enforces.
 
-				// SCORM 1.2 / 2004 runtime.
-				r.Post("/scorm/upload", d.lmsh.scormUpload)
-				r.Post("/scorm/{lessonID}/initialize", d.lmsh.scormInitialize)
-				r.Post("/scorm/{lessonID}/commit", d.lmsh.scormCommit)
-				r.Post("/scorm/{lessonID}/terminate", d.lmsh.scormTerminate)
+				// Learner-accessible tier (tenant.member). Catalogue
+				// reads plus the learner's own activity: enrolling
+				// themselves, driving the SCORM/xAPI runtime, and
+				// participating in course discussions. tenant.admin /
+				// owner inherit tenant.member via the role hierarchy,
+				// so admins keep access too.
+				r.Group(func(r chi.Router) {
+					r.Use(d.authzGate("tenant.member", ""))
 
-				// xAPI (Tin Can) receiver.
-				r.Post("/xapi/statements", d.lmsh.xapiStatements)
+					r.Get("/learning-paths", d.lmsh.listPaths)
+					r.Get("/learning-paths/{id}", d.lmsh.getPath)
+					r.Post("/learning-paths/{id}/enroll", d.lmsh.enrollPath)
+					r.Post("/learning-paths/{id}/complete", d.lmsh.completePath)
 
-				// Discussion forums.
-				r.Post("/discussions", d.lmsh.createThread)
-				r.Get("/discussions", d.lmsh.listThreads)
-				r.Get("/discussions/{id}", d.lmsh.getThread)
-				r.Patch("/discussions/{id}", d.lmsh.updateThread)
-				r.Delete("/discussions/{id}", d.lmsh.deleteThread)
-				r.Post("/discussions/{id}/replies", d.lmsh.addReply)
-				r.Post("/discussions/{id}/replies/{replyID}/answer", d.lmsh.markAnswer)
+					r.Post("/scorm/{lessonID}/initialize", d.lmsh.scormInitialize)
+					r.Post("/scorm/{lessonID}/commit", d.lmsh.scormCommit)
+					r.Post("/scorm/{lessonID}/terminate", d.lmsh.scormTerminate)
 
-				// Gamification.
-				r.Post("/badges", d.lmsh.createBadge)
-				r.Get("/badges", d.lmsh.listBadges)
-				r.Get("/badges/awards", d.lmsh.listAwards)
+					r.Post("/xapi/statements", d.lmsh.xapiStatements)
 
-				// Instructor analytics.
-				r.Get("/courses/{id}/analytics", d.lmsh.courseAnalytics)
+					r.Get("/discussions", d.lmsh.listThreads)
+					r.Get("/discussions/{id}", d.lmsh.getThread)
+					r.Post("/discussions", d.lmsh.createThread)
+					r.Post("/discussions/{id}/replies", d.lmsh.addReply)
+
+					r.Get("/badges", d.lmsh.listBadges)
+					r.Get("/badges/awards", d.lmsh.listAwards)
+				})
+
+				// Admin / instructor tier (lms.admin). Authoring
+				// (learning paths, path composition, SCORM package
+				// upload, badge definitions), forum moderation
+				// (editing/closing/deleting threads, marking the
+				// accepted answer) and the instructor analytics
+				// dashboard — all restricted to lms.admin (and
+				// tenant.admin/owner via lms.* / * wildcards).
+				r.Group(func(r chi.Router) {
+					r.Use(d.authzGate("lms.admin", ""))
+
+					r.Post("/learning-paths", d.lmsh.createPath)
+					r.Patch("/learning-paths/{id}", d.lmsh.updatePath)
+					r.Delete("/learning-paths/{id}", d.lmsh.deletePath)
+					r.Post("/learning-paths/{id}/courses", d.lmsh.addPathCourse)
+					r.Delete("/learning-paths/{id}/courses/{courseID}", d.lmsh.removePathCourse)
+
+					r.Post("/scorm/upload", d.lmsh.scormUpload)
+
+					r.Patch("/discussions/{id}", d.lmsh.updateThread)
+					r.Delete("/discussions/{id}", d.lmsh.deleteThread)
+					r.Post("/discussions/{id}/replies/{replyID}/answer", d.lmsh.markAnswer)
+
+					r.Post("/badges", d.lmsh.createBadge)
+
+					r.Get("/courses/{id}/analytics", d.lmsh.courseAnalytics)
+				})
 			})
 		}
 

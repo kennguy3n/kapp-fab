@@ -183,7 +183,12 @@ export interface ScormCMIData {
 
 export interface ScormRuntimeState {
   status: string;
-  score?: string;
+  // The Go side (`internal/lms.RuntimeState.Score`) is a
+  // `*decimal.Decimal`, which shopspring/decimal marshals as an
+  // unquoted JSON number — so this is a `number` on the wire, not a
+  // string. Consumers writing it into the SCORM CMI store (which the
+  // spec requires to hold strings) must `String(...)` it first.
+  score?: number;
   time_spent_seconds: number;
   suspend_data: string;
   exists: boolean;

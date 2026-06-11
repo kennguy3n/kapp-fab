@@ -74,6 +74,15 @@ export function lmsStatusToScorm(
   }
 }
 
+// cmiScoreRaw normalizes the persisted score (a JSON number on the wire,
+// since the Go side is a *decimal.Decimal) into the string the SCORM CMI
+// data model mandates for cmi.core.score.raw / cmi.score.raw. Returns
+// undefined when there is no score to hydrate; a legitimate 0 is kept
+// (it stringifies to "0") rather than being dropped by a truthiness test.
+export function cmiScoreRaw(score: number | undefined): string | undefined {
+  return score != null ? String(score) : undefined;
+}
+
 function projectCMI(store: Store, version: ScormVersion): ScormCMIData {
   const cmi: ScormCMIData = {
     version: version === "scorm_12" ? "scorm_12" : "scorm_2004",
@@ -215,12 +224,15 @@ export function ScormPlayer({
         if (rt.exists) {
           store.set("cmi.suspend_data", rt.suspend_data ?? "");
           const scormStatus = lmsStatusToScorm(rt.status, version);
+          // rt.score is a JSON number on the wire; the CMI store is
+          // string-typed per the SCORM data model, so stringify it.
+          const scoreRaw = cmiScoreRaw(rt.score);
           if (version === "scorm_12") {
             store.set("cmi.core.lesson_status", scormStatus);
-            if (rt.score) store.set("cmi.core.score.raw", rt.score);
+            if (scoreRaw !== undefined) store.set("cmi.core.score.raw", scoreRaw);
           } else {
             store.set("cmi.completion_status", scormStatus);
-            if (rt.score) store.set("cmi.score.raw", rt.score);
+            if (scoreRaw !== undefined) store.set("cmi.score.raw", scoreRaw);
           }
         }
         // Only now (resume state populated) do we allow the iframe to load,

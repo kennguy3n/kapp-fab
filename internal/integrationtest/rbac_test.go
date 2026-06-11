@@ -6,6 +6,7 @@ package integrationtest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -199,5 +200,99 @@ func TestAuthzMultiRoleAndHierarchy(t *testing.T) {
 		"owner": other.String(),
 	}); err == nil {
 		t.Errorf("owner_only should deny when actor is not owner")
+	}
+}
+
+// TestLMSRouteAuthzGateActions pins the security contract of the two
+// authz gates protecting the /api/v1/lms route group
+// (services/api/routes.go): the learner tier is gated on the
+// "tenant.member" action, the admin/instructor tier on "lms.admin".
+// Before this was wired the group had no gate at all, so any
+// authenticated tenant member could author learning paths, upload
+// SCORM packages, create badges, moderate forums and read instructor
+// analytics. This test asserts, against the live wizard-seeded roles,
+// that:
+//
+//   - a plain tenant.member passes the learner gate but is DENIED the
+//     admin gate (so they cannot reach the authoring endpoints), and
+//   - an lms.admin passes BOTH gates — it reaches the admin endpoints
+//     and, via the tenant.member parent in the role hierarchy, the
+//     learner endpoints too.
+func TestLMSRouteAuthzGateActions(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	slug := uniqueSlug("lmsauthz")
+	tt, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: slug, Name: "LMS Authz Co", Cell: "test", Plan: "free",
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+
+	// Seed the canonical roles (tenant.member, lms.admin, …) with the
+	// 000050 parent_role hierarchy.
+	w := tenant.NewWizard(h.pool)
+	if _, err := w.RunSetupWizard(ctx, tt.ID, tenant.SetupWizardConfig{
+		CompanyName: "LMS Authz Co",
+		CoATemplate: "us_gaap_basic",
+	}); err != nil {
+		t.Fatalf("wizard: %v", err)
+	}
+
+	// Two users: a plain member and an LMS administrator.
+	memberID := uuid.New()
+	adminID := uuid.New()
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO users (id, kchat_user_id, email, display_name)
+		 VALUES ($1, $2, $3, $4), ($5, $6, $7, $8)`,
+		memberID, "kc-m-"+slug, "m-"+slug+"@example.com", "Member",
+		adminID, "kc-a-"+slug, "a-"+slug+"@example.com", "LMS Admin",
+	); err != nil {
+		t.Fatalf("insert users: %v", err)
+	}
+
+	assign := map[uuid.UUID]string{
+		memberID: "tenant.member",
+		adminID:  "lms.admin",
+	}
+	if err := dbutil.WithTenantTx(ctx, h.pool, tt.ID, func(ctx context.Context, tx pgx.Tx) error {
+		for uid, role := range assign {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO user_tenants (user_id, tenant_id, role, status)
+				 VALUES ($1, $2, $3, 'active')`,
+				uid, tt.ID, role,
+			); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO user_tenant_roles (tenant_id, user_id, role_name)
+				 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+				tt.ID, uid, role,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed memberships: %v", err)
+	}
+
+	eval := authz.NewPGEvaluator(h.pool, platform.NewLRUCache(32, 5*time.Second))
+
+	// Learner gate: both the plain member and the admin pass it.
+	if err := eval.Authorize(ctx, tt.ID, memberID, "tenant.member", ""); err != nil {
+		t.Errorf("member should pass the learner (tenant.member) gate: %v", err)
+	}
+	if err := eval.Authorize(ctx, tt.ID, adminID, "tenant.member", ""); err != nil {
+		t.Errorf("lms.admin should inherit tenant.member and pass the learner gate: %v", err)
+	}
+
+	// Admin gate: the plain member is DENIED, the admin passes.
+	if err := eval.Authorize(ctx, tt.ID, memberID, "lms.admin", ""); !errors.Is(err, authz.ErrDenied) {
+		t.Errorf("member must be DENIED the admin (lms.admin) gate, got err=%v", err)
+	}
+	if err := eval.Authorize(ctx, tt.ID, adminID, "lms.admin", ""); err != nil {
+		t.Errorf("lms.admin should pass the admin gate: %v", err)
 	}
 }
