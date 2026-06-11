@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,10 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/ledger/bankfeed"
+	"github.com/kennguy3n/kapp-fab/internal/platform"
+	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
 
 // TestWriteBankFeedErrorMappings pins the sentinel→HTTP-status contract
@@ -231,5 +235,37 @@ func TestRuleResponseShape(t *testing.T) {
 	}
 	if strings.Contains(string(blob), "bank_account_id") {
 		t.Fatalf("global rule should omit bank_account_id: %s", string(blob))
+	}
+}
+
+// TestUploadCSVRejectsOversizeBody proves the statement-upload guard
+// returns 413 for a body past maxCSVUploadBytes instead of silently
+// ingesting a truncated prefix. The size check runs before any store or
+// provider access, so an oversize body is rejected even on a handler
+// with no wired dependencies — which is exactly what this test exercises.
+func TestUploadCSVRejectsOversizeBody(t *testing.T) {
+	t.Parallel()
+	h := &bankfeedHandlers{}
+	acct := uuid.New()
+
+	// One byte past the cap is enough to trip the guard; the handler must
+	// not read (or buffer) more than maxCSVUploadBytes+1.
+	body := strings.Repeat("a", maxCSVUploadBytes+1)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/finance/bank-feeds/accounts/"+acct.String()+"/upload",
+		strings.NewReader(body),
+	)
+	ctx := platform.WithTenant(req.Context(), &tenant.Tenant{ID: uuid.New()})
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("bank_account_id", acct.String())
+	ctx = context.WithValue(ctx, chi.RouteCtxKey, rctx)
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	h.uploadCSV(rr, req)
+
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize upload: want 413, got %d (body=%q)", rr.Code, rr.Body.String())
 	}
 }

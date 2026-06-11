@@ -429,6 +429,44 @@ func TestSyncOneUnknownProvider(t *testing.T) {
 	}
 }
 
+// TestSyncOneAndIngestRawGuardAgainstUnwiredHandler proves the manual
+// entry points fail with a descriptive error rather than panicking when
+// invoked on a partially-constructed handler (e.g. a future caller or a
+// test that forgot to wire the store). This mirrors Handle's own wiring
+// guard so all three entry points behave consistently.
+func TestSyncOneAndIngestRawGuardAgainstUnwiredHandler(t *testing.T) {
+	tn := uuid.New()
+	conn := &Connection{ID: uuid.New(), TenantID: tn, BankAccountID: uuid.New(), Provider: ProviderCSV}
+
+	// Bare handler: nil registry and nil store. Neither call may panic.
+	bare := &SyncHandler{}
+	if _, err := bare.SyncOne(context.Background(), tn, conn); err == nil {
+		t.Error("SyncOne on unwired handler: expected error, got nil")
+	}
+	if _, err := bare.IngestRaw(context.Background(), tn, conn, nil); err == nil {
+		t.Error("IngestRaw on unwired handler: expected error, got nil")
+	}
+
+	// Registry present but store still nil: SyncOne must reject before it
+	// reaches ingestDelta's store writes.
+	noStore := newSyncHandlerForTest(&fakeConns{}, &fakeRules{}, NewRegistry(NewCSVProvider()), nil, nil)
+	if _, err := noStore.SyncOne(context.Background(), tn, conn); err == nil {
+		t.Error("SyncOne with nil store: expected error, got nil")
+	}
+	if _, err := noStore.IngestRaw(context.Background(), tn, conn, nil); err == nil {
+		t.Error("IngestRaw with nil store: expected error, got nil")
+	}
+
+	// A nil connection must also be rejected rather than dereferenced.
+	wired := newSyncHandlerForTest(&fakeConns{}, &fakeRules{}, NewRegistry(NewCSVProvider()), &fakeStore{}, nil)
+	if _, err := wired.SyncOne(context.Background(), tn, nil); err == nil {
+		t.Error("SyncOne with nil connection: expected error, got nil")
+	}
+	if _, err := wired.IngestRaw(context.Background(), tn, nil, nil); err == nil {
+		t.Error("IngestRaw with nil connection: expected error, got nil")
+	}
+}
+
 func TestHandleMarksErrorAndContinues(t *testing.T) {
 	tn := uuid.New()
 	okConn := Connection{ID: uuid.New(), TenantID: tn, BankAccountID: uuid.New(), Provider: "ok"}

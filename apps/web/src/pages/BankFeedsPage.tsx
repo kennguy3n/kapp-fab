@@ -183,13 +183,29 @@ function ConnectionsPanel({
   const [provider, setProvider] = useState("");
   const effectiveProvider = provider || providers[0] || "";
 
-  const invalidate = () =>
+  // Invalidation helpers take the account id explicitly so callbacks key
+  // off the account the mutation actually ran against (captured in the
+  // mutation variables at call time) rather than whatever bankAccountId
+  // the component happens to be rendering when the async callback fires —
+  // otherwise switching accounts mid-flight would refresh the wrong
+  // account's queries.
+  const invalidateConnections = (accountId: string) =>
     qc.invalidateQueries({
-      queryKey: ["bankfeed", "connections", bankAccountId],
+      queryKey: ["bankfeed", "connections", accountId],
+    });
+  const invalidateSuggestions = (accountId: string) =>
+    qc.invalidateQueries({
+      queryKey: ["bankfeed", "suggestions", accountId],
     });
 
   const connectMut = useMutation({
-    mutationFn: async (p: string) => {
+    mutationFn: async ({
+      provider: p,
+      accountId,
+    }: {
+      provider: string;
+      accountId: string;
+    }) => {
       // CSV is push-based: there is no provider handshake, so we create
       // the credential-less connection row directly. Hosted providers
       // need their link handshake first; we surface the returned link so
@@ -197,20 +213,20 @@ function ConnectionsPanel({
       if (p === "csv") {
         await api.completeBankFeedConnect({
           provider: p,
-          bank_account_id: bankAccountId,
+          bank_account_id: accountId,
         });
         return { kind: "csv" as const };
       }
       const link = await api.initiateBankFeedConnect({
         provider: p,
-        bank_account_id: bankAccountId,
+        bank_account_id: accountId,
       });
       return { kind: "link" as const, link: link.link };
     },
-    onSuccess: (res) => {
+    onSuccess: (res, { accountId }) => {
       if (res.kind === "csv") {
         toast.success("CSV feed connected");
-        invalidate();
+        invalidateConnections(accountId);
         return;
       }
       if (res.link) {
@@ -227,23 +243,23 @@ function ConnectionsPanel({
   });
 
   const syncMut = useMutation({
-    mutationFn: (id: string) => api.syncBankFeedConnection(id),
-    onSuccess: (res) => {
+    mutationFn: ({ id }: { id: string; accountId: string }) =>
+      api.syncBankFeedConnection(id),
+    onSuccess: (res, { accountId }) => {
       toast.success("Sync complete", {
         description: `${res.fetched} fetched · ${res.inserted} new · ${res.suggested} suggested · ${res.auto_matched} auto-matched`,
       });
-      invalidate();
-      qc.invalidateQueries({
-        queryKey: ["bankfeed", "suggestions", bankAccountId],
-      });
+      invalidateConnections(accountId);
+      invalidateSuggestions(accountId);
     },
     onError: (e) =>
       toast.error("Sync failed", { description: (e as Error).message }),
   });
 
   const disconnectMut = useMutation({
-    mutationFn: (id: string) => api.disconnectBankFeed(id),
-    onSuccess: (res) => {
+    mutationFn: ({ id }: { id: string; accountId: string }) =>
+      api.disconnectBankFeed(id),
+    onSuccess: (res, { accountId }) => {
       if (res.provider_warning) {
         toast.warning("Disconnected with warning", {
           description: res.provider_warning,
@@ -251,7 +267,7 @@ function ConnectionsPanel({
       } else {
         toast.success("Disconnected");
       }
-      invalidate();
+      invalidateConnections(accountId);
     },
     onError: (e) =>
       toast.error("Disconnect failed", { description: (e as Error).message }),
@@ -280,7 +296,12 @@ function ConnectionsPanel({
           <Button
             size="sm"
             disabled={!effectiveProvider || connectMut.isPending}
-            onClick={() => connectMut.mutate(effectiveProvider)}
+            onClick={() =>
+              connectMut.mutate({
+                provider: effectiveProvider,
+                accountId: bankAccountId,
+              })
+            }
           >
             Connect
           </Button>
@@ -290,11 +311,9 @@ function ConnectionsPanel({
       <CSVUploader
         bankAccountId={bankAccountId}
         defaultCurrency={defaultCurrency}
-        onUploaded={() => {
-          invalidate();
-          qc.invalidateQueries({
-            queryKey: ["bankfeed", "suggestions", bankAccountId],
-          });
+        onUploaded={(accountId) => {
+          invalidateConnections(accountId);
+          invalidateSuggestions(accountId);
         }}
       />
 
@@ -344,7 +363,9 @@ function ConnectionsPanel({
                         size="sm"
                         variant="outline"
                         disabled={syncMut.isPending || c.status === "revoked"}
-                        onClick={() => syncMut.mutate(c.id)}
+                        onClick={() =>
+                          syncMut.mutate({ id: c.id, accountId: bankAccountId })
+                        }
                       >
                         Sync now
                       </Button>
@@ -354,7 +375,12 @@ function ConnectionsPanel({
                         disabled={
                           disconnectMut.isPending || c.status === "revoked"
                         }
-                        onClick={() => disconnectMut.mutate(c.id)}
+                        onClick={() =>
+                          disconnectMut.mutate({
+                            id: c.id,
+                            accountId: bankAccountId,
+                          })
+                        }
                       >
                         Disconnect
                       </Button>
@@ -376,7 +402,7 @@ function CSVUploader({
 }: {
   bankAccountId: string;
   defaultCurrency: string;
-  onUploaded: () => void;
+  onUploaded: (accountId: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -393,7 +419,10 @@ function CSVUploader({
       toast.success("Statement uploaded", {
         description: `${res.fetched} rows · ${res.inserted} new · ${res.suggested} suggested · ${res.auto_matched} auto-matched`,
       });
-      onUploaded();
+      // Pass the account we uploaded to (captured in this closure) so the
+      // parent refreshes the correct account even if the selection moved
+      // on during the upload.
+      onUploaded(bankAccountId);
     } catch (e) {
       toast.error("Upload failed", { description: (e as Error).message });
     } finally {
@@ -432,26 +461,31 @@ function SuggestionsPanel({ bankAccountId }: { bankAccountId: string }) {
     queryFn: () => api.listBankFeedSuggestions(bankAccountId),
   });
 
-  const invalidate = () =>
+  // Keyed off the account captured in the mutation variables at click
+  // time so an in-flight accept/reject refreshes the right account even
+  // if the operator switches accounts before it resolves.
+  const invalidateSuggestions = (accountId: string) =>
     qc.invalidateQueries({
-      queryKey: ["bankfeed", "suggestions", bankAccountId],
+      queryKey: ["bankfeed", "suggestions", accountId],
     });
 
   const acceptMut = useMutation({
-    mutationFn: (id: string) => api.acceptBankFeedSuggestion(id),
-    onSuccess: () => {
+    mutationFn: ({ id }: { id: string; accountId: string }) =>
+      api.acceptBankFeedSuggestion(id),
+    onSuccess: (_res, { accountId }) => {
       toast.success("Suggestion accepted");
-      invalidate();
+      invalidateSuggestions(accountId);
     },
     onError: (e) =>
       toast.error("Accept failed", { description: (e as Error).message }),
   });
 
   const rejectMut = useMutation({
-    mutationFn: (id: string) => api.rejectBankFeedSuggestion(id),
-    onSuccess: () => {
+    mutationFn: ({ id }: { id: string; accountId: string }) =>
+      api.rejectBankFeedSuggestion(id),
+    onSuccess: (_res, { accountId }) => {
       toast.success("Suggestion rejected");
-      invalidate();
+      invalidateSuggestions(accountId);
     },
     onError: (e) =>
       toast.error("Reject failed", { description: (e as Error).message }),
@@ -500,7 +534,9 @@ function SuggestionsPanel({ bankAccountId }: { bankAccountId: string }) {
                       <Button
                         size="sm"
                         disabled={acceptMut.isPending}
-                        onClick={() => acceptMut.mutate(s.id)}
+                        onClick={() =>
+                          acceptMut.mutate({ id: s.id, accountId: bankAccountId })
+                        }
                       >
                         Accept
                       </Button>
@@ -508,7 +544,9 @@ function SuggestionsPanel({ bankAccountId }: { bankAccountId: string }) {
                         size="sm"
                         variant="ghost"
                         disabled={rejectMut.isPending}
-                        onClick={() => rejectMut.mutate(s.id)}
+                        onClick={() =>
+                          rejectMut.mutate({ id: s.id, accountId: bankAccountId })
+                        }
                       >
                         Reject
                       </Button>

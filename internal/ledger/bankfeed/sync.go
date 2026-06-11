@@ -222,6 +222,16 @@ func (h *SyncHandler) syncConnection(ctx context.Context, tenantID uuid.UUID, co
 // connection's transactions and advances its cursor. Exposed so the
 // manual sync route can call it and surface counts to the operator.
 func (h *SyncHandler) SyncOne(ctx context.Context, tenantID uuid.UUID, conn *Connection) (*SyncResult, error) {
+	// Mirror Handle's wiring guard: SyncOne is reachable from the manual
+	// "Sync now" route and the agent tool, so a partially-constructed
+	// handler must fail with a descriptive error rather than panic on a
+	// nil registry (provider lookup) or nil store (ingestDelta writes).
+	if h == nil || h.registry == nil || h.store == nil {
+		return nil, errors.New("bankfeed: sync handler not wired")
+	}
+	if conn == nil {
+		return nil, errors.New("bankfeed: sync requires a connection")
+	}
 	provider, err := h.registry.Get(conn.Provider)
 	if err != nil {
 		return nil, fmt.Errorf("bankfeed: provider %q not registered: %w", conn.Provider, err)
@@ -250,6 +260,16 @@ func (h *SyncHandler) SyncOne(ctx context.Context, tenantID uuid.UUID, conn *Con
 // The CSV provider carries no incremental cursor, so the delta is
 // added-only with an empty cursor.
 func (h *SyncHandler) IngestRaw(ctx context.Context, tenantID uuid.UUID, conn *Connection, raw []RawTransaction) (*SyncResult, error) {
+	// Mirror Handle's wiring guard: IngestRaw is the CSV-upload entry
+	// point, so a partially-constructed handler must fail with a
+	// descriptive error rather than panic on a nil store inside
+	// ingestDelta.
+	if h == nil || h.store == nil {
+		return nil, errors.New("bankfeed: sync handler not wired")
+	}
+	if conn == nil {
+		return nil, errors.New("bankfeed: ingest requires a connection")
+	}
 	return h.ingestDelta(ctx, tenantID, conn, FetchDelta{Added: raw})
 }
 
