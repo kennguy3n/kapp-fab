@@ -453,8 +453,8 @@ func loadScheduledReceiptsByItem(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 // on-hand off every item's gross demand exactly once, so emitting the
 // target here yields a planned order of reorder_level - on_hand without
 // double-counting the on-hand stock. Items already at or above their
-// reorder level are skipped entirely. Due on the horizon start (the
-// shortfall already exists).
+// reorder level are skipped entirely, as are inactive (retired) items.
+// Due on the horizon start (the shortfall already exists).
 func loadMinStockDemand(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -467,7 +467,7 @@ func loadMinStockDemand(
 	rows, err := tx.Query(ctx,
 		`SELECT id, sku, reorder_level
 		   FROM inventory_items
-		  WHERE tenant_id = $1 AND reorder_level > 0`,
+		  WHERE tenant_id = $1 AND active = true AND reorder_level > 0`,
 		tenantID,
 	)
 	if err != nil {
