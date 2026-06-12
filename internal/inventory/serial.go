@@ -335,7 +335,7 @@ func (s *PGStore) ListSerials(ctx context.Context, tenantID uuid.UUID, filter Se
 		}
 		args = append(args, filter.Limit, filter.Offset)
 		q := fmt.Sprintf(
-			`SELECT tenant_id, id, item_id, serial_no, status, warehouse_id, batch_id, created_at, updated_at
+			`SELECT tenant_id, id, item_id, serial_no, status, warehouse_id, batch_id, created_by, created_at, updated_at
 			   FROM inventory_serials
 			  WHERE %s
 			  ORDER BY item_id, serial_no
@@ -370,7 +370,7 @@ func (s *PGStore) GetSerial(ctx context.Context, tenantID, itemID uuid.UUID, ser
 	var sr Serial
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		row := tx.QueryRow(ctx,
-			`SELECT tenant_id, id, item_id, serial_no, status, warehouse_id, batch_id, created_at, updated_at
+			`SELECT tenant_id, id, item_id, serial_no, status, warehouse_id, batch_id, created_by, created_at, updated_at
 			   FROM inventory_serials
 			  WHERE tenant_id = $1 AND item_id = $2 AND serial_no = $3`,
 			tenantID, itemID, serialNo,
@@ -442,7 +442,7 @@ func (s *PGStore) TraceSerial(ctx context.Context, tenantID, itemID uuid.UUID, s
 	var trace SerialTrace
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		row := tx.QueryRow(ctx,
-			`SELECT tenant_id, id, item_id, serial_no, status, warehouse_id, batch_id, created_at, updated_at
+			`SELECT tenant_id, id, item_id, serial_no, status, warehouse_id, batch_id, created_by, created_at, updated_at
 			   FROM inventory_serials
 			  WHERE tenant_id = $1 AND item_id = $2 AND serial_no = $3`,
 			tenantID, itemID, serialNo,
@@ -542,7 +542,7 @@ func scanSerial(row rowScanner) (Serial, error) {
 	var sr Serial
 	if err := row.Scan(
 		&sr.TenantID, &sr.ID, &sr.ItemID, &sr.SerialNo, &sr.Status,
-		&sr.WarehouseID, &sr.BatchID, &sr.CreatedAt, &sr.UpdatedAt,
+		&sr.WarehouseID, &sr.BatchID, &sr.CreatedBy, &sr.CreatedAt, &sr.UpdatedAt,
 	); err != nil {
 		return Serial{}, err
 	}

@@ -160,6 +160,11 @@ func TestWS2SerialTrackingAndTrace(t *testing.T) {
 		if s.WarehouseID == nil || *s.WarehouseID != wh.ID {
 			t.Fatalf("serial %s not at warehouse", s.SerialNo)
 		}
+		// created_by must be surfaced on the read path so the audit
+		// trail is queryable, not just persisted.
+		if s.CreatedBy == nil || *s.CreatedBy != actor {
+			t.Fatalf("serial %s created_by = %v, want %s", s.SerialNo, s.CreatedBy, actor)
+		}
 	}
 
 	// Duplicate intake of an in-stock serial is rejected.
