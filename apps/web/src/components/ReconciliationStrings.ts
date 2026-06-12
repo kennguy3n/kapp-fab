@@ -48,6 +48,7 @@ export const RECONCILIATION_STRINGS = {
   "reconciliation.fx.foreign": "Foreign currency",
   "reconciliation.fx.base": "Base equivalent",
   "reconciliation.fx.diff": "FX difference",
+  "reconciliation.fx.rateLabel": "Rate",
   "reconciliation.fx.noRate":
     "No exchange rate available — base equivalent can’t be shown.",
   "reconciliation.fx.mismatchWarning":
@@ -80,6 +81,8 @@ export const RECONCILIATION_STRINGS = {
   "reconciliation.split.balanced": "Balanced — ready to reconcile.",
   "reconciliation.split.unbalanced": "Allocate the full amount to reconcile.",
   "reconciliation.split.needTwo": "Add at least one entry to split against.",
+  "reconciliation.split.duplicateEntry":
+    "Each ledger entry can only be used once — pick a different entry for the duplicated row.",
   "reconciliation.split.done": "Split reconciled across {count} entries",
   "reconciliation.split.failed": "Could not reconcile the split",
 

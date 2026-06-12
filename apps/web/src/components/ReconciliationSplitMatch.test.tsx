@@ -109,6 +109,12 @@ describe("ReconciliationSplitMatch", () => {
     expect(
       screen.getByRole("button", { name: /reconcile split/i }),
     ).toBeDisabled();
+    // Balanced-but-colliding must explain why it can't reconcile rather than
+    // showing the misleading "ready to reconcile" success badge.
+    expect(screen.getByText(/can only be used once/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/ready to reconcile/i),
+    ).not.toBeInTheDocument();
   });
 
   it("shows the running remaining amount", async () => {

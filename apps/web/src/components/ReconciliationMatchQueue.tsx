@@ -127,6 +127,9 @@ function GroupCard({
   return (
     <li
       ref={cardRef}
+      id={`match-group-${group.transactionId}`}
+      role="option"
+      aria-selected={active}
       aria-current={active ? "true" : undefined}
       className={`rounded-lg border bg-bg-subtle p-3 transition-colors ${
         active ? "border-accent ring-2 ring-(--focus-ring)" : "border-border"
@@ -239,28 +242,41 @@ export function ReconciliationMatchQueue({
 }) {
   const [activeIndex, setActiveIndex] = useState(0);
   const cardRefs = useRef<(HTMLLIElement | null)[]>([]);
+  // Index the next render should scroll into view. Set by an explicit move
+  // (not by the clamp below) so shrinking the queue never auto-scrolls.
+  const scrollTargetRef = useRef<number | null>(null);
 
   // Keep the active index in range as the queue shrinks (lines get
-  // matched / rejected out from under it).
+  // matched / rejected out from under it), and drop now-stale card refs so
+  // the array doesn't grow unbounded across a long session.
   useEffect(() => {
+    cardRefs.current.length = groups.length;
     setActiveIndex((i) => {
       if (groups.length === 0) return 0;
       return Math.min(i, groups.length - 1);
     });
   }, [groups.length]);
 
+  // Perform the scroll in an effect rather than inside the state updater:
+  // updaters must stay pure (StrictMode runs them twice), and DOM reads like
+  // scrollIntoView don't belong there.
+  useEffect(() => {
+    const target = scrollTargetRef.current;
+    if (target == null) return;
+    scrollTargetRef.current = null;
+    cardRefs.current[target]?.scrollIntoView({
+      block: "nearest",
+      behavior: "smooth",
+    });
+  }, [activeIndex]);
+
   const move = useCallback(
     (delta: number) => {
-      setActiveIndex((i) => {
-        const next = Math.max(0, Math.min(groups.length - 1, i + delta));
-        cardRefs.current[next]?.scrollIntoView({
-          block: "nearest",
-          behavior: "smooth",
-        });
-        return next;
-      });
+      const next = Math.max(0, Math.min(groups.length - 1, activeIndex + delta));
+      scrollTargetRef.current = next;
+      setActiveIndex(next);
     },
-    [groups.length],
+    [groups.length, activeIndex],
   );
 
   const onKeyDown = useCallback(

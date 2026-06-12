@@ -284,26 +284,34 @@ export function BankReconciliationPage() {
   const acceptAllHighConfidence = useCallback(async () => {
     if (highConfidence.length === 0) return;
     setBulkPending(true);
-    // Capture the lines this batch is about to reconcile so the operator
-    // can undo the whole action in one click afterwards.
-    const affected = highConfidence
-      .map((s) => txnById.get(s.transaction_id))
-      .filter((r): r is KRecord => r !== undefined);
-    let ok = 0;
+    // Capture each line as its accept actually succeeds, so undo covers
+    // exactly what was reconciled — including a partial batch that stops on
+    // an error midway (those lines would otherwise be stranded with no undo).
+    const accepted: KRecord[] = [];
+    let error: Error | null = null;
     try {
       for (const s of highConfidence) {
         await api.acceptBankFeedSuggestion(s.id);
-        ok += 1;
+        const rec = txnById.get(s.transaction_id);
+        if (rec) accepted.push(rec);
       }
-      toast.success(`Accepted ${ok} high-confidence match${ok === 1 ? "" : "es"}`);
-      setLastBulk(affected.length > 0 ? affected : null);
     } catch (e) {
-      toast.error("Bulk accept stopped", {
-        description: `${(e as Error).message} (accepted ${ok})`,
-      });
+      error = e as Error;
     } finally {
+      setLastBulk(accepted.length > 0 ? accepted : null);
       setBulkPending(false);
       invalidateMatchData();
+    }
+    if (error) {
+      toast.error("Bulk accept stopped", {
+        description: `${error.message} (accepted ${accepted.length})`,
+      });
+    } else {
+      toast.success(
+        `Accepted ${accepted.length} high-confidence match${
+          accepted.length === 1 ? "" : "es"
+        }`,
+      );
     }
   }, [highConfidence, txnById, invalidateMatchData]);
 

@@ -379,6 +379,11 @@ describe("BankReconciliationPage", () => {
     expect(
       within(sidebyside).getAllByText(/Foreign currency/i).length,
     ).toBeGreaterThan(0);
+    // The applied conversion rate is shown (unit-free), not a cross-currency
+    // "base − face value" subtraction (which is meaningless across units).
+    expect(
+      within(sidebyside).getByText(/Rate: 1\.1\b/),
+    ).toBeInTheDocument();
   });
 
   it("guards a cross-currency match with an explicit warning and 'Match anyway'", async () => {
@@ -451,6 +456,67 @@ describe("BankReconciliationPage", () => {
         expect.objectContaining({ status: "unreconciled" }),
       ),
     );
+  });
+
+  it("still offers undo for the lines accepted before a bulk accept fails midway", async () => {
+    const TXN_B = makeKRecord({
+      id: "txn-b",
+      ktype: "finance.bank_transaction",
+      data: {
+        bank_account_id: "acct-1",
+        value_date: "2024-02-02",
+        description: "Globex invoice",
+        amount: 700,
+        currency: "USD",
+        status: "unreconciled",
+      },
+    });
+    routeListRecords([TXN_UNRECONCILED, TXN_B]);
+    listBankFeedSuggestions.mockResolvedValue([
+      SUGGESTION_BEST,
+      {
+        ...SUGGESTION_BEST,
+        id: "sug-best-b",
+        transaction_id: "txn-b",
+        journal_entry_id: "je-dddd4444-0000-0000-0000-000000000000",
+      },
+    ]);
+    // First accept succeeds, the second throws — a partial batch that
+    // previously stranded the accepted line with no undo path.
+    acceptBankFeedSuggestion
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("conflict"));
+    updateRecord.mockResolvedValue(TXN_UNRECONCILED);
+
+    const user = userEvent.setup();
+    renderWithProviders(<BankReconciliationPage />);
+    await user.click(await screen.findByText("Operating USD"));
+
+    const queue = await screen.findByRole("region", { name: "Match review queue" });
+    await user.click(
+      within(queue).getByRole("button", {
+        name: /Accept all high-confidence \(2\)/,
+      }),
+    );
+    await waitFor(() =>
+      expect(acceptBankFeedSuggestion).toHaveBeenCalledTimes(2),
+    );
+
+    // Undo is still offered, and reverts exactly the one line that was
+    // accepted before the failure.
+    const undo = await screen.findByRole("button", { name: "Undo" });
+    await user.click(undo);
+    await waitFor(() =>
+      expect(updateRecord).toHaveBeenCalledWith(
+        "finance.bank_transaction",
+        expect.any(String),
+        expect.objectContaining({ status: "unreconciled" }),
+      ),
+    );
+    const reverted = updateRecord.mock.calls.filter(
+      (c) => (c[2] as { status?: string }).status === "unreconciled",
+    );
+    expect(reverted).toHaveLength(1);
   });
 
   // --- Batch-3: edge states --------------------------------------------

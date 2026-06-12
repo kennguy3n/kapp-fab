@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { BankFeedSuggestion, KRecord } from "@kapp/client";
 import { Badge, Button, Input, Select } from "@kapp/ui";
 import {
@@ -25,12 +25,6 @@ interface AllocationRow {
   raw: string;
 }
 
-let rowSeq = 0;
-function newRow(suggestionId = ""): AllocationRow {
-  rowSeq += 1;
-  return { key: `alloc-${rowSeq}`, suggestionId, raw: "" };
-}
-
 /**
  * ReconciliationSplitMatch is the partial / split-match composer: it lets
  * an operator allocate one bank line across several candidate ledger
@@ -55,6 +49,13 @@ export function ReconciliationSplitMatch({
   onReconcile: (allocations: SplitAllocation[]) => void;
 }) {
   const target = txnAmount(txn);
+  // Per-instance row-key sequence, so keys are locally unique and stable
+  // across test runs (a module-level counter would leak between instances).
+  const seqRef = useRef(0);
+  const newRow = useCallback((suggestionId = ""): AllocationRow => {
+    seqRef.current += 1;
+    return { key: `alloc-${seqRef.current}`, suggestionId, raw: "" };
+  }, []);
   const [rows, setRows] = useState<AllocationRow[]>(() => [
     newRow(suggestions[0]?.id ?? ""),
   ]);
@@ -199,7 +200,11 @@ export function ReconciliationSplitMatch({
         <Button size="sm" disabled={!canReconcile} onClick={handleReconcile}>
           {rt("reconciliation.split.reconcile")}
         </Button>
-        {balanced ? (
+        {balanced && !distinctEntries ? (
+          <span className="text-xs text-danger">
+            {rt("reconciliation.split.duplicateEntry")}
+          </span>
+        ) : balanced ? (
           <Badge variant="success" size="xs">
             {rt("reconciliation.split.balanced")}
           </Badge>
