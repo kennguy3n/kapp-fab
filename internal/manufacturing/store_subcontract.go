@@ -422,13 +422,11 @@ func (s *PGStore) setSubcontractStatus(ctx context.Context, tenantID, orderID uu
 	if tenantID == uuid.Nil || orderID == uuid.Nil {
 		return nil, errors.New("manufacturing: tenant id and order id required")
 	}
-	var order *SubcontractOrder
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		o, err := loadSubcontractOrderTx(ctx, tx, tenantID, orderID, true)
 		if err != nil {
 			return err
 		}
-		order = o
 		if !o.CanTransitionTo(target) {
 			return fmt.Errorf("%w: %s -> %s", ErrSubcontractInvalidTransition, o.Status, target)
 		}
@@ -448,7 +446,10 @@ func (s *PGStore) setSubcontractStatus(ctx context.Context, tenantID, orderID uu
 	if err != nil {
 		return nil, err
 	}
-	return order, nil
+	// Re-fetch so callers see the database-assigned updated_at (set by
+	// now() in the UPDATE), matching the rest of the status-transition
+	// methods and the optimistic-concurrency contract.
+	return s.GetSubcontractOrder(ctx, tenantID, orderID)
 }
 
 // loadSubcontractOrderTx reads an order header (optionally FOR UPDATE)
