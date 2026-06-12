@@ -7,6 +7,7 @@ import {
   formatConfidence,
   parseReasons,
   shortId,
+  txnAmount,
   txnData,
   type SuggestionGroup,
 } from "./reconciliation";
@@ -129,12 +130,9 @@ function GroupCard({
           </div>
           <div className="text-xs text-fg-muted">{d?.value_date ?? ""}</div>
         </div>
-        {d && (
+        {d && txn && (
           <div className="text-right font-semibold tabular-nums text-fg">
-            {formatAmount(
-              typeof d.amount === "number" ? d.amount : Number(d.amount ?? 0),
-              d.currency,
-            )}
+            {formatAmount(txnAmount(txn), d.currency)}
           </div>
         )}
       </div>

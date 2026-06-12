@@ -6,6 +6,7 @@ import {
   formatConfidence,
   parseReasons,
   shortId,
+  txnAmount,
   txnData,
   type ReconTotals,
 } from "./reconciliation";
@@ -22,7 +23,7 @@ function BankLineButton({
   onSelect: (id: string) => void;
 }) {
   const d = txnData(txn);
-  const amount = typeof d.amount === "number" ? d.amount : Number(d.amount ?? 0);
+  const amount = txnAmount(txn);
   return (
     <li>
       <button
