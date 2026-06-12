@@ -54,6 +54,8 @@ import {
   ALL_KTYPES,
   APPROVALS,
   AUDIT_LOG,
+  BANK_FEED_RULES_FIXTURE,
+  BANK_FEED_SUGGESTIONS_FIXTURE,
   DASHBOARD_SUMMARY,
   DEMO_TENANT_ID,
   EXCHANGE_RATES,
@@ -118,6 +120,11 @@ const records: Record<string, KRecord[]> = {};
 for (const [k, v] of Object.entries(RECORDS_BY_KTYPE)) {
   records[k] = [...v];
 }
+
+// Mutable bank-feed review state so accept/reject round-trips in the
+// demo: accepting marks the matched bank line and clears its candidate
+// suggestions, rejecting just clears the one candidate.
+let bankFeedSuggestions = [...BANK_FEED_SUGGESTIONS_FIXTURE];
 
 function nextId(): string {
   return `00000000-0000-4000-8000-${Math.floor(Math.random() * 1e12)
@@ -241,6 +248,42 @@ const handlers = {
     list[idx] = { ...list[idx], status: action, updated_at: nowIso() };
     return delay<KRecord>(list[idx]);
   },
+
+  // --- Bank feeds / reconciliation ------------------------------------
+  listBankFeedSuggestions: (bankAccountId: string) => {
+    const txnIds = new Set(
+      (records["finance.bank_transaction"] ?? [])
+        .filter((r) => (r.data as { bank_account_id?: string }).bank_account_id === bankAccountId)
+        .map((r) => r.id),
+    );
+    return delay(
+      bankFeedSuggestions.filter((s) => txnIds.has(s.transaction_id)),
+    );
+  },
+  acceptBankFeedSuggestion: (id: string) => {
+    const accepted = bankFeedSuggestions.find((s) => s.id === id);
+    if (accepted) {
+      const list = records["finance.bank_transaction"] ?? [];
+      const idx = list.findIndex((r) => r.id === accepted.transaction_id);
+      if (idx !== -1) {
+        list[idx] = {
+          ...list[idx],
+          data: { ...list[idx].data, status: "matched", matched_entry_id: accepted.journal_entry_id },
+          updated_at: nowIso(),
+        };
+      }
+      // Clear every candidate for the now-matched line.
+      bankFeedSuggestions = bankFeedSuggestions.filter(
+        (s) => s.transaction_id !== accepted.transaction_id,
+      );
+    }
+    return delay(accepted ?? bankFeedSuggestions[0] ?? null);
+  },
+  rejectBankFeedSuggestion: (id: string) => {
+    bankFeedSuggestions = bankFeedSuggestions.filter((s) => s.id !== id);
+    return delay<void>(undefined as unknown as void);
+  },
+  listBankFeedRules: () => delay([...BANK_FEED_RULES_FIXTURE]),
 
   // --- Search ---------------------------------------------------------
   searchRecords: (params: { q: string }) => delay<SearchResponse>(searchResults(params.q ?? "")),

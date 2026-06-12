@@ -8,6 +8,8 @@
 import type {
   Approval,
   AuditEntry,
+  BankFeedRule,
+  BankFeedSuggestion,
   DashboardSummary,
   ExchangeRate,
   FinanceAccount,
@@ -965,17 +967,47 @@ const COST_CENTERS: KRecord[] = [
 ];
 
 const BANK_ACCOUNT_ID = uuid("finance.bank_account:main");
+const BANK_SAVINGS_ID = uuid("finance.bank_account:savings");
 const BANK_ACCOUNTS: KRecord[] = [
   { ...kr("finance.bank_account", "main", { name: "Acme Operating — USD", currency: "USD", account_number: "****4137" }), id: BANK_ACCOUNT_ID },
+  { ...kr("finance.bank_account", "savings", { name: "Acme Savings — USD", currency: "USD", account_number: "****9921" }), id: BANK_SAVINGS_ID },
 ];
 
+// Transaction ids are derived the same way kr() derives them so the
+// suggestion fixtures below can reference specific bank lines.
+const BT3_ID = uuid("finance.bank_transaction:bt3");
+const BT6_ID = uuid("finance.bank_transaction:bt6");
+
 const BANK_TXNS: KRecord[] = [
-  kr("finance.bank_transaction", "bt1", { bank_account_id: BANK_ACCOUNT_ID, value_date: todayPlus(-7), description: "Wire — Globex AR-2026-0001", amount: 4200, currency: "USD", status: "matched" }),
-  kr("finance.bank_transaction", "bt2", { bank_account_id: BANK_ACCOUNT_ID, value_date: todayPlus(-5), description: "ACH — Initech AR-2026-0002", amount: 9800, currency: "USD", status: "matched" }),
-  kr("finance.bank_transaction", "bt3", { bank_account_id: BANK_ACCOUNT_ID, value_date: todayPlus(-3), description: "Card — POS daily settlement", amount: 1240.5, currency: "USD", status: "unmatched" }),
-  kr("finance.bank_transaction", "bt4", { bank_account_id: BANK_ACCOUNT_ID, value_date: todayPlus(-2), description: "Bill payment — Umbrella PO-2026-0001", amount: -11200, currency: "USD", status: "matched" }),
+  kr("finance.bank_transaction", "bt1", { bank_account_id: BANK_ACCOUNT_ID, value_date: todayPlus(-7), description: "Wire — Globex AR-2026-0001", amount: 4200, currency: "USD", status: "matched", matched_entry_id: "je1" }),
+  kr("finance.bank_transaction", "bt2", { bank_account_id: BANK_ACCOUNT_ID, value_date: todayPlus(-5), description: "ACH — Initech AR-2026-0002", amount: 9800, currency: "USD", status: "matched", matched_entry_id: "je2" }),
+  kr("finance.bank_transaction", "bt3", { bank_account_id: BANK_ACCOUNT_ID, value_date: todayPlus(-3), description: "Card — POS daily settlement", amount: 1240.5, currency: "USD", status: "unreconciled" }),
+  kr("finance.bank_transaction", "bt4", { bank_account_id: BANK_ACCOUNT_ID, value_date: todayPlus(-2), description: "Bill payment — Umbrella PO-2026-0001", amount: -11200, currency: "USD", status: "matched", matched_entry_id: "je3" }),
   kr("finance.bank_transaction", "bt5", { bank_account_id: BANK_ACCOUNT_ID, value_date: todayPlus(-1), description: "Bank fee", amount: -25, currency: "USD", status: "ignored" }),
+  kr("finance.bank_transaction", "bt6", { bank_account_id: BANK_ACCOUNT_ID, value_date: todayPlus(-1), description: "ACH — Hooli AR-2026-0003", amount: 31000, currency: "USD", status: "unreconciled" }),
+  // Inter-account transfer pair (auto-flagged by the backend detector):
+  // money out of Operating, the equal-and-opposite leg into Savings.
+  kr("finance.bank_transaction", "bt7", { bank_account_id: BANK_ACCOUNT_ID, value_date: todayPlus(-2), description: "Transfer to savings", amount: -15000, currency: "USD", status: "transfer" }),
+  kr("finance.bank_transaction", "bt8", { bank_account_id: BANK_SAVINGS_ID, value_date: todayPlus(-2), description: "Transfer from operating", amount: 15000, currency: "USD", status: "transfer" }),
 ];
+
+// Smart-matcher review queue: confidence-scored candidate journal
+// entries per unreconciled bank line, highest confidence first. bt6
+// carries two candidates so the "find alternative" path is exercised.
+const BANK_FEED_SUGGESTIONS: BankFeedSuggestion[] = [
+  { id: uuid("bfs:s1"), tenant_id: DEMO_TENANT_ID, transaction_id: BT6_ID, journal_entry_id: uuid("je:hooli-ar"), confidence: 0.97, match_reason: "exact amount, same-day, learned counterparty", status: "suggested", created_at: NOW_ISO },
+  { id: uuid("bfs:s2"), tenant_id: DEMO_TENANT_ID, transaction_id: BT6_ID, journal_entry_id: uuid("je:hooli-deposit"), confidence: 0.62, match_reason: "amount within tolerance, 3 days apart", status: "suggested", created_at: NOW_ISO },
+  { id: uuid("bfs:s3"), tenant_id: DEMO_TENANT_ID, transaction_id: BT3_ID, journal_entry_id: uuid("je:pos-settlement"), confidence: 0.74, match_reason: "amount within tolerance, description match", status: "suggested", created_at: NOW_ISO },
+];
+
+const BANK_FEED_RULES: BankFeedRule[] = [
+  { id: uuid("bfr:r1"), priority: 10, condition_type: "description_contains", condition_value: "POS daily settlement", target_account_code: "1100", target_cost_center: "SALES", auto_approve: false, bank_account_id: BANK_ACCOUNT_ID, enabled: true, created_at: LAST_MONTH_ISO, updated_at: NOW_ISO },
+  { id: uuid("bfr:r2"), priority: 20, condition_type: "counterparty_equals", condition_value: "Hooli", target_account_code: "1020", target_cost_center: "", auto_approve: true, bank_account_id: null, enabled: true, created_at: LAST_MONTH_ISO, updated_at: NOW_ISO },
+  { id: uuid("bfr:r3"), priority: 30, condition_type: "description_contains", condition_value: "Bank fee", target_account_code: "6200", target_cost_center: "", auto_approve: true, bank_account_id: null, enabled: false, created_at: LAST_MONTH_ISO, updated_at: NOW_ISO },
+];
+
+export const BANK_FEED_SUGGESTIONS_FIXTURE = BANK_FEED_SUGGESTIONS;
+export const BANK_FEED_RULES_FIXTURE = BANK_FEED_RULES;
 
 // --- Records — Finance: Invoices / Bills ------------------------------
 
