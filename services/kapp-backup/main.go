@@ -292,6 +292,26 @@ var TenantScopedTables = []string{
 	// FK to any other tenant-scoped table (it stores a self-contained
 	// result envelope), so restore ordering is irrelevant.
 	"fx_revaluation_runs",
+	// Batch-2 manufacturing — MRP run (migration 000092). mrp_runs is
+	// the parent; mrp_demand_lines and mrp_planned_orders both FK
+	// mrp_runs (ON DELETE CASCADE), so the parent must land first on
+	// restore. mrp_demand_lines FKs inventory_items; mrp_planned_orders
+	// FKs inventory_items + boms + routings — all listed earlier. All
+	// three carry the default (tenant_id, id) PK so the fallback ON
+	// CONFLICT path applies; no tableConflictKeys entries required.
+	"mrp_runs",
+	"mrp_demand_lines",
+	"mrp_planned_orders",
+	// Batch-2 manufacturing — subcontracting (migration 000093).
+	// subcontract_orders FKs work_orders (listed earlier in the
+	// Manufacturing block) + inventory_items / inventory_warehouses;
+	// subcontract_components FKs subcontract_orders (ON DELETE CASCADE),
+	// so the parent precedes its child on restore. Both carry the
+	// default (tenant_id, id) PK — the one-row-per-(order, component)
+	// rule is a UNIQUE index, not the PK — so neither needs a
+	// tableConflictKeys entry.
+	"subcontract_orders",
+	"subcontract_components",
 }
 
 // manifest is the first record in every dump file.

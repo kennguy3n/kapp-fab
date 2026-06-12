@@ -1591,6 +1591,22 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Get("/job-cards/{jid}", d.mfgh.getJobCard)
 			r.Post("/job-cards/{jid}/start", d.mfgh.startJobCard)
 			r.Post("/job-cards/{jid}/complete", d.mfgh.completeJobCard)
+
+			// Batch-2 — MRP runs and subcontracting. Same authz
+			// scope as the manufacturing surface above. An MRP run
+			// nets demand against supply and persists its planned
+			// orders; subcontract orders issue components to a
+			// supplier and receive the finished item back.
+			r.Post("/mrp-runs", d.mfgh.runMRP)
+			r.Get("/mrp-runs", d.mfgh.listMRPRuns)
+			r.Get("/mrp-runs/{id}", d.mfgh.getMRPRun)
+			r.Post("/subcontract-orders", d.mfgh.createSubcontractOrder)
+			r.Get("/subcontract-orders", d.mfgh.listSubcontractOrders)
+			r.Get("/subcontract-orders/{id}", d.mfgh.getSubcontractOrder)
+			r.Post("/subcontract-orders/{id}/issue", d.mfgh.issueSubcontractOrder)
+			r.Post("/subcontract-orders/{id}/receive", d.mfgh.receiveSubcontractOrder)
+			r.Post("/subcontract-orders/{id}/close", d.mfgh.closeSubcontractOrder)
+			r.Post("/subcontract-orders/{id}/cancel", d.mfgh.cancelSubcontractOrder)
 		})
 
 		// Forms KApp. Creation and tenant-scoped lookups go through the
