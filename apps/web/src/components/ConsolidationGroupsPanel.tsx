@@ -94,6 +94,7 @@ export function ConsolidationGroupsPanel({
     onSuccess: (g) => {
       onCreated(g);
       setName("");
+      setCurrency("USD");
       setMembers("");
       setCtaAccount("");
       setPairs([]);

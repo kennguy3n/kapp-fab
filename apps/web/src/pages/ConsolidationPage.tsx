@@ -55,9 +55,10 @@ interface RateDraft {
  * translation and pre-posting unrealized FX review.
  */
 export function ConsolidationPage() {
-  const [groups, setGroups] = useState<ConsolidationGroup[]>(() => loadGroups());
+  const initialGroups = loadGroups();
+  const [groups, setGroups] = useState<ConsolidationGroup[]>(initialGroups);
   const [activeGroupId, setActiveGroupId] = useState<string | null>(
-    () => loadGroups()[0]?.id ?? null,
+    initialGroups[0]?.id ?? null,
   );
   const [asOf, setAsOf] = useState("");
   const [statementsAsOf, setStatementsAsOf] = useState("");

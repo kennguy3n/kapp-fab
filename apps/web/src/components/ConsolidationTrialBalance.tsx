@@ -92,7 +92,7 @@ export function ConsolidationTrialBalance({
     return map;
   }, [result.eliminated]);
 
-  const colSpan = 3 + entities.length + 1;
+  const colSpan = 2 + entities.length + 1;
 
   return (
     <Card>
