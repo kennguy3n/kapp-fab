@@ -294,6 +294,7 @@ export function BankReconciliationPage() {
               currency={selectedCurrency}
               selectedTxnId={activeLine}
               pendingIds={pendingIds as Set<string>}
+              bulkPending={bulkPending}
               onSelectTxn={setActiveLine}
               onAccept={(s) => acceptMut.mutate(s)}
             />

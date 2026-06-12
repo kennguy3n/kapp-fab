@@ -60,11 +60,13 @@ function BankLineButton({
 function CandidatePanel({
   suggestions,
   pendingIds,
+  bulkPending,
   onAccept,
   hasSelection,
 }: {
   suggestions: BankFeedSuggestion[];
   pendingIds: Set<string>;
+  bulkPending: boolean;
   onAccept: (s: BankFeedSuggestion) => void;
   hasSelection: boolean;
 }) {
@@ -123,7 +125,7 @@ function CandidatePanel({
             <div className="mt-2">
               <Button
                 size="sm"
-                disabled={pendingIds.has(s.id)}
+                disabled={bulkPending || pendingIds.has(s.id)}
                 onClick={() => onAccept(s)}
               >
                 Match
@@ -150,6 +152,7 @@ export function ReconciliationSideBySide({
   currency,
   selectedTxnId,
   pendingIds,
+  bulkPending,
   onSelectTxn,
   onAccept,
 }: {
@@ -159,6 +162,7 @@ export function ReconciliationSideBySide({
   currency?: string;
   selectedTxnId: string | null;
   pendingIds: Set<string>;
+  bulkPending: boolean;
   onSelectTxn: (id: string) => void;
   onAccept: (s: BankFeedSuggestion) => void;
 }) {
@@ -224,6 +228,7 @@ export function ReconciliationSideBySide({
           <CandidatePanel
             suggestions={candidates}
             pendingIds={pendingIds}
+            bulkPending={bulkPending}
             onAccept={onAccept}
             hasSelection={selected !== null}
           />
