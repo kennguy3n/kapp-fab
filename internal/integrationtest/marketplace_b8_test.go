@@ -270,6 +270,17 @@ func TestB8BundleStore_GCStorageReclaimedAccurate(t *testing.T) {
 	objs := &failingDeleteObjectStore{inner: bundlestore.NewMemoryStore()}
 	bs := bundlestore.NewStore(h.pool, objs).WithAdminPool(h.pool)
 
+	// Backdate the two orphans by pinning the store clock to an hour
+	// ago for the uploads. GC eligibility is created_at < now-minAge;
+	// without backdating the test relied on real wall-clock time
+	// elapsing between Upload and the sweep, so under full-suite load
+	// the newest upload could still be younger than a 1ms minAge and
+	// escape the sweep — making DeletedRows/OrphanedObjects flaky
+	// (passed alone, failed in-suite). Pinning created_at makes both
+	// rows deterministically eligible regardless of timing.
+	base := time.Now().UTC().Add(-time.Hour)
+	bs.SetClock(func() time.Time { return base })
+
 	// Upload two orphans (no MarkReferenced) so they're eligible
 	// for GC. Use distinct bytes so each gets its own metadata
 	// row and the counter sum is non-trivial.
@@ -288,7 +299,12 @@ func TestB8BundleStore_GCStorageReclaimedAccurate(t *testing.T) {
 		t.Fatalf("Upload(orphan2): %v", err)
 	}
 
-	res, err := bs.GCUnreferenced(ctx, 1*time.Millisecond)
+	// Sweep with the real clock: cutoff = now-1m sits comfortably
+	// after the hour-old orphans (so both qualify) but before any
+	// fresh orphans sibling tests created ~now (so the sweep stays
+	// effectively scoped to this test's rows).
+	bs.SetClock(nil)
+	res, err := bs.GCUnreferenced(ctx, time.Minute)
 	if err != nil {
 		t.Fatalf("GCUnreferenced: %v", err)
 	}
@@ -413,14 +429,14 @@ func TestB8BundleStore_InvalidHashRejected(t *testing.T) {
 	bs := bundlestore.NewStore(h.pool, objs)
 
 	cases := []string{
-		"",                                   // empty
-		"abc",                                // too short
-		strings.Repeat("g", 64),              // non-hex
-		strings.Repeat("A", 64),              // uppercase
-		"http://malicious",                   // URL-like
-		strings.Repeat("a", 63),              // 63 chars
-		strings.Repeat("a", 65),              // 65 chars
-		uuid.NewString(),                     // UUID
+		"",                      // empty
+		"abc",                   // too short
+		strings.Repeat("g", 64), // non-hex
+		strings.Repeat("A", 64), // uppercase
+		"http://malicious",      // URL-like
+		strings.Repeat("a", 63), // 63 chars
+		strings.Repeat("a", 65), // 65 chars
+		uuid.NewString(),        // UUID
 	}
 	for _, c := range cases {
 		_, err := bs.GetByHash(ctx, c)

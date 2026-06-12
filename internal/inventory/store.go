@@ -182,16 +182,18 @@ func (s *PGStore) UpsertItem(ctx context.Context, it Item) (*Item, error) {
 	out := it
 	err := dbutil.WithTenantTx(ctx, s.pool, it.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`INSERT INTO inventory_items (tenant_id, id, sku, name, uom, active, reorder_level)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			`INSERT INTO inventory_items (tenant_id, id, sku, name, uom, active, reorder_level, lot_tracked, serial_tracked)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			 ON CONFLICT (tenant_id, sku) DO UPDATE SET
 			     name = EXCLUDED.name,
 			     uom = EXCLUDED.uom,
 			     active = EXCLUDED.active,
-			     reorder_level = EXCLUDED.reorder_level
-			 RETURNING id, sku, name, uom, active, reorder_level`,
-			it.TenantID, it.ID, it.SKU, it.Name, it.UOM, it.Active, it.ReorderLevel,
-		).Scan(&out.ID, &out.SKU, &out.Name, &out.UOM, &out.Active, &out.ReorderLevel)
+			     reorder_level = EXCLUDED.reorder_level,
+			     lot_tracked = EXCLUDED.lot_tracked,
+			     serial_tracked = EXCLUDED.serial_tracked
+			 RETURNING id, sku, name, uom, active, reorder_level, lot_tracked, serial_tracked`,
+			it.TenantID, it.ID, it.SKU, it.Name, it.UOM, it.Active, it.ReorderLevel, it.LotTracked, it.SerialTracked,
+		).Scan(&out.ID, &out.SKU, &out.Name, &out.UOM, &out.Active, &out.ReorderLevel, &out.LotTracked, &out.SerialTracked)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("inventory: upsert item: %w", err)
@@ -207,10 +209,10 @@ func (s *PGStore) GetItem(ctx context.Context, tenantID, id uuid.UUID) (*Item, e
 	var it Item
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		err := tx.QueryRow(ctx,
-			`SELECT tenant_id, id, sku, name, uom, active, reorder_level
+			`SELECT tenant_id, id, sku, name, uom, active, reorder_level, lot_tracked, serial_tracked
 			 FROM inventory_items WHERE tenant_id = $1 AND id = $2`,
 			tenantID, id,
-		).Scan(&it.TenantID, &it.ID, &it.SKU, &it.Name, &it.UOM, &it.Active, &it.ReorderLevel)
+		).Scan(&it.TenantID, &it.ID, &it.SKU, &it.Name, &it.UOM, &it.Active, &it.ReorderLevel, &it.LotTracked, &it.SerialTracked)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrItemNotFound
 		}
@@ -230,10 +232,10 @@ func (s *PGStore) GetItemBySKU(ctx context.Context, tenantID uuid.UUID, sku stri
 	var it Item
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		err := tx.QueryRow(ctx,
-			`SELECT tenant_id, id, sku, name, uom, active, reorder_level
+			`SELECT tenant_id, id, sku, name, uom, active, reorder_level, lot_tracked, serial_tracked
 			 FROM inventory_items WHERE tenant_id = $1 AND sku = $2`,
 			tenantID, sku,
-		).Scan(&it.TenantID, &it.ID, &it.SKU, &it.Name, &it.UOM, &it.Active, &it.ReorderLevel)
+		).Scan(&it.TenantID, &it.ID, &it.SKU, &it.Name, &it.UOM, &it.Active, &it.ReorderLevel, &it.LotTracked, &it.SerialTracked)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrItemNotFound
 		}
@@ -267,7 +269,7 @@ func (s *PGStore) ListItems(ctx context.Context, tenantID uuid.UUID, filter Item
 		}
 		args = append(args, filter.Limit, filter.Offset)
 		q := fmt.Sprintf(
-			`SELECT tenant_id, id, sku, name, uom, active, reorder_level
+			`SELECT tenant_id, id, sku, name, uom, active, reorder_level, lot_tracked, serial_tracked
 			 FROM inventory_items
 			 WHERE %s
 			 ORDER BY sku
@@ -281,7 +283,7 @@ func (s *PGStore) ListItems(ctx context.Context, tenantID uuid.UUID, filter Item
 		defer rows.Close()
 		for rows.Next() {
 			var it Item
-			if err := rows.Scan(&it.TenantID, &it.ID, &it.SKU, &it.Name, &it.UOM, &it.Active, &it.ReorderLevel); err != nil {
+			if err := rows.Scan(&it.TenantID, &it.ID, &it.SKU, &it.Name, &it.UOM, &it.Active, &it.ReorderLevel, &it.LotTracked, &it.SerialTracked); err != nil {
 				return fmt.Errorf("inventory: scan item: %w", err)
 			}
 			out = append(out, it)
@@ -423,15 +425,15 @@ func (s *PGStore) RecordMove(ctx context.Context, m Move) (*Move, error) {
 // which is too costly for a defensive check. Instead the contract is
 // enforced two ways:
 //
-//   1. Compile-time / code-review: RecordMoveTx takes pgx.Tx directly,
-//      so the only callers are those who already opened a tx through
-//      WithTenantTx (the GUC setup is visible at the call site).
-//   2. RLS at the database: if a future caller forgets the GUC, the
-//      inventory_moves RLS policy reads
-//      `current_setting('app.tenant_id', true)`, which returns the
-//      empty string, the policy fails, and the INSERT is rejected
-//      with a clear 42501 row-level-security violation — not a
-//      silent failure.
+//  1. Compile-time / code-review: RecordMoveTx takes pgx.Tx directly,
+//     so the only callers are those who already opened a tx through
+//     WithTenantTx (the GUC setup is visible at the call site).
+//  2. RLS at the database: if a future caller forgets the GUC, the
+//     inventory_moves RLS policy reads
+//     `current_setting('app.tenant_id', true)`, which returns the
+//     empty string, the policy fails, and the INSERT is rejected
+//     with a clear 42501 row-level-security violation — not a
+//     silent failure.
 //
 // The architecturally cleaner fix is a typed dbutil.TenantTx wrapper
 // the compiler requires (so this signature would take dbutil.TenantTx
@@ -494,6 +496,17 @@ func (s *PGStore) recordMoveInTx(ctx context.Context, tx pgx.Tx, m Move) (*Move,
 		batchID = *m.BatchID
 	}
 	out := m
+	// Enforce the item's lot/serial tracking contract before writing
+	// anything. A single indexed PK lookup; tracked == false (the
+	// default for every pre-Workstream-2 item) is a no-op so untracked
+	// flows behave exactly as before.
+	lotTracked, serialTracked, err := s.itemTracking(ctx, tx, m.TenantID, m.ItemID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateMoveTracking(m, lotTracked, serialTracked); err != nil {
+		return nil, err
+	}
 	// Pre-validate batch ↔ item linkage so a mismatched batch
 	// surfaces ErrBatchItemMismatch / ErrBatchNotFound rather
 	// than a generic FK violation on the INSERT below. The
@@ -531,19 +544,23 @@ func (s *PGStore) recordMoveInTx(ctx context.Context, tx pgx.Tx, m Move) (*Move,
 		}
 		return nil, fmt.Errorf("inventory: insert move: %w", err)
 	}
-	// Best-effort qty_on_hand maintenance for the batch when
-	// the move references one. Mismatches between the batch
-	// running total and SUM(qty) on inventory_moves are
-	// surfaced by integration tests; production reconciliation
-	// is a separate scheduled job.
+	// Roll the batch's qty_on_hand. The helper guards against an
+	// over-issue: a decrement that would drive the lot negative is
+	// rejected with ErrInsufficientLotStock before any state escapes,
+	// which (together with the inventory_batches_qty_on_hand_nonneg
+	// CHECK) makes lot over-issue impossible.
 	if m.BatchID != nil {
-		if _, err := tx.Exec(ctx,
-			`UPDATE inventory_batches
-			    SET qty_on_hand = qty_on_hand + $1, updated_at = now()
-			  WHERE tenant_id = $2 AND id = $3`,
-			m.Qty, m.TenantID, *m.BatchID,
-		); err != nil {
-			return nil, fmt.Errorf("inventory: roll batch qty: %w", err)
+		if err := rollBatchQty(ctx, tx, m.TenantID, *m.BatchID, m.Qty); err != nil {
+			return nil, err
+		}
+	}
+	// Thread serial numbers: create/re-stock on receipt, decrement
+	// (transition to a terminal state) on issue, and link each serial
+	// to this move for forward/backward traceability. No-op when the
+	// move carries no serials.
+	if len(m.SerialNos) > 0 {
+		if err := s.applyMoveSerials(ctx, tx, m, out.ID); err != nil {
+			return nil, err
 		}
 	}
 	if err := s.emitMove(ctx, tx, out, "inventory.move.recorded"); err != nil {
@@ -571,13 +588,20 @@ func (s *PGStore) RecordTransfer(ctx context.Context, t Transfer) ([]Move, error
 	if t.MovedAt.IsZero() {
 		t.MovedAt = s.now()
 	}
-	var unitCost any
-	if t.UnitCost.IsPositive() {
-		unitCost = t.UnitCost
-	}
 
 	out := make([]Move, 0, 2)
 	err := dbutil.WithTenantTx(ctx, s.pool, t.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// Both legs route through recordMoveInTx so a transfer honours
+		// the item's lot/serial contract exactly like a plain move:
+		// the lot's qty_on_hand nets to zero across the two legs, and
+		// each serial is issued out of FromWarehouse (negative leg)
+		// then re-stocked at ToWarehouse (positive leg), keeping the
+		// serial registry's warehouse_id consistent with the ledger.
+		// The legs share BatchID/SerialNos; ordering (neg then pos) is
+		// load-bearing for the serial round-trip, so they are emitted
+		// sequentially. issueSerial's in-stock-at-warehouse guard makes
+		// a transfer of a serial that isn't actually at the source
+		// warehouse fail with ErrSerialNotAvailable.
 		neg := Move{
 			TenantID:    t.TenantID,
 			ItemID:      t.ItemID,
@@ -587,6 +611,8 @@ func (s *PGStore) RecordTransfer(ctx context.Context, t Transfer) ([]Move, error
 			SourceKType: MoveSourceTransfer,
 			MovedAt:     t.MovedAt,
 			CreatedBy:   t.CreatedBy,
+			BatchID:     t.BatchID,
+			SerialNos:   t.SerialNos,
 		}
 		pos := Move{
 			TenantID:    t.TenantID,
@@ -597,24 +623,16 @@ func (s *PGStore) RecordTransfer(ctx context.Context, t Transfer) ([]Move, error
 			SourceKType: MoveSourceTransfer,
 			MovedAt:     t.MovedAt,
 			CreatedBy:   t.CreatedBy,
+			BatchID:     t.BatchID,
+			SerialNos:   t.SerialNos,
 		}
-		for _, m := range []Move{neg, pos} {
-			row := m
-			err := tx.QueryRow(ctx,
-				`INSERT INTO inventory_moves
-				     (tenant_id, item_id, warehouse_id, qty, unit_cost, source_ktype, source_id, moved_at, created_by)
-				 VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8)
-				 RETURNING id`,
-				row.TenantID, row.ItemID, row.WarehouseID, row.Qty, unitCost, row.SourceKType, row.MovedAt,
-				nullableUUIDValue(row.CreatedBy),
-			).Scan(&row.ID)
+		legs := []Move{neg, pos}
+		for i := range legs {
+			rec, err := s.recordMoveInTx(ctx, tx, legs[i])
 			if err != nil {
-				return fmt.Errorf("inventory: insert transfer move: %w", err)
-			}
-			if err := s.emitMove(ctx, tx, row, "inventory.move.recorded"); err != nil {
 				return err
 			}
-			out = append(out, row)
+			out = append(out, *rec)
 		}
 		return nil
 	})
@@ -736,16 +754,23 @@ func (s *PGStore) ReverseMove(ctx context.Context, tenantID uuid.UUID, moveID in
 		// Roll the batch's running qty_on_hand back by the contra
 		// qty so reversing a batched receipt cleanly drains the
 		// batch. Mirrors the same accounting RecordMove does on
-		// the forward path.
+		// the forward path, and the same guard: reversing a receipt
+		// whose lot has already been issued out would drive the lot
+		// negative and is rejected with ErrInsufficientLotStock.
 		if origBatchID != nil {
-			if _, err := tx.Exec(ctx,
-				`UPDATE inventory_batches
-				    SET qty_on_hand = qty_on_hand + $1, updated_at = now()
-				  WHERE tenant_id = $2 AND id = $3`,
-				newQty, tenantID, *origBatchID,
-			); err != nil {
-				return fmt.Errorf("inventory: roll batch qty on reverse: %w", err)
+			if err := rollBatchQty(ctx, tx, tenantID, *origBatchID, newQty); err != nil {
+				return err
 			}
+		}
+		// Reverse the serial transitions the original move made and
+		// link the affected serials to the contra row so the trace
+		// stays complete. Called unconditionally: it is keyed on the
+		// original move's inventory_move_serials rows, so an untracked
+		// or non-serial move (which has none) is a no-op — keeping
+		// ReverseMove a single path correct for tracked and untracked
+		// moves alike rather than branching on a tracking lookup.
+		if err := s.reverseMoveSerials(ctx, tx, tenantID, moveID, out.ID, origQty, origWh); err != nil {
+			return err
 		}
 		_ = memo // memo is currently informational; logged via audit when wired through the agent tool / API
 		return s.emitMove(ctx, tx, out, "inventory.move.reversed")
@@ -1155,27 +1180,37 @@ func (s *PGStore) GetBatch(ctx context.Context, tenantID, batchID uuid.UUID) (*B
 	}
 	var b Batch
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		row := tx.QueryRow(ctx,
-			`SELECT tenant_id, id, item_id, batch_no, manufactured_at,
-			        expires_at, qty_on_hand, metadata,
-			        COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid),
-			        created_at, updated_at
-			 FROM inventory_batches WHERE tenant_id = $1 AND id = $2`,
-			tenantID, batchID)
-		if err := row.Scan(&b.TenantID, &b.ID, &b.ItemID, &b.BatchNo,
-			&b.ManufacturedAt, &b.ExpiresAt, &b.QtyOnHand, &b.Metadata,
-			&b.CreatedBy, &b.CreatedAt, &b.UpdatedAt); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrBatchNotFound
-			}
-			return err
-		}
-		return nil
+		var err error
+		b, err = getBatchTx(ctx, tx, tenantID, batchID)
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	return &b, nil
+}
+
+// getBatchTx loads a single batch on the caller's transaction. Shared
+// by GetBatch and the lot traceability query so both scan the batch
+// the same way under the same RLS scope.
+func getBatchTx(ctx context.Context, tx pgx.Tx, tenantID, batchID uuid.UUID) (Batch, error) {
+	var b Batch
+	row := tx.QueryRow(ctx,
+		`SELECT tenant_id, id, item_id, batch_no, manufactured_at,
+		        expires_at, qty_on_hand, metadata,
+		        COALESCE(created_by, '00000000-0000-0000-0000-000000000000'::uuid),
+		        created_at, updated_at
+		 FROM inventory_batches WHERE tenant_id = $1 AND id = $2`,
+		tenantID, batchID)
+	if err := row.Scan(&b.TenantID, &b.ID, &b.ItemID, &b.BatchNo,
+		&b.ManufacturedAt, &b.ExpiresAt, &b.QtyOnHand, &b.Metadata,
+		&b.CreatedBy, &b.CreatedAt, &b.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Batch{}, ErrBatchNotFound
+		}
+		return Batch{}, err
+	}
+	return b, nil
 }
 
 // ListBatchesForItem returns every batch defined for the supplied item.

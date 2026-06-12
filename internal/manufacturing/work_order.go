@@ -198,6 +198,23 @@ type CompleteWorkOrderInput struct {
 	// decimal.Decimal{} to default to planned_qty (i.e. nominal
 	// yield).
 	ActualQty decimal.Decimal
+
+	// FinishedBatchID, when set, is the lot the finished-good receipt
+	// is booked into. Required when the output item is lot-tracked.
+	FinishedBatchID *uuid.UUID
+	// FinishedSerials enumerates the serial numbers of the produced
+	// units. Required (len == ActualQty) when the output item is
+	// serial-tracked; ignored otherwise.
+	FinishedSerials []string
+
+	// ComponentBatches maps a component item id to the lot the
+	// consumption move draws down. Required for every lot-tracked
+	// component.
+	ComponentBatches map[uuid.UUID]uuid.UUID
+	// ComponentSerials maps a component item id to the specific serial
+	// numbers consumed. Required for every serial-tracked component
+	// (len == the computed consumption qty for that component).
+	ComponentSerials map[uuid.UUID][]string
 }
 
 // yieldToleranceFactor caps the allowed over-yield at 10% above
@@ -243,6 +260,12 @@ func (s *PGStore) CompleteWorkOrder(ctx context.Context, tenantID, woID, actorID
 		itemID      uuid.UUID
 		qty         decimal.Decimal
 		sourceKType string
+		batchID     *uuid.UUID
+		serials     []string
+		// outStatus is the terminal serial state for issue moves.
+		// Component consumption marks serials 'consumed'; the
+		// finished-good receipt leaves it empty (a receipt re-stocks).
+		outStatus string
 	}
 	var moves []plannedMove
 	var wo WorkOrder
@@ -421,21 +444,37 @@ func (s *PGStore) CompleteWorkOrder(ctx context.Context, tenantID, woID, actorID
 				}
 			}
 
-			moves = append(moves, plannedMove{
+			cm := plannedMove{
 				itemID:      pc.c.ComponentItemID,
 				qty:         total.Neg(),
 				sourceKType: MoveSourceWorkOrderConsume,
-			})
+				outStatus:   inventory.SerialStatusConsumed,
+			}
+			if b, ok := in.ComponentBatches[pc.c.ComponentItemID]; ok {
+				bid := b
+				cm.batchID = &bid
+			}
+			cm.serials = in.ComponentSerials[pc.c.ComponentItemID]
+			if err := validateTrackedMove(ctx, tx, tenantID, cm.itemID, cm.qty, cm.batchID, cm.serials); err != nil {
+				return err
+			}
+			moves = append(moves, cm)
 		}
 		if len(insufficient) > 0 {
 			return fmt.Errorf("%w: %s", ErrWorkOrderInsufficientStock, strings.Join(insufficient, "; "))
 		}
 		// Finished-goods receipt.
-		moves = append(moves, plannedMove{
+		fg := plannedMove{
 			itemID:      wo.ItemID,
 			qty:         actualQty,
 			sourceKType: MoveSourceWorkOrderReceipt,
-		})
+			batchID:     in.FinishedBatchID,
+			serials:     in.FinishedSerials,
+		}
+		if err := validateTrackedMove(ctx, tx, tenantID, fg.itemID, fg.qty, fg.batchID, fg.serials); err != nil {
+			return err
+		}
+		moves = append(moves, fg)
 
 		if alreadyCompleted {
 			// Phase 1 metadata (status / actual_qty /
@@ -480,13 +519,16 @@ func (s *PGStore) CompleteWorkOrder(ctx context.Context, tenantID, woID, actorID
 	sourceID := wo.ID
 	for _, m := range moves {
 		_, err := s.inventory.RecordMove(ctx, inventory.Move{
-			TenantID:    tenantID,
-			ItemID:      m.itemID,
-			WarehouseID: wo.WarehouseID,
-			Qty:         m.qty,
-			SourceKType: m.sourceKType,
-			SourceID:    &sourceID,
-			CreatedBy:   actorID,
+			TenantID:        tenantID,
+			ItemID:          m.itemID,
+			WarehouseID:     wo.WarehouseID,
+			Qty:             m.qty,
+			SourceKType:     m.sourceKType,
+			SourceID:        &sourceID,
+			CreatedBy:       actorID,
+			BatchID:         m.batchID,
+			SerialNos:       m.serials,
+			SerialOutStatus: m.outStatus,
 		})
 		if err != nil && !errors.Is(err, inventory.ErrDuplicateSourceMove) {
 			return nil, fmt.Errorf("manufacturing: emit move for %s: %w", m.itemID, err)
@@ -498,4 +540,59 @@ func (s *PGStore) CompleteWorkOrder(ctx context.Context, tenantID, woID, actorID
 	// the value the database actually persisted, not the in-memory
 	// struct read at the start of Phase 1.
 	return s.GetWorkOrder(ctx, tenantID, woID)
+}
+
+// validateTrackedMove enforces an item's lot/serial tracking contract
+// during Phase 1 — before the work order is flipped to completed — so a
+// missing lot or a serial-count mismatch fails the whole completion up
+// front rather than leaving the work order stamped `completed` with
+// moves that Phase 2 can never emit. It mirrors the inventory layer's
+// own validation, reading the flags from inventory_items inside the
+// caller's tenant tx (RLS-scoped). qty is the signed move quantity.
+func validateTrackedMove(
+	ctx context.Context, tx pgx.Tx,
+	tenantID, itemID uuid.UUID, qty decimal.Decimal,
+	batchID *uuid.UUID, serials []string,
+) error {
+	var lotTracked, serialTracked bool
+	if err := tx.QueryRow(ctx,
+		`SELECT lot_tracked, serial_tracked FROM inventory_items
+		  WHERE tenant_id = $1 AND id = $2`,
+		tenantID, itemID,
+	).Scan(&lotTracked, &serialTracked); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// No inventory_items config row → untracked item.
+			// Mirrors inventory.itemTracking so a legacy
+			// krecord-only item still completes unchanged.
+			return nil
+		}
+		return fmt.Errorf("manufacturing: lookup item tracking for %s: %w", itemID, err)
+	}
+	if lotTracked && batchID == nil {
+		return fmt.Errorf("%w (item %s)", inventory.ErrLotRequired, itemID)
+	}
+	if len(serials) > 0 && !serialTracked {
+		return fmt.Errorf("%w (item %s)", inventory.ErrSerialUnsupported, itemID)
+	}
+	if serialTracked {
+		if len(serials) == 0 {
+			return fmt.Errorf("%w (item %s)", inventory.ErrSerialRequired, itemID)
+		}
+		if !qty.Abs().Equal(decimal.NewFromInt(int64(len(serials)))) {
+			return fmt.Errorf("%w (item %s)", inventory.ErrSerialQtyMismatch, itemID)
+		}
+		// Catch duplicate serials here in Phase 1. The inventory layer
+		// rejects them too (applyMoveSerials → ErrDuplicateSerialInput),
+		// but that only fires in Phase 2 after the work order is flipped
+		// to completed; mirroring the check up front keeps the whole
+		// completion atomic on bad input.
+		seen := make(map[string]struct{}, len(serials))
+		for _, sn := range serials {
+			if _, dup := seen[sn]; dup {
+				return fmt.Errorf("%w (item %s, serial %s)", inventory.ErrDuplicateSerialInput, itemID, sn)
+			}
+			seen[sn] = struct{}{}
+		}
+	}
+	return nil
 }

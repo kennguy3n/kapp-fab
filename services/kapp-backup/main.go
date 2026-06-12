@@ -90,6 +90,12 @@ var TenantScopedTables = []string{
 	"inventory_items",
 	"inventory_batches",
 	"inventory_moves",
+	// Lot/serial tracking (Workstream 2). inventory_serials FKs
+	// items / warehouses / batches (all above); the move↔serial
+	// junction FKs inventory_moves AND inventory_serials, so it must
+	// land last of the inventory group.
+	"inventory_serials",
+	"inventory_move_serials",
 	// Manufacturing (Phase N6)
 	"boms",
 	"bom_components",
@@ -699,6 +705,15 @@ var tableConflictKeys = map[string][]string{
 	// rows. work_centers, routings, and job_cards use the standard
 	// (tenant_id, id) PK and fall through to the default path.
 	"routing_operations": {"tenant_id", "routing_id", "sequence"},
+	// Workstream 2 — inventory_move_serials is the move↔serial
+	// junction; its PK is the natural composite (tenant_id, move_id,
+	// serial_id) with no surrogate `id`, so the (tenant_id, id)
+	// fallback would degrade to ON CONFLICT DO NOTHING. The junction
+	// rows are immutable links, so DO NOTHING is harmless on replay,
+	// but declaring the real key keeps the restore aligned with the
+	// actual unique constraint. inventory_serials uses the standard
+	// (tenant_id, id) PK and falls through to the default path.
+	"inventory_move_serials": {"tenant_id", "move_id", "serial_id"},
 	// Phase A2 — tenant_record_counts has PK (tenant_id) with no
 	// `id` column, so the default upsert path would degrade to
 	// ON CONFLICT DO NOTHING and a re-restore would leave a stale
