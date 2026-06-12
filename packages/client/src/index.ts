@@ -1894,6 +1894,107 @@ export class ApiClient {
     });
   }
 
+  // --- Manufacturing depth: MRP runs (Batch-3) -------------------------
+
+  /** List the tenant's MRP run headers, newest first. The demand-line
+   *  and planned-order detail is omitted from the list payload — load
+   *  it per-run via getMRPRun. */
+  listMRPRuns(): Promise<MRPRun[]> {
+    return this.request("/manufacturing/mrp-runs");
+  }
+
+  /** Load one MRP run with its demand snapshot and generated planned
+   *  orders (make vs buy, suggested release dates). */
+  getMRPRun(id: string): Promise<MRPRun> {
+    return this.request(`/manufacturing/mrp-runs/${encodeURIComponent(id)}`);
+  }
+
+  /** Execute an MRP run over the supplied horizon + demand and persist
+   *  its planned orders. */
+  runMRP(input: RunMRPInput): Promise<MRPRun> {
+    return this.request("/manufacturing/mrp-runs", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  // --- Manufacturing depth: subcontracting (Batch-3) -------------------
+
+  listSubcontractOrders(status?: string): Promise<SubcontractOrder[]> {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+    return this.request(`/manufacturing/subcontract-orders${qs}`);
+  }
+
+  getSubcontractOrder(id: string): Promise<SubcontractOrder> {
+    return this.request(
+      `/manufacturing/subcontract-orders/${encodeURIComponent(id)}`,
+    );
+  }
+
+  createSubcontractOrder(
+    input: CreateSubcontractOrderInput,
+  ): Promise<SubcontractOrder> {
+    return this.request("/manufacturing/subcontract-orders", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** Issue every component out to the supplier (draft → issued). The
+   *  optional payload carries per-component lot / serial selections. */
+  issueSubcontractOrder(
+    id: string,
+    input?: IssueSubcontractInput,
+  ): Promise<SubcontractOrder> {
+    return this.request(
+      `/manufacturing/subcontract-orders/${encodeURIComponent(id)}/issue`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: input ? JSON.stringify(input) : undefined,
+      },
+    );
+  }
+
+  /** Receive the finished item back from the supplier (issued →
+   *  received). Defaults to the full order quantity when actual_qty is
+   *  omitted. */
+  receiveSubcontractOrder(
+    id: string,
+    input?: ReceiveSubcontractInput,
+  ): Promise<SubcontractOrder> {
+    return this.request(
+      `/manufacturing/subcontract-orders/${encodeURIComponent(id)}/receive`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: input ? JSON.stringify(input) : undefined,
+      },
+    );
+  }
+
+  closeSubcontractOrder(id: string): Promise<SubcontractOrder> {
+    return this.request(
+      `/manufacturing/subcontract-orders/${encodeURIComponent(id)}/close`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      },
+    );
+  }
+
+  cancelSubcontractOrder(id: string): Promise<SubcontractOrder> {
+    return this.request(
+      `/manufacturing/subcontract-orders/${encodeURIComponent(id)}/cancel`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      },
+    );
+  }
+
   // --- Saved views (Phase G) -------------------------------------------
 
   /** List saved views for the caller, scoped to a KType. Returns the
@@ -3807,6 +3908,168 @@ export interface CapacityPlan {
   start: string;
   end: string;
   rows: WorkCenterSchedule[];
+}
+
+// --- Manufacturing depth: MRP runs + subcontracting (Batch-3) --------
+//
+// Mirrors the Go domain types in internal/manufacturing/mrp.go and
+// internal/manufacturing/subcontract.go. All quantities are decimal
+// strings (the wire shape of shopspring/decimal) so the SPA never
+// loses precision through float64; dates are RFC 3339 strings.
+
+/** Where an independent MRP demand line originated. */
+export type MRPDemandSource =
+  | "sales_order"
+  | "work_order"
+  | "min_stock"
+  | "manual";
+
+/** An item with an active BOM is made in-house (and exploded into
+ *  component demand); anything else is bought. */
+export type MRPOrderType = "make" | "buy";
+
+export type MRPRunStatus = "completed" | "failed";
+
+export interface MRPRun {
+  tenant_id: string;
+  id: string;
+  status: MRPRunStatus;
+  horizon_start: string;
+  horizon_end: string;
+  include_min_stock: boolean;
+  buy_lead_time_days: number;
+  demand_line_count: number;
+  planned_order_count: number;
+  make_order_count: number;
+  buy_order_count: number;
+  notes?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+  // Loaded only by getMRPRun; omitted from the list payload.
+  demand_lines?: MRPDemandLine[];
+  planned_orders?: MRPPlannedOrder[];
+}
+
+export interface MRPDemandLine {
+  tenant_id: string;
+  id: string;
+  run_id: string;
+  item_id: string;
+  qty: string;
+  due_date: string;
+  source: MRPDemandSource;
+  source_ref?: string;
+  created_at: string;
+}
+
+export interface MRPPlannedOrder {
+  tenant_id: string;
+  id: string;
+  run_id: string;
+  item_id: string;
+  order_type: MRPOrderType;
+  qty: string;
+  due_date: string;
+  suggested_start_date: string;
+  explosion_level: number;
+  bom_id?: string | null;
+  routing_id?: string | null;
+  lead_time_days: number;
+  created_at: string;
+}
+
+/** One independent demand line supplied to a run. due_date is an
+ *  ISO calendar date (YYYY-MM-DD). */
+export interface MRPDemandLineInput {
+  item_id: string;
+  qty: string;
+  due_date: string;
+  source?: MRPDemandSource;
+  source_ref?: string;
+}
+
+export interface RunMRPInput {
+  // Horizon bounds (YYYY-MM-DD). Demand due after horizon_end is
+  // ignored by the planner.
+  horizon_start: string;
+  horizon_end: string;
+  // Top up items below their reorder level in addition to the
+  // explicit demand lines.
+  include_min_stock?: boolean;
+  // Purchasing lead time used to backward-schedule buy orders. The
+  // server falls back to its default (7d) when omitted / zero.
+  buy_lead_time_days?: number;
+  notes?: string;
+  demand?: MRPDemandLineInput[];
+}
+
+export type SubcontractStatus =
+  | "draft"
+  | "issued"
+  | "received"
+  | "closed"
+  | "cancelled";
+
+export interface SubcontractComponent {
+  tenant_id: string;
+  id: string;
+  subcontract_order_id: string;
+  item_id: string;
+  qty: string;
+  issued_qty: string;
+  created_at: string;
+}
+
+export interface SubcontractOrder {
+  tenant_id: string;
+  id: string;
+  work_order_id?: string | null;
+  routing_operation_seq?: number | null;
+  supplier_id?: string | null;
+  item_id: string;
+  warehouse_id: string;
+  qty: string;
+  received_qty: string;
+  status: SubcontractStatus;
+  charge_amount: string;
+  charge_currency?: string;
+  issued_at?: string | null;
+  received_at?: string | null;
+  notes?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+  // Loaded by getSubcontractOrder and the issue path.
+  components?: SubcontractComponent[];
+}
+
+export interface CreateSubcontractOrderInput {
+  work_order_id?: string;
+  routing_operation_seq?: number;
+  supplier_id?: string;
+  item_id: string;
+  warehouse_id: string;
+  qty: string;
+  charge_amount?: string;
+  charge_currency?: string;
+  notes?: string;
+  components: Array<{ item_id: string; qty: string }>;
+}
+
+/** Optional lot/serial payload for the component issue moves, keyed by
+ *  component item id. */
+export interface IssueSubcontractInput {
+  component_batches?: Record<string, string>;
+  component_serials?: Record<string, string[]>;
+}
+
+/** Optional received quantity + lot/serial payload for the finished
+ *  item receipt move. */
+export interface ReceiveSubcontractInput {
+  actual_qty?: string;
+  finished_batch_id?: string;
+  finished_serials?: string[];
 }
 
 export interface InventoryValuationRow {
