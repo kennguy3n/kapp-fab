@@ -207,7 +207,9 @@ func (e *Exporter) exportSource(ctx context.Context, cfg *Config, d sourceDescri
 		committed := false
 		defer func() {
 			if !committed {
-				_ = destTx.Rollback(context.Background())
+				// WithoutCancel so an aborted run still rolls back
+				// cleanly even when the caller's ctx is already done.
+				_ = destTx.Rollback(context.WithoutCancel(ctx))
 			}
 		}()
 		if effectiveFull {
@@ -337,7 +339,7 @@ func buildUpsertSQL(schema, table, staging string, d sourceDescriptor) string {
 		pkCols[i] = pgx.Identifier{p}.Sanitize()
 		pkSet[p] = struct{}{}
 	}
-	var setClauses []string
+	setClauses := make([]string, 0, len(dest))
 	for _, c := range dest {
 		if _, isPK := pkSet[c]; isPK {
 			continue
@@ -362,16 +364,13 @@ func buildUpsertSQL(schema, table, staging string, d sourceDescriptor) string {
 // parameters are the optional KType filter and the keyset lower bound,
 // both bound as $N placeholders. args is returned in the exact order
 // the placeholders are numbered.
-func buildSelectSQL(d sourceDescriptor, cur cursor) (string, []any) {
+func buildSelectSQL(d sourceDescriptor, cur cursor) (query string, args []any) {
 	cols := make([]string, len(d.columns))
 	for i, c := range d.columns {
 		cols[i] = c.src
 	}
-	var (
-		conds []string
-		args  []any
-		n     = 1
-	)
+	var conds []string
+	n := 1
 	if d.ktype != "" {
 		conds = append(conds, fmt.Sprintf("ktype = $%d", n))
 		args = append(args, d.ktype)
@@ -384,24 +383,22 @@ func buildSelectSQL(d sourceDescriptor, cur cursor) (string, []any) {
 		if cur.hasTime {
 			conds = append(conds, fmt.Sprintf("(%s, %s) > ($%d, $%d::uuid)", d.wmTimeCol, d.wmUUIDCol, n, n+1))
 			args = append(args, cur.ts, cur.id)
-			n += 2
 		}
 	case watermarkBigint:
 		orderCols = []string{d.wmBigCol}
 		if cur.hasSeq {
 			conds = append(conds, fmt.Sprintf("%s > $%d", d.wmBigCol, n))
 			args = append(args, cur.seq)
-			n++
 		}
 	default:
 		orderCols = append(orderCols, d.pk...)
 	}
-	sql := "SELECT " + strings.Join(cols, ", ") + " FROM " + d.relation
+	query = "SELECT " + strings.Join(cols, ", ") + " FROM " + d.relation
 	if len(conds) > 0 {
-		sql += " WHERE " + strings.Join(conds, " AND ")
+		query += " WHERE " + strings.Join(conds, " AND ")
 	}
 	if len(orderCols) > 0 {
-		sql += " ORDER BY " + strings.Join(orderCols, ", ")
+		query += " ORDER BY " + strings.Join(orderCols, ", ")
 	}
-	return sql, args
+	return query, args
 }

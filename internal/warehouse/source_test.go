@@ -70,11 +70,11 @@ func TestResolveSource_Rejects(t *testing.T) {
 
 func TestIsKTypeName_Length(t *testing.T) {
 	// 63-byte cap on the assembled "ktype_<name>" identifier.
-	long := "a" + strings.Repeat("b", 60) // ktype_ + 61 = 67 > 63
+	long := "a" + strings.Repeat("b", 60) // assembled name exceeds the 63-byte cap
 	if isKTypeName(long) {
 		t.Fatalf("isKTypeName(%q) = true, want false (exceeds 63-byte table name)", long)
 	}
-	ok := strings.Repeat("a", 57) // ktype_ + 57 = 63
+	ok := strings.Repeat("a", 57) // assembled name is exactly 63 bytes
 	if !isKTypeName(ok) {
 		t.Fatalf("isKTypeName(57 chars) = false, want true")
 	}

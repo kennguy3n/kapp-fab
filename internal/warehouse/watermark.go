@@ -144,8 +144,11 @@ func (s *copyFromSource) ensureIdx() {
 	s.inited = true
 }
 
+// Next advances to the next source row; it satisfies pgx.CopyFromSource.
 func (s *copyFromSource) Next() bool { return s.rows.Next() }
 
+// Values returns the current row's column values and, as a side
+// effect, counts the row and advances the running watermark.
 func (s *copyFromSource) Values() ([]any, error) {
 	vals, err := s.rows.Values()
 	if err != nil {
@@ -159,6 +162,8 @@ func (s *copyFromSource) Values() ([]any, error) {
 	return vals, nil
 }
 
+// Err reports the first error seen while streaming, preferring a
+// decode error captured in Values over the cursor's own error.
 func (s *copyFromSource) Err() error {
 	if s.err != nil {
 		return s.err

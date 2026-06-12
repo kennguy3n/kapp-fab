@@ -53,7 +53,7 @@ var ErrInvalidConfig = errors.New("warehouse: invalid config")
 
 // invalidConfig tags err as client-correctable.
 func invalidConfig(err error) error {
-	return fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+	return fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 }
 
 // mapWriteErr translates a Postgres constraint violation raised by a
@@ -338,7 +338,8 @@ func (s *ConfigStore) ListDue(ctx context.Context, tenantID uuid.UUID, now time.
 		return nil, err
 	}
 	due := make([]Config, 0, len(all))
-	for _, c := range all {
+	for i := range all {
+		c := all[i]
 		if !c.Enabled {
 			continue
 		}
