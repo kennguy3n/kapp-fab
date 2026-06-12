@@ -1,9 +1,15 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { BankFeedRule, BankFeedSuggestion, KRecord } from "@kapp/client";
+import type {
+  BankFeedRule,
+  BankFeedSuggestion,
+  ExchangeRate,
+  KRecord,
+} from "@kapp/client";
 import {
   Badge,
   Button,
+  Input,
   Table,
   TableBody,
   TableCell,
@@ -15,19 +21,26 @@ import {
 } from "@kapp/ui";
 import { api } from "../lib/api";
 import {
+  buildRateMap,
   computeTotals,
+  convertToBase,
+  detectAnomalies,
   detectTransferPairs,
   groupSuggestions,
   highConfidenceSuggestions,
+  isForeignLine,
   isUnmatched,
+  matchesQuery,
   txnData,
   txnStatus,
 } from "../components/reconciliation";
+import type { SplitAllocation } from "../components/ReconciliationSplitMatch";
 import { ReconciliationSummary } from "../components/ReconciliationSummary";
 import { ReconciliationMatchQueue } from "../components/ReconciliationMatchQueue";
 import { ReconciliationSideBySide } from "../components/ReconciliationSideBySide";
 import { ReconciliationTransfers } from "../components/ReconciliationTransfers";
 import { ReconciliationRulesPanel } from "../components/ReconciliationRulesPanel";
+import { rt, rtp } from "../components/ReconciliationStrings";
 
 const KTYPE_ACCOUNT = "finance.bank_account";
 const KTYPE_TXN = "finance.bank_transaction";
@@ -81,6 +94,11 @@ export function BankReconciliationPage() {
   const [activeLine, setActiveLine] = useState<string | null>(null);
   const [pendingIds, setPendingIds] = useState<ReadonlySet<string>>(new Set());
   const [bulkPending, setBulkPending] = useState(false);
+  const [query, setQuery] = useState("");
+  // Snapshot of the bank lines a bulk accept reconciled, kept only until
+  // the operator either undoes it or starts another batch — the basis for
+  // the one-click "undo bulk" correction.
+  const [lastBulk, setLastBulk] = useState<KRecord[] | null>(null);
 
   const suggestionsQ = useQuery<BankFeedSuggestion[]>({
     queryKey: ["bankfeed", "suggestions", selected],
@@ -90,6 +108,14 @@ export function BankReconciliationPage() {
   const rulesQ = useQuery<BankFeedRule[]>({
     queryKey: ["bankfeed", "rules"],
     queryFn: () => api.listBankFeedRules(),
+    enabled: !!selected,
+  });
+  // Exchange rates power the foreign-currency base-equivalent display. The
+  // list is small and tenant-scoped; we load it once an account is open
+  // and reuse it across every foreign line.
+  const ratesQ = useQuery<{ rates: ExchangeRate[] }>({
+    queryKey: ["exchange-rates"],
+    queryFn: () => api.listExchangeRates({ limit: 500 }),
     enabled: !!selected,
   });
 
@@ -199,9 +225,70 @@ export function BankReconciliationPage() {
     return (acct?.data as BankAccountData | undefined)?.currency;
   }, [accounts.data, selected]);
 
+  const rateMap = useMemo(
+    () => buildRateMap(ratesQ.data?.rates ?? []),
+    [ratesQ.data],
+  );
+
+  // Duplicate / reversed lines are flagged across the whole account so the
+  // badges are stable regardless of the current filter.
+  const anomalies = useMemo(() => detectAnomalies(visible), [visible]);
+
+  // The search box narrows the unmatched-line surfaces (match queue +
+  // side-by-side). Resolved lines stay in the totals and table so the
+  // operator never loses the full picture while filtering work-in-progress.
+  const filteredUnmatched = useMemo(
+    () => unmatched.filter((r) => matchesQuery(r, query)),
+    [unmatched, query],
+  );
+  const filteredGroups = useMemo(() => {
+    if (query.trim() === "") return groups;
+    return groups.filter((g) => {
+      const txn = txnById.get(g.transactionId);
+      return txn ? matchesQuery(txn, query) : false;
+    });
+  }, [groups, query, txnById]);
+
+  // Clear transient per-account state when the operator switches accounts:
+  // a stale filter or an undo snapshot from another account would be
+  // confusing (and undoing it would touch the wrong tenant lines).
+  useEffect(() => {
+    setQuery("");
+    setLastBulk(null);
+  }, [selected]);
+
+  // unmatchData returns the line's data reset to the open state, dropping
+  // the matched ledger reference so a re-matched line starts clean.
+  const unmatchData = useCallback((r: KRecord) => {
+    const next = { ...(r.data as Record<string, unknown>) };
+    delete next.matched_entry_id;
+    next.status = "unreconciled";
+    return next;
+  }, []);
+
+  const unmatchMut = useMutation({
+    mutationFn: (r: KRecord) =>
+      api.updateRecord(KTYPE_TXN, r.id, unmatchData(r)),
+    onMutate: (r) => setPending(r.id, true),
+    onSuccess: () => {
+      toast.success(rt("reconciliation.unmatch.done"));
+      invalidateMatchData();
+    },
+    onError: (e) =>
+      toast.error(rt("reconciliation.unmatch.failed"), {
+        description: (e as Error).message,
+      }),
+    onSettled: (_d, _e, r) => setPending(r.id, false),
+  });
+
   const acceptAllHighConfidence = useCallback(async () => {
     if (highConfidence.length === 0) return;
     setBulkPending(true);
+    // Capture the lines this batch is about to reconcile so the operator
+    // can undo the whole action in one click afterwards.
+    const affected = highConfidence
+      .map((s) => txnById.get(s.transaction_id))
+      .filter((r): r is KRecord => r !== undefined);
     let ok = 0;
     try {
       for (const s of highConfidence) {
@@ -209,6 +296,7 @@ export function BankReconciliationPage() {
         ok += 1;
       }
       toast.success(`Accepted ${ok} high-confidence match${ok === 1 ? "" : "es"}`);
+      setLastBulk(affected.length > 0 ? affected : null);
     } catch (e) {
       toast.error("Bulk accept stopped", {
         description: `${(e as Error).message} (accepted ${ok})`,
@@ -217,7 +305,68 @@ export function BankReconciliationPage() {
       setBulkPending(false);
       invalidateMatchData();
     }
-  }, [highConfidence, invalidateMatchData]);
+  }, [highConfidence, txnById, invalidateMatchData]);
+
+  // undoBulk reverts the most recent bulk accept by returning each matched
+  // line to the open state. It re-reads the live record from the cache so
+  // it never clobbers an edit the operator made after the batch.
+  const undoBulk = useCallback(async () => {
+    if (!lastBulk || lastBulk.length === 0) return;
+    setBulkPending(true);
+    let ok = 0;
+    let failed = false;
+    try {
+      for (const snapshot of lastBulk) {
+        const live = txnById.get(snapshot.id) ?? snapshot;
+        await api.updateRecord(KTYPE_TXN, live.id, unmatchData(live));
+        ok += 1;
+      }
+    } catch {
+      failed = true;
+    } finally {
+      setBulkPending(false);
+      setLastBulk(null);
+      invalidateMatchData();
+    }
+    if (failed) {
+      toast.error(rt("reconciliation.bulk.undoFailed"));
+    } else {
+      toast.success(
+        rtp("reconciliation.bulk.undone", {
+          count: ok,
+          plural: ok === 1 ? "" : "s",
+        }),
+      );
+    }
+  }, [lastBulk, txnById, unmatchData, invalidateMatchData]);
+
+  // Reconcile a split: accept each chosen suggestion in turn, mirroring the
+  // bulk-accept loop. Consumes only the existing accept endpoint — the
+  // running-difference gating lives in the composer.
+  const reconcileSplit = useCallback(
+    async (allocations: SplitAllocation[]) => {
+      if (allocations.length === 0) return;
+      setBulkPending(true);
+      let ok = 0;
+      try {
+        for (const a of allocations) {
+          await api.acceptBankFeedSuggestion(a.suggestion.id);
+          ok += 1;
+        }
+        toast.success(
+          rtp("reconciliation.split.done", { count: ok }),
+        );
+      } catch (e) {
+        toast.error(rt("reconciliation.split.failed"), {
+          description: (e as Error).message,
+        });
+      } finally {
+        setBulkPending(false);
+        invalidateMatchData();
+      }
+    },
+    [invalidateMatchData],
+  );
 
   return (
     <section className="flex gap-4">
@@ -231,8 +380,25 @@ export function BankReconciliationPage() {
         </p>
         <h2 className="mt-4 text-sm font-semibold text-fg">Accounts</h2>
         {accounts.isLoading && (
-          <p className="text-sm text-fg-muted">Loading…</p>
+          <p className="text-sm text-fg-muted">{rt("reconciliation.loading")}</p>
         )}
+        {accounts.isError && (
+          <div className="flex flex-col items-start gap-1">
+            <p className="text-sm text-danger">
+              {rt("reconciliation.accounts.error")}
+            </p>
+            <Button size="sm" variant="outline" onClick={() => accounts.refetch()}>
+              {rt("reconciliation.retry")}
+            </Button>
+          </div>
+        )}
+        {!accounts.isLoading &&
+          !accounts.isError &&
+          (accounts.data ?? []).length === 0 && (
+            <p className="text-sm text-fg-muted">
+              {rt("reconciliation.accounts.empty")}
+            </p>
+          )}
         <ul className="mt-2 flex list-none flex-col gap-1 p-0">
           {(accounts.data ?? []).map((r) => {
             const d = r.data as unknown as BankAccountData;
@@ -265,20 +431,95 @@ export function BankReconciliationPage() {
 
       <div className="min-w-0 flex-1">
         {!selected ? (
-          <p className="text-sm text-fg-muted">Select a bank account.</p>
+          <p className="text-sm text-fg-muted">
+            {rt("reconciliation.selectAccount")}
+          </p>
         ) : (
           <div className="flex flex-col gap-6">
             <ReconciliationSummary totals={totals} currency={selectedCurrency} />
 
+            {txns.isError && (
+              <div className="flex items-center gap-2">
+                <p className="text-sm text-danger">
+                  {rt("reconciliation.txns.error")}
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => txns.refetch()}
+                >
+                  {rt("reconciliation.retry")}
+                </Button>
+              </div>
+            )}
+
+            {lastBulk && lastBulk.length > 0 && (
+              <div
+                role="status"
+                className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-bg-subtle px-3 py-2"
+              >
+                <span className="text-sm text-fg">
+                  {rtp("reconciliation.bulk.recent", {
+                    count: lastBulk.length,
+                    plural: lastBulk.length === 1 ? "" : "s",
+                  })}
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={bulkPending}
+                  onClick={undoBulk}
+                >
+                  {rt("reconciliation.bulk.undo")}
+                </Button>
+              </div>
+            )}
+
+            <div className="flex flex-col gap-1">
+              <label
+                htmlFor="recon-filter"
+                className="text-xs font-medium text-fg-muted"
+              >
+                {rt("reconciliation.search.label")}
+              </label>
+              <Input
+                id="recon-filter"
+                type="search"
+                size="sm"
+                className="max-w-sm"
+                placeholder={rt("reconciliation.search.placeholder")}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+              {query.trim() !== "" &&
+                unmatched.length > 0 &&
+                filteredUnmatched.length === 0 && (
+                  <p className="text-xs text-fg-muted">
+                    {rtp("reconciliation.search.noMatches", { query })}
+                  </p>
+                )}
+            </div>
+
             {suggestionsQ.isError && (
-              <p className="text-sm text-danger">
-                Could not load suggestions: {String(suggestionsQ.error)}
-              </p>
+              <div className="flex items-center gap-2">
+                <p className="text-sm text-danger">
+                  {rt("reconciliation.suggestions.error")}
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => suggestionsQ.refetch()}
+                >
+                  {rt("reconciliation.retry")}
+                </Button>
+              </div>
             )}
 
             <ReconciliationMatchQueue
-              groups={groups}
+              groups={filteredGroups}
               txnById={txnById}
+              baseCurrency={selectedCurrency}
+              rates={rateMap}
               pendingIds={pendingIds as Set<string>}
               highConfidenceCount={highConfidence.length}
               bulkPending={bulkPending}
@@ -288,15 +529,17 @@ export function BankReconciliationPage() {
             />
 
             <ReconciliationSideBySide
-              unmatched={unmatched}
+              unmatched={filteredUnmatched}
               suggestionsByTxn={suggestionsByTxn}
               totals={totals}
               currency={selectedCurrency}
+              rates={rateMap}
               selectedTxnId={activeLine}
               pendingIds={pendingIds as Set<string>}
               bulkPending={bulkPending}
               onSelectTxn={setActiveLine}
               onAccept={(s) => acceptMut.mutate(s)}
+              onSplitReconcile={reconcileSplit}
             />
 
             <ReconciliationTransfers pairs={transferPairs} />
@@ -326,20 +569,64 @@ export function BankReconciliationPage() {
                     {visible.map((r) => {
                       const d = txnData(r);
                       const status = txnStatus(r);
+                      const amount = Number(d.amount ?? 0);
+                      const foreign = isForeignLine(d.currency, selectedCurrency);
+                      const conv = foreign
+                        ? convertToBase(
+                            Number.isFinite(amount) ? amount : 0,
+                            d.currency,
+                            selectedCurrency,
+                            rateMap,
+                          )
+                        : null;
+                      const isDup = anomalies.duplicateIds.has(r.id);
+                      const isRev = anomalies.reversalIds.has(r.id);
                       return (
                         <TableRow key={r.id}>
                           <TableCell>{d.value_date ?? ""}</TableCell>
                           <TableCell>{d.description ?? ""}</TableCell>
                           <TableCell className="text-right tabular-nums">
-                            {d.amount ?? 0} {d.currency ?? ""}
+                            <div>
+                              {d.amount ?? 0} {d.currency ?? ""}
+                            </div>
+                            {foreign && (
+                              <div className="text-xs text-fg-muted">
+                                {conv
+                                  ? `≈ ${conv.base.toLocaleString(undefined, {
+                                      minimumFractionDigits: 2,
+                                      maximumFractionDigits: 2,
+                                    })} ${selectedCurrency ?? ""}`
+                                  : rt("reconciliation.fx.noRate")}
+                              </div>
+                            )}
                           </TableCell>
                           <TableCell>
-                            <Badge
-                              variant={STATUS_BADGE[status] ?? "outline"}
-                              size="xs"
-                            >
-                              {status}
-                            </Badge>
+                            <div className="flex flex-wrap items-center gap-1">
+                              <Badge
+                                variant={STATUS_BADGE[status] ?? "outline"}
+                                size="xs"
+                              >
+                                {status}
+                              </Badge>
+                              {isDup && (
+                                <Badge
+                                  variant="warning"
+                                  size="xs"
+                                  title={rt("reconciliation.flag.duplicate.hint")}
+                                >
+                                  {rt("reconciliation.flag.duplicate")}
+                                </Badge>
+                              )}
+                              {isRev && (
+                                <Badge
+                                  variant="warning"
+                                  size="xs"
+                                  title={rt("reconciliation.flag.reversal.hint")}
+                                >
+                                  {rt("reconciliation.flag.reversal")}
+                                </Badge>
+                              )}
+                            </div>
                           </TableCell>
                           <TableCell className="font-mono text-xs">
                             {d.matched_entry_id ?? "—"}
@@ -349,6 +636,7 @@ export function BankReconciliationPage() {
                               <Button
                                 size="sm"
                                 variant="ghost"
+                                disabled={pendingIds.has(r.id)}
                                 onClick={() =>
                                   updateTxn.mutate({
                                     ...r,
@@ -359,6 +647,16 @@ export function BankReconciliationPage() {
                                 Mark ignored
                               </Button>
                             )}
+                            {status === "matched" && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={pendingIds.has(r.id)}
+                                onClick={() => unmatchMut.mutate(r)}
+                              >
+                                {rt("reconciliation.unmatch")}
+                              </Button>
+                            )}
                           </TableCell>
                         </TableRow>
                       );
@@ -366,7 +664,7 @@ export function BankReconciliationPage() {
                     {visible.length === 0 && (
                       <TableRow>
                         <TableCell colSpan={6} className="text-fg-muted">
-                          No transactions yet.
+                          {rt("reconciliation.txns.empty")}
                         </TableCell>
                       </TableRow>
                     )}

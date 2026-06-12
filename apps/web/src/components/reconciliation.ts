@@ -1,4 +1,4 @@
-import type { BankFeedSuggestion, KRecord } from "@kapp/client";
+import type { BankFeedSuggestion, ExchangeRate, KRecord } from "@kapp/client";
 
 // Statuses a finance.bank_transaction can hold. The first four are the
 // KType enum (internal/ledger/bank.go); "transfer" is written by the
@@ -32,6 +32,18 @@ export function txnData(r: KRecord): BankTxnData {
 export function txnStatus(r: KRecord): string {
   return txnData(r).status ?? "unreconciled";
 }
+
+// The currency a bank line is denominated in (the statement's own
+// currency), independent of the account's base/presentation currency.
+export function txnCurrency(r: KRecord): string | undefined {
+  return txnData(r).currency;
+}
+
+// Half a cent: the tolerance at which a running split difference (or a
+// reversal pairing) is treated as netting to zero. Floating-point sums of
+// money values accumulate sub-cent error, so an exact === 0 check would
+// leave a balanced split looking unbalanced.
+export const AMOUNT_TOLERANCE = 0.005;
 
 // Terminal statuses are resolved lines that have left the review queue.
 const TERMINAL_STATUSES = new Set(["matched", "ignored", "voided", "transfer"]);
@@ -287,4 +299,200 @@ export function formatAmount(amount: number, currency?: string): string {
 // keeping the full value available via the title attribute at call sites.
 export function shortId(id: string): string {
   return id.split("-")[0] ?? id;
+}
+
+// --- Multi-currency -----------------------------------------------------
+//
+// Bank lines carry their own statement currency, which can differ from the
+// account's base/presentation currency (a USD account receiving a EUR
+// wire). The matcher pairs on amount, so a foreign line whose number
+// happens to equal a base-currency ledger entry would silently mis-match.
+// These helpers convert a foreign amount to its base equivalent (so the
+// operator sees the comparable figure and the FX difference) and flag the
+// lines that must not be reconciled without an explicit currency check.
+
+function normCur(c: string | undefined): string {
+  return (c ?? "").trim().toUpperCase();
+}
+
+// isForeignLine is true when a bank line's currency differs from the
+// account's base currency. A missing currency on either side is treated as
+// same-currency (no FX badge) rather than guessed.
+export function isForeignLine(
+  lineCurrency: string | undefined,
+  baseCurrency: string | undefined,
+): boolean {
+  const a = normCur(lineCurrency);
+  const b = normCur(baseCurrency);
+  if (a === "" || b === "") return false;
+  return a !== b;
+}
+
+// A directional from→to rate lookup, latest quote per pair.
+export type RateMap = ReadonlyMap<string, number>;
+
+function rateKey(from: string, to: string): string {
+  return `${normCur(from)}>${normCur(to)}`;
+}
+
+// buildRateMap reduces the exchange-rate rows the API returns to the most
+// recent rate per (from,to) pair, keyed for O(1) lookup. Rows with a
+// non-numeric or non-positive rate are dropped — a zero/negative FX rate
+// is never a valid conversion factor and would produce nonsense base
+// amounts.
+export function buildRateMap(rates: ExchangeRate[]): RateMap {
+  const latestDate = new Map<string, string>();
+  const map = new Map<string, number>();
+  for (const r of rates) {
+    const rate = Number(r.rate);
+    if (!Number.isFinite(rate) || rate <= 0) continue;
+    const key = rateKey(r.from_currency, r.to_currency);
+    const prev = latestDate.get(key);
+    if (prev === undefined || r.rate_date > prev) {
+      latestDate.set(key, r.rate_date);
+      map.set(key, rate);
+    }
+  }
+  return map;
+}
+
+export interface BaseConversion {
+  /** The line amount expressed in the account's base currency. */
+  base: number;
+  /** The applied from→base conversion factor. */
+  rate: number;
+}
+
+// convertToBase expresses a foreign amount in the account's base currency.
+// Same-currency conversion is the identity (rate 1). When only the inverse
+// (base→from) rate is published it is reciprocated. Returns null when no
+// rate can be found so the caller flags the line for manual FX handling
+// rather than presenting a fabricated base figure.
+export function convertToBase(
+  amount: number,
+  from: string | undefined,
+  base: string | undefined,
+  rates: RateMap,
+): BaseConversion | null {
+  const b = normCur(base);
+  if (b === "") return null;
+  const f = normCur(from) || b;
+  if (f === b) return { base: amount, rate: 1 };
+  const direct = rates.get(rateKey(f, b));
+  if (direct !== undefined) return { base: amount * direct, rate: direct };
+  const inverse = rates.get(rateKey(b, f));
+  if (inverse !== undefined && inverse !== 0) {
+    return { base: amount / inverse, rate: 1 / inverse };
+  }
+  return null;
+}
+
+// --- Filtering / search -------------------------------------------------
+
+// matchesQuery is a case-insensitive substring test across a bank line's
+// description, amount, date and currency, so an operator can narrow a long
+// queue by payee, value or date fragment. An empty query matches every
+// line.
+export function matchesQuery(r: KRecord, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (q === "") return true;
+  const d = txnData(r);
+  const haystack = [
+    d.description ?? "",
+    String(d.amount ?? ""),
+    d.value_date ?? "",
+    d.currency ?? "",
+  ]
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(q);
+}
+
+// --- Split / partial matches -------------------------------------------
+
+// splitRemaining is the running difference a split composer shows: the
+// target (the bank line being split, or the ledger total being built up)
+// minus the sum of the allocations entered so far. Positive means there is
+// still an amount to allocate; negative means the split is over-allocated.
+// Non-finite allocations contribute zero so a half-typed input never makes
+// the whole figure NaN.
+export function splitRemaining(target: number, allocations: number[]): number {
+  const sum = allocations.reduce(
+    (acc, n) => acc + (Number.isFinite(n) ? n : 0),
+    0,
+  );
+  return target - sum;
+}
+
+// isBalanced is true when a running difference has netted to zero within
+// the half-cent tolerance — the point at which a split may be reconciled.
+export function isBalanced(
+  remaining: number,
+  tolerance: number = AMOUNT_TOLERANCE,
+): boolean {
+  return Math.abs(remaining) <= tolerance;
+}
+
+// --- Duplicate / reversal detection ------------------------------------
+
+export interface TxnAnomalies {
+  /** Lines that are byte-for-byte repeats of another line (date, amount,
+   *  description, currency) — typically a statement imported twice. */
+  duplicateIds: ReadonlySet<string>;
+  /** Lines that have an equal-and-opposite counterpart with the same
+   *  description and currency — a refund, bounced payment or correction
+   *  the operator should reconcile as a pair, not match individually. */
+  reversalIds: ReadonlySet<string>;
+}
+
+const EMPTY_ANOMALIES: TxnAnomalies = {
+  duplicateIds: new Set(),
+  reversalIds: new Set(),
+};
+
+// detectAnomalies flags the two error classes a bookkeeper most often hits
+// on a freshly imported statement: duplicate rows (a re-imported file) and
+// reversed pairs (a charge plus its refund). Both are computed in a single
+// O(n) pass keyed on a normalised signature so it stays cheap on the large
+// statements a busy account accumulates.
+export function detectAnomalies(txns: KRecord[]): TxnAnomalies {
+  if (txns.length === 0) return EMPTY_ANOMALIES;
+  const duplicateIds = new Set<string>();
+  const reversalIds = new Set<string>();
+
+  // Exact-match buckets for duplicates.
+  const exact = new Map<string, KRecord[]>();
+  // |amount|-keyed buckets split by sign for reversals.
+  const bySig = new Map<string, { pos: KRecord[]; neg: KRecord[] }>();
+
+  for (const r of txns) {
+    const d = txnData(r);
+    const amount = txnAmount(r);
+    const desc = (d.description ?? "").trim().toLowerCase();
+    const cur = normCur(d.currency);
+    const date = d.value_date ?? "";
+
+    const exactKey = `${date}|${desc}|${amount}|${cur}`;
+    const exactList = exact.get(exactKey) ?? [];
+    exactList.push(r);
+    exact.set(exactKey, exactList);
+
+    if (amount !== 0) {
+      const sig = `${cur}|${desc}|${Math.abs(amount).toFixed(2)}`;
+      const slot = bySig.get(sig) ?? { pos: [], neg: [] };
+      (amount > 0 ? slot.pos : slot.neg).push(r);
+      bySig.set(sig, slot);
+    }
+  }
+
+  for (const list of exact.values()) {
+    if (list.length > 1) for (const r of list) duplicateIds.add(r.id);
+  }
+  for (const slot of bySig.values()) {
+    if (slot.pos.length > 0 && slot.neg.length > 0) {
+      for (const r of slot.pos) reversalIds.add(r.id);
+      for (const r of slot.neg) reversalIds.add(r.id);
+    }
+  }
+  return { duplicateIds, reversalIds };
 }
