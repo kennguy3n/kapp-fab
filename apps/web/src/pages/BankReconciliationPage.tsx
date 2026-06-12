@@ -103,9 +103,12 @@ export function BankReconciliationPage() {
   }, []);
 
   const invalidateMatchData = useCallback(() => {
-    qc.invalidateQueries({ queryKey: ["bankfeed", "suggestions", selected] });
+    // Prefix match invalidates every account's suggestion cache, so a
+    // mutation that settles after the operator switches accounts still
+    // refreshes the account the suggestion belonged to.
+    qc.invalidateQueries({ queryKey: ["bankfeed", "suggestions"] });
     qc.invalidateQueries({ queryKey: ["records", KTYPE_TXN] });
-  }, [qc, selected]);
+  }, [qc]);
 
   const updateTxn = useMutation({
     mutationFn: (r: KRecord) => api.updateRecord(KTYPE_TXN, r.id, r.data),

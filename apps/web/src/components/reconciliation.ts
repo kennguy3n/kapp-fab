@@ -191,15 +191,29 @@ export interface TransferPairRow {
   in?: TransferLeg;
 }
 
+// dateDistance returns the absolute gap in days between two value_date
+// strings, or Infinity when either is missing/unparseable so a dated
+// candidate is always preferred over an undated one.
+function dateDistance(a?: string, b?: string): number {
+  if (!a || !b) return Number.POSITIVE_INFINITY;
+  const ta = Date.parse(a);
+  const tb = Date.parse(b);
+  if (Number.isNaN(ta) || Number.isNaN(tb)) return Number.POSITIVE_INFINITY;
+  return Math.abs(ta - tb) / 86_400_000;
+}
+
 // detectTransferPairs reconstructs the inter-account transfer pairs the
 // backend already produced (it marks both legs status="transfer") so the
 // operator can see them as a single internal movement rather than two
 // orphan lines. The backend owns the authoritative pairing in
 // bank_transfer_pairs; that table is not exposed over HTTP, so we pair
 // client-side by the same rule the detector uses — equal magnitude,
-// opposite sign, same currency — across the tenant's transfer-flagged
-// lines. Lines that cannot be paired (e.g. the counter-leg is out of the
-// loaded window) are surfaced on their own so nothing is hidden.
+// opposite sign, same currency — and, when several credits could match a
+// debit, prefer the one closest in value_date (the detector pairs within a
+// few days) so two unrelated same-amount transfers don't get crossed.
+// Lines that cannot be paired (e.g. the counter-leg is out of the loaded
+// window) — and zero-amount legs, which have no magnitude to match on — are
+// surfaced on their own so nothing is hidden.
 export function detectTransferPairs(
   transfers: KRecord[],
   accountName: (id: string) => string,
@@ -210,18 +224,26 @@ export function detectTransferPairs(
   });
   const credits = transfers.filter((r) => txnAmount(r) > 0);
   const debits = transfers.filter((r) => txnAmount(r) < 0);
+  const zeros = transfers.filter((r) => txnAmount(r) === 0);
   const usedCredits = new Set<string>();
   const rows: TransferPairRow[] = [];
 
   for (const debit of debits) {
     const d = txnData(debit);
     const magnitude = Math.abs(txnAmount(debit));
-    const match = credits.find(
-      (c) =>
-        !usedCredits.has(c.id) &&
-        txnData(c).currency === d.currency &&
-        Math.abs(txnAmount(c) - magnitude) < 1e-9,
-    );
+    let match: KRecord | undefined;
+    let bestGap = Number.POSITIVE_INFINITY;
+    for (const c of credits) {
+      if (usedCredits.has(c.id)) continue;
+      const cd = txnData(c);
+      if (cd.currency !== d.currency) continue;
+      if (Math.abs(txnAmount(c) - magnitude) >= 1e-9) continue;
+      const gap = dateDistance(cd.value_date, d.value_date);
+      if (gap < bestGap) {
+        bestGap = gap;
+        match = c;
+      }
+    }
     if (match) usedCredits.add(match.id);
     rows.push({
       key: match ? `${debit.id}:${match.id}` : debit.id,
@@ -239,6 +261,15 @@ export function detectTransferPairs(
       amount: Math.abs(txnAmount(credit)),
       currency: c.currency ?? "",
       in: legOf(credit),
+    });
+  }
+  for (const zero of zeros) {
+    const z = txnData(zero);
+    rows.push({
+      key: zero.id,
+      amount: 0,
+      currency: z.currency ?? "",
+      out: legOf(zero),
     });
   }
   return rows;
