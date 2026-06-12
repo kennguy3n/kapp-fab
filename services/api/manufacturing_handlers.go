@@ -407,6 +407,9 @@ func writeManufacturingError(w http.ResponseWriter, err error) {
 		errors.Is(err, manufacturing.ErrWorkCenterNotFound),
 		errors.Is(err, manufacturing.ErrJobCardNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, manufacturing.ErrMRPRunNotFound),
+		errors.Is(err, manufacturing.ErrSubcontractOrderNotFound):
+		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, manufacturing.ErrWorkCenterDuplicateName):
 		// Duplicate (tenant_id, name) — a conflict the client can
 		// resolve by renaming, so 409 rather than the 422 used for
@@ -449,6 +452,12 @@ func writeManufacturingError(w http.ResponseWriter, err error) {
 		errors.Is(err, manufacturing.ErrRoutingDuplicateSequence),
 		errors.Is(err, manufacturing.ErrJobCardInvalidTransition),
 		errors.Is(err, manufacturing.ErrCapacityRangeInvalid),
+		errors.Is(err, manufacturing.ErrMRPNoDemand),
+		errors.Is(err, manufacturing.ErrMRPCyclicBOM),
+		errors.Is(err, manufacturing.ErrSubcontractNoComponents),
+		errors.Is(err, manufacturing.ErrSubcontractDuplicateComponent),
+		errors.Is(err, manufacturing.ErrSubcontractInvalidTransition),
+		errors.Is(err, manufacturing.ErrSubcontractInsufficientStock),
 		// ErrInvalidInput is the umbrella sentinel for client-supplied
 		// validation failures (empty / zero / out-of-range fields on
 		// the create/update endpoints — invalid bom status, negative
@@ -838,4 +847,345 @@ func (h *manufacturingHandlers) completeJobCard(w http.ResponseWriter, r *http.R
 		return
 	}
 	writeJSON(w, http.StatusOK, jc)
+}
+
+// ---------------------------------------------------------------------------
+// MRP runs
+// ---------------------------------------------------------------------------
+
+// mrpDemandRequest is one independent demand line on a runMRP call.
+// due_date is a YYYY-MM-DD calendar date; source defaults to "manual".
+type mrpDemandRequest struct {
+	ItemID    uuid.UUID       `json:"item_id"`
+	Qty       decimal.Decimal `json:"qty"`
+	DueDate   string          `json:"due_date"`
+	Source    string          `json:"source,omitempty"`
+	SourceRef string          `json:"source_ref,omitempty"`
+}
+
+// runMRPRequest is the HTTP shape for executing an MRP run. The horizon
+// bounds which demand due dates are planned; include_min_stock
+// additionally tops up items below their reorder level.
+type runMRPRequest struct {
+	HorizonStart    string             `json:"horizon_start"`
+	HorizonEnd      string             `json:"horizon_end"`
+	IncludeMinStock bool               `json:"include_min_stock,omitempty"`
+	BuyLeadTimeDays int                `json:"buy_lead_time_days,omitempty"`
+	Notes           string             `json:"notes,omitempty"`
+	Demand          []mrpDemandRequest `json:"demand,omitempty"`
+}
+
+func (h *manufacturingHandlers) runMRP(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	actor := actorOrDefault(r.Context())
+	var req runMRPRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	horizonStart, err := time.Parse("2006-01-02", req.HorizonStart)
+	if err != nil {
+		http.Error(w, "invalid horizon_start (want YYYY-MM-DD)", http.StatusBadRequest)
+		return
+	}
+	horizonEnd, err := time.Parse("2006-01-02", req.HorizonEnd)
+	if err != nil {
+		http.Error(w, "invalid horizon_end (want YYYY-MM-DD)", http.StatusBadRequest)
+		return
+	}
+	in := manufacturing.MRPRunInput{
+		HorizonStart:    horizonStart,
+		HorizonEnd:      horizonEnd,
+		IncludeMinStock: req.IncludeMinStock,
+		BuyLeadTimeDays: req.BuyLeadTimeDays,
+		Notes:           req.Notes,
+	}
+	for _, d := range req.Demand {
+		due, err := time.Parse("2006-01-02", d.DueDate)
+		if err != nil {
+			http.Error(w, "invalid demand due_date (want YYYY-MM-DD)", http.StatusBadRequest)
+			return
+		}
+		in.Demand = append(in.Demand, manufacturing.MRPDemandInput{
+			ItemID:    d.ItemID,
+			Qty:       d.Qty,
+			DueDate:   due,
+			Source:    d.Source,
+			SourceRef: d.SourceRef,
+		})
+	}
+	run, err := h.store.RunMRP(r.Context(), t.ID, actor, in)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, run)
+}
+
+func (h *manufacturingHandlers) listMRPRuns(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	out, err := h.store.ListMRPRuns(r.Context(), t.ID)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *manufacturingHandlers) getMRPRun(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid mrp run id", http.StatusBadRequest)
+		return
+	}
+	run, err := h.store.GetMRPRun(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
+// ---------------------------------------------------------------------------
+// Subcontracting
+// ---------------------------------------------------------------------------
+
+type subcontractComponentRequest struct {
+	ItemID uuid.UUID       `json:"item_id"`
+	Qty    decimal.Decimal `json:"qty"`
+}
+
+type createSubcontractOrderRequest struct {
+	WorkOrderID         *uuid.UUID                    `json:"work_order_id,omitempty"`
+	RoutingOperationSeq *int                          `json:"routing_operation_seq,omitempty"`
+	SupplierID          *uuid.UUID                    `json:"supplier_id,omitempty"`
+	ItemID              uuid.UUID                     `json:"item_id"`
+	WarehouseID         uuid.UUID                     `json:"warehouse_id"`
+	Qty                 decimal.Decimal               `json:"qty"`
+	ChargeAmount        decimal.Decimal               `json:"charge_amount,omitempty"`
+	ChargeCurrency      string                        `json:"charge_currency,omitempty"`
+	Notes               string                        `json:"notes,omitempty"`
+	Components          []subcontractComponentRequest `json:"components"`
+}
+
+func (h *manufacturingHandlers) createSubcontractOrder(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	actor := actorOrDefault(r.Context())
+	var req createSubcontractOrderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	in := manufacturing.CreateSubcontractOrderInput{
+		WorkOrderID:         req.WorkOrderID,
+		RoutingOperationSeq: req.RoutingOperationSeq,
+		SupplierID:          req.SupplierID,
+		ItemID:              req.ItemID,
+		WarehouseID:         req.WarehouseID,
+		Qty:                 req.Qty,
+		ChargeAmount:        req.ChargeAmount,
+		ChargeCurrency:      req.ChargeCurrency,
+		Notes:               req.Notes,
+	}
+	for _, c := range req.Components {
+		in.Components = append(in.Components, manufacturing.SubcontractComponentInput{
+			ItemID: c.ItemID,
+			Qty:    c.Qty,
+		})
+	}
+	order, err := h.store.CreateSubcontractOrder(r.Context(), t.ID, actor, in)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, order)
+}
+
+func (h *manufacturingHandlers) listSubcontractOrders(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	status := r.URL.Query().Get("status")
+	out, err := h.store.ListSubcontractOrders(r.Context(), t.ID, status)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *manufacturingHandlers) getSubcontractOrder(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid subcontract order id", http.StatusBadRequest)
+		return
+	}
+	order, err := h.store.GetSubcontractOrder(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, order)
+}
+
+// issueSubcontractOrderRequest carries optional lot/serial payloads for
+// the component issue moves, keyed by component item id (UUID string).
+type issueSubcontractOrderRequest struct {
+	ComponentBatches map[string]string   `json:"component_batches,omitempty"`
+	ComponentSerials map[string][]string `json:"component_serials,omitempty"`
+}
+
+func (h *manufacturingHandlers) issueSubcontractOrder(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid subcontract order id", http.StatusBadRequest)
+		return
+	}
+	var req issueSubcontractOrderRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+	}
+	in := manufacturing.IssueSubcontractInput{}
+	if len(req.ComponentBatches) > 0 {
+		in.ComponentBatches = make(map[uuid.UUID]uuid.UUID, len(req.ComponentBatches))
+		for itemStr, batchStr := range req.ComponentBatches {
+			itemID, err := uuid.Parse(itemStr)
+			if err != nil {
+				http.Error(w, "invalid component_batches item id", http.StatusBadRequest)
+				return
+			}
+			batchID, err := uuid.Parse(batchStr)
+			if err != nil {
+				http.Error(w, "invalid component_batches batch id", http.StatusBadRequest)
+				return
+			}
+			in.ComponentBatches[itemID] = batchID
+		}
+	}
+	if len(req.ComponentSerials) > 0 {
+		in.ComponentSerials = make(map[uuid.UUID][]string, len(req.ComponentSerials))
+		for itemStr, serials := range req.ComponentSerials {
+			itemID, err := uuid.Parse(itemStr)
+			if err != nil {
+				http.Error(w, "invalid component_serials item id", http.StatusBadRequest)
+				return
+			}
+			in.ComponentSerials[itemID] = serials
+		}
+	}
+	order, err := h.store.IssueSubcontractOrder(r.Context(), t.ID, actorOrDefault(r.Context()), id, in)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, order)
+}
+
+// receiveSubcontractOrderRequest carries the received quantity (defaults
+// to the order quantity) and optional lot/serial payload for the
+// finished item receipt move.
+type receiveSubcontractOrderRequest struct {
+	ActualQty       *decimal.Decimal `json:"actual_qty,omitempty"`
+	FinishedBatchID *uuid.UUID       `json:"finished_batch_id,omitempty"`
+	FinishedSerials []string         `json:"finished_serials,omitempty"`
+}
+
+func (h *manufacturingHandlers) receiveSubcontractOrder(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid subcontract order id", http.StatusBadRequest)
+		return
+	}
+	var req receiveSubcontractOrderRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+	}
+	order, err := h.store.ReceiveSubcontractOrder(r.Context(), t.ID, actorOrDefault(r.Context()), id, manufacturing.ReceiveSubcontractInput{
+		ActualQty:       req.ActualQty,
+		FinishedBatchID: req.FinishedBatchID,
+		FinishedSerials: req.FinishedSerials,
+	})
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, order)
+}
+
+func (h *manufacturingHandlers) closeSubcontractOrder(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid subcontract order id", http.StatusBadRequest)
+		return
+	}
+	order, err := h.store.CloseSubcontractOrder(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, order)
+}
+
+func (h *manufacturingHandlers) cancelSubcontractOrder(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid subcontract order id", http.StatusBadRequest)
+		return
+	}
+	order, err := h.store.CancelSubcontractOrder(r.Context(), t.ID, id)
+	if err != nil {
+		writeManufacturingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, order)
 }

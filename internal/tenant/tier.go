@@ -113,6 +113,23 @@ var TenantScopedTables = []string{
 	// Workstream 3 (000090) — FX revaluation run audit trail. Default
 	// (tenant_id, id) PK, no FK to other tenant-scoped tables.
 	"fx_revaluation_runs",
+	// Batch-2 manufacturing — MRP run (000092). mrp_runs is the parent;
+	// mrp_demand_lines and mrp_planned_orders both FK mrp_runs (ON DELETE
+	// CASCADE), so the parent precedes its children in the FK-restore
+	// walk. mrp_demand_lines also FKs inventory_items; mrp_planned_orders
+	// FKs inventory_items + boms + routings — all listed earlier. All
+	// three carry the default (tenant_id, id) PK.
+	"mrp_runs",
+	"mrp_demand_lines",
+	"mrp_planned_orders",
+	// Batch-2 manufacturing — subcontracting (000093). subcontract_orders
+	// FKs work_orders (listed earlier) + inventory_items/warehouses;
+	// subcontract_components FKs subcontract_orders (ON DELETE CASCADE),
+	// so the parent precedes its child. Both carry the default
+	// (tenant_id, id) PK (the one-row-per-(order,item) rule is a UNIQUE
+	// index, not the PK), so neither needs a tableConflictKeys entry.
+	"subcontract_orders",
+	"subcontract_components",
 }
 
 // SchemaName returns the canonical dedicated-schema name for a
