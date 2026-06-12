@@ -820,12 +820,12 @@ const navSections: NavSection[] = [
       {
         to: "/manufacturing/mrp",
         label: "MRP",
-        icon: navIcon(Gauge),
+        icon: navIcon(Network),
       },
       {
         to: "/manufacturing/subcontracting",
         label: "Subcontracting",
-        icon: navIcon(Factory),
+        icon: navIcon(Handshake),
       },
     ],
   },

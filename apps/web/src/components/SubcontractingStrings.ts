@@ -107,7 +107,6 @@ export const SUBCONTRACTING_STRINGS = {
     "Only a draft order can be cancelled, before any components have been issued.",
   "subcontracting.confirm.confirm": "Confirm",
   "subcontracting.confirm.cancel": "Back",
-  "subcontracting.confirm.working": "Working…",
 
   // Generic
   "subcontracting.error": "Something went wrong.",

@@ -201,9 +201,11 @@ interface RunMrpFormProps {
 }
 
 function RunMrpForm({ items, onRan }: RunMrpFormProps) {
-  const start = today();
-  const [horizonStart, setHorizonStart] = useState(start);
-  const [horizonEnd, setHorizonEnd] = useState(addDays(start, 30));
+  // Lazy initialisers: the default horizon is anchored to the mount-time
+  // calendar day, not recomputed on every render. `start` is a one-shot
+  // seed, not a live clock.
+  const [horizonStart, setHorizonStart] = useState(() => today());
+  const [horizonEnd, setHorizonEnd] = useState(() => addDays(today(), 30));
   const [includeMinStock, setIncludeMinStock] = useState(false);
   const [buyLeadTimeDays, setBuyLeadTimeDays] = useState("");
   const [notes, setNotes] = useState("");
