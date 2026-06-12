@@ -98,12 +98,14 @@ function GroupCard({
   group,
   txn,
   pendingIds,
+  bulkPending,
   onAccept,
   onReject,
 }: {
   group: SuggestionGroup;
   txn: KRecord | undefined;
   pendingIds: Set<string>;
+  bulkPending: boolean;
   onAccept: (s: BankFeedSuggestion) => void;
   onReject: (s: BankFeedSuggestion) => void;
 }) {
@@ -142,7 +144,7 @@ function GroupCard({
           <CandidateRow
             suggestion={best}
             primary
-            pending={pendingIds.has(best.id)}
+            pending={bulkPending || pendingIds.has(best.id)}
             onAccept={onAccept}
             onReject={onReject}
           />
@@ -167,7 +169,7 @@ function GroupCard({
                   key={s.id}
                   suggestion={s}
                   primary={false}
-                  pending={pendingIds.has(s.id)}
+                  pending={bulkPending || pendingIds.has(s.id)}
                   onAccept={onAccept}
                   onReject={onReject}
                 />
@@ -230,6 +232,7 @@ export function ReconciliationMatchQueue({
               group={g}
               txn={txnById.get(g.transactionId)}
               pendingIds={pendingIds}
+              bulkPending={bulkPending}
               onAccept={onAccept}
               onReject={onReject}
             />

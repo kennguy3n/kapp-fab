@@ -158,15 +158,13 @@ export function BankReconciliationPage() {
     return m;
   }, [allTxns]);
 
+  const groups = useMemo(() => groupSuggestions(suggestions), [suggestions]);
+
   const suggestionsByTxn = useMemo(() => {
     const m = new Map<string, BankFeedSuggestion[]>();
-    for (const g of groupSuggestions(suggestions)) {
-      m.set(g.transactionId, g.suggestions);
-    }
+    for (const g of groups) m.set(g.transactionId, g.suggestions);
     return m;
-  }, [suggestions]);
-
-  const groups = useMemo(() => groupSuggestions(suggestions), [suggestions]);
+  }, [groups]);
   const totals = useMemo(() => computeTotals(visible), [visible]);
   const highConfidence = useMemo(
     () => highConfidenceSuggestions(suggestions),
