@@ -482,10 +482,11 @@ function OrderDetail({ orderId, labelFor, whLabel }: OrderDetailProps) {
       }
     },
     onSuccess: () => {
-      // Optimistic refresh: invalidate both the detail and every
-      // status-filtered list so the moved order disappears from / lands
-      // in the right bucket without a manual reload.
-      qc.invalidateQueries({ queryKey: [...ORDERS_KEY, "detail", orderId] });
+      // Optimistic refresh: the detail query key is constructed under
+      // ORDERS_KEY (`[...ORDERS_KEY, "detail", orderId]`), so this single
+      // prefix-matched invalidation refetches both the open detail and
+      // every status-filtered list — the moved order disappears from /
+      // lands in the right bucket without a manual reload.
       qc.invalidateQueries({ queryKey: ORDERS_KEY });
       setPending(null);
     },
