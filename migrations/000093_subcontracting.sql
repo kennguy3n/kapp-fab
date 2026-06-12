@@ -13,7 +13,11 @@
 --                              model rather than forking a parallel one.
 --                              status walks draft → issued → received →
 --                              closed, with a cancelled terminal state
---                              from draft / issued. item_id is the
+--                              reachable only from draft (once issued the
+--                              components have moved, so the order must be
+--                              received rather than cancelled — enforced by
+--                              the Go state machine, not this CHECK).
+--                              item_id is the
 --                              finished item received back; supplier_id
 --                              is an opaque ref to the crm.organization
 --                              KRecord (no FK — suppliers are records,

@@ -300,12 +300,16 @@ func loadActiveBOMs(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (map[uui
 		return byItem, nil
 	}
 
+	bomIDs := make([]uuid.UUID, 0, len(byID))
+	for id := range byID {
+		bomIDs = append(bomIDs, id)
+	}
 	crows, err := tx.Query(ctx,
 		`SELECT bom_id, component_item_id, qty, uom, scrap_percent, sort_order
 		   FROM bom_components
-		  WHERE tenant_id = $1
+		  WHERE tenant_id = $1 AND bom_id = ANY($2::uuid[])
 		  ORDER BY bom_id, sort_order, component_item_id`,
-		tenantID,
+		tenantID, bomIDs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("manufacturing: select bom components: %w", err)

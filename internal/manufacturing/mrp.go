@@ -217,22 +217,6 @@ func planMRP(
 		gross[item] = d
 	}
 
-	// Process items by ascending level, then by item id for a
-	// deterministic order (tests and the persisted output both depend on
-	// stable ordering).
-	items := make([]uuid.UUID, 0, len(gross))
-	seen := make(map[uuid.UUID]struct{}, len(gross))
-	addItem := func(id uuid.UUID) {
-		if _, ok := seen[id]; ok {
-			return
-		}
-		seen[id] = struct{}{}
-		items = append(items, id)
-	}
-	for item := range gross {
-		addItem(item)
-	}
-
 	var planned []MRPPlannedOrder
 	// Explosion may add new items (components) to gross; iterate until no
 	// unprocessed item remains, always picking the lowest-level item next.
