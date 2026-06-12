@@ -55,10 +55,9 @@ interface RateDraft {
  * translation and pre-posting unrealized FX review.
  */
 export function ConsolidationPage() {
-  const initialGroups = loadGroups();
-  const [groups, setGroups] = useState<ConsolidationGroup[]>(initialGroups);
+  const [groups, setGroups] = useState<ConsolidationGroup[]>(() => loadGroups());
   const [activeGroupId, setActiveGroupId] = useState<string | null>(
-    initialGroups[0]?.id ?? null,
+    () => groups[0]?.id ?? null,
   );
   const [asOf, setAsOf] = useState("");
   const [statementsAsOf, setStatementsAsOf] = useState("");
@@ -102,6 +101,16 @@ export function ConsolidationPage() {
       });
     },
   });
+
+  // Clear any prior group's run/statement output (and errors) when the
+  // active group changes, so Group A's figures never render under Group
+  // B's name + CTA settings.
+  const runReset = runMut.reset;
+  const statementsReset = statementsMut.reset;
+  useEffect(() => {
+    runReset();
+    statementsReset();
+  }, [activeGroupId, runReset, statementsReset]);
 
   const upsertGroup = (g: ConsolidationGroup) =>
     setGroups((prev) => {
@@ -294,7 +303,7 @@ export function ConsolidationPage() {
                         setRates((prev) => prev.filter((_, idx) => idx !== i))
                       }
                     >
-                      {ct("consolidation.groups.removeElimination")}
+                      {ct("consolidation.run.removeRate")}
                     </Button>
                   </div>
                 ))}

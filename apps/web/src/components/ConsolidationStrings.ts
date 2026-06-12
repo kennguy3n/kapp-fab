@@ -72,6 +72,7 @@ export const CONSOLIDATION_STRINGS = {
   "consolidation.run.addRate": "Add rate",
   "consolidation.run.currency": "Currency",
   "consolidation.run.rate": "Rate",
+  "consolidation.run.removeRate": "Remove",
   "consolidation.run.needsGroup": "Select or create a group first.",
 
   // Trial balance

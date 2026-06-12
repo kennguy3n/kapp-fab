@@ -108,6 +108,33 @@ describe("ConsolidationPage", () => {
     expect(screen.getByText(/Consolidated trial balance/i)).toBeInTheDocument();
   });
 
+  it("clears a prior group's trial balance when switching active group", async () => {
+    const groupB: ConsolidationGroup = {
+      id: "grp-2",
+      name: "Regional",
+      presentation_currency: "EUR",
+      member_tenant_ids: ["t3"],
+    };
+    seedGroups([group, groupB]);
+    runConsolidation.mockResolvedValueOnce(tb);
+    renderWithProviders(<ConsolidationPage />);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("tab", { name: /Trial Balance/i }));
+    await user.click(screen.getByRole("button", { name: /^Run consolidation$/i }));
+    expect(await screen.findByText("Balanced")).toBeInTheDocument();
+
+    // Switch active group from the Groups tab (grp-2 is the second row).
+    await user.click(screen.getByRole("tab", { name: /Groups & Run/i }));
+    await user.click(screen.getAllByRole("button", { name: /^Select$/i })[1]);
+
+    // Stale trial balance must be gone for the newly selected group.
+    await user.click(screen.getByRole("tab", { name: /Trial Balance/i }));
+    await waitFor(() =>
+      expect(screen.queryByText("Balanced")).not.toBeInTheDocument(),
+    );
+  });
+
   it("disables the run button when no group is selected", async () => {
     renderWithProviders(<ConsolidationPage />);
     const user = userEvent.setup();
