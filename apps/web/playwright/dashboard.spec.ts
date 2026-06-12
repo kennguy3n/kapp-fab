@@ -13,7 +13,9 @@ test.describe("dashboard", () => {
   test("renders KPI tiles backed by the mock summary", async ({ page }) => {
     await page.goto("/");
 
-    await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /Good (morning|afternoon|evening)/ }),
+    ).toBeVisible();
     // Tile labels from DashboardPage.
     await expect(page.getByText("Open deals")).toBeVisible();
     await expect(page.getByText("Outstanding AR")).toBeVisible();
@@ -24,7 +26,9 @@ test.describe("dashboard", () => {
 
   test("each tile links to its underlying worklist", async ({ page }) => {
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /Good (morning|afternoon|evening)/ }),
+    ).toBeVisible();
 
     // The "Open deals" tile deep-links to the crm.deal list.
     const dealLink = page.locator('a[href="/records/crm.deal"]');
