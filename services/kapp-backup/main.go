@@ -281,6 +281,11 @@ var TenantScopedTables = []string{
 	"bank_reconciliation_rules",
 	"bank_match_suggestions",
 	"bank_learned_matches",
+	// Transfer detection (migration 000091). bank_transfer_pairs FKs
+	// bank_transactions (listed earlier in the Finance block), so
+	// restore order is satisfied. Default (tenant_id, id) PK, so no
+	// tableConflictKeys entry is required.
+	"bank_transfer_pairs",
 	// Workstream 3 (migration 000090) — on-demand FX revaluation run
 	// audit trail. Default (tenant_id, id) PK so the fallback ON
 	// CONFLICT path applies; no tableConflictKeys entry required. No

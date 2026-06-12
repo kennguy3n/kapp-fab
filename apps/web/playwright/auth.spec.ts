@@ -17,8 +17,11 @@ test.describe("authentication", () => {
     await page.locator("label", { hasText: "KChat auth code" }).locator("input").fill("kchat-code");
     await page.getByRole("button", { name: "Continue" }).click();
 
-    // Redirects to the dashboard shell.
-    await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+    // Redirects to the dashboard shell; its landing heading is the
+    // time-of-day greeting ("Good morning, …").
+    await expect(
+      page.getByRole("heading", { name: /Good (morning|afternoon|evening)/ }),
+    ).toBeVisible();
     // Tokens from the SSO response are persisted for session continuity.
     expect(await page.evaluate(() => localStorage.getItem("kapp.token"))).toBe(
       "e2e-access-token",
@@ -33,11 +36,15 @@ test.describe("authentication", () => {
     await seedSession(page);
 
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /Good (morning|afternoon|evening)/ }),
+    ).toBeVisible();
 
     await page.reload();
     // Still authenticated (no bounce to /login) after the reload.
-    await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /Good (morning|afternoon|evening)/ }),
+    ).toBeVisible();
     expect(page.url()).not.toContain("/login");
   });
 
@@ -51,7 +58,9 @@ test.describe("authentication", () => {
     await page.goto("/login");
     await page.locator("label", { hasText: "KChat auth code" }).locator("input").fill("kchat-code");
     await page.getByRole("button", { name: "Continue" }).click();
-    await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /Good (morning|afternoon|evening)/ }),
+    ).toBeVisible();
 
     // Simulate logout: drop the persisted credentials, as a logout
     // control would, then navigate to the login surface.

@@ -1,6 +1,6 @@
 module github.com/kennguy3n/kapp-fab
 
-go 1.25.10
+go 1.25.11
 
 require (
 	cloud.google.com/go/secretmanager v1.20.0
