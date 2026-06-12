@@ -1506,6 +1506,21 @@ const (
 	defaultInsightsCacheRefreshIntervalSeconds = 300
 )
 
+// defaultWarehouseSyncActionType / defaultWarehouseSyncIntervalSeconds
+// drive the per-tenant warehouse/BI export bridge (Workstream 4). Each
+// tick runs every due warehouse sync config, exporting the selected
+// ktype/ledger sources into the tenant's external destination. Mirrors
+// warehouse.ActionTypeWarehouseSync / DefaultWarehouseSyncIntervalSeconds;
+// duplicated here for the same package-cycle reason as the constants
+// above (the tenant package must not import the warehouse subtree).
+// Only seeded for plans that include FeatureInsightsExternal — the same
+// flag that admits the external-datasource destination the export
+// writes into.
+const (
+	defaultWarehouseSyncActionType      = "warehouse_sync"
+	defaultWarehouseSyncIntervalSeconds = 300
+)
+
 // seedDefaultScheduledActions seeds the per-tenant scheduled_actions
 // rows the platform expects to exist after a successful wizard run.
 // Uses INSERT … WHERE NOT EXISTS so re-running the wizard is a no-op
@@ -1540,6 +1555,12 @@ func seedDefaultScheduledActions(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 			actionType      string
 			intervalSeconds int
 		}{defaultInsightsCacheRefreshActionType, defaultInsightsCacheRefreshIntervalSeconds})
+	}
+	if DefaultFeaturesForPlan(plan)[FeatureInsightsExternal] {
+		defaults = append(defaults, struct {
+			actionType      string
+			intervalSeconds int
+		}{defaultWarehouseSyncActionType, defaultWarehouseSyncIntervalSeconds})
 	}
 	if DefaultFeaturesForPlan(plan)[FeatureBankFeed] {
 		defaults = append(defaults, struct {

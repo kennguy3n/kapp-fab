@@ -312,6 +312,16 @@ var TenantScopedTables = []string{
 	// tableConflictKeys entry.
 	"subcontract_orders",
 	"subcontract_components",
+	// Workstream 4 (migration 000094) — warehouse/BI export bridge.
+	// warehouse_sync_configs FKs insights_data_sources (listed earlier
+	// in the Insights block) via (tenant_id, destination_datasource_id),
+	// so the parent datasource lands first on restore;
+	// warehouse_sync_runs FKs warehouse_sync_configs (ON DELETE CASCADE),
+	// so the config precedes its run history. Both carry the default
+	// (tenant_id, id) PK so the fallback ON CONFLICT path applies; no
+	// tableConflictKeys entries required.
+	"warehouse_sync_configs",
+	"warehouse_sync_runs",
 }
 
 // manifest is the first record in every dump file.

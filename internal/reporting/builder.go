@@ -50,6 +50,16 @@ var allowedLedgerSources = map[string]struct{}{
 	"ledger.stock_levels":    {},
 }
 
+// IsAllowedLedgerSource reports whether source is a blessed
+// `ledger.*` relation. Exported so sibling packages (e.g.
+// internal/warehouse) can gate against the SAME allow-list instead of
+// duplicating it — keeping a single source of truth for which ledger
+// relations are reportable/exportable.
+func IsAllowedLedgerSource(source string) bool {
+	_, ok := allowedLedgerSources[source]
+	return ok
+}
+
 // Aggregation operators. `count` is the only one that works on non-
 // numeric fields; the others require JSONB → numeric casts handled by
 // the runner.

@@ -344,6 +344,16 @@ func fingerprintDSN(dsn string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// FingerprintDSN is the exported wrapper around fingerprintDSN. A
+// sibling package that resolves a destination pool through PoolManager
+// (e.g. internal/warehouse) needs the SAME cache-invalidation
+// signature so a credential rotation on the shared DataSource closes
+// the stale pool on next use. Exposing only the fingerprint keeps the
+// secret material inside this package.
+func FingerprintDSN(dsn string) string {
+	return fingerprintDSN(dsn)
+}
+
 // isSafeExternalIdentifier mirrors reporting.isIdentifier but is
 // exported via the external runner so call sites that don't own the
 // reporting helper can still validate.

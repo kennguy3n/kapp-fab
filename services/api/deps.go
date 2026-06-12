@@ -216,6 +216,7 @@ type apiDeps struct {
 	dashh          *dashboardHandlers
 	insh           *insightsHandlers
 	insdsh         *insightsDataSourceHandlers
+	whsh           *warehouseSyncHandlers
 	insembh        *insightsEmbedHandlers
 	hrh            *hrHandlers
 	lmsh           *lmsHandlers
