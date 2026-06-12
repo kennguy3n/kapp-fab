@@ -82,6 +82,15 @@ describe("MrpPage", () => {
     const submit = screen.getByRole("button", { name: "Run MRP" });
     expect(submit).toBeDisabled();
 
+    // An empty demand row (no item picked) must not arm the submit.
+    await user.click(screen.getByRole("button", { name: "Add demand line" }));
+    expect(submit).toBeDisabled();
+    await user.selectOptions(screen.getByLabelText("Item 1"), "item-1");
+    expect(submit).toBeEnabled();
+
+    // Removing the only valid row disarms it again; min-stock re-arms.
+    await user.click(screen.getByRole("button", { name: "Remove" }));
+    expect(submit).toBeDisabled();
     await user.click(screen.getByLabelText(/Top up items below reorder level/i));
     expect(submit).toBeEnabled();
   });

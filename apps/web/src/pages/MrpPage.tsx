@@ -35,8 +35,12 @@ const DEMAND_SOURCES: MRPDemandSource[] = [
 // today returns today's date as a YYYY-MM-DD string for the date
 // inputs' default values, computed in the browser's local timezone so
 // the planner's horizon lines up with the operator's calendar.
+// `new Date().toISOString().slice(0, 10)` is off-by-one for UTC+ zones
+// because it formats the UTC instant, not the local calendar day.
 function today(): string {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 // addDays returns the ISO date `days` after `iso` (YYYY-MM-DD). Used to
@@ -172,7 +176,7 @@ export function MrpPage() {
       <div className="min-w-0">
         <h2>{mt("mrp.detail.heading")}</h2>
         {selectedRunId ? (
-          <RunDetail runId={selectedRunId} labelFor={labelFor} />
+          <RunDetail key={selectedRunId} runId={selectedRunId} labelFor={labelFor} />
         ) : (
           <p className="text-fg-muted">{mt("mrp.detail.select")}</p>
         )}
@@ -214,9 +218,12 @@ function RunMrpForm({ items, onRan }: RunMrpFormProps) {
     },
   });
 
-  // A run needs at least one demand line OR reorder top-up, mirroring
-  // the backend's ErrMRPNoDemand guard so we never POST a no-op run.
-  const hasDemand = demand.length > 0 || includeMinStock;
+  // Only rows with an item picked count as demand; a half-filled draft
+  // row must not arm the submit. A run needs at least one such line OR a
+  // reorder top-up, mirroring the backend's ErrMRPNoDemand guard so we
+  // never POST a no-op (or partially-empty) run.
+  const validDemand = demand.filter((row) => row.item_id !== "");
+  const hasDemand = validDemand.length > 0 || includeMinStock;
 
   const addDemand = () =>
     setDemand((d) => [
@@ -238,7 +245,7 @@ function RunMrpForm({ items, onRan }: RunMrpFormProps) {
       include_min_stock: includeMinStock,
       notes: notes.trim() || undefined,
       ...(lead ? { buy_lead_time_days: Number(lead) } : {}),
-      demand: demand.map<MRPDemandLineInput>((row) => ({
+      demand: validDemand.map<MRPDemandLineInput>((row) => ({
         item_id: row.item_id,
         qty: row.qty,
         due_date: row.due_date,

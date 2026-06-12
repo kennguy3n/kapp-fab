@@ -188,6 +188,7 @@ export function SubcontractingPage() {
         <h2>{st("subcontracting.detail.heading")}</h2>
         {selectedId ? (
           <OrderDetail
+            key={selectedId}
             orderId={selectedId}
             labelFor={labelFor}
             whLabel={whLabel}
