@@ -112,7 +112,7 @@ export function BankReconciliationPage() {
 
   const updateTxn = useMutation({
     mutationFn: (r: KRecord) => api.updateRecord(KTYPE_TXN, r.id, r.data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["records", KTYPE_TXN] }),
+    onSuccess: () => invalidateMatchData(),
   });
 
   const acceptMut = useMutation({

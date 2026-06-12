@@ -119,7 +119,7 @@ function GroupCard({
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div className="min-w-0">
           <div className="font-medium text-fg">
-            {d?.description ?? (
+            {d?.description || (
               <span
                 className="font-mono text-sm"
                 title={group.transactionId}
