@@ -1,183 +1,352 @@
-import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ConsolidatedTrialBalance, ConsolidationGroup } from "@kapp/client";
+import { useEffect, useMemo, useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import {
+  Badge,
   Button,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  EmptyState,
   Input,
-  Table,
-  TableBody,
-  TableCell,
-  TableFooter,
-  TableHead,
-  TableHeader,
-  TableRow,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
 } from "@kapp/ui";
-import { api } from "../lib/api";
+import {
+  consolidationApi,
+  type ConsolidatedStatements,
+  type ConsolidatedTrialBalance,
+  type ConsolidationGroup,
+} from "../components/ConsolidationApi";
+import { ConsolidationGroupsPanel } from "../components/ConsolidationGroupsPanel";
+import { ConsolidationStatements } from "../components/ConsolidationStatements";
+import { ConsolidationTrialBalance } from "../components/ConsolidationTrialBalance";
+import { FxReviewPanel } from "../components/FxReviewPanel";
+import { ct } from "../components/ConsolidationStrings";
+
+// Per-browser registry of groups the operator created or tracked,
+// compensating for the absent list-groups endpoint on the backend.
+const STORAGE_KEY = "kapp.consolidation.groups";
+
+function loadGroups(): ConsolidationGroup[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as ConsolidationGroup[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+interface RateDraft {
+  currency: string;
+  rate: string;
+}
 
 /**
- * ConsolidationPage is the admin-only Phase M Task 7 surface.
- * Lists consolidation groups, lets the operator create a new
- * group + run it, and renders the combined trial balance with
- * per-tenant contributions and an Eliminated section so the
- * inter-company reconciliation is auditable.
+ * ConsolidationPage is the admin-only multi-entity consolidation + FX
+ * review console. It manages consolidation groups, triggers a
+ * consolidation run and statement pack, renders the consolidated trial
+ * balance (per-entity columns, drill-down, CTA, eliminations) and the
+ * derived statements, and exposes an FX review surface for current-rate
+ * translation and pre-posting unrealized FX review.
  */
 export function ConsolidationPage() {
-  const queryClient = useQueryClient();
-  const groupsQ = useQuery<ConsolidationGroup[]>({
-    queryKey: ["admin.consolidation.groups"],
-    // No list endpoint yet — this page works against a single group
-    // returned from create, plus runs against arbitrary group ids.
-    queryFn: () => Promise.resolve([]),
+  const [groups, setGroups] = useState<ConsolidationGroup[]>(() => loadGroups());
+  const [activeGroupId, setActiveGroupId] = useState<string | null>(
+    () => loadGroups()[0]?.id ?? null,
+  );
+  const [asOf, setAsOf] = useState("");
+  const [statementsAsOf, setStatementsAsOf] = useState("");
+  const [rates, setRates] = useState<RateDraft[]>([]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(groups));
+    } catch {
+      // Storage may be unavailable (private mode); the registry just
+      // won't persist across reloads in that case.
+    }
+  }, [groups]);
+
+  const activeGroup = useMemo(
+    () => groups.find((g) => g.id === activeGroupId) ?? null,
+    [groups, activeGroupId],
+  );
+
+  const runMut = useMutation<ConsolidatedTrialBalance>({
+    mutationFn: () =>
+      consolidationApi.runConsolidation(
+        activeGroupId ?? "",
+        asOf ? new Date(asOf).toISOString() : undefined,
+      ),
   });
 
-  const [name, setName] = useState("");
-  const [currency, setCurrency] = useState("USD");
-  const [members, setMembers] = useState("");
-  const [runGroup, setRunGroup] = useState<string>("");
-  const [result, setResult] = useState<ConsolidatedTrialBalance | null>(null);
-
-  const createMut = useMutation({
-    mutationFn: () =>
-      api.createConsolidationGroup({
-        name,
-        presentation_currency: currency,
-        member_tenant_ids: members.split(",").map((s) => s.trim()).filter(Boolean),
-      }),
-    onSuccess: (g) => {
-      void queryClient.invalidateQueries({ queryKey: ["admin.consolidation.groups"] });
-      setRunGroup(g.id);
+  const statementsMut = useMutation<ConsolidatedStatements>({
+    mutationFn: () => {
+      const average_rates: Record<string, string> = {};
+      for (const r of rates) {
+        if (r.currency.trim() && r.rate.trim()) {
+          average_rates[r.currency.trim().toUpperCase()] = r.rate.trim();
+        }
+      }
+      return consolidationApi.runStatements(activeGroupId ?? "", {
+        ...(statementsAsOf
+          ? { as_of: new Date(statementsAsOf).toISOString() }
+          : {}),
+        ...(Object.keys(average_rates).length ? { average_rates } : {}),
+      });
     },
   });
 
-  const runMut = useMutation({
-    mutationFn: (groupID: string) => api.runConsolidation(groupID),
-    onSuccess: (out) => setResult(out),
-  });
+  const upsertGroup = (g: ConsolidationGroup) =>
+    setGroups((prev) => {
+      const without = prev.filter((x) => x.id !== g.id);
+      return [g, ...without];
+    });
 
-  void groupsQ; // placeholder until list endpoint lands.
+  const handleCreated = (g: ConsolidationGroup) => {
+    upsertGroup(g);
+    setActiveGroupId(g.id);
+  };
+
+  const handleTrack = (id: string) => {
+    if (!groups.some((g) => g.id === id)) {
+      upsertGroup({
+        id,
+        name: "",
+        presentation_currency: "",
+        member_tenant_ids: [],
+      });
+    }
+    setActiveGroupId(id);
+  };
+
+  const handleForget = (id: string) => {
+    setGroups((prev) => prev.filter((g) => g.id !== id));
+    setActiveGroupId((cur) => (cur === id ? null : cur));
+  };
+
+  const noGroup = !activeGroupId;
 
   return (
-    <section>
-      <h1>Consolidation</h1>
-      <p className="text-fg-muted">
-        Roll up trial balances across child tenants into a single presentation
-        currency, eliminating inter-company balances. Admin only.
-      </p>
+    <section className="grid gap-4">
+      <header className="grid gap-1">
+        <h1 className="text-xl font-semibold">{ct("consolidation.title")}</h1>
+        <p className="max-w-3xl text-sm text-fg-muted">
+          {ct("consolidation.subtitle")}
+        </p>
+        {activeGroup ? (
+          <p className="text-sm">
+            {ct("consolidation.groups.activeGroup")}:{" "}
+            <Badge variant="accent">
+              {activeGroup.name || activeGroup.id}
+            </Badge>{" "}
+            {activeGroup.presentation_currency ? (
+              <span className="text-fg-muted">
+                {activeGroup.presentation_currency}
+              </span>
+            ) : null}
+          </p>
+        ) : null}
+      </header>
 
-      <div className="grid grid-cols-2 gap-6">
-        <fieldset>
-          <legend>Create group</legend>
-          <div className="grid gap-2">
-            <label className="flex flex-col gap-1">
-              Name
-              <Input value={name} onChange={(e) => setName(e.target.value)} />
-            </label>
-            <label className="flex flex-col gap-1">
-              Presentation currency
-              <Input
-                value={currency}
-                onChange={(e) => setCurrency(e.target.value.toUpperCase())}
-                maxLength={3}
-              />
-            </label>
-            <label className="flex flex-col gap-1">
-              Member tenant IDs (comma-separated)
-              <textarea
-                value={members}
-                onChange={(e) => setMembers(e.target.value)}
-                rows={3}
-                className="rounded-md border border-border bg-bg px-3 py-2 text-sm"
-              />
-            </label>
-            <Button onClick={() => createMut.mutate()} disabled={createMut.isPending}>
-              {createMut.isPending ? "Creating…" : "Create group"}
-            </Button>
-            {createMut.error && (
-              <span className="text-danger">{(createMut.error as Error).message}</span>
-            )}
-          </div>
-        </fieldset>
+      <Tabs defaultValue="groups">
+        <TabsList>
+          <TabsTrigger value="groups">
+            {ct("consolidation.tab.groups")}
+          </TabsTrigger>
+          <TabsTrigger value="trial-balance">
+            {ct("consolidation.tab.trialBalance")}
+          </TabsTrigger>
+          <TabsTrigger value="statements">
+            {ct("consolidation.tab.statements")}
+          </TabsTrigger>
+          <TabsTrigger value="fx">{ct("consolidation.tab.fx")}</TabsTrigger>
+        </TabsList>
 
-        <fieldset>
-          <legend>Run consolidation</legend>
-          <div className="grid gap-2">
-            <label className="flex flex-col gap-1">
-              Group ID
-              <Input value={runGroup} onChange={(e) => setRunGroup(e.target.value)} />
-            </label>
-            <Button
-              onClick={() => runMut.mutate(runGroup)}
-              disabled={!runGroup || runMut.isPending}
-            >
-              {runMut.isPending ? "Running…" : "Run"}
-            </Button>
-            {runMut.error && (
-              <span className="text-danger">{(runMut.error as Error).message}</span>
-            )}
-          </div>
-        </fieldset>
-      </div>
+        <TabsContent value="groups" className="pt-4">
+          <ConsolidationGroupsPanel
+            groups={groups}
+            activeGroupId={activeGroupId}
+            onSelect={setActiveGroupId}
+            onForget={handleForget}
+            onCreated={handleCreated}
+            onTrack={handleTrack}
+          />
+        </TabsContent>
 
-      {result && (
-        <div className="mt-6">
-          <h2>
-            Consolidated trial balance — {result.presentation_currency} as of{" "}
-            {new Date(result.as_of).toLocaleString()}
-          </h2>
-          <Table className="text-sm">
-            <TableHeader>
-              <TableRow>
-                <TableHead>Account</TableHead>
-                <TableHead>Debit</TableHead>
-                <TableHead>Credit</TableHead>
-                <TableHead>Balance</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {result.rows.map((row) => (
-                <TableRow key={row.account_code}>
-                  <TableCell>{row.account_code}</TableCell>
-                  <TableCell className="text-right tabular-nums">{row.debit}</TableCell>
-                  <TableCell className="text-right tabular-nums">{row.credit}</TableCell>
-                  <TableCell className="text-right tabular-nums">{row.balance}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-            <TableFooter>
-              <TableRow className="font-semibold">
-                <TableCell>Total</TableCell>
-                <TableCell className="text-right tabular-nums">{result.total_debit}</TableCell>
-                <TableCell className="text-right tabular-nums">{result.total_credit}</TableCell>
-                <TableCell className="text-right tabular-nums"></TableCell>
-              </TableRow>
-            </TableFooter>
-          </Table>
+        <TabsContent value="trial-balance" className="grid gap-4 pt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>{ct("consolidation.run.heading")}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <form
+                className="flex flex-wrap items-end gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  runMut.mutate();
+                }}
+              >
+                <label className="grid gap-1 text-sm">
+                  {ct("consolidation.run.asOf")}
+                  <Input
+                    type="date"
+                    value={asOf}
+                    onChange={(e) => setAsOf(e.target.value)}
+                    className="w-auto"
+                  />
+                </label>
+                <Button type="submit" disabled={noGroup || runMut.isPending}>
+                  {runMut.isPending
+                    ? ct("consolidation.run.running")
+                    : ct("consolidation.run.run")}
+                </Button>
+                {noGroup ? (
+                  <span className="text-sm text-fg-subtle">
+                    {ct("consolidation.run.needsGroup")}
+                  </span>
+                ) : null}
+              </form>
+              {runMut.error ? (
+                <p className="mt-2 text-sm text-danger">
+                  {(runMut.error as Error).message}
+                </p>
+              ) : null}
+            </CardContent>
+          </Card>
 
-          {result.eliminated.length > 0 && (
-            <div className="mt-4">
-              <h3>Eliminated (inter-company)</h3>
-              <Table className="text-sm">
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Account</TableHead>
-                    <TableHead>Debit</TableHead>
-                    <TableHead>Credit</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {result.eliminated.map((row) => (
-                    <TableRow key={row.account_code}>
-                      <TableCell>{row.account_code}</TableCell>
-                      <TableCell className="text-right tabular-nums">{row.debit}</TableCell>
-                      <TableCell className="text-right tabular-nums">{row.credit}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
+          {runMut.data ? (
+            <ConsolidationTrialBalance
+              result={runMut.data}
+              ctaAccountCode={activeGroup?.cta_account_code}
+            />
+          ) : (
+            <EmptyState
+              title={ct("consolidation.tb.heading")}
+              description={ct("consolidation.tb.empty")}
+            />
           )}
-        </div>
-      )}
+        </TabsContent>
+
+        <TabsContent value="statements" className="grid gap-4 pt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>{ct("consolidation.run.statements")}</CardTitle>
+              <p className="text-sm text-fg-muted">
+                {ct("consolidation.run.averageRatesHint")}
+              </p>
+            </CardHeader>
+            <CardContent className="grid gap-3">
+              <label className="grid gap-1 text-sm">
+                {ct("consolidation.run.asOf")}
+                <Input
+                  type="date"
+                  value={statementsAsOf}
+                  onChange={(e) => setStatementsAsOf(e.target.value)}
+                  className="w-auto"
+                />
+              </label>
+
+              <fieldset className="grid gap-2 rounded-md border border-border p-3">
+                <legend className="px-1 text-sm font-medium">
+                  {ct("consolidation.run.averageRates")}
+                </legend>
+                {rates.map((r, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <Input
+                      aria-label={ct("consolidation.run.currency")}
+                      placeholder={ct("consolidation.run.currency")}
+                      value={r.currency}
+                      maxLength={3}
+                      className="w-20"
+                      onChange={(e) =>
+                        setRates((prev) =>
+                          prev.map((x, idx) =>
+                            idx === i ? { ...x, currency: e.target.value } : x,
+                          ),
+                        )
+                      }
+                    />
+                    <Input
+                      aria-label={ct("consolidation.run.rate")}
+                      placeholder={ct("consolidation.run.rate")}
+                      value={r.rate}
+                      className="w-28"
+                      onChange={(e) =>
+                        setRates((prev) =>
+                          prev.map((x, idx) =>
+                            idx === i ? { ...x, rate: e.target.value } : x,
+                          ),
+                        )
+                      }
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        setRates((prev) => prev.filter((_, idx) => idx !== i))
+                      }
+                    >
+                      {ct("consolidation.groups.removeElimination")}
+                    </Button>
+                  </div>
+                ))}
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() =>
+                    setRates((prev) => [...prev, { currency: "", rate: "" }])
+                  }
+                >
+                  {ct("consolidation.run.addRate")}
+                </Button>
+              </fieldset>
+
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  disabled={noGroup || statementsMut.isPending}
+                  onClick={() => statementsMut.mutate()}
+                >
+                  {statementsMut.isPending
+                    ? ct("consolidation.run.buildingStatements")
+                    : ct("consolidation.run.statements")}
+                </Button>
+                {noGroup ? (
+                  <span className="text-sm text-fg-subtle">
+                    {ct("consolidation.run.needsGroup")}
+                  </span>
+                ) : null}
+              </div>
+              {statementsMut.error ? (
+                <p className="text-sm text-danger">
+                  {(statementsMut.error as Error).message}
+                </p>
+              ) : null}
+            </CardContent>
+          </Card>
+
+          {statementsMut.data ? (
+            <ConsolidationStatements statements={statementsMut.data} />
+          ) : (
+            <EmptyState
+              title={ct("consolidation.stmt.heading")}
+              description={ct("consolidation.stmt.empty")}
+            />
+          )}
+        </TabsContent>
+
+        <TabsContent value="fx" className="pt-4">
+          <FxReviewPanel />
+        </TabsContent>
+      </Tabs>
     </section>
   );
 }
