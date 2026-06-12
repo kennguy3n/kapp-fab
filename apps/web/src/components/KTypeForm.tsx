@@ -65,7 +65,14 @@ function FieldInput({ field, value, onChange }: FieldInputProps) {
         <Input
           type="number"
           value={(value as number | "") ?? ""}
-          onChange={(e) => onChange(e.target.valueAsNumber)}
+          onChange={(e) => {
+            const n = e.target.valueAsNumber;
+            // Empty input -> NaN. Send null (not undefined) so a cleared
+            // field is preserved by JSON.stringify and reaches the PATCH
+            // body as an explicit clear; undefined would be dropped and the
+            // backend would read the omitted key as "leave unchanged".
+            onChange(Number.isNaN(n) ? null : n);
+          }}
         />
       );
     case "boolean":
