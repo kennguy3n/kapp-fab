@@ -181,7 +181,10 @@ function CandidatePanel({
         </ul>
       )}
 
-      {suggestions.length > 0 && (
+      {/* A split allocates the line across >=2 distinct entries, so the
+          composer is only offered when the matcher surfaced at least two
+          candidates — a single-candidate line can only be a 1:1 accept. */}
+      {suggestions.length > 1 && (
         <div>
           <Button
             size="sm"

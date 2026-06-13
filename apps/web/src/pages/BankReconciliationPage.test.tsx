@@ -643,4 +643,25 @@ describe("BankReconciliationPage", () => {
     expect(acceptBankFeedSuggestion).not.toHaveBeenCalled();
     void selects;
   });
+
+  it("hides the split composer when only one candidate exists", async () => {
+    // A split needs >=2 distinct entries; with a single candidate the line
+    // can only be a 1:1 accept, so the composer must not be offered.
+    listBankFeedSuggestions.mockResolvedValue([SUGGESTION_BEST]);
+    const user = userEvent.setup();
+    renderWithProviders(<BankReconciliationPage />);
+    await user.click(await screen.findByText("Operating USD"));
+
+    const sidebyside = await screen.findByRole("region", {
+      name: "Side-by-side reconciliation",
+    });
+    await user.click(
+      within(sidebyside).getByRole("button", { name: /ACME invoice/ }),
+    );
+    expect(
+      within(sidebyside).queryByRole("button", {
+        name: /Split across entries/i,
+      }),
+    ).not.toBeInTheDocument();
+  });
 });
