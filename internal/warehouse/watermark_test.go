@@ -77,3 +77,36 @@ func TestNoneWatermark_SerializesNil(t *testing.T) {
 		t.Fatalf("watermarkNone must serialize to nil, got %s", raw)
 	}
 }
+
+// TestUUIDString_DecoderForms guards the watermark id extraction
+// against whichever concrete type a pgx UUID codec decodes into, so a
+// future codec swap can never silently stall watermark advance and
+// force a full re-read every incremental run.
+func TestUUIDString_DecoderForms(t *testing.T) {
+	id := uuid.New()
+	want := id.String()
+	cases := []struct {
+		name string
+		in   any
+	}{
+		{"array16", [16]byte(id)},
+		{"uuidType", id},
+		{"string", id.String()},
+		{"bytes16", id[:]},
+		{"bytesText", []byte(id.String())},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := uuidString(c.in)
+			if !ok || got != want {
+				t.Fatalf("uuidString(%T) = (%q, %v), want (%q, true)", c.in, got, ok, want)
+			}
+		})
+	}
+	if _, ok := uuidString(42); ok {
+		t.Fatal("uuidString(int) must report ok=false, not a bogus id")
+	}
+	if _, ok := uuidString("not-a-uuid"); ok {
+		t.Fatal("uuidString(non-uuid string) must report ok=false")
+	}
+}

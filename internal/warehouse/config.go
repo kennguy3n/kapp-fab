@@ -45,6 +45,13 @@ const (
 // under the tenant's RLS scope.
 var ErrConfigNotFound = errors.New("warehouse: sync config not found")
 
+// ErrRunInProgress is returned when a run for a config is requested
+// while another run of the SAME config is already executing. It maps
+// to HTTP 409 so a "run now" click that collides with a scheduler tick
+// (or a double click) is reported as a benign conflict rather than
+// racing into a second concurrent export.
+var ErrRunInProgress = errors.New("warehouse: a run for this config is already in progress")
+
 // ErrInvalidConfig wraps every client-correctable rejection (failed
 // validation, a duplicate name, a destination datasource that does not
 // exist) so the HTTP layer can map the whole class to 400 without
@@ -356,6 +363,49 @@ func (s *ConfigStore) ListDue(ctx context.Context, tenantID uuid.UUID, now time.
 		}
 	}
 	return due, nil
+}
+
+// TryLockRun acquires a session-scoped Postgres advisory lock that
+// serializes runs of a single config, so a manual "run now" and a
+// scheduler tick (or two ticks) never export the same config
+// concurrently. Without it, two concurrent full-mode runs could each
+// TRUNCATE the destination and race on the COPY, leaving the warehouse
+// empty while a run still reports success.
+//
+// The lock is held on a dedicated pooled connection for the run's
+// whole duration and auto-releases if that connection dies, so a
+// crashed worker never wedges future runs — no operational cleanup or
+// stale-row reaper is required. ok is false when another run already
+// holds the lock; the caller should skip (scheduler) or surface
+// ErrRunInProgress (API). The key is namespaced by config id; config
+// UUIDs are globally unique, so no cross-config or cross-subsystem
+// collision is possible.
+func (s *ConfigStore) TryLockRun(ctx context.Context, configID uuid.UUID) (release func(), ok bool, err error) {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("warehouse: acquire run-lock conn: %w", err)
+	}
+	var locked bool
+	if err := conn.QueryRow(ctx,
+		`SELECT pg_try_advisory_lock(hashtextextended('warehouse_sync_run:' || $1::text, 0))`,
+		configID,
+	).Scan(&locked); err != nil {
+		conn.Release()
+		return nil, false, fmt.Errorf("warehouse: acquire run lock: %w", err)
+	}
+	if !locked {
+		conn.Release()
+		return nil, false, nil
+	}
+	return func() {
+		// WithoutCancel so the unlock still issues even when the run's
+		// ctx was cancelled; the lock would auto-release on Release
+		// anyway, but an explicit unlock returns the slot promptly.
+		_, _ = conn.Exec(context.WithoutCancel(ctx),
+			`SELECT pg_advisory_unlock(hashtextextended('warehouse_sync_run:' || $1::text, 0))`,
+			configID)
+		conn.Release()
+	}, true, nil
 }
 
 // SaveWatermarks persists the per-source cursor map after a run, and

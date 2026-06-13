@@ -10,41 +10,57 @@ import (
 
 func TestBuildSelectSQL_IncrementalKeyset(t *testing.T) {
 	d, _ := resolveSource("ledger.journal_lines") // bigint watermark
+	tid := uuid.New()
 	cur := cursor{hasSeq: true, seq: 42}
-	sql, args := buildSelectSQL(d, cur)
-	if !strings.Contains(sql, "id > $1") {
+	sql, args := buildSelectSQL(tid, d, cur)
+	// tenant_id = $1 is the defense-in-depth filter; the keyset bound
+	// follows at $2.
+	if !strings.Contains(sql, "WHERE tenant_id = $1") {
+		t.Fatalf("missing tenant filter: %s", sql)
+	}
+	if !strings.Contains(sql, "id > $2") {
 		t.Fatalf("missing bigint keyset bound: %s", sql)
 	}
 	if !strings.HasSuffix(sql, "ORDER BY id") {
 		t.Fatalf("missing order by watermark: %s", sql)
 	}
-	if len(args) != 1 || args[0].(int64) != 42 {
-		t.Fatalf("args = %v, want [42]", args)
+	if len(args) != 2 || args[0].(uuid.UUID) != tid || args[1].(int64) != 42 {
+		t.Fatalf("args = %v, want [tenant, 42]", args)
 	}
 }
 
 func TestBuildSelectSQL_TimestampUUIDKeyset(t *testing.T) {
 	d, _ := resolveSource("ktype:sales.order")
+	tid := uuid.New()
 	ts := time.Now().UTC()
 	id := uuid.NewString()
-	sql, args := buildSelectSQL(d, cursor{hasTime: true, ts: ts, id: id})
-	// ktype filter is $1, the keyset tuple is ($2,$3).
-	if !strings.Contains(sql, "(updated_at, id) > ($2, $3::uuid)") {
+	sql, args := buildSelectSQL(tid, d, cursor{hasTime: true, ts: ts, id: id})
+	// tenant filter is $1, ktype filter is $2, the keyset tuple is ($3,$4).
+	if !strings.Contains(sql, "WHERE tenant_id = $1") {
+		t.Fatalf("missing tenant filter: %s", sql)
+	}
+	if !strings.Contains(sql, "(updated_at, id) > ($3, $4::uuid)") {
 		t.Fatalf("missing tuple keyset bound: %s", sql)
 	}
-	if len(args) != 3 {
-		t.Fatalf("args = %v, want 3 (ktype, ts, id)", args)
+	if len(args) != 4 {
+		t.Fatalf("args = %v, want 4 (tenant, ktype, ts, id)", args)
 	}
 }
 
 func TestBuildSelectSQL_FullNoCursor(t *testing.T) {
 	d, _ := resolveSource("ledger.stock_levels") // watermarkNone
-	sql, args := buildSelectSQL(d, cursor{})
+	tid := uuid.New()
+	sql, args := buildSelectSQL(tid, d, cursor{})
 	if strings.Contains(sql, ">") {
 		t.Fatalf("full read must have no keyset predicate: %s", sql)
 	}
-	if len(args) != 0 {
-		t.Fatalf("full read must bind no args, got %v", args)
+	// Even the aggregate view (which bypasses RLS) MUST carry the
+	// explicit tenant filter, else it would export every tenant's rows.
+	if !strings.Contains(sql, "WHERE tenant_id = $1") {
+		t.Fatalf("aggregate view read must still filter by tenant: %s", sql)
+	}
+	if len(args) != 1 || args[0].(uuid.UUID) != tid {
+		t.Fatalf("full read must bind only the tenant id, got %v", args)
 	}
 	// Ordered by the PK so the read is deterministic.
 	if !strings.Contains(sql, "ORDER BY item_id, warehouse_id") {

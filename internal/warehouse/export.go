@@ -189,7 +189,7 @@ func (e *Exporter) exportSource(ctx context.Context, cfg *Config, d sourceDescri
 		newWM      json.RawMessage
 	)
 	err = dbutil.WithReadOnlyTenantTxOnPool(ctx, e.local, cfg.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-		sql, args := buildSelectSQL(d, cur)
+		sql, args := buildSelectSQL(cfg.TenantID, d, cur)
 		rows, qerr := tx.Query(ctx, sql, args...)
 		if qerr != nil {
 			return qerr
@@ -361,16 +361,27 @@ func buildUpsertSQL(schema, table, staging string, d sourceDescriptor) string {
 
 // buildSelectSQL renders the ordered source read for a descriptor. The
 // column list, relation, and order key are all code-defined; the only
-// parameters are the optional KType filter and the keyset lower bound,
-// both bound as $N placeholders. args is returned in the exact order
-// the placeholders are numbered.
-func buildSelectSQL(d sourceDescriptor, cur cursor) (query string, args []any) {
+// parameters are tenantID, the optional KType filter, and the keyset
+// lower bound, all bound as $N placeholders. args is returned in the
+// exact order the placeholders are numbered.
+//
+// The leading tenant_id = $1 predicate is defense-in-depth: the read
+// already runs under tenant RLS, but ledger.stock_levels is a plain
+// (non security_invoker) VIEW that executes as its owner and so
+// bypasses RLS on the underlying inventory_moves table. Without an
+// explicit tenant filter that single source would export every
+// tenant's rows. The reporting engine pins the same predicate for the
+// same reason (internal/reporting/builder.go buildQuery), so every
+// source here is filtered identically regardless of whether the
+// relation is an RLS-protected table or an RLS-bypassing view.
+func buildSelectSQL(tenantID uuid.UUID, d sourceDescriptor, cur cursor) (query string, args []any) {
 	cols := make([]string, len(d.columns))
 	for i, c := range d.columns {
 		cols[i] = c.src
 	}
-	var conds []string
-	n := 1
+	conds := []string{"tenant_id = $1"}
+	args = append(args, tenantID)
+	n := 2
 	if d.ktype != "" {
 		conds = append(conds, fmt.Sprintf("ktype = $%d", n))
 		args = append(args, d.ktype)

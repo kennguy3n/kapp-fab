@@ -86,8 +86,8 @@ func (w *runningWatermark) update(d sourceDescriptor, vals []any, tsIdx, idIdx, 
 			}
 		}
 		if idIdx >= 0 && idIdx < len(vals) {
-			if b, ok := vals[idIdx].([16]byte); ok {
-				w.id = uuid.UUID(b).String()
+			if s, ok := uuidString(vals[idIdx]); ok {
+				w.id = s
 			}
 		}
 	case watermarkBigint:
@@ -96,6 +96,39 @@ func (w *runningWatermark) update(d sourceDescriptor, vals []any, tsIdx, idIdx, 
 				w.seq = n
 			}
 		}
+	}
+}
+
+// uuidString extracts the canonical UUID text from whatever concrete
+// type the pgx codec decoded the id column into. pgx v5's default UUID
+// codec yields [16]byte, but a registered codec extension (e.g.
+// pgx-google-uuid) yields uuid.UUID, and a text-mode path yields a
+// string. Handling all three means a future codec swap cannot silently
+// stall watermark advance — which would otherwise force every
+// incremental run to re-read the whole relation. ok is false only for
+// a genuinely unexpected type, leaving the prior high-water mark
+// untouched.
+func uuidString(v any) (string, bool) {
+	switch x := v.(type) {
+	case [16]byte:
+		return uuid.UUID(x).String(), true
+	case uuid.UUID:
+		return x.String(), true
+	case string:
+		if _, err := uuid.Parse(x); err != nil {
+			return "", false
+		}
+		return x, true
+	case []byte:
+		if u, err := uuid.FromBytes(x); err == nil {
+			return u.String(), true
+		}
+		if u, err := uuid.Parse(string(x)); err == nil {
+			return u.String(), true
+		}
+		return "", false
+	default:
+		return "", false
 	}
 }
 

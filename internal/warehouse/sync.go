@@ -58,9 +58,11 @@ func (h *SyncHandler) Handle(ctx context.Context, tenantID uuid.UUID, _ schedule
 	for i := range due {
 		cfg := due[i]
 		if _, runErr := h.RunConfig(ctx, tenantID, &cfg, TriggerSchedule); runErr != nil {
-			// The failure is already persisted on the run + config by
-			// RunConfig; continue so one broken sync doesn't starve the
-			// rest.
+			// ErrRunInProgress means a manual run (or a prior tick that
+			// overran) already holds this config's run lock; skipping is
+			// correct, not a failure. Any other failure is already
+			// persisted on the run + config by RunConfig; continue so one
+			// broken sync doesn't starve the rest.
 			continue
 		}
 	}
@@ -75,6 +77,18 @@ func (h *SyncHandler) Handle(ctx context.Context, tenantID uuid.UUID, _ schedule
 // re-run resumes from the furthest durable point rather than re-reading
 // everything.
 func (h *SyncHandler) RunConfig(ctx context.Context, tenantID uuid.UUID, cfg *Config, trigger string) (*Run, error) {
+	// Serialize against any other run of this same config (a colliding
+	// scheduler tick or a concurrent "run now"). The lock is held for
+	// the whole run and auto-releases if the worker dies.
+	release, ok, err := h.configs.TryLockRun(ctx, cfg.ID)
+	if err != nil {
+		return nil, fmt.Errorf("warehouse: lock run: %w", err)
+	}
+	if !ok {
+		return nil, ErrRunInProgress
+	}
+	defer release()
+
 	started := h.now()
 	run, err := h.runs.Start(ctx, tenantID, cfg.ID, cfg.Mode, trigger, started)
 	if err != nil {

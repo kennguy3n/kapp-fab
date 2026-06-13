@@ -3,6 +3,8 @@ package warehouse
 import (
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func TestResolveSource_KType(t *testing.T) {
@@ -23,12 +25,14 @@ func TestResolveSource_KType(t *testing.T) {
 		t.Fatalf("destTable = %q, want ktype_crm_contact", got)
 	}
 	// ktype must be a bound parameter, never interpolated into the SQL.
-	sql, args := buildSelectSQL(d, cursor{})
-	if !strings.Contains(sql, "ktype = $1") {
+	// tenant_id is $1, so the ktype filter binds at $2.
+	tid := uuid.New()
+	sql, args := buildSelectSQL(tid, d, cursor{})
+	if !strings.Contains(sql, "ktype = $2") {
 		t.Fatalf("select sql does not bind ktype as a parameter: %s", sql)
 	}
-	if len(args) != 1 || args[0] != "crm.contact" {
-		t.Fatalf("args = %v, want [crm.contact]", args)
+	if len(args) != 2 || args[0].(uuid.UUID) != tid || args[1] != "crm.contact" {
+		t.Fatalf("args = %v, want [tenant, crm.contact]", args)
 	}
 }
 

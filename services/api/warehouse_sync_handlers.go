@@ -27,6 +27,9 @@ type warehouseSyncHandlers struct {
 
 // warehouseSyncRequest is the create/update body. Watermarks and
 // last-run state are server-owned and never accepted from the client.
+// Enabled is a pointer so an omitted field is distinguishable from an
+// explicit false: omitting it defaults to enabled (matching the DB
+// column default) rather than silently creating a disabled sync.
 type warehouseSyncRequest struct {
 	Name                    string    `json:"name"`
 	DestinationDataSourceID uuid.UUID `json:"destination_datasource_id"`
@@ -34,7 +37,18 @@ type warehouseSyncRequest struct {
 	Sources                 []string  `json:"sources"`
 	CronExpression          string    `json:"cron_expression"`
 	Mode                    string    `json:"mode"`
-	Enabled                 bool      `json:"enabled"`
+	Enabled                 *bool     `json:"enabled"`
+}
+
+// enabledOrDefault resolves the tri-state Enabled field: a nil (omitted)
+// value defaults to true so a client that does not mention enablement
+// gets an active sync, matching the warehouse_sync_configs.enabled DB
+// default.
+func (req warehouseSyncRequest) enabledOrDefault() bool {
+	if req.Enabled == nil {
+		return true
+	}
+	return *req.Enabled
 }
 
 func (h *warehouseSyncHandlers) list(w http.ResponseWriter, r *http.Request) {
@@ -71,7 +85,7 @@ func (h *warehouseSyncHandlers) create(w http.ResponseWriter, r *http.Request) {
 		Sources:                 req.Sources,
 		CronExpression:          req.CronExpression,
 		Mode:                    req.Mode,
-		Enabled:                 req.Enabled,
+		Enabled:                 req.enabledOrDefault(),
 		CreatedBy:               &actor,
 	})
 	if err != nil {
@@ -125,7 +139,7 @@ func (h *warehouseSyncHandlers) update(w http.ResponseWriter, r *http.Request) {
 		Sources:                 req.Sources,
 		CronExpression:          req.CronExpression,
 		Mode:                    req.Mode,
-		Enabled:                 req.Enabled,
+		Enabled:                 req.enabledOrDefault(),
 	})
 	if err != nil {
 		writeWarehouseError(w, err)
@@ -176,7 +190,9 @@ func (h *warehouseSyncHandlers) run(w http.ResponseWriter, r *http.Request) {
 	}
 	run, runErr := h.sync.RunConfig(r.Context(), t.ID, cfg, warehouse.TriggerManual)
 	if run == nil {
-		// Could not even start the run (e.g. the run row insert failed).
+		// Could not even start the run: either the run row insert failed
+		// or another run already holds this config's lock
+		// (ErrRunInProgress -> 409).
 		writeWarehouseError(w, runErr)
 		return
 	}
@@ -216,6 +232,8 @@ func writeWarehouseError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, warehouse.ErrInvalidConfig):
 		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, warehouse.ErrRunInProgress):
+		http.Error(w, err.Error(), http.StatusConflict)
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}

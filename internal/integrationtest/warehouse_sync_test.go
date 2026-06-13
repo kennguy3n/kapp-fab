@@ -162,6 +162,120 @@ func TestWarehouseSyncExportsRowsToDestinationSchema(t *testing.T) {
 	}
 }
 
+// seedMove inserts an inventory_moves row for a tenant via the admin
+// pool (which can write any tenant_id). The append-only moves feed the
+// stock_levels aggregate view.
+func seedMove(t *testing.T, h *harness, tenantID, itemID, warehouseID uuid.UUID, qty string) {
+	t.Helper()
+	if _, err := h.adminPool.Exec(context.Background(),
+		`INSERT INTO inventory_moves (tenant_id, item_id, warehouse_id, qty)
+		 VALUES ($1, $2, $3, $4::numeric)`,
+		tenantID, itemID, warehouseID, qty); err != nil {
+		t.Fatalf("seed inventory move: %v", err)
+	}
+}
+
+// TestWarehouseSyncStockLevelsTenantIsolation is the regression guard
+// for the cross-tenant leak Devin Review flagged: ledger.stock_levels
+// is a plain (non security_invoker) VIEW that executes as its owner and
+// so BYPASSES row-level security on the underlying inventory_moves
+// table (relforcerowsecurity = false). Relying on RLS alone would
+// export every tenant's stock into one tenant's warehouse. The export's
+// explicit tenant_id = $1 predicate must contain the read so only the
+// running tenant's stock lands. This test seeds two tenants' moves and
+// asserts tenant B's stock never reaches tenant A's destination.
+func TestWarehouseSyncStockLevelsTenantIsolation(t *testing.T) {
+	h := newHarness(t)
+	if h.adminPool == nil {
+		t.Skip("KAPP_TEST_ADMIN_DB_URL not set; skipping stock-levels isolation test")
+	}
+	adminURL := os.Getenv("KAPP_TEST_ADMIN_DB_URL")
+	if adminURL == "" {
+		t.Skip("KAPP_TEST_ADMIN_DB_URL not set")
+	}
+	ctx := context.Background()
+
+	tnA, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("whSA"), Name: "Stock A", Cell: "test", Plan: "enterprise",
+	})
+	if err != nil {
+		t.Fatalf("tenant A: %v", err)
+	}
+	tnB, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("whSB"), Name: "Stock B", Cell: "test", Plan: "enterprise",
+	})
+	if err != nil {
+		t.Fatalf("tenant B: %v", err)
+	}
+
+	// Tenant A: two distinct (item, warehouse) positions. Tenant B:
+	// three positions that must never leak. Multiple moves per position
+	// also confirm the aggregate SUM(qty) is exported as one row.
+	aItem1, aItem2, wh := uuid.New(), uuid.New(), uuid.New()
+	seedMove(t, h, tnA.ID, aItem1, wh, "10")
+	seedMove(t, h, tnA.ID, aItem1, wh, "5") // same position, aggregates to 15
+	seedMove(t, h, tnA.ID, aItem2, wh, "7")
+	for i := 0; i < 3; i++ {
+		seedMove(t, h, tnB.ID, uuid.New(), wh, "99")
+	}
+
+	destSchema := "wh_stk_" + uuid.NewString()[:8]
+	t.Cleanup(func() {
+		_, _ = h.adminPool.Exec(context.Background(),
+			fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, destSchema))
+	})
+
+	dsStore := insights.NewDataSourceStore(h.pool, newTestEncryptor())
+	ds, err := dsStore.Create(ctx, insights.DataSource{
+		TenantID: tnA.ID, Name: "stockDestA", Dialect: "postgres",
+		ConnectionString: adminURL, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("datasource: %v", err)
+	}
+	pools := insights.NewPoolManager()
+	t.Cleanup(pools.Close)
+	configStore := warehouse.NewConfigStore(h.pool)
+	syncH := warehouse.NewSyncHandler(
+		configStore,
+		warehouse.NewRunStore(h.pool),
+		warehouse.NewExporter(h.pool, dsStore, pools),
+	)
+	cfg, err := configStore.Create(ctx, warehouse.Config{
+		TenantID: tnA.ID, Name: "stock-iso", DestinationDataSourceID: ds.ID,
+		DestinationSchema: destSchema, Sources: []string{"ledger.stock_levels"},
+		CronExpression: "0 2 * * *", Mode: warehouse.ModeFull, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	run, err := syncH.RunConfig(ctx, tnA.ID, cfg, warehouse.TriggerManual)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if run.Status != warehouse.StatusSuccess {
+		t.Fatalf("run status = %q (%s), want success", run.Status, run.Error)
+	}
+	// Tenant A has exactly two aggregated positions; tenant B's three
+	// must NOT leak through the RLS-bypassing view.
+	if run.RowsExported != 2 {
+		t.Fatalf("rows = %d, want 2 (tenant A positions only)", run.RowsExported)
+	}
+	mirror := fmt.Sprintf("%q.%q", destSchema, "ledger_stock_levels")
+	assertCount(t, h, mirror, 2)
+
+	// The aggregate for aItem1 must be the SUM (10+5=15), proving the
+	// view's grouping is preserved and only A's moves contribute.
+	var qty string
+	if err := h.adminPool.QueryRow(ctx,
+		fmt.Sprintf(`SELECT qty::text FROM %s WHERE item_id = $1`, mirror), aItem1).Scan(&qty); err != nil {
+		t.Fatalf("read aggregated qty: %v", err)
+	}
+	if qty != "15.0000" {
+		t.Fatalf("aItem1 qty = %q, want 15.0000", qty)
+	}
+}
+
 // assertCount checks the mirror table holds exactly want rows, read
 // through the admin pool (the destination warehouse is not RLS-scoped).
 func assertCount(t *testing.T, h *harness, fqTable string, want int64) {
