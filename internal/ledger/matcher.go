@@ -514,7 +514,7 @@ func (m *SmartMatcher) AcceptSuggestion(ctx context.Context, tenantID, suggestio
 //
 // Every invariant the web composer surfaces is RE-VALIDATED here — the
 // server never trusts a client-sent balance for a financial mutation:
-//   - at least one leg, with distinct journal entries
+//   - at least two legs, with distinct journal entries
 //   - every journal entry exists under the tenant's RLS scope
 //   - sum(leg.Amount) == line.amount within SplitAmountTolerance
 //   - (currency is implicitly the line's; legs carry no separate currency,

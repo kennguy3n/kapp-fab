@@ -110,7 +110,11 @@ export function ReconciliationSplitMatch({
       const s = suggestionById.get(r.suggestionId);
       if (s) allocations.push({ suggestion: s, amount: Number(r.raw) });
     }
-    if (allocations.length > 0) onReconcile(allocations);
+    // Dispatch on the SAME >=2 invariant as the gate. completeRows and
+    // suggestionById both derive from the suggestions prop, so a row can
+    // only fail the lookup if the candidate list shrank mid-edit; refusing
+    // here keeps us from ever sending a <2-leg "split" the server rejects.
+    if (allocations.length >= 2) onReconcile(allocations);
   };
 
   return (

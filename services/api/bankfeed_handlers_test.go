@@ -373,10 +373,19 @@ func TestBankTransactionResponseShape(t *testing.T) {
 // with no wired matcher still exercises every branch). A well-formed but
 // semantically unbalanced split is the matcher's job (422, integration-
 // tested); here we pin the 400s for malformed wire input.
+//
+// The per-field cases (bad entry/amount/suggestion uuid) carry TWO
+// allocations on purpose: the handler rejects len < 2 *before* it iterates
+// allocations to validate fields, so a single-allocation body would be
+// caught at the length gate and never reach the field-level branch under
+// test. Putting the malformed value in the first of two legs guarantees the
+// per-field validation actually runs.
 func TestAcceptSplitRejectsMalformedRequest(t *testing.T) {
 	t.Parallel()
 	txn := uuid.New()
 	entry := uuid.New()
+	entry2 := uuid.New()
+	good := `{"journal_entry_id":"` + entry2.String() + `","amount":"-40.00"}`
 	cases := []struct {
 		name string
 		body string
@@ -385,9 +394,9 @@ func TestAcceptSplitRejectsMalformedRequest(t *testing.T) {
 		{"single allocation", `{"allocations":[{"journal_entry_id":"` + entry.String() + `","amount":"-100.00"}]}`},
 		{"missing allocations", `{}`},
 		{"invalid json", `{`},
-		{"bad entry uuid", `{"allocations":[{"journal_entry_id":"not-a-uuid","amount":"-100.00"}]}`},
-		{"bad amount", `{"allocations":[{"journal_entry_id":"` + entry.String() + `","amount":"NaN"}]}`},
-		{"bad suggestion uuid", `{"allocations":[{"journal_entry_id":"` + entry.String() + `","amount":"-100.00","suggestion_id":"nope"}]}`},
+		{"bad entry uuid", `{"allocations":[{"journal_entry_id":"not-a-uuid","amount":"-60.00"},` + good + `]}`},
+		{"bad amount", `{"allocations":[{"journal_entry_id":"` + entry.String() + `","amount":"NaN"},` + good + `]}`},
+		{"bad suggestion uuid", `{"allocations":[{"journal_entry_id":"` + entry.String() + `","amount":"-60.00","suggestion_id":"nope"},` + good + `]}`},
 	}
 	for _, tc := range cases {
 		tc := tc
