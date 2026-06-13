@@ -248,13 +248,21 @@ func (s *PayrollStore) MarkRunPosted(ctx context.Context, tenantID, runID, jeID 
 	})
 }
 
+// RunTotals is the denormalized rollup of a run's persisted payslips.
+type RunTotals struct {
+	Count        int
+	Gross        decimal.Decimal
+	Taxable      decimal.Decimal
+	EEDeductions decimal.Decimal
+	Net          decimal.Decimal
+}
+
 // SumRunTotals aggregates the persisted payslips for a run into the
 // denormalized header rollup. The typed payslips are the source of truth
 // (in particular total_taxable has no KType equivalent).
-func (s *PayrollStore) SumRunTotals(
-	ctx context.Context, tenantID, runID uuid.UUID,
-) (count int, gross, taxable, eeDeductions, net decimal.Decimal, err error) {
-	err = dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+func (s *PayrollStore) SumRunTotals(ctx context.Context, tenantID, runID uuid.UUID) (RunTotals, error) {
+	var tot RunTotals
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		row := tx.QueryRow(ctx, `
 			SELECT COUNT(*),
 			       COALESCE(SUM(gross), 0),
@@ -265,15 +273,15 @@ func (s *PayrollStore) SumRunTotals(
 			 WHERE tenant_id = $1 AND run_id = $2`,
 			tenantID, runID,
 		)
-		if err := row.Scan(&count, &gross, &taxable, &eeDeductions, &net); err != nil {
+		if err := row.Scan(&tot.Count, &tot.Gross, &tot.Taxable, &tot.EEDeductions, &tot.Net); err != nil {
 			return fmt.Errorf("hr: sum run totals: %w", err)
 		}
 		return nil
 	})
 	if err != nil {
-		return 0, decimal.Zero, decimal.Zero, decimal.Zero, decimal.Zero, err
+		return RunTotals{}, err
 	}
-	return count, gross, taxable, eeDeductions, net, nil
+	return tot, nil
 }
 
 // GatherPayInputs reads every variable input for one (run, employee),
@@ -379,7 +387,7 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 		//    stable identity across re-generations.
 		var existingID uuid.UUID
 		var priorTaxable, priorTax decimal.Decimal
-		exists := false
+		var exists bool
 		row := tx.QueryRow(ctx, `
 			SELECT id, taxable_gross, tax_total
 			  FROM payroll_payslips
@@ -431,7 +439,7 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 		// 3. Lock + read the YTD accumulator.
 		var cumGross, cumTax decimal.Decimal
 		var perCodeRaw []byte
-		ytdExists := false
+		var ytdExists bool
 		yrow := tx.QueryRow(ctx, `
 			SELECT cumulative_gross, cumulative_tax, per_code_base
 			  FROM payroll_ytd

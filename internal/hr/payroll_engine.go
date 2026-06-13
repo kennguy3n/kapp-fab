@@ -443,7 +443,7 @@ func (e *PayrollEngine) GeneratePayslips(
 	// Refresh the typed run rollup from the persisted payslips (the source
 	// of truth). total_taxable has no KType equivalent, so the typed sum
 	// is the only correct source for it.
-	cnt, tg, tt, tee, tnet, err := store.SumRunTotals(ctx, tenantID, payRunID)
+	tot, err := store.SumRunTotals(ctx, tenantID, payRunID)
 	if err != nil {
 		return out, err
 	}
@@ -451,7 +451,7 @@ func (e *PayrollEngine) GeneratePayslips(
 	if runStatus == "" || runStatus == "draft" {
 		runStatus = "processing"
 	}
-	if err := store.UpdateRunTotals(ctx, tenantID, payRunID, cnt, tg, tt, tee, tnet, runStatus); err != nil {
+	if err := store.UpdateRunTotals(ctx, tenantID, payRunID, tot.Count, tot.Gross, tot.Taxable, tot.EEDeductions, tot.Net, runStatus); err != nil {
 		return out, err
 	}
 
@@ -914,61 +914,6 @@ func splitDeductionsByCode(perCode map[string]decimal.Decimal, accountMap map[st
 	return out
 }
 
-// rollStructure expands a salary_structure's components into
-// resolved earnings/deductions lines and returns gross/deductions/net.
-// Percentage components are resolved against base_salary; fixed
-// components pass through. Component overrides on the structure are
-// honoured — when an override amount is present it replaces the
-// catalog amount.
-func rollStructure(sv structureData, _ string) ([]lineOut, []lineOut, decimal.Decimal, decimal.Decimal, decimal.Decimal) {
-	base := sv.BaseSalary
-	var earnings, deductions []lineOut
-	// The base salary itself is the canonical earning line so a
-	// structure with no components still produces a sensible slip.
-	if base.IsPositive() {
-		earnings = append(earnings, lineOut{
-			ComponentID: "",
-			Code:        "BASE",
-			Name:        "Base Salary",
-			Amount:      base,
-		})
-	}
-	for _, c := range sv.Components {
-		amt := c.OverrideAmount
-		if !amt.IsPositive() {
-			amt = c.Amount
-		}
-		amountType := c.OverrideAmountType
-		if amountType == "" {
-			amountType = c.AmountType
-		}
-		if amountType == "percentage" {
-			amt = base.Mul(amt).Div(decimal.NewFromInt(100)).Round(2)
-		}
-		line := lineOut{
-			ComponentID: c.ComponentID,
-			Code:        c.Code,
-			Name:        c.Name,
-			Amount:      amt,
-		}
-		switch c.Type {
-		case "deduction":
-			deductions = append(deductions, line)
-		default:
-			earnings = append(earnings, line)
-		}
-	}
-	var gross, deduct decimal.Decimal
-	for _, e := range earnings {
-		gross = gross.Add(e.Amount)
-	}
-	for _, d := range deductions {
-		deduct = deduct.Add(d.Amount)
-	}
-	net := gross.Sub(deduct)
-	return earnings, deductions, gross, deduct, net
-}
-
 // parsePayrollDate accepts the canonical `YYYY-MM-DD` pay-period
 // format plus RFC3339 so callers authoring the pay_run via agent
 // tools with `time.Now().Format(time.RFC3339)` also work.
@@ -1158,13 +1103,6 @@ type structureView struct {
 	Data          structureData
 }
 
-type lineOut struct {
-	ComponentID string          `json:"component_id,omitempty"`
-	Code        string          `json:"code"`
-	Name        string          `json:"name"`
-	Amount      decimal.Decimal `json:"amount"`
-}
-
 // decimalFloat collapses a decimal to a float64 so the surrounding
 // JSON is emitted as a JSON number. The KRecord schema validator
 // rejects strings for number-typed fields.
@@ -1217,22 +1155,4 @@ func rollupTypedLines(lines []PayslipLine) (gross, deductions, net decimal.Decim
 	}
 	net = gross.Sub(deductions)
 	return gross, deductions, net, perCode
-}
-
-// linesToJSON renders a list of resolved component lines with
-// `amount` as a JSON number (not a quoted decimal string).
-func linesToJSON(ls []lineOut) []map[string]any {
-	out := make([]map[string]any, 0, len(ls))
-	for _, l := range ls {
-		row := map[string]any{
-			"code":   l.Code,
-			"name":   l.Name,
-			"amount": decimalFloat(l.Amount),
-		}
-		if l.ComponentID != "" {
-			row["component_id"] = l.ComponentID
-		}
-		out = append(out, row)
-	}
-	return out
 }

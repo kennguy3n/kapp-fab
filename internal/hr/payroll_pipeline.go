@@ -87,7 +87,7 @@ func periodDays(period taxpacks.PayPeriod) int {
 // month, whichever is later) through the period-end month, inclusive.
 // Feeds the cumulative-withholding packs (e.g. CN) a real month index
 // derived from persisted data rather than a static employee field.
-func monthsEmployedYTD(joinDate time.Time, periodEnd time.Time, taxYear int) int {
+func monthsEmployedYTD(joinDate, periodEnd time.Time, taxYear int) int {
 	endMonth := int(periodEnd.UTC().Month())
 	startMonth := 1
 	if !joinDate.IsZero() {
@@ -109,7 +109,7 @@ func monthsEmployedYTD(joinDate time.Time, periodEnd time.Time, taxYear int) int
 // resolveComponentAmount applies the structure's override + percentage
 // rules, mirroring rollStructure so the typed pipeline and the legacy
 // roll agree on the per-component figure.
-func resolveComponentAmount(c structureComponent, base decimal.Decimal) decimal.Decimal {
+func resolveComponentAmount(c *structureComponent, base decimal.Decimal) decimal.Decimal {
 	amt := c.OverrideAmount
 	if !amt.IsPositive() {
 		amt = c.Amount
@@ -126,7 +126,7 @@ func resolveComponentAmount(c structureComponent, base decimal.Decimal) decimal.
 
 // resolveInputAmount returns the money figure for a variable input,
 // deriving qty*rate when the explicit amount is zero.
-func resolveInputAmount(in PayInput) decimal.Decimal {
+func resolveInputAmount(in *PayInput) decimal.Decimal {
 	if !in.Amount.IsZero() {
 		return in.Amount
 	}
@@ -172,7 +172,8 @@ func buildPipeline(sv structureData, inputs []PayInput, joinDate time.Time, peri
 	if base.IsPositive() {
 		addEarning("BASE", "Base Salary", base, true)
 	}
-	for _, c := range sv.Components {
+	for i := range sv.Components {
+		c := &sv.Components[i]
 		amt := resolveComponentAmount(c, base)
 		switch c.Type {
 		case "deduction":
@@ -192,9 +193,9 @@ func buildPipeline(sv structureData, inputs []PayInput, joinDate time.Time, peri
 
 	// --- D1: loss-of-pay dock (reduces gross and taxable). -------------
 	var lopDays decimal.Decimal
-	for _, in := range inputs {
-		if in.Type == PayInputLOPDays {
-			lopDays = lopDays.Add(in.Qty)
+	for i := range inputs {
+		if inputs[i].Type == PayInputLOPDays {
+			lopDays = lopDays.Add(inputs[i].Qty)
 		}
 	}
 	if lopDays.IsPositive() && recurringUnprorated.IsPositive() {
@@ -212,7 +213,8 @@ func buildPipeline(sv structureData, inputs []PayInput, joinDate time.Time, peri
 	}
 
 	// --- D1: additive variable inputs (bonus / overtime / etc.). -------
-	for _, in := range inputs {
+	for i := range inputs {
+		in := &inputs[i]
 		switch in.Type {
 		case PayInputLOPDays:
 			continue
