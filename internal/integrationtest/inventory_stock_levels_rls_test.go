@@ -5,7 +5,6 @@ package integrationtest
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/google/uuid"
@@ -33,9 +32,6 @@ func TestStockLevelsViewSecurityInvoker(t *testing.T) {
 	h := newHarness(t)
 	if h.adminPool == nil {
 		t.Skip("KAPP_TEST_ADMIN_DB_URL not set; skipping stock_levels RLS test")
-	}
-	if os.Getenv("KAPP_TEST_ADMIN_DB_URL") == "" {
-		t.Skip("KAPP_TEST_ADMIN_DB_URL not set")
 	}
 	ctx := context.Background()
 
