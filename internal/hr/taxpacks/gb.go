@@ -134,8 +134,12 @@ func (gbPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return nil, nil
 	}
-	// PAYE income tax runs on the post-pre-tax base; NIC and the student
-	// loan deduction below keep using the full period gross.
+	// PAYE income tax runs on the post-pre-tax income-tax base; NIC and
+	// the student-loan deduction below run on the contribution base
+	// (NIC-able pay), which equals the full gross by default and is only
+	// reduced when a component is flagged to also reduce the contribution
+	// base — matching HMRC, where student-loan repayments are assessed on
+	// the same earnings as Class 1 NICs.
 	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	// Resolve the personal allowance after the £100k taper.

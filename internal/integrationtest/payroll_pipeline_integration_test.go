@@ -388,3 +388,91 @@ func TestPayrollPipeline_ConcurrentYTD(t *testing.T) {
 		t.Fatalf("ytd cumulative_contribution_gross = %s, want %s (double-count or lost update)", ytd.CumulativeContributionGross, want)
 	}
 }
+
+// TestPayrollPipeline_ConcurrentSameRunEmployee asserts FinalizePayslip
+// is safe when two finalizers race for the SAME (run, employee) — e.g. a
+// double-clicked generate or a concurrent retry. Both must succeed (no FK
+// violation from a stale "not found" inserting lines under an id the
+// upsert never created), exactly one slip must exist for the pair, and
+// the YTD must reflect the slip's contribution exactly once (the second
+// finalizer REPLACES the first rather than double-counting). This guards
+// the fix that moved the payslip existence/prior reads under the YTD
+// FOR UPDATE lock so the second caller observes the first's committed slip.
+func TestPayrollPipeline_ConcurrentSameRunEmployee(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tn, _, _ := newTenantForFinance(t, h)
+	registerPayrollKTypes(t, h)
+
+	actor := uuid.New()
+	empID := createEmployeeWithJoin(t, h, tn.ID, actor, "2026-01-01")
+
+	store := hr.NewPayrollStore(h.pool)
+
+	runID := uuid.New()
+	seedTypedRun(t, store, tn.ID, runID, actor, "Jan 2026", "2026-01-01", "2026-01-31")
+
+	ps, _ := time.Parse("2006-01-02", "2026-01-01")
+	pe, _ := time.Parse("2006-01-02", "2026-01-31")
+	mkInput := func() hr.FinalizeInput {
+		amt := decimal.NewFromInt(1000)
+		return hr.FinalizeInput{
+			TenantID:          tn.ID,
+			RunID:             runID,
+			PayslipID:         uuid.New(), // distinct proposed id per caller
+			EmployeeID:        empID,
+			Currency:          "USD",
+			PeriodStart:       ps,
+			PeriodEnd:         pe,
+			TaxYear:           2026,
+			Gross:             amt,
+			TaxableGross:      amt,
+			ContributionGross: amt,
+			Earnings: []hr.PayslipLine{
+				{Code: "BASE", Label: "Base Salary", Amount: amt, Taxable: true},
+			},
+		}
+	}
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			_, errs[idx] = store.FinalizePayslip(ctx, mkInput())
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent same-(run,employee) FinalizePayslip[%d] failed: %v", i, err)
+		}
+	}
+
+	// Exactly one slip for the (run, employee) pair.
+	tot, err := store.SumRunTotals(ctx, tn.ID, runID)
+	if err != nil {
+		t.Fatalf("sum run totals: %v", err)
+	}
+	if tot.Count != 1 {
+		t.Fatalf("run payslip count = %d, want 1 (duplicate slip from racing finalizers)", tot.Count)
+	}
+
+	// YTD reflects the single slip exactly once (replacement, not sum).
+	ytd, err := store.LoadYTD(ctx, tn.ID, empID, 2026)
+	if err != nil {
+		t.Fatalf("load ytd: %v", err)
+	}
+	if want := decimal.NewFromInt(1000); !ytd.CumulativeGross.Equal(want) {
+		t.Fatalf("ytd cumulative_gross = %s, want %s (double-count from racing same-run finalizers)", ytd.CumulativeGross, want)
+	}
+	if want := decimal.NewFromInt(1000); !ytd.CumulativeContributionGross.Equal(want) {
+		t.Fatalf("ytd cumulative_contribution_gross = %s, want %s (double-count from racing same-run finalizers)", ytd.CumulativeContributionGross, want)
+	}
+}

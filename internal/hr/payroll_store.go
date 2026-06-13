@@ -412,9 +412,57 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 	}
 	var result FinalizedPayslip
 	err := dbutil.WithTenantTx(ctx, s.pool, in.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-		// 1. Existing slip for this (run, employee)? Its id is the
+		// 1. Lock + read the YTD accumulator FIRST. Seed a zero row so
+		//    the FOR UPDATE below always has a row to lock: a bare
+		//    SELECT ... FOR UPDATE locks nothing when the row is absent,
+		//    so two concurrent first-of-year finalizers would both miss
+		//    the lock and race to INSERT, with one failing the natural
+		//    PK. The ON CONFLICT DO NOTHING makes a concurrent seeder
+		//    block on the uncommitted row and then no-op, after which the
+		//    FOR UPDATE serializes both transactions on the now-existing
+		//    row.
+		//
+		//    Acquiring this lock BEFORE reading the payslip identity is
+		//    what makes two concurrent generations of the SAME
+		//    (run, employee) safe: the existence/prior reads below run
+		//    only once we hold the YTD lock, so under READ COMMITTED the
+		//    second caller sees the first's committed slip + lines and
+		//    correctly REPLACES (reverses + re-adds) instead of reading a
+		//    stale "not found" — which would otherwise insert lines under
+		//    a fresh id that the ON CONFLICT upsert never created (FK
+		//    violation) and double-count the YTD.
+		seedNow := s.now().UTC()
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO payroll_ytd
+				(tenant_id, employee_id, tax_year, cumulative_gross,
+				 cumulative_taxable, cumulative_contribution_gross, cumulative_tax,
+				 per_code_base, updated_at)
+			VALUES ($1, $2, $3, 0, 0, 0, 0, '{}'::jsonb, $4)
+			ON CONFLICT (tenant_id, employee_id, tax_year) DO NOTHING`,
+			in.TenantID, in.EmployeeID, in.TaxYear, seedNow,
+		); err != nil {
+			return fmt.Errorf("hr: seed ytd: %w", err)
+		}
+		var cumGross, cumTaxable, cumContribution, cumTax decimal.Decimal
+		var perCodeRaw []byte
+		yrow := tx.QueryRow(ctx, `
+			SELECT cumulative_gross, cumulative_taxable, cumulative_contribution_gross,
+			       cumulative_tax, per_code_base
+			  FROM payroll_ytd
+			 WHERE tenant_id = $1 AND employee_id = $2 AND tax_year = $3
+			 FOR UPDATE`,
+			in.TenantID, in.EmployeeID, in.TaxYear,
+		)
+		if err := yrow.Scan(&cumGross, &cumTaxable, &cumContribution, &cumTax, &perCodeRaw); err != nil {
+			return fmt.Errorf("hr: lock ytd: %w", err)
+		}
+		perCode := decodePerCode(perCodeRaw)
+
+		// 2. Existing slip for this (run, employee)? Its id is the
 		//    canonical payslip id we reuse so the typed slip keeps a
-		//    stable identity across re-generations.
+		//    stable identity across re-generations. Read under the YTD
+		//    lock (see step 1) so a concurrent same-(run, employee)
+		//    finalizer that already committed is visible here.
 		var existingID uuid.UUID
 		var priorGross, priorTaxable, priorContribution, priorTax decimal.Decimal
 		var exists bool
@@ -437,7 +485,7 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 			payslipID = existingID
 		}
 
-		// 2. Prior per-code contribution of THIS slip (for the YTD
+		// 3. Prior per-code contribution of THIS slip (for the YTD
 		//    per_code_base reversal), reconstructed from its lines.
 		priorPerCode := map[string]decimal.Decimal{}
 		if exists {
@@ -465,42 +513,6 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 				return fmt.Errorf("hr: iterate prior lines: %w", err)
 			}
 		}
-
-		// 3. Lock + read the YTD accumulator. Seed a zero row first so
-		//    the FOR UPDATE below always has a row to lock: a bare
-		//    SELECT ... FOR UPDATE locks nothing when the row is absent,
-		//    so two concurrent first-of-year finalizers would both miss
-		//    the lock and race to INSERT, with one failing the natural
-		//    PK. The ON CONFLICT DO NOTHING makes a concurrent seeder
-		//    block on the uncommitted row and then no-op, after which the
-		//    FOR UPDATE serializes both transactions on the now-existing
-		//    row.
-		seedNow := s.now().UTC()
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO payroll_ytd
-				(tenant_id, employee_id, tax_year, cumulative_gross,
-				 cumulative_taxable, cumulative_contribution_gross, cumulative_tax,
-				 per_code_base, updated_at)
-			VALUES ($1, $2, $3, 0, 0, 0, 0, '{}'::jsonb, $4)
-			ON CONFLICT (tenant_id, employee_id, tax_year) DO NOTHING`,
-			in.TenantID, in.EmployeeID, in.TaxYear, seedNow,
-		); err != nil {
-			return fmt.Errorf("hr: seed ytd: %w", err)
-		}
-		var cumGross, cumTaxable, cumContribution, cumTax decimal.Decimal
-		var perCodeRaw []byte
-		yrow := tx.QueryRow(ctx, `
-			SELECT cumulative_gross, cumulative_taxable, cumulative_contribution_gross,
-			       cumulative_tax, per_code_base
-			  FROM payroll_ytd
-			 WHERE tenant_id = $1 AND employee_id = $2 AND tax_year = $3
-			 FOR UPDATE`,
-			in.TenantID, in.EmployeeID, in.TaxYear,
-		)
-		if err := yrow.Scan(&cumGross, &cumTaxable, &cumContribution, &cumTax, &perCodeRaw); err != nil {
-			return fmt.Errorf("hr: lock ytd: %w", err)
-		}
-		perCode := decodePerCode(perCodeRaw)
 
 		// 4. Reverse this slip's prior contribution so the base reflects
 		//    only OTHER runs in the year. On a first generation prior* are
