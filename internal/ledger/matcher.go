@@ -616,13 +616,25 @@ func (m *SmartMatcher) AcceptSplit(ctx context.Context, tenantID, txnID uuid.UUI
 			a := actor
 			actorID = &a
 		}
+		// Clear any allocation rows already attached to this line before
+		// re-inserting. A line can be unmatched (status reset to
+		// unreconciled) and then re-split against a *different* set of
+		// entries; without this, the prior split's rows for entries absent
+		// from the new split would linger as orphans and corrupt the
+		// allocations table — the source of truth for the split. Deleting
+		// first gives every split a clean slate, so the table always
+		// reflects exactly the current legs.
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM bank_transaction_allocations WHERE tenant_id = $1 AND transaction_id = $2`,
+			tenantID, txnID,
+		); err != nil {
+			return fmt.Errorf("ledger: clear prior allocations: %w", err)
+		}
 		for _, leg := range legs {
 			if _, err := tx.Exec(ctx,
 				`INSERT INTO bank_transaction_allocations
 				    (tenant_id, id, transaction_id, journal_entry_id, amount, created_by, created_at)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7)
-				 ON CONFLICT (tenant_id, transaction_id, journal_entry_id)
-				 DO UPDATE SET amount = EXCLUDED.amount, created_by = EXCLUDED.created_by, created_at = EXCLUDED.created_at`,
+				 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 				tenantID, uuid.New(), txnID, leg.JournalEntryID, leg.Amount, actorID, now,
 			); err != nil {
 				return fmt.Errorf("ledger: insert allocation: %w", err)

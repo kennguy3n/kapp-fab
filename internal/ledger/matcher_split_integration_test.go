@@ -318,3 +318,86 @@ func TestAcceptSplitDoesNotTouchForeignSuggestion(t *testing.T) {
 		t.Fatalf("txn2 status = %q; want unreconciled", txn2Status)
 	}
 }
+
+// TestAcceptSplitReSplitReplacesAllocations proves a line that is split,
+// unmatched, then re-split against a *different* set of entries ends up
+// with exactly the new legs — no orphan rows from the first split linger.
+// The allocations table is the source of truth for a split, so stale legs
+// would corrupt every downstream read (reporting, display, undo).
+func TestAcceptSplitReSplitReplacesAllocations(t *testing.T) {
+	pool := matcherPool(t)
+	ctx := context.Background()
+	store, tenantID, acctID := seedMatcherFixture(t, pool)
+	for _, code := range []string{"6100", "6200", "6300"} {
+		if _, err := store.CreateAccount(ctx, Account{
+			TenantID: tenantID, Code: code, Name: "Acct " + code, Type: AccountTypeExpense, Active: true,
+		}); err != nil {
+			t.Fatalf("create account %s: %v", code, err)
+		}
+	}
+
+	vd := time.Now().UTC().Truncate(24 * time.Hour)
+	entryA := splitEntry(t, store, tenantID, vd, "6000", "60.00", "A")
+	entryB := splitEntry(t, store, tenantID, vd, "6100", "40.00", "B")
+	entryC := splitEntry(t, store, tenantID, vd, "6200", "70.00", "C")
+	entryD := splitEntry(t, store, tenantID, vd, "6300", "30.00", "D")
+
+	in, err := store.SyncBankTransactions(ctx, tenantID, acctID, []BankTransaction{{
+		BankAccountID: acctID, ValueDate: vd, Description: "ACME CORP",
+		Amount: decimal.RequireFromString("-100.00"), Currency: "USD", ExternalRef: "resplit-1",
+	}})
+	if err != nil || len(in) != 1 {
+		t.Fatalf("SyncBankTransactions = %v, %v", in, err)
+	}
+	txnID := in[0].ID
+	matcher := NewSmartMatcher(store).WithClock(func() time.Time { return vd })
+	actor := uuid.New()
+
+	// First split: A (-60) + B (-40).
+	if _, err := matcher.AcceptSplit(ctx, tenantID, txnID, []SplitLeg{
+		{JournalEntryID: entryA, Amount: decimal.RequireFromString("-60.00")},
+		{JournalEntryID: entryB, Amount: decimal.RequireFromString("-40.00")},
+	}, actor); err != nil {
+		t.Fatalf("first AcceptSplit: %v", err)
+	}
+
+	// Unmatch: the operator-facing undo resets the line to unreconciled and
+	// drops the matched pointer (mirrors the generic record update the UI
+	// issues). Allocation rows from the first split are intentionally left
+	// behind here — clearing them is AcceptSplit's job on the next split.
+	if err := dbutil.WithTenantTx(ctx, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, e := tx.Exec(ctx,
+			`UPDATE bank_transactions SET status = $3, matched_entry_id = NULL
+			  WHERE tenant_id = $1 AND id = $2`,
+			tenantID, txnID, BankTxnUnreconciled)
+		return e
+	}); err != nil {
+		t.Fatalf("unmatch: %v", err)
+	}
+
+	// Re-split against a disjoint set: C (-70) + D (-30).
+	if _, err := matcher.AcceptSplit(ctx, tenantID, txnID, []SplitLeg{
+		{JournalEntryID: entryC, Amount: decimal.RequireFromString("-70.00")},
+		{JournalEntryID: entryD, Amount: decimal.RequireFromString("-30.00")},
+	}, actor); err != nil {
+		t.Fatalf("re-split AcceptSplit: %v", err)
+	}
+
+	// Only the new legs survive; A and B must be gone.
+	allocs := allocationsFor(t, pool, tenantID, txnID)
+	if len(allocs) != 2 {
+		t.Fatalf("want exactly 2 allocation rows after re-split, got %d: %v", len(allocs), allocs)
+	}
+	if _, stale := allocs[entryA]; stale {
+		t.Fatal("orphan allocation for entryA survived the re-split")
+	}
+	if _, stale := allocs[entryB]; stale {
+		t.Fatal("orphan allocation for entryB survived the re-split")
+	}
+	if got := allocs[entryC]; !got.Equal(decimal.RequireFromString("-70.00")) {
+		t.Fatalf("entryC allocation = %s; want -70.00", got)
+	}
+	if got := allocs[entryD]; !got.Equal(decimal.RequireFromString("-30.00")) {
+		t.Fatalf("entryD allocation = %s; want -30.00", got)
+	}
+}
