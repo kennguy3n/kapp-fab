@@ -229,6 +229,13 @@ func TestAcceptSplitRejectsInvalid(t *testing.T) {
 		t.Fatal("empty split should be rejected")
 	}
 
+	// Single leg: a split must span >=2 entries (one entry is a 1:1 accept).
+	if _, err := matcher.AcceptSplit(ctx, tenantID, mk("inv-5"), []SplitLeg{
+		{JournalEntryID: entryA, Amount: decimal.RequireFromString("-100.00")},
+	}, actor); err == nil {
+		t.Fatal("single-leg split should be rejected")
+	}
+
 	// Non-existent / cross-tenant entry: a random uuid is not visible
 	// under this tenant's RLS scope, so it reads as not-found.
 	if _, err := matcher.AcceptSplit(ctx, tenantID, mk("inv-4"), []SplitLeg{

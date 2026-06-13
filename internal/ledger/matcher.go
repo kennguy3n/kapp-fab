@@ -529,8 +529,12 @@ func (m *SmartMatcher) AcceptSplit(ctx context.Context, tenantID, txnID uuid.UUI
 	if tenantID == uuid.Nil || txnID == uuid.Nil {
 		return nil, errors.New("ledger: tenant_id and transaction_id required")
 	}
-	if len(legs) == 0 {
-		return nil, fmt.Errorf("ledger: split needs at least one allocation: %w", ErrSplitInvalid)
+	// A split must span at least two entries. A single-leg "split" is a
+	// 1:1 match and must go through AcceptSuggestion so the line keeps its
+	// matched_entry_id pointer — routing it here would instead leave that
+	// column NULL and diverge the data model for an identical outcome.
+	if len(legs) < 2 {
+		return nil, fmt.Errorf("ledger: split needs at least two allocations: %w", ErrSplitInvalid)
 	}
 	seen := make(map[uuid.UUID]struct{}, len(legs))
 	sum := decimal.Zero

@@ -875,8 +875,11 @@ func (h *bankfeedHandlers) acceptSplit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	if len(req.Allocations) == 0 {
-		http.Error(w, "at least one allocation is required", http.StatusBadRequest)
+	// A split spans >=2 entries; a single allocation is a 1:1 match and
+	// must use the accept endpoint (which sets matched_entry_id) rather
+	// than this one (which leaves it NULL). The matcher re-checks this.
+	if len(req.Allocations) < 2 {
+		http.Error(w, "a split requires at least two allocations", http.StatusBadRequest)
 		return
 	}
 	legs := make([]ledger.SplitLeg, 0, len(req.Allocations))

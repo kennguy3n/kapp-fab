@@ -80,8 +80,10 @@ export function ReconciliationSplitMatch({
   const balanced = isBalanced(remaining);
 
   // A row is complete when it names a candidate and carries a finite,
-  // non-zero amount. The reconcile gate needs at least one complete row,
-  // a zero remaining, and no two rows pointing at the same ledger entry.
+  // non-zero amount. The reconcile gate needs at least TWO complete rows
+  // (a split spans >=2 entries; a single entry is a 1:1 accept), a zero
+  // remaining, and no two rows pointing at the same ledger entry. The
+  // server enforces the same >=2 / distinct / balanced invariants.
   const completeRows = rows.filter(
     (r) => r.suggestionId !== "" && Number.isFinite(Number(r.raw)) && Number(r.raw) !== 0,
   );
@@ -89,7 +91,7 @@ export function ReconciliationSplitMatch({
     new Set(completeRows.map((r) => r.suggestionId)).size ===
     completeRows.length;
   const canReconcile =
-    !pending && balanced && completeRows.length >= 1 && distinctEntries;
+    !pending && balanced && completeRows.length >= 2 && distinctEntries;
 
   const setRow = (key: string, patch: Partial<AllocationRow>) =>
     setRows((prev) =>

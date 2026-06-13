@@ -382,6 +382,7 @@ func TestAcceptSplitRejectsMalformedRequest(t *testing.T) {
 		body string
 	}{
 		{"empty allocations", `{"allocations":[]}`},
+		{"single allocation", `{"allocations":[{"journal_entry_id":"` + entry.String() + `","amount":"-100.00"}]}`},
 		{"missing allocations", `{}`},
 		{"invalid json", `{`},
 		{"bad entry uuid", `{"allocations":[{"journal_entry_id":"not-a-uuid","amount":"-100.00"}]}`},
