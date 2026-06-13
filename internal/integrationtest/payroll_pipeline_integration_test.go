@@ -6,6 +6,7 @@ package integrationtest
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -284,5 +285,87 @@ func assertLinesInPipelineOrder(t *testing.T, store *hr.PayrollStore, tenantID, 
 		}
 		prevSeq = l.Seq
 		prevRank = r
+	}
+}
+
+// TestPayrollPipeline_ConcurrentYTD asserts FinalizePayslip serializes
+// two concurrent finalizers for the SAME (employee, tax_year) when no
+// payroll_ytd row exists yet — the first-of-year race. Both calls must
+// succeed (no PK-violation rollback) and the accumulator must reflect
+// each contribution exactly once (no double-count, no lost update).
+func TestPayrollPipeline_ConcurrentYTD(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tn, _, _ := newTenantForFinance(t, h)
+	registerPayrollKTypes(t, h)
+
+	actor := uuid.New()
+	empID := createEmployeeWithJoin(t, h, tn.ID, actor, "2026-01-01")
+
+	store := hr.NewPayrollStore(h.pool)
+
+	// Two distinct runs in the same tax year so each finalizer writes a
+	// separate slip but contends on the single (employee, 2026) YTD row.
+	runA := uuid.New()
+	runB := uuid.New()
+	seedTypedRun(t, store, tn.ID, runA, actor, "Jan 2026", "2026-01-01", "2026-01-31")
+	seedTypedRun(t, store, tn.ID, runB, actor, "Feb 2026", "2026-02-01", "2026-02-28")
+
+	mkInput := func(runID uuid.UUID, start, end string, taxable int64) hr.FinalizeInput {
+		ps, _ := time.Parse("2006-01-02", start)
+		pe, _ := time.Parse("2006-01-02", end)
+		amt := decimal.NewFromInt(taxable)
+		return hr.FinalizeInput{
+			TenantID:     tn.ID,
+			RunID:        runID,
+			PayslipID:    uuid.New(),
+			EmployeeID:   empID,
+			Currency:     "USD",
+			PeriodStart:  ps,
+			PeriodEnd:    pe,
+			TaxYear:      2026,
+			Gross:        amt,
+			TaxableGross: amt,
+			Earnings: []hr.PayslipLine{
+				{Code: "BASE", Label: "Base Salary", Amount: amt, Taxable: true},
+			},
+		}
+	}
+	inA := mkInput(runA, "2026-01-01", "2026-01-31", 1000)
+	inB := mkInput(runB, "2026-02-01", "2026-02-28", 2000)
+
+	// Release both goroutines from a common barrier to maximize the
+	// chance they reach the seed/lock step simultaneously.
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make([]error, 2)
+	for i, in := range []hr.FinalizeInput{inA, inB} {
+		wg.Add(1)
+		go func(idx int, fi hr.FinalizeInput) {
+			defer wg.Done()
+			<-start
+			_, errs[idx] = store.FinalizePayslip(ctx, fi)
+		}(i, in)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent FinalizePayslip[%d] failed: %v", i, err)
+		}
+	}
+
+	// Both contributions land exactly once: 1000 + 2000 = 3000.
+	ytd, err := store.LoadYTD(ctx, tn.ID, empID, 2026)
+	if err != nil {
+		t.Fatalf("load ytd: %v", err)
+	}
+	if !ytd.Exists {
+		t.Fatalf("expected a YTD row after concurrent finalizers")
+	}
+	if want := decimal.NewFromInt(3000); !ytd.CumulativeGross.Equal(want) {
+		t.Fatalf("ytd cumulative_gross = %s, want %s (double-count or lost update)", ytd.CumulativeGross, want)
 	}
 }

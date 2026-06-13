@@ -436,10 +436,28 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 			}
 		}
 
-		// 3. Lock + read the YTD accumulator.
+		// 3. Lock + read the YTD accumulator. Seed a zero row first so
+		//    the FOR UPDATE below always has a row to lock: a bare
+		//    SELECT ... FOR UPDATE locks nothing when the row is absent,
+		//    so two concurrent first-of-year finalizers would both miss
+		//    the lock and race to INSERT, with one failing the natural
+		//    PK. The ON CONFLICT DO NOTHING makes a concurrent seeder
+		//    block on the uncommitted row and then no-op, after which the
+		//    FOR UPDATE serializes both transactions on the now-existing
+		//    row.
+		seedNow := s.now().UTC()
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO payroll_ytd
+				(tenant_id, employee_id, tax_year, cumulative_gross,
+				 cumulative_tax, per_code_base, updated_at)
+			VALUES ($1, $2, $3, 0, 0, '{}'::jsonb, $4)
+			ON CONFLICT (tenant_id, employee_id, tax_year) DO NOTHING`,
+			in.TenantID, in.EmployeeID, in.TaxYear, seedNow,
+		); err != nil {
+			return fmt.Errorf("hr: seed ytd: %w", err)
+		}
 		var cumGross, cumTax decimal.Decimal
 		var perCodeRaw []byte
-		var ytdExists bool
 		yrow := tx.QueryRow(ctx, `
 			SELECT cumulative_gross, cumulative_tax, per_code_base
 			  FROM payroll_ytd
@@ -447,12 +465,7 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 			 FOR UPDATE`,
 			in.TenantID, in.EmployeeID, in.TaxYear,
 		)
-		switch err := yrow.Scan(&cumGross, &cumTax, &perCodeRaw); {
-		case err == nil:
-			ytdExists = true
-		case errors.Is(err, pgx.ErrNoRows):
-			ytdExists = false
-		default:
+		if err := yrow.Scan(&cumGross, &cumTax, &perCodeRaw); err != nil {
 			return fmt.Errorf("hr: lock ytd: %w", err)
 		}
 		perCode := decodePerCode(perCodeRaw)
@@ -561,26 +574,16 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 		if err != nil {
 			return err
 		}
-		if ytdExists {
-			if _, err := tx.Exec(ctx, `
-				UPDATE payroll_ytd
-				   SET cumulative_gross = $4, cumulative_tax = $5,
-				       per_code_base = $6, updated_at = $7
-				 WHERE tenant_id = $1 AND employee_id = $2 AND tax_year = $3`,
-				in.TenantID, in.EmployeeID, in.TaxYear, newCumGross, newCumTax, perCodeJSON, now,
-			); err != nil {
-				return fmt.Errorf("hr: update ytd: %w", err)
-			}
-		} else {
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO payroll_ytd
-					(tenant_id, employee_id, tax_year, cumulative_gross,
-					 cumulative_tax, per_code_base, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-				in.TenantID, in.EmployeeID, in.TaxYear, newCumGross, newCumTax, perCodeJSON, now,
-			); err != nil {
-				return fmt.Errorf("hr: insert ytd: %w", err)
-			}
+		// The row was seeded + locked in step 3, so an unconditional
+		// UPDATE is always correct here (no INSERT-vs-UPDATE split).
+		if _, err := tx.Exec(ctx, `
+			UPDATE payroll_ytd
+			   SET cumulative_gross = $4, cumulative_tax = $5,
+			       per_code_base = $6, updated_at = $7
+			 WHERE tenant_id = $1 AND employee_id = $2 AND tax_year = $3`,
+			in.TenantID, in.EmployeeID, in.TaxYear, newCumGross, newCumTax, perCodeJSON, now,
+		); err != nil {
+			return fmt.Errorf("hr: update ytd: %w", err)
 		}
 
 		result = FinalizedPayslip{
