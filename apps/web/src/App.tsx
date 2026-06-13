@@ -265,6 +265,11 @@ const JobCardPage = lazyNamed(
   () => import("./pages/JobCardPage"),
   "JobCardPage",
 );
+const MrpPage = lazyNamed(() => import("./pages/MrpPage"), "MrpPage");
+const SubcontractingPage = lazyNamed(
+  () => import("./pages/SubcontractingPage"),
+  "SubcontractingPage",
+);
 const LandedCostPage = lazyNamed(
   () => import("./pages/LandedCostPage"),
   "LandedCostPage",
@@ -811,6 +816,16 @@ const navSections: NavSection[] = [
         to: "/manufacturing/job-cards",
         label: "Job Cards",
         icon: navIcon(ClipboardList),
+      },
+      {
+        to: "/manufacturing/mrp",
+        label: "MRP",
+        icon: navIcon(Network),
+      },
+      {
+        to: "/manufacturing/subcontracting",
+        label: "Subcontracting",
+        icon: navIcon(Handshake),
       },
     ],
   },
@@ -1969,6 +1984,11 @@ function AppShell() {
               <Route
                 path="/manufacturing/job-cards"
                 element={<JobCardPage />}
+              />
+              <Route path="/manufacturing/mrp" element={<MrpPage />} />
+              <Route
+                path="/manufacturing/subcontracting"
+                element={<SubcontractingPage />}
               />
               <Route
                 path="/inventory/landed-costs"
