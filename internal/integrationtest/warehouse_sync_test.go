@@ -162,6 +162,139 @@ func TestWarehouseSyncExportsRowsToDestinationSchema(t *testing.T) {
 	}
 }
 
+// TestWarehouseSyncStartManualRunAsync exercises the API "run now"
+// path: StartManualRun records a 'running' run and returns immediately
+// while the caller drives the export on a detached context. It asserts
+// (a) the returned run is observable as 'running' before finish, (b) a
+// second StartManualRun is rejected with ErrRunInProgress while the
+// first holds the per-config lock, and (c) finish lands the rows and
+// finalizes the run to 'success'.
+func TestWarehouseSyncStartManualRunAsync(t *testing.T) {
+	h := newHarness(t)
+	if h.adminPool == nil {
+		t.Skip("KAPP_TEST_ADMIN_DB_URL not set; skipping warehouse export integration test")
+	}
+	adminURL := os.Getenv("KAPP_TEST_ADMIN_DB_URL")
+	if adminURL == "" {
+		t.Skip("KAPP_TEST_ADMIN_DB_URL not set; skipping warehouse export integration test")
+	}
+	ctx := context.Background()
+
+	tn, err := h.tenants.Create(ctx, tenant.CreateInput{
+		Slug: uniqueSlug("wh"), Name: "Warehouse Async Co", Cell: "test", Plan: "enterprise",
+	})
+	if err != nil {
+		t.Fatalf("tenant: %v", err)
+	}
+	if err := crm.RegisterKTypes(ctx, h.ktypes); err != nil {
+		t.Fatalf("register crm ktypes: %v", err)
+	}
+	actor := uuid.New()
+	seedContact(t, h, tn.ID, actor, "alice")
+	seedContact(t, h, tn.ID, actor, "bob")
+
+	destSchema := "wh_" + uuid.NewString()[:8]
+	t.Cleanup(func() {
+		_, _ = h.adminPool.Exec(context.Background(),
+			fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, destSchema))
+	})
+
+	enc := newTestEncryptor()
+	dsStore := insights.NewDataSourceStore(h.pool, enc)
+	ds, err := dsStore.Create(ctx, insights.DataSource{
+		TenantID:         tn.ID,
+		Name:             "warehouse-dest",
+		Dialect:          "postgres",
+		ConnectionString: adminURL,
+		Enabled:          true,
+	})
+	if err != nil {
+		t.Fatalf("create destination datasource: %v", err)
+	}
+
+	pools := insights.NewPoolManager()
+	t.Cleanup(pools.Close)
+	exporter := warehouse.NewExporter(h.pool, dsStore, pools)
+	configStore := warehouse.NewConfigStore(h.pool)
+	runStore := warehouse.NewRunStore(h.pool)
+	syncH := warehouse.NewSyncHandler(configStore, runStore, exporter)
+
+	cfg, err := configStore.Create(ctx, warehouse.Config{
+		TenantID:                tn.ID,
+		Name:                    "ondemand-contacts",
+		DestinationDataSourceID: ds.ID,
+		DestinationSchema:       destSchema,
+		Sources:                 []string{"ktype:crm.contact"},
+		CronExpression:          "0 2 * * *",
+		Mode:                    warehouse.ModeIncremental,
+		Enabled:                 true,
+		CreatedBy:               &actor,
+	})
+	if err != nil {
+		t.Fatalf("create config: %v", err)
+	}
+
+	run, finish, err := syncH.StartManualRun(ctx, tn.ID, cfg)
+	if err != nil {
+		t.Fatalf("start manual run: %v", err)
+	}
+	if run.Status != warehouse.StatusRunning {
+		t.Fatalf("started run status = %q, want running", run.Status)
+	}
+	if run.Trigger != warehouse.TriggerManual {
+		t.Fatalf("started run trigger = %q, want manual", run.Trigger)
+	}
+
+	// The run row is durable and observable as 'running' before finish.
+	pending, err := runStore.List(ctx, tn.ID, cfg.ID, 10)
+	if err != nil {
+		t.Fatalf("list runs (pending): %v", err)
+	}
+	if len(pending) != 1 || pending[0].Status != warehouse.StatusRunning {
+		t.Fatalf("pending run not observable as running: %+v", pending)
+	}
+
+	// While the first run holds the lock, a colliding run-now is
+	// rejected rather than racing into a second concurrent export.
+	if _, _, err := syncH.StartManualRun(ctx, tn.ID, cfg); err != warehouse.ErrRunInProgress {
+		t.Fatalf("concurrent StartManualRun err = %v, want ErrRunInProgress", err)
+	}
+
+	if err := finish(ctx); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+
+	mirror := fmt.Sprintf("%q.%q", destSchema, "ktype_crm_contact")
+	assertCount(t, h, mirror, 2)
+
+	done, err := runStore.List(ctx, tn.ID, cfg.ID, 10)
+	if err != nil {
+		t.Fatalf("list runs (done): %v", err)
+	}
+	if len(done) != 1 || done[0].Status != warehouse.StatusSuccess {
+		t.Fatalf("run not finalized to success: %+v", done)
+	}
+	if done[0].RowsExported != 2 {
+		t.Fatalf("finished run rows = %d, want 2", done[0].RowsExported)
+	}
+
+	// The lock released with finish, so a fresh run-now is accepted again.
+	reloaded, err := configStore.Get(ctx, tn.ID, cfg.ID)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	run2, finish2, err := syncH.StartManualRun(ctx, tn.ID, reloaded)
+	if err != nil {
+		t.Fatalf("second start manual run: %v", err)
+	}
+	if run2.Status != warehouse.StatusRunning {
+		t.Fatalf("second started run status = %q, want running", run2.Status)
+	}
+	if err := finish2(ctx); err != nil {
+		t.Fatalf("finish2: %v", err)
+	}
+}
+
 // seedMove inserts an inventory_moves row for a tenant via the admin
 // pool (which can write any tenant_id). The append-only moves feed the
 // stock_levels aggregate view.

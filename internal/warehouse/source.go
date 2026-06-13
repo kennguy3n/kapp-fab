@@ -109,6 +109,7 @@ var ktypeColumns = []column{
 	{src: "data", dest: "data", typ: "jsonb"},
 	{src: "created_by", dest: "created_by", typ: "uuid"},
 	{src: "created_at", dest: "created_at", typ: "timestamptz"},
+	{src: "updated_by", dest: "updated_by", typ: "uuid"},
 	{src: "updated_at", dest: "updated_at", typ: "timestamptz"},
 	{src: "deleted_at", dest: "deleted_at", typ: "timestamptz"},
 }

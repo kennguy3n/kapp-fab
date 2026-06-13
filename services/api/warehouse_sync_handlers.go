@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -166,12 +167,17 @@ func (h *warehouseSyncHandlers) delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// run executes a config immediately (TriggerManual) using the shared
-// orchestration, then returns the recorded run. The export runs
-// synchronously so the caller receives the terminal outcome (matching
-// the synchronous "run" semantics of the insights/report surfaces); an
-// export failure is still a successfully-recorded run row, so a non-2xx
-// is reserved for config-resolution problems, not export errors.
+// run starts an on-demand export (TriggerManual) for a config and
+// returns 202 Accepted with the newly-created 'running' run. The export
+// itself is driven on a context detached from this request, so a large
+// sync (up to MaxSourcesPerConfig sources, each with its own copy
+// budget) is never bound by HTTP gateway/load-balancer timeouts. The
+// caller polls the run-history endpoint (GET .../runs) for the terminal
+// status and per-source row counts. A non-2xx is reserved for problems
+// that prevent the run from starting at all: an unknown config (404),
+// or another run already holding this config's lock (ErrRunInProgress
+// -> 409). The detached export's own failures land on the run row, not
+// on this response.
 func (h *warehouseSyncHandlers) run(w http.ResponseWriter, r *http.Request) {
 	t := platform.TenantFromContext(r.Context())
 	if t == nil {
@@ -188,15 +194,23 @@ func (h *warehouseSyncHandlers) run(w http.ResponseWriter, r *http.Request) {
 		writeWarehouseError(w, err)
 		return
 	}
-	run, runErr := h.sync.RunConfig(r.Context(), t.ID, cfg, warehouse.TriggerManual)
-	if run == nil {
-		// Could not even start the run: either the run row insert failed
-		// or another run already holds this config's lock
-		// (ErrRunInProgress -> 409).
-		writeWarehouseError(w, runErr)
+	run, finish, err := h.sync.StartManualRun(r.Context(), t.ID, cfg)
+	if err != nil {
+		writeWarehouseError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, run)
+	// Detach from the request so the export survives the response being
+	// written; finish owns releasing the per-config run lock and bounds
+	// itself with an overall deadline. Failures are recorded on the run
+	// row, so they are surfaced via the history endpoint, not lost.
+	go func() {
+		ctx := context.WithoutCancel(r.Context())
+		if err := finish(ctx); err != nil {
+			platform.LoggerFromContext(ctx).Error("warehouse: manual run",
+				"tenant", t.ID, "config", cfg.ID, "run", run.ID, "error", err)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, run)
 }
 
 // runs lists a config's run history, newest first. ?limit caps the

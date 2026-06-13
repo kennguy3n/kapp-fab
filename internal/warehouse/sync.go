@@ -70,12 +70,12 @@ func (h *SyncHandler) Handle(ctx context.Context, tenantID uuid.UUID, _ schedule
 }
 
 // RunConfig executes a single sync config end to end and returns the
-// recorded run. Shared by the scheduler (TriggerSchedule) and the
-// "run now" API handler (TriggerManual). The export is all-or-nothing
-// within a run: on failure the run is marked 'error', but the
-// watermarks of any sources that DID land are still persisted so a
-// re-run resumes from the furthest durable point rather than re-reading
-// everything.
+// recorded run. Used by the scheduler (TriggerSchedule), which runs in
+// the worker process where blocking for the full export is fine. The
+// export is all-or-nothing within a run: on failure the run is marked
+// 'error', but the watermarks of any sources that DID land are still
+// persisted so a re-run resumes from the furthest durable point rather
+// than re-reading everything.
 func (h *SyncHandler) RunConfig(ctx context.Context, tenantID uuid.UUID, cfg *Config, trigger string) (*Run, error) {
 	// Serialize against any other run of this same config (a colliding
 	// scheduler tick or a concurrent "run now"). The lock is held for
@@ -89,12 +89,69 @@ func (h *SyncHandler) RunConfig(ctx context.Context, tenantID uuid.UUID, cfg *Co
 	}
 	defer release()
 
-	started := h.now()
-	run, err := h.runs.Start(ctx, tenantID, cfg.ID, cfg.Mode, trigger, started)
+	run, err := h.startRun(ctx, tenantID, cfg, trigger)
+	if err != nil {
+		return nil, err
+	}
+	return run, h.complete(ctx, tenantID, cfg, run)
+}
+
+// StartManualRun acquires the per-config run lock, records a 'running'
+// run row, and returns the run plus a finish closure that drives the
+// export to completion and releases the lock. It lets the API "run now"
+// surface return immediately (202 + the running run) and execute the
+// possibly-long export on a context detached from the HTTP request, so
+// a large sync is not bound by gateway/load-balancer request timeouts.
+// The history endpoint is the poll surface: the returned run carries
+// the id, and its terminal status/row counts land on the same row when
+// finish completes. ErrRunInProgress is returned (without starting a
+// run) when another run already holds the config's lock.
+//
+// The caller MUST invoke finish exactly once (it owns releasing the
+// lock); finish bounds itself with an overall deadline so a hung
+// destination can never pin the advisory lock indefinitely.
+func (h *SyncHandler) StartManualRun(ctx context.Context, tenantID uuid.UUID, cfg *Config) (run *Run, finish func(context.Context) error, err error) {
+	release, ok, err := h.configs.TryLockRun(ctx, cfg.ID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("warehouse: lock run: %w", err)
+	}
+	if !ok {
+		return nil, nil, ErrRunInProgress
+	}
+	run, err = h.startRun(ctx, tenantID, cfg, TriggerManual)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	finish = func(ctx context.Context) error {
+		defer release()
+		// Bound the detached run: each source still gets its full
+		// per-source copy budget plus one slot of slack for destination
+		// setup, but the whole run cannot outlive that ceiling and strand
+		// the lock.
+		budget := time.Duration(len(cfg.Sources)+1) * h.exporter.timeout
+		ctx, cancel := context.WithTimeout(ctx, budget)
+		defer cancel()
+		return h.complete(ctx, tenantID, cfg, run)
+	}
+	return run, finish, nil
+}
+
+// startRun records the 'running' row that both the synchronous and
+// detached paths build on.
+func (h *SyncHandler) startRun(ctx context.Context, tenantID uuid.UUID, cfg *Config, trigger string) (*Run, error) {
+	run, err := h.runs.Start(ctx, tenantID, cfg.ID, cfg.Mode, trigger, h.now())
 	if err != nil {
 		return nil, fmt.Errorf("warehouse: start run: %w", err)
 	}
+	return run, nil
+}
 
+// complete drives the export for an already-started run, finalizes the
+// run row, and advances the config watermarks. On export failure the
+// run is marked 'error' and the failing error is returned, but the
+// watermarks of the sources that DID land are still persisted first.
+func (h *SyncHandler) complete(ctx context.Context, tenantID uuid.UUID, cfg *Config, run *Run) error {
 	res, exportErr := h.exporter.Export(ctx, cfg)
 	finished := h.now()
 
@@ -110,15 +167,12 @@ func (h *SyncHandler) RunConfig(ctx context.Context, tenantID uuid.UUID, cfg *Co
 	}
 
 	if finErr := h.runs.Finish(ctx, run, status, finished, errMsg); finErr != nil {
-		return run, fmt.Errorf("warehouse: finish run: %w", finErr)
+		return fmt.Errorf("warehouse: finish run: %w", finErr)
 	}
 	if wmErr := h.configs.SaveWatermarks(ctx, tenantID, cfg.ID, res.Watermarks, finished, status, errMsg); wmErr != nil {
-		return run, fmt.Errorf("warehouse: save watermarks: %w", wmErr)
+		return fmt.Errorf("warehouse: save watermarks: %w", wmErr)
 	}
-	if exportErr != nil {
-		return run, exportErr
-	}
-	return run, nil
+	return exportErr
 }
 
 // sumRows totals the per-source row counts for the run summary.

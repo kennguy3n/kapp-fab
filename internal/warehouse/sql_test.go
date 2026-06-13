@@ -80,6 +80,11 @@ func TestBuildCreateTableSQL_Sanitised(t *testing.T) {
 	if !strings.Contains(sql, `"data" jsonb`) {
 		t.Fatalf("missing jsonb data column: %s", sql)
 	}
+	// The krecords envelope mirrors both audit actors so a BI user can
+	// reconstruct who created AND who last modified a record.
+	if !strings.Contains(sql, `"created_by" uuid`) || !strings.Contains(sql, `"updated_by" uuid`) {
+		t.Fatalf("krecords mirror must carry created_by and updated_by: %s", sql)
+	}
 }
 
 func TestBuildUpsertSQL_MergesNonPK(t *testing.T) {
