@@ -238,3 +238,67 @@ func TestAcceptSplitRejectsInvalid(t *testing.T) {
 		t.Fatal("split citing an unknown entry should be rejected")
 	}
 }
+
+// TestAcceptSplitDoesNotTouchForeignSuggestion proves that citing a
+// suggestion_id belonging to a *different* bank line cannot flip that
+// foreign suggestion to accepted. Without the transaction_id scope on the
+// per-leg accept, splitting line 1 while citing line 2's suggestion would
+// strand line 2 unreconciled with an accepted suggestion that has vanished
+// from its review queue — a cross-line corruption.
+func TestAcceptSplitDoesNotTouchForeignSuggestion(t *testing.T) {
+	pool := matcherPool(t)
+	ctx := context.Background()
+	store, tenantID, acctID := seedMatcherFixture(t, pool)
+	if _, err := store.CreateAccount(ctx, Account{
+		TenantID: tenantID, Code: "6100", Name: "Office", Type: AccountTypeExpense, Active: true,
+	}); err != nil {
+		t.Fatalf("create account 6100: %v", err)
+	}
+	vd := time.Now().UTC().Truncate(24 * time.Hour)
+	entryA := splitEntry(t, store, tenantID, vd, "6000", "60.00", "A")
+	entryB := splitEntry(t, store, tenantID, vd, "6100", "40.00", "B")
+	foreignEntry := splitEntry(t, store, tenantID, vd, "6000", "100.00", "foreign")
+	matcher := NewSmartMatcher(store).WithClock(func() time.Time { return vd })
+	actor := uuid.New()
+
+	mk := func(ref string) uuid.UUID {
+		in, err := store.SyncBankTransactions(ctx, tenantID, acctID, []BankTransaction{{
+			BankAccountID: acctID, ValueDate: vd, Description: "ACME",
+			Amount: decimal.RequireFromString("-100.00"), Currency: "USD", ExternalRef: ref,
+		}})
+		if err != nil || len(in) != 1 {
+			t.Fatalf("sync %s: %v %v", ref, in, err)
+		}
+		return in[0].ID
+	}
+
+	txn1 := mk("foreign-1")
+	txn2 := mk("foreign-2")
+	// An open suggestion belonging to txn2 (the line we are NOT splitting).
+	foreignSug := seedSuggestion(t, pool, tenantID, txn2, foreignEntry, vd)
+
+	// Split txn1, maliciously/accidentally citing txn2's suggestion on a leg.
+	if _, err := matcher.AcceptSplit(ctx, tenantID, txn1, []SplitLeg{
+		{JournalEntryID: entryA, Amount: decimal.RequireFromString("-60.00"), SuggestionID: foreignSug},
+		{JournalEntryID: entryB, Amount: decimal.RequireFromString("-40.00")},
+	}, actor); err != nil {
+		t.Fatalf("AcceptSplit txn1: %v", err)
+	}
+
+	// txn2's suggestion must be untouched (still open), and txn2 itself
+	// must remain unreconciled.
+	if st := suggestionStatus(t, store, tenantID, foreignSug); st != SuggestionSuggested {
+		t.Fatalf("foreign suggestion status = %q; want still suggested (split must not touch another line's suggestion)", st)
+	}
+	var txn2Status string
+	if err := dbutil.WithTenantTx(ctx, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT status FROM bank_transactions WHERE tenant_id=$1 AND id=$2`,
+			tenantID, txn2).Scan(&txn2Status)
+	}); err != nil {
+		t.Fatalf("read txn2: %v", err)
+	}
+	if txn2Status != BankTxnUnreconciled {
+		t.Fatalf("txn2 status = %q; want unreconciled", txn2Status)
+	}
+}

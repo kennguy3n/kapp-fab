@@ -618,12 +618,16 @@ func (m *SmartMatcher) AcceptSplit(ctx context.Context, tenantID, txnID uuid.UUI
 				return fmt.Errorf("ledger: insert allocation: %w", err)
 			}
 			// Accept the leg's suggestion if one was cited; ignore a stale
-			// id (already decided) rather than fail the whole split.
+			// id (already decided) rather than fail the whole split. Scope to
+			// transaction_id so a cited suggestion belonging to a *different*
+			// bank line can never be flipped to accepted by this split — that
+			// would strand the other line unreconciled with an accepted
+			// suggestion no longer in its review queue.
 			if leg.SuggestionID != uuid.Nil {
 				if _, err := tx.Exec(ctx,
 					`UPDATE bank_match_suggestions SET status = $3, updated_at = $4
-					  WHERE tenant_id = $1 AND id = $2 AND status = $5`,
-					tenantID, leg.SuggestionID, SuggestionAccepted, now, SuggestionSuggested); err != nil {
+					  WHERE tenant_id = $1 AND id = $2 AND status = $5 AND transaction_id = $6`,
+					tenantID, leg.SuggestionID, SuggestionAccepted, now, SuggestionSuggested, txnID); err != nil {
 					return fmt.Errorf("ledger: accept split suggestion: %w", err)
 				}
 			}
