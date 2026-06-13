@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { BankFeedSuggestion, KRecord } from "@kapp/client";
 import { Badge, Button, cn } from "@kapp/ui";
 import {
@@ -96,6 +96,14 @@ function CandidatePanel({
 }) {
   const [splitOpen, setSplitOpen] = useState(false);
 
+  // The composer only exists for >1 candidates; if the candidate list shrinks
+  // below that (e.g. a concurrent accept removes one), collapse it so it can't
+  // silently reappear already-open when candidates later grow back.
+  const canSplit = suggestions.length > 1;
+  useEffect(() => {
+    if (!canSplit && splitOpen) setSplitOpen(false);
+  }, [canSplit, splitOpen]);
+
   if (!hasSelection || !txn) {
     return (
       <p className="text-sm text-fg-muted">
@@ -184,7 +192,7 @@ function CandidatePanel({
       {/* A split allocates the line across >=2 distinct entries, so the
           composer is only offered when the matcher surfaced at least two
           candidates — a single-candidate line can only be a 1:1 accept. */}
-      {suggestions.length > 1 && (
+      {canSplit && (
         <div>
           <Button
             size="sm"
