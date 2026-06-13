@@ -337,6 +337,15 @@ func (e *PayrollEngine) GeneratePayslips(
 			if pack == nil {
 				return nil, decimal.Zero, nil
 			}
+			// The engine always knows all three bases, so it passes them
+			// explicitly as non-nil pointers — a zero base (e.g. pre-tax
+			// deductions wiping out the income-tax base) is the real value,
+			// distinct from "unset". Local copies so each slip's pointers
+			// are independent across loop iterations.
+			taxableBase := taxableGross
+			contributionBase := contributionGross
+			ytdTaxableBase := ytdTaxable
+			ytdContributionBase := ytdContribution
 			info := taxpacks.EmployeeInfo{
 				ID:         empIDLocal,
 				FilingType: empData.FilingType,
@@ -347,10 +356,10 @@ func (e *PayrollEngine) GeneratePayslips(
 				// Two-base withholding: income tax runs on the income-tax
 				// base (post pre-tax), contributions on the contribution
 				// base (full gross unless a component reduces it).
-				TaxableGross:         taxableGross,      // period income-tax base
-				ContributionGross:    contributionGross, // period contribution base
-				YTDGross:             ytdTaxable,        // cumulative income-tax base
-				YTDContributionGross: ytdContribution,   // cumulative contribution base
+				TaxableGross:         &taxableBase,         // period income-tax base
+				ContributionGross:    &contributionBase,    // period contribution base
+				YTDGross:             ytdTaxableBase,       // cumulative income-tax base
+				YTDContributionGross: &ytdContributionBase, // cumulative contribution base
 				Currency:             empCurrency,
 
 				// Phase-M2 fields. Each defaults to its zero

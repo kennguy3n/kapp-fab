@@ -8,6 +8,10 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// dptr returns a pointer to a decimal, for the *decimal.Decimal base
+// fields on EmployeeInfo (nil = unset, non-nil = use verbatim).
+func dptr(d decimal.Decimal) *decimal.Decimal { return &d }
+
 // codeMap collapses a deduction slice to a code→amount lookup.
 func codeMap(out []Deduction) map[string]decimal.Decimal {
 	m := make(map[string]decimal.Decimal, len(out))
@@ -37,8 +41,8 @@ func TestUSPack401kReducesIncomeTaxNotFICA(t *testing.T) {
 	withDeferral, err := pack.ComputeWithholding(context.Background(), EmployeeInfo{
 		FilingType:        "single",
 		Resident:          true,
-		TaxableGross:      decimal.NewFromInt(9000),  // income-tax base (post 401k)
-		ContributionGross: decimal.NewFromInt(10000), // FICA base unchanged
+		TaxableGross:      dptr(decimal.NewFromInt(9000)),  // income-tax base (post 401k)
+		ContributionGross: dptr(decimal.NewFromInt(10000)), // FICA base unchanged
 	}, gross, period)
 	if err != nil {
 		t.Fatalf("compute (deferral): %v", err)
@@ -46,8 +50,8 @@ func TestUSPack401kReducesIncomeTaxNotFICA(t *testing.T) {
 	noDeferral, err := pack.ComputeWithholding(context.Background(), EmployeeInfo{
 		FilingType:        "single",
 		Resident:          true,
-		TaxableGross:      decimal.NewFromInt(10000),
-		ContributionGross: decimal.NewFromInt(10000),
+		TaxableGross:      dptr(decimal.NewFromInt(10000)),
+		ContributionGross: dptr(decimal.NewFromInt(10000)),
 	}, gross, period)
 	if err != nil {
 		t.Fatalf("compute (no deferral): %v", err)
@@ -88,9 +92,9 @@ func TestUSPackSSCapUsesContributionYTD(t *testing.T) {
 	out, err := pack.ComputeWithholding(context.Background(), EmployeeInfo{
 		FilingType:           "single",
 		Resident:             true,
-		YTDGross:             decimal.NewFromInt(120000), // income-tax cumulative, under cap
-		YTDContributionGross: decimal.NewFromInt(176100), // contribution cumulative, at cap
-		ContributionGross:    decimal.NewFromInt(5000),
+		YTDGross:             decimal.NewFromInt(120000),       // income-tax cumulative, under cap
+		YTDContributionGross: dptr(decimal.NewFromInt(176100)), // contribution cumulative, at cap
+		ContributionGross:    dptr(decimal.NewFromInt(5000)),
 	}, decimal.NewFromInt(5000), period)
 	if err != nil {
 		t.Fatalf("compute: %v", err)
@@ -103,6 +107,38 @@ func TestUSPackSSCapUsesContributionYTD(t *testing.T) {
 	// Medicare has no cap and must still accrue on the full slip.
 	if codeMap(out)["FICA_MEDICARE"].Cmp(decimal.NewFromFloat(72.5)) != 0 {
 		t.Fatalf("FICA_MEDICARE = %s; want 72.50", codeMap(out)["FICA_MEDICARE"])
+	}
+}
+
+// TestUSPackZeroTaxableBaseYieldsZeroIncomeTax guards the *decimal.Decimal
+// base fields: when pre-tax deductions wipe out the income-tax base
+// (TaxableGross = &0, a legitimate computed zero — NOT "unset"), the pack
+// must compute zero federal income tax, not fall back to taxing the full
+// gross. FICA still accrues on the full contribution base. This is the
+// regression the zero-vs-nil sentinel fix protects against.
+func TestUSPackZeroTaxableBaseYieldsZeroIncomeTax(t *testing.T) {
+	pack, _ := Lookup("US")
+	period := PayPeriod{
+		Start: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		End:   time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC),
+	}
+	gross := decimal.NewFromInt(10000)
+	out, err := pack.ComputeWithholding(context.Background(), EmployeeInfo{
+		FilingType:        "single",
+		Resident:          true,
+		TaxableGross:      dptr(decimal.Zero),              // pre-tax wiped the income-tax base
+		ContributionGross: dptr(decimal.NewFromInt(10000)), // FICA base unchanged
+	}, gross, period)
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	m := codeMap(out)
+	if m["FED_TAX"].IsPositive() {
+		t.Fatalf("FED_TAX must be zero when the income-tax base is zero, got %s (fell back to full gross?)", m["FED_TAX"])
+	}
+	// FICA still on the full $10,000 contribution base.
+	if m["FICA_OASDI"].Cmp(decimal.NewFromInt(620)) != 0 {
+		t.Fatalf("FICA_OASDI = %s; want 620.00 (6.2%% of full gross)", m["FICA_OASDI"])
 	}
 }
 
@@ -132,16 +168,16 @@ func TestMYPackEPFIgnoresPreTax(t *testing.T) {
 
 	withPreTax, err := pack.ComputeWithholding(context.Background(), EmployeeInfo{
 		Resident:          true,
-		TaxableGross:      decimal.NewFromInt(9000),
-		ContributionGross: decimal.NewFromInt(10000),
+		TaxableGross:      dptr(decimal.NewFromInt(9000)),
+		ContributionGross: dptr(decimal.NewFromInt(10000)),
 	}, gross, period)
 	if err != nil {
 		t.Fatalf("compute (pretax): %v", err)
 	}
 	noPreTax, err := pack.ComputeWithholding(context.Background(), EmployeeInfo{
 		Resident:          true,
-		TaxableGross:      decimal.NewFromInt(10000),
-		ContributionGross: decimal.NewFromInt(10000),
+		TaxableGross:      dptr(decimal.NewFromInt(10000)),
+		ContributionGross: dptr(decimal.NewFromInt(10000)),
 	}, gross, period)
 	if err != nil {
 		t.Fatalf("compute (no pretax): %v", err)

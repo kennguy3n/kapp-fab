@@ -103,9 +103,10 @@ func (bePack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// ONSS employee share — 13.07% on every euro of the contribution
 	// base (full gross by default). Belgium computes ONSS BEFORE the
 	// income tax base, so we emit it first; the bracket walk uses the
-	// income-tax base MINUS the actual ONSS as the IRPP base (matches
+	// income-tax base MINUS the annual ONSS as the IRPP base (matches
 	// the SPF Finances barème logic).
-	onss := e.ContributionBase(gross).Mul(beONSSRate).Round(2)
+	contributionBase := e.ContributionBase(gross)
+	onss := contributionBase.Mul(beONSSRate).Round(2)
 	if onss.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "BE_ONSS",
@@ -113,7 +114,12 @@ func (bePack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 			Amount: onss,
 		})
 	}
-	annualONSS := onss.Div(periodFraction)
+	// Annualise the ONSS from the *unrounded* contribution base rather
+	// than the per-period rounded line, so the per-period rounding never
+	// leaks into the IRPP taxable base. When the contribution base equals
+	// the full gross (the default, no flagged pre-tax), this reproduces
+	// the pre-two-base figure exactly.
+	annualONSS := contributionBase.Div(periodFraction).Mul(beONSSRate)
 
 	// Précompte professionnel — bracket walk on annualGross
 	// minus ONSS minus personal allowance.

@@ -75,10 +75,13 @@ type EmployeeInfo struct {
 	// period gross AFTER every pre-tax (salary-sacrifice / pension)
 	// deduction. The `gross` argument to ComputeWithholding is the FULL
 	// period gross, so a pack's income-tax bracket walk reads
-	// IncomeTaxBase(gross). Zero means "no pre-tax reduction supplied" and
-	// IncomeTaxBase() falls back to the full gross, preserving the
-	// pre-split behaviour for callers (and unit tests) that don't set it.
-	TaxableGross decimal.Decimal
+	// IncomeTaxBase(gross). A nil pointer means "no income-tax base
+	// supplied" and IncomeTaxBase() falls back to the full gross,
+	// preserving the pre-split behaviour for callers (and unit tests) that
+	// don't set it. A non-nil pointer is used verbatim — including a
+	// legitimately zero base (pre-tax deductions >= taxable earnings),
+	// which must yield zero income tax, NOT the full gross.
+	TaxableGross *decimal.Decimal
 
 	// ContributionGross is the social-security / contribution base for the
 	// current slip. By default it equals the full gross — pre-tax
@@ -86,15 +89,17 @@ type EmployeeInfo struct {
 	// below the full gross when a component is explicitly flagged to also
 	// reduce the contribution base (e.g. a US Section-125 cafeteria plan).
 	// Packs read ContributionBase(gross) for every FICA / SS / EPF / CPF /
-	// Medicare / levy line. Zero falls back to the full gross.
-	ContributionGross decimal.Decimal
+	// Medicare / levy line. A nil pointer falls back to the full gross; a
+	// non-nil pointer (including zero) is used verbatim.
+	ContributionGross *decimal.Decimal
 
 	// YTDContributionGross is the cumulative *contribution* base year-to-
 	// date (cumulative ContributionGross), used for statutory contribution
 	// wage caps / surtax thresholds (FICA OASDI cap, Medicare surtax, ZUS /
 	// INPS / EFKA / AHV-ALV ceilings, CPP/EI MIE, …). Use
-	// YTDContributionBase(); zero falls back to YTDGross.
-	YTDContributionGross decimal.Decimal
+	// YTDContributionBase(); a nil pointer falls back to YTDGross, a
+	// non-nil pointer (including zero) is used verbatim.
+	YTDContributionGross *decimal.Decimal
 
 	// Canton is the 2-letter Swiss canton code (ZH, GE, VD, …)
 	// used by the CH pack to resolve cantonal tax on top of
@@ -197,12 +202,15 @@ type EmployeeInfo struct {
 // proration math see real earnings; the income-tax and contribution
 // bases are then selected explicitly via IncomeTaxBase / ContributionBase.
 //
-// The fallback to full gross only triggers on the zero value (e.g. a unit
-// test that doesn't model pre-tax deductions), preserving the pre-split
-// single-base behaviour.
+// The fallback to full gross only triggers when the field is nil (e.g. a
+// unit test that doesn't model pre-tax deductions), preserving the
+// pre-split single-base behaviour. A non-nil pointer is honoured verbatim,
+// so a legitimately zero income-tax base (pre-tax deductions >= taxable
+// earnings) correctly yields zero income tax rather than falling back to
+// the full gross.
 func (e EmployeeInfo) IncomeTaxBase(gross decimal.Decimal) decimal.Decimal {
-	if e.TaxableGross.IsPositive() {
-		return e.TaxableGross
+	if e.TaxableGross != nil {
+		return *e.TaxableGross
 	}
 	return gross
 }
@@ -213,10 +221,11 @@ func (e EmployeeInfo) IncomeTaxBase(gross decimal.Decimal) decimal.Decimal {
 // Pre-tax deductions reduce income tax but NOT contributions by default,
 // so ContributionGross equals the full gross unless a component is flagged
 // to also reduce the contribution base (e.g. a Section-125 plan). The
-// fallback to full gross only triggers on the zero value.
+// fallback to full gross only triggers when the field is nil; a non-nil
+// pointer (including a zero contribution base) is honoured verbatim.
 func (e EmployeeInfo) ContributionBase(gross decimal.Decimal) decimal.Decimal {
-	if e.ContributionGross.IsPositive() {
-		return e.ContributionGross
+	if e.ContributionGross != nil {
+		return *e.ContributionGross
 	}
 	return gross
 }
@@ -236,8 +245,8 @@ func (e EmployeeInfo) IncomeTaxYTD() decimal.Decimal {
 // as before, since without pre-tax the income-tax and contribution YTD bases
 // coincide.
 func (e EmployeeInfo) YTDContributionBase() decimal.Decimal {
-	if e.YTDContributionGross.IsPositive() {
-		return e.YTDContributionGross
+	if e.YTDContributionGross != nil {
+		return *e.YTDContributionGross
 	}
 	return e.YTDGross
 }
