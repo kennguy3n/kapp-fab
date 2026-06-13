@@ -286,7 +286,7 @@ var TenantScopedTables = []string{
 	// restore order is satisfied. Default (tenant_id, id) PK, so no
 	// tableConflictKeys entry is required.
 	"bank_transfer_pairs",
-	// Split reconciliation (migration 000094) — partial allocations of
+	// Split reconciliation (migration 000097) — partial allocations of
 	// one bank line across several journal entries.
 	// bank_transaction_allocations FKs bank_transactions (listed earlier
 	// in the Finance block, ON DELETE CASCADE), so the parent lands first
