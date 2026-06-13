@@ -225,8 +225,12 @@ func (s *PayrollStore) UpdateRunTotals(
 	})
 }
 
-// MarkRunPosted links the posted JE to the run and flips it to paid.
-func (s *PayrollStore) MarkRunPosted(ctx context.Context, tenantID, runID, jeID uuid.UUID) error {
+// MarkRunPosted links the posted JE to the run and flips the posted
+// payslips to paid. Only the payslips in paidPayslipIDs — the slips that
+// were actually included in the journal entry (PostPayRun posts only
+// approved slips) — are promoted, so a partially-approved run does not
+// mark its still-draft slips paid against a JE that excluded them.
+func (s *PayrollStore) MarkRunPosted(ctx context.Context, tenantID, runID, jeID uuid.UUID, paidPayslipIDs []uuid.UUID) error {
 	return dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
 			UPDATE payroll_runs
@@ -236,11 +240,14 @@ func (s *PayrollStore) MarkRunPosted(ctx context.Context, tenantID, runID, jeID 
 		); err != nil {
 			return fmt.Errorf("hr: mark payroll_run posted: %w", err)
 		}
+		if len(paidPayslipIDs) == 0 {
+			return nil
+		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE payroll_payslips
 			   SET status = 'paid', posted_je_id = $3, updated_at = $4
-			 WHERE tenant_id = $1 AND run_id = $2 AND status <> 'paid'`,
-			tenantID, runID, jeID, s.now().UTC(),
+			 WHERE tenant_id = $1 AND run_id = $2 AND id = ANY($5) AND status <> 'paid'`,
+			tenantID, runID, jeID, s.now().UTC(), paidPayslipIDs,
 		); err != nil {
 			return fmt.Errorf("hr: mark payroll_payslips paid: %w", err)
 		}

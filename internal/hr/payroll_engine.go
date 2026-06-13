@@ -709,10 +709,17 @@ func (e *PayrollEngine) PostPayRun(
 		}
 	}
 
-	// Sync the typed run + slips to paid and link the JE. Idempotent
-	// (only flips rows not already paid), so retries converge.
+	// Sync the typed run + slips to paid and link the JE. Only the slips
+	// that were actually posted (the approved set, whose ids match the
+	// typed payslip ids) are flipped, so a partially-approved run leaves
+	// its still-draft typed slips untouched. Idempotent (only flips rows
+	// not already paid), so retries converge.
 	if store != nil {
-		if err := store.MarkRunPosted(ctx, tenantID, payRunID, entry.ID); err != nil {
+		paidIDs := make([]uuid.UUID, 0, len(approved))
+		for i := range approved {
+			paidIDs = append(paidIDs, approved[i].ID)
+		}
+		if err := store.MarkRunPosted(ctx, tenantID, payRunID, entry.ID, paidIDs); err != nil {
 			return entry, fmt.Errorf("hr: sync typed payroll status: %w", err)
 		}
 	}
@@ -992,16 +999,15 @@ type payslipData struct {
 	// existed still decode without errors.
 	//
 	// Wire-format coupling: this field reads from the same
-	// `deductions` JSON array written by `linesToJSON` (see
+	// `deductions` JSON array written by `linesToShimJSON` (see
 	// the slip generation path, search for `"deductions"`).
-	// `linesToJSON` emits a `map[string]any` per line with
-	// keys `code`, `name`, `amount` (and optionally
-	// `component_id`); `deductionLine` declares only `Code`
-	// and `Amount` so Go's json.Unmarshal silently drops the
-	// extra keys. Amounts round-trip cleanly because the
-	// writer uses `decimalFloat()` and decimal.Decimal parses
+	// `linesToShimJSON` emits a `map[string]any` per line with
+	// keys `code`, `name`, `amount`; `deductionLine` declares
+	// only `Code` and `Amount` so Go's json.Unmarshal silently
+	// drops the extra keys. Amounts round-trip cleanly because
+	// the writer uses `decimalFloat()` and decimal.Decimal parses
 	// both float64 and string JSON numbers. If either side of
-	// this contract ever drifts (e.g. linesToJSON renames a
+	// this contract ever drifts (e.g. linesToShimJSON renames a
 	// key, or deductionLine adds a tag that conflicts), the
 	// PostPayRun deduction-split path silently loses data, so
 	// the symmetric tests in payroll_engine_*_test.go pin the
