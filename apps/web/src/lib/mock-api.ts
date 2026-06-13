@@ -283,6 +283,42 @@ const handlers = {
     bankFeedSuggestions = bankFeedSuggestions.filter((s) => s.id !== id);
     return delay<void>(undefined as unknown as void);
   },
+  acceptBankFeedSplit: (
+    transactionId: string,
+    allocations: ReadonlyArray<{
+      journal_entry_id: string;
+      amount: string;
+      suggestion_id?: string;
+    }>,
+  ) => {
+    const list = records["finance.bank_transaction"] ?? [];
+    const idx = list.findIndex((r) => r.id === transactionId);
+    // A split clears matched_entry_id (NULL): the allocations are the
+    // source of truth, mirroring the server projection.
+    if (idx !== -1) {
+      const { matched_entry_id: _drop, ...rest } = list[idx].data as Record<string, unknown>;
+      list[idx] = {
+        ...list[idx],
+        data: { ...rest, status: "matched" },
+        updated_at: nowIso(),
+      };
+    }
+    // Collapse every candidate for the now-reconciled line.
+    bankFeedSuggestions = bankFeedSuggestions.filter(
+      (s) => s.transaction_id !== transactionId,
+    );
+    const txn = idx !== -1 ? list[idx] : undefined;
+    // tenant_id is a top-level KRecord field; bank_account_id lives in data.
+    const data = (txn?.data ?? {}) as Record<string, unknown>;
+    return delay({
+      id: transactionId,
+      tenant_id: txn?.tenant_id ?? "",
+      bank_account_id: (data.bank_account_id as string) ?? "",
+      amount: String(data.amount ?? allocations.reduce((a, x) => a + Number(x.amount), 0)),
+      currency: (data.currency as string) ?? "USD",
+      status: "matched",
+    });
+  },
   listBankFeedRules: () => delay([...BANK_FEED_RULES_FIXTURE]),
 
   // --- Search ---------------------------------------------------------

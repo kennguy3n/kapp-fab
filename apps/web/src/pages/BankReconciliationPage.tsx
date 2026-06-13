@@ -348,21 +348,31 @@ export function BankReconciliationPage() {
     }
   }, [lastBulk, txnById, unmatchData, invalidateMatchData]);
 
-  // Reconcile a split: accept each chosen suggestion in turn, mirroring the
-  // bulk-accept loop. Consumes only the existing accept endpoint — the
-  // running-difference gating lives in the composer.
+  // Reconcile a split in a single accept-with-amount call: the server
+  // re-validates the running difference (legs must net to the line amount),
+  // persists each partial allocation, and clears the line atomically. The
+  // composer's net-to-zero gate is UX-only — the ledger never trusts a
+  // client balance. All legs share one transaction id (the line being
+  // cleared); amounts go on the wire as exact decimal strings.
   const reconcileSplit = useCallback(
     async (allocations: SplitAllocation[]) => {
-      if (allocations.length === 0) return;
+      // A split spans >=2 entries; refuse anything smaller here too, so the
+      // page-level guard matches the composer, handler, and matcher invariant
+      // (defense-in-depth — never put a sub-2-leg "split" on the wire).
+      if (allocations.length < 2) return;
+      const transactionId = allocations[0].suggestion.transaction_id;
       setBulkPending(true);
-      let ok = 0;
       try {
-        for (const a of allocations) {
-          await api.acceptBankFeedSuggestion(a.suggestion.id);
-          ok += 1;
-        }
+        await api.acceptBankFeedSplit(
+          transactionId,
+          allocations.map((a) => ({
+            journal_entry_id: a.suggestion.journal_entry_id,
+            amount: String(a.amount),
+            suggestion_id: a.suggestion.id,
+          })),
+        );
         toast.success(
-          rtp("reconciliation.split.done", { count: ok }),
+          rtp("reconciliation.split.done", { count: allocations.length }),
         );
       } catch (e) {
         toast.error(rt("reconciliation.split.failed"), {

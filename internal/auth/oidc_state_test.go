@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -50,10 +51,20 @@ func TestOIDCStateCodec_RejectsTamper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	// Flip a byte near the end (within the ciphertext/tag).
-	b := []byte(sealed)
-	b[len(b)-1] ^= 0x01
-	if _, err := codec.Open(string(b)); err == nil {
+	// Tamper a byte of the *decoded* blob (within the ciphertext/GCM tag),
+	// then re-encode. Flipping a byte of the base64 string directly is
+	// unreliable: RawURLEncoding's final character carries "don't-care"
+	// low bits, so a flip there can decode to identical ciphertext and the
+	// authentic tag still verifies — which made this test flaky. Operating
+	// on the raw bytes guarantees the ciphertext actually changes, so GCM
+	// authentication must reject it every time.
+	raw, err := base64.RawURLEncoding.DecodeString(sealed)
+	if err != nil {
+		t.Fatalf("decode sealed: %v", err)
+	}
+	raw[len(raw)-1] ^= 0x01
+	tampered := base64.RawURLEncoding.EncodeToString(raw)
+	if _, err := codec.Open(tampered); err == nil {
 		t.Fatal("Open accepted tampered ciphertext; want auth failure")
 	}
 }

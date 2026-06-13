@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/kennguy3n/kapp-fab/internal/ledger"
 	"github.com/kennguy3n/kapp-fab/internal/ledger/bankfeed"
@@ -46,6 +47,8 @@ func TestWriteBankFeedErrorMappings(t *testing.T) {
 		{"wrapped suggestion not found → 404", fmt.Errorf("ledger: suggestion x: %w", ledger.ErrSuggestionNotFound), http.StatusNotFound, ""},
 		{"suggestion conflict → 409", ledger.ErrSuggestionConflict, http.StatusConflict, ""},
 		{"wrapped suggestion conflict → 409", fmt.Errorf("ledger: suggestion already accepted: %w", ledger.ErrSuggestionConflict), http.StatusConflict, ""},
+		{"split invalid → 422", ledger.ErrSplitInvalid, http.StatusUnprocessableEntity, ""},
+		{"wrapped split invalid → 422", fmt.Errorf("ledger: split sums to -90, expected -100: %w", ledger.ErrSplitInvalid), http.StatusUnprocessableEntity, ""},
 		{"unrelated → 500 (detail not leaked)", errors.New("pgx: password=hunter2 host=10.0.0.1 pool exhausted"), http.StatusInternalServerError, "hunter2"},
 	}
 	for _, tc := range cases {
@@ -325,5 +328,95 @@ func TestUploadCSVRejectsOversizeBody(t *testing.T) {
 
 	if rr.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversize upload: want 413, got %d (body=%q)", rr.Code, rr.Body.String())
+	}
+}
+
+// TestBankTransactionResponseShape pins the split endpoint's response DTO:
+// snake_case keys, amount as an exact decimal string, and matched_entry_id
+// omitted for a split (it is NULL — the allocations table is the source of
+// truth) but surfaced for a 1:1 match.
+func TestBankTransactionResponseShape(t *testing.T) {
+	t.Parallel()
+	split := ledger.BankTransaction{
+		ID:            uuid.New(),
+		TenantID:      uuid.New(),
+		BankAccountID: uuid.New(),
+		Amount:        decimal.RequireFromString("-100.00"),
+		Currency:      "USD",
+		Status:        ledger.BankTxnMatched,
+	}
+	blob, err := json.Marshal(toBankTransactionResponse(&split))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	out := string(blob)
+	for _, want := range []string{`"amount":"-100"`, `"currency":"USD"`, `"status":"matched"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("txn DTO missing %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out, "matched_entry_id") {
+		t.Fatalf("split DTO should omit matched_entry_id (NULL): %s", out)
+	}
+	// A 1:1 match surfaces matched_entry_id.
+	entry := uuid.New()
+	one := split
+	one.MatchedEntryID = &entry
+	blob, _ = json.Marshal(toBankTransactionResponse(&one))
+	if !strings.Contains(string(blob), `"matched_entry_id":"`+entry.String()+`"`) {
+		t.Fatalf("1:1 DTO should surface matched_entry_id: %s", string(blob))
+	}
+}
+
+// TestAcceptSplitRejectsMalformedRequest covers the handler's client-input
+// validation, all of which runs before any matcher/DB access (so a handler
+// with no wired matcher still exercises every branch). A well-formed but
+// semantically unbalanced split is the matcher's job (422, integration-
+// tested); here we pin the 400s for malformed wire input.
+//
+// The per-field cases (bad entry/amount/suggestion uuid) carry TWO
+// allocations on purpose: the handler rejects len < 2 *before* it iterates
+// allocations to validate fields, so a single-allocation body would be
+// caught at the length gate and never reach the field-level branch under
+// test. Putting the malformed value in the first of two legs guarantees the
+// per-field validation actually runs.
+func TestAcceptSplitRejectsMalformedRequest(t *testing.T) {
+	t.Parallel()
+	txn := uuid.New()
+	entry := uuid.New()
+	entry2 := uuid.New()
+	good := `{"journal_entry_id":"` + entry2.String() + `","amount":"-40.00"}`
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty allocations", `{"allocations":[]}`},
+		{"single allocation", `{"allocations":[{"journal_entry_id":"` + entry.String() + `","amount":"-100.00"}]}`},
+		{"missing allocations", `{}`},
+		{"invalid json", `{`},
+		{"bad entry uuid", `{"allocations":[{"journal_entry_id":"not-a-uuid","amount":"-60.00"},` + good + `]}`},
+		{"bad amount", `{"allocations":[{"journal_entry_id":"` + entry.String() + `","amount":"NaN"},` + good + `]}`},
+		{"bad suggestion uuid", `{"allocations":[{"journal_entry_id":"` + entry.String() + `","amount":"-60.00","suggestion_id":"nope"},` + good + `]}`},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := &bankfeedHandlers{}
+			req := httptest.NewRequest(http.MethodPost,
+				"/api/v1/finance/bank-feeds/bank-transactions/"+txn.String()+"/split",
+				strings.NewReader(tc.body))
+			ctx := platform.WithTenant(req.Context(), &tenant.Tenant{ID: uuid.New()})
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("transaction_id", txn.String())
+			ctx = context.WithValue(ctx, chi.RouteCtxKey, rctx)
+			req = req.WithContext(ctx)
+
+			rr := httptest.NewRecorder()
+			h.acceptSplit(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("%s: want 400, got %d (body=%q)", tc.name, rr.Code, rr.Body.String())
+			}
+		})
 	}
 }

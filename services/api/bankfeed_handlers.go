@@ -817,6 +817,102 @@ func (h *bankfeedHandlers) rejectSuggestion(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// splitAllocationDTO is one leg of a split-reconcile request. amount is a
+// decimal string so the wire value is exact (no float drift); suggestion_id
+// is optional and ties the leg back to a ranked suggestion.
+type splitAllocationDTO struct {
+	JournalEntryID string `json:"journal_entry_id"`
+	Amount         string `json:"amount"`
+	SuggestionID   string `json:"suggestion_id,omitempty"`
+}
+
+type splitRequest struct {
+	Allocations []splitAllocationDTO `json:"allocations"`
+}
+
+// bankTransactionResponse is the explicit wire projection of a reconciled
+// bank line returned by the split endpoint. Like the suggestion DTO, a
+// dedicated projection means an internal field added to BankTransaction
+// later cannot silently leak to a tenant.
+type bankTransactionResponse struct {
+	ID             uuid.UUID  `json:"id"`
+	TenantID       uuid.UUID  `json:"tenant_id"`
+	BankAccountID  uuid.UUID  `json:"bank_account_id"`
+	Amount         string     `json:"amount"`
+	Currency       string     `json:"currency"`
+	Status         string     `json:"status"`
+	MatchedEntryID *uuid.UUID `json:"matched_entry_id,omitempty"`
+}
+
+func toBankTransactionResponse(t *ledger.BankTransaction) bankTransactionResponse {
+	return bankTransactionResponse{
+		ID:             t.ID,
+		TenantID:       t.TenantID,
+		BankAccountID:  t.BankAccountID,
+		Amount:         t.Amount.String(),
+		Currency:       t.Currency,
+		Status:         t.Status,
+		MatchedEntryID: t.MatchedEntryID,
+	}
+}
+
+// acceptSplit reconciles one bank line across multiple journal entries,
+// recording each leg's partial amount. The running-difference gate the web
+// composer enforces is re-validated server-side (see SmartMatcher.AcceptSplit)
+// — an unbalanced or malformed split is a 422, a line already reconciled a 409.
+func (h *bankfeedHandlers) acceptSplit(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	txnID, ok := parseUUIDParam(w, r, "transaction_id")
+	if !ok {
+		return
+	}
+	var req splitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	// A split spans >=2 entries; a single allocation is a 1:1 match and
+	// must use the accept endpoint (which sets matched_entry_id) rather
+	// than this one (which leaves it NULL). The matcher re-checks this.
+	if len(req.Allocations) < 2 {
+		http.Error(w, "a split requires at least two allocations", http.StatusBadRequest)
+		return
+	}
+	legs := make([]ledger.SplitLeg, 0, len(req.Allocations))
+	for _, a := range req.Allocations {
+		entryID, err := uuid.Parse(strings.TrimSpace(a.JournalEntryID))
+		if err != nil {
+			http.Error(w, "journal_entry_id must be a valid UUID", http.StatusBadRequest)
+			return
+		}
+		amount, err := decimal.NewFromString(strings.TrimSpace(a.Amount))
+		if err != nil {
+			http.Error(w, "amount must be a decimal string", http.StatusBadRequest)
+			return
+		}
+		leg := ledger.SplitLeg{JournalEntryID: entryID, Amount: amount}
+		if s := strings.TrimSpace(a.SuggestionID); s != "" {
+			sugID, err := uuid.Parse(s)
+			if err != nil {
+				http.Error(w, "suggestion_id must be a valid UUID", http.StatusBadRequest)
+				return
+			}
+			leg.SuggestionID = sugID
+		}
+		legs = append(legs, leg)
+	}
+	out, err := h.matcher.AcceptSplit(r.Context(), t.ID, txnID, legs, actorOrDefault(r.Context()))
+	if err != nil {
+		writeBankFeedError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toBankTransactionResponse(out))
+}
+
 // writeBankFeedError maps the bankfeed / matcher errors to HTTP status
 // codes consistent with the rest of the API surface. Unknown / unconfigured
 // providers are a client-addressable 4xx whose sentinel message is safe to
@@ -837,6 +933,11 @@ func writeBankFeedError(w http.ResponseWriter, r *http.Request, err error) {
 		// The suggestion exists but is no longer actionable (already
 		// decided, or its transaction has since been reconciled). 409.
 		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, ledger.ErrSplitInvalid):
+		// A split-reconcile request is well-formed JSON but semantically
+		// unprocessable (unbalanced, duplicate or missing entries). The
+		// operator can correct it, so it's a 422, not a server fault.
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 	case errors.Is(err, bankfeed.ErrProviderNotConfigured):
 		// Provider selected but credentials absent — the operator must
 		// configure it (or the deployment is fail-closed). 503-class.

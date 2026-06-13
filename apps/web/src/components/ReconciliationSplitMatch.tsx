@@ -30,10 +30,12 @@ interface AllocationRow {
  * an operator allocate one bank line across several candidate ledger
  * entries, shows the running difference (line amount − allocations), and
  * only enables reconciliation once the split nets to zero (within the
- * half-cent tolerance). It consumes the same accept endpoint as a single
- * match — the parent accepts each chosen suggestion — so no backend change
- * is required; the value here is the balance-to-zero workflow Xero and
- * QuickBooks operators rely on for one-to-many clears.
+ * half-cent tolerance). The parent sends the chosen legs (entry + partial
+ * amount) to the accept-with-amount endpoint in a single call, which
+ * re-validates the balance server-side and persists each allocation. The
+ * net-to-zero gate here is UX-only — it keeps the operator's math honest
+ * before the round-trip; the ledger is the source of truth. This is the
+ * balance-to-zero, one-to-many clear Xero and QuickBooks operators rely on.
  */
 export function ReconciliationSplitMatch({
   txn,
@@ -78,8 +80,10 @@ export function ReconciliationSplitMatch({
   const balanced = isBalanced(remaining);
 
   // A row is complete when it names a candidate and carries a finite,
-  // non-zero amount. The reconcile gate needs at least one complete row,
-  // a zero remaining, and no two rows pointing at the same ledger entry.
+  // non-zero amount. The reconcile gate needs at least TWO complete rows
+  // (a split spans >=2 entries; a single entry is a 1:1 accept), a zero
+  // remaining, and no two rows pointing at the same ledger entry. The
+  // server enforces the same >=2 / distinct / balanced invariants.
   const completeRows = rows.filter(
     (r) => r.suggestionId !== "" && Number.isFinite(Number(r.raw)) && Number(r.raw) !== 0,
   );
@@ -87,7 +91,7 @@ export function ReconciliationSplitMatch({
     new Set(completeRows.map((r) => r.suggestionId)).size ===
     completeRows.length;
   const canReconcile =
-    !pending && balanced && completeRows.length >= 1 && distinctEntries;
+    !pending && balanced && completeRows.length >= 2 && distinctEntries;
 
   const setRow = (key: string, patch: Partial<AllocationRow>) =>
     setRows((prev) =>
@@ -106,7 +110,11 @@ export function ReconciliationSplitMatch({
       const s = suggestionById.get(r.suggestionId);
       if (s) allocations.push({ suggestion: s, amount: Number(r.raw) });
     }
-    if (allocations.length > 0) onReconcile(allocations);
+    // Dispatch on the SAME >=2 invariant as the gate. completeRows and
+    // suggestionById both derive from the suggestions prop, so a row can
+    // only fail the lookup if the candidate list shrank mid-edit; refusing
+    // here keeps us from ever sending a <2-leg "split" the server rejects.
+    if (allocations.length >= 2) onReconcile(allocations);
   };
 
   return (

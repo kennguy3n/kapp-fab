@@ -1613,6 +1613,36 @@ export class ApiClient {
     );
   }
 
+  /**
+   * Split-reconcile one bank line across several journal entries with
+   * partial amounts (the accept-with-amount path). The server re-validates
+   * the running difference (legs must net to the line amount within a
+   * half-cent tolerance), enforces distinct entries, and persists each leg
+   * to bank_transaction_allocations atomically — the client gate in the
+   * split composer is UX-only. `amount` is a decimal string to avoid float
+   * drift on the wire; `suggestion_id` is optional (present when the leg
+   * came from a smart-matcher suggestion, so it can be marked accepted).
+   */
+  acceptBankFeedSplit(
+    transactionId: string,
+    allocations: ReadonlyArray<{
+      journal_entry_id: string;
+      amount: string;
+      suggestion_id?: string;
+    }>
+  ): Promise<BankTransactionResult> {
+    return this.request(
+      `/finance/bank-feeds/bank-transactions/${encodeURIComponent(
+        transactionId
+      )}/split`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ allocations }),
+      }
+    );
+  }
+
   /** Post a draft finance.credit_note KRecord. Reverses the AR posting
    *  of the referenced invoice (Dr Revenue, Cr AR). */
   postCreditNote(id: string): Promise<JournalEntry> {
@@ -3500,6 +3530,23 @@ export interface BankFeedSuggestion {
   match_reason: string;
   status: string;
   created_at: string;
+}
+
+/**
+ * BankTransactionResult is the reconciled bank line returned by
+ * acceptBankFeedSplit. `matched_entry_id` is intentionally optional: a
+ * split clears it (NULL) because the allocations table is the source of
+ * truth for one-to-many clears, whereas a 1:1 match carries the single
+ * entry id. `amount` is a decimal string, matching the rest of the SDK.
+ */
+export interface BankTransactionResult {
+  id: string;
+  tenant_id: string;
+  bank_account_id: string;
+  amount: string;
+  currency: string;
+  status: string;
+  matched_entry_id?: string;
 }
 
 // --- Recruitment (Session 16) ------------------------------------------

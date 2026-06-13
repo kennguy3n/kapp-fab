@@ -128,6 +128,10 @@ TABLES=(
   # Transfer detection (000091). FKs bank_transactions (listed earlier);
   # default (tenant_id, id) PK.
   bank_transfer_pairs
+  # Split reconciliation (000094) — partial allocations of one bank line
+  # across several journal entries. FKs bank_transactions (listed
+  # earlier, ON DELETE CASCADE); default (tenant_id, id) PK.
+  bank_transaction_allocations
   # Workstream 3 (000090) — FX revaluation run audit trail. Default
   # (tenant_id, id) PK, no FK to other tenant-scoped tables.
   fx_revaluation_runs

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -56,7 +57,32 @@ var (
 	// no longer actionable (already accepted/rejected, or its transaction
 	// has since been reconciled by another path).
 	ErrSuggestionConflict = errors.New("ledger: suggestion no longer actionable")
+	// ErrSplitInvalid is returned when a split-reconcile request is
+	// malformed in a way the operator can correct: no legs, duplicate
+	// journal entries, a leg in a different currency than the bank line,
+	// or legs that do not sum to the line's amount. It is a 422 (the
+	// request is well-formed JSON but semantically unprocessable), never a
+	// server fault — the ledger re-validates every split server-side and
+	// refuses to persist an unbalanced reconciliation.
+	ErrSplitInvalid = errors.New("ledger: split allocation invalid")
 )
+
+// SplitAmountTolerance is the absolute slack allowed between the sum of a
+// split's legs and the bank line's amount. Half a cent absorbs the
+// rounding an operator's per-line figures can carry while still rejecting
+// a genuinely unbalanced split. It mirrors the web composer's gate so the
+// client and server agree on what "balanced" means.
+var SplitAmountTolerance = decimal.RequireFromString("0.005")
+
+// SplitLeg is one allocation of a bank line to a journal entry. Amount is
+// the signed partial figure in the bank line's currency; SuggestionID
+// optionally ties the leg back to a ranked suggestion so it is marked
+// accepted (and its siblings collapsed) just like a single accept.
+type SplitLeg struct {
+	SuggestionID   uuid.UUID
+	JournalEntryID uuid.UUID
+	Amount         decimal.Decimal
+}
 
 // DefaultMinConfidence is the floor below which a candidate is not worth
 // surfacing as a suggestion. 0.5 keeps the queue signal-rich (an exact
@@ -453,6 +479,19 @@ func (m *SmartMatcher) AcceptSuggestion(ctx context.Context, tenantID, suggestio
 		} else if ct.RowsAffected() == 0 {
 			return fmt.Errorf("ledger: transaction no longer unreconciled: %w", ErrSuggestionConflict)
 		}
+		// A 1:1 accept records its match via matched_entry_id, so any
+		// allocation rows are stale: this line may have been split earlier,
+		// unmatched, and is now accepted single-leg. Leaving them would put
+		// the line in a contradictory state (non-NULL matched_entry_id *and*
+		// split allocations), so any reader of bank_transaction_allocations
+		// would wrongly treat it as split-reconciled. Mirror AcceptSplit's
+		// cleanup and clear them.
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM bank_transaction_allocations WHERE tenant_id = $1 AND transaction_id = $2`,
+			tenantID, s.TransactionID,
+		); err != nil {
+			return fmt.Errorf("ledger: clear stale allocations: %w", err)
+		}
 		// Mark this suggestion accepted and any sibling open suggestions
 		// rejected so the queue collapses to the decided state.
 		if _, err := tx.Exec(ctx,
@@ -478,6 +517,208 @@ func (m *SmartMatcher) AcceptSuggestion(ctx context.Context, tenantID, suggestio
 		return nil, err
 	}
 	return accepted, nil
+}
+
+// AcceptSplit reconciles one bank line against several journal entries in a
+// single tenant-scoped transaction, recording each leg's partial amount in
+// bank_transaction_allocations. It is the multi-entry counterpart to
+// AcceptSuggestion: the operator allocates the line across >1 entries and
+// the split is persisted only when it nets to the line's amount.
+//
+// Every invariant the web composer surfaces is RE-VALIDATED here — the
+// server never trusts a client-sent balance for a financial mutation:
+//   - at least two legs, with distinct journal entries and non-zero amounts
+//   - every journal entry exists under the tenant's RLS scope
+//   - sum(leg.Amount) == line.amount within SplitAmountTolerance
+//   - (currency is implicitly the line's; legs carry no separate currency,
+//     so a split cannot silently mix currencies)
+//
+// On success the line moves to 'matched' with matched_entry_id left NULL
+// (the allocations table is the source of truth for a split); any chosen
+// suggestion is marked accepted and the line's other open suggestions are
+// collapsed to rejected, mirroring AcceptSuggestion. The learner is fed
+// once per entry and an audit row is written.
+func (m *SmartMatcher) AcceptSplit(ctx context.Context, tenantID, txnID uuid.UUID, legs []SplitLeg, actor uuid.UUID) (*BankTransaction, error) {
+	if tenantID == uuid.Nil || txnID == uuid.Nil {
+		return nil, errors.New("ledger: tenant_id and transaction_id required")
+	}
+	// A split must span at least two entries. A single-leg "split" is a
+	// 1:1 match and must go through AcceptSuggestion so the line keeps its
+	// matched_entry_id pointer — routing it here would instead leave that
+	// column NULL and diverge the data model for an identical outcome.
+	if len(legs) < 2 {
+		return nil, fmt.Errorf("ledger: split needs at least two allocations: %w", ErrSplitInvalid)
+	}
+	seen := make(map[uuid.UUID]struct{}, len(legs))
+	sum := decimal.Zero
+	for _, leg := range legs {
+		if leg.JournalEntryID == uuid.Nil {
+			return nil, fmt.Errorf("ledger: split leg missing journal_entry_id: %w", ErrSplitInvalid)
+		}
+		// A zero-amount leg is meaningless: it persists a junk allocation row
+		// that contributes nothing to the balance. The composer already drops
+		// such rows, but the server must not trust the client — reject it here.
+		if leg.Amount.IsZero() {
+			return nil, fmt.Errorf("ledger: split entry %s has zero amount: %w", leg.JournalEntryID, ErrSplitInvalid)
+		}
+		if _, dup := seen[leg.JournalEntryID]; dup {
+			return nil, fmt.Errorf("ledger: split entry %s allocated twice: %w", leg.JournalEntryID, ErrSplitInvalid)
+		}
+		seen[leg.JournalEntryID] = struct{}{}
+		sum = sum.Add(leg.Amount)
+	}
+
+	var out *BankTransaction
+	err := dbutil.WithTenantTx(ctx, m.store.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var (
+			line    BankTransaction
+			amount  decimal.Decimal
+			matched *uuid.UUID
+			extern  *string
+			status  string
+		)
+		if err := tx.QueryRow(ctx,
+			`SELECT id, tenant_id, bank_account_id, value_date, COALESCE(description,''),
+			        amount, currency, status, matched_entry_id, external_ref
+			   FROM bank_transactions WHERE tenant_id = $1 AND id = $2`,
+			tenantID, txnID,
+		).Scan(&line.ID, &line.TenantID, &line.BankAccountID, &line.ValueDate, &line.Description,
+			&amount, &line.Currency, &status, &matched, &extern); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("ledger: transaction %s: %w", txnID, ErrSuggestionNotFound)
+			}
+			return fmt.Errorf("ledger: load transaction: %w", err)
+		}
+		if status != BankTxnUnreconciled {
+			return fmt.Errorf("ledger: transaction already %s: %w", status, ErrSuggestionConflict)
+		}
+		// Net-zero check: the legs must reconstruct the line's amount. A
+		// split that leaves a residual is exactly what we must refuse.
+		if sum.Sub(amount).Abs().GreaterThan(SplitAmountTolerance) {
+			return fmt.Errorf("ledger: split sums to %s, expected %s: %w", sum, amount, ErrSplitInvalid)
+		}
+		// Every entry must exist under the tenant. The RLS policy already
+		// scopes the read, so a cross-tenant id simply isn't visible here.
+		for _, leg := range legs {
+			var exists bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS(SELECT 1 FROM journal_entries WHERE tenant_id = $1 AND id = $2)`,
+				tenantID, leg.JournalEntryID).Scan(&exists); err != nil {
+				return fmt.Errorf("ledger: verify entry: %w", err)
+			}
+			if !exists {
+				return fmt.Errorf("ledger: journal entry %s: %w", leg.JournalEntryID, ErrSuggestionNotFound)
+			}
+		}
+
+		now := m.now()
+		// Reconcile the line. Guarded on status so two concurrent splits (or
+		// a split racing a single accept) cannot both win.
+		if ct, err := tx.Exec(ctx,
+			`UPDATE bank_transactions SET status = $3, matched_entry_id = NULL
+			  WHERE tenant_id = $1 AND id = $2 AND status = $4`,
+			tenantID, txnID, BankTxnMatched, BankTxnUnreconciled,
+		); err != nil {
+			return fmt.Errorf("ledger: reconcile via split: %w", err)
+		} else if ct.RowsAffected() == 0 {
+			return fmt.Errorf("ledger: transaction no longer unreconciled: %w", ErrSuggestionConflict)
+		}
+
+		var actorID *uuid.UUID
+		if actor != uuid.Nil {
+			a := actor
+			actorID = &a
+		}
+		// Clear any allocation rows already attached to this line before
+		// re-inserting. A line can be unmatched (status reset to
+		// unreconciled) and then re-split against a *different* set of
+		// entries; without this, the prior split's rows for entries absent
+		// from the new split would linger as orphans and corrupt the
+		// allocations table — the source of truth for the split. Deleting
+		// first gives every split a clean slate, so the table always
+		// reflects exactly the current legs.
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM bank_transaction_allocations WHERE tenant_id = $1 AND transaction_id = $2`,
+			tenantID, txnID,
+		); err != nil {
+			return fmt.Errorf("ledger: clear prior allocations: %w", err)
+		}
+		for _, leg := range legs {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO bank_transaction_allocations
+				    (tenant_id, id, transaction_id, journal_entry_id, amount, created_by, created_at)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+				tenantID, uuid.New(), txnID, leg.JournalEntryID, leg.Amount, actorID, now,
+			); err != nil {
+				return fmt.Errorf("ledger: insert allocation: %w", err)
+			}
+			// Accept the leg's suggestion if one was cited; ignore a stale
+			// id (already decided) rather than fail the whole split. Scope to
+			// transaction_id so a cited suggestion belonging to a *different*
+			// bank line can never be flipped to accepted by this split — that
+			// would strand the other line unreconciled with an accepted
+			// suggestion no longer in its review queue.
+			if leg.SuggestionID != uuid.Nil {
+				if _, err := tx.Exec(ctx,
+					`UPDATE bank_match_suggestions SET status = $3, updated_at = $4
+					  WHERE tenant_id = $1 AND id = $2 AND status = $5 AND transaction_id = $6`,
+					tenantID, leg.SuggestionID, SuggestionAccepted, now, SuggestionSuggested, txnID); err != nil {
+					return fmt.Errorf("ledger: accept split suggestion: %w", err)
+				}
+			}
+			if err := m.learnFromMatchTx(ctx, tx, tenantID, txnID, leg.JournalEntryID, now); err != nil {
+				return err
+			}
+		}
+		// Collapse any remaining open suggestions for this line so the queue
+		// reflects the decided state.
+		if _, err := tx.Exec(ctx,
+			`UPDATE bank_match_suggestions SET status = $3, updated_at = $4
+			  WHERE tenant_id = $1 AND transaction_id = $2 AND status = $5`,
+			tenantID, txnID, SuggestionRejected, now, SuggestionSuggested); err != nil {
+			return fmt.Errorf("ledger: collapse suggestions: %w", err)
+		}
+
+		line.Amount = amount
+		line.Status = BankTxnMatched
+		line.MatchedEntryID = nil
+		if extern != nil {
+			line.ExternalRef = *extern
+		}
+		out = &line
+		return m.auditSplit(ctx, tx, tenantID, actorID, txnID, len(legs))
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// auditSplit records a single audit entry for a split reconciliation,
+// keyed on the bank transaction (not a suggestion, since a split may span
+// several or none).
+func (m *SmartMatcher) auditSplit(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, actor *uuid.UUID, txnID uuid.UUID, legs int) error {
+	if m.store.auditor == nil {
+		return nil
+	}
+	id := txnID
+	actorKind := audit.ActorUser
+	if actor == nil || *actor == uuid.Nil {
+		actorKind = audit.ActorSystem
+		actor = nil
+	}
+	// Record how many legs the split cleared so a forensic review can tell
+	// a 2-way split from a 5-way one without re-reading the allocations.
+	auditCtx, _ := json.Marshal(map[string]any{"legs": legs})
+	return m.store.auditor.LogTx(ctx, tx, audit.Entry{
+		TenantID:    tenantID,
+		ActorID:     actor,
+		ActorKind:   actorKind,
+		Action:      "finance.bank_feed.transaction.split",
+		TargetKType: "finance.bank_transaction",
+		TargetID:    &id,
+		Context:     auditCtx,
+	})
 }
 
 // RejectSuggestion marks a single suggestion rejected without touching
