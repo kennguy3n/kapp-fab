@@ -1,0 +1,35 @@
+-- Inventory — close the RLS bypass on the `stock_levels` view.
+--
+-- `stock_levels` (migrations/000005_inventory.sql) projects the live
+-- SUM(qty) per (tenant_id, item_id, warehouse_id) from the append-only
+-- `inventory_moves` ledger. Its 000005 comment claims it inherits
+-- tenant isolation via "the default `security_invoker = true` behaviour
+-- on Postgres 15+", but that is NOT the default: a view runs with the
+-- privileges of its OWNER unless it is explicitly declared
+-- `security_invoker = true`. The view is owned by `kapp` (which also
+-- owns `inventory_moves`), and `inventory_moves` is not declared FORCE
+-- ROW LEVEL SECURITY, so the owner is exempt from its own RLS policy.
+-- The net effect: querying `stock_levels` as the application role
+-- `kapp_app` runs the underlying scan as `kapp` and BYPASSES the
+-- `tenant_isolation` policy on `inventory_moves` — every tenant's stock
+-- could leak through the view to any caller that forgot an explicit
+-- `tenant_id` predicate.
+--
+-- This migration fixes the root cause by flipping the view to
+-- `security_invoker = true`, exactly mirroring what 000089 did for the
+-- sibling `stock_levels_by_batch` projection. The view then scans
+-- `inventory_moves` as the *invoking* role, so the `tenant_isolation`
+-- policy becomes a hard backstop: an unset / wrong `app.tenant_id` GUC
+-- yields zero rows (default-deny), matching every other tenant-scoped
+-- surface. Legitimate callers are unaffected — they already run inside
+-- `dbutil.WithTenantTx` with the GUC set (RLS returns their tenant's
+-- rows), and the BYPASSRLS `kapp_admin` control-plane pool still reads
+-- across tenants regardless of the view option.
+--
+-- Forward-only (no .down companion): re-tightening isolation is never
+-- something we want an automated rollback to silently undo. `ALTER
+-- VIEW ... SET` is surgical and leaves the projection definition in
+-- 000005 untouched; re-running it is harmless (the option is simply set
+-- to true again).
+
+ALTER VIEW stock_levels SET (security_invoker = true);

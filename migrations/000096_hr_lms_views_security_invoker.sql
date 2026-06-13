@@ -1,0 +1,33 @@
+-- HR / LMS — close the same RLS bypass on the `leave_balances` and
+-- `enrollment_progress` views that 000095 fixed for `stock_levels`.
+--
+-- Both views were created (000006_hr.sql, 000007_lms.sql) without
+-- WITH (security_invoker = true) and carry the same incorrect comment
+-- claiming security_invoker is the Postgres 15+ default. It is not: a
+-- view runs with the privileges of its OWNER unless explicitly declared
+-- security_invoker, and the owner `kapp` also owns the RLS-protected
+-- base tables, which are not FORCE ROW LEVEL SECURITY — so the owner is
+-- exempt from their tenant_isolation policies.
+--
+--   * leave_balances  -> base leave_ledger  (RLS enabled, not FORCEd)
+--   * enrollment_progress -> base lesson_progress (RLS enabled, not FORCEd)
+--
+-- Queried as the application role `kapp_app`, each view scans its base
+-- table as `kapp` and BYPASSES tenant isolation — every tenant's HR
+-- leave balances / LMS progress could leak to any caller that forgot an
+-- explicit tenant_id predicate.
+--
+-- Flip both views to security_invoker = true so they scan their base
+-- table as the *invoking* role, making the tenant_isolation policy a
+-- hard backstop: an unset / wrong app.tenant_id GUC yields zero rows
+-- (default-deny). Legitimate callers run inside dbutil.WithTenantTx with
+-- the GUC set and are unaffected; the BYPASSRLS `kapp_admin` pool still
+-- reads across tenants regardless of the view option.
+--
+-- Forward-only (no .down companion): re-tightening isolation is never
+-- something we want an automated rollback to silently undo. ALTER VIEW
+-- ... SET is surgical and leaves the projection definitions in 000006 /
+-- 000007 untouched; re-running it is harmless.
+
+ALTER VIEW leave_balances SET (security_invoker = true);
+ALTER VIEW enrollment_progress SET (security_invoker = true);
