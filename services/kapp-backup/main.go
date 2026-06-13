@@ -286,6 +286,13 @@ var TenantScopedTables = []string{
 	// restore order is satisfied. Default (tenant_id, id) PK, so no
 	// tableConflictKeys entry is required.
 	"bank_transfer_pairs",
+	// Split reconciliation (migration 000094) — partial allocations of
+	// one bank line across several journal entries.
+	// bank_transaction_allocations FKs bank_transactions (listed earlier
+	// in the Finance block, ON DELETE CASCADE), so the parent lands first
+	// on restore. Default (tenant_id, id) PK so the fallback ON CONFLICT
+	// path applies; no tableConflictKeys entry required.
+	"bank_transaction_allocations",
 	// Workstream 3 (migration 000090) — on-demand FX revaluation run
 	// audit trail. Default (tenant_id, id) PK so the fallback ON
 	// CONFLICT path applies; no tableConflictKeys entry required. No

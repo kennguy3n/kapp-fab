@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -667,6 +668,9 @@ func (m *SmartMatcher) auditSplit(ctx context.Context, tx pgx.Tx, tenantID uuid.
 		actorKind = audit.ActorSystem
 		actor = nil
 	}
+	// Record how many legs the split cleared so a forensic review can tell
+	// a 2-way split from a 5-way one without re-reading the allocations.
+	auditCtx, _ := json.Marshal(map[string]any{"legs": legs})
 	return m.store.auditor.LogTx(ctx, tx, audit.Entry{
 		TenantID:    tenantID,
 		ActorID:     actor,
@@ -674,6 +678,7 @@ func (m *SmartMatcher) auditSplit(ctx context.Context, tx pgx.Tx, tenantID uuid.
 		Action:      "finance.bank_feed.transaction.split",
 		TargetKType: "finance.bank_transaction",
 		TargetID:    &id,
+		Context:     auditCtx,
 	})
 }
 
