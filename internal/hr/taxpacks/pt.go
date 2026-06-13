@@ -97,7 +97,7 @@ var (
 //   - PT_SEG_SOCIAL    (Segurança Social employee share at 11%)
 //
 // Negative or zero gross / period return nil.
-func (ptPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (ptPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -109,7 +109,9 @@ func (ptPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return nil, nil
 	}
-	annualGross := gross.Div(periodFraction)
+	// IRS (incl. sobretaxa) runs on the post-pre-tax base; Seguranca
+	// Social keeps the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	out := []Deduction{}
 
@@ -134,8 +136,9 @@ func (ptPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 		})
 	}
 
-	// Segurança Social — 11% on gross, no cap.
-	if ss := gross.Mul(ptSSRate).Round(2); ss.IsPositive() {
+	// Segurança Social — 11% on the contribution base (full gross by
+	// default), no cap.
+	if ss := e.ContributionBase(gross).Mul(ptSSRate).Round(2); ss.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "PT_SS",
 			Name:   "Segurança Social (employee, PT)",

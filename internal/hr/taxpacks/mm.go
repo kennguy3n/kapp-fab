@@ -101,7 +101,8 @@ func (mmPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	out := []Deduction{}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(mmAnnualPeriodFraction)
-	annualGross := gross.Div(periodFraction)
+	// Income tax runs on the post-pre-tax base; SSB keeps the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	var taxable decimal.Decimal
 	if e.Resident {
@@ -146,8 +147,9 @@ func (mmPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		return out, nil
 	}
 
-	// SSB employee contribution: 2% of monthly wage, capped.
-	ssbBase := gross
+	// SSB employee contribution: 2% of the contribution base (full gross
+	// by default), capped.
+	ssbBase := e.ContributionBase(gross)
 	if ssbBase.GreaterThan(mmSSBContributoryCap) {
 		ssbBase = mmSSBContributoryCap
 	}

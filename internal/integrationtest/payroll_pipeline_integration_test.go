@@ -125,13 +125,23 @@ func TestPayrollPipeline_EndToEnd(t *testing.T) {
 
 	assertLinesInPipelineOrder(t, store, tn.ID, slip1ID)
 
-	// YTD after month1: cumulative taxable gross == taxable1.
+	// YTD after month1, dual-base: cumulative_gross tracks the full gross,
+	// cumulative_taxable the income-tax base, cumulative_contribution_gross
+	// the contribution base. The PENSION pre-tax deduction is a default
+	// 401(k)-style item (not flagged to reduce contributions), so the
+	// contribution base equals the full gross.
 	ytd1, err := store.LoadYTD(ctx, tn.ID, empID, 2026)
 	if err != nil {
 		t.Fatalf("load ytd month1: %v", err)
 	}
-	if !ytd1.Exists || !ytd1.CumulativeGross.Equal(taxable1) {
-		t.Fatalf("month1 ytd cumulative_gross = %s (exists=%v), want %s", ytd1.CumulativeGross, ytd1.Exists, taxable1)
+	if !ytd1.Exists || !ytd1.CumulativeGross.Equal(gross1) {
+		t.Fatalf("month1 ytd cumulative_gross = %s (exists=%v), want %s", ytd1.CumulativeGross, ytd1.Exists, gross1)
+	}
+	if !ytd1.CumulativeTaxable.Equal(taxable1) {
+		t.Fatalf("month1 ytd cumulative_taxable = %s, want %s", ytd1.CumulativeTaxable, taxable1)
+	}
+	if !ytd1.CumulativeContributionGross.Equal(gross1) {
+		t.Fatalf("month1 ytd cumulative_contribution_gross = %s, want %s (pre-tax does not reduce it)", ytd1.CumulativeContributionGross, gross1)
 	}
 	if !ytd1.CumulativeTax.Equal(tax1) {
 		t.Fatalf("month1 ytd cumulative_tax = %s, want %s", ytd1.CumulativeTax, tax1)
@@ -170,14 +180,19 @@ func TestPayrollPipeline_EndToEnd(t *testing.T) {
 		t.Fatalf("month2 taxable = %s, want 2800", taxable2)
 	}
 
-	// YTD now spans both runs: cumulative taxable = taxable1 + taxable2.
+	// YTD now spans both runs. cumulative_taxable = taxable1 + taxable2;
+	// cumulative_gross = gross1 + gross2 (full gross).
 	ytd2, err := store.LoadYTD(ctx, tn.ID, empID, 2026)
 	if err != nil {
 		t.Fatalf("load ytd month2: %v", err)
 	}
-	wantCum := taxable1.Add(taxable2)
-	if !ytd2.CumulativeGross.Equal(wantCum) {
-		t.Fatalf("month2 ytd cumulative_gross = %s, want %s", ytd2.CumulativeGross, wantCum)
+	wantCumTaxable := taxable1.Add(taxable2)
+	if !ytd2.CumulativeTaxable.Equal(wantCumTaxable) {
+		t.Fatalf("month2 ytd cumulative_taxable = %s, want %s", ytd2.CumulativeTaxable, wantCumTaxable)
+	}
+	wantCumGross := gross1.Add(gross2)
+	if !ytd2.CumulativeGross.Equal(wantCumGross) {
+		t.Fatalf("month2 ytd cumulative_gross = %s, want %s", ytd2.CumulativeGross, wantCumGross)
 	}
 
 	// --- GL tie-out: approve month1's slip and post the run. ------------
@@ -317,16 +332,17 @@ func TestPayrollPipeline_ConcurrentYTD(t *testing.T) {
 		pe, _ := time.Parse("2006-01-02", end)
 		amt := decimal.NewFromInt(taxable)
 		return hr.FinalizeInput{
-			TenantID:     tn.ID,
-			RunID:        runID,
-			PayslipID:    uuid.New(),
-			EmployeeID:   empID,
-			Currency:     "USD",
-			PeriodStart:  ps,
-			PeriodEnd:    pe,
-			TaxYear:      2026,
-			Gross:        amt,
-			TaxableGross: amt,
+			TenantID:          tn.ID,
+			RunID:             runID,
+			PayslipID:         uuid.New(),
+			EmployeeID:        empID,
+			Currency:          "USD",
+			PeriodStart:       ps,
+			PeriodEnd:         pe,
+			TaxYear:           2026,
+			Gross:             amt,
+			TaxableGross:      amt,
+			ContributionGross: amt,
 			Earnings: []hr.PayslipLine{
 				{Code: "BASE", Label: "Base Salary", Amount: amt, Taxable: true},
 			},
@@ -367,5 +383,8 @@ func TestPayrollPipeline_ConcurrentYTD(t *testing.T) {
 	}
 	if want := decimal.NewFromInt(3000); !ytd.CumulativeGross.Equal(want) {
 		t.Fatalf("ytd cumulative_gross = %s, want %s (double-count or lost update)", ytd.CumulativeGross, want)
+	}
+	if want := decimal.NewFromInt(3000); !ytd.CumulativeContributionGross.Equal(want) {
+		t.Fatalf("ytd cumulative_contribution_gross = %s, want %s (double-count or lost update)", ytd.CumulativeContributionGross, want)
 	}
 }

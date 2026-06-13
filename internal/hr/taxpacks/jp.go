@@ -120,7 +120,7 @@ func (jpPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// + 2.1% reconstruction surtax on 20% = 0.42%).
 	if !e.Resident {
 		nrRate := dec("0.20").Mul(dec("1.021"))
-		nr := gross.Mul(nrRate).Round(2)
+		nr := e.IncomeTaxBase(gross).Mul(nrRate).Round(2)
 		if nr.IsPositive() {
 			out = append(out, Deduction{
 				Code:   "JP_NONRESIDENT_TAX",
@@ -132,7 +132,9 @@ func (jpPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(jpAnnualPeriodFraction)
-	annualGross := gross.Div(periodFraction)
+	// Income tax runs on the post-pre-tax base; social-insurance lines
+	// below keep using the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 	annualTax := walkJPBrackets(annualGross)
 	// Add 2.1% reconstruction surtax.
 	annualTaxWithSurtax := annualTax.Mul(decimal.NewFromInt(1).Add(jpReconstructionSurtax))
@@ -145,9 +147,9 @@ func (jpPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		})
 	}
 
-	// Social insurance: monthly-equivalent gross as standard-
-	// remuneration proxy.
-	monthlyEquiv := gross.Mul(jpMonthlyDaysApprox).Div(decimal.NewFromInt(int64(days)))
+	// Social insurance: monthly-equivalent contribution base (full gross
+	// by default) as standard-remuneration proxy.
+	monthlyEquiv := e.ContributionBase(gross).Mul(jpMonthlyDaysApprox).Div(decimal.NewFromInt(int64(days)))
 
 	health := monthlyEquiv.Mul(jpHealthInsuranceRate)
 	healthPeriod := health.Mul(decimal.NewFromInt(int64(days))).Div(jpMonthlyDaysApprox).Round(2)

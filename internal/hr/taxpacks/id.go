@@ -131,7 +131,7 @@ func (idPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 
 	// Non-resident: flat 20% on gross, no BPJS.
 	if !e.Resident {
-		nr := gross.Mul(idNonResidentRate).Round(2)
+		nr := e.IncomeTaxBase(gross).Mul(idNonResidentRate).Round(2)
 		if nr.IsPositive() {
 			out = append(out, Deduction{
 				Code:   "ID_NONRESIDENT_TAX",
@@ -143,7 +143,9 @@ func (idPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(idPeriodsPerYear)
-	annualGross := gross.Div(periodFraction)
+	// PPh 21 income tax runs on the post-pre-tax base; the BPJS
+	// contributions below keep using the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	// PTKP: TK/n where n = min(NumDependents, 3).
 	deps := e.NumDependents
@@ -170,8 +172,11 @@ func (idPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		})
 	}
 
+	// BPJS contributions run on the contribution base (full gross by default).
+	contribGross := e.ContributionBase(gross)
+
 	// BPJS Kesehatan 1% on capped wage.
-	kesBase := gross
+	kesBase := contribGross
 	if kesBase.GreaterThan(idBPJSKesWageCap) {
 		kesBase = idBPJSKesWageCap
 	}
@@ -185,7 +190,7 @@ func (idPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	// BPJS Ketenagakerjaan JHT 2% — no cap.
-	jht := gross.Mul(idBPJSJHTEmployeeRate).Round(2)
+	jht := contribGross.Mul(idBPJSJHTEmployeeRate).Round(2)
 	if jht.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "ID_BPJS_JHT",
@@ -195,7 +200,7 @@ func (idPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	// BPJS Ketenagakerjaan JP 1% on capped wage.
-	jpBase := gross
+	jpBase := contribGross
 	if jpBase.GreaterThan(idBPJSJP2024Ceiling) {
 		jpBase = idBPJSJP2024Ceiling
 	}

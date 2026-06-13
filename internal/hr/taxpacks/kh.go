@@ -95,7 +95,7 @@ func (khPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	out := []Deduction{}
 
 	if !e.Resident {
-		nr := gross.Mul(khNonResidentRate).Round(2)
+		nr := e.IncomeTaxBase(gross).Mul(khNonResidentRate).Round(2)
 		if nr.IsPositive() {
 			out = append(out, Deduction{
 				Code:   "KH_NONRESIDENT_TAX",
@@ -113,7 +113,7 @@ func (khPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	if deps > khMaxDependents {
 		deps = khMaxDependents
 	}
-	taxable := gross.Sub(khDependentRelief.Mul(decimal.NewFromInt(int64(deps))))
+	taxable := e.IncomeTaxBase(gross).Sub(khDependentRelief.Mul(decimal.NewFromInt(int64(deps))))
 	if taxable.IsNegative() {
 		taxable = decimal.Zero
 	}
@@ -127,8 +127,9 @@ func (khPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	// NSSF pension: 2% of the contributory wage, which is the
-	// monthly gross banded between the floor and ceiling.
-	pensionBase := gross
+	// contribution base (full gross by default) banded between the
+	// floor and ceiling.
+	pensionBase := e.ContributionBase(gross)
 	if pensionBase.LessThan(khNSSFWageFloor) {
 		pensionBase = khNSSFWageFloor
 	}

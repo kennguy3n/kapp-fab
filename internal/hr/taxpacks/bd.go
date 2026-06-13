@@ -86,7 +86,7 @@ func (bdPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	if !e.Resident {
-		nr := gross.Mul(bdNonResidentRate).Round(2)
+		nr := e.IncomeTaxBase(gross).Mul(bdNonResidentRate).Round(2)
 		if !nr.IsPositive() {
 			return nil, nil
 		}
@@ -98,7 +98,7 @@ func (bdPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(bdAnnualPeriodFraction)
-	annualGross := gross.Div(periodFraction)
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 	annualTax := walkBDBrackets(annualGross, bdBracketsResident)
 	periodTax := annualTax.Mul(periodFraction).Round(2)
 	if !periodTax.IsPositive() {

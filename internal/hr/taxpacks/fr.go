@@ -138,7 +138,7 @@ var (
 //     PMSS plus déplafonnée on the rest)
 //
 // Negative or zero gross / period return nil.
-func (frPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (frPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -151,12 +151,15 @@ func (frPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	// to a monthly equivalent for band lookup then apply the
 	// resolved rate to the slip's actual gross. This way a
 	// fortnightly or bi-monthly slip lands in the correct band.
-	monthlyEq := gross.Mul(frPeriodDays.Div(decimal.NewFromInt(int64(days))))
+	// PAS (income tax) runs on the post-pre-tax base; the CSG/CRDS and
+	// Sécurité Sociale contribution lines below keep using the full gross.
+	itGross := e.IncomeTaxBase(gross)
+	monthlyEq := itGross.Mul(frPeriodDays.Div(decimal.NewFromInt(int64(days))))
 	rate := frResolvePASRate(monthlyEq)
 
 	out := []Deduction{}
 	if rate.IsPositive() {
-		pas := gross.Mul(rate).Round(2)
+		pas := itGross.Mul(rate).Round(2)
 		if pas.IsPositive() {
 			out = append(out, Deduction{
 				Code:   "FR_PAS",
@@ -166,8 +169,12 @@ func (frPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 		}
 	}
 
-	// CSG (9.2%) and CRDS (0.5%) on 98.25% of gross.
-	csgBase := gross.Mul(frCSGCRDSAbatement)
+	// CSG/CRDS + Sécurité Sociale run on the contribution base (full
+	// gross by default).
+	contribGross := e.ContributionBase(gross)
+
+	// CSG (9.2%) and CRDS (0.5%) on 98.25% of the contribution base.
+	csgBase := contribGross.Mul(frCSGCRDSAbatement)
 	csg := csgBase.Mul(frCSGRate).Round(2)
 	if csg.IsPositive() {
 		out = append(out, Deduction{
@@ -190,7 +197,7 @@ func (frPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	// fortnightly slip gets half the cap and a bi-monthly slip
 	// gets twice the cap.
 	periodPMSS := frPMSS2025.Mul(decimal.NewFromInt(int64(days)).Div(frPeriodDays))
-	plafondBase := gross
+	plafondBase := contribGross
 	if plafondBase.GreaterThan(periodPMSS) {
 		plafondBase = periodPMSS
 	}
@@ -203,7 +210,7 @@ func (frPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	}
 
 	// Sécurité Sociale déplafonnée — full gross, no cap.
-	if ssDep := gross.Mul(frSSDeplafondRate).Round(2); ssDep.IsPositive() {
+	if ssDep := contribGross.Mul(frSSDeplafondRate).Round(2); ssDep.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "FR_SS_DEPLAFONNEE",
 			Name:   "Sécurité Sociale déplafonnée (employee share, FR)",

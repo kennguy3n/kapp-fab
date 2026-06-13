@@ -322,14 +322,18 @@ func (e *PayrollEngine) GeneratePayslips(
 		pipe := buildPipeline(sv.Data, inputs, joinDate, period)
 
 		// computeTax is evaluated by FinalizePayslip with the prior-period
-		// cumulative taxable gross as YTDGross. It withholds on the
-		// post-pre-tax taxable base (D2), not raw gross.
+		// cumulative bases. The pack receives the FULL period gross as its
+		// `gross` argument (the statutory contribution base) plus the
+		// post-pre-tax income-tax base (D2) in TaxableGross, so pre-tax
+		// deductions reduce income tax but not social-security contributions.
 		monthsYTD := monthsEmployedYTD(joinDate, periodEnd, taxYear)
 		empData := ed
 		empCurrency := slipCurrency
 		empIDLocal := empIDStr
+		periodGross := pipe.Gross
 		taxableGross := pipe.TaxableGross
-		computeTax := func(ytdGross decimal.Decimal) ([]PayslipLine, decimal.Decimal, error) {
+		contributionGross := pipe.ContributionGross
+		computeTax := func(ytdTaxable, ytdContribution decimal.Decimal) ([]PayslipLine, decimal.Decimal, error) {
 			if pack == nil {
 				return nil, decimal.Zero, nil
 			}
@@ -339,8 +343,15 @@ func (e *PayrollEngine) GeneratePayslips(
 				Allowances: empData.Allowances,
 				Resident:   empData.Resident == nil || *empData.Resident, // default resident=true
 				HasTFN:     empData.HasTFN == nil || *empData.HasTFN,     // default has_tfn=true
-				YTDGross:   ytdGross,
-				Currency:   empCurrency,
+
+				// Two-base withholding: income tax runs on the income-tax
+				// base (post pre-tax), contributions on the contribution
+				// base (full gross unless a component reduces it).
+				TaxableGross:         taxableGross,      // period income-tax base
+				ContributionGross:    contributionGross, // period contribution base
+				YTDGross:             ytdTaxable,        // cumulative income-tax base
+				YTDContributionGross: ytdContribution,   // cumulative contribution base
+				Currency:             empCurrency,
 
 				// Phase-M2 fields. Each defaults to its zero
 				// value; the packs apply their own "most
@@ -364,7 +375,7 @@ func (e *PayrollEngine) GeneratePayslips(
 				// the CN cumulative pack and mid-year joiners are correct.
 				MonthsEmployedYTD: monthsYTD,
 			}
-			extra, err := pack.ComputeWithholding(ctx, info, taxableGross, period)
+			extra, err := pack.ComputeWithholding(ctx, info, periodGross, period)
 			if err != nil {
 				return nil, decimal.Zero, fmt.Errorf("hr: tax pack %s: %w", pack.Country(), err)
 			}
@@ -390,6 +401,7 @@ func (e *PayrollEngine) GeneratePayslips(
 			TaxYear:           taxYear,
 			Gross:             pipe.Gross,
 			TaxableGross:      pipe.TaxableGross,
+			ContributionGross: pipe.ContributionGross,
 			Earnings:          pipe.Earnings,
 			PretaxDeductions:  pipe.PretaxDeductions,
 			PosttaxDeductions: pipe.PosttaxDeductions,
@@ -1101,6 +1113,13 @@ type structureComponent struct {
 	// → false (post-tax), so pre-D2 structures keep applying their
 	// deductions after tax exactly as before. Ignored for earnings.
 	PreTax bool `json:"pre_tax,omitempty"`
+	// PreTaxReducesContributionBase additionally lets a PreTax deduction
+	// reduce the social-security / contribution base, not just the
+	// income-tax base. Default false models the common 401(k) case
+	// (pre-tax for income tax but FICA still runs on the full gross);
+	// true models a US Section-125 cafeteria plan (pre-tax for both).
+	// Ignored when PreTax is false or for earning components.
+	PreTaxReducesContributionBase bool `json:"pretax_reduces_contribution_base,omitempty"`
 }
 
 type structureView struct {

@@ -98,7 +98,7 @@ var (
 // non-residents alike (PAYE applies the same brackets and rebate;
 // non-residents are only taxed on RSA-sourced income but the slip
 // gross is already that). Zero-amount lines are omitted.
-func (zaPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (zaPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -110,8 +110,11 @@ func (zaPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	out := []Deduction{}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(zaAnnualPeriodFraction)
-	annualGross := gross.Div(periodFraction)
-	annualTax := walkZABrackets(annualGross)
+	// annualGross (contribution base) drives the UIF contribution ceiling;
+	// PAYE walks the post-pre-tax base.
+	annualGross := e.ContributionBase(gross).Div(periodFraction)
+	annualTaxable := e.IncomeTaxBase(gross).Div(periodFraction)
+	annualTax := walkZABrackets(annualTaxable)
 	// Apply the section 6(2) primary rebate. Rebates reduce tax
 	// payable but never below zero — a slip whose annualised
 	// gross sits in the 18% bracket below the rebate emits no

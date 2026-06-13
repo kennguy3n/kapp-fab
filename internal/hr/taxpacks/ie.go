@@ -92,7 +92,7 @@ var (
 //     share)
 //
 // Negative or zero gross / period return nil.
-func (iePack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (iePack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -104,7 +104,9 @@ func (iePack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return nil, nil
 	}
-	annualGross := gross.Div(periodFraction)
+	// PAYE + USC (income tax) run on the post-pre-tax base; PRSI keeps
+	// using the full slip gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	out := []Deduction{}
 
@@ -144,8 +146,9 @@ func (iePack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 		}
 	}
 
-	// PRSI Class A — flat 4.1% on slip gross, no cap.
-	if prsi := gross.Mul(iePRSIRate).Round(2); prsi.IsPositive() {
+	// PRSI Class A — flat 4.1% on the contribution base (full gross by
+	// default), no cap.
+	if prsi := e.ContributionBase(gross).Mul(iePRSIRate).Round(2); prsi.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "IE_PRSI",
 			Name:   "PRSI Class A (employee, IE)",

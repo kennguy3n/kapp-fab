@@ -86,12 +86,18 @@ func (czPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 
 	out := []Deduction{}
 
+	// Contributions run on the contribution base (full gross by default;
+	// pre-tax deductions reduce income tax but not social/health insurance)
+	// and the cap runs on cumulative contribution wages.
+	contribGross := employee.ContributionBase(gross)
+	ytdContrib := employee.YTDContributionBase()
+
 	// Sociální pojištění — 6.5%, capped via YTD.
-	socialBase := gross
-	if employee.YTDGross.GreaterThanOrEqual(czSocialAnnCap) {
+	socialBase := contribGross
+	if ytdContrib.GreaterThanOrEqual(czSocialAnnCap) {
 		socialBase = decimal.Zero
-	} else if employee.YTDGross.Add(gross).GreaterThan(czSocialAnnCap) {
-		socialBase = czSocialAnnCap.Sub(employee.YTDGross)
+	} else if ytdContrib.Add(contribGross).GreaterThan(czSocialAnnCap) {
+		socialBase = czSocialAnnCap.Sub(ytdContrib)
 	}
 	social := socialBase.Mul(czSocialRate).Round(2)
 	if social.IsPositive() {
@@ -103,7 +109,7 @@ func (czPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 	}
 
 	// Zdravotní pojištění — 4.5%, no cap.
-	health := gross.Mul(czHealthRate).Round(2)
+	health := contribGross.Mul(czHealthRate).Round(2)
 	if health.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "CZ_ZP",
@@ -113,7 +119,7 @@ func (czPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 	}
 
 	// PIT — 15/23% with annual taxpayer credit.
-	annualGross := gross.Div(periodFraction)
+	annualGross := employee.IncomeTaxBase(gross).Div(periodFraction)
 	var annualPIT decimal.Decimal
 	if annualGross.LessThanOrEqual(czPITBracketCutoff) {
 		annualPIT = annualGross.Mul(czPITLowRate)

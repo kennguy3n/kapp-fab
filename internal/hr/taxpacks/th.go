@@ -124,7 +124,7 @@ func (thPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 
 	// Non-resident: flat 15% on gross, no SSF.
 	if !e.Resident {
-		nr := gross.Mul(thNonResidentRate).Round(2)
+		nr := e.IncomeTaxBase(gross).Mul(thNonResidentRate).Round(2)
 		if nr.IsPositive() {
 			out = append(out, Deduction{
 				Code:   "TH_NONRESIDENT_TAX",
@@ -136,7 +136,8 @@ func (thPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(thPeriodsPerYear)
-	annualGross := gross.Div(periodFraction)
+	// PIT runs on the post-pre-tax base; SSF keeps the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	// Standard deduction: 50% of income capped at THB 100,000.
 	stdDed := annualGross.Mul(thStandardDeductionRate)
@@ -184,7 +185,7 @@ func (thPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 
 	// SSF — flat 5% of monthly wage capped at THB 750. The cap
 	// is implicit in capping the wage base at THB 15,000.
-	ssfBase := gross
+	ssfBase := e.ContributionBase(gross)
 	if ssfBase.GreaterThan(thSSFCeiling) {
 		ssfBase = thSSFCeiling
 	}

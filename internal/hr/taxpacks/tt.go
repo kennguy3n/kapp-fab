@@ -100,7 +100,7 @@ var (
 // chargeable income and 30% above, prorated back to the
 // pay-period (365.25-day year). Weekly figures use day-count/7
 // so a standard monthly payroll period collapses to 4.333 weeks.
-func (ttPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (ttPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -118,10 +118,12 @@ func (ttPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	// Approximate weeks-in-period via days/7 for the NIS lookup
 	// and the health surcharge step. For a standard monthly
 	// payroll period this collapses to 4.333 weeks.
+	// NIS + Health Surcharge run on the contribution base (full gross
+	// by default).
 	weeks := decimal.NewFromInt(int64(days)).Div(decimal.NewFromInt(7))
 	weeklyGross := decimal.Zero
 	if weeks.IsPositive() {
-		weeklyGross = gross.Div(weeks)
+		weeklyGross = e.ContributionBase(gross).Div(weeks)
 	}
 
 	// NIS — class lookup by weekly AWE, then × weeks.
@@ -139,8 +141,9 @@ func (ttPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 		out = append(out, Deduction{Code: "TT_HEALTH_SURCHARGE", Name: "Health Surcharge", Amount: total})
 	}
 
-	// PAYE — annualise, subtract personal allowance, walk.
-	annualGross := gross.Div(periodFraction)
+	// PAYE — annualise the post-pre-tax base, subtract personal allowance,
+	// walk. NIS + Health Surcharge above keep the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 	chargeable := annualGross.Sub(ttPersonalAllowance)
 	if chargeable.LessThanOrEqual(decimal.Zero) {
 		return out, nil

@@ -360,7 +360,9 @@ func (caPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return nil, nil
 	}
-	annualGross := gross.Div(periodFraction)
+	// Federal + provincial income tax run on the post-pre-tax base; CPP/
+	// QPP/EI/QPIP below keep using the full gross (their YTD caps too).
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 	province := caResolveProvince(e.Province)
 	isQuebec := province == "QC"
 
@@ -407,12 +409,16 @@ func (caPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		}
 	}
 
+	// CPP/QPP/EI/QPIP run on the contribution base (full gross by default)
+	// and their ceilings on cumulative contribution wages.
+	contribGross := e.ContributionBase(gross)
+
 	// --- CPP / QPP (employee share) ---
 	if !e.CPPExempt {
 		if isQuebec {
-			out = appendCAPensionLines(out, e, gross, periodFraction, caQPPMGA, caQPPMGAS, caQPPEmployeeRate, caQPP2EmployeeRate, "CA_QPP", "Québec Pension Plan (employee share)", "CA_QPP2", "Québec Pension Plan additional (employee share)")
+			out = appendCAPensionLines(out, e, contribGross, periodFraction, caQPPMGA, caQPPMGAS, caQPPEmployeeRate, caQPP2EmployeeRate, "CA_QPP", "Québec Pension Plan (employee share)", "CA_QPP2", "Québec Pension Plan additional (employee share)")
 		} else {
-			out = appendCAPensionLines(out, e, gross, periodFraction, caCPPYMPE, caCPPYAMPE, caCPPEmployeeRate, caCPP2EmployeeRate, "CA_CPP", "Canada Pension Plan (employee share)", "CA_CPP2", "Canada Pension Plan additional (employee share)")
+			out = appendCAPensionLines(out, e, contribGross, periodFraction, caCPPYMPE, caCPPYAMPE, caCPPEmployeeRate, caCPP2EmployeeRate, "CA_CPP", "Canada Pension Plan (employee share)", "CA_CPP2", "Canada Pension Plan additional (employee share)")
 		}
 	}
 
@@ -426,7 +432,7 @@ func (caPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 			eiCode = "CA_EI_QC"
 			eiName = "Employment Insurance (employee, CA — Québec reduced rate)"
 		}
-		eiBase := capYTDBase(gross, e.YTDGross, caEIMIE)
+		eiBase := capYTDBase(contribGross, e.YTDContributionBase(), caEIMIE)
 		if ei := eiBase.Mul(eiRate).Round(2); ei.IsPositive() {
 			out = append(out, Deduction{Code: eiCode, Name: eiName, Amount: ei})
 		}
@@ -434,7 +440,7 @@ func (caPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 
 	// --- QPIP (Québec parental insurance, employee) ---
 	if isQuebec {
-		qpipBase := capYTDBase(gross, e.YTDGross, caQPIPCeiling)
+		qpipBase := capYTDBase(contribGross, e.YTDContributionBase(), caQPIPCeiling)
 		if qpip := qpipBase.Mul(caQPIPRate).Round(2); qpip.IsPositive() {
 			out = append(out, Deduction{
 				Code:   "CA_QPIP",
@@ -491,14 +497,15 @@ func appendCAPensionLines(
 	if subjectGross.LessThan(decimal.Zero) {
 		subjectGross = decimal.Zero
 	}
-	cppBase := capYTDBase(subjectGross, e.YTDGross, baseCeiling)
+	ytdContrib := e.YTDContributionBase()
+	cppBase := capYTDBase(subjectGross, ytdContrib, baseCeiling)
 	if cpp := cppBase.Mul(baseRate).Round(2); cpp.IsPositive() {
 		out = append(out, Deduction{Code: baseCode, Name: baseName, Amount: cpp})
 	}
 	// Additional (CPP2 / QPP2): subject to gross between YMPE and
-	// YAMPE / MGAS. Driven by YTDGross.
-	if e.YTDGross.GreaterThanOrEqual(baseCeiling) && e.YTDGross.LessThan(additionalCeiling) {
-		ceilingHeadroom := additionalCeiling.Sub(e.YTDGross)
+	// YAMPE / MGAS. Driven by cumulative contribution wages.
+	if ytdContrib.GreaterThanOrEqual(baseCeiling) && ytdContrib.LessThan(additionalCeiling) {
+		ceilingHeadroom := additionalCeiling.Sub(ytdContrib)
 		base2 := gross
 		if base2.GreaterThan(ceilingHeadroom) {
 			base2 = ceilingHeadroom
@@ -506,10 +513,10 @@ func appendCAPensionLines(
 		if cpp2 := base2.Mul(additionalRate).Round(2); cpp2.IsPositive() {
 			out = append(out, Deduction{Code: additionalCode, Name: additionalName, Amount: cpp2})
 		}
-	} else if e.YTDGross.LessThan(baseCeiling) && e.YTDGross.Add(gross).GreaterThan(baseCeiling) {
+	} else if ytdContrib.LessThan(baseCeiling) && ytdContrib.Add(gross).GreaterThan(baseCeiling) {
 		// Slip straddles the YMPE — the portion above YMPE is
 		// subject to CPP2 / QPP2 (capped at YAMPE / MGAS).
-		overflow := e.YTDGross.Add(gross).Sub(baseCeiling)
+		overflow := ytdContrib.Add(gross).Sub(baseCeiling)
 		room := additionalCeiling.Sub(baseCeiling)
 		if overflow.GreaterThan(room) {
 			overflow = room

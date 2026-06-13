@@ -86,7 +86,7 @@ var (
 // pay-period (365.25-day year). Renta is computed in UIT so a
 // future UIT bump only requires updating peUIT2025; the scale
 // itself is UIT-indexed. Below 7 UIT annual → ONP only.
-func (pePack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (pePack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -97,8 +97,8 @@ func (pePack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 
 	out := []Deduction{}
 
-	// ONP — 13% on gross.
-	if onp := gross.Mul(peONPRate).Round(2); onp.IsPositive() {
+	// ONP — 13% on the contribution base (full gross by default).
+	if onp := e.ContributionBase(gross).Mul(peONPRate).Round(2); onp.IsPositive() {
 		out = append(out, Deduction{Code: "PE_ONP", Name: "ONP (Sistema Nacional de Pensiones)", Amount: onp})
 	}
 
@@ -108,7 +108,7 @@ func (pePack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return out, nil
 	}
-	annualGross := gross.Div(periodFraction)
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 	annualGrossUIT := annualGross.Div(peUIT2025)
 	taxableUIT := annualGrossUIT.Sub(peExemptUIT)
 	if taxableUIT.LessThanOrEqual(decimal.Zero) {

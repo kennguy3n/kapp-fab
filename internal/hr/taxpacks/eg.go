@@ -85,7 +85,7 @@ var (
 // the social-insurance line, the personal exemption is then
 // subtracted, and the result is walked against the brackets.
 // Zero-amount lines are omitted.
-func (egPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (egPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -96,7 +96,8 @@ func (egPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 
 	out := []Deduction{}
 
-	monthlyEquiv := gross.Mul(egMonthlyDaysApprox).Div(decimal.NewFromInt(int64(days)))
+	// Social insurance runs on the contribution base (full gross by default).
+	monthlyEquiv := e.ContributionBase(gross).Mul(egMonthlyDaysApprox).Div(decimal.NewFromInt(int64(days)))
 
 	// Social insurance: clamp monthly equivalent to [floor, ceiling].
 	siBase := monthlyEquiv
@@ -118,7 +119,7 @@ func (egPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 
 	// PIT: annualise (gross - SI) and subtract personal exemption.
 	periodFraction := decimal.NewFromInt(int64(days)).Div(egAnnualPeriodFraction)
-	netForPIT := gross.Sub(siPeriod)
+	netForPIT := e.IncomeTaxBase(gross).Sub(siPeriod)
 	if netForPIT.LessThan(decimal.Zero) {
 		netForPIT = decimal.Zero
 	}

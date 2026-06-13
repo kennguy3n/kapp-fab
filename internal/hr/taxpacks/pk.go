@@ -91,7 +91,9 @@ func (pkPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	out := []Deduction{}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(pkAnnualPeriodFraction)
-	annualGross := gross.Div(periodFraction)
+	// Income tax runs on the post-pre-tax base; EOBI keeps its fixed
+	// insurable-wage contribution base.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 	annualTax := walkPKBrackets(annualGross, pkBracketsResident)
 	periodTax := annualTax.Mul(periodFraction).Round(2)
 	if periodTax.IsPositive() {

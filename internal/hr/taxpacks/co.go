@@ -97,7 +97,7 @@ var (
 // minus pensión/salud minus the 25% renta exenta.
 //
 // Negative / zero gross returns nil.
-func (coPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (coPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -107,8 +107,10 @@ func (coPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 
 	out := []Deduction{}
 
-	// IBC for Pensión / Salud — capped at 25 SMLMV.
-	ibc := gross
+	// IBC for Pensión / Salud / FSP — the contribution base (full gross
+	// by default), capped at 25 SMLMV.
+	contribGross := e.ContributionBase(gross)
+	ibc := contribGross
 	maxIBC := coSMLMV2025.Mul(decimal.NewFromInt(25))
 	if ibc.GreaterThan(maxIBC) {
 		ibc = maxIBC
@@ -123,7 +125,7 @@ func (coPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	}
 
 	// FSP — 1% over 4 SMLMV, +1% over 16 SMLMV.
-	salaryInSMLMV := gross.Div(coSMLMV2025)
+	salaryInSMLMV := contribGross.Div(coSMLMV2025)
 	fsp := decimal.Zero
 	if salaryInSMLMV.GreaterThanOrEqual(coFSPMinSMLMV) {
 		fsp = fsp.Add(ibc.Mul(coFSPRate1))
@@ -139,12 +141,15 @@ func (coPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	// Retención en la fuente — Art. 383 ET.
 	// Base = gross - aportes obligatorios - 25% renta exenta
 	//        (with a cap at 790 UVT/year ≈ 65.83 UVT/month).
-	rentaExenta := gross.Sub(pension).Sub(salud).Sub(fsp).Mul(dec("0.25"))
+	// Income tax runs on the post-pre-tax base; the IBC-based
+	// contributions (pension / salud / FSP) above keep the full gross.
+	itGross := e.IncomeTaxBase(gross)
+	rentaExenta := itGross.Sub(pension).Sub(salud).Sub(fsp).Mul(dec("0.25"))
 	exemptCapMonthly := coUVT2025.Mul(dec("65.83"))
 	if rentaExenta.GreaterThan(exemptCapMonthly) {
 		rentaExenta = exemptCapMonthly
 	}
-	taxableCOP := gross.Sub(pension).Sub(salud).Sub(fsp).Sub(rentaExenta)
+	taxableCOP := itGross.Sub(pension).Sub(salud).Sub(fsp).Sub(rentaExenta)
 	if taxableCOP.LessThanOrEqual(decimal.Zero) {
 		return out, nil
 	}

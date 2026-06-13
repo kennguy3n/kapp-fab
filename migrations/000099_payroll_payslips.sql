@@ -32,10 +32,14 @@
 -- ---------------------------------------------------------------------------
 -- id mirrors the hr.payslip KRecord id so the typed slip and its
 -- backward-compatible KType shim share one identity. taxable_gross is the
--- statutory base after pre-tax deductions reduce it (computed BEFORE
--- withholding); tax_total is the sum of the 'tax' lines; total_ee_deductions
--- is pretax + tax + posttax; net = gross - total_ee_deductions. The
--- composite FK to payroll_runs cascades a run delete to its slips.
+-- income-tax base after pre-tax deductions reduce it (computed BEFORE
+-- withholding); contribution_gross is the social-security / contribution
+-- base (the full gross unless a component is flagged to also reduce it),
+-- persisted so a draft re-run can reverse the slip's prior contribution
+-- cleanly when advancing payroll_ytd; tax_total is the sum of the 'tax'
+-- lines; total_ee_deductions is pretax + tax + posttax; net = gross -
+-- total_ee_deductions. The composite FK to payroll_runs cascades a run
+-- delete to its slips.
 CREATE TABLE IF NOT EXISTS payroll_payslips (
     tenant_id           UUID NOT NULL REFERENCES tenants(id),
     id                  UUID NOT NULL,
@@ -47,6 +51,7 @@ CREATE TABLE IF NOT EXISTS payroll_payslips (
     period_end          DATE NOT NULL,
     gross               NUMERIC(20, 6) NOT NULL DEFAULT 0,
     taxable_gross       NUMERIC(20, 6) NOT NULL DEFAULT 0,
+    contribution_gross  NUMERIC(20, 6) NOT NULL DEFAULT 0,
     tax_total           NUMERIC(20, 6) NOT NULL DEFAULT 0,
     total_ee_deductions NUMERIC(20, 6) NOT NULL DEFAULT 0,
     net                 NUMERIC(20, 6) NOT NULL DEFAULT 0,

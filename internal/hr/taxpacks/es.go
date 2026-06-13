@@ -101,7 +101,7 @@ var (
 //
 // All Seguridad Social lines are capped at the monthly base
 // máxima. Negative or zero gross / period return nil.
-func (esPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (esPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -113,7 +113,9 @@ func (esPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return nil, nil
 	}
-	annualGross := gross.Div(periodFraction)
+	// IRPF runs on the post-pre-tax income-tax base; Seguridad Social
+	// below keeps the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	out := []Deduction{}
 
@@ -136,8 +138,9 @@ func (esPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	// Seguridad Social — apply each employee component
 	// separately for ledger clarity. Cap each at the prorated
 	// monthly base máxima.
+	// Seguridad Social runs on the contribution base (full gross by default).
 	periodCap := esSSBaseMaximaMonth.Mul(decimal.NewFromInt(int64(days)).Div(esPeriodMonth))
-	ssBase := gross
+	ssBase := e.ContributionBase(gross)
 	if ssBase.GreaterThan(periodCap) {
 		ssBase = periodCap
 	}

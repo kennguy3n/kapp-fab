@@ -70,11 +70,24 @@ type PayslipLine struct {
 
 // YTD is the engine-owned year-to-date accumulator for one
 // (employee, tax_year), read from payroll_ytd.
+//
+// CumulativeTaxable is the cumulative *income-tax* base after pre-tax
+// deductions (fed to packs as EmployeeInfo.YTDGross for cumulative-
+// withholding income-tax methods like China's 累计预扣预缴).
+// CumulativeContributionGross is the cumulative *contribution* base (fed
+// as EmployeeInfo.YTDContributionGross for statutory contribution wage
+// caps / surtax thresholds). CumulativeGross is the literal full gross
+// paid (for reporting); it coincides with CumulativeContributionGross
+// unless a component is flagged to also reduce the contribution base.
+// The income-tax and contribution bases diverge once an employee has any
+// pre-tax / salary-sacrifice line.
 type YTD struct {
-	CumulativeGross decimal.Decimal
-	CumulativeTax   decimal.Decimal
-	PerCodeBase     map[string]decimal.Decimal
-	Exists          bool
+	CumulativeGross             decimal.Decimal
+	CumulativeTaxable           decimal.Decimal
+	CumulativeContributionGross decimal.Decimal
+	CumulativeTax               decimal.Decimal
+	PerCodeBase                 map[string]decimal.Decimal
+	Exists                      bool
 }
 
 // RunHeader is the typed payroll_runs row the engine upserts when a run
@@ -100,27 +113,34 @@ type RunHeader struct {
 // post-tax lines are computed by the pure pipeline before the
 // transaction opens; only the statutory tax lines depend on the persisted
 // YTD, so they are produced inside the transaction via ComputeTax (which
-// receives the prior-period cumulative taxable gross as its YTDGross).
+// receives the prior-period cumulative income-tax base and cumulative
+// contribution base — the real persisted YTD bases).
 type FinalizeInput struct {
-	TenantID     uuid.UUID
-	RunID        uuid.UUID
-	PayslipID    uuid.UUID
-	EmployeeID   uuid.UUID
-	StructureID  uuid.UUID
-	Currency     string
-	PeriodStart  time.Time
-	PeriodEnd    time.Time
-	TaxYear      int
-	Gross        decimal.Decimal
-	TaxableGross decimal.Decimal
+	TenantID          uuid.UUID
+	RunID             uuid.UUID
+	PayslipID         uuid.UUID
+	EmployeeID        uuid.UUID
+	StructureID       uuid.UUID
+	Currency          string
+	PeriodStart       time.Time
+	PeriodEnd         time.Time
+	TaxYear           int
+	Gross             decimal.Decimal
+	TaxableGross      decimal.Decimal
+	ContributionGross decimal.Decimal
 
 	Earnings          []PayslipLine
 	PretaxDeductions  []PayslipLine
 	PosttaxDeductions []PayslipLine
 
 	// ComputeTax returns the statutory tax lines and their total given the
-	// prior-period cumulative taxable gross (the real persisted YTDGross).
-	ComputeTax func(ytdGross decimal.Decimal) ([]PayslipLine, decimal.Decimal, error)
+	// prior-period cumulative bases: ytdTaxable is the cumulative income-tax
+	// base (→ EmployeeInfo.YTDGross, for cumulative-withholding income-tax
+	// methods) and ytdContribution is the cumulative contribution base
+	// (→ EmployeeInfo.YTDContributionGross, for statutory contribution wage
+	// caps / surtax thresholds). Both exclude this slip's own prior
+	// contribution (reversed before the call) so a draft re-run is idempotent.
+	ComputeTax func(ytdTaxable, ytdContribution decimal.Decimal) ([]PayslipLine, decimal.Decimal, error)
 }
 
 // FinalizedPayslip is the result of FinalizePayslip: the persisted slip's
@@ -129,6 +149,7 @@ type FinalizedPayslip struct {
 	PayslipID         uuid.UUID
 	Gross             decimal.Decimal
 	TaxableGross      decimal.Decimal
+	ContributionGross decimal.Decimal
 	TaxTotal          decimal.Decimal
 	TotalEEDeductions decimal.Decimal
 	Net               decimal.Decimal
@@ -355,12 +376,14 @@ func (s *PayrollStore) LoadYTD(ctx context.Context, tenantID, employeeID uuid.UU
 	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var perCode []byte
 		row := tx.QueryRow(ctx, `
-			SELECT cumulative_gross, cumulative_tax, per_code_base
+			SELECT cumulative_gross, cumulative_taxable, cumulative_contribution_gross,
+			       cumulative_tax, per_code_base
 			  FROM payroll_ytd
 			 WHERE tenant_id = $1 AND employee_id = $2 AND tax_year = $3`,
 			tenantID, employeeID, taxYear,
 		)
-		if err := row.Scan(&y.CumulativeGross, &y.CumulativeTax, &perCode); err != nil {
+		if err := row.Scan(&y.CumulativeGross, &y.CumulativeTaxable, &y.CumulativeContributionGross,
+			&y.CumulativeTax, &perCode); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil
 			}
@@ -383,7 +406,7 @@ func (s *PayrollStore) LoadYTD(ctx context.Context, tenantID, employeeID uuid.UU
 // double-count.
 func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*FinalizedPayslip, error) {
 	if in.ComputeTax == nil {
-		in.ComputeTax = func(decimal.Decimal) ([]PayslipLine, decimal.Decimal, error) {
+		in.ComputeTax = func(_, _ decimal.Decimal) ([]PayslipLine, decimal.Decimal, error) {
 			return nil, decimal.Zero, nil
 		}
 	}
@@ -393,15 +416,15 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 		//    canonical payslip id we reuse so the typed slip keeps a
 		//    stable identity across re-generations.
 		var existingID uuid.UUID
-		var priorTaxable, priorTax decimal.Decimal
+		var priorGross, priorTaxable, priorContribution, priorTax decimal.Decimal
 		var exists bool
 		row := tx.QueryRow(ctx, `
-			SELECT id, taxable_gross, tax_total
+			SELECT id, gross, taxable_gross, contribution_gross, tax_total
 			  FROM payroll_payslips
 			 WHERE tenant_id = $1 AND run_id = $2 AND employee_id = $3`,
 			in.TenantID, in.RunID, in.EmployeeID,
 		)
-		switch err := row.Scan(&existingID, &priorTaxable, &priorTax); {
+		switch err := row.Scan(&existingID, &priorGross, &priorTaxable, &priorContribution, &priorTax); {
 		case err == nil:
 			exists = true
 		case errors.Is(err, pgx.ErrNoRows):
@@ -456,23 +479,25 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO payroll_ytd
 				(tenant_id, employee_id, tax_year, cumulative_gross,
-				 cumulative_tax, per_code_base, updated_at)
-			VALUES ($1, $2, $3, 0, 0, '{}'::jsonb, $4)
+				 cumulative_taxable, cumulative_contribution_gross, cumulative_tax,
+				 per_code_base, updated_at)
+			VALUES ($1, $2, $3, 0, 0, 0, 0, '{}'::jsonb, $4)
 			ON CONFLICT (tenant_id, employee_id, tax_year) DO NOTHING`,
 			in.TenantID, in.EmployeeID, in.TaxYear, seedNow,
 		); err != nil {
 			return fmt.Errorf("hr: seed ytd: %w", err)
 		}
-		var cumGross, cumTax decimal.Decimal
+		var cumGross, cumTaxable, cumContribution, cumTax decimal.Decimal
 		var perCodeRaw []byte
 		yrow := tx.QueryRow(ctx, `
-			SELECT cumulative_gross, cumulative_tax, per_code_base
+			SELECT cumulative_gross, cumulative_taxable, cumulative_contribution_gross,
+			       cumulative_tax, per_code_base
 			  FROM payroll_ytd
 			 WHERE tenant_id = $1 AND employee_id = $2 AND tax_year = $3
 			 FOR UPDATE`,
 			in.TenantID, in.EmployeeID, in.TaxYear,
 		)
-		if err := yrow.Scan(&cumGross, &cumTax, &perCodeRaw); err != nil {
+		if err := yrow.Scan(&cumGross, &cumTaxable, &cumContribution, &cumTax, &perCodeRaw); err != nil {
 			return fmt.Errorf("hr: lock ytd: %w", err)
 		}
 		perCode := decodePerCode(perCodeRaw)
@@ -480,14 +505,19 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 		// 4. Reverse this slip's prior contribution so the base reflects
 		//    only OTHER runs in the year. On a first generation prior* are
 		//    zero, so base == cumulative (sum of earlier runs).
-		baseGross := cumGross.Sub(priorTaxable)
+		baseGross := cumGross.Sub(priorGross)
+		baseTaxable := cumTaxable.Sub(priorTaxable)
+		baseContribution := cumContribution.Sub(priorContribution)
 		baseTax := cumTax.Sub(priorTax)
 		for code, amt := range priorPerCode {
 			perCode[code] = perCode[code].Sub(amt)
 		}
 
-		// 5. Statutory tax, computed against the real persisted YTDGross.
-		taxLines, taxTotal, err := in.ComputeTax(baseGross)
+		// 5. Statutory tax, computed against the real persisted YTD bases:
+		//    cumulative income-tax base (cumulative-withholding methods) +
+		//    cumulative contribution base (contribution caps / surtax
+		//    thresholds), both excluding this slip.
+		taxLines, taxTotal, err := in.ComputeTax(baseTaxable, baseContribution)
 		if err != nil {
 			return err
 		}
@@ -526,9 +556,9 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO payroll_payslips
 				(tenant_id, id, run_id, employee_id, structure_id, currency,
-				 period_start, period_end, gross, taxable_gross, tax_total,
-				 total_ee_deductions, net, status, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'draft', $14, $14)
+				 period_start, period_end, gross, taxable_gross, contribution_gross,
+				 tax_total, total_ee_deductions, net, status, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'draft', $15, $15)
 			ON CONFLICT (tenant_id, run_id, employee_id) DO UPDATE SET
 				structure_id = EXCLUDED.structure_id,
 				currency = EXCLUDED.currency,
@@ -536,6 +566,7 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 				period_end = EXCLUDED.period_end,
 				gross = EXCLUDED.gross,
 				taxable_gross = EXCLUDED.taxable_gross,
+				contribution_gross = EXCLUDED.contribution_gross,
 				tax_total = EXCLUDED.tax_total,
 				total_ee_deductions = EXCLUDED.total_ee_deductions,
 				net = EXCLUDED.net,
@@ -543,7 +574,7 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 				updated_at = EXCLUDED.updated_at`,
 			in.TenantID, payslipID, in.RunID, in.EmployeeID, nullableUUID(in.StructureID),
 			currencyOrDefault(in.Currency), in.PeriodStart, in.PeriodEnd, in.Gross,
-			in.TaxableGross, taxTotal, totalEE, net, now,
+			in.TaxableGross, in.ContributionGross, taxTotal, totalEE, net, now,
 		); err != nil {
 			return fmt.Errorf("hr: upsert payslip: %w", err)
 		}
@@ -568,9 +599,14 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 			}
 		}
 
-		// 9. Advance YTD: cumulative_gross tracks cumulative TAXABLE gross
-		//    (the withholding base), cumulative_tax the tax withheld.
-		newCumGross := baseGross.Add(in.TaxableGross)
+		// 9. Advance YTD: cumulative_gross tracks the literal full gross,
+		//    cumulative_taxable the cumulative income-tax base,
+		//    cumulative_contribution_gross the cumulative contribution base
+		//    (contribution caps / surtax thresholds), cumulative_tax the tax
+		//    withheld.
+		newCumGross := baseGross.Add(in.Gross)
+		newCumTaxable := baseTaxable.Add(in.TaxableGross)
+		newCumContribution := baseContribution.Add(in.ContributionGross)
 		newCumTax := baseTax.Add(taxTotal)
 		for _, l := range ordered {
 			if l.Code != "" {
@@ -585,10 +621,12 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 		// UPDATE is always correct here (no INSERT-vs-UPDATE split).
 		if _, err := tx.Exec(ctx, `
 			UPDATE payroll_ytd
-			   SET cumulative_gross = $4, cumulative_tax = $5,
-			       per_code_base = $6, updated_at = $7
+			   SET cumulative_gross = $4, cumulative_taxable = $5,
+			       cumulative_contribution_gross = $6, cumulative_tax = $7,
+			       per_code_base = $8, updated_at = $9
 			 WHERE tenant_id = $1 AND employee_id = $2 AND tax_year = $3`,
-			in.TenantID, in.EmployeeID, in.TaxYear, newCumGross, newCumTax, perCodeJSON, now,
+			in.TenantID, in.EmployeeID, in.TaxYear, newCumGross, newCumTaxable,
+			newCumContribution, newCumTax, perCodeJSON, now,
 		); err != nil {
 			return fmt.Errorf("hr: update ytd: %w", err)
 		}
@@ -597,6 +635,7 @@ func (s *PayrollStore) FinalizePayslip(ctx context.Context, in FinalizeInput) (*
 			PayslipID:         payslipID,
 			Gross:             in.Gross,
 			TaxableGross:      in.TaxableGross,
+			ContributionGross: in.ContributionGross,
 			TaxTotal:          taxTotal,
 			TotalEEDeductions: totalEE,
 			Net:               net,

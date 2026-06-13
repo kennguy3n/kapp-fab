@@ -72,7 +72,7 @@ var (
 // ComputeWithholding emits LK_APIT (annualised progressive advance
 // personal income tax) and LK_EPF_EMPLOYEE (8% provident-fund
 // contribution).
-func (lkPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (lkPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -84,7 +84,7 @@ func (lkPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	out := []Deduction{}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(lkAnnualPeriodFraction)
-	annualGross := gross.Div(periodFraction)
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 	annualTax := walkLKBrackets(annualGross, lkBracketsResident)
 	periodTax := annualTax.Mul(periodFraction).Round(2)
 	if periodTax.IsPositive() {
@@ -95,7 +95,8 @@ func (lkPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 		})
 	}
 
-	epf := gross.Mul(lkEPFEmployeeRate).Round(2)
+	// EPF runs on the contribution base (full gross by default).
+	epf := e.ContributionBase(gross).Mul(lkEPFEmployeeRate).Round(2)
 	if epf.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "LK_EPF_EMPLOYEE",

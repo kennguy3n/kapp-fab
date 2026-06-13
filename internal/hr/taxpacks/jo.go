@@ -88,7 +88,8 @@ func (joPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	out := []Deduction{}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(joAnnualPeriodFraction)
-	annualGross := gross.Div(periodFraction)
+	// Income tax runs on the post-pre-tax base; SSC keeps the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	exemption := joPersonalExemption
 	if e.NumDependents > 0 {
@@ -110,8 +111,9 @@ func (joPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		})
 	}
 
-	// SSC employee contribution on the capped subscription wage.
-	sscBase := gross
+	// SSC employee contribution on the capped subscription wage, which is
+	// the contribution base (full gross by default).
+	sscBase := e.ContributionBase(gross)
 	if sscBase.GreaterThan(joSSCWageCeiling) {
 		sscBase = joSSCWageCeiling
 	}

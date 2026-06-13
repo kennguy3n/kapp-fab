@@ -126,7 +126,9 @@ func (dePack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return nil, nil
 	}
-	annualGross := gross.Div(periodFraction)
+	// Lohnsteuer runs on the post-pre-tax income-tax base; the RV/KV/PV/
+	// ALV social-insurance shares below keep using the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	out := []Deduction{}
 
@@ -170,9 +172,14 @@ func (dePack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		}
 	}
 
+	// Social-insurance shares run on the contribution base (full gross by
+	// default) and the BBG ceilings on cumulative contribution wages.
+	contribGross := e.ContributionBase(gross)
+	ytdContrib := e.YTDContributionBase()
+
 	// Rentenversicherung — capped at BBG-RV. YTD-aware against
-	// EmployeeInfo.YTDGross.
-	if rv := deComputeCappedShare(gross, e.YTDGross, deRVRate, deBBGRV); rv.IsPositive() {
+	// cumulative contribution wages.
+	if rv := deComputeCappedShare(contribGross, ytdContrib, deRVRate, deBBGRV); rv.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "DE_RV",
 			Name:   "Rentenversicherung (employee share, DE)",
@@ -181,7 +188,7 @@ func (dePack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	// Krankenversicherung — capped at BBG-KV.
-	if kv := deComputeCappedShare(gross, e.YTDGross, deKVRate, deBBGKV); kv.IsPositive() {
+	if kv := deComputeCappedShare(contribGross, ytdContrib, deKVRate, deBBGKV); kv.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "DE_KV",
 			Name:   "Krankenversicherung (employee share, DE)",
@@ -195,7 +202,7 @@ func (dePack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	if e.NumDependents == 0 && e.Age >= 23 {
 		pvRate = pvRate.Add(dePVChildless)
 	}
-	if pv := deComputeCappedShare(gross, e.YTDGross, pvRate, deBBGKV); pv.IsPositive() {
+	if pv := deComputeCappedShare(contribGross, ytdContrib, pvRate, deBBGKV); pv.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "DE_PV",
 			Name:   "Pflegeversicherung (employee share, DE)",
@@ -204,7 +211,7 @@ func (dePack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	// Arbeitslosenversicherung — capped at BBG-RV.
-	if alv := deComputeCappedShare(gross, e.YTDGross, deALVRate, deBBGRV); alv.IsPositive() {
+	if alv := deComputeCappedShare(contribGross, ytdContrib, deALVRate, deBBGRV); alv.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "DE_ALV",
 			Name:   "Arbeitslosenversicherung (employee share, DE)",

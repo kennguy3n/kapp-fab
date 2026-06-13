@@ -99,7 +99,7 @@ var (
 // ComputeWithholding emits KE_PAYE, KE_NSSF, KE_SHIF, KE_HOUSING_LEVY.
 // All four bases use the slip's monthly-equivalent gross (slip ÷
 // period days × 30.4375); zero-amount lines are omitted.
-func (kePack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (kePack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -110,11 +110,13 @@ func (kePack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 
 	out := []Deduction{}
 
-	// Monthly-equivalent gross.
-	monthlyEquiv := gross.Mul(keMonthlyDaysApprox).Div(decimal.NewFromInt(int64(days)))
+	// Monthly-equivalent contribution base for the NSSF / SHIF / Housing
+	// Levy contributions, and a post-pre-tax monthly equivalent for PAYE.
+	monthlyEquiv := e.ContributionBase(gross).Mul(keMonthlyDaysApprox).Div(decimal.NewFromInt(int64(days)))
+	monthlyTaxable := e.IncomeTaxBase(gross).Mul(keMonthlyDaysApprox).Div(decimal.NewFromInt(int64(days)))
 
 	// PAYE: walk the monthly bands, subtract personal relief.
-	monthlyTax := walkKEBrackets(monthlyEquiv).Sub(kePersonalReliefMonthly)
+	monthlyTax := walkKEBrackets(monthlyTaxable).Sub(kePersonalReliefMonthly)
 	if monthlyTax.LessThan(decimal.Zero) {
 		monthlyTax = decimal.Zero
 	}

@@ -129,7 +129,10 @@ func (nlPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return nil, nil
 	}
-	annualGross := gross.Div(periodFraction)
+	// Loonheffing (wage tax + premies volksverzekeringen, levied on the
+	// box-1 income base) runs on the post-pre-tax base; ZVW keeps full
+	// gross and its YTD contribution cap.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	out := []Deduction{}
 
@@ -150,8 +153,9 @@ func (nlPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		})
 	}
 
-	// ZVW — 5.32% on gross up to the annual ceiling, YTD-aware.
-	if zvw := nlComputeZVW(gross, e.YTDGross); zvw.IsPositive() {
+	// ZVW — 5.32% on the contribution base up to the annual ceiling,
+	// against cumulative contribution wages.
+	if zvw := nlComputeZVW(e.ContributionBase(gross), e.YTDContributionBase()); zvw.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "NL_ZVW",
 			Name:   "ZVW (Zorgverzekering, employee, NL)",

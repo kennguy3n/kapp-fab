@@ -95,7 +95,7 @@ var (
 // taxable base is computed, per PITA s.33 (statutory deductions
 // are allowable in addition to the consolidated relief allowance).
 // Zero-amount lines are omitted.
-func (ngPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (ngPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -106,8 +106,11 @@ func (ngPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 
 	out := []Deduction{}
 
+	// Pension + NHF run on the contribution base (full gross by default).
+	contribGross := e.ContributionBase(gross)
+
 	// Pension first (employee share, 8% of gross).
-	pension := gross.Mul(ngPensionRate).Round(2)
+	pension := contribGross.Mul(ngPensionRate).Round(2)
 	if pension.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "NG_PENSION",
@@ -117,7 +120,7 @@ func (ngPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	}
 	// NHF: 2.5% of monthly basic. Using gross as base is a
 	// documented over-contribution; reconciliation via FMBN.
-	nhf := gross.Mul(ngNHFRate).Round(2)
+	nhf := contribGross.Mul(ngNHFRate).Round(2)
 	if nhf.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "NG_NHF",
@@ -129,7 +132,9 @@ func (ngPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	// PAYE: gross minus pension minus NHF, then annualise, apply
 	// consolidated relief allowance, walk the brackets.
 	periodFraction := decimal.NewFromInt(int64(days)).Div(ngAnnualPeriodFraction)
-	netForPAYE := gross.Sub(pension).Sub(nhf)
+	// PAYE base is the post-pre-tax income base less pension and NHF; the
+	// pension and NHF contributions above keep using the full gross.
+	netForPAYE := e.IncomeTaxBase(gross).Sub(pension).Sub(nhf)
 	annualGross := netForPAYE.Div(periodFraction)
 
 	// CRA: higher of ₦200k or 1%+20% = 21% of gross.

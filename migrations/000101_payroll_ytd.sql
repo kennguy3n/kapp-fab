@@ -13,11 +13,25 @@
 --                   reverses the slip's prior contribution before adding
 --                   the new one, so YTD is never double-counted.
 --
--- cumulative_gross tracks cumulative *taxable* gross (the withholding base
--- after pre-tax deductions) because that is exactly what a cumulative
--- withholding computation consumes as prior-period income; cumulative_tax
--- tracks tax withheld to date. per_code_base is a JSONB map of
--- cumulative per-code bases (for future per-component YTD reporting and
+-- The table carries the two statutory bases the two-base withholding split
+-- needs, because pre-tax deductions reduce the income-tax base but generally
+-- NOT the contribution base:
+--   * cumulative_taxable tracks cumulative *income-tax* base (gross after
+--     pre-tax deductions). Cumulative-withholding income-tax methods (e.g.
+--     China's 累计预扣预缴) consume it as prior-period taxable income via
+--     EmployeeInfo.YTDGross / IncomeTaxYTD().
+--   * cumulative_contribution_gross tracks cumulative *contribution* base —
+--     the base the law applies statutory contribution wage caps / surtax
+--     thresholds to (FICA OASDI wage base, Medicare surtax, ZUS / INPS /
+--     EFKA / AHV-ALV ceilings, CPP/EI MIE, …). Packs read it via
+--     EmployeeInfo.YTDContributionBase(). It equals the full gross unless a
+--     salary component is flagged to also reduce the contribution base
+--     (e.g. a US Section-125 cafeteria plan).
+--   * cumulative_gross tracks the literal *full* gross paid (for reporting);
+--     it coincides with cumulative_contribution_gross unless a flagged
+--     component reduces the contribution base.
+-- cumulative_tax tracks tax withheld to date. per_code_base is a JSONB map
+-- of cumulative per-code bases (for future per-component YTD reporting and
 -- cap-based statutory ceilings in later batches).
 --
 -- This table uses a NATURAL / COMPOSITE primary key
@@ -37,8 +51,10 @@ CREATE TABLE IF NOT EXISTS payroll_ytd (
     tenant_id        UUID NOT NULL REFERENCES tenants(id),
     employee_id      UUID NOT NULL,
     tax_year         INTEGER NOT NULL CHECK (tax_year >= 1900 AND tax_year <= 9999),
-    cumulative_gross NUMERIC(20, 6) NOT NULL DEFAULT 0,
-    cumulative_tax   NUMERIC(20, 6) NOT NULL DEFAULT 0,
+    cumulative_gross              NUMERIC(20, 6) NOT NULL DEFAULT 0,
+    cumulative_taxable            NUMERIC(20, 6) NOT NULL DEFAULT 0,
+    cumulative_contribution_gross NUMERIC(20, 6) NOT NULL DEFAULT 0,
+    cumulative_tax                NUMERIC(20, 6) NOT NULL DEFAULT 0,
     per_code_base    JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, employee_id, tax_year)

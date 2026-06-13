@@ -83,7 +83,7 @@ func (ghPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	if !e.Resident {
-		nr := gross.Mul(ghNonResidentRate).Round(2)
+		nr := e.IncomeTaxBase(gross).Mul(ghNonResidentRate).Round(2)
 		if !nr.IsPositive() {
 			return nil, nil
 		}
@@ -98,7 +98,7 @@ func (ghPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 
 	// SSNIT first-tier employee contribution, deductible before
 	// PAYE.
-	ssnit := gross.Mul(ghSSNITEmployeeRate).Round(2)
+	ssnit := e.ContributionBase(gross).Mul(ghSSNITEmployeeRate).Round(2)
 	if ssnit.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "GH_SSNIT",
@@ -107,7 +107,7 @@ func (ghPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		})
 	}
 
-	chargeable := gross.Sub(ssnit)
+	chargeable := e.IncomeTaxBase(gross).Sub(ssnit)
 	if chargeable.IsNegative() {
 		chargeable = decimal.Zero
 	}

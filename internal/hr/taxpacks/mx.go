@@ -112,7 +112,7 @@ var (
 
 // ComputeWithholding emits MX_ISR (post-subsidio, clamped) and
 // MX_IMSS for monthly slips. Negative / zero gross returns nil.
-func (mxPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (mxPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -122,11 +122,12 @@ func (mxPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 
 	out := []Deduction{}
 
-	// ISR — bracket walk.
-	isr := walkMXBrackets(gross, mxISRBrackets)
+	// ISR — bracket walk on the post-pre-tax base; IMSS keeps full gross.
+	itGross := e.IncomeTaxBase(gross)
+	isr := walkMXBrackets(itGross, mxISRBrackets)
 	// Subsidio para el Empleo — applied as a credit against ISR.
 	subsidio := decimal.Zero
-	if gross.LessThanOrEqual(mxSubsidioStepThreshold) {
+	if itGross.LessThanOrEqual(mxSubsidioStepThreshold) {
 		subsidio = mxSubsidioStepAmount
 	}
 	netISR := isr.Sub(subsidio).Round(2)
@@ -148,8 +149,9 @@ func (mxPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 		})
 	}
 
-	// IMSS — employee share, capped at 25× UMA daily.
-	imssBase := gross
+	// IMSS — employee share on the contribution base (full gross by
+	// default), capped at 25× UMA daily.
+	imssBase := e.ContributionBase(gross)
 	if imssBase.GreaterThan(mxIMSSMonthlyCap) {
 		imssBase = mxIMSSMonthlyCap
 	}

@@ -139,8 +139,9 @@ func (brPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 
 	out := []Deduction{}
 
-	// INSS first — its result feeds the IRRF base.
-	inss := brComputeINSS(gross).Round(2)
+	// INSS first — its result feeds the IRRF base. INSS runs on the
+	// contribution base (full gross by default).
+	inss := brComputeINSS(e.ContributionBase(gross)).Round(2)
 	if inss.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "BR_INSS",
@@ -152,7 +153,7 @@ func (brPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// IRRF — subtract INSS and the per-dependent allowance, then
 	// run the bracket walk.
 	dependents := decimal.NewFromInt(int64(e.NumDependents))
-	base := gross.Sub(inss).Sub(dependents.Mul(brIRRFDependentDeduction))
+	base := e.IncomeTaxBase(gross).Sub(inss).Sub(dependents.Mul(brIRRFDependentDeduction))
 	if base.LessThanOrEqual(decimal.Zero) {
 		return out, nil
 	}

@@ -102,17 +102,20 @@ func (plPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 
 	out := []Deduction{}
 
-	// ZUS pension + disability are capped via YTD. Compute the
-	// capped pension+disability base for this slip.
-	pensionDisabilityBase := gross
-	if employee.YTDGross.GreaterThanOrEqual(plZUSAnnualCap) {
+	// ZUS pension + disability are capped via YTD. They run on the
+	// contribution base (full gross by default) and the cap runs on
+	// cumulative contribution wages.
+	contribGross := employee.ContributionBase(gross)
+	ytdContrib := employee.YTDContributionBase()
+	pensionDisabilityBase := contribGross
+	if ytdContrib.GreaterThanOrEqual(plZUSAnnualCap) {
 		pensionDisabilityBase = decimal.Zero
-	} else if employee.YTDGross.Add(gross).GreaterThan(plZUSAnnualCap) {
-		pensionDisabilityBase = plZUSAnnualCap.Sub(employee.YTDGross)
+	} else if ytdContrib.Add(contribGross).GreaterThan(plZUSAnnualCap) {
+		pensionDisabilityBase = plZUSAnnualCap.Sub(ytdContrib)
 	}
 	zusEmerytalne := pensionDisabilityBase.Mul(plZUSEmerytalneRate)
 	zusRentowe := pensionDisabilityBase.Mul(plZUSRentoweRate)
-	zusChorobowe := gross.Mul(plZUSChorobowRate) // never capped
+	zusChorobowe := contribGross.Mul(plZUSChorobowRate) // never capped
 	zusTotal := zusEmerytalne.Add(zusRentowe).Add(zusChorobowe).Round(2)
 	if zusTotal.IsPositive() {
 		out = append(out, Deduction{
@@ -124,7 +127,7 @@ func (plPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 
 	// NFZ base = gross − ZUS (the contribution base post-2022
 	// Polski Ład; not deductible from PIT).
-	nfzBase := gross.Sub(zusTotal)
+	nfzBase := contribGross.Sub(zusTotal)
 	if nfzBase.LessThan(decimal.Zero) {
 		nfzBase = decimal.Zero
 	}
@@ -140,7 +143,9 @@ func (plPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 	// PIT base = (gross − ZUS); progressive bracket walk on
 	// annualised base, then prorated back by periodFraction,
 	// with the PLN 3,600 / yr credit also prorated.
-	pitBase := gross.Sub(zusTotal)
+	// PIT runs on the post-pre-tax income base less ZUS; ZUS and NFZ above
+	// keep using the full gross.
+	pitBase := employee.IncomeTaxBase(gross).Sub(zusTotal)
 	if pitBase.LessThanOrEqual(decimal.Zero) {
 		return out, nil
 	}

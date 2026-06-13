@@ -30,6 +30,12 @@ type pipelineResult struct {
 	PosttaxDeductions []PayslipLine
 	Gross             decimal.Decimal
 	TaxableGross      decimal.Decimal
+	// ContributionGross is the social-security / contribution base: the
+	// full gross minus only those pre-tax deductions flagged to also
+	// reduce the contribution base (Section-125 style). Pre-tax
+	// deductions that reduce income tax only (the 401(k) case) leave it
+	// equal to the full gross.
+	ContributionGross decimal.Decimal
 	ProrationFactor   decimal.Decimal
 }
 
@@ -145,6 +151,9 @@ func buildPipeline(sv structureData, inputs []PayInput, joinDate time.Time, peri
 
 	var earnings, pretax, posttax []PayslipLine
 	var recurringUnprorated decimal.Decimal
+	// contribReducers holds the pre-tax deduction codes flagged to also
+	// reduce the contribution base, so D2 can subtract exactly those.
+	contribReducers := map[string]bool{}
 
 	// --- D1: recurring structure earnings, prorated for joiners. -------
 	addEarning := func(code, label string, full decimal.Decimal, taxable bool) {
@@ -182,6 +191,9 @@ func buildPipeline(sv structureData, inputs []PayInput, joinDate time.Time, peri
 			line := PayslipLine{Code: c.Code, Label: c.Name, Amount: amt, Taxable: false}
 			if c.PreTax {
 				pretax = append(pretax, line)
+				if c.PreTaxReducesContributionBase {
+					contribReducers[c.Code] = true
+				}
 			} else {
 				posttax = append(posttax, line)
 			}
@@ -249,19 +261,29 @@ func buildPipeline(sv structureData, inputs []PayInput, joinDate time.Time, peri
 		}
 	}
 
-	// --- D2: gross + taxable base. -------------------------------------
-	var gross, taxable decimal.Decimal
+	// --- D2: gross + taxable base + contribution base. ----------------
+	// Income tax runs on the taxable base (gross minus every pre-tax
+	// deduction); contributions run on the contribution base (gross minus
+	// only the pre-tax deductions explicitly flagged to reduce it).
+	var gross, taxable, contribution decimal.Decimal
 	for _, e := range earnings {
 		gross = gross.Add(e.Amount)
 		if e.Taxable {
 			taxable = taxable.Add(e.Amount)
 		}
 	}
+	contribution = gross
 	for _, p := range pretax {
 		taxable = taxable.Sub(p.Amount)
+		if contribReducers[p.Code] {
+			contribution = contribution.Sub(p.Amount)
+		}
 	}
 	if taxable.IsNegative() {
 		taxable = decimal.Zero
+	}
+	if contribution.IsNegative() {
+		contribution = decimal.Zero
 	}
 
 	return pipelineResult{
@@ -270,6 +292,7 @@ func buildPipeline(sv structureData, inputs []PayInput, joinDate time.Time, peri
 		PosttaxDeductions: posttax,
 		Gross:             twoPlaces(gross),
 		TaxableGross:      twoPlaces(taxable),
+		ContributionGross: twoPlaces(contribution),
 		ProrationFactor:   factor,
 	}
 }

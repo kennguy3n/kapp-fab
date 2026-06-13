@@ -109,7 +109,8 @@ func (nzPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	if periodFraction.IsZero() {
 		return nil, nil
 	}
-	annualGross := gross.Div(periodFraction)
+	// PAYE runs on the post-pre-tax base; ACC + KiwiSaver keep full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	annualTax := walkNZBrackets(annualGross, nzBracketsResident)
 	periodTax := annualTax.Mul(periodFraction).Round(2)
@@ -126,8 +127,10 @@ func (nzPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// the employee past the 142,283 ceiling only levies the
 	// portion under the cap; downstream YTD reconciliation lives
 	// in the engine, not this pack.
+	// ACC + KiwiSaver run on the contribution base (full gross by default).
+	contribGross := e.ContributionBase(gross)
 	periodACCCap := nzACCCeiling.Mul(periodFraction)
-	accBase := gross
+	accBase := contribGross
 	if accBase.GreaterThan(periodACCCap) {
 		accBase = periodACCCap
 	}
@@ -143,7 +146,7 @@ func (nzPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// Non-zero rates apply verbatim against gross (not after
 	// PAYE) per IRD payroll rules.
 	if e.KiwiSaverRate.IsPositive() {
-		if ks := gross.Mul(e.KiwiSaverRate).Round(2); ks.IsPositive() {
+		if ks := contribGross.Mul(e.KiwiSaverRate).Round(2); ks.IsPositive() {
 			out = append(out, Deduction{
 				Code:   "NZ_KIWISAVER",
 				Name:   "KiwiSaver employee contribution (NZ)",

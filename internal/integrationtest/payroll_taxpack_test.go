@@ -162,3 +162,78 @@ func TestPayrollEngineSkipsStatutoryWhenCountryUnset(t *testing.T) {
 		t.Fatalf("expected 0 deductions when no country pack resolved, got %s", deduct)
 	}
 }
+
+// TestPayrollEngine401kReducesIncomeTaxNotFICA is the end-to-end two-base
+// acceptance test. A US employee with a $1,000 pre-tax 401(k) deferral
+// (default flag: reduces income tax only) on a $10,000 base must withhold
+// FICA on the FULL $10,000 (OASDI $620 + Medicare $145) while federal
+// income tax is computed on the reduced $9,000 income-tax base. It then
+// verifies payroll_ytd advances cumulative_contribution_gross by the full
+// gross and cumulative_taxable by the reduced base.
+func TestPayrollEngine401kReducesIncomeTaxNotFICA(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	tn, ledgerStore, _ := newTenantForFinance(t, h)
+	registerPayrollKTypes(t, h)
+	actor := uuid.New()
+
+	empID := createEmployeeRecord(t, h, tn.ID, actor, "Engineer")
+	createSalaryStructure(t, h, tn.ID, actor, empID, "USD", decimal.NewFromInt(10000), []map[string]any{
+		{"code": "401K", "name": "401(k) deferral", "type": "deduction",
+			"amount_type": "fixed", "amount": 1000, "pre_tax": true},
+	})
+	runID := createPayRun(t, h, tn.ID, actor, "Mar 2026", "2026-03-01", "2026-03-31", "")
+
+	resolver := func(ctx context.Context, tenantID uuid.UUID) (string, error) { return "US", nil }
+	store := hr.NewPayrollStore(h.pool)
+	engine := hr.NewPayrollEngine(h.records, ledgerStore).WithPool(h.pool).WithCountryResolver(resolver)
+	res, err := engine.GeneratePayslips(ctx, tn.ID, runID, actor)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if res.CreatedCount != 1 {
+		t.Fatalf("created %d slips, want 1", res.CreatedCount)
+	}
+
+	gross, taxable, _, _, _ := readTypedSlip(t, h, tn.ID, runID, empID)
+	if !gross.Equal(decimal.NewFromInt(10000)) {
+		t.Fatalf("gross = %s, want 10000", gross)
+	}
+	if !taxable.Equal(decimal.NewFromInt(9000)) {
+		t.Fatalf("taxable = %s, want 9000 (10000 - 1000 pre-tax 401k)", taxable)
+	}
+
+	slip := getRecord(t, h, tn.ID, res.PayslipIDs[0])
+	var sd map[string]any
+	if err := json.Unmarshal(slip.Data, &sd); err != nil {
+		t.Fatalf("decode slip: %v", err)
+	}
+	amounts := map[string]decimal.Decimal{}
+	deductions, _ := sd["deductions"].([]any)
+	for _, d := range deductions {
+		row, _ := d.(map[string]any)
+		code, _ := row["code"].(string)
+		amounts[code] = decimal.RequireFromString(asStrNum(t, row["amount"]))
+	}
+	// FICA runs on the FULL $10,000 contribution base, unaffected by 401k.
+	if amounts["FICA_OASDI"].Cmp(decimal.NewFromInt(620)) != 0 {
+		t.Fatalf("FICA_OASDI = %s, want 620.00 (6.2%% of full gross)", amounts["FICA_OASDI"])
+	}
+	if amounts["FICA_MEDICARE"].Cmp(decimal.NewFromFloat(145)) != 0 {
+		t.Fatalf("FICA_MEDICARE = %s, want 145.00 (1.45%% of full gross)", amounts["FICA_MEDICARE"])
+	}
+
+	// YTD: cumulative_taxable tracks the reduced income-tax base; the
+	// contribution base tracks the full gross.
+	ytd, err := store.LoadYTD(ctx, tn.ID, empID, 2026)
+	if err != nil {
+		t.Fatalf("load ytd: %v", err)
+	}
+	if !ytd.CumulativeTaxable.Equal(decimal.NewFromInt(9000)) {
+		t.Fatalf("ytd cumulative_taxable = %s, want 9000", ytd.CumulativeTaxable)
+	}
+	if !ytd.CumulativeContributionGross.Equal(decimal.NewFromInt(10000)) {
+		t.Fatalf("ytd cumulative_contribution_gross = %s, want 10000", ytd.CumulativeContributionGross)
+	}
+}

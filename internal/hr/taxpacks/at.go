@@ -94,7 +94,7 @@ var (
 //     capped at the Höchstbeitragsgrundlage)
 //
 // Negative or zero gross / period return nil.
-func (atPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (atPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -106,7 +106,9 @@ func (atPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return nil, nil
 	}
-	annualGross := gross.Div(periodFraction)
+	// Lohnsteuer runs on the post-pre-tax income-tax base; the SV lines
+	// below keep using the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	out := []Deduction{}
 
@@ -121,9 +123,10 @@ func (atPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 		})
 	}
 
-	// SV-Beiträge — capped per-period at the prorated HBGl.
+	// SV-Beiträge — run on the contribution base (full gross by default),
+	// capped per-period at the prorated HBGl.
 	periodCap := atHBGlMonthly.Mul(decimal.NewFromInt(int64(days)).Div(atMonthDays))
-	svBase := gross
+	svBase := e.ContributionBase(gross)
 	if svBase.GreaterThan(periodCap) {
 		svBase = periodCap
 	}

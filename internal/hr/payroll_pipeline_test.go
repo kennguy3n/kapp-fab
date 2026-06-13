@@ -157,6 +157,59 @@ func TestBuildPipeline_PreTaxDeductionReducesTaxable(t *testing.T) {
 	}
 }
 
+// TestBuildPipeline_ContributionBaseRespectsFlag is the two-base invariant
+// at the pipeline layer: a default pre-tax deduction (401(k) case) reduces
+// the income-tax base but leaves the contribution base at the full gross,
+// while a pre-tax deduction flagged PreTaxReducesContributionBase
+// (Section-125 case) reduces BOTH bases.
+func TestBuildPipeline_ContributionBaseRespectsFlag(t *testing.T) {
+	sv := structureData{
+		BaseSalary: decimal.NewFromInt(10000),
+		Components: []structureComponent{
+			// 401(k): pre-tax for income tax only.
+			{Code: "401K", Name: "401(k) deferral", Type: "deduction",
+				AmountType: "fixed", Amount: decimal.NewFromInt(1000), PreTax: true},
+			// Section-125: pre-tax for income tax AND contributions.
+			{Code: "S125", Name: "Section 125 cafeteria", Type: "deduction",
+				AmountType: "fixed", Amount: decimal.NewFromInt(400), PreTax: true,
+				PreTaxReducesContributionBase: true},
+		},
+	}
+	res := buildPipeline(sv, nil, time.Time{}, march2026())
+
+	if !res.Gross.Equal(decimal.NewFromInt(10000)) {
+		t.Fatalf("gross: got %s want 10000", res.Gross)
+	}
+	// taxable = 10000 - 1000 (401k) - 400 (s125) = 8600.
+	if !res.TaxableGross.Equal(decimal.NewFromInt(8600)) {
+		t.Fatalf("taxable: got %s want 8600", res.TaxableGross)
+	}
+	// contribution = 10000 - 400 (only the flagged s125) = 9600.
+	if !res.ContributionGross.Equal(decimal.NewFromInt(9600)) {
+		t.Fatalf("contribution: got %s want 9600 (only S125 reduces it)", res.ContributionGross)
+	}
+}
+
+// TestBuildPipeline_ContributionBaseDefaultsToGross confirms that with no
+// flagged components the contribution base equals the full gross even when
+// an ordinary pre-tax deduction lowers the taxable base.
+func TestBuildPipeline_ContributionBaseDefaultsToGross(t *testing.T) {
+	sv := structureData{
+		BaseSalary: decimal.NewFromInt(5000),
+		Components: []structureComponent{
+			{Code: "PENSION", Type: "deduction", AmountType: "fixed",
+				Amount: decimal.NewFromInt(300), PreTax: true},
+		},
+	}
+	res := buildPipeline(sv, nil, time.Time{}, march2026())
+	if !res.TaxableGross.Equal(decimal.NewFromInt(4700)) {
+		t.Fatalf("taxable: got %s want 4700", res.TaxableGross)
+	}
+	if !res.ContributionGross.Equal(decimal.NewFromInt(5000)) {
+		t.Fatalf("contribution: got %s want 5000 (pre-tax does not reduce it)", res.ContributionGross)
+	}
+}
+
 // TestBuildPipeline_TaxableComponentFlag honours a per-earning taxable=false.
 func TestBuildPipeline_TaxableComponentFlag(t *testing.T) {
 	sv := structureData{

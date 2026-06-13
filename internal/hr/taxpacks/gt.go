@@ -64,7 +64,7 @@ var (
 // above, then prorated back to the pay-period (365.25-day year).
 // The lower-tier 5% case is the default; the high-tier branch
 // reuses the Q15,000 pre-computed base (= Q300,000 × 5%).
-func (gtPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (gtPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -74,7 +74,8 @@ func (gtPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	}
 	out := []Deduction{}
 
-	igss := gross.Mul(gtIGSSRate).Round(2)
+	// IGSS runs on the contribution base (full gross by default).
+	igss := e.ContributionBase(gross).Mul(gtIGSSRate).Round(2)
 	if igss.IsPositive() {
 		out = append(out, Deduction{Code: "GT_IGSS", Name: "IGSS (cuota laboral, 4.83%)", Amount: igss})
 	}
@@ -84,7 +85,7 @@ func (gtPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 		return out, nil
 	}
 	// Annual renta bruta projected from slip.
-	annualGross := gross.Div(periodFraction)
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 	annualIGSS := igss.Div(periodFraction)
 	rentaImponible := annualGross.Sub(gtISRExempt).Sub(annualIGSS)
 	if rentaImponible.LessThanOrEqual(decimal.Zero) {

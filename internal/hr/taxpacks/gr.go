@@ -110,12 +110,15 @@ func (grPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 
 	out := []Deduction{}
 
-	// EFKA — 13.87% on gross, capped via YTD-aware accumulation.
-	efkaBase := gross
-	if employee.YTDGross.GreaterThanOrEqual(grEFKAAnnualCap) {
+	// EFKA — 13.87% on the contribution base, capped via cumulative
+	// contribution wages.
+	contribGross := employee.ContributionBase(gross)
+	ytdContrib := employee.YTDContributionBase()
+	efkaBase := contribGross
+	if ytdContrib.GreaterThanOrEqual(grEFKAAnnualCap) {
 		efkaBase = decimal.Zero
-	} else if employee.YTDGross.Add(gross).GreaterThan(grEFKAAnnualCap) {
-		efkaBase = grEFKAAnnualCap.Sub(employee.YTDGross)
+	} else if ytdContrib.Add(contribGross).GreaterThan(grEFKAAnnualCap) {
+		efkaBase = grEFKAAnnualCap.Sub(ytdContrib)
 	}
 	efka := efkaBase.Mul(grEFKARate).Round(2)
 	if efka.IsPositive() {
@@ -128,7 +131,7 @@ func (grPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 
 	// PIT base = gross − EFKA (Greek tax law allows EFKA to be
 	// deducted from the taxable income base).
-	annualGross := gross.Div(periodFraction)
+	annualGross := employee.IncomeTaxBase(gross).Div(periodFraction)
 	annualEFKA := efka.Div(periodFraction)
 	taxableAnnual := annualGross.Sub(annualEFKA)
 	if taxableAnnual.LessThan(decimal.Zero) {

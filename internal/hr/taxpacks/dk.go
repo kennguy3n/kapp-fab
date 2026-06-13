@@ -83,7 +83,7 @@ var (
 //     PI = gross − AM-bidrag, annualised)
 //
 // Negative or zero gross returns nil.
-func (dkPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (dkPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -98,8 +98,9 @@ func (dkPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 
 	out := []Deduction{}
 
-	// AM-bidrag — 8% on raw gross, no allowance.
-	amBidrag := gross.Mul(dkAMBidragRate).Round(2)
+	// AM-bidrag — 8% labour-market contribution on the contribution base
+	// (full gross by default), no allowance.
+	amBidrag := e.ContributionBase(gross).Mul(dkAMBidragRate).Round(2)
 	if amBidrag.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "DK_AM_BIDRAG",
@@ -113,7 +114,7 @@ func (dkPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	// allowance are measured against — the personfradrag is
 	// applied later as a composite base reduction for the bundskat
 	// + kommune slice only, while topskat tests PI directly.
-	aSkatBase := gross.Sub(amBidrag)
+	aSkatBase := e.IncomeTaxBase(gross).Sub(amBidrag)
 	annualPI := aSkatBase.Div(periodFraction)
 	taxableAnnual := annualPI.Sub(dkPersonfradrag)
 	if taxableAnnual.LessThan(decimal.Zero) {

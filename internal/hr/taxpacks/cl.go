@@ -104,7 +104,7 @@ var (
 // walks the UTM schedule.
 //
 // Negative / zero gross returns nil.
-func (clPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (clPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -114,9 +114,10 @@ func (clPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 
 	out := []Deduction{}
 
-	// Tope imponible — 84.6 UF × UF-CLP.
+	// AFP / Salud / Cesantía run on the contribution base (full gross by
+	// default), capped at the tope imponible — 84.6 UF × UF-CLP.
 	tope := clTopeImponibleUF.Mul(clUF2025Jan)
-	base := gross
+	base := e.ContributionBase(gross)
 	if base.GreaterThan(tope) {
 		base = tope
 	}
@@ -137,7 +138,7 @@ func (clPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	totalCotizaciones := base.Mul(clAFPObligatoryRate.Add(clAFPCommissionRate)).
 		Add(base.Mul(clSaludRate)).
 		Add(base.Mul(clCesantiaRate))
-	taxableCLP := gross.Sub(totalCotizaciones)
+	taxableCLP := e.IncomeTaxBase(gross).Sub(totalCotizaciones)
 	if taxableCLP.LessThanOrEqual(decimal.Zero) {
 		return out, nil
 	}
