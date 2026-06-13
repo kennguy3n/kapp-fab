@@ -8,6 +8,7 @@ const createRecord = vi.fn();
 const listBankFeedSuggestions = vi.fn();
 const listBankFeedRules = vi.fn();
 const acceptBankFeedSuggestion = vi.fn();
+const acceptBankFeedSplit = vi.fn();
 const rejectBankFeedSuggestion = vi.fn();
 const listExchangeRates = vi.fn();
 
@@ -19,6 +20,7 @@ vi.mock("../lib/api", () => ({
     listBankFeedSuggestions: (...a: unknown[]) => listBankFeedSuggestions(...a),
     listBankFeedRules: (...a: unknown[]) => listBankFeedRules(...a),
     acceptBankFeedSuggestion: (...a: unknown[]) => acceptBankFeedSuggestion(...a),
+    acceptBankFeedSplit: (...a: unknown[]) => acceptBankFeedSplit(...a),
     rejectBankFeedSuggestion: (...a: unknown[]) => rejectBankFeedSuggestion(...a),
     listExchangeRates: (...a: unknown[]) => listExchangeRates(...a),
   },
@@ -179,12 +181,14 @@ describe("BankReconciliationPage", () => {
     listBankFeedSuggestions.mockReset();
     listBankFeedRules.mockReset();
     acceptBankFeedSuggestion.mockReset();
+    acceptBankFeedSplit.mockReset();
     rejectBankFeedSuggestion.mockReset();
     listExchangeRates.mockReset();
     routeListRecords();
     listBankFeedSuggestions.mockResolvedValue([]);
     listBankFeedRules.mockResolvedValue([]);
     acceptBankFeedSuggestion.mockResolvedValue(undefined);
+    acceptBankFeedSplit.mockResolvedValue({ id: "txn-1", status: "matched" });
     rejectBankFeedSuggestion.mockResolvedValue(undefined);
     listExchangeRates.mockResolvedValue({ rates: [] });
   });
@@ -619,10 +623,24 @@ describe("BankReconciliationPage", () => {
     await user.click(
       within(sidebyside).getByRole("button", { name: /Reconcile split/i }),
     );
-    await waitFor(() => {
-      expect(acceptBankFeedSuggestion).toHaveBeenCalledWith("sug-best");
-      expect(acceptBankFeedSuggestion).toHaveBeenCalledWith("sug-alt");
-    });
+    // A split is one accept-with-amount call carrying every leg (entry +
+    // partial amount + originating suggestion), not N single-accepts. The
+    // backend re-validates the net-to-zero balance and persists the legs.
+    await waitFor(() => expect(acceptBankFeedSplit).toHaveBeenCalledTimes(1));
+    expect(acceptBankFeedSplit).toHaveBeenCalledWith("txn-1", [
+      {
+        journal_entry_id: "je-aaaa1111-0000-0000-0000-000000000000",
+        amount: "125",
+        suggestion_id: "sug-best",
+      },
+      {
+        journal_entry_id: "je-bbbb2222-0000-0000-0000-000000000000",
+        amount: "125",
+        suggestion_id: "sug-alt",
+      },
+    ]);
+    // The split path must NOT fall back to single-accept.
+    expect(acceptBankFeedSuggestion).not.toHaveBeenCalled();
     void selects;
   });
 });

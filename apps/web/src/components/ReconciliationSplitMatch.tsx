@@ -30,10 +30,12 @@ interface AllocationRow {
  * an operator allocate one bank line across several candidate ledger
  * entries, shows the running difference (line amount − allocations), and
  * only enables reconciliation once the split nets to zero (within the
- * half-cent tolerance). It consumes the same accept endpoint as a single
- * match — the parent accepts each chosen suggestion — so no backend change
- * is required; the value here is the balance-to-zero workflow Xero and
- * QuickBooks operators rely on for one-to-many clears.
+ * half-cent tolerance). The parent sends the chosen legs (entry + partial
+ * amount) to the accept-with-amount endpoint in a single call, which
+ * re-validates the balance server-side and persists each allocation. The
+ * net-to-zero gate here is UX-only — it keeps the operator's math honest
+ * before the round-trip; the ledger is the source of truth. This is the
+ * balance-to-zero, one-to-many clear Xero and QuickBooks operators rely on.
  */
 export function ReconciliationSplitMatch({
   txn,

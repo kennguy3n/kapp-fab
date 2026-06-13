@@ -1024,6 +1024,11 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 				r.Post("/suggestions/{id}/accept", d.bfh.acceptSuggestion)
 				r.Post("/suggestions/{id}/reject", d.bfh.rejectSuggestion)
 
+				// Split reconciliation: allocate one bank line across
+				// multiple journal entries with partial amounts. The
+				// running-difference balance is re-validated server-side.
+				r.Post("/bank-transactions/{transaction_id}/split", d.bfh.acceptSplit)
+
 				// Rule "test/preview": evaluate the supplied rule (or rule
 				// set) against a sample line without persisting anything, so
 				// the editor can show which rule would fire before save.
