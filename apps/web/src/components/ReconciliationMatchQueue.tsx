@@ -1,16 +1,18 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { BankFeedSuggestion, KRecord } from "@kapp/client";
 import { Badge, Button } from "@kapp/ui";
 import {
   confidenceBand,
-  formatAmount,
   formatConfidence,
   parseReasons,
   shortId,
   txnAmount,
   txnData,
+  type RateMap,
   type SuggestionGroup,
 } from "./reconciliation";
+import { ReconciliationFxCell } from "./ReconciliationFxCell";
+import { rt } from "./ReconciliationStrings";
 
 function ConfidenceBadge({ confidence }: { confidence: number }) {
   const band = confidenceBand(confidence);
@@ -98,24 +100,41 @@ function CandidateRow({
 function GroupCard({
   group,
   txn,
+  active,
+  baseCurrency,
+  rates,
   pendingIds,
   bulkPending,
   onAccept,
   onReject,
+  cardRef,
 }: {
   group: SuggestionGroup;
   txn: KRecord | undefined;
+  active: boolean;
+  baseCurrency?: string;
+  rates: RateMap;
   pendingIds: Set<string>;
   bulkPending: boolean;
   onAccept: (s: BankFeedSuggestion) => void;
   onReject: (s: BankFeedSuggestion) => void;
+  cardRef?: (el: HTMLLIElement | null) => void;
 }) {
   const [showAlternatives, setShowAlternatives] = useState(false);
   const [best, ...alternatives] = group.suggestions;
   const d = txn ? txnData(txn) : undefined;
 
   return (
-    <li className="rounded-lg border border-border bg-bg-subtle p-3">
+    <li
+      ref={cardRef}
+      id={`match-group-${group.transactionId}`}
+      role="option"
+      aria-selected={active}
+      aria-current={active ? "true" : undefined}
+      className={`rounded-lg border bg-bg-subtle p-3 transition-colors ${
+        active ? "border-accent ring-2 ring-(--focus-ring)" : "border-border"
+      }`}
+    >
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div className="min-w-0">
           <div className="font-medium text-fg">
@@ -131,8 +150,13 @@ function GroupCard({
           <div className="text-xs text-fg-muted">{d?.value_date ?? ""}</div>
         </div>
         {d && txn && (
-          <div className="text-right font-semibold tabular-nums text-fg">
-            {formatAmount(txnAmount(txn), d.currency)}
+          <div className="text-right">
+            <ReconciliationFxCell
+              amount={txnAmount(txn)}
+              lineCurrency={d.currency}
+              baseCurrency={baseCurrency}
+              rates={rates}
+            />
           </div>
         )}
       </div>
@@ -186,10 +210,18 @@ function GroupCard({
  * accept / reject. Lines with more than one candidate fold the rest behind
  * a "find alternative" toggle. The header carries the accept-all-high-
  * confidence bulk action.
+ *
+ * For throughput on a large queue the list is keyboard-drivable: the
+ * container is focusable and ↑/↓ move the active card, A accepts the
+ * active line's best candidate, R rejects it, and S skips to the next
+ * line — so a bookkeeper can clear a statement without leaving the
+ * keyboard.
  */
 export function ReconciliationMatchQueue({
   groups,
   txnById,
+  baseCurrency,
+  rates,
   pendingIds,
   highConfidenceCount,
   bulkPending,
@@ -199,6 +231,8 @@ export function ReconciliationMatchQueue({
 }: {
   groups: SuggestionGroup[];
   txnById: Map<string, KRecord>;
+  baseCurrency?: string;
+  rates: RateMap;
   pendingIds: Set<string>;
   highConfidenceCount: number;
   bulkPending: boolean;
@@ -206,33 +240,136 @@ export function ReconciliationMatchQueue({
   onReject: (s: BankFeedSuggestion) => void;
   onAcceptAllHighConfidence: () => void;
 }) {
+  const [activeIndex, setActiveIndex] = useState(0);
+  const cardRefs = useRef<(HTMLLIElement | null)[]>([]);
+  // Index the next render should scroll into view. Set by an explicit move
+  // (not by the clamp below) so shrinking the queue never auto-scrolls.
+  const scrollTargetRef = useRef<number | null>(null);
+
+  // Keep the active index in range as the queue shrinks (lines get
+  // matched / rejected out from under it), and drop now-stale card refs so
+  // the array doesn't grow unbounded across a long session.
+  useEffect(() => {
+    cardRefs.current.length = groups.length;
+    setActiveIndex((i) => {
+      if (groups.length === 0) return 0;
+      return Math.min(i, groups.length - 1);
+    });
+  }, [groups.length]);
+
+  // Perform the scroll in an effect rather than inside the state updater:
+  // updaters must stay pure (StrictMode runs them twice), and DOM reads like
+  // scrollIntoView don't belong there.
+  useEffect(() => {
+    const target = scrollTargetRef.current;
+    if (target == null) return;
+    scrollTargetRef.current = null;
+    cardRefs.current[target]?.scrollIntoView({
+      block: "nearest",
+      behavior: "smooth",
+    });
+  }, [activeIndex]);
+
+  const move = useCallback(
+    (delta: number) => {
+      const next = Math.max(0, Math.min(groups.length - 1, activeIndex + delta));
+      scrollTargetRef.current = next;
+      setActiveIndex(next);
+    },
+    [groups.length, activeIndex],
+  );
+
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLUListElement>) => {
+      if (groups.length === 0) return;
+      const group = groups[activeIndex];
+      const best = group?.suggestions[0];
+      switch (e.key) {
+        case "ArrowDown":
+          e.preventDefault();
+          move(1);
+          break;
+        case "ArrowUp":
+          e.preventDefault();
+          move(-1);
+          break;
+        case "a":
+        case "A":
+          if (best && !bulkPending && !pendingIds.has(best.id)) {
+            e.preventDefault();
+            onAccept(best);
+          }
+          break;
+        case "r":
+        case "R":
+          if (best && !bulkPending && !pendingIds.has(best.id)) {
+            e.preventDefault();
+            onReject(best);
+          }
+          break;
+        case "s":
+        case "S":
+          e.preventDefault();
+          move(1);
+          break;
+        default:
+          break;
+      }
+    },
+    [activeIndex, groups, move, onAccept, onReject, bulkPending, pendingIds],
+  );
+
   return (
     <section className="flex flex-col gap-3" aria-label="Match review queue">
       <header className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-base font-semibold text-fg">Match review queue</h2>
-        <Button
-          size="sm"
-          disabled={highConfidenceCount === 0 || bulkPending}
-          onClick={onAcceptAllHighConfidence}
-        >
-          Accept all high-confidence ({highConfidenceCount})
-        </Button>
+        <div className="flex items-center gap-2">
+          {groups.length > 0 && (
+            <span className="hidden text-xs text-fg-muted sm:inline">
+              {rt("reconciliation.kbd.hint")}
+            </span>
+          )}
+          <Button
+            size="sm"
+            disabled={highConfidenceCount === 0 || bulkPending}
+            onClick={onAcceptAllHighConfidence}
+          >
+            Accept all high-confidence ({highConfidenceCount})
+          </Button>
+        </div>
       </header>
       {groups.length === 0 ? (
         <p className="text-sm text-fg-muted">
-          No match suggestions to review.
+          {rt("reconciliation.suggestions.empty")}
         </p>
       ) : (
-        <ul className="flex list-none flex-col gap-2 p-0">
-          {groups.map((g) => (
+        <ul
+          className="flex list-none flex-col gap-2 p-0 focus-visible:outline-none"
+          tabIndex={0}
+          role="listbox"
+          aria-label="Match review queue"
+          aria-activedescendant={
+            groups[activeIndex]
+              ? `match-group-${groups[activeIndex].transactionId}`
+              : undefined
+          }
+          onKeyDown={onKeyDown}
+        >
+          {groups.map((g, idx) => (
             <GroupCard
               key={g.transactionId}
               group={g}
               txn={txnById.get(g.transactionId)}
+              active={idx === activeIndex}
+              baseCurrency={baseCurrency}
+              rates={rates}
               pendingIds={pendingIds}
               bulkPending={bulkPending}
               onAccept={onAccept}
               onReject={onReject}
+              cardRef={(el) => {
+                cardRefs.current[idx] = el;
+              }}
             />
           ))}
         </ul>
