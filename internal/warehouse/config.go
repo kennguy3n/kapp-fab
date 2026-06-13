@@ -337,19 +337,37 @@ func (s *ConfigStore) Delete(ctx context.Context, tenantID, id uuid.UUID) error 
 
 // ListDue returns the enabled configs whose next cron fire is at or
 // before now. A config with no recorded last_run_at fires immediately.
-// Mirrors reporting.ScheduleStore.ListDue so the two schedulers behave
-// identically.
+//
+// The enabled = TRUE predicate is pushed to SQL so a scheduler tick
+// never loads (or deserializes the JSONB sources/watermarks of)
+// configs a tenant has paused — across a 5000-tenant fleet ticking
+// every few minutes that is the bulk of the avoidable per-tick cost.
+// The cron "is it due yet" test stays in Go because the cron grammar
+// is not expressible as a SQL predicate; the remaining in-Go filter
+// therefore runs only over the already-active subset.
 func (s *ConfigStore) ListDue(ctx context.Context, tenantID uuid.UUID, now time.Time) ([]Config, error) {
-	all, err := s.List(ctx, tenantID)
+	var enabled []Config
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		c, err := scanConfigs(ctx, tx,
+			`SELECT tenant_id, id, name, destination_datasource_id, destination_schema,
+			        sources, cron_expression, mode, enabled, watermarks,
+			        last_run_at, last_status, last_error, created_by, created_at, updated_at
+			   FROM warehouse_sync_configs
+			  WHERE tenant_id = $1 AND enabled = TRUE
+			  ORDER BY created_at DESC, id`,
+			tenantID)
+		if err != nil {
+			return err
+		}
+		enabled = c
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	due := make([]Config, 0, len(all))
-	for i := range all {
-		c := all[i]
-		if !c.Enabled {
-			continue
-		}
+	due := make([]Config, 0, len(enabled))
+	for i := range enabled {
+		c := enabled[i]
 		sched, err := cronParser.Parse(c.CronExpression)
 		if err != nil {
 			continue
