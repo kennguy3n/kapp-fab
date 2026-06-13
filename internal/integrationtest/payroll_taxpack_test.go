@@ -38,7 +38,7 @@ func TestPayrollEngineAppliesUSTaxPack(t *testing.T) {
 	resolver := func(ctx context.Context, tenantID uuid.UUID) (string, error) {
 		return "US", nil
 	}
-	engine := hr.NewPayrollEngine(h.records, ledgerStore).WithCountryResolver(resolver)
+	engine := hr.NewPayrollEngine(h.records, ledgerStore).WithPool(h.pool).WithCountryResolver(resolver)
 	res, err := engine.GeneratePayslips(ctx, tn.ID, runID, actor)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -99,7 +99,7 @@ func TestPayrollEngineAppliesAUTaxPack(t *testing.T) {
 	resolver := func(ctx context.Context, tenantID uuid.UUID) (string, error) {
 		return "AU", nil
 	}
-	engine := hr.NewPayrollEngine(h.records, ledgerStore).WithCountryResolver(resolver)
+	engine := hr.NewPayrollEngine(h.records, ledgerStore).WithPool(h.pool).WithCountryResolver(resolver)
 	res, err := engine.GeneratePayslips(ctx, tn.ID, runID, actor)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -147,7 +147,7 @@ func TestPayrollEngineSkipsStatutoryWhenCountryUnset(t *testing.T) {
 	resolver := func(ctx context.Context, tenantID uuid.UUID) (string, error) {
 		return "", nil // no country → no pack
 	}
-	engine := hr.NewPayrollEngine(h.records, ledgerStore).WithCountryResolver(resolver)
+	engine := hr.NewPayrollEngine(h.records, ledgerStore).WithPool(h.pool).WithCountryResolver(resolver)
 	res, err := engine.GeneratePayslips(ctx, tn.ID, runID, actor)
 	if err != nil {
 		t.Fatalf("generate: %v", err)

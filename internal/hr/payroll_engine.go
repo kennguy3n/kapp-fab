@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
 	"github.com/kennguy3n/kapp-fab/internal/hr/taxpacks"
@@ -50,12 +51,36 @@ type PayrollEngine struct {
 	ledger   *ledger.PGStore
 	now      func() time.Time
 	resolver CountryResolver
+	// pool backs the typed payroll tables (runs / payslips / lines /
+	// pay_inputs / ytd). GeneratePayslips requires it; PostPayRun uses it
+	// to source the journal entry from the persisted typed lines and to
+	// keep the typed run/slip status in sync. Wired via WithPool.
+	pool *pgxpool.Pool
 }
 
 // NewPayrollEngine binds the engine to a record store. Pass the
 // ledger store to enable PostPayRun.
 func NewPayrollEngine(records *record.PGStore, ledgerStore *ledger.PGStore) *PayrollEngine {
 	return &PayrollEngine{records: records, ledger: ledgerStore, now: time.Now}
+}
+
+// WithPool wires the pgx pool that backs the typed payroll tables. The
+// typed model (payroll_runs / payroll_payslips / payroll_payslip_lines /
+// payroll_pay_inputs / payroll_ytd) is the source of truth for the
+// ordered calculation pipeline and persisted YTD; GeneratePayslips
+// returns an error if no pool is configured.
+func (e *PayrollEngine) WithPool(pool *pgxpool.Pool) *PayrollEngine {
+	e.pool = pool
+	return e
+}
+
+// payrollStore builds a typed-table store bound to the engine's pool and
+// clock. Returns nil when no pool is configured.
+func (e *PayrollEngine) payrollStore() *PayrollStore {
+	if e.pool == nil {
+		return nil
+	}
+	return NewPayrollStore(e.pool).WithClock(e.now)
 }
 
 // WithClock overrides the engine's now() source so tests can drive
@@ -219,6 +244,32 @@ func (e *PayrollEngine) GeneratePayslips(
 		}
 	}
 	period := taxpacks.PayPeriod{Start: periodStart, End: periodEnd}
+	taxYear := periodEnd.Year()
+
+	store := e.payrollStore()
+	if store == nil {
+		return nil, errors.New("hr: payroll engine requires a database pool (call WithPool)")
+	}
+	// Promote the run header into the typed payroll_runs table so the
+	// slips/lines written below have a parent row to FK to. The upsert
+	// keeps re-generation safe and refreshes the account codes the
+	// posting path reads later.
+	if err := store.UpsertRun(ctx, tenantID, RunHeader{
+		ID:                       payRunID,
+		Name:                     run.Name,
+		PeriodStart:              periodStart,
+		PeriodEnd:                periodEnd,
+		Currency:                 runCurrency,
+		Status:                   "processing",
+		Department:               run.Department,
+		SalaryExpenseAccountCode: run.SalaryExpenseAccountCode,
+		SalaryPayableAccountCode: run.SalaryPayableAccountCode,
+		DeductionAccountMap:      run.DeductionAccountMap,
+		CreatedBy:                actorID,
+	}); err != nil {
+		return nil, err
+	}
+
 	// existingSlips is already narrowed to this pay_run via the
 	// ListByField filter above, so we no longer need the in-memory
 	// pay_run_id check that the old ListAll path required.
@@ -259,70 +310,100 @@ func (e *PayrollEngine) GeneratePayslips(
 		if strings.ToUpper(sv.Data.Currency) != "" {
 			slipCurrency = strings.ToUpper(sv.Data.Currency)
 		}
-		earnings, deductions, gross, deduct, net := rollStructure(sv.Data, slipCurrency)
+		// D1 + D2: ordered pipeline over the structure + this run's
+		// variable inputs, prorated for a mid-period join date. The
+		// statutory tax step (D3) runs inside FinalizePayslip's
+		// transaction so it reads the real persisted YTD.
+		inputs, err := store.GatherPayInputs(ctx, tenantID, payRunID, emp.ID)
+		if err != nil {
+			return nil, err
+		}
+		joinDate, _ := parsePayrollDate(ed.DateOfJoining)
+		pipe := buildPipeline(sv.Data, inputs, joinDate, period)
 
-		// Statutory tax-pack deductions are appended after the
-		// structure-driven lines so the slip's `deductions` array
-		// keeps a stable ordering: structure components first,
-		// then federal / FICA / PAYG. Engine totals are
-		// recomputed below so the rollup catches the new lines.
-		if pack != nil {
+		// computeTax is evaluated by FinalizePayslip with the prior-period
+		// cumulative taxable gross as YTDGross. It withholds on the
+		// post-pre-tax taxable base (D2), not raw gross.
+		monthsYTD := monthsEmployedYTD(joinDate, periodEnd, taxYear)
+		empData := ed
+		empCurrency := slipCurrency
+		empIDLocal := empIDStr
+		taxableGross := pipe.TaxableGross
+		computeTax := func(ytdGross decimal.Decimal) ([]PayslipLine, decimal.Decimal, error) {
+			if pack == nil {
+				return nil, decimal.Zero, nil
+			}
 			info := taxpacks.EmployeeInfo{
-				ID:         empIDStr,
-				FilingType: ed.FilingType,
-				Allowances: ed.Allowances,
-				Resident:   ed.Resident == nil || *ed.Resident, // default resident=true
-				HasTFN:     ed.HasTFN == nil || *ed.HasTFN,     // default has_tfn=true
-				YTDGross:   ed.YTDGross,
-				Currency:   slipCurrency,
+				ID:         empIDLocal,
+				FilingType: empData.FilingType,
+				Allowances: empData.Allowances,
+				Resident:   empData.Resident == nil || *empData.Resident, // default resident=true
+				HasTFN:     empData.HasTFN == nil || *empData.HasTFN,     // default has_tfn=true
+				YTDGross:   ytdGross,
+				Currency:   empCurrency,
 
 				// Phase-M2 fields. Each defaults to its zero
 				// value; the packs apply their own "most
 				// common" fallbacks so pre-Phase-M2
-				// KRecords still produce correct slips:
-				//   - CH pack: empty Canton → federal-only.
-				//   - GCC packs: empty Nationality → "expat"
-				//     (no employee SS withholding).
-				//   - IN pack: empty TaxRegime → "new".
-				//   - NZ pack: zero KiwiSaverRate → no KS line.
-				//   - SG pack: zero Age → treat as ≤55 tier.
-				Canton:        ed.Canton,
-				Nationality:   ed.Nationality,
-				TaxRegime:     ed.TaxRegime,
-				KiwiSaverRate: ed.KiwiSaverRate,
-				NumDependents: ed.NumDependents,
-				Age:           ed.Age,
-				PermitType:    ed.PermitType,
+				// KRecords still produce correct slips.
+				Canton:        empData.Canton,
+				Nationality:   empData.Nationality,
+				TaxRegime:     empData.TaxRegime,
+				KiwiSaverRate: empData.KiwiSaverRate,
+				NumDependents: empData.NumDependents,
+				Age:           empData.Age,
+				PermitType:    empData.PermitType,
 
-				// Phase-M3 fields (CA + LATAM). The CA pack
-				// reads Province for the second bracket walk
-				// and CPPExempt / EIExempt for the per-employee
-				// CRA exemption letters; LATAM packs reuse
-				// Nationality / NumDependents / Age / TaxRegime
-				// from the Phase-M2 block above.
-				Province:  ed.Province,
-				CPPExempt: ed.CPPExempt,
-				EIExempt:  ed.EIExempt,
+				// Phase-M3 fields (CA + LATAM).
+				Province:  empData.Province,
+				CPPExempt: empData.CPPExempt,
+				EIExempt:  empData.EIExempt,
 
-				// Cumulative-withholding month count for the CN
-				// pack. Zero (pre-existing KRecord) → the pack
-				// falls back to the pay-period end month.
-				MonthsEmployedYTD: ed.MonthsEmployedYTD,
+				// D3: a real, persisted month index derived from the
+				// join date + tax year rather than a static field, so
+				// the CN cumulative pack and mid-year joiners are correct.
+				MonthsEmployedYTD: monthsYTD,
 			}
-			extraLines, err := pack.ComputeWithholding(ctx, info, gross, period)
+			extra, err := pack.ComputeWithholding(ctx, info, taxableGross, period)
 			if err != nil {
-				return nil, fmt.Errorf("hr: tax pack %s: %w", pack.Country(), err)
+				return nil, decimal.Zero, fmt.Errorf("hr: tax pack %s: %w", pack.Country(), err)
 			}
-			for _, d := range extraLines {
-				deductions = append(deductions, lineOut{
-					Code:   d.Code,
-					Name:   d.Name,
-					Amount: d.Amount,
-				})
-				deduct = deduct.Add(d.Amount)
+			lines := make([]PayslipLine, 0, len(extra))
+			var total decimal.Decimal
+			for _, d := range extra {
+				lines = append(lines, PayslipLine{Code: d.Code, Label: d.Name, Amount: d.Amount})
+				total = total.Add(d.Amount)
 			}
-			net = gross.Sub(deduct)
+			return lines, total, nil
 		}
+
+		// Persist the slip + ordered lines and advance YTD atomically.
+		fin, err := store.FinalizePayslip(ctx, FinalizeInput{
+			TenantID:          tenantID,
+			RunID:             payRunID,
+			PayslipID:         uuid.New(),
+			EmployeeID:        emp.ID,
+			StructureID:       sv.ID,
+			Currency:          slipCurrency,
+			PeriodStart:       periodStart,
+			PeriodEnd:         periodEnd,
+			TaxYear:           taxYear,
+			Gross:             pipe.Gross,
+			TaxableGross:      pipe.TaxableGross,
+			Earnings:          pipe.Earnings,
+			PretaxDeductions:  pipe.PretaxDeductions,
+			PosttaxDeductions: pipe.PosttaxDeductions,
+			ComputeTax:        computeTax,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("hr: finalize payslip for %s: %w", empIDStr, err)
+		}
+
+		// KType compatibility shim: mirror the typed slip into the
+		// hr.payslip KRecord so existing readers (HTTP list/get, agent
+		// tools, PostPayRun's approval gate) keep working. The KType id is
+		// forced equal to the typed payslip id so the two stay linked and
+		// PostPayRun can load the typed lines by the same id.
 		slipData := map[string]any{
 			"pay_run_id":       payRunID.String(),
 			"employee_id":      empIDStr,
@@ -330,11 +411,12 @@ func (e *PayrollEngine) GeneratePayslips(
 			"pay_period_end":   run.PayPeriodEnd,
 			"structure_id":     sv.ID.String(),
 			"currency":         slipCurrency,
-			"earnings":         linesToJSON(earnings),
-			"deductions":       linesToJSON(deductions),
-			"gross_pay":        decimalFloat(gross),
-			"total_deductions": decimalFloat(deduct),
-			"net_pay":          decimalFloat(net),
+			"earnings":         linesToShimJSON(fin.Lines, LineKindEarning),
+			"deductions":       linesToShimJSON(fin.Lines, LineKindPretaxDeduction, LineKindTax, LineKindPosttaxDeduction),
+			"gross_pay":        decimalFloat(pipe.Gross),
+			"taxable_gross":    decimalFloat(pipe.TaxableGross),
+			"total_deductions": decimalFloat(fin.TotalEEDeductions),
+			"net_pay":          decimalFloat(fin.Net),
 			"status":           "draft",
 		}
 		body, err := json.Marshal(slipData)
@@ -342,6 +424,7 @@ func (e *PayrollEngine) GeneratePayslips(
 			return nil, fmt.Errorf("hr: marshal payslip for %s: %w", empIDStr, err)
 		}
 		created, err := e.records.Create(ctx, record.KRecord{
+			ID:        fin.PayslipID,
 			TenantID:  tenantID,
 			KType:     KTypePayslip,
 			Data:      body,
@@ -352,9 +435,24 @@ func (e *PayrollEngine) GeneratePayslips(
 		}
 		out.PayslipIDs = append(out.PayslipIDs, created.ID)
 		out.CreatedCount++
-		totalGross = totalGross.Add(gross)
-		totalDeductions = totalDeductions.Add(deduct)
-		totalNet = totalNet.Add(net)
+		totalGross = totalGross.Add(pipe.Gross)
+		totalDeductions = totalDeductions.Add(fin.TotalEEDeductions)
+		totalNet = totalNet.Add(fin.Net)
+	}
+
+	// Refresh the typed run rollup from the persisted payslips (the source
+	// of truth). total_taxable has no KType equivalent, so the typed sum
+	// is the only correct source for it.
+	cnt, tg, tt, tee, tnet, err := store.SumRunTotals(ctx, tenantID, payRunID)
+	if err != nil {
+		return out, err
+	}
+	runStatus := run.Status
+	if runStatus == "" || runStatus == "draft" {
+		runStatus = "processing"
+	}
+	if err := store.UpdateRunTotals(ctx, tenantID, payRunID, cnt, tg, tt, tee, tnet, runStatus); err != nil {
+		return out, err
 	}
 
 	// Roll up totals onto the pay_run and flip status→processing so
@@ -437,6 +535,10 @@ func (e *PayrollEngine) PostPayRun(
 	if currency == "" {
 		currency = "USD"
 	}
+	// Typed-table store (may be nil for a pool-less engine). When present
+	// the journal entry is sourced from the persisted typed lines and the
+	// typed run/slip status is synced to paid after posting.
+	store := e.payrollStore()
 
 	// Fast-check: does a JE already exist for this pay_run? If
 	// so, this call is a retry of a previous attempt that committed
@@ -512,6 +614,26 @@ func (e *PayrollEngine) PostPayRun(
 			continue
 		}
 		approved = append(approved, s)
+		// Prefer the persisted typed lines as the posting source. The
+		// slip's KType id equals the typed payslip id (forced at
+		// generation), so we load by the same id. Legacy slips with no
+		// typed lines fall back to the KType rollup fields.
+		if store != nil {
+			tl, lerr := store.GetPayslipLines(ctx, tenantID, s.ID)
+			if lerr != nil {
+				return nil, fmt.Errorf("hr: load typed lines for %s: %w", s.ID, lerr)
+			}
+			if len(tl) > 0 {
+				g, d, n, pc := rollupTypedLines(tl)
+				gross = gross.Add(g)
+				deductions = deductions.Add(d)
+				net = net.Add(n)
+				for code, amt := range pc {
+					perCodeDeductions[code] = perCodeDeductions[code].Add(amt)
+				}
+				continue
+			}
+		}
 		gross = gross.Add(sd.GrossPay)
 		deductions = deductions.Add(sd.TotalDeductions)
 		net = net.Add(sd.NetPay)
@@ -584,6 +706,14 @@ func (e *PayrollEngine) PostPayRun(
 			UpdatedBy: &actorID,
 		}); err != nil {
 			return entry, fmt.Errorf("hr: mark payslip %s paid: %w", s.ID, err)
+		}
+	}
+
+	// Sync the typed run + slips to paid and link the JE. Idempotent
+	// (only flips rows not already paid), so retries converge.
+	if store != nil {
+		if err := store.MarkRunPosted(ctx, tenantID, payRunID, entry.ID); err != nil {
+			return entry, fmt.Errorf("hr: sync typed payroll status: %w", err)
 		}
 	}
 
@@ -947,6 +1077,10 @@ type deductionLine struct {
 type employeeData struct {
 	Status     string `json:"status"`
 	Department string `json:"department"`
+	// DateOfJoining drives D1 proration: when it falls inside the pay
+	// period the recurring earnings are scaled to the employed fraction
+	// of the period. Empty / unparsable → no proration (full period).
+	DateOfJoining string `json:"date_of_joining,omitempty"`
 	// Tax-pack inputs. Optional; pre-Phase-M employee KRecords
 	// don't carry these and the packs degrade gracefully.
 	FilingType string          `json:"filing_type,omitempty"`
@@ -1005,6 +1139,17 @@ type structureComponent struct {
 	AmountType         string          `json:"amount_type"`
 	OverrideAmount     decimal.Decimal `json:"override_amount"`
 	OverrideAmountType string          `json:"override_amount_type"`
+
+	// Taxable marks whether an EARNING component contributes to the
+	// statutory taxable base. nil → true (the salary_component default),
+	// so pre-D2 structures keep their existing behaviour where every
+	// earning is taxable. Ignored for deduction components.
+	Taxable *bool `json:"taxable,omitempty"`
+	// PreTax marks a DEDUCTION component as salary-sacrifice / pre-tax:
+	// it reduces taxable_gross BEFORE statutory withholding (D2). Absent
+	// → false (post-tax), so pre-D2 structures keep applying their
+	// deductions after tax exactly as before. Ignored for earnings.
+	PreTax bool `json:"pre_tax,omitempty"`
 }
 
 type structureView struct {
@@ -1026,6 +1171,52 @@ type lineOut struct {
 func decimalFloat(d decimal.Decimal) float64 {
 	f, _ := d.Float64()
 	return f
+}
+
+// linesToShimJSON renders persisted typed payslip lines of the given
+// kind(s) into the KType payslip's earnings/deductions arrays, matching
+// linesToJSON's shape (code / name / amount as a JSON number) so existing
+// KType readers and PostPayRun's per-code split keep working unchanged.
+func linesToShimJSON(lines []PayslipLine, kinds ...string) []map[string]any {
+	want := map[string]bool{}
+	for _, k := range kinds {
+		want[k] = true
+	}
+	out := make([]map[string]any, 0, len(lines))
+	for _, l := range lines {
+		if !want[l.Kind] {
+			continue
+		}
+		out = append(out, map[string]any{
+			"code":   l.Code,
+			"name":   l.Label,
+			"amount": decimalFloat(l.Amount),
+		})
+	}
+	return out
+}
+
+// rollupTypedLines reduces persisted typed payslip lines into the
+// posting totals: gross = Σ earnings; deductions = Σ (pretax + tax +
+// posttax); net = gross − deductions; and the per-code deduction map the
+// journal builder splits across liability accounts. This is how
+// PostPayRun sources its journal entry from the persisted lines rather
+// than recomputing from the KType shim.
+func rollupTypedLines(lines []PayslipLine) (gross, deductions, net decimal.Decimal, perCode map[string]decimal.Decimal) {
+	perCode = map[string]decimal.Decimal{}
+	for _, l := range lines {
+		switch l.Kind {
+		case LineKindEarning:
+			gross = gross.Add(l.Amount)
+		case LineKindPretaxDeduction, LineKindTax, LineKindPosttaxDeduction:
+			deductions = deductions.Add(l.Amount)
+			if l.Code != "" {
+				perCode[l.Code] = perCode[l.Code].Add(l.Amount)
+			}
+		}
+	}
+	net = gross.Sub(deductions)
+	return gross, deductions, net, perCode
 }
 
 // linesToJSON renders a list of resolved component lines with

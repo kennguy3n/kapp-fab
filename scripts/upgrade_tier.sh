@@ -150,6 +150,14 @@ TABLES=(
   # warehouse_sync_runs FKs warehouse_sync_configs (ON DELETE CASCADE),
   # so the config precedes its run history. Both default (tenant_id, id) PK.
   warehouse_sync_configs warehouse_sync_runs
+  # Payroll depth — P1 (000098–000101). Typed payroll run model promoted
+  # from the hr.pay_run/hr.payslip KTypes. payroll_runs is the parent;
+  # payroll_payslips FKs payroll_runs (ON DELETE CASCADE) and
+  # payroll_payslip_lines FKs payroll_payslips (ON DELETE CASCADE);
+  # payroll_pay_inputs FKs payroll_runs; payroll_ytd has no run FK. The
+  # first four default (tenant_id, id) PK; payroll_ytd uses a natural
+  # composite PK (tenant_id, employee_id, tax_year).
+  payroll_runs payroll_payslips payroll_payslip_lines payroll_pay_inputs payroll_ytd
 )
 
 # Build a Postgres TEXT[] literal: ARRAY['t1','t2',...]
