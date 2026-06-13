@@ -356,7 +356,10 @@ export function BankReconciliationPage() {
   // cleared); amounts go on the wire as exact decimal strings.
   const reconcileSplit = useCallback(
     async (allocations: SplitAllocation[]) => {
-      if (allocations.length === 0) return;
+      // A split spans >=2 entries; refuse anything smaller here too, so the
+      // page-level guard matches the composer, handler, and matcher invariant
+      // (defense-in-depth — never put a sub-2-leg "split" on the wire).
+      if (allocations.length < 2) return;
       const transactionId = allocations[0].suggestion.transaction_id;
       setBulkPending(true);
       try {
