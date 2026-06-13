@@ -141,6 +141,11 @@ TABLES=(
   # subcontract_orders (ON DELETE CASCADE), so the parent precedes its
   # child. Both default (tenant_id, id) PK.
   subcontract_orders subcontract_components
+  # Workstream 4 (000094) — warehouse/BI export bridge.
+  # warehouse_sync_configs FKs insights_data_sources (listed earlier);
+  # warehouse_sync_runs FKs warehouse_sync_configs (ON DELETE CASCADE),
+  # so the config precedes its run history. Both default (tenant_id, id) PK.
+  warehouse_sync_configs warehouse_sync_runs
 )
 
 # Build a Postgres TEXT[] literal: ARRAY['t1','t2',...]

@@ -1383,6 +1383,32 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Delete("/{id}", d.repsh.delete)
 		})
 
+		// Workstream 4 — warehouse/BI export bridge. CRUD for sync
+		// configs + on-demand run + run history; the worker owns
+		// scheduled dispatch via warehouse.ActionTypeWarehouseSync.
+		// Gated on FeatureInsightsExternal because a sync's
+		// destination IS an insights external datasource — the same
+		// flag that admits managing those connections admits
+		// exporting INTO them. The path carries no FeatureFromPath
+		// mapping, so the gate is wired explicitly rather than via
+		// d.featureMW.
+		r.Route("/api/v1/warehouse-sync", func(r chi.Router) {
+			d.tenantChain(r)
+			r.Use(d.apiCallMW)
+			r.Use(platform.FeatureMiddleware(d.featureStore, tenant.FeatureInsightsExternal))
+			r.Use(d.authzGate("insights.read", ""))
+			r.Use(platform.IdempotencyMiddleware(d.pool))
+			r.Use(d.rateLimitMW)
+			r.Use(platform.QuotaMiddleware(d.quotaEnforcer))
+			r.Get("/", d.whsh.list)
+			r.Post("/", d.whsh.create)
+			r.Get("/{id}", d.whsh.get)
+			r.Put("/{id}", d.whsh.update)
+			r.Delete("/{id}", d.whsh.delete)
+			r.Post("/{id}/run", d.whsh.run)
+			r.Get("/{id}/runs", d.whsh.runHistory)
+		})
+
 		// Phase L Insights. CRUD for saved queries + dashboards,
 		// cache-aware query execution under per-tenant
 		// statement_timeout, dashboard widget upsert/delete, and

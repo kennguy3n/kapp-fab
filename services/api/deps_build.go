@@ -55,6 +55,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/sales"
 	"github.com/kennguy3n/kapp-fab/internal/secrets"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
+	"github.com/kennguy3n/kapp-fab/internal/warehouse"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
 
@@ -1111,6 +1112,20 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		pools:    insightsPools,
 		features: featureStore,
 	}
+	// Workstream 4 — warehouse/BI export bridge. The exporter reuses
+	// the insights datasource store + pool manager (already built
+	// above) as the destination connection model; reads run under
+	// tenant RLS against the primary pool. The API surface drives an
+	// on-demand run through the SAME SyncHandler the worker uses for
+	// scheduled dispatch.
+	warehouseConfigStore := warehouse.NewConfigStore(pool)
+	warehouseRunStore := warehouse.NewRunStore(pool)
+	warehouseExporter := warehouse.NewExporter(pool, insightsDataSources, insightsPools)
+	whsh := &warehouseSyncHandlers{
+		configs: warehouseConfigStore,
+		runs:    warehouseRunStore,
+		sync:    warehouse.NewSyncHandler(warehouseConfigStore, warehouseRunStore, warehouseExporter),
+	}
 	// Public embed billing prefers the Redis-backed limiter when wired
 	// so multi-replica deployments share a single per-tenant token
 	// bucket. Without this, a viral embed served across N replicas
@@ -1677,6 +1692,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		dashh:                  dashh,
 		insh:                   insh,
 		insdsh:                 insdsh,
+		whsh:                   whsh,
 		insembh:                insembh,
 		hrh:                    hrh,
 		lmsh:                   lmsh,

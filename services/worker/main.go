@@ -50,6 +50,7 @@ import (
 	"github.com/kennguy3n/kapp-fab/internal/reporting"
 	"github.com/kennguy3n/kapp-fab/internal/scheduler"
 	"github.com/kennguy3n/kapp-fab/internal/tenant"
+	"github.com/kennguy3n/kapp-fab/internal/warehouse"
 	"github.com/kennguy3n/kapp-fab/internal/workflow"
 )
 
@@ -450,6 +451,30 @@ func run() error {
 	schedRegistry.Register(
 		insights.ActionTypeQueryCacheRefresh,
 		NewQueryCacheRefreshHandler(insightsQueryStore, insightsRunner),
+	)
+
+	// Workstream 4 — warehouse/BI export bridge. Mirrors the report
+	// scheduler: each tenant tick runs every due warehouse sync
+	// config, exporting the selected sources into the tenant's
+	// external destination. The destination connection model is the
+	// insights datasource store + pool manager (encrypted connection
+	// strings via the same KeyManager the bank-feed sync uses), so the
+	// export targets only connections the tenant already owns. Seeded
+	// by tenant.seedDefaultScheduledActions for plans that include
+	// FeatureInsightsExternal.
+	var warehouseEncryptor insights.Encryptor
+	if workerKeyManager != nil {
+		warehouseEncryptor = workerKeyManager
+	}
+	warehouseDataSources := insights.NewDataSourceStore(pool, warehouseEncryptor)
+	warehousePools := insights.NewPoolManager()
+	defer warehousePools.Close()
+	warehouseConfigStore := warehouse.NewConfigStore(pool)
+	warehouseRunStore := warehouse.NewRunStore(pool)
+	warehouseExporter := warehouse.NewExporter(pool, warehouseDataSources, warehousePools)
+	schedRegistry.Register(
+		warehouse.ActionTypeWarehouseSync,
+		warehouse.NewSyncHandler(warehouseConfigStore, warehouseRunStore, warehouseExporter),
 	)
 
 	exportWorker := NewExportWorker(exporter.NewStore(pool, adminPool), recordStore, 5*time.Second)

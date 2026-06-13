@@ -130,6 +130,14 @@ var TenantScopedTables = []string{
 	// index, not the PK), so neither needs a tableConflictKeys entry.
 	"subcontract_orders",
 	"subcontract_components",
+	// Workstream 4 (000094) — warehouse/BI export bridge.
+	// warehouse_sync_configs FKs insights_data_sources (listed earlier
+	// in the Insights block) via (tenant_id, destination_datasource_id);
+	// warehouse_sync_runs FKs warehouse_sync_configs (ON DELETE CASCADE),
+	// so the parent config precedes its run history in the FK-restore
+	// walk. Both carry the default (tenant_id, id) PK.
+	"warehouse_sync_configs",
+	"warehouse_sync_runs",
 }
 
 // SchemaName returns the canonical dedicated-schema name for a
