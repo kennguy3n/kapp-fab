@@ -308,10 +308,11 @@ const handlers = {
       (s) => s.transaction_id !== transactionId,
     );
     const txn = idx !== -1 ? list[idx] : undefined;
+    // tenant_id is a top-level KRecord field; bank_account_id lives in data.
     const data = (txn?.data ?? {}) as Record<string, unknown>;
     return delay({
       id: transactionId,
-      tenant_id: (data.tenant_id as string) ?? "",
+      tenant_id: txn?.tenant_id ?? "",
       bank_account_id: (data.bank_account_id as string) ?? "",
       amount: String(data.amount ?? allocations.reduce((a, x) => a + Number(x.amount), 0)),
       currency: (data.currency as string) ?? "USD",
