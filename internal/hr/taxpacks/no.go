@@ -97,7 +97,7 @@ var (
 //   - NO_TRINNSKATT (bracket tax above NOK 217,400 / yr)
 //
 // Negative or zero gross returns nil.
-func (noPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (noPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -109,7 +109,11 @@ func (noPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return nil, nil
 	}
-	annualGross := gross.Div(periodFraction)
+	// Trygdeavgift (national-insurance contribution on personinntekt)
+	// uses the contribution base (full gross by default); the income taxes
+	// below use the post-pre-tax base.
+	annualGross := e.ContributionBase(gross).Div(periodFraction)
+	annualTaxable := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	out := []Deduction{}
 
@@ -127,11 +131,11 @@ func (noPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	}
 
 	// Minstefradrag = min(46% × gross, cap).
-	minstefradrag := annualGross.Mul(noMinstefradragRate)
+	minstefradrag := annualTaxable.Mul(noMinstefradragRate)
 	if minstefradrag.GreaterThan(noMinstefradragCap) {
 		minstefradrag = noMinstefradragCap
 	}
-	alminneligInntekt := annualGross.Sub(minstefradrag)
+	alminneligInntekt := annualTaxable.Sub(minstefradrag)
 	if alminneligInntekt.LessThan(decimal.Zero) {
 		alminneligInntekt = decimal.Zero
 	}
@@ -148,7 +152,7 @@ func (noPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 
 	// Trinnskatt — bracket walk on annual gross (personal
 	// income), prorated back.
-	annualTrinnskatt := walkNOBrackets(annualGross, noTrinnskattBrackets)
+	annualTrinnskatt := walkNOBrackets(annualTaxable, noTrinnskattBrackets)
 	periodTrinnskatt := annualTrinnskatt.Mul(periodFraction).Round(2)
 	if periodTrinnskatt.IsPositive() {
 		out = append(out, Deduction{

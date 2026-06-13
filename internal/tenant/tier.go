@@ -142,6 +142,22 @@ var TenantScopedTables = []string{
 	// walk. Both carry the default (tenant_id, id) PK.
 	"warehouse_sync_configs",
 	"warehouse_sync_runs",
+	// Payroll depth — P1 (000098–000101). The typed payroll run model
+	// promoted from the hr.pay_run/hr.payslip KTypes. FK-safe restore
+	// order: payroll_runs is the parent; payroll_payslips FKs
+	// payroll_runs (ON DELETE CASCADE) and payroll_payslip_lines FKs
+	// payroll_payslips (ON DELETE CASCADE); payroll_pay_inputs FKs
+	// payroll_runs; payroll_ytd has no FK to a run (it is keyed per
+	// employee/tax_year). payroll_ytd uses a NATURAL composite PK
+	// (tenant_id, employee_id, tax_year) — NOT the default
+	// (tenant_id, id) — so it requires a tableConflictKeys entry in the
+	// backup service (services/kapp-backup/main.go); the other four
+	// carry the default (tenant_id, id) PK.
+	"payroll_runs",
+	"payroll_payslips",
+	"payroll_payslip_lines",
+	"payroll_pay_inputs",
+	"payroll_ytd",
 }
 
 // SchemaName returns the canonical dedicated-schema name for a

@@ -35,7 +35,7 @@ func TestPayrollEngineGeneratesSlipsFromStructure(t *testing.T) {
 	})
 	runID := createPayRun(t, h, tn.ID, actor, "Jun 2026", "2026-06-01", "2026-06-30", "")
 
-	engine := hr.NewPayrollEngine(h.records, ledgerStore)
+	engine := hr.NewPayrollEngine(h.records, ledgerStore).WithPool(h.pool)
 	res, err := engine.GeneratePayslips(ctx, tn.ID, runID, actor)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -82,7 +82,7 @@ func TestPayrollEngineIsIdempotentOnReGenerate(t *testing.T) {
 	createSalaryStructure(t, h, tn.ID, actor, empID, "USD", decimal.NewFromInt(4000), nil)
 	runID := createPayRun(t, h, tn.ID, actor, "Jul 2026", "2026-07-01", "2026-07-31", "")
 
-	engine := hr.NewPayrollEngine(h.records, ledgerStore)
+	engine := hr.NewPayrollEngine(h.records, ledgerStore).WithPool(h.pool)
 	if _, err := engine.GeneratePayslips(ctx, tn.ID, runID, actor); err != nil {
 		t.Fatalf("first generate: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestPayrollEngineHandlesMoreThan50Employees(t *testing.T) {
 	}
 	runID := createPayRun(t, h, tn.ID, actor, "Jun 2026", "2026-06-01", "2026-06-30", "")
 
-	engine := hr.NewPayrollEngine(h.records, ledgerStore)
+	engine := hr.NewPayrollEngine(h.records, ledgerStore).WithPool(h.pool)
 	res, err := engine.GeneratePayslips(ctx, tn.ID, runID, actor)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -192,7 +192,7 @@ func TestPayrollEngineListPayslipsForRunReturnsAllSlips(t *testing.T) {
 	runA := createPayRun(t, h, tn.ID, actor, "A", "2026-09-01", "2026-09-30", "Engineering")
 	runB := createPayRun(t, h, tn.ID, actor, "B", "2026-09-01", "2026-09-30", "Sales")
 
-	engine := hr.NewPayrollEngine(h.records, ledgerStore)
+	engine := hr.NewPayrollEngine(h.records, ledgerStore).WithPool(h.pool)
 	if _, err := engine.GeneratePayslips(ctx, tn.ID, runA, actor); err != nil {
 		t.Fatalf("generate A: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestPayrollEngineFiltersByDepartment(t *testing.T) {
 
 	runID := createPayRun(t, h, tn.ID, actor, "Aug 2026", "2026-08-01", "2026-08-31", "Engineering")
 
-	engine := hr.NewPayrollEngine(h.records, ledgerStore)
+	engine := hr.NewPayrollEngine(h.records, ledgerStore).WithPool(h.pool)
 	res, err := engine.GeneratePayslips(ctx, tn.ID, runID, actor)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -283,7 +283,7 @@ func TestPayrollEnginePostsJournalEntry(t *testing.T) {
 	runID := createPayRunWithAccounts(t, h, tn.ID, actor,
 		"Sep 2026", "2026-09-01", "2026-09-30", "", "5100", "2300")
 
-	engine := hr.NewPayrollEngine(h.records, ledgerStore)
+	engine := hr.NewPayrollEngine(h.records, ledgerStore).WithPool(h.pool)
 	res, err := engine.GeneratePayslips(ctx, tn.ID, runID, actor)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -352,7 +352,7 @@ func TestPayrollEnginePostPayRunIsIdempotentAfterPartialFailure(t *testing.T) {
 	runID := createPayRunWithAccounts(t, h, tn.ID, actor,
 		"Dec 2026", "2026-12-01", "2026-12-31", "", "5100", "2300")
 
-	engine := hr.NewPayrollEngine(h.records, ledgerStore)
+	engine := hr.NewPayrollEngine(h.records, ledgerStore).WithPool(h.pool)
 	genRes, err := engine.GeneratePayslips(ctx, tn.ID, runID, actor)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -434,7 +434,7 @@ func TestPayrollEngineRejectsRunWithoutAccounts(t *testing.T) {
 	actor := uuid.New()
 	runID := createPayRun(t, h, tn.ID, actor, "Oct 2026", "2026-10-01", "2026-10-31", "")
 
-	engine := hr.NewPayrollEngine(h.records, ledgerStore)
+	engine := hr.NewPayrollEngine(h.records, ledgerStore).WithPool(h.pool)
 	if _, err := engine.PostPayRun(ctx, tn.ID, runID, actor); err == nil {
 		t.Fatalf("expected ErrMissingAccounts, got nil")
 	}

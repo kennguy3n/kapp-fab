@@ -64,7 +64,7 @@ var (
 // 120), prorated back to the pay-period (365.25-day year).
 // Below the 80-jornal threshold (most employees) only IPS is
 // withheld. Multi-tier is closed-form (no bracket walk).
-func (pyPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (pyPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -74,7 +74,8 @@ func (pyPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	}
 	out := []Deduction{}
 
-	ips := gross.Mul(pyIPSEmployeeRate).Round(2)
+	// IPS runs on the contribution base (full gross by default).
+	ips := e.ContributionBase(gross).Mul(pyIPSEmployeeRate).Round(2)
 	if ips.IsPositive() {
 		out = append(out, Deduction{Code: "PY_IPS", Name: "IPS (cuota laboral, 9%)", Amount: ips})
 	}
@@ -83,7 +84,8 @@ func (pyPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return out, nil
 	}
-	annualGross := gross.Div(periodFraction)
+	// IRP runs on the post-pre-tax base; IPS keeps the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 	// IRP thresholds in PYG.
 	thr0 := pyJornalMinimo.Mul(pyIRPThreshold0).Mul(decimal.NewFromInt(30))
 	thr1 := pyJornalMinimo.Mul(pyIRPThreshold1).Mul(decimal.NewFromInt(30))

@@ -75,7 +75,8 @@ func (omPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		return nil, nil
 	}
 
-	base := gross
+	// PASI runs on the contribution base (full gross by default).
+	base := e.ContributionBase(gross)
 	if base.GreaterThan(omPASICeiling) {
 		base = omPASICeiling
 	}

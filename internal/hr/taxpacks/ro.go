@@ -76,7 +76,7 @@ var roAnnualDeducerePersonala = roDeducerePersonala.Mul(decimal.NewFromInt(12))
 //   - RO_IMPOZIT (income tax 10% on (gross - CAS - CASS - personal deduction))
 //
 // Negative or zero gross returns nil.
-func (roPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (roPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -91,7 +91,10 @@ func (roPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 
 	out := []Deduction{}
 
-	cas := gross.Mul(roCASRate).Round(2)
+	// CAS + CASS run on the contribution base (full gross by default).
+	contribGross := e.ContributionBase(gross)
+
+	cas := contribGross.Mul(roCASRate).Round(2)
 	if cas.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "RO_CAS",
@@ -100,7 +103,7 @@ func (roPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 		})
 	}
 
-	cass := gross.Mul(roCASSRate).Round(2)
+	cass := contribGross.Mul(roCASSRate).Round(2)
 	if cass.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "RO_CASS",
@@ -114,7 +117,9 @@ func (roPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	// back by periodFraction. The annual personal deduction
 	// (7,200 RON/yr) is applied at the annual layer so a 14-day
 	// slip only gets ~276 RON of the deduction, not the full 600.
-	annualGross := gross.Div(periodFraction)
+	// Impozit runs on the post-pre-tax base less CAS/CASS; CAS and CASS
+	// above keep using the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 	annualCAS := cas.Div(periodFraction)
 	annualCASS := cass.Div(periodFraction)
 	annualTaxBase := annualGross.Sub(annualCAS).Sub(annualCASS).Sub(roAnnualDeducerePersonala)

@@ -100,7 +100,8 @@ func (maPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	out := []Deduction{}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(maAnnualPeriodFraction)
-	annualGross := gross.Div(periodFraction)
+	// IR runs on the post-pre-tax base; CNSS / AMO keep the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	profDeduction := annualGross.Mul(maProfessionalDeductionRate)
 	if profDeduction.GreaterThan(maProfessionalDeductionCap) {
@@ -133,7 +134,9 @@ func (maPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		})
 	}
 
-	cnssBase := gross
+	// CNSS + AMO run on the contribution base (full gross by default).
+	contribGross := e.ContributionBase(gross)
+	cnssBase := contribGross
 	if cnssBase.GreaterThan(maCNSSWageCeiling) {
 		cnssBase = maCNSSWageCeiling
 	}
@@ -146,7 +149,7 @@ func (maPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		})
 	}
 
-	amo := gross.Mul(maAMOEmployeeRate).Round(2)
+	amo := contribGross.Mul(maAMOEmployeeRate).Round(2)
 	if amo.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "MA_AMO",

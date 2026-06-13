@@ -136,7 +136,9 @@ func (krPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	out := []Deduction{}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(krAnnualPeriodFraction)
-	annualGross := gross.Div(periodFraction)
+	// Income tax runs on the post-pre-tax base; NPS/NHI/EI keep the full
+	// gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	// Basic personal deduction applied before bracket walk.
 	taxableAnnual := annualGross.Sub(krBasicDeductionAnnual)
@@ -167,7 +169,8 @@ func (krPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		return out, nil
 	}
 
-	monthlyEquiv := gross.Mul(krMonthlyDaysApprox).Div(decimal.NewFromInt(int64(days)))
+	// NPS/NHI/LTC/EI run on the contribution base (full gross by default).
+	monthlyEquiv := e.ContributionBase(gross).Mul(krMonthlyDaysApprox).Div(decimal.NewFromInt(int64(days)))
 
 	// NPS: 4.5% capped at KRW 6,170,000 monthly.
 	npsBase := monthlyEquiv

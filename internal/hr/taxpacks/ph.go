@@ -122,7 +122,7 @@ func (phPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// Non-resident alien not engaged in trade or business: flat
 	// 25% on PH-sourced gross income, no social contributions.
 	if !e.Resident {
-		nranetbTax := gross.Mul(phNRANETBRate).Round(2)
+		nranetbTax := e.IncomeTaxBase(gross).Mul(phNRANETBRate).Round(2)
 		if nranetbTax.IsPositive() {
 			out = append(out, Deduction{
 				Code:   "PH_NRANETB_TAX",
@@ -134,7 +134,9 @@ func (phPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(phPeriodsPerYear)
-	annualGross := gross.Div(periodFraction)
+	// Withholding tax runs on the post-pre-tax base; SSS / PhilHealth /
+	// Pag-IBIG keep the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	annualTax := walkPHBrackets(annualGross, phBracketsResident)
 	periodTax := annualTax.Mul(periodFraction).Round(2)
@@ -146,8 +148,12 @@ func (phPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		})
 	}
 
+	// SSS / PhilHealth / Pag-IBIG run on the contribution base (full gross
+	// by default).
+	contribGross := e.ContributionBase(gross)
+
 	// SSS: 5% of monthly compensation, capped at MSC ceiling.
-	sssBase := gross
+	sssBase := contribGross
 	if sssBase.GreaterThan(phSSSCeiling) {
 		sssBase = phSSSCeiling
 	}
@@ -160,7 +166,7 @@ func (phPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	// PhilHealth: 2.5% on monthly compensation in the floor / ceiling band.
-	phBase := gross
+	phBase := contribGross
 	if phBase.LessThan(phPhilHealthFloor) {
 		phBase = phPhilHealthFloor
 	}
@@ -176,7 +182,7 @@ func (phPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	// Pag-IBIG: 2% capped at PHP 10,000 monthly comp → max PHP 200.
-	pagBase := gross
+	pagBase := contribGross
 	if pagBase.GreaterThan(phPagIBIGCeiling) {
 		pagBase = phPagIBIGCeiling
 	}

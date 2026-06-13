@@ -78,18 +78,21 @@ var (
 // HK$30,000 maximum relevant income level. No income tax is
 // withheld (Hong Kong Salaries Tax is assessed directly by the
 // IRD, not deducted at source).
-func (hkPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (hkPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) || period.Days() <= 0 {
 		return nil, nil
 	}
 
+	// MPF runs on the contribution base (full relevant income by default).
+	contribGross := e.ContributionBase(gross)
+
 	// Below the minimum relevant income level → no employee
 	// mandatory contribution.
-	if gross.LessThan(hkMPFMinRelevantIncome) {
+	if contribGross.LessThan(hkMPFMinRelevantIncome) {
 		return nil, nil
 	}
 
-	base := gross
+	base := contribGross
 	if base.GreaterThan(hkMPFMaxRelevantIncome) {
 		base = hkMPFMaxRelevantIncome
 	}

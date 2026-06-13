@@ -58,7 +58,7 @@ var (
 //   - HU_SZJA (személyi jövedelemadó, 15% on gross)
 //
 // Negative or zero gross returns nil.
-func (huPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (huPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -68,7 +68,8 @@ func (huPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 
 	out := []Deduction{}
 
-	tb := gross.Mul(huTBRate).Round(2)
+	// TB járulék runs on the contribution base (full gross by default).
+	tb := e.ContributionBase(gross).Mul(huTBRate).Round(2)
 	if tb.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "HU_TB",
@@ -77,7 +78,7 @@ func (huPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 		})
 	}
 
-	szja := gross.Mul(huSZJARate).Round(2)
+	szja := e.IncomeTaxBase(gross).Mul(huSZJARate).Round(2)
 	if szja.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "HU_SZJA",

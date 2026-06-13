@@ -74,7 +74,7 @@ var (
 // the pay-period using a 365.25-day year. Negative / zero gross
 // or period → nil; below-exempt annualised net → social-security
 // rows only.
-func (doPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (doPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -84,7 +84,9 @@ func (doPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	}
 	out := []Deduction{}
 
-	afpBase := gross
+	// AFP + SFS run on the contribution base (full gross by default).
+	contribGross := e.ContributionBase(gross)
+	afpBase := contribGross
 	afpCap := doSMN.Mul(doAFPCapMult)
 	if afpBase.GreaterThan(afpCap) {
 		afpBase = afpCap
@@ -94,7 +96,7 @@ func (doPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 		out = append(out, Deduction{Code: "DO_AFP", Name: "AFP — Aporte personal a pensiones", Amount: afp})
 	}
 
-	sfsBase := gross
+	sfsBase := contribGross
 	sfsCap := doSMN.Mul(doSFSCapMult)
 	if sfsBase.GreaterThan(sfsCap) {
 		sfsBase = sfsCap
@@ -109,7 +111,7 @@ func (doPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return out, nil
 	}
-	netMonthly := gross.Sub(afp).Sub(sfs)
+	netMonthly := e.IncomeTaxBase(gross).Sub(afp).Sub(sfs)
 	if netMonthly.LessThanOrEqual(decimal.Zero) {
 		return out, nil
 	}

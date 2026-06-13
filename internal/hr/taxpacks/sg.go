@@ -125,7 +125,7 @@ func (sgPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// invariant locally means a future relaxation of the early
 	// guard can't accidentally emit a zero-amount slip line.
 	if !e.Resident {
-		nr := gross.Mul(sgNonResidentRate).Round(2)
+		nr := e.IncomeTaxBase(gross).Mul(sgNonResidentRate).Round(2)
 		if !nr.IsPositive() {
 			return nil, nil
 		}
@@ -142,8 +142,9 @@ func (sgPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// by CPF Board adjustment in the next pay run.
 	rate := resolveCPFEmployeeRate(e.Age)
 
-	// CPF is applied to gross capped at the OW ceiling.
-	owBase := gross
+	// CPF is applied to the contribution base (full gross by default)
+	// capped at the OW ceiling.
+	owBase := e.ContributionBase(gross)
 	if owBase.GreaterThan(sgCPFMonthlyOWCeiling) {
 		owBase = sgCPFMonthlyOWCeiling
 	}

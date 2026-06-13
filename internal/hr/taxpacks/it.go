@@ -142,7 +142,9 @@ func (itPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return nil, nil
 	}
-	annualGross := gross.Div(periodFraction)
+	// IRPEF + addizionali (income tax) run on the post-pre-tax base; INPS
+	// below keeps using the full gross and its YTD contribution cap.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	out := []Deduction{}
 
@@ -186,8 +188,9 @@ func (itPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	// INPS — capped at the massimale, with the 1% MaggiorAzione
-	// applied between the first ceiling and the massimale.
-	if inps := itComputeINPS(gross, e.YTDGross); inps.IsPositive() {
+	// applied between the first ceiling and the massimale. Runs on the
+	// contribution base against cumulative contribution wages.
+	if inps := itComputeINPS(e.ContributionBase(gross), e.YTDContributionBase()); inps.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "IT_INPS",
 			Name:   "INPS (employee share, IT)",

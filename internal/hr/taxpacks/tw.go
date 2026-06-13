@@ -137,11 +137,12 @@ func (twPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 
 	// Non-resident flat withholding (Standards Article 3).
 	if !e.Resident {
+		itGross := e.IncomeTaxBase(gross)
 		rate := twNonResidentHighRate
-		if gross.LessThanOrEqual(twNonResidentThreshold) {
+		if itGross.LessThanOrEqual(twNonResidentThreshold) {
 			rate = twNonResidentLowRate
 		}
-		nr := gross.Mul(rate).Round(2)
+		nr := itGross.Mul(rate).Round(2)
 		if nr.IsPositive() {
 			out = append(out, Deduction{
 				Code:   "TW_NONRESIDENT_TAX",
@@ -155,7 +156,9 @@ func (twPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// Income tax: annualise, subtract deductions, walk brackets,
 	// prorate back to the slip period.
 	periodFraction := decimal.NewFromInt(int64(days)).Div(twAnnualPeriodFraction)
-	annualGross := gross.Div(periodFraction)
+	// Income tax runs on the post-pre-tax base; Labor/Employment/Health
+	// insurance keep the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	deps := e.NumDependents
 	if deps < 0 {
@@ -180,9 +183,13 @@ func (twPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		})
 	}
 
+	// Labor + Employment + Health Insurance run on the contribution base
+	// (full gross by default).
+	contribGross := e.ContributionBase(gross)
+
 	// Labor + Employment Insurance employee share. The slip's gross
 	// is the insured-salary proxy; cap at the LI maximum grade.
-	liBase := gross
+	liBase := contribGross
 	if liBase.GreaterThan(twLaborInsuranceCeiling) {
 		liBase = twLaborInsuranceCeiling
 	}
@@ -197,7 +204,7 @@ func (twPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 
 	// National Health Insurance employee share; cap at the NHI
 	// maximum grade.
-	nhiBase := gross
+	nhiBase := contribGross
 	if nhiBase.GreaterThan(twNHICeiling) {
 		nhiBase = twNHICeiling
 	}

@@ -91,7 +91,8 @@ func (aePack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		return nil, nil
 	}
 
-	base := gross
+	// GPSSA runs on the contribution base (full gross by default).
+	base := e.ContributionBase(gross)
 	if base.GreaterThan(aeGPSSACeiling) {
 		base = aeGPSSACeiling
 	}

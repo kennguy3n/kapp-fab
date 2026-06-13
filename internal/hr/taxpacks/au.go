@@ -85,12 +85,13 @@ func (auPack) ComputeWithholding(ctx context.Context, e EmployeeInfo, gross deci
 		return []Deduction{{
 			Code:   "PAYG_NO_TFN",
 			Name:   "PAYG withholding — no TFN (AU)",
-			Amount: gross.Mul(auNoTFNRate).Round(2),
+			Amount: e.IncomeTaxBase(gross).Mul(auNoTFNRate).Round(2),
 		}}, nil
 	}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(auPeriodsPerYear)
-	annualGross := gross.Div(periodFraction)
+	// PAYG withholds on the post-pre-tax income-tax base.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	scale := auScaleResident
 	if !e.Resident {

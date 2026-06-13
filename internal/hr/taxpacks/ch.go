@@ -239,7 +239,9 @@ func (chPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	if chIsQuellensteuerLiable(e) {
 		periodFraction := decimal.NewFromInt(int64(days)).Div(chAnnualDays)
 		if periodFraction.IsPositive() {
-			annualGross := gross.Div(periodFraction)
+			// Quellensteuer (source income tax) runs on the post-pre-tax
+			// base; AHV / ALV contributions below keep the full gross.
+			annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 			// Federal portion via the bracket walk.
 			annualFed := walkCHBrackets(annualGross, chFederalBrackets)
 			periodFed := annualFed.Mul(periodFraction).Round(2)
@@ -251,7 +253,7 @@ func (chPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 				})
 			}
 			// Cantonal portion via per-canton average-rate lookup.
-			cantonal := gross.Mul(chResolveCantonalRate(e.Canton)).Round(2)
+			cantonal := e.IncomeTaxBase(gross).Mul(chResolveCantonalRate(e.Canton)).Round(2)
 			if cantonal.IsPositive() {
 				out = append(out, Deduction{
 					Code:   "CH_CANTONAL_TAX",
@@ -262,9 +264,14 @@ func (chPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		}
 	}
 
+	// Contributions run on the contribution base (full gross by default)
+	// and the ALV ceiling on cumulative contribution wages.
+	contribGross := e.ContributionBase(gross)
+	ytdContrib := e.YTDContributionBase()
+
 	// AHV/IV/EO — every employee regardless of permit / residency
 	// pays the 5.3% combined employee share. No ceiling.
-	if ahv := gross.Mul(chAHVEmployeeRate).Round(2); ahv.IsPositive() {
+	if ahv := contribGross.Mul(chAHVEmployeeRate).Round(2); ahv.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "CH_AHV",
 			Name:   "AHV/IV/EO (employee share, CH)",
@@ -282,11 +289,11 @@ func (chPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// not. This is the BSV-correct enforcement; period-prorated
 	// caps are a steady-state approximation that fails for bonus
 	// and other irregular slips.
-	alvBase := gross
-	if e.YTDGross.GreaterThanOrEqual(chALVAnnualCap) {
+	alvBase := contribGross
+	if ytdContrib.GreaterThanOrEqual(chALVAnnualCap) {
 		alvBase = decimal.Zero
-	} else if e.YTDGross.Add(gross).GreaterThan(chALVAnnualCap) {
-		alvBase = chALVAnnualCap.Sub(e.YTDGross)
+	} else if ytdContrib.Add(contribGross).GreaterThan(chALVAnnualCap) {
+		alvBase = chALVAnnualCap.Sub(ytdContrib)
 	}
 	if alv := alvBase.Mul(chALVEmployeeRate).Round(2); alv.IsPositive() {
 		out = append(out, Deduction{

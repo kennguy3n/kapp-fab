@@ -61,8 +61,45 @@ type EmployeeInfo struct {
 	Allowances int    // US W-4 allowances (legacy). 0 for AU.
 	Resident   bool   // AU residency status — non-residents pay a flat 32.5% bracket from $0.
 	HasTFN     bool   // AU: tax file number declared. False forces the 47% no-TFN rate.
-	YTDGross   decimal.Decimal
-	Currency   string
+
+	// YTDGross is the cumulative *income-tax* base paid to the employee
+	// year-to-date, BEFORE the slip being computed (cumulative
+	// IncomeTaxBase). It feeds cumulative-withholding income-tax methods
+	// (e.g. China's 累计预扣预缴) where the running base is taxable income.
+	// Statutory contribution wage caps / surtax thresholds instead read
+	// YTDContributionBase(), which is keyed off the contribution base.
+	YTDGross decimal.Decimal
+	Currency string
+
+	// TaxableGross is the *income-tax* base for the current slip — the
+	// period gross AFTER every pre-tax (salary-sacrifice / pension)
+	// deduction. The `gross` argument to ComputeWithholding is the FULL
+	// period gross, so a pack's income-tax bracket walk reads
+	// IncomeTaxBase(gross). A nil pointer means "no income-tax base
+	// supplied" and IncomeTaxBase() falls back to the full gross,
+	// preserving the pre-split behaviour for callers (and unit tests) that
+	// don't set it. A non-nil pointer is used verbatim — including a
+	// legitimately zero base (pre-tax deductions >= taxable earnings),
+	// which must yield zero income tax, NOT the full gross.
+	TaxableGross *decimal.Decimal
+
+	// ContributionGross is the social-security / contribution base for the
+	// current slip. By default it equals the full gross — pre-tax
+	// deductions reduce income tax but NOT contributions — and is only
+	// below the full gross when a component is explicitly flagged to also
+	// reduce the contribution base (e.g. a US Section-125 cafeteria plan).
+	// Packs read ContributionBase(gross) for every FICA / SS / EPF / CPF /
+	// Medicare / levy line. A nil pointer falls back to the full gross; a
+	// non-nil pointer (including zero) is used verbatim.
+	ContributionGross *decimal.Decimal
+
+	// YTDContributionGross is the cumulative *contribution* base year-to-
+	// date (cumulative ContributionGross), used for statutory contribution
+	// wage caps / surtax thresholds (FICA OASDI cap, Medicare surtax, ZUS /
+	// INPS / EFKA / AHV-ALV ceilings, CPP/EI MIE, …). Use
+	// YTDContributionBase(); a nil pointer falls back to YTDGross, a
+	// non-nil pointer (including zero) is used verbatim.
+	YTDContributionGross *decimal.Decimal
 
 	// Canton is the 2-letter Swiss canton code (ZH, GE, VD, …)
 	// used by the CH pack to resolve cantonal tax on top of
@@ -158,6 +195,62 @@ type EmployeeInfo struct {
 	MonthsEmployedYTD int
 }
 
+// IncomeTaxBase returns the period base a pack should run its income-tax
+// bracket walk against: the post-pre-tax income-tax base (TaxableGross)
+// when set, else the supplied full gross. The engine passes the FULL
+// period gross as the `gross` argument so the early gross<=0 guards and
+// proration math see real earnings; the income-tax and contribution
+// bases are then selected explicitly via IncomeTaxBase / ContributionBase.
+//
+// The fallback to full gross only triggers when the field is nil (e.g. a
+// unit test that doesn't model pre-tax deductions), preserving the
+// pre-split single-base behaviour. A non-nil pointer is honoured verbatim,
+// so a legitimately zero income-tax base (pre-tax deductions >= taxable
+// earnings) correctly yields zero income tax rather than falling back to
+// the full gross.
+func (e EmployeeInfo) IncomeTaxBase(gross decimal.Decimal) decimal.Decimal {
+	if e.TaxableGross != nil {
+		return *e.TaxableGross
+	}
+	return gross
+}
+
+// ContributionBase returns the period base a pack should run every
+// statutory contribution line (FICA / SS / EPF / CPF / Medicare / levy)
+// against: ContributionGross when set, else the supplied full gross.
+// Pre-tax deductions reduce income tax but NOT contributions by default,
+// so ContributionGross equals the full gross unless a component is flagged
+// to also reduce the contribution base (e.g. a Section-125 plan). The
+// fallback to full gross only triggers when the field is nil; a non-nil
+// pointer (including a zero contribution base) is honoured verbatim.
+func (e EmployeeInfo) ContributionBase(gross decimal.Decimal) decimal.Decimal {
+	if e.ContributionGross != nil {
+		return *e.ContributionGross
+	}
+	return gross
+}
+
+// IncomeTaxYTD returns the cumulative income-tax base for cumulative-
+// withholding income-tax methods (e.g. China's 累计预扣预缴) — simply
+// YTDGross, exposed as a named method so the call site reads symmetrically
+// with YTDContributionBase.
+func (e EmployeeInfo) IncomeTaxYTD() decimal.Decimal {
+	return e.YTDGross
+}
+
+// YTDContributionBase returns the cumulative contribution base used for
+// statutory contribution wage caps / surtax thresholds: YTDContributionGross
+// when set, else YTDGross. The fallback keeps single-base callers (and unit
+// tests that only populate YTDGross, with no pre-tax split) behaving exactly
+// as before, since without pre-tax the income-tax and contribution YTD bases
+// coincide.
+func (e EmployeeInfo) YTDContributionBase() decimal.Decimal {
+	if e.YTDContributionGross != nil {
+		return *e.YTDContributionGross
+	}
+	return e.YTDGross
+}
+
 // Deduction is one withholding line a pack appends to the slip's
 // deductions array. The Code is canonical (e.g. "FED_TAX",
 // "FICA_OASDI", "PAYG_WITHHOLDING") so the ledger can map it to a
@@ -174,6 +267,14 @@ type Deduction struct {
 // pay for the slip, and the pay period. It returns zero or more
 // Deduction lines; an empty slice means "no statutory withholding"
 // (a legitimate result for, say, an under-threshold AU PAYG slip).
+//
+// `gross` is the FULL period gross — the statutory contribution base,
+// because pre-tax (salary-sacrifice / pension) deductions reduce the
+// income-tax base but generally NOT social-security contributions.
+// Packs compute income tax against employee.IncomeTaxBase(gross) (the
+// post-pre-tax taxable base, falling back to gross when no pre-tax
+// reduction is supplied) and keep using `gross` for FICA / EPF / CPF /
+// social-security and other statutory contribution lines.
 //
 // EffectiveYear returns the fiscal year the pack's rate tables are
 // calibrated for. The payroll engine compares this against the

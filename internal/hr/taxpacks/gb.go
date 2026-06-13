@@ -134,7 +134,13 @@ func (gbPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return nil, nil
 	}
-	annualGross := gross.Div(periodFraction)
+	// PAYE income tax runs on the post-pre-tax income-tax base; NIC and
+	// the student-loan deduction below run on the contribution base
+	// (NIC-able pay), which equals the full gross by default and is only
+	// reduced when a component is flagged to also reduce the contribution
+	// base — matching HMRC, where student-loan repayments are assessed on
+	// the same earnings as Class 1 NICs.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	// Resolve the personal allowance after the £100k taper.
 	// Annualised gross is the right input here because HMRC's
@@ -160,10 +166,11 @@ func (gbPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		})
 	}
 
-	// NIC Class 1 employee primary contributions on the slip
-	// gross (no annualisation — NIC is computed per-pay-period
-	// at the pay-period-prorated thresholds).
-	if nic := gbComputeNIC(gross, periodFraction); nic.IsPositive() {
+	// NIC Class 1 employee primary contributions on the contribution
+	// base (full gross by default; no annualisation — NIC is computed
+	// per-pay-period at the pay-period-prorated thresholds).
+	contribGross := e.ContributionBase(gross)
+	if nic := gbComputeNIC(contribGross, periodFraction); nic.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "GB_NIC",
 			Name:   "National Insurance Class 1 (employee, GB)",
@@ -180,8 +187,8 @@ func (gbPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// first-class EmployeeInfo fields.
 	if gbHasStudentLoan(e) {
 		threshold := gbStudentLoanPlan1Annual.Mul(periodFraction)
-		if gross.GreaterThan(threshold) {
-			sl := gross.Sub(threshold).Mul(gbStudentLoanRate).Round(2)
+		if contribGross.GreaterThan(threshold) {
+			sl := contribGross.Sub(threshold).Mul(gbStudentLoanRate).Round(2)
 			if sl.IsPositive() {
 				out = append(out, Deduction{
 					Code:   "GB_STUDENT_LOAN",

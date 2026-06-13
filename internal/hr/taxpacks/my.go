@@ -149,7 +149,7 @@ func (myPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// residents under each respective scheme's enabling act,
 	// so non-resident slips emit only the income-tax line.
 	if !e.Resident {
-		nr := gross.Mul(myNonResidentRate).Round(2)
+		nr := e.IncomeTaxBase(gross).Mul(myNonResidentRate).Round(2)
 		if !nr.IsPositive() {
 			return nil, nil
 		}
@@ -163,7 +163,8 @@ func (myPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// Annualise → walk brackets → prorate. Same period-fraction
 	// pattern as the AU pack so off-cycle slips compute correctly.
 	periodFraction := decimal.NewFromInt(int64(days)).Div(myPeriodsPerYear)
-	annualGross := gross.Div(periodFraction)
+	// PCB runs on the post-pre-tax base; EPF / SOCSO / EIS keep full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 	annualTax := walkMYBrackets(annualGross, myBracketsResident)
 	periodTax := annualTax.Mul(periodFraction).Round(2)
 
@@ -182,7 +183,7 @@ func (myPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	if e.Age >= 60 {
 		epfRate = myEPFRate60Plus
 	}
-	epf := gross.Mul(epfRate).Round(2)
+	epf := e.ContributionBase(gross).Mul(epfRate).Round(2)
 	if epf.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "MY_EPF",
@@ -196,7 +197,7 @@ func (myPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// statutory schedule is ambiguous; this pack applies the
 	// ceiling per-period as the conservative reading (matching
 	// PERKESO's pro-rata guidance for daily-rated workers).
-	insurable := gross
+	insurable := e.ContributionBase(gross)
 	if insurable.GreaterThan(myInsurableCeiling) {
 		insurable = myInsurableCeiling
 	}

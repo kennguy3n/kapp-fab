@@ -944,7 +944,9 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// instances would produce identical behavior — but a single instance
 	// keeps allocations down and makes it unambiguous to readers that
 	// both surfaces share the same posting / country-resolution path.
-	payrollEngine := hr.NewPayrollEngine(recordStore, ledgerStore).WithCountryResolver(tenantCountryResolver(tenantSvc))
+	payrollEngine := hr.NewPayrollEngine(recordStore, ledgerStore).
+		WithCountryResolver(tenantCountryResolver(tenantSvc)).
+		WithPool(pool)
 	agents.RegisterPayrollTools(executor, payrollEngine)
 	agents.RegisterLMSTools(executor, lmsStore)
 	agents.RegisterCertificateTool(executor, lms.NewCertificateIssuer(recordStore, pool))

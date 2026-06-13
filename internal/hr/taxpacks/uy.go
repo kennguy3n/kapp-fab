@@ -102,7 +102,10 @@ func (uyPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 	out := []Deduction{}
 
-	jub := gross.Mul(uyJubilacionRate).Round(2)
+	// BPS / FONASA / FRL run on the contribution base (full gross by default).
+	contribGross := e.ContributionBase(gross)
+
+	jub := contribGross.Mul(uyJubilacionRate).Round(2)
 	if jub.IsPositive() {
 		out = append(out, Deduction{Code: "UY_BPS_JUBILACION", Name: "Jubilación BPS (empleado, 15%)", Amount: jub})
 	}
@@ -112,18 +115,19 @@ func (uyPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	if e.NumDependents > 0 {
 		fonasaRate = fonasaRate.Add(dec("0.015"))
 	}
-	fonasa := gross.Mul(fonasaRate).Round(2)
+	fonasa := contribGross.Mul(fonasaRate).Round(2)
 	if fonasa.IsPositive() {
 		out = append(out, Deduction{Code: "UY_BPS_FONASA", Name: "FONASA (empleado)", Amount: fonasa})
 	}
 
-	frl := gross.Mul(uyFRLRate).Round(2)
+	frl := contribGross.Mul(uyFRLRate).Round(2)
 	if frl.IsPositive() {
 		out = append(out, Deduction{Code: "UY_FRL", Name: "Fondo de Reconversión Laboral (empleado)", Amount: frl})
 	}
 
-	// IRPF base = gross - aportes previsionales obligatorios.
-	taxable := gross.Sub(jub).Sub(fonasa).Sub(frl)
+	// IRPF base = income-tax gross - aportes previsionales obligatorios.
+	// The BPS / FONASA / FRL contributions above keep using the full gross.
+	taxable := e.IncomeTaxBase(gross).Sub(jub).Sub(fonasa).Sub(frl)
 	if taxable.LessThanOrEqual(decimal.Zero) {
 		return out, nil
 	}

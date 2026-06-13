@@ -63,7 +63,7 @@ var (
 // ISR on annualised gross, applied as 15% on (annual − 11,000) up
 // to 50,000 and 25% on the excess above 50,000. Below USD 11,000
 // annual → social-security rows only; below period → nil.
-func (paPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (paPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -73,10 +73,13 @@ func (paPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	}
 	out := []Deduction{}
 
-	if css := gross.Mul(paCSSEmployeeRate).Round(2); css.IsPositive() {
+	// CSS + Seguro Educativo run on the contribution base (full gross by default).
+	contribGross := e.ContributionBase(gross)
+
+	if css := contribGross.Mul(paCSSEmployeeRate).Round(2); css.IsPositive() {
 		out = append(out, Deduction{Code: "PA_CSS", Name: "CSS (cuota obrera, seguridad social)", Amount: css})
 	}
-	if seduc := gross.Mul(paSeguroEducativoRate).Round(2); seduc.IsPositive() {
+	if seduc := contribGross.Mul(paSeguroEducativoRate).Round(2); seduc.IsPositive() {
 		out = append(out, Deduction{Code: "PA_SEGURO_EDUCATIVO", Name: "Seguro Educativo (empleado)", Amount: seduc})
 	}
 
@@ -86,7 +89,7 @@ func (paPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return out, nil
 	}
-	annualGross := gross.Div(periodFraction)
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 	annualTax := decimal.Zero
 	switch {
 	case annualGross.LessThanOrEqual(paISRThreshold1):

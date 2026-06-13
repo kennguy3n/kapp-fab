@@ -113,16 +113,22 @@ func (fiPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 	if !periodFraction.IsPositive() {
 		return nil, nil
 	}
-	annualGross := gross.Div(periodFraction)
+	// annualGross (full) gates the SAVA contribution floor; annualTaxable
+	// (post pre-tax) is the income-tax base for the state + municipal walks.
+	annualGross := employee.ContributionBase(gross).Div(periodFraction)
+	annualTaxable := employee.IncomeTaxBase(gross).Div(periodFraction)
 
 	out := []Deduction{}
+
+	// TyEL + SAVA run on the contribution base (full gross by default).
+	contribGross := employee.ContributionBase(gross)
 
 	// TyEL: 8.65% for ages 53-62 (inclusive), 7.15% otherwise.
 	tyelRate := fiTyELDefaultRate
 	if employee.Age >= 53 && employee.Age <= 62 {
 		tyelRate = fiTyELMidlifeRate
 	}
-	tyel := gross.Mul(tyelRate).Round(2)
+	tyel := contribGross.Mul(tyelRate).Round(2)
 	if tyel.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "FI_TYEL",
@@ -133,7 +139,7 @@ func (fiPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 
 	// SAVA: 1.57% combined above EUR 16,862 / yr.
 	if annualGross.GreaterThan(fiSavaFloorAnnualEUR) {
-		sava := gross.Mul(fiSavaPaivarahaRate.Add(fiSavaSairaanhoitoRate)).Round(2)
+		sava := contribGross.Mul(fiSavaPaivarahaRate.Add(fiSavaSairaanhoitoRate)).Round(2)
 		if sava.IsPositive() {
 			out = append(out, Deduction{
 				Code:   "FI_SAVA",
@@ -144,7 +150,7 @@ func (fiPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 	}
 
 	// State income tax — 5-bracket walk on annual gross.
-	annualStateTax := walkFIBrackets(annualGross, fiStateTaxBrackets)
+	annualStateTax := walkFIBrackets(annualTaxable, fiStateTaxBrackets)
 	periodStateTax := annualStateTax.Mul(periodFraction).Round(2)
 	if periodStateTax.IsPositive() {
 		out = append(out, Deduction{
@@ -159,7 +165,7 @@ func (fiPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 	if r, ok := fiKuntaRates[employee.Canton]; ok {
 		kuntaRate = r
 	}
-	annualKunta := annualGross.Mul(kuntaRate)
+	annualKunta := annualTaxable.Mul(kuntaRate)
 	periodKunta := annualKunta.Mul(periodFraction).Round(2)
 	if periodKunta.IsPositive() {
 		out = append(out, Deduction{

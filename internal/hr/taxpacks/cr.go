@@ -78,7 +78,7 @@ var (
 // social security before the bracket walk (unlike BR's IRRF-after-
 // INSS rule). Zero / negative gross or zero / negative period
 // return nil.
-func (crPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (crPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -87,11 +87,12 @@ func (crPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	}
 	out := []Deduction{}
 
-	if ccss := gross.Mul(crCCSSEmployeeRate).Round(2); ccss.IsPositive() {
+	// CCSS runs on the contribution base (full gross by default).
+	if ccss := e.ContributionBase(gross).Mul(crCCSSEmployeeRate).Round(2); ccss.IsPositive() {
 		out = append(out, Deduction{Code: "CR_CCSS", Name: "CCSS (cuota obrera, SEM + IVM + BP)", Amount: ccss})
 	}
 
-	if tax := walkCRBrackets(gross, crSalarioBrackets).Round(2); tax.IsPositive() {
+	if tax := walkCRBrackets(e.IncomeTaxBase(gross), crSalarioBrackets).Round(2); tax.IsPositive() {
 		out = append(out, Deduction{Code: "CR_IMPUESTO_SALARIO", Name: "Impuesto sobre el Salario", Amount: tax})
 	}
 	return out, nil

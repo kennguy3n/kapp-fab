@@ -208,8 +208,12 @@ func (cnPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 
 	out := []Deduction{}
 
+	// Social insurance + housing fund run on the contribution base (full
+	// gross by default).
+	contribGross := employee.ContributionBase(gross)
+
 	// --- Social insurance (employee share) for this slip ---
-	socialInsurance := gross.Mul(siRate).Add(cnMedicalFixedMonthly).Round(2)
+	socialInsurance := contribGross.Mul(siRate).Add(cnMedicalFixedMonthly).Round(2)
 	if socialInsurance.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "CN_SOCIAL_INSURANCE",
@@ -219,7 +223,7 @@ func (cnPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 	}
 
 	// --- Housing provident fund (employee share), city-dependent ---
-	housingFund := gross.Mul(hfRate).Round(2)
+	housingFund := contribGross.Mul(hfRate).Round(2)
 	if housingFund.IsPositive() {
 		out = append(out, Deduction{
 			Code:   "CN_HOUSING_FUND",
@@ -234,11 +238,16 @@ func (cnPack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 	// is applied per-month inside cnCumulativeTaxable.
 	deductibleRate := siRate.Add(hfRate)
 
-	cumGrossPrior := employee.YTDGross
+	// IIT runs the cumulative method on the income-tax base: pre-tax /
+	// salary-sacrifice deductions reduce taxable income, while the social
+	// insurance / housing-fund contributions above stay on the full gross.
+	// IncomeTaxYTD / IncomeTaxBase fall back to the full-gross figures when
+	// no pre-tax reduction is supplied, preserving the legacy behaviour.
+	cumGrossPrior := employee.IncomeTaxYTD()
 	if cumGrossPrior.IsNegative() {
 		cumGrossPrior = decimal.Zero
 	}
-	cumGrossNow := cumGrossPrior.Add(gross)
+	cumGrossNow := cumGrossPrior.Add(employee.IncomeTaxBase(gross))
 
 	// The cumulative month index is the number of months the
 	// employee has received employment income this year, including

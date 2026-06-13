@@ -86,7 +86,7 @@ var (
 // the 10-row scale in Resolución NAC-DGERCGC-2024, then prorated
 // back to the pay-period using a 365.25-day year. Below the
 // USD 11,902 personal exemption → IESS only; below period → nil.
-func (ecPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (ecPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -96,7 +96,8 @@ func (ecPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	}
 	out := []Deduction{}
 
-	iess := gross.Mul(ecIESSRate).Round(2)
+	// IESS runs on the contribution base (full gross by default).
+	iess := e.ContributionBase(gross).Mul(ecIESSRate).Round(2)
 	if iess.IsPositive() {
 		out = append(out, Deduction{Code: "EC_IESS", Name: "IESS Aporte Personal (empleado, 9.45%)", Amount: iess})
 	}
@@ -106,7 +107,7 @@ func (ecPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	if !periodFraction.IsPositive() {
 		return out, nil
 	}
-	annualNet := gross.Sub(iess).Div(periodFraction)
+	annualNet := e.IncomeTaxBase(gross).Sub(iess).Div(periodFraction)
 	if annualNet.LessThanOrEqual(decimal.Zero) {
 		return out, nil
 	}

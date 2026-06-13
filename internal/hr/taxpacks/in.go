@@ -147,7 +147,9 @@ func (inPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	if regime == "new" {
 		periodFraction := decimal.NewFromInt(int64(days)).Div(inAnnualDays)
 		if periodFraction.IsPositive() {
-			annualGross := gross.Div(periodFraction)
+			// TDS runs on the post-pre-tax base; EPF / ESI / PT below
+			// keep using the full slip gross.
+			annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 			taxableAnnual := annualGross.Sub(inStandardDeduction)
 			if taxableAnnual.LessThan(decimal.Zero) {
 				taxableAnnual = decimal.Zero
@@ -223,7 +225,9 @@ func (inPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// tenant with a distinct basic must encode it via the
 	// salary_structure component split rather than rely on this
 	// pack to derive it.
-	epfBase := gross
+	// EPF / ESI / PT run on the contribution base (full gross by default).
+	contribGross := e.ContributionBase(gross)
+	epfBase := contribGross
 	if epfBase.GreaterThan(inEPFCeiling) {
 		epfBase = inEPFCeiling
 	}
@@ -239,8 +243,8 @@ func (inPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// apply the threshold against gross directly since this pack
 	// runs on the slip's natural monthly cadence; off-cycle slips
 	// scale through the engine, not here.
-	if gross.LessThanOrEqual(inESIThreshold) {
-		if esi := gross.Mul(inESIRate).Round(2); esi.IsPositive() {
+	if contribGross.LessThanOrEqual(inESIThreshold) {
+		if esi := contribGross.Mul(inESIRate).Round(2); esi.IsPositive() {
 			out = append(out, Deduction{
 				Code:   "IN_ESI",
 				Name:   "ESI employee contribution (IN)",
@@ -253,7 +257,7 @@ func (inPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// today; Karnataka / WB / TN follow in PR-2c+ via PermitType
 	// state-code resolution.
 	state := strings.ToUpper(strings.TrimSpace(e.PermitType))
-	if state == "MH" && gross.GreaterThan(inPTMaharashtraFloor) {
+	if state == "MH" && contribGross.GreaterThan(inPTMaharashtraFloor) {
 		pt := inPTMaharashtraMonthly
 		// February catch-up: ₹300 instead of ₹200 to reach the
 		// ₹2,500 annual maximum (₹200 × 11 + ₹300 = ₹2,500).

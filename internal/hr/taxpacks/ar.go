@@ -124,8 +124,9 @@ func (arPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 
 	out := []Deduction{}
 
-	// Social-security cap — period-prorated MOPRE.
-	socialBase := gross
+	// Social-security runs on the contribution base (full gross by
+	// default), capped at the period-prorated MOPRE.
+	socialBase := e.ContributionBase(gross)
 	monthlyCap := arMOPREMonthly.Mul(decimal.NewFromInt(int64(days))).Div(decimal.NewFromFloat(30.4167))
 	if socialBase.GreaterThan(monthlyCap) {
 		socialBase = monthlyCap
@@ -140,8 +141,10 @@ func (arPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		out = append(out, Deduction{Code: "AR_OBRA_SOCIAL", Name: "Obra Social (empleado)", Amount: os})
 	}
 
-	// Ganancias 4ta categoría — annualise then bracket-walk.
-	annualGross := gross.Div(periodFraction)
+	// Ganancias 4ta categoría — annualise then bracket-walk. Income tax
+	// runs on the post-pre-tax base; the social-security lines above keep
+	// using the full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 	deductions := arMNIAnnual.Add(arDeduccionEspAnnual)
 	if e.NumDependents > 0 {
 		deductions = deductions.Add(arPerDependentAnnual.Mul(decimal.NewFromInt(int64(e.NumDependents))))

@@ -76,7 +76,7 @@ var (
 // ComputeWithholding emits TN_IRPP (annualised progressive income
 // tax, net of the professional deduction) and TN_CNSS (social-
 // security employee contribution).
-func (tnPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (tnPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -88,11 +88,13 @@ func (tnPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	out := []Deduction{}
 
 	// CNSS is itself deductible from the IRPP base; compute it
-	// first so the income-tax base is net of social security.
-	cnss := gross.Mul(tnCNSSEmployeeRate).Round(2)
+	// first so the income-tax base is net of social security. It runs
+	// on the contribution base (full gross by default).
+	cnss := e.ContributionBase(gross).Mul(tnCNSSEmployeeRate).Round(2)
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(tnAnnualPeriodFraction)
-	annualGross := gross.Div(periodFraction)
+	// IRPP runs on the post-pre-tax base less CNSS; CNSS keeps full gross.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 	annualCNSS := cnss.Div(periodFraction)
 
 	profDeduction := annualGross.Mul(tnProfessionalDeductionRate)

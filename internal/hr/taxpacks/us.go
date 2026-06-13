@@ -96,7 +96,9 @@ func (usPack) ComputeWithholding(ctx context.Context, e EmployeeInfo, gross deci
 		return nil, nil
 	}
 	periodFraction := decimal.NewFromInt(int64(days)).Div(usPeriodsPerYear)
-	annualGross := gross.Div(periodFraction)
+	// Federal income tax runs on the post-pre-tax base; FICA OASDI and
+	// Medicare below keep using the full gross and YTD full-gross cap.
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 
 	brackets := usBracketsSingle
 	stdDeduction := usStandardDeductionSingle
@@ -121,13 +123,20 @@ func (usPack) ComputeWithholding(ctx context.Context, e EmployeeInfo, gross deci
 		{Code: "FED_TAX", Name: "Federal income tax (US)", Amount: federal},
 	}
 
-	// Social Security: 6.2% up to wage-base cap. Once YTD gross
-	// hits the cap the slip stops accruing OASDI.
-	socialBase := gross
-	if e.YTDGross.GreaterThanOrEqual(usFICASocialWageBase) {
+	// FICA runs on the contribution base (full gross by default; pre-tax
+	// deductions reduce income tax but not FICA), and the wage-base cap /
+	// surtax thresholds run on cumulative contribution wages, not the
+	// income-tax YTD.
+	contribGross := e.ContributionBase(gross)
+	ytdContrib := e.YTDContributionBase()
+
+	// Social Security: 6.2% up to wage-base cap. Once YTD contribution
+	// wages hit the cap the slip stops accruing OASDI.
+	socialBase := contribGross
+	if ytdContrib.GreaterThanOrEqual(usFICASocialWageBase) {
 		socialBase = decimal.Zero
-	} else if e.YTDGross.Add(gross).GreaterThan(usFICASocialWageBase) {
-		socialBase = usFICASocialWageBase.Sub(e.YTDGross)
+	} else if ytdContrib.Add(contribGross).GreaterThan(usFICASocialWageBase) {
+		socialBase = usFICASocialWageBase.Sub(ytdContrib)
 	}
 	if socialBase.IsPositive() {
 		out = append(out, Deduction{
@@ -138,15 +147,15 @@ func (usPack) ComputeWithholding(ctx context.Context, e EmployeeInfo, gross deci
 	}
 
 	// Medicare: 1.45% on every dollar, plus 0.9% surtax on YTD
-	// gross over $200k. The surtax ratchet uses pre-slip YTD so a
-	// slip that straddles the threshold is split correctly.
-	medicare := gross.Mul(usFICAMedicareRate)
-	preSlipYTD := e.YTDGross
-	postSlipYTD := preSlipYTD.Add(gross)
+	// contribution wages over $200k. The surtax ratchet uses pre-slip YTD
+	// so a slip that straddles the threshold is split correctly.
+	medicare := contribGross.Mul(usFICAMedicareRate)
+	preSlipYTD := ytdContrib
+	postSlipYTD := preSlipYTD.Add(contribGross)
 	if postSlipYTD.GreaterThan(usFICAAdditionalThr) {
 		surtaxBase := postSlipYTD.Sub(usFICAAdditionalThr)
 		if preSlipYTD.GreaterThan(usFICAAdditionalThr) {
-			surtaxBase = gross
+			surtaxBase = contribGross
 		}
 		medicare = medicare.Add(surtaxBase.Mul(usFICAAdditionalRate))
 	}

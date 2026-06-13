@@ -141,7 +141,7 @@ func (vnPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// Non-resident foreign individual: flat 20% on VN-sourced
 	// employment income, no social contributions.
 	if !e.Resident {
-		nrTax := gross.Mul(vnNonResidentRate).Round(2)
+		nrTax := e.IncomeTaxBase(gross).Mul(vnNonResidentRate).Round(2)
 		if nrTax.IsPositive() {
 			out = append(out, Deduction{
 				Code:   "VN_NONRESIDENT_TAX",
@@ -155,8 +155,9 @@ func (vnPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	// Bring the slip onto an average-month basis so off-cycle /
 	// non-monthly slips compare against the statute's monthly
 	// brackets.
+	// PIT runs on the post-pre-tax base; SI/HI/UI keep the full gross.
 	monthFraction := decimal.NewFromInt(int64(days)).Div(vnAvgMonthDays)
-	monthlyGross := gross.Div(monthFraction)
+	monthlyGross := e.IncomeTaxBase(gross).Div(monthFraction)
 
 	deps := e.NumDependents
 	if deps < 0 {
@@ -182,8 +183,11 @@ func (vnPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 		})
 	}
 
+	// SI / HI / UI run on the contribution base (full gross by default).
+	contribGross := e.ContributionBase(gross)
+
 	// SI / HI share the 20× base-salary cap.
-	siHiBase := gross
+	siHiBase := contribGross
 	if siHiBase.GreaterThan(vnSIHICeiling) {
 		siHiBase = vnSIHICeiling
 	}
@@ -203,7 +207,7 @@ func (vnPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decima
 	}
 
 	// UI uses the 20× region-I minimum-wage cap.
-	uiBase := gross
+	uiBase := contribGross
 	if uiBase.GreaterThan(vnUICeiling) {
 		uiBase = vnUICeiling
 	}

@@ -101,13 +101,15 @@ func (sePack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 
 	out := []Deduction{}
 
-	// Allmän pensionsavgift — 7% of gross, capped on the annual
-	// pensionable base via YTD.
-	pensionBase := gross
-	if employee.YTDGross.GreaterThanOrEqual(seAllmanPensionCap) {
+	// Allmän pensionsavgift — 7% of the contribution base, capped on the
+	// annual pensionable base via cumulative contribution wages.
+	contribGross := employee.ContributionBase(gross)
+	ytdContrib := employee.YTDContributionBase()
+	pensionBase := contribGross
+	if ytdContrib.GreaterThanOrEqual(seAllmanPensionCap) {
 		pensionBase = decimal.Zero
-	} else if employee.YTDGross.Add(gross).GreaterThan(seAllmanPensionCap) {
-		pensionBase = seAllmanPensionCap.Sub(employee.YTDGross)
+	} else if ytdContrib.Add(contribGross).GreaterThan(seAllmanPensionCap) {
+		pensionBase = seAllmanPensionCap.Sub(ytdContrib)
 	}
 	pension := pensionBase.Mul(seAllmanPensionRate).Round(2)
 	if pension.IsPositive() {
@@ -119,7 +121,9 @@ func (sePack) ComputeWithholding(_ context.Context, employee EmployeeInfo, gross
 	}
 
 	// Taxable annual income = annual gross - grundavdrag.
-	annualGross := gross.Div(periodFraction)
+	// Kommunal + statlig income tax run on the post-pre-tax base; the
+	// allmän pensionsavgift above keeps the full gross.
+	annualGross := employee.IncomeTaxBase(gross).Div(periodFraction)
 	taxableAnnual := annualGross.Sub(seGrundavdrag)
 	if taxableAnnual.LessThan(decimal.Zero) {
 		taxableAnnual = decimal.Zero

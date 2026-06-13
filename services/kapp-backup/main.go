@@ -329,6 +329,21 @@ var TenantScopedTables = []string{
 	// tableConflictKeys entries required.
 	"warehouse_sync_configs",
 	"warehouse_sync_runs",
+	// Payroll depth — P1 (migrations 000098–000101). Typed payroll run
+	// model promoted from the hr.pay_run/hr.payslip KTypes. FK-safe
+	// restore order: payroll_runs (parent) → payroll_payslips (FKs
+	// payroll_runs, ON DELETE CASCADE) → payroll_payslip_lines (FKs
+	// payroll_payslips, ON DELETE CASCADE); payroll_pay_inputs FKs
+	// payroll_runs; payroll_ytd has no run FK. The first four carry the
+	// default (tenant_id, id) PK so the fallback ON CONFLICT path
+	// applies. payroll_ytd uses a NATURAL composite PK
+	// (tenant_id, employee_id, tax_year) — see its tableConflictKeys
+	// entry below so upsert-on-restore targets the natural key.
+	"payroll_runs",
+	"payroll_payslips",
+	"payroll_payslip_lines",
+	"payroll_pay_inputs",
+	"payroll_ytd",
 }
 
 // manifest is the first record in every dump file.
@@ -811,6 +826,19 @@ var tableConflictKeys = map[string][]string{
 	// last_seen_at on existing rows. The other three bank-feed tables use
 	// the standard (tenant_id, id) PK and fall through to the default path.
 	"bank_learned_matches": {"tenant_id", "bank_account_id", "description_key", "account_code"},
+	// Payroll depth — P1 (migration 000101) — payroll_ytd is the
+	// engine-owned year-to-date accumulator. It has NO surrogate `id`;
+	// its PK is the natural composite (tenant_id, employee_id, tax_year)
+	// — one accumulator row per employee per tax year. The default
+	// (tenant_id, id) fallback would degrade to ON CONFLICT DO NOTHING
+	// and a corrective re-restore would leave a stale cumulative_gross /
+	// cumulative_tax / per_code_base in place. Declaring the composite
+	// here turns the restore into an upsert on the natural key so the
+	// dump's (most recent) cumulative figures overwrite on conflict. The
+	// other four payroll tables (payroll_runs, payroll_payslips,
+	// payroll_payslip_lines, payroll_pay_inputs) use the standard
+	// (tenant_id, id) PK and fall through to the default path.
+	"payroll_ytd": {"tenant_id", "employee_id", "tax_year"},
 }
 
 // insertRow issues a parameterised INSERT that lists the columns from

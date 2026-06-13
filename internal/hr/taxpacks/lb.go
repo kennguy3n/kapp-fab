@@ -85,7 +85,7 @@ var (
 // ComputeWithholding emits LB_INCOME_TAX (annualised progressive R10
 // payroll tax) and LB_NSSF (NSSF sickness/maternity employee
 // contribution).
-func (lbPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
+func (lbPack) ComputeWithholding(_ context.Context, e EmployeeInfo, gross decimal.Decimal, period PayPeriod) ([]Deduction, error) {
 	if gross.LessThanOrEqual(decimal.Zero) {
 		return nil, nil
 	}
@@ -97,7 +97,7 @@ func (lbPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 	out := []Deduction{}
 
 	periodFraction := decimal.NewFromInt(int64(days)).Div(lbAnnualPeriodFraction)
-	annualGross := gross.Div(periodFraction)
+	annualGross := e.IncomeTaxBase(gross).Div(periodFraction)
 	taxable := annualGross.Sub(lbPersonalExemption)
 	if taxable.IsNegative() {
 		taxable = decimal.Zero
@@ -112,7 +112,8 @@ func (lbPack) ComputeWithholding(_ context.Context, _ EmployeeInfo, gross decima
 		})
 	}
 
-	nsssBase := gross
+	// NSSF runs on the contribution base (full gross by default).
+	nsssBase := e.ContributionBase(gross)
 	if nsssBase.GreaterThan(lbNSSFWageCeiling) {
 		nsssBase = lbNSSFWageCeiling
 	}
