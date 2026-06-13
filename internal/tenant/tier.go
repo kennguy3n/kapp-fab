@@ -110,7 +110,7 @@ var TenantScopedTables = []string{
 	// Transfer detection (000091). bank_transfer_pairs FKs
 	// bank_transactions (listed earlier), default (tenant_id, id) PK.
 	"bank_transfer_pairs",
-	// Split reconciliation (000094). bank_transaction_allocations FKs
+	// Split reconciliation (000097). bank_transaction_allocations FKs
 	// bank_transactions (listed earlier, ON DELETE CASCADE), default
 	// (tenant_id, id) PK.
 	"bank_transaction_allocations",
