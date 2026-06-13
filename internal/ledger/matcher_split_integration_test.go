@@ -236,6 +236,15 @@ func TestAcceptSplitRejectsInvalid(t *testing.T) {
 		t.Fatal("single-leg split should be rejected")
 	}
 
+	// Zero-amount leg: even though the legs sum to the line amount, a leg
+	// carrying zero persists a meaningless allocation row and must be refused.
+	if _, err := matcher.AcceptSplit(ctx, tenantID, mk("inv-6"), []SplitLeg{
+		{JournalEntryID: entryA, Amount: decimal.RequireFromString("-100.00")},
+		{JournalEntryID: entryB, Amount: decimal.Zero},
+	}, actor); err == nil {
+		t.Fatal("split with a zero-amount leg should be rejected")
+	}
+
 	// Non-existent / cross-tenant entry: a random uuid is not visible
 	// under this tenant's RLS scope, so it reads as not-found.
 	if _, err := matcher.AcceptSplit(ctx, tenantID, mk("inv-4"), []SplitLeg{

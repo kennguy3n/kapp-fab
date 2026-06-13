@@ -514,7 +514,7 @@ func (m *SmartMatcher) AcceptSuggestion(ctx context.Context, tenantID, suggestio
 //
 // Every invariant the web composer surfaces is RE-VALIDATED here — the
 // server never trusts a client-sent balance for a financial mutation:
-//   - at least two legs, with distinct journal entries
+//   - at least two legs, with distinct journal entries and non-zero amounts
 //   - every journal entry exists under the tenant's RLS scope
 //   - sum(leg.Amount) == line.amount within SplitAmountTolerance
 //   - (currency is implicitly the line's; legs carry no separate currency,
@@ -541,6 +541,12 @@ func (m *SmartMatcher) AcceptSplit(ctx context.Context, tenantID, txnID uuid.UUI
 	for _, leg := range legs {
 		if leg.JournalEntryID == uuid.Nil {
 			return nil, fmt.Errorf("ledger: split leg missing journal_entry_id: %w", ErrSplitInvalid)
+		}
+		// A zero-amount leg is meaningless: it persists a junk allocation row
+		// that contributes nothing to the balance. The composer already drops
+		// such rows, but the server must not trust the client — reject it here.
+		if leg.Amount.IsZero() {
+			return nil, fmt.Errorf("ledger: split entry %s has zero amount: %w", leg.JournalEntryID, ErrSplitInvalid)
 		}
 		if _, dup := seen[leg.JournalEntryID]; dup {
 			return nil, fmt.Errorf("ledger: split entry %s allocated twice: %w", leg.JournalEntryID, ErrSplitInvalid)
