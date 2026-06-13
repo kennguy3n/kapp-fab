@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/kennguy3n/kapp-fab/internal/dbutil"
-	"github.com/kennguy3n/kapp-fab/internal/tenant"
 )
 
 // TestStockLevelsViewSecurityInvoker is the regression guard for
@@ -35,18 +34,8 @@ func TestStockLevelsViewSecurityInvoker(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	tnA, err := h.tenants.Create(ctx, tenant.CreateInput{
-		Slug: uniqueSlug("si-a"), Name: "Stock A", Cell: "test", Plan: "enterprise",
-	})
-	if err != nil {
-		t.Fatalf("tenant A: %v", err)
-	}
-	tnB, err := h.tenants.Create(ctx, tenant.CreateInput{
-		Slug: uniqueSlug("si-b"), Name: "Stock B", Cell: "test", Plan: "enterprise",
-	})
-	if err != nil {
-		t.Fatalf("tenant B: %v", err)
-	}
+	tnA := mustTenant(t, ctx, h, "si-a")
+	tnB := mustTenant(t, ctx, h, "si-b")
 
 	// Seed one move per tenant via the BYPASSRLS admin pool (it can
 	// write any tenant_id). Distinct (item, warehouse) keys so each
@@ -88,7 +77,7 @@ func TestStockLevelsViewSecurityInvoker(t *testing.T) {
 	// With the GUC bound to tenant A, only A's position is visible and
 	// none of B's leaks through.
 	var mine, leaked int
-	err = dbutil.WithTenantTx(ctx, h.pool, tnA.ID, func(ctx context.Context, tx pgx.Tx) error {
+	err := dbutil.WithTenantTx(ctx, h.pool, tnA.ID, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
 			`SELECT count(*) FILTER (WHERE tenant_id = $1),
 			        count(*) FILTER (WHERE tenant_id <> $1)
