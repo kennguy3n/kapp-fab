@@ -401,3 +401,81 @@ func TestAcceptSplitReSplitReplacesAllocations(t *testing.T) {
 		t.Fatalf("entryD allocation = %s; want -30.00", got)
 	}
 }
+
+// TestAcceptSuggestionClearsStaleAllocations proves the 1:1 accept path is
+// symmetric with AcceptSplit's cleanup: a line that is split, unmatched,
+// then accepted single-leg must not retain the prior split's allocation
+// rows — otherwise the line would carry a non-NULL matched_entry_id AND
+// split allocations, a contradictory state that reads as split-reconciled.
+func TestAcceptSuggestionClearsStaleAllocations(t *testing.T) {
+	pool := matcherPool(t)
+	ctx := context.Background()
+	store, tenantID, acctID := seedMatcherFixture(t, pool)
+	if _, err := store.CreateAccount(ctx, Account{
+		TenantID: tenantID, Code: "6100", Name: "Office", Type: AccountTypeExpense, Active: true,
+	}); err != nil {
+		t.Fatalf("create account 6100: %v", err)
+	}
+
+	vd := time.Now().UTC().Truncate(24 * time.Hour)
+	entryA := splitEntry(t, store, tenantID, vd, "6000", "60.00", "A")
+	entryB := splitEntry(t, store, tenantID, vd, "6100", "40.00", "B")
+	entryC := splitEntry(t, store, tenantID, vd, "6000", "100.00", "C full")
+
+	in, err := store.SyncBankTransactions(ctx, tenantID, acctID, []BankTransaction{{
+		BankAccountID: acctID, ValueDate: vd, Description: "ACME CORP",
+		Amount: decimal.RequireFromString("-100.00"), Currency: "USD", ExternalRef: "accept-clear-1",
+	}})
+	if err != nil || len(in) != 1 {
+		t.Fatalf("SyncBankTransactions = %v, %v", in, err)
+	}
+	txnID := in[0].ID
+	matcher := NewSmartMatcher(store).WithClock(func() time.Time { return vd })
+	actor := uuid.New()
+
+	// Split A (-60) + B (-40) → 2 allocation rows.
+	if _, err := matcher.AcceptSplit(ctx, tenantID, txnID, []SplitLeg{
+		{JournalEntryID: entryA, Amount: decimal.RequireFromString("-60.00")},
+		{JournalEntryID: entryB, Amount: decimal.RequireFromString("-40.00")},
+	}, actor); err != nil {
+		t.Fatalf("AcceptSplit: %v", err)
+	}
+	if got := allocationsFor(t, pool, tenantID, txnID); len(got) != 2 {
+		t.Fatalf("want 2 allocation rows after split, got %d", len(got))
+	}
+
+	// Unmatch (UI resets status; allocations intentionally remain for now).
+	if err := dbutil.WithTenantTx(ctx, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, e := tx.Exec(ctx,
+			`UPDATE bank_transactions SET status = $3, matched_entry_id = NULL
+			  WHERE tenant_id = $1 AND id = $2`,
+			tenantID, txnID, BankTxnUnreconciled)
+		return e
+	}); err != nil {
+		t.Fatalf("unmatch: %v", err)
+	}
+
+	// Now 1:1 accept a single suggestion for the whole line.
+	sugC := seedSuggestion(t, pool, tenantID, txnID, entryC, vd)
+	if _, err := matcher.AcceptSuggestion(ctx, tenantID, sugC, actor); err != nil {
+		t.Fatalf("AcceptSuggestion: %v", err)
+	}
+
+	// The stale split allocations must be gone.
+	if got := allocationsFor(t, pool, tenantID, txnID); len(got) != 0 {
+		t.Fatalf("want 0 allocation rows after 1:1 accept, got %d: %v", len(got), got)
+	}
+	// And the line carries the 1:1 matched pointer.
+	var status string
+	var matched *uuid.UUID
+	if err := dbutil.WithTenantTx(ctx, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT status, matched_entry_id FROM bank_transactions WHERE tenant_id=$1 AND id=$2`,
+			tenantID, txnID).Scan(&status, &matched)
+	}); err != nil {
+		t.Fatalf("read txn: %v", err)
+	}
+	if status != BankTxnMatched || matched == nil || *matched != entryC {
+		t.Fatalf("1:1 accept state: status=%q matched=%v; want matched + entryC", status, matched)
+	}
+}

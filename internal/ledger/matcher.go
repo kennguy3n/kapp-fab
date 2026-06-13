@@ -479,6 +479,19 @@ func (m *SmartMatcher) AcceptSuggestion(ctx context.Context, tenantID, suggestio
 		} else if ct.RowsAffected() == 0 {
 			return fmt.Errorf("ledger: transaction no longer unreconciled: %w", ErrSuggestionConflict)
 		}
+		// A 1:1 accept records its match via matched_entry_id, so any
+		// allocation rows are stale: this line may have been split earlier,
+		// unmatched, and is now accepted single-leg. Leaving them would put
+		// the line in a contradictory state (non-NULL matched_entry_id *and*
+		// split allocations), so any reader of bank_transaction_allocations
+		// would wrongly treat it as split-reconciled. Mirror AcceptSplit's
+		// cleanup and clear them.
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM bank_transaction_allocations WHERE tenant_id = $1 AND transaction_id = $2`,
+			tenantID, s.TransactionID,
+		); err != nil {
+			return fmt.Errorf("ledger: clear stale allocations: %w", err)
+		}
 		// Mark this suggestion accepted and any sibling open suggestions
 		// rejected so the queue collapses to the decided state.
 		if _, err := tx.Exec(ctx,
