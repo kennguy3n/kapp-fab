@@ -123,7 +123,7 @@ func DecodeCursor(token string) (time.Time, uuid.UUID, error) {
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
-		return time.Time{}, uuid.Nil, fmt.Errorf("%w: %v", ErrInvalidCursor, err)
+		return time.Time{}, uuid.Nil, fmt.Errorf("%w: %w", ErrInvalidCursor, err)
 	}
 	parts := strings.SplitN(string(raw), "|", 3)
 	if len(parts) < 2 {
@@ -131,11 +131,11 @@ func DecodeCursor(token string) (time.Time, uuid.UUID, error) {
 	}
 	nanos, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
-		return time.Time{}, uuid.Nil, fmt.Errorf("%w: %v", ErrInvalidCursor, err)
+		return time.Time{}, uuid.Nil, fmt.Errorf("%w: %w", ErrInvalidCursor, err)
 	}
 	id, err := uuid.Parse(parts[1])
 	if err != nil {
-		return time.Time{}, uuid.Nil, fmt.Errorf("%w: %v", ErrInvalidCursor, err)
+		return time.Time{}, uuid.Nil, fmt.Errorf("%w: %w", ErrInvalidCursor, err)
 	}
 	return time.Unix(0, nanos).UTC(), id, nil
 }

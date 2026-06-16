@@ -72,7 +72,7 @@ func (s *ReportSchedule) Validate() error {
 		return fmt.Errorf("%w: report_id required", ErrScheduleInvalidInput)
 	}
 	if _, err := scheduleCronParser.Parse(s.CronExpression); err != nil {
-		return fmt.Errorf("%w: invalid cron expression: %v", ErrScheduleInvalidInput, err)
+		return fmt.Errorf("%w: invalid cron expression: %w", ErrScheduleInvalidInput, err)
 	}
 	switch s.Format {
 	case ReportScheduleFormatCSV, ReportScheduleFormatPDF:

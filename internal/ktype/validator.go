@@ -154,7 +154,7 @@ func validateString(field FieldSpec, value any) error {
 	if field.Pattern != "" {
 		re, err := patternRegexp(field.Pattern)
 		if err != nil {
-			return fmt.Errorf("invalid pattern: %v", err)
+			return fmt.Errorf("invalid pattern: %w", err)
 		}
 		if !re.MatchString(s) {
 			return fmt.Errorf("does not match pattern %q", field.Pattern)

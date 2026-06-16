@@ -261,7 +261,7 @@ func (v *JWKSValidator) verifySignatureAndDecode(token string) (map[string]json.
 	signingInput := parts[0] + "." + parts[1]
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrTokenSignature, err)
+		return nil, fmt.Errorf("%w: %w", ErrTokenSignature, err)
 	}
 	key, err := v.keyForKID(header.KID)
 	if err != nil {
@@ -272,11 +272,11 @@ func (v *JWKSValidator) verifySignatureAndDecode(token string) (map[string]json.
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrTokenInvalid, err)
+		return nil, fmt.Errorf("%w: %w", ErrTokenInvalid, err)
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrTokenInvalid, err)
+		return nil, fmt.Errorf("%w: %w", ErrTokenInvalid, err)
 	}
 	return raw, nil
 }
@@ -642,10 +642,10 @@ func decodeJWTHeader(seg string) (jwtHeader, error) {
 	var h jwtHeader
 	b, err := base64.RawURLEncoding.DecodeString(seg)
 	if err != nil {
-		return h, fmt.Errorf("%w: header decode: %v", ErrTokenInvalid, err)
+		return h, fmt.Errorf("%w: header decode: %w", ErrTokenInvalid, err)
 	}
 	if err := json.Unmarshal(b, &h); err != nil {
-		return h, fmt.Errorf("%w: header parse: %v", ErrTokenInvalid, err)
+		return h, fmt.Errorf("%w: header parse: %w", ErrTokenInvalid, err)
 	}
 	return h, nil
 }

@@ -256,3 +256,42 @@ func TestPlanMRPScrapAndOutputQty(t *testing.T) {
 		t.Errorf("component qty = %s, want 33", compOrder.Qty.String())
 	}
 }
+
+// TestPlanMRPZeroOutputQty guards the explosion divisor: a make BOM
+// with a non-positive output_qty (corrupt/legacy data CreateBOM would
+// reject) must surface ErrMRPInvalidBOMOutputQty rather than panic on
+// a divide-by-zero.
+func TestPlanMRPZeroOutputQty(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		outputQty decimal.Decimal
+	}{
+		{"zero", decimal.Zero},
+		{"negative", decimal.NewFromInt(-1)},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			finished := uuid.New()
+			comp := uuid.New()
+			bom := &BOM{
+				ID:        uuid.New(),
+				ItemID:    finished,
+				OutputQty: tc.outputQty,
+				Components: []BOMComponent{
+					{ComponentItemID: comp, Qty: decimal.NewFromInt(3)},
+				},
+			}
+			independent := map[uuid.UUID]mrpDemand{finished: {qty: decimal.NewFromInt(20), due: mustDate(t, "2026-07-01")}}
+			data := map[uuid.UUID]mrpItemData{
+				finished: {ActiveBOM: bom},
+				comp:     {},
+			}
+			_, err := planMRP(independent, data, nil, 7)
+			if !errors.Is(err, ErrMRPInvalidBOMOutputQty) {
+				t.Fatalf("planMRP err = %v, want ErrMRPInvalidBOMOutputQty", err)
+			}
+		})
+	}
+}
