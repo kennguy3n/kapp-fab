@@ -72,13 +72,13 @@ func unverifiedIssuer(tok string) (string, error) {
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrTokenInvalid, err)
+		return "", fmt.Errorf("%w: %w", ErrTokenInvalid, err)
 	}
 	var body struct {
 		Iss string `json:"iss"`
 	}
 	if err := json.Unmarshal(payload, &body); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrTokenInvalid, err)
+		return "", fmt.Errorf("%w: %w", ErrTokenInvalid, err)
 	}
 	return body.Iss, nil
 }

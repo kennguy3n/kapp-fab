@@ -2,6 +2,7 @@ package manufacturing
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -79,6 +80,12 @@ var (
 	// cycle (item A's BOM consumes B whose BOM consumes A). Explosion
 	// cannot terminate, so the run is rejected rather than looping.
 	ErrMRPCyclicBOM = errors.New("manufacturing: cyclic bom detected during mrp explosion")
+
+	// ErrMRPInvalidBOMOutputQty is returned when an active BOM reaches
+	// the explosion step with a non-positive output_qty. CreateBOM
+	// rejects such values up front, so this only fires on corrupt or
+	// legacy data; the run is rejected rather than dividing by zero.
+	ErrMRPInvalidBOMOutputQty = errors.New("manufacturing: bom output_qty must be positive for mrp explosion")
 )
 
 // MRPRunInput is the canonical input for RunMRP. Demand carries the
@@ -281,6 +288,12 @@ func planMRP(
 		// Explode net into component gross demand, due by this make
 		// order's suggested start date.
 		bom := info.ActiveBOM
+		// OutputQty is the per-batch yield and the explosion divisor.
+		// CreateBOM enforces a positive value, but guard here too so a
+		// corrupt/legacy row can't panic this otherwise-pure planner.
+		if !bom.OutputQty.IsPositive() {
+			return nil, fmt.Errorf("%w: item %s bom %s", ErrMRPInvalidBOMOutputQty, next, bom.ID)
+		}
 		for _, c := range bom.Components {
 			compQty := c.EffectiveQty().Mul(net).Div(bom.OutputQty)
 			cur, ok := gross[c.ComponentItemID]

@@ -81,7 +81,7 @@ func TestPortalSMTPMailer_PropagatesSendError(t *testing.T) {
 func TestFailingPortalMailer_AlwaysErrors(t *testing.T) {
 	sentinel := errors.New("portal: SMTP not configured")
 	mailer := failingPortalMailer{err: sentinel}
-	if err := mailer.Send(context.Background(), uuid.New(), "x@example.invalid", "link"); err != sentinel {
+	if err := mailer.Send(context.Background(), uuid.New(), "x@example.invalid", "link"); !errors.Is(err, sentinel) {
 		t.Fatalf("err = %v, want %v", err, sentinel)
 	}
 }

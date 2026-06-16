@@ -59,7 +59,7 @@ func WithTenantTx(
 		}
 		if err != nil {
 			if rbErr := tx.Rollback(context.Background()); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-				err = fmt.Errorf("%w; rollback: %v", err, rbErr)
+				err = fmt.Errorf("%w; rollback: %w", err, rbErr)
 			}
 		}
 	}()
@@ -146,7 +146,7 @@ func WithReadOnlyTenantTxOnPool(
 		}
 		if err != nil {
 			if rbErr := tx.Rollback(context.Background()); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-				err = fmt.Errorf("%w; rollback: %v", err, rbErr)
+				err = fmt.Errorf("%w; rollback: %w", err, rbErr)
 			}
 		}
 	}()

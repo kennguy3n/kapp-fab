@@ -386,7 +386,7 @@ func (s *Signer) verify(token, expectedAudience string) (*Claims, error) {
 	signingInput := parts[0] + "." + parts[1]
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrTokenSignature, err)
+		return nil, fmt.Errorf("%w: %w", ErrTokenSignature, err)
 	}
 	hdrJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
@@ -409,11 +409,11 @@ func (s *Signer) verify(token, expectedAudience string) (*Claims, error) {
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrTokenInvalid, err)
+		return nil, fmt.Errorf("%w: %w", ErrTokenInvalid, err)
 	}
 	var c Claims
 	if err := json.Unmarshal(payload, &c); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrTokenInvalid, err)
+		return nil, fmt.Errorf("%w: %w", ErrTokenInvalid, err)
 	}
 	if expectedAudience != "" && c.Audience != expectedAudience {
 		return nil, ErrTokenInvalid

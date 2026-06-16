@@ -454,6 +454,7 @@ func writeManufacturingError(w http.ResponseWriter, err error) {
 		errors.Is(err, manufacturing.ErrCapacityRangeInvalid),
 		errors.Is(err, manufacturing.ErrMRPNoDemand),
 		errors.Is(err, manufacturing.ErrMRPCyclicBOM),
+		errors.Is(err, manufacturing.ErrMRPInvalidBOMOutputQty),
 		errors.Is(err, manufacturing.ErrSubcontractNoComponents),
 		errors.Is(err, manufacturing.ErrSubcontractDuplicateComponent),
 		errors.Is(err, manufacturing.ErrSubcontractInvalidTransition),

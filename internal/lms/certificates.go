@@ -85,14 +85,14 @@ func (c *CertificateIssuer) IssueCertificate(ctx context.Context, tenantID, enro
 	}
 	enrollment, err := c.records.Get(ctx, tenantID, enrollmentID)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrEnrollmentNotFound, err)
+		return nil, fmt.Errorf("%w: %w", ErrEnrollmentNotFound, err)
 	}
 	if enrollment.KType != KTypeEnrollment {
 		return nil, fmt.Errorf("%w: record %s is not an enrollment", ErrCertificateInvalidPayload, enrollmentID)
 	}
 	var enrollmentBody map[string]any
 	if err := json.Unmarshal(enrollment.Data, &enrollmentBody); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrCertificateInvalidPayload, err)
+		return nil, fmt.Errorf("%w: %w", ErrCertificateInvalidPayload, err)
 	}
 	status, _ := enrollmentBody["status"].(string)
 	if status != "completed" {
@@ -128,7 +128,7 @@ func (c *CertificateIssuer) IssueCertificate(ctx context.Context, tenantID, enro
 	}
 	dataJSON, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("%w: marshal: %v", ErrCertificateInvalidPayload, err)
+		return nil, fmt.Errorf("%w: marshal: %w", ErrCertificateInvalidPayload, err)
 	}
 	cert, err := c.records.Create(ctx, record.KRecord{
 		TenantID:     tenantID,
@@ -145,7 +145,7 @@ func (c *CertificateIssuer) IssueCertificate(ctx context.Context, tenantID, enro
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			existing, getErr := c.findExisting(ctx, tenantID, enrollmentID)
 			if getErr != nil {
-				return nil, fmt.Errorf("%w (and lookup failed: %v)", ErrCertificateAlreadyIssued, getErr)
+				return nil, fmt.Errorf("%w (and lookup failed: %w)", ErrCertificateAlreadyIssued, getErr)
 			}
 			return existing, ErrCertificateAlreadyIssued
 		}

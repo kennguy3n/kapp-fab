@@ -21,8 +21,12 @@ import (
 // CountryResolver returns the ISO 3166-1 alpha-2 country code for a
 // tenant. Implemented by *tenant.PGStore via a thin adapter so the
 // hr package doesn't import tenant directly (and keeps the existing
-// no-cycle invariant). Empty + ErrNoPack are treated identically by
-// the engine — the slip simply skips statutory withholding.
+// no-cycle invariant). An empty country (the tenant has none, or the
+// row doesn't exist) is treated as "no statutory pack" — the slip
+// simply skips statutory withholding. A non-nil error, by contrast,
+// signals a genuine lookup failure (e.g. a transient database error)
+// and aborts the run: the engine must not silently emit payslips
+// with zero withholding because the jurisdiction couldn't be read.
 type CountryResolver func(ctx context.Context, tenantID uuid.UUID) (string, error)
 
 // Payroll engine — materialises payslips off salary structures for a
@@ -95,11 +99,36 @@ func (e *PayrollEngine) WithClock(now func() time.Time) *PayrollEngine {
 // WithCountryResolver wires a tenant→country lookup so the engine
 // can resolve a per-country tax pack at slip generation time. A nil
 // resolver disables statutory withholding entirely (matching the
-// pre-Phase-M behaviour); resolvers that return "" or
-// taxpacks.ErrNoPack also fall back to the no-pack code path.
+// pre-Phase-M behaviour); a resolver that returns "" (or a country
+// with no registered pack) falls back to the no-pack code path. A
+// resolver that returns a non-nil error aborts GeneratePayslips so a
+// transient lookup failure can't silently zero out withholding.
 func (e *PayrollEngine) WithCountryResolver(r CountryResolver) *PayrollEngine {
 	e.resolver = r
 	return e
+}
+
+// resolveTaxPack looks up the statutory tax pack for a tenant via the
+// configured resolver. A nil resolver, an empty country, or a country
+// with no registered pack all yield the zero-value pack — i.e. the
+// slip runs without statutory withholding. A resolver error is
+// wrapped and returned so callers abort rather than silently treating
+// a transient lookup failure as "no withholding".
+func (e *PayrollEngine) resolveTaxPack(ctx context.Context, tenantID uuid.UUID) (taxpacks.TaxPack, error) {
+	var pack taxpacks.TaxPack
+	if e.resolver == nil {
+		return pack, nil
+	}
+	country, err := e.resolver(ctx, tenantID)
+	if err != nil {
+		return pack, fmt.Errorf("hr: resolve tenant country: %w", err)
+	}
+	if country != "" {
+		if p, err := taxpacks.Lookup(country); err == nil {
+			pack = p
+		}
+	}
+	return pack, nil
 }
 
 // GenerateResult describes what happened during GeneratePayslips. All
@@ -129,7 +158,7 @@ func (e *PayrollEngine) GeneratePayslips(
 
 	runRec, err := e.records.Get(ctx, tenantID, payRunID)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrPayRunNotFound, err)
+		return nil, fmt.Errorf("%w: %w", ErrPayRunNotFound, err)
 	}
 	if runRec.KType != KTypePayRun {
 		return nil, fmt.Errorf("%w: %s is %s", ErrPayRunNotFound, payRunID, runRec.KType)
@@ -230,18 +259,12 @@ func (e *PayrollEngine) GeneratePayslips(
 	var totalGross, totalDeductions, totalNet decimal.Decimal
 
 	// Resolve the tenant's tax pack once — every slip in this run
-	// shares the same jurisdiction. Failures here fail-soft: the
-	// engine logs nothing (no logger plumbed) and the slips run
-	// without statutory deductions, which matches the pre-Phase-M
-	// behaviour for tenants without a country code.
-	var pack taxpacks.TaxPack
-	if e.resolver != nil {
-		country, err := e.resolver(ctx, tenantID)
-		if err == nil && country != "" {
-			if p, err := taxpacks.Lookup(country); err == nil {
-				pack = p
-			}
-		}
+	// shares the same jurisdiction. A resolver error aborts the run:
+	// guessing "no withholding" on a transient lookup failure would
+	// silently under-deduct statutory tax for every employee.
+	pack, err := e.resolveTaxPack(ctx, tenantID)
+	if err != nil {
+		return nil, err
 	}
 	period := taxpacks.PayPeriod{Start: periodStart, End: periodEnd}
 	taxYear := periodEnd.Year()
@@ -540,7 +563,7 @@ func (e *PayrollEngine) PostPayRun(
 
 	runRec, err := e.records.Get(ctx, tenantID, payRunID)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrPayRunNotFound, err)
+		return nil, fmt.Errorf("%w: %w", ErrPayRunNotFound, err)
 	}
 	if runRec.KType != KTypePayRun {
 		return nil, fmt.Errorf("%w: %s is %s", ErrPayRunNotFound, payRunID, runRec.KType)

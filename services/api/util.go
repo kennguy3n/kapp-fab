@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -52,10 +53,12 @@ func writeJSON(w http.ResponseWriter, code int, body any) {
 // tenantCountryResolver adapts *tenant.PGStore to the
 // hr.CountryResolver shape so the payroll engine can fetch a
 // tenant's ISO 3166-1 alpha-2 country code without importing the
-// tenant package directly. Lookup failures collapse to "" + nil
-// because the engine treats both as "no statutory pack" and we'd
-// rather fail-soft a slip than block payroll on a control-plane
-// hiccup.
+// tenant package directly. A missing tenant row (ErrNotFound)
+// collapses to "" + nil because the engine treats an empty country
+// as "no statutory pack". Any other error (e.g. a transient
+// database failure) is propagated so the engine fails the run
+// rather than silently producing payslips with zero statutory
+// withholding for every employee.
 func tenantCountryResolver(svc *tenant.PGStore) hr.CountryResolver {
 	if svc == nil {
 		return nil
@@ -63,7 +66,10 @@ func tenantCountryResolver(svc *tenant.PGStore) hr.CountryResolver {
 	return func(ctx context.Context, tenantID uuid.UUID) (string, error) {
 		t, err := svc.Get(ctx, tenantID)
 		if err != nil {
-			return "", nil
+			if errors.Is(err, tenant.ErrNotFound) {
+				return "", nil
+			}
+			return "", err
 		}
 		return t.Country, nil
 	}
