@@ -193,14 +193,22 @@ export function BOMPage() {
   }, [valuationQ.data]);
 
   // item_id → its active BOM (with components) for sub-assembly explosion.
+  // useQueries returns a fresh array every render, so depend on a stable
+  // key derived from the resolved data (mirrors StockLevelsPage) rather
+  // than the array identity — otherwise the recursive cost roll-up below
+  // would recompute on every render.
+  const activeDetailData = activeDetailQs.map((q) => q.data);
+  const activeDetailKey = activeDetailData
+    .map((b) => (b ? b.id : ""))
+    .join("|");
   const bomByItem = useMemo(() => {
     const m = new Map<string, BOM>();
-    activeDetailQs.forEach((q) => {
-      const b = q.data;
+    activeDetailData.forEach((b) => {
       if (b && b.components) m.set(b.item_id, b);
     });
     return m;
-  }, [activeDetailQs]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeDetailKey]);
 
   function handleExport() {
     const rows = (bomsQ.data ?? []).map((b) => [
