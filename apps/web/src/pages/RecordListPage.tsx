@@ -169,6 +169,43 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
     setHiddenColumns(new Set());
     setRecordToDelete(null);
   }, [ktype]);
+
+  // Client-side search over the saved-view-filtered records. Lifted into
+  // a memo (rather than computed only in render) so the selection-pruning
+  // effect below can react to it: a row hidden by the search must drop out
+  // of the bulk selection so an action never touches a row off-screen.
+  const searchedRecords = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return records;
+    const schema = ktypeQuery.data?.schema;
+    const cols =
+      schema?.views?.list?.columns ??
+      (schema?.fields ?? []).slice(0, 4).map((f) => f.name);
+    return records.filter((r) =>
+      cols.some((c) => {
+        const v = r.data[c];
+        return v != null && String(v).toLowerCase().includes(q);
+      }),
+    );
+  }, [records, search, ktypeQuery.data]);
+
+  // Keep the bulk selection in sync with what is visible: if a search
+  // hides a selected row, drop it so the "N selected" count and the bulk
+  // actions never include a record the operator can no longer see.
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const visible = new Set(searchedRecords.map((r) => r.id));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (visible.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [searchedRecords]);
+
   const toggleSelect = (id: string, checked: boolean) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -370,14 +407,7 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
   const visibleColumns = schemaColumns.filter((c) => !hiddenColumns.has(c));
 
   const query = search.trim().toLowerCase();
-  const visibleRecords = query
-    ? records.filter((r) =>
-        schemaColumns.some((c) => {
-          const v = r.data[c];
-          return v != null && String(v).toLowerCase().includes(query);
-        }),
-      )
-    : records;
+  const visibleRecords = searchedRecords;
   const hasRecords = visibleRecords.length > 0;
 
   const pluralLabel = ktypePlural(kt.name);
@@ -385,7 +415,11 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
   const pluralLower = pluralLabel.toLowerCase();
   const singularLower = singularLabel.toLowerCase();
   const area = humanizeToken(kt.name.split(".")[0] ?? kt.name);
-  const isFiltered = !!activeView || !!query;
+  // A saved view only "filters" when it actually carries filter criteria;
+  // an empty-filter view must not flip the empty state to "No matching …".
+  const isFiltered =
+    !!query ||
+    (!!activeView && Object.keys(activeView.filters ?? {}).length > 0);
   const countLabel = `${visibleRecords.length.toLocaleString()} ${
     visibleRecords.length === 1 ? singularLower : pluralLower
   }`;

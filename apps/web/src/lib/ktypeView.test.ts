@@ -52,6 +52,11 @@ describe("resolveControl", () => {
     expect(
       resolveControl(field({ name: "summary", max_length: 500 })),
     ).toBe("textarea");
+    // A numeric field keeps its number input even with a generous
+    // max_length — the textarea heuristic only applies to string fields.
+    expect(
+      resolveControl(field({ name: "score", type: "number", max_length: 200 })),
+    ).toBe("number");
   });
 });
 

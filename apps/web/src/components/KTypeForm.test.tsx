@@ -5,6 +5,12 @@ import type { KType } from "@kapp/client";
 import { renderWithProviders } from "../test-utils";
 import { KTypeForm } from "./KTypeForm";
 
+// The relation control loads its options through the API client; stub it
+// so the searchable picker can render without a real network round-trip.
+vi.mock("../lib/api", () => ({
+  api: { listRecords: vi.fn().mockResolvedValue([]) },
+}));
+
 // KTypeForm is the shared metadata-driven form renderer: every page
 // that edits a KRecord builds its inputs from a KType's field specs
 // through this component, so its type→input mapping and submit
@@ -241,5 +247,71 @@ describe("KTypeForm", () => {
     await waitFor(() => expect(onAddAnother).toHaveBeenCalledTimes(1));
     // The form keeps the typed value because the save rejected.
     expect(screen.getByRole("textbox")).toHaveValue("Precious data");
+  });
+
+  it("keeps the unsaved-changes guard armed when a plain Save fails", async () => {
+    const user = userEvent.setup();
+    // A rejected save must not clear the dirty flag: the navigate-away
+    // guard has to stay armed so the operator can't silently lose input.
+    const onSubmit = vi.fn().mockRejectedValue(new Error("save failed"));
+    const onCancel = vi.fn();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderWithProviders(
+      <KTypeForm
+        ktype={ktypeWith([{ name: "title", type: "string" }])}
+        onSubmit={onSubmit}
+        onCancel={onCancel}
+      />,
+    );
+    await user.type(screen.getByRole("textbox"), "Draft");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    // Still dirty: Cancel prompts to discard, and declining aborts.
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(onCancel).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("clears the unsaved-changes guard after a successful plain Save", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const onCancel = vi.fn();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderWithProviders(
+      <KTypeForm
+        ktype={ktypeWith([{ name: "title", type: "string" }])}
+        onSubmit={onSubmit}
+        onCancel={onCancel}
+      />,
+    );
+    await user.type(screen.getByRole("textbox"), "Draft");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    // The save resolved, so the form is no longer dirty: Cancel navigates
+    // straight away without a discard prompt.
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(onCancel).toHaveBeenCalledTimes(1));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("does not submit the form when Enter is pressed in the relation search box", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    renderWithProviders(
+      <KTypeForm
+        ktype={ktypeWith([
+          { name: "owner", type: "relation", ktype: "crm.contact" },
+        ])}
+        onSubmit={onSubmit}
+      />,
+    );
+    // Open the relation combobox, then press Enter inside its search box.
+    await user.click(screen.getByRole("combobox"));
+    const searchBox = await screen.findByPlaceholderText(/^Search /i);
+    await user.type(searchBox, "ac{Enter}");
+    // Enter filters the option list; it must not submit the record form.
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });

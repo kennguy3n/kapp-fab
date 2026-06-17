@@ -197,7 +197,13 @@ export function RecordFormPage() {
         initialData={recordQuery.data?.data}
         submitting={saving}
         onCancel={() => navigate(`/records/${ktype}`)}
-        onSubmit={(data) => (id ? updateMut.mutate(data) : createMut.mutate(data))}
+        onSubmit={async (data) => {
+          // mutateAsync so KTypeForm can await the result and only clear
+          // its dirty guard once the save succeeds — a failed save rejects
+          // (and surfaces a toast via onError) while the guard stays armed.
+          if (id) await updateMut.mutateAsync(data);
+          else await createMut.mutateAsync(data);
+        }}
         onSubmitAndAddAnother={
           id
             ? undefined

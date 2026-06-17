@@ -310,11 +310,11 @@ export function resolveControl(field: FieldSpec): ControlKind {
   )
     return "tel";
   if (type === "url" || name === "url" || name === "website") return "url";
-  // Long free-text fallback runs after the typed/name-based controls
-  // so a generous `max_length` on an email/url/phone field doesn't
-  // override its specialised input.
-  if (field.max_length != null && field.max_length > 160) return "textarea";
   if (NUMERIC_TYPES.has(type)) return "number";
+  // Long free-text fallback runs after the typed/name-based controls so a
+  // generous `max_length` on a typed field (numeric, email, url, phone)
+  // never overrides its specialised input.
+  if (field.max_length != null && field.max_length > 160) return "textarea";
   return "text";
 }
 

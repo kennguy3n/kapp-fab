@@ -24,7 +24,7 @@ import {
 interface KTypeFormProps {
   ktype: KType;
   initialData?: Record<string, unknown>;
-  onSubmit: (data: Record<string, unknown>) => void;
+  onSubmit: (data: Record<string, unknown>) => void | Promise<void>;
   /** When set, renders a Cancel action (e.g. navigate back to the list). */
   onCancel?: () => void;
   /**
@@ -174,8 +174,15 @@ export function KTypeForm({
       }
       return;
     }
-    setDirty(false);
-    onSubmit(data);
+    // Mirror the "again" path: only clear the dirty flag once the save
+    // resolves so a failed save keeps the unsaved-changes guard armed and
+    // the operator can't navigate away and silently lose their input.
+    try {
+      await onSubmit(data);
+      setDirty(false);
+    } catch {
+      // The parent surfaces the failure (toast); keep the form dirty.
+    }
   };
 
   const errorCount = Object.keys(errors).length;
@@ -568,6 +575,11 @@ function RelationCombobox({
               placeholder={`Search ${targetLabel.toLowerCase()}s`}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                // The combobox lives inside the record <form>; Enter in
+                // this search box must filter, not submit the whole form.
+                if (e.key === "Enter") e.preventDefault();
+              }}
             />
           </div>
           <ul role="listbox" className="max-h-56 overflow-auto pb-1">
