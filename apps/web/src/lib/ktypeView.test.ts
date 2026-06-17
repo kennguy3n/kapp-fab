@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { FieldSpec } from "@kapp/client";
+import type { Formatters } from "./i18n";
 import {
+  formatValue,
   isMoneyField,
+  isStatusField,
   resolveControl,
   schemaHasCurrency,
 } from "./ktypeView";
@@ -10,6 +13,26 @@ const field = (partial: Partial<FieldSpec> & { name: string }): FieldSpec => ({
   type: "string",
   ...partial,
 });
+
+// A real en-US Intl-backed formatter so `currency` throws a RangeError
+// on a non-ISO-4217 code exactly as the production `useFormatter` does.
+const enFormatters: Formatters = {
+  number: (n, opts) => new Intl.NumberFormat("en-US", opts).format(n),
+  currency: (amount, currencyCode, opts) =>
+    new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: currencyCode,
+      ...opts,
+    }).format(amount),
+  date: (d, opts) => new Intl.DateTimeFormat("en-US", opts).format(d),
+  dateTime: (d, opts) => new Intl.DateTimeFormat("en-US", opts).format(d),
+  time: (d, opts) => new Intl.DateTimeFormat("en-US", opts).format(d),
+  relativeTime: (value, unit, opts) =>
+    new Intl.RelativeTimeFormat("en-US", { numeric: "auto", ...opts }).format(
+      value,
+      unit,
+    ),
+};
 
 describe("resolveControl", () => {
   it("maps types and name heuristics to the right control", () => {
@@ -83,6 +106,43 @@ describe("isMoneyField", () => {
     expect(isMoneyField(field({ name: "quantity", type: "number" }))).toBe(
       false,
     );
+  });
+});
+
+describe("isStatusField", () => {
+  it("treats an enum type as a status field regardless of letter case", () => {
+    // resolveControl lowercases `type`, so isStatusField must too — a
+    // schema using `Enum`/`ENUM` (without a values array) still badges.
+    expect(isStatusField(field({ name: "phase", type: "Enum" }))).toBe(true);
+    expect(isStatusField(field({ name: "phase", type: "ENUM" }))).toBe(true);
+  });
+
+  it("matches by values array or a known status field name", () => {
+    expect(
+      isStatusField(field({ name: "whatever", values: ["a", "b"] })),
+    ).toBe(true);
+    expect(isStatusField(field({ name: "status" }))).toBe(true);
+    expect(isStatusField(field({ name: "title" }))).toBe(false);
+  });
+});
+
+describe("formatValue", () => {
+  it("never throws on a non-ISO currency code — falls back to a plain number", () => {
+    const amount = field({ name: "amount", type: "number" });
+    expect(() =>
+      formatValue(amount, 1234.5, { data: { currency: "dollars" } }, enFormatters),
+    ).not.toThrow();
+    // The bad code must not leak; a clean grouped number is shown instead.
+    expect(
+      formatValue(amount, 1234.5, { data: { currency: "dollars" } }, enFormatters),
+    ).toBe("1,234.5");
+  });
+
+  it("formats a valid currency code with its symbol", () => {
+    const amount = field({ name: "amount", type: "number" });
+    expect(
+      formatValue(amount, 1234.5, { data: { currency: "USD" } }, enFormatters),
+    ).toBe("$1,234.50");
   });
 });
 

@@ -219,7 +219,7 @@ const STATUS_FIELD_NAMES = new Set([
 /** Whether a field's values should render as status Badges. */
 export function isStatusField(field: FieldSpec): boolean {
   return (
-    field.type === "enum" ||
+    field.type.toLowerCase() === "enum" ||
     (Array.isArray(field.values) && field.values.length > 0) ||
     STATUS_FIELD_NAMES.has(field.name.toLowerCase())
   );
@@ -422,7 +422,14 @@ export function formatValue(
         typeof currencyCode === "string" &&
         currencyCode.trim()
       ) {
-        return fmt.currency(n, currencyCode);
+        try {
+          return fmt.currency(n, currencyCode);
+        } catch {
+          // A record may carry a non-ISO-4217 currency string; rather
+          // than let Intl throw a RangeError and crash the whole
+          // list/detail/kanban view, fall back to a plain number.
+          return fmt.number(n);
+        }
       }
       return fmt.number(n);
     }
