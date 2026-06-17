@@ -170,6 +170,16 @@ export function PlacementPolicyPage() {
     policyQuery.error instanceof Error &&
     /paid plan|free/i.test(policyQuery.error.message);
 
+  const loadingCard = (
+    <Card>
+      <CardContent className="flex flex-col gap-4 pt-4">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <Skeleton key={i} variant="rect" className="h-10 w-full" />
+        ))}
+      </CardContent>
+    </Card>
+  );
+
   return (
     <section className="flex flex-col gap-6">
       <AdminPageHeader
@@ -184,13 +194,7 @@ export function PlacementPolicyPage() {
       />
 
       {policyQuery.isLoading ? (
-        <Card>
-          <CardContent className="flex flex-col gap-4 pt-4">
-            {Array.from({ length: 4 }).map((_, i) => (
-              <Skeleton key={i} variant="rect" className="h-10 w-full" />
-            ))}
-          </CardContent>
-        </Card>
+        loadingCard
       ) : isFreePlanError ? (
         <UpgradeNotice />
       ) : policyQuery.error ? (
@@ -342,7 +346,10 @@ export function PlacementPolicyPage() {
             </div>
           )}
         </>
-      ) : null}
+      ) : (
+        // data has arrived but the form effect hasn't run for this frame
+        loadingCard
+      )}
     </section>
   );
 }

@@ -242,11 +242,15 @@ export function AuditLogPage() {
 }
 
 function actionVariant(action: string): BadgeVariant {
-  const verb = action.toLowerCase();
-  if (/(create|add|insert)/.test(verb)) return "success";
-  if (/(delete|remove|destroy)/.test(verb)) return "danger";
-  if (/(suspend|disable|revoke|archive)/.test(verb)) return "warning";
-  if (/(update|edit|change|set)/.test(verb)) return "info";
+  // Match whole verb segments (actions are dotted/underscored, e.g.
+  // "record.create", "ar_invoice.post") so a substring like "set" inside
+  // "reset_password" doesn't pick up the wrong colour.
+  const verbs = action.toLowerCase().split(/[._\s-]+/).filter(Boolean);
+  const has = (...words: string[]) => verbs.some((v) => words.includes(v));
+  if (has("create", "add", "insert")) return "success";
+  if (has("delete", "remove", "destroy")) return "danger";
+  if (has("suspend", "disable", "revoke", "archive")) return "warning";
+  if (has("update", "edit", "change", "set")) return "info";
   return "neutral";
 }
 
@@ -376,6 +380,53 @@ function DiffView({
 
   const created = before == null && after != null;
   const deleted = before != null && after == null;
+
+  // Scalars, arrays, or otherwise non-object payloads have no named
+  // fields to diff. Render the whole value(s) so a genuine change isn't
+  // silently swallowed as "No field changes".
+  if (!beforeObj && !afterObj) {
+    if (
+      !created &&
+      !deleted &&
+      JSON.stringify(before) === JSON.stringify(after)
+    ) {
+      return <span className="text-fg-subtle">No field changes</span>;
+    }
+    return (
+      <div className="flex flex-col gap-1">
+        {created && (
+          <Badge variant="success" className="self-start">
+            Record created
+          </Badge>
+        )}
+        {deleted && (
+          <Badge variant="danger" className="self-start">
+            Record removed
+          </Badge>
+        )}
+        <div className="flex flex-wrap items-baseline gap-1.5">
+          {created ? (
+            <span className="text-success">{formatScalar(after, fmt)}</span>
+          ) : deleted ? (
+            <span className="text-fg-muted line-through">
+              {formatScalar(before, fmt)}
+            </span>
+          ) : (
+            <>
+              <span className="text-fg-muted line-through">
+                {formatScalar(before, fmt)}
+              </span>
+              <span aria-hidden="true" className="text-fg-subtle">
+                →
+              </span>
+              <span className="text-fg">{formatScalar(after, fmt)}</span>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   const changes = diffRecords(beforeObj, afterObj);
 
   // A deletion is always flagged, even when it carries field data
