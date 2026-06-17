@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { FieldSpec, KType } from "@kapp/client";
 import {
@@ -18,6 +18,7 @@ import {
   recordLabel,
   relationTargetKtype,
   resolveControl,
+  schemaHasCurrency,
 } from "../lib/ktypeView";
 
 interface KTypeFormProps {
@@ -28,10 +29,14 @@ interface KTypeFormProps {
   onCancel?: () => void;
   /**
    * When set, renders a "Save & add another" action. The form submits
-   * the payload and then resets itself for the next entry — used by the
-   * create flow so operators can capture several records in a row.
+   * the payload and only resets itself for the next entry once the
+   * save resolves — used by the create flow so operators can capture
+   * several records in a row without losing input if a save fails.
+   * Return a promise so the form can await the result before clearing.
    */
-  onSubmitAndAddAnother?: (data: Record<string, unknown>) => void;
+  onSubmitAndAddAnother?: (
+    data: Record<string, unknown>,
+  ) => void | Promise<void>;
   /** Disables the action bar while a save mutation is in flight. */
   submitting?: boolean;
 }
@@ -65,6 +70,10 @@ export function KTypeForm({
     () => ktype.schema?.fields ?? [],
     [ktype],
   );
+  // Only show a currency affordance on monetary inputs when the schema
+  // actually models a currency, so a plain numeric field never picks
+  // up a spurious `$`.
+  const moneyContext = useMemo(() => schemaHasCurrency(fields), [fields]);
   const [data, setData] = useState<Record<string, unknown>>(initialData ?? {});
   const [errors, setErrors] = useState<Errors>({});
   const [dirty, setDirty] = useState(false);
@@ -147,16 +156,25 @@ export function KTypeForm({
     return next;
   };
 
-  const submit = (after: "close" | "again") => {
+  const submit = async (after: "close" | "again") => {
     const found = validate();
     setErrors(found);
     if (Object.keys(found).length > 0) return;
-    setDirty(false);
     if (after === "again" && onSubmitAndAddAnother) {
-      onSubmitAndAddAnother(data);
-      setData({});
+      // Wait for the save to resolve before clearing the form so a
+      // failed create never silently discards what the operator typed.
+      try {
+        await onSubmitAndAddAnother(data);
+        setData({});
+        setErrors({});
+        setDirty(false);
+      } catch {
+        // The parent surfaces the failure (toast); keep the form
+        // populated so the entry can be retried without retyping.
+      }
       return;
     }
+    setDirty(false);
     onSubmit(data);
   };
 
@@ -174,7 +192,7 @@ export function KTypeForm({
       noValidate
       onSubmit={(e) => {
         e.preventDefault();
-        submit("close");
+        void submit("close");
       }}
     >
       {errorCount > 0 && (
@@ -200,6 +218,7 @@ export function KTypeForm({
                 field={field}
                 value={data[field.name]}
                 error={errors[field.name]}
+                moneyContext={moneyContext}
                 onChange={(v) => update(field.name, v)}
               />
             ))}
@@ -222,7 +241,7 @@ export function KTypeForm({
           <Button
             type="button"
             variant="secondary"
-            onClick={() => submit("again")}
+            onClick={() => void submit("again")}
             disabled={submitting}
           >
             Save &amp; add another
@@ -240,10 +259,12 @@ interface FieldRowProps {
   field: FieldSpec;
   value: unknown;
   error?: string;
+  /** Whether the owning schema models a currency (gates the `$`). */
+  moneyContext: boolean;
   onChange: (value: unknown) => void;
 }
 
-function FieldRow({ field, value, error, onChange }: FieldRowProps) {
+function FieldRow({ field, value, error, moneyContext, onChange }: FieldRowProps) {
   const control = resolveControl(field);
   const label = humanizeLabel(field.name);
   const required = !!field.required;
@@ -282,7 +303,13 @@ function FieldRow({ field, value, error, onChange }: FieldRowProps) {
       help={fieldHelp(field, control)}
       className={cn(fullWidth && "sm:col-span-2")}
     >
-      <FieldControl field={field} control={control} value={value} onChange={onChange} />
+      <FieldControl
+        field={field}
+        control={control}
+        value={value}
+        moneyContext={moneyContext}
+        onChange={onChange}
+      />
     </Field>
   );
 }
@@ -302,6 +329,7 @@ interface FieldControlProps {
   field: FieldSpec;
   control: ReturnType<typeof resolveControl>;
   value: unknown;
+  moneyContext?: boolean;
   onChange: (value: unknown) => void;
   id?: string;
   invalid?: boolean;
@@ -313,6 +341,7 @@ function FieldControl({
   field,
   control,
   value,
+  moneyContext,
   onChange,
   ...injected
 }: FieldControlProps) {
@@ -405,7 +434,7 @@ function FieldControl({
         />
       );
     case "number": {
-      const money = isMoneyField(field);
+      const money = isMoneyField(field) && !!moneyContext;
       const stepDecimal = /^(decimal|float|double|money|currency)$/i.test(
         field.type,
       );
@@ -469,6 +498,22 @@ function RelationCombobox({
   const target = relationTargetKtype(field);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Close the dropdown when the operator clicks anywhere outside it.
+  useEffect(() => {
+    if (!open) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(e.target as Node)
+      ) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [open]);
 
   const recordsQuery = useQuery({
     queryKey: ["records", target],
@@ -490,7 +535,7 @@ function RelationCombobox({
     : "record";
 
   return (
-    <div className="relative">
+    <div className="relative" ref={containerRef}>
       <Input
         {...aria}
         id={id}

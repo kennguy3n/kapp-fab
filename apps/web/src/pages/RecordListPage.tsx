@@ -222,12 +222,10 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
   const deleteRecordMutation = useMutation({
     mutationFn: async (record: KRecord) =>
       api.bulkRecords(ktype!, { ids: [record.id], action: "delete" }),
-    onSuccess: () => {
+    onSuccess: (_data, record) => {
       qc.invalidateQueries({ queryKey: ["records", ktype] });
       setRecordToDelete(null);
-      setSelected((cur) =>
-        cur && cur.id === recordToDelete?.id ? null : cur,
-      );
+      setSelected((cur) => (cur && cur.id === record.id ? null : cur));
       toast.success("Record deleted");
     },
     onError: (err) => {
@@ -614,6 +612,10 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
             />
           ) : (
             <KTypeList
+              // Remount when the active saved view changes so the
+              // table's manual column sort resets and the view's own
+              // sort (already applied to `records`) takes effect.
+              key={`${ktype}:${activeView?.id ?? NEW_VIEW_ID}`}
               ktype={kt}
               records={visibleRecords}
               columns={visibleColumns}

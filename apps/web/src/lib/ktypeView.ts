@@ -241,8 +241,36 @@ export function isNumericField(field: FieldSpec): boolean {
   return NUMERIC_TYPES.has(field.type.toLowerCase());
 }
 
-const MONEY_NAME_RE =
-  /(amount|total|value|price|cost|subtotal|balance|rate|fee|salary|revenue|budget|net|gross|paid|due|discount|tax)/i;
+// Curated money-name tokens, matched against the *tokenized* field
+// name (so `unit_price` → ["unit", "price"]) rather than as raw
+// substrings. This avoids false positives (e.g. `evaluation`) and
+// deliberately excludes ambiguous bare words like `due`, `rate`,
+// `net`, `gross`, and `paid` that are frequently plain counts/ratios
+// rather than monetary amounts.
+const MONEY_NAME_TOKENS = new Set([
+  "amount",
+  "total",
+  "subtotal",
+  "price",
+  "cost",
+  "balance",
+  "fee",
+  "salary",
+  "wage",
+  "payroll",
+  "revenue",
+  "budget",
+  "discount",
+  "tax",
+  "charge",
+  "payment",
+  "premium",
+  "refund",
+  "deposit",
+  "mrr",
+  "arr",
+  "value",
+]);
 const MONEY_TYPES = new Set(["money", "currency"]);
 
 /** The control to render for a field in a form. */
@@ -270,8 +298,7 @@ export function resolveControl(field: FieldSpec): ControlKind {
   if (relationTargetKtype(field)) return "relation";
   if (type === "date") return "date";
   if (type === "datetime" || type === "timestamp") return "datetime";
-  if (type === "text" || (field.max_length != null && field.max_length > 160))
-    return "textarea";
+  if (type === "text") return "textarea";
   if (type === "email" || name === "email" || name.endsWith("_email"))
     return "email";
   if (
@@ -283,13 +310,40 @@ export function resolveControl(field: FieldSpec): ControlKind {
   )
     return "tel";
   if (type === "url" || name === "url" || name === "website") return "url";
+  // Long free-text fallback runs after the typed/name-based controls
+  // so a generous `max_length` on an email/url/phone field doesn't
+  // override its specialised input.
+  if (field.max_length != null && field.max_length > 160) return "textarea";
   if (NUMERIC_TYPES.has(type)) return "number";
   return "text";
 }
 
-/** Whether a numeric field should render with a currency affordance. */
+/**
+ * Whether a numeric field represents a monetary amount. Driven by an
+ * explicit money/currency type or a curated money name token. The
+ * `$` affordance / currency formatting is gated further at the call
+ * site on an actual currency context (a sibling `currency` field on
+ * the schema, or a `currency` value on the record) so a plain numeric
+ * field never picks up a spurious currency presentation.
+ */
 export function isMoneyField(field: FieldSpec): boolean {
-  return MONEY_TYPES.has(field.type.toLowerCase()) || MONEY_NAME_RE.test(field.name);
+  if (MONEY_TYPES.has(field.type.toLowerCase())) return true;
+  return splitWords(field.name).some((w) =>
+    MONEY_NAME_TOKENS.has(w.toLowerCase()),
+  );
+}
+
+/**
+ * Whether a KType schema models currency, i.e. it has a dedicated
+ * `currency` field (or an explicit money/currency-typed field). Used
+ * to gate the form's `$` affordance so monetary inputs only show a
+ * currency symbol when the schema actually tracks a currency.
+ */
+export function schemaHasCurrency(fields: FieldSpec[]): boolean {
+  return fields.some((f) => {
+    const t = f.type.toLowerCase();
+    return f.name.toLowerCase() === "currency" || MONEY_TYPES.has(t);
+  });
 }
 
 /** A human label for a record (for relation pickers / resolved cells). */

@@ -33,6 +33,11 @@ export function RecordFormPage() {
       qc.invalidateQueries({ queryKey: ["records", ktype] });
       navigate(`/records/${ktype}`);
     },
+    onError: (err) => {
+      toast.error("Couldn't create record", {
+        description: (err as Error).message,
+      });
+    },
   });
 
   const createAnotherMut = useMutation({
@@ -41,6 +46,11 @@ export function RecordFormPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["records", ktype] });
       toast.success("Record created");
+    },
+    onError: (err) => {
+      toast.error("Couldn't create record", {
+        description: (err as Error).message,
+      });
     },
   });
 
@@ -51,6 +61,11 @@ export function RecordFormPage() {
       qc.invalidateQueries({ queryKey: ["records", ktype] });
       qc.invalidateQueries({ queryKey: ["record", ktype, id] });
       navigate(`/records/${ktype}`);
+    },
+    onError: (err) => {
+      toast.error("Couldn't save changes", {
+        description: (err as Error).message,
+      });
     },
   });
 
@@ -98,7 +113,8 @@ export function RecordFormPage() {
   const kt = ktypeQuery.data;
   const singular = ktypeSingular(kt.name);
   const area = humanizeToken(kt.name.split(".")[0] ?? kt.name);
-  const saving = createMut.isPending || updateMut.isPending;
+  const saving =
+    createMut.isPending || updateMut.isPending || createAnotherMut.isPending;
 
   // Print routes require X-Tenant-ID + Authorization headers, which
   // browser anchor navigation does not send. The buttons therefore
@@ -183,7 +199,14 @@ export function RecordFormPage() {
         onCancel={() => navigate(`/records/${ktype}`)}
         onSubmit={(data) => (id ? updateMut.mutate(data) : createMut.mutate(data))}
         onSubmitAndAddAnother={
-          id ? undefined : (data) => createAnotherMut.mutate(data)
+          id
+            ? undefined
+            : async (data) => {
+                // mutateAsync so KTypeForm can await the save and only
+                // reset once it resolves — a failure rejects, the form
+                // keeps the input, and onError surfaces the toast.
+                await createAnotherMut.mutateAsync(data);
+              }
         }
       />
     </section>

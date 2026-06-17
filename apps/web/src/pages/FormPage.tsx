@@ -21,6 +21,7 @@ import {
   isMoneyField,
   ktypeSingular,
   resolveControl,
+  schemaHasCurrency,
 } from "../lib/ktypeView";
 
 type FormErrors = Record<string, string>;
@@ -91,6 +92,9 @@ export function FormPage() {
 
   const { form, schema } = formQuery.data;
   const fields: FieldSpec[] = schema.fields ?? [];
+  // Only show a currency affordance on monetary inputs when the schema
+  // actually models a currency.
+  const moneyContext = schemaHasCurrency(fields);
   const title = form.config?.title || ktypeSingular(schema.name);
 
   const validate = (): FormErrors => {
@@ -186,6 +190,7 @@ export function FormPage() {
               field={f}
               value={values[f.name]}
               error={errors[f.name]}
+              moneyContext={moneyContext}
               onChange={(v) => update(f.name, v)}
             />
           ))}
@@ -221,10 +226,18 @@ interface PublicFieldProps {
   field: FieldSpec;
   value: unknown;
   error?: string;
+  /** Whether the owning schema models a currency (gates the `$`). */
+  moneyContext: boolean;
   onChange: (value: unknown) => void;
 }
 
-function PublicField({ field, value, error, onChange }: PublicFieldProps) {
+function PublicField({
+  field,
+  value,
+  error,
+  moneyContext,
+  onChange,
+}: PublicFieldProps) {
   const control = resolveControl(field);
   const label = humanizeLabel(field.name);
   const required = !!field.required;
@@ -265,6 +278,7 @@ function PublicField({ field, value, error, onChange }: PublicFieldProps) {
         field={field}
         control={control}
         value={value}
+        moneyContext={moneyContext}
         onChange={onChange}
       />
     </Field>
@@ -275,6 +289,7 @@ interface PublicControlProps {
   field: FieldSpec;
   control: ReturnType<typeof resolveControl>;
   value: unknown;
+  moneyContext?: boolean;
   onChange: (value: unknown) => void;
   id?: string;
   invalid?: boolean;
@@ -286,6 +301,7 @@ function PublicControl({
   field,
   control,
   value,
+  moneyContext,
   onChange,
   ...injected
 }: PublicControlProps) {
@@ -369,7 +385,7 @@ function PublicControl({
         />
       );
     case "number": {
-      const money = isMoneyField(field);
+      const money = isMoneyField(field) && !!moneyContext;
       const stepDecimal = /^(decimal|float|double|money|currency)$/i.test(
         field.type,
       );

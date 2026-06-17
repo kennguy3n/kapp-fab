@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, screen } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { KType } from "@kapp/client";
 import { renderWithProviders } from "../test-utils";
@@ -197,5 +197,49 @@ describe("KTypeForm", () => {
     // Guard the PATCH contract directly: the cleared field must survive
     // JSON serialization as an explicit null, not be dropped.
     expect(JSON.stringify({ data: submitted })).toBe('{"data":{"qty":null}}');
+  });
+
+  it("clears the form only after Save & add another resolves", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const onAddAnother = vi.fn().mockResolvedValue(undefined);
+    renderWithProviders(
+      <KTypeForm
+        ktype={ktypeWith([{ name: "title", type: "string" }])}
+        onSubmit={onSubmit}
+        onSubmitAndAddAnother={onAddAnother}
+      />,
+    );
+    await user.type(screen.getByRole("textbox"), "First lead");
+    await user.click(
+      screen.getByRole("button", { name: "Save & add another" }),
+    );
+    expect(onAddAnother).toHaveBeenCalledWith({ title: "First lead" });
+    // The reset is gated on the save resolving, so the next entry
+    // starts from a clean form.
+    await waitFor(() => expect(screen.getByRole("textbox")).toHaveValue(""));
+  });
+
+  it("preserves entered values when Save & add another fails (no silent data loss)", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    // A rejected save must not wipe the form: the operator keeps their
+    // input and can retry without retyping.
+    const onAddAnother = vi.fn().mockRejectedValue(new Error("save failed"));
+    renderWithProviders(
+      <KTypeForm
+        ktype={ktypeWith([{ name: "title", type: "string" }])}
+        onSubmit={onSubmit}
+        onSubmitAndAddAnother={onAddAnother}
+      />,
+    );
+    await user.type(screen.getByRole("textbox"), "Precious data");
+    await user.click(
+      screen.getByRole("button", { name: "Save & add another" }),
+    );
+    expect(onAddAnother).toHaveBeenCalledWith({ title: "Precious data" });
+    await waitFor(() => expect(onAddAnother).toHaveBeenCalledTimes(1));
+    // The form keeps the typed value because the save rejected.
+    expect(screen.getByRole("textbox")).toHaveValue("Precious data");
   });
 });
