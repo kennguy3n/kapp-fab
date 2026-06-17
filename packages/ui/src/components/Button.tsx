@@ -32,7 +32,11 @@ const buttonVariants = cva(
   // and the disabled-state pointer/opacity treatment so callers
   // never have to set `disabled:opacity-50` themselves.
   cn(
-    "inline-flex items-center justify-center gap-2",
+    // `shrink-0` so a tight flex row (e.g. a page header toolbar)
+    // can never squeeze a button below its content width — that would
+    // push the `whitespace-nowrap` label into the pill's rounded cap
+    // and make it look clipped. Buttons wrap, they don't squish.
+    "inline-flex shrink-0 items-center justify-center gap-2",
     // Full pill radius is the KChat button shape — violet/near-black
     // capsule with white label.  `rounded-pill` is generated from the
     // --radius-pill theme token (globals.css) so it tracks the design

@@ -140,7 +140,7 @@ import { NotificationBell } from "./components/NotificationBell";
 import { LocaleSwitcher } from "./components/LocaleSwitcher";
 import { LocaleProvider } from "./lib/i18n";
 import { useTheme } from "./lib/theme";
-import { useTenantName } from "./lib/tenant";
+import { tenantKey, useTenantName } from "./lib/tenant";
 
 /**
  * Route-level code splitting.  Every page is loaded on first
@@ -489,9 +489,6 @@ const InstallationDetailPage = lazyNamed(
   () => import("./pages/marketplace/InstallationDetailPage"),
   "InstallationDetailPage",
 );
-
-const tenantKey = (): string =>
-  localStorage.getItem("kapp.tenant") ?? "default";
 
 /**
  * featureFromSection maps a nav-section title to the tenant
@@ -1774,7 +1771,14 @@ function AppSidebarNav({
   const q = query.trim().toLowerCase();
   const results = q
     ? sections.flatMap((s) =>
-        s.links.filter((l) => l.label.toLowerCase().includes(q)),
+        // A query that *prefixes* a section title surfaces the whole
+        // section (so "adm" → Admin, "hr" → HR); otherwise fall back to
+        // matching link labels. Prefix (not substring) keeps a short
+        // query like "in" from sweeping in every section that merely
+        // contains those letters (Finance, Manufacturing, …).
+        s.title.toLowerCase().startsWith(q)
+          ? s.links
+          : s.links.filter((l) => l.label.toLowerCase().includes(q)),
       )
     : [];
 
@@ -1921,6 +1925,14 @@ function ProfileMenu({ collapsed }: { collapsed: boolean }) {
       "kapp.tenant",
       "kapp.expires_at",
       "kapp.id_token",
+      // Per-user nav state — cleared on sign-out so it doesn't leak to
+      // the next user signing in on a shared device. RECENT_PAGES_KEY
+      // holds labels of records the user opened (CRM contacts, invoices,
+      // tickets), so it's the most sensitive of these.
+      NAV_FAVORITES_KEY,
+      NAV_COLLAPSED_SECTIONS_KEY,
+      SIDEBAR_COLLAPSED_KEY,
+      RECENT_PAGES_KEY,
     ]) {
       try {
         localStorage.removeItem(k);
