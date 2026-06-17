@@ -12,6 +12,7 @@ import {
   buildNameResolver,
   deriveTaxRate,
   itemOptions as toItemOptions,
+  lineCount,
   linesFromData,
   orgOptions,
   type DocumentSubmitPayload,
@@ -76,14 +77,18 @@ export function SalesOrdersPage() {
     mutationFn: async ({ r, to }: { r: KRecord; to: string }) => {
       const current = (r.data as unknown as SalesOrderData).status ?? "draft";
       if (current === to) return;
+      // Always drive moves through the workflow action so backend
+      // side-effects run; an edge the state machine doesn't expose is
+      // rejected rather than patched straight onto status.
       const action = resolveAction(current, to);
       if (!action) {
-        await api.updateRecord(KTYPE, r.id, { ...r.data, status: to });
-        return;
+        throw new Error(`An order can’t move straight to “${to}” from “${current}”.`);
       }
       await api.runAction(KTYPE, r.id, action);
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["records", KTYPE] }),
+    // Resync to the server's truth whether the transition succeeded or
+    // was rejected, so a refused drop snaps the card back.
+    onSettled: () => qc.invalidateQueries({ queryKey: ["records", KTYPE] }),
     onError: (e: Error) => toast.error("Couldn’t move order", { description: e.message }),
   });
 
@@ -138,7 +143,7 @@ export function SalesOrdersPage() {
         emptyDescription="Create your first order to start tracking fulfilment."
         renderCard={(r) => {
           const d = r.data as unknown as SalesOrderData;
-          const lineCount = linesFromData("sales_order", r.data).length;
+          const count = lineCount(r.data);
           return (
             <div className="flex flex-col gap-1.5">
               <div className="flex items-start justify-between gap-2">
@@ -158,9 +163,9 @@ export function SalesOrdersPage() {
                   })}
                 </span>
               </div>
-              {lineCount > 0 && (
+              {count > 0 && (
                 <span className="text-xs text-fg-subtle">
-                  {lineCount} line{lineCount === 1 ? "" : "s"}
+                  {count} line{count === 1 ? "" : "s"}
                 </span>
               )}
             </div>
@@ -196,8 +201,9 @@ export function SalesOrdersPage() {
 }
 
 // resolveAction maps (from, to) stage pairs to the workflow action
-// names declared in internal/sales/ktypes.go. Invalid transitions
-// return undefined so the caller can fall back to a raw patch.
+// names declared in internal/sales/ktypes.go. Edges the state
+// machine doesn't expose return undefined, and the caller rejects
+// the move rather than patching status directly.
 function resolveAction(from: string, to: string): string | undefined {
   if (from === "draft" && to === "confirmed") return "confirm";
   if (from === "confirmed" && to === "fulfilled") return "fulfil";

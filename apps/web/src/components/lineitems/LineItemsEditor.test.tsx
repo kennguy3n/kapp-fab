@@ -59,4 +59,19 @@ describe("LineItemsEditor", () => {
     await user.type(qty, "3");
     expect(within(row).getByText(/USD\s*30\.00/)).toBeInTheDocument();
   });
+
+  it("clamps a discount typed above the line gross down to the gross", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<Harness />);
+    await user.click(screen.getByRole("button", { name: "Add line" }));
+    await user.selectOptions(screen.getByLabelText("Item for line 1"), "i1");
+
+    // qty 1 × price 10 → gross 10, so the discount can't exceed 10.
+    const discount = screen.getByLabelText("Discount for line 1") as HTMLInputElement;
+    await user.type(discount, "50");
+    expect(discount.value).toBe("10");
+
+    const row = discount.closest("tr") as HTMLTableRowElement;
+    expect(within(row).getByText(/USD\s*0\.00/)).toBeInTheDocument();
+  });
 });

@@ -16,23 +16,36 @@ export function lineGross(line: LineItem): number {
   return round2(qty * price);
 }
 
-/** Net amount for a line: gross minus the per-line discount, floored
- *  at zero so a discount can never make a line negative. */
+/** Effective per-line discount: the entered discount clamped to the
+ *  line's own gross, so a discount can never exceed the value of the
+ *  line it applies to. This keeps the discounted subtotal — and the
+ *  document total — from ever going negative, and keeps the per-line
+ *  Amount consistent with the totals panel. Non-positive/non-finite
+ *  discounts collapse to zero. */
+export function lineDiscount(line: LineItem): number {
+  const raw = Number.isFinite(line.discount) ? line.discount : 0;
+  if (raw <= 0) return 0;
+  const gross = lineGross(line);
+  return raw > gross ? gross : raw;
+}
+
+/** Net amount for a line: gross minus the (clamped) per-line discount,
+ *  so a discount can never make a line negative. */
 export function lineNet(line: LineItem): number {
-  const discount = Number.isFinite(line.discount) ? line.discount : 0;
-  const net = lineGross(line) - discount;
-  return round2(net > 0 ? net : 0);
+  return round2(lineGross(line) - lineDiscount(line));
 }
 
 /**
  * Compute document totals from the normalised lines, mirroring the
  * backend posters:
  *   subtotal       = Σ (qty × unit_price)            (gross)
- *   discount_total = Σ line.discount
+ *   discount_total = Σ min(line.discount, line gross) (clamped per line)
  *   tax_amount     = (subtotal − discount_total) × taxRate%
  *   total          = subtotal − discount_total + tax_amount
- * Documents without tax (requisitions) pass taxRate 0, so total
- * collapses to subtotal − discount_total.
+ * Each line's discount is clamped to its own gross so the discounted
+ * base (and therefore tax and total) can never go negative. Documents
+ * without tax (requisitions) pass taxRate 0, so total collapses to
+ * subtotal − discount_total.
  */
 export function computeTotals(
   lines: LineItem[],
@@ -43,7 +56,7 @@ export function computeTotals(
   let discountTotal = 0;
   for (const line of lines) {
     subtotal += lineGross(line);
-    discountTotal += Number.isFinite(line.discount) ? line.discount : 0;
+    discountTotal += lineDiscount(line);
   }
   subtotal = round2(subtotal);
   discountTotal = round2(discountTotal);

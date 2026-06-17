@@ -1,4 +1,4 @@
-import { computeTotals, lineNet } from "./compute";
+import { computeTotals, lineDiscount, lineNet } from "./compute";
 import type { DocumentConfig, DocumentKind, LineItem } from "./types";
 
 // Raw line shape as stored on the record's JSONB `data.lines`. Each
@@ -28,6 +28,12 @@ function str(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+/** Cheap count of a record's stored lines for board card summaries,
+ *  without building the full normalised line model on every render. */
+export function lineCount(data: Record<string, unknown>): number {
+  return Array.isArray(data.lines) ? data.lines.length : 0;
+}
+
 /** Read a record's stored lines into the normalised editor model. */
 export function linesFromData(kind: DocumentKind, data: Record<string, unknown>): LineItem[] {
   const raw = Array.isArray(data.lines) ? (data.lines as RawLine[]) : [];
@@ -55,7 +61,10 @@ export function buildLines(config: DocumentConfig, lines: LineItem[]): Record<st
     };
     if (config.columns.description && l.description) out.description = l.description;
     if (config.columns.uom && l.uom) out.uom = l.uom;
-    if (config.columns.discount && l.discount) out.discount = l.discount;
+    if (config.columns.discount) {
+      const discount = lineDiscount(l);
+      if (discount > 0) out.discount = discount;
+    }
     return out;
   });
 }
@@ -73,10 +82,17 @@ export function deriveTaxRate(data: Record<string, unknown>): number {
 
 /**
  * Build the full `data` payload for a create/update call: the header
- * fields (empty values dropped so optional refs aren't sent blank),
- * the serialised lines, the currency, and the computed totals. Tax
- * and discount/total fields are emitted only where the schema has
- * them (requisitions persist subtotal only).
+ * fields, the serialised lines, the currency, and the computed
+ * totals. Tax and discount/total fields are emitted only where the
+ * schema has them (requisitions persist subtotal only).
+ *
+ * Header handling depends on `mode`. On **create**, empty optional
+ * fields are dropped so blank optional refs are never sent. On
+ * **edit**, the payload is merged over the existing record
+ * (`{ ...record.data, ...payload.data }`), so a cleared optional
+ * field is emitted as an explicit `null` to overwrite the stored
+ * value rather than being dropped (which would silently retain it).
+ * Required fields are never empty here — the dialog blocks submit.
  */
 export function buildDocumentData(
   config: DocumentConfig,
@@ -84,11 +100,16 @@ export function buildDocumentData(
   lines: LineItem[],
   currency: string,
   taxRate: number,
+  mode: "create" | "edit" = "create",
 ): Record<string, unknown> {
   const totals = computeTotals(lines, { taxRate: config.taxable ? taxRate : 0 });
   const data: Record<string, unknown> = { currency };
   for (const [k, v] of Object.entries(header)) {
-    if (v !== "") data[k] = v;
+    if (v !== "") {
+      data[k] = v;
+    } else if (mode === "edit") {
+      data[k] = null;
+    }
   }
   data.lines = buildLines(config, lines);
   data.subtotal = totals.subtotal;

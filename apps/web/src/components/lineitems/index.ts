@@ -5,11 +5,12 @@
 // the i18n formatter).
 
 export { DOCUMENT_CONFIGS } from "./configs";
-export { computeTotals, lineGross, lineNet, round2 } from "./compute";
+export { computeTotals, lineDiscount, lineGross, lineNet, round2 } from "./compute";
 export {
   buildDocumentData,
   buildLines,
   deriveTaxRate,
+  lineCount,
   linesFromData,
   priceKey,
 } from "./mapping";

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeTotals, lineGross, lineNet, round2 } from "./compute";
+import { computeTotals, lineDiscount, lineGross, lineNet, round2 } from "./compute";
 import type { LineItem } from "./types";
 
 function line(overrides: Partial<LineItem> = {}): LineItem {
@@ -30,6 +30,14 @@ describe("lineGross / lineNet", () => {
   });
 });
 
+describe("lineDiscount", () => {
+  it("clamps the discount to the line gross and floors negatives at zero", () => {
+    expect(lineDiscount(line({ qty: 2, unitPrice: 10, discount: 5 }))).toBe(5);
+    expect(lineDiscount(line({ qty: 1, unitPrice: 10, discount: 999 }))).toBe(10);
+    expect(lineDiscount(line({ qty: 1, unitPrice: 10, discount: -4 }))).toBe(0);
+  });
+});
+
 describe("computeTotals", () => {
   it("sums gross subtotal with no tax or discount", () => {
     const totals = computeTotals([
@@ -52,5 +60,15 @@ describe("computeTotals", () => {
     const totals = computeTotals([line({ qty: 1, unitPrice: 30, discount: 5 })]);
     expect(totals.total).toBe(25);
     expect(totals.taxAmount).toBe(0);
+  });
+
+  it("never goes negative when a discount exceeds the line gross", () => {
+    const totals = computeTotals(
+      [line({ qty: 1, unitPrice: 10, discount: 999 })],
+      { taxRate: 10 },
+    );
+    // discount clamps to the line gross (10), so taxable, tax and
+    // total all collapse to zero rather than going negative.
+    expect(totals).toEqual({ subtotal: 10, discountTotal: 10, taxAmount: 0, total: 0 });
   });
 });

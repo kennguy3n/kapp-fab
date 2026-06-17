@@ -4,6 +4,7 @@ import {
   buildDocumentData,
   buildLines,
   deriveTaxRate,
+  lineCount,
   linesFromData,
   priceKey,
 } from "./mapping";
@@ -43,12 +44,32 @@ describe("linesFromData", () => {
   });
 });
 
+describe("lineCount", () => {
+  it("counts stored lines without normalising them, and is safe when absent", () => {
+    expect(lineCount({ lines: [{ item_id: "a" }, { item_id: "b" }] })).toBe(2);
+    expect(lineCount({})).toBe(0);
+    expect(lineCount({ lines: "oops" })).toBe(0);
+  });
+});
+
 describe("buildLines", () => {
   it("emits only the columns a sales order uses (discount, no uom/description)", () => {
     const out = buildLines(DOCUMENT_CONFIGS.sales_order, [
       line({ qty: 2, unitPrice: 10, discount: 1, description: "skip", uom: "skip" }),
     ]);
     expect(out[0]).toEqual({ item_id: "i1", qty: 2, unit_price: 10, line_total: 19, discount: 1 });
+  });
+
+  it("clamps a persisted discount to the line gross and omits a zero discount", () => {
+    const clamped = buildLines(DOCUMENT_CONFIGS.sales_order, [
+      line({ qty: 1, unitPrice: 10, discount: 999 }),
+    ]);
+    expect(clamped[0]).toEqual({ item_id: "i1", qty: 1, unit_price: 10, line_total: 0, discount: 10 });
+
+    const noDiscount = buildLines(DOCUMENT_CONFIGS.sales_order, [
+      line({ qty: 1, unitPrice: 10, discount: 0 }),
+    ]);
+    expect(noDiscount[0]).not.toHaveProperty("discount");
   });
 
   it("emits description/uom for purchase orders and uses estimated price for requisitions", () => {
@@ -91,6 +112,18 @@ describe("buildDocumentData", () => {
       total: 19.8,
     });
     expect(data).not.toHaveProperty("order_number");
+  });
+
+  it("emits cleared optional header fields as null on edit so the merge overwrites them", () => {
+    const data = buildDocumentData(
+      DOCUMENT_CONFIGS.sales_order,
+      { customer_id: "c1", order_date: "2024-01-01", order_number: "" },
+      [line({ qty: 1, unitPrice: 10 })],
+      "USD",
+      0,
+      "edit",
+    );
+    expect(data).toMatchObject({ customer_id: "c1", order_date: "2024-01-01", order_number: null });
   });
 
   it("persists subtotal only for a requisition (no tax/discount/total)", () => {

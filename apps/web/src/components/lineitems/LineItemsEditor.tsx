@@ -10,7 +10,7 @@ import {
 } from "@kapp/ui";
 import { Plus, Trash2 } from "lucide-react";
 import { useFormatter } from "../../lib/i18n/useFormatter";
-import { lineNet } from "./compute";
+import { lineGross, lineNet } from "./compute";
 import { RecordSelect } from "./RecordSelect";
 import type { ItemOption, LineColumns, LineItem } from "./types";
 
@@ -57,6 +57,15 @@ export function LineItemsEditor({
 
   const update = (index: number, patch: Partial<LineItem>) => {
     onChange(lines.map((line, i) => (i === index ? { ...line, ...patch } : line)));
+  };
+
+  // Keep the entered discount within [0, line gross] so a line — and
+  // therefore the document total — can never go negative.
+  const onDiscountChange = (index: number, raw: string, line: LineItem) => {
+    const value = Number(raw);
+    const safe = Number.isFinite(value) && value > 0 ? value : 0;
+    const gross = lineGross(line);
+    update(index, { discount: gross > 0 ? Math.min(safe, gross) : safe });
   };
 
   const onItemChange = (index: number, value: string) => {
@@ -159,11 +168,12 @@ export function LineItemsEditor({
                     <Input
                       type="number"
                       min={0}
+                      max={lineGross(line) || undefined}
                       step="0.01"
                       aria-label={`Discount for line ${i + 1}`}
                       className="text-end"
                       value={String(line.discount)}
-                      onChange={(e) => update(i, { discount: Number(e.target.value) })}
+                      onChange={(e) => onDiscountChange(i, e.target.value, line)}
                       disabled={disabled}
                     />
                   </TableCell>

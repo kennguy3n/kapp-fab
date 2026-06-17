@@ -110,7 +110,7 @@ export function DocumentDialog({
     setAttempted(true);
     const headerInvalid = config.header.some((f) => missing(f));
     if (headerInvalid || hasLineError) return;
-    const data = buildDocumentData(config, header, validLines, currency, taxRate);
+    const data = buildDocumentData(config, header, validLines, currency, taxRate, mode);
     onSubmit({ header, lines: validLines, currency, taxRate, data });
   };
 
