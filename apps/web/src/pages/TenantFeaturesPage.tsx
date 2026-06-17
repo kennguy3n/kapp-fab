@@ -10,9 +10,7 @@ import {
   TableRow,
 } from "@kapp/ui";
 import { api } from "../lib/api";
-
-const tenantKey = (): string =>
-  localStorage.getItem("kapp.tenant") ?? "default";
+import { tenantKey } from "../lib/tenant";
 
 export function TenantFeaturesPage() {
   const qc = useQueryClient();

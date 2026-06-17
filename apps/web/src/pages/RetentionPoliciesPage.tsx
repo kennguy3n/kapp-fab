@@ -12,9 +12,7 @@ import {
   TableRow,
 } from "@kapp/ui";
 import { api } from "../lib/api";
-
-const tenantKey = (): string =>
-  localStorage.getItem("kapp.tenant") ?? "default";
+import { tenantKey } from "../lib/tenant";
 
 // Categories the platform's RetentionSweeper knows how to delete. The
 // list mirrors `retentionTargets` in internal/platform/retention.go;

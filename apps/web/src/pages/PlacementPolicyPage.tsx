@@ -3,9 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { PlacementPolicy } from "@kapp/client";
 import { Button } from "@kapp/ui";
 import { api } from "../lib/api";
-
-const tenantKey = (): string =>
-  localStorage.getItem("kapp.tenant") ?? "default";
+import { tenantKey } from "../lib/tenant";
 
 // PlacementPolicyPage is the JSON editor for a tenant's ZK Object
 // Fabric placement policy. Free-plan tenants see the platform-derived
