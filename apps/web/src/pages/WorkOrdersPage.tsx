@@ -5,53 +5,102 @@ import type {
   InventoryWarehouse,
   WorkOrder,
 } from "@kapp/client";
-import { Button, Input, Select } from "@kapp/ui";
+import {
+  Badge,
+  Button,
+  EmptyState,
+  Eyebrow,
+  Field,
+  Input,
+  Select,
+  Skeleton,
+  type BadgeProps,
+} from "@kapp/ui";
+import { AlertTriangle, ClipboardList, Plus } from "lucide-react";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n";
+
+type WOStatus = WorkOrder["status"];
+type Formatters = ReturnType<typeof useFormatter>;
+
+interface LaneDef {
+  status: WOStatus;
+  label: string;
+  // Accent classes drive the lane header tint; kept to design tokens so
+  // both themes stay intentional. Each lane gets a soft fill + a solid
+  // bar so the board reads at a glance on a shop-floor monitor.
+  fill: string;
+  bar: string;
+}
 
 // COLUMNS lists the always-visible kanban lanes. `closed` is
-// deliberately NOT here: closed work orders are archival and
-// would crowd the active board if shown by default. They are
-// surfaced via a `Show closed (N)` toggle that appends a sixth
-// lane on demand (see CLOSED_COLUMN + showClosed below). Keeping
-// it as a toggleable column rather than a separate page preserves
-// the kanban metaphor and lets operators retrieve a closed order
-// without leaving the work-orders surface.
-const COLUMNS: Array<{
-  status: WorkOrder["status"];
-  label: string;
-  accent: string;
-}> = [
-  { status: "draft", label: "Draft", accent: "bg-bg-muted" },
-  { status: "released", label: "Released", accent: "bg-info/15" },
-  { status: "in_progress", label: "In Progress", accent: "bg-warning/25" },
-  { status: "completed", label: "Completed", accent: "bg-success/15" },
-  { status: "cancelled", label: "Cancelled", accent: "bg-danger/15" },
+// deliberately NOT here: closed work orders are archival and would
+// crowd the active board if shown by default. They are surfaced via a
+// `Show closed (N)` toggle that appends a sixth lane on demand. Keeping
+// it toggleable rather than a separate page preserves the board
+// metaphor and lets operators retrieve a closed order in place.
+const COLUMNS: LaneDef[] = [
+  { status: "draft", label: "Draft", fill: "bg-bg-muted", bar: "bg-border-strong" },
+  { status: "released", label: "Released", fill: "bg-info/10", bar: "bg-info" },
+  {
+    status: "in_progress",
+    label: "In Progress",
+    fill: "bg-warning/15",
+    bar: "bg-warning",
+  },
+  {
+    status: "completed",
+    label: "Completed",
+    fill: "bg-success/10",
+    bar: "bg-success",
+  },
+  {
+    status: "cancelled",
+    label: "Cancelled",
+    fill: "bg-danger/10",
+    bar: "bg-danger",
+  },
 ];
 
-// CLOSED_COLUMN is the on-demand sixth lane, conditionally
-// appended to the rendered set when the user toggles
-// `Show closed`. Pulling its shape out keeps the rendering loop
-// uniform and avoids special-casing the closed bucket downstream.
-const CLOSED_COLUMN: (typeof COLUMNS)[number] = {
+const CLOSED_COLUMN: LaneDef = {
   status: "closed",
   label: "Closed",
-  accent: "bg-accent/15",
+  fill: "bg-accent/10",
+  bar: "bg-accent",
 };
 
+const STATUS_VARIANT: Record<WOStatus, BadgeProps["variant"]> = {
+  draft: "default",
+  released: "info",
+  in_progress: "warning",
+  completed: "success",
+  closed: "accent",
+  cancelled: "danger",
+};
+
+const STATUS_LABEL: Record<WOStatus, string> = {
+  draft: "Draft",
+  released: "Released",
+  in_progress: "In Progress",
+  completed: "Completed",
+  closed: "Closed",
+  cancelled: "Cancelled",
+};
+
+type TransitionAction = "release" | "start" | "complete" | "cancel" | "close";
+
 /**
- * WorkOrdersPage renders a kanban view of work orders bucketed by
- * status. Each card exposes the legal state-machine transitions:
- * draft→release, released→start|complete, in_progress→complete, etc.
- * The complete action emits the inventory moves (consumption +
- * receipt) atomically on the server side.
+ * WorkOrdersPage renders a touch-friendly status board of production
+ * runs bucketed by status. Each card exposes the legal state-machine
+ * transitions (draft→release, released→start|complete,
+ * in_progress→complete, etc.); completing a work order emits the
+ * consumption + receipt inventory moves atomically server-side.
  */
 export function WorkOrdersPage() {
   const qc = useQueryClient();
-  // showClosed defaults to false so the active board stays
-  // uncluttered. The count in the toggle label is sourced from
-  // the same `grouped` map the columns render against, so it's
-  // always live with the latest server snapshot.
+  const fmt = useFormatter();
   const [showClosed, setShowClosed] = useState(false);
+
   const wosQ = useQuery({
     queryKey: ["mfg", "work-orders"],
     queryFn: () => api.listWorkOrders(),
@@ -87,7 +136,7 @@ export function WorkOrdersPage() {
       actualQty,
     }: {
       id: string;
-      action: "release" | "start" | "complete" | "cancel" | "close";
+      action: TransitionAction;
       actualQty?: string;
     }) => {
       switch (action) {
@@ -107,11 +156,10 @@ export function WorkOrdersPage() {
   });
 
   const grouped = useMemo(() => {
-    const m = new Map<WorkOrder["status"], WorkOrder[]>();
+    const m = new Map<WOStatus, WorkOrder[]>();
     COLUMNS.forEach((c) => m.set(c.status, []));
-    // Pre-allocate the closed bucket so the count is correct
-    // even when no closed orders exist yet (Map.get returns
-    // undefined for missing keys, which would render "NaN").
+    // Pre-allocate the closed bucket so its count is 0 (not NaN) when no
+    // closed orders exist yet.
     m.set(CLOSED_COLUMN.status, []);
     (wosQ.data ?? []).forEach((wo: WorkOrder) => {
       const arr = m.get(wo.status) ?? [];
@@ -121,147 +169,233 @@ export function WorkOrdersPage() {
     return m;
   }, [wosQ.data]);
 
-  // visibleColumns is COLUMNS plus the closed lane iff the user
-  // toggled it on. Computing once per render is fine; the array
-  // is at most 6 entries.
   const visibleColumns = showClosed ? [...COLUMNS, CLOSED_COLUMN] : COLUMNS;
   const closedCount = (grouped.get(CLOSED_COLUMN.status) ?? []).length;
+  const total = (wosQ.data ?? []).length;
 
   return (
-    <section>
-      <h1>Work Orders</h1>
-      <p className="text-fg-muted">
-        Kanban of production runs. Completing a work order emits the
-        consumption + receipt inventory moves atomically.
-      </p>
+    <section className="flex flex-col gap-4">
+      <header className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <Eyebrow>Manufacturing</Eyebrow>
+            <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-fg">
+              Work Orders
+            </h1>
+            <p className="mt-1 max-w-2xl text-sm text-fg-muted">
+              Track each production run from draft to done. Completing a work
+              order books the components out and the finished goods in
+              automatically.
+            </p>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant={showClosed ? "secondary" : "outline"}
+            onClick={() => setShowClosed((v) => !v)}
+            aria-pressed={showClosed}
+          >
+            {showClosed ? "Hide" : "Show"} closed ({closedCount})
+          </Button>
+        </div>
+      </header>
 
       <CreateWorkOrderForm
         items={itemsQ.data ?? []}
         warehouses={whQ.data ?? []}
       />
 
-      {wosQ.isLoading && <p>Loading…</p>}
-      {wosQ.isError && (
-        <p className="text-danger">{String(wosQ.error)}</p>
-      )}
-      <div className="mt-3">
-        <Button
-          type="button"
-          size="sm"
-          variant={showClosed ? "secondary" : "outline"}
-          onClick={() => setShowClosed((v) => !v)}
-          aria-pressed={showClosed}
-        >
-          {showClosed ? "Hide" : "Show"} closed ({closedCount})
-        </Button>
-      </div>
-      <div
-        className="mt-4 grid gap-3"
-        style={{
-          gridTemplateColumns: `repeat(${visibleColumns.length}, 1fr)`,
-        }}
-      >
-        {visibleColumns.map((col) => (
-          <div
-            key={col.status}
-            className="min-h-[200px] rounded-lg bg-bg-subtle p-2"
-          >
-            <div
-              className={`mb-2 rounded px-2 py-1 font-semibold ${col.accent}`}
-            >
-              {col.label} ({(grouped.get(col.status) ?? []).length})
+      {wosQ.isLoading ? (
+        <div className="flex gap-3 overflow-x-auto pb-2">
+          {COLUMNS.map((c) => (
+            <div key={c.status} className="min-w-[220px] flex-1">
+              <Skeleton className="h-8 w-full" />
+              <Skeleton className="mt-2 h-28 w-full" />
             </div>
-            {(grouped.get(col.status) ?? []).map((wo) => (
-              <WorkOrderCard
-                key={wo.id}
-                wo={wo}
-                itemLabel={itemLabel}
-                whLabel={whLabel}
-                onTransition={(action, actualQty) =>
-                  transitionMut.mutate({ id: wo.id, action, actualQty })
-                }
-                disabled={transitionMut.isPending}
-              />
-            ))}
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      ) : wosQ.isError ? (
+        <EmptyState
+          icon={<AlertTriangle />}
+          title="Couldn't load work orders"
+          description={(wosQ.error as Error).message}
+          action={
+            <Button
+              variant="secondary"
+              onClick={() => void wosQ.refetch()}
+              disabled={wosQ.isFetching}
+            >
+              Retry
+            </Button>
+          }
+        />
+      ) : total === 0 ? (
+        <EmptyState
+          icon={<ClipboardList />}
+          title="No work orders yet"
+          description="Create your first work order above to start tracking production."
+        />
+      ) : (
+        <div className="flex gap-3 overflow-x-auto pb-2">
+          {visibleColumns.map((col) => {
+            const cards = grouped.get(col.status) ?? [];
+            return (
+              <div
+                key={col.status}
+                className="flex min-w-[220px] flex-1 flex-col rounded-xl border border-border bg-bg-subtle"
+              >
+                <div
+                  className={`flex items-center gap-2 rounded-t-xl px-3 py-2 ${col.fill}`}
+                >
+                  <span className={`h-2.5 w-2.5 rounded-full ${col.bar}`} />
+                  <span className="font-semibold text-fg">
+                    {col.label} ({cards.length})
+                  </span>
+                </div>
+                <div className="flex min-h-[120px] flex-col gap-2 p-2">
+                  {cards.map((wo) => (
+                    <WorkOrderCard
+                      key={wo.id}
+                      wo={wo}
+                      fmt={fmt}
+                      itemLabel={itemLabel}
+                      whLabel={whLabel}
+                      onTransition={(action, actualQty) =>
+                        transitionMut.mutate({ id: wo.id, action, actualQty })
+                      }
+                      disabled={transitionMut.isPending}
+                    />
+                  ))}
+                  {cards.length === 0 ? (
+                    <p className="px-1 py-6 text-center text-xs text-fg-subtle">
+                      Nothing here
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </section>
   );
 }
 
 interface WorkOrderCardProps {
   wo: WorkOrder;
+  fmt: Formatters;
   itemLabel: Map<string, string>;
   whLabel: Map<string, string>;
-  onTransition: (
-    action: "release" | "start" | "complete" | "cancel" | "close",
-    actualQty?: string,
-  ) => void;
+  onTransition: (action: TransitionAction, actualQty?: string) => void;
   disabled: boolean;
 }
 
 function WorkOrderCard({
   wo,
+  fmt,
   itemLabel,
   whLabel,
   onTransition,
   disabled,
 }: WorkOrderCardProps) {
   const [actual, setActual] = useState(wo.planned_qty);
+  const canComplete = wo.status === "released" || wo.status === "in_progress";
   return (
-    <div className="mb-2 rounded-md border border-border bg-bg-elevated p-2 text-[13px]">
-      <div className="font-semibold">
+    <div className="rounded-lg border border-border bg-bg-elevated p-3 shadow-sm">
+      <div className="truncate text-sm font-semibold text-fg">
         {itemLabel.get(wo.item_id) ?? wo.item_id}
       </div>
-      <div className="text-fg-muted">{whLabel.get(wo.warehouse_id)}</div>
-      <div>
-        Planned: {wo.planned_qty}
-        {wo.actual_qty ? <> · Actual: {wo.actual_qty}</> : null}
+      <div className="mt-0.5 truncate text-xs text-fg-muted">
+        {whLabel.get(wo.warehouse_id) ?? "—"}
       </div>
-      <div className="mt-2 flex flex-wrap items-center gap-1">
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
+        <span>
+          Planned{" "}
+          <span className="font-medium tabular-nums text-fg">
+            {fmt.number(Number(wo.planned_qty))}
+          </span>
+        </span>
+        {wo.actual_qty ? (
+          <span>
+            Made{" "}
+            <span className="font-medium tabular-nums text-fg">
+              {fmt.number(Number(wo.actual_qty))}
+            </span>
+          </span>
+        ) : null}
+      </div>
+
+      {canComplete ? (
+        <div className="mt-3 flex items-end gap-2">
+          <Input
+            aria-label="actual qty"
+            size="sm"
+            type="number"
+            step="0.01"
+            min="0"
+            inputMode="decimal"
+            className="w-24 text-right tabular-nums"
+            value={actual}
+            onChange={(e) => setActual(e.target.value)}
+          />
+          <Button
+            size="sm"
+            onClick={() => onTransition("complete", actual)}
+            disabled={disabled}
+          >
+            Complete
+          </Button>
+        </div>
+      ) : null}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         {wo.status === "draft" && (
-          <Button size="sm" variant="outline" onClick={() => onTransition("release")} disabled={disabled}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => onTransition("release")}
+            disabled={disabled}
+          >
             Release
           </Button>
         )}
         {wo.status === "released" && (
-          <Button size="sm" variant="outline" onClick={() => onTransition("start")} disabled={disabled}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => onTransition("start")}
+            disabled={disabled}
+          >
             Start
           </Button>
-        )}
-        {(wo.status === "released" || wo.status === "in_progress") && (
-          <>
-            <Input
-              aria-label="actual qty"
-              type="number"
-              step="0.01"
-              value={actual}
-              onChange={(e) => setActual(e.target.value)}
-              className="w-16"
-            />
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => onTransition("complete", actual)}
-              disabled={disabled}
-            >
-              Complete
-            </Button>
-          </>
         )}
         {(wo.status === "draft" ||
           wo.status === "released" ||
           wo.status === "in_progress") && (
-          <Button size="sm" variant="outline" onClick={() => onTransition("cancel")} disabled={disabled}>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => onTransition("cancel")}
+            disabled={disabled}
+          >
             Cancel
           </Button>
         )}
         {wo.status === "completed" && (
-          <Button size="sm" variant="outline" onClick={() => onTransition("close")} disabled={disabled}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => onTransition("close")}
+            disabled={disabled}
+          >
             Close
           </Button>
         )}
+        {wo.status === "closed" || wo.status === "cancelled" ? (
+          <Badge variant={STATUS_VARIANT[wo.status]} size="xs">
+            {STATUS_LABEL[wo.status]}
+          </Badge>
+        ) : null}
       </div>
     </div>
   );
@@ -298,55 +432,63 @@ function CreateWorkOrderForm({ items, warehouses }: CreateFormProps) {
         e.preventDefault();
         createMut.mutate();
       }}
-      className="flex items-end gap-2 rounded-md bg-bg-subtle p-3"
+      className="rounded-xl border border-border bg-bg-subtle p-4"
     >
-      <label className="flex flex-col gap-1 text-[13px]">
-        Item
-        <Select
-          value={itemID}
-          onChange={(e) => setItemID(e.target.value)}
-          required
+      <h2 className="m-0 text-sm font-semibold text-fg">Plan a work order</h2>
+      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-[2fr_2fr_1fr_auto] lg:items-end">
+        <Field label="Item" required>
+          <Select
+            value={itemID}
+            onChange={(e) => setItemID(e.target.value)}
+            required
+          >
+            <option value="">Select item…</option>
+            {items.map((it) => (
+              <option key={it.id} value={it.id}>
+                {it.sku} — {it.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Warehouse" required>
+          <Select
+            value={whID}
+            onChange={(e) => setWhID(e.target.value)}
+            required
+          >
+            <option value="">Select warehouse…</option>
+            {warehouses.map((w) => (
+              <option key={w.id} value={w.id}>
+                {w.code} — {w.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Planned qty" required>
+          <Input
+            type="number"
+            step="0.01"
+            min="0"
+            inputMode="decimal"
+            className="text-right tabular-nums"
+            value={plannedQty}
+            onChange={(e) => setPlannedQty(e.target.value)}
+            required
+          />
+        </Field>
+        <Button
+          type="submit"
+          leadingIcon={<Plus className="size-4" />}
+          disabled={createMut.isPending || !itemID || !whID}
         >
-          <option value="">Select item…</option>
-          {items.map((it) => (
-            <option key={it.id} value={it.id}>
-              {it.sku} — {it.name}
-            </option>
-          ))}
-        </Select>
-      </label>
-      <label className="flex flex-col gap-1 text-[13px]">
-        Warehouse
-        <Select
-          value={whID}
-          onChange={(e) => setWhID(e.target.value)}
-          required
-        >
-          <option value="">Select warehouse…</option>
-          {warehouses.map((w) => (
-            <option key={w.id} value={w.id}>
-              {w.code} — {w.name}
-            </option>
-          ))}
-        </Select>
-      </label>
-      <label className="flex flex-col gap-1 text-[13px]">
-        Planned qty
-        <Input
-          type="number"
-          step="0.01"
-          value={plannedQty}
-          onChange={(e) => setPlannedQty(e.target.value)}
-          required
-          className="w-[100px]"
-        />
-      </label>
-      <Button type="submit" disabled={createMut.isPending}>
-        {createMut.isPending ? "Creating…" : "Create work order"}
-      </Button>
-      {createMut.isError && (
-        <span className="text-danger">{String(createMut.error)}</span>
-      )}
+          {createMut.isPending ? "Creating…" : "Create work order"}
+        </Button>
+      </div>
+      {createMut.isError ? (
+        <p className="mt-2 text-xs text-danger">
+          Couldn't create work order: {(createMut.error as Error).message}
+        </p>
+      ) : null}
     </form>
   );
 }

@@ -130,10 +130,10 @@ describe("SubcontractingPage", () => {
     await screen.findByRole("button", { name: /View SKU-1/ });
 
     await user.selectOptions(
-      screen.getByLabelText("Finished item"),
+      screen.getByLabelText(/^Finished item/),
       "item-1",
     );
-    await user.selectOptions(screen.getByLabelText("Warehouse"), "wh-1");
+    await user.selectOptions(screen.getByLabelText(/^Warehouse/), "wh-1");
     await user.selectOptions(screen.getByLabelText("component 1"), "item-2");
     await user.click(screen.getByRole("button", { name: "Create order" }));
 

@@ -94,6 +94,31 @@ export const MRP_STRINGS = {
   "mrp.orderType.make": "Make",
   "mrp.orderType.buy": "Buy",
 
+  // Page chrome
+  "mrp.eyebrow": "Manufacturing",
+
+  // Run-list async states
+  "mrp.runs.retry": "Try again",
+  "mrp.runs.errorTitle": "Couldn't load MRP runs",
+  "mrp.runs.emptyTitle": "No MRP runs yet",
+  "mrp.runs.emptyBody": "Run the planner to generate make and buy suggestions.",
+
+  // Run-detail async states + actionable presentation
+  "mrp.detail.errorTitle": "Couldn't load this run",
+  "mrp.detail.explainer":
+    "Each card below is an order the planner suggests to cover a shortfall — make it in-house or buy it in, in the quantity shown, and start it by the release date so it arrives before it's needed.",
+  "mrp.detail.makeHeading": "Make in-house",
+  "mrp.detail.buyHeading": "Buy from a supplier",
+  "mrp.detail.makeCount": "{count} to make",
+  "mrp.detail.buyCount": "{count} to buy",
+  "mrp.suggestion.qtyLabel": "Quantity",
+  "mrp.suggestion.startByLabel": "Start by",
+  "mrp.suggestion.dueByLabel": "Needed by",
+  "mrp.suggestion.leadTimeLabel": "Lead time",
+  "mrp.suggestion.levelLabel": "BOM level",
+  "mrp.suggestion.leadTimeDays": "{days} day(s)",
+  "mrp.detail.viewRun": "View {date}",
+
   // Generic
   "mrp.error": "Something went wrong.",
 } as const;

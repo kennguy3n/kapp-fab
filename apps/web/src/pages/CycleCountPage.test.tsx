@@ -73,13 +73,15 @@ describe("CycleCountPage", () => {
   it("shows the empty state with no sessions", async () => {
     listCycleCountSessions.mockResolvedValue([]);
     renderWithProviders(<CycleCountPage />);
-    expect(await screen.findByText("No sessions.")).toBeInTheDocument();
+    expect(await screen.findByText(/No sessions yet/)).toBeInTheDocument();
   });
 
   it("surfaces a list load error", async () => {
     listCycleCountSessions.mockRejectedValue(new Error("boom"));
     renderWithProviders(<CycleCountPage />);
-    expect(await screen.findByText(/Failed: boom/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Couldn't load sessions: boom/),
+    ).toBeInTheDocument();
   });
 
   it("refetches with the chosen status filter", async () => {
@@ -102,8 +104,8 @@ describe("CycleCountPage", () => {
 
     const create = await screen.findByRole("button", { name: "Create draft session" });
     expect(create).toBeDisabled();
-    await user.type(screen.getByLabelText("Code"), "CC-NEW");
-    await user.selectOptions(screen.getByLabelText("Warehouse"), "wh-00000001-aaaa");
+    await user.type(screen.getByLabelText(/^Code/), "CC-NEW");
+    await user.selectOptions(screen.getByLabelText(/^Warehouse/), "wh-00000001-aaaa");
     expect(create).toBeEnabled();
     await user.click(create);
 

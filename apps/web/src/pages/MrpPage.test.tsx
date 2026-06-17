@@ -59,7 +59,9 @@ describe("MrpPage", () => {
 
   it("lists past runs with their make/buy counts", async () => {
     renderWithProviders(<MrpPage />);
-    expect(await screen.findByText("2026-01-01 → 2026-01-31")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Jan 1, 2026 → Jan 31, 2026"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Completed")).toBeInTheDocument();
     // make / buy column
     expect(screen.getByText("1 / 1")).toBeInTheDocument();
@@ -76,7 +78,7 @@ describe("MrpPage", () => {
   it("requires demand or reorder top-up before running", async () => {
     const user = userEvent.setup();
     renderWithProviders(<MrpPage />);
-    await screen.findByText("2026-01-01 → 2026-01-31");
+    await screen.findByText("Jan 1, 2026 → Jan 31, 2026");
 
     // Run button is disabled until there is demand or min-stock top-up.
     const submit = screen.getByRole("button", { name: "Run MRP" });
@@ -105,7 +107,7 @@ describe("MrpPage", () => {
     });
     const user = userEvent.setup();
     renderWithProviders(<MrpPage />);
-    await screen.findByText("2026-01-01 → 2026-01-31");
+    await screen.findByText("Jan 1, 2026 → Jan 31, 2026");
 
     await user.click(screen.getByRole("button", { name: "Add demand line" }));
     await user.selectOptions(screen.getByLabelText("Item 1"), "item-1");
@@ -158,11 +160,13 @@ describe("MrpPage", () => {
     });
     const user = userEvent.setup();
     renderWithProviders(<MrpPage />);
-    await user.click(await screen.findByRole("button", { name: /View 2026-01-01/ }));
+    await user.click(
+      await screen.findByRole("button", { name: /View Jan 1, 2026/ }),
+    );
 
     expect(await screen.findByText("Planned orders")).toBeInTheDocument();
     expect(screen.getByText("Make")).toBeInTheDocument();
-    expect(screen.getByText("2026-01-13")).toBeInTheDocument();
+    expect(screen.getByText("Jan 13, 2026")).toBeInTheDocument();
     expect(screen.getByText("7d")).toBeInTheDocument();
   });
 

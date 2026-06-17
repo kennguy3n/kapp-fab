@@ -72,8 +72,8 @@ describe("WorkOrdersPage", () => {
     renderWithProviders(<WorkOrdersPage />);
     await screen.findByText("Draft (1)");
 
-    await user.selectOptions(screen.getByLabelText("Item"), "item-1");
-    await user.selectOptions(screen.getByLabelText("Warehouse"), "wh-1");
+    await user.selectOptions(screen.getByLabelText(/^Item/), "item-1");
+    await user.selectOptions(screen.getByLabelText(/^Warehouse/), "wh-1");
     await user.click(screen.getByRole("button", { name: "Create work order" }));
 
     await waitFor(() =>
