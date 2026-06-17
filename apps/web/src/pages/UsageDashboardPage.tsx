@@ -8,10 +8,8 @@ import {
   TableRow,
 } from "@kapp/ui";
 import { api } from "../lib/api";
+import { tenantKey } from "../lib/tenant";
 import type { PlanLimits } from "@kapp/client";
-
-const tenantKey = (): string =>
-  localStorage.getItem("kapp.tenant") ?? "default";
 
 const METRIC_ORDER: Array<{ key: string; label: string; format: (n: number) => string }> = [
   { key: "api_calls", label: "API Calls", format: (n) => n.toLocaleString() },
