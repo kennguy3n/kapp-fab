@@ -15,6 +15,7 @@ import {
 import { AlertTriangle } from "lucide-react";
 import { api } from "../lib/api";
 import { useFormatter } from "../lib/i18n";
+import { useTenantName } from "../lib/tenant";
 
 /**
  * DashboardPage renders a KPI grid backed by /api/v1/dashboard/summary.
@@ -71,19 +72,18 @@ export function DashboardPage() {
 }
 
 /**
- * Time-of-day greeting header.  The tenant key stands in for the
- * signed-in user (the web app has no per-user identity surface yet),
- * title-cased so "acme-corp" reads as "Acme Corp".
+ * Time-of-day greeting header.  The tenant name stands in for the
+ * signed-in user (the web app has no per-user identity surface yet)
+ * and is resolved via `useTenantName` so the heading shows the
+ * display name ("Acme Corp"), never the raw tenant UUID.
  */
 function DashboardGreeting() {
-  // Snapshot the clock and tenant once per mount so the heading is
-  // deterministic across re-renders (a fresh `new Date()` each render
-  // could otherwise flip the greeting at an hour boundary and read
-  // localStorage on every paint).
-  const { part, name, dateLabel } = useMemo(() => {
+  // Snapshot the clock once per mount so the heading is deterministic
+  // across re-renders (a fresh `new Date()` each render could otherwise
+  // flip the greeting at an hour boundary).
+  const { part, dateLabel } = useMemo(() => {
     const now = new Date();
     const hour = now.getHours();
-    const tenant = localStorage.getItem("kapp.tenant") ?? "there";
     return {
       part:
         hour < 12
@@ -91,9 +91,6 @@ function DashboardGreeting() {
           : hour < 18
             ? "Good afternoon"
             : "Good evening",
-      name: tenant
-        .replace(/[-_]/g, " ")
-        .replace(/\b\w/g, (c) => c.toUpperCase()),
       dateLabel: now.toLocaleDateString(undefined, {
         weekday: "long",
         year: "numeric",
@@ -102,6 +99,7 @@ function DashboardGreeting() {
       }),
     };
   }, []);
+  const { name } = useTenantName();
   return (
     <header className="flex flex-col gap-1">
       <h1 className="text-2xl font-semibold tracking-tight text-fg">

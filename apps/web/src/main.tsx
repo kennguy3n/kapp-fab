@@ -10,6 +10,11 @@ import { App } from "./App";
 // package later (or splitting it across multiple files) doesn't
 // require an apps/web code change.
 import "@kapp/ui/styles/globals.css";
+import { initTheme } from "./lib/theme";
+
+// Apply the persisted / system colour scheme synchronously before the
+// first React render so there's no flash of the wrong theme.
+initTheme();
 
 const queryClient = new QueryClient();
 

@@ -15,6 +15,13 @@ export {
   type SelectProps,
 } from "./components/Select";
 export {
+  Textarea,
+  textareaVariants,
+  type TextareaProps,
+} from "./components/Textarea";
+export { Field, type FieldProps } from "./components/Field";
+export { Eyebrow, type EyebrowProps } from "./components/Eyebrow";
+export {
   Card,
   CardHeader,
   CardTitle,

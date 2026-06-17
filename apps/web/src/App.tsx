@@ -31,6 +31,11 @@ import {
   Card,
   CardContent,
   CommandPalette,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
   Input,
   Sidebar,
   SidebarBody,
@@ -42,6 +47,7 @@ import {
   Spinner,
   Toaster,
   TooltipProvider,
+  cn,
   initials,
   type CommandGroup,
 } from "@kapp/ui";
@@ -61,6 +67,7 @@ import {
   Calendar,
   CalendarClock,
   CheckSquare,
+  ChevronDown,
   ClipboardCheck,
   ClipboardList,
   Clock,
@@ -86,9 +93,11 @@ import {
   LayoutDashboard,
   LayoutGrid,
   LifeBuoy,
+  LogOut,
   MapPin,
   MessageSquare,
   Milestone,
+  Moon,
   Network,
   Rss,
   Package,
@@ -109,7 +118,9 @@ import {
   Shield,
   ShoppingCart,
   Stamp,
+  Star,
   Store,
+  Sun,
   Tags,
   ToggleLeft,
   TrendingUp,
@@ -128,6 +139,8 @@ import { api } from "./lib/api";
 import { NotificationBell } from "./components/NotificationBell";
 import { LocaleSwitcher } from "./components/LocaleSwitcher";
 import { LocaleProvider } from "./lib/i18n";
+import { useTheme } from "./lib/theme";
+import { useTenantName } from "./lib/tenant";
 
 /**
  * Route-level code splitting.  Every page is loaded on first
@@ -1008,6 +1021,27 @@ const flatNav: FlatNav[] = navSections.flatMap((s) =>
   })),
 );
 
+// Glyph shown next to each collapsible section header in the sidebar.
+// Keyed by section title so adding a section to `navSections` without
+// a matching icon simply falls back to no glyph (never throws).
+const sectionIcons: Record<string, ComponentType<{ className?: string }>> = {
+  Overview: LayoutDashboard,
+  CRM: Contact,
+  Work: CheckSquare,
+  Projects: FolderKanban,
+  Finance: Landmark,
+  Helpdesk: LifeBuoy,
+  Sales: ShoppingCart,
+  POS: Store,
+  Inventory: Warehouse,
+  Manufacturing: Factory,
+  HR: Users,
+  LMS: GraduationCap,
+  Insights: BarChart3,
+  Marketplace: Puzzle,
+  Admin: Settings,
+};
+
 /**
  * Longest-prefix nav match for a pathname.  `/records/crm.lead/new`
  * resolves to the "Leads" link (not "Dashboard") because the most
@@ -1585,10 +1619,387 @@ function AppNavLink({
   );
 }
 
+// localStorage keys for the per-user sidebar preferences.  All are
+// best-effort: a read/parse failure falls back to defaults so a
+// corrupted value never breaks navigation.
+const NAV_FAVORITES_KEY = "kapp.nav.favorites";
+const NAV_COLLAPSED_SECTIONS_KEY = "kapp.nav.sections.collapsed";
+const SIDEBAR_COLLAPSED_KEY = "kapp.sidebar.collapsed";
+
+function readStringSet(key: string): string[] {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((v): v is string => typeof v === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStringSet(key: string, values: string[]): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(values));
+  } catch {
+    // Best-effort: preferences are a convenience, never load-bearing.
+  }
+}
+
+/**
+ * Best-effort decode of the signed-in user's email from the JWT
+ * `sub` claim.  Purely cosmetic (profile menu) — never used for
+ * authorization — so any malformed token silently yields null.
+ */
+function currentUserEmail(): string | null {
+  try {
+    const token = localStorage.getItem("kapp.token");
+    const segment = token?.split(".")[1];
+    if (!segment) return null;
+    const json = atob(segment.replace(/-/g, "+").replace(/_/g, "/"));
+    const payload: unknown = JSON.parse(json);
+    if (payload && typeof payload === "object" && "sub" in payload) {
+      const sub = (payload as { sub: unknown }).sub;
+      if (typeof sub === "string" && sub.length > 0) return sub;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A single sidebar nav row: the navigation link plus a pin/unpin
+ * star overlaid on its inline-end edge.  The star is a sibling of
+ * the anchor (not a child) so clicking it toggles the favorite
+ * without navigating.
+ */
+function NavRow({
+  link,
+  isFavorite,
+  onToggleFavorite,
+}: {
+  link: NavLink;
+  isFavorite: boolean;
+  onToggleFavorite: (to: string) => void;
+}) {
+  return (
+    <div className="group/navrow relative">
+      <AppNavLink to={link.to} label={link.label} icon={link.icon} />
+      <button
+        type="button"
+        onClick={() => onToggleFavorite(link.to)}
+        aria-label={isFavorite ? `Unpin ${link.label}` : `Pin ${link.label}`}
+        aria-pressed={isFavorite}
+        className={cn(
+          "absolute end-1 top-1/2 -translate-y-1/2 rounded p-1 transition-opacity",
+          "hover:text-accent focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)",
+          isFavorite
+            ? "text-accent opacity-100"
+            : "text-fg-subtle opacity-0 group-hover/navrow:opacity-100",
+        )}
+      >
+        <Star className={cn("h-3.5 w-3.5", isFavorite && "fill-current")} />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The shell's primary navigation.  Replaces the previous flat dump
+ * of ~90 links with a self-service surface a first-time SME user can
+ * actually scan:
+ *   - a filter box that flattens to matching links as you type,
+ *   - per-user pinned favorites surfaced in a group at the top,
+ *   - collapsible, icon-labelled sections (collapse state persisted).
+ *
+ * When the sidebar is in its icon-rail (collapsed) mode the search /
+ * collapse / favorite affordances don't apply, so it falls back to
+ * the compact `SidebarGroup` + icon layout.
+ */
+function AppSidebarNav({
+  sections,
+  collapsed,
+}: {
+  sections: NavSection[];
+  collapsed: boolean;
+}) {
+  const [query, setQuery] = useState("");
+  const [favorites, setFavorites] = useState<string[]>(() =>
+    readStringSet(NAV_FAVORITES_KEY),
+  );
+  const [collapsedSections, setCollapsedSections] = useState<string[]>(() =>
+    readStringSet(NAV_COLLAPSED_SECTIONS_KEY),
+  );
+
+  const toggleFavorite = (to: string) =>
+    setFavorites((prev) => {
+      const next = prev.includes(to)
+        ? prev.filter((p) => p !== to)
+        : [...prev, to];
+      writeStringSet(NAV_FAVORITES_KEY, next);
+      return next;
+    });
+
+  const toggleSection = (title: string) =>
+    setCollapsedSections((prev) => {
+      const next = prev.includes(title)
+        ? prev.filter((t) => t !== title)
+        : [...prev, title];
+      writeStringSet(NAV_COLLAPSED_SECTIONS_KEY, next);
+      return next;
+    });
+
+  // Icon-rail mode: no room for search/collapse/favorites chrome.
+  if (collapsed) {
+    return (
+      <>
+        {sections.map((section) => (
+          <SidebarGroup key={section.title} title={section.title}>
+            {section.links.map((link) => (
+              <AppNavLink
+                key={link.to}
+                to={link.to}
+                label={link.label}
+                icon={link.icon}
+              />
+            ))}
+          </SidebarGroup>
+        ))}
+      </>
+    );
+  }
+
+  const q = query.trim().toLowerCase();
+  const results = q
+    ? sections.flatMap((s) =>
+        s.links.filter((l) => l.label.toLowerCase().includes(q)),
+      )
+    : [];
+
+  const byTo = new Map<string, NavLink>();
+  for (const s of sections) for (const l of s.links) byTo.set(l.to, l);
+  const favLinks = favorites
+    .map((to) => byTo.get(to))
+    .filter((l): l is NavLink => Boolean(l));
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="relative px-1 pb-1">
+        <Search className="pointer-events-none absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-subtle" />
+        <Input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search navigation…"
+          aria-label="Search navigation"
+          className="ps-9"
+        />
+      </div>
+
+      {q ? (
+        results.length > 0 ? (
+          <div className="flex flex-col gap-0.5">
+            {results.map((link) => (
+              <NavRow
+                key={link.to}
+                link={link}
+                isFavorite={favorites.includes(link.to)}
+                onToggleFavorite={toggleFavorite}
+              />
+            ))}
+          </div>
+        ) : (
+          <p className="px-2 py-3 text-sm text-fg-subtle">
+            No matches for “{query.trim()}”.
+          </p>
+        )
+      ) : (
+        <>
+          {favLinks.length > 0 && (
+            <div className="flex flex-col">
+              <div className="flex items-center gap-1.5 px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wider text-fg-subtle">
+                <Star className="h-3.5 w-3.5 fill-current text-accent" />
+                <span>Favorites</span>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                {favLinks.map((link) => (
+                  <NavRow
+                    key={`fav-${link.to}`}
+                    link={link}
+                    isFavorite
+                    onToggleFavorite={toggleFavorite}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {sections.map((section) => {
+            const Icon = sectionIcons[section.title];
+            const open = !collapsedSections.includes(section.title);
+            return (
+              <div key={section.title} className="flex flex-col">
+                <button
+                  type="button"
+                  onClick={() => toggleSection(section.title)}
+                  aria-expanded={open}
+                  className="flex w-full items-center gap-1.5 rounded-md px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wider text-fg-subtle transition-colors hover:text-fg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
+                >
+                  {Icon && <Icon className="h-3.5 w-3.5" />}
+                  <span className="flex-1 text-start">{section.title}</span>
+                  <ChevronDown
+                    className={cn(
+                      "h-3.5 w-3.5 transition-transform",
+                      !open && "-rotate-90",
+                    )}
+                  />
+                </button>
+                {open && (
+                  <div className="flex flex-col gap-0.5">
+                    {section.links.map((link) => (
+                      <NavRow
+                        key={link.to}
+                        link={link}
+                        isFavorite={favorites.includes(link.to)}
+                        onToggleFavorite={toggleFavorite}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Topbar light/dark toggle.  Reads/writes the shared theme store so
+ * it stays in sync with the profile-menu toggle.
+ */
+function ThemeToggle() {
+  const { theme, toggle } = useTheme();
+  const isDark = theme === "dark";
+  return (
+    <button
+      type="button"
+      onClick={toggle}
+      aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
+      aria-pressed={isDark}
+      className={cn(
+        "inline-flex h-9 w-9 items-center justify-center rounded-pill text-fg-muted transition-colors hover:bg-bg-subtle hover:text-fg",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring) focus-visible:ring-offset-2 focus-visible:ring-offset-(--bg)",
+      )}
+    >
+      {isDark ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
+    </button>
+  );
+}
+
+/**
+ * Account / profile menu anchored in the sidebar footer.  Shows the
+ * resolved tenant DISPLAY NAME (never the raw UUID) plus the signed-in
+ * user's email, and offers workspace settings, a theme toggle, and
+ * sign-out.  Adapts to the sidebar's icon-rail mode by collapsing to
+ * just the avatar.
+ */
+function ProfileMenu({ collapsed }: { collapsed: boolean }) {
+  const navigate = useNavigate();
+  const { theme, toggle } = useTheme();
+  const { name } = useTenantName();
+  const email = currentUserEmail();
+  const isDark = theme === "dark";
+
+  const signOut = () => {
+    for (const k of [
+      "kapp.token",
+      "kapp.refresh",
+      "kapp.tenant",
+      "kapp.expires_at",
+      "kapp.id_token",
+    ]) {
+      try {
+        localStorage.removeItem(k);
+      } catch {
+        // ignore storage errors — navigating to /login is the real reset
+      }
+    }
+    navigate("/login");
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label="Account menu"
+          className={cn(
+            "flex w-full items-center gap-2 rounded-md p-1 text-start transition-colors hover:bg-bg-subtle",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)",
+            collapsed && "justify-center",
+          )}
+        >
+          <Avatar size="sm">
+            <AvatarFallback>{initials(name)}</AvatarFallback>
+          </Avatar>
+          {!collapsed && (
+            <>
+              <span className="flex min-w-0 flex-1 flex-col">
+                <span className="truncate text-sm font-medium text-fg">
+                  {name}
+                </span>
+                {email && (
+                  <span className="truncate text-xs text-fg-subtle">
+                    {email}
+                  </span>
+                )}
+              </span>
+              <ChevronDown className="h-4 w-4 shrink-0 text-fg-subtle" />
+            </>
+          )}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" side="top" className="w-60">
+        <div className="px-2 py-1.5">
+          <p className="truncate text-sm font-medium text-fg">{name}</p>
+          <p className="truncate text-xs text-fg-subtle">{email ?? "Member"}</p>
+        </div>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => navigate("/admin/tenants")}>
+          <Building className="h-4 w-4" />
+          Workspace settings
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onSelect={(e) => {
+            // Keep the menu open so the user sees the theme flip.
+            e.preventDefault();
+            toggle();
+          }}
+        >
+          {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+          {isDark ? "Light mode" : "Dark mode"}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={signOut}>
+          <LogOut className="h-4 w-4" />
+          Sign out
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(
+    () => readStringSet(SIDEBAR_COLLAPSED_KEY)[0] === "1",
+  );
   const [recent, setRecent] = useState<RecentPage[]>(() => readRecentPages());
 
   // Cmd/Ctrl+K toggles the command palette from anywhere in the
@@ -1771,42 +2182,37 @@ function AppShell() {
 
   return (
     <div className="flex min-h-screen bg-bg">
-      <Sidebar defaultCollapsed={false}>
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        onCollapsedChange={(next) => {
+          setSidebarCollapsed(next);
+          writeStringSet(SIDEBAR_COLLAPSED_KEY, [next ? "1" : "0"]);
+        }}
+      >
         <SidebarHeader>
-          <Link to="/" className="flex items-center gap-2">
-            <div className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-accent-fg font-bold">
+          <Link to="/" className="flex items-center gap-2" aria-label="Kapp home">
+            {/* KChat-style violet speech-bubble badge: a rounded
+                square with a small tail at its bottom-inline-start. */}
+            <span className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-[0.5rem] bg-accent text-sm font-semibold text-accent-fg">
               K
-            </div>
-            <span className="font-semibold tracking-tight">Kapp</span>
+              <span
+                aria-hidden="true"
+                className="absolute -bottom-0.5 start-1 h-2 w-2 rotate-45 rounded-[2px] bg-accent"
+              />
+            </span>
+            {!sidebarCollapsed && (
+              <span className="font-medium tracking-tight">Kapp</span>
+            )}
           </Link>
           <div className="ms-auto">
             <SidebarToggle />
           </div>
         </SidebarHeader>
         <SidebarBody>
-          {visible.map((section) => (
-            <SidebarGroup key={section.title} title={section.title}>
-              {section.links.map((link) => (
-                <AppNavLink
-                  key={link.to}
-                  to={link.to}
-                  label={link.label}
-                  icon={link.icon}
-                />
-              ))}
-            </SidebarGroup>
-          ))}
+          <AppSidebarNav sections={visible} collapsed={sidebarCollapsed} />
         </SidebarBody>
         <SidebarFooter>
-          <Avatar size="sm">
-            <AvatarFallback>{initials(tenantKey())}</AvatarFallback>
-          </Avatar>
-          <div className="flex flex-col min-w-0 flex-1">
-            <span className="text-sm truncate">{tenantKey()}</span>
-            <span className="text-[10px] uppercase tracking-wider text-fg-subtle">
-              tenant
-            </span>
-          </div>
+          <ProfileMenu collapsed={sidebarCollapsed} />
         </SidebarFooter>
       </Sidebar>
       <main className="flex-1 flex flex-col min-w-0">
@@ -1853,6 +2259,7 @@ function AppShell() {
               </Badge>
             )}
             <LocaleSwitcher className="hidden md:inline-flex w-auto" />
+            <ThemeToggle />
             <NotificationBell />
           </div>
         </header>

@@ -1,5 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Bell } from "lucide-react";
+import { cn } from "@kapp/ui";
 
 interface Notification {
   id: string;
@@ -50,10 +52,16 @@ async function markAllRead(): Promise<void> {
  * persists every notification envelope it sees, so this UI shows
  * everything the user has received even when the outbound transport
  * (KChat, webhook, email) failed.
+ *
+ * It stays a hand-rolled popover (rather than the shared DropdownMenu)
+ * because the per-item "Mark read" / "Mark all read" actions must NOT
+ * dismiss the panel — a menu would close on every select.  Styling is
+ * driven entirely by design tokens so it tracks light/dark themes.
  */
 export function NotificationBell() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
   const list = useQuery({
     queryKey: ["notifications"],
     queryFn: fetchNotifications,
@@ -68,94 +76,99 @@ export function NotificationBell() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
   });
 
+  // Dismiss on outside click / Escape so the panel behaves like a menu
+  // without being one.
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
   const items = list.data ?? [];
   const unread = items.filter((n) => !n.read).length;
 
   return (
-    <div style={{ position: "relative" }}>
+    <div ref={rootRef} className="relative">
       <button
+        type="button"
         onClick={() => setOpen((v) => !v)}
-        style={{
-          background: "transparent",
-          border: "1px solid #e5e7eb",
-          borderRadius: 6,
-          padding: "4px 10px",
-          cursor: "pointer",
-        }}
         aria-label="Notifications"
+        aria-haspopup="true"
+        aria-expanded={open}
+        className={cn(
+          "relative inline-flex h-9 w-9 items-center justify-center rounded-pill",
+          "text-fg-muted transition-colors hover:bg-bg-subtle hover:text-fg",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring) focus-visible:ring-offset-2 focus-visible:ring-offset-(--bg)",
+        )}
       >
-        Bell {unread > 0 && <strong>({unread})</strong>}
+        <Bell className="h-5 w-5" />
+        {unread > 0 && (
+          <>
+            <span
+              className="absolute -right-0.5 -top-0.5 flex min-w-4 items-center justify-center rounded-pill bg-danger px-1 text-[10px] font-semibold leading-4 text-danger-fg"
+              aria-hidden="true"
+            >
+              {unread > 9 ? "9+" : unread}
+            </span>
+            <span className="sr-only">({unread})</span>
+          </>
+        )}
       </button>
       {open && (
         <div
-          style={{
-            position: "absolute",
-            right: 0,
-            top: "calc(100% + 4px)",
-            width: 360,
-            background: "white",
-            border: "1px solid #e5e7eb",
-            borderRadius: 6,
-            boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
-            zIndex: 50,
-            maxHeight: 480,
-            overflowY: "auto",
-          }}
+          role="dialog"
+          aria-label="Notifications"
+          className="absolute end-0 top-[calc(100%+8px)] z-50 max-h-[480px] w-80 overflow-y-auto rounded-lg border border-border bg-bg-elevated text-fg shadow-lg"
         >
-          <div
-            style={{
-              padding: 10,
-              display: "flex",
-              justifyContent: "space-between",
-              borderBottom: "1px solid #e5e7eb",
-            }}
-          >
-            <strong>Notifications</strong>
+          <div className="flex items-center justify-between border-b border-border px-3 py-2.5">
+            <span className="text-sm font-medium">Notifications</span>
             <button
+              type="button"
               onClick={() => readAll.mutate()}
               disabled={readAll.isPending || unread === 0}
-              style={{ fontSize: 12 }}
+              className="text-xs font-medium text-accent transition-colors hover:text-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
             >
               Mark all read
             </button>
           </div>
           {items.length === 0 && (
-            <div
-              style={{ padding: 12, color: "#9ca3af", fontStyle: "italic" }}
-            >
+            <div className="px-3 py-6 text-center text-sm text-fg-subtle">
               No notifications.
             </div>
           )}
           {items.map((n) => (
             <div
               key={n.id}
-              style={{
-                padding: 10,
-                borderBottom: "1px solid #f3f4f6",
-                background: n.read ? "white" : "#f9fafb",
-              }}
+              className={cn(
+                "border-b border-border px-3 py-2.5 last:border-b-0",
+                !n.read && "bg-bg-subtle",
+              )}
             >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  gap: 8,
-                }}
-              >
-                <strong style={{ fontSize: 13 }}>
+              <div className="flex items-start justify-between gap-2">
+                <span className="text-sm font-medium text-fg">
                   {n.title || n.type}
-                </strong>
-                <span style={{ fontSize: 11, color: "#6b7280" }}>
+                </span>
+                <span className="shrink-0 text-[11px] text-fg-subtle">
                   {new Date(n.created_at).toLocaleString()}
                 </span>
               </div>
-              {n.body && (
-                <p style={{ margin: "4px 0", fontSize: 13 }}>{n.body}</p>
-              )}
+              {n.body && <p className="mt-1 text-sm text-fg-muted">{n.body}</p>}
               {!n.read && (
                 <button
+                  type="button"
                   onClick={() => readOne.mutate(n.id)}
-                  style={{ fontSize: 11 }}
+                  disabled={readOne.isPending}
+                  className="mt-1.5 text-xs font-medium text-accent transition-colors hover:text-accent-hover disabled:opacity-40"
                 >
                   Mark read
                 </button>

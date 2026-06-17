@@ -24,6 +24,13 @@ const badgeVariants = cva(
     variants: {
       variant: {
         default: "border-border bg-bg-muted text-fg",
+        // `neutral` is the semantic alias of `default` — same muted
+        // grey treatment.  Both are kept: `default` stays the cva
+        // fallback (and remains the value used by existing call
+        // sites) while `neutral` is the name the status→variant
+        // mapping in THEME.md / Badge.stories.tsx refers to, so
+        // status code reads `variant="neutral"` intentionally.
+        neutral: "border-border bg-bg-muted text-fg",
         accent: "border-transparent bg-accent text-accent-fg",
         success: "border-transparent bg-success text-success-fg",
         warning: "border-transparent bg-warning text-warning-fg",

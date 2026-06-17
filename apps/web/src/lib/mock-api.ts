@@ -156,6 +156,8 @@ function makeDemoDataSource(input: InsightsDataSourceInput): InsightsDataSource 
 const handlers = {
   // --- Tenants / features / placement / retention ----------------------
   listTenants: () => delay<Tenant[]>([...TENANTS]),
+  getTenant: (id: string) =>
+    delay<Tenant>(TENANTS.find((t) => t.id === id) ?? TENANTS[0]!),
   listTenantFeatures: () => delay<TenantFeaturesResponse>({ ...TENANT_FEATURES }),
   updateTenantFeatures: (_tid: string, features: Record<string, boolean>) =>
     delay<TenantFeaturesResponse>({ tenant_id: DEMO_TENANT_ID, features }),

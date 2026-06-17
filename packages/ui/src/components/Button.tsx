@@ -33,7 +33,11 @@ const buttonVariants = cva(
   // never have to set `disabled:opacity-50` themselves.
   cn(
     "inline-flex items-center justify-center gap-2",
-    "whitespace-nowrap rounded-md font-medium",
+    // Full pill radius is the KChat button shape — violet/near-black
+    // capsule with white label.  `rounded-pill` is generated from the
+    // --radius-pill theme token (globals.css) so it tracks the design
+    // system rather than a one-off 9999px literal.
+    "whitespace-nowrap rounded-pill font-medium",
     "transition-colors duration-150",
     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring) focus-visible:ring-offset-2 focus-visible:ring-offset-(--bg)",
     "disabled:pointer-events-none disabled:opacity-50",
