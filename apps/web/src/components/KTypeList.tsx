@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { FieldSpec, KType, KRecord } from "@kapp/client";
 import {
   Badge,
@@ -73,6 +73,10 @@ export function KTypeList({
     columnsProp ??
     ktype.schema?.views?.list?.columns ??
     fields.slice(0, 4).map((f) => f.name);
+  // A stable key over the column contents so effects can react to the
+  // operator hiding/showing columns without depending on the array's
+  // identity (which changes every render).
+  const columnsKey = columns.join("\u0000");
 
   const fieldByName = useMemo(() => {
     const map = new Map<string, FieldSpec>();
@@ -84,6 +88,14 @@ export function KTypeList({
     fieldByName.get(name) ?? { name, type: "string" };
 
   const [sort, setSort] = useState<SortState>(null);
+
+  // If the active sort column is hidden via the Columns menu, drop the
+  // sort so records aren't left in an unexplained order with no visible
+  // sort indicator on any header.
+  useEffect(() => {
+    if (sort && !columns.includes(sort.key)) setSort(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columnsKey, sort]);
 
   const sortedRecords = useMemo(() => {
     if (!sort) return records;

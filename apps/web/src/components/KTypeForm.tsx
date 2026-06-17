@@ -276,8 +276,9 @@ function FieldRow({ field, value, error, moneyContext, onChange }: FieldRowProps
   const label = humanizeLabel(field.name);
   const required = !!field.required;
 
-  // Long text and the full-width relation picker read better spanning
-  // both grid columns.
+  // Long free-text reads better spanning both grid columns; every
+  // other control (including the single-line relation picker) sits in
+  // one column.
   const fullWidth = control === "textarea";
 
   if (control === "boolean") {
