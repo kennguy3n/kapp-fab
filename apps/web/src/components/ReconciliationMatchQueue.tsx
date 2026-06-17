@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { BankFeedSuggestion, KRecord } from "@kapp/client";
-import { Badge, Button } from "@kapp/ui";
+import { Badge, Button, EmptyState } from "@kapp/ui";
+import { useFormatter } from "../lib/i18n/useFormatter";
 import {
   confidenceBand,
   formatConfidence,
+  parseDateValue,
   parseReasons,
-  shortId,
   txnAmount,
   txnData,
   type RateMap,
@@ -63,10 +64,10 @@ function CandidateRow({
         <div className="flex items-center gap-2">
           <ConfidenceBadge confidence={suggestion.confidence} />
           <span
-            className="font-mono text-xs text-fg-muted"
+            className="text-xs font-medium text-fg"
             title={suggestion.journal_entry_id}
           >
-            Journal entry {shortId(suggestion.journal_entry_id)}
+            {rt("reconciliation.ledgerEntry")}
           </span>
           {primary && (
             <Badge variant="accent" size="xs">
@@ -122,7 +123,9 @@ function GroupCard({
 }) {
   const [showAlternatives, setShowAlternatives] = useState(false);
   const [best, ...alternatives] = group.suggestions;
+  const f = useFormatter();
   const d = txn ? txnData(txn) : undefined;
+  const date = parseDateValue(d?.value_date);
 
   return (
     <li
@@ -139,15 +142,14 @@ function GroupCard({
         <div className="min-w-0">
           <div className="font-medium text-fg">
             {d?.description || (
-              <span
-                className="font-mono text-sm"
-                title={group.transactionId}
-              >
-                Transaction {shortId(group.transactionId)}
+              <span className="text-sm" title={group.transactionId}>
+                {rt("reconciliation.bankLine")}
               </span>
             )}
           </div>
-          <div className="text-xs text-fg-muted">{d?.value_date ?? ""}</div>
+          <div className="text-xs text-fg-muted">
+            {date ? f.date(date) : ""}
+          </div>
         </div>
         {d && txn && (
           <div className="text-right">
@@ -339,9 +341,10 @@ export function ReconciliationMatchQueue({
         </div>
       </header>
       {groups.length === 0 ? (
-        <p className="text-sm text-fg-muted">
-          {rt("reconciliation.suggestions.empty")}
-        </p>
+        <EmptyState
+          title={rt("reconciliation.suggestions.empty")}
+          description="Matched lines clear out of the queue. Import a statement or adjust your rules to surface more suggestions."
+        />
       ) : (
         <ul
           className="flex list-none flex-col gap-2 p-0 focus-visible:outline-none"

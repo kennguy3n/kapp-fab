@@ -8,7 +8,9 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
+  EmptyState,
   Input,
+  Skeleton,
   StatCard,
   Table,
   TableBody,
@@ -18,7 +20,9 @@ import {
   TableRow,
 } from "@kapp/ui";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n/useFormatter";
 import { consolidationApi, type RevaluationResult } from "./ConsolidationApi";
+import { formatMoney, parseDateValue } from "./reconciliation";
 import { ct } from "./ConsolidationStrings";
 
 function signVariant(amount: string): "success" | "danger" | "default" {
@@ -27,8 +31,17 @@ function signVariant(amount: string): "success" | "danger" | "default" {
   return n > 0 ? "success" : "danger";
 }
 
+// Money amounts across the FX surface share the reconciliation formatter
+// so every figure renders with grouped digits and two decimals.
+function useMoney() {
+  const f = useFormatter();
+  return (value: string | number) =>
+    formatMoney(f, typeof value === "number" ? value : Number(value));
+}
+
 function ExchangeRatesCard() {
   const qc = useQueryClient();
+  const f = useFormatter();
   const q = useQuery<{ rates: ExchangeRate[] }>({
     queryKey: ["consolidation.fx.rates"],
     queryFn: () => api.listExchangeRates({ limit: 100 }),
@@ -117,11 +130,34 @@ function ExchangeRatesCard() {
           <p className="text-sm text-danger">{(upsert.error as Error).message}</p>
         ) : null}
 
-        {q.isLoading ? <p className="text-sm">Loading…</p> : null}
-        {rates.length === 0 && !q.isLoading ? (
-          <p className="text-sm italic text-fg-subtle">
-            {ct("consolidation.fx.noRates")}
-          </p>
+        {q.isLoading ? (
+          <div className="grid gap-2">
+            <Skeleton variant="rect" className="h-8" />
+            <Skeleton variant="rect" className="h-8" />
+          </div>
+        ) : null}
+        {q.isError && !q.isLoading ? (
+          <div className="grid gap-2 rounded-md border border-border bg-bg-subtle p-3">
+            <p className="text-sm text-danger">
+              {ct("consolidation.fx.ratesError")}
+            </p>
+            <div>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => q.refetch()}
+              >
+                {ct("consolidation.retry")}
+              </Button>
+            </div>
+          </div>
+        ) : null}
+        {!q.isLoading && !q.isError && rates.length === 0 ? (
+          <EmptyState
+            title={ct("consolidation.fx.noRates")}
+            description={ct("consolidation.fx.noRatesHint")}
+          />
         ) : null}
         {rates.length > 0 ? (
           <Table className="text-sm">
@@ -136,20 +172,27 @@ function ExchangeRatesCard() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rates.map((r) => (
-                <TableRow
-                  key={`${r.from_currency}-${r.to_currency}-${r.rate_date}`}
-                >
-                  <TableCell>{r.rate_date.slice(0, 10)}</TableCell>
-                  <TableCell>
-                    <code>
-                      {r.from_currency} → {r.to_currency}
-                    </code>
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">{r.rate}</TableCell>
-                  <TableCell>{r.provider ?? ""}</TableCell>
-                </TableRow>
-              ))}
+              {rates.map((r) => {
+                const d = parseDateValue(r.rate_date);
+                return (
+                  <TableRow
+                    key={`${r.from_currency}-${r.to_currency}-${r.rate_date}`}
+                  >
+                    <TableCell className="whitespace-nowrap">
+                      {d ? f.date(d) : r.rate_date.slice(0, 10)}
+                    </TableCell>
+                    <TableCell>
+                      <code>
+                        {r.from_currency} → {r.to_currency}
+                      </code>
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {r.rate}
+                    </TableCell>
+                    <TableCell>{r.provider ?? ""}</TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         ) : null}
@@ -159,6 +202,7 @@ function ExchangeRatesCard() {
 }
 
 function TranslateCard() {
+  const money = useMoney();
   const [form, setForm] = useState({
     from: "EUR",
     to: "USD",
@@ -237,7 +281,7 @@ function TranslateCard() {
           <p className="text-sm" data-testid="fx-convert-result">
             {ct("consolidation.fx.converted")}:{" "}
             <span className="font-medium tabular-nums">
-              {convert.data.converted} {convert.data.to}
+              {money(convert.data.converted)} {convert.data.to}
             </span>{" "}
             <span className="text-fg-muted">
               ({ct("consolidation.fx.usingRate")} {convert.data.rate})
@@ -250,6 +294,7 @@ function TranslateCard() {
 }
 
 function UnrealizedCard() {
+  const money = useMoney();
   const [form, setForm] = useState({
     foreign_amount: "1000",
     foreign_currency: "EUR",
@@ -339,7 +384,7 @@ function UnrealizedCard() {
           <p className="text-sm" data-testid="fx-unrealized-result">
             {ct("consolidation.fx.unrealizedResult")}:{" "}
             <Badge variant={signVariant(compute.data.unrealized_gain_loss)}>
-              {compute.data.unrealized_gain_loss}
+              {money(compute.data.unrealized_gain_loss)}
             </Badge>{" "}
             <span className="text-xs text-fg-subtle">
               {ct("consolidation.fx.gainHint")}
@@ -352,6 +397,7 @@ function UnrealizedCard() {
 }
 
 function RevaluationCard() {
+  const money = useMoney();
   const [form, setForm] = useState({
     tenant_id: "",
     gain_account: "",
@@ -438,16 +484,18 @@ function RevaluationCard() {
             <div className="grid grid-cols-3 gap-3">
               <StatCard
                 label={ct("consolidation.fx.totalGain")}
-                value={result.total_gain}
+                value={money(result.total_gain)}
               />
               <StatCard
                 label={ct("consolidation.fx.totalLoss")}
-                value={result.total_loss}
+                value={money(result.total_loss)}
               />
               <StatCard
                 label={ct("consolidation.fx.net")}
                 value={
-                  <Badge variant={signVariant(result.net)}>{result.net}</Badge>
+                  <Badge variant={signVariant(result.net)}>
+                    {money(result.net)}
+                  </Badge>
                 }
               />
             </div>
@@ -492,19 +540,21 @@ function RevaluationCard() {
                         </TableCell>
                         <TableCell>{l.currency}</TableCell>
                         <TableCell className="text-right tabular-nums">
-                          {l.foreign_net}
+                          {money(l.foreign_net)}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">
                           {l.current_rate}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">
-                          {l.recorded_base}
+                          {money(l.recorded_base)}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">
-                          {l.revalued_base}
+                          {money(l.revalued_base)}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">
-                          <Badge variant={signVariant(l.delta)}>{l.delta}</Badge>
+                          <Badge variant={signVariant(l.delta)}>
+                            {money(l.delta)}
+                          </Badge>
                         </TableCell>
                         <TableCell>
                           <code>{l.gain_loss_account}</code>
@@ -540,7 +590,7 @@ function RevaluationCard() {
                         </TableCell>
                         <TableCell>{s.currency}</TableCell>
                         <TableCell className="text-right tabular-nums">
-                          {s.foreign_net}
+                          {money(s.foreign_net)}
                         </TableCell>
                         <TableCell>{s.reason}</TableCell>
                       </TableRow>

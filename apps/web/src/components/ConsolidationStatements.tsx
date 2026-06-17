@@ -16,6 +16,8 @@ import type {
   ConsolidatedStatementRow,
   ConsolidatedStatements,
 } from "./ConsolidationApi";
+import { useFormatter } from "../lib/i18n/useFormatter";
+import { formatMoney } from "./reconciliation";
 import { ct } from "./ConsolidationStrings";
 
 function StatementSection({
@@ -29,6 +31,8 @@ function StatementSection({
   total: string;
   totalLabel: string;
 }) {
+  const f = useFormatter();
+  const money = (value: string) => formatMoney(f, Number(value));
   return (
     <div>
       <h4 className="mb-1 text-xs font-medium uppercase tracking-wide text-fg-subtle">
@@ -52,14 +56,18 @@ function StatementSection({
                   <span className="ml-2 text-fg-muted">{r.account_name}</span>
                 ) : null}
               </TableCell>
-              <TableCell className="text-right tabular-nums">{r.amount}</TableCell>
+              <TableCell className="text-right tabular-nums">
+                {money(r.amount)}
+              </TableCell>
             </TableRow>
           ))}
         </TableBody>
         <TableFooter>
           <TableRow className="font-medium">
             <TableCell>{totalLabel}</TableCell>
-            <TableCell className="text-right tabular-nums">{total}</TableCell>
+            <TableCell className="text-right tabular-nums">
+              {money(total)}
+            </TableCell>
           </TableRow>
         </TableFooter>
       </Table>
@@ -79,6 +87,8 @@ export interface ConsolidationStatementsProps {
 export function ConsolidationStatements({
   statements,
 }: ConsolidationStatementsProps) {
+  const f = useFormatter();
+  const money = (value: string) => formatMoney(f, Number(value));
   const is = statements.income_statement;
   const bs = statements.balance_sheet;
   return (
@@ -88,7 +98,9 @@ export function ConsolidationStatements({
           <CardTitle>{ct("consolidation.stmt.incomeStatement")}</CardTitle>
           <p className="text-sm text-fg-muted">
             {ct("consolidation.stmt.netIncome")}:{" "}
-            <span className="font-medium tabular-nums">{is.net_income}</span>{" "}
+            <span className="font-medium tabular-nums">
+              {money(is.net_income)}
+            </span>{" "}
             {is.presentation_currency}
           </p>
         </CardHeader>
@@ -120,13 +132,17 @@ export function ConsolidationStatements({
           </CardTitle>
           <p className="text-sm text-fg-muted">
             {ct("consolidation.stmt.totalAssets")}:{" "}
-            <span className="font-medium tabular-nums">{bs.total_assets}</span> ·{" "}
-            {ct("consolidation.stmt.totalLiabilities")}:{" "}
             <span className="font-medium tabular-nums">
-              {bs.total_liabilities}
+              {money(bs.total_assets)}
+            </span>{" "}
+            · {ct("consolidation.stmt.totalLiabilities")}:{" "}
+            <span className="font-medium tabular-nums">
+              {money(bs.total_liabilities)}
             </span>{" "}
             · {ct("consolidation.stmt.totalEquity")}:{" "}
-            <span className="font-medium tabular-nums">{bs.total_equity}</span>
+            <span className="font-medium tabular-nums">
+              {money(bs.total_equity)}
+            </span>
           </p>
         </CardHeader>
         <CardContent className="grid gap-3">

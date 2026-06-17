@@ -9,7 +9,11 @@ import type {
 import {
   Badge,
   Button,
+  EmptyState,
+  Eyebrow,
+  Field,
   Input,
+  Skeleton,
   Table,
   TableBody,
   TableCell,
@@ -20,17 +24,20 @@ import {
   toast,
 } from "@kapp/ui";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n/useFormatter";
 import {
   buildRateMap,
   computeTotals,
   convertToBase,
   detectAnomalies,
   detectTransferPairs,
+  formatMoney,
   groupSuggestions,
   highConfidenceSuggestions,
   isForeignLine,
   isUnmatched,
   matchesQuery,
+  parseDateValue,
   txnData,
   txnStatus,
 } from "../components/reconciliation";
@@ -40,7 +47,7 @@ import { ReconciliationMatchQueue } from "../components/ReconciliationMatchQueue
 import { ReconciliationSideBySide } from "../components/ReconciliationSideBySide";
 import { ReconciliationTransfers } from "../components/ReconciliationTransfers";
 import { ReconciliationRulesPanel } from "../components/ReconciliationRulesPanel";
-import { rt, rtp } from "../components/ReconciliationStrings";
+import { rt, rtp, txnStatusLabel } from "../components/ReconciliationStrings";
 
 const KTYPE_ACCOUNT = "finance.bank_account";
 const KTYPE_TXN = "finance.bank_transaction";
@@ -82,6 +89,7 @@ const STATUS_BADGE: Record<
  */
 export function BankReconciliationPage() {
   const qc = useQueryClient();
+  const f = useFormatter();
   const accounts = useQuery<KRecord[]>({
     queryKey: ["records", KTYPE_ACCOUNT],
     queryFn: () => api.listRecords(KTYPE_ACCOUNT),
@@ -389,16 +397,20 @@ export function BankReconciliationPage() {
   return (
     <section className="flex gap-4">
       <div className="flex-[0_0_260px]">
-        <h1 className="text-2xl font-semibold tracking-tight text-fg">
-          Bank Reconciliation
+        <Eyebrow>{rt("reconciliation.eyebrow")}</Eyebrow>
+        <h1 className="mt-1 text-2xl font-semibold tracking-tight text-fg">
+          {rt("reconciliation.title")}
         </h1>
         <p className="mt-1 text-sm text-fg-muted">
-          Review smart-matcher suggestions, clear lines side-by-side, and
-          import statements via CSV.
+          {rt("reconciliation.subtitle")}
         </p>
         <h2 className="mt-4 text-sm font-semibold text-fg">Accounts</h2>
         {accounts.isLoading && (
-          <p className="text-sm text-fg-muted">{rt("reconciliation.loading")}</p>
+          <div className="mt-2 flex flex-col gap-1" aria-hidden="true">
+            <Skeleton className="h-9 w-full" />
+            <Skeleton className="h-9 w-full" />
+            <Skeleton className="h-9 w-full" />
+          </div>
         )}
         {accounts.isError && (
           <div className="flex flex-col items-start gap-1">
@@ -435,7 +447,7 @@ export function BankReconciliationPage() {
                   )}
                 >
                   <div className="font-medium text-fg">
-                    {d.name ?? "(unnamed)"}
+                    {d.name ?? "Unnamed account"}
                   </div>
                   <div className="text-xs text-fg-muted">
                     {d.currency ?? ""} {d.account_number ?? ""}
@@ -449,9 +461,10 @@ export function BankReconciliationPage() {
 
       <div className="min-w-0 flex-1">
         {!selected ? (
-          <p className="text-sm text-fg-muted">
-            {rt("reconciliation.selectAccount")}
-          </p>
+          <EmptyState
+            title={rt("reconciliation.selectAccount")}
+            description="Choose a bank account from the list to review matches, clear lines, and import statements."
+          />
         ) : (
           <div className="flex flex-col gap-6">
             <ReconciliationSummary totals={totals} currency={selectedCurrency} />
@@ -493,26 +506,20 @@ export function BankReconciliationPage() {
               </div>
             )}
 
-            <div className="flex flex-col gap-1">
-              <label
-                htmlFor="recon-filter"
-                className="text-xs font-medium text-fg-muted"
-              >
-                {rt("reconciliation.search.label")}
-              </label>
-              <Input
-                id="recon-filter"
-                type="search"
-                size="sm"
-                className="max-w-sm"
-                placeholder={rt("reconciliation.search.placeholder")}
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
+            <div className="max-w-sm">
+              <Field label={rt("reconciliation.search.label")}>
+                <Input
+                  type="search"
+                  size="sm"
+                  placeholder={rt("reconciliation.search.placeholder")}
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                />
+              </Field>
               {query.trim() !== "" &&
                 unmatched.length > 0 &&
                 filteredUnmatched.length === 0 && (
-                  <p className="text-xs text-fg-muted">
+                  <p className="mt-1 text-xs text-fg-muted">
                     {rtp("reconciliation.search.noMatches", { query })}
                   </p>
                 )}
@@ -563,10 +570,17 @@ export function BankReconciliationPage() {
             <ReconciliationTransfers pairs={transferPairs} />
 
             <div>
-              <header className="flex items-center justify-between">
-                <h2 className="text-base font-semibold text-fg">
-                  Transactions
-                </h2>
+              <header className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-base font-semibold text-fg">
+                    Transactions
+                  </h2>
+                  {visible.length > 0 && (
+                    <Badge variant="neutral" size="sm">
+                      {f.number(visible.length)}
+                    </Badge>
+                  )}
+                </div>
                 <CSVUploader bankAccountId={selected} />
               </header>
               <div className="mt-2">
@@ -587,6 +601,7 @@ export function BankReconciliationPage() {
                     {visible.map((r) => {
                       const d = txnData(r);
                       const status = txnStatus(r);
+                      const valueDate = parseDateValue(d.value_date);
                       const amount = Number(d.amount ?? 0);
                       const foreign = isForeignLine(d.currency, selectedCurrency);
                       const conv = foreign
@@ -601,19 +616,16 @@ export function BankReconciliationPage() {
                       const isRev = anomalies.reversalIds.has(r.id);
                       return (
                         <TableRow key={r.id}>
-                          <TableCell>{d.value_date ?? ""}</TableCell>
+                          <TableCell className="whitespace-nowrap">
+                            {valueDate ? f.date(valueDate) : (d.value_date ?? "")}
+                          </TableCell>
                           <TableCell>{d.description ?? ""}</TableCell>
                           <TableCell className="text-right tabular-nums">
-                            <div>
-                              {d.amount ?? 0} {d.currency ?? ""}
-                            </div>
+                            <div>{formatMoney(f, amount, d.currency)}</div>
                             {foreign && (
                               <div className="text-xs text-fg-muted">
                                 {conv
-                                  ? `≈ ${conv.base.toLocaleString(undefined, {
-                                      minimumFractionDigits: 2,
-                                      maximumFractionDigits: 2,
-                                    })} ${selectedCurrency ?? ""}`
+                                  ? `≈ ${formatMoney(f, conv.base, selectedCurrency)}`
                                   : rt("reconciliation.fx.noRate")}
                               </div>
                             )}
@@ -624,7 +636,7 @@ export function BankReconciliationPage() {
                                 variant={STATUS_BADGE[status] ?? "outline"}
                                 size="xs"
                               >
-                                {status}
+                                {txnStatusLabel(status)}
                               </Badge>
                               {isDup && (
                                 <Badge
@@ -646,8 +658,18 @@ export function BankReconciliationPage() {
                               )}
                             </div>
                           </TableCell>
-                          <TableCell className="font-mono text-xs">
-                            {d.matched_entry_id ?? "—"}
+                          <TableCell>
+                            {d.matched_entry_id ? (
+                              <Badge
+                                variant="neutral"
+                                size="xs"
+                                title={d.matched_entry_id}
+                              >
+                                {rt("reconciliation.ledgerEntry")}
+                              </Badge>
+                            ) : (
+                              <span className="text-fg-subtle">—</span>
+                            )}
                           </TableCell>
                           <TableCell>
                             {isUnmatched(status) && (
@@ -679,13 +701,22 @@ export function BankReconciliationPage() {
                         </TableRow>
                       );
                     })}
-                    {visible.length === 0 && (
-                      <TableRow>
-                        <TableCell colSpan={6} className="text-fg-muted">
-                          {rt("reconciliation.txns.empty")}
-                        </TableCell>
-                      </TableRow>
-                    )}
+                    {visible.length === 0 &&
+                      (txns.isLoading ? (
+                        [0, 1, 2].map((i) => (
+                          <TableRow key={`txn-skeleton-${i}`}>
+                            <TableCell colSpan={6}>
+                              <Skeleton className="h-5 w-full" />
+                            </TableCell>
+                          </TableRow>
+                        ))
+                      ) : (
+                        <TableRow>
+                          <TableCell colSpan={6} className="text-fg-muted">
+                            {rt("reconciliation.txns.empty")}
+                          </TableCell>
+                        </TableRow>
+                      ))}
                   </TableBody>
                 </Table>
               </div>
@@ -695,7 +726,7 @@ export function BankReconciliationPage() {
               rules={rulesQ.data ?? []}
               isLoading={rulesQ.isLoading}
               isError={rulesQ.isError}
-              error={rulesQ.error}
+              onRetry={() => void rulesQ.refetch()}
             />
           </div>
         )}
@@ -741,6 +772,7 @@ function CSVUploader({ bankAccountId }: { bankAccountId: string }) {
       <input
         type="file"
         accept=".csv,text/csv"
+        aria-label="Import statement CSV"
         disabled={busy}
         onChange={(e) => {
           const f = e.target.files?.[0];

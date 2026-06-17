@@ -1,4 +1,5 @@
 import type { BankFeedSuggestion, ExchangeRate, KRecord } from "@kapp/client";
+import type { Formatters } from "../lib/i18n/useFormatter";
 
 // Statuses a finance.bank_transaction can hold. The first four are the
 // KType enum (internal/ledger/bank.go); "transfer" is written by the
@@ -295,10 +296,56 @@ export function formatAmount(amount: number, currency?: string): string {
   return currency ? `${body} ${currency}` : body;
 }
 
+// formatMoney renders an amount through the active locale's currency
+// formatter (so a USD line shows "$1,234.50", an EUR line "€1,234.50")
+// while staying safe inside render: a missing or unrecognised ISO 4217
+// code falls back to a grouped two-decimal number rather than letting
+// Intl throw a RangeError, and a non-finite amount renders as an em dash.
+// Display components share this helper so money is formatted identically
+// across the reconciliation and consolidation surfaces.
+export function formatMoney(
+  f: Formatters,
+  amount: number,
+  currency?: string,
+): string {
+  if (!Number.isFinite(amount)) return "—";
+  const code = (currency ?? "").trim().toUpperCase();
+  if (code) {
+    try {
+      return f.currency(amount, code);
+    } catch {
+      // Unrecognised currency code — fall through to a plain number.
+    }
+  }
+  return f.number(amount, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
 // shortId trims a UUID to its first segment for compact display while
 // keeping the full value available via the title attribute at call sites.
 export function shortId(id: string): string {
   return id.split("-")[0] ?? id;
+}
+
+// parseDateValue turns a stored date string into a Date for locale-aware
+// rendering. A date-only "YYYY-MM-DD" value is constructed as a LOCAL
+// calendar date so a medium-format render can't slip to the previous day
+// under a behind-UTC time zone; full timestamps parse as-is. Returns null
+// for an empty or unparseable value so callers can omit the cell.
+export function parseDateValue(value: string | undefined): Date | null {
+  if (!value) return null;
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (dateOnly) {
+    return new Date(
+      Number(dateOnly[1]),
+      Number(dateOnly[2]) - 1,
+      Number(dateOnly[3]),
+    );
+  }
+  const dt = new Date(value);
+  return Number.isNaN(dt.getTime()) ? null : dt;
 }
 
 // --- Multi-currency -----------------------------------------------------

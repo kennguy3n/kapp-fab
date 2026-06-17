@@ -18,6 +18,12 @@
  */
 
 export const RECONCILIATION_STRINGS = {
+  // Page header
+  "reconciliation.eyebrow": "Finance",
+  "reconciliation.title": "Bank Reconciliation",
+  "reconciliation.subtitle":
+    "Match imported bank lines to your ledger, then confirm with confidence.",
+
   // Async / edge states
   "reconciliation.loading": "Loading…",
   "reconciliation.retry": "Retry",
@@ -92,6 +98,38 @@ export const RECONCILIATION_STRINGS = {
   "reconciliation.kbd.accept": "Accept",
   "reconciliation.kbd.reject": "Reject",
   "reconciliation.kbd.skip": "Skip",
+
+  // Human-readable labels for the entities a line can be matched to. The
+  // raw ledger/transaction ids are UUIDs, so they're never surfaced —
+  // these labels stand in, with the full id kept on the title attribute.
+  "reconciliation.ledgerEntry": "Ledger entry",
+  "reconciliation.bankLine": "Bank line",
+  "reconciliation.match": "Match",
+
+  // Transaction status labels (humanised from the stored enum tokens).
+  "reconciliation.status.unreconciled": "Unreconciled",
+  "reconciliation.status.matched": "Matched",
+  "reconciliation.status.ignored": "Ignored",
+  "reconciliation.status.voided": "Voided",
+  "reconciliation.status.transfer": "Transfer",
+
+  // Rule condition labels (humanised from the stored condition_type token).
+  "reconciliation.rule.condition.description_contains": "Description contains",
+  "reconciliation.rule.condition.description_regex":
+    "Description matches regex",
+  "reconciliation.rule.condition.counterparty_equals": "Counterparty equals",
+  "reconciliation.rule.condition.amount_equals": "Amount equals",
+
+  // Summary tiles.
+  "reconciliation.summary.label": "Reconciliation summary",
+  "reconciliation.summary.unmatched": "Unmatched",
+  "reconciliation.summary.matched": "Matched",
+  "reconciliation.summary.transfers": "Transfers",
+  "reconciliation.summary.ignored": "Ignored",
+  "reconciliation.summary.difference": "Difference",
+  "reconciliation.summary.toReview": "still to reconcile",
+  "reconciliation.summary.reconciled": "reconciled",
+  "reconciliation.summary.netDifference": "Net still to reconcile",
 } as const;
 
 export type ReconciliationStringKey = keyof typeof RECONCILIATION_STRINGS;
@@ -113,4 +151,36 @@ export function rtp(
   return rt(key).replace(/\{(\w+)\}/g, (whole, name: string) =>
     name in params ? String(params[name]) : whole,
   );
+}
+
+// humanizeToken turns an unknown snake_case/lowercase enum token into a
+// Title Case label ("partially_matched" → "Partially Matched") so a value
+// we don't have explicit copy for still reads as a label rather than a
+// machine token.
+function humanizeToken(token: string): string {
+  return token
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * Human label for a `finance.bank_transaction` status. Falls back to a
+ * humanised token for any status without explicit copy so the badge never
+ * surfaces a raw enum value like "partially_matched".
+ */
+export function txnStatusLabel(status: string): string {
+  const key = `reconciliation.status.${status}` as ReconciliationStringKey;
+  return RECONCILIATION_STRINGS[key] ?? humanizeToken(status);
+}
+
+/**
+ * Human label for a bank-feed rule's condition type, e.g.
+ * "description_contains" → "Description contains". Unknown condition types
+ * humanise gracefully instead of leaking the raw token.
+ */
+export function ruleConditionLabel(conditionType: string): string {
+  const key =
+    `reconciliation.rule.condition.${conditionType}` as ReconciliationStringKey;
+  return RECONCILIATION_STRINGS[key] ?? humanizeToken(conditionType);
 }

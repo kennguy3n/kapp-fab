@@ -45,15 +45,15 @@ describe("ConsolidationTrialBalance", () => {
   it("renders CTA, residual and a balanced badge", () => {
     renderWithProviders(<ConsolidationTrialBalance result={fixture} />);
     expect(screen.getByText("Balanced")).toBeInTheDocument();
-    // CTA stat value.
-    expect(screen.getByText("120")).toBeInTheDocument();
+    // CTA stat value (presentation currency, grouped two-decimal).
+    expect(screen.getByText("120.00")).toBeInTheDocument();
   });
 
   it("renders one column header per contributing entity", () => {
     renderWithProviders(<ConsolidationTrialBalance result={fixture} />);
-    // Tenant ids are truncated to 8 chars + ellipsis in the header.
-    expect(screen.getByText("tenant-a…")).toBeInTheDocument();
-    expect(screen.getByText("tenant-b…")).toBeInTheDocument();
+    // Member tenants surface as "Entity N" so no raw tenant id leaks.
+    expect(screen.getByText("Entity 1")).toBeInTheDocument();
+    expect(screen.getByText("Entity 2")).toBeInTheDocument();
   });
 
   it("flags the CTA row with a badge", () => {
@@ -76,8 +76,8 @@ describe("ConsolidationTrialBalance", () => {
       within(drill).getByText("Per-entity contributions"),
     ).toBeInTheDocument();
     // Both contributing entities + their debit amounts appear.
-    expect(within(drill).getByText("1200")).toBeInTheDocument();
-    expect(within(drill).getByText("800")).toBeInTheDocument();
+    expect(within(drill).getByText("1,200.00")).toBeInTheDocument();
+    expect(within(drill).getByText("800.00")).toBeInTheDocument();
   });
 
   it("renders the eliminated intercompany section", () => {

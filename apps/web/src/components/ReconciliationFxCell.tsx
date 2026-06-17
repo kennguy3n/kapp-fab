@@ -1,7 +1,8 @@
 import { Badge } from "@kapp/ui";
+import { useFormatter } from "../lib/i18n/useFormatter";
 import {
   convertToBase,
-  formatAmount,
+  formatMoney,
   isForeignLine,
   type RateMap,
 } from "./reconciliation";
@@ -36,13 +37,14 @@ export function ReconciliationFxCell({
   rates: RateMap;
   align?: "left" | "right";
 }) {
+  const f = useFormatter();
   const foreign = isForeignLine(lineCurrency, baseCurrency);
   const alignCls = align === "right" ? "text-right" : "text-left";
 
   if (!foreign) {
     return (
       <span className={`font-semibold tabular-nums text-fg ${alignCls}`}>
-        {formatAmount(amount, lineCurrency)}
+        {formatMoney(f, amount, lineCurrency)}
       </span>
     );
   }
@@ -52,7 +54,7 @@ export function ReconciliationFxCell({
   return (
     <span className={`flex flex-col ${align === "right" ? "items-end" : "items-start"}`}>
       <span className="font-semibold tabular-nums text-fg">
-        {formatAmount(amount, lineCurrency)}
+        {formatMoney(f, amount, lineCurrency)}
       </span>
       <Badge variant="warning" size="xs" title={rt("reconciliation.fx.foreign")}>
         {rt("reconciliation.fx.foreign")}
@@ -64,9 +66,10 @@ export function ReconciliationFxCell({
             rate: conv.rate.toFixed(6),
           })}
         >
-          {rt("reconciliation.fx.base")}: {formatAmount(conv.base, baseCurrency)}
+          {rt("reconciliation.fx.base")}: {formatMoney(f, conv.base, baseCurrency)}
           {" · "}
-          {rt("reconciliation.fx.rateLabel")}: {Number(conv.rate.toFixed(6))}
+          {rt("reconciliation.fx.rateLabel")}:{" "}
+          {f.number(conv.rate, { maximumFractionDigits: 6 })}
         </span>
       ) : (
         <span className="text-xs text-danger">

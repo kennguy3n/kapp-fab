@@ -7,7 +7,9 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
+  Field,
   Input,
+  Textarea,
 } from "@kapp/ui";
 import {
   consolidationApi,
@@ -118,45 +120,44 @@ export function ConsolidationGroupsPanel({
               createMut.mutate();
             }}
           >
-            <label className="grid gap-1 text-sm">
-              {ct("consolidation.groups.name")}
+            <Field label={ct("consolidation.groups.name")} required>
               <Input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 required
               />
-            </label>
-            <label className="grid gap-1 text-sm">
-              {ct("consolidation.groups.presentationCurrency")}
+            </Field>
+            <Field
+              label={ct("consolidation.groups.presentationCurrency")}
+              required
+            >
               <Input
                 value={currency}
                 onChange={(e) => setCurrency(e.target.value.toUpperCase())}
                 maxLength={3}
                 required
-                className="w-24"
               />
-            </label>
-            <label className="grid gap-1 text-sm">
-              {ct("consolidation.groups.members")}
-              <textarea
+            </Field>
+            <Field
+              label={ct("consolidation.groups.members")}
+              help={ct("consolidation.groups.membersHelp")}
+            >
+              <Textarea
                 value={members}
                 onChange={(e) => setMembers(e.target.value)}
                 rows={3}
-                className="rounded-md border border-border bg-bg px-3 py-2 text-sm"
               />
-            </label>
-            <label className="grid gap-1 text-sm">
-              {ct("consolidation.groups.ctaAccount")}
+            </Field>
+            <Field
+              label={ct("consolidation.groups.ctaAccount")}
+              help={ct("consolidation.groups.ctaAccountHint")}
+            >
               <Input
                 value={ctaAccount}
                 onChange={(e) => setCtaAccount(e.target.value)}
                 placeholder="3900"
-                className="w-32"
               />
-              <span className="text-xs text-fg-subtle">
-                {ct("consolidation.groups.ctaAccountHint")}
-              </span>
-            </label>
+            </Field>
 
             <fieldset className="grid gap-2 rounded-md border border-border p-3">
               <legend className="px-1 text-sm font-medium">
@@ -259,7 +260,9 @@ export function ConsolidationGroupsPanel({
                   >
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
-                        <span className="truncate font-medium">{g.name || g.id}</span>
+                        <span className="truncate font-medium" title={g.id}>
+                          {g.name || ct("consolidation.groups.untitled")}
+                        </span>
                         {active ? (
                           <Badge variant="accent" size="xs">
                             {ct("consolidation.groups.selected")}
@@ -267,8 +270,9 @@ export function ConsolidationGroupsPanel({
                         ) : null}
                       </div>
                       <div className="text-xs text-fg-subtle">
-                        <code title={g.id}>{g.id}</code> ·{" "}
-                        {g.presentation_currency} ·{" "}
+                        {g.presentation_currency
+                          ? `${g.presentation_currency} · `
+                          : ""}
                         {ctp("consolidation.groups.membersCount", {
                           count: g.member_tenant_ids?.length ?? 0,
                         })}
@@ -308,14 +312,15 @@ export function ConsolidationGroupsPanel({
               setExistingId("");
             }}
           >
-            <label className="grid flex-1 gap-1 text-sm">
-              {ct("consolidation.groups.addExisting")}
-              <Input
-                value={existingId}
-                onChange={(e) => setExistingId(e.target.value)}
-                placeholder="group id (uuid)"
-              />
-            </label>
+            <div className="flex-1">
+              <Field label={ct("consolidation.groups.addExisting")}>
+                <Input
+                  value={existingId}
+                  onChange={(e) => setExistingId(e.target.value)}
+                  placeholder="group id (uuid)"
+                />
+              </Field>
+            </div>
             <Button type="submit" variant="secondary" disabled={!existingId.trim()}>
               {ct("consolidation.groups.add")}
             </Button>

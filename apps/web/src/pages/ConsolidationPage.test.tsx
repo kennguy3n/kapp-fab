@@ -150,7 +150,7 @@ describe("ConsolidationPage", () => {
     renderWithProviders(<ConsolidationPage />);
     const user = userEvent.setup();
 
-    await user.type(screen.getByLabelText(/^Name$/i), "Global");
+    await user.type(screen.getByLabelText(/^Name/i), "Global");
     await user.click(screen.getByRole("button", { name: /^Create group$/i }));
 
     await waitFor(() => expect(createGroup).toHaveBeenCalledTimes(1));
