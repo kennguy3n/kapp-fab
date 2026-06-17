@@ -515,10 +515,14 @@ function PayRunsTable() {
     (s, r) => s + num((r.data as PayRunData).total_net),
     0,
   );
-  // Footer currency follows the first run; mixed-currency tenants are
-  // rare for a single payroll workspace and each row still shows its own.
+  // Footer totals are only meaningful within a single currency; each row
+  // still shows its own, so the aggregate is suppressed when runs mix them.
+  const currencies = new Set(
+    rows.map((r) => (r.data as PayRunData).currency ?? "USD"),
+  );
   const footerCurrency =
     (rows[0]?.data as PayRunData | undefined)?.currency ?? "USD";
+  const mixedCurrency = currencies.size > 1;
 
   if (runs.isError) {
     return (
@@ -649,12 +653,23 @@ function PayRunsTable() {
               <TableCell className="font-medium" colSpan={4}>
                 Total
               </TableCell>
-              <TableCell className="text-end font-semibold">
-                {fmt.currency(totalGross, footerCurrency)}
-              </TableCell>
-              <TableCell className="text-end font-semibold">
-                {fmt.currency(totalNet, footerCurrency)}
-              </TableCell>
+              {mixedCurrency ? (
+                <TableCell
+                  colSpan={2}
+                  className="text-end text-sm text-fg-muted"
+                >
+                  Mixed currencies — see each row
+                </TableCell>
+              ) : (
+                <>
+                  <TableCell className="text-end font-semibold">
+                    {fmt.currency(totalGross, footerCurrency)}
+                  </TableCell>
+                  <TableCell className="text-end font-semibold">
+                    {fmt.currency(totalNet, footerCurrency)}
+                  </TableCell>
+                </>
+              )}
               <TableCell colSpan={2} />
             </TableRow>
           </TableFooter>
