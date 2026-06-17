@@ -2,7 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
 import {
+  Badge,
   Button,
+  Eyebrow,
+  EmptyState,
+  Field,
   Input,
   Select,
   Table,
@@ -12,13 +16,18 @@ import {
   TableHeader,
   TableRow,
 } from "@kapp/ui";
+import { Minus, Plus, ScanLine, ShoppingCart, Trash2 } from "lucide-react";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n/useFormatter";
 
 const KTYPE_PROFILE = "sales.pos_profile";
 const KTYPE_INVOICE = "sales.pos_invoice";
 const KTYPE_ITEM = "inventory.item";
 
 const QUEUE_STORAGE_KEY = "kapp.pos.offline-queue";
+
+// Quick-cash denominations offered as one-tap tender chips.
+const QUICK_CASH = [5, 10, 20, 50, 100];
 
 interface ItemData {
   name?: string;
@@ -53,10 +62,11 @@ interface QueuedInvoice {
 }
 
 /**
- * POSPage is the Phase M Task 6 storefront UX. It renders a
- * touch-friendly item grid, a cart, a barcode/SKU input for fast
- * scan-and-ring, and a finalize button that posts the cart through
- * the /api/v1/pos/invoices/{id}/finalize endpoint.
+ * POSPage is the storefront register UX. It renders a touch-friendly
+ * item grid, a cart with quantity steppers, a barcode/SKU input for
+ * fast scan-and-ring, quick-cash tender chips with change due, and a
+ * finalize button that posts the cart through the
+ * /api/v1/pos/invoices/{id}/finalize endpoint.
  *
  * Offline behaviour:
  *  - All finalize calls go through `attemptFinalize` which catches
@@ -67,6 +77,7 @@ interface QueuedInvoice {
  *    idempotency_key so the server collapses duplicates.
  */
 export function POSPage() {
+  const fmt = useFormatter();
   const profilesQ = useQuery<KRecord[]>({
     queryKey: ["records", KTYPE_PROFILE],
     queryFn: () => api.listRecords(KTYPE_PROFILE),
@@ -90,9 +101,12 @@ export function POSPage() {
   }, [profileId, profilesQ.data]);
 
   const currency = (profile?.data as ProfileData)?.currency ?? "USD";
+  const money = (n: number) => fmt.currency(n, currency, { currencyDisplay: "code" });
 
   const subtotal = cart.reduce((s, l) => s + l.qty * l.unitPrice, 0);
   const total = subtotal; // tax stub — real tax pack runs server-side
+  const tenderedNum = Number(tendered) || 0;
+  const changeDue = tenderedNum - total;
 
   // Drain the offline queue once on mount and whenever the network
   // flips back to online. Drains are best-effort; failures stay in
@@ -101,9 +115,6 @@ export function POSPage() {
   useEffect(() => {
     let cancelled = false;
     const drain = async () => {
-      // loadQueue() reads from localStorage so concurrent drains
-      // (e.g. a stale 'online' listener firing while finalize is
-      // also racing) all start from the same source-of-truth slice.
       const pending = loadQueue();
       if (pending.length === 0) return;
       const remaining: QueuedInvoice[] = [];
@@ -116,10 +127,6 @@ export function POSPage() {
         }
       }
       if (cancelled) return;
-      // Functional setQueue avoids stomping a sibling finalize that
-      // appended to the queue between loadQueue() and now: keep any
-      // ids in `prev` that aren't in the current `pending` slice and
-      // merge them with `remaining`.
       setQueue((prev) => {
         const pendingIds = new Set(pending.map((p) => p.idempotencyKey));
         const appendedDuringDrain = prev.filter((p) => !pendingIds.has(p.idempotencyKey));
@@ -155,6 +162,7 @@ export function POSPage() {
   const addToCart = (rec: KRecord) => {
     const data = (rec.data as ItemData) ?? {};
     const price = Number(data.default_price ?? 0);
+    setStatus("");
     setCart((prev) => {
       const idx = prev.findIndex((l) => l.itemId === rec.id);
       if (idx >= 0) {
@@ -173,6 +181,17 @@ export function POSPage() {
       ];
     });
   };
+
+  const changeQty = (itemId: string, delta: number) => {
+    setCart((prev) =>
+      prev
+        .map((l) => (l.itemId === itemId ? { ...l, qty: l.qty + delta } : l))
+        .filter((l) => l.qty > 0),
+    );
+  };
+
+  const removeLine = (itemId: string) =>
+    setCart((prev) => prev.filter((l) => l.itemId !== itemId));
 
   const finalize = async () => {
     if (!profile) {
@@ -210,10 +229,6 @@ export function POSPage() {
         setCart([]);
         setTendered("0");
       } catch (err) {
-        // Network or transient error — queue for replay. Functional
-        // setQueue updater so a concurrent drain that ran between
-        // this render and this catch can't overwrite the appended
-        // entry with its stale closure value.
         const queued: QueuedInvoice = {
           idempotencyKey,
           posInvoiceId: created.id,
@@ -233,16 +248,19 @@ export function POSPage() {
   };
 
   return (
-    <section className="grid grid-cols-[2fr_1fr] gap-4">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight text-fg">
-          Point of Sale
-        </h1>
-        <div className="mt-3 mb-3">
-          <label className="flex items-center gap-2 text-sm text-fg">
-            Profile:
+    <section className="grid grid-cols-1 gap-6 lg:grid-cols-[2fr_1fr]">
+      <div className="flex flex-col gap-4">
+        <header className="flex flex-col gap-1">
+          <Eyebrow>Point of sale</Eyebrow>
+          <h1 className="text-2xl font-semibold tracking-tight text-fg">Point of Sale</h1>
+          <p className="text-sm text-fg-muted">
+            Scan or tap products to build the sale, take payment, and finalize the receipt.
+          </p>
+        </header>
+
+        <div className="flex flex-wrap items-end gap-3">
+          <Field label="Register" className="w-56">
             <Select
-              className="w-auto"
               value={profileId || profile?.id || ""}
               onChange={(e) => setProfileId(e.target.value)}
             >
@@ -252,95 +270,201 @@ export function POSPage() {
                 </option>
               ))}
             </Select>
-          </label>
-        </div>
+          </Field>
 
-        <div className="mb-3 flex gap-2">
-          <Input
-            placeholder="Scan or type barcode/SKU…"
-            value={barcode}
-            onChange={(e) => setBarcode(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") addByBarcode();
-            }}
-            className="flex-1"
-          />
+          <Field label="Scan barcode or SKU" className="flex-1 min-w-[220px]">
+            <Input
+              placeholder="Scan or type barcode/SKU…"
+              value={barcode}
+              onChange={(e) => setBarcode(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") addByBarcode();
+              }}
+              leadingAddon={<ScanLine className="h-4 w-4" aria-hidden="true" />}
+            />
+          </Field>
           <Button onClick={addByBarcode}>Add</Button>
         </div>
 
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-2">
-          {(itemsQ.data ?? []).slice(0, 24).map((rec) => {
-            const data = (rec.data as ItemData) ?? {};
-            return (
-              <button
-                key={rec.id}
-                onClick={() => addToCart(rec)}
-                className="flex min-h-20 flex-col rounded-md border border-border bg-bg-elevated p-3 text-left transition-colors hover:bg-bg-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
-              >
-                <div className="font-semibold text-fg">
-                  {data.name ?? rec.id}
-                </div>
-                <div className="text-xs text-fg-muted">{data.sku}</div>
-                <div className="mt-1 text-fg">
-                  {currency} {Number(data.default_price ?? 0).toFixed(2)}
-                </div>
-              </button>
-            );
-          })}
-        </div>
+        {itemsQ.isLoading ? (
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-3">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div
+                key={i}
+                className="h-24 animate-pulse rounded-xl border border-border bg-bg-muted"
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-3">
+            {(itemsQ.data ?? []).slice(0, 24).map((rec) => {
+              const data = (rec.data as ItemData) ?? {};
+              return (
+                <button
+                  key={rec.id}
+                  type="button"
+                  onClick={() => addToCart(rec)}
+                  className="flex min-h-24 flex-col justify-between rounded-xl border border-border bg-bg-elevated p-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-accent hover:shadow-md active:translate-y-0 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
+                >
+                  <div className="flex flex-col">
+                    <span className="font-semibold leading-snug text-fg">
+                      {data.name ?? rec.id}
+                    </span>
+                    {data.sku && (
+                      <span className="text-xs text-fg-subtle">{data.sku}</span>
+                    )}
+                  </div>
+                  <span className="mt-2 font-medium tabular-nums text-fg">
+                    {money(Number(data.default_price ?? 0))}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
-      <aside className="border-l border-border pl-4">
-        <h2 className="text-lg font-semibold text-fg">Cart</h2>
+      <aside className="flex flex-col gap-3 rounded-xl border border-border bg-bg-subtle p-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-fg">Cart</h2>
+          {cart.length > 0 && (
+            <Button variant="ghost" size="sm" onClick={() => setCart([])}>
+              Clear
+            </Button>
+          )}
+        </div>
+
         {cart.length === 0 ? (
-          <p className="text-fg-muted">Empty.</p>
+          <EmptyState
+            icon={<ShoppingCart aria-hidden="true" />}
+            title="Your cart is empty"
+            description="Scan a barcode or tap a product to start a sale."
+          />
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Item</TableHead>
-                <TableHead className="text-center">Qty</TableHead>
-                <TableHead className="text-right">Price</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {cart.map((l) => (
-                <TableRow key={l.itemId}>
-                  <TableCell>{l.itemName}</TableCell>
-                  <TableCell className="text-center">{l.qty}</TableCell>
-                  <TableCell className="text-right">
-                    {(l.qty * l.unitPrice).toFixed(2)}
-                  </TableCell>
+          <div className="overflow-hidden rounded-lg border border-border bg-bg-elevated">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Item</TableHead>
+                  <TableHead className="text-center">Qty</TableHead>
+                  <TableHead className="text-end">Amount</TableHead>
+                  <TableHead className="w-10">
+                    <span className="sr-only">Remove</span>
+                  </TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {cart.map((l) => (
+                  <TableRow key={l.itemId}>
+                    <TableCell>
+                      <span className="font-medium text-fg">{l.itemName}</span>
+                      <span className="block text-xs text-fg-subtle tabular-nums">
+                        {money(l.unitPrice)} each
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center justify-center gap-1">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          aria-label={`Decrease ${l.itemName}`}
+                          onClick={() => changeQty(l.itemId, -1)}
+                        >
+                          <Minus className="h-3 w-3" aria-hidden="true" />
+                        </Button>
+                        <span className="w-6 text-center tabular-nums text-fg">{l.qty}</span>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          aria-label={`Increase ${l.itemName}`}
+                          onClick={() => changeQty(l.itemId, 1)}
+                        >
+                          <Plus className="h-3 w-3" aria-hidden="true" />
+                        </Button>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-end font-medium tabular-nums text-fg">
+                      {money(l.qty * l.unitPrice)}
+                    </TableCell>
+                    <TableCell className="text-end">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        aria-label={`Remove ${l.itemName}`}
+                        onClick={() => removeLine(l.itemId)}
+                      >
+                        <Trash2 className="h-4 w-4" aria-hidden="true" />
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
         )}
-        <div className="mt-3 text-lg text-fg">
-          Total: {currency} {total.toFixed(2)}
+
+        <dl className="flex flex-col gap-1 border-t border-border pt-3">
+          <div className="flex items-center justify-between text-sm">
+            <dt className="text-fg-muted">Subtotal</dt>
+            <dd className="tabular-nums text-fg">{money(subtotal)}</dd>
+          </div>
+          <p className="flex items-center justify-between text-lg font-semibold text-fg">
+            Total: {money(total)}
+          </p>
+        </dl>
+
+        <Field label="Cash tendered">
+          <Input
+            inputMode="decimal"
+            value={tendered}
+            onChange={(e) => setTendered(e.target.value)}
+            className="text-end tabular-nums"
+          />
+        </Field>
+
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" onClick={() => setTendered(total.toFixed(2))}>
+            Exact
+          </Button>
+          {QUICK_CASH.map((amount) => (
+            <Button
+              key={amount}
+              variant="outline"
+              size="sm"
+              onClick={() => setTendered(String(amount))}
+            >
+              {money(amount)}
+            </Button>
+          ))}
         </div>
-        <div className="mt-2">
-          <label className="flex items-center gap-2 text-sm text-fg">
-            Tendered:
-            <Input
-              value={tendered}
-              onChange={(e) => setTendered(e.target.value)}
-              className="w-28"
-            />
-          </label>
-        </div>
-        <Button onClick={finalize} className="mt-3 w-full" size="lg">
-          Finalize
+
+        {cart.length > 0 && (
+          <div
+            className={`flex items-center justify-between rounded-lg px-3 py-2 text-sm font-medium ${
+              changeDue >= 0 ? "bg-success/15 text-fg" : "bg-warning/15 text-fg"
+            }`}
+          >
+            <span>{changeDue >= 0 ? "Change due" : "Balance due"}</span>
+            <span className="tabular-nums">{money(Math.abs(changeDue))}</span>
+          </div>
+        )}
+
+        <Button onClick={finalize} className="w-full" size="lg">
+          Finalize sale
         </Button>
 
         {queue.length > 0 && (
-          <div className="mt-4 rounded-md bg-warning/15 p-2 text-sm text-fg">
-            <strong>Offline queue:</strong> {queue.length} pending
+          <div className="flex items-center gap-2 rounded-md bg-warning/15 p-2 text-sm text-fg">
+            <Badge variant="warning" size="xs">
+              {queue.length}
+            </Badge>
+            <span>
+              {queue.length} pending {queue.length === 1 ? "sale" : "sales"} will sync when
+              you’re back online
+            </span>
           </div>
         )}
-        {status && (
-          <div className="mt-4 text-sm text-fg-muted">{status}</div>
-        )}
+        {status && <p className="text-sm text-fg-muted" role="status">{status}</p>}
       </aside>
     </section>
   );

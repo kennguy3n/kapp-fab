@@ -1,11 +1,27 @@
-import { useMemo } from "react";
-import { useNavigate } from "react-router-dom";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
-import { Button } from "@kapp/ui";
+import { toast } from "@kapp/ui";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n/useFormatter";
+import {
+  DOCUMENT_CONFIGS,
+  DocumentBoard,
+  DocumentDialog,
+  StatusBadge,
+  buildNameResolver,
+  deriveTaxRate,
+  itemOptions as toItemOptions,
+  linesFromData,
+  orgOptions,
+  type DocumentSubmitPayload,
+} from "../components/lineitems";
 
 const KTYPE = "procurement.purchase_order";
+const config = DOCUMENT_CONFIGS.purchase_order;
+
+// Workflow states from internal/sales/ktypes.go.
+const STAGES = ["draft", "confirmed", "received", "cancelled"];
 
 interface PurchaseOrderData {
   po_number?: string;
@@ -16,22 +32,44 @@ interface PurchaseOrderData {
   status?: string;
 }
 
-// STAGES mirrors the workflow declared in internal/sales/ktypes.go.
-const STAGES: string[] = ["draft", "confirmed", "received", "cancelled"];
+type DialogState = { mode: "create" } | { mode: "edit"; record: KRecord };
 
-/**
- * PurchaseOrdersPage renders a procurement kanban over
- * `procurement.purchase_order`. Drag-drop between columns drives the
- * workflow via the action endpoint; cards link to the record form
- * for line-item edits.
- */
+function dateInput(value: string | undefined): string {
+  return value ? value.slice(0, 10) : "";
+}
+
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 export function PurchaseOrdersPage() {
-  const nav = useNavigate();
   const qc = useQueryClient();
+  const fmt = useFormatter();
+  const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const q = useQuery<KRecord[]>({
     queryKey: ["records", KTYPE],
     queryFn: () => api.listRecords(KTYPE),
   });
+  const orgsQ = useQuery<KRecord[]>({
+    queryKey: ["records", "crm.organization"],
+    queryFn: () => api.listRecords("crm.organization"),
+  });
+  const itemsQ = useQuery<KRecord[]>({
+    queryKey: ["records", "inventory.item"],
+    queryFn: () => api.listRecords("inventory.item"),
+  });
+
+  const supplierName = useMemo(() => buildNameResolver(orgsQ.data), [orgsQ.data]);
+  const orgOpts = useMemo(() => orgOptions(orgsQ.data ?? []), [orgsQ.data]);
+  const itemOpts = useMemo(() => toItemOptions(itemsQ.data ?? []), [itemsQ.data]);
+
+  const fmtDate = (value?: string) => {
+    if (!value) return "";
+    const d = new Date(value.length === 10 ? `${value}T00:00:00` : value);
+    return Number.isNaN(d.getTime()) ? "" : fmt.date(d);
+  };
 
   const moveMutation = useMutation({
     mutationFn: async ({ r, to }: { r: KRecord; to: string }) => {
@@ -45,74 +83,118 @@ export function PurchaseOrdersPage() {
       await api.runAction(KTYPE, r.id, action);
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["records", KTYPE] }),
+    onError: (e: Error) =>
+      toast.error("Couldn’t move purchase order", { description: e.message }),
   });
 
-  const columns = useMemo(() => {
-    const by = new Map<string, KRecord[]>();
-    for (const s of STAGES) by.set(s, []);
-    for (const r of q.data ?? []) {
-      const s = (r.data as unknown as PurchaseOrderData).status ?? "draft";
-      (by.get(s) ?? by.set(s, []).get(s)!).push(r);
-    }
-    return by;
-  }, [q.data]);
+  const saveMutation = useMutation({
+    mutationFn: async (payload: DocumentSubmitPayload) => {
+      if (dialog?.mode === "edit") {
+        return api.updateRecord(KTYPE, dialog.record.id, {
+          ...dialog.record.data,
+          ...payload.data,
+        });
+      }
+      return api.createRecord(KTYPE, { status: "draft", ...payload.data });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["records", KTYPE] });
+      toast.success(dialog?.mode === "edit" ? "Purchase order updated" : "Purchase order created");
+      setDialog(null);
+      setSaveError(null);
+    },
+    onError: (e: Error) => setSaveError(e.message),
+  });
+
+  const openCreate = () => {
+    setSaveError(null);
+    setDialog({ mode: "create" });
+  };
+  const openEdit = (record: KRecord) => {
+    setSaveError(null);
+    setDialog({ mode: "edit", record });
+  };
+
+  const editData = dialog?.mode === "edit" ? (dialog.record.data as Record<string, unknown>) : null;
 
   return (
-    <section>
-      <header className="flex items-center justify-between">
-        <h1>Purchase Orders</h1>
-        <Button onClick={() => nav(`/records/${KTYPE}/new`)}>New PO</Button>
-      </header>
-      {q.isLoading && <p>Loading…</p>}
-      {q.isError && (
-        <p className="text-danger">
-          Failed to load purchase orders: {(q.error as Error).message}
-        </p>
-      )}
-      <div className="mt-3 flex gap-3 overflow-x-auto">
-        {STAGES.map((s) => (
-          <div
-            key={s}
-            className="min-w-[240px] rounded-md border border-border bg-bg-subtle p-2"
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={(e) => {
-              const id = e.dataTransfer.getData("text/plain");
-              const r = (q.data ?? []).find((x) => x.id === id);
-              if (r) moveMutation.mutate({ r, to: s });
-            }}
-          >
-            <div className="text-xs capitalize text-fg-muted">
-              {s} · {(columns.get(s) ?? []).length}
+    <>
+      <DocumentBoard
+        eyebrow="Procurement"
+        title="Purchase Orders"
+        description="Order stock and services from suppliers, then track each PO from draft through to received."
+        newLabel="New PO"
+        onNew={openCreate}
+        stages={STAGES}
+        records={q.data}
+        statusOf={(r) => (r.data as unknown as PurchaseOrderData).status ?? "draft"}
+        isLoading={q.isLoading}
+        isError={q.isError}
+        error={q.error}
+        onRetry={() => q.refetch()}
+        onMove={(r, to) => moveMutation.mutate({ r, to })}
+        onCardClick={openEdit}
+        emptyTitle="No purchase orders yet"
+        emptyDescription="Raise your first PO to start ordering stock from suppliers."
+        renderCard={(r) => {
+          const d = r.data as unknown as PurchaseOrderData;
+          const lineCount = linesFromData("purchase_order", r.data).length;
+          return (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-start justify-between gap-2">
+                <span className="font-medium text-fg">{d.po_number || "Untitled PO"}</span>
+                <StatusBadge status={d.status ?? "draft"} size="xs" />
+              </div>
+              <span className="text-xs text-fg-muted">
+                {supplierName(d.supplier_id) || "Unknown supplier"}
+              </span>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-fg-muted">{fmtDate(d.order_date)}</span>
+                <span className="font-medium tabular-nums text-fg">
+                  {fmt.currency(Number(d.total ?? 0), d.currency ?? "USD", {
+                    currencyDisplay: "code",
+                  })}
+                </span>
+              </div>
+              {lineCount > 0 && (
+                <span className="text-xs text-fg-subtle">
+                  {lineCount} line{lineCount === 1 ? "" : "s"}
+                </span>
+              )}
             </div>
-            {(columns.get(s) ?? []).map((r) => {
-              const d = r.data as unknown as PurchaseOrderData;
-              return (
-                <div
-                  key={r.id}
-                  draggable
-                  onDragStart={(e) => e.dataTransfer.setData("text/plain", r.id)}
-                  onClick={() => nav(`/records/${KTYPE}/${r.id}`)}
-                  className="mt-1.5 cursor-pointer rounded border border-border bg-bg-elevated p-2 text-[13px]"
-                >
-                  <div className="font-medium">
-                    {d.po_number ?? r.id.slice(0, 8)}
-                  </div>
-                  <div className="text-xs text-fg-muted">
-                    {d.supplier_id ?? "—"}
-                  </div>
-                  <div className="mt-1 text-xs">
-                    {d.total ?? 0} {d.currency ?? "USD"}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        ))}
-      </div>
-    </section>
+          );
+        }}
+      />
+
+      {dialog && (
+        <DocumentDialog
+          open
+          onClose={() => setDialog(null)}
+          mode={dialog.mode}
+          config={config}
+          title={dialog.mode === "edit" ? "Edit purchase order" : "New purchase order"}
+          initialHeader={{
+            supplier_id: editData ? String(editData.supplier_id ?? "") : "",
+            order_date: editData ? dateInput(editData.order_date as string) : today(),
+            expected_date: editData ? dateInput(editData.expected_date as string) : "",
+            po_number: editData ? String(editData.po_number ?? "") : "",
+          }}
+          initialLines={editData ? linesFromData("purchase_order", editData) : []}
+          initialCurrency={editData ? String(editData.currency ?? "USD") : "USD"}
+          initialTaxRate={editData ? deriveTaxRate(editData) : 0}
+          itemOptions={itemOpts}
+          selectOptions={{ supplier_id: orgOpts }}
+          saving={saveMutation.isPending}
+          error={saveError}
+          onSubmit={(payload) => saveMutation.mutate(payload)}
+        />
+      )}
+    </>
   );
 }
 
+// resolveAction maps (from, to) stage pairs to the workflow action
+// names declared in internal/sales/ktypes.go.
 function resolveAction(from: string, to: string): string | undefined {
   if (from === "draft" && to === "confirmed") return "confirm";
   if (from === "confirmed" && to === "received") return "receive";

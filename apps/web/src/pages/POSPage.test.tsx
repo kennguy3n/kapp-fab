@@ -56,7 +56,7 @@ describe("POSPage", () => {
     renderWithProviders(<POSPage />);
     expect(screen.getByRole("heading", { name: "Point of Sale" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: /Coffee/ })).toBeInTheDocument();
-    expect(screen.getByText("Empty.")).toBeInTheDocument();
+    expect(screen.getByText("Your cart is empty")).toBeInTheDocument();
     expect(screen.getByText(/Total: USD 0\.00/)).toBeInTheDocument();
   });
 
@@ -88,7 +88,7 @@ describe("POSPage", () => {
     const user = userEvent.setup();
     renderWithProviders(<POSPage />);
     await screen.findByRole("button", { name: /Coffee/ });
-    await user.click(screen.getByRole("button", { name: "Finalize" }));
+    await user.click(screen.getByRole("button", { name: "Finalize sale" }));
     expect(screen.getByText("Cart is empty")).toBeInTheDocument();
     expect(createRecord).not.toHaveBeenCalled();
   });
@@ -99,13 +99,13 @@ describe("POSPage", () => {
     const user = userEvent.setup();
     renderWithProviders(<POSPage />);
     await user.click(await screen.findByRole("button", { name: /Coffee/ }));
-    await user.click(screen.getByRole("button", { name: "Finalize" }));
+    await user.click(screen.getByRole("button", { name: "Finalize sale" }));
 
     await waitFor(() => expect(createRecord).toHaveBeenCalledWith("sales.pos_invoice", expect.any(Object)));
     expect(finalizePOSInvoice).toHaveBeenCalledWith("inv-1", expect.any(String));
     expect(await screen.findByText("Finalized inv-1")).toBeInTheDocument();
     // Cart resets after a successful sale.
-    expect(screen.getByText("Empty.")).toBeInTheDocument();
+    expect(screen.getByText("Your cart is empty")).toBeInTheDocument();
   });
 
   it("queues the sale offline when finalize fails", async () => {
@@ -114,7 +114,7 @@ describe("POSPage", () => {
     const user = userEvent.setup();
     renderWithProviders(<POSPage />);
     await user.click(await screen.findByRole("button", { name: /Coffee/ }));
-    await user.click(screen.getByRole("button", { name: "Finalize" }));
+    await user.click(screen.getByRole("button", { name: "Finalize sale" }));
 
     expect(await screen.findByText(/Queued offline: network down/)).toBeInTheDocument();
     expect(screen.getByText(/1 pending/)).toBeInTheDocument();
