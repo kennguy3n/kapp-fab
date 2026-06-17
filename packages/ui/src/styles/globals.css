@@ -21,6 +21,21 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Mona Sans — the KChat brand typeface.  Self-hosted variable font
+ * (SIL OFL, github.com/github/mona-sans) so we never hotlink a CDN
+ * and the weight axis (200–900) is available without shipping one
+ * file per weight.  font-display:swap keeps text visible during the
+ * woff2 fetch (the --font-sans fallback stack renders first), and
+ * because the file is bundled by Vite from a fixed path there's no
+ * layout shift beyond the metric-compatible fallback. */
+@font-face {
+  font-family: "Mona Sans";
+  src: url("./fonts/MonaSans.woff2") format("woff2");
+  font-weight: 200 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 @theme {
   /* Semantic colour tokens — these map to CSS variables resolved
    * at runtime, so .dark { --bg: ... } switches the entire app's
@@ -60,6 +75,10 @@
   --radius-md: 0.375rem;
   --radius-lg: 0.5rem;
   --radius-xl: 0.75rem;
+  /* Full pill radius — KChat buttons and chips use a fully
+   * rounded capsule shape.  Named `pill` so `rounded-pill`
+   * reads intentionally at call sites vs. an opaque large value. */
+  --radius-pill: 9999px;
 
   /* Shadow scale — small for inline controls, md for popovers,
    * lg for modals / dialogs. */
@@ -67,67 +86,79 @@
   --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
   --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
 
-  /* Font family — Inter is the primary type for the dashboard;
-   * the OS UI stack is the fallback so users without Inter still
-   * get a tuned sans-serif appropriate to their platform. */
+  /* Font family — Mona Sans is the KChat brand typeface (self-hosted
+   * variable font, declared via @font-face below).  Inter and the OS
+   * UI stack are fallbacks so the first paint before the woff2 loads
+   * (and any user without the font) still gets a tuned sans-serif. */
   --font-sans:
-    "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    "Mona Sans", "Inter", ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    sans-serif;
   --font-mono:
     ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
     monospace;
 }
 
 :root {
-  /* Light theme — slate neutrals + indigo accent.  These are the
-   * defaults; the .dark variant below overrides each token. */
-  --bg: oklch(98.5% 0.002 247);
-  --bg-subtle: oklch(96.5% 0.003 247);
-  --bg-muted: oklch(92% 0.005 247);
+  /* Light theme — KChat neutrals + violet accent.  Neutrals are
+   * de-tinted (chroma ~0) toward the KChat near-black #191919 /
+   * white #FFFFFF palette; the prior slate cast (hue 247) is gone.
+   * These are the defaults; the .dark variant below overrides each
+   * token. */
+  --bg: oklch(99% 0 0);
+  --bg-subtle: oklch(97% 0 0);
+  --bg-muted: oklch(93.5% 0 0);
   --bg-elevated: oklch(100% 0 0);
-  --fg: oklch(20% 0.02 247);
-  --fg-muted: oklch(45% 0.015 247);
-  --fg-subtle: oklch(60% 0.01 247);
-  --fg-inverted: oklch(98.5% 0.002 247);
-  --border: oklch(92% 0.005 247);
-  --border-strong: oklch(80% 0.01 247);
-  --accent: oklch(54% 0.22 277);
-  --accent-fg: oklch(98.5% 0.002 247);
-  --accent-hover: oklch(48% 0.22 277);
+  /* --fg ≈ #191919 near-black — neutral, no blue cast. */
+  --fg: oklch(18% 0 0);
+  --fg-muted: oklch(44% 0.004 277);
+  --fg-subtle: oklch(60% 0.004 277);
+  --fg-inverted: oklch(99% 0 0);
+  --border: oklch(92% 0.002 277);
+  --border-strong: oklch(82% 0.004 277);
+  /* --accent ≈ #553BD8 KChat primary violet. */
+  --accent: oklch(48% 0.23 277);
+  --accent-fg: oklch(99% 0 0);
+  --accent-hover: oklch(43% 0.23 277);
   --success: oklch(62% 0.18 145);
-  --success-fg: oklch(98.5% 0.002 247);
+  --success-fg: oklch(99% 0 0);
   --warning: oklch(75% 0.16 80);
-  --warning-fg: oklch(20% 0.02 247);
+  --warning-fg: oklch(18% 0 0);
   --danger: oklch(58% 0.22 27);
-  --danger-fg: oklch(98.5% 0.002 247);
+  --danger-fg: oklch(99% 0 0);
   --info: oklch(60% 0.18 230);
-  --info-fg: oklch(98.5% 0.002 247);
-  --focus-ring: oklch(54% 0.22 277 / 0.4);
+  --info-fg: oklch(99% 0 0);
+  --focus-ring: oklch(48% 0.23 277 / 0.4);
 }
 
 .dark {
-  --bg: oklch(15% 0.015 247);
-  --bg-subtle: oklch(18% 0.015 247);
-  --bg-muted: oklch(22% 0.018 247);
-  --bg-elevated: oklch(20% 0.018 247);
-  --fg: oklch(96% 0.005 247);
-  --fg-muted: oklch(75% 0.01 247);
-  --fg-subtle: oklch(60% 0.012 247);
-  --fg-inverted: oklch(15% 0.015 247);
-  --border: oklch(28% 0.02 247);
-  --border-strong: oklch(38% 0.025 247);
-  --accent: oklch(65% 0.2 277);
-  --accent-fg: oklch(15% 0.015 247);
-  --accent-hover: oklch(70% 0.2 277);
+  /* Dark theme — near-black neutral surfaces (de-tinted toward the
+   * KChat #191919 family) with the light-violet accent #BAB2FF so
+   * CTAs and links read against the dark ground. */
+  --bg: oklch(16% 0 0);
+  --bg-subtle: oklch(19% 0 0);
+  --bg-muted: oklch(23% 0 0);
+  --bg-elevated: oklch(21% 0 0);
+  --fg: oklch(96% 0 0);
+  --fg-muted: oklch(75% 0.004 277);
+  --fg-subtle: oklch(60% 0.006 277);
+  --fg-inverted: oklch(16% 0 0);
+  --border: oklch(28% 0.004 277);
+  --border-strong: oklch(38% 0.006 277);
+  /* --accent ≈ #BAB2FF KChat light violet (reads on dark surfaces);
+   * --accent-fg is near-black so label text on the violet CTA reads. */
+  --accent: oklch(80% 0.11 282);
+  --accent-fg: oklch(18% 0 0);
+  --accent-hover: oklch(85% 0.09 282);
   --success: oklch(70% 0.16 145);
-  --success-fg: oklch(15% 0.015 247);
+  --success-fg: oklch(16% 0 0);
   --warning: oklch(80% 0.14 80);
-  --warning-fg: oklch(15% 0.015 247);
+  --warning-fg: oklch(16% 0 0);
   --danger: oklch(68% 0.2 27);
-  --danger-fg: oklch(15% 0.015 247);
+  --danger-fg: oklch(16% 0 0);
   --info: oklch(70% 0.16 230);
-  --info-fg: oklch(15% 0.015 247);
-  --focus-ring: oklch(65% 0.2 277 / 0.45);
+  --info-fg: oklch(16% 0 0);
+  --focus-ring: oklch(80% 0.11 282 / 0.5);
 }
 
 html,
@@ -142,6 +173,19 @@ body {
 
 * {
   box-sizing: border-box;
+}
+
+/* KChat headings — Mona Sans medium (500) with tight negative
+ * tracking.  Applied to the bare elements so every heading inherits
+ * the brand treatment without each call site repeating the
+ * `font-medium tracking-tight` utilities; call sites can still
+ * override via Tailwind utilities thanks to specificity (a utility
+ * class beats this element selector). */
+h1,
+h2,
+h3 {
+  font-weight: 500;
+  letter-spacing: -0.02em;
 }
 
 /* Default focus ring — applied to all keyboard-focusable elements
