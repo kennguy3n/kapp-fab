@@ -378,10 +378,11 @@ function DiffView({
   const deleted = before != null && after == null;
   const changes = diffRecords(beforeObj, afterObj);
 
-  if (deleted && changes.length === 0) {
-    return <Badge variant="danger">Record removed</Badge>;
-  }
-  if (changes.length === 0) {
+  // A deletion is always flagged, even when it carries field data
+  // (before populated, after null). Without this, a deletion fell
+  // through to the generic "old → empty" path and lost its "removed"
+  // indicator.
+  if (!created && !deleted && changes.length === 0) {
     return <span className="text-fg-subtle">No field changes</span>;
   }
 
@@ -392,26 +393,41 @@ function DiffView({
           Record created
         </Badge>
       )}
-      <ul className="flex flex-col gap-1">
-        {changes.map((c) => (
-          <li key={c.key} className="flex flex-wrap items-baseline gap-1.5">
-            <span className="font-medium text-fg">{humanizeLabel(c.key)}</span>
-            {created ? (
-              <span className="text-success">{formatScalar(c.after, fmt)}</span>
-            ) : (
-              <>
+      {deleted && (
+        <Badge variant="danger" className="self-start">
+          Record removed
+        </Badge>
+      )}
+      {changes.length > 0 && (
+        <ul className="flex flex-col gap-1">
+          {changes.map((c) => (
+            <li key={c.key} className="flex flex-wrap items-baseline gap-1.5">
+              <span className="font-medium text-fg">
+                {humanizeLabel(c.key)}
+              </span>
+              {created ? (
+                <span className="text-success">
+                  {formatScalar(c.after, fmt)}
+                </span>
+              ) : deleted ? (
                 <span className="text-fg-muted line-through">
                   {formatScalar(c.before, fmt)}
                 </span>
-                <span aria-hidden="true" className="text-fg-subtle">
-                  →
-                </span>
-                <span className="text-fg">{formatScalar(c.after, fmt)}</span>
-              </>
-            )}
-          </li>
-        ))}
-      </ul>
+              ) : (
+                <>
+                  <span className="text-fg-muted line-through">
+                    {formatScalar(c.before, fmt)}
+                  </span>
+                  <span aria-hidden="true" className="text-fg-subtle">
+                    →
+                  </span>
+                  <span className="text-fg">{formatScalar(c.after, fmt)}</span>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

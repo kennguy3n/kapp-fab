@@ -14,7 +14,7 @@
  * Everything here is context-free (no i18n/formatter hooks) so it can
  * be rendered in any test harness without extra providers.
  */
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, Check, Copy } from "lucide-react";
 import {
   Button,
@@ -62,7 +62,7 @@ export function AdminPageHeader({
         )}
       </div>
       {description && (
-        <p className="max-w-2xl text-sm text-fg-muted">{description}</p>
+        <div className="max-w-2xl text-sm text-fg-muted">{description}</div>
       )}
     </header>
   );
@@ -203,14 +203,23 @@ export function CopyableId({
   full?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
+  const resetTimer = useRef<number | null>(null);
   const display = full || value.length <= 12 ? value : `${value.slice(0, 8)}…`;
+
+  useEffect(
+    () => () => {
+      if (resetTimer.current !== null) window.clearTimeout(resetTimer.current);
+    },
+    [],
+  );
 
   async function copy() {
     try {
       await navigator.clipboard.writeText(value);
       setCopied(true);
       toast.success("Copied to clipboard");
-      window.setTimeout(() => setCopied(false), 1500);
+      if (resetTimer.current !== null) window.clearTimeout(resetTimer.current);
+      resetTimer.current = window.setTimeout(() => setCopied(false), 1500);
     } catch {
       toast.error("Couldn't copy to clipboard");
     }

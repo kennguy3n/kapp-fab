@@ -132,10 +132,15 @@ export function PlacementPolicyPage() {
 
   const dirty = useMemo(() => {
     if (!policyQuery.data || !form) return false;
-    return (
-      JSON.stringify(toPolicy(policyQuery.data, form)) !==
-      JSON.stringify(policyQuery.data)
+    // Compare both sides through the same toPolicy transform. toPolicy
+    // omits empty optionals (kms, regions, …), so comparing its output
+    // against the raw server payload would flag a phantom change on
+    // first load whenever the server returns those fields empty. Pushing
+    // the baseline through toForm→toPolicy normalises it the same way.
+    const baseline = JSON.stringify(
+      toPolicy(policyQuery.data, toForm(policyQuery.data)),
     );
+    return JSON.stringify(toPolicy(policyQuery.data, form)) !== baseline;
   }, [form, policyQuery.data]);
 
   const countryError =
