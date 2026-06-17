@@ -6,7 +6,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { Link } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
 import {
   Badge,
@@ -42,6 +42,14 @@ interface MilestoneData {
   due_date?: string;
   weight?: number;
   status?: string;
+}
+
+interface RescheduleVars {
+  project: KRecord;
+  patch: { start_date: string; end_date: string };
+  withToast: boolean;
+  ns: Date;
+  ne: Date;
 }
 
 type Zoom = "day" | "week" | "month";
@@ -216,7 +224,47 @@ export function ProjectGanttPage() {
     return parseDate(data.start_date) !== null && parseDate(data.end_date) !== null;
   }
 
-  async function commitReschedule(
+  // Drag/keyboard rescheduling persists via react-query's optimistic-update
+  // contract: onMutate cancels in-flight fetches, snapshots the list, and
+  // shifts the bar; onError rolls back to that snapshot; onSettled always
+  // invalidates so the cache reconverges with the server even if a second
+  // reschedule overlaps the first.
+  const rescheduleMut = useMutation({
+    mutationFn: ({ project, patch }: RescheduleVars) =>
+      api.updateRecord(KTYPE_PROJECT, project.id, patch),
+    onMutate: async ({ project, patch }) => {
+      const key = ["records", KTYPE_PROJECT];
+      await qc.cancelQueries({ queryKey: key });
+      const prev = qc.getQueryData<KRecord[]>(key);
+      qc.setQueryData<KRecord[]>(
+        key,
+        (old) =>
+          old?.map((r) =>
+            r.id === project.id ? { ...r, data: { ...r.data, ...patch } } : r,
+          ) ?? old,
+      );
+      return { prev };
+    },
+    onSuccess: (_saved, { project, withToast, ns, ne }) => {
+      if (withToast) {
+        toast.success(
+          `Moved “${recordLabel(project)}” to ${fmt.date(ns, {
+            month: "short",
+            day: "numeric",
+          })} – ${fmt.date(ne, { month: "short", day: "numeric", year: "numeric" })}`,
+        );
+      }
+    },
+    onError: (err, _vars, context) => {
+      if (context?.prev)
+        qc.setQueryData(["records", KTYPE_PROJECT], context.prev);
+      toast.error(`Couldn't reschedule: ${(err as Error).message}`);
+    },
+    onSettled: () =>
+      qc.invalidateQueries({ queryKey: ["records", KTYPE_PROJECT] }),
+  });
+
+  function commitReschedule(
     project: KRecord,
     deltaDays: number,
     withToast: boolean,
@@ -229,30 +277,7 @@ export function ProjectGanttPage() {
     const ns = addDays(s, deltaDays);
     const ne = addDays(e, deltaDays);
     const patch = { start_date: toISODate(ns), end_date: toISODate(ne) };
-    const key = ["records", KTYPE_PROJECT];
-    const prev = qc.getQueryData<KRecord[]>(key);
-    qc.setQueryData<KRecord[]>(key, (old) =>
-      old?.map((r) =>
-        r.id === project.id ? { ...r, data: { ...r.data, ...patch } } : r,
-      ) ?? old,
-    );
-    try {
-      const saved = await api.updateRecord(KTYPE_PROJECT, project.id, patch);
-      qc.setQueryData<KRecord[]>(key, (old) =>
-        old?.map((r) => (r.id === project.id ? saved : r)) ?? old,
-      );
-      if (withToast) {
-        toast.success(
-          `Moved “${recordLabel(project)}” to ${fmt.date(ns, {
-            month: "short",
-            day: "numeric",
-          })} – ${fmt.date(ne, { month: "short", day: "numeric", year: "numeric" })}`,
-        );
-      }
-    } catch (err) {
-      if (prev) qc.setQueryData(key, prev);
-      toast.error(`Couldn't reschedule: ${(err as Error).message}`);
-    }
+    rescheduleMut.mutate({ project, patch, withToast, ns, ne });
   }
 
   function onBarPointerDown(e: ReactPointerEvent<HTMLDivElement>, p: KRecord) {

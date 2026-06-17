@@ -323,14 +323,14 @@ function KpiGrid({
     {
       label: "Outstanding AR",
       value: formatAmount(s.outstanding_ar, s.base_currency),
-      sub: `Owed to you · in ${s.base_currency}`,
+      sub: s.base_currency ? `Owed to you · in ${s.base_currency}` : "Owed to you",
       to: "/records/finance.ar_invoice",
       icon: <Receipt />,
     },
     {
       label: "Outstanding AP",
       value: formatAmount(s.outstanding_ap, s.base_currency),
-      sub: `You owe · in ${s.base_currency}`,
+      sub: s.base_currency ? `You owe · in ${s.base_currency}` : "You owe",
       to: "/records/finance.ap_bill",
       icon: <Wallet />,
     },

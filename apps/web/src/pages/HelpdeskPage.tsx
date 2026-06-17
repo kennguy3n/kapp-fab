@@ -44,6 +44,12 @@ interface TicketData {
   sla_resolution_by?: string;
 }
 
+interface PatchTicketVars {
+  id: string;
+  patch: Partial<TicketData>;
+  successMsg?: string;
+}
+
 const BOARD_COLUMNS: { status: string; label: string }[] = [
   { status: "open", label: "Open" },
   { status: "in_progress", label: "In progress" },
@@ -181,27 +187,44 @@ export function HelpdeskPage() {
     return map;
   }, [boardTickets]);
 
-  async function patchTicket(
+  // Re-triage persists through react-query's optimistic-update contract:
+  // onMutate cancels in-flight fetches, snapshots the list, and applies the
+  // change; onError rolls back to that snapshot; onSettled always invalidates
+  // so the cache reconverges with the server even when concurrent edits overlap.
+  const patchTicketMut = useMutation({
+    mutationFn: ({ id, patch }: PatchTicketVars) =>
+      api.updateRecord(TICKET_KTYPE, id, patch),
+    onMutate: async ({ id, patch }) => {
+      const key = ["records", TICKET_KTYPE];
+      await qc.cancelQueries({ queryKey: key });
+      const prev = qc.getQueryData<KRecord[]>(key);
+      qc.setQueryData<KRecord[]>(
+        key,
+        (old) =>
+          old?.map((r) =>
+            r.id === id ? { ...r, data: { ...r.data, ...patch } } : r,
+          ) ?? old,
+      );
+      return { prev };
+    },
+    onSuccess: (_saved, { successMsg }) => {
+      if (successMsg) toast.success(successMsg);
+    },
+    onError: (err, _vars, context) => {
+      if (context?.prev)
+        qc.setQueryData(["records", TICKET_KTYPE], context.prev);
+      toast.error(`Couldn't update ticket: ${(err as Error).message}`);
+    },
+    onSettled: () =>
+      qc.invalidateQueries({ queryKey: ["records", TICKET_KTYPE] }),
+  });
+
+  function patchTicket(
     id: string,
     patch: Partial<TicketData>,
     successMsg?: string,
   ) {
-    const key = ["records", TICKET_KTYPE];
-    const prev = qc.getQueryData<KRecord[]>(key);
-    qc.setQueryData<KRecord[]>(key, (old) =>
-      old?.map((r) => (r.id === id ? { ...r, data: { ...r.data, ...patch } } : r)) ??
-      old,
-    );
-    try {
-      const saved = await api.updateRecord(TICKET_KTYPE, id, patch);
-      qc.setQueryData<KRecord[]>(key, (old) =>
-        old?.map((r) => (r.id === id ? saved : r)) ?? old,
-      );
-      if (successMsg) toast.success(successMsg);
-    } catch (err) {
-      if (prev) qc.setQueryData(key, prev);
-      toast.error(`Couldn't update ticket: ${(err as Error).message}`);
-    }
+    patchTicketMut.mutate({ id, patch, successMsg });
   }
 
   function handleDrop(e: DragEvent<HTMLDivElement>, status: string) {

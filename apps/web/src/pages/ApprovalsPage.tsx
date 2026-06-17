@@ -197,17 +197,21 @@ export function ApprovalsPage() {
   });
 
   const bulkApprove = useMutation({
+    // Promise.allSettled never rejects, so the mutation always resolves and
+    // there is no reachable error path — per-item failures are reported via
+    // the resolved `failedIds` instead of an onError handler.
     mutationFn: async (ids: string[]) => {
       const results = await Promise.allSettled(
         ids.map((id) => api.decideApproval(id, "approve")),
       );
-      return {
-        total: ids.length,
-        failed: results.filter((r) => r.status === "rejected").length,
-      };
+      const failedIds = ids.filter((_, i) => results[i].status === "rejected");
+      return { total: ids.length, failedIds };
     },
-    onSuccess: ({ total, failed }) => {
-      setSelected(new Set());
+    onSuccess: ({ total, failedIds }) => {
+      const failed = failedIds.length;
+      // Keep the requests that failed selected so the operator can retry them
+      // directly; clear only the ones that actually went through.
+      setSelected(new Set(failedIds));
       if (failed === 0) {
         toast.success(`Approved ${total} request${total === 1 ? "" : "s"}`);
       } else {
@@ -216,10 +220,6 @@ export function ApprovalsPage() {
         });
       }
     },
-    onError: (error) =>
-      toast.error("Couldn't approve the selected requests", {
-        description: (error as Error).message,
-      }),
     onSettled: () => qc.invalidateQueries({ queryKey: ["approvals"] }),
   });
 
