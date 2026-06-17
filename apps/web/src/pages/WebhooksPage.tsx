@@ -183,13 +183,9 @@ export function WebhooksPage() {
                     className="flex items-center justify-end gap-1"
                     onClick={(e) => e.stopPropagation()}
                   >
-                    <Button
-                      asChild
-                      size="sm"
-                      variant="ghost"
-                      leadingIcon={<ScrollText />}
-                    >
+                    <Button asChild size="sm" variant="ghost">
                       <Link to={`/admin/webhooks/${h.id}/deliveries`}>
+                        <ScrollText className="h-4 w-4" />
                         Delivery log
                       </Link>
                     </Button>

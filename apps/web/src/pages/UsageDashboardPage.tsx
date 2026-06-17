@@ -45,6 +45,16 @@ const METRICS: Array<{
   { key: "user_seats", label: "Seats", format: (n, fmt) => fmt.number(n) },
 ];
 
+// Friendly series labels for the history chart, keyed by the raw metric
+// name the usage meter emits (api_calls, krecord_count, …). Falls back to
+// humanizeLabel so a newly-added metric still reads reasonably.
+const METRIC_LABELS: Record<string, string> = Object.fromEntries(
+  METRICS.map((m) => [m.key, m.label]),
+);
+function metricLabel(key: string): string {
+  return METRIC_LABELS[key] ?? humanizeLabel(key);
+}
+
 function usageStatus(value: number, limit: number): {
   label: string;
   variant: BadgeVariant;
@@ -282,7 +292,7 @@ function UsageHistoryChart({
         return (
           <div key={m} className="flex flex-col gap-1">
             <div className="text-xs font-medium text-fg-muted">
-              {humanizeLabel(m)}
+              {metricLabel(m)}
             </div>
             <div className="flex h-24 items-end gap-1.5">
               {periods.map((p, i) => {
@@ -303,7 +313,7 @@ function UsageHistoryChart({
               {periods.map((p) => (
                 <div
                   key={p}
-                  className="flex-1 text-center text-[10px] text-fg-muted"
+                  className="flex-1 text-center text-xs text-fg-muted"
                 >
                   {fmt.date(new Date(p), { month: "short" })}
                 </div>

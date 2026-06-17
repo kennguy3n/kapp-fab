@@ -22,9 +22,10 @@ function renderImports(initialEntry: string) {
       <LocaleProvider>
         <MemoryRouter initialEntries={[initialEntry]}>
           <Routes>
+            {/* Mirror App.tsx exactly: /imports/new is its own static route
+                (no :id param), registered ahead of the dynamic /imports/:id. */}
             <Route path="/imports" element={<ImportPage />} />
-            {/* /imports/new is captured by the :id param (id === "new"),
-                matching the real route table in App.tsx. */}
+            <Route path="/imports/new" element={<ImportPage />} />
             <Route path="/imports/:id" element={<ImportPage />} />
           </Routes>
         </MemoryRouter>

@@ -192,7 +192,7 @@ export function RetentionPoliciesPage() {
                     </div>
                   </TableCell>
                   <TableCell className="text-end">
-                    <div className="flex justify-end">
+                    <div className="flex items-center justify-end gap-2">
                       <Input
                         type="number"
                         min={1}
@@ -201,14 +201,14 @@ export function RetentionPoliciesPage() {
                         value={row.retention_days}
                         aria-label={`${meta?.label ?? c} retention in days`}
                         invalid={invalid}
-                        trailingAddon="days"
                         onChange={(e) =>
                           updateField(c, {
                             retention_days: Number(e.target.value),
                           })
                         }
-                        className="w-28 text-end font-tabular"
+                        className="w-20 text-end font-tabular"
                       />
+                      <span className="text-sm text-fg-muted">days</span>
                     </div>
                   </TableCell>
                   <TableCell>

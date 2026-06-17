@@ -15,6 +15,17 @@ import { tenantKey, useTenantName } from "../lib/tenant";
 import { humanizeLabel, humanizeToken } from "../lib/ktypeView";
 import { AdminErrorState, AdminPageHeader, Toggle } from "./adminKit";
 
+// ktypeView's acronym map covers CRM/HR/POS/LMS but not a few that the
+// platform's feature keys use, so labels read "Insights SQL Editor"
+// rather than "Insights Sql Editor".
+const EXTRA_ACRONYMS: Record<string, string> = { Sql: "SQL" };
+function featureLabel(key: string): string {
+  return humanizeLabel(key)
+    .split(" ")
+    .map((word) => EXTRA_ACRONYMS[word] ?? word)
+    .join(" ");
+}
+
 export function TenantFeaturesPage() {
   const qc = useQueryClient();
   const tenantId = tenantKey();
@@ -101,7 +112,7 @@ export function TenantFeaturesPage() {
                   >
                     <div className="min-w-0">
                       <p className="truncate font-medium text-fg" title={k}>
-                        {humanizeLabel(k)}
+                        {featureLabel(k)}
                       </p>
                       <p className="text-xs text-fg-muted">
                         {on ? "Enabled" : "Disabled"}
@@ -110,7 +121,7 @@ export function TenantFeaturesPage() {
                     <Toggle
                       checked={on}
                       onChange={() => toggle(k)}
-                      label={`Toggle ${humanizeLabel(k)}`}
+                      label={`Toggle ${featureLabel(k)}`}
                     />
                   </li>
                 );

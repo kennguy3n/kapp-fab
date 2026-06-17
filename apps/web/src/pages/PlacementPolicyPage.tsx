@@ -16,6 +16,7 @@ import {
   toast,
 } from "@kapp/ui";
 import { api } from "../lib/api";
+import { humanizeToken } from "../lib/ktypeView";
 import { tenantKey, useTenantName } from "../lib/tenant";
 import { AdminErrorState, AdminPageHeader } from "./adminKit";
 
@@ -38,7 +39,10 @@ const ENCRYPTION_MODES: { value: string; label: string; help: string }[] = [
 ];
 
 function modeLabel(mode: string): string {
-  return ENCRYPTION_MODES.find((m) => m.value === mode)?.label ?? mode;
+  if (!mode) return "—";
+  // Known modes get their friendly label; anything unexpected from the
+  // fabric still reads as Title Case rather than a raw enum token.
+  return ENCRYPTION_MODES.find((m) => m.value === mode)?.label ?? humanizeToken(mode);
 }
 
 interface PolicyForm {

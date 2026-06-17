@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { Link, useParams, useNavigate } from "react-router-dom";
+import { Link, useParams, useNavigate, useLocation } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
@@ -149,8 +149,12 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function ImportPage() {
   const { id } = useParams<{ id?: string }>();
-  if (id && id !== "new") return <ImportWizard jobId={id} />;
-  if (id === "new") return <ImportWizard jobId={undefined} />;
+  const { pathname } = useLocation();
+  // App.tsx registers /imports/new as its own route, so on that path there
+  // is no :id param; fall back to the pathname to detect a fresh wizard.
+  const isNew = id === "new" || pathname.endsWith("/imports/new");
+  if (isNew) return <ImportWizard jobId={undefined} />;
+  if (id) return <ImportWizard jobId={id} />;
   return <ImportIndex />;
 }
 
