@@ -99,12 +99,14 @@ describe("KTypeForm", () => {
         onSubmit={() => {}}
       />,
     );
+    // The option labels are humanized to Title Case for non-experts,
+    // while the underlying option values stay the raw schema tokens.
     expect(
-      screen.getByRole("option", { name: "open" }),
-    ).toBeInTheDocument();
+      screen.getByRole("option", { name: "Open" }),
+    ).toHaveValue("open");
     expect(
-      screen.getByRole("option", { name: "closed" }),
-    ).toBeInTheDocument();
+      screen.getByRole("option", { name: "Closed" }),
+    ).toHaveValue("closed");
   });
 
   it("coerces numeric field input to a JS number (not a string) on submit", async () => {

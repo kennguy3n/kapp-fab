@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { LocaleProvider } from "../lib/i18n";
 import { makeKType, makeKRecord, makeWorkflowRun } from "../test/factories";
 
 const getWorkflowRun = vi.fn();
@@ -24,17 +25,19 @@ function renderPane(
   });
   const onClose = props.onClose ?? vi.fn();
   const utils = render(
-    <QueryClientProvider client={qc}>
-      <RightPane
-        ktype={KTYPE}
-        record={makeKRecord({
-          id: "rec-1",
-          data: { title: "Acme deal", stage: "open", value: 5000 },
-        })}
-        onClose={onClose}
-        {...props}
-      />
-    </QueryClientProvider>,
+    <LocaleProvider>
+      <QueryClientProvider client={qc}>
+        <RightPane
+          ktype={KTYPE}
+          record={makeKRecord({
+            id: "rec-1",
+            data: { title: "Acme deal", stage: "open", value: 5000 },
+          })}
+          onClose={onClose}
+          {...props}
+        />
+      </QueryClientProvider>
+    </LocaleProvider>,
   );
   return { ...utils, onClose };
 }
@@ -56,8 +59,10 @@ describe("RightPane", () => {
     expect(
       await screen.findByRole("heading", { name: /Acme deal/i }),
     ).toBeInTheDocument();
-    expect(screen.getByText("title")).toBeInTheDocument();
-    expect(screen.getByText("5000")).toBeInTheDocument();
+    // Field labels are humanized to Title Case; numbers are locale-formatted
+    // (no `currency` sibling on this record, so it renders as a plain number).
+    expect(screen.getByText("Title")).toBeInTheDocument();
+    expect(screen.getByText("5,000")).toBeInTheDocument();
   });
 
   it("derives the workflow state heuristically when no run exists", async () => {
@@ -67,7 +72,8 @@ describe("RightPane", () => {
     await waitFor(() =>
       expect(screen.getByText("Workflow state")).toBeInTheDocument(),
     );
-    expect(screen.getAllByText("open").length).toBeGreaterThan(0);
+    // The state token renders as a humanized Badge ("Open").
+    expect(screen.getAllByText("Open").length).toBeGreaterThan(0);
   });
 
   it("renders the legal next actions and invokes onAction when clicked", async () => {
@@ -99,7 +105,8 @@ describe("RightPane", () => {
     const user = userEvent.setup();
     renderPane();
 
-    await user.click(await screen.findByRole("button", { name: /Timeline/i }));
+    // Tabs use the ARIA tablist pattern (role="tab" + aria-selected).
+    await user.click(await screen.findByRole("tab", { name: /Timeline/i }));
     expect(await screen.findByText(/open → won/i)).toBeInTheDocument();
     expect(screen.getByText(/by user-9/i)).toBeInTheDocument();
   });

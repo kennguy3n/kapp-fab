@@ -5,17 +5,41 @@ import type { KRecord, SavedView } from "@kapp/client";
 import {
   Button,
   ConfirmDialog,
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
   EmptyState,
+  Eyebrow,
+  Input,
   PromptDialog,
   Select,
   Skeleton,
   toast,
 } from "@kapp/ui";
-import { AlertTriangle, Inbox, Plus } from "lucide-react";
+import {
+  AlertTriangle,
+  Inbox,
+  Plus,
+  Rows2,
+  Rows3,
+  Search,
+  SlidersHorizontal,
+} from "lucide-react";
 import { api } from "../lib/api";
-import { KTypeList } from "../components/KTypeList";
+import { KTypeList, type Density } from "../components/KTypeList";
 import { KanbanView } from "../components/KanbanView";
 import { RightPane } from "../components/RightPane";
+import {
+  humanizeLabel,
+  humanizeToken,
+  ktypePlural,
+  ktypeSingular,
+} from "../lib/ktypeView";
 
 type ViewMode = "list" | "kanban";
 
@@ -123,6 +147,11 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
     },
   });
 
+  const [search, setSearch] = useState("");
+  const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(new Set());
+  const [density, setDensity] = useState<Density>("comfortable");
+  const [recordToDelete, setRecordToDelete] = useState<KRecord | null>(null);
+
   const [selected, setSelected] = useState<KRecord | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   // React Router reuses this component across /records/:ktype
@@ -136,6 +165,9 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
   useEffect(() => {
     setSelectedIds(new Set());
     setSelected(null);
+    setSearch("");
+    setHiddenColumns(new Set());
+    setRecordToDelete(null);
   }, [ktype]);
   const toggleSelect = (id: string, checked: boolean) => {
     setSelectedIds((prev) => {
@@ -182,6 +214,25 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
     onError: (err) => {
       setBulkDeleteOpen(false);
       toast.error("Bulk delete failed", {
+        description: (err as Error).message,
+      });
+    },
+  });
+
+  const deleteRecordMutation = useMutation({
+    mutationFn: async (record: KRecord) =>
+      api.bulkRecords(ktype!, { ids: [record.id], action: "delete" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["records", ktype] });
+      setRecordToDelete(null);
+      setSelected((cur) =>
+        cur && cur.id === recordToDelete?.id ? null : cur,
+      );
+      toast.success("Record deleted");
+    },
+    onError: (err) => {
+      setRecordToDelete(null);
+      toast.error("Couldn't delete record", {
         description: (err as Error).message,
       });
     },
@@ -306,8 +357,8 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
     return (
       <EmptyState
         icon={<AlertTriangle />}
-        title="KType not found"
-        description="This record type doesn't exist or you don't have access to it."
+        title="We couldn't find that record type"
+        description="This record type doesn't exist, or you don't have access to it. Check the link and try again."
       />
     );
   }
@@ -315,18 +366,44 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
   const kt = ktypeQuery.data;
   const views = viewsQuery.data ?? [];
 
-  const hasRecords = records.length > 0;
+  const fields = kt.schema?.fields ?? [];
+  const schemaColumns =
+    kt.schema?.views?.list?.columns ?? fields.slice(0, 4).map((f) => f.name);
+  const visibleColumns = schemaColumns.filter((c) => !hiddenColumns.has(c));
+
+  const query = search.trim().toLowerCase();
+  const visibleRecords = query
+    ? records.filter((r) =>
+        schemaColumns.some((c) => {
+          const v = r.data[c];
+          return v != null && String(v).toLowerCase().includes(query);
+        }),
+      )
+    : records;
+  const hasRecords = visibleRecords.length > 0;
+
+  const pluralLabel = ktypePlural(kt.name);
+  const singularLabel = ktypeSingular(kt.name);
+  const pluralLower = pluralLabel.toLowerCase();
+  const singularLower = singularLabel.toLowerCase();
+  const area = humanizeToken(kt.name.split(".")[0] ?? kt.name);
+  const isFiltered = !!activeView || !!query;
+  const countLabel = `${visibleRecords.length.toLocaleString()} ${
+    visibleRecords.length === 1 ? singularLower : pluralLower
+  }`;
 
   return (
     <div className="flex items-start gap-4">
       <section className="min-w-0 flex-1">
-        <header className="flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight text-fg">
-            {kt.name}
-          </h1>
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-2 text-sm text-fg-muted">
-              View:
+        <header className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <Eyebrow>{area}</Eyebrow>
+              <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-fg">
+                {pluralLabel}
+              </h1>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
               <Select
                 size="sm"
                 aria-label="Saved view"
@@ -343,81 +420,193 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
                   </option>
                 ))}
               </Select>
-            </label>
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => setSaveViewOpen(true)}
-              disabled={createViewMutation.isPending}
-            >
-              Save view
-            </Button>
-            {activeView && (
               <Button
                 size="sm"
-                variant="ghost"
-                onClick={() => setDeleteViewOpen(true)}
-                disabled={deleteViewMutation.isPending}
+                variant="secondary"
+                onClick={() => setSaveViewOpen(true)}
+                disabled={createViewMutation.isPending}
               >
-                Delete view
+                Save view
               </Button>
-            )}
-            {hasKanban && (
-              <div role="tablist" className="flex gap-1">
+              {activeView && (
                 <Button
                   size="sm"
-                  variant={mode === "list" ? "primary" : "outline"}
-                  onClick={() => setModeOverride("list")}
-                  aria-pressed={mode === "list"}
+                  variant="ghost"
+                  onClick={() => setDeleteViewOpen(true)}
+                  disabled={deleteViewMutation.isPending}
                 >
-                  List
+                  Delete view
                 </Button>
-                <Button
-                  size="sm"
-                  variant={mode === "kanban" ? "primary" : "outline"}
-                  onClick={() => setModeOverride("kanban")}
-                  aria-pressed={mode === "kanban"}
-                >
-                  Kanban
-                </Button>
-              </div>
-            )}
-            <Button
-              size="sm"
-              leadingIcon={<Plus className="h-4 w-4" />}
-              onClick={() => navigate(`/records/${ktype}/new`)}
-            >
-              New
-            </Button>
+              )}
+              {hasKanban && (
+                <div role="tablist" className="flex gap-1">
+                  <Button
+                    size="sm"
+                    variant={mode === "list" ? "primary" : "outline"}
+                    onClick={() => setModeOverride("list")}
+                    aria-pressed={mode === "list"}
+                  >
+                    List
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={mode === "kanban" ? "primary" : "outline"}
+                    onClick={() => setModeOverride("kanban")}
+                    aria-pressed={mode === "kanban"}
+                  >
+                    Kanban
+                  </Button>
+                </div>
+              )}
+              <Button
+                size="sm"
+                leadingIcon={<Plus className="h-4 w-4" />}
+                onClick={() => navigate(`/records/${ktype}/new`)}
+              >
+                New {singularLabel}
+              </Button>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {mode === "list" && (
+                <>
+                  <Input
+                    size="sm"
+                    type="search"
+                    aria-label="Search records"
+                    placeholder={`Search ${pluralLower}`}
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    leadingAddon={<Search className="size-4" aria-hidden />}
+                    className="w-56"
+                  />
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        leadingIcon={<SlidersHorizontal className="size-4" />}
+                      >
+                        Columns
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start">
+                      <DropdownMenuLabel>Toggle columns</DropdownMenuLabel>
+                      <DropdownMenuSeparator />
+                      {schemaColumns.map((c) => {
+                        const checked = !hiddenColumns.has(c);
+                        return (
+                          <DropdownMenuCheckboxItem
+                            key={c}
+                            checked={checked}
+                            onSelect={(e) => e.preventDefault()}
+                            onCheckedChange={(next) =>
+                              setHiddenColumns((prev) => {
+                                const set = new Set(prev);
+                                if (next) set.delete(c);
+                                else if (
+                                  schemaColumns.length - set.size >
+                                  1
+                                )
+                                  set.add(c);
+                                return set;
+                              })
+                            }
+                          >
+                            {humanizeLabel(c)}
+                          </DropdownMenuCheckboxItem>
+                        );
+                      })}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        aria-label="Row density"
+                        leadingIcon={
+                          density === "compact" ? (
+                            <Rows3 className="size-4" />
+                          ) : (
+                            <Rows2 className="size-4" />
+                          )
+                        }
+                      >
+                        Density
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start">
+                      <DropdownMenuLabel>Row density</DropdownMenuLabel>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuRadioGroup
+                        value={density}
+                        onValueChange={(v) => setDensity(v as Density)}
+                      >
+                        <DropdownMenuRadioItem value="comfortable">
+                          Comfortable
+                        </DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="compact">
+                          Compact
+                        </DropdownMenuRadioItem>
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </>
+              )}
+            </div>
+            <p className="text-sm text-fg-muted" aria-live="polite">
+              {countLabel}
+            </p>
           </div>
         </header>
         <div className="mt-4">
           {!hasRecords ? (
-            <EmptyState
-              icon={<Inbox />}
-              title={
-                activeView
-                  ? `No matching ${kt.name} records`
-                  : `No ${kt.name} records yet`
-              }
-              description={
-                activeView
-                  ? "No records match this view's filters."
-                  : "Create your first one to get started."
-              }
-              action={
-                <Button
-                  leadingIcon={<Plus className="h-4 w-4" />}
-                  onClick={() => navigate(`/records/${ktype}/new`)}
-                >
-                  New {kt.name}
-                </Button>
-              }
-            />
+            query ? (
+              <EmptyState
+                icon={<Search />}
+                title="No matches"
+                description={`No ${pluralLower} match “${search.trim()}”. Try a different search.`}
+                action={
+                  <Button variant="secondary" onClick={() => setSearch("")}>
+                    Clear search
+                  </Button>
+                }
+              />
+            ) : isFiltered ? (
+              <EmptyState
+                icon={<Inbox />}
+                title={`No matching ${pluralLower}`}
+                description="No records match this view's filters. Adjust or clear the view to see more."
+                action={
+                  <Button
+                    leadingIcon={<Plus className="h-4 w-4" />}
+                    onClick={() => navigate(`/records/${ktype}/new`)}
+                  >
+                    New {singularLabel}
+                  </Button>
+                }
+              />
+            ) : (
+              <EmptyState
+                icon={<Inbox />}
+                title={`No ${pluralLower} yet`}
+                description={`Create your first ${singularLower} to start tracking ${pluralLower} here.`}
+                action={
+                  <Button
+                    leadingIcon={<Plus className="h-4 w-4" />}
+                    onClick={() => navigate(`/records/${ktype}/new`)}
+                  >
+                    New {singularLabel}
+                  </Button>
+                }
+              />
+            )
           ) : mode === "kanban" && hasKanban ? (
             <KanbanView
               ktype={kt}
-              records={records}
+              records={visibleRecords}
               onCardClick={(r) => setSelected(r)}
               onMove={(record, toStage) =>
                 moveMutation.mutate({ record, toStage })
@@ -426,11 +615,15 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
           ) : (
             <KTypeList
               ktype={kt}
-              records={records}
+              records={visibleRecords}
+              columns={visibleColumns}
+              density={density}
               onRowClick={(r) => setSelected(r)}
               selectedIds={selectedIds}
               onToggleSelect={toggleSelect}
-              onToggleAll={(checked) => toggleSelectAll(checked, records)}
+              onToggleAll={(checked) => toggleSelectAll(checked, visibleRecords)}
+              onEditRow={(r) => navigate(`/records/${ktype}/${r.id}`)}
+              onDeleteRow={(r) => setRecordToDelete(r)}
             />
           )}
         </div>
@@ -525,6 +718,20 @@ export function RecordListPage({ defaultMode }: { defaultMode?: ViewMode } = {})
         confirmLabel="Delete view"
         loading={deleteViewMutation.isPending}
         onConfirm={confirmDeleteView}
+      />
+      <ConfirmDialog
+        open={!!recordToDelete}
+        onOpenChange={(o) => {
+          if (!o && !deleteRecordMutation.isPending) setRecordToDelete(null);
+        }}
+        destructive
+        title={`Delete this ${singularLower}?`}
+        description="This permanently removes the record. This action cannot be undone."
+        confirmLabel="Delete"
+        loading={deleteRecordMutation.isPending}
+        onConfirm={() =>
+          recordToDelete && deleteRecordMutation.mutate(recordToDelete)
+        }
       />
     </div>
   );

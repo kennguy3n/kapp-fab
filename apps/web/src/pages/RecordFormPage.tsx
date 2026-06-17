@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button } from "@kapp/ui";
+import { AlertTriangle, ArrowLeft } from "lucide-react";
+import { Button, EmptyState, Eyebrow, Skeleton, toast } from "@kapp/ui";
 import { api } from "../lib/api";
 import { KTypeForm } from "../components/KTypeForm";
+import { humanizeToken, ktypeSingular } from "../lib/ktypeView";
 
 export function RecordFormPage() {
   const { ktype, id } = useParams<{ ktype: string; id?: string }>();
@@ -33,12 +35,22 @@ export function RecordFormPage() {
     },
   });
 
+  const createAnotherMut = useMutation({
+    mutationFn: (data: Record<string, unknown>) =>
+      api.createRecord(ktype!, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["records", ktype] });
+      toast.success("Record created");
+    },
+  });
+
   const updateMut = useMutation({
     mutationFn: (data: Record<string, unknown>) =>
       api.updateRecord(ktype!, id!, data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["records", ktype] });
       qc.invalidateQueries({ queryKey: ["record", ktype, id] });
+      navigate(`/records/${ktype}`);
     },
   });
 
@@ -47,9 +59,46 @@ export function RecordFormPage() {
   // state from initialData via useState, which ignores later prop updates,
   // so mounting it before the record arrives would render a blank form.
   if (ktypeQuery.isLoading || (id && recordQuery.isLoading))
-    return <div>Loading…</div>;
-  if (!ktypeQuery.data) return <div>KType not found.</div>;
-  if (id && !recordQuery.data) return <div>Record not found.</div>;
+    return (
+      <section className="space-y-4">
+        <Skeleton className="h-8 w-48" />
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-16 w-full" />
+          ))}
+        </div>
+      </section>
+    );
+  if (!ktypeQuery.data)
+    return (
+      <EmptyState
+        icon={<AlertTriangle />}
+        title="We couldn't find that record type"
+        description="This record type doesn't exist, or you don't have access to it. Check the link and try again."
+      />
+    );
+  if (id && !recordQuery.data)
+    return (
+      <EmptyState
+        icon={<AlertTriangle />}
+        title="We couldn't find that record"
+        description="It may have been deleted, or you don't have access to it."
+        action={
+          <Button
+            variant="secondary"
+            leadingIcon={<ArrowLeft className="size-4" />}
+            onClick={() => navigate(`/records/${ktype}`)}
+          >
+            Back to list
+          </Button>
+        }
+      />
+    );
+
+  const kt = ktypeQuery.data;
+  const singular = ktypeSingular(kt.name);
+  const area = humanizeToken(kt.name.split(".")[0] ?? kt.name);
+  const saving = createMut.isPending || updateMut.isPending;
 
   // Print routes require X-Tenant-ID + Authorization headers, which
   // browser anchor navigation does not send. The buttons therefore
@@ -89,39 +138,53 @@ export function RecordFormPage() {
   };
 
   return (
-    <section>
-      <h1>
-        {id ? "Edit" : "New"} {ktypeQuery.data.name}
-      </h1>
-      {id && (
-        <div className="mb-3 flex items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => runPrint("pdf")}
-            disabled={printing !== null}
-          >
-            {printing === "pdf" ? "Preparing PDF…" : "Download PDF"}
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => runPrint("html")}
-            disabled={printing !== null}
-          >
-            {printing === "html" ? "Preparing preview…" : "Print preview (HTML)"}
-          </Button>
-          {printError && (
-            <span className="text-xs text-danger">{printError}</span>
-          )}
+    <section className="mx-auto max-w-3xl space-y-6">
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <Eyebrow>{area}</Eyebrow>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-fg">
+            {id ? "Edit" : "New"} {singular}
+          </h1>
         </div>
+        {id && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => runPrint("pdf")}
+              disabled={printing !== null}
+            >
+              {printing === "pdf" ? "Preparing PDF…" : "Download PDF"}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => runPrint("html")}
+              disabled={printing !== null}
+            >
+              {printing === "html"
+                ? "Preparing preview…"
+                : "Print preview (HTML)"}
+            </Button>
+          </div>
+        )}
+      </header>
+      {printError && (
+        <p className="text-sm text-danger" role="alert">
+          {printError}
+        </p>
       )}
       <KTypeForm
-        ktype={ktypeQuery.data}
+        ktype={kt}
         initialData={recordQuery.data?.data}
+        submitting={saving}
+        onCancel={() => navigate(`/records/${ktype}`)}
         onSubmit={(data) => (id ? updateMut.mutate(data) : createMut.mutate(data))}
+        onSubmitAndAddAnother={
+          id ? undefined : (data) => createAnotherMut.mutate(data)
+        }
       />
     </section>
   );

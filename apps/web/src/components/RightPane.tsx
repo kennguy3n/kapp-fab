@@ -1,7 +1,21 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import type { FieldSpec, KRecord, KType, WorkflowRun } from "@kapp/client";
+import { Badge, Button, cn } from "@kapp/ui";
+import { X } from "lucide-react";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n";
+import {
+  formatValue,
+  humanizeLabel,
+  humanizeToken,
+  isStatusField,
+  recordLabel,
+  relationTargetKtype,
+  statusVariant,
+  useRelationLabels,
+  type RelationResolver,
+} from "../lib/ktypeView";
 
 interface RightPaneProps {
   ktype: KType;
@@ -16,7 +30,8 @@ type Tab = "details" | "timeline" | "related";
  * RightPane is a slide-out detail view for a KRecord. Instead of
  * navigating away from the list/kanban, clicking a row opens this
  * panel alongside the list. It surfaces:
- *   - field-by-field record detail,
+ *   - field-by-field record detail (humanized labels, formatted values,
+ *     status Badges, resolved relations),
  *   - the active workflow run's state + legal next actions (as buttons),
  *   - a transition timeline derived from workflow_run.history,
  *   - related records for KTypes with `ref` fields.
@@ -27,6 +42,7 @@ type Tab = "details" | "timeline" | "related";
  * (e.g. record created but not yet transitioned).
  */
 export function RightPane({ ktype, record, onClose, onAction }: RightPaneProps) {
+  const fmt = useFormatter();
   const [tab, setTab] = useState<Tab>("details");
 
   useEffect(() => {
@@ -51,8 +67,9 @@ export function RightPane({ ktype, record, onClose, onAction }: RightPaneProps) 
   });
 
   const fields = ktype.schema?.fields ?? [];
+  const relations = useRelationLabels(fields);
   const refFields = useMemo(
-    () => fields.filter((f) => f.ref || f.type === "ref"),
+    () => fields.filter((f) => f.ref || f.type === "ref" || relationTargetKtype(f)),
     [fields],
   );
 
@@ -72,44 +89,33 @@ export function RightPane({ ktype, record, onClose, onAction }: RightPaneProps) 
   const nextActions = (workflow?.transitions ?? []).filter((t) => t.from.includes(state));
 
   return (
-    <aside
-      style={{
-        width: 380,
-        borderLeft: "1px solid #e5e7eb",
-        padding: 16,
-        background: "#ffffff",
-        display: "flex",
-        flexDirection: "column",
-        gap: 16,
-        position: "sticky",
-        top: 0,
-        height: "100vh",
-        overflowY: "auto",
-      }}
-    >
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h3 style={{ margin: 0 }}>
-          {String(data["name"] ?? data["title"] ?? record.id.slice(0, 8))}
+    <aside className="sticky top-0 flex h-screen w-[380px] shrink-0 flex-col gap-4 overflow-y-auto border-s border-border bg-bg-elevated p-4">
+      <header className="flex items-start justify-between gap-2">
+        <h3 className="min-w-0 truncate text-lg font-semibold tracking-tight text-fg">
+          {recordLabel(record)}
         </h3>
-        <button onClick={onClose} aria-label="Close">
-          ×
-        </button>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Close"
+          onClick={onClose}
+        >
+          <X className="size-4" aria-hidden />
+        </Button>
       </header>
 
       {state && (
-        <section>
-          <div style={{ color: "#6b7280", fontSize: 12 }}>Workflow state</div>
-          <div style={{ fontWeight: 500 }}>{state}</div>
+        <section className="space-y-1">
+          <div className="text-xs font-medium text-fg-muted">Workflow state</div>
+          <Badge variant={statusVariant(state)} size="sm">
+            {humanizeToken(state)}
+          </Badge>
         </section>
       )}
 
       <nav
-        style={{
-          display: "flex",
-          gap: 4,
-          borderBottom: "1px solid #e5e7eb",
-          fontSize: 13,
-        }}
+        className="flex gap-1 border-b border-border text-sm"
+        role="tablist"
       >
         <TabButton active={tab === "details"} onClick={() => setTab("details")}>
           Details
@@ -127,17 +133,21 @@ export function RightPane({ ktype, record, onClose, onAction }: RightPaneProps) 
       {tab === "details" && (
         <DetailsTab
           fields={fields}
-          data={data}
+          record={record}
           state={state}
+          relations={relations}
+          fmt={fmt}
           nextActions={nextActions.map((a) => ({ action: a.action, to: a.to }))}
           onAction={onAction}
         />
       )}
 
-      {tab === "timeline" && <TimelineTab run={run} loading={workflowRun.isFetching} />}
+      {tab === "timeline" && (
+        <TimelineTab run={run} loading={workflowRun.isFetching} fmt={fmt} />
+      )}
 
       {tab === "related" && refFields.length > 0 && (
-        <RelatedTab fields={refFields} data={data} />
+        <RelatedTab fields={refFields} data={data} relations={relations} />
       )}
     </aside>
   );
@@ -154,67 +164,106 @@ function TabButton({
 }) {
   return (
     <button
+      type="button"
+      role="tab"
+      aria-selected={active}
       onClick={onClick}
-      style={{
-        background: "transparent",
-        border: "none",
-        borderBottom: active ? "2px solid #111827" : "2px solid transparent",
-        padding: "6px 10px",
-        fontWeight: active ? 600 : 400,
-        cursor: "pointer",
-      }}
+      className={cn(
+        "border-b-2 px-2.5 py-1.5 font-medium transition-colors",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)",
+        active
+          ? "border-fg text-fg"
+          : "border-transparent text-fg-muted hover:text-fg",
+      )}
     >
       {children}
     </button>
   );
 }
 
+function DetailValue({
+  field,
+  record,
+  relations,
+  fmt,
+}: {
+  field: FieldSpec;
+  record: KRecord;
+  relations: RelationResolver;
+  fmt: ReturnType<typeof useFormatter>;
+}) {
+  const value = record.data[field.name];
+
+  if (relationTargetKtype(field)) {
+    const label = relations.resolve(field, value);
+    return <span className="text-fg">{label ?? "—"}</span>;
+  }
+
+  if (isStatusField(field) && typeof value === "string" && value !== "") {
+    return (
+      <Badge variant={statusVariant(value)} size="sm">
+        {humanizeToken(value)}
+      </Badge>
+    );
+  }
+
+  return <span className="text-fg">{formatValue(field, value, record, fmt)}</span>;
+}
+
 function DetailsTab({
   fields,
-  data,
+  record,
   state,
+  relations,
+  fmt,
   nextActions,
   onAction,
 }: {
   fields: FieldSpec[];
-  data: Record<string, unknown>;
+  record: KRecord;
   state: string;
+  relations: RelationResolver;
+  fmt: ReturnType<typeof useFormatter>;
   nextActions: Array<{ action: string; to: string }>;
   onAction?: (action: string) => Promise<void> | void;
 }) {
   return (
     <>
-      <section>
-        <div style={{ color: "#6b7280", fontSize: 12, marginBottom: 4 }}>Details</div>
-        <dl
-          style={{
-            display: "grid",
-            gridTemplateColumns: "auto 1fr",
-            gap: "4px 12px",
-            margin: 0,
-          }}
-        >
+      <section className="space-y-2">
+        <div className="text-xs font-medium text-fg-muted">Details</div>
+        <dl className="grid grid-cols-[minmax(0,9rem)_1fr] gap-x-3 gap-y-2 text-sm">
           {fields.map((f) => (
-            <div key={f.name} style={{ display: "contents" }}>
-              <dt style={{ color: "#6b7280" }}>{f.name}</dt>
-              <dd style={{ margin: 0 }}>{formatValue(data[f.name])}</dd>
+            <div key={f.name} className="contents">
+              <dt className="truncate text-fg-muted" title={humanizeLabel(f.name)}>
+                {humanizeLabel(f.name)}
+              </dt>
+              <dd className="m-0 min-w-0 break-words">
+                <DetailValue
+                  field={f}
+                  record={record}
+                  relations={relations}
+                  fmt={fmt}
+                />
+              </dd>
             </div>
           ))}
         </dl>
       </section>
 
       {nextActions.length > 0 && state && (
-        <section>
-          <div style={{ color: "#6b7280", fontSize: 12, marginBottom: 4 }}>Actions</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        <section className="space-y-2">
+          <div className="text-xs font-medium text-fg-muted">Actions</div>
+          <div className="flex flex-wrap gap-2">
             {nextActions.map((a) => (
-              <button
+              <Button
                 key={a.action}
+                size="sm"
+                variant="secondary"
                 onClick={() => onAction?.(a.action)}
                 disabled={!onAction}
               >
-                {a.action} → {a.to}
-              </button>
+                {humanizeToken(a.action)} → {humanizeToken(a.to)}
+              </Button>
             ))}
           </div>
         </section>
@@ -223,49 +272,48 @@ function DetailsTab({
   );
 }
 
-function TimelineTab({ run, loading }: { run: WorkflowRun | null; loading: boolean }) {
+function TimelineTab({
+  run,
+  loading,
+  fmt,
+}: {
+  run: WorkflowRun | null;
+  loading: boolean;
+  fmt: ReturnType<typeof useFormatter>;
+}) {
   if (loading && !run) {
-    return <div style={{ color: "#6b7280", fontSize: 12 }}>Loading run…</div>;
+    return <div className="text-xs text-fg-muted">Loading run…</div>;
   }
   if (!run) {
     return (
-      <div style={{ color: "#6b7280", fontSize: 12 }}>
-        No workflow run yet. Transitions will appear here once the record is advanced.
+      <div className="text-xs text-fg-muted">
+        No workflow run yet. Transitions will appear here once the record is
+        advanced.
       </div>
     );
   }
   const history = run.history ?? [];
   if (history.length === 0) {
     return (
-      <div style={{ color: "#6b7280", fontSize: 12 }}>
-        Run started in <strong>{run.state}</strong>. No transitions recorded yet.
+      <div className="text-xs text-fg-muted">
+        Run started in <strong>{humanizeToken(run.state)}</strong>. No
+        transitions recorded yet.
       </div>
     );
   }
   return (
-    <section>
-      <div style={{ color: "#6b7280", fontSize: 12, marginBottom: 8 }}>Transitions</div>
-      <ol
-        style={{
-          listStyle: "none",
-          margin: 0,
-          padding: 0,
-          display: "flex",
-          flexDirection: "column",
-          gap: 10,
-          borderLeft: "2px solid #e5e7eb",
-          paddingLeft: 12,
-        }}
-      >
+    <section className="space-y-2">
+      <div className="text-xs font-medium text-fg-muted">Transitions</div>
+      <ol className="m-0 flex list-none flex-col gap-3 border-s-2 border-border ps-3">
         {[...history].reverse().map((h, idx) => (
           <li key={idx}>
-            <div style={{ fontWeight: 500 }}>
-              {h.from_state} → {h.to_state}
+            <div className="text-sm font-medium text-fg">
+              {humanizeToken(h.from_state)} → {humanizeToken(h.to_state)}
             </div>
-            <div style={{ color: "#6b7280", fontSize: 12 }}>
-              {h.action} · {new Date(h.timestamp).toLocaleString()}
+            <div className="text-xs text-fg-muted">
+              {humanizeToken(h.action)} · {fmt.dateTime(new Date(h.timestamp))}
             </div>
-            <div style={{ color: "#9ca3af", fontSize: 11 }}>by {h.actor_id}</div>
+            <div className="text-[11px] text-fg-subtle">by {h.actor_id}</div>
           </li>
         ))}
       </ol>
@@ -276,43 +324,40 @@ function TimelineTab({ run, loading }: { run: WorkflowRun | null; loading: boole
 function RelatedTab({
   fields,
   data,
+  relations,
 }: {
   fields: FieldSpec[];
   data: Record<string, unknown>;
+  relations: RelationResolver;
 }) {
   return (
-    <section>
-      <div style={{ color: "#6b7280", fontSize: 12, marginBottom: 4 }}>Related records</div>
-      <ul
-        style={{
-          listStyle: "none",
-          margin: 0,
-          padding: 0,
-          display: "flex",
-          flexDirection: "column",
-          gap: 8,
-        }}
-      >
+    <section className="space-y-2">
+      <div className="text-xs font-medium text-fg-muted">Related records</div>
+      <ul className="m-0 flex list-none flex-col gap-2 p-0 text-sm">
         {fields.map((f) => {
           const value = data[f.name];
+          const target = f.ref || f.ktype || relationTargetKtype(f) || "";
+          const label = relations.resolve(f, value);
           if (!value) {
             return (
-              <li key={f.name} style={{ color: "#9ca3af", fontSize: 13 }}>
-                <span style={{ color: "#6b7280" }}>{f.name}</span>: —
+              <li key={f.name} className="text-fg-subtle">
+                <span className="text-fg-muted">{humanizeLabel(f.name)}</span>: —
               </li>
             );
           }
-          const target = f.ref || f.ktype || "";
           const id = String(value);
           return (
-            <li key={f.name} style={{ fontSize: 13 }}>
-              <span style={{ color: "#6b7280" }}>{f.name}</span>:{" "}
+            <li key={f.name}>
+              <span className="text-fg-muted">{humanizeLabel(f.name)}</span>:{" "}
               {target ? (
-                <a href={`/records/${encodeURIComponent(target)}/${encodeURIComponent(id)}`}>
-                  {target} · {id.slice(0, 8)}
+                <a
+                  className="text-accent hover:underline"
+                  href={`/records/${encodeURIComponent(target)}/${encodeURIComponent(id)}`}
+                >
+                  {label ?? humanizeLabel(target.split(".").pop() ?? target)}
                 </a>
               ) : (
-                id
+                (label ?? id)
               )}
             </li>
           );
@@ -320,10 +365,4 @@ function RelatedTab({
       </ul>
     </section>
   );
-}
-
-function formatValue(v: unknown): string {
-  if (v == null) return "—";
-  if (typeof v === "object") return JSON.stringify(v);
-  return String(v);
 }
