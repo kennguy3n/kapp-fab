@@ -66,7 +66,12 @@ export function ChartOfAccountsPage() {
   const visibleGroups = useMemo(
     () =>
       groups
-        .map((g) => ({ ...g, forest: pruneForest(g.forest, term) }))
+        .map((g) => {
+          const forest = pruneForest(g.forest, term);
+          // While searching, the group header must count the matches it
+          // actually shows, not the unfiltered total.
+          return { ...g, forest, count: term ? flatten(forest).length : g.count };
+        })
         .filter((g) => g.forest.length > 0),
     [groups, term],
   );

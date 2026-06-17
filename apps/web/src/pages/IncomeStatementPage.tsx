@@ -96,7 +96,7 @@ export function IncomeStatementPage() {
       totalRow("Total expenses", report.total_expense, priorReport?.total_expense, showCompare),
       totalRow("Net income", report.net_income, priorReport?.net_income, showCompare),
     ];
-    downloadCsv(csvFilename(`income-statement_${from}_${to}`), headers, rows);
+    downloadCsv(csvFilename("income-statement", `${from}_${to}`), headers, rows);
     toast.success("Income statement exported");
   };
 

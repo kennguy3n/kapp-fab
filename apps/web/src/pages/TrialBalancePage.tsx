@@ -21,6 +21,7 @@ import {
   csvFilename,
   downloadCsv,
   parseAmount,
+  todayLocalISO,
   useMoney,
 } from "../lib/finance/format";
 import {
@@ -211,13 +212,4 @@ export function TrialBalancePage() {
       )}
     </section>
   );
-}
-
-// todayLocalISO returns YYYY-MM-DD in the viewer's local timezone. Using
-// `new Date().toISOString().slice(0, 10)` is off-by-one for UTC+ zones
-// because it formats the UTC instant, not the local calendar day.
-function todayLocalISO(): string {
-  const d = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }

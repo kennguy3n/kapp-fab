@@ -89,6 +89,23 @@ describe("ChartOfAccountsPage", () => {
     expect(screen.queryByText("Cash")).toBeNull();
   });
 
+  it("shows the filtered match count in the group header while searching", async () => {
+    listAccounts.mockResolvedValueOnce(accounts);
+    renderPage();
+    await screen.findByText("Cash");
+
+    const user = userEvent.setup();
+    await user.type(
+      screen.getByPlaceholderText("Search by code or name…"),
+      "cash",
+    );
+
+    // The Asset group has two accounts but only one matches "cash";
+    // the header must reflect the visible match, not the total.
+    expect(screen.getByText("1 account")).toBeInTheDocument();
+    expect(screen.queryByText("2 accounts")).toBeNull();
+  });
+
   it("renders an error surface with retry when the query fails", async () => {
     listAccounts.mockRejectedValueOnce(new Error("accounts down"));
     renderPage();

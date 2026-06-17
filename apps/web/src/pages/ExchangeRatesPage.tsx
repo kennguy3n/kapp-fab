@@ -18,14 +18,15 @@ import {
 } from "@kapp/ui";
 import { api } from "../lib/api";
 import { useFormatter } from "../lib/i18n";
-import { csvFilename, downloadCsv, parseAmount } from "../lib/finance/format";
+import {
+  csvFilename,
+  downloadCsv,
+  parseAmount,
+  todayLocalISO,
+} from "../lib/finance/format";
 import { FinanceError, TableSkeleton } from "../lib/finance/presentation";
 
 const CURRENCY_RE = /^[A-Za-z]{3}$/;
-
-function todayISO(): string {
-  return new Date().toISOString().slice(0, 10);
-}
 
 /**
  * ExchangeRatesPage renders the tenant's per-day currency conversion
@@ -58,7 +59,7 @@ export function ExchangeRatesPage() {
 
   const [from, setFrom] = useState("USD");
   const [to, setTo] = useState("EUR");
-  const [rateDate, setRateDate] = useState(todayISO());
+  const [rateDate, setRateDate] = useState(todayLocalISO());
   const [rate, setRate] = useState("1.0");
   const [provider, setProvider] = useState("");
   const [touched, setTouched] = useState(false);
@@ -179,7 +180,7 @@ export function ExchangeRatesPage() {
               type="date"
               value={rateDate}
               onChange={(e) => setRateDate(e.target.value)}
-              max={todayISO()}
+              max={todayLocalISO()}
               required
             />
           </Field>

@@ -49,13 +49,18 @@ export type Money = ReturnType<typeof useMoney>;
 
 type CsvCell = string | number | null | undefined;
 
+// A bare number such as -120000.00 is data, not a formula. Guarding it
+// like a formula (prefixing ') turns it into text and breaks SUM/AVERAGE
+// in the exported sheet, so numeric cells are exempt from the prefix.
+const NUMERIC_CELL = /^-?\d+(\.\d+)?$/;
+
 // Escape a single CSV cell. Beyond RFC-4180 quoting we neutralise
 // formula-injection vectors (a cell beginning with = + - @ tab CR is
 // interpreted as a formula by spreadsheet apps) by prefixing a single
 // quote, so an exported ledger can't smuggle executable content.
 function escapeCsvCell(cell: CsvCell): string {
   let s = cell === null || cell === undefined ? "" : String(cell);
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  if (/^[=+\-@\t\r]/.test(s) && !NUMERIC_CELL.test(s)) s = `'${s}`;
   if (/[",\n\r]/.test(s)) s = `"${s.replace(/"/g, '""')}"`;
   return s;
 }
@@ -91,8 +96,19 @@ export function downloadCsv(
   URL.revokeObjectURL(url);
 }
 
+/**
+ * todayLocalISO returns YYYY-MM-DD in the viewer's local timezone.
+ * `new Date().toISOString().slice(0, 10)` is off-by-one for UTC+ zones
+ * because it formats the UTC instant rather than the local calendar day.
+ */
+export function todayLocalISO(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 /** Compose a date-stamped CSV filename, e.g. `trial-balance_2026-06-17.csv`. */
 export function csvFilename(base: string, stamp?: string): string {
-  const date = stamp ?? new Date().toISOString().slice(0, 10);
+  const date = stamp ?? todayLocalISO();
   return `${base}_${date}.csv`;
 }

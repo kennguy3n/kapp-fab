@@ -119,4 +119,56 @@ describe("SubledgerPage (AR)", () => {
 
     expect(await screen.findByText(/No invoices yet/i)).toBeInTheDocument();
   });
+
+  it("counts posted and partially-paid documents toward outstanding", async () => {
+    const mixed = [
+      makeKRecord({
+        id: "p1",
+        ktype: "finance.ar_invoice",
+        data: {
+          invoice_number: "INV-100",
+          customer_id: "org1",
+          due_date: "2025-02-01T00:00:00Z",
+          total: "1000.00",
+          currency: "USD",
+          status: "posted",
+        },
+      }),
+      makeKRecord({
+        id: "p2",
+        ktype: "finance.ar_invoice",
+        data: {
+          invoice_number: "INV-101",
+          customer_id: "org1",
+          due_date: "2025-02-02T00:00:00Z",
+          total: "400.00",
+          currency: "USD",
+          status: "partially_paid",
+        },
+      }),
+      makeKRecord({
+        id: "p3",
+        ktype: "finance.ar_invoice",
+        data: {
+          invoice_number: "INV-102",
+          customer_id: "org1",
+          due_date: "2025-02-03T00:00:00Z",
+          total: "9999.00",
+          currency: "USD",
+          status: "paid",
+        },
+      }),
+    ];
+    listRecords.mockImplementation((ktype: string) =>
+      ktype === "crm.organization"
+        ? Promise.resolve(orgs)
+        : Promise.resolve(mixed),
+    );
+    renderWithProviders(<SubledgerPage variant="ar" />);
+
+    await screen.findByText("INV-100");
+    // 1000 + 400 outstanding; the paid 9999 is excluded.
+    expect(screen.getAllByText("$1,400.00").length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText("$10,399.00")).toBeNull();
+  });
 });

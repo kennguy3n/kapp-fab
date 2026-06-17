@@ -45,6 +45,12 @@ const SUBLEDGER_STATUS: Record<string, BadgeVariant> = {
   canceled: "outline",
 };
 
+// A document still owes money once it's posted and until it's fully
+// paid — partially_paid rows carry a remaining balance, so both count
+// toward outstanding. Drafts (awaiting posting), paid, and cancelled
+// rows do not.
+const OUTSTANDING_STATUSES = new Set(["posted", "partially_paid"]);
+
 function statusOf(record: KRecord): string {
   return (record.data.status as string) ?? record.status ?? "draft";
 }
@@ -154,14 +160,15 @@ export function SubledgerPage({ variant }: { variant: "ar" | "ap" }) {
       : allRows.filter((r) => statusOf(r) === statusFilter);
 
   const totalOutstanding = allRows
-    .filter((r) => statusOf(r) === "posted")
+    .filter((r) => OUTSTANDING_STATUSES.has(statusOf(r)))
     .reduce((sum, r) => sum + (parseAmount(r.data.total as string) || 0), 0);
   const draftCount = allRows.filter((r) => {
     const s = statusOf(r);
     return s === "draft" || s === "pending_approval";
   }).length;
   const outstandingCurrency =
-    (allRows.find((r) => statusOf(r) === "posted")?.data.currency as string) ??
+    (allRows.find((r) => OUTSTANDING_STATUSES.has(statusOf(r)))?.data
+      .currency as string) ??
     (allRows[0]?.data.currency as string) ??
     "USD";
 
@@ -215,7 +222,7 @@ export function SubledgerPage({ variant }: { variant: "ar" | "ap" }) {
           <StatCard
             label="Outstanding"
             value={money(totalOutstanding, { currency: outstandingCurrency })}
-            sub="Sum of posted totals"
+            sub="Posted and partially paid"
           />
           <StatCard
             label="Awaiting posting"
@@ -338,7 +345,7 @@ export function SubledgerPage({ variant }: { variant: "ar" | "ap" }) {
           <TableFooter>
             <TableRow>
               <TableCell colSpan={3} className="font-semibold">
-                Outstanding (posted)
+                Outstanding
               </TableCell>
               <TableCell className="text-right font-semibold tabular-nums">
                 {money(totalOutstanding, { currency: outstandingCurrency })}
