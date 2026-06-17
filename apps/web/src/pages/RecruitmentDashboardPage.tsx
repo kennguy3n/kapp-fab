@@ -131,13 +131,11 @@ export function RecruitmentDashboardPage() {
             play, and how fast you're hiring.
           </p>
         </div>
-        <Button
-          size="sm"
-          variant="outline"
-          asChild
-          leadingIcon={<Briefcase className="h-4 w-4" />}
-        >
-          <Link to="/hr/recruitment/job-openings">View job openings</Link>
+        <Button size="sm" variant="outline" asChild>
+          <Link to="/hr/recruitment/job-openings">
+            <Briefcase className="h-4 w-4" />
+            View job openings
+          </Link>
         </Button>
       </header>
 
