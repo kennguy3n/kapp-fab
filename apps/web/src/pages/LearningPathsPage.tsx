@@ -4,25 +4,41 @@ import type { LearningPath } from "@kapp/client";
 import {
   Badge,
   Button,
+  Card,
+  EmptyState,
+  Field,
   Input,
+  Modal,
+  ModalClose,
+  ModalContent,
+  ModalDescription,
+  ModalFooter,
+  ModalHeader,
+  ModalTitle,
   Select,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
+  Skeleton,
+  Textarea,
+  toast,
 } from "@kapp/ui";
+import {
+  AlertTriangle,
+  Clock,
+  Compass,
+  Plus,
+  Route,
+  Signal,
+} from "lucide-react";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n";
+import { humanizeToken, statusVariant } from "../lib/ktypeView";
+import { CoverArt, LmsPageHeader } from "../components/lms/primitives";
 
 /**
- * LearningPathsPage (Session 17, Deliverable 12).
- *
- * Lists a tenant's learning paths and offers a header form to create a
- * new one plus a one-click enroll action per row. All reads/writes go
- * through the FeatureLMS-gated `/api/v1/lms/learning-paths` surface, so
- * tenants without the flag get a 403 which surfaces here as an error
- * banner rather than a crash.
+ * LearningPathsPage lists a tenant's learning paths as consumer-grade
+ * cards and offers a modal form to create one plus a one-click enroll
+ * action per card. Reads/writes go through the FeatureLMS-gated
+ * `/api/v1/lms/learning-paths` surface, so tenants without the flag get
+ * a 403 that surfaces as an error state rather than a crash.
  */
 const DIFFICULTIES = ["beginner", "intermediate", "advanced"];
 
@@ -44,7 +60,10 @@ const emptyDraft = (): Draft => ({
 
 export function LearningPathsPage() {
   const qc = useQueryClient();
+  const fmt = useFormatter();
   const [draft, setDraft] = useState<Draft>(emptyDraft());
+  const [createOpen, setCreateOpen] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
 
   const pathsQ = useQuery({
     queryKey: ["lms", "learning-paths"],
@@ -67,148 +86,259 @@ export function LearningPathsPage() {
               .filter(Boolean)
           : undefined,
       }),
-    onSuccess: () => {
+    onSuccess: (created) => {
+      const title = created?.title ?? draft.title.trim();
       setDraft(emptyDraft());
+      setSubmitted(false);
+      setCreateOpen(false);
       qc.invalidateQueries({ queryKey: ["lms", "learning-paths"] });
+      toast.success("Learning path created", { description: title });
+    },
+    onError: (err) => {
+      toast.error("Couldn't create learning path", {
+        description: (err as Error).message,
+      });
     },
   });
 
   const enroll = useMutation({
     mutationFn: (pathId: string) => api.enrollInLearningPath(pathId),
-    onSuccess: () => {
+    onSuccess: (_data, pathId) => {
+      const path = paths.find((p) => p.id === pathId);
       qc.invalidateQueries({ queryKey: ["lms", "learning-paths"] });
+      toast.success("You're enrolled", { description: path?.title });
+    },
+    onError: (err) => {
+      toast.error("Couldn't enroll", { description: (err as Error).message });
     },
   });
 
   const paths: LearningPath[] = pathsQ.data?.learning_paths ?? [];
+  const titleError =
+    submitted && !draft.title.trim() ? "Please enter a title." : undefined;
+
+  function submitCreate() {
+    setSubmitted(true);
+    if (draft.title.trim()) createPath.mutate();
+  }
+
+  const newPathButton = (
+    <Button leadingIcon={<Plus className="h-4 w-4" />} onClick={() => setCreateOpen(true)}>
+      New path
+    </Button>
+  );
 
   return (
-    <section>
-      <h1>Learning Paths</h1>
-      <p className="text-fg-muted">
-        Curated sequences of courses. A path completes when all its
-        mandatory courses are complete.
-      </p>
+    <section className="flex flex-col gap-6">
+      <LmsPageHeader
+        area="Learning"
+        title="Learning Paths"
+        description="Curated sequences of courses. A path completes when all its mandatory courses are done."
+        actions={newPathButton}
+      />
 
-      <form
-        className="mt-4 flex flex-wrap items-end gap-2"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (draft.title.trim()) createPath.mutate();
+      {pathsQ.isLoading ? (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Card key={i} className="overflow-hidden">
+              <Skeleton variant="rect" className="aspect-[16/9] w-full" />
+              <div className="flex flex-col gap-3 p-4">
+                <Skeleton variant="text" className="h-5 w-3/4" />
+                <Skeleton variant="text" className="h-4 w-full" />
+                <Skeleton variant="rect" className="h-9 w-full" />
+              </div>
+            </Card>
+          ))}
+        </div>
+      ) : pathsQ.isError ? (
+        <EmptyState
+          icon={<AlertTriangle />}
+          title="Couldn't load learning paths"
+          description={(pathsQ.error as Error).message}
+          action={
+            <Button variant="secondary" onClick={() => pathsQ.refetch()}>
+              Try again
+            </Button>
+          }
+        />
+      ) : paths.length === 0 ? (
+        <EmptyState
+          icon={<Compass />}
+          title="No learning paths yet"
+          description="Build your first path to guide learners through a sequence of courses."
+          action={newPathButton}
+        />
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {paths.map((p) => {
+            const hours = p.estimated_duration_hours ?? 0;
+            const roles = p.target_roles ?? [];
+            return (
+              <Card key={p.id} className="flex flex-col overflow-hidden">
+                <CoverArt seed={p.title} icon={Route} />
+                <div className="flex flex-1 flex-col gap-3 p-4">
+                  <div className="flex items-start justify-between gap-2">
+                    <h3 className="line-clamp-2 text-base font-semibold text-fg">
+                      {p.title}
+                    </h3>
+                    <Badge variant={statusVariant(p.status)} className="shrink-0">
+                      {humanizeToken(p.status)}
+                    </Badge>
+                  </div>
+
+                  {p.description ? (
+                    <p className="line-clamp-2 text-sm text-fg-muted">
+                      {p.description}
+                    </p>
+                  ) : null}
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="outline">
+                      <Signal className="h-3 w-3" aria-hidden />
+                      {humanizeToken(p.difficulty)}
+                    </Badge>
+                    {hours > 0 ? (
+                      <span className="inline-flex items-center gap-1 text-xs text-fg-muted">
+                        <Clock className="h-3.5 w-3.5" aria-hidden />
+                        {fmt.number(hours)} hrs
+                      </span>
+                    ) : null}
+                  </div>
+
+                  {roles.length > 0 ? (
+                    <div className="flex flex-wrap gap-1">
+                      {roles.map((role) => (
+                        <Badge key={role} variant="neutral" size="xs">
+                          {humanizeToken(role)}
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  <div className="mt-auto pt-1">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="w-full"
+                      onClick={() => enroll.mutate(p.id)}
+                      disabled={enroll.isPending && enroll.variables === p.id}
+                    >
+                      {enroll.isPending && enroll.variables === p.id
+                        ? "Enrolling…"
+                        : "Enroll"}
+                    </Button>
+                  </div>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      <Modal
+        open={createOpen}
+        onOpenChange={(next) => {
+          setCreateOpen(next);
+          if (!next) setSubmitted(false);
         }}
       >
-        <label className="flex flex-col text-[12px] text-fg-muted">
-          Title
-          <Input
-            value={draft.title}
-            onChange={(e) => setDraft({ ...draft, title: e.target.value })}
-            placeholder="e.g. New Manager Onboarding"
-            required
-          />
-        </label>
-        <label className="flex flex-col text-[12px] text-fg-muted">
-          Difficulty
-          <Select
-            value={draft.difficulty}
-            onChange={(e) => setDraft({ ...draft, difficulty: e.target.value })}
+        <ModalContent>
+          <ModalHeader>
+            <ModalTitle>New learning path</ModalTitle>
+            <ModalDescription>
+              Curate a sequence of courses learners complete in order.
+            </ModalDescription>
+          </ModalHeader>
+          <form
+            className="flex flex-col gap-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              submitCreate();
+            }}
           >
-            {DIFFICULTIES.map((d) => (
-              <option key={d} value={d}>
-                {d}
-              </option>
-            ))}
-          </Select>
-        </label>
-        <label className="flex flex-col text-[12px] text-fg-muted">
-          Est. hours
-          <Input
-            type="number"
-            min="0"
-            value={draft.estimated_duration_hours}
-            onChange={(e) =>
-              setDraft({ ...draft, estimated_duration_hours: e.target.value })
-            }
-            className="w-24"
-          />
-        </label>
-        <label className="flex flex-col text-[12px] text-fg-muted">
-          Target roles (comma-separated)
-          <Input
-            value={draft.target_roles}
-            onChange={(e) =>
-              setDraft({ ...draft, target_roles: e.target.value })
-            }
-            placeholder="manager, sales"
-          />
-        </label>
-        <Button type="submit" disabled={!draft.title.trim() || createPath.isPending}>
-          {createPath.isPending ? "Creating…" : "+ New path"}
-        </Button>
-      </form>
-      {createPath.isError && (
-        <p className="mt-2 text-danger">
-          Failed to create: {(createPath.error as Error).message}
-        </p>
-      )}
+            <Field
+              label="Title"
+              required
+              error={titleError}
+              help="The name learners will see for this path."
+            >
+              <Input
+                value={draft.title}
+                onChange={(e) => setDraft({ ...draft, title: e.target.value })}
+                placeholder="e.g. New Manager Onboarding"
+                autoFocus
+              />
+            </Field>
 
-      {pathsQ.isLoading && <p className="mt-4">Loading…</p>}
-      {pathsQ.isError && (
-        <p className="mt-4 text-danger">
-          Failed to load learning paths: {(pathsQ.error as Error).message}
-        </p>
-      )}
-      {pathsQ.data && paths.length === 0 && (
-        <p className="mt-4 text-fg-muted">No learning paths yet.</p>
-      )}
-      {paths.length > 0 && (
-        <Table className="mt-4 text-[13px]">
-          <TableHeader>
-            <TableRow className="text-left">
-              <TableHead>Title</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Difficulty</TableHead>
-              <TableHead className="text-right">Est. hours</TableHead>
-              <TableHead>Target roles</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {paths.map((p) => (
-              <TableRow key={p.id}>
-                <TableCell>{p.title}</TableCell>
-                <TableCell>
-                  <Badge>{p.status}</Badge>
-                </TableCell>
-                <TableCell>{p.difficulty}</TableCell>
-                <TableCell className="text-right">
-                  {p.estimated_duration_hours}
-                </TableCell>
-                <TableCell>{(p.target_roles ?? []).join(", ")}</TableCell>
-                <TableCell className="text-right">
-                  <Button
-                    variant="secondary"
-                    onClick={() => enroll.mutate(p.id)}
-                    // Only disable the row being enrolled. enroll.variables
-                    // holds the path id of the in-flight mutation, so a single
-                    // shared mutation instance doesn't disable every row's
-                    // button at once.
-                    disabled={enroll.isPending && enroll.variables === p.id}
-                  >
-                    {enroll.isPending && enroll.variables === p.id
-                      ? "Enrolling…"
-                      : "Enroll"}
-                  </Button>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      )}
-      {enroll.isError && (
-        <p className="mt-2 text-danger">
-          Enroll failed: {(enroll.error as Error).message}
-        </p>
-      )}
+            <Field label="Description" help="Optional — what learners will gain.">
+              <Textarea
+                value={draft.description}
+                onChange={(e) =>
+                  setDraft({ ...draft, description: e.target.value })
+                }
+                placeholder="Summarize the goal of this path."
+                rows={3}
+              />
+            </Field>
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Field label="Difficulty">
+                <Select
+                  value={draft.difficulty}
+                  onChange={(e) =>
+                    setDraft({ ...draft, difficulty: e.target.value })
+                  }
+                >
+                  {DIFFICULTIES.map((d) => (
+                    <option key={d} value={d}>
+                      {humanizeToken(d)}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+
+              <Field label="Estimated hours" help="Optional.">
+                <Input
+                  type="number"
+                  min="0"
+                  value={draft.estimated_duration_hours}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      estimated_duration_hours: e.target.value,
+                    })
+                  }
+                  placeholder="0"
+                />
+              </Field>
+            </div>
+
+            <Field
+              label="Target roles"
+              help="Optional — comma-separated, e.g. Manager, Sales."
+            >
+              <Input
+                value={draft.target_roles}
+                onChange={(e) =>
+                  setDraft({ ...draft, target_roles: e.target.value })
+                }
+                placeholder="Manager, Sales"
+              />
+            </Field>
+
+            <ModalFooter>
+              <ModalClose asChild>
+                <Button type="button" variant="ghost">
+                  Cancel
+                </Button>
+              </ModalClose>
+              <Button type="submit" disabled={createPath.isPending}>
+                {createPath.isPending ? "Creating…" : "Create path"}
+              </Button>
+            </ModalFooter>
+          </form>
+        </ModalContent>
+      </Modal>
     </section>
   );
 }

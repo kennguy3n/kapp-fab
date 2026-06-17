@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { lmsStatusToScorm, cmiScoreRaw } from "./ScormPlayer";
+import { lmsStatusToScorm, cmiScoreRaw, scormStatusLabel } from "./ScormPlayer";
 
 // LMS lesson_progress.status vocabulary must be translated into valid
 // SCORM CMI status values before resume hydration; an unmapped value
@@ -43,5 +43,32 @@ describe("cmiScoreRaw", () => {
 
   it("returns undefined when there is no score to hydrate", () => {
     expect(cmiScoreRaw(undefined)).toBeUndefined();
+  });
+});
+
+// The player's internal lifecycle token must never be surfaced verbatim
+// to learners; scormStatusLabel maps it to human copy + a semantic tone.
+describe("scormStatusLabel", () => {
+  it("maps each lifecycle state to learner-facing copy", () => {
+    expect(scormStatusLabel("loading")).toEqual({
+      label: "Loading",
+      tone: "muted",
+    });
+    expect(scormStatusLabel("ready")).toEqual({ label: "Ready", tone: "info" });
+    expect(scormStatusLabel("running")).toEqual({
+      label: "In progress",
+      tone: "accent",
+    });
+    expect(scormStatusLabel("terminated")).toEqual({
+      label: "Finished",
+      tone: "success",
+    });
+  });
+
+  it("humanizes an unexpected token rather than leaking it raw", () => {
+    expect(scormStatusLabel("some_state")).toEqual({
+      label: "Some State",
+      tone: "muted",
+    });
   });
 });
