@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderWithProviders } from "../test-utils";
 
 // Mock the api module *before* importing the page so the page's
 // top-level `import { api } from "../lib/api"` resolves to the
@@ -20,16 +20,10 @@ vi.mock("../lib/api", () => ({
 import { ExchangeRatesPage } from "./ExchangeRatesPage";
 
 function renderPage() {
-  // A fresh QueryClient per test so cached fixtures from one
-  // assertion don't bleed into the next.
-  const qc = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
-  return render(
-    <QueryClientProvider client={qc}>
-      <ExchangeRatesPage />
-    </QueryClientProvider>,
-  );
+  // renderWithProviders gives each render a fresh QueryClient (retries
+  // disabled) plus the LocaleProvider/Router the page now needs for
+  // its date/number formatting.
+  return renderWithProviders(<ExchangeRatesPage />);
 }
 
 describe("ExchangeRatesPage", () => {
@@ -77,13 +71,14 @@ describe("ExchangeRatesPage", () => {
 
     expect(await screen.findByText("USD", { exact: false })).toBeInTheDocument();
     expect(screen.getByText(/GBP/)).toBeInTheDocument();
-    // The rate column is rendered as the raw decimal string.
+    // The rate column is locale-formatted (up to 6 fraction digits),
+    // which is a no-op for these already-short decimals.
     expect(screen.getByText("0.91")).toBeInTheDocument();
     expect(screen.getByText("1.17")).toBeInTheDocument();
-    // Provider null falls through to an empty cell; ECB renders.
+    // Provider null falls through to an em dash; ECB renders as a badge.
     expect(screen.getByText("ECB")).toBeInTheDocument();
-    // Date column slices the leading 10 chars off the timestamp.
-    expect(screen.getByText("2025-01-15")).toBeInTheDocument();
+    // Date column is locale-formatted (medium) rather than the raw ISO.
+    expect(screen.getByText("Jan 15, 2025")).toBeInTheDocument();
   });
 
   it("upsertExchangeRate is invoked with uppercased currency codes", async () => {
@@ -105,11 +100,11 @@ describe("ExchangeRatesPage", () => {
     // overwrite a few fields with lowercase input to prove that the
     // submit handler normalises the codes to uppercase.
     const user = userEvent.setup();
-    const fromInput = screen.getByPlaceholderText("from") as HTMLInputElement;
-    const toInput = screen.getByPlaceholderText("to") as HTMLInputElement;
-    const rateInput = screen.getByPlaceholderText("rate") as HTMLInputElement;
+    const fromInput = screen.getByPlaceholderText("USD") as HTMLInputElement;
+    const toInput = screen.getByPlaceholderText("EUR") as HTMLInputElement;
+    const rateInput = screen.getByPlaceholderText("0.91") as HTMLInputElement;
     const providerInput = screen.getByPlaceholderText(
-      /provider \(optional\)/i,
+      "manual",
     ) as HTMLInputElement;
 
     await user.clear(fromInput);
@@ -135,8 +130,14 @@ describe("ExchangeRatesPage", () => {
   it("renders the load-error banner when the list query fails", async () => {
     listExchangeRates.mockRejectedValueOnce(new Error("network down"));
     renderPage();
+    // The error surface shows a "Failed to load rates" heading plus the
+    // underlying message and a retry affordance.
     expect(
-      await screen.findByText(/Failed to load rates: network down/i),
+      await screen.findByText(/Failed to load rates/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/network down/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /try again/i }),
     ).toBeInTheDocument();
     // The error and the empty-state placeholder are mutually
     // exclusive: when the list query fails we should not also tell
