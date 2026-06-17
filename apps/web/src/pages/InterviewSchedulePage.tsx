@@ -479,12 +479,23 @@ function ScheduleInterviewModal({
   };
   const [form, setForm] = useState<CreateInterviewInput>(empty);
   const [submitted, setSubmitted] = useState(false);
+
+  const createMut = useMutation({
+    mutationFn: (input: CreateInterviewInput) => api.createInterview(input),
+    onSuccess: () => {
+      toast.success("Interview scheduled");
+      onOpenChange(false);
+      onScheduled();
+    },
+  });
+
   const [seedOpen, setSeedOpen] = useState(open);
   if (seedOpen !== open) {
     setSeedOpen(open);
     if (open) {
       setForm(empty);
       setSubmitted(false);
+      createMut.reset();
     }
   }
 
@@ -496,15 +507,6 @@ function ScheduleInterviewModal({
       a.status !== "withdrawn" &&
       a.status !== "hired",
   );
-
-  const createMut = useMutation({
-    mutationFn: (input: CreateInterviewInput) => api.createInterview(input),
-    onSuccess: () => {
-      toast.success("Interview scheduled");
-      onOpenChange(false);
-      onScheduled();
-    },
-  });
 
   const appError = submitted && !form.application_id;
   const isInPerson = form.interview_type === "in_person";

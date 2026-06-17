@@ -431,24 +431,6 @@ function AssignShiftModal({
   const [notes, setNotes] = useState("");
   const [submitted, setSubmitted] = useState(false);
 
-  // Re-seed the form whenever a new cell opens it (the modal stays
-  // mounted, so prop changes drive the reset rather than remount).
-  const [seed, setSeed] = useState({ initialEmployeeId, initialDate, open });
-  if (
-    seed.initialEmployeeId !== initialEmployeeId ||
-    seed.initialDate !== initialDate ||
-    seed.open !== open
-  ) {
-    setSeed({ initialEmployeeId, initialDate, open });
-    if (open) {
-      setEmployeeId(initialEmployeeId);
-      setShiftDate(initialDate);
-      setShiftTypeId("");
-      setNotes("");
-      setSubmitted(false);
-    }
-  }
-
   const create = useMutation({
     mutationFn: () =>
       api.createRecord(KTYPE_SHIFT_ASSIGNMENT, {
@@ -464,6 +446,25 @@ function AssignShiftModal({
       onOpenChange(false);
     },
   });
+
+  // Re-seed the form whenever a new cell opens it (the modal stays
+  // mounted, so prop changes drive the reset rather than remount).
+  const [seed, setSeed] = useState({ initialEmployeeId, initialDate, open });
+  if (
+    seed.initialEmployeeId !== initialEmployeeId ||
+    seed.initialDate !== initialDate ||
+    seed.open !== open
+  ) {
+    setSeed({ initialEmployeeId, initialDate, open });
+    if (open) {
+      setEmployeeId(initialEmployeeId);
+      setShiftDate(initialDate);
+      setShiftTypeId("");
+      setNotes("");
+      setSubmitted(false);
+      create.reset();
+    }
+  }
 
   const valid = employeeId && shiftTypeId && shiftDate;
 

@@ -489,6 +489,8 @@ function PayRunsTable() {
         description: `${result.created_count} created · ${result.skipped_existing} already existed`,
       });
     },
+    onError: (e) =>
+      toast.error("Couldn't generate payslips", { description: String(e) }),
   });
 
   const post = useMutation({
@@ -498,6 +500,10 @@ function PayRunsTable() {
       setPostTarget(null);
       toast.success("Pay run posted to the ledger");
     },
+    // The post confirmation overlay can cover the inline error, so also
+    // surface failures as a toast that renders above the dialog.
+    onError: (e) =>
+      toast.error("Couldn't post pay run", { description: String(e) }),
   });
 
   const rows = runs.data ?? [];

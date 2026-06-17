@@ -348,14 +348,6 @@ function CreateOpeningModal({
   };
   const [form, setForm] = useState<JobOpeningInput>(empty);
   const [submitted, setSubmitted] = useState(false);
-  const [seedOpen, setSeedOpen] = useState(open);
-  if (seedOpen !== open) {
-    setSeedOpen(open);
-    if (open) {
-      setForm(empty);
-      setSubmitted(false);
-    }
-  }
 
   const createMut = useMutation({
     mutationFn: (input: JobOpeningInput) => api.createJobOpening(input),
@@ -365,6 +357,16 @@ function CreateOpeningModal({
       onCreated();
     },
   });
+
+  const [seedOpen, setSeedOpen] = useState(open);
+  if (seedOpen !== open) {
+    setSeedOpen(open);
+    if (open) {
+      setForm(empty);
+      setSubmitted(false);
+      createMut.reset();
+    }
+  }
 
   const titleError = submitted && !form.title.trim();
 
