@@ -1,6 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
+import { RefreshCw } from "lucide-react";
 import {
   Badge,
+  Button,
   Card,
   CardContent,
   CardHeader,
@@ -13,6 +15,9 @@ import {
   TableRow,
   cn,
 } from "@kapp/ui";
+import { useFormatter } from "../lib/i18n";
+import { humanizeLabel, humanizeToken } from "../lib/ktypeView";
+import { AdminErrorState, AdminPageHeader } from "./adminKit";
 
 // AdminHealthPage is the operator dashboard backed by the admin-only
 // GET /api/v1/admin/health/detailed. Like the public status page it
@@ -112,7 +117,13 @@ function SaturationBar({ percent }: { percent: number }) {
   const color =
     pct > 90 ? "bg-danger" : pct > 70 ? "bg-warning" : "bg-success";
   return (
-    <div className="h-3 overflow-hidden rounded-full bg-bg-muted">
+    <div
+      className="h-3 overflow-hidden rounded-full bg-bg-muted"
+      role="progressbar"
+      aria-valuenow={Math.round(pct)}
+      aria-valuemin={0}
+      aria-valuemax={100}
+    >
       <div
         className={cn(
           "h-full rounded-full transition-[width] duration-200",
@@ -124,7 +135,26 @@ function SaturationBar({ percent }: { percent: number }) {
   );
 }
 
+function summarizeDetail(
+  detail: Record<string, unknown>,
+  formatNumber: (n: number) => string,
+): string {
+  const parts = Object.entries(detail).map(([k, v]) => {
+    const value =
+      typeof v === "number"
+        ? formatNumber(v)
+        : typeof v === "boolean"
+          ? v
+            ? "yes"
+            : "no"
+          : String(v);
+    return `${humanizeLabel(k)}: ${value}`;
+  });
+  return parts.join(" · ");
+}
+
 export function AdminHealthPage() {
+  const fmt = useFormatter();
   const healthQuery = useQuery({
     queryKey: ["admin-health"],
     queryFn: fetchAdminHealth,
@@ -133,15 +163,31 @@ export function AdminHealthPage() {
 
   if (healthQuery.isLoading) {
     return (
-      <section className="text-sm text-fg-muted">
-        Loading operator dashboard…
+      <section className="flex flex-col gap-6">
+        <AdminPageHeader area="Operations" title="System health" />
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Card key={i}>
+              <CardContent className="pt-4">
+                <div className="h-24 animate-pulse rounded-md bg-bg-muted" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
       </section>
     );
   }
   if (healthQuery.error || !healthQuery.data) {
     return (
-      <section className="text-sm text-danger">
-        Error loading operator dashboard.
+      <section className="flex flex-col gap-6">
+        <AdminPageHeader area="Operations" title="System health" />
+        <AdminErrorState
+          title="Couldn't load system health"
+          error={
+            healthQuery.error ?? new Error("The dashboard returned no data.")
+          }
+          onRetry={() => healthQuery.refetch()}
+        />
       </section>
     );
   }
@@ -159,17 +205,28 @@ export function AdminHealthPage() {
 
   return (
     <section className="flex flex-col gap-6">
-      <header className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold tracking-tight text-fg">
-          System Health
-        </h1>
-        <div className="flex items-center gap-3">
-          <StatusPill status={data.system.status} />
-          <span className="text-sm text-fg-muted">
-            Checked {new Date(data.system.checked_at).toLocaleString()}
-          </span>
-        </div>
-      </header>
+      <AdminPageHeader
+        area="Operations"
+        title="System health"
+        description="Live view of platform components, the database pool, and cell capacity. Refreshes automatically every 15 seconds."
+        actions={
+          <div className="flex flex-wrap items-center gap-3">
+            <StatusPill status={data.system.status} />
+            <span className="text-xs text-fg-muted">
+              Checked {fmt.dateTime(new Date(data.system.checked_at))}
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              leadingIcon={<RefreshCw className="h-4 w-4" />}
+              disabled={healthQuery.isFetching}
+              onClick={() => healthQuery.refetch()}
+            >
+              {healthQuery.isFetching ? "Refreshing…" : "Refresh"}
+            </Button>
+          </div>
+        }
+      />
 
       <Card>
         <CardHeader>
@@ -181,7 +238,7 @@ export function AdminHealthPage() {
               <TableRow>
                 <TableHead>Component</TableHead>
                 <TableHead>Status</TableHead>
-                <TableHead>Latency</TableHead>
+                <TableHead className="text-end">Latency</TableHead>
                 <TableHead>Detail</TableHead>
               </TableRow>
             </TableHeader>
@@ -189,24 +246,34 @@ export function AdminHealthPage() {
               {data.system.components.map((c) => (
                 <TableRow key={c.name}>
                   <TableCell className="font-medium text-fg">
-                    {c.name}
+                    {humanizeToken(c.name)}
                   </TableCell>
                   <TableCell>
                     <StatusPill status={c.status} />
                   </TableCell>
-                  <TableCell className="tabular-nums">
-                    {c.latency_ms.toFixed(1)} ms
+                  <TableCell className="text-end font-tabular">
+                    {fmt.number(c.latency_ms, {
+                      minimumFractionDigits: 1,
+                      maximumFractionDigits: 1,
+                    })}{" "}
+                    ms
                   </TableCell>
                   <TableCell
                     className={cn(
                       "max-w-xs truncate",
                       c.error ? "text-danger" : "text-fg-muted",
                     )}
+                    title={
+                      c.error ??
+                      (c.detail
+                        ? summarizeDetail(c.detail, (n) => fmt.number(n))
+                        : undefined)
+                    }
                   >
                     {c.error
                       ? c.error
                       : c.detail
-                        ? JSON.stringify(c.detail)
+                        ? summarizeDetail(c.detail, (n) => fmt.number(n))
                         : "—"}
                   </TableCell>
                 </TableRow>
@@ -216,42 +283,44 @@ export function AdminHealthPage() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Database connection pool</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-1">
-          <div className="flex justify-between text-sm text-fg">
-            <span>
-              {data.pool.total_conns} / {data.pool.max_conns} connections (
-              {data.pool.acquired_conns} in use, {data.pool.idle_conns} idle)
-            </span>
-            <span className="tabular-nums text-fg-muted">
-              {data.pool.saturation_percent.toFixed(0)}%
-            </span>
-          </div>
-          <SaturationBar percent={data.pool.saturation_percent} />
-        </CardContent>
-      </Card>
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>Database connection pool</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-1">
+            <div className="flex justify-between text-sm text-fg">
+              <span>
+                {data.pool.total_conns} / {data.pool.max_conns} connections (
+                {data.pool.acquired_conns} in use, {data.pool.idle_conns} idle)
+              </span>
+              <span className="font-tabular text-fg-muted">
+                {data.pool.saturation_percent.toFixed(0)}%
+              </span>
+            </div>
+            <SaturationBar percent={data.pool.saturation_percent} />
+          </CardContent>
+        </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Outbox backlog</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-fg-muted">
-            <strong
-              className={cn(
-                "text-xl",
-                outboxBacklog > 0 ? "text-warning" : "text-success",
-              )}
-            >
-              {outboxBacklog.toLocaleString()}
-            </strong>{" "}
-            undelivered events awaiting drain.
-          </p>
-        </CardContent>
-      </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>Outbox backlog</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-fg-muted">
+              <strong
+                className={cn(
+                  "text-xl",
+                  outboxBacklog > 0 ? "text-warning" : "text-success",
+                )}
+              >
+                {fmt.number(outboxBacklog)}
+              </strong>{" "}
+              undelivered events awaiting drain.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
 
       <Card>
         <CardHeader>
@@ -266,13 +335,14 @@ export function AdminHealthPage() {
                 <div key={cell.id} className="flex flex-col gap-1">
                   <div className="flex justify-between text-sm text-fg">
                     <strong className="font-semibold">
-                      {cell.id}{" "}
+                      {humanizeToken(cell.id)}{" "}
                       <span className="font-normal text-fg-subtle">
                         ({cell.region || "—"})
                       </span>
                     </strong>
-                    <span className="tabular-nums">
-                      {cell.tenant_count} / {cell.max_tenants} tenants ·{" "}
+                    <span className="font-tabular">
+                      {fmt.number(cell.tenant_count)} /{" "}
+                      {fmt.number(cell.max_tenants)} tenants ·{" "}
                       {cell.utilization_pct.toFixed(0)}%
                     </span>
                   </div>
@@ -304,8 +374,8 @@ export function AdminHealthPage() {
                 <div key={t.tenant_id} className="flex flex-col gap-1">
                   <div className="flex justify-between text-sm text-fg">
                     <span>{t.name || t.tenant_id}</span>
-                    <span className="tabular-nums">
-                      {t.api_calls.toLocaleString()}
+                    <span className="font-tabular">
+                      {fmt.number(t.api_calls)}
                     </span>
                   </div>
                   <div className="h-2.5 overflow-hidden rounded-full bg-bg-muted">

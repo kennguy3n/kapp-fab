@@ -3,6 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 
+import { LocaleProvider } from "../lib/i18n";
 import { AdminHealthPage } from "./AdminHealthPage";
 
 const FIXTURE = {
@@ -53,9 +54,11 @@ function renderPage() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/admin/health"]}>
-        <AdminHealthPage />
-      </MemoryRouter>
+      <LocaleProvider>
+        <MemoryRouter initialEntries={["/admin/health"]}>
+          <AdminHealthPage />
+        </MemoryRouter>
+      </LocaleProvider>
     </QueryClientProvider>,
   );
 }
@@ -76,18 +79,19 @@ describe("AdminHealthPage", () => {
     );
     renderPage();
 
-    expect(await screen.findByText("System Health")).toBeInTheDocument();
-    // Component rows.
-    expect(screen.getByText("postgres")).toBeInTheDocument();
-    expect(screen.getByText("outbox")).toBeInTheDocument();
-    // Outbox backlog surfaced from component detail.
+    // Component rows (machine names are humanized into Title Case);
+    // wait on a data-only row so we're past the loading skeleton.
+    expect(await screen.findByText("Postgres")).toBeInTheDocument();
+    expect(screen.getByText("System health")).toBeInTheDocument();
+    expect(screen.getByText("Outbox")).toBeInTheDocument();
+    // Outbox backlog surfaced from component detail, locale-formatted.
     expect(screen.getByText("4,200")).toBeInTheDocument();
     // Pool saturation.
     expect(
       screen.getByText(/8 \/ 20 connections \(3 in use, 5 idle\)/),
     ).toBeInTheDocument();
-    // Cell + tenant leaderboard.
-    expect(screen.getByText(/250 \/ 1000 tenants/)).toBeInTheDocument();
+    // Cell + tenant leaderboard (counts are locale-formatted).
+    expect(screen.getByText(/250 \/ 1,000 tenants/)).toBeInTheDocument();
     expect(screen.getByText("Acme")).toBeInTheDocument();
     expect(screen.getByText("Globex")).toBeInTheDocument();
   });
@@ -99,7 +103,7 @@ describe("AdminHealthPage", () => {
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(JSON.stringify(FIXTURE), { status: 200 }));
     renderPage();
-    await screen.findByText("System Health");
+    await screen.findByText("System health");
 
     expect(spy).toHaveBeenCalledWith(
       "/api/v1/admin/health/detailed",
@@ -117,8 +121,11 @@ describe("AdminHealthPage", () => {
     renderPage();
     await waitFor(() =>
       expect(
-        screen.getByText(/Error loading operator dashboard/i),
+        screen.getByText(/Couldn't load system health/i),
       ).toBeInTheDocument(),
     );
+    expect(
+      screen.getByRole("button", { name: /try again/i }),
+    ).toBeInTheDocument();
   });
 });

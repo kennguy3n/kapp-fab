@@ -1,14 +1,52 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  ArrowDown,
+  ArrowUp,
+  GripVertical,
+  Plus,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 import type {
   FieldSpec,
+  KType,
   KTypeSchema,
   TenantKType,
   TenantKTypeStatus,
   UpsertTenantKTypeInput,
 } from "@kapp/client";
-import { Badge, Button, Input, Select } from "@kapp/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  EmptyState,
+  Field,
+  Input,
+  Select,
+  Skeleton,
+  Textarea,
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+  type BadgeProps,
+} from "@kapp/ui";
 import { api } from "../lib/api";
+import {
+  humanizeLabel,
+  humanizeToken,
+  ktypeSingular,
+  relationTargetKtype,
+  resolveControl,
+} from "../lib/ktypeView";
+import {
+  AdminErrorState,
+  AdminPageHeader,
+  Toggle,
+} from "./adminKit";
 
 /**
  * KTypeBuilderPage is the Phase N8b low-code visual editor for
@@ -27,28 +65,44 @@ import { api } from "../lib/api";
  *   - Status transitions: draft → active → archived. Only `active`
  *     KTypes back record creates.
  */
-const STATUS_VARIANT: Record<TenantKTypeStatus, "success" | "default" | "warning"> = {
+type BadgeVariant = NonNullable<BadgeProps["variant"]>;
+
+const STATUS_VARIANT: Record<TenantKTypeStatus, BadgeVariant> = {
   active: "success",
-  archived: "default",
+  archived: "neutral",
   draft: "warning",
 };
 
-const SAFE_TYPES: { value: string; label: string; help?: string }[] = [
+const STATUS_LABEL: Record<TenantKTypeStatus, string> = {
+  draft: "Draft",
+  active: "Active",
+  archived: "Archived",
+};
+
+const STATUS_HELP: Record<TenantKTypeStatus, string> = {
+  draft: "Draft — editable, no records yet",
+  active: "Active — can back new records",
+  archived: "Archived — frozen, read-only",
+};
+
+const SAFE_TYPES: { value: string; label: string }[] = [
   { value: "string", label: "Short text" },
   { value: "text", label: "Long text" },
   { value: "number", label: "Number" },
   { value: "integer", label: "Integer" },
   { value: "float", label: "Float" },
   { value: "decimal", label: "Decimal" },
-  { value: "boolean", label: "Boolean (yes / no)" },
+  { value: "boolean", label: "Yes / no" },
   { value: "date", label: "Date" },
   { value: "datetime", label: "Date & time" },
-  { value: "enum", label: "Choice list (enum)" },
-  { value: "ref", label: "Reference to another record" },
+  { value: "enum", label: "Choice list" },
+  { value: "ref", label: "Link to another record" },
   { value: "email", label: "Email" },
   { value: "phone", label: "Phone" },
   { value: "url", label: "URL" },
 ];
+
+const TYPE_LABEL = new Map(SAFE_TYPES.map((t) => [t.value, t.label]));
 
 // FieldRow couples a FieldSpec with a row-local React identity so
 // the field list can stay reorderable without using the array
@@ -108,20 +162,14 @@ export function KTypeBuilderPage() {
     queryKey: ["tenant-ktypes"],
     queryFn: () => api.listTenantKTypes(),
   });
+  const ktypesQuery = useQuery<KType[]>({
+    queryKey: ["ktypes"],
+    queryFn: () => api.listKTypes(),
+    staleTime: 60_000,
+  });
 
   const upsert = useMutation({
-    mutationFn: (input: UpsertTenantKTypeInput) =>
-      api.upsertTenantKType(input),
-    // The save just persisted `status`, so the editor's notion of the
-    // loaded row's status is now stale. Bring it back in lock-step
-    // before the next render so the forward-only transition gate
-    // (canTransitionStatus / validationErrors) keeps reading the
-    // correct from-state — otherwise the user could pick a value
-    // that round-trips through canTransitionStatus(loadedStatus,
-    // requestedStatus) but is rejected by the backend with 409.
-    // input.status is typed optional on UpsertTenantKTypeInput, but
-    // the builder's `preview` memo always sets it from the editor's
-    // status state — fall back to that state for type-safety.
+    mutationFn: (input: UpsertTenantKTypeInput) => api.upsertTenantKType(input),
     onSuccess: (_saved, input) => {
       setLoadedStatus(input.status ?? status);
       qc.invalidateQueries({ queryKey: ["tenant-ktypes"] });
@@ -133,16 +181,9 @@ export function KTypeBuilderPage() {
       version: number;
       status: TenantKTypeStatus;
     }) => api.setTenantKTypeStatus(args.name, args.version, args.status),
-    // The sidebar status buttons operate on rows in the list, not the
-    // editor — but if the affected row is the one currently loaded
-    // in the editor, loadedStatus would otherwise stay stale and
-    // open the same backward-transition desync as the upsert path.
     onSuccess: (_data, args) => {
       if (args.name === name && args.version === version) {
         setLoadedStatus(args.status);
-        // Keep the editor's "Status on save" picker pointed at the
-        // newly-persisted status by default so the next Save isn't
-        // a backward transition.
         setLocalStatus(args.status);
       }
       qc.invalidateQueries({ queryKey: ["tenant-ktypes"] });
@@ -154,47 +195,32 @@ export function KTypeBuilderPage() {
   const [name, setName] = useState("custom.");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  // The KType version of the row currently loaded in the editor. A
-  // freshly-reset editor defaults to 1; loadInto pulls the loaded
-  // row's version so re-saving from an existing record updates the
-  // correct version in tenant_ktypes rather than silently writing
-  // back into v1 and stranding any v2+ rows that may have been
-  // shipped by a developer-authored migration.
   const [version, setVersion] = useState<number>(1);
   const [rows, setRows] = useState<FieldRow[]>(() => [emptyFieldRow()]);
   const [status, setLocalStatus] = useState<TenantKTypeStatus>("draft");
-  // The loaded row's status, used to gate which lifecycle
-  // transition buttons the sidebar offers. "" means "no row
-  // loaded yet" (i.e. we're authoring a brand-new KType) so the
-  // "Status on save" picker shows every option.
   const [loadedStatus, setLoadedStatus] = useState<TenantKTypeStatus | "">("");
+  const [submitted, setSubmitted] = useState(false);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
 
-  // FieldSpec[] is the wire-shape the API expects; rows hold extra
-  // React identity. Derive once per render so downstream readers
-  // (preview memo, validation memo) don't re-pull rowIDs out.
-  const fields = useMemo<FieldSpec[]>(
-    () => rows.map((r) => r.spec),
-    [rows],
-  );
+  const fields = useMemo<FieldSpec[]>(() => rows.map((r) => r.spec), [rows]);
 
   const items = list.data?.items ?? [];
   const fieldLimit = list.data?.field_limit ?? 50;
 
-  // Live preview: project the editor state into the wire shape
-  // the API expects, so the user sees exactly what they're about
-  // to POST. The mock store / openapi-typescript can validate
-  // against this shape without an extra schema layer.
-  //
-  // Both the schema's `version` and the top-level `version` track
-  // the editor-state `version` so re-saving an existing custom
-  // KType writes back into the row the user loaded instead of
-  // silently targeting v1.
+  // Candidate targets for "link to another record" fields: the
+  // platform KTypes plus the tenant's own custom objects, labelled
+  // in plain language rather than raw machine names.
+  const refOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const k of ktypesQuery.data ?? []) map.set(k.name, ktypeSingular(k.name));
+    for (const it of items) map.set(it.name, it.title || ktypeSingular(it.name));
+    return Array.from(map.entries())
+      .map(([value, label]) => ({ value, label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [ktypesQuery.data, items]);
+
   const preview = useMemo<UpsertTenantKTypeInput>(() => {
-    const schema: KTypeSchema = {
-      name,
-      version,
-      fields,
-    };
+    const schema: KTypeSchema = { name, version, fields };
     return { name, title, description, schema, status, version };
   }, [name, title, description, fields, status, version]);
 
@@ -202,36 +228,31 @@ export function KTypeBuilderPage() {
     const errs: string[] = [];
     if (!isCustomName(name))
       errs.push(
-        "Name must look like custom.<slug> (lowercase letters, digits, underscores)",
+        "Name must look like custom.<slug> (lowercase letters, digits, underscores).",
       );
-    if (!title.trim()) errs.push("Title is required");
-    if (fields.length === 0) errs.push("Add at least one field");
+    if (!title.trim()) errs.push("Give your object a title.");
+    if (fields.length === 0) errs.push("Add at least one field.");
     if (fields.length > fieldLimit)
-      errs.push(`Maximum ${fieldLimit} fields per custom KType`);
-    // Duplicate field-name guard — mirrors the backend
-    // ErrDuplicateField check in validateCustomSchema. Surfacing
-    // here turns a confusing 400-with-server-error into a precise
-    // inline error pointing at the duplicated slot.
+      errs.push(`You can add at most ${fieldLimit} fields.`);
     const seen = new Set<string>();
     fields.forEach((f, i) => {
-      if (!f.name.trim()) errs.push(`Field #${i + 1}: name required`);
+      if (!f.name.trim()) errs.push(`Field ${i + 1}: enter a field name.`);
       else if (seen.has(f.name))
-        errs.push(`Field "${f.name}" is duplicated`);
+        errs.push(`The field name "${f.name}" is used more than once.`);
       else seen.add(f.name);
       if (
         f.type === "enum" &&
         (!f.values || f.values.filter((v) => v.trim()).length === 0)
       )
-        errs.push(`Field "${f.name || `#${i + 1}`}": enum needs values`);
+        errs.push(
+          `Field "${f.name || i + 1}": add at least one choice for the choice list.`,
+        );
       if (f.type === "ref" && !(f.ref || f.ktype))
-        errs.push(`Field "${f.name || `#${i + 1}`}": ref needs target KType`);
+        errs.push(`Field "${f.name || i + 1}": pick a record type to link to.`);
     });
-    // Forward-only lifecycle guard — mirrors the backend
-    // ErrInvalidTransition check. Surfaced inline so the user
-    // sees the rejection before clicking Save.
     if (loadedStatus && !canTransitionStatus(loadedStatus, status))
       errs.push(
-        `Cannot move ${loadedStatus} → ${status}: status lifecycle is forward-only (draft → active → archived)`,
+        `Can't move ${STATUS_LABEL[loadedStatus]} → ${STATUS_LABEL[status]}: status only moves forward (Draft → Active → Archived).`,
       );
     return errs;
   }, [name, title, fields, fieldLimit, loadedStatus, status]);
@@ -242,16 +263,35 @@ export function KTypeBuilderPage() {
     const j = i + dir;
     if (j < 0 || j >= rows.length) return;
     const next = [...rows];
-    const tmp = next[i];
-    next[i] = next[j];
-    next[j] = tmp;
+    [next[i], next[j]] = [next[j], next[i]];
     setRows(next);
+  }
+
+  function reorderField(from: number, to: number) {
+    if (from === to) return;
+    setRows((rs) => {
+      const next = [...rs];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
   }
 
   function updateField(i: number, patch: Partial<FieldSpec>) {
     const next = [...rows];
     next[i] = { ...next[i], spec: { ...next[i].spec, ...patch } };
     setRows(next);
+  }
+
+  function changeFieldType(i: number, type: string) {
+    // Switching type makes the previous type's extras meaningless,
+    // so clear them to avoid posting a stale enum list / ref target.
+    updateField(i, {
+      type,
+      values: type === "enum" ? rows[i].spec.values : undefined,
+      ref: type === "ref" ? rows[i].spec.ref : undefined,
+      ktype: type === "ref" ? rows[i].spec.ktype : undefined,
+    });
   }
 
   function loadInto(kt: TenantKType) {
@@ -262,6 +302,7 @@ export function KTypeBuilderPage() {
     setRows(toFieldRows(kt.schema.fields ?? []));
     setLocalStatus(kt.status);
     setLoadedStatus(kt.status);
+    setSubmitted(false);
   }
 
   function reset() {
@@ -272,218 +313,289 @@ export function KTypeBuilderPage() {
     setRows([emptyFieldRow()]);
     setLocalStatus("draft");
     setLoadedStatus("");
+    setSubmitted(false);
   }
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
+    setSubmitted(true);
+    if (!canSave) return;
     upsert.mutate(preview);
   }
 
+  const editingExisting = loadedStatus !== "";
+  const statusOptions = (["draft", "active", "archived"] as TenantKTypeStatus[]).filter(
+    (s) => !loadedStatus || canTransitionStatus(loadedStatus, s),
+  );
+
   return (
-    <section className="max-w-[1100px]">
-      <h1>Low-code KType Builder</h1>
-      <p className="text-fg-muted">
-        Define a custom business object for your tenant — an asset register,
-        compliance checklist, custom approval form. The generated KType is
-        scoped to your tenant only and lives in the <code>custom.*</code>{" "}
-        namespace; record CRUD, list views, and agent tools auto-generate from
-        the definition.
-      </p>
+    <section className="flex flex-col gap-6">
+      <AdminPageHeader
+        area="Data model"
+        title="Custom objects"
+        description="Design your own business objects — an asset register, a compliance checklist, an approval form — without writing code. Records, lists, and forms generate automatically from what you define here."
+        actions={
+          <Button leadingIcon={<Plus />} variant="secondary" onClick={reset}>
+            New object
+          </Button>
+        }
+      />
 
-      <div className="grid grid-cols-[320px_1fr] items-start gap-4">
+      <div className="grid items-start gap-6 lg:grid-cols-[18rem_1fr]">
         {/* Sidebar: existing custom KTypes ------------------------- */}
-        <aside className="rounded-md border border-border p-3">
-          <header className="flex items-center justify-between">
-            <h2 className="m-0 text-sm">Your custom KTypes</h2>
-            <Button type="button" variant="ghost" size="sm" onClick={reset}>
-              + New
-            </Button>
-          </header>
-          {list.isLoading && <p className="text-xs">Loading…</p>}
-          {items.length === 0 && !list.isLoading && (
-            <p className="text-xs text-fg-muted">
-              No custom KTypes yet. Define one on the right.
+        <aside className="flex flex-col gap-2">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-fg-muted">
+            Your custom objects
+          </h2>
+          {list.isLoading ? (
+            <div className="flex flex-col gap-2">
+              <Skeleton variant="rect" className="h-16 w-full" />
+              <Skeleton variant="rect" className="h-16 w-full" />
+            </div>
+          ) : list.isError ? (
+            <AdminErrorState
+              title="Couldn't load your objects"
+              error={list.error}
+              onRetry={() => list.refetch()}
+            />
+          ) : items.length === 0 ? (
+            <p className="rounded-lg border border-dashed border-border p-4 text-sm text-fg-muted">
+              No custom objects yet. Define one on the right and save it as a
+              draft to get started.
             </p>
-          )}
-          <ul className="m-0 list-none p-0 text-[13px]">
-            {items.map((it) => (
-              <li
-                key={`${it.name}@${it.version}`}
-                className="border-t border-border py-1.5"
-              >
-                <div className="flex justify-between">
-                  <button
-                    type="button"
-                    onClick={() => loadInto(it)}
-                    className="cursor-pointer border-none bg-transparent p-0 text-start text-fg"
-                  >
-                    <strong>{it.title}</strong>
-                    <br />
-                    <code className="text-[11px] text-fg-muted">{it.name}</code>
-                  </button>
-                  <Badge variant={STATUS_VARIANT[it.status]} size="xs">
-                    {it.status}
-                  </Badge>
-                </div>
-                <div className="mt-1 flex flex-wrap gap-1">
-                  {(["draft", "active", "archived"] as TenantKTypeStatus[])
-                    .filter(
-                      (s) =>
-                        s !== it.status &&
-                        // Only offer forward transitions — see
-                        // canTransitionStatus for the matrix that
-                        // matches the backend’s ErrInvalidTransition
-                        // gate. Hiding the buttons (rather than
-                        // disabling them) keeps the sidebar quiet
-                        // for archived rows, which otherwise advertise
-                        // “→ draft” and “→ active” only to surface 409
-                        // on click.
-                        canTransitionStatus(it.status, s),
-                    )
-                    .map((s) => (
-                      <Button
-                        key={s}
+          ) : (
+            <ul className="flex list-none flex-col gap-2 p-0">
+              {items.map((it) => {
+                const selected = it.name === name && it.version === version;
+                return (
+                  <li key={`${it.name}@${it.version}`}>
+                    <div
+                      className={`rounded-lg border p-3 transition-colors ${
+                        selected
+                          ? "border-accent bg-bg-subtle"
+                          : "border-border bg-bg-elevated hover:bg-bg-subtle"
+                      }`}
+                    >
+                      <button
                         type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() =>
-                          setStatus.mutate({
-                            name: it.name,
-                            version: it.version,
-                            status: s,
-                          })
-                        }
-                        disabled={setStatus.isPending}
+                        onClick={() => loadInto(it)}
+                        className="flex w-full items-start justify-between gap-2 text-start focus-visible:outline-none"
                       >
-                        → {s}
-                      </Button>
-                    ))}
-                </div>
-              </li>
-            ))}
-          </ul>
-        </aside>
-
-        {/* Editor ---------------------------------------------- */}
-        <form onSubmit={submit} className="grid gap-3">
-          <label className="grid gap-1 text-[13px]">
-            <span>Machine name</span>
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="custom.asset_register"
-            />
-            <span className="text-[11px] text-fg-muted">
-              Must start with <code>custom.</code> and use lowercase letters,
-              digits, or underscores.
-            </span>
-          </label>
-
-          <label className="grid gap-1 text-[13px]">
-            <span>Title</span>
-            <Input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="Asset Register"
-            />
-          </label>
-
-          <label className="grid gap-1 text-[13px]">
-            <span>Description</span>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              rows={2}
-              className="rounded-md border border-border bg-bg px-2 py-1.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
-            />
-          </label>
-
-          <fieldset className="border border-border p-3">
-            <legend className="text-[13px]">
-              Fields ({fields.length} / {fieldLimit})
-            </legend>
-            {rows.map((r, i) => (
-              <FieldEditor
-                key={r.rowID}
-                field={r.spec}
-                onChange={(patch) => updateField(i, patch)}
-                onMoveUp={() => moveField(i, -1)}
-                onMoveDown={() => moveField(i, 1)}
-                onRemove={() =>
-                  setRows(rows.filter((_, j) => j !== i))
-                }
-              />
-            ))}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setRows([...rows, emptyFieldRow()])}
-              disabled={rows.length >= fieldLimit}
-              className="mt-2"
-            >
-              + Add field
-            </Button>
-          </fieldset>
-
-          <label className="grid gap-1 text-[13px]">
-            <span>Status on save</span>
-            <Select
-              value={status}
-              onChange={(e) =>
-                setLocalStatus(e.target.value as TenantKTypeStatus)
-              }
-            >
-              {/* Only show statuses the loaded row can transition
-                  to (or every status when authoring a brand-new
-                  KType). Mirrors the backend lifecycle gate. */}
-              {(["draft", "active", "archived"] as TenantKTypeStatus[])
-                .filter(
-                  (s) =>
-                    !loadedStatus || canTransitionStatus(loadedStatus, s),
-                )
-                .map((s) => (
-                  <option key={s} value={s}>
-                    {s === "draft"
-                      ? "draft (editable, no records yet)"
-                      : s === "active"
-                        ? "active (back record creates)"
-                        : "archived (frozen)"}
-                  </option>
-                ))}
-            </Select>
-          </label>
-
-          {validationErrors.length > 0 && (
-            <ul className="pl-4 text-xs text-danger">
-              {validationErrors.map((e) => (
-                <li key={e}>{e}</li>
-              ))}
+                        <span className="min-w-0">
+                          <span className="block truncate font-medium text-fg">
+                            {it.title || ktypeSingular(it.name)}
+                          </span>
+                          <span className="block truncate text-xs text-fg-muted">
+                            {it.schema.fields?.length ?? 0}{" "}
+                            {(it.schema.fields?.length ?? 0) === 1
+                              ? "field"
+                              : "fields"}
+                          </span>
+                        </span>
+                        <Badge variant={STATUS_VARIANT[it.status]} size="xs">
+                          {STATUS_LABEL[it.status]}
+                        </Badge>
+                      </button>
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {(["draft", "active", "archived"] as TenantKTypeStatus[])
+                          .filter(
+                            (s) => s !== it.status && canTransitionStatus(it.status, s),
+                          )
+                          .map((s) => (
+                            <Button
+                              key={s}
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() =>
+                                setStatus.mutate({
+                                  name: it.name,
+                                  version: it.version,
+                                  status: s,
+                                })
+                              }
+                              disabled={setStatus.isPending}
+                            >
+                              Mark {STATUS_LABEL[s].toLowerCase()}
+                            </Button>
+                          ))}
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           )}
-          {upsert.isError && (
-            <p className="text-xs text-danger">
-              {(upsert.error as Error).message}
-            </p>
-          )}
-          <div className="flex gap-2">
-            <Button type="submit" disabled={!canSave}>
-              {upsert.isPending ? "Saving…" : "Save KType"}
-            </Button>
-            <Button type="button" variant="outline" onClick={reset}>
-              Reset
-            </Button>
-          </div>
+        </aside>
 
-          <details>
-            <summary className="text-xs text-fg-muted">
-              Live preview (JSON sent to API)
-            </summary>
-            <pre className="overflow-auto bg-bg-muted p-2 text-[11px]">
-              {JSON.stringify(preview, null, 2)}
-            </pre>
-          </details>
-        </form>
+        {/* Editor + live preview ------------------------------------ */}
+        <div className="grid items-start gap-6 2xl:grid-cols-2">
+          <form onSubmit={submit} className="flex flex-col gap-4">
+            <Card>
+              <CardHeader>
+                <CardTitle>{editingExisting ? "Edit object" : "New object"}</CardTitle>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-4">
+                <Field
+                  label="Title"
+                  required
+                  error={submitted && !title.trim() ? "Give your object a title." : undefined}
+                  help="The friendly name people see, e.g. Asset Register."
+                >
+                  <Input
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    placeholder="Asset Register"
+                  />
+                </Field>
+                <Field
+                  label="Machine name"
+                  required
+                  error={
+                    submitted && !isCustomName(name)
+                      ? "Use custom.<slug> — lowercase letters, digits, underscores."
+                      : undefined
+                  }
+                  help="A stable identifier used behind the scenes. Starts with custom."
+                >
+                  <Input
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="custom.asset_register"
+                    className="font-mono"
+                    disabled={editingExisting}
+                  />
+                </Field>
+                <Field
+                  label="Description"
+                  help="Optional. Explain what this object is for."
+                >
+                  <Textarea
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    rows={2}
+                    placeholder="Tracks every physical asset the company owns."
+                  />
+                </Field>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
+                <CardTitle>Fields</CardTitle>
+                <Badge variant="neutral">
+                  {fields.length} of {fieldLimit}
+                </Badge>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-3">
+                {rows.map((r, i) => (
+                  <div
+                    key={r.rowID}
+                    onDragOver={(e) => {
+                      if (dragIndex !== null && dragIndex !== i) e.preventDefault();
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      if (dragIndex !== null) {
+                        reorderField(dragIndex, i);
+                        setDragIndex(null);
+                      }
+                    }}
+                    className={
+                      dragIndex === i ? "opacity-60" : undefined
+                    }
+                  >
+                    <FieldEditor
+                      field={r.spec}
+                      index={i}
+                      count={rows.length}
+                      refOptions={refOptions}
+                      onChange={(patch) => updateField(i, patch)}
+                      onChangeType={(t) => changeFieldType(i, t)}
+                      onMoveUp={() => moveField(i, -1)}
+                      onMoveDown={() => moveField(i, 1)}
+                      onRemove={() => setRows(rows.filter((_, j) => j !== i))}
+                      onDragStart={() => setDragIndex(i)}
+                      onDragEnd={() => setDragIndex(null)}
+                    />
+                  </div>
+                ))}
+                <div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    leadingIcon={<Plus />}
+                    onClick={() => setRows([...rows, emptyFieldRow()])}
+                    disabled={rows.length >= fieldLimit}
+                  >
+                    Add field
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Lifecycle</CardTitle>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-4">
+                <Field
+                  label="Status on save"
+                  help="Records can only be created against Active objects. Status moves forward only."
+                >
+                  <Select
+                    value={status}
+                    onChange={(e) =>
+                      setLocalStatus(e.target.value as TenantKTypeStatus)
+                    }
+                  >
+                    {statusOptions.map((s) => (
+                      <option key={s} value={s}>
+                        {STATUS_HELP[s]}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+
+                {submitted && validationErrors.length > 0 && (
+                  <div className="rounded-md border border-danger/40 bg-danger/10 p-3">
+                    <p className="text-sm font-medium text-danger">
+                      Fix these before saving:
+                    </p>
+                    <ul className="mt-1 list-disc pl-5 text-sm text-danger">
+                      {validationErrors.map((e) => (
+                        <li key={e}>{e}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {upsert.isError && (
+                  <p className="text-sm text-danger">
+                    {(upsert.error as Error).message}
+                  </p>
+                )}
+
+                <div className="flex flex-wrap gap-2">
+                  <Button type="submit" disabled={!canSave}>
+                    {upsert.isPending ? "Saving…" : "Save object"}
+                  </Button>
+                  <Button type="button" variant="ghost" onClick={reset}>
+                    Reset
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </form>
+
+          <SchemaPreview
+            title={title}
+            description={description}
+            status={status}
+            fields={fields}
+            refOptions={refOptions}
+          />
+        </div>
       </div>
     </section>
   );
@@ -491,76 +603,298 @@ export function KTypeBuilderPage() {
 
 interface FieldEditorProps {
   field: FieldSpec;
+  index: number;
+  count: number;
+  refOptions: { value: string; label: string }[];
   onChange: (patch: Partial<FieldSpec>) => void;
+  onChangeType: (type: string) => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
   onRemove: () => void;
+  onDragStart: () => void;
+  onDragEnd: () => void;
 }
 
 function FieldEditor({
   field,
+  index,
+  count,
+  refOptions,
   onChange,
+  onChangeType,
   onMoveUp,
   onMoveDown,
   onRemove,
+  onDragStart,
+  onDragEnd,
 }: FieldEditorProps) {
+  const label = field.name.trim() ? humanizeLabel(field.name) : `Field ${index + 1}`;
+  const refValue = field.ref ?? field.ktype ?? "";
+  const refMissing = refValue !== "" && !refOptions.some((o) => o.value === refValue);
+
   return (
-    <div className="my-2 grid grid-cols-[1fr_1fr_auto_auto_auto_auto] items-center gap-1.5 text-[13px]">
-      <Input
-        value={field.name}
-        onChange={(e) => onChange({ name: e.target.value })}
-        placeholder="field name"
-      />
-      <Select
-        value={field.type}
-        onChange={(e) => onChange({ type: e.target.value })}
-      >
-        {SAFE_TYPES.map((t) => (
-          <option key={t.value} value={t.value}>
-            {t.label}
-          </option>
-        ))}
-      </Select>
-      <label className="flex items-center gap-1 text-[11px]">
-        <input
-          type="checkbox"
-          checked={field.required ?? false}
-          onChange={(e) => onChange({ required: e.target.checked })}
-        />
-        required
-      </label>
-      <Button type="button" variant="outline" size="sm" onClick={onMoveUp}>
-        ↑
-      </Button>
-      <Button type="button" variant="outline" size="sm" onClick={onMoveDown}>
-        ↓
-      </Button>
-      <Button type="button" variant="outline" size="sm" onClick={onRemove}>
-        ✕
-      </Button>
+    <div className="rounded-lg border border-border bg-bg-subtle p-3">
+      <div className="flex flex-wrap items-end gap-2">
+        <span
+          draggable
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+          aria-hidden="true"
+          className="mb-1.5 flex h-9 cursor-grab items-center text-fg-subtle active:cursor-grabbing"
+          title="Drag to reorder"
+        >
+          <GripVertical className="h-4 w-4" />
+        </span>
+        <Field label="Field name" className="min-w-[10rem] flex-1">
+          <Input
+            value={field.name}
+            onChange={(e) => onChange({ name: e.target.value })}
+            placeholder="serial_number"
+            className="font-mono"
+          />
+        </Field>
+        <Field label="Type" className="min-w-[9rem]">
+          <Select value={field.type} onChange={(e) => onChangeType(e.target.value)}>
+            {SAFE_TYPES.map((t) => (
+              <option key={t.value} value={t.value}>
+                {t.label}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <div className="mb-1.5 flex items-center gap-2">
+          <Toggle
+            checked={field.required ?? false}
+            onChange={(v) => onChange({ required: v })}
+            label={`Make ${label} required`}
+          />
+          <span className="text-sm text-fg-muted">Required</span>
+        </div>
+        <div className="mb-1 flex items-center gap-0.5">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={`Move ${label} up`}
+            disabled={index === 0}
+            onClick={onMoveUp}
+          >
+            <ArrowUp className="h-4 w-4" aria-hidden="true" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={`Move ${label} down`}
+            disabled={index === count - 1}
+            onClick={onMoveDown}
+          >
+            <ArrowDown className="h-4 w-4" aria-hidden="true" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={`Remove ${label}`}
+            onClick={onRemove}
+          >
+            <Trash2 className="h-4 w-4" aria-hidden="true" />
+          </Button>
+        </div>
+      </div>
+
       {field.type === "enum" && (
-        <Input
-          value={(field.values ?? []).join(",")}
-          onChange={(e) =>
-            onChange({
-              values: e.target.value
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean),
-            })
-          }
-          placeholder="comma,separated,values"
-          className="col-span-6"
-        />
+        <div className="mt-2">
+          <Field
+            label="Choices"
+            help="Comma-separated options people can pick from."
+          >
+            <Input
+              value={(field.values ?? []).join(", ")}
+              onChange={(e) =>
+                onChange({
+                  values: e.target.value
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+                })
+              }
+              placeholder="Active, In repair, Retired"
+            />
+          </Field>
+        </div>
       )}
       {field.type === "ref" && (
-        <Input
-          value={field.ref ?? field.ktype ?? ""}
-          onChange={(e) => onChange({ ref: e.target.value })}
-          placeholder="target ktype (e.g. crm.account)"
-          className="col-span-6"
-        />
+        <div className="mt-2">
+          <Field label="Links to" help="Which record type this field points at.">
+            <Select
+              value={refValue}
+              onChange={(e) => onChange({ ref: e.target.value, ktype: undefined })}
+            >
+              <option value="">Select a record type…</option>
+              {refMissing && <option value={refValue}>{refValue}</option>}
+              {refOptions.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * SchemaPreview renders the editor state the way an end user will
+ * actually experience it — a record form with real labels and the
+ * right control per field type — so authors get instant, jargon-free
+ * feedback instead of reading raw JSON.
+ */
+function SchemaPreview({
+  title,
+  description,
+  status,
+  fields,
+  refOptions,
+}: {
+  title: string;
+  description: string;
+  status: TenantKTypeStatus;
+  fields: FieldSpec[];
+  refOptions: { value: string; label: string }[];
+}) {
+  const named = fields.filter((f) => f.name.trim());
+  return (
+    <Card className="2xl:sticky 2xl:top-4">
+      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
+        <CardTitle className="flex items-center gap-2">
+          <Sparkles className="h-4 w-4 text-accent" aria-hidden="true" />
+          Live preview
+        </CardTitle>
+        <Badge variant={STATUS_VARIANT[status]} size="xs">
+          {STATUS_LABEL[status]}
+        </Badge>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <div>
+          <h3 className="text-base font-semibold text-fg">
+            {title.trim() || "Untitled object"}
+          </h3>
+          {description.trim() && (
+            <p className="mt-1 text-sm text-fg-muted">{description}</p>
+          )}
+        </div>
+        {named.length === 0 ? (
+          <EmptyState
+            icon={<Sparkles />}
+            title="Add a field to preview"
+            description="As you add fields, the record form people will fill in appears here."
+          />
+        ) : (
+          <div className="flex flex-col gap-3">
+            {named.map((f, i) => (
+              <PreviewControl key={`${f.name}-${i}`} field={f} refOptions={refOptions} />
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function PreviewControl({
+  field,
+  refOptions,
+}: {
+  field: FieldSpec;
+  refOptions: { value: string; label: string }[];
+}) {
+  const label = humanizeLabel(field.name);
+  const control = resolveControl(field);
+  const required = field.required ?? false;
+
+  const labelNode = (
+    <span className="flex items-center gap-1 text-sm font-medium text-fg">
+      {label}
+      {required && (
+        <span className="text-danger" aria-hidden="true">
+          *
+        </span>
+      )}
+      <Badge variant="outline" size="xs" className="ml-1 font-normal">
+        {TYPE_LABEL.get(field.type) ?? humanizeToken(field.type)}
+      </Badge>
+    </span>
+  );
+
+  let body: React.ReactNode;
+  if (control === "boolean") {
+    body = (
+      <span className="flex items-center gap-2 text-sm text-fg-muted">
+        <Toggle checked={false} disabled onChange={() => {}} label={`${label} preview`} />
+        No
+      </span>
+    );
+  } else if (control === "select") {
+    body = (
+      <span className="flex flex-wrap gap-1">
+        {(field.values ?? []).length === 0 ? (
+          <span className="text-sm text-fg-subtle">No choices yet</span>
+        ) : (
+          field.values!.map((v) => (
+            <Badge key={v} variant="neutral" size="xs">
+              {humanizeToken(v)}
+            </Badge>
+          ))
+        )}
+      </span>
+    );
+  } else if (control === "relation") {
+    const target = relationTargetKtype(field);
+    const targetLabel =
+      refOptions.find((o) => o.value === target)?.label ??
+      (target ? ktypeSingular(target) : "record");
+    body = (
+      <span className="block rounded-md border border-border bg-bg px-3 py-2 text-sm text-fg-subtle">
+        Search a {targetLabel}…
+      </span>
+    );
+  } else if (control === "textarea") {
+    body = (
+      <span className="block h-16 rounded-md border border-border bg-bg px-3 py-2 text-sm text-fg-subtle">
+        Long text…
+      </span>
+    );
+  } else {
+    const placeholder: Record<string, string> = {
+      number: "0",
+      date: "Pick a date",
+      datetime: "Pick a date & time",
+      email: "name@example.com",
+      tel: "+1 555 0100",
+      url: "https://…",
+      text: "Text…",
+    };
+    body = (
+      <span className="block rounded-md border border-border bg-bg px-3 py-2 text-sm text-fg-subtle">
+        {placeholder[control] ?? "Text…"}
+      </span>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      {field.type === "ref" && !field.name.trim() ? (
+        <Tooltip>
+          <TooltipTrigger asChild>{labelNode}</TooltipTrigger>
+          <TooltipContent>Name this field to finish it.</TooltipContent>
+        </Tooltip>
+      ) : (
+        labelNode
+      )}
+      {body}
     </div>
   );
 }
