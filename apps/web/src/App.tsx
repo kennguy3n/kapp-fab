@@ -1922,11 +1922,14 @@ function ProfileMenu({ collapsed }: { collapsed: boolean }) {
       "kapp.tenant",
       "kapp.expires_at",
       "kapp.id_token",
-      // Per-user nav preferences — cleared on sign-out so they don't
-      // leak to the next user signing in on a shared device.
+      // Per-user nav state — cleared on sign-out so it doesn't leak to
+      // the next user signing in on a shared device. RECENT_PAGES_KEY
+      // holds labels of records the user opened (CRM contacts, invoices,
+      // tickets), so it's the most sensitive of these.
       NAV_FAVORITES_KEY,
       NAV_COLLAPSED_SECTIONS_KEY,
       SIDEBAR_COLLAPSED_KEY,
+      RECENT_PAGES_KEY,
     ]) {
       try {
         localStorage.removeItem(k);
