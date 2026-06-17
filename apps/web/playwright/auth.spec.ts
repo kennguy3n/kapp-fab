@@ -14,6 +14,7 @@ test.describe("authentication", () => {
     await page.goto("/login");
 
     await page.getByRole("heading", { name: "Sign in" }).waitFor();
+    await page.getByRole("button", { name: /Developer sign-in/i }).click();
     await page.locator("label", { hasText: "KChat auth code" }).locator("input").fill("kchat-code");
     await page.getByRole("button", { name: "Continue" }).click();
 
@@ -56,6 +57,7 @@ test.describe("authentication", () => {
     // here: seedSession installs a persistent init script that re-seeds
     // the token on every navigation, which would mask the logout.
     await page.goto("/login");
+    await page.getByRole("button", { name: /Developer sign-in/i }).click();
     await page.locator("label", { hasText: "KChat auth code" }).locator("input").fill("kchat-code");
     await page.getByRole("button", { name: "Continue" }).click();
     await expect(
@@ -89,6 +91,7 @@ test.describe("authentication", () => {
     );
 
     await page.goto("/login");
+    await page.getByRole("button", { name: /Developer sign-in/i }).click();
     await page.locator("label", { hasText: "KChat auth code" }).locator("input").fill("bad");
     await page.getByRole("button", { name: "Continue" }).click();
 

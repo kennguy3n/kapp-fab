@@ -242,8 +242,10 @@ describe("App shell", () => {
   it("renders the public login route without the tenant shell", async () => {
     renderApp("/login");
 
-    // LoginPage exposes Tenant + Token fields.
-    expect(await screen.findByLabelText(/^Tenant$/i)).toBeInTheDocument();
+    // LoginPage renders its branded "Sign in" heading.
+    expect(
+      await screen.findByRole("heading", { name: /^Sign in$/i }),
+    ).toBeInTheDocument();
     // No authenticated sidebar chrome on the public route.
     expect(screen.queryByText("Overview")).not.toBeInTheDocument();
     expect(screen.queryByText("CRM")).not.toBeInTheDocument();

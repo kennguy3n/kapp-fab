@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import {
@@ -8,24 +8,20 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Field,
   Input,
   Select,
   Stepper,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
   cn,
 } from "@kapp/ui";
-import { Check, ChevronDown, Plus, Search } from "lucide-react";
+import { Check, ChevronDown, Plus, Search, Trash2 } from "lucide-react";
 import {
   SupportedLocales,
   bestSupportedLocaleForCountry,
   localeInfo,
   useTranslation,
 } from "../lib/i18n";
+import { KappMark } from "./auth/AuthScaffold";
 
 // SetupWizardPage drives the tenant setup wizard on the frontend. It
 // collects the first-run company profile, CoA template, and initial
@@ -325,6 +321,13 @@ function defaultCoATemplateForCountry(country: string): string {
   return COUNTRY_COA_DEFAULTS[code] ?? "ifrs_basic";
 }
 
+// coaLabel maps a stored template value (e.g. "sg_basic") back to its
+// human label for the completion screen, so a raw template token is
+// never echoed back at the user.
+function coaLabel(value: string): string {
+  return COA_TEMPLATES.find((tpl) => tpl.value === value)?.label ?? value;
+}
+
 interface InitialUser {
   email: string;
   display_name: string;
@@ -357,6 +360,61 @@ const AVAILABLE_ROLES = [
   "reporting.viewer",
 ];
 
+// Human-friendly labels + one-line descriptions for the seedable
+// roles. Keys mirror AVAILABLE_ROLES (and the backend role names);
+// only the display changes so the person running setup never sees a
+// raw "crm.rep" token.
+const ROLE_META: Record<string, { label: string; description: string }> = {
+  owner: { label: "Owner", description: "Full control, including billing" },
+  "tenant.admin": {
+    label: "Administrator",
+    description: "Manage settings, people, and data",
+  },
+  "tenant.member": {
+    label: "Member",
+    description: "Day-to-day access to the workspace",
+  },
+  "finance.admin": {
+    label: "Finance admin",
+    description: "Accounting, invoicing, and payroll",
+  },
+  "hr.admin": { label: "HR admin", description: "People, leave, and onboarding" },
+  "lms.admin": {
+    label: "Training admin",
+    description: "Courses and learning content",
+  },
+  "crm.rep": { label: "Sales rep", description: "Work leads and deals" },
+  "crm.manager": {
+    label: "Sales manager",
+    description: "Oversee the sales pipeline",
+  },
+  "inventory.admin": {
+    label: "Inventory admin",
+    description: "Products, stock, and warehouses",
+  },
+  "helpdesk.agent": {
+    label: "Support agent",
+    description: "Answer customer tickets",
+  },
+  "helpdesk.manager": {
+    label: "Support manager",
+    description: "Manage the support queue",
+  },
+  "sales.rep": { label: "Order desk", description: "Quotes and sales orders" },
+  "procurement.rep": {
+    label: "Purchasing",
+    description: "Suppliers and purchase orders",
+  },
+  "reporting.viewer": {
+    label: "Report viewer",
+    description: "Read-only dashboards and reports",
+  },
+};
+
+function roleLabel(role: string): string {
+  return ROLE_META[role]?.label ?? role;
+}
+
 interface SetupPayload {
   company_name: string;
   industry?: string;
@@ -384,6 +442,23 @@ interface SetupResult {
   // catalogue (e.g. "hi" → "en" today). The completion screen
   // surfaces this so the user can see what was actually committed.
   locale_used: string;
+}
+
+// Full-page branded shell for the setup wizard. The wizard renders
+// outside the authenticated app shell (the tenant has no nav-worthy
+// data until setup completes), so it owns its own centered,
+// KChat-branded page chrome.
+function WizardShell({ children }: { children: ReactNode }) {
+  return (
+    <main className="flex min-h-screen w-full flex-col items-center bg-bg px-4 py-10">
+      <div className="flex w-full max-w-2xl flex-col gap-8">
+        <div className="flex justify-center">
+          <KappMark size="lg" />
+        </div>
+        {children}
+      </div>
+    </main>
+  );
 }
 
 export function SetupWizardPage() {
@@ -602,30 +677,31 @@ export function SetupWizardPage() {
 
   if (!tenantId) {
     return (
-      <section className="mx-auto flex max-w-2xl flex-col gap-4">
-        <h1 className="text-2xl font-semibold tracking-tight text-fg">
-          Tenant Setup
-        </h1>
-        <div
-          role="alert"
-          className="rounded-md border border-border border-s-2 border-s-danger bg-bg-subtle px-3 py-2 text-sm text-danger"
-        >
-          Missing tenant id in route. Expected <code>/setup/:id</code>.
-        </div>
-      </section>
+      <WizardShell>
+        <section className="flex flex-col gap-4">
+          <h1 className="text-2xl font-medium tracking-tight text-fg">
+            Tenant Setup
+          </h1>
+          <div
+            role="alert"
+            className="rounded-md border border-border border-s-2 border-s-danger bg-bg-subtle px-3 py-2 text-sm text-danger"
+          >
+            Missing tenant id in route. Expected <code>/setup/:id</code>.
+          </div>
+        </section>
+      </WizardShell>
     );
   }
 
   return (
-    <section className="mx-auto flex max-w-2xl flex-col gap-6">
-      <header className="flex flex-col gap-1">
-        <h1 className="text-2xl font-semibold tracking-tight text-fg">
-          Tenant Setup
+    <WizardShell>
+      <header className="flex flex-col gap-1 text-center">
+        <h1 className="text-2xl font-medium tracking-tight text-fg">
+          Set up your workspace
         </h1>
         <p className="text-sm text-fg-muted">
-          Seeds the chart of accounts, default roles, and invites your
-          starting team. You can edit every value after setup from the
-          admin pages.
+          A few quick steps to get Kapp ready for your team. You can
+          change anything later from Settings.
         </p>
       </header>
       {/* Stepper marks indices < current as completed (check marker)
@@ -646,55 +722,44 @@ export function SetupWizardPage() {
           <CardHeader>
             <CardTitle>{t("wizard.step.company")}</CardTitle>
             <CardDescription>
-              Tell us who you are. These details seed the company profile
-              and drive the country-specific defaults on the next step.
+              Tell us about your business. We'll use this to set smart
+              defaults for the next steps.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
-            <label className="flex flex-col gap-1.5">
-              <span className="text-sm font-medium text-fg">Company name</span>
+            <Field label="Company name" required>
               <Input
                 value={companyName}
                 onChange={(e) => setCompanyName(e.target.value)}
+                placeholder="Your company's name"
                 required
+                autoFocus
               />
-            </label>
-            <label className="flex flex-col gap-1.5">
-              <span className="text-sm font-medium text-fg">Industry</span>
+            </Field>
+            <Field
+              label="Industry"
+              help="Optional — helps us tailor defaults to your business."
+            >
               <Input
                 value={industry}
                 onChange={(e) => setIndustry(e.target.value)}
                 placeholder="e.g. Software, Retail"
               />
-            </label>
-            <label className="flex flex-col gap-1.5">
-              <span className="text-sm font-medium text-fg">Country</span>
+            </Field>
+            <Field
+              label="Country"
+              help="Enter your country (name or 2-letter code) to pre-select the right accounting defaults."
+            >
               <Input
                 value={country}
                 onChange={(e) => setCountry(e.target.value)}
-                placeholder="ISO country code or name"
+                placeholder="e.g. United States or US"
               />
-            </label>
-            <label className="flex flex-col gap-1.5">
-              <span className="text-sm font-medium text-fg">
-                {t("common.language")}
-              </span>
-              <Select
-                value={effectiveLocale}
-                onChange={(e) => setLocaleState(e.target.value)}
-                aria-label={t("common.language")}
-              >
-                {SupportedLocales.map((info) => (
-                  <option key={info.tag} value={info.tag}>
-                    {info.name}
-                  </option>
-                ))}
-              </Select>
-              {/* Hint copy reflects the locale-resolution precedence:
-                  an explicit pick wins, else a country-derived locale,
-                  else the LocaleProvider's navigator/cookie value. */}
-              <span className="text-xs font-normal text-fg-muted">
-                {locale
+            </Field>
+            <Field
+              label={t("common.language")}
+              help={
+                locale
                   ? country &&
                     effectiveLocale !== bestSupportedLocaleForCountry(country)
                     ? t("wizard.locale.override_hint", {
@@ -708,9 +773,21 @@ export function SetupWizardPage() {
                     ? t("wizard.locale.country_hint", {
                         country: country.trim().toUpperCase(),
                       })
-                    : t("wizard.locale.browser_hint")}
-              </span>
-            </label>
+                    : t("wizard.locale.browser_hint")
+              }
+            >
+              <Select
+                value={effectiveLocale}
+                onChange={(e) => setLocaleState(e.target.value)}
+                aria-label={t("common.language")}
+              >
+                {SupportedLocales.map((info) => (
+                  <option key={info.tag} value={info.tag}>
+                    {info.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
             <div className="flex justify-end">
               <Button
                 type="button"
@@ -729,9 +806,9 @@ export function SetupWizardPage() {
           <CardHeader>
             <CardTitle>{t("wizard.step.coa")}</CardTitle>
             <CardDescription>
-              Pick the chart of accounts for your statutory jurisdiction.
-              Selecting a country on the previous step pre-selects the
-              matching chart; search or browse by region to change it.
+              Choose the chart of accounts that matches your country's
+              accounting standards. Picking a country on the previous step
+              pre-selects a match — search or browse by region to change it.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
@@ -823,11 +900,8 @@ export function SetupWizardPage() {
               )}
             </div>
             <p className="text-xs text-fg-muted">
-              Templates live in{" "}
-              <code>internal/tenant/coa_templates/</code>. Every account is
-              inserted with{" "}
-              <code>ON CONFLICT (tenant_id, code) DO NOTHING</code> so the
-              step is safe to re-run.
+              Not sure? You can change your chart of accounts later, and
+              re-running setup never creates duplicate accounts.
             </p>
             <div className="flex justify-between">
               <Button
@@ -850,104 +924,24 @@ export function SetupWizardPage() {
           <CardHeader>
             <CardTitle>{t("wizard.step.users")}</CardTitle>
             <CardDescription>
-              Invite initial team members. Each user is seeded into the{" "}
-              <code>users</code> table and added to the tenant via{" "}
-              <code>user_tenants</code> with the selected roles.
+              Invite the people who'll use Kapp with you. You can add more
+              team members and change roles anytime after setup.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Email</TableHead>
-                  <TableHead>Display name</TableHead>
-                  <TableHead>Roles</TableHead>
-                  <TableHead>
-                    <span className="sr-only">Actions</span>
-                  </TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {users.map((u, i) => (
-                  <TableRow key={i}>
-                    <TableCell>
-                      <Input
-                        value={u.email}
-                        onChange={(e) =>
-                          setUsers((prev) =>
-                            prev.map((row, j) =>
-                              j === i
-                                ? { ...row, email: e.target.value }
-                                : row,
-                            ),
-                          )
-                        }
-                        type="email"
-                        placeholder="name@example.com"
-                        aria-label={`Email for user ${i + 1}`}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Input
-                        value={u.display_name}
-                        onChange={(e) =>
-                          setUsers((prev) =>
-                            prev.map((row, j) =>
-                              j === i
-                                ? { ...row, display_name: e.target.value }
-                                : row,
-                            ),
-                          )
-                        }
-                        aria-label={`Display name for user ${i + 1}`}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      {/* The Select primitive is single-select by
-                          design, so roles render as a checkbox group.
-                          `role` mirrors the first checked role to keep
-                          the legacy single-role back-end column
-                          populated. */}
-                      <fieldset
-                        className="flex flex-col gap-1"
-                        aria-label={`Roles for user ${i + 1}`}
-                      >
-                        {AVAILABLE_ROLES.map((role) => (
-                          <label
-                            key={role}
-                            className="flex items-center gap-2 text-sm text-fg"
-                          >
-                            <input
-                              type="checkbox"
-                              value={role}
-                              checked={u.roles.includes(role)}
-                              className="accent-[var(--accent)]"
-                              onChange={(e) =>
-                                setUsers((prev) =>
-                                  prev.map((row, j) => {
-                                    if (j !== i) return row;
-                                    const nextRoles = e.target.checked
-                                      ? [...row.roles, role]
-                                      : row.roles.filter((r) => r !== role);
-                                    return {
-                                      ...row,
-                                      role: nextRoles[0] ?? row.role,
-                                      roles: nextRoles,
-                                    };
-                                  }),
-                                )
-                              }
-                            />
-                            {role}
-                          </label>
-                        ))}
-                      </fieldset>
-                    </TableCell>
-                    <TableCell>
+            <div className="flex flex-col gap-4">
+              {users.map((u, i) => (
+                <Card key={i}>
+                  <CardContent className="flex flex-col gap-4 p-5">
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="text-sm font-medium text-fg">
+                        Team member {i + 1}
+                      </h3>
                       <Button
                         type="button"
                         variant="ghost"
                         size="sm"
+                        leadingIcon={<Trash2 className="h-4 w-4" />}
                         onClick={() =>
                           setUsers((prev) => prev.filter((_, j) => j !== i))
                         }
@@ -955,11 +949,101 @@ export function SetupWizardPage() {
                       >
                         Remove
                       </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                    </div>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <Field label="Email">
+                        <Input
+                          value={u.email}
+                          onChange={(e) =>
+                            setUsers((prev) =>
+                              prev.map((row, j) =>
+                                j === i
+                                  ? { ...row, email: e.target.value }
+                                  : row,
+                              ),
+                            )
+                          }
+                          type="email"
+                          placeholder="name@example.com"
+                        />
+                      </Field>
+                      <Field label="Full name">
+                        <Input
+                          value={u.display_name}
+                          onChange={(e) =>
+                            setUsers((prev) =>
+                              prev.map((row, j) =>
+                                j === i
+                                  ? { ...row, display_name: e.target.value }
+                                  : row,
+                              ),
+                            )
+                          }
+                          placeholder="e.g. Jordan Lee"
+                        />
+                      </Field>
+                    </div>
+                    <fieldset className="flex flex-col gap-2">
+                      <legend className="text-sm font-medium text-fg">
+                        Roles
+                      </legend>
+                      <p className="text-xs text-fg-muted">
+                        Choose what this person can do. You can change this
+                        anytime later.
+                      </p>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {AVAILABLE_ROLES.map((role) => {
+                          const meta = ROLE_META[role];
+                          const checked = u.roles.includes(role);
+                          return (
+                            <label
+                              key={role}
+                              className={cn(
+                                "flex cursor-pointer items-start gap-2.5 rounded-md border border-border px-3 py-2 text-sm transition-colors hover:bg-bg-subtle",
+                                checked &&
+                                  "border-s-2 border-s-accent bg-bg-subtle",
+                              )}
+                            >
+                              <input
+                                type="checkbox"
+                                value={role}
+                                checked={checked}
+                                className="mt-0.5 accent-[var(--accent)]"
+                                onChange={(e) =>
+                                  setUsers((prev) =>
+                                    prev.map((row, j) => {
+                                      if (j !== i) return row;
+                                      const nextRoles = e.target.checked
+                                        ? [...row.roles, role]
+                                        : row.roles.filter((r) => r !== role);
+                                      return {
+                                        ...row,
+                                        role: nextRoles[0] ?? row.role,
+                                        roles: nextRoles,
+                                      };
+                                    }),
+                                  )
+                                }
+                              />
+                              <span className="flex flex-col gap-0.5">
+                                <span className="font-medium text-fg">
+                                  {roleLabel(role)}
+                                </span>
+                                {meta && (
+                                  <span className="text-xs text-fg-muted">
+                                    {meta.description}
+                                  </span>
+                                )}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </fieldset>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
             <div>
               <Button
                 type="button"
@@ -986,7 +1070,8 @@ export function SetupWizardPage() {
                 role="alert"
                 className="rounded-md border border-border border-s-2 border-s-danger bg-bg-subtle px-3 py-2 text-sm text-danger"
               >
-                Setup failed: {submit.error.message}
+                We couldn't finish setting up your workspace. Please check
+                your details and try again.
               </div>
             )}
             <div className="flex justify-between">
@@ -1024,9 +1109,9 @@ export function SetupWizardPage() {
               </p>
             </div>
             <dl className="grid w-full max-w-sm grid-cols-2 gap-x-4 gap-y-2 text-left text-sm">
-              <dt className="text-fg-muted">CoA template</dt>
+              <dt className="text-fg-muted">Chart of accounts</dt>
               <dd className="text-end font-medium text-fg">
-                <code>{submit.data.coa_template_used}</code>
+                {coaLabel(submit.data.coa_template_used)}
               </dd>
               {/* locale_used reflects the locale the backend persisted
                   after its resolver downgrade. May differ from the
@@ -1060,6 +1145,6 @@ export function SetupWizardPage() {
           </CardContent>
         </Card>
       )}
-    </section>
+    </WizardShell>
   );
 }
