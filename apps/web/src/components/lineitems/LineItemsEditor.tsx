@@ -53,7 +53,7 @@ export function LineItemsEditor({
   const money = (n: number) => fmt.currency(n, currency, { currencyDisplay: "code" });
 
   const colCount =
-    4 + (columns.description ? 1 : 0) + (columns.uom ? 1 : 0) + (columns.discount ? 1 : 0);
+    6 + (columns.description ? 1 : 0) + (columns.uom ? 1 : 0) + (columns.discount ? 1 : 0);
 
   const update = (index: number, patch: Partial<LineItem>) => {
     onChange(lines.map((line, i) => (i === index ? { ...line, ...patch } : line)));

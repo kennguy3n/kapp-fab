@@ -1,9 +1,12 @@
 import type { DocumentTotals, LineItem } from "./types";
 
 /** Round to 2 decimal places, nudging by EPSILON so values like
- *  1.005 round up rather than down due to binary float drift. */
+ *  1.005 round up rather than down due to binary float drift. The
+ *  nudge is applied to the magnitude so negative values round
+ *  symmetrically to their positive counterparts (−1.005 → −1.01). */
 export function round2(n: number): number {
-  return Math.round((n + Number.EPSILON) * 100) / 100;
+  const sign = n < 0 ? -1 : 1;
+  return (sign * Math.round((Math.abs(n) + Number.EPSILON) * 100)) / 100;
 }
 
 /** Gross amount for a line before its discount (qty × unit price). */

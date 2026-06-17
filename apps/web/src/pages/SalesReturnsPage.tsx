@@ -10,6 +10,7 @@ import {
   DocumentDialog,
   StatusBadge,
   buildNameResolver,
+  deriveTaxRate,
   invoiceOptions,
   itemOptions as toItemOptions,
   linesFromData,
@@ -211,6 +212,7 @@ export function SalesReturnsPage() {
           }}
           initialLines={editData ? linesFromData("sales_return", editData) : []}
           initialCurrency={editData ? String(editData.currency ?? "USD") : "USD"}
+          initialTaxRate={editData ? deriveTaxRate(editData) : 0}
           itemOptions={itemOpts}
           selectOptions={{
             original_invoice_id: invoiceOpts,
