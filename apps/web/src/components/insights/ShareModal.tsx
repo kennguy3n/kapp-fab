@@ -1,11 +1,11 @@
-// Phase L Insights — share modal.
+// Insights — share modal.
 //
 // Reused by the QueryBuilder and Dashboard pages to grant view/edit
 // access on a saved query or a dashboard to a user (by id) or a role
 // (by name). Lists the existing grants so the caller can revoke them
 // in-place, and posts new grants via the appropriate /share route.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   useMutation,
   useQuery,
@@ -16,6 +16,8 @@ import type {
   InsightsPermission,
   InsightsShare,
 } from "@kapp/client";
+import { Button, Field, Input, Select, Skeleton } from "@kapp/ui";
+import { humanizeToken } from "../../lib/ktypeView";
 import { api } from "../../lib/api";
 
 export type ShareResource = "query" | "dashboard";
@@ -26,6 +28,11 @@ interface ShareModalProps {
   resourceName: string;
   onClose: () => void;
 }
+
+const PERMISSION_LABEL: Record<InsightsPermission, string> = {
+  view: "View",
+  edit: "Edit",
+};
 
 function listShares(resource: ShareResource, id: string) {
   return resource === "query"
@@ -66,6 +73,15 @@ export function ShareModal({
   const [permission, setPermission] = useState<InsightsPermission>("view");
   const [error, setError] = useState<string | null>(null);
 
+  // Escape-to-close, matching the app's modal convention.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const createMut = useMutation({
     mutationFn: () =>
       postShare(resource, resourceId, {
@@ -102,131 +118,136 @@ export function ShareModal({
     createMut.mutate();
   };
 
+  const shares = sharesQuery.data?.shares ?? [];
+
   return (
     <div
       role="dialog"
       aria-modal="true"
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(15, 23, 42, 0.45)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 1000,
-      }}
+      aria-label={`Share ${resource}`}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        style={{
-          background: "white",
-          borderRadius: 8,
-          padding: 20,
-          minWidth: 480,
-          maxWidth: 640,
-          maxHeight: "90vh",
-          overflow: "auto",
-          boxShadow: "0 10px 25px rgba(0,0,0,0.2)",
-        }}
+        className="flex max-h-[90vh] w-full max-w-xl flex-col overflow-auto rounded-lg border border-border bg-bg-elevated text-fg shadow-lg"
       >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 12,
-          }}
-        >
-          <h3 style={{ margin: 0 }}>
-            Share {resource} — {resourceName}
-          </h3>
-          <button onClick={onClose} aria-label="close">
+        <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+          <div className="min-w-0">
+            <h3 className="text-base font-semibold text-fg">
+              Share {resource} — {resourceName}
+            </h3>
+            <p className="mt-0.5 text-sm text-fg-muted">
+              Give a teammate or role permission to view or edit this{" "}
+              {resource}.
+            </p>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Close"
+            onClick={onClose}
+          >
             ✕
-          </button>
+          </Button>
         </div>
 
-        <form
-          onSubmit={submit}
-          style={{
-            display: "grid",
-            gridTemplateColumns: "120px 1fr 120px auto",
-            gap: 8,
-            alignItems: "center",
-            marginBottom: 12,
-          }}
-        >
-          <select
-            value={granteeType}
-            onChange={(e) =>
-              setGranteeType(e.target.value as InsightsGranteeType)
-            }
-          >
-            <option value="user">User (id)</option>
-            <option value="role">Role (name)</option>
-          </select>
-          <input
-            value={grantee}
-            placeholder={
-              granteeType === "user" ? "user uuid" : "role name (e.g. analyst)"
-            }
-            onChange={(e) => setGrantee(e.target.value)}
-          />
-          <select
-            value={permission}
-            onChange={(e) =>
-              setPermission(e.target.value as InsightsPermission)
-            }
-          >
-            <option value="view">View</option>
-            <option value="edit">Edit</option>
-          </select>
-          <button type="submit" disabled={createMut.isPending}>
-            {createMut.isPending ? "Sharing…" : "Share"}
-          </button>
-        </form>
-
-        {error && (
-          <div style={{ color: "#dc2626", fontSize: 13, marginBottom: 8 }}>
-            {error}
-          </div>
-        )}
-
-        <h4 style={{ fontSize: 14, margin: "16px 0 8px" }}>Existing shares</h4>
-        {sharesQuery.isLoading && <p>Loading…</p>}
-        {!sharesQuery.isLoading &&
-          (sharesQuery.data?.shares ?? []).length === 0 && (
-            <p style={{ color: "#9ca3af", fontStyle: "italic", fontSize: 13 }}>
-              Not shared with anyone yet.
-            </p>
-          )}
-        <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-          {(sharesQuery.data?.shares ?? []).map((s) => (
-            <li
-              key={s.id}
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                padding: "6px 0",
-                borderBottom: "1px solid #f3f4f6",
-                fontSize: 13,
-              }}
-            >
-              <span>
-                <strong>{s.grantee_type}</strong>: {s.grantee}{" "}
-                <span style={{ color: "#6b7280" }}>({s.permission})</span>
-              </span>
-              <button
-                onClick={() => deleteMut.mutate(s.id)}
-                disabled={deleteMut.isPending}
-                style={{ color: "#dc2626" }}
+        <div className="flex flex-col gap-4 px-5 py-4">
+          <form onSubmit={submit} className="flex flex-col gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[140px_1fr_130px]">
+              <Field label="Share with">
+                <Select
+                  value={granteeType}
+                  onChange={(e) =>
+                    setGranteeType(e.target.value as InsightsGranteeType)
+                  }
+                >
+                  <option value="user">A person</option>
+                  <option value="role">A role</option>
+                </Select>
+              </Field>
+              <Field label={granteeType === "user" ? "User ID" : "Role name"}>
+                <Input
+                  value={grantee}
+                  placeholder={
+                    granteeType === "user"
+                      ? "User UUID"
+                      : "Role name (e.g. analyst)"
+                  }
+                  onChange={(e) => setGrantee(e.target.value)}
+                />
+              </Field>
+              <Field label="Access">
+                <Select
+                  value={permission}
+                  onChange={(e) =>
+                    setPermission(e.target.value as InsightsPermission)
+                  }
+                >
+                  <option value="view">View</option>
+                  <option value="edit">Edit</option>
+                </Select>
+              </Field>
+            </div>
+            {error && (
+              <div
+                role="alert"
+                className="rounded-md border border-danger/40 bg-danger/5 px-3 py-2 text-sm text-danger"
               >
-                Revoke
-              </button>
-            </li>
-          ))}
-        </ul>
+                {error}
+              </div>
+            )}
+            <div className="flex justify-end">
+              <Button type="submit" disabled={createMut.isPending}>
+                {createMut.isPending ? "Sharing…" : "Share"}
+              </Button>
+            </div>
+          </form>
+
+          <div>
+            <h4 className="mb-2 text-sm font-semibold text-fg">
+              Who has access
+            </h4>
+            {sharesQuery.isLoading ? (
+              <div className="flex flex-col gap-1.5" aria-hidden>
+                <Skeleton className="h-7 w-full" />
+                <Skeleton className="h-7 w-2/3" />
+              </div>
+            ) : shares.length === 0 ? (
+              <p className="text-sm italic text-fg-muted">
+                Not shared with anyone yet.
+              </p>
+            ) : (
+              <ul className="m-0 flex list-none flex-col p-0">
+                {shares.map((s) => (
+                  <li
+                    key={s.id}
+                    className="flex items-center justify-between gap-3 border-b border-border py-2 text-sm last:border-0"
+                  >
+                    <span className="min-w-0 truncate text-fg">
+                      <strong className="font-medium">
+                        {humanizeToken(s.grantee_type)}
+                      </strong>
+                      : {s.grantee}{" "}
+                      <span className="text-fg-muted">
+                        ({PERMISSION_LABEL[s.permission]})
+                      </span>
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="text-danger hover:text-danger"
+                      onClick={() => deleteMut.mutate(s.id)}
+                      disabled={deleteMut.isPending}
+                    >
+                      Revoke
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

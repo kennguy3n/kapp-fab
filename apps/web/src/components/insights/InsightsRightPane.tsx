@@ -13,6 +13,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import type { InsightsDashboardBundle, InsightsRunResult } from "@kapp/client";
+import { Button, Skeleton } from "@kapp/ui";
 import { api } from "../../lib/api";
 import { Viz } from "./Charts";
 
@@ -31,60 +32,56 @@ export function InsightsRightPane({ dashboardId, onClose, onOpenFull }: Props) {
 
   return (
     <aside
-      style={{
-        width: 380,
-        borderLeft: "1px solid #e5e7eb",
-        padding: 16,
-        background: "#ffffff",
-        display: "flex",
-        flexDirection: "column",
-        gap: 12,
-        position: "sticky",
-        top: 0,
-        height: "100vh",
-        overflowY: "auto",
-      }}
       aria-label="Insights dashboard preview"
+      className="sticky top-0 flex h-screen w-[380px] flex-col gap-3 overflow-y-auto border-l border-border bg-bg p-4"
     >
-      <header
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          gap: 8,
-        }}
-      >
-        <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>
+      <header className="flex items-center justify-between gap-2">
+        <h3 className="min-w-0 truncate text-sm font-semibold text-fg">
           {bundle.data?.dashboard.name ?? "Dashboard"}
         </h3>
-        <div style={{ display: "flex", gap: 4 }}>
+        <div className="flex shrink-0 items-center gap-1">
           {onOpenFull && (
-            <button
+            <Button
+              size="sm"
+              variant="outline"
               onClick={() => onOpenFull(dashboardId)}
-              style={{
-                background: "transparent",
-                border: "1px solid #d1d5db",
-                padding: "4px 8px",
-                fontSize: 12,
-                cursor: "pointer",
-              }}
             >
               Open
-            </button>
+            </Button>
           )}
           {onClose && (
-            <button onClick={onClose} aria-label="Close">
-              ×
-            </button>
+            <Button
+              size="icon"
+              variant="ghost"
+              aria-label="Close"
+              onClick={onClose}
+            >
+              ✕
+            </Button>
           )}
         </div>
       </header>
 
-      {bundle.isLoading && <p style={{ color: "#6b7280" }}>Loading…</p>}
-      {bundle.error && (
-        <p style={{ color: "#b91c1c", fontSize: 13 }}>
-          Failed to load dashboard: {(bundle.error as Error).message}
-        </p>
+      {bundle.isLoading && (
+        <div className="flex flex-col gap-3" aria-hidden>
+          <Skeleton className="h-40 w-full" />
+          <Skeleton className="h-40 w-full" />
+        </div>
+      )}
+      {bundle.isError && (
+        <div className="rounded-lg border border-border p-4 text-center">
+          <p className="text-sm text-fg-muted">
+            We couldn’t load this dashboard.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            className="mt-2"
+            onClick={() => bundle.refetch()}
+          >
+            Try again
+          </Button>
+        </div>
       )}
 
       {bundle.data && <MiniDashboard bundle={bundle.data} />}
@@ -96,13 +93,13 @@ function MiniDashboard({ bundle }: { bundle: InsightsDashboardBundle }) {
   const widgets = bundle.dashboard.widgets ?? [];
   if (widgets.length === 0) {
     return (
-      <p style={{ color: "#6b7280", fontSize: 13 }}>
-        This dashboard has no widgets yet.
+      <p className="text-sm text-fg-muted">
+        This dashboard doesn’t have any charts yet.
       </p>
     );
   }
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    <div className="flex flex-col gap-3">
       {widgets.map((w) => {
         const run: InsightsRunResult | null =
           bundle.widget_results[w.id] ?? null;
@@ -110,17 +107,10 @@ function MiniDashboard({ bundle }: { bundle: InsightsDashboardBundle }) {
         return (
           <section
             key={w.id}
-            style={{
-              border: "1px solid #e5e7eb",
-              borderRadius: 6,
-              padding: 12,
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-            }}
+            className="flex flex-col gap-2 rounded-lg border border-border bg-bg-elevated p-3"
           >
-            <header style={{ fontSize: 12, color: "#6b7280" }}>
-              {w.config.title ?? w.viz_type}
+            <header className="truncate text-xs font-medium text-fg-muted">
+              {w.config.title ?? "Untitled chart"}
             </header>
             <Viz
               vizType={w.viz_type}

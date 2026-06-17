@@ -1,12 +1,14 @@
-// Phase L Insights — dashboard builder.
+// Insights — dashboard builder.
 //
 // Picks an existing dashboard (or creates a new one) and renders its
-// widgets in a 12-column CSS grid. Each widget binds to a saved
-// insights query and selects a viz_type; the per-widget run result
-// arrives bundled with the dashboard payload so the page renders
-// without a per-widget fan-out. Linked filters live in the dashboard
-// `layout` blob — picking a value on one widget re-runs every widget
-// whose config maps the same `linked_filter_key`.
+// widgets in a 12-column CSS grid of chart cards. Each widget binds to
+// a saved insights query and selects a viz_type; the per-widget run
+// result arrives bundled with the dashboard payload so the page renders
+// without a per-widget fan-out. Cards can be dragged to reorder — the
+// drop swaps the two cards' grid positions and persists both through
+// the widget upsert endpoint (no extra layout library). Linked filters
+// live in the dashboard `layout` blob — picking a value on one widget
+// re-runs every widget whose config maps the same `linked_filter_key`.
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -24,14 +26,21 @@ import type {
   InsightsWidgetConfig,
 } from "@kapp/client";
 import {
+  Badge,
   Button,
   ConfirmDialog,
+  EmptyState,
+  Eyebrow,
+  Field,
   Input,
   PromptDialog,
   Select,
+  Skeleton,
   cn,
 } from "@kapp/ui";
+import { BarChart3, GripVertical, LayoutDashboard, Plus } from "lucide-react";
 import { api } from "../lib/api";
+import { humanizeLabel } from "../lib/ktypeView";
 import { Viz } from "../components/insights/Charts";
 import { ShareModal } from "../components/insights/ShareModal";
 
@@ -45,6 +54,18 @@ const VIZ_OPTIONS: InsightsVizType[] = [
   "number_card",
   "pivot",
 ];
+
+// Plain-language label for each viz type (never surface the raw token).
+const VIZ_LABELS: Record<InsightsVizType, string> = {
+  table: "Table",
+  bar: "Bar chart",
+  line: "Line chart",
+  pie: "Pie chart",
+  donut: "Donut chart",
+  funnel: "Funnel",
+  number_card: "Single number",
+  pivot: "Pivot table",
+};
 
 interface LinkedFilterValues {
   // dashboard layout.linked_filters: { [filter_key]: selected_value }
@@ -238,46 +259,103 @@ export function InsightsDashboardPage() {
   }, [dashboard]);
 
   return (
-    <section className="flex flex-col gap-4">
-      <h1 className="text-2xl font-semibold tracking-tight text-fg">
-        Insights — Dashboards
-      </h1>
+    <section className="flex flex-col gap-5">
+      <header>
+        <Eyebrow>Insights</Eyebrow>
+        <h1 className="mt-1 text-2xl font-semibold tracking-tight text-fg">
+          Dashboards
+        </h1>
+        <p className="mt-1 max-w-prose text-sm text-fg-muted">
+          Pin your saved queries as charts, arrange them by dragging, and share
+          a live view with your team.
+        </p>
+      </header>
 
-      <div className="flex gap-4">
-        <aside className="flex-[0_0_220px]">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-fg">Dashboards</h3>
+      <div className="flex flex-col gap-5 lg:flex-row">
+        <aside className="lg:flex-[0_0_240px]">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-fg">Dashboards</h2>
             <Button size="sm" variant="ghost" onClick={() => setNewOpen(true)}>
               + New
             </Button>
           </div>
-          {dashboardsQuery.isLoading && (
-            <p className="text-sm text-fg-muted">Loading…</p>
+          {dashboardsQuery.isLoading ? (
+            <div className="mt-2 flex flex-col gap-1.5" aria-hidden>
+              <Skeleton className="h-8 w-full" />
+              <Skeleton className="h-8 w-4/5" />
+            </div>
+          ) : dashboardsQuery.isError ? (
+            <div className="mt-2 rounded-lg border border-border p-3 text-sm">
+              <p className="text-fg-muted">Couldn’t load your dashboards.</p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-2"
+                onClick={() => dashboardsQuery.refetch()}
+              >
+                Try again
+              </Button>
+            </div>
+          ) : (dashboardsQuery.data?.dashboards ?? []).length === 0 ? (
+            <p className="mt-2 text-sm text-fg-muted">No dashboards yet.</p>
+          ) : (
+            <ul className="mt-2 flex list-none flex-col gap-0.5 p-0">
+              {(dashboardsQuery.data?.dashboards ?? []).map((d) => (
+                <li key={d.id}>
+                  <button
+                    onClick={() => setSelectedId(d.id)}
+                    className={cn(
+                      "w-full cursor-pointer truncate rounded-md px-2.5 py-1.5 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)",
+                      selectedId === d.id
+                        ? "bg-bg-muted font-medium text-fg"
+                        : "text-fg-muted hover:bg-bg-subtle hover:text-fg",
+                    )}
+                  >
+                    {d.name}
+                  </button>
+                </li>
+              ))}
+            </ul>
           )}
-          <ul className="m-0 list-none p-0 text-sm">
-            {(dashboardsQuery.data?.dashboards ?? []).map((d) => (
-              <li key={d.id} className="py-1">
-                <button
-                  onClick={() => setSelectedId(d.id)}
-                  className={cn(
-                    "cursor-pointer rounded text-left transition-colors hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)",
-                    selectedId === d.id
-                      ? "font-semibold text-fg"
-                      : "text-accent",
-                  )}
-                >
-                  {d.name}
-                </button>
-              </li>
-            ))}
-          </ul>
         </aside>
 
-        <div className="flex flex-1 flex-col gap-3">
-          {!dashboard && (
-            <p className="text-sm text-fg-muted">
-              Select or create a dashboard to start adding widgets.
-            </p>
+        <div className="flex min-w-0 flex-1 flex-col gap-4">
+          {!selectedId && (
+            <EmptyState
+              icon={<LayoutDashboard className="h-6 w-6" aria-hidden />}
+              title="No dashboard selected"
+              description="Select or create a dashboard to start adding widgets."
+              action={
+                <Button onClick={() => setNewOpen(true)}>
+                  <Plus className="h-4 w-4" aria-hidden /> New dashboard
+                </Button>
+              }
+            />
+          )}
+
+          {selectedId && bundleQuery.isLoading && (
+            <div className="flex flex-col gap-4">
+              <Skeleton className="h-10 w-1/2" />
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Skeleton className="h-56 w-full" />
+                <Skeleton className="h-56 w-full" />
+              </div>
+            </div>
+          )}
+
+          {selectedId && bundleQuery.isError && (
+            <div className="rounded-lg border border-border p-6 text-center">
+              <p className="text-sm text-fg-muted">
+                We couldn’t load this dashboard.
+              </p>
+              <Button
+                variant="outline"
+                className="mt-3"
+                onClick={() => bundleQuery.refetch()}
+              >
+                Try again
+              </Button>
+            </div>
           )}
 
           {dashboard && (
@@ -290,19 +368,14 @@ export function InsightsDashboardPage() {
               />
 
               {linkedFilterKeys.length > 0 && (
-                <fieldset className="rounded-md border border-border p-2 text-sm">
-                  <legend className="px-1.5 font-semibold text-fg">
-                    Linked filters
-                  </legend>
+                <div className="rounded-lg border border-border bg-bg-elevated p-3">
+                  <h3 className="mb-2 text-sm font-semibold text-fg">
+                    Filters
+                  </h3>
                   <div className="flex flex-wrap gap-3">
                     {linkedFilterKeys.map((k) => (
-                      <label
-                        key={k}
-                        className="flex items-center gap-1.5 text-fg"
-                      >
-                        {k}:
+                      <Field key={k} label={humanizeLabel(k)} className="w-48">
                         <Input
-                          className="w-auto"
                           value={String(linkedFilters[k] ?? "")}
                           onChange={(e) => {
                             const next = {
@@ -313,10 +386,10 @@ export function InsightsDashboardPage() {
                             updateDashboardMut.mutate({ linked_filters: next });
                           }}
                         />
-                      </label>
+                      </Field>
                     ))}
                   </div>
-                </fieldset>
+                </div>
               )}
 
               <WidgetGrid
@@ -330,7 +403,14 @@ export function InsightsDashboardPage() {
             </>
           )}
 
-          {error && <div className="text-sm text-danger">{error}</div>}
+          {error && (
+            <div
+              role="alert"
+              className="rounded-md border border-danger/40 bg-danger/5 px-3 py-2 text-sm text-danger"
+            >
+              {error}
+            </div>
+          )}
         </div>
       </div>
 
@@ -401,35 +481,48 @@ function DashboardHeader({
   }, [dashboard.id, dashboard.name, dashboard.auto_refresh_seconds]);
 
   return (
-    <div className="flex items-center gap-2">
-      <Input
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        onBlur={() => {
-          if (name !== dashboard.name) onUpdate({ name });
-        }}
-        className="flex-1 text-base font-semibold"
-      />
-      <label className="flex items-center gap-1.5 text-xs text-fg-muted">
-        Auto-refresh (s):
+    <div className="flex flex-wrap items-end justify-between gap-3 border-b border-border pb-4">
+      <Field label="Dashboard name" hideLabel className="min-w-0 flex-1">
         <Input
-          type="number"
-          value={autoRefresh}
-          onChange={(e) => setAutoRefresh(Number(e.target.value))}
+          aria-label="Dashboard name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
           onBlur={() => {
-            if (autoRefresh !== dashboard.auto_refresh_seconds) {
-              onUpdate({ auto_refresh_seconds: autoRefresh });
-            }
+            if (name !== dashboard.name) onUpdate({ name });
           }}
-          className="w-20"
+          className="text-base font-semibold"
         />
-      </label>
-      <Button variant="outline" size="sm" onClick={onShare}>
-        Share…
-      </Button>
-      <Button variant="destructive" size="sm" onClick={onDelete}>
-        Delete
-      </Button>
+      </Field>
+      <div className="flex flex-wrap items-end gap-2">
+        <Field
+          label="Refresh every"
+          help="Seconds — 0 turns auto-refresh off."
+          className="w-36"
+        >
+          <Input
+            type="number"
+            min={0}
+            aria-label="Auto-refresh seconds"
+            value={autoRefresh}
+            onChange={(e) => setAutoRefresh(Number(e.target.value))}
+            onBlur={() => {
+              if (autoRefresh !== dashboard.auto_refresh_seconds) {
+                onUpdate({ auto_refresh_seconds: autoRefresh });
+              }
+            }}
+          />
+        </Field>
+        <Button variant="outline" onClick={onShare}>
+          Share
+        </Button>
+        <Button
+          variant="ghost"
+          className="text-danger hover:text-danger"
+          onClick={onDelete}
+        >
+          Delete
+        </Button>
+      </div>
     </div>
   );
 }
@@ -449,6 +542,8 @@ function WidgetGrid({
   onDelete: (w: InsightsWidget) => void;
   dashboardId: string;
 }) {
+  const [dragId, setDragId] = useState<string | null>(null);
+
   const addWidget = () => {
     const blank: InsightsWidget = {
       tenant_id: "",
@@ -464,14 +559,41 @@ function WidgetGrid({
     onUpsert(blank);
   };
 
+  // Drag-to-reorder: dropping card A onto card B swaps their grid
+  // positions and persists both. Swapping (rather than free placement)
+  // keeps the 12-column grid gap-free without a layout library.
+  const onDropOnto = (target: InsightsWidget) => {
+    if (!dragId || dragId === target.id) return;
+    const dragged = widgets.find((w) => w.id === dragId);
+    if (!dragged) return;
+    onUpsert({ ...dragged, position: target.position });
+    onUpsert({ ...target, position: dragged.position });
+    setDragId(null);
+  };
+
+  if (widgets.length === 0) {
+    return (
+      <EmptyState
+        icon={<BarChart3 className="h-6 w-6" aria-hidden />}
+        title="No charts yet"
+        description="Add your first chart, then bind it to a saved query to bring this dashboard to life."
+        action={
+          <Button onClick={addWidget}>
+            <Plus className="h-4 w-4" aria-hidden /> Add chart
+          </Button>
+        }
+      />
+    );
+  }
+
   return (
-    <div>
-      <div className="mb-2">
+    <div className="flex flex-col gap-3">
+      <div>
         <Button size="sm" variant="outline" onClick={addWidget}>
-          + Add widget
+          <Plus className="h-4 w-4" aria-hidden /> Add chart
         </Button>
       </div>
-      <div className="grid auto-rows-[70px] grid-cols-12 gap-3">
+      <div className="grid auto-rows-[72px] grid-cols-12 gap-3">
         {widgets.map((w) => {
           const pos = w.position ?? {};
           const x = (pos.x ?? 0) + 1;
@@ -480,7 +602,17 @@ function WidgetGrid({
           return (
             <div
               key={w.id}
-              className="flex flex-col overflow-hidden rounded-md border border-border bg-bg-elevated p-3"
+              onDragOver={(e) => {
+                if (dragId) e.preventDefault();
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                onDropOnto(w);
+              }}
+              className={cn(
+                "flex flex-col overflow-hidden rounded-lg border border-border bg-bg-elevated p-3 transition-shadow",
+                dragId && dragId !== w.id && "ring-1 ring-border",
+              )}
               style={{
                 gridColumn: `${x} / span ${w_}`,
                 gridRow: `span ${h}`,
@@ -492,6 +624,8 @@ function WidgetGrid({
                 queries={queries}
                 onUpdate={onUpsert}
                 onDelete={() => onDelete(w)}
+                onDragStart={() => setDragId(w.id)}
+                onDragEnd={() => setDragId(null)}
               />
             </div>
           );
@@ -507,30 +641,59 @@ function WidgetView({
   queries,
   onUpdate,
   onDelete,
+  onDragStart,
+  onDragEnd,
 }: {
   widget: InsightsWidget;
   result: InsightsRunResult | null;
   queries: InsightsQuery[];
   onUpdate: (w: InsightsWidget) => void;
   onDelete: () => void;
+  onDragStart: () => void;
+  onDragEnd: () => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const title =
+    widget.config.title ??
+    queries.find((q) => q.id === widget.query_id)?.name ??
+    "Untitled widget";
   return (
     <>
-      <div className="mb-1.5 flex items-center justify-between">
-        <strong className="text-sm text-fg">
-          {widget.config.title ??
-            queries.find((q) => q.id === widget.query_id)?.name ??
-            "Untitled widget"}
-        </strong>
-        <span className="flex items-center gap-1">
-          <Button size="sm" variant="ghost" onClick={() => setEditing((v) => !v)}>
+      <div className="mb-1.5 flex items-center justify-between gap-1">
+        <div
+          className="flex min-w-0 items-center gap-1.5"
+          draggable={!editing}
+          onDragStart={(e) => {
+            e.dataTransfer.effectAllowed = "move";
+            onDragStart();
+          }}
+          onDragEnd={onDragEnd}
+        >
+          {!editing && (
+            <GripVertical
+              className="h-4 w-4 shrink-0 cursor-grab text-fg-subtle"
+              aria-hidden
+            />
+          )}
+          <strong className="truncate text-sm text-fg">{title}</strong>
+        </div>
+        <span className="flex shrink-0 items-center gap-1">
+          {!editing && (
+            <Badge variant="neutral" size="xs">
+              {VIZ_LABELS[widget.viz_type]}
+            </Badge>
+          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setEditing((v) => !v)}
+          >
             {editing ? "Done" : "Edit"}
           </Button>
           <Button
             size="sm"
             variant="ghost"
-            className="text-danger"
+            className="text-danger hover:text-danger"
             aria-label="Delete widget"
             onClick={onDelete}
           >
@@ -557,9 +720,9 @@ function WidgetView({
           />
         </div>
       ) : widget.query_id ? (
-        <p className="text-sm text-fg-subtle">Loading…</p>
+        <Skeleton className="h-full min-h-24 w-full" />
       ) : (
-        <p className="text-sm text-fg-subtle">
+        <p className="flex-1 text-sm text-fg-subtle">
           Bind this widget to a saved query.
         </p>
       )}
@@ -582,64 +745,57 @@ function WidgetConfigPanel({
   const [position, setPosition] = useState(widget.position);
 
   return (
-    <div className="flex flex-col gap-1.5 text-sm">
-      <label className="flex flex-col gap-1 text-fg">
-        Saved query:
+    <div className="flex flex-col gap-3 overflow-auto text-sm">
+      <Field label="Saved query">
         <Select
           value={queryId ?? ""}
           onChange={(e) => setQueryId(e.target.value || null)}
         >
-          <option value="">— choose —</option>
+          <option value="">Select a saved query…</option>
           {queries.map((q) => (
             <option key={q.id} value={q.id}>
               {q.name}
             </option>
           ))}
         </Select>
-      </label>
-      <label className="flex flex-col gap-1 text-fg">
-        Visualisation:
+      </Field>
+      <Field label="Chart type">
         <Select
           value={vizType}
           onChange={(e) => setVizType(e.target.value as InsightsVizType)}
         >
           {VIZ_OPTIONS.map((v) => (
             <option key={v} value={v}>
-              {v}
+              {VIZ_LABELS[v]}
             </option>
           ))}
         </Select>
-      </label>
-      <label className="flex flex-col gap-1 text-fg">
-        Title:
+      </Field>
+      <Field label="Title" help="Optional — defaults to the query name.">
         <Input
           value={config.title ?? ""}
           onChange={(e) => setConfig({ ...config, title: e.target.value })}
         />
-      </label>
-      <div className="flex gap-1.5">
-        <label className="flex flex-1 flex-col gap-1 text-fg">
-          X:
+      </Field>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Category (X) field">
           <Input
             value={config.x_column ?? ""}
-            onChange={(e) =>
-              setConfig({ ...config, x_column: e.target.value })
-            }
+            onChange={(e) => setConfig({ ...config, x_column: e.target.value })}
           />
-        </label>
-        <label className="flex flex-1 flex-col gap-1 text-fg">
-          Y / value:
+        </Field>
+        <Field label="Value (Y) field">
           <Input
             value={config.y_column ?? config.value_column ?? ""}
-            onChange={(e) =>
-              setConfig({ ...config, y_column: e.target.value })
-            }
+            onChange={(e) => setConfig({ ...config, y_column: e.target.value })}
           />
-        </label>
+        </Field>
       </div>
-      <div className="flex gap-1.5">
-        <label className="flex flex-1 flex-col gap-1 text-fg">
-          Linked filter key:
+      <div className="grid grid-cols-2 gap-2">
+        <Field
+          label="Filter key"
+          help="Connect this chart to a dashboard filter."
+        >
           <Input
             value={config.linked_filter_key ?? ""}
             onChange={(e) =>
@@ -649,9 +805,8 @@ function WidgetConfigPanel({
               })
             }
           />
-        </label>
-        <label className="flex flex-1 flex-col gap-1 text-fg">
-          → column:
+        </Field>
+        <Field label="Applies to field">
           <Input
             value={config.linked_filter_column ?? ""}
             onChange={(e) =>
@@ -661,45 +816,41 @@ function WidgetConfigPanel({
               })
             }
           />
-        </label>
+        </Field>
       </div>
-      <div className="flex gap-1.5">
-        <label className="flex flex-col gap-1 text-fg">
-          x:
-          <Input
-            type="number"
-            value={position.x ?? 0}
-            onChange={(e) =>
-              setPosition({ ...position, x: Number(e.target.value) })
-            }
-            className="w-16"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-fg">
-          w:
-          <Input
-            type="number"
-            value={position.w ?? 6}
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Width" help="Out of 12 columns.">
+          <Select
+            value={String(position.w ?? 6)}
             onChange={(e) =>
               setPosition({ ...position, w: Number(e.target.value) })
             }
-            className="w-16"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-fg">
-          h:
-          <Input
-            type="number"
-            value={position.h ?? 4}
+          >
+            {[3, 4, 6, 8, 12].map((n) => (
+              <option key={n} value={n}>
+                {n === 12 ? "Full width" : `${n} / 12`}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Height" help="Grid rows.">
+          <Select
+            value={String(position.h ?? 4)}
             onChange={(e) =>
               setPosition({ ...position, h: Number(e.target.value) })
             }
-            className="w-16"
-          />
-        </label>
+          >
+            {[3, 4, 6, 8].map((n) => (
+              <option key={n} value={n}>
+                {n} rows
+              </option>
+            ))}
+          </Select>
+        </Field>
       </div>
       <Button
         size="sm"
+        className="self-start"
         onClick={() =>
           onSave({
             ...widget,

@@ -1,13 +1,15 @@
 import { useMemo } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
 // useQuery is still used by the installations list above; we
 // deliberately dropped the per-row useQuery (was N+1 against
 // listMarketplaceVersions for data already in extQueries).
 import {
   Badge,
-  Card,
-  CardContent,
+  Button,
+  EmptyState,
+  Eyebrow,
+  Skeleton,
   Table,
   TableBody,
   TableCell,
@@ -15,6 +17,7 @@ import {
   TableHeader,
   TableRow,
 } from "@kapp/ui";
+import { PackageOpen } from "lucide-react";
 import { api } from "../../lib/api";
 import type {
   MarketplaceExtension,
@@ -44,6 +47,7 @@ import {
  * label.
  */
 export function MarketplaceInstallationsPage() {
+  const navigate = useNavigate();
   const installations = useQuery<MarketplaceListInstallationsResponse>({
     queryKey: ["marketplace", "installations"],
     queryFn: () => api.listMarketplaceInstallations(),
@@ -91,35 +95,61 @@ export function MarketplaceInstallationsPage() {
   });
 
   return (
-    <section>
-      <header className="mb-4">
-        <h1 className="mb-1">Installed extensions</h1>
-        <p className="text-fg-muted">
-          Marketplace extensions currently or previously installed for this
-          tenant. <Link to="/marketplace">Browse the marketplace</Link> to
-          add more.
+    <section className="flex flex-col gap-6">
+      <header>
+        <Eyebrow>Marketplace</Eyebrow>
+        <h1 className="mt-1 text-2xl font-semibold tracking-tight text-fg">
+          Installed extensions
+        </h1>
+        <p className="mt-1 max-w-prose text-sm text-fg-muted">
+          Extensions currently or previously installed for this workspace.{" "}
+          <Link
+            to="/marketplace"
+            className="font-medium text-accent hover:underline"
+          >
+            Browse the marketplace
+          </Link>{" "}
+          to add more.
         </p>
       </header>
 
-      {installations.isLoading && <p>Loading…</p>}
+      {installations.isLoading && (
+        <div className="flex flex-col gap-2" aria-hidden>
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-12 w-full rounded-lg" />
+          ))}
+        </div>
+      )}
       {installations.isError && (
-        <p className="text-danger">
-          Failed to load installations:{" "}
-          {(installations.error as Error).message}
-        </p>
+        <div className="rounded-lg border border-border p-8 text-center">
+          <p className="text-sm font-medium text-fg">
+            We couldn’t load your installed extensions.
+          </p>
+          <p className="mt-1 text-xs text-fg-muted">
+            {(installations.error as Error).message}
+          </p>
+          <Button
+            variant="outline"
+            className="mt-3"
+            onClick={() => installations.refetch()}
+          >
+            Try again
+          </Button>
+        </div>
       )}
 
       {installations.isSuccess &&
         (installations.data.items.length === 0 ? (
-          <Card>
-            <CardContent className="p-8 text-center">
-              <p className="text-fg-muted">
-                No extensions are installed yet.{" "}
-                <Link to="/marketplace">Browse the marketplace</Link> to find
-                one.
-              </p>
-            </CardContent>
-          </Card>
+          <EmptyState
+            icon={<PackageOpen className="h-6 w-6" aria-hidden />}
+            title="No extensions installed yet"
+            description="No extensions are installed yet. Browse the marketplace to find one."
+            action={
+              <Button onClick={() => navigate("/marketplace")}>
+                Browse the marketplace
+              </Button>
+            }
+          />
         ) : (
           <Table className="text-sm">
             <TableHeader>
@@ -161,16 +191,17 @@ function InstallationRow({
     <TableRow>
       <TableCell className="align-top">
         {ext ? (
-          <Link to={`/marketplace/extensions/${ext.id}`}>
-            <strong>{ext.display_name}</strong>
+          <Link
+            to={`/marketplace/extensions/${ext.id}`}
+            className="font-medium text-fg hover:text-accent hover:underline"
+          >
+            {ext.display_name}
           </Link>
         ) : (
-          <span className="font-mono text-xs">
-            {row.extension_id}
-          </span>
+          <span className="text-fg-muted">Unknown extension</span>
         )}
-        {ext && (
-          <div className="text-xs text-fg-muted">{ext.name}</div>
+        {ext?.author && (
+          <div className="text-xs text-fg-muted">{ext.author}</div>
         )}
       </TableCell>
       <TableCell className="align-top">
@@ -200,7 +231,12 @@ function InstallationRow({
         )}
       </TableCell>
       <TableCell className="align-top">
-        <Link to={`/marketplace/installed/${row.id}`}>Manage →</Link>
+        <Link
+          to={`/marketplace/installed/${row.id}`}
+          className="font-medium text-accent hover:underline"
+        >
+          Manage →
+        </Link>
       </TableCell>
     </TableRow>
   );
@@ -218,19 +254,11 @@ function renderVersion(
   versions: MarketplaceExtensionVersion[] | undefined,
 ): React.ReactNode {
   if (!ext) {
-    return (
-      <span className="font-mono text-xs">
-        {row.extension_version_id}
-      </span>
-    );
+    return <span className="text-fg-subtle">—</span>;
   }
   const installed = versions?.find((v) => v.id === row.extension_version_id);
   if (!installed) {
-    return (
-      <span className="font-mono text-xs">
-        {row.extension_version_id.slice(0, 8)}…
-      </span>
-    );
+    return <span className="text-fg-subtle">—</span>;
   }
   // "Update available" needs a published_at-timestamp comparison,
   // not a SemVer-string inequality, for the same reason the

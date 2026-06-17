@@ -1,7 +1,17 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Badge, Card, CardContent, Input } from "@kapp/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  EmptyState,
+  Eyebrow,
+  Input,
+  Skeleton,
+} from "@kapp/ui";
+import { ArrowRight, Store } from "lucide-react";
 import { api } from "../../lib/api";
 import type {
   MarketplaceExtension,
@@ -70,17 +80,25 @@ export function MarketplaceBrowsePage() {
   const hasFilter = debouncedSearch.trim() !== "" || debouncedPublisher.trim() !== "";
 
   return (
-    <section>
-      <header className="mb-4">
-        <h1 className="mb-1">Marketplace</h1>
-        <p className="text-fg-muted">
-          Browse and install extensions for this tenant. Visit{" "}
-          <Link to="/marketplace/installed">Installed extensions</Link> to
-          manage what's already running.
+    <section className="flex flex-col gap-6">
+      <header>
+        <Eyebrow>Marketplace</Eyebrow>
+        <h1 className="mt-1 text-2xl font-semibold tracking-tight text-fg">
+          Browse extensions
+        </h1>
+        <p className="mt-1 max-w-prose text-sm text-fg-muted">
+          Discover and install extensions for your workspace. Visit{" "}
+          <Link
+            to="/marketplace/installed"
+            className="font-medium text-accent hover:underline"
+          >
+            Installed extensions
+          </Link>{" "}
+          to manage what’s already running.
         </p>
       </header>
 
-      <div className="mb-4 flex flex-wrap gap-3">
+      <div className="flex flex-wrap gap-3">
         <Input
           type="search"
           placeholder="Search extensions…"
@@ -94,28 +112,48 @@ export function MarketplaceBrowsePage() {
           placeholder="Publisher (e.g. acme)"
           value={publisherFilter}
           onChange={(e) => setPublisherFilter(e.target.value)}
-          aria-label="Filter by publisher slug"
+          aria-label="Filter by publisher"
           className="min-w-[200px]"
         />
       </div>
 
-      {q.isLoading && <p>Loading…</p>}
+      {q.isLoading && (
+        <div
+          className="grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-4"
+          aria-hidden
+        >
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-44 w-full rounded-lg" />
+          ))}
+        </div>
+      )}
+
       {q.isError && (
-        <p className="text-danger">
-          Failed to load marketplace: {(q.error as Error).message}
-        </p>
+        <div className="rounded-lg border border-border p-8 text-center">
+          <p className="text-sm font-medium text-fg">
+            We couldn’t load the marketplace.
+          </p>
+          <p className="mt-1 text-xs text-fg-muted">{(q.error as Error).message}</p>
+          <Button variant="outline" className="mt-3" onClick={() => q.refetch()}>
+            Try again
+          </Button>
+        </div>
       )}
 
       {q.isSuccess && items.length === 0 && (
-        <Card>
-          <CardContent className="p-8 text-center">
-            <p className="text-fg-muted">
-              {hasFilter
-                ? "No extensions match your filter."
-                : "No extensions are currently published in the marketplace."}
-            </p>
-          </CardContent>
-        </Card>
+        <EmptyState
+          icon={<Store className="h-6 w-6" aria-hidden />}
+          title={
+            hasFilter
+              ? "No extensions match your filter"
+              : "No extensions published yet"
+          }
+          description={
+            hasFilter
+              ? "Try a different search term or clear the publisher filter."
+              : "There aren’t any extensions published in the marketplace yet."
+          }
+        />
       )}
 
       {q.isSuccess && items.length > 0 && (
@@ -133,37 +171,44 @@ function ExtensionCard({ ext }: { ext: MarketplaceExtension }) {
   return (
     <Link
       to={`/marketplace/extensions/${ext.id}`}
-      className="text-inherit no-underline"
+      className="group text-inherit no-underline"
       data-testid={`extension-card-${ext.id}`}
     >
-      <Card className="h-full cursor-pointer">
-        <CardContent className="pt-4">
+      <Card className="flex h-full flex-col transition-shadow hover:shadow-md">
+        <CardContent className="flex flex-1 flex-col pt-4">
           <div className="mb-3 flex items-start gap-3">
             <ExtensionIcon ext={ext} />
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
-                <strong className="text-base">{ext.display_name}</strong>
+                <strong className="truncate text-base text-fg">
+                  {ext.display_name}
+                </strong>
                 <Badge variant={extensionStatusVariant(ext.status)}>
                   {extensionStatusLabel(ext.status)}
                 </Badge>
               </div>
-              <div className="mt-0.5 text-xs text-fg-muted">
-                {ext.name}
+              <div className="mt-0.5 truncate text-xs text-fg-muted">
+                {ext.author ? ext.author : ext.publisher}
                 {ext.listed_version ? ` · v${ext.listed_version}` : ""}
               </div>
             </div>
           </div>
-          <p className="m-0 line-clamp-3 text-sm text-fg">
+          <p className="m-0 line-clamp-3 text-sm text-fg-muted">
             {ext.description || (
               <span className="italic text-fg-subtle">
                 No description provided.
               </span>
             )}
           </p>
-          <div className="mt-3 flex flex-wrap gap-3 text-xs text-fg-muted">
-            {ext.author && <span>By {ext.author}</span>}
-            {ext.license && <span>· {ext.license}</span>}
-            <span>· Updated {formatTimestamp(ext.updated_at)}</span>
+          <div className="mt-auto flex items-center justify-between pt-4 text-xs text-fg-muted">
+            <span>Updated {formatTimestamp(ext.updated_at)}</span>
+            <span className="inline-flex items-center gap-1 font-medium text-accent">
+              View details
+              <ArrowRight
+                className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5"
+                aria-hidden
+              />
+            </span>
           </div>
         </CardContent>
       </Card>
@@ -179,7 +224,7 @@ function ExtensionIcon({ ext }: { ext: MarketplaceExtension }) {
         alt=""
         width={40}
         height={40}
-        className="rounded-lg bg-bg-muted object-cover"
+        className="h-10 w-10 shrink-0 rounded-lg bg-bg-muted object-cover"
         // Manifest validation pins this URL but the browser may
         // still 404 (asset deleted post-publish). Falling back
         // to a hidden state lets the layout collapse to text-
@@ -190,36 +235,18 @@ function ExtensionIcon({ ext }: { ext: MarketplaceExtension }) {
       />
     );
   }
-  // Letter-tile fallback when no icon URL is set — first
-  // character of display_name on a coloured background. The
-  // colour is derived from the extension name so the same
-  // extension always gets the same tile, providing a stable
-  // visual anchor across renders.
-  const letter = (ext.display_name || ext.slug || "?")
-    .charAt(0)
-    .toUpperCase();
-  const hue = hashString(ext.name) % 360;
+  // Letter-tile fallback when no icon URL is set — first character of
+  // display_name on the KChat accent so the catalogue stays on-brand
+  // and the tile reads as a consistent app icon.
+  const letter = (ext.display_name || ext.slug || "?").charAt(0).toUpperCase();
   return (
     <div
       aria-hidden
-      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-lg font-semibold text-white"
-      style={{ background: `hsl(${hue}, 60%, 45%)` }}
+      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent text-lg font-semibold text-accent-fg"
     >
       {letter}
     </div>
   );
-}
-
-// Tiny deterministic string hash for the icon-fallback tile
-// colour. FNV-1a 32-bit — collision rate is irrelevant since the
-// only consequence is two extensions sharing a hue.
-function hashString(s: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return Math.abs(h);
 }
 
 // useDebounced returns the latest `value` after `delay` ms of
