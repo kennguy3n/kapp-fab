@@ -3,6 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { LocaleProvider } from "../lib/i18n";
 
 const getKType = vi.fn();
 const listRecords = vi.fn();
@@ -58,13 +59,15 @@ function renderPage() {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/records/crm.deal"]}>
-        <Routes>
-          <Route path="/records/:ktype" element={<RecordListPage />} />
-        </Routes>
-      </MemoryRouter>
-    </QueryClientProvider>,
+    <LocaleProvider>
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/records/crm.deal"]}>
+          <Routes>
+            <Route path="/records/:ktype" element={<RecordListPage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    </LocaleProvider>,
   );
 }
 

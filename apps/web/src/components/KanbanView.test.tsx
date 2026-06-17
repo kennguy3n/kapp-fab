@@ -72,7 +72,8 @@ describe("KanbanView", () => {
         onCardClick={() => {}}
       />,
     );
-    for (const label of ["todo", "doing", "done"]) {
+    // Column headers humanize the raw enum tokens to Title Case.
+    for (const label of ["Todo", "Doing", "Done"]) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
   });
@@ -109,8 +110,9 @@ describe("KanbanView", () => {
         onCardClick={() => {}}
       />,
     );
-    expect(screen.getByText("backlog")).toBeInTheDocument();
-    expect(screen.getByText("shipped")).toBeInTheDocument();
+    // Observed string values are humanized for display too.
+    expect(screen.getByText("Backlog")).toBeInTheDocument();
+    expect(screen.getByText("Shipped")).toBeInTheDocument();
   });
 
   it("uses card_title / card_subtitle from the kanban config", () => {
@@ -176,7 +178,9 @@ describe("KanbanView", () => {
     // assertion below, this exercises the real move regardless of any
     // wrapper markup the column might gain in the future: if the drop ever
     // failed to reach a handler, onMove would not fire and this test fails.
-    const doneHeader = screen.getByText("done");
+    // The header label is humanized ("Done"), but onMove must still report
+    // the RAW field value ("done") so the caller can PATCH the record.
+    const doneHeader = screen.getByText("Done");
 
     fireEvent.dragStart(cardEl as Element, { dataTransfer });
     fireEvent.drop(doneHeader, { dataTransfer });

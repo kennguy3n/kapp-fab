@@ -14,7 +14,7 @@ test.describe("record CRUD", () => {
 
   test("lists the seeded records", async ({ page }) => {
     await page.goto("/records/crm.deal");
-    await expect(page.getByRole("heading", { name: "crm.deal" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Deals" })).toBeVisible();
     await expect(page.getByText("Acme renewal")).toBeVisible();
     await expect(page.getByText("Globex expansion")).toBeVisible();
   });
@@ -23,10 +23,10 @@ test.describe("record CRUD", () => {
     page,
   }) => {
     await page.goto("/records/crm.deal");
-    await expect(page.getByRole("heading", { name: "crm.deal" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Deals" })).toBeVisible();
 
-    await page.getByRole("button", { name: "New" }).click();
-    await expect(page.getByRole("heading", { name: "New crm.deal" })).toBeVisible();
+    await page.getByRole("button", { name: "New Deal" }).click();
+    await expect(page.getByRole("heading", { name: "New Deal" })).toBeVisible();
 
     // Scope to the record form (the one with the Save button) — the
     // app shell also renders a header global-search <form>, so an
@@ -34,11 +34,13 @@ test.describe("record CRUD", () => {
     const recordForm = page.locator("form:has(button)");
     // First field in the KType form is the required "title" string.
     await recordForm.locator("input").first().fill("Initech rollout");
-    await page.getByRole("button", { name: "Save" }).click();
+    // The create form now offers Cancel / "Save & add another" / Save,
+    // so anchor the match to the bare "Save" submit button.
+    await page.getByRole("button", { name: /^Save$/ }).click();
 
     // createRecord -> navigate back to the list; the new record is now
     // returned by the (stateful) mock list endpoint.
-    await expect(page.getByRole("heading", { name: "crm.deal" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Deals" })).toBeVisible();
     await expect(page.getByText("Initech rollout")).toBeVisible();
   });
 });

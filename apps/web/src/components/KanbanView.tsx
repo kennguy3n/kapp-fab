@@ -1,5 +1,8 @@
 import { useMemo } from "react";
 import type { KType, KRecord, FieldSpec } from "@kapp/client";
+import { Badge, cn } from "@kapp/ui";
+import { useFormatter } from "../lib/i18n";
+import { formatValue, humanizeToken, recordLabel, statusVariant } from "../lib/ktypeView";
 
 interface KanbanViewProps {
   ktype: KType;
@@ -13,6 +16,10 @@ interface KanbanViewProps {
  * field. Columns are derived from that field's enum values so the UI
  * stays in sync with the schema without additional configuration.
  *
+ * Column headers display the humanized token (e.g. `in_progress` →
+ * `In Progress`) but the move callback always reports the RAW field
+ * value so the caller can PATCH the record / drive the workflow.
+ *
  * Drag-and-drop fires `onMove(record, toStage)` on drop; the caller is
  * responsible for (a) PATCHing the record and (b) driving any attached
  * workflow action. We deliberately split that concern outside the
@@ -20,6 +27,7 @@ interface KanbanViewProps {
  * workflows.
  */
 export function KanbanView({ ktype, records, onCardClick, onMove }: KanbanViewProps) {
+  const fmt = useFormatter();
   const kanban = ktype.schema?.views?.kanban;
   const groupBy = kanban?.group_by;
   const titleKey = kanban?.card_title ?? "name";
@@ -42,7 +50,11 @@ export function KanbanView({ ktype, records, onCardClick, onMove }: KanbanViewPr
   }, [field, groupBy, records]);
 
   if (!groupBy) {
-    return <div>This KType has no kanban view configured.</div>;
+    return (
+      <div className="rounded-xl border border-border bg-bg-subtle px-4 py-8 text-center text-sm text-fg-muted">
+        This record type has no kanban view configured.
+      </div>
+    );
   }
 
   const grouped: Record<string, KRecord[]> = {};
@@ -55,22 +67,16 @@ export function KanbanView({ ktype, records, onCardClick, onMove }: KanbanViewPr
   }
 
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: `repeat(${columns.length}, minmax(220px, 1fr))`,
-        gap: 12,
-        overflowX: "auto",
-      }}
-    >
+    <div className="flex gap-3 overflow-x-auto pb-2">
       {columns.map((col) => (
         <KanbanColumn
           key={col}
-          label={col}
+          value={col}
           records={grouped[col] ?? []}
           titleKey={titleKey}
           subtitleKey={subtitleKey}
           fields={fields}
+          fmt={fmt}
           onCardClick={onCardClick}
           onDrop={(recordId) => {
             const moved = records.find((r) => r.id === recordId);
@@ -83,31 +89,34 @@ export function KanbanView({ ktype, records, onCardClick, onMove }: KanbanViewPr
 }
 
 interface ColumnProps {
-  label: string;
+  value: string;
   records: KRecord[];
   titleKey: string;
   subtitleKey?: string;
   fields: FieldSpec[];
+  fmt: ReturnType<typeof useFormatter>;
   onCardClick: (record: KRecord) => void;
   onDrop: (recordId: string) => void;
 }
 
 function KanbanColumn({
-  label,
+  value,
   records,
   titleKey,
   subtitleKey,
+  fields,
+  fmt,
   onCardClick,
   onDrop,
 }: ColumnProps) {
+  const titleField = fields.find((f) => f.name === titleKey);
+  const subtitleField = subtitleKey
+    ? fields.find((f) => f.name === subtitleKey)
+    : undefined;
+
   return (
     <div
-      style={{
-        background: "#f9fafb",
-        borderRadius: 8,
-        padding: 12,
-        minHeight: 240,
-      }}
+      className="flex max-h-[70vh] w-72 shrink-0 flex-col rounded-xl border border-border bg-bg-subtle"
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => {
         e.preventDefault();
@@ -115,44 +124,65 @@ function KanbanColumn({
         if (id) onDrop(id);
       }}
     >
-      <header
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 8,
-        }}
-      >
-        <strong>{label}</strong>
-        <span style={{ color: "#6b7280", fontSize: 12 }}>{records.length}</span>
+      <header className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+        <Badge variant={statusVariant(value)} size="sm">
+          {humanizeToken(value)}
+        </Badge>
+        <span className="text-xs font-medium tabular-nums text-fg-muted">
+          {records.length}
+        </span>
       </header>
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div className="flex flex-col gap-2 overflow-y-auto p-2">
         {records.map((r) => {
           const data = r.data as Record<string, unknown>;
-          const title = String(data[titleKey] ?? r.id.slice(0, 8));
+          const rawTitle = data[titleKey];
+          const title =
+            rawTitle != null && rawTitle !== ""
+              ? titleField
+                ? formatValue(titleField, rawTitle, r, fmt)
+                : String(rawTitle)
+              : recordLabel(r);
+          const rawSubtitle =
+            subtitleKey != null ? data[subtitleKey] : undefined;
           const subtitle =
-            subtitleKey != null ? String(data[subtitleKey] ?? "") : "";
+            rawSubtitle != null && rawSubtitle !== ""
+              ? subtitleField
+                ? formatValue(subtitleField, rawSubtitle, r, fmt)
+                : String(rawSubtitle)
+              : "";
           return (
-            <div
+            <button
               key={r.id}
+              type="button"
               draggable
               onDragStart={(e) => e.dataTransfer.setData("text/plain", r.id)}
               onClick={() => onCardClick(r)}
-              style={{
-                background: "#ffffff",
-                border: "1px solid #e5e7eb",
-                borderRadius: 6,
-                padding: 8,
-                cursor: "pointer",
-              }}
-            >
-              <div style={{ fontWeight: 500 }}>{title}</div>
-              {subtitle && (
-                <div style={{ color: "#6b7280", fontSize: 12 }}>{subtitle}</div>
+              className={cn(
+                "w-full rounded-lg border border-border bg-bg-elevated p-3 text-start",
+                "transition-colors hover:border-border-strong hover:bg-bg",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)",
+                "cursor-grab active:cursor-grabbing",
               )}
-            </div>
+            >
+              <div className="truncate text-sm font-medium text-fg" title={title}>
+                {title}
+              </div>
+              {subtitle && (
+                <div
+                  className="mt-0.5 truncate text-xs text-fg-muted"
+                  title={subtitle}
+                >
+                  {subtitle}
+                </div>
+              )}
+            </button>
           );
         })}
+        {records.length === 0 && (
+          <p className="px-1 py-6 text-center text-xs text-fg-subtle">
+            Nothing here yet
+          </p>
+        )}
       </div>
     </div>
   );

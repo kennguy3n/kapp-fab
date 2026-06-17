@@ -58,9 +58,16 @@ describe("RecordFormPage", () => {
     getKType.mockResolvedValue(KTYPE);
     renderForm("/records/crm.deal");
 
-    expect(await screen.findByText(/New crm\.deal/i)).toBeInTheDocument();
-    // Field labels come from the schema (title / stage / value).
-    expect(screen.getByText(/title \*/i)).toBeInTheDocument();
+    // Heading uses the humanized, singularized display label — never the
+    // raw ktype id.
+    expect(await screen.findByText(/New Deal/i)).toBeInTheDocument();
+    expect(screen.queryByText(/crm\.deal/i)).not.toBeInTheDocument();
+    // Field labels come from the schema, humanized to Title Case. The
+    // required field carries an asterisk marker rendered as a sibling
+    // element, so assert on the label's full text content.
+    expect(screen.getByText("title", { exact: false }).textContent).toContain(
+      "*",
+    );
     expect(screen.getByText(/stage/i)).toBeInTheDocument();
     expect(screen.getByText(/value/i)).toBeInTheDocument();
     // Print buttons are edit-only — absent in create mode.
@@ -75,7 +82,7 @@ describe("RecordFormPage", () => {
     const user = userEvent.setup();
     renderForm("/records/crm.deal");
 
-    await screen.findByText(/New crm\.deal/i);
+    await screen.findByText(/New Deal/i);
     const title = screen.getAllByRole("textbox")[0];
     await user.type(title, "Acme renewal");
     await user.click(screen.getByRole("button", { name: /^Save$/i }));
@@ -96,7 +103,7 @@ describe("RecordFormPage", () => {
     const user = userEvent.setup();
     renderForm("/records/crm.deal/rec-1");
 
-    expect(await screen.findByText(/Edit crm\.deal/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Edit Deal/i)).toBeInTheDocument();
     // The form is seeded from the loaded record.
     expect(screen.getByDisplayValue("Existing deal")).toBeInTheDocument();
     // Edit mode exposes the print actions.
@@ -115,13 +122,17 @@ describe("RecordFormPage", () => {
   it("shows a not-found message when the KType does not exist", async () => {
     getKType.mockResolvedValue(undefined);
     renderForm("/records/crm.deal");
-    expect(await screen.findByText(/KType not found\./i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/couldn't find that record type/i),
+    ).toBeInTheDocument();
   });
 
   it("shows a not-found message when the record id resolves to nothing", async () => {
     getKType.mockResolvedValue(KTYPE);
     getRecord.mockResolvedValue(undefined);
     renderForm("/records/crm.deal/missing");
-    expect(await screen.findByText(/Record not found\./i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/couldn't find that record$/i),
+    ).toBeInTheDocument();
   });
 });
