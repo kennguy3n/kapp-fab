@@ -1771,9 +1771,12 @@ function AppSidebarNav({
   const q = query.trim().toLowerCase();
   const results = q
     ? sections.flatMap((s) =>
-        // A query that matches the section title surfaces the whole
-        // section; otherwise fall back to matching link labels.
-        s.title.toLowerCase().includes(q)
+        // A query that *prefixes* a section title surfaces the whole
+        // section (so "adm" → Admin, "hr" → HR); otherwise fall back to
+        // matching link labels. Prefix (not substring) keeps a short
+        // query like "in" from sweeping in every section that merely
+        // contains those letters (Finance, Manufacturing, …).
+        s.title.toLowerCase().startsWith(q)
           ? s.links
           : s.links.filter((l) => l.label.toLowerCase().includes(q)),
       )
