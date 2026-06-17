@@ -1,6 +1,8 @@
 import { Badge } from "@kapp/ui";
+import { useFormatter } from "../lib/i18n/useFormatter";
 import {
-  formatAmount,
+  formatMoney,
+  parseDateValue,
   txnData,
   type TransferPairRow,
 } from "./reconciliation";
@@ -16,6 +18,8 @@ function Leg({
   description?: string;
   valueDate?: string;
 }) {
+  const f = useFormatter();
+  const date = parseDateValue(valueDate);
   return (
     <div className="min-w-0">
       <div className="text-xs uppercase tracking-wide text-fg-muted">
@@ -25,8 +29,24 @@ function Leg({
         {accountName || "(unknown account)"}
       </div>
       <div className="truncate text-xs text-fg-muted">
-        {description || "(no description)"} · {valueDate ?? ""}
+        {description || "(no description)"}
+        {date ? ` · ${f.date(date)}` : ""}
       </div>
+    </div>
+  );
+}
+
+function TransferAmount({
+  amount,
+  currency,
+}: {
+  amount: number;
+  currency?: string;
+}) {
+  const f = useFormatter();
+  return (
+    <div className="text-center font-semibold tabular-nums text-fg">
+      {formatMoney(f, amount, currency)}
     </div>
   );
 }
@@ -49,7 +69,7 @@ export function ReconciliationTransfers({
       <header className="flex items-center gap-2">
         <h2 className="text-base font-semibold text-fg">Detected transfers</h2>
         <Badge variant="info" size="xs">
-          auto-paired
+          Auto-paired
         </Badge>
       </header>
       <p className="text-sm text-fg-muted">
@@ -77,9 +97,7 @@ export function ReconciliationTransfers({
                   Counter-leg outside current view
                 </div>
               )}
-              <div className="text-center font-semibold tabular-nums text-fg">
-                {formatAmount(p.amount, p.currency)}
-              </div>
+              <TransferAmount amount={p.amount} currency={p.currency} />
               {p.in ? (
                 <Leg
                   label="To"

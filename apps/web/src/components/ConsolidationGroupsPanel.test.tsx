@@ -51,7 +51,7 @@ describe("ConsolidationGroupsPanel", () => {
     const props = setup();
     const user = userEvent.setup();
 
-    await user.type(screen.getByLabelText(/^Name$/i), "EMEA Roll-up");
+    await user.type(screen.getByLabelText(/^Name/i), "EMEA Roll-up");
     const members = screen.getByLabelText(/Member tenant IDs/i);
     await user.type(members, "t1, t2");
 
@@ -69,7 +69,7 @@ describe("ConsolidationGroupsPanel", () => {
     setup();
     const user = userEvent.setup();
 
-    await user.type(screen.getByLabelText(/^Name$/i), "G");
+    await user.type(screen.getByLabelText(/^Name/i), "G");
     await user.click(screen.getByRole("button", { name: /Add pair/i }));
     await user.type(screen.getByPlaceholderText("From tenant"), "t1");
     await user.type(screen.getByPlaceholderText("To tenant"), "t2");

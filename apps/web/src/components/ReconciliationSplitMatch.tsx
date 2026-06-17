@@ -1,10 +1,11 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { BankFeedSuggestion, KRecord } from "@kapp/client";
 import { Badge, Button, Input, Select } from "@kapp/ui";
+import { useFormatter } from "../lib/i18n/useFormatter";
 import {
-  formatAmount,
+  formatConfidence,
+  formatMoney,
   isBalanced,
-  shortId,
   splitRemaining,
   txnAmount,
 } from "./reconciliation";
@@ -50,6 +51,7 @@ export function ReconciliationSplitMatch({
   pending: boolean;
   onReconcile: (allocations: SplitAllocation[]) => void;
 }) {
+  const f = useFormatter();
   const target = txnAmount(txn);
   // Per-instance row-key sequence, so keys are locally unique and stable
   // across test runs (a module-level counter would leak between instances).
@@ -137,7 +139,9 @@ export function ReconciliationSplitMatch({
               <option value="">—</option>
               {suggestions.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {`Journal entry ${shortId(s.journal_entry_id)}`}
+                  {`${rt("reconciliation.ledgerEntry")} · ${formatConfidence(
+                    s.confidence,
+                  )}`}
                 </option>
               ))}
             </Select>
@@ -179,7 +183,7 @@ export function ReconciliationSplitMatch({
         <div className="flex gap-1">
           <dt className="text-fg-muted">{rt("reconciliation.split.target")}</dt>
           <dd className="font-semibold tabular-nums text-fg">
-            {formatAmount(target, currency)}
+            {formatMoney(f, target, currency)}
           </dd>
         </div>
         <div className="flex gap-1">
@@ -187,7 +191,7 @@ export function ReconciliationSplitMatch({
             {rt("reconciliation.split.allocated")}
           </dt>
           <dd className="font-semibold tabular-nums text-fg">
-            {formatAmount(allocated, currency)}
+            {formatMoney(f, allocated, currency)}
           </dd>
         </div>
         <div className="flex gap-1">
@@ -199,7 +203,7 @@ export function ReconciliationSplitMatch({
               balanced ? "text-success" : "text-accent"
             }`}
           >
-            {formatAmount(remaining, currency)}
+            {formatMoney(f, remaining, currency)}
           </dd>
         </div>
       </dl>

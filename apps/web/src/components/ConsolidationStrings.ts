@@ -18,6 +18,7 @@
  */
 
 export const CONSOLIDATION_STRINGS = {
+  "consolidation.eyebrow": "Finance",
   "consolidation.title": "Consolidation & FX Review",
   "consolidation.subtitle":
     "Roll up subsidiary trial balances into one presentation currency, review currency-translation (CTA) and intercompany eliminations, and clear unrealized FX before posting. Admin only.",
@@ -36,7 +37,8 @@ export const CONSOLIDATION_STRINGS = {
     "No groups tracked in this browser yet. Create one, or add an existing group by ID.",
   "consolidation.groups.name": "Name",
   "consolidation.groups.presentationCurrency": "Presentation currency",
-  "consolidation.groups.members": "Member tenant IDs (one per line or comma-separated)",
+  "consolidation.groups.members": "Member tenant IDs",
+  "consolidation.groups.membersHelp": "One per line or comma-separated.",
   "consolidation.groups.ctaAccount": "CTA account code (optional)",
   "consolidation.groups.ctaAccountHint":
     "Equity account that absorbs currency-translation differences. Defaults to 3900.",
@@ -54,6 +56,7 @@ export const CONSOLIDATION_STRINGS = {
   "consolidation.groups.select": "Select",
   "consolidation.groups.selected": "Selected",
   "consolidation.groups.activeGroup": "Active group",
+  "consolidation.groups.untitled": "Untitled group",
   "consolidation.groups.forget": "Forget",
   "consolidation.groups.membersCount": "{count} entities",
   "consolidation.groups.listEndpointNote":
@@ -94,6 +97,7 @@ export const CONSOLIDATION_STRINGS = {
   "consolidation.tb.drillHint": "Select a row to see per-entity contributions and any eliminations applied.",
   "consolidation.tb.contributions": "Per-entity contributions",
   "consolidation.tb.entity": "Entity",
+  "consolidation.tb.entityN": "Entity {n}",
   "consolidation.tb.eliminationsApplied": "Intercompany eliminations on this account",
   "consolidation.tb.noContributions": "No per-entity breakdown for this row.",
   "consolidation.tb.eliminated": "Eliminated (intercompany)",
@@ -130,7 +134,10 @@ export const CONSOLIDATION_STRINGS = {
   "consolidation.fx.provider": "Provider",
   "consolidation.fx.saveRate": "Save rate",
   "consolidation.fx.savingRate": "Saving…",
-  "consolidation.fx.noRates": "No exchange rates yet.",
+  "consolidation.fx.noRates": "No exchange rates yet",
+  "consolidation.fx.noRatesHint":
+    "Add a rate above to translate balances and run revaluations.",
+  "consolidation.fx.ratesError": "We couldn't load exchange rates.",
   "consolidation.fx.pair": "Pair",
 
   "consolidation.fx.translate": "Current-rate translation",
@@ -177,8 +184,16 @@ export const CONSOLIDATION_STRINGS = {
   "consolidation.fx.noRevalLines": "No open foreign-currency balances were revalued.",
   "consolidation.fx.revalEmpty": "Run a revaluation to review unrealized FX gain/loss.",
 
+  // Account-type labels (humanised from the stored type token).
+  "consolidation.accountType.asset": "Asset",
+  "consolidation.accountType.liability": "Liability",
+  "consolidation.accountType.equity": "Equity",
+  "consolidation.accountType.revenue": "Revenue",
+  "consolidation.accountType.expense": "Expense",
+
   // Generic
   "consolidation.error": "Something went wrong.",
+  "consolidation.retry": "Try again",
 } as const;
 
 export type ConsolidationStringKey = keyof typeof CONSOLIDATION_STRINGS;
@@ -200,4 +215,24 @@ export function ctp(
   return ct(key).replace(/\{(\w+)\}/g, (whole, name: string) =>
     name in params ? String(params[name]) : whole,
   );
+}
+
+// humanizeToken turns an unknown snake_case/lowercase token into a Title
+// Case label so an account type we don't have explicit copy for still
+// reads as a label rather than a raw machine token.
+function humanizeToken(token: string): string {
+  return token
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * Human label for a chart-of-accounts type, e.g. "asset" → "Asset".
+ * Unknown types humanise gracefully instead of leaking the raw token.
+ */
+export function accountTypeLabel(type: string): string {
+  const key =
+    `consolidation.accountType.${type.toLowerCase()}` as ConsolidationStringKey;
+  return CONSOLIDATION_STRINGS[key] ?? humanizeToken(type);
 }

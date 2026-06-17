@@ -18,22 +18,9 @@ import type {
   ConsolidatedRow,
   ConsolidatedTrialBalance,
 } from "./ConsolidationApi";
-import { ct } from "./ConsolidationStrings";
-
-/** Short, stable label for a tenant id used as a column header. */
-function entityLabel(tenantId: string): string {
-  return tenantId.length > 8 ? `${tenantId.slice(0, 8)}…` : tenantId;
-}
-
-/** Net contribution (debit − credit), rounded to cents for display so
- *  float noise from the string→number parse never leaks into the UI.
- *  The authoritative consolidated figure stays the backend's
- *  `row.balance` string; this is only the per-entity slice. */
-function netStr(debit: string, credit: string): string {
-  const n = Number(debit) - Number(credit);
-  if (!Number.isFinite(n)) return "—";
-  return (Math.round(n * 100) / 100).toString();
-}
+import { useFormatter } from "../lib/i18n/useFormatter";
+import { formatMoney, shortId } from "./reconciliation";
+import { accountTypeLabel, ct, ctp } from "./ConsolidationStrings";
 
 function isZero(amount: string | undefined): boolean {
   if (!amount) return true;
@@ -59,6 +46,12 @@ export function ConsolidationTrialBalance({
   ctaAccountCode,
 }: ConsolidationTrialBalanceProps) {
   const [open, setOpen] = useState<string | null>(null);
+  const f = useFormatter();
+  // Presentation-currency figures render as grouped two-decimal numbers
+  // (the currency itself is stated once in the card title), right-aligned
+  // with tabular figures so columns line up to the cent.
+  const money = (value: string | number) =>
+    formatMoney(f, typeof value === "number" ? value : Number(value));
 
   // Stable union of every tenant that contributes to any row — these
   // become the per-entity columns.
@@ -75,6 +68,18 @@ export function ConsolidationTrialBalance({
     }
     return ordered;
   }, [result.rows]);
+
+  // Member tenants surface as "Entity 1…N" (the raw tenant UUID stays in
+  // the column's title for auditing) so no machine id leaks into a label.
+  const entityNo = useMemo(() => {
+    const m = new Map<string, number>();
+    entities.forEach((id, i) => m.set(id, i + 1));
+    return m;
+  }, [entities]);
+  const entityName = (id: string) => {
+    const n = entityNo.get(id);
+    return n ? ctp("consolidation.tb.entityN", { n }) : shortId(id);
+  };
 
   const cta = ctaAccountCode ?? "3900";
   const residual = result.residual ?? "0";
@@ -101,23 +106,26 @@ export function ConsolidationTrialBalance({
           {ct("consolidation.tb.heading")} — {result.presentation_currency}
         </CardTitle>
         <p className="text-sm text-fg-muted">
-          {ct("consolidation.tb.asOf")}: {new Date(result.as_of).toLocaleString()}
+          {ct("consolidation.tb.asOf")}: {f.date(new Date(result.as_of))}
         </p>
       </CardHeader>
       <CardContent className="grid gap-4">
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
           <StatCard
             label={ct("consolidation.tb.totalDebit")}
-            value={result.total_debit}
+            value={money(result.total_debit)}
           />
           <StatCard
             label={ct("consolidation.tb.totalCredit")}
-            value={result.total_credit}
+            value={money(result.total_credit)}
           />
-          <StatCard label={ct("consolidation.tb.cta")} value={result.cta ?? "0"} />
+          <StatCard
+            label={ct("consolidation.tb.cta")}
+            value={money(result.cta ?? "0")}
+          />
           <StatCard
             label={ct("consolidation.tb.residual")}
-            value={residual}
+            value={money(residual)}
             sub={
               <Badge variant={balanced ? "success" : "danger"}>
                 {balanced
@@ -137,7 +145,7 @@ export function ConsolidationTrialBalance({
               <TableHead>{ct("consolidation.tb.type")}</TableHead>
               {entities.map((id) => (
                 <TableHead key={id} className="text-right" title={id}>
-                  {entityLabel(id)}
+                  {entityName(id)}
                 </TableHead>
               ))}
               <TableHead className="text-right">
@@ -176,7 +184,9 @@ export function ConsolidationTrialBalance({
                         ) : null}
                       </span>
                     </TableCell>
-                    <TableCell className="text-fg-muted">{row.type ?? ""}</TableCell>
+                    <TableCell className="text-fg-muted">
+                      {row.type ? accountTypeLabel(row.type) : ""}
+                    </TableCell>
                     {entities.map((id) => {
                       const c = contribById.get(id);
                       return (
@@ -184,12 +194,12 @@ export function ConsolidationTrialBalance({
                           key={id}
                           className="text-right tabular-nums text-fg-muted"
                         >
-                          {c ? netStr(c.debit, c.credit) : ""}
+                          {c ? money(Number(c.debit) - Number(c.credit)) : ""}
                         </TableCell>
                       );
                     })}
                     <TableCell className="text-right font-medium tabular-nums">
-                      {row.balance}
+                      {money(row.balance)}
                     </TableCell>
                   </TableRow>
 
@@ -223,16 +233,14 @@ export function ConsolidationTrialBalance({
                                 <TableBody>
                                   {(row.contributions ?? []).map((c) => (
                                     <TableRow key={c.tenant_id}>
-                                      <TableCell>
-                                        <code title={c.tenant_id}>
-                                          {entityLabel(c.tenant_id)}
-                                        </code>
+                                      <TableCell title={c.tenant_id}>
+                                        {entityName(c.tenant_id)}
                                       </TableCell>
                                       <TableCell className="text-right tabular-nums">
-                                        {c.debit}
+                                        {money(c.debit)}
                                       </TableCell>
                                       <TableCell className="text-right tabular-nums">
-                                        {c.credit}
+                                        {money(c.credit)}
                                       </TableCell>
                                     </TableRow>
                                   ))}
@@ -267,10 +275,10 @@ export function ConsolidationTrialBalance({
                                         <code>{e.account_code}</code>
                                       </TableCell>
                                       <TableCell className="text-right tabular-nums">
-                                        {e.debit}
+                                        {money(e.debit)}
                                       </TableCell>
                                       <TableCell className="text-right tabular-nums">
-                                        {e.credit}
+                                        {money(e.credit)}
                                       </TableCell>
                                     </TableRow>
                                   ))}
@@ -294,7 +302,7 @@ export function ConsolidationTrialBalance({
                 <TableCell key={id} />
               ))}
               <TableCell className="text-right tabular-nums">
-                {result.total_debit} / {result.total_credit}
+                {money(result.total_debit)} / {money(result.total_credit)}
               </TableCell>
             </TableRow>
           </TableFooter>
@@ -324,10 +332,10 @@ export function ConsolidationTrialBalance({
                       <code>{row.account_code}</code>
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
-                      {row.debit}
+                      {money(row.debit)}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
-                      {row.credit}
+                      {money(row.credit)}
                     </TableCell>
                   </TableRow>
                 ))}

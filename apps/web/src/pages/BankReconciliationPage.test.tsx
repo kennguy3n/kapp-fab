@@ -361,7 +361,7 @@ describe("BankReconciliationPage", () => {
     await user.click(await screen.findByText("Operating USD"));
 
     const rules = await screen.findByRole("region", { name: "Reconciliation rules" });
-    expect(within(rules).getByText("description_contains: ACME")).toBeInTheDocument();
+    expect(within(rules).getByText("Description contains: ACME")).toBeInTheDocument();
     expect(within(rules).getByText("Enabled")).toBeInTheDocument();
   });
 
@@ -376,9 +376,10 @@ describe("BankReconciliationPage", () => {
     const sidebyside = await screen.findByRole("region", {
       name: "Side-by-side reconciliation",
     });
-    // 100 EUR × 1.10 = 110.00 USD base equivalent surfaces on the line.
+    // 100 EUR × 1.10 = 110.00 USD base equivalent surfaces on the line
+    // (locale-formatted as the account's base currency).
     expect(
-      await within(sidebyside).findByText(/110\.00 USD/),
+      await within(sidebyside).findByText(/\$110\.00/),
     ).toBeInTheDocument();
     expect(
       within(sidebyside).getAllByText(/Foreign currency/i).length,

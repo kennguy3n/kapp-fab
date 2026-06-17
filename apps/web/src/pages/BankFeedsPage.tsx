@@ -10,8 +10,12 @@ import type {
 import {
   Badge,
   Button,
+  EmptyState,
+  Eyebrow,
+  Field,
   Input,
   Select,
+  Skeleton,
   Table,
   TableBody,
   TableCell,
@@ -22,6 +26,13 @@ import {
   toast,
 } from "@kapp/ui";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n/useFormatter";
+import {
+  formatConfidence,
+  parseDateValue,
+  parseReasons,
+} from "../components/reconciliation";
+import { ruleConditionLabel } from "../components/ReconciliationStrings";
 
 const KTYPE_ACCOUNT = "finance.bank_account";
 
@@ -53,6 +64,16 @@ const RULE_CONDITION_TYPES: Array<{ value: string; label: string }> = [
   { value: "counterparty_equals", label: "Counterparty equals" },
   { value: "amount_equals", label: "Amount equals" },
 ];
+
+// humanizeStatus turns a lifecycle token ("active", "revoked") into a human
+// label ("Active", "Revoked") so the feed table never surfaces a raw enum.
+function humanizeStatus(token: string): string {
+  return token
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
 
 /**
  * BankFeedsPage is the operator console for the Session 15 bank-feed +
@@ -90,7 +111,8 @@ export function BankFeedsPage() {
   return (
     <section className="flex flex-col gap-4">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight text-fg">
+        <Eyebrow>Finance</Eyebrow>
+        <h1 className="mt-1 text-2xl font-semibold tracking-tight text-fg">
           Bank Feeds
         </h1>
         <p className="mt-1 text-sm text-fg-muted">
@@ -103,12 +125,30 @@ export function BankFeedsPage() {
         <div className="flex-[0_0_240px]">
           <h2 className="text-sm font-semibold text-fg">Accounts</h2>
           {accountsQ.isLoading && (
-            <p className="mt-2 text-sm text-fg-muted">Loading…</p>
+            <div className="mt-2 flex flex-col gap-1" aria-hidden="true">
+              <Skeleton className="h-9 w-full" />
+              <Skeleton className="h-9 w-full" />
+              <Skeleton className="h-9 w-full" />
+            </div>
           )}
-          {!accountsQ.isLoading && accounts.length === 0 && (
+          {accountsQ.isError && (
+            <div className="mt-2 flex flex-col items-start gap-1">
+              <p className="text-sm text-danger">
+                We couldn&apos;t load your bank accounts.
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void accountsQ.refetch()}
+              >
+                Retry
+              </Button>
+            </div>
+          )}
+          {!accountsQ.isLoading && !accountsQ.isError && accounts.length === 0 && (
             <p className="mt-2 text-sm text-fg-muted">
-              No bank accounts yet. Create a finance.bank_account record
-              first.
+              No bank accounts yet. Add a bank account to start connecting
+              feeds.
             </p>
           )}
           <ul className="mt-2 flex list-none flex-col gap-1 p-0">
@@ -126,7 +166,7 @@ export function BankFeedsPage() {
                     )}
                   >
                     <div className="font-medium text-fg">
-                      {d.name ?? "(unnamed)"}
+                      {d.name ?? "Unnamed account"}
                     </div>
                     <div className="text-xs text-fg-muted">
                       {d.currency ?? ""} {d.account_number ?? ""}
@@ -140,7 +180,10 @@ export function BankFeedsPage() {
 
         <div className="min-w-0 flex-1">
           {!selected ? (
-            <p className="text-sm text-fg-muted">Select a bank account.</p>
+            <EmptyState
+              title="Select a bank account"
+              description="Choose a bank account from the list to connect a feed, upload a statement, and review match suggestions."
+            />
           ) : (
             <div className="flex flex-col gap-6">
               <ConnectionsPanel
@@ -170,6 +213,7 @@ function ConnectionsPanel({
   defaultCurrency: string;
 }) {
   const qc = useQueryClient();
+  const f = useFormatter();
   const providersQ = useQuery({
     queryKey: ["bankfeed", "providers"],
     queryFn: () => api.listBankFeedProviders(),
@@ -278,7 +322,14 @@ function ConnectionsPanel({
   return (
     <div className="flex flex-col gap-3">
       <header className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-base font-semibold text-fg">Connections</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-semibold text-fg">Connections</h2>
+          {connections.length > 0 && (
+            <Badge variant="neutral" size="sm">
+              {f.number(connections.length)}
+            </Badge>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <Select
             aria-label="Provider"
@@ -289,7 +340,7 @@ function ConnectionsPanel({
           >
             {providers.map((p) => (
               <option key={p} value={p}>
-                {p}
+                {p === "csv" ? "CSV" : humanizeStatus(p)}
               </option>
             ))}
           </Select>
@@ -318,16 +369,32 @@ function ConnectionsPanel({
       />
 
       {connectionsQ.isLoading && (
-        <p className="text-sm text-fg-muted">Loading…</p>
+        <div className="flex flex-col gap-1" aria-hidden="true">
+          <Skeleton className="h-9 w-full" />
+          <Skeleton className="h-9 w-full" />
+        </div>
       )}
       {connectionsQ.isError && (
-        <p className="text-sm text-danger">{String(connectionsQ.error)}</p>
+        <div className="flex flex-col items-start gap-1">
+          <p className="text-sm text-danger">
+            We couldn&apos;t load this account&apos;s feed connections.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void connectionsQ.refetch()}
+          >
+            Retry
+          </Button>
+        </div>
       )}
       {!connectionsQ.isLoading &&
+        !connectionsQ.isError &&
         (connections.length === 0 ? (
-          <p className="text-sm text-fg-muted">
-            No connections for this account.
-          </p>
+          <EmptyState
+            title="No feed connections yet"
+            description="Connect a provider above or upload a CSV statement to start importing transactions for this account."
+          />
         ) : (
           <Table>
             <TableHeader>
@@ -339,12 +406,16 @@ function ConnectionsPanel({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {connections.map((c: BankFeedConnection) => (
+              {connections.map((c: BankFeedConnection) => {
+                const synced = parseDateValue(c.last_sync_at ?? undefined);
+                return (
                 <TableRow key={c.id}>
-                  <TableCell className="font-medium">{c.provider}</TableCell>
+                  <TableCell className="font-medium">
+                    {c.provider === "csv" ? "CSV" : humanizeStatus(c.provider)}
+                  </TableCell>
                   <TableCell>
                     <Badge variant={CONNECTION_BADGE[c.status] ?? "default"}>
-                      {c.status}
+                      {humanizeStatus(c.status)}
                     </Badge>
                     {c.last_error && (
                       <span className="ml-2 text-xs text-danger">
@@ -352,10 +423,8 @@ function ConnectionsPanel({
                       </span>
                     )}
                   </TableCell>
-                  <TableCell>
-                    {c.last_sync_at
-                      ? new Date(c.last_sync_at).toLocaleString()
-                      : "never"}
+                  <TableCell className="whitespace-nowrap text-fg-muted">
+                    {synced ? f.dateTime(synced) : "Never synced"}
                   </TableCell>
                   <TableCell className="text-end">
                     <div className="flex justify-end gap-1">
@@ -387,7 +456,8 @@ function ConnectionsPanel({
                     </div>
                   </TableCell>
                 </TableRow>
-              ))}
+                );
+              })}
             </TableBody>
           </Table>
         ))}
@@ -438,6 +508,7 @@ function CSVUploader({
         ref={inputRef}
         type="file"
         accept=".csv,text/csv"
+        aria-label="Upload statement CSV"
         disabled={busy}
         onChange={(e) => {
           const f = e.target.files?.[0];
@@ -456,6 +527,7 @@ function CSVUploader({
 
 function SuggestionsPanel({ bankAccountId }: { bankAccountId: string }) {
   const qc = useQueryClient();
+  const f = useFormatter();
   const suggestionsQ = useQuery({
     queryKey: ["bankfeed", "suggestions", bankAccountId],
     queryFn: () => api.listBankFeedSuggestions(bankAccountId),
@@ -495,40 +567,87 @@ function SuggestionsPanel({ bankAccountId }: { bankAccountId: string }) {
 
   return (
     <div className="flex flex-col gap-3">
-      <h2 className="text-base font-semibold text-fg">Match suggestions</h2>
+      <div className="flex items-center gap-2">
+        <h2 className="text-base font-semibold text-fg">Match suggestions</h2>
+        {suggestions.length > 0 && (
+          <Badge variant="neutral" size="sm">
+            {f.number(suggestions.length)}
+          </Badge>
+        )}
+      </div>
       {suggestionsQ.isLoading && (
-        <p className="text-sm text-fg-muted">Loading…</p>
+        <div className="flex flex-col gap-1" aria-hidden="true">
+          <Skeleton className="h-9 w-full" />
+          <Skeleton className="h-9 w-full" />
+        </div>
       )}
       {suggestionsQ.isError && (
-        <p className="text-sm text-danger">{String(suggestionsQ.error)}</p>
+        <div className="flex flex-col items-start gap-1">
+          <p className="text-sm text-danger">
+            We couldn&apos;t load match suggestions for this account.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void suggestionsQ.refetch()}
+          >
+            Retry
+          </Button>
+        </div>
       )}
       {!suggestionsQ.isLoading &&
+        !suggestionsQ.isError &&
         (suggestions.length === 0 ? (
-          <p className="text-sm text-fg-muted">No open suggestions.</p>
+          <EmptyState
+            title="No open suggestions"
+            description="Sync a feed or upload a statement and we'll surface high-confidence matches here for review."
+          />
         ) : (
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Transaction</TableHead>
-                <TableHead>Journal entry</TableHead>
+                <TableHead>Bank line</TableHead>
+                <TableHead>Ledger entry</TableHead>
                 <TableHead className="text-right">Confidence</TableHead>
-                <TableHead>Reason</TableHead>
+                <TableHead>Match reason</TableHead>
                 <TableHead className="text-end">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {suggestions.map((s: BankFeedSuggestion) => (
+              {suggestions.map((s: BankFeedSuggestion) => {
+                const reasons = parseReasons(s.match_reason);
+                return (
                 <TableRow key={s.id}>
-                  <TableCell className="font-mono text-xs">
-                    {s.transaction_id}
+                  <TableCell>
+                    <Badge variant="neutral" size="xs" title={s.transaction_id}>
+                      Bank line
+                    </Badge>
                   </TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {s.journal_entry_id}
+                  <TableCell>
+                    <Badge
+                      variant="neutral"
+                      size="xs"
+                      title={s.journal_entry_id}
+                    >
+                      Ledger entry
+                    </Badge>
                   </TableCell>
-                  <TableCell className="text-right">
-                    {(s.confidence * 100).toFixed(0)}%
+                  <TableCell className="text-right tabular-nums">
+                    {formatConfidence(s.confidence)}
                   </TableCell>
-                  <TableCell>{s.match_reason}</TableCell>
+                  <TableCell>
+                    {reasons.length > 0 ? (
+                      <div className="flex flex-wrap gap-1">
+                        {reasons.map((r) => (
+                          <Badge key={r} variant="outline" size="xs">
+                            {r}
+                          </Badge>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-fg-subtle">—</span>
+                    )}
+                  </TableCell>
                   <TableCell className="text-end">
                     <div className="flex justify-end gap-1">
                       <Button
@@ -553,7 +672,8 @@ function SuggestionsPanel({ bankAccountId }: { bankAccountId: string }) {
                     </div>
                   </TableCell>
                 </TableRow>
-              ))}
+                );
+              })}
             </TableBody>
           </Table>
         ))}
@@ -577,6 +697,7 @@ const EMPTY_RULE: BankFeedRuleInput = {
 
 function RulesPanel() {
   const qc = useQueryClient();
+  const f = useFormatter();
   const rulesQ = useQuery({
     queryKey: ["bankfeed", "rules"],
     queryFn: () => api.listBankFeedRules(),
@@ -641,9 +762,16 @@ function RulesPanel() {
 
   return (
     <div className="flex flex-col gap-3">
-      <h2 className="text-base font-semibold text-fg">
-        Auto-categorization rules
-      </h2>
+      <div className="flex items-center gap-2">
+        <h2 className="text-base font-semibold text-fg">
+          Auto-categorization rules
+        </h2>
+        {rules.length > 0 && (
+          <Badge variant="neutral" size="sm">
+            {f.number(rules.length)}
+          </Badge>
+        )}
+      </div>
       <p className="text-sm text-fg-muted">
         Rules are evaluated by ascending priority; the first match assigns the
         GL account (and optionally auto-approves the posting).
@@ -651,69 +779,72 @@ function RulesPanel() {
 
       <form
         onSubmit={submit}
-        className="flex flex-wrap items-end gap-2 rounded-md border border-border bg-bg-subtle p-3"
+        className="flex flex-wrap items-end gap-3 rounded-md border border-border bg-bg-subtle p-3"
       >
-        <label className="flex flex-col gap-1 text-xs text-fg-muted">
-          Priority
-          <Input
-            type="number"
-            value={String(draft.priority)}
-            onChange={(e) =>
-              setDraft({ ...draft, priority: Number(e.target.value) })
-            }
-            className="w-24"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-xs text-fg-muted">
-          Condition
-          <Select
-            value={draft.condition_type}
-            onChange={(e) =>
-              setDraft({ ...draft, condition_type: e.target.value })
-            }
-            className="w-auto"
-          >
-            {RULE_CONDITION_TYPES.map((c) => (
-              <option key={c.value} value={c.value}>
-                {c.label}
-              </option>
-            ))}
-          </Select>
-        </label>
-        <label className="flex flex-col gap-1 text-xs text-fg-muted">
-          Value
-          <Input
-            value={draft.condition_value}
-            onChange={(e) =>
-              setDraft({ ...draft, condition_value: e.target.value })
-            }
-            placeholder="e.g. STRIPE"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-xs text-fg-muted">
-          Account code
-          <Input
-            value={draft.target_account_code ?? ""}
-            onChange={(e) =>
-              setDraft({ ...draft, target_account_code: e.target.value })
-            }
-            placeholder="e.g. 4000"
-            className="w-28"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-xs text-fg-muted">
-          Cost center
-          <Input
-            value={draft.target_cost_center ?? ""}
-            onChange={(e) =>
-              setDraft({ ...draft, target_cost_center: e.target.value })
-            }
-            className="w-28"
-          />
-        </label>
-        <label className="flex items-center gap-1 text-xs text-fg-muted">
+        <div className="w-24">
+          <Field label="Priority">
+            <Input
+              type="number"
+              value={String(draft.priority)}
+              onChange={(e) =>
+                setDraft({ ...draft, priority: Number(e.target.value) })
+              }
+            />
+          </Field>
+        </div>
+        <div className="w-52">
+          <Field label="Condition">
+            <Select
+              value={draft.condition_type}
+              onChange={(e) =>
+                setDraft({ ...draft, condition_type: e.target.value })
+              }
+            >
+              {RULE_CONDITION_TYPES.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        </div>
+        <div className="w-48">
+          <Field label="Value" required>
+            <Input
+              value={draft.condition_value}
+              onChange={(e) =>
+                setDraft({ ...draft, condition_value: e.target.value })
+              }
+              placeholder="e.g. STRIPE"
+            />
+          </Field>
+        </div>
+        <div className="w-32">
+          <Field label="Account code" required>
+            <Input
+              value={draft.target_account_code ?? ""}
+              onChange={(e) =>
+                setDraft({ ...draft, target_account_code: e.target.value })
+              }
+              placeholder="e.g. 4000"
+            />
+          </Field>
+        </div>
+        <div className="w-32">
+          <Field label="Cost center">
+            <Input
+              value={draft.target_cost_center ?? ""}
+              onChange={(e) =>
+                setDraft({ ...draft, target_cost_center: e.target.value })
+              }
+              placeholder="Optional"
+            />
+          </Field>
+        </div>
+        <label className="flex h-9 items-center gap-2 text-sm text-fg">
           <input
             type="checkbox"
+            className="size-4"
             checked={draft.auto_approve}
             onChange={(e) =>
               setDraft({ ...draft, auto_approve: e.target.checked })
@@ -726,10 +857,34 @@ function RulesPanel() {
         </Button>
       </form>
 
-      {rulesQ.isLoading && <p className="text-sm text-fg-muted">Loading…</p>}
+      {rulesQ.isLoading && (
+        <div className="flex flex-col gap-1" aria-hidden="true">
+          <Skeleton className="h-9 w-full" />
+          <Skeleton className="h-9 w-full" />
+          <Skeleton className="h-9 w-full" />
+        </div>
+      )}
+      {rulesQ.isError && (
+        <div className="flex flex-col items-start gap-1">
+          <p className="text-sm text-danger">
+            We couldn&apos;t load your reconciliation rules.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void rulesQ.refetch()}
+          >
+            Retry
+          </Button>
+        </div>
+      )}
       {!rulesQ.isLoading &&
+        !rulesQ.isError &&
         (rules.length === 0 ? (
-          <p className="text-sm text-fg-muted">No rules configured.</p>
+          <EmptyState
+            title="No rules yet"
+            description="Add a rule above to auto-assign a GL account when a bank line matches — for example, route anything containing “STRIPE” to your revenue account."
+          />
         ) : (
           <Table>
             <TableHeader>
@@ -746,21 +901,37 @@ function RulesPanel() {
             <TableBody>
               {rules.map((rule: BankFeedRule) => (
                 <TableRow key={rule.id}>
-                  <TableCell className="text-right">{rule.priority}</TableCell>
-                  <TableCell>{rule.condition_type}</TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {rule.condition_value}
+                  <TableCell className="text-right tabular-nums">
+                    {rule.priority}
                   </TableCell>
                   <TableCell>
-                    {rule.target_account_code || "—"}
+                    {ruleConditionLabel(rule.condition_type)}
+                  </TableCell>
+                  <TableCell>{rule.condition_value}</TableCell>
+                  <TableCell>
+                    {rule.target_account_code ? (
+                      <code className="rounded bg-bg-muted px-1 py-0.5 text-xs">
+                        {rule.target_account_code}
+                      </code>
+                    ) : (
+                      <span className="text-fg-subtle">—</span>
+                    )}
                     {rule.target_cost_center
                       ? ` / ${rule.target_cost_center}`
                       : ""}
                   </TableCell>
-                  <TableCell>{rule.auto_approve ? "Yes" : "No"}</TableCell>
                   <TableCell>
-                    <Badge variant={rule.enabled ? "success" : "outline"}>
-                      {rule.enabled ? "enabled" : "disabled"}
+                    {rule.auto_approve ? (
+                      <Badge variant="accent" size="sm">
+                        Auto
+                      </Badge>
+                    ) : (
+                      <span className="text-sm text-fg-muted">Review</span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant={rule.enabled ? "success" : "neutral"}>
+                      {rule.enabled ? "Enabled" : "Disabled"}
                     </Badge>
                   </TableCell>
                   <TableCell className="text-end">

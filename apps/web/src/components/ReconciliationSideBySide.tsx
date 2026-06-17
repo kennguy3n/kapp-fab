@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import type { BankFeedSuggestion, KRecord } from "@kapp/client";
 import { Badge, Button, cn } from "@kapp/ui";
+import { useFormatter } from "../lib/i18n/useFormatter";
 import {
   confidenceBand,
-  formatAmount,
   formatConfidence,
+  formatMoney,
   isForeignLine,
+  parseDateValue,
   parseReasons,
-  shortId,
   txnAmount,
   txnCurrency,
   txnData,
@@ -36,8 +37,10 @@ function BankLineButton({
   rates: RateMap;
   onSelect: (id: string) => void;
 }) {
+  const f = useFormatter();
   const d = txnData(txn);
   const amount = txnAmount(txn);
+  const date = parseDateValue(d.value_date);
   return (
     <li>
       <button
@@ -61,7 +64,7 @@ function BankLineButton({
           />
         </div>
         <div className="flex items-center justify-between gap-2 text-xs text-fg-muted">
-          <span>{d.value_date ?? ""}</span>
+          <span>{date ? f.date(date) : ""}</span>
           {candidateCount > 0 ? (
             <Badge variant="outline" size="xs">
               {candidateCount} candidate{candidateCount === 1 ? "" : "s"}
@@ -147,10 +150,10 @@ function CandidatePanel({
               >
                 <div className="flex items-center justify-between gap-2">
                   <span
-                    className="font-mono text-xs text-fg-muted"
+                    className="text-xs font-medium text-fg"
                     title={s.journal_entry_id}
                   >
-                    Journal entry {shortId(s.journal_entry_id)}
+                    {rt("reconciliation.ledgerEntry")}
                   </span>
                   <Badge
                     variant={
@@ -180,7 +183,9 @@ function CandidatePanel({
                     disabled={pending}
                     onClick={() => onAccept(s)}
                   >
-                    {foreign ? rt("reconciliation.fx.confirmMatch") : "Match"}
+                    {foreign
+                      ? rt("reconciliation.fx.confirmMatch")
+                      : rt("reconciliation.match")}
                   </Button>
                 </div>
               </li>
@@ -266,6 +271,7 @@ export function ReconciliationSideBySide({
     ? unmatched.find((t) => t.id === selected)
     : undefined;
   const candidates = selected ? (suggestionsByTxn.get(selected) ?? []) : [];
+  const f = useFormatter();
 
   return (
     <section className="flex flex-col gap-3" aria-label="Side-by-side reconciliation">
@@ -273,21 +279,21 @@ export function ReconciliationSideBySide({
         <h2 className="text-base font-semibold text-fg">Side-by-side</h2>
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
           <span>
-            Matched{" "}
+            {rt("reconciliation.summary.matched")}{" "}
             <span className="font-semibold tabular-nums text-fg">
-              {totals.matchedCount}
+              {f.number(totals.matchedCount)}
             </span>
           </span>
           <span>
-            Unmatched{" "}
+            {rt("reconciliation.summary.unmatched")}{" "}
             <span className="font-semibold tabular-nums text-fg">
-              {totals.unmatchedCount}
+              {f.number(totals.unmatchedCount)}
             </span>
           </span>
           <span>
-            Difference{" "}
+            {rt("reconciliation.summary.difference")}{" "}
             <span className="font-semibold tabular-nums text-fg">
-              {formatAmount(totals.difference, currency)}
+              {formatMoney(f, totals.difference, currency)}
             </span>
           </span>
         </div>

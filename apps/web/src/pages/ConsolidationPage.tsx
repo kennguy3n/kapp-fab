@@ -8,7 +8,10 @@ import {
   CardHeader,
   CardTitle,
   EmptyState,
+  Eyebrow,
+  Field,
   Input,
+  Skeleton,
   Tabs,
   TabsContent,
   TabsList,
@@ -144,16 +147,19 @@ export function ConsolidationPage() {
 
   return (
     <section className="grid gap-4">
-      <header className="grid gap-1">
-        <h1 className="text-xl font-semibold">{ct("consolidation.title")}</h1>
-        <p className="max-w-3xl text-sm text-fg-muted">
+      <header>
+        <Eyebrow>{ct("consolidation.eyebrow")}</Eyebrow>
+        <h1 className="mt-1 text-2xl font-semibold tracking-tight text-fg">
+          {ct("consolidation.title")}
+        </h1>
+        <p className="mt-1 max-w-3xl text-sm text-fg-muted">
           {ct("consolidation.subtitle")}
         </p>
         {activeGroup ? (
-          <p className="text-sm">
+          <p className="mt-2 text-sm">
             {ct("consolidation.groups.activeGroup")}:{" "}
-            <Badge variant="accent">
-              {activeGroup.name || activeGroup.id}
+            <Badge variant="accent" title={activeGroup.id}>
+              {activeGroup.name || ct("consolidation.groups.untitled")}
             </Badge>{" "}
             {activeGroup.presentation_currency ? (
               <span className="text-fg-muted">
@@ -196,21 +202,21 @@ export function ConsolidationPage() {
             </CardHeader>
             <CardContent>
               <form
-                className="flex flex-wrap items-end gap-2"
+                className="flex flex-wrap items-end gap-3"
                 onSubmit={(e) => {
                   e.preventDefault();
                   runMut.mutate();
                 }}
               >
-                <label className="grid gap-1 text-sm">
-                  {ct("consolidation.run.asOf")}
-                  <Input
-                    type="date"
-                    value={asOf}
-                    onChange={(e) => setAsOf(e.target.value)}
-                    className="w-auto"
-                  />
-                </label>
+                <div className="w-44">
+                  <Field label={ct("consolidation.run.asOf")}>
+                    <Input
+                      type="date"
+                      value={asOf}
+                      onChange={(e) => setAsOf(e.target.value)}
+                    />
+                  </Field>
+                </div>
                 <Button type="submit" disabled={noGroup || runMut.isPending}>
                   {runMut.isPending
                     ? ct("consolidation.run.running")
@@ -230,7 +236,14 @@ export function ConsolidationPage() {
             </CardContent>
           </Card>
 
-          {runMut.data ? (
+          {runMut.isPending ? (
+            <Card>
+              <CardContent className="grid gap-2 p-4">
+                <Skeleton variant="rect" className="h-8" />
+                <Skeleton variant="rect" className="h-40" />
+              </CardContent>
+            </Card>
+          ) : runMut.data ? (
             <ConsolidationTrialBalance
               result={runMut.data}
               ctaAccountCode={activeGroup?.cta_account_code}
@@ -252,15 +265,15 @@ export function ConsolidationPage() {
               </p>
             </CardHeader>
             <CardContent className="grid gap-3">
-              <label className="grid gap-1 text-sm">
-                {ct("consolidation.run.asOf")}
-                <Input
-                  type="date"
-                  value={statementsAsOf}
-                  onChange={(e) => setStatementsAsOf(e.target.value)}
-                  className="w-auto"
-                />
-              </label>
+              <div className="w-44">
+                <Field label={ct("consolidation.run.asOf")}>
+                  <Input
+                    type="date"
+                    value={statementsAsOf}
+                    onChange={(e) => setStatementsAsOf(e.target.value)}
+                  />
+                </Field>
+              </div>
 
               <fieldset className="grid gap-2 rounded-md border border-border p-3">
                 <legend className="px-1 text-sm font-medium">
@@ -343,7 +356,14 @@ export function ConsolidationPage() {
             </CardContent>
           </Card>
 
-          {statementsMut.data ? (
+          {statementsMut.isPending ? (
+            <Card>
+              <CardContent className="grid gap-2 p-4">
+                <Skeleton variant="rect" className="h-8" />
+                <Skeleton variant="rect" className="h-40" />
+              </CardContent>
+            </Card>
+          ) : statementsMut.data ? (
             <ConsolidationStatements statements={statementsMut.data} />
           ) : (
             <EmptyState

@@ -100,7 +100,7 @@ describe("FxReviewPanel", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /^Translate$/i }));
     const result = await screen.findByTestId("fx-convert-result");
-    expect(within(result).getByText(/1100 USD/)).toBeInTheDocument();
+    expect(within(result).getByText(/1,100\.00 USD/)).toBeInTheDocument();
   });
 
   it("computes unrealized gain/loss for review", async () => {
@@ -109,7 +109,7 @@ describe("FxReviewPanel", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /Compute delta/i }));
     const result = await screen.findByTestId("fx-unrealized-result");
-    expect(within(result).getByText("42")).toBeInTheDocument();
+    expect(within(result).getByText("42.00")).toBeInTheDocument();
   });
 
   it("runs a revaluation and shows per-account lines, totals and skips", async () => {
@@ -121,7 +121,7 @@ describe("FxReviewPanel", () => {
     await user.click(screen.getByRole("button", { name: /^Run revaluation$/i }));
 
     const result = await screen.findByTestId("fx-reval-result");
-    expect(within(result).getByText("1100")).toBeInTheDocument(); // revalued base
+    expect(within(result).getByText("1,100.00")).toBeInTheDocument(); // revalued base
     expect(within(result).getByText("7200")).toBeInTheDocument(); // gl account
     // Skipped balance surfaced with reason.
     expect(
