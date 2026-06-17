@@ -19,6 +19,7 @@ import { rt, ruleConditionLabel } from "./ReconciliationStrings";
 function describeCondition(rule: BankFeedRule): string {
   if (!rule.condition_type && !rule.condition_value) return "—";
   const label = ruleConditionLabel(rule.condition_type);
+  if (!label) return rule.condition_value;
   return rule.condition_value ? `${label}: ${rule.condition_value}` : label;
 }
 
