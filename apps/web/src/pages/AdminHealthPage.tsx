@@ -77,7 +77,20 @@ const tenantId = (): string =>
   localStorage.getItem("kapp.tenant") ?? "default";
 const token = (): string | null => localStorage.getItem("kapp.token");
 
+// In demo mode the mock layer installs a window.fetch shim that serves
+// /api/v1/admin/health/detailed from an in-memory fixture. api.ts
+// installs it on boot, but this page's first read can fire before that
+// resolves — so ensure the (idempotent) shim is in place first,
+// otherwise a cold load races the install and 500s through the proxy.
+const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
+async function ensureDemoFetch(): Promise<void> {
+  if (!demoMode) return;
+  const { installPortalDemoFetch } = await import("../lib/mock-api");
+  installPortalDemoFetch();
+}
+
 async function fetchAdminHealth(): Promise<AdminHealth> {
+  await ensureDemoFetch();
   const headers: Record<string, string> = { "X-Tenant-ID": tenantId() };
   const t = token();
   if (t) headers.Authorization = `Bearer ${t}`;

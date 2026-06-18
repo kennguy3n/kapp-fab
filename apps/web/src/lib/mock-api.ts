@@ -2235,8 +2235,15 @@ const parseBody = (init?: RequestInit): Record<string, unknown> => {
 // bypass mockApi entirely and 500 against the Vite proxy in demo,
 // leaving infinite skeletons and console noise. Anything not handled
 // here falls through to the real fetch untouched.
+//
+// Idempotent: api.ts installs this once on boot, but the raw-fetch
+// widgets also call it (awaiting the dynamic import) right before their
+// first fetch so a cold page load can't race the install and 500.
+let portalDemoFetchInstalled = false;
 export function installPortalDemoFetch(): void {
   if (typeof window === "undefined") return;
+  if (portalDemoFetchInstalled) return;
+  portalDemoFetchInstalled = true;
   const origFetch = window.fetch.bind(window);
   window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =

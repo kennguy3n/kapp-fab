@@ -130,7 +130,20 @@ function tenantId(): string {
   return localStorage.getItem("kapp.tenant") ?? "default";
 }
 
+// In demo mode the mock layer installs a window.fetch shim that serves
+// the /imports REST surface from in-memory fixtures. api.ts installs it
+// on boot, but the wizard's first read can fire before that resolves —
+// so ensure the (idempotent) shim is in place before any fetch here,
+// otherwise a cold load races the install and 500s through the proxy.
+const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
+async function ensureDemoFetch(): Promise<void> {
+  if (!demoMode) return;
+  const { installPortalDemoFetch } = await import("../lib/mock-api");
+  installPortalDemoFetch();
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  await ensureDemoFetch();
   const res = await fetch(`${baseUrl}${path}`, {
     ...init,
     headers: {
