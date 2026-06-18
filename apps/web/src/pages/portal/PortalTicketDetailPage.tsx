@@ -49,7 +49,7 @@ export function PortalTicketDetailPage() {
   });
   const [reply, setReply] = useState("");
   const replyMut = useMutation({
-    mutationFn: () => portalApi.reply(id!, reply),
+    mutationFn: (body: string) => portalApi.reply(id!, body),
     onSuccess: () => {
       setReply("");
       qc.invalidateQueries({ queryKey: ["portal-ticket", tenant_slug, id] });
@@ -197,7 +197,7 @@ export function PortalTicketDetailPage() {
             onSubmit={(e) => {
               e.preventDefault();
               if (!reply.trim() || replyMut.isPending) return;
-              replyMut.mutate();
+              replyMut.mutate(reply);
             }}
             className="flex flex-col gap-4"
           >

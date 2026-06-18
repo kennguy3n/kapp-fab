@@ -58,7 +58,7 @@ export function PortalLoginPage() {
         const url = new URL(window.location.href);
         url.searchParams.delete("token");
         url.searchParams.delete("email");
-        window.history.replaceState({}, "", `${url.pathname}${url.search}`);
+        window.history.replaceState(null, "", `${url.pathname}${url.search}`);
       }
     })();
   }, [incomingToken, incomingEmail, tenant_slug, nav]);
