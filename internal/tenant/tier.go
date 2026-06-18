@@ -80,6 +80,11 @@ var TenantScopedTables = []string{
 	"marketplace_extension_agent_tools",
 	"marketplace_webhook_subscriptions",
 	"marketplace_dispatch_log",
+	// Tenant-authored marketplace ratings (000102). FKs the GLOBAL
+	// marketplace_extensions catalog (operator-managed, not in this
+	// slice) plus tenants/users, so no marketplace_*_installations
+	// ordering dependency; the default (tenant_id, id) PK applies.
+	"marketplace_extension_ratings",
 	// Session 17 — LMS deep enhancement. Parents precede children so
 	// FKs resolve on restore: learning_paths before its courses /
 	// enrollments; lms_badges before lms_user_badges;

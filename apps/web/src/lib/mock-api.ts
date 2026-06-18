@@ -25,12 +25,23 @@ import type {
   InsightsShareInput,
   InsightsWidget,
   InsightsWidgetInput,
+  InstallMarketplaceExtensionInput,
+  InstallMarketplaceExtensionResponse,
   InventoryItem,
   InventoryValuationReport,
   InventoryWarehouse,
   JournalEntry,
   KRecord,
   KType,
+  MarketplaceExtension,
+  MarketplaceGetExtensionResponse,
+  MarketplaceInstallation,
+  MarketplaceListExtensionsOptions,
+  MarketplaceListExtensionsResponse,
+  MarketplaceListInstallationsResponse,
+  MarketplaceListVersionsResponse,
+  MarketplaceRatingSummary,
+  MarketplaceUpdateSettingsResponse,
   PayslipGenerateResult,
   Plan,
   PlacementPolicy,
@@ -46,6 +57,8 @@ import type {
   TenantUsageHistoryResponse,
   TenantUsageResponse,
   TrialBalanceReport,
+  UpgradeMarketplaceInstallationInput,
+  UpgradeMarketplaceInstallationResponse,
   Webhook,
   WebhookDelivery,
 } from "@kapp/client";
@@ -68,6 +81,10 @@ import {
   INVENTORY_VALUATION,
   INVENTORY_WAREHOUSES,
   JOURNAL_ENTRIES,
+  MARKETPLACE_EXTENSIONS,
+  MARKETPLACE_INSTALLATIONS,
+  MARKETPLACE_MY_RATINGS,
+  MARKETPLACE_VERSIONS,
   PLACEMENT_POLICY,
   PLANS,
   PORTAL_TICKETS,
@@ -125,6 +142,27 @@ for (const [k, v] of Object.entries(RECORDS_BY_KTYPE)) {
 // demo: accepting marks the matched bank line and clears its candidate
 // suggestions, rejecting just clears the one candidate.
 let bankFeedSuggestions = [...BANK_FEED_SUGGESTIONS_FIXTURE];
+
+// Mutable marketplace demo state so install / uninstall / upgrade /
+// rate actions round-trip inside the UI. Cloned from the fixtures so
+// reloading the page resets to the seeded catalogue. Rating updates the
+// cross-tenant rollup on the cloned extension so Browse + Detail
+// reflect the new average immediately.
+const mktExtensions: MarketplaceExtension[] = MARKETPLACE_EXTENSIONS.map(
+  (e) => ({ ...e }),
+);
+let mktInstallations: MarketplaceInstallation[] = MARKETPLACE_INSTALLATIONS.map(
+  (i) => ({ ...i }),
+);
+const mktMyRatings: Record<string, number> = { ...MARKETPLACE_MY_RATINGS };
+
+function findExtension(extId: string): MarketplaceExtension {
+  return mktExtensions.find((e) => e.id === extId) ?? mktExtensions[0]!;
+}
+
+function findInstallation(installId: string): MarketplaceInstallation {
+  return mktInstallations.find((i) => i.id === installId) ?? mktInstallations[0]!;
+}
 
 function nextId(): string {
   return `00000000-0000-4000-8000-${Math.floor(Math.random() * 1e12)
@@ -576,6 +614,117 @@ const handlers = {
     delay<InsightsDataSource>(makeDemoDataSource(input)),
   deleteInsightsDataSource: () => delay<void>(undefined as unknown as void),
   testInsightsDataSource: () => delay<{ ok: boolean }>({ ok: true }),
+
+  // --- Marketplace ----------------------------------------------------
+  listMarketplaceExtensions: (opts: MarketplaceListExtensionsOptions = {}) => {
+    const q = opts.q?.toLowerCase().trim();
+    const publisher = opts.publisher?.toLowerCase().trim();
+    let items = mktExtensions.filter((e) => e.status === "listed");
+    if (publisher) {
+      items = items.filter((e) => e.publisher.toLowerCase().includes(publisher));
+    }
+    if (opts.category) {
+      items = items.filter((e) => e.category === opts.category);
+    }
+    if (q) {
+      items = items.filter(
+        (e) =>
+          e.display_name.toLowerCase().includes(q) ||
+          e.description.toLowerCase().includes(q) ||
+          e.name.toLowerCase().includes(q),
+      );
+    }
+    return delay<MarketplaceListExtensionsResponse>({
+      items: items.map((e) => ({ ...e })),
+    });
+  },
+  getMarketplaceExtension: (extId: string) => {
+    const ext = findExtension(extId);
+    return delay<MarketplaceGetExtensionResponse>({
+      extension: { ...ext },
+      versions: (MARKETPLACE_VERSIONS[ext.id] ?? []).map((v) => ({ ...v })),
+      my_rating: mktMyRatings[ext.id] ?? null,
+    });
+  },
+  listMarketplaceVersions: (extId: string) =>
+    delay<MarketplaceListVersionsResponse>({
+      items: (MARKETPLACE_VERSIONS[extId] ?? []).map((v) => ({ ...v })),
+    }),
+  rateMarketplaceExtension: (extId: string, stars: number) => {
+    const ext = findExtension(extId);
+    const prev = mktMyRatings[extId] ?? 0;
+    const sum = ext.rating_average * ext.rating_count;
+    if (prev > 0) {
+      // Revising an existing rating — count is unchanged, swap the
+      // contribution of the old star value for the new one.
+      ext.rating_average =
+        ext.rating_count > 0 ? (sum - prev + stars) / ext.rating_count : stars;
+    } else {
+      const count = ext.rating_count + 1;
+      ext.rating_average = (sum + stars) / count;
+      ext.rating_count = count;
+    }
+    mktMyRatings[extId] = stars;
+    return delay<MarketplaceRatingSummary>({
+      rating_average: ext.rating_average,
+      rating_count: ext.rating_count,
+      my_rating: stars,
+    });
+  },
+  listMarketplaceInstallations: () =>
+    delay<MarketplaceListInstallationsResponse>({
+      items: mktInstallations.map((i) => ({ ...i })),
+    }),
+  getMarketplaceInstallation: (installId: string) =>
+    delay<MarketplaceInstallation>({ ...findInstallation(installId) }),
+  installMarketplaceExtension: (input: InstallMarketplaceExtensionInput) => {
+    const inst: MarketplaceInstallation = {
+      id: nextId(),
+      tenant_id: DEMO_TENANT_ID,
+      extension_id: input.extension_id,
+      extension_version_id: input.version_id,
+      status: "active",
+      settings: input.settings ?? {},
+      webhook_base: input.webhook_base,
+      installed_at: nowIso(),
+      updated_at: nowIso(),
+      last_health_check_at: nowIso(),
+      last_health_check_status: "ok",
+    };
+    mktInstallations = [...mktInstallations, inst];
+    return delay<InstallMarketplaceExtensionResponse>({
+      installation: { ...inst },
+      signing_secret: `whsec_demo_${nextId().replace(/-/g, "")}`,
+    });
+  },
+  updateMarketplaceInstallationSettings: (
+    installId: string,
+    settings: Record<string, unknown>,
+  ) => {
+    const inst = findInstallation(installId);
+    inst.settings = settings;
+    inst.updated_at = nowIso();
+    return delay<MarketplaceUpdateSettingsResponse>({
+      installation: { ...inst },
+    });
+  },
+  upgradeMarketplaceInstallation: (
+    installId: string,
+    input: UpgradeMarketplaceInstallationInput,
+  ) => {
+    const inst = findInstallation(installId);
+    inst.extension_version_id = input.to_version_id;
+    inst.updated_at = nowIso();
+    if (input.settings != null) inst.settings = input.settings;
+    return delay<UpgradeMarketplaceInstallationResponse>({
+      installation: { ...inst },
+      from_version_id: input.from_version_id,
+    });
+  },
+  uninstallMarketplaceExtension: (installId: string) => {
+    mktInstallations = mktInstallations.filter((i) => i.id !== installId);
+    return delay<void>(undefined as unknown as void);
+  },
 
   // --- Misc fallbacks -------------------------------------------------
   getPublicForm: () => delay({ id: "demo-form", title: "Demo form", fields: [] }),

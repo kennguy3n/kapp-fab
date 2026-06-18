@@ -8,8 +8,67 @@
 import type {
   ExtensionStatus,
   InstallStatus,
+  MarketplaceCategory,
   MarketplaceExtensionVersion,
 } from "@kapp/client";
+
+// MARKETPLACE_CATEGORIES is the display-ordered taxonomy used by the
+// Browse category filter and the per-card / detail category label.
+// The `value`s mirror MarketplaceCategory (packages/client) and the
+// marketplace_extensions_category_valid CHECK (migration 000102); the
+// `label`s are the SME-facing copy. Ordered most-broad-first so the
+// dropdown reads naturally rather than alphabetically.
+export const MARKETPLACE_CATEGORIES: ReadonlyArray<{
+  value: MarketplaceCategory;
+  label: string;
+}> = [
+  { value: "productivity", label: "Productivity" },
+  { value: "finance", label: "Finance" },
+  { value: "sales", label: "Sales" },
+  { value: "marketing", label: "Marketing" },
+  { value: "crm", label: "CRM" },
+  { value: "hr", label: "HR" },
+  { value: "inventory", label: "Inventory" },
+  { value: "analytics", label: "Analytics" },
+  { value: "communication", label: "Communication" },
+  { value: "developer_tools", label: "Developer Tools" },
+  { value: "integrations", label: "Integrations" },
+  { value: "other", label: "Other" },
+];
+
+const CATEGORY_LABELS: Record<MarketplaceCategory, string> =
+  Object.fromEntries(
+    MARKETPLACE_CATEGORIES.map((c) => [c.value, c.label]),
+  ) as Record<MarketplaceCategory, string>;
+
+// categoryLabel renders the SME-facing label for a category token.
+// Falls back to the raw token (defensively title-cased) if the API
+// ships a category the bundled taxonomy doesn't yet recognise, so a
+// forward-compatible server never surfaces a machine value.
+export function categoryLabel(category: string): string {
+  const known = CATEGORY_LABELS[category as MarketplaceCategory];
+  if (known) return known;
+  return category
+    .split("_")
+    .map((w) => (w ? w.charAt(0).toUpperCase() + w.slice(1) : w))
+    .join(" ");
+}
+
+// formatRatingAverage renders the cross-tenant average to a single
+// decimal place (app-store convention, e.g. "4.6"). Callers gate on
+// count > 0 before showing this — a 0-count average is "—".
+export function formatRatingAverage(average: number): string {
+  if (!Number.isFinite(average) || average <= 0) return "—";
+  return average.toFixed(1);
+}
+
+// formatRatingCount renders the human "N ratings" suffix, singularised
+// and thousands-grouped, with a teaching string for the no-ratings
+// case so an unrated listing reads as an invitation rather than a 0.
+export function formatRatingCount(count: number): string {
+  if (!Number.isFinite(count) || count <= 0) return "No ratings yet";
+  return `${count.toLocaleString()} ${count === 1 ? "rating" : "ratings"}`;
+}
 
 // formatBundleSize prints a 10 MiB / 256 KiB style human size for
 // the bundle_size_bytes field. EXTENSION_SPEC §2 caps bundles at

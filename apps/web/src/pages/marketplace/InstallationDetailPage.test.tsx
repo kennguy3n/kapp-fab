@@ -51,6 +51,10 @@ const EXT = {
   license: "MIT",
   status: "listed" as const,
   listed_version: "1.2.0",
+  category: "inventory" as const,
+  screenshots: [],
+  rating_average: 0,
+  rating_count: 0,
   created_at: "2025-01-01T00:00:00Z",
   updated_at: "2025-02-01T00:00:00Z",
 };

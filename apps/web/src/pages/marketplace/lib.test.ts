@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { sortVersionsByPublishedDesc } from "./lib";
+import {
+  MARKETPLACE_CATEGORIES,
+  categoryLabel,
+  formatRatingAverage,
+  formatRatingCount,
+  sortVersionsByPublishedDesc,
+} from "./lib";
 import type { MarketplaceExtensionVersion } from "@kapp/client";
 
 // Minimal factory that fills in the irrelevant fields with
@@ -89,5 +95,53 @@ describe("sortVersionsByPublishedDesc", () => {
     const before = input.map((v) => v.id).join(",");
     sortVersionsByPublishedDesc(input);
     expect(input.map((v) => v.id).join(",")).toBe(before);
+  });
+});
+
+describe("categoryLabel", () => {
+  it("renders the SME label for every known taxonomy value", () => {
+    expect(categoryLabel("developer_tools")).toBe("Developer Tools");
+    expect(categoryLabel("crm")).toBe("CRM");
+    expect(categoryLabel("hr")).toBe("HR");
+    expect(categoryLabel("inventory")).toBe("Inventory");
+  });
+
+  it("never surfaces a raw machine token for an unknown forward-compat category", () => {
+    // A server that ships a category the bundled taxonomy doesn't
+    // know yet must still render a humanised label, never the raw
+    // snake_case token.
+    expect(categoryLabel("supply_chain")).toBe("Supply Chain");
+    expect(categoryLabel("ai")).toBe("Ai");
+  });
+
+  it("keeps MARKETPLACE_CATEGORIES and categoryLabel in lock-step", () => {
+    for (const c of MARKETPLACE_CATEGORIES) {
+      expect(categoryLabel(c.value)).toBe(c.label);
+    }
+  });
+});
+
+describe("formatRatingAverage", () => {
+  it("renders one decimal place for a real average", () => {
+    expect(formatRatingAverage(4.567)).toBe("4.6");
+    expect(formatRatingAverage(5)).toBe("5.0");
+  });
+
+  it("renders an em-dash when there is no rating", () => {
+    expect(formatRatingAverage(0)).toBe("—");
+    expect(formatRatingAverage(Number.NaN)).toBe("—");
+  });
+});
+
+describe("formatRatingCount", () => {
+  it("singularises and thousands-groups the count", () => {
+    expect(formatRatingCount(1)).toBe("1 rating");
+    expect(formatRatingCount(2)).toBe("2 ratings");
+    expect(formatRatingCount(1234)).toBe("1,234 ratings");
+  });
+
+  it("teaches rather than showing a bare 0 for an unrated listing", () => {
+    expect(formatRatingCount(0)).toBe("No ratings yet");
+    expect(formatRatingCount(Number.NaN)).toBe("No ratings yet");
   });
 });

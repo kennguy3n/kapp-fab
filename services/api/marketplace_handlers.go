@@ -138,6 +138,9 @@ type listExtensionsResponse struct {
 type getExtensionResponse struct {
 	Extension marketplace.Extension          `json:"extension"`
 	Versions  []marketplace.ExtensionVersion `json:"versions"`
+	// MyRating is the requesting tenant's own star value (1..5),
+	// or null when the tenant has not rated this extension.
+	MyRating *int `json:"my_rating,omitempty"`
 }
 
 type listVersionsResponse struct {
@@ -315,15 +318,23 @@ type upgradeResponse struct {
 }
 
 type createExtensionRequestBody struct {
-	Publisher    string `json:"publisher"`
-	Slug         string `json:"slug"`
-	DisplayName  string `json:"display_name"`
-	Description  string `json:"description"`
-	Author       string `json:"author"`
-	License      string `json:"license"`
-	Homepage     string `json:"homepage,omitempty"`
-	SupportEmail string `json:"support_email,omitempty"`
-	IconURL      string `json:"icon_url,omitempty"`
+	Publisher    string                   `json:"publisher"`
+	Slug         string                   `json:"slug"`
+	DisplayName  string                   `json:"display_name"`
+	Description  string                   `json:"description"`
+	Author       string                   `json:"author"`
+	License      string                   `json:"license"`
+	Homepage     string                   `json:"homepage,omitempty"`
+	SupportEmail string                   `json:"support_email,omitempty"`
+	IconURL      string                   `json:"icon_url,omitempty"`
+	Category     string                   `json:"category,omitempty"`
+	Screenshots  []marketplace.Screenshot `json:"screenshots,omitempty"`
+}
+
+// rateExtensionRequestBody is the wire shape for POST
+// /api/v1/marketplace/extensions/{ext_id}/ratings. Stars must be 1..5.
+type rateExtensionRequestBody struct {
+	Stars int `json:"stars"`
 }
 
 // publishVersionRequestBody is the wire shape for the admin
@@ -464,7 +475,63 @@ func (h *marketplaceHandlers) getExtension(w http.ResponseWriter, r *http.Reques
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, getExtensionResponse{Extension: *ext, Versions: vers})
+	resp := getExtensionResponse{Extension: *ext, Versions: vers}
+	// Surface the requesting tenant's own rating (if any) so the
+	// detail page can render an editable star control. The route
+	// runs under tenantChain, so a tenant is always present; guard
+	// defensively rather than panic if that ever changes.
+	if t := platform.TenantFromContext(r.Context()); t != nil {
+		stars, err := h.store.GetMyRating(r.Context(), t.ID, ext.ID)
+		if err != nil {
+			h.writeError(w, err)
+			return
+		}
+		if stars > 0 {
+			resp.MyRating = &stars
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// rateExtension records (or revises) the requesting tenant's 1..5 star
+// rating for an extension it has installed, returning the recomputed
+// marketplace average + count + the caller's own star value. Gated on
+// marketplace.read; the store enforces verified-usage (the tenant must
+// have an installation) and listing status.
+func (h *marketplaceHandlers) rateExtension(w http.ResponseWriter, r *http.Request) {
+	t := platform.TenantFromContext(r.Context())
+	if t == nil {
+		http.Error(w, "tenant context missing", http.StatusInternalServerError)
+		return
+	}
+	extID, err := uuid.Parse(chi.URLParam(r, "ext_id"))
+	if err != nil {
+		http.Error(w, "invalid extension_id", http.StatusBadRequest)
+		return
+	}
+	var req rateExtensionRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	// created_by is NULL for unauthenticated/system contexts so the
+	// FK to users(id) holds; under tenantChain a real user is
+	// present in practice.
+	var createdBy *uuid.UUID
+	if uid := platform.UserIDFromContext(r.Context()); uid != uuid.Nil {
+		createdBy = &uid
+	}
+	summary, err := h.store.RateExtension(r.Context(), marketplace.RateExtensionInput{
+		TenantID:    t.ID,
+		ExtensionID: extID,
+		Stars:       req.Stars,
+		CreatedBy:   createdBy,
+	})
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
 }
 
 // listVersions returns every approved, non-yanked version of an
@@ -1035,6 +1102,8 @@ func (h *marketplaceHandlers) createExtension(w http.ResponseWriter, r *http.Req
 		Homepage:     req.Homepage,
 		SupportEmail: req.SupportEmail,
 		IconURL:      req.IconURL,
+		Category:     req.Category,
+		Screenshots:  req.Screenshots,
 	})
 	if err != nil {
 		h.writeError(w, err)

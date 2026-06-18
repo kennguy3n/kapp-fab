@@ -52,6 +52,70 @@ func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
+// extensionColumns is the canonical projection of marketplace_extensions
+// in the exact order scanExtension consumes it. Every extension read
+// site (Create RETURNING, Get, GetByName, List) shares this constant so
+// the column list and the scan target can never drift. screenshots is
+// cast ::text so the jsonbScanner receives the raw JSON bytes.
+const extensionColumns = `id, name, publisher, slug, display_name, description, author,
+	license, COALESCE(homepage,''), COALESCE(support_email,''), COALESCE(icon_url,''),
+	status, COALESCE(listed_version,''), category, screenshots::text, rating_sum, rating_count,
+	created_at, updated_at`
+
+// rowScanner is satisfied by both pgx.Row (QueryRow) and pgx.Rows
+// (Query loop), so scanExtension works against either.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// scanExtension reads one extension row projected via extensionColumns
+// into out, decoding the screenshots JSONB and deriving the rating
+// average from the denormalised sum/count.
+func scanExtension(row rowScanner, out *Extension) error {
+	var screenshotsRaw []byte
+	var ratingSum int64
+	if err := row.Scan(
+		&out.ID, &out.Name, &out.Publisher, &out.Slug, &out.DisplayName, &out.Description, &out.Author,
+		&out.License, &out.Homepage, &out.SupportEmail, &out.IconURL,
+		&out.Status, &out.ListedVersion, &out.Category, scanJSONB(&screenshotsRaw), &ratingSum, &out.RatingCount,
+		&out.CreatedAt, &out.UpdatedAt,
+	); err != nil {
+		return err
+	}
+	ss, err := decodeScreenshots(screenshotsRaw)
+	if err != nil {
+		return err
+	}
+	out.Screenshots = ss
+	out.RatingAverage = ratingAverage(ratingSum, out.RatingCount)
+	return nil
+}
+
+// decodeScreenshots turns the raw screenshots JSONB into a (never-nil)
+// slice so the wire contract always carries an array, not null.
+func decodeScreenshots(raw []byte) ([]Screenshot, error) {
+	out := []Screenshot{}
+	if len(raw) == 0 {
+		return out, nil
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("marketplace: decode screenshots: %w", err)
+	}
+	if out == nil {
+		out = []Screenshot{}
+	}
+	return out, nil
+}
+
+// ratingAverage derives the mean star value from the denormalised
+// sum/count, returning 0 for an unrated listing.
+func ratingAverage(sum int64, count int) float64 {
+	if count <= 0 {
+		return 0
+	}
+	return float64(sum) / float64(count)
+}
+
 // CreateExtension inserts a publisher-level listing row. Returns
 // ErrConflict if (publisher, slug) is already taken, which the B6
 // API translates to 409. The display_name / description / etc. are
@@ -74,26 +138,40 @@ func (s *Store) CreateExtension(ctx context.Context, in CreateExtensionInput) (*
 	if in.License == "" {
 		return nil, fmt.Errorf("%w: license required", ErrInvalidManifest)
 	}
+	// category defaults to DefaultCategory when the publisher
+	// declared none; an explicit value must be in the curated set.
+	category := in.Category
+	if category == "" {
+		category = DefaultCategory
+	}
+	if !IsValidCategory(category) {
+		return nil, fmt.Errorf("%w: unknown category %q", ErrInvalidManifest, category)
+	}
+	screenshots, err := validateScreenshots(in.Screenshots)
+	if err != nil {
+		return nil, err
+	}
+	screenshotsJSON, err := json.Marshal(screenshots)
+	if err != nil {
+		return nil, fmt.Errorf("marketplace: encode screenshots: %w", err)
+	}
 	name := in.Publisher + "." + in.Slug
 	id := uuid.New()
 	var out Extension
-	err := s.pool.QueryRow(ctx,
+	err = scanExtension(s.pool.QueryRow(ctx,
 		`INSERT INTO marketplace_extensions (
 			id, name, publisher, slug, display_name, description, author,
-			license, homepage, support_email, icon_url, status, listed_version
+			license, homepage, support_email, icon_url, status, listed_version,
+			category, screenshots
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9,''), NULLIF($10,''), NULLIF($11,''), 'unpublished', NULL
+			$1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9,''), NULLIF($10,''), NULLIF($11,''), 'unpublished', NULL,
+			$12, $13::jsonb
 		)
-		RETURNING id, name, publisher, slug, display_name, description, author,
-		          license, COALESCE(homepage,''), COALESCE(support_email,''), COALESCE(icon_url,''),
-		          status, COALESCE(listed_version,''), created_at, updated_at`,
+		RETURNING `+extensionColumns,
 		id, name, in.Publisher, in.Slug, in.DisplayName, in.Description, in.Author,
 		in.License, in.Homepage, in.SupportEmail, in.IconURL,
-	).Scan(
-		&out.ID, &out.Name, &out.Publisher, &out.Slug, &out.DisplayName, &out.Description, &out.Author,
-		&out.License, &out.Homepage, &out.SupportEmail, &out.IconURL,
-		&out.Status, &out.ListedVersion, &out.CreatedAt, &out.UpdatedAt,
-	)
+		category, string(screenshotsJSON),
+	), &out)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrConflict
@@ -119,6 +197,13 @@ type CreateExtensionInput struct {
 	Homepage     string
 	SupportEmail string
 	IconURL      string
+	// Category is the publisher-declared taxonomy bucket. Empty
+	// coerces to DefaultCategory; a non-empty value must be in
+	// ValidCategories.
+	Category string
+	// Screenshots is the publisher-declared detail-page gallery.
+	// Each URL must be HTTPS; the slice is capped at MaxScreenshots.
+	Screenshots []Screenshot
 }
 
 // GetExtension returns the extension row for an id. Returns
@@ -128,16 +213,10 @@ func (s *Store) GetExtension(ctx context.Context, id uuid.UUID) (*Extension, err
 		return nil, fmt.Errorf("%w: id required", ErrNotFound)
 	}
 	var out Extension
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, name, publisher, slug, display_name, description, author,
-		        license, COALESCE(homepage,''), COALESCE(support_email,''), COALESCE(icon_url,''),
-		        status, COALESCE(listed_version,''), created_at, updated_at
+	err := scanExtension(s.pool.QueryRow(ctx,
+		`SELECT `+extensionColumns+`
 		 FROM marketplace_extensions WHERE id = $1`, id,
-	).Scan(
-		&out.ID, &out.Name, &out.Publisher, &out.Slug, &out.DisplayName, &out.Description, &out.Author,
-		&out.License, &out.Homepage, &out.SupportEmail, &out.IconURL,
-		&out.Status, &out.ListedVersion, &out.CreatedAt, &out.UpdatedAt,
-	)
+	), &out)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -155,16 +234,10 @@ func (s *Store) GetExtensionByName(ctx context.Context, name string) (*Extension
 		return nil, fmt.Errorf("%w: name must be <publisher>.<slug>", ErrNotFound)
 	}
 	var out Extension
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, name, publisher, slug, display_name, description, author,
-		        license, COALESCE(homepage,''), COALESCE(support_email,''), COALESCE(icon_url,''),
-		        status, COALESCE(listed_version,''), created_at, updated_at
+	err := scanExtension(s.pool.QueryRow(ctx,
+		`SELECT `+extensionColumns+`
 		 FROM marketplace_extensions WHERE name = $1`, name,
-	).Scan(
-		&out.ID, &out.Name, &out.Publisher, &out.Slug, &out.DisplayName, &out.Description, &out.Author,
-		&out.License, &out.Homepage, &out.SupportEmail, &out.IconURL,
-		&out.Status, &out.ListedVersion, &out.CreatedAt, &out.UpdatedAt,
-	)
+	), &out)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -172,6 +245,115 @@ func (s *Store) GetExtensionByName(ctx context.Context, name string) (*Extension
 		return nil, fmt.Errorf("marketplace: get extension by name: %w", err)
 	}
 	return &out, nil
+}
+
+// RateExtensionInput is the parameter block for RateExtension. Stars
+// must be 1..5; CreatedBy is the acting user (may be nil for
+// service-actor contexts).
+type RateExtensionInput struct {
+	TenantID    uuid.UUID
+	ExtensionID uuid.UUID
+	Stars       int
+	CreatedBy   *uuid.UUID
+}
+
+// RateExtension records (or revises) the calling tenant's 1..5 star
+// rating for a listed extension and returns the recomputed rollup.
+//
+// Guards, in order:
+//
+//   - Stars range (1..5) → ErrInvalidManifest (400).
+//   - The extension must exist and be `listed` → ErrNotFound (404).
+//     Unpublished / deprecated / removed listings are not ratable.
+//   - Verified usage: the tenant must have an installation of the
+//     extension → ErrForbidden (403). This blocks rating-bombing by
+//     tenants that never installed it.
+//
+// The upsert + aggregate read run inside one WithTenantTx so the RLS
+// policy admits the row and the denormalised rating_sum/rating_count
+// (maintained by the AFTER trigger within the same statement) are read
+// back consistently. The marketplace_extensions row is global (no RLS)
+// so the post-upsert SELECT sees the trigger's update.
+func (s *Store) RateExtension(ctx context.Context, in RateExtensionInput) (*RatingSummary, error) {
+	if in.Stars < 1 || in.Stars > 5 {
+		return nil, fmt.Errorf("%w: stars must be between 1 and 5", ErrInvalidManifest)
+	}
+	if in.TenantID == uuid.Nil {
+		return nil, fmt.Errorf("%w: tenant id required", ErrNotFound)
+	}
+	if in.ExtensionID == uuid.Nil {
+		return nil, fmt.Errorf("%w: extension id required", ErrNotFound)
+	}
+	ext, err := s.GetExtension(ctx, in.ExtensionID)
+	if err != nil {
+		return nil, err
+	}
+	if ext.Status != ExtensionStatusListed {
+		return nil, fmt.Errorf("%w: extension %s is not listed", ErrNotFound, in.ExtensionID)
+	}
+	var out RatingSummary
+	err = dbutil.WithTenantTx(ctx, s.pool, in.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var installed bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS(
+				SELECT 1 FROM marketplace_extension_installations WHERE extension_id = $1
+			)`, in.ExtensionID,
+		).Scan(&installed); err != nil {
+			return err
+		}
+		if !installed {
+			return fmt.Errorf("%w: install the extension before rating it", ErrForbidden)
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO marketplace_extension_ratings (tenant_id, extension_id, stars, created_by)
+			 VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (tenant_id, extension_id)
+			 DO UPDATE SET stars = EXCLUDED.stars, updated_at = now()`,
+			in.TenantID, in.ExtensionID, in.Stars, in.CreatedBy,
+		); err != nil {
+			return err
+		}
+		var sum int64
+		var count int
+		if err := tx.QueryRow(ctx,
+			`SELECT rating_sum, rating_count FROM marketplace_extensions WHERE id = $1`,
+			in.ExtensionID,
+		).Scan(&sum, &count); err != nil {
+			return err
+		}
+		out.RatingAverage = ratingAverage(sum, count)
+		out.RatingCount = count
+		out.MyRating = in.Stars
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marketplace: rate extension: %w", err)
+	}
+	return &out, nil
+}
+
+// GetMyRating returns the calling tenant's own star value for an
+// extension, or 0 if the tenant has not rated it. Runs inside
+// WithTenantTx so the RLS policy scopes the read to the tenant's row.
+func (s *Store) GetMyRating(ctx context.Context, tenantID, extID uuid.UUID) (int, error) {
+	if tenantID == uuid.Nil || extID == uuid.Nil {
+		return 0, fmt.Errorf("%w: tenant and extension ids required", ErrNotFound)
+	}
+	var stars int
+	err := dbutil.WithTenantTx(ctx, s.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		e := tx.QueryRow(ctx,
+			`SELECT stars FROM marketplace_extension_ratings WHERE extension_id = $1`, extID,
+		).Scan(&stars)
+		if errors.Is(e, pgx.ErrNoRows) {
+			stars = 0
+			return nil
+		}
+		return e
+	})
+	if err != nil {
+		return 0, fmt.Errorf("marketplace: get my rating: %w", err)
+	}
+	return stars, nil
 }
 
 // ListExtensionsFilter narrows ListExtensions to a subset of the
@@ -182,6 +364,9 @@ type ListExtensionsFilter struct {
 	Status ExtensionStatus
 	// Publisher restricts to a single publisher's extensions.
 	Publisher string
+	// Category restricts to a single taxonomy bucket. Empty means
+	// "all categories".
+	Category string
 	// Limit caps the number of rows returned. <=0 means "no
 	// explicit limit"; the implementation enforces a hard ceiling
 	// of 500 to keep one runaway listing query from buffering the
@@ -207,6 +392,13 @@ func (s *Store) ListExtensions(ctx context.Context, filter ListExtensionsFilter)
 		args = append(args, filter.Publisher)
 		conditions = append(conditions, fmt.Sprintf("publisher = $%d", len(args)))
 	}
+	if filter.Category != "" {
+		if !IsValidCategory(filter.Category) {
+			return nil, fmt.Errorf("%w: unknown category %q", ErrInvalidManifest, filter.Category)
+		}
+		args = append(args, filter.Category)
+		conditions = append(conditions, fmt.Sprintf("category = $%d", len(args)))
+	}
 	where := ""
 	if len(conditions) > 0 {
 		where = "WHERE " + strings.Join(conditions, " AND ")
@@ -217,12 +409,10 @@ func (s *Store) ListExtensions(ctx context.Context, filter ListExtensionsFilter)
 	}
 	args = append(args, limit)
 	q := fmt.Sprintf(`
-		SELECT id, name, publisher, slug, display_name, description, author,
-		       license, COALESCE(homepage,''), COALESCE(support_email,''), COALESCE(icon_url,''),
-		       status, COALESCE(listed_version,''), created_at, updated_at
+		SELECT %s
 		FROM marketplace_extensions %s
 		ORDER BY name ASC
-		LIMIT $%d`, where, len(args))
+		LIMIT $%d`, extensionColumns, where, len(args))
 	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("marketplace: list extensions: %w", err)
@@ -231,11 +421,7 @@ func (s *Store) ListExtensions(ctx context.Context, filter ListExtensionsFilter)
 	out := make([]Extension, 0, 16)
 	for rows.Next() {
 		var e Extension
-		if err := rows.Scan(
-			&e.ID, &e.Name, &e.Publisher, &e.Slug, &e.DisplayName, &e.Description, &e.Author,
-			&e.License, &e.Homepage, &e.SupportEmail, &e.IconURL,
-			&e.Status, &e.ListedVersion, &e.CreatedAt, &e.UpdatedAt,
-		); err != nil {
+		if err := scanExtension(rows, &e); err != nil {
 			return nil, fmt.Errorf("marketplace: list extensions: scan: %w", err)
 		}
 		out = append(out, e)
