@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderWithProviders, makeKRecord } from "../test-utils";
 
@@ -170,5 +170,54 @@ describe("SubledgerPage (AR)", () => {
     // 1000 + 400 outstanding; the paid 9999 is excluded.
     expect(screen.getAllByText("$1,400.00").length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText("$10,399.00")).toBeNull();
+  });
+
+  it("links partially-paid documents to their posted journal entry", async () => {
+    const rows = [
+      makeKRecord({
+        id: "pp1",
+        ktype: "finance.ar_invoice",
+        data: {
+          invoice_number: "INV-200",
+          customer_id: "org1",
+          due_date: "2025-02-01T00:00:00Z",
+          total: "750.00",
+          currency: "USD",
+          status: "partially_paid",
+        },
+      }),
+      makeKRecord({
+        id: "dr1",
+        ktype: "finance.ar_invoice",
+        data: {
+          invoice_number: "INV-201",
+          customer_id: "org1",
+          due_date: "2025-02-02T00:00:00Z",
+          total: "300.00",
+          currency: "USD",
+          status: "draft",
+        },
+      }),
+    ];
+    listRecords.mockImplementation((ktype: string) =>
+      ktype === "crm.organization"
+        ? Promise.resolve(orgs)
+        : Promise.resolve(rows),
+    );
+    renderWithProviders(<SubledgerPage variant="ar" />);
+
+    // A partially-paid document was necessarily posted first, so it
+    // still drills through to its journal entry.
+    const ppRow = (await screen.findByText("INV-200")).closest(
+      "tr",
+    ) as HTMLElement;
+    const link = within(ppRow).getByRole("link", { name: /view entry/i });
+    const href = link.getAttribute("href") ?? "";
+    expect(href).toContain("source_id=pp1");
+    expect(href).toContain("source_ktype=finance.ar_invoice");
+
+    // A still-unposted draft has no entry to view.
+    const draftRow = screen.getByText("INV-201").closest("tr") as HTMLElement;
+    expect(within(draftRow).queryByRole("link")).toBeNull();
   });
 });

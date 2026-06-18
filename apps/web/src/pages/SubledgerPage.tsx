@@ -51,6 +51,11 @@ const SUBLEDGER_STATUS: Record<string, BadgeVariant> = {
 // rows do not.
 const OUTSTANDING_STATUSES = new Set(["posted", "partially_paid"]);
 
+// A document has a journal entry to drill into once it's been posted to
+// the ledger — posted, partially_paid, and paid all qualify. Drafts,
+// pending approvals, and cancelled rows have no entry yet.
+const POSTED_STATUSES = new Set(["posted", "partially_paid", "paid"]);
+
 function statusOf(record: KRecord): string {
   return (record.data.status as string) ?? record.status ?? "draft";
 }
@@ -296,7 +301,7 @@ export function SubledgerPage({ variant }: { variant: "ar" | "ap" }) {
               const dueDate = r.data.due_date as string | undefined;
               const currency = (r.data.currency as string) ?? "USD";
               const canPost = status === "draft" || status === "pending_approval";
-              const isPosted = status === "posted" || status === "paid";
+              const isPosted = POSTED_STATUSES.has(status);
               return (
                 <TableRow key={r.id}>
                   <TableCell className="font-medium text-fg">{number}</TableCell>

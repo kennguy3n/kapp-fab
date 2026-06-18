@@ -81,6 +81,30 @@ describe("ExchangeRatesPage", () => {
     expect(screen.getByText("Jan 15, 2025")).toBeInTheDocument();
   });
 
+  it("shows an em dash instead of the literal NaN for a malformed rate", async () => {
+    listExchangeRates.mockResolvedValueOnce({
+      rates: [
+        {
+          tenant_id: "t1",
+          from_currency: "USD",
+          to_currency: "EUR",
+          rate_date: "2025-01-15T00:00:00Z",
+          rate: "not-a-number",
+          provider: "manual",
+          created_at: "2025-01-15T00:00:00Z",
+          updated_at: "2025-01-15T00:00:00Z",
+        },
+      ],
+    });
+    renderPage();
+
+    // The pair still renders, but the unparseable rate degrades to an
+    // em dash rather than surfacing a raw "NaN" machine value.
+    expect(await screen.findByText("USD", { exact: false })).toBeInTheDocument();
+    expect(screen.queryByText("NaN")).toBeNull();
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(1);
+  });
+
   it("upsertExchangeRate is invoked with uppercased currency codes", async () => {
     listExchangeRates.mockResolvedValueOnce({ rates: [] });
     upsertExchangeRate.mockResolvedValueOnce({

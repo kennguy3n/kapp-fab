@@ -261,7 +261,9 @@ export function ExchangeRatesPage() {
                   </span>
                 </TableCell>
                 <TableCell className="text-right font-tabular tabular-nums">
-                  {f.number(parseAmount(r.rate), { maximumFractionDigits: 6 })}
+                  {Number.isFinite(parseAmount(r.rate))
+                    ? f.number(parseAmount(r.rate), { maximumFractionDigits: 6 })
+                    : "—"}
                 </TableCell>
                 <TableCell>
                   {r.provider ? (
