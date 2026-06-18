@@ -94,6 +94,9 @@ import type {
   StockLevel,
   SubcontractOrder,
   Tenant,
+  TenantKType,
+  TenantKTypeStatus,
+  UpsertTenantKTypeInput,
   TenantFeaturesResponse,
   TenantUsageHistoryResponse,
   TenantUsageResponse,
@@ -143,6 +146,8 @@ import {
   LANDED_COST_CHARGES_BY_VOUCHER,
   LANDED_COST_TARGETS_BY_VOUCHER,
   LANDED_COST_VOUCHERS,
+  TENANT_KTYPES,
+  TENANT_KTYPE_FIELD_LIMIT,
   MARKETPLACE_EXTENSIONS,
   MARKETPLACE_INSTALLATIONS,
   MARKETPLACE_MY_RATINGS,
@@ -267,6 +272,10 @@ const interviews: Interview[] = INTERVIEWS.map((i) => ({ ...i }));
 // Mutable LMS demo state so creating a learning path round-trips in
 // the UI. Cloned from the fixtures so a reload resets.
 const learningPaths: LearningPath[] = LEARNING_PATHS.map((p) => ({ ...p }));
+
+// Mutable KType-builder demo state so authoring a custom object and
+// changing its status round-trips in the UI. Cloned so a reload resets.
+const tenantKTypes: TenantKType[] = TENANT_KTYPES.map((k) => ({ ...k }));
 
 // Mutable marketplace demo state so install / uninstall / upgrade /
 // rate actions round-trip inside the UI. Cloned from the fixtures so
@@ -1808,6 +1817,66 @@ const handlers = {
     delay<{ awards: BadgeAward[] }>({
       awards: BADGE_AWARDS.map((a) => ({ ...a })),
     }),
+
+  // --- KType Builder: tenant-authored custom objects -----------------
+  listTenantKTypes: () =>
+    delay<{ items: TenantKType[]; field_limit: number }>({
+      items: tenantKTypes.map((k) => ({ ...k })),
+      field_limit: TENANT_KTYPE_FIELD_LIMIT,
+    }),
+  getTenantKType: (name: string, version?: number) => {
+    const k =
+      tenantKTypes.find(
+        (x) => x.name === name && (version === undefined || x.version === version),
+      ) ?? tenantKTypes[0];
+    return delay<TenantKType>({ ...k });
+  },
+  upsertTenantKType: (input: UpsertTenantKTypeInput) => {
+    const version = input.version ?? 1;
+    const existing = tenantKTypes.find(
+      (x) => x.name === input.name && x.version === version,
+    );
+    if (existing) {
+      existing.title = input.title;
+      existing.description = input.description ?? "";
+      existing.schema = input.schema;
+      if (input.status) existing.status = input.status;
+      existing.updated_at = nowIso();
+      return delay<TenantKType>({ ...existing });
+    }
+    const k: TenantKType = {
+      tenant_id: DEMO_TENANT_ID,
+      name: input.name,
+      version,
+      title: input.title,
+      description: input.description ?? "",
+      schema: input.schema,
+      status: input.status ?? "draft",
+      created_by: "demo",
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    tenantKTypes.unshift(k);
+    return delay<TenantKType>({ ...k });
+  },
+  setTenantKTypeStatus: (
+    name: string,
+    version: number,
+    status: TenantKTypeStatus,
+  ) => {
+    const k = tenantKTypes.find(
+      (x) => x.name === name && x.version === version,
+    );
+    if (k) {
+      k.status = status;
+      k.updated_at = nowIso();
+    }
+    return delay<{
+      name: string;
+      version: number;
+      status: TenantKTypeStatus;
+    }>({ name, version, status });
+  },
 
   // --- POS ------------------------------------------------------------
   finalizePOSInvoice: () => delay<KRecord>({ id: nextId(), tenant_id: DEMO_TENANT_ID, ktype: "sales.pos_invoice", ktype_version: 1, data: { status: "finalized" }, status: "finalized", version: 1, created_at: nowIso(), updated_at: nowIso() }),

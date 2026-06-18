@@ -65,6 +65,7 @@ import type {
   StockLevel,
   SubcontractComponent,
   SubcontractOrder,
+  TenantKType,
   Tenant,
   TenantFeaturesResponse,
   TenantUsageHistoryResponse,
@@ -1761,6 +1762,115 @@ export const BADGE_AWARDS: BadgeAward[] = [
   { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:5"), user_id: EMP_IDS.mgrSales, badge_id: BADGE_IDS.compliancePro, earned_at: daysAgoIso(9) },
   { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:6"), user_id: EMP_IDS.ic3, badge_id: BADGE_IDS.pathfinder, earned_at: daysAgoIso(5) },
   { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:7"), user_id: EMP_IDS.vpEng, badge_id: BADGE_IDS.topPerformer, earned_at: daysAgoIso(3) },
+];
+
+// --- KType Builder: tenant-authored custom objects -------------------
+//
+// Low-code objects the tenant has authored on top of the platform —
+// across the draft / active / archived lifecycle. Each carries a
+// believable field schema restricted to the safe field-type subset.
+
+export const TENANT_KTYPE_FIELD_LIMIT = 50;
+
+export const TENANT_KTYPES: TenantKType[] = [
+  {
+    tenant_id: DEMO_TENANT_ID,
+    name: "custom.asset",
+    version: 1,
+    title: "Asset",
+    description: "Company asset register — equipment, vehicles and IT hardware.",
+    status: "active",
+    created_by: "system",
+    created_at: LAST_MONTH_ISO,
+    updated_at: LAST_WEEK_ISO,
+    schema: {
+      name: "custom.asset",
+      version: 1,
+      fields: [
+        { name: "asset_tag", type: "string", required: true, max_length: 32 },
+        { name: "name", type: "string", required: true },
+        { name: "category", type: "enum", values: ["IT", "Furniture", "Vehicle", "Machinery"] },
+        { name: "purchase_date", type: "date" },
+        { name: "purchase_cost", type: "decimal" },
+        { name: "assigned_to", type: "ref", ktype: "hr.employee" },
+        { name: "in_service", type: "boolean", default: true },
+      ],
+      views: { list: { columns: ["asset_tag", "name", "category", "assigned_to"] } },
+    },
+  },
+  {
+    tenant_id: DEMO_TENANT_ID,
+    name: "custom.warranty_claim",
+    version: 2,
+    title: "Warranty Claim",
+    description: "Customer warranty claims raised against shipped products.",
+    status: "active",
+    created_by: "system",
+    created_at: LAST_MONTH_ISO,
+    updated_at: NOW_ISO,
+    schema: {
+      name: "custom.warranty_claim",
+      version: 2,
+      fields: [
+        { name: "claim_number", type: "string", required: true, max_length: 24 },
+        { name: "customer", type: "ref", ktype: "crm.organization" },
+        { name: "product", type: "string" },
+        { name: "claim_date", type: "date" },
+        { name: "description", type: "text" },
+        { name: "status", type: "enum", values: ["open", "approved", "rejected", "closed"] },
+        { name: "approved_amount", type: "decimal" },
+      ],
+      views: { list: { columns: ["claim_number", "customer", "status", "claim_date"] } },
+    },
+  },
+  {
+    tenant_id: DEMO_TENANT_ID,
+    name: "custom.site_visit",
+    version: 1,
+    title: "Site Visit",
+    description: "Field engineer site-visit log with follow-up tracking.",
+    status: "draft",
+    created_by: "system",
+    created_at: NOW_ISO,
+    updated_at: NOW_ISO,
+    schema: {
+      name: "custom.site_visit",
+      version: 1,
+      fields: [
+        { name: "visit_code", type: "string", required: true },
+        { name: "site", type: "string" },
+        { name: "visited_on", type: "date" },
+        { name: "engineer", type: "ref", ktype: "hr.employee" },
+        { name: "notes", type: "text" },
+        { name: "follow_up_required", type: "boolean" },
+      ],
+      views: { list: { columns: ["visit_code", "site", "visited_on", "engineer"] } },
+    },
+  },
+  {
+    tenant_id: DEMO_TENANT_ID,
+    name: "custom.contract",
+    version: 1,
+    title: "Customer Contract",
+    description: "Legacy contract object — superseded by the billing module.",
+    status: "archived",
+    created_by: "system",
+    created_at: LAST_MONTH_ISO,
+    updated_at: LAST_MONTH_ISO,
+    schema: {
+      name: "custom.contract",
+      version: 1,
+      fields: [
+        { name: "contract_number", type: "string", required: true },
+        { name: "customer", type: "ref", ktype: "crm.organization" },
+        { name: "start_date", type: "date" },
+        { name: "end_date", type: "date" },
+        { name: "annual_value", type: "decimal" },
+        { name: "auto_renew", type: "boolean" },
+      ],
+      views: { list: { columns: ["contract_number", "customer", "annual_value"] } },
+    },
+  },
 ];
 
 function jl(account_code: string, debit: string, credit: string, memo = "", currency = "USD") {
