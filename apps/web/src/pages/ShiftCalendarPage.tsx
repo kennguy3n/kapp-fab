@@ -464,8 +464,9 @@ function AssignShiftModal({
             Assign a shift to a team member on a given day.
           </ModalDescription>
         </ModalHeader>
-        {/* Keyed by the cell so the form remounts (and resets its own state
-            plus the create mutation) whenever a different cell opens it. */}
+        {/* Keyed by the cell so switching cells while the modal stays open
+            remounts the form to re-seed it. (Open → close → reopen resets via
+            the Radix portal unmounting the form, independent of this key.) */}
         <AssignShiftForm
           key={`${initialEmployeeId}|${initialDate}`}
           employees={employees}
