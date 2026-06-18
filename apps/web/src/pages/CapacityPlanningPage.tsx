@@ -18,32 +18,10 @@ import {
 } from "@kapp/ui";
 import { AlertTriangle, CalendarRange, Gauge } from "lucide-react";
 import { api } from "../lib/api";
+import { parseCalendarDate, toCalendarISO } from "../lib/date";
 import { useFormatter } from "../lib/i18n";
 
 type Formatters = ReturnType<typeof useFormatter>;
-
-// isoDate formats a Date as YYYY-MM-DD using its LOCAL calendar date,
-// matching the format the capacity endpoint expects for its start / end
-// query parameters. Local (not UTC) so the default window opens on the
-// user's "today": toISOString() would render the UTC date, which for a
-// user east of UTC shortly after local midnight is still yesterday,
-// defaulting the picker to the wrong day. The server treats the date
-// string as a calendar day (truncated to midnight UTC), so the grid the
-// user sees lines up with the date they picked.
-function isoDate(d: Date): string {
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-// parseCalendarDate turns a calendar-day string (YYYY-MM-DD, optionally
-// with a time suffix) into a local-midnight Date so formatting never
-// drifts to the previous day for users east of UTC.
-function parseCalendarDate(value: string): Date {
-  const [y, m, d] = value.slice(0, 10).split("-").map(Number);
-  return new Date(y, (m || 1) - 1, d || 1);
-}
 
 function dayWeekday(fmt: Formatters, value: string): string {
   return fmt.date(parseCalendarDate(value), { weekday: "short" });
@@ -75,12 +53,12 @@ export function CapacityPlanningPage() {
   // Advance by calendar days rather than adding 6*24h of milliseconds:
   // setDate normalises across DST transitions, so the default window is
   // always exactly 7 calendar days. Millisecond arithmetic would land an
-  // hour off on a DST boundary and, for a user near midnight, isoDate
+  // hour off on a DST boundary and, for a user near midnight, toCalendarISO
   // could then read the previous local day — a 6-day window.
   const weekOut = new Date(today);
   weekOut.setDate(weekOut.getDate() + 6);
-  const [start, setStart] = useState(isoDate(today));
-  const [end, setEnd] = useState(isoDate(weekOut));
+  const [start, setStart] = useState(toCalendarISO(today));
+  const [end, setEnd] = useState(toCalendarISO(weekOut));
 
   const planQ = useQuery({
     queryKey: ["mfg", "capacity", start, end],

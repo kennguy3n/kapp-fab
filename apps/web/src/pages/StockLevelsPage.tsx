@@ -20,30 +20,10 @@ import {
 } from "@kapp/ui";
 import { AlertTriangle, Boxes, Download } from "lucide-react";
 import { api } from "../lib/api";
+import { downloadCsv } from "../lib/csv";
 import { useFormatter } from "../lib/i18n";
 
 const ALL_WAREHOUSES = "__all__";
-
-/** Quote a CSV cell only when it contains a delimiter, quote, or newline. */
-function csvCell(value: string): string {
-  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
-}
-
-/** Trigger a client-side download of a CSV built from the given rows. */
-function downloadCsv(filename: string, headers: string[], rows: string[][]) {
-  const body = [headers, ...rows]
-    .map((cols) => cols.map(csvCell).join(","))
-    .join("\n");
-  const blob = new Blob([body], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
 
 /**
  * StockLevelsPage renders one row per (item, warehouse) with the
@@ -285,6 +265,12 @@ export function StockLevelsPage() {
               const itemTotal = totalByItem.get(r.item_id) ?? 0;
               const uom = uomByItem.get(r.item_id);
               const outOfStock = qty <= 0;
+              // "Low stock" compares the item's org-wide on-hand total
+              // (itemTotal) against its reorder level, NOT this row's
+              // single-warehouse qty. Reorder level is defined per item,
+              // so the badge reflects whether the item needs reordering
+              // overall — it stays consistent even when the table is
+              // filtered to one warehouse. "Out of stock" is per-row.
               const lowStock = !outOfStock && reorder > 0 && itemTotal <= reorder;
               return (
                 <TableRow key={`${r.item_id}:${r.warehouse_id}`}>

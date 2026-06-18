@@ -18,36 +18,11 @@ import {
 } from "@kapp/ui";
 import { AlertTriangle, Coins, Download } from "lucide-react";
 import { api } from "../lib/api";
+import { downloadCsv } from "../lib/csv";
+import { parseCalendarDate, toCalendarISO } from "../lib/date";
 import { useFormatter } from "../lib/i18n";
 
-const todayLocalISO = (() => {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-})();
-
-/** Quote a CSV cell only when it contains a delimiter, quote, or newline. */
-function csvCell(value: string): string {
-  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
-}
-
-/** Trigger a client-side download of a CSV built from the given rows. */
-function downloadCsv(filename: string, headers: string[], rows: string[][]) {
-  const body = [headers, ...rows]
-    .map((cols) => cols.map(csvCell).join(","))
-    .join("\n");
-  const blob = new Blob([body], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
+const todayLocalISO = toCalendarISO(new Date());
 
 const MONEY_OPTS: Intl.NumberFormatOptions = {
   minimumFractionDigits: 2,
@@ -78,7 +53,7 @@ export function InventoryValuationPage() {
     });
   }
 
-  const asOfLabel = fmt.date(new Date(`${asOf}T00:00:00`));
+  const asOfLabel = fmt.date(parseCalendarDate(asOf));
 
   return (
     <section className="flex flex-col gap-4">

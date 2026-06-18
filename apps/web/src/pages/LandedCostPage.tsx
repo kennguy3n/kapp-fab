@@ -31,6 +31,7 @@ import {
 } from "@kapp/ui";
 import { AlertTriangle, Download, FileStack, Plus } from "lucide-react";
 import { api } from "../lib/api";
+import { downloadCsv } from "../lib/csv";
 import { useFormatter } from "../lib/i18n";
 
 type AllocationMethod = "by_qty" | "by_amount" | "by_weight";
@@ -67,27 +68,6 @@ function humanizeKType(ktype: string): string {
     .filter(Boolean)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ");
-}
-
-/** Quote a CSV cell only when it contains a delimiter, quote, or newline. */
-function csvCell(value: string): string {
-  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
-}
-
-/** Trigger a client-side download of a CSV built from the given rows. */
-function downloadCsv(filename: string, headers: string[], rows: string[][]) {
-  const body = [headers, ...rows]
-    .map((cols) => cols.map(csvCell).join(","))
-    .join("\n");
-  const blob = new Blob([body], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
 }
 
 function StatusBadge({ status }: { status: LandedCostVoucher["status"] }) {
@@ -770,7 +750,7 @@ function TargetsSection(props: {
   const reconcile = props.totalCharges - props.totalAllocated;
   const reconcileMismatch = Math.abs(reconcile) >= 0.005;
 
-  const colSpan = props.editable ? 7 : 6;
+  const colSpan = props.editable ? 8 : 7;
 
   return (
     <div className="flex flex-col gap-2">
@@ -783,6 +763,10 @@ function TargetsSection(props: {
               <TableHead>Item</TableHead>
               <TableHead>Warehouse</TableHead>
               <TableHead className="text-right">Qty</TableHead>
+              {/* Weight is only consumed server-side for the "By weight"
+                  allocation method, but it stays in the table so operators
+                  can audit the per-line weights they entered. */}
+              <TableHead className="text-right">Weight</TableHead>
               <TableHead className="text-right">Unit cost</TableHead>
               <TableHead className="text-right">Allocated</TableHead>
               {props.editable && (
@@ -819,6 +803,9 @@ function TargetsSection(props: {
                   <TableCell className="text-right tabular-nums">
                     {fmt.number(Number(t.qty))}
                   </TableCell>
+                  <TableCell className="text-right tabular-nums text-fg-muted">
+                    {Number(t.weight) > 0 ? fmt.number(Number(t.weight)) : "—"}
+                  </TableCell>
                   <TableCell className="text-right tabular-nums">
                     {fmt.number(Number(t.unit_cost), MONEY_OPTS)}
                   </TableCell>
@@ -843,7 +830,7 @@ function TargetsSection(props: {
           </TableBody>
           <TableFooter>
             <TableRow>
-              <TableCell colSpan={5} className="text-right font-medium text-fg">
+              <TableCell colSpan={6} className="text-right font-medium text-fg">
                 Total allocated
               </TableCell>
               <TableCell className="text-right font-semibold tabular-nums text-fg">

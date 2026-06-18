@@ -37,6 +37,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { api } from "../lib/api";
+import { downloadCsv } from "../lib/csv";
 import { useFormatter } from "../lib/i18n";
 
 type BOMStatus = BOM["status"];
@@ -80,27 +81,6 @@ function StatusBadge({ status }: { status: BOMStatus }) {
 function scrapFraction(c: { scrap_percent?: string | null }): number {
   const pct = Number(c.scrap_percent ?? 0);
   return Number.isFinite(pct) && pct > 0 ? pct / 100 : 0;
-}
-
-/** Quote a CSV cell only when it contains a delimiter, quote, or newline. */
-function csvCell(value: string): string {
-  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
-}
-
-/** Trigger a client-side download of a CSV built from the given rows. */
-function downloadCsv(filename: string, headers: string[], rows: string[][]) {
-  const body = [headers, ...rows]
-    .map((cols) => cols.map(csvCell).join(","))
-    .join("\n");
-  const blob = new Blob([body], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
 }
 
 /**
