@@ -28,6 +28,7 @@ import {
 } from "@kapp/ui";
 import { AlertTriangle, Inbox, PackageCheck, Plus } from "lucide-react";
 import { api } from "../lib/api";
+import { parseCalendarDate } from "../lib/date";
 import { useFormatter } from "../lib/i18n";
 import {
   st,
@@ -65,14 +66,6 @@ const BADGE_VARIANT: Record<SubcontractStatus, BadgeProps["variant"]> = {
 
 function statusLabel(status: SubcontractStatus): string {
   return st(`subcontracting.status.${status}` as SubcontractingStringKey);
-}
-
-// parseCalendarDate reads the YYYY-MM-DD prefix of an API timestamp and
-// builds a Date at local midnight, so formatting never drifts a day
-// across timezones the way `new Date("2026-01-01")` (parsed as UTC) can.
-function parseCalendarDate(value: string): Date {
-  const [y, m, d] = value.slice(0, 10).split("-").map(Number);
-  return new Date(y, (m || 1) - 1, d || 1);
 }
 
 function formatQty(fmt: Formatters, value: string): string {

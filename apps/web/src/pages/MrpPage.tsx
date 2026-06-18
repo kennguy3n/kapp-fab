@@ -28,6 +28,7 @@ import {
 } from "@kapp/ui";
 import { AlertTriangle, Factory, Inbox, Plus, ShoppingCart } from "lucide-react";
 import { api } from "../lib/api";
+import { parseCalendarDate, toCalendarISO } from "../lib/date";
 import { useFormatter } from "../lib/i18n";
 import { mt, mtp, type MrpStringKey } from "../components/MrpStrings";
 
@@ -44,12 +45,8 @@ const DEMAND_SOURCES: MRPDemandSource[] = [
 // today returns today's date as a YYYY-MM-DD string for the date
 // inputs' default values, computed in the browser's local timezone so
 // the planner's horizon lines up with the operator's calendar.
-// `new Date().toISOString().slice(0, 10)` is off-by-one for UTC+ zones
-// because it formats the UTC instant, not the local calendar day.
 function today(): string {
-  const d = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return toCalendarISO(new Date());
 }
 
 // addDays returns the ISO date `days` after `iso` (YYYY-MM-DD). Used to
@@ -59,14 +56,6 @@ function addDays(iso: string, days: number): string {
   const d = new Date(`${iso}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
-}
-
-// parseCalendarDate reads the YYYY-MM-DD prefix of an API date/timestamp
-// and builds a Date at local midnight, so formatting never drifts a day
-// across timezones the way `new Date("2026-01-01")` (parsed as UTC) can.
-function parseCalendarDate(value: string): Date {
-  const [y, m, d] = value.slice(0, 10).split("-").map(Number);
-  return new Date(y, (m || 1) - 1, d || 1);
 }
 
 function formatDate(fmt: Formatters, value: string): string {
