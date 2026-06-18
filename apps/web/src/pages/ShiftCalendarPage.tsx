@@ -514,6 +514,8 @@ function AssignShiftForm({
       toast.success("Shift scheduled");
       onClose();
     },
+    onError: (e) =>
+      toast.error("Couldn't schedule shift", { description: String(e) }),
   });
 
   const valid = employeeId && shiftTypeId && shiftDate;

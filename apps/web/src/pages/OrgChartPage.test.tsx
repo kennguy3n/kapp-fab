@@ -19,12 +19,14 @@ import { renderWithProviders, makeKRecord } from "../test-utils";
 //   Casey Root (CEO)
 //     └ Morgan Lead (VP)
 //         └ Riley Report (IC)
+//             └ Noah Junior (IC)
 //   Dana Other (root)
 //     └ Sam Side (IC)
 const EMPLOYEES = [
   makeKRecord({ id: "ceo", ktype: "hr.employee", data: { name: "Casey Root", designation: "CEO" } }),
   makeKRecord({ id: "vp", ktype: "hr.employee", data: { name: "Morgan Lead", designation: "VP", reporting_to: "ceo" } }),
   makeKRecord({ id: "ic", ktype: "hr.employee", data: { name: "Riley Report", designation: "Engineer", reporting_to: "vp" } }),
+  makeKRecord({ id: "junior", ktype: "hr.employee", data: { name: "Noah Junior", designation: "Engineer", reporting_to: "ic" } }),
   makeKRecord({ id: "other", ktype: "hr.employee", data: { name: "Dana Other", designation: "COO" } }),
   makeKRecord({ id: "side", ktype: "hr.employee", data: { name: "Sam Side", designation: "Analyst", reporting_to: "other" } }),
 ];
@@ -54,6 +56,20 @@ describe("OrgChartPage search", () => {
     await user.type(screen.getByPlaceholderText(/Search name, role, team/i), "Morgan");
 
     expect(await screen.findByText("Riley Report")).toBeInTheDocument();
+  });
+
+  it("keeps a non-leaf match's grandchildren collapsed", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<OrgChartPage />);
+    await screen.findByText("Casey Root");
+
+    await user.type(screen.getByPlaceholderText(/Search name, role, team/i), "Morgan");
+
+    // Morgan's direct report shows (matched node is expanded)...
+    expect(await screen.findByText("Riley Report")).toBeInTheDocument();
+    // ...but Riley's own report (a grandchild that doesn't match) stays hidden,
+    // so the result stays focused rather than expanding the whole subtree.
+    expect(screen.queryByText("Noah Junior")).not.toBeInTheDocument();
   });
 
   it("collapses branches that don't lead to a match", async () => {
