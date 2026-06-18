@@ -1,11 +1,31 @@
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
-import { Button } from "@kapp/ui";
+import { Badge, toast } from "@kapp/ui";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n/useFormatter";
+import {
+  DOCUMENT_CONFIGS,
+  DocumentBoard,
+  DocumentDialog,
+  StatusBadge,
+  buildNameResolver,
+  deriveTaxRate,
+  invoiceOptions,
+  itemOptions as toItemOptions,
+  linesFromData,
+  orgOptions,
+  warehouseOptions,
+  type DocumentSubmitPayload,
+} from "../components/lineitems";
 
 const KTYPE = "sales.return";
+const config = DOCUMENT_CONFIGS.sales_return;
+
+// Workflow states from internal/sales/returns.go.
+const STAGES = ["requested", "approved", "received", "refunded", "cancelled"];
+
+type Verb = "approve" | "receive" | "refund" | "cancel";
 
 interface SalesReturnData {
   return_number?: string;
@@ -18,177 +38,199 @@ interface SalesReturnData {
   currency?: string;
   status?: string;
   credit_note_id?: string;
-  journal_entry_id?: string;
-  received_at?: string;
-  refunded_at?: string;
 }
 
-// STAGES mirrors the workflow declared in internal/sales/returns.go.
-// "cancelled" is a terminal state reachable from any pre-refund column;
-// rendering it as the rightmost column gives operators a visible
-// drop target for abandoning a return without scattering "cancel"
-// affordances across the other columns.
-const STAGES: string[] = [
-  "requested",
-  "approved",
-  "received",
-  "refunded",
-  "cancelled",
-];
+type DialogState = { mode: "create" } | { mode: "edit"; record: KRecord };
 
-type Verb = "approve" | "receive" | "refund" | "cancel";
+function dateInput(value: string | undefined): string {
+  return value ? value.slice(0, 10) : "";
+}
 
-/**
- * SalesReturnsPage renders a kanban over `sales.return`. Each card
- * shows the return number, customer, warehouse, total, and posting
- * footprint (credit-note + JE links once refunded). Drag a card into
- * a downstream column to fire the matching ReturnPoster transition
- * via /api/v1/sales/returns/{id}/{verb}; the kanban is read-only for
- * any transition the state machine rejects (e.g. refunded → cancelled).
- *
- * The page intentionally re-renders against the server snapshot
- * after each mutation rather than optimistically updating the
- * column — Receive and Refund can both fail (validation: missing
- * warehouse, original invoice not posted, etc.) and the operator
- * needs to see the authoritative state, not a transient client
- * guess.
- */
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 export function SalesReturnsPage() {
-  const nav = useNavigate();
   const qc = useQueryClient();
-  const [error, setError] = useState<string | null>(null);
+  const fmt = useFormatter();
+  const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const q = useQuery<KRecord[]>({
     queryKey: ["records", KTYPE],
     queryFn: () => api.listRecords(KTYPE),
   });
+  const orgsQ = useQuery<KRecord[]>({
+    queryKey: ["records", "crm.organization"],
+    queryFn: () => api.listRecords("crm.organization"),
+  });
+  const itemsQ = useQuery<KRecord[]>({
+    queryKey: ["records", "inventory.item"],
+    queryFn: () => api.listRecords("inventory.item"),
+  });
+  const invoicesQ = useQuery<KRecord[]>({
+    queryKey: ["records", "finance.ar_invoice"],
+    queryFn: () => api.listRecords("finance.ar_invoice"),
+  });
+  const warehousesQ = useQuery({
+    queryKey: ["inventory", "warehouses"],
+    queryFn: () => api.listInventoryWarehouses(),
+  });
+
+  const customerName = useMemo(() => buildNameResolver(orgsQ.data), [orgsQ.data]);
+  const invoiceName = useMemo(
+    () => buildNameResolver(invoicesQ.data, "invoice_number"),
+    [invoicesQ.data],
+  );
+  const orgOpts = useMemo(() => orgOptions(orgsQ.data ?? []), [orgsQ.data]);
+  const itemOpts = useMemo(() => toItemOptions(itemsQ.data ?? []), [itemsQ.data]);
+  const invoiceOpts = useMemo(() => invoiceOptions(invoicesQ.data ?? []), [invoicesQ.data]);
+  const warehouseOpts = useMemo(
+    () => warehouseOptions(warehousesQ.data ?? []),
+    [warehousesQ.data],
+  );
+
+  const fmtDate = (value?: string) => {
+    if (!value) return "";
+    const d = new Date(value.length === 10 ? `${value}T00:00:00` : value);
+    return Number.isNaN(d.getTime()) ? "" : fmt.date(d);
+  };
 
   const moveMutation = useMutation({
     mutationFn: async ({ r, to }: { r: KRecord; to: string }) => {
       const current = (r.data as unknown as SalesReturnData).status ?? "requested";
       if (current === to) return;
       const verb = resolveVerb(current, to);
-      if (!verb) {
-        // No legal transition between these two states — surface a
-        // friendly inline error and bail. We deliberately do NOT
-        // fall back to PATCHing the status field directly the way
-        // PurchaseOrdersPage does for ad-hoc edits: the sales.return
-        // state machine has posting side-effects on every legal
-        // transition, so a bare status edit would skip the
-        // inventory / JE writes the operator expects.
-        throw new Error(`cannot move from "${current}" to "${to}"`);
-      }
+      if (!verb) throw new Error(`A return can’t move straight to “${to}” from “${current}”.`);
       await api.runSalesReturnTransition(r.id, verb);
     },
-    onSuccess: () => {
-      setError(null);
-      qc.invalidateQueries({ queryKey: ["records", KTYPE] });
-    },
-    onError: (err: unknown) => {
-      setError(err instanceof Error ? err.message : String(err));
-      // Resync the board against the server even on failure: if
-      // the rejection was a 409 because another operator already
-      // advanced the return, the card needs to move to its new
-      // (server-authoritative) column instead of sitting in the
-      // pre-drag column until React Query's stale-time triggers a
-      // background refetch. invalidateQueries is a no-op for the
-      // already-fresh case, so this is safe to call unconditionally.
-      qc.invalidateQueries({ queryKey: ["records", KTYPE] });
-    },
+    // Resync to the server's truth whether the transition succeeded
+    // or was rejected, so a refused drop snaps the card back.
+    onSettled: () => qc.invalidateQueries({ queryKey: ["records", KTYPE] }),
+    onError: (e: Error) => toast.error("Couldn’t move return", { description: e.message }),
   });
 
-  const columns = useMemo(() => {
-    const by = new Map<string, KRecord[]>();
-    for (const s of STAGES) by.set(s, []);
-    for (const r of q.data ?? []) {
-      const s = (r.data as unknown as SalesReturnData).status ?? "requested";
-      (by.get(s) ?? by.set(s, []).get(s)!).push(r);
-    }
-    return by;
-  }, [q.data]);
+  const saveMutation = useMutation({
+    mutationFn: async (payload: DocumentSubmitPayload) => {
+      if (dialog?.mode === "edit") {
+        return api.updateRecord(KTYPE, dialog.record.id, {
+          ...dialog.record.data,
+          ...payload.data,
+        });
+      }
+      return api.createRecord(KTYPE, { status: "requested", ...payload.data });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["records", KTYPE] });
+      toast.success(dialog?.mode === "edit" ? "Return updated" : "Return created");
+      setDialog(null);
+      setSaveError(null);
+    },
+    onError: (e: Error) => setSaveError(e.message),
+  });
+
+  const openCreate = () => {
+    setSaveError(null);
+    setDialog({ mode: "create" });
+  };
+  const openEdit = (record: KRecord) => {
+    setSaveError(null);
+    setDialog({ mode: "edit", record });
+  };
+
+  const editData = dialog?.mode === "edit" ? (dialog.record.data as Record<string, unknown>) : null;
 
   return (
-    <section>
-      <header className="flex items-center justify-between">
-        <h1>Sales Returns</h1>
-        <Button onClick={() => nav(`/records/${KTYPE}/new`)}>New Return</Button>
-      </header>
-      <p className="mt-1 text-[13px] text-fg-muted">
-        Customer returns and RMAs. Drag a card into Approved → Received →
-        Refunded to advance through the lifecycle. The Received column
-        posts inventory receipts back into the warehouse; Refunded posts
-        the credit-note journal entry that reverses AR / revenue.
-      </p>
-      {q.isLoading && <p>Loading…</p>}
-      {q.isError && (
-        <p className="text-danger">
-          Failed to load returns: {(q.error as Error).message}
-        </p>
-      )}
-      {error && (
-        <p className="mt-1.5 text-danger" role="alert">
-          {error}
-        </p>
-      )}
-      <div className="mt-3 flex gap-3 overflow-x-auto">
-        {STAGES.map((s) => (
-          <div
-            key={s}
-            className="min-w-[240px] rounded-md border border-border bg-bg-subtle p-2"
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={(e) => {
-              const id = e.dataTransfer.getData("text/plain");
-              const r = (q.data ?? []).find((x) => x.id === id);
-              if (r) moveMutation.mutate({ r, to: s });
-            }}
-          >
-            <div className="text-xs capitalize text-fg-muted">
-              {s} · {(columns.get(s) ?? []).length}
+    <>
+      <DocumentBoard
+        eyebrow="Sales"
+        title="Sales Returns"
+        description="Accept returned goods against an invoice, receive them back into stock, and issue the customer’s refund."
+        newLabel="New return"
+        onNew={openCreate}
+        stages={STAGES}
+        records={q.data}
+        statusOf={(r) => (r.data as unknown as SalesReturnData).status ?? "requested"}
+        isLoading={q.isLoading}
+        isError={q.isError}
+        error={q.error}
+        onRetry={() => q.refetch()}
+        onMove={(r, to) => moveMutation.mutate({ r, to })}
+        onCardClick={openEdit}
+        emptyTitle="No returns yet"
+        emptyDescription="Log a return when a customer sends goods back against an invoice."
+        renderCard={(r) => {
+          const d = r.data as unknown as SalesReturnData;
+          return (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-start justify-between gap-2">
+                <span className="font-medium text-fg">
+                  {d.return_number || "Untitled return"}
+                </span>
+                <StatusBadge status={d.status ?? "requested"} size="xs" />
+              </div>
+              <span className="text-xs text-fg-muted">
+                {customerName(d.customer_id) || "Unknown customer"}
+              </span>
+              {d.original_invoice_id && (
+                <span className="text-xs text-fg-subtle">
+                  Invoice {invoiceName(d.original_invoice_id) || "—"}
+                </span>
+              )}
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-fg-muted">{fmtDate(d.return_date)}</span>
+                <span className="font-medium tabular-nums text-fg">
+                  {fmt.currency(Number(d.total ?? 0), d.currency ?? "USD", {
+                    currencyDisplay: "code",
+                  })}
+                </span>
+              </div>
+              {d.credit_note_id && (
+                <Badge variant="success" size="xs">
+                  Credit note issued
+                </Badge>
+              )}
             </div>
-            {(columns.get(s) ?? []).map((r) => {
-              const d = r.data as unknown as SalesReturnData;
-              return (
-                <div
-                  key={r.id}
-                  draggable
-                  onDragStart={(e) =>
-                    e.dataTransfer.setData("text/plain", r.id)
-                  }
-                  onClick={() => nav(`/records/${KTYPE}/${r.id}`)}
-                  className="mt-1.5 cursor-pointer rounded border border-border bg-bg-elevated p-2 text-[13px]"
-                >
-                  <div className="font-medium">
-                    {d.return_number ?? r.id.slice(0, 8)}
-                  </div>
-                  <div className="text-xs text-fg-muted">
-                    Customer: {d.customer_id ?? "—"}
-                  </div>
-                  <div className="mt-1 text-xs">
-                    {d.total ?? 0} {d.currency ?? "USD"}
-                  </div>
-                  {d.credit_note_id && (
-                    <div className="mt-1 text-[11px] text-fg-muted">
-                      CN: {d.credit_note_id.slice(0, 8)}
-                    </div>
-                  )}
-                  {d.journal_entry_id && (
-                    <div className="text-[11px] text-fg-muted">
-                      JE: {d.journal_entry_id.slice(0, 8)}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        ))}
-      </div>
-    </section>
+          );
+        }}
+      />
+
+      {dialog && (
+        <DocumentDialog
+          open
+          onClose={() => setDialog(null)}
+          mode={dialog.mode}
+          config={config}
+          title={dialog.mode === "edit" ? "Edit return" : "New return"}
+          initialHeader={{
+            original_invoice_id: editData ? String(editData.original_invoice_id ?? "") : "",
+            customer_id: editData ? String(editData.customer_id ?? "") : "",
+            warehouse_id: editData ? String(editData.warehouse_id ?? "") : "",
+            return_date: editData ? dateInput(editData.return_date as string) : today(),
+            return_number: editData ? String(editData.return_number ?? "") : "",
+            reason: editData ? String(editData.reason ?? "") : "",
+          }}
+          initialLines={editData ? linesFromData("sales_return", editData) : []}
+          initialCurrency={editData ? String(editData.currency ?? "USD") : "USD"}
+          initialTaxRate={editData ? deriveTaxRate(editData) : 0}
+          itemOptions={itemOpts}
+          selectOptions={{
+            original_invoice_id: invoiceOpts,
+            customer_id: orgOpts,
+            warehouse_id: warehouseOpts,
+          }}
+          saving={saveMutation.isPending}
+          error={saveError}
+          onSubmit={(payload) => saveMutation.mutate(payload)}
+        />
+      )}
+    </>
   );
 }
 
 // resolveVerb maps a (from, to) status pair to the lifecycle verb
 // that drives the ReturnPoster transition. Returns undefined for any
-// pair the state machine doesn't permit; the caller surfaces an
-// inline error in that case rather than silently no-op'ing.
+// pair the state machine doesn't permit.
 function resolveVerb(from: string, to: string): Verb | undefined {
   if (from === "requested" && to === "approved") return "approve";
   if (from === "approved" && to === "received") return "receive";

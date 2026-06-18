@@ -1,11 +1,28 @@
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
-import { Button } from "@kapp/ui";
+import { Badge, toast } from "@kapp/ui";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n/useFormatter";
+import {
+  DOCUMENT_CONFIGS,
+  DocumentBoard,
+  DocumentDialog,
+  StatusBadge,
+  buildNameResolver,
+  itemOptions as toItemOptions,
+  linesFromData,
+  orgOptions,
+  type DocumentSubmitPayload,
+} from "../components/lineitems";
 
 const KTYPE = "procurement.purchase_requisition";
+const config = DOCUMENT_CONFIGS.purchase_requisition;
+
+// Workflow states from internal/sales/requisition.go.
+const STAGES = ["requested", "approved", "ordered", "cancelled"];
+
+type Verb = "approve" | "convert" | "cancel";
 
 interface RequisitionData {
   requisition_number?: string;
@@ -20,240 +37,180 @@ interface RequisitionData {
   currency?: string;
   status?: string;
   po_id?: string;
-  approved_by?: string;
-  approved_at?: string;
 }
 
-// STAGES mirrors the workflow declared in internal/sales/requisition.go.
-// "cancelled" is a terminal state reachable from any pre-ordered
-// column; rendering it as the rightmost column gives operators a
-// visible drop target for abandoning a requisition without
-// scattering "cancel" affordances across the other columns.
-const STAGES: string[] = ["requested", "approved", "ordered", "cancelled"];
+type DialogState = { mode: "create" } | { mode: "edit"; record: KRecord };
 
-type Verb = "approve" | "convert" | "cancel";
+function dateInput(value: string | undefined): string {
+  return value ? value.slice(0, 10) : "";
+}
 
-/**
- * PurchaseRequisitionsPage renders a kanban over
- * `procurement.purchase_requisition`. Each card shows the
- * requisition number, requested-by, supplier (optional), subtotal,
- * and conversion footprint (po_id once converted). Drag a card into
- * a downstream column to fire the matching RequisitionPoster
- * transition via /api/v1/procurement/requisitions/{id}/{verb}; the
- * kanban is read-only for any transition the state machine rejects
- * (e.g. ordered → cancelled).
- *
- * The page intentionally re-renders against the server snapshot
- * after each mutation rather than optimistically updating the
- * column — Convert can fail (validation: no supplier set, lines
- * empty, PO already exists, etc.) and the operator needs to see
- * the authoritative state, not a transient client guess.
- */
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 export function PurchaseRequisitionsPage() {
-  const nav = useNavigate();
   const qc = useQueryClient();
-  const [error, setError] = useState<string | null>(null);
+  const fmt = useFormatter();
+  const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const q = useQuery<KRecord[]>({
     queryKey: ["records", KTYPE],
     queryFn: () => api.listRecords(KTYPE),
   });
+  const orgsQ = useQuery<KRecord[]>({
+    queryKey: ["records", "crm.organization"],
+    queryFn: () => api.listRecords("crm.organization"),
+  });
+  const itemsQ = useQuery<KRecord[]>({
+    queryKey: ["records", "inventory.item"],
+    queryFn: () => api.listRecords("inventory.item"),
+  });
+
+  const supplierName = useMemo(() => buildNameResolver(orgsQ.data), [orgsQ.data]);
+  const orgOpts = useMemo(() => orgOptions(orgsQ.data ?? []), [orgsQ.data]);
+  const itemOpts = useMemo(() => toItemOptions(itemsQ.data ?? []), [itemsQ.data]);
 
   const moveMutation = useMutation({
     mutationFn: async ({ r, to }: { r: KRecord; to: string }) => {
-      const current =
-        (r.data as unknown as RequisitionData).status ?? "requested";
-      // Note: same-column drops are filtered in the onDrop handler
-      // below before mutate() is called, so the mutation never sees
-      // current === to. Keeping that guard at the call site means
-      // onMutate (which clears the error banner) and onSuccess
-      // (which invalidates the records query) only fire on real
-      // state changes — a no-op drop should not trigger a refetch.
+      const current = (r.data as unknown as RequisitionData).status ?? "requested";
+      if (current === to) return;
+      // No raw-status fallback: `convert` allocates a purchase order
+      // on the backend, so a bare status patch would orphan the
+      // requisition from its PO. Defer entirely to the state machine.
       const verb = resolveVerb(current, to);
       if (!verb) {
-        // No legal transition between these two states — surface a
-        // friendly inline error and bail. We deliberately do NOT
-        // fall back to PATCHing the status field directly: convert
-        // allocates a procurement.purchase_order KRecord on the way
-        // through, so a bare status edit would skip that allocation
-        // and orphan the requisition from the PO surface.
-        throw new Error(`cannot move from "${current}" to "${to}"`);
+        throw new Error(`A requisition can’t move straight to “${to}” from “${current}”.`);
       }
       await api.runRequisitionTransition(r.id, verb);
     },
-    onMutate: () => {
-      // Clear any prior error before a new attempt so the inline
-      // banner reflects only the current mutation outcome — a retry
-      // after a failure should not leave the previous error
-      // rendered while the request is in flight.
-      setError(null);
+    onSettled: () => qc.invalidateQueries({ queryKey: ["records", KTYPE] }),
+    onError: (e: Error) => toast.error("Couldn’t move requisition", { description: e.message }),
+  });
+
+  const saveMutation = useMutation({
+    mutationFn: async (payload: DocumentSubmitPayload) => {
+      if (dialog?.mode === "edit") {
+        return api.updateRecord(KTYPE, dialog.record.id, {
+          ...dialog.record.data,
+          ...payload.data,
+        });
+      }
+      return api.createRecord(KTYPE, { status: "requested", ...payload.data });
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["records", KTYPE] });
+      toast.success(dialog?.mode === "edit" ? "Requisition updated" : "Requisition created");
+      setDialog(null);
+      setSaveError(null);
     },
-    onError: (err: unknown) => {
-      setError(err instanceof Error ? err.message : String(err));
-    },
+    onError: (e: Error) => setSaveError(e.message),
   });
 
-  // columns is the (status → rows) map; allStages is the ordered
-  // list of column headers to render. STAGES is the canonical
-  // workflow but we also surface any unknown status discovered in
-  // the data so a future backend schema migration (or anomalous
-  // record) cannot make rows silently disappear from the kanban —
-  // operators must always be able to see every requisition somewhere.
-  // Unknown statuses are rendered after the canonical columns with
-  // a visual tag so they stand out; drop targets on them resolve to
-  // resolveVerb() === undefined and surface the inline error,
-  // preventing accidental writes to a status the frontend does not
-  // understand.
-  const { columns, allStages, unknownStages } = useMemo(() => {
-    const by = new Map<string, KRecord[]>();
-    for (const s of STAGES) by.set(s, []);
-    const extras = new Set<string>();
-    for (const r of q.data ?? []) {
-      const s =
-        (r.data as unknown as RequisitionData).status ?? "requested";
-      if (!by.has(s)) {
-        by.set(s, []);
-        extras.add(s);
-      }
-      by.get(s)!.push(r);
-    }
-    const extrasList = Array.from(extras).sort();
-    return {
-      columns: by,
-      allStages: [...STAGES, ...extrasList],
-      unknownStages: extras,
-    };
-  }, [q.data]);
+  const openCreate = () => {
+    setSaveError(null);
+    setDialog({ mode: "create" });
+  };
+  const openEdit = (record: KRecord) => {
+    setSaveError(null);
+    setDialog({ mode: "edit", record });
+  };
+
+  const editData = dialog?.mode === "edit" ? (dialog.record.data as Record<string, unknown>) : null;
 
   return (
-    <section>
-      <header className="flex items-center justify-between">
-        <h1>Purchase Requisitions</h1>
-        <Button onClick={() => nav(`/records/${KTYPE}/new`)}>
-          New Requisition
-        </Button>
-      </header>
-      <p className="mt-1 text-[13px] text-fg-muted">
-        Internal purchase requests pending approval. Drag a card into
-        Approved → Ordered to advance through the lifecycle. The
-        Ordered column allocates a procurement.purchase_order
-        KRecord and stamps po_id so a retried convert reuses the
-        prior PO instead of spawning a duplicate.
-      </p>
-      {q.isLoading && <p>Loading…</p>}
-      {q.isError && (
-        <p className="text-danger">
-          Failed to load requisitions: {(q.error as Error).message}
-        </p>
-      )}
-      {error && (
-        <p className="mt-1.5 text-danger" role="alert">
-          {error}
-        </p>
-      )}
-      <div className="mt-3 flex gap-3 overflow-x-auto">
-        {allStages.map((s) => {
-          const isUnknown = unknownStages.has(s);
+    <>
+      <DocumentBoard
+        eyebrow="Procurement"
+        title="Purchase Requisitions"
+        description="Internal requests to buy. Approve a requisition, then convert it into a purchase order in one step."
+        newLabel="New requisition"
+        onNew={openCreate}
+        stages={STAGES}
+        records={q.data}
+        statusOf={(r) => (r.data as unknown as RequisitionData).status ?? "requested"}
+        isLoading={q.isLoading}
+        isError={q.isError}
+        error={q.error}
+        onRetry={() => q.refetch()}
+        onMove={(r, to) => moveMutation.mutate({ r, to })}
+        onCardClick={openEdit}
+        emptyTitle="No requisitions yet"
+        emptyDescription="Raise a requisition when someone needs to buy stock or services."
+        renderCard={(r) => {
+          const d = r.data as unknown as RequisitionData;
           return (
-          <div
-            key={s}
-            className={`min-w-[240px] rounded-md p-2 ${
-              isUnknown
-                ? "border border-dashed border-warning bg-warning/15"
-                : "border border-border bg-bg-subtle"
-            }`}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={(e) => {
-              const id = e.dataTransfer.getData("text/plain");
-              const r = (q.data ?? []).find((x) => x.id === id);
-              if (!r) return;
-              const current =
-                (r.data as unknown as RequisitionData).status ?? "requested";
-              // Skip same-column drops at the call site so the
-              // mutation lifecycle (onMutate / onSuccess) never
-              // fires for no-op moves — otherwise a card dropped
-              // back into its own column would clear the inline
-              // error and trigger a refetch even though nothing
-              // changed.
-              if (current === s) return;
-              moveMutation.mutate({ r, to: s });
-            }}
-          >
-            <div
-              className={`text-xs capitalize ${
-                isUnknown ? "font-semibold text-warning" : "text-fg-muted"
-              }`}
-              title={
-                isUnknown
-                  ? `"${s}" is not a known requisition status. The backend may have added a new state; update STAGES in PurchaseRequisitionsPage.tsx so this column gets the canonical styling.`
-                  : undefined
-              }
-            >
-              {s} · {(columns.get(s) ?? []).length}
-              {isUnknown && " (unknown)"}
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-start justify-between gap-2">
+                <span className="font-medium text-fg">
+                  {d.requisition_number || "Untitled requisition"}
+                </span>
+                <StatusBadge status={d.status ?? "requested"} size="xs" />
+              </div>
+              <span className="text-xs text-fg-muted">
+                {d.requested_by ? `Requested by ${d.requested_by}` : "Requester not set"}
+              </span>
+              {d.department && (
+                <span className="text-xs text-fg-subtle">{d.department}</span>
+              )}
+              {d.supplier_id && (
+                <span className="text-xs text-fg-subtle">
+                  {supplierName(d.supplier_id) || "Suggested supplier"}
+                </span>
+              )}
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-fg-muted">&nbsp;</span>
+                <span className="font-medium tabular-nums text-fg">
+                  {fmt.currency(Number(d.subtotal ?? 0), d.currency ?? "USD", {
+                    currencyDisplay: "code",
+                  })}
+                </span>
+              </div>
+              {d.po_id && (
+                <Badge variant="success" size="xs">
+                  Purchase order created
+                </Badge>
+              )}
             </div>
-            {(columns.get(s) ?? []).map((r) => {
-              const d = r.data as unknown as RequisitionData;
-              return (
-                <div
-                  key={r.id}
-                  draggable
-                  onDragStart={(e) =>
-                    e.dataTransfer.setData("text/plain", r.id)
-                  }
-                  onClick={() => nav(`/records/${KTYPE}/${r.id}`)}
-                  className="mt-1.5 cursor-pointer rounded border border-border bg-bg-elevated p-2 text-[13px]"
-                >
-                  <div className="font-medium">
-                    {d.requisition_number ?? r.id.slice(0, 8)}
-                  </div>
-                  <div className="text-xs text-fg-muted">
-                    Requested by: {d.requested_by ?? "—"}
-                  </div>
-                  {d.department && (
-                    <div className="text-xs text-fg-muted">
-                      Dept: {d.department}
-                    </div>
-                  )}
-                  <div className="mt-1 text-xs">
-                    {d.subtotal ?? 0} {d.currency ?? "USD"}
-                  </div>
-                  {d.po_id && (
-                    <div className="mt-1 text-[11px] text-fg-muted">
-                      PO: {d.po_id.slice(0, 8)}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
           );
-        })}
-      </div>
-    </section>
+        }}
+      />
+
+      {dialog && (
+        <DocumentDialog
+          open
+          onClose={() => setDialog(null)}
+          mode={dialog.mode}
+          config={config}
+          title={dialog.mode === "edit" ? "Edit requisition" : "New requisition"}
+          initialHeader={{
+            requested_by: editData ? String(editData.requested_by ?? "") : "",
+            request_date: editData ? dateInput(editData.request_date as string) : today(),
+            needed_by: editData ? dateInput(editData.needed_by as string) : "",
+            department: editData ? String(editData.department ?? "") : "",
+            cost_center: editData ? String(editData.cost_center ?? "") : "",
+            supplier_id: editData ? String(editData.supplier_id ?? "") : "",
+            requisition_number: editData ? String(editData.requisition_number ?? "") : "",
+            justification: editData ? String(editData.justification ?? "") : "",
+          }}
+          initialLines={editData ? linesFromData("purchase_requisition", editData) : []}
+          initialCurrency={editData ? String(editData.currency ?? "USD") : "USD"}
+          itemOptions={itemOpts}
+          selectOptions={{ supplier_id: orgOpts }}
+          saving={saveMutation.isPending}
+          error={saveError}
+          onSubmit={(payload) => saveMutation.mutate(payload)}
+        />
+      )}
+    </>
   );
 }
 
-// resolveVerb maps a (from, to) status pair to the lifecycle verb
-// that drives the RequisitionPoster transition. The mapping is
-// intentionally permissive on the "to=cancelled" side: any drop into
-// the Cancelled column resolves to the `cancel` verb regardless of
-// origin column, so the backend's RequisitionPoster.Cancel can return
-// its specific error message ("ordered requisitions cannot be
-// cancelled (cancel the PO instead)" — requisition_poster.go:257)
-// rather than the frontend short-circuiting with a generic
-// `cannot move from "ordered" to "cancelled"`. The state machine on
-// the backend is the single source of truth for which transitions
-// are legal; duplicating that logic on the frontend would risk drift
-// (e.g., if a future state is added) and would hide the more
-// actionable error from operators.
-//
-// Returns undefined only for pairs that have no corresponding verb
-// at all (e.g. cancelled→approved, ordered→requested) — for those
-// the caller surfaces a generic inline error because there's no
-// backend endpoint to delegate to.
+// resolveVerb maps a (from, to) status pair to the RequisitionPoster
+// verb. Any drop into Cancelled resolves to `cancel` so the backend
+// can return its specific rejection (e.g. ordered requisitions must
+// be cancelled via their PO) rather than a generic frontend message.
 function resolveVerb(from: string, to: string): Verb | undefined {
   if (from === "requested" && to === "approved") return "approve";
   if (from === "approved" && to === "ordered") return "convert";

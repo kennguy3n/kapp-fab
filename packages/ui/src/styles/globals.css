@@ -21,6 +21,15 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Register this package's own source as a content root.  Because the
+ * Tailwind entry point lives inside packages/ui but is compiled from a
+ * consumer (apps/web, apps/storybook), v4's automatic content detection
+ * — which is rooted at the consuming app — never scans packages/ui/src,
+ * so utility classes used *only* inside design-system components (modal
+ * centering/overlay, etc.) would be dropped from the build.  Explicitly
+ * sourcing the package's src restores them regardless of the consumer. */
+@source "../";
+
 /* Mona Sans — the KChat brand typeface.  Self-hosted variable font
  * (SIL OFL, github.com/github/mona-sans) so we never hotlink a CDN
  * and the weight axis (200–900) is available without shipping one

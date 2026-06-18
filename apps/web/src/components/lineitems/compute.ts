@@ -1,0 +1,67 @@
+import type { DocumentTotals, LineItem } from "./types";
+
+/** Round to 2 decimal places, nudging by EPSILON so values like
+ *  1.005 round up rather than down due to binary float drift. The
+ *  nudge is applied to the magnitude so negative values round
+ *  symmetrically to their positive counterparts (−1.005 → −1.01). */
+export function round2(n: number): number {
+  const sign = n < 0 ? -1 : 1;
+  return (sign * Math.round((Math.abs(n) + Number.EPSILON) * 100)) / 100;
+}
+
+/** Gross amount for a line before its discount (qty × unit price). */
+export function lineGross(line: LineItem): number {
+  const qty = Number.isFinite(line.qty) ? line.qty : 0;
+  const price = Number.isFinite(line.unitPrice) ? line.unitPrice : 0;
+  return round2(qty * price);
+}
+
+/** Effective per-line discount: the entered discount clamped to the
+ *  line's own gross, so a discount can never exceed the value of the
+ *  line it applies to. This keeps the discounted subtotal — and the
+ *  document total — from ever going negative, and keeps the per-line
+ *  Amount consistent with the totals panel. Non-positive/non-finite
+ *  discounts collapse to zero. */
+export function lineDiscount(line: LineItem): number {
+  const raw = Number.isFinite(line.discount) ? line.discount : 0;
+  if (raw <= 0) return 0;
+  const gross = lineGross(line);
+  return raw > gross ? gross : raw;
+}
+
+/** Net amount for a line: gross minus the (clamped) per-line discount,
+ *  so a discount can never make a line negative. */
+export function lineNet(line: LineItem): number {
+  return round2(lineGross(line) - lineDiscount(line));
+}
+
+/**
+ * Compute document totals from the normalised lines, mirroring the
+ * backend posters:
+ *   subtotal       = Σ (qty × unit_price)            (gross)
+ *   discount_total = Σ min(line.discount, line gross) (clamped per line)
+ *   tax_amount     = (subtotal − discount_total) × taxRate%
+ *   total          = subtotal − discount_total + tax_amount
+ * Each line's discount is clamped to its own gross so the discounted
+ * base (and therefore tax and total) can never go negative. Documents
+ * without tax (requisitions) pass taxRate 0, so total collapses to
+ * subtotal − discount_total.
+ */
+export function computeTotals(
+  lines: LineItem[],
+  opts: { taxRate?: number } = {},
+): DocumentTotals {
+  const taxRate = Number.isFinite(opts.taxRate) ? (opts.taxRate as number) : 0;
+  let subtotal = 0;
+  let discountTotal = 0;
+  for (const line of lines) {
+    subtotal += lineGross(line);
+    discountTotal += lineDiscount(line);
+  }
+  subtotal = round2(subtotal);
+  discountTotal = round2(discountTotal);
+  const taxable = subtotal - discountTotal;
+  const taxAmount = round2((taxable * taxRate) / 100);
+  const total = round2(taxable + taxAmount);
+  return { subtotal, discountTotal, taxAmount, total };
+}
