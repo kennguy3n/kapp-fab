@@ -52,6 +52,13 @@ export function PortalLoginPage() {
           ),
         );
         setVerifying(false);
+        // Drop the consumed (now-invalid) magic-link params from the URL
+        // so a refresh doesn't re-attempt the dead token and the customer
+        // lands cleanly on the request form (mirrors CallbackPage).
+        const url = new URL(window.location.href);
+        url.searchParams.delete("token");
+        url.searchParams.delete("email");
+        window.history.replaceState({}, "", `${url.pathname}${url.search}`);
       }
     })();
   }, [incomingToken, incomingEmail, tenant_slug, nav]);

@@ -94,12 +94,18 @@ export function replyKindLabel(kind: string | undefined): string {
  * Map a raw API failure to friendly, plain-language copy. `portalApi`
  * throws `Error("<status>: <body>")`; we surface a calm message keyed
  * off the HTTP status and never echo the raw body to the customer.
+ *
+ * COUPLING: the status parse below depends on the error-message format
+ * produced by `req()` in `lib/portalApi.ts` (`"<status>: <body>"`). If
+ * that throw template changes, update the `msg.split(":")` parse here —
+ * otherwise every error silently falls through to `fallback`.
  */
 export function friendlyPortalError(
   err: unknown,
   fallback = "Something went wrong. Please try again.",
 ): string {
   const msg = err instanceof Error ? err.message : "";
+  // Status prefix from portalApi's `req()` throw (see COUPLING above).
   const status = Number.parseInt(msg.split(":")[0], 10);
   switch (status) {
     case 400:
