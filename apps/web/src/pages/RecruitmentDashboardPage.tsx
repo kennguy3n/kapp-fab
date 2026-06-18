@@ -18,6 +18,7 @@ import { AlertTriangle, Briefcase, RefreshCw } from "lucide-react";
 import { api } from "../lib/api";
 import { useFormatter } from "../lib/i18n/useFormatter";
 import { humanizeToken } from "../lib/ktypeView";
+import { openingVariant } from "../lib/recruitmentStatus";
 
 // FUNNEL_STAGES are the forward pipeline stages, in order, used for the
 // conversion funnel. Terminal states (rejected/withdrawn) are excluded —
@@ -294,26 +295,6 @@ export function RecruitmentDashboardPage() {
       )}
     </section>
   );
-}
-
-/** Job-opening lifecycle status → Badge variant (domain tokens not in
- * the shared statusVariant map: `open`/`filled`). */
-function openingVariant(
-  status: JobOpening["status"],
-): "success" | "warning" | "neutral" | "accent" | "info" {
-  switch (status) {
-    case "open":
-      return "success";
-    case "on_hold":
-      return "warning";
-    case "filled":
-      return "accent";
-    case "draft":
-      return "info";
-    case "closed":
-    default:
-      return "neutral";
-  }
 }
 
 function DashboardSkeleton() {

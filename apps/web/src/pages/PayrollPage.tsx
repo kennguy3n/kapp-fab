@@ -97,11 +97,17 @@ const NEW_ROUTE: Record<Tab, string> = {
   runs: `/records/${KTYPE_PAYRUN}/new`,
 };
 
-/** Coerce a JSONB numeric field (sometimes serialised as a string) to a number. */
+/** Coerce a JSONB numeric field (sometimes serialised as a string) to a
+ * number. Malformed data (non-numeric strings, Infinity) collapses to 0 so
+ * NaN never propagates into totals or the currency formatter. */
 function num(value: number | string | undefined): number {
-  if (typeof value === "number") return value;
-  if (typeof value === "string" && value.trim() !== "") return Number(value);
-  return 0;
+  const n =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim() !== ""
+        ? Number(value)
+        : 0;
+  return Number.isFinite(n) ? n : 0;
 }
 
 /** Parse a date field. Date-only strings ("YYYY-MM-DD") are anchored to
@@ -771,6 +777,14 @@ function PayslipsForRun({
     (s, r) => s + num((r.data as PayslipData).net_pay),
     0,
   );
+  // Mirror the outer table: per-slip currencies can differ, so summing is
+  // only meaningful within one currency. Suppress the aggregate when mixed.
+  const slipCurrencies = new Set(
+    rows.map((r) => (r.data as PayslipData).currency ?? currency),
+  );
+  const footerCurrency =
+    (rows[0]?.data as PayslipData | undefined)?.currency ?? currency;
+  const mixedCurrency = slipCurrencies.size > 1;
 
   return (
     <div className="flex flex-col gap-2">
@@ -834,15 +848,26 @@ function PayslipsForRun({
             <TableFooter>
               <TableRow>
                 <TableCell className="font-medium">Total</TableCell>
-                <TableCell className="text-end font-semibold">
-                  {fmt.currency(totalGross, currency)}
-                </TableCell>
-                <TableCell className="text-end font-semibold">
-                  {fmt.currency(totalDeductions, currency)}
-                </TableCell>
-                <TableCell className="text-end font-semibold">
-                  {fmt.currency(totalNet, currency)}
-                </TableCell>
+                {mixedCurrency ? (
+                  <TableCell
+                    colSpan={3}
+                    className="text-end text-sm text-fg-muted"
+                  >
+                    Mixed currencies — see each row
+                  </TableCell>
+                ) : (
+                  <>
+                    <TableCell className="text-end font-semibold">
+                      {fmt.currency(totalGross, footerCurrency)}
+                    </TableCell>
+                    <TableCell className="text-end font-semibold">
+                      {fmt.currency(totalDeductions, footerCurrency)}
+                    </TableCell>
+                    <TableCell className="text-end font-semibold">
+                      {fmt.currency(totalNet, footerCurrency)}
+                    </TableCell>
+                  </>
+                )}
                 <TableCell />
               </TableRow>
             </TableFooter>

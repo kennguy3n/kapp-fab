@@ -4,7 +4,6 @@ import type {
   CompleteInterviewInput,
   CreateInterviewInput,
   Interview,
-  InterviewStatus,
   JobApplication,
   KRecord,
 } from "@kapp/client";
@@ -28,7 +27,6 @@ import {
   TabsTrigger,
   Textarea,
   toast,
-  type BadgeProps,
 } from "@kapp/ui";
 import {
   AlertTriangle,
@@ -41,6 +39,7 @@ import {
 import { api } from "../lib/api";
 import { useFormatter } from "../lib/i18n/useFormatter";
 import { humanizeToken } from "../lib/ktypeView";
+import { interviewVariant } from "../lib/recruitmentStatus";
 
 const INTERVIEW_TYPES = [
   { value: "phone", label: "Phone" },
@@ -58,22 +57,6 @@ const RECOMMENDATIONS = [
   { value: "no", label: "No" },
   { value: "strong_no", label: "Strong no" },
 ];
-
-// Interview status → Badge variant. `no_show` isn't in the shared
-// statusVariant map, so the domain maps the lifecycle here.
-function interviewVariant(status: InterviewStatus): BadgeProps["variant"] {
-  switch (status) {
-    case "scheduled":
-      return "info";
-    case "completed":
-      return "success";
-    case "no_show":
-      return "danger";
-    case "cancelled":
-    default:
-      return "neutral";
-  }
-}
 
 type Tab = "scheduled" | "completed";
 
@@ -472,6 +455,40 @@ function ScheduleInterviewModal({
   employees: KRecord[];
   onScheduled: () => void;
 }) {
+  return (
+    <Modal open={open} onOpenChange={onOpenChange}>
+      <ModalContent className="max-w-2xl">
+        <ModalHeader>
+          <ModalTitle>Schedule an interview</ModalTitle>
+          <ModalDescription>
+            Pick a candidate and the format. You can add timing and feedback
+            details now or later.
+          </ModalDescription>
+        </ModalHeader>
+        {/* Rendered inside ModalContent so it mounts fresh on each open,
+            resetting the form and the create mutation without seed state. */}
+        <ScheduleInterviewForm
+          applications={applications}
+          employees={employees}
+          onScheduled={onScheduled}
+          onClose={() => onOpenChange(false)}
+        />
+      </ModalContent>
+    </Modal>
+  );
+}
+
+function ScheduleInterviewForm({
+  applications,
+  employees,
+  onScheduled,
+  onClose,
+}: {
+  applications: JobApplication[];
+  employees: KRecord[];
+  onScheduled: () => void;
+  onClose: () => void;
+}) {
   const empty: CreateInterviewInput = {
     application_id: "",
     interview_type: "video",
@@ -484,20 +501,12 @@ function ScheduleInterviewModal({
     mutationFn: (input: CreateInterviewInput) => api.createInterview(input),
     onSuccess: () => {
       toast.success("Interview scheduled");
-      onOpenChange(false);
+      onClose();
       onScheduled();
     },
+    onError: (e) =>
+      toast.error("Couldn't schedule interview", { description: String(e) }),
   });
-
-  const [seedOpen, setSeedOpen] = useState(open);
-  if (seedOpen !== open) {
-    setSeedOpen(open);
-    if (open) {
-      setForm(empty);
-      setSubmitted(false);
-      createMut.reset();
-    }
-  }
 
   // Only applications still in the pipeline can sensibly be interviewed;
   // terminal states are filtered out of the picker.
@@ -516,154 +525,139 @@ function ScheduleInterviewModal({
   }
 
   return (
-    <Modal open={open} onOpenChange={onOpenChange}>
-      <ModalContent className="max-w-2xl">
-        <ModalHeader>
-          <ModalTitle>Schedule an interview</ModalTitle>
-          <ModalDescription>
-            Pick a candidate and the format. You can add timing and feedback
-            details now or later.
-          </ModalDescription>
-        </ModalHeader>
-        <form
-          className="flex flex-col gap-4"
-          onSubmit={(e) => {
-            e.preventDefault();
-            setSubmitted(true);
-            if (!form.application_id) return;
-            createMut.mutate({
-              ...form,
-              // datetime-local yields "YYYY-MM-DDTHH:mm"; widen to RFC3339
-              // by converting to an ISO UTC instant the server accepts.
-              scheduled_at: form.scheduled_at
-                ? new Date(form.scheduled_at).toISOString()
-                : undefined,
-            });
-          }}
+    <form
+      className="flex flex-col gap-4"
+      onSubmit={(e) => {
+        e.preventDefault();
+        setSubmitted(true);
+        if (!form.application_id) return;
+        createMut.mutate({
+          ...form,
+          // datetime-local yields "YYYY-MM-DDTHH:mm"; widen to RFC3339
+          // by converting to an ISO UTC instant the server accepts.
+          scheduled_at: form.scheduled_at
+            ? new Date(form.scheduled_at).toISOString()
+            : undefined,
+        });
+      }}
+    >
+      <Field
+        label="Candidate"
+        required
+        error={appError ? "Choose a candidate to interview." : undefined}
+        help={
+          interviewable.length === 0
+            ? "No candidates are in the interview stage yet."
+            : undefined
+        }
+      >
+        <Select
+          value={form.application_id}
+          onChange={(e) => patch({ application_id: e.target.value })}
+          invalid={appError || undefined}
         >
-          <Field
-            label="Candidate"
-            required
-            error={appError ? "Choose a candidate to interview." : undefined}
-            help={
-              interviewable.length === 0
-                ? "No candidates are in the interview stage yet."
-                : undefined
+          <option value="">Select a candidate…</option>
+          {interviewable.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.applicant_name} — {humanizeToken(a.status)}
+            </option>
+          ))}
+        </Select>
+      </Field>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <Field label="Interview type">
+          <Select
+            value={form.interview_type}
+            onChange={(e) => {
+              const interview_type = e.target.value;
+              // In-person carries a physical location; remote carries a
+              // meeting link. Clear the field that no longer applies so
+              // we never persist both.
+              patch({
+                interview_type,
+                ...(interview_type === "in_person"
+                  ? { meeting_link: undefined }
+                  : { location: undefined }),
+              });
+            }}
+          >
+            {INTERVIEW_TYPES.map((t) => (
+              <option key={t.value} value={t.value}>
+                {t.label}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Interviewer">
+          <Select
+            value={form.interviewer_id ?? ""}
+            onChange={(e) =>
+              patch({ interviewer_id: e.target.value || undefined })
             }
           >
-            <Select
-              value={form.application_id}
-              onChange={(e) => patch({ application_id: e.target.value })}
-              invalid={appError || undefined}
-            >
-              <option value="">Select a candidate…</option>
-              {interviewable.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.applicant_name} — {humanizeToken(a.status)}
-                </option>
-              ))}
-            </Select>
-          </Field>
+            <option value="">Unassigned</option>
+            {employees.map((emp) => (
+              <option key={emp.id} value={emp.id}>
+                {(emp.data as EmployeeData)?.name ?? "Unnamed"}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Date & time" help="Leave blank to confirm later.">
+          <Input
+            type="datetime-local"
+            value={form.scheduled_at ?? ""}
+            onChange={(e) => patch({ scheduled_at: e.target.value })}
+          />
+        </Field>
+        <Field label="Duration" help="In minutes.">
+          <Input
+            type="number"
+            min={15}
+            step={15}
+            value={form.duration_minutes ?? 60}
+            onChange={(e) =>
+              patch({ duration_minutes: Number(e.target.value) || 60 })
+            }
+          />
+        </Field>
+      </div>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <Field label="Interview type">
-              <Select
-                value={form.interview_type}
-                onChange={(e) => {
-                  const interview_type = e.target.value;
-                  // In-person carries a physical location; remote carries a
-                  // meeting link. Clear the field that no longer applies so
-                  // we never persist both.
-                  patch({
-                    interview_type,
-                    ...(interview_type === "in_person"
-                      ? { meeting_link: undefined }
-                      : { location: undefined }),
-                  });
-                }}
-              >
-                {INTERVIEW_TYPES.map((t) => (
-                  <option key={t.value} value={t.value}>
-                    {t.label}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <Field label="Interviewer">
-              <Select
-                value={form.interviewer_id ?? ""}
-                onChange={(e) =>
-                  patch({ interviewer_id: e.target.value || undefined })
-                }
-              >
-                <option value="">Unassigned</option>
-                {employees.map((emp) => (
-                  <option key={emp.id} value={emp.id}>
-                    {(emp.data as EmployeeData)?.name ?? "Unnamed"}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <Field label="Date & time" help="Leave blank to confirm later.">
-              <Input
-                type="datetime-local"
-                value={form.scheduled_at ?? ""}
-                onChange={(e) => patch({ scheduled_at: e.target.value })}
-              />
-            </Field>
-            <Field label="Duration" help="In minutes.">
-              <Input
-                type="number"
-                min={15}
-                step={15}
-                value={form.duration_minutes ?? 60}
-                onChange={(e) =>
-                  patch({ duration_minutes: Number(e.target.value) || 60 })
-                }
-              />
-            </Field>
-          </div>
+      {isInPerson ? (
+        <Field label="Location">
+          <Input
+            value={form.location ?? ""}
+            onChange={(e) => patch({ location: e.target.value })}
+            placeholder="e.g. Room 4B, 2nd floor"
+          />
+        </Field>
+      ) : (
+        <Field label="Meeting link">
+          <Input
+            type="url"
+            value={form.meeting_link ?? ""}
+            onChange={(e) => patch({ meeting_link: e.target.value })}
+            placeholder="https://…"
+          />
+        </Field>
+      )}
 
-          {isInPerson ? (
-            <Field label="Location">
-              <Input
-                value={form.location ?? ""}
-                onChange={(e) => patch({ location: e.target.value })}
-                placeholder="e.g. Room 4B, 2nd floor"
-              />
-            </Field>
-          ) : (
-            <Field label="Meeting link">
-              <Input
-                type="url"
-                value={form.meeting_link ?? ""}
-                onChange={(e) => patch({ meeting_link: e.target.value })}
-                placeholder="https://…"
-              />
-            </Field>
-          )}
+      {createMut.isError && (
+        <p className="text-sm text-danger">
+          Couldn't schedule the interview: {String(createMut.error)}
+        </p>
+      )}
 
-          {createMut.isError && (
-            <p className="text-sm text-danger">
-              Couldn't schedule the interview: {String(createMut.error)}
-            </p>
-          )}
-
-          <ModalFooter>
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => onOpenChange(false)}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" disabled={createMut.isPending}>
-              {createMut.isPending ? "Scheduling…" : "Schedule interview"}
-            </Button>
-          </ModalFooter>
-        </form>
-      </ModalContent>
-    </Modal>
+      <ModalFooter>
+        <Button type="button" variant="ghost" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={createMut.isPending}>
+          {createMut.isPending ? "Scheduling…" : "Schedule interview"}
+        </Button>
+      </ModalFooter>
+    </form>
   );
 }
 

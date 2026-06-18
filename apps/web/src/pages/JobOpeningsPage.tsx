@@ -1,12 +1,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type {
-  JobOpening,
-  JobOpeningInput,
-  JobOpeningStatus,
-  KRecord,
-} from "@kapp/client";
+import type { JobOpening, JobOpeningInput, KRecord } from "@kapp/client";
 import {
   Badge,
   Button,
@@ -42,6 +37,7 @@ import {
 import { api } from "../lib/api";
 import { useFormatter } from "../lib/i18n/useFormatter";
 import { humanizeToken } from "../lib/ktypeView";
+import { openingVariant } from "../lib/recruitmentStatus";
 
 const EMPLOYMENT_TYPES: Array<{ value: string; label: string }> = [
   { value: "full_time", label: "Full-time" },
@@ -339,6 +335,37 @@ function CreateOpeningModal({
   employees: KRecord[];
   onCreated: () => void;
 }) {
+  return (
+    <Modal open={open} onOpenChange={onOpenChange}>
+      <ModalContent className="max-w-2xl">
+        <ModalHeader>
+          <ModalTitle>New job opening</ModalTitle>
+          <ModalDescription>
+            Describe the role. You can publish it to applicants once it's
+            ready.
+          </ModalDescription>
+        </ModalHeader>
+        {/* Rendered inside ModalContent so it mounts fresh on each open,
+            resetting the form and the create mutation without seed state. */}
+        <CreateOpeningForm
+          employees={employees}
+          onCreated={onCreated}
+          onClose={() => onOpenChange(false)}
+        />
+      </ModalContent>
+    </Modal>
+  );
+}
+
+function CreateOpeningForm({
+  employees,
+  onCreated,
+  onClose,
+}: {
+  employees: KRecord[];
+  onCreated: () => void;
+  onClose: () => void;
+}) {
   const empty: JobOpeningInput = {
     title: "",
     department: "",
@@ -353,20 +380,12 @@ function CreateOpeningModal({
     mutationFn: (input: JobOpeningInput) => api.createJobOpening(input),
     onSuccess: () => {
       toast.success("Opening created");
-      onOpenChange(false);
+      onClose();
       onCreated();
     },
+    onError: (e) =>
+      toast.error("Couldn't create opening", { description: String(e) }),
   });
-
-  const [seedOpen, setSeedOpen] = useState(open);
-  if (seedOpen !== open) {
-    setSeedOpen(open);
-    if (open) {
-      setForm(empty);
-      setSubmitted(false);
-      createMut.reset();
-    }
-  }
 
   const titleError = submitted && !form.title.trim();
 
@@ -375,189 +394,153 @@ function CreateOpeningModal({
   }
 
   return (
-    <Modal open={open} onOpenChange={onOpenChange}>
-      <ModalContent className="max-w-2xl">
-        <ModalHeader>
-          <ModalTitle>New job opening</ModalTitle>
-          <ModalDescription>
-            Describe the role. You can publish it to applicants once it's
-            ready.
-          </ModalDescription>
-        </ModalHeader>
-        <form
-          className="flex flex-col gap-4"
-          onSubmit={(e) => {
-            e.preventDefault();
-            setSubmitted(true);
-            if (!form.title.trim()) return;
-            createMut.mutate({
-              ...form,
-              title: form.title.trim(),
-              department: form.department?.trim() || undefined,
-              location: form.location?.trim() || undefined,
-            });
-          }}
-        >
-          <Field
-            label="Role title"
-            required
-            error={titleError ? "Give the role a title." : undefined}
+    <form
+      className="flex flex-col gap-4"
+      onSubmit={(e) => {
+        e.preventDefault();
+        setSubmitted(true);
+        if (!form.title.trim()) return;
+        createMut.mutate({
+          ...form,
+          title: form.title.trim(),
+          department: form.department?.trim() || undefined,
+          location: form.location?.trim() || undefined,
+        });
+      }}
+    >
+      <Field
+        label="Role title"
+        required
+        error={titleError ? "Give the role a title." : undefined}
+      >
+        <Input
+          value={form.title}
+          onChange={(e) => patch({ title: e.target.value })}
+          placeholder="e.g. Senior Software Engineer"
+          invalid={titleError || undefined}
+        />
+      </Field>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <Field label="Department">
+          <Input
+            value={form.department ?? ""}
+            onChange={(e) => patch({ department: e.target.value })}
+            placeholder="e.g. Engineering"
+          />
+        </Field>
+        <Field label="Location">
+          <Input
+            value={form.location ?? ""}
+            onChange={(e) => patch({ location: e.target.value })}
+            placeholder="e.g. Remote · London"
+          />
+        </Field>
+        <Field label="Employment type">
+          <Select
+            value={form.employment_type}
+            onChange={(e) => patch({ employment_type: e.target.value })}
           >
+            {EMPLOYMENT_TYPES.map((t) => (
+              <option key={t.value} value={t.value}>
+                {t.label}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Hiring manager">
+          <Select
+            value={form.hiring_manager_id ?? ""}
+            onChange={(e) =>
+              patch({ hiring_manager_id: e.target.value || undefined })
+            }
+          >
+            <option value="">Unassigned</option>
+            {employees.map((emp) => (
+              <option key={emp.id} value={emp.id}>
+                {(emp.data as EmployeeData)?.name ?? "Unnamed"}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      </div>
+
+      <fieldset className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <Field label="Openings" help="How many people to hire.">
+          <Input
+            type="number"
+            min={1}
+            value={form.max_positions ?? 1}
+            onChange={(e) =>
+              patch({ max_positions: Number(e.target.value) || 1 })
+            }
+          />
+        </Field>
+        <Field label="Pay range (min)">
+          <Input
+            type="number"
+            min={0}
+            inputMode="decimal"
+            value={form.salary_range_min ?? ""}
+            onChange={(e) =>
+              patch({ salary_range_min: e.target.value || undefined })
+            }
+            placeholder="e.g. 80000"
+          />
+        </Field>
+        <Field label="Pay range (max)">
+          <div className="flex gap-2">
             <Input
-              value={form.title}
-              onChange={(e) => patch({ title: e.target.value })}
-              placeholder="e.g. Senior Software Engineer"
-              invalid={titleError || undefined}
+              type="number"
+              min={0}
+              inputMode="decimal"
+              value={form.salary_range_max ?? ""}
+              onChange={(e) =>
+                patch({ salary_range_max: e.target.value || undefined })
+              }
+              placeholder="e.g. 120000"
             />
-          </Field>
-
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <Field label="Department">
-              <Input
-                value={form.department ?? ""}
-                onChange={(e) => patch({ department: e.target.value })}
-                placeholder="e.g. Engineering"
-              />
-            </Field>
-            <Field label="Location">
-              <Input
-                value={form.location ?? ""}
-                onChange={(e) => patch({ location: e.target.value })}
-                placeholder="e.g. Remote · London"
-              />
-            </Field>
-            <Field label="Employment type">
-              <Select
-                value={form.employment_type}
-                onChange={(e) => patch({ employment_type: e.target.value })}
-              >
-                {EMPLOYMENT_TYPES.map((t) => (
-                  <option key={t.value} value={t.value}>
-                    {t.label}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <Field label="Hiring manager">
-              <Select
-                value={form.hiring_manager_id ?? ""}
-                onChange={(e) =>
-                  patch({ hiring_manager_id: e.target.value || undefined })
-                }
-              >
-                <option value="">Unassigned</option>
-                {employees.map((emp) => (
-                  <option key={emp.id} value={emp.id}>
-                    {(emp.data as EmployeeData)?.name ?? "Unnamed"}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-          </div>
-
-          <fieldset className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <Field label="Openings" help="How many people to hire.">
-              <Input
-                type="number"
-                min={1}
-                value={form.max_positions ?? 1}
-                onChange={(e) =>
-                  patch({ max_positions: Number(e.target.value) || 1 })
-                }
-              />
-            </Field>
-            <Field label="Pay range (min)">
-              <Input
-                type="number"
-                min={0}
-                inputMode="decimal"
-                value={form.salary_range_min ?? ""}
-                onChange={(e) =>
-                  patch({ salary_range_min: e.target.value || undefined })
-                }
-                placeholder="e.g. 80000"
-              />
-            </Field>
-            <Field label="Pay range (max)">
-              <div className="flex gap-2">
-                <Input
-                  type="number"
-                  min={0}
-                  inputMode="decimal"
-                  value={form.salary_range_max ?? ""}
-                  onChange={(e) =>
-                    patch({ salary_range_max: e.target.value || undefined })
-                  }
-                  placeholder="e.g. 120000"
-                />
-                <Select
-                  className="w-24"
-                  aria-label="Currency"
-                  value={form.currency}
-                  onChange={(e) => patch({ currency: e.target.value })}
-                >
-                  {CURRENCIES.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </Select>
-              </div>
-            </Field>
-          </fieldset>
-
-          <Field label="Description" help="What the role is about (optional).">
-            <Textarea
-              rows={3}
-              value={form.description ?? ""}
-              onChange={(e) => patch({ description: e.target.value })}
-              placeholder="Summarise the role and what you're looking for."
-            />
-          </Field>
-
-          {createMut.isError && (
-            <p className="text-sm text-danger">
-              Couldn't create the opening: {String(createMut.error)}
-            </p>
-          )}
-
-          <ModalFooter>
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => onOpenChange(false)}
+            <Select
+              className="w-24"
+              aria-label="Currency"
+              value={form.currency}
+              onChange={(e) => patch({ currency: e.target.value })}
             >
-              Cancel
-            </Button>
-            <Button type="submit" disabled={createMut.isPending}>
-              {createMut.isPending ? "Creating…" : "Create opening"}
-            </Button>
-          </ModalFooter>
-        </form>
-      </ModalContent>
-    </Modal>
-  );
-}
+              {CURRENCIES.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </Select>
+          </div>
+        </Field>
+      </fieldset>
 
-/** Job-opening lifecycle status → Badge variant. `open`/`filled` aren't
- * in the shared statusVariant map, so the recruitment domain maps them
- * here (open = live, filled = goal met). */
-function openingVariant(
-  status: JobOpeningStatus,
-): "success" | "warning" | "neutral" | "accent" | "info" {
-  switch (status) {
-    case "open":
-      return "success";
-    case "on_hold":
-      return "warning";
-    case "filled":
-      return "accent";
-    case "draft":
-      return "info";
-    case "closed":
-    default:
-      return "neutral";
-  }
+      <Field label="Description" help="What the role is about (optional).">
+        <Textarea
+          rows={3}
+          value={form.description ?? ""}
+          onChange={(e) => patch({ description: e.target.value })}
+          placeholder="Summarise the role and what you're looking for."
+        />
+      </Field>
+
+      {createMut.isError && (
+        <p className="text-sm text-danger">
+          Couldn't create the opening: {String(createMut.error)}
+        </p>
+      )}
+
+      <ModalFooter>
+        <Button type="button" variant="ghost" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={createMut.isPending}>
+          {createMut.isPending ? "Creating…" : "Create opening"}
+        </Button>
+      </ModalFooter>
+    </form>
+  );
 }
 
 function humanEmploymentType(t: string): string {

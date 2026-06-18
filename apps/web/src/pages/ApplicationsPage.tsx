@@ -18,7 +18,6 @@ import {
   Skeleton,
   initials,
   toast,
-  type BadgeProps,
 } from "@kapp/ui";
 import {
   AlertTriangle,
@@ -29,6 +28,7 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api";
 import { humanizeToken } from "../lib/ktypeView";
+import { appStatusVariant } from "../lib/recruitmentStatus";
 
 // COLUMNS are the live pipeline lanes shown on the board — hired is
 // always visible as the success endpoint. Rejected / withdrawn are
@@ -62,29 +62,6 @@ const ADVANCE_TARGETS: Record<ApplicationStatus, ApplicationStatus | null> = {
   rejected: null,
   withdrawn: null,
 };
-
-// Pipeline stage → Badge variant. The recruitment tokens aren't in the
-// shared statusVariant map, so the domain maps them here.
-function appStatusVariant(status: ApplicationStatus): BadgeProps["variant"] {
-  switch (status) {
-    case "applied":
-      return "neutral";
-    case "screening":
-    case "shortlisted":
-      return "info";
-    case "interview":
-      return "warning";
-    case "offered":
-      return "accent";
-    case "hired":
-      return "success";
-    case "rejected":
-      return "danger";
-    case "withdrawn":
-    default:
-      return "neutral";
-  }
-}
 
 /**
  * ApplicationsPage renders the recruitment pipeline as a kanban board

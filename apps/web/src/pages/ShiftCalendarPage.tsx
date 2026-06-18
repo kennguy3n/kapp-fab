@@ -456,6 +456,44 @@ function AssignShiftModal({
   initialEmployeeId: string;
   initialDate: string;
 }) {
+  return (
+    <Modal open={open} onOpenChange={onOpenChange}>
+      <ModalContent>
+        <ModalHeader>
+          <ModalTitle>Schedule a shift</ModalTitle>
+          <ModalDescription>
+            Assign a shift to a team member on a given day.
+          </ModalDescription>
+        </ModalHeader>
+        {/* Keyed by the cell so switching cells while the modal stays open
+            remounts the form to re-seed it. (Open → close → reopen resets via
+            the Radix portal unmounting the form, independent of this key.) */}
+        <AssignShiftForm
+          key={`${initialEmployeeId}|${initialDate}`}
+          employees={employees}
+          shiftTypes={shiftTypes}
+          initialEmployeeId={initialEmployeeId}
+          initialDate={initialDate}
+          onClose={() => onOpenChange(false)}
+        />
+      </ModalContent>
+    </Modal>
+  );
+}
+
+function AssignShiftForm({
+  employees,
+  shiftTypes,
+  initialEmployeeId,
+  initialDate,
+  onClose,
+}: {
+  employees: Employee[];
+  shiftTypes: ShiftType[];
+  initialEmployeeId: string;
+  initialDate: string;
+  onClose: () => void;
+}) {
   const qc = useQueryClient();
   const [employeeId, setEmployeeId] = useState(initialEmployeeId);
   const [shiftTypeId, setShiftTypeId] = useState("");
@@ -475,128 +513,97 @@ function AssignShiftModal({
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["records", KTYPE_SHIFT_ASSIGNMENT] });
       toast.success("Shift scheduled");
-      onOpenChange(false);
+      onClose();
     },
+    onError: (e) =>
+      toast.error("Couldn't schedule shift", { description: String(e) }),
   });
-
-  // Re-seed the form whenever a new cell opens it (the modal stays
-  // mounted, so prop changes drive the reset rather than remount).
-  const [seed, setSeed] = useState({ initialEmployeeId, initialDate, open });
-  if (
-    seed.initialEmployeeId !== initialEmployeeId ||
-    seed.initialDate !== initialDate ||
-    seed.open !== open
-  ) {
-    setSeed({ initialEmployeeId, initialDate, open });
-    if (open) {
-      setEmployeeId(initialEmployeeId);
-      setShiftDate(initialDate);
-      setShiftTypeId("");
-      setNotes("");
-      setSubmitted(false);
-      create.reset();
-    }
-  }
 
   const valid = employeeId && shiftTypeId && shiftDate;
 
   return (
-    <Modal open={open} onOpenChange={onOpenChange}>
-      <ModalContent>
-        <ModalHeader>
-          <ModalTitle>Schedule a shift</ModalTitle>
-          <ModalDescription>
-            Assign a shift to a team member on a given day.
-          </ModalDescription>
-        </ModalHeader>
-        <form
-          className="flex flex-col gap-4"
-          onSubmit={(e) => {
-            e.preventDefault();
-            setSubmitted(true);
-            if (!valid) return;
-            create.mutate();
-          }}
+    <form
+      className="flex flex-col gap-4"
+      onSubmit={(e) => {
+        e.preventDefault();
+        setSubmitted(true);
+        if (!valid) return;
+        create.mutate();
+      }}
+    >
+      <Field
+        label="Employee"
+        required
+        error={submitted && !employeeId ? "Choose an employee." : undefined}
+      >
+        <Select
+          value={employeeId}
+          onChange={(e) => setEmployeeId(e.target.value)}
         >
-          <Field
-            label="Employee"
-            required
-            error={submitted && !employeeId ? "Choose an employee." : undefined}
-          >
-            <Select
-              value={employeeId}
-              onChange={(e) => setEmployeeId(e.target.value)}
-            >
-              <option value="">Select employee…</option>
-              {employees.map((e) => (
-                <option key={e.id} value={e.id}>
-                  {e.name ?? "Unnamed"}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field
-            label="Shift type"
-            required
-            error={submitted && !shiftTypeId ? "Choose a shift type." : undefined}
-            help={
-              shiftTypes.length === 0
-                ? "No shift types defined yet — create one first."
-                : undefined
-            }
-          >
-            <Select
-              value={shiftTypeId}
-              onChange={(e) => setShiftTypeId(e.target.value)}
-            >
-              <option value="">Select shift type…</option>
-              {shiftTypes.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name ?? "Shift"}
-                  {s.start_time ? ` (${formatRange(s.start_time, s.end_time)})` : ""}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field
-            label="Date"
-            required
-            error={submitted && !shiftDate ? "Pick a date." : undefined}
-          >
-            <Input
-              type="date"
-              value={shiftDate}
-              onChange={(e) => setShiftDate(e.target.value)}
-            />
-          </Field>
-          <Field label="Notes" help="Optional — visible to schedulers.">
-            <Textarea
-              rows={2}
-              placeholder="e.g. Covering for Sam"
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-            />
-          </Field>
-          {create.isError && (
-            <p className="text-sm text-danger">
-              Couldn't schedule the shift: {String(create.error)}
-            </p>
-          )}
-          <ModalFooter>
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => onOpenChange(false)}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" disabled={create.isPending}>
-              {create.isPending ? "Scheduling…" : "Schedule shift"}
-            </Button>
-          </ModalFooter>
-        </form>
-      </ModalContent>
-    </Modal>
+          <option value="">Select employee…</option>
+          {employees.map((e) => (
+            <option key={e.id} value={e.id}>
+              {e.name ?? "Unnamed"}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <Field
+        label="Shift type"
+        required
+        error={submitted && !shiftTypeId ? "Choose a shift type." : undefined}
+        help={
+          shiftTypes.length === 0
+            ? "No shift types defined yet — create one first."
+            : undefined
+        }
+      >
+        <Select
+          value={shiftTypeId}
+          onChange={(e) => setShiftTypeId(e.target.value)}
+        >
+          <option value="">Select shift type…</option>
+          {shiftTypes.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name ?? "Shift"}
+              {s.start_time ? ` (${formatRange(s.start_time, s.end_time)})` : ""}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <Field
+        label="Date"
+        required
+        error={submitted && !shiftDate ? "Pick a date." : undefined}
+      >
+        <Input
+          type="date"
+          value={shiftDate}
+          onChange={(e) => setShiftDate(e.target.value)}
+        />
+      </Field>
+      <Field label="Notes" help="Optional — visible to schedulers.">
+        <Textarea
+          rows={2}
+          placeholder="e.g. Covering for Sam"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+        />
+      </Field>
+      {create.isError && (
+        <p className="text-sm text-danger">
+          Couldn't schedule the shift: {String(create.error)}
+        </p>
+      )}
+      <ModalFooter>
+        <Button type="button" variant="ghost" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={create.isPending}>
+          {create.isPending ? "Scheduling…" : "Schedule shift"}
+        </Button>
+      </ModalFooter>
+    </form>
   );
 }
 
