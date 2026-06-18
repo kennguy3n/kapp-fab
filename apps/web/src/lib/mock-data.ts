@@ -33,7 +33,10 @@ import type {
   InventoryItem,
   InventoryValuationReport,
   InventoryWarehouse,
+  Interview,
+  JobApplication,
   JobCard,
+  JobOpening,
   JournalEntry,
   KRecord,
   KType,
@@ -1628,6 +1631,63 @@ export const CYCLE_COUNT_LINES_BY_SESSION: Record<string, CycleCountLine[]> = {
     ccLine(CC_IDS.s0010, "0010-filter", MFG_ITEMS.filter, "40", "41"),
   ],
 };
+
+// --- Recruitment: job openings, applications, interviews -------------
+//
+// A small but believable hiring pipeline: open / draft / on-hold /
+// closed requisitions, candidates spread across the application
+// lifecycle, and a couple of scheduled + completed interviews.
+
+const JO_IDS = {
+  backend: uuid("hr.job_opening:backend"),
+  ae: uuid("hr.job_opening:account-exec"),
+  designer: uuid("hr.job_opening:product-designer"),
+  devops: uuid("hr.job_opening:devops"),
+  opsAnalyst: uuid("hr.job_opening:ops-analyst"),
+  techWriter: uuid("hr.job_opening:tech-writer"),
+};
+
+export const JOB_OPENINGS: JobOpening[] = [
+  { id: JO_IDS.backend, tenant_id: DEMO_TENANT_ID, title: "Senior Backend Engineer", department: "Engineering", description: "Own core services across the Kapp kernel — Go APIs, workers and the record engine.", requirements: "5+ years building production Go services; strong SQL; distributed systems.", employment_type: "full_time", location: "San Francisco / Remote", salary_range_min: "150000", salary_range_max: "190000", currency: DEMO_BASE_CURRENCY, status: "open", hiring_manager_id: EMP_IDS.vpEng, max_positions: 2, positions_filled: 0, published_at: LAST_WEEK_ISO, closes_at: toCalendarISO(addDays(TODAY, 21)), created_by: "system", created_at: LAST_WEEK_ISO, updated_at: NOW_ISO },
+  { id: JO_IDS.ae, tenant_id: DEMO_TENANT_ID, title: "Account Executive", department: "Sales", description: "Drive net-new revenue across mid-market accounts in the East region.", requirements: "3+ years B2B SaaS closing experience; track record of quota attainment.", employment_type: "full_time", location: "New York, NY", salary_range_min: "85000", salary_range_max: "115000", currency: DEMO_BASE_CURRENCY, status: "open", hiring_manager_id: EMP_IDS.mgrSales, max_positions: 3, positions_filled: 1, published_at: LAST_MONTH_ISO, closes_at: toCalendarISO(addDays(TODAY, 10)), created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { id: JO_IDS.designer, tenant_id: DEMO_TENANT_ID, title: "Product Designer", department: "Product", description: "Shape the end-to-end experience of the KChat UI across all 16 modules.", requirements: "Portfolio of shipped B2B products; fluency in Figma and design systems.", employment_type: "full_time", location: "Remote (US)", salary_range_min: "115000", salary_range_max: "145000", currency: DEMO_BASE_CURRENCY, status: "open", hiring_manager_id: EMP_IDS.vpEng, max_positions: 1, positions_filled: 0, published_at: LAST_WEEK_ISO, closes_at: null, created_by: "system", created_at: LAST_WEEK_ISO, updated_at: NOW_ISO },
+  { id: JO_IDS.devops, tenant_id: DEMO_TENANT_ID, title: "DevOps Engineer", department: "Engineering", description: "Own CI/CD, observability and the release pipeline.", requirements: "Kubernetes, Terraform, GitHub Actions; on-call maturity.", employment_type: "full_time", location: "Remote (US)", salary_range_min: "135000", salary_range_max: "165000", currency: DEMO_BASE_CURRENCY, status: "draft", hiring_manager_id: EMP_IDS.mgrPlatform, max_positions: 1, positions_filled: 0, published_at: null, closes_at: null, created_by: "system", created_at: NOW_ISO, updated_at: NOW_ISO },
+  { id: JO_IDS.opsAnalyst, tenant_id: DEMO_TENANT_ID, title: "Operations Analyst", department: "Operations", description: "Support demand planning and supplier performance reporting.", requirements: "Strong Excel/SQL; supply-chain exposure a plus.", employment_type: "full_time", location: "Austin, TX", salary_range_min: "72000", salary_range_max: "92000", currency: DEMO_BASE_CURRENCY, status: "on_hold", hiring_manager_id: EMP_IDS.vpOps, max_positions: 1, positions_filled: 0, published_at: LAST_MONTH_ISO, closes_at: null, created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { id: JO_IDS.techWriter, tenant_id: DEMO_TENANT_ID, title: "Technical Writer (Contract)", department: "Engineering", description: "Document the public API and onboarding guides.", requirements: "Developer-docs experience; comfortable reading Go + TypeScript.", employment_type: "contract", location: "Remote", salary_range_min: "60", salary_range_max: "85", currency: DEMO_BASE_CURRENCY, status: "filled", hiring_manager_id: EMP_IDS.vpEng, max_positions: 1, positions_filled: 1, published_at: LAST_MONTH_ISO, closes_at: LAST_WEEK_ISO, created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+];
+
+const APP_IDS = {
+  maria: uuid("hr.application:maria"),
+  david: uuid("hr.application:david"),
+  priya: uuid("hr.application:priya"),
+  james: uuid("hr.application:james"),
+  sofia: uuid("hr.application:sofia"),
+  liam: uuid("hr.application:liam"),
+  aisha: uuid("hr.application:aisha"),
+  tom: uuid("hr.application:tom"),
+};
+
+function daysAgoIso(n: number): string {
+  return new Date(TODAY.getTime() - n * 86400_000).toISOString();
+}
+
+export const JOB_APPLICATIONS: JobApplication[] = [
+  { id: APP_IDS.maria, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.backend, applicant_name: "Maria Gonzalez", applicant_email: "maria.gonzalez@example.com", phone: "+1-415-555-0142", resume_file_id: null, cover_letter: "Excited about the record-engine work.", source: "linkedin", referrer_employee_id: null, status: "interview", rating: 4, notes: "Strong systems background; advancing to onsite.", hired_employee_id: null, applied_at: daysAgoIso(9), created_by: "system", created_at: daysAgoIso(9), updated_at: daysAgoIso(2) },
+  { id: APP_IDS.david, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.backend, applicant_name: "David Chen", applicant_email: "david.chen@example.com", phone: "+1-408-555-0119", resume_file_id: null, cover_letter: undefined, source: "referral", referrer_employee_id: EMP_IDS.ic1, status: "screening", rating: null, notes: "Referred by platform team.", hired_employee_id: null, applied_at: daysAgoIso(6), created_by: "system", created_at: daysAgoIso(6), updated_at: daysAgoIso(3) },
+  { id: APP_IDS.priya, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.backend, applicant_name: "Priya Nair", applicant_email: "priya.nair@example.com", phone: undefined, resume_file_id: null, cover_letter: undefined, source: "website", referrer_employee_id: null, status: "applied", rating: null, notes: undefined, hired_employee_id: null, applied_at: daysAgoIso(2), created_by: "system", created_at: daysAgoIso(2), updated_at: daysAgoIso(2) },
+  { id: APP_IDS.james, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.ae, applicant_name: "James Wilson", applicant_email: "james.wilson@example.com", phone: "+1-212-555-0177", resume_file_id: null, cover_letter: "Closed $4M in net-new last year.", source: "referral", referrer_employee_id: EMP_IDS.mgrSales, status: "hired", rating: 5, notes: "Accepted offer; starts next month.", hired_employee_id: EMP_IDS.ic2, applied_at: daysAgoIso(25), created_by: "system", created_at: daysAgoIso(25), updated_at: daysAgoIso(5) },
+  { id: APP_IDS.sofia, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.ae, applicant_name: "Sofia Rossi", applicant_email: "sofia.rossi@example.com", phone: "+1-646-555-0163", resume_file_id: null, cover_letter: undefined, source: "agency", referrer_employee_id: null, status: "offered", rating: 5, notes: "Offer sent; awaiting response.", hired_employee_id: null, applied_at: daysAgoIso(14), created_by: "system", created_at: daysAgoIso(14), updated_at: daysAgoIso(1) },
+  { id: APP_IDS.liam, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.designer, applicant_name: "Liam O'Brien", applicant_email: "liam.obrien@example.com", phone: undefined, resume_file_id: null, cover_letter: "Portfolio attached.", source: "website", referrer_employee_id: null, status: "shortlisted", rating: 4, notes: "Strong portfolio; schedule design exercise.", hired_employee_id: null, applied_at: daysAgoIso(8), created_by: "system", created_at: daysAgoIso(8), updated_at: daysAgoIso(4) },
+  { id: APP_IDS.aisha, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.designer, applicant_name: "Aisha Khan", applicant_email: "aisha.khan@example.com", phone: undefined, resume_file_id: null, cover_letter: undefined, source: "website", referrer_employee_id: null, status: "rejected", rating: 2, notes: "Not enough B2B depth.", hired_employee_id: null, applied_at: daysAgoIso(12), created_by: "system", created_at: daysAgoIso(12), updated_at: daysAgoIso(7) },
+  { id: APP_IDS.tom, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.opsAnalyst, applicant_name: "Tom Becker", applicant_email: "tom.becker@example.com", phone: "+1-512-555-0150", resume_file_id: null, cover_letter: undefined, source: "website", referrer_employee_id: null, status: "applied", rating: null, notes: undefined, hired_employee_id: null, applied_at: daysAgoIso(3), created_by: "system", created_at: daysAgoIso(3), updated_at: daysAgoIso(3) },
+];
+
+export const INTERVIEWS: Interview[] = [
+  { id: uuid("hr.interview:maria-phone"), tenant_id: DEMO_TENANT_ID, application_id: APP_IDS.maria, interviewer_id: EMP_IDS.mgrPlatform, interview_type: "phone", scheduled_at: daysAgoIso(5), duration_minutes: 30, location: undefined, meeting_link: "https://meet.example.com/maria-screen", status: "completed", rating: 4, feedback: "Solid phone screen; good communication.", recommendation: "yes", created_by: "system", created_at: daysAgoIso(6), updated_at: daysAgoIso(5) },
+  { id: uuid("hr.interview:maria-tech"), tenant_id: DEMO_TENANT_ID, application_id: APP_IDS.maria, interviewer_id: EMP_IDS.vpEng, interview_type: "technical", scheduled_at: toCalendarISO(addDays(TODAY, 2)), duration_minutes: 60, location: undefined, meeting_link: "https://meet.example.com/maria-tech", status: "scheduled", rating: null, feedback: undefined, recommendation: undefined, created_by: "system", created_at: daysAgoIso(2), updated_at: daysAgoIso(2) },
+  { id: uuid("hr.interview:sofia-panel"), tenant_id: DEMO_TENANT_ID, application_id: APP_IDS.sofia, interviewer_id: EMP_IDS.mgrSales, interview_type: "panel", scheduled_at: daysAgoIso(3), duration_minutes: 45, location: "NYC Office — Room 4B", meeting_link: undefined, status: "completed", rating: 5, feedback: "Excellent discovery skills; strong close.", recommendation: "strong_yes", created_by: "system", created_at: daysAgoIso(6), updated_at: daysAgoIso(3) },
+  { id: uuid("hr.interview:liam-portfolio"), tenant_id: DEMO_TENANT_ID, application_id: APP_IDS.liam, interviewer_id: EMP_IDS.vpEng, interview_type: "video", scheduled_at: toCalendarISO(addDays(TODAY, 4)), duration_minutes: 45, location: undefined, meeting_link: "https://meet.example.com/liam-portfolio", status: "scheduled", rating: null, feedback: undefined, recommendation: undefined, created_by: "system", created_at: daysAgoIso(1), updated_at: daysAgoIso(1) },
+];
 
 function jl(account_code: string, debit: string, credit: string, memo = "", currency = "USD") {
   return { account_code, debit, credit, memo, currency };

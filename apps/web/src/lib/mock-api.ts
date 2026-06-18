@@ -46,7 +46,15 @@ import type {
   InventoryItem,
   InventoryValuationReport,
   InventoryWarehouse,
+  Interview,
+  CompleteInterviewInput,
+  CreateInterviewInput,
+  JobApplication,
+  CreateApplicationInput,
+  UpdateApplicationInput,
   JobCard,
+  JobOpening,
+  JobOpeningInput,
   JournalEntry,
   KRecord,
   KType,
@@ -108,6 +116,7 @@ import {
   CYCLE_COUNT_LINES_BY_SESSION,
   CYCLE_COUNT_SESSIONS,
   DASHBOARD_SUMMARY,
+  DEMO_BASE_CURRENCY,
   DEMO_TENANT_ID,
   EXCHANGE_RATES,
   FINANCE_ACCOUNTS,
@@ -118,7 +127,10 @@ import {
   INVENTORY_ITEMS,
   INVENTORY_VALUATION,
   INVENTORY_WAREHOUSES,
+  JOB_APPLICATIONS,
   JOB_CARDS_BY_WO,
+  JOB_OPENINGS,
+  INTERVIEWS,
   JOURNAL_ENTRIES,
   LANDED_COST_CHARGES_BY_VOUCHER,
   LANDED_COST_TARGETS_BY_VOUCHER,
@@ -236,6 +248,13 @@ const cycleCountLines: Record<string, CycleCountLine[]> = {};
 for (const [k, v] of Object.entries(CYCLE_COUNT_LINES_BY_SESSION)) {
   cycleCountLines[k] = v.map((l) => ({ ...l }));
 }
+
+// Mutable recruitment demo state so create + lifecycle transitions
+// (publish / close, advance / reject, schedule / complete interview)
+// round-trip in the UI. Cloned from the fixtures so a reload resets.
+const jobOpenings: JobOpening[] = JOB_OPENINGS.map((o) => ({ ...o }));
+const applications: JobApplication[] = JOB_APPLICATIONS.map((a) => ({ ...a }));
+const interviews: Interview[] = INTERVIEWS.map((i) => ({ ...i }));
 
 // Mutable marketplace demo state so install / uninstall / upgrade /
 // rate actions round-trip inside the UI. Cloned from the fixtures so
@@ -1513,6 +1532,201 @@ const handlers = {
       s.updated_at = nowIso();
     }
     return delay<CycleCountSession>({ ...(s ?? cycleCountSessions[0]) });
+  },
+
+  // --- Recruitment: job openings -------------------------------------
+  listJobOpenings: (filter?: { status?: string; department?: string }) => {
+    const rows = jobOpenings.filter(
+      (o) =>
+        (!filter?.status || o.status === filter.status) &&
+        (!filter?.department || o.department === filter.department),
+    );
+    return delay<JobOpening[]>(rows.map((o) => ({ ...o })));
+  },
+  getJobOpening: (id: string) => {
+    const o = jobOpenings.find((x) => x.id === id) ?? jobOpenings[0];
+    return delay<JobOpening>({ ...o });
+  },
+  createJobOpening: (input: JobOpeningInput) => {
+    const o: JobOpening = {
+      id: nextId(),
+      tenant_id: DEMO_TENANT_ID,
+      title: input.title,
+      department: input.department,
+      description: input.description,
+      requirements: input.requirements,
+      employment_type: input.employment_type ?? "full_time",
+      location: input.location,
+      salary_range_min: input.salary_range_min ?? null,
+      salary_range_max: input.salary_range_max ?? null,
+      currency: input.currency ?? DEMO_BASE_CURRENCY,
+      status: "draft",
+      hiring_manager_id: input.hiring_manager_id ?? null,
+      max_positions: input.max_positions ?? 1,
+      positions_filled: 0,
+      published_at: null,
+      closes_at: input.closes_at ?? null,
+      created_by: "demo",
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    jobOpenings.unshift(o);
+    return delay<JobOpening>({ ...o });
+  },
+  updateJobOpening: (id: string, input: JobOpeningInput) => {
+    const o = jobOpenings.find((x) => x.id === id);
+    if (o) {
+      o.title = input.title;
+      o.department = input.department;
+      o.description = input.description;
+      o.requirements = input.requirements;
+      if (input.employment_type) o.employment_type = input.employment_type;
+      o.location = input.location;
+      o.salary_range_min = input.salary_range_min ?? null;
+      o.salary_range_max = input.salary_range_max ?? null;
+      if (input.currency) o.currency = input.currency;
+      o.hiring_manager_id = input.hiring_manager_id ?? null;
+      if (input.max_positions !== undefined) o.max_positions = input.max_positions;
+      o.closes_at = input.closes_at ?? null;
+      o.updated_at = nowIso();
+    }
+    return delay<JobOpening>({ ...(o ?? jobOpenings[0]) });
+  },
+  publishJobOpening: (id: string) => {
+    const o = jobOpenings.find((x) => x.id === id);
+    if (o) {
+      o.status = "open";
+      o.published_at = nowIso();
+      o.updated_at = nowIso();
+    }
+    return delay<JobOpening>({ ...(o ?? jobOpenings[0]) });
+  },
+  closeJobOpening: (id: string) => {
+    const o = jobOpenings.find((x) => x.id === id);
+    if (o) {
+      o.status = "closed";
+      o.updated_at = nowIso();
+    }
+    return delay<JobOpening>({ ...(o ?? jobOpenings[0]) });
+  },
+
+  // --- Recruitment: applications -------------------------------------
+  listApplications: (filter?: {
+    job_opening_id?: string;
+    status?: string;
+  }) => {
+    const rows = applications.filter(
+      (a) =>
+        (!filter?.job_opening_id ||
+          a.job_opening_id === filter.job_opening_id) &&
+        (!filter?.status || a.status === filter.status),
+    );
+    return delay<JobApplication[]>(rows.map((a) => ({ ...a })));
+  },
+  getApplication: (id: string) => {
+    const a = applications.find((x) => x.id === id) ?? applications[0];
+    return delay<JobApplication>({ ...a });
+  },
+  createApplication: (input: CreateApplicationInput) => {
+    const a: JobApplication = {
+      id: nextId(),
+      tenant_id: DEMO_TENANT_ID,
+      job_opening_id: input.job_opening_id,
+      applicant_name: input.applicant_name,
+      applicant_email: input.applicant_email,
+      phone: input.phone,
+      resume_file_id: input.resume_file_id ?? null,
+      cover_letter: input.cover_letter,
+      source: input.source ?? "website",
+      referrer_employee_id: input.referrer_employee_id ?? null,
+      status: "applied",
+      rating: input.rating ?? null,
+      notes: input.notes,
+      hired_employee_id: null,
+      applied_at: nowIso(),
+      created_by: "demo",
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    applications.unshift(a);
+    return delay<JobApplication>({ ...a });
+  },
+  updateApplication: (id: string, input: UpdateApplicationInput) => {
+    const a = applications.find((x) => x.id === id);
+    if (a) {
+      a.applicant_name = input.applicant_name;
+      a.applicant_email = input.applicant_email;
+      a.phone = input.phone;
+      a.resume_file_id = input.resume_file_id ?? null;
+      a.cover_letter = input.cover_letter;
+      if (input.source) a.source = input.source;
+      a.referrer_employee_id = input.referrer_employee_id ?? null;
+      a.rating = input.rating ?? null;
+      a.notes = input.notes;
+      a.updated_at = nowIso();
+    }
+    return delay<JobApplication>({ ...(a ?? applications[0]) });
+  },
+  advanceApplication: (id: string, status: string) => {
+    const a = applications.find((x) => x.id === id);
+    if (a) {
+      a.status = status as JobApplication["status"];
+      a.updated_at = nowIso();
+    }
+    return delay<JobApplication>({ ...(a ?? applications[0]) });
+  },
+  rejectApplication: (id: string, reason?: string) => {
+    const a = applications.find((x) => x.id === id);
+    if (a) {
+      a.status = "rejected";
+      if (reason) a.notes = reason;
+      a.updated_at = nowIso();
+    }
+    return delay<JobApplication>({ ...(a ?? applications[0]) });
+  },
+
+  // --- Recruitment: interviews ---------------------------------------
+  listInterviews: (filter?: { application_id?: string; status?: string }) => {
+    const rows = interviews.filter(
+      (i) =>
+        (!filter?.application_id ||
+          i.application_id === filter.application_id) &&
+        (!filter?.status || i.status === filter.status),
+    );
+    return delay<Interview[]>(rows.map((i) => ({ ...i })));
+  },
+  createInterview: (input: CreateInterviewInput) => {
+    const i: Interview = {
+      id: nextId(),
+      tenant_id: DEMO_TENANT_ID,
+      application_id: input.application_id,
+      interviewer_id: input.interviewer_id ?? null,
+      interview_type: input.interview_type ?? "video",
+      scheduled_at: input.scheduled_at ?? null,
+      duration_minutes: input.duration_minutes ?? 45,
+      location: input.location,
+      meeting_link: input.meeting_link,
+      status: "scheduled",
+      rating: null,
+      feedback: undefined,
+      recommendation: undefined,
+      created_by: "demo",
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    interviews.unshift(i);
+    return delay<Interview>({ ...i });
+  },
+  completeInterview: (id: string, input: CompleteInterviewInput) => {
+    const i = interviews.find((x) => x.id === id);
+    if (i) {
+      i.status = "completed";
+      i.rating = input.rating ?? null;
+      i.feedback = input.feedback;
+      i.recommendation = input.recommendation;
+      i.updated_at = nowIso();
+    }
+    return delay<Interview>({ ...(i ?? interviews[0]) });
   },
 
   // --- POS ------------------------------------------------------------
