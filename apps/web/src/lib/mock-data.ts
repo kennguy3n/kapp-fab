@@ -10,6 +10,11 @@ import type {
   AuditEntry,
   BankFeedRule,
   BankFeedSuggestion,
+  Budget,
+  BudgetLine,
+  BudgetVarianceAccountType,
+  BudgetVarianceReport,
+  BudgetVarianceRow,
   DashboardSummary,
   ExchangeRate,
   FinanceAccount,
@@ -1059,6 +1064,126 @@ export const FINANCE_ACCOUNTS: FinanceAccount[] = ACCOUNT_SEEDS.map((s) => ({
   parent_code: s.parent,
   active: true,
 }));
+
+// --- Finance: budgets (Phase N5) -------------------------------------
+
+const BUDGET_IDS = {
+  ops2026: uuid("finance.budget:ops-2026"),
+  sales2026: uuid("finance.budget:sales-2026"),
+  ops2025: uuid("finance.budget:ops-2025"),
+  draft2027: uuid("finance.budget:draft-2027"),
+};
+
+export const BUDGETS: Budget[] = [
+  { tenant_id: DEMO_TENANT_ID, id: BUDGET_IDS.ops2026, name: "FY2026 Operating Plan", fiscal_year: 2026, status: "active", cost_center: "ENG", notes: "Company-wide operating budget for the 2026 fiscal year.", variance_threshold: "10", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BUDGET_IDS.sales2026, name: "FY2026 Sales & Marketing", fiscal_year: 2026, status: "active", cost_center: "SALES", notes: "Go-to-market and demand-generation spend plan.", variance_threshold: "15", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BUDGET_IDS.ops2025, name: "FY2025 Operating Plan", fiscal_year: 2025, status: "closed", cost_center: "ENG", notes: "Prior-year plan, closed for reporting.", variance_threshold: "10", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BUDGET_IDS.draft2027, name: "FY2027 Draft Plan", fiscal_year: 2027, status: "draft", notes: "Early draft pending leadership review.", variance_threshold: null, created_by: "system", created_at: NOW_ISO, updated_at: NOW_ISO },
+];
+
+function budgetLine(budgetId: string, seed: string, account_code: string, cost_center: string | undefined, monthly: number): BudgetLine {
+  return {
+    tenant_id: DEMO_TENANT_ID,
+    id: uuid(`finance.budget_line:${seed}`),
+    budget_id: budgetId,
+    account_code,
+    cost_center,
+    months: Array(12).fill(monthly.toFixed(2)),
+    annual_total: (monthly * 12).toFixed(2),
+    created_at: LAST_MONTH_ISO,
+    updated_at: NOW_ISO,
+  };
+}
+
+export const BUDGET_LINES_BY_ID: Record<string, BudgetLine[]> = {
+  [BUDGET_IDS.ops2026]: [
+    budgetLine(BUDGET_IDS.ops2026, "ops26-salaries", "6010", "ENG", 62000),
+    budgetLine(BUDGET_IDS.ops2026, "ops26-rent", "6020", undefined, 14000),
+    budgetLine(BUDGET_IDS.ops2026, "ops26-marketing", "6030", "SALES", 9500),
+    budgetLine(BUDGET_IDS.ops2026, "ops26-cogs", "5000", undefined, 38000),
+    budgetLine(BUDGET_IDS.ops2026, "ops26-revenue", "4010", "SALES", 165000),
+  ],
+  [BUDGET_IDS.sales2026]: [
+    budgetLine(BUDGET_IDS.sales2026, "sales26-marketing", "6030", "SALES", 22000),
+    budgetLine(BUDGET_IDS.sales2026, "sales26-salaries", "6010", "SALES", 41000),
+    budgetLine(BUDGET_IDS.sales2026, "sales26-revenue", "4020", "SALES", 88000),
+  ],
+  [BUDGET_IDS.ops2025]: [
+    budgetLine(BUDGET_IDS.ops2025, "ops25-salaries", "6010", "ENG", 56000),
+    budgetLine(BUDGET_IDS.ops2025, "ops25-rent", "6020", undefined, 13000),
+    budgetLine(BUDGET_IDS.ops2025, "ops25-revenue", "4010", "SALES", 150000),
+  ],
+  [BUDGET_IDS.draft2027]: [],
+};
+
+// Deterministic per-account "actual vs plan" factors so the variance
+// dashboard renders believable favourable / unfavourable rows.
+const VARIANCE_FACTORS: Record<string, number> = {
+  "6010": 1.04, // salaries slightly over plan
+  "6020": 0.98, // rent slightly under plan
+  "6030": 1.18, // marketing over plan
+  "5000": 0.93, // COGS under plan
+  "4010": 1.07, // product revenue over plan
+  "4020": 0.95, // service revenue under plan
+};
+
+// buildBudgetVariance derives a believable plan-vs-actual report from a
+// budget's lines. The backend sign-normalises so a positive variance
+// always means actual exceeded plan; favourability then depends on the
+// account's chart-of-accounts type (revenue over = good, expense over =
+// bad).
+export function buildBudgetVariance(
+  budget: Budget,
+  lines: BudgetLine[]
+): BudgetVarianceReport {
+  let totalBudgeted = 0;
+  let totalActual = 0;
+  let totalFav = 0;
+  let totalUnfav = 0;
+  const rows: BudgetVarianceRow[] = lines.map((l) => {
+    const acct = FINANCE_ACCOUNTS.find((a) => a.code === l.account_code);
+    const accountType = (acct?.type ?? "") as BudgetVarianceAccountType;
+    const budgeted = Number(l.annual_total);
+    const factor = VARIANCE_FACTORS[l.account_code] ?? 1;
+    const actual = Math.round(budgeted * factor * 100) / 100;
+    const variance = Math.round((actual - budgeted) * 100) / 100;
+    const variancePct = budgeted ? variance / budgeted : 0;
+    const favourable =
+      accountType === "revenue" ? variance >= 0 : variance <= 0;
+    totalBudgeted += budgeted;
+    totalActual += actual;
+    if (favourable) totalFav += Math.abs(variance);
+    else totalUnfav += Math.abs(variance);
+    return {
+      budget_id: budget.id,
+      account_code: l.account_code,
+      account_name: acct?.name,
+      account_type: accountType,
+      cost_center: l.cost_center,
+      period: String(budget.fiscal_year),
+      budgeted: budgeted.toFixed(2),
+      actual: actual.toFixed(2),
+      variance: variance.toFixed(2),
+      variance_pct: variancePct.toFixed(4),
+      favourable,
+      unplanned: false,
+    };
+  });
+  return {
+    tenant_id: DEMO_TENANT_ID,
+    budget_id: budget.id,
+    budget_name: budget.name,
+    fiscal_year: budget.fiscal_year,
+    from: `${budget.fiscal_year}-01-01`,
+    to: `${budget.fiscal_year}-12-31`,
+    rows,
+    total_budgeted: totalBudgeted.toFixed(2),
+    total_actual: totalActual.toFixed(2),
+    total_variance: (totalActual - totalBudgeted).toFixed(2),
+    total_favourable_variance: totalFav.toFixed(2),
+    total_unfavourable_variance: totalUnfav.toFixed(2),
+  };
+}
 
 function jl(account_code: string, debit: string, credit: string, memo = "", currency = "USD") {
   return { account_code, debit, credit, memo, currency };

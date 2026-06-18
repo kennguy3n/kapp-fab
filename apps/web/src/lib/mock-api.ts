@@ -11,6 +11,12 @@ import type {
   Approval,
   ApiClient,
   AuditEntry,
+  Budget,
+  BudgetLine,
+  BudgetLineInput,
+  BudgetVarianceReport,
+  CreateBudgetInput,
+  UpdateBudgetInput,
   DashboardSummary,
   ExchangeRate,
   FinanceAccount,
@@ -69,6 +75,9 @@ import {
   AUDIT_LOG,
   BANK_FEED_RULES_FIXTURE,
   BANK_FEED_SUGGESTIONS_FIXTURE,
+  BUDGETS,
+  BUDGET_LINES_BY_ID,
+  buildBudgetVariance,
   DASHBOARD_SUMMARY,
   DEMO_TENANT_ID,
   EXCHANGE_RATES,
@@ -142,6 +151,15 @@ for (const [k, v] of Object.entries(RECORDS_BY_KTYPE)) {
 // demo: accepting marks the matched bank line and clears its candidate
 // suggestions, rejecting just clears the one candidate.
 let bankFeedSuggestions = [...BANK_FEED_SUGGESTIONS_FIXTURE];
+
+// Mutable budget demo state so create / update / delete + line edits
+// round-trip inside the UI. Cloned from the fixtures so reloading the
+// page resets to the seeded plans.
+const budgets: Budget[] = BUDGETS.map((b) => ({ ...b }));
+const budgetLines: Record<string, BudgetLine[]> = {};
+for (const [k, v] of Object.entries(BUDGET_LINES_BY_ID)) {
+  budgetLines[k] = v.map((l) => ({ ...l }));
+}
 
 // Mutable marketplace demo state so install / uninstall / upgrade /
 // rate actions round-trip inside the UI. Cloned from the fixtures so
@@ -457,6 +475,99 @@ const handlers = {
     list[idx] = { ...list[idx], data: { ...list[idx].data, status: "posted" }, updated_at: nowIso() };
     return delay<KRecord>(list[idx]);
   },
+  // --- Finance: budgets -----------------------------------------------
+  listBudgets: () => delay<Budget[]>([...budgets]),
+  getBudget: (id: string) =>
+    delay<Budget>(budgets.find((b) => b.id === id) ?? budgets[0]),
+  createBudget: (input: CreateBudgetInput) => {
+    const now = nowIso();
+    const b: Budget = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      name: input.name,
+      fiscal_year: input.fiscal_year,
+      status: input.status ?? "draft",
+      cost_center: input.cost_center,
+      notes: input.notes,
+      variance_threshold: input.variance_threshold ?? null,
+      created_by: "demo-user",
+      created_at: now,
+      updated_at: now,
+    };
+    budgets.unshift(b);
+    budgetLines[b.id] = [];
+    return delay<Budget>(b);
+  },
+  updateBudget: (id: string, input: UpdateBudgetInput) => {
+    const idx = budgets.findIndex((b) => b.id === id);
+    if (idx === -1) return delay<Budget>(budgets[0]);
+    budgets[idx] = {
+      ...budgets[idx],
+      name: input.name,
+      status: input.status,
+      cost_center: input.cost_center,
+      notes: input.notes,
+      variance_threshold: input.variance_threshold ?? null,
+      updated_at: nowIso(),
+    };
+    return delay<Budget>(budgets[idx]);
+  },
+  deleteBudget: (id: string) => {
+    const idx = budgets.findIndex((b) => b.id === id);
+    if (idx !== -1) budgets.splice(idx, 1);
+    delete budgetLines[id];
+    return delay<void>(undefined as unknown as void);
+  },
+  listBudgetLines: (budgetId: string) =>
+    delay<BudgetLine[]>([...(budgetLines[budgetId] ?? [])]),
+  upsertBudgetLine: (budgetId: string, input: BudgetLineInput) => {
+    const list = budgetLines[budgetId] ?? (budgetLines[budgetId] = []);
+    const months = input.months.slice(0, 12);
+    const annual = months
+      .reduce((sum, m) => sum + (Number(m) || 0), 0)
+      .toFixed(2);
+    const now = nowIso();
+    if (input.id) {
+      const idx = list.findIndex((l) => l.id === input.id);
+      if (idx !== -1) {
+        list[idx] = {
+          ...list[idx],
+          account_code: input.account_code,
+          cost_center: input.cost_center,
+          months,
+          annual_total: annual,
+          updated_at: now,
+        };
+        return delay<BudgetLine>(list[idx]);
+      }
+    }
+    const line: BudgetLine = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      budget_id: budgetId,
+      account_code: input.account_code,
+      cost_center: input.cost_center,
+      months,
+      annual_total: annual,
+      created_at: now,
+      updated_at: now,
+    };
+    list.push(line);
+    return delay<BudgetLine>(line);
+  },
+  deleteBudgetLine: (budgetId: string, lineId: string) => {
+    const list = budgetLines[budgetId] ?? [];
+    const idx = list.findIndex((l) => l.id === lineId);
+    if (idx !== -1) list.splice(idx, 1);
+    return delay<void>(undefined as unknown as void);
+  },
+  budgetVariance: (budgetId: string) => {
+    const b = budgets.find((x) => x.id === budgetId) ?? budgets[0];
+    return delay<BudgetVarianceReport>(
+      buildBudgetVariance(b, budgetLines[b.id] ?? []),
+    );
+  },
+
   listExchangeRates: () => delay<{ rates: ExchangeRate[] }>({ rates: [...EXCHANGE_RATES] }),
   upsertExchangeRate: (input: Partial<ExchangeRate>) => {
     const er: ExchangeRate = {
