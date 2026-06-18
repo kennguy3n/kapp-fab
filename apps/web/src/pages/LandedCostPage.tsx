@@ -342,8 +342,10 @@ function CreateVoucherForm(props: {
       setVoucherNumber("");
       setDescription("");
       setAllocationMethod("by_qty");
-      toast.success("Voucher created", { description: v.voucher_number });
-      props.onCreated(v);
+      if (v) {
+        toast.success("Voucher created", { description: v.voucher_number });
+        props.onCreated(v);
+      }
     },
   });
 

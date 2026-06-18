@@ -266,7 +266,7 @@ function NewSessionBuilder(props: {
       // Invalidate the list so the newly-created session shows up in
       // SessionListPanel without waiting for staleTime expiry.
       qc.invalidateQueries({ queryKey: ["cycle-counts", "list"] });
-      props.onCreated(s);
+      if (s) props.onCreated(s);
       setCode("");
       setDescription("");
       setWarehouseId("");

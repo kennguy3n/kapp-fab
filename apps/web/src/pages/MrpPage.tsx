@@ -275,7 +275,7 @@ function RunMrpForm({ items, onRan }: RunMrpFormProps) {
   const runMut = useMutation({
     mutationFn: (input: RunMRPInput) => api.runMRP(input),
     onSuccess: (run) => {
-      onRan(run);
+      if (run) onRan(run);
       setDemand([]);
       setNotes("");
     },
