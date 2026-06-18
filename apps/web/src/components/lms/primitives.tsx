@@ -252,9 +252,9 @@ export function BarChart({
   const ceiling = Math.max(1, max ?? Math.max(...data.map((d) => d.value)));
   return (
     <div className="flex flex-col gap-3">
-      {data.map((d) => (
+      {data.map((d, i) => (
         <div
-          key={d.label}
+          key={`${d.label}-${i}`}
           className="grid grid-cols-[8rem_1fr_3.5rem] items-center gap-3 sm:grid-cols-[10rem_1fr_4rem]"
         >
           <span className="truncate text-sm text-fg-muted" title={d.label}>

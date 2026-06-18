@@ -222,8 +222,20 @@ function CourseAnalyticsView({
     return l.status !== "completed" && (ratio < 0.5 || lowScore);
   });
 
-  const learnerName = (userId: string, index: number) =>
-    employeeNameById.get(userId) || `Learner ${index + 1}`;
+  // Assign a stable fallback number to each distinct learner by their order in
+  // the full per-learner list, so an unnamed learner shows the same "Learner N"
+  // in both the at-risk card and the full table.
+  const learnerNameByUser = new Map<string, string>();
+  a.per_learner.forEach((l) => {
+    if (learnerNameByUser.has(l.user_id)) return;
+    const known = employeeNameById.get(l.user_id);
+    learnerNameByUser.set(
+      l.user_id,
+      known || `Learner ${learnerNameByUser.size + 1}`,
+    );
+  });
+  const learnerName = (userId: string) =>
+    learnerNameByUser.get(userId) ?? "Learner";
 
   return (
     <div className="flex flex-col gap-6">
@@ -334,8 +346,8 @@ function CourseAnalyticsView({
             </div>
           ) : (
             <ul className="flex flex-col gap-3">
-              {atRisk.map((l, i) => {
-                const name = learnerName(l.user_id, i);
+              {atRisk.map((l) => {
+                const name = learnerName(l.user_id);
                 const ratio =
                   l.lessons_total > 0
                     ? (l.lessons_completed / l.lessons_total) * 100
@@ -399,8 +411,8 @@ function CourseAnalyticsView({
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {a.per_learner.map((l, i) => {
-                    const name = learnerName(l.user_id, i);
+                  {a.per_learner.map((l) => {
+                    const name = learnerName(l.user_id);
                     const ratio =
                       l.lessons_total > 0
                         ? (l.lessons_completed / l.lessons_total) * 100

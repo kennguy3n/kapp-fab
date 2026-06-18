@@ -72,13 +72,19 @@ function stringField(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-function numericField(value: unknown): number {
-  if (typeof value === "number") return value;
-  if (typeof value === "string") {
+/** Parse a numeric field, returning null when absent or unparseable. */
+function numericField(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
     const n = Number(value);
     if (!Number.isNaN(n)) return n;
   }
-  return Number.MAX_SAFE_INTEGER;
+  return null;
+}
+
+/** Sort key for an optional `order` field: missing values sort last. */
+function orderKey(value: unknown): number {
+  return numericField(value) ?? Number.MAX_SAFE_INTEGER;
 }
 
 interface LessonProgress {
@@ -141,7 +147,7 @@ function lessonStatusToken(p: LessonProgress): string {
 function orderedModulesForCourse(modules: KRecord[], courseId: string): KRecord[] {
   return modules
     .filter((m) => asData(m).course_id === courseId)
-    .sort((a, b) => numericField(asData(a).order) - numericField(asData(b).order));
+    .sort((a, b) => orderKey(asData(a).order) - orderKey(asData(b).order));
 }
 
 function groupLessonsByModule(lessons: KRecord[]): Map<string, KRecord[]> {
@@ -154,7 +160,7 @@ function groupLessonsByModule(lessons: KRecord[]): Map<string, KRecord[]> {
     byModule.set(moduleId, bucket);
   });
   byModule.forEach((list) =>
-    list.sort((a, b) => numericField(asData(a).order) - numericField(asData(b).order)),
+    list.sort((a, b) => orderKey(asData(a).order) - orderKey(asData(b).order)),
   );
   return byModule;
 }
@@ -168,37 +174,6 @@ function indexProgress(progress: KRecord[], enrollmentId: string): Map<string, K
     if (lessonId) byLesson.set(lessonId, p);
   });
   return byLesson;
-}
-
-function lessonsForCourse(
-  modules: KRecord[],
-  lessons: KRecord[],
-  courseId: string,
-): KRecord[] {
-  const byModule = groupLessonsByModule(lessons);
-  return orderedModulesForCourse(modules, courseId).flatMap(
-    (m) => byModule.get(m.id) ?? [],
-  );
-}
-
-function summarize(
-  enrollmentId: string,
-  courseId: string,
-  modules: KRecord[],
-  lessons: KRecord[],
-  progress: KRecord[],
-): { completed: number; total: number; percent: number } {
-  const courseLessons = lessonsForCourse(modules, lessons, courseId);
-  const byLesson = indexProgress(progress, enrollmentId);
-  const completed = courseLessons.filter(
-    (l) => lessonProgressOf(byLesson.get(l.id)).completed,
-  ).length;
-  const total = courseLessons.length;
-  return {
-    completed,
-    total,
-    percent: total > 0 ? pct((completed / total) * 100) : 0,
-  };
 }
 
 function useLearnerNames() {
@@ -248,6 +223,62 @@ function LearnerProgressIndex() {
     (coursesQ.data ?? []).forEach((c) => byId.set(c.id, c));
     return byId;
   }, [coursesQ.data]);
+
+  // Build all enrollment summaries in a single pass so the index grid stays
+  // O(enrollments + records) instead of recomputing the lesson/progress maps
+  // for every card on each render.
+  const summaries = useMemo(() => {
+    const modules = modulesQ.data ?? [];
+    const lessons = lessonsQ.data ?? [];
+    const progress = progressQ.data ?? [];
+
+    const lessonsByModule = groupLessonsByModule(lessons);
+    const lessonsByCourse = new Map<string, KRecord[]>();
+    const courseLessons = (courseId: string): KRecord[] => {
+      let list = lessonsByCourse.get(courseId);
+      if (!list) {
+        list = orderedModulesForCourse(modules, courseId).flatMap(
+          (m) => lessonsByModule.get(m.id) ?? [],
+        );
+        lessonsByCourse.set(courseId, list);
+      }
+      return list;
+    };
+
+    const progressByEnrollment = new Map<string, Map<string, KRecord>>();
+    progress.forEach((p) => {
+      const d = asData(p);
+      const enrollmentId = stringField(d.enrollment_id);
+      const lessonId = stringField(d.lesson_id);
+      if (!enrollmentId || !lessonId) return;
+      let byLesson = progressByEnrollment.get(enrollmentId);
+      if (!byLesson) {
+        byLesson = new Map<string, KRecord>();
+        progressByEnrollment.set(enrollmentId, byLesson);
+      }
+      byLesson.set(lessonId, p);
+    });
+
+    const byEnrollment = new Map<
+      string,
+      { completed: number; total: number; percent: number }
+    >();
+    (enrollmentsQ.data ?? []).forEach((e) => {
+      const courseId = stringField(asData(e).course_id);
+      const list = courseLessons(courseId);
+      const byLesson = progressByEnrollment.get(e.id);
+      const completed = list.filter(
+        (l) => lessonProgressOf(byLesson?.get(l.id)).completed,
+      ).length;
+      const total = list.length;
+      byEnrollment.set(e.id, {
+        completed,
+        total,
+        percent: total > 0 ? pct((completed / total) * 100) : 0,
+      });
+    });
+    return byEnrollment;
+  }, [enrollmentsQ.data, modulesQ.data, lessonsQ.data, progressQ.data]);
 
   const enrollments = enrollmentsQ.data ?? [];
 
@@ -300,13 +331,11 @@ function LearnerProgressIndex() {
             const learnerId = learnerIdOf(d);
             const learnerName = learnerNames.get(learnerId) || "Unassigned learner";
             const status = stringField(d.status);
-            const summary = summarize(
-              e.id,
-              courseId,
-              modulesQ.data ?? [],
-              lessonsQ.data ?? [],
-              progressQ.data ?? [],
-            );
+            const summary = summaries.get(e.id) ?? {
+              completed: 0,
+              total: 0,
+              percent: 0,
+            };
             return (
               <Card key={e.id} className="flex flex-col overflow-hidden">
                 <CoverArt seed={courseCode || courseTitle} icon={GraduationCap} />
@@ -557,7 +586,7 @@ function LearnerProgressDetail({ enrollmentId }: { enrollmentId: string }) {
                               </span>
                             </TableCell>
                             <TableCell className="text-fg-muted">
-                              {duration !== Number.MAX_SAFE_INTEGER ? (
+                              {duration != null ? (
                                 <span className="inline-flex items-center gap-1">
                                   <Clock className="h-3.5 w-3.5" aria-hidden />
                                   {fmt.number(duration)} min

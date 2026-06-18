@@ -43,6 +43,14 @@ import { LmsPageHeader } from "../components/lms/primitives";
  */
 type ThreadDraft = { title: string; body: string };
 
+/**
+ * Format an ISO timestamp as a localized relative time ("3 hours ago").
+ *
+ * Each tier (minutes, hours, days, …) is derived directly from `diffSec`
+ * rather than from the previously rounded tier. This is intentional: chaining
+ * (e.g. deriving hours from already-rounded minutes) would compound rounding
+ * error, whereas re-deriving from seconds keeps every boundary correct.
+ */
 function relativeFromNow(iso: string, fmt: ReturnType<typeof useFormatter>): string {
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "";
