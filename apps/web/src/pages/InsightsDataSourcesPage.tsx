@@ -1,4 +1,4 @@
-// Phase L deferred — Insights external data sources.
+// Insights — external data sources.
 //
 // CRUD page for `insights_data_sources`. Connection strings are
 // posted as plaintext over the wire (the API layer encrypts at rest)
@@ -19,9 +19,14 @@ import type {
   InsightsDataSourceInput,
 } from "@kapp/client";
 import {
+  Badge,
   Button,
   ConfirmDialog,
+  EmptyState,
+  Eyebrow,
+  Field,
   Input,
+  Skeleton,
   Table,
   TableBody,
   TableCell,
@@ -29,6 +34,7 @@ import {
   TableHeader,
   TableRow,
 } from "@kapp/ui";
+import { Database } from "lucide-react";
 import { api } from "../lib/api";
 
 const DEFAULT_INPUT: InsightsDataSourceInput = {
@@ -47,7 +53,9 @@ export function InsightsDataSourcesPage() {
   });
   const [draft, setDraft] = useState<InsightsDataSourceInput>(DEFAULT_INPUT);
   const [editing, setEditing] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<Record<string, string>>({});
+  const [testResult, setTestResult] = useState<
+    Record<string, { ok: boolean; message?: string }>
+  >({});
   const [deleteTarget, setDeleteTarget] = useState<{
     id: string;
     name: string;
@@ -79,71 +87,106 @@ export function InsightsDataSourcesPage() {
     onSuccess: (res, id) =>
       setTestResult((prev) => ({
         ...prev,
-        [id]: res.ok ? "ok" : "failed",
+        [id]: { ok: res.ok },
       })),
     onError: (err: unknown, id) =>
       setTestResult((prev) => ({
         ...prev,
-        [id]: err instanceof Error ? err.message : "failed",
+        [id]: {
+          ok: false,
+          message: err instanceof Error ? err.message : undefined,
+        },
       })),
   });
 
-  return (
-    <div className="p-6">
-      <h1 className="text-2xl font-semibold mb-4">Data sources</h1>
-      <p className="text-sm text-fg-muted mb-4">
-        Read-only Postgres connections that can be queried from saved
-        queries via <code>source: "external:&lt;id&gt;"</code>. Connection
-        strings are encrypted at rest with the per-tenant HKDF key.
-      </p>
+  const dataSources = list.data?.data_sources ?? [];
 
-      <section className="mb-8 border border-border rounded p-4">
-        <h2 className="text-lg font-medium mb-2">
-          {editing ? "Edit data source" : "Add data source"}
+  return (
+    <section className="flex flex-col gap-6">
+      <header>
+        <Eyebrow>Insights</Eyebrow>
+        <h1 className="mt-1 text-2xl font-semibold tracking-tight text-fg">
+          Data sources
+        </h1>
+        <p className="mt-1 max-w-prose text-sm text-fg-muted">
+          Connect a read-only PostgreSQL database so your saved queries can
+          report on data that lives outside Kapp. Credentials are encrypted and
+          never shown again once saved.
+        </p>
+      </header>
+
+      <section className="rounded-lg border border-border bg-bg-elevated p-5">
+        <h2 className="mb-4 text-base font-semibold text-fg">
+          {editing ? "Edit data source" : "Add a data source"}
         </h2>
         <form
           onSubmit={(e) => {
             e.preventDefault();
             upsert.mutate(draft);
           }}
-          className="grid grid-cols-1 md:grid-cols-2 gap-3"
+          className="flex flex-col gap-4"
         >
-          <Input
-            placeholder="Name"
-            value={draft.name}
-            onChange={(e) =>
-              setDraft({ ...draft, name: e.target.value })
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <Field label="Name" required>
+              <Input
+                placeholder="e.g. Warehouse reporting DB"
+                value={draft.name}
+                onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                required
+              />
+            </Field>
+            <Field label="Description" help="Optional — what this connects to.">
+              <Input
+                placeholder="e.g. Nightly export of order history"
+                value={draft.description ?? ""}
+                onChange={(e) =>
+                  setDraft({ ...draft, description: e.target.value })
+                }
+              />
+            </Field>
+          </div>
+          <Field
+            label="Connection string"
+            help={
+              editing
+                ? "Leave blank to keep the existing credential."
+                : "We encrypt this at rest and never display it again."
             }
-            required
-          />
-          <Input
-            placeholder="Description"
-            value={draft.description ?? ""}
-            onChange={(e) =>
-              setDraft({ ...draft, description: e.target.value })
-            }
-          />
-          <Input
-            className="col-span-full"
-            placeholder="postgres://user:password@host:5432/dbname"
-            value={draft.connection_string ?? ""}
-            onChange={(e) =>
-              setDraft({ ...draft, connection_string: e.target.value })
-            }
-          />
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={draft.enabled ?? true}
+          >
+            <Input
+              type="password"
+              autoComplete="off"
+              placeholder="postgres://user:password@host:5432/dbname"
+              value={draft.connection_string ?? ""}
               onChange={(e) =>
-                setDraft({ ...draft, enabled: e.target.checked })
+                setDraft({ ...draft, connection_string: e.target.value })
               }
             />
-            <span>Enabled</span>
+          </Field>
+          <label className="flex w-fit items-center gap-2 text-sm text-fg">
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border-border accent-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
+              checked={draft.enabled ?? true}
+              onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })}
+            />
+            <span>Enabled — available to saved queries</span>
           </label>
-          <div className="col-span-full flex gap-2">
+          {upsert.isError && (
+            <div
+              role="alert"
+              className="rounded-md border border-danger/40 bg-danger/5 px-3 py-2 text-sm text-danger"
+            >
+              {(upsert.error as Error).message}
+            </div>
+          )}
+          <div className="flex gap-2">
             <Button type="submit" disabled={upsert.isPending}>
-              {editing ? "Save changes" : "Create data source"}
+              {upsert.isPending
+                ? "Saving…"
+                : editing
+                  ? "Save changes"
+                  : "Add data source"}
             </Button>
             {editing && (
               <Button
@@ -158,91 +201,129 @@ export function InsightsDataSourcesPage() {
               </Button>
             )}
           </div>
-          {upsert.isError && (
-            <p className="col-span-full text-danger text-sm">
-              {(upsert.error as Error).message}
-            </p>
-          )}
         </form>
       </section>
 
-      <section>
-        <h2 className="text-lg font-medium mb-2">Existing data sources</h2>
+      <section className="flex flex-col gap-3">
+        <h2 className="text-base font-semibold text-fg">Connected sources</h2>
         {list.isLoading ? (
-          <p>Loading…</p>
-        ) : list.error ? (
-          <p className="text-danger">{(list.error as Error).message}</p>
+          <div className="flex flex-col gap-2" aria-hidden>
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-3/4" />
+          </div>
+        ) : list.isError ? (
+          <div className="rounded-lg border border-border p-6 text-center">
+            <p className="text-sm text-fg-muted">
+              We couldn’t load your data sources.
+            </p>
+            <Button
+              variant="outline"
+              className="mt-3"
+              onClick={() => list.refetch()}
+            >
+              Try again
+            </Button>
+          </div>
+        ) : dataSources.length === 0 ? (
+          <EmptyState
+            icon={<Database className="h-6 w-6" aria-hidden />}
+            title="No data sources yet"
+            description="Add a PostgreSQL connection above to query data that lives outside Kapp."
+          />
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Dialect</TableHead>
-                <TableHead>Enabled</TableHead>
-                <TableHead>Test</TableHead>
-                <TableHead>Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {(list.data?.data_sources ?? []).map(
-                (ds: InsightsDataSource) => (
-                  <TableRow key={ds.id}>
-                    <TableCell>{ds.name}</TableCell>
-                    <TableCell>{ds.dialect}</TableCell>
-                    <TableCell>{ds.enabled ? "yes" : "no"}</TableCell>
-                    <TableCell>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => test.mutate(ds.id)}
-                      >
-                        Test
-                      </Button>
-                      {testResult[ds.id] && (
-                        <span className="ml-2 text-xs text-fg-muted">
-                          {testResult[ds.id]}
-                        </span>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="mr-2"
-                        onClick={() => {
-                          setEditing(ds.id);
-                          setDraft({
-                            name: ds.name,
-                            description: ds.description ?? "",
-                            dialect: ds.dialect,
-                            // Connection string stays blank on edit;
-                            // server keeps the existing encrypted value
-                            // when the field is empty.
-                            connection_string: "",
-                            enabled: ds.enabled,
-                          });
-                        }}
-                      >
-                        Edit
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        onClick={() =>
-                          setDeleteTarget({ id: ds.id, name: ds.name })
-                        }
-                      >
-                        Delete
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                )
-              )}
-            </TableBody>
-          </Table>
+          <div className="overflow-x-auto rounded-lg border border-border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Connection</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {dataSources.map((ds: InsightsDataSource) => {
+                  const result = testResult[ds.id];
+                  return (
+                    <TableRow key={ds.id}>
+                      <TableCell>
+                        <div className="font-medium text-fg">{ds.name}</div>
+                        {ds.description && (
+                          <div className="text-xs text-fg-muted">
+                            {ds.description}
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-fg-muted">PostgreSQL</TableCell>
+                      <TableCell>
+                        <Badge variant={ds.enabled ? "success" : "neutral"}>
+                          {ds.enabled ? "Enabled" : "Disabled"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={test.isPending}
+                            onClick={() => test.mutate(ds.id)}
+                          >
+                            Test
+                          </Button>
+                          {result &&
+                            (result.ok ? (
+                              <Badge variant="success">Connected</Badge>
+                            ) : (
+                              <Badge variant="danger" title={result.message}>
+                                Failed
+                              </Badge>
+                            ))}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex justify-end gap-1">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              setEditing(ds.id);
+                              setDraft({
+                                name: ds.name,
+                                description: ds.description ?? "",
+                                dialect: ds.dialect,
+                                // Connection string stays blank on edit;
+                                // server keeps the existing encrypted value
+                                // when the field is empty.
+                                connection_string: "",
+                                enabled: ds.enabled,
+                              });
+                            }}
+                          >
+                            Edit
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="text-danger hover:text-danger"
+                            onClick={() =>
+                              setDeleteTarget({ id: ds.id, name: ds.name })
+                            }
+                          >
+                            Delete
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </div>
         )}
       </section>
 
@@ -252,9 +333,7 @@ export function InsightsDataSourcesPage() {
           if (!o && !remove.isPending) setDeleteTarget(null);
         }}
         title={
-          deleteTarget
-            ? `Delete ${deleteTarget.name}?`
-            : "Delete data source?"
+          deleteTarget ? `Delete ${deleteTarget.name}?` : "Delete data source?"
         }
         description="This removes the data source and its stored connection credential. Saved queries that reference it will stop running."
         confirmLabel="Delete"
@@ -264,6 +343,6 @@ export function InsightsDataSourcesPage() {
           if (deleteTarget) remove.mutate(deleteTarget.id);
         }}
       />
-    </div>
+    </section>
   );
 }

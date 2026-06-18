@@ -6,6 +6,9 @@ import {
   Button,
   Card,
   CardContent,
+  EmptyState,
+  Eyebrow,
+  Skeleton,
   Table,
   TableBody,
   TableCell,
@@ -75,16 +78,45 @@ export function MarketplaceExtensionDetailPage() {
   const [installVersionId, setInstallVersionId] = useState<string | null>(null);
 
   if (!extId) {
-    return <p>No extension specified.</p>;
+    return (
+      <EmptyState
+        title="No extension specified"
+        description="Open this page from the marketplace catalogue."
+      />
+    );
   }
   if (detail.isLoading) {
-    return <p>Loading…</p>;
+    return (
+      <section className="flex flex-col gap-4">
+        <Skeleton className="h-4 w-28" />
+        <div className="flex items-start gap-4">
+          <Skeleton className="h-16 w-16 rounded-xl" />
+          <div className="flex-1 space-y-2">
+            <Skeleton className="h-7 w-64" />
+            <Skeleton className="h-4 w-40" />
+          </div>
+        </div>
+        <Skeleton className="h-64 w-full rounded-lg" />
+      </section>
+    );
   }
   if (detail.isError) {
     return (
-      <p className="text-danger">
-        Failed to load extension: {(detail.error as Error).message}
-      </p>
+      <div className="rounded-lg border border-border p-8 text-center">
+        <p className="text-sm font-medium text-fg">
+          We couldn’t load this extension.
+        </p>
+        <p className="mt-1 text-xs text-fg-muted">
+          {(detail.error as Error).message}
+        </p>
+        <Button
+          variant="outline"
+          className="mt-3"
+          onClick={() => detail.refetch()}
+        >
+          Try again
+        </Button>
+      </div>
     );
   }
   const ext = detail.data!.extension;
@@ -121,15 +153,21 @@ export function MarketplaceExtensionDetailPage() {
   return (
     <section>
       <div className="mb-3">
-        <Link to="/marketplace" className="text-[13px] text-fg-muted">
+        <Link
+          to="/marketplace"
+          className="text-sm text-fg-muted transition-colors hover:text-fg"
+        >
           ← Marketplace
         </Link>
       </div>
       <header className="mb-4 flex items-start gap-4">
         <DetailIcon iconUrl={ext.icon_url} fallback={ext.display_name} />
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2.5">
-            <h1 className="m-0">{ext.display_name}</h1>
+          <Eyebrow>Marketplace</Eyebrow>
+          <div className="mt-1 flex flex-wrap items-center gap-2.5">
+            <h1 className="m-0 text-2xl font-semibold tracking-tight text-fg">
+              {ext.display_name}
+            </h1>
             <Badge variant={extensionStatusVariant(ext.status)}>
               {extensionStatusLabel(ext.status)}
             </Badge>
@@ -140,8 +178,7 @@ export function MarketplaceExtensionDetailPage() {
             )}
           </div>
           <div className="mt-1 text-sm text-fg-muted">
-            {ext.name}
-            {ext.author && ` · By ${ext.author}`}
+            {ext.author ? `By ${ext.author}` : ext.publisher}
             {ext.license && ` · ${ext.license}`}
           </div>
         </div>
@@ -274,7 +311,7 @@ function DetailIcon({
   return (
     <div
       aria-hidden
-      className="flex h-16 w-16 items-center justify-center rounded-xl bg-bg-muted text-[28px] font-bold text-fg"
+      className="flex h-16 w-16 shrink-0 items-center justify-center rounded-xl bg-bg-muted text-3xl font-bold text-fg"
     >
       {fallback.charAt(0).toUpperCase()}
     </div>
@@ -412,9 +449,9 @@ function VersionsTab({
               <TableCell>
                 <strong>v{v.version}</strong>
                 {ext.listed_version === v.version && (
-                  <span className="ml-1.5 text-[11px] text-success">
+                  <Badge variant="success" size="xs" className="ml-1.5">
                     DEFAULT
-                  </span>
+                  </Badge>
                 )}
               </TableCell>
               <TableCell>{formatTimestamp(v.published_at)}</TableCell>
@@ -519,9 +556,12 @@ function PermissionList({ items, empty }: { items: string[]; empty: string }) {
     return <p className="italic text-fg-subtle">{empty}</p>;
   }
   return (
-    <ul className="m-0 pl-[18px]">
+    <ul className="m-0 flex flex-wrap gap-2">
       {items.map((p) => (
-        <li key={p} className="font-mono text-[13px]">
+        <li
+          key={p}
+          className="rounded-md border border-border bg-bg-subtle px-2 py-1 font-mono text-xs text-fg"
+        >
           {p}
         </li>
       ))}

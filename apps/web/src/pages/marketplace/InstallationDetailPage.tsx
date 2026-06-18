@@ -12,7 +12,11 @@ import {
   CardContent,
   ConfirmDialog,
   ControlledModal,
+  EmptyState,
+  Eyebrow,
+  Skeleton,
 } from "@kapp/ui";
+import { PackageOpen } from "lucide-react";
 import { api } from "../../lib/api";
 import type {
   MarketplaceExtensionVersion,
@@ -308,13 +312,47 @@ export function InstallationDetailPage() {
     },
   });
 
-  if (!installId) return <p>No installation specified.</p>;
-  if (install.isLoading) return <p>Loading…</p>;
+  if (!installId) {
+    return (
+      <EmptyState
+        icon={<PackageOpen className="h-6 w-6" aria-hidden />}
+        title="No installation specified"
+        description="We couldn’t find an installation to show. Head back to your installed extensions."
+        action={
+          <Button onClick={() => navigate("/marketplace/installed")}>
+            Installed extensions
+          </Button>
+        }
+      />
+    );
+  }
+  if (install.isLoading) {
+    return (
+      <section className="flex flex-col gap-4">
+        <Skeleton className="h-4 w-40" />
+        <Skeleton className="h-8 w-64" />
+        <Skeleton className="h-40 w-full rounded-lg" />
+        <Skeleton className="h-40 w-full rounded-lg" />
+      </section>
+    );
+  }
   if (install.isError) {
     return (
-      <p className="text-danger">
-        Failed to load installation: {(install.error as Error).message}
-      </p>
+      <div className="rounded-lg border border-border p-8 text-center">
+        <p className="text-sm font-medium text-fg">
+          We couldn’t load this installation.
+        </p>
+        <p className="mt-1 text-xs text-fg-muted">
+          {(install.error as Error).message}
+        </p>
+        <Button
+          variant="outline"
+          className="mt-3"
+          onClick={() => install.refetch()}
+        >
+          Try again
+        </Button>
+      </div>
     );
   }
   const row = install.data!;
@@ -454,22 +492,31 @@ export function InstallationDetailPage() {
       <div className="mb-3">
         <Link
           to="/marketplace/installed"
-          className="text-[13px] text-fg-muted"
+          className="text-sm text-fg-muted transition-colors hover:text-fg"
         >
           ← Installed extensions
         </Link>
       </div>
 
-      <header className="mb-4 flex flex-wrap items-start gap-3">
+      <header className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <h1 className="m-0">
-            {extension ? extension.display_name : row.extension_id}
+          <Eyebrow>Marketplace</Eyebrow>
+          <h1 className="m-0 mt-1 text-2xl font-semibold tracking-tight text-fg">
+            {extension ? extension.display_name : "Installed extension"}
           </h1>
           <div className="mt-1 text-sm text-fg-muted">
             {extension && (
-              <Link to={`/marketplace/extensions/${extension.id}`}>
-                {extension.name}
-              </Link>
+              <>
+                {extension.author
+                  ? `By ${extension.author}`
+                  : extension.publisher}
+                <Link
+                  to={`/marketplace/extensions/${extension.id}`}
+                  className="ml-2 font-medium text-accent hover:underline"
+                >
+                  View in marketplace
+                </Link>
+              </>
             )}
             {installedVersion && (
               <span className="ml-2">· v{installedVersion.version}</span>
@@ -487,7 +534,7 @@ export function InstallationDetailPage() {
         <Card className="mb-4 border-danger/40">
           <CardContent className="p-3">
             <strong className="text-danger">Last failure:</strong>{" "}
-            <span className="font-mono text-[13px]">
+            <span className="font-mono text-sm">
               {row.failure_reason}
             </span>
           </CardContent>
@@ -498,10 +545,6 @@ export function InstallationDetailPage() {
         <Card>
           <CardContent className="p-4">
             <h3 className="mt-0">Installation details</h3>
-            <DetailRow
-              label="Install ID"
-              value={<code className="text-xs">{row.id}</code>}
-            />
             <DetailRow
               label="Installed at"
               value={formatTimestamp(row.installed_at)}
@@ -533,7 +576,7 @@ export function InstallationDetailPage() {
         <Card>
           <CardContent className="p-4">
             <h3 className="mt-0">Settings</h3>
-            <p className="mt-0 text-[13px] text-fg-muted">
+            <p className="mt-0 text-sm text-fg-muted">
               The extension's runtime reads these settings every time it
               dispatches a webhook or evaluates a hook. Changes go live
               immediately after saving.
@@ -554,12 +597,12 @@ export function InstallationDetailPage() {
               disabled={settingsMutation.isPending}
             />
             {settingsError && (
-              <p className="mt-2 text-[13px] text-danger">
+              <p className="mt-2 text-sm text-danger">
                 {settingsError}
               </p>
             )}
             {settingsMutation.isError && (
-              <p className="mt-2 text-[13px] text-danger">
+              <p className="mt-2 text-sm text-danger">
                 Save failed:{" "}
                 {(settingsMutation.error as Error).message}
               </p>
@@ -641,7 +684,7 @@ export function InstallationDetailPage() {
             <Card>
               <CardContent className="p-4">
                 <h3 className="mt-0">Upgrade</h3>
-                <p className="mt-0 text-[13px] text-fg-muted">
+                <p className="mt-0 text-sm text-fg-muted">
                   You are already on the latest approved version
                   (v{installedVersion.version}, published{" "}
                   {formatTimestamp(installedVersion.published_at)}). New
@@ -654,7 +697,7 @@ export function InstallationDetailPage() {
           <Card>
             <CardContent className="p-4">
               <h3 className="mt-0">Upgrade</h3>
-              <p className="mt-0 text-[13px] text-fg-muted">
+              <p className="mt-0 text-sm text-fg-muted">
                 A newer version is available. Upgrades preserve settings by
                 default; you'll be prompted to migrate the document if the
                 new version requires it.
@@ -699,10 +742,10 @@ export function InstallationDetailPage() {
         <Card>
           <CardContent className="p-4">
             <h3 className="mt-0 text-danger">Uninstall</h3>
-            <p className="text-[13px] text-fg-muted">
+            <p className="text-sm text-fg-muted">
               Removes the registry rows the extension installed and tears
               down its webhook subscriptions. The install row is preserved
-              for audit purposes (status flips to <code>uninstalled</code>).
+              for audit purposes (the status changes to “Uninstalled”).
               Reinstalling later starts fresh.
             </p>
             <Button
@@ -715,7 +758,7 @@ export function InstallationDetailPage() {
               Uninstall extension
             </Button>
             {uninstallMutation.isError && (
-              <p className="mt-2 text-[13px] text-danger">
+              <p className="mt-2 text-sm text-danger">
                 Uninstall failed:{" "}
                 {(uninstallMutation.error as Error).message}
               </p>
@@ -830,7 +873,7 @@ function UpgradeDialog({
           </div>
         )}
         {error && (
-          <p className="m-0 text-[13px] text-danger">
+          <p className="m-0 text-sm text-danger">
             Upgrade failed: {error.message}
           </p>
         )}

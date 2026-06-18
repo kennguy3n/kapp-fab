@@ -14,11 +14,11 @@ test.describe("insights query builder", () => {
   test("saves and runs a query, rendering the result table", async ({ page }) => {
     await page.goto("/insights/queries");
     await expect(
-      page.getByRole("heading", { name: "Insights — Query Builder" }),
+      page.getByRole("heading", { name: "Query Builder" }),
     ).toBeVisible();
 
     // Name + save (visual mode only requires a name).
-    await page.getByPlaceholder("query name").fill("Deals by stage");
+    await page.getByPlaceholder("Query name").fill("Deals by stage");
     await page.getByRole("button", { name: "Save", exact: true }).click();
 
     // After a successful create the Run action becomes available.
@@ -26,23 +26,24 @@ test.describe("insights query builder", () => {
     await expect(runButton).toBeVisible();
     await runButton.click();
 
-    // The mock run result is a "stage"/"count" table — assert the
-    // rendered result table surfaces those columns. Scope to
-    // columnheader roles since "stage"/"count" substrings also appear
+    // The mock run result is a stage/count table. The result table
+    // humanizes column keys for display (stage -> "Stage",
+    // count -> "Count"), so assert the humanized columnheaders.
+    // Scope to columnheader roles since these substrings also appear
     // in sidebar nav + the source dropdown.
     await expect(page.getByRole("table")).toBeVisible();
     await expect(
-      page.getByRole("columnheader", { name: "stage" }),
+      page.getByRole("columnheader", { name: "Stage", exact: true }),
     ).toBeVisible();
     await expect(
-      page.getByRole("columnheader", { name: "count" }),
+      page.getByRole("columnheader", { name: "Count", exact: true }),
     ).toBeVisible();
   });
 
   test("blocks running until the query has been saved", async ({ page }) => {
     await page.goto("/insights/queries");
     await expect(
-      page.getByRole("heading", { name: "Insights — Query Builder" }),
+      page.getByRole("heading", { name: "Query Builder" }),
     ).toBeVisible();
 
     // Before saving, the Run button isn't rendered (it appears only

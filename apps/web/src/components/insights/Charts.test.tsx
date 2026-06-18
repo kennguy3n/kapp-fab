@@ -57,10 +57,11 @@ describe("Viz dispatch + renderers", () => {
 
   it("renders a table with column headers and a cell per row", () => {
     render(<Viz vizType="table" result={RESULT} />);
-    expect(screen.getByRole("columnheader", { name: "stage" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "count" })).toBeInTheDocument();
-    expect(screen.getByRole("cell", { name: "open" })).toBeInTheDocument();
-    expect(screen.getByRole("cell", { name: "won" })).toBeInTheDocument();
+    // Headers are humanized field labels; enum-token cells are humanized too.
+    expect(screen.getByRole("columnheader", { name: "Stage" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Count" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "Open" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "Won" })).toBeInTheDocument();
   });
 
   it("falls back to a table for an unknown viz type via the default branch", () => {
@@ -90,14 +91,14 @@ describe("Viz dispatch + renderers", () => {
     );
     expect(screen.getByText("East")).toBeInTheDocument();
     expect(screen.getByText("West")).toBeInTheDocument();
-    expect(screen.getByText("open")).toBeInTheDocument();
+    expect(screen.getByText("Open")).toBeInTheDocument();
     // A pivot cell value.
     expect(screen.getByText("4")).toBeInTheDocument();
   });
 
   it("falls back to a plain table when a pivot viz has no pivot block", () => {
     render(<Viz vizType="pivot" result={RESULT} />);
-    expect(screen.getByRole("columnheader", { name: "stage" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Stage" })).toBeInTheDocument();
   });
 
   it.each(["bar", "line", "pie", "donut", "funnel"] as const)(

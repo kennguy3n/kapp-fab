@@ -261,7 +261,7 @@ function SettingsField({
   });
   return (
     <div>
-      <label htmlFor={id} className="mb-1 block text-[13px] font-medium">
+      <label htmlFor={id} className="mb-1 block text-sm font-medium">
         {label}
         {required && <span className="ml-1 text-danger">*</span>}
       </label>
@@ -336,6 +336,7 @@ function renderControl({
           checked={checked}
           disabled={disabled}
           onChange={(e) => onChange(e.target.checked)}
+          className="h-4 w-4 rounded border-border accent-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
         />
       );
     }
@@ -618,7 +619,7 @@ function NestedJsonEditor({
             setError((err as Error).message);
           }
         }}
-        className="w-full rounded-md border border-border bg-bg p-2 font-mono text-[13px] text-fg"
+        className="w-full rounded-md border border-border bg-bg p-2 font-mono text-sm text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
       />
       {error && (
         <p className="mt-1 text-xs text-danger">
@@ -772,7 +773,7 @@ function FreeformJsonEditor({
             setError((err as Error).message);
           }
         }}
-        className="w-full rounded-md border border-border bg-bg p-2 font-mono text-[13px] text-fg"
+        className="w-full rounded-md border border-border bg-bg p-2 font-mono text-sm text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
       />
       {error && (
         <p className="mt-1 text-xs text-danger">
