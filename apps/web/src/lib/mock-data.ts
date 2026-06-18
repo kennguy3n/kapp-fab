@@ -10,11 +10,15 @@ import type {
   AuditEntry,
   BankFeedRule,
   BankFeedSuggestion,
+  BOM,
+  BOMComponent,
   Budget,
   BudgetLine,
   BudgetVarianceAccountType,
   BudgetVarianceReport,
   BudgetVarianceRow,
+  CapacityDayLoad,
+  CapacityPlan,
   DashboardSummary,
   ExchangeRate,
   FinanceAccount,
@@ -27,20 +31,28 @@ import type {
   InventoryItem,
   InventoryValuationReport,
   InventoryWarehouse,
+  JobCard,
   JournalEntry,
   KRecord,
   KType,
   MarketplaceExtension,
   MarketplaceExtensionVersion,
   MarketplaceInstallation,
+  MRPDemandLine,
+  MRPPlannedOrder,
+  MRPRun,
   Plan,
   PlacementPolicy,
   RetentionPolicy,
+  Routing,
+  RoutingOperation,
   SLAPolicy,
   SavedReport,
   SavedView,
   SearchResponse,
   StockLevel,
+  SubcontractComponent,
+  SubcontractOrder,
   Tenant,
   TenantFeaturesResponse,
   TenantUsageHistoryResponse,
@@ -48,6 +60,9 @@ import type {
   TrialBalanceReport,
   Webhook,
   WebhookDelivery,
+  WorkCenter,
+  WorkCenterSchedule,
+  WorkOrder,
 } from "@kapp/client";
 import { toCalendarISO } from "./date";
 
@@ -1184,6 +1199,329 @@ export function buildBudgetVariance(
     total_unfavourable_variance: totalUnfav.toFixed(2),
   };
 }
+
+// --- Manufacturing: work centers, BOMs, routings, work orders, --------
+// job cards, capacity, MRP, subcontracting (Stream 2 / Batch-3) -------
+//
+// Finished goods and components are drawn from the shared inventory
+// catalogue above so item labels resolve everywhere a manufacturing
+// page joins to listInventoryItems().
+
+const MFG_ITEMS = {
+  widget: INVENTORY_ITEMS[0].id, // ACM-001 Acme Widget Mark II
+  gadget: INVENTORY_ITEMS[1].id, // ACM-002 Acme Gadget Pro
+  sprocket: INVENTORY_ITEMS[2].id, // ACM-003 Sprocket Assembly
+  bolt: INVENTORY_ITEMS[3].id, // ACM-004 Hex Bolt M8 (100-pack)
+  adapter: INVENTORY_ITEMS[4].id, // ACM-005 Power Adapter 12V
+  cable: INVENTORY_ITEMS[5].id, // ACM-006 Cable USB-C 2m
+  filter: INVENTORY_ITEMS[6].id, // ACM-007 Replacement Filter
+};
+
+const WC_IDS = {
+  assembly: uuid("mfg.work_center:assembly"),
+  machining: uuid("mfg.work_center:machining"),
+  finishing: uuid("mfg.work_center:finishing"),
+  packaging: uuid("mfg.work_center:packaging"),
+};
+
+export const WORK_CENTERS: WorkCenter[] = [
+  { tenant_id: DEMO_TENANT_ID, id: WC_IDS.assembly, name: "Assembly Line A", capacity_per_hour: "30", operating_hours_per_day: "8", efficiency_percent: "92", status: "active", notes: "Primary final-assembly line.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WC_IDS.machining, name: "CNC Machining Cell", capacity_per_hour: "12", operating_hours_per_day: "16", efficiency_percent: "88", status: "active", notes: "Two-shift CNC cell for machined parts.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WC_IDS.finishing, name: "Finishing & QA", capacity_per_hour: "20", operating_hours_per_day: "8", efficiency_percent: "95", status: "active", notes: "Surface finishing and final inspection.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WC_IDS.packaging, name: "Packaging Station", capacity_per_hour: "60", operating_hours_per_day: "8", efficiency_percent: "97", status: "maintenance", notes: "Offline for conveyor maintenance this week.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: NOW_ISO },
+];
+
+const BOM_IDS = {
+  widgetV2: uuid("mfg.bom:widget-v2"),
+  widgetV1: uuid("mfg.bom:widget-v1"),
+  gadgetV1: uuid("mfg.bom:gadget-v1"),
+  sprocketV1: uuid("mfg.bom:sprocket-v1"),
+};
+
+function bomComponent(bomId: string, componentItemId: string, qty: string, sort: number, scrap?: string): BOMComponent {
+  return { bom_id: bomId, component_item_id: componentItemId, qty, uom: "EA", scrap_percent: scrap ?? null, sort_order: sort };
+}
+
+export const BOMS: BOM[] = [
+  {
+    tenant_id: DEMO_TENANT_ID, id: BOM_IDS.widgetV2, item_id: MFG_ITEMS.widget, version: "v2", status: "active", output_qty: "1", uom: "EA",
+    notes: "Current production recipe for the Widget Mark II.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO,
+    components: [
+      bomComponent(BOM_IDS.widgetV2, MFG_ITEMS.sprocket, "2", 1),
+      bomComponent(BOM_IDS.widgetV2, MFG_ITEMS.bolt, "4", 2, "5"),
+      bomComponent(BOM_IDS.widgetV2, MFG_ITEMS.cable, "1", 3),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: BOM_IDS.widgetV1, item_id: MFG_ITEMS.widget, version: "v1", status: "obsolete", output_qty: "1", uom: "EA",
+    notes: "Superseded by v2; kept for historical orders.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO,
+    components: [
+      bomComponent(BOM_IDS.widgetV1, MFG_ITEMS.sprocket, "2", 1),
+      bomComponent(BOM_IDS.widgetV1, MFG_ITEMS.bolt, "6", 2),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: BOM_IDS.gadgetV1, item_id: MFG_ITEMS.gadget, version: "v1", status: "active", output_qty: "1", uom: "EA",
+    notes: "Gadget Pro standard build.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO,
+    components: [
+      bomComponent(BOM_IDS.gadgetV1, MFG_ITEMS.adapter, "1", 1),
+      bomComponent(BOM_IDS.gadgetV1, MFG_ITEMS.cable, "1", 2),
+      bomComponent(BOM_IDS.gadgetV1, MFG_ITEMS.bolt, "6", 3, "5"),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: BOM_IDS.sprocketV1, item_id: MFG_ITEMS.sprocket, version: "v1", status: "active", output_qty: "1", uom: "EA",
+    notes: "Sub-assembly consumed by the Widget Mark II recipe.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO,
+    components: [bomComponent(BOM_IDS.sprocketV1, MFG_ITEMS.bolt, "8", 1)],
+  },
+];
+
+const ROUTING_IDS = {
+  widget: uuid("mfg.routing:widget-v1"),
+  gadget: uuid("mfg.routing:gadget-v1"),
+  sprocket: uuid("mfg.routing:sprocket-v1"),
+};
+
+function routingOp(routingId: string, seq: number, name: string, wc: string, setup: string, cycle: string, description?: string): RoutingOperation {
+  return { routing_id: routingId, sequence: seq, operation_name: name, work_center_id: wc, setup_time_minutes: setup, cycle_time_minutes: cycle, description };
+}
+
+export const ROUTINGS: Routing[] = [
+  {
+    tenant_id: DEMO_TENANT_ID, id: ROUTING_IDS.widget, item_id: MFG_ITEMS.widget, version: "v1", status: "active",
+    notes: "Three-stage build for the Widget Mark II.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO,
+    operations: [
+      routingOp(ROUTING_IDS.widget, 1, "Machine sprockets", WC_IDS.machining, "30", "4", "Rough + finish machining."),
+      routingOp(ROUTING_IDS.widget, 2, "Assemble widget", WC_IDS.assembly, "15", "6", "Press-fit and fasten."),
+      routingOp(ROUTING_IDS.widget, 3, "Finish & inspect", WC_IDS.finishing, "10", "3", "Deburr, clean, QA."),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: ROUTING_IDS.gadget, item_id: MFG_ITEMS.gadget, version: "v1", status: "active",
+    notes: "Gadget Pro assembly and pack-out.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO,
+    operations: [
+      routingOp(ROUTING_IDS.gadget, 1, "Assemble gadget", WC_IDS.assembly, "20", "5", "Wire adapter and cable."),
+      routingOp(ROUTING_IDS.gadget, 2, "Pack & label", WC_IDS.packaging, "5", "1", "Box, label, palletise."),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: ROUTING_IDS.sprocket, item_id: MFG_ITEMS.sprocket, version: "v1", status: "draft",
+    notes: "Draft routing for in-house sprocket machining.", created_by: "system", created_at: NOW_ISO, updated_at: NOW_ISO,
+    operations: [routingOp(ROUTING_IDS.sprocket, 1, "Machine sprocket", WC_IDS.machining, "25", "3.5")],
+  },
+];
+
+const WO_IDS = {
+  widgetReleased: uuid("mfg.work_order:widget-released"),
+  gadgetInProgress: uuid("mfg.work_order:gadget-in-progress"),
+  sprocketDraft: uuid("mfg.work_order:sprocket-draft"),
+  widgetCompleted: uuid("mfg.work_order:widget-completed"),
+  gadgetClosed: uuid("mfg.work_order:gadget-closed"),
+  filterCancelled: uuid("mfg.work_order:filter-cancelled"),
+};
+
+export const WORK_ORDERS: WorkOrder[] = [
+  { tenant_id: DEMO_TENANT_ID, id: WO_IDS.widgetReleased, item_id: MFG_ITEMS.widget, bom_id: BOM_IDS.widgetV2, routing_id: ROUTING_IDS.widget, warehouse_id: WAREHOUSE_IDS.main, planned_qty: "100", actual_qty: null, status: "released", scheduled_start: toCalendarISO(addDays(TODAY, 1)), scheduled_end: toCalendarISO(addDays(TODAY, 5)), started_at: null, completed_at: null, notes: "Replenish Q3 widget stock.", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WO_IDS.gadgetInProgress, item_id: MFG_ITEMS.gadget, bom_id: BOM_IDS.gadgetV1, routing_id: ROUTING_IDS.gadget, warehouse_id: WAREHOUSE_IDS.main, planned_qty: "50", actual_qty: null, status: "in_progress", scheduled_start: toCalendarISO(addDays(TODAY, -1)), scheduled_end: toCalendarISO(addDays(TODAY, 2)), started_at: LAST_WEEK_ISO, completed_at: null, notes: "Priority customer order.", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WO_IDS.sprocketDraft, item_id: MFG_ITEMS.sprocket, bom_id: null, routing_id: null, warehouse_id: WAREHOUSE_IDS.west, planned_qty: "500", actual_qty: null, status: "draft", scheduled_start: null, scheduled_end: null, started_at: null, completed_at: null, notes: "Build sub-assembly buffer.", created_by: "system", created_at: NOW_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WO_IDS.widgetCompleted, item_id: MFG_ITEMS.widget, bom_id: BOM_IDS.widgetV2, routing_id: ROUTING_IDS.widget, warehouse_id: WAREHOUSE_IDS.main, planned_qty: "80", actual_qty: "78", status: "completed", scheduled_start: toCalendarISO(addDays(TODAY, -10)), scheduled_end: toCalendarISO(addDays(TODAY, -6)), started_at: LAST_MONTH_ISO, completed_at: LAST_WEEK_ISO, notes: "Two units scrapped at QA.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WO_IDS.gadgetClosed, item_id: MFG_ITEMS.gadget, bom_id: BOM_IDS.gadgetV1, routing_id: ROUTING_IDS.gadget, warehouse_id: WAREHOUSE_IDS.main, planned_qty: "40", actual_qty: "40", status: "closed", scheduled_start: toCalendarISO(addDays(TODAY, -20)), scheduled_end: toCalendarISO(addDays(TODAY, -16)), started_at: LAST_MONTH_ISO, completed_at: LAST_MONTH_ISO, notes: undefined, created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WO_IDS.filterCancelled, item_id: MFG_ITEMS.filter, bom_id: null, routing_id: null, warehouse_id: WAREHOUSE_IDS.west, planned_qty: "30", actual_qty: null, status: "cancelled", scheduled_start: null, scheduled_end: null, started_at: null, completed_at: null, notes: "Cancelled — sourced externally.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+];
+
+function jobCard(woId: string, seq: number, wc: string, status: JobCard["status"], produced: string, rejected: string, start?: string, end?: string): JobCard {
+  return {
+    tenant_id: DEMO_TENANT_ID,
+    id: uuid(`mfg.job_card:${woId}:${seq}`),
+    work_order_id: woId,
+    routing_operation_seq: seq,
+    work_center_id: wc,
+    status,
+    planned_start: null,
+    planned_end: null,
+    actual_start: start ?? null,
+    actual_end: end ?? null,
+    operator_id: null,
+    qty_produced: produced,
+    qty_rejected: rejected,
+    created_at: LAST_WEEK_ISO,
+    updated_at: NOW_ISO,
+  };
+}
+
+export const JOB_CARDS_BY_WO: Record<string, JobCard[]> = {
+  [WO_IDS.widgetReleased]: [
+    jobCard(WO_IDS.widgetReleased, 1, WC_IDS.machining, "pending", "0", "0"),
+    jobCard(WO_IDS.widgetReleased, 2, WC_IDS.assembly, "pending", "0", "0"),
+    jobCard(WO_IDS.widgetReleased, 3, WC_IDS.finishing, "pending", "0", "0"),
+  ],
+  [WO_IDS.gadgetInProgress]: [
+    jobCard(WO_IDS.gadgetInProgress, 1, WC_IDS.assembly, "completed", "50", "0", LAST_WEEK_ISO, NOW_ISO),
+    jobCard(WO_IDS.gadgetInProgress, 2, WC_IDS.packaging, "in_progress", "0", "0", NOW_ISO),
+  ],
+};
+
+// buildCapacityPlan derives a finite-capacity utilisation grid across
+// the requested [start, end] calendar window. Weekdays carry a stable
+// per-work-center load (some intentionally overloaded); weekends are
+// idle. Dates are produced as YYYY-MM-DD so the page's calendar
+// parser lines them up exactly.
+const WC_DOW_LOAD: Record<string, number[]> = {
+  // Indexed by Date.getDay(): 0=Sun … 6=Sat.
+  [WC_IDS.assembly]: [0, 78, 92, 96, 88, 70, 0],
+  [WC_IDS.machining]: [0, 104, 118, 88, 112, 96, 0],
+  [WC_IDS.finishing]: [0, 54, 68, 73, 60, 48, 0],
+  [WC_IDS.packaging]: [0, 0, 0, 0, 0, 0, 0],
+};
+
+export function buildCapacityPlan(start: string, end: string): CapacityPlan {
+  const s = new Date(`${start}T00:00:00`);
+  const e = new Date(`${end}T00:00:00`);
+  const days: Date[] = [];
+  if (!isNaN(s.getTime()) && !isNaN(e.getTime()) && e >= s) {
+    let cur = s;
+    while (cur <= e && days.length < 45) {
+      days.push(new Date(cur));
+      cur = addDays(cur, 1);
+    }
+  }
+  if (days.length === 0) days.push(new Date(TODAY));
+  const rows: WorkCenterSchedule[] = WORK_CENTERS.map((wc) => {
+    const available = Number(wc.operating_hours_per_day) * 60;
+    const pattern = WC_DOW_LOAD[wc.id] ?? [0, 60, 60, 60, 60, 60, 0];
+    const dayLoads: CapacityDayLoad[] = days.map((d) => {
+      const util = pattern[d.getDay()] ?? 0;
+      const scheduled = Math.round((available * util) / 100);
+      return {
+        date: toCalendarISO(d),
+        scheduled_minutes: String(scheduled),
+        available_minutes: String(available),
+        utilization_percent: String(util),
+        overloaded: util > 100,
+      };
+    });
+    return { work_center_id: wc.id, work_center_name: wc.name, status: wc.status, days: dayLoads };
+  });
+  return { start, end, rows };
+}
+
+// --- MRP runs --------------------------------------------------------
+
+const MRP_IDS = {
+  run1: uuid("mfg.mrp_run:1"),
+  run2: uuid("mfg.mrp_run:2"),
+  run3: uuid("mfg.mrp_run:3"),
+};
+
+function demandLine(runId: string, seed: string, itemId: string, qty: string, due: string, source: MRPDemandLine["source"], sourceRef?: string): MRPDemandLine {
+  return { tenant_id: DEMO_TENANT_ID, id: uuid(`mfg.mrp_demand:${seed}`), run_id: runId, item_id: itemId, qty, due_date: due, source, source_ref: sourceRef, created_at: LAST_WEEK_ISO };
+}
+
+function plannedOrder(runId: string, seed: string, itemId: string, type: MRPPlannedOrder["order_type"], qty: string, due: string, startDate: string, level: number, lead: number, bomId?: string | null): MRPPlannedOrder {
+  return { tenant_id: DEMO_TENANT_ID, id: uuid(`mfg.mrp_planned:${seed}`), run_id: runId, item_id: itemId, order_type: type, qty, due_date: due, suggested_start_date: startDate, explosion_level: level, bom_id: bomId ?? null, routing_id: null, lead_time_days: lead, created_at: LAST_WEEK_ISO };
+}
+
+// Full MRP runs (header + detail). listMRPRuns strips the detail to
+// mirror the real list payload; getMRPRun returns the full record.
+export const MRP_RUNS: MRPRun[] = [
+  {
+    tenant_id: DEMO_TENANT_ID, id: MRP_IDS.run1, status: "completed",
+    horizon_start: toCalendarISO(TODAY), horizon_end: toCalendarISO(addDays(TODAY, 30)),
+    include_min_stock: true, buy_lead_time_days: 7, demand_line_count: 3, planned_order_count: 6, make_order_count: 3, buy_order_count: 3,
+    notes: "Monthly net-requirements run with reorder top-up.", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: LAST_WEEK_ISO,
+    demand_lines: [
+      demandLine(MRP_IDS.run1, "r1-widget", MFG_ITEMS.widget, "120", toCalendarISO(addDays(TODAY, 20)), "sales_order", "SO-2026-0042"),
+      demandLine(MRP_IDS.run1, "r1-gadget", MFG_ITEMS.gadget, "60", toCalendarISO(addDays(TODAY, 25)), "sales_order", "SO-2026-0043"),
+      demandLine(MRP_IDS.run1, "r1-sprocket", MFG_ITEMS.sprocket, "200", toCalendarISO(addDays(TODAY, 15)), "manual"),
+    ],
+    planned_orders: [
+      plannedOrder(MRP_IDS.run1, "r1-mk-widget", MFG_ITEMS.widget, "make", "120", toCalendarISO(addDays(TODAY, 20)), toCalendarISO(addDays(TODAY, 15)), 0, 5, BOM_IDS.widgetV2),
+      plannedOrder(MRP_IDS.run1, "r1-mk-gadget", MFG_ITEMS.gadget, "make", "60", toCalendarISO(addDays(TODAY, 25)), toCalendarISO(addDays(TODAY, 22)), 0, 3, BOM_IDS.gadgetV1),
+      plannedOrder(MRP_IDS.run1, "r1-mk-sprocket", MFG_ITEMS.sprocket, "make", "440", toCalendarISO(addDays(TODAY, 15)), toCalendarISO(addDays(TODAY, 12)), 1, 3, BOM_IDS.sprocketV1),
+      plannedOrder(MRP_IDS.run1, "r1-by-bolt", MFG_ITEMS.bolt, "buy", "4040", toCalendarISO(addDays(TODAY, 12)), toCalendarISO(addDays(TODAY, 5)), 2, 7),
+      plannedOrder(MRP_IDS.run1, "r1-by-adapter", MFG_ITEMS.adapter, "buy", "60", toCalendarISO(addDays(TODAY, 22)), toCalendarISO(addDays(TODAY, 12)), 1, 10),
+      plannedOrder(MRP_IDS.run1, "r1-by-cable", MFG_ITEMS.cable, "buy", "180", toCalendarISO(addDays(TODAY, 20)), toCalendarISO(addDays(TODAY, 13)), 1, 7),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: MRP_IDS.run2, status: "completed",
+    horizon_start: toCalendarISO(addDays(TODAY, -7)), horizon_end: toCalendarISO(addDays(TODAY, 14)),
+    include_min_stock: false, buy_lead_time_days: 7, demand_line_count: 2, planned_order_count: 3, make_order_count: 2, buy_order_count: 1,
+    notes: "Short-horizon check against firm orders.", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: LAST_WEEK_ISO,
+    demand_lines: [
+      demandLine(MRP_IDS.run2, "r2-widget", MFG_ITEMS.widget, "40", toCalendarISO(addDays(TODAY, 10)), "manual"),
+      demandLine(MRP_IDS.run2, "r2-gadget", MFG_ITEMS.gadget, "25", toCalendarISO(addDays(TODAY, 12)), "work_order", "WO-2026-0008"),
+    ],
+    planned_orders: [
+      plannedOrder(MRP_IDS.run2, "r2-mk-widget", MFG_ITEMS.widget, "make", "40", toCalendarISO(addDays(TODAY, 10)), toCalendarISO(addDays(TODAY, 5)), 0, 5, BOM_IDS.widgetV2),
+      plannedOrder(MRP_IDS.run2, "r2-mk-gadget", MFG_ITEMS.gadget, "make", "25", toCalendarISO(addDays(TODAY, 12)), toCalendarISO(addDays(TODAY, 9)), 0, 3, BOM_IDS.gadgetV1),
+      plannedOrder(MRP_IDS.run2, "r2-by-cable", MFG_ITEMS.cable, "buy", "65", toCalendarISO(addDays(TODAY, 10)), toCalendarISO(addDays(TODAY, 3)), 1, 7),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: MRP_IDS.run3, status: "failed",
+    horizon_start: toCalendarISO(addDays(TODAY, -14)), horizon_end: toCalendarISO(addDays(TODAY, -1)),
+    include_min_stock: false, buy_lead_time_days: 7, demand_line_count: 1, planned_order_count: 0, make_order_count: 0, buy_order_count: 0,
+    notes: "Failed — demand item had no active BOM.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO,
+    demand_lines: [
+      demandLine(MRP_IDS.run3, "r3-filter", MFG_ITEMS.filter, "30", toCalendarISO(addDays(TODAY, -2)), "manual"),
+    ],
+    planned_orders: [],
+  },
+];
+
+// --- Subcontracting --------------------------------------------------
+
+const SO_IDS = {
+  draft: uuid("mfg.subcontract:draft"),
+  issued: uuid("mfg.subcontract:issued"),
+  received: uuid("mfg.subcontract:received"),
+  closed: uuid("mfg.subcontract:closed"),
+  cancelled: uuid("mfg.subcontract:cancelled"),
+};
+
+function subComponent(orderId: string, seed: string, itemId: string, qty: string, issued: string): SubcontractComponent {
+  return { tenant_id: DEMO_TENANT_ID, id: uuid(`mfg.subcontract_component:${seed}`), subcontract_order_id: orderId, item_id: itemId, qty, issued_qty: issued, created_at: LAST_WEEK_ISO };
+}
+
+export const SUBCONTRACT_ORDERS: SubcontractOrder[] = [
+  {
+    tenant_id: DEMO_TENANT_ID, id: SO_IDS.draft, work_order_id: null, routing_operation_seq: null, supplier_id: "Globex Precision Castings",
+    item_id: MFG_ITEMS.sprocket, warehouse_id: WAREHOUSE_IDS.main, qty: "100", received_qty: "0", status: "draft", charge_amount: "1850.00", charge_currency: "USD",
+    issued_at: null, received_at: null, notes: "Outsourced sprocket machining.", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: LAST_WEEK_ISO,
+    components: [subComponent(SO_IDS.draft, "draft-bolt", MFG_ITEMS.bolt, "800", "0")],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: SO_IDS.issued, work_order_id: null, routing_operation_seq: null, supplier_id: "Initech Machining LLC",
+    item_id: MFG_ITEMS.widget, warehouse_id: WAREHOUSE_IDS.main, qty: "50", received_qty: "0", status: "issued", charge_amount: "1200.00", charge_currency: "USD",
+    issued_at: LAST_WEEK_ISO, received_at: null, notes: "Components issued to supplier.", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: NOW_ISO,
+    components: [
+      subComponent(SO_IDS.issued, "issued-bolt", MFG_ITEMS.bolt, "200", "200"),
+      subComponent(SO_IDS.issued, "issued-cable", MFG_ITEMS.cable, "50", "50"),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: SO_IDS.received, work_order_id: null, routing_operation_seq: null, supplier_id: "Hooli Assembly Partners",
+    item_id: MFG_ITEMS.gadget, warehouse_id: WAREHOUSE_IDS.main, qty: "40", received_qty: "40", status: "received", charge_amount: "980.00", charge_currency: "USD",
+    issued_at: LAST_MONTH_ISO, received_at: LAST_WEEK_ISO, notes: "Finished gadgets received back.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO,
+    components: [
+      subComponent(SO_IDS.received, "received-adapter", MFG_ITEMS.adapter, "40", "40"),
+      subComponent(SO_IDS.received, "received-cable", MFG_ITEMS.cable, "40", "40"),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: SO_IDS.closed, work_order_id: null, routing_operation_seq: null, supplier_id: "Initech Machining LLC",
+    item_id: MFG_ITEMS.widget, warehouse_id: WAREHOUSE_IDS.main, qty: "30", received_qty: "30", status: "closed", charge_amount: "720.00", charge_currency: "USD",
+    issued_at: LAST_MONTH_ISO, received_at: LAST_MONTH_ISO, notes: "Closed and reconciled.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO,
+    components: [subComponent(SO_IDS.closed, "closed-bolt", MFG_ITEMS.bolt, "120", "120")],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: SO_IDS.cancelled, work_order_id: null, routing_operation_seq: null, supplier_id: null,
+    item_id: MFG_ITEMS.filter, warehouse_id: WAREHOUSE_IDS.west, qty: "20", received_qty: "0", status: "cancelled", charge_amount: "0.00", charge_currency: "USD",
+    issued_at: null, received_at: null, notes: "Cancelled before issue.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO,
+    components: [],
+  },
+];
 
 function jl(account_code: string, debit: string, credit: string, memo = "", currency = "USD") {
   return { account_code, debit, credit, memo, currency };

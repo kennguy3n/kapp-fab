@@ -11,11 +11,18 @@ import type {
   Approval,
   ApiClient,
   AuditEntry,
+  BOM,
   Budget,
   BudgetLine,
   BudgetLineInput,
   BudgetVarianceReport,
+  CapacityPlan,
+  CreateBOMInput,
   CreateBudgetInput,
+  CreateRoutingInput,
+  CreateSubcontractOrderInput,
+  CreateWorkCenterInput,
+  CreateWorkOrderInput,
   UpdateBudgetInput,
   DashboardSummary,
   ExchangeRate,
@@ -36,6 +43,7 @@ import type {
   InventoryItem,
   InventoryValuationReport,
   InventoryWarehouse,
+  JobCard,
   JournalEntry,
   KRecord,
   KType,
@@ -48,16 +56,20 @@ import type {
   MarketplaceListVersionsResponse,
   MarketplaceRatingSummary,
   MarketplaceUpdateSettingsResponse,
+  MRPRun,
   PayslipGenerateResult,
   Plan,
   PlacementPolicy,
   RetentionPolicy,
   ReportResult,
+  Routing,
+  RunMRPInput,
   SLAPolicy,
   SavedReport,
   SavedView,
   SearchResponse,
   StockLevel,
+  SubcontractOrder,
   Tenant,
   TenantFeaturesResponse,
   TenantUsageHistoryResponse,
@@ -67,6 +79,8 @@ import type {
   UpgradeMarketplaceInstallationResponse,
   Webhook,
   WebhookDelivery,
+  WorkCenter,
+  WorkOrder,
 } from "@kapp/client";
 
 import {
@@ -75,9 +89,11 @@ import {
   AUDIT_LOG,
   BANK_FEED_RULES_FIXTURE,
   BANK_FEED_SUGGESTIONS_FIXTURE,
+  BOMS,
   BUDGETS,
   BUDGET_LINES_BY_ID,
   buildBudgetVariance,
+  buildCapacityPlan,
   DASHBOARD_SUMMARY,
   DEMO_TENANT_ID,
   EXCHANGE_RATES,
@@ -89,20 +105,24 @@ import {
   INVENTORY_ITEMS,
   INVENTORY_VALUATION,
   INVENTORY_WAREHOUSES,
+  JOB_CARDS_BY_WO,
   JOURNAL_ENTRIES,
   MARKETPLACE_EXTENSIONS,
   MARKETPLACE_INSTALLATIONS,
   MARKETPLACE_MY_RATINGS,
   MARKETPLACE_VERSIONS,
+  MRP_RUNS,
   PLACEMENT_POLICY,
   PLANS,
   PORTAL_TICKETS,
   RECORDS_BY_KTYPE,
   RETENTION_POLICIES,
+  ROUTINGS,
   SAVED_REPORTS,
   SAVED_VIEWS_BY_KTYPE,
   SLA_POLICIES,
   STOCK_LEVELS,
+  SUBCONTRACT_ORDERS,
   TENANTS,
   TENANT_FEATURES,
   TENANT_USAGE,
@@ -110,6 +130,8 @@ import {
   TRIAL_BALANCE,
   WEBHOOKS,
   WEBHOOK_DELIVERIES,
+  WORK_CENTERS,
+  WORK_ORDERS,
   getKTypeByName,
   searchResults,
   widgetResultForQuery,
@@ -160,6 +182,22 @@ const budgetLines: Record<string, BudgetLine[]> = {};
 for (const [k, v] of Object.entries(BUDGET_LINES_BY_ID)) {
   budgetLines[k] = v.map((l) => ({ ...l }));
 }
+
+// Mutable manufacturing demo state so create + lifecycle transitions
+// (release / start / complete / issue / receive …) round-trip in the
+// UI. Cloned from the fixtures so a page reload resets to the seed.
+const workCenters: WorkCenter[] = WORK_CENTERS.map((w) => ({ ...w }));
+const boms: BOM[] = BOMS.map((b) => ({ ...b }));
+const routings: Routing[] = ROUTINGS.map((r) => ({ ...r }));
+const workOrders: WorkOrder[] = WORK_ORDERS.map((w) => ({ ...w }));
+const jobCardsByWO: Record<string, JobCard[]> = {};
+for (const [k, v] of Object.entries(JOB_CARDS_BY_WO)) {
+  jobCardsByWO[k] = v.map((c) => ({ ...c }));
+}
+const mrpRuns: MRPRun[] = MRP_RUNS.map((r) => ({ ...r }));
+const subcontractOrders: SubcontractOrder[] = SUBCONTRACT_ORDERS.map((o) => ({
+  ...o,
+}));
 
 // Mutable marketplace demo state so install / uninstall / upgrade /
 // rate actions round-trip inside the UI. Cloned from the fixtures so
@@ -590,6 +628,531 @@ const handlers = {
   listStockLevels: () => delay<StockLevel[]>([...STOCK_LEVELS]),
   getInventoryValuation: () => delay<InventoryValuationReport>({ ...INVENTORY_VALUATION }),
   listInventoryBatchesByItem: () => delay<KRecord[]>([]),
+
+  // --- Manufacturing: work centers ------------------------------------
+  listWorkCenters: (status?: string) =>
+    delay<WorkCenter[]>(
+      workCenters.filter((w) => !status || w.status === status).map((w) => ({ ...w })),
+    ),
+  getWorkCenter: (id: string) =>
+    delay<WorkCenter>(workCenters.find((w) => w.id === id) ?? workCenters[0]),
+  createWorkCenter: (input: CreateWorkCenterInput) => {
+    const now = nowIso();
+    const wc: WorkCenter = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      name: input.name,
+      capacity_per_hour: input.capacity_per_hour,
+      operating_hours_per_day: input.operating_hours_per_day,
+      efficiency_percent: input.efficiency_percent,
+      status: "active",
+      notes: input.notes,
+      created_by: "demo-user",
+      created_at: now,
+      updated_at: now,
+    };
+    workCenters.unshift(wc);
+    return delay<WorkCenter>(wc);
+  },
+  setWorkCenterStatus: (id: string, status: string) => {
+    const wc = workCenters.find((w) => w.id === id);
+    if (wc) {
+      wc.status = status as WorkCenter["status"];
+      wc.updated_at = nowIso();
+    }
+    return delay<WorkCenter>(wc ?? workCenters[0]);
+  },
+
+  // --- Manufacturing: BOMs --------------------------------------------
+  listBOMs: (status?: string) =>
+    delay<BOM[]>(
+      boms
+        .filter((b) => !status || b.status === status)
+        .map(({ components: _omit, ...rest }) => ({ ...rest })),
+    ),
+  getBOM: (id: string) => {
+    const b = boms.find((x) => x.id === id) ?? boms[0];
+    return delay<BOM>({ ...b, components: (b.components ?? []).map((c) => ({ ...c })) });
+  },
+  createBOM: (input: CreateBOMInput) => {
+    const now = nowIso();
+    const id = nextId();
+    const activate = input.activate ?? false;
+    if (activate) {
+      // Activating a new BOM demotes any currently-active BOM for the
+      // same item to obsolete, mirroring the server's single-active rule.
+      boms.forEach((b) => {
+        if (b.item_id === input.item_id && b.status === "active") {
+          b.status = "obsolete";
+          b.updated_at = now;
+        }
+      });
+    }
+    const bom: BOM = {
+      tenant_id: DEMO_TENANT_ID,
+      id,
+      item_id: input.item_id,
+      version: input.version,
+      status: activate ? "active" : "draft",
+      output_qty: input.output_qty,
+      uom: input.uom,
+      notes: input.notes,
+      created_by: "demo-user",
+      created_at: now,
+      updated_at: now,
+      components: input.components.map((c, i) => ({
+        bom_id: id,
+        component_item_id: c.component_item_id,
+        qty: c.qty,
+        uom: c.uom,
+        scrap_percent: c.scrap_percent ?? null,
+        sort_order: i + 1,
+      })),
+    };
+    boms.unshift(bom);
+    return delay<BOM>(bom);
+  },
+  setBOMStatus: (id: string, status: string) => {
+    const b = boms.find((x) => x.id === id);
+    if (b) {
+      const next = status as BOM["status"];
+      if (next === "active") {
+        boms.forEach((other) => {
+          if (other.item_id === b.item_id && other.id !== b.id && other.status === "active") {
+            other.status = "obsolete";
+            other.updated_at = nowIso();
+          }
+        });
+      }
+      b.status = next;
+      b.updated_at = nowIso();
+    }
+    return delay<BOM>(b ?? boms[0]);
+  },
+
+  // --- Manufacturing: routings ----------------------------------------
+  listRoutings: (status?: string) =>
+    delay<Routing[]>(
+      routings
+        .filter((r) => !status || r.status === status)
+        .map(({ operations: _omit, ...rest }) => ({ ...rest })),
+    ),
+  getRouting: (id: string) => {
+    const r = routings.find((x) => x.id === id) ?? routings[0];
+    return delay<Routing>({ ...r, operations: (r.operations ?? []).map((o) => ({ ...o })) });
+  },
+  createRouting: (input: CreateRoutingInput) => {
+    const now = nowIso();
+    const id = nextId();
+    const activate = input.activate ?? false;
+    if (activate) {
+      routings.forEach((r) => {
+        if (r.item_id === input.item_id && r.status === "active") {
+          r.status = "obsolete";
+          r.updated_at = now;
+        }
+      });
+    }
+    const routing: Routing = {
+      tenant_id: DEMO_TENANT_ID,
+      id,
+      item_id: input.item_id,
+      version: input.version,
+      status: activate ? "active" : "draft",
+      notes: input.notes,
+      created_by: "demo-user",
+      created_at: now,
+      updated_at: now,
+      operations: input.operations.map((o, i) => ({
+        routing_id: id,
+        sequence: i + 1,
+        operation_name: o.operation_name,
+        work_center_id: o.work_center_id,
+        setup_time_minutes: o.setup_time_minutes,
+        cycle_time_minutes: o.cycle_time_minutes,
+        description: o.description,
+      })),
+    };
+    routings.unshift(routing);
+    return delay<Routing>(routing);
+  },
+  setRoutingStatus: (id: string, status: string) => {
+    const r = routings.find((x) => x.id === id);
+    if (r) {
+      const next = status as Routing["status"];
+      if (next === "active") {
+        routings.forEach((other) => {
+          if (other.item_id === r.item_id && other.id !== r.id && other.status === "active") {
+            other.status = "obsolete";
+            other.updated_at = nowIso();
+          }
+        });
+      }
+      r.status = next;
+      r.updated_at = nowIso();
+    }
+    return delay<Routing>(r ?? routings[0]);
+  },
+
+  // --- Manufacturing: capacity ----------------------------------------
+  capacityPlan: (params?: { start?: string; end?: string }) => {
+    const today = nowIso().slice(0, 10);
+    const start = params?.start ?? today;
+    const end = params?.end ?? start;
+    return delay<CapacityPlan>(buildCapacityPlan(start, end));
+  },
+
+  // --- Manufacturing: work orders -------------------------------------
+  listWorkOrders: (status?: string) =>
+    delay<WorkOrder[]>(
+      workOrders.filter((w) => !status || w.status === status).map((w) => ({ ...w })),
+    ),
+  getWorkOrder: (id: string) =>
+    delay<WorkOrder>(workOrders.find((w) => w.id === id) ?? workOrders[0]),
+  createWorkOrder: (input: CreateWorkOrderInput) => {
+    const now = nowIso();
+    const wo: WorkOrder = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      item_id: input.item_id,
+      bom_id: null,
+      routing_id: null,
+      warehouse_id: input.warehouse_id,
+      planned_qty: input.planned_qty,
+      actual_qty: null,
+      status: "draft",
+      scheduled_start: input.scheduled_start ?? null,
+      scheduled_end: input.scheduled_end ?? null,
+      started_at: null,
+      completed_at: null,
+      notes: input.notes,
+      created_by: "demo-user",
+      created_at: now,
+      updated_at: now,
+    };
+    workOrders.unshift(wo);
+    return delay<WorkOrder>(wo);
+  },
+  releaseWorkOrder: (id: string) => {
+    const wo = workOrders.find((w) => w.id === id);
+    if (wo) {
+      const activeBom = boms.find((b) => b.item_id === wo.item_id && b.status === "active");
+      const activeRouting = routings.find(
+        (r) => r.item_id === wo.item_id && r.status === "active",
+      );
+      wo.bom_id = activeBom?.id ?? wo.bom_id ?? null;
+      wo.routing_id = activeRouting?.id ?? wo.routing_id ?? null;
+      wo.status = "released";
+      wo.updated_at = nowIso();
+      // Job cards are generated one-per-operation when a routing exists.
+      if (activeRouting?.operations && !jobCardsByWO[wo.id]) {
+        jobCardsByWO[wo.id] = activeRouting.operations.map((op) => ({
+          tenant_id: DEMO_TENANT_ID,
+          id: nextId(),
+          work_order_id: wo.id,
+          routing_operation_seq: op.sequence,
+          work_center_id: op.work_center_id,
+          status: "pending",
+          planned_start: null,
+          planned_end: null,
+          actual_start: null,
+          actual_end: null,
+          operator_id: null,
+          qty_produced: "0",
+          qty_rejected: "0",
+          created_at: nowIso(),
+          updated_at: nowIso(),
+        }));
+      }
+    }
+    return delay<WorkOrder>(wo ?? workOrders[0]);
+  },
+  startWorkOrder: (id: string) => {
+    const wo = workOrders.find((w) => w.id === id);
+    if (wo) {
+      wo.status = "in_progress";
+      wo.started_at = nowIso();
+      wo.updated_at = nowIso();
+    }
+    return delay<WorkOrder>(wo ?? workOrders[0]);
+  },
+  completeWorkOrder: (id: string, actualQty?: string) => {
+    const wo = workOrders.find((w) => w.id === id);
+    if (wo) {
+      wo.status = "completed";
+      wo.actual_qty = actualQty ?? wo.planned_qty;
+      wo.completed_at = nowIso();
+      wo.updated_at = nowIso();
+    }
+    return delay<WorkOrder>(wo ?? workOrders[0]);
+  },
+  cancelWorkOrder: (id: string) => {
+    const wo = workOrders.find((w) => w.id === id);
+    if (wo) {
+      wo.status = "cancelled";
+      wo.updated_at = nowIso();
+    }
+    return delay<WorkOrder>(wo ?? workOrders[0]);
+  },
+  closeWorkOrder: (id: string) => {
+    const wo = workOrders.find((w) => w.id === id);
+    if (wo) {
+      wo.status = "closed";
+      wo.updated_at = nowIso();
+    }
+    return delay<WorkOrder>(wo ?? workOrders[0]);
+  },
+
+  // --- Manufacturing: job cards ---------------------------------------
+  listJobCards: (workOrderId: string) =>
+    delay<JobCard[]>((jobCardsByWO[workOrderId] ?? []).map((c) => ({ ...c }))),
+  getJobCard: (id: string) => {
+    for (const list of Object.values(jobCardsByWO)) {
+      const found = list.find((c) => c.id === id);
+      if (found) return delay<JobCard>({ ...found });
+    }
+    return delay<JobCard>(null as unknown as JobCard);
+  },
+  startJobCard: (id: string) => {
+    for (const list of Object.values(jobCardsByWO)) {
+      const card = list.find((c) => c.id === id);
+      if (card) {
+        card.status = "in_progress";
+        card.actual_start = nowIso();
+        card.updated_at = nowIso();
+        return delay<JobCard>({ ...card });
+      }
+    }
+    return delay<JobCard>(null as unknown as JobCard);
+  },
+  completeJobCard: (
+    id: string,
+    input?: { qty_produced?: string; qty_rejected?: string; notes?: string },
+  ) => {
+    for (const [woId, list] of Object.entries(jobCardsByWO)) {
+      const card = list.find((c) => c.id === id);
+      if (card) {
+        card.status = "completed";
+        card.actual_end = nowIso();
+        if (input?.qty_produced) card.qty_produced = input.qty_produced;
+        if (input?.qty_rejected) card.qty_rejected = input.qty_rejected;
+        card.updated_at = nowIso();
+        // Completing the last open card auto-completes the work order.
+        if (list.every((c) => c.status === "completed")) {
+          const wo = workOrders.find((w) => w.id === woId);
+          if (wo && (wo.status === "released" || wo.status === "in_progress")) {
+            wo.status = "completed";
+            wo.actual_qty = wo.planned_qty;
+            wo.completed_at = nowIso();
+            wo.updated_at = nowIso();
+          }
+        }
+        return delay<JobCard>({ ...card });
+      }
+    }
+    return delay<JobCard>(null as unknown as JobCard);
+  },
+
+  // --- Manufacturing: MRP ---------------------------------------------
+  listMRPRuns: () =>
+    delay<MRPRun[]>(
+      mrpRuns.map(({ demand_lines: _d, planned_orders: _p, ...rest }) => ({ ...rest })),
+    ),
+  getMRPRun: (id: string) => {
+    const run = mrpRuns.find((r) => r.id === id) ?? mrpRuns[0];
+    return delay<MRPRun>({
+      ...run,
+      demand_lines: (run.demand_lines ?? []).map((d) => ({ ...d })),
+      planned_orders: (run.planned_orders ?? []).map((p) => ({ ...p })),
+    });
+  },
+  runMRP: (input: RunMRPInput) => {
+    const now = nowIso();
+    const runId = nextId();
+    const buyLead = input.buy_lead_time_days && input.buy_lead_time_days > 0
+      ? input.buy_lead_time_days
+      : 7;
+    const shift = (iso: string, days: number) => {
+      const d = new Date(`${iso}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() - days);
+      return d.toISOString().slice(0, 10);
+    };
+    const demandLines = (input.demand ?? []).map((d) => ({
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      run_id: runId,
+      item_id: d.item_id,
+      qty: d.qty,
+      due_date: d.due_date,
+      source: d.source ?? ("manual" as const),
+      source_ref: d.source_ref,
+      created_at: now,
+    }));
+    const plannedOrders: MRPRun["planned_orders"] = [];
+    demandLines.forEach((d) => {
+      const activeBom = boms.find((b) => b.item_id === d.item_id && b.status === "active");
+      if (activeBom) {
+        plannedOrders.push({
+          tenant_id: DEMO_TENANT_ID,
+          id: nextId(),
+          run_id: runId,
+          item_id: d.item_id,
+          order_type: "make",
+          qty: d.qty,
+          due_date: d.due_date,
+          suggested_start_date: shift(d.due_date, 5),
+          explosion_level: 0,
+          bom_id: activeBom.id,
+          routing_id: null,
+          lead_time_days: 5,
+          created_at: now,
+        });
+        (activeBom.components ?? []).forEach((c) => {
+          plannedOrders.push({
+            tenant_id: DEMO_TENANT_ID,
+            id: nextId(),
+            run_id: runId,
+            item_id: c.component_item_id,
+            order_type: "buy",
+            qty: String(Number(c.qty) * Number(d.qty)),
+            due_date: shift(d.due_date, 5),
+            suggested_start_date: shift(d.due_date, 5 + buyLead),
+            explosion_level: 1,
+            bom_id: null,
+            routing_id: null,
+            lead_time_days: buyLead,
+            created_at: now,
+          });
+        });
+      } else {
+        plannedOrders.push({
+          tenant_id: DEMO_TENANT_ID,
+          id: nextId(),
+          run_id: runId,
+          item_id: d.item_id,
+          order_type: "buy",
+          qty: d.qty,
+          due_date: d.due_date,
+          suggested_start_date: shift(d.due_date, buyLead),
+          explosion_level: 0,
+          bom_id: null,
+          routing_id: null,
+          lead_time_days: buyLead,
+          created_at: now,
+        });
+      }
+    });
+    const makeCount = plannedOrders.filter((p) => p.order_type === "make").length;
+    const run: MRPRun = {
+      tenant_id: DEMO_TENANT_ID,
+      id: runId,
+      status: "completed",
+      horizon_start: input.horizon_start,
+      horizon_end: input.horizon_end,
+      include_min_stock: input.include_min_stock ?? false,
+      buy_lead_time_days: buyLead,
+      demand_line_count: demandLines.length,
+      planned_order_count: plannedOrders.length,
+      make_order_count: makeCount,
+      buy_order_count: plannedOrders.length - makeCount,
+      notes: input.notes,
+      created_by: "demo-user",
+      created_at: now,
+      updated_at: now,
+      demand_lines: demandLines,
+      planned_orders: plannedOrders,
+    };
+    mrpRuns.unshift(run);
+    return delay<MRPRun>(run);
+  },
+
+  // --- Manufacturing: subcontracting ----------------------------------
+  listSubcontractOrders: (status?: string) =>
+    delay<SubcontractOrder[]>(
+      subcontractOrders
+        .filter((o) => !status || o.status === status)
+        .map(({ components: _omit, ...rest }) => ({ ...rest })),
+    ),
+  getSubcontractOrder: (id: string) => {
+    const o = subcontractOrders.find((x) => x.id === id) ?? subcontractOrders[0];
+    return delay<SubcontractOrder>({
+      ...o,
+      components: (o.components ?? []).map((c) => ({ ...c })),
+    });
+  },
+  createSubcontractOrder: (input: CreateSubcontractOrderInput) => {
+    const now = nowIso();
+    const id = nextId();
+    const order: SubcontractOrder = {
+      tenant_id: DEMO_TENANT_ID,
+      id,
+      work_order_id: input.work_order_id ?? null,
+      routing_operation_seq: input.routing_operation_seq ?? null,
+      supplier_id: input.supplier_id ?? null,
+      item_id: input.item_id,
+      warehouse_id: input.warehouse_id,
+      qty: input.qty,
+      received_qty: "0",
+      status: "draft",
+      charge_amount: input.charge_amount ?? "0.00",
+      charge_currency: input.charge_currency ?? "USD",
+      issued_at: null,
+      received_at: null,
+      notes: input.notes,
+      created_by: "demo-user",
+      created_at: now,
+      updated_at: now,
+      components: input.components.map((c) => ({
+        tenant_id: DEMO_TENANT_ID,
+        id: nextId(),
+        subcontract_order_id: id,
+        item_id: c.item_id,
+        qty: c.qty,
+        issued_qty: "0",
+        created_at: now,
+      })),
+    };
+    subcontractOrders.unshift(order);
+    return delay<SubcontractOrder>(order);
+  },
+  issueSubcontractOrder: (id: string) => {
+    const o = subcontractOrders.find((x) => x.id === id);
+    if (o) {
+      o.status = "issued";
+      o.issued_at = nowIso();
+      o.updated_at = nowIso();
+      (o.components ?? []).forEach((c) => {
+        c.issued_qty = c.qty;
+      });
+    }
+    return delay<SubcontractOrder>(o ?? subcontractOrders[0]);
+  },
+  receiveSubcontractOrder: (id: string, input?: { actual_qty?: string }) => {
+    const o = subcontractOrders.find((x) => x.id === id);
+    if (o) {
+      o.status = "received";
+      o.received_qty = input?.actual_qty ?? o.qty;
+      o.received_at = nowIso();
+      o.updated_at = nowIso();
+    }
+    return delay<SubcontractOrder>(o ?? subcontractOrders[0]);
+  },
+  closeSubcontractOrder: (id: string) => {
+    const o = subcontractOrders.find((x) => x.id === id);
+    if (o) {
+      o.status = "closed";
+      o.updated_at = nowIso();
+    }
+    return delay<SubcontractOrder>(o ?? subcontractOrders[0]);
+  },
+  cancelSubcontractOrder: (id: string) => {
+    const o = subcontractOrders.find((x) => x.id === id);
+    if (o) {
+      o.status = "cancelled";
+      o.updated_at = nowIso();
+    }
+    return delay<SubcontractOrder>(o ?? subcontractOrders[0]);
+  },
 
   // --- POS ------------------------------------------------------------
   finalizePOSInvoice: () => delay<KRecord>({ id: nextId(), tenant_id: DEMO_TENANT_ID, ktype: "sales.pos_invoice", ktype_version: 1, data: { status: "finalized" }, status: "finalized", version: 1, created_at: nowIso(), updated_at: nowIso() }),
