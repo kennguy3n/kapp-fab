@@ -1,24 +1,61 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import type { InventoryBatch } from "@kapp/client";
 import {
+  Badge,
+  Button,
+  EmptyState,
+  Eyebrow,
+  Field,
+  Select,
+  Skeleton,
   Table,
   TableBody,
   TableCell,
+  TableFooter,
   TableHead,
   TableHeader,
   TableRow,
+  toast,
 } from "@kapp/ui";
+import { AlertTriangle, Boxes, Download } from "lucide-react";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n";
+
+const ALL_WAREHOUSES = "__all__";
+
+/** Quote a CSV cell only when it contains a delimiter, quote, or newline. */
+function csvCell(value: string): string {
+  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+/** Trigger a client-side download of a CSV built from the given rows. */
+function downloadCsv(filename: string, headers: string[], rows: string[][]) {
+  const body = [headers, ...rows]
+    .map((cols) => cols.map(csvCell).join(","))
+    .join("\n");
+  const blob = new Blob([body], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 /**
- * StockLevelsPage renders the `stock_levels` view — one row per
- * (item, warehouse) with the running SUM(qty) from the append-only
- * `inventory_moves` ledger. Items/warehouses are fetched alongside so
- * the UI can show human-readable SKUs and warehouse codes instead of
- * bare UUIDs.
+ * StockLevelsPage renders one row per (item, warehouse) with the
+ * running on-hand quantity. Items and warehouses are resolved to
+ * human-readable labels, low-stock rows are flagged against each
+ * item's reorder level, and the list can be filtered per warehouse
+ * and exported to CSV.
  */
 export function StockLevelsPage() {
+  const fmt = useFormatter();
+  const [warehouse, setWarehouse] = useState<string>(ALL_WAREHOUSES);
+
   const levelsQ = useQuery({
     queryKey: ["inventory", "stock-levels"],
     queryFn: () => api.listStockLevels(),
@@ -37,16 +74,35 @@ export function StockLevelsPage() {
     (itemsQ.data ?? []).forEach((it) => m.set(it.id, `${it.sku} — ${it.name}`));
     return m;
   }, [itemsQ.data]);
+  const reorderByItem = useMemo(() => {
+    const m = new Map<string, number>();
+    (itemsQ.data ?? []).forEach((it) => m.set(it.id, Number(it.reorder_level)));
+    return m;
+  }, [itemsQ.data]);
+  const uomByItem = useMemo(() => {
+    const m = new Map<string, string>();
+    (itemsQ.data ?? []).forEach((it) => m.set(it.id, it.uom));
+    return m;
+  }, [itemsQ.data]);
   const whLabel = useMemo(() => {
     const m = new Map<string, string>();
     (warehousesQ.data ?? []).forEach((w) => m.set(w.id, `${w.code} — ${w.name}`));
     return m;
   }, [warehousesQ.data]);
 
+  // Total on-hand per item across every warehouse drives the
+  // low-stock comparison against the item's reorder level (which is
+  // defined per item, not per location).
+  const totalByItem = useMemo(() => {
+    const m = new Map<string, number>();
+    (levelsQ.data ?? []).forEach((r) => {
+      m.set(r.item_id, (m.get(r.item_id) ?? 0) + Number(r.qty));
+    });
+    return m;
+  }, [levelsQ.data]);
+
   // Fan out one batches request per item we have stock for. Items
   // without any batches return [] and render the standard "—" cell.
-  // Phase G/L: the Batches column unlocks FEFO inspection on the
-  // same page operators already use to read live stock.
   const itemIds = useMemo(() => {
     const seen = new Set<string>();
     (levelsQ.data ?? []).forEach((r) => seen.add(r.item_id));
@@ -78,58 +134,223 @@ export function StockLevelsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemIds, batchDataKey]);
 
+  const rows = useMemo(() => {
+    const all = levelsQ.data ?? [];
+    return warehouse === ALL_WAREHOUSES
+      ? all
+      : all.filter((r) => r.warehouse_id === warehouse);
+  }, [levelsQ.data, warehouse]);
+
+  const lowStockCount = useMemo(() => {
+    const items = new Set<string>();
+    rows.forEach((r) => {
+      const reorder = reorderByItem.get(r.item_id) ?? 0;
+      if (reorder > 0 && (totalByItem.get(r.item_id) ?? 0) <= reorder) {
+        items.add(r.item_id);
+      }
+    });
+    return items.size;
+  }, [rows, reorderByItem, totalByItem]);
+
+  function handleExport() {
+    const header = ["SKU", "Item", "Warehouse", "Quantity", "Unit"];
+    const data = rows.map((r) => {
+      const label = itemLabel.get(r.item_id) ?? r.item_id;
+      const [sku, ...rest] = label.split(" — ");
+      return [
+        sku,
+        rest.join(" — ") || label,
+        whLabel.get(r.warehouse_id) ?? r.warehouse_id,
+        r.qty,
+        uomByItem.get(r.item_id) ?? "",
+      ];
+    });
+    downloadCsv("stock-levels.csv", header, data);
+    toast.success("Export complete", {
+      description: `stock-levels.csv · ${data.length} row(s)`,
+    });
+  }
+
+  const ready = !levelsQ.isLoading && !levelsQ.isError;
+
   return (
-    <section>
-      <h1>Stock Levels</h1>
-      <p className="text-fg-muted">
-        Live SUM(qty) from the append-only inventory_moves ledger.
-      </p>
-      {levelsQ.isLoading && <p>Loading…</p>}
-      {levelsQ.isError && (
-        <p className="text-danger">
-          Failed to load stock levels: {(levelsQ.error as Error).message}
-        </p>
-      )}
-      {levelsQ.data && (
-        <Table className="mt-3 text-[13px]">
-          <TableHeader>
+    <section className="flex flex-col gap-4">
+      <header className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <Eyebrow>Inventory</Eyebrow>
+            <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-fg">
+              Stock Levels
+            </h1>
+            <p className="mt-1 text-sm text-fg-muted">
+              What you have on hand right now, by item and warehouse.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-end gap-2">
+            <Field label="Warehouse" className="w-56">
+              <Select
+                size="sm"
+                value={warehouse}
+                onChange={(e) => setWarehouse(e.target.value)}
+              >
+                <option value={ALL_WAREHOUSES}>All warehouses</option>
+                {(warehousesQ.data ?? []).map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.code} — {w.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Button
+              size="sm"
+              variant="outline"
+              leadingIcon={<Download className="size-4" />}
+              onClick={handleExport}
+              disabled={!ready || rows.length === 0}
+            >
+              Export CSV
+            </Button>
+          </div>
+        </div>
+        {ready && rows.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 text-sm text-fg-muted">
+            <span>
+              {fmt.number(rows.length)} row{rows.length === 1 ? "" : "s"}
+            </span>
+            {lowStockCount > 0 && (
+              <Badge variant="warning">
+                {fmt.number(lowStockCount)} low on stock
+              </Badge>
+            )}
+          </div>
+        )}
+      </header>
+
+      {levelsQ.isLoading ? (
+        <StockLevelsSkeleton />
+      ) : levelsQ.isError ? (
+        <EmptyState
+          icon={<AlertTriangle />}
+          title="Couldn't load stock levels"
+          description={(levelsQ.error as Error).message}
+          action={
+            <Button
+              variant="secondary"
+              onClick={() => void levelsQ.refetch()}
+              disabled={levelsQ.isFetching}
+            >
+              Retry
+            </Button>
+          }
+        />
+      ) : rows.length === 0 ? (
+        <EmptyState
+          icon={<Boxes />}
+          title={
+            warehouse === ALL_WAREHOUSES
+              ? "No stock recorded yet"
+              : "No stock in this warehouse"
+          }
+          description={
+            warehouse === ALL_WAREHOUSES
+              ? "Stock appears here once items are received or produced."
+              : "Try another warehouse, or receive stock into this one."
+          }
+          action={
+            warehouse === ALL_WAREHOUSES ? undefined : (
+              <Button
+                variant="secondary"
+                onClick={() => setWarehouse(ALL_WAREHOUSES)}
+              >
+                Show all warehouses
+              </Button>
+            )
+          }
+        />
+      ) : (
+        <Table>
+          <TableHeader className="sticky top-0 z-10">
             <TableRow>
               <TableHead>Item</TableHead>
               <TableHead>Warehouse</TableHead>
-              <TableHead className="text-right">Qty</TableHead>
+              <TableHead className="text-right">On hand</TableHead>
               <TableHead>Batches</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {levelsQ.data.map((r) => {
+            {rows.map((r) => {
               const batches = batchesByItem.get(r.item_id) ?? [];
+              const qty = Number(r.qty);
+              const reorder = reorderByItem.get(r.item_id) ?? 0;
+              const itemTotal = totalByItem.get(r.item_id) ?? 0;
+              const uom = uomByItem.get(r.item_id);
+              const outOfStock = qty <= 0;
+              const lowStock = !outOfStock && reorder > 0 && itemTotal <= reorder;
               return (
                 <TableRow key={`${r.item_id}:${r.warehouse_id}`}>
                   <TableCell>
-                    {itemLabel.get(r.item_id) ?? r.item_id}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium text-fg">
+                        {itemLabel.get(r.item_id) ?? r.item_id}
+                      </span>
+                      {outOfStock && <Badge variant="danger">Out of stock</Badge>}
+                      {lowStock && <Badge variant="warning">Low stock</Badge>}
+                    </div>
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="text-fg-muted">
                     {whLabel.get(r.warehouse_id) ?? r.warehouse_id}
                   </TableCell>
-                  <TableCell className="text-right">{r.qty}</TableCell>
-                  <TableCell className={batches.length === 0 ? "text-fg-subtle" : undefined}>
+                  <TableCell className="text-right tabular-nums">
+                    <span className="font-medium text-fg">
+                      {fmt.number(qty)}
+                    </span>
+                    {uom && (
+                      <span className="ms-1 text-fg-subtle">{uom}</span>
+                    )}
+                  </TableCell>
+                  <TableCell
+                    className={batches.length === 0 ? "text-fg-subtle" : undefined}
+                  >
                     {batches.length === 0
                       ? "—"
                       : batches
                           .slice(0, 3)
                           .map((b) =>
                             b.expires_at
-                              ? `${b.batch_no} (exp ${b.expires_at.slice(0, 10)})`
+                              ? `${b.batch_no} (exp ${fmt.date(new Date(b.expires_at))})`
                               : b.batch_no,
                           )
-                          .join(", ") + (batches.length > 3 ? `, +${batches.length - 3}` : "")}
+                          .join(", ") +
+                        (batches.length > 3 ? `, +${batches.length - 3} more` : "")}
                   </TableCell>
                 </TableRow>
               );
             })}
           </TableBody>
+          <TableFooter>
+            <TableRow>
+              <TableCell colSpan={4} className="text-fg-muted">
+                {fmt.number(rows.length)} row{rows.length === 1 ? "" : "s"}
+                {warehouse === ALL_WAREHOUSES
+                  ? " across all warehouses"
+                  : ` in ${whLabel.get(warehouse) ?? "this warehouse"}`}
+              </TableCell>
+            </TableRow>
+          </TableFooter>
         </Table>
       )}
     </section>
+  );
+}
+
+/** Loading placeholder matching the stock-levels table shape. */
+function StockLevelsSkeleton() {
+  return (
+    <div className="flex flex-col gap-2">
+      <Skeleton className="h-9 w-full" />
+      {Array.from({ length: 6 }).map((_, i) => (
+        <Skeleton key={i} className="h-11 w-full" />
+      ))}
+    </div>
   );
 }

@@ -6,6 +6,7 @@ const listWorkOrders = vi.fn();
 const listJobCards = vi.fn();
 const startJobCard = vi.fn();
 const completeJobCard = vi.fn();
+const listInventoryItems = vi.fn();
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -13,6 +14,7 @@ vi.mock("../lib/api", () => ({
     listJobCards: (...a: unknown[]) => listJobCards(...a),
     startJobCard: (...a: unknown[]) => startJobCard(...a),
     completeJobCard: (...a: unknown[]) => completeJobCard(...a),
+    listInventoryItems: (...a: unknown[]) => listInventoryItems(...a),
   },
 }));
 
@@ -26,6 +28,16 @@ const WO = {
   status: "released",
   planned_qty: "10",
   actual_qty: "",
+};
+
+const ITEM = {
+  tenant_id: "t",
+  id: "item-1",
+  sku: "SKU-1",
+  name: "Widget",
+  uom: "each",
+  active: true,
+  reorder_level: "0",
 };
 
 function card(overrides: Record<string, unknown> = {}) {
@@ -47,18 +59,23 @@ async function selectWorkOrder(user: ReturnType<typeof userEvent.setup>) {
   renderWithProviders(<JobCardPage />);
   // The selector is limited to released / in-progress orders; wait for
   // the work-order query to populate the option before choosing it.
-  await screen.findByRole("option", { name: /released — qty 10/ });
+  await screen.findByRole("option", { name: /qty 10/ });
   await user.selectOptions(screen.getByLabelText("Work order"), WO.id);
 }
 
 describe("JobCardPage", () => {
   beforeEach(() => {
-    [listWorkOrders, listJobCards, startJobCard, completeJobCard].forEach((m) =>
-      m.mockReset(),
-    );
+    [
+      listWorkOrders,
+      listJobCards,
+      startJobCard,
+      completeJobCard,
+      listInventoryItems,
+    ].forEach((m) => m.mockReset());
     listWorkOrders.mockImplementation((status: string) =>
       status === "released" ? Promise.resolve([WO]) : Promise.resolve([]),
     );
+    listInventoryItems.mockResolvedValue([ITEM]);
   });
 
   it("lists the job cards for the selected work order", async () => {

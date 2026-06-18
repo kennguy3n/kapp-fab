@@ -21,6 +21,7 @@ export const SUBCONTRACTING_STRINGS = {
   "subcontracting.title": "Subcontracting Workbench",
   "subcontracting.subtitle":
     "Out-source an operation to a supplier: issue components out of stock, receive the finished item back valued at the supplier's service charge, then close the order. Each step posts the matching inventory move.",
+  "subcontracting.eyebrow": "Manufacturing",
 
   // Create form
   "subcontracting.create.heading": "Create subcontract order",
@@ -48,8 +49,12 @@ export const SUBCONTRACTING_STRINGS = {
   "subcontracting.orders.heading": "Subcontract orders",
   "subcontracting.orders.empty":
     "No subcontract orders yet. Create one to out-source an operation.",
+  "subcontracting.orders.emptyTitle": "No subcontract orders yet",
+  "subcontracting.orders.emptyBody": "Create one to out-source an operation.",
   "subcontracting.orders.loading": "Loading orders…",
   "subcontracting.orders.error": "Failed to load subcontract orders.",
+  "subcontracting.orders.errorTitle": "Couldn't load subcontract orders",
+  "subcontracting.orders.retry": "Try again",
   "subcontracting.orders.filterStatus": "Status",
   "subcontracting.orders.filterAll": "All",
   "subcontracting.orders.item": "Item",
@@ -69,8 +74,10 @@ export const SUBCONTRACTING_STRINGS = {
   // Detail + lifecycle
   "subcontracting.detail.heading": "Order detail",
   "subcontracting.detail.select": "Select an order to drive its lifecycle.",
+  "subcontracting.detail.selectTitle": "No order selected",
   "subcontracting.detail.loading": "Loading order…",
   "subcontracting.detail.error": "Failed to load the order.",
+  "subcontracting.detail.errorTitle": "Couldn't load this order",
   "subcontracting.detail.supplier": "Supplier",
   "subcontracting.detail.warehouse": "Warehouse",
   "subcontracting.detail.qty": "Quantity",

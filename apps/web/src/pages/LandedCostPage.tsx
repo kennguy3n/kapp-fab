@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
+  InventoryItem,
+  InventoryWarehouse,
   LandedCostCharge,
   LandedCostTarget,
   LandedCostVoucher,
@@ -11,35 +13,100 @@ import type {
 import {
   Badge,
   Button,
+  EmptyState,
+  Eyebrow,
+  Field,
   Input,
   Select,
+  Skeleton,
   Table,
   TableBody,
   TableCell,
+  TableFooter,
   TableHead,
   TableHeader,
   TableRow,
+  toast,
   type BadgeProps,
 } from "@kapp/ui";
+import { AlertTriangle, Download, FileStack, Plus } from "lucide-react";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n";
+
+type AllocationMethod = "by_qty" | "by_amount" | "by_weight";
+
+const MONEY_OPTS: Intl.NumberFormatOptions = {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+};
+
+const ALLOCATION_METHOD_LABELS: Record<AllocationMethod, string> = {
+  by_qty: "By quantity",
+  by_amount: "By value",
+  by_weight: "By weight",
+};
+
+const STATUS_LABELS: Record<LandedCostVoucher["status"], string> = {
+  draft: "Draft",
+  allocated: "Allocated",
+  posted: "Posted",
+};
+
+const STATUS_VARIANT: Record<LandedCostVoucher["status"], BadgeProps["variant"]> =
+  {
+    draft: "default",
+    allocated: "info",
+    posted: "success",
+  };
+
+/** Turn a ktype id like `purchasing.goods_receipt` into "Goods Receipt". */
+function humanizeKType(ktype: string): string {
+  const last = ktype.split(/[./]/).pop() ?? ktype;
+  return last
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+/** Quote a CSV cell only when it contains a delimiter, quote, or newline. */
+function csvCell(value: string): string {
+  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+/** Trigger a client-side download of a CSV built from the given rows. */
+function downloadCsv(filename: string, headers: string[], rows: string[][]) {
+  const body = [headers, ...rows]
+    .map((cols) => cols.map(csvCell).join(","))
+    .join("\n");
+  const blob = new Blob([body], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function StatusBadge({ status }: { status: LandedCostVoucher["status"] }) {
+  return <Badge variant={STATUS_VARIANT[status]}>{STATUS_LABELS[status]}</Badge>;
+}
 
 /**
- * LandedCostPage is the operator UI for the Phase N9c landed-cost
- * voucher lifecycle (draft → allocated → posted).
+ * LandedCostPage is the operator UI for the landed-cost voucher
+ * lifecycle (draft → allocated → posted).
  *
  * Left column: list of vouchers filtered by status.
  * Right column: selected voucher detail with editable charge + target
  * tables, an Allocate button (preview shares without committing
  * inventory moves), and a Post button (writes per-target reversal +
- * forward inventory_moves plus the booking JE; idempotent).
- *
- * The page intentionally keeps the editing surface minimal — there is
- * no row-level validation beyond the backend's CHECK constraints,
- * because every mutation goes through the typed API client which
- * surfaces the backend's typed errors.
+ * forward inventory moves plus the booking journal entry; idempotent).
  */
 export function LandedCostPage() {
   const queryClient = useQueryClient();
+  const fmt = useFormatter();
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -56,6 +123,30 @@ export function LandedCostPage() {
     queryFn: () => api.getLandedCostVoucher(selectedId!),
     enabled: !!selectedId,
   });
+
+  // Item + warehouse catalogues resolve the target rows' foreign keys
+  // to human-readable labels and back the picker dropdowns in the
+  // target editor, so the UI never surfaces a raw UUID.
+  const itemsQ = useQuery({
+    queryKey: ["inventory", "items"],
+    queryFn: () => api.listInventoryItems(),
+  });
+  const warehousesQ = useQuery({
+    queryKey: ["inventory", "warehouses"],
+    queryFn: () => api.listInventoryWarehouses(),
+  });
+  const items = itemsQ.data ?? [];
+  const warehouses = warehousesQ.data ?? [];
+  const itemLabel = useMemo(() => {
+    const m = new Map<string, string>();
+    items.forEach((it) => m.set(it.id, `${it.sku} — ${it.name}`));
+    return m;
+  }, [items]);
+  const whLabel = useMemo(() => {
+    const m = new Map<string, string>();
+    warehouses.forEach((w) => m.set(w.id, `${w.code} — ${w.name}`));
+    return m;
+  }, [warehouses]);
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["landed-costs"] });
@@ -89,15 +180,48 @@ export function LandedCostPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
+  function handleExportList() {
+    const vouchers = listQ.data ?? [];
+    const header = ["Voucher", "Method", "Status", "Description"];
+    const data = vouchers.map((v) => [
+      v.voucher_number,
+      ALLOCATION_METHOD_LABELS[v.allocation_method],
+      STATUS_LABELS[v.status],
+      v.description ?? "",
+    ]);
+    downloadCsv("landed-cost-vouchers.csv", header, data);
+    toast.success("Export complete", {
+      description: `landed-cost-vouchers.csv · ${data.length} row(s)`,
+    });
+  }
+
   return (
-    <section>
-      <h1>Landed Cost Vouchers</h1>
-      <p className="text-fg-muted">
-        Allocate freight, duty, insurance and other landed costs across
-        receipt lines. Draft vouchers may be edited; allocating freezes the
-        share preview and a posted voucher writes inventory_moves +
-        journal entries (idempotent).
-      </p>
+    <section className="flex flex-col gap-4">
+      <header className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <Eyebrow>Inventory</Eyebrow>
+            <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-fg">
+              Landed Costs
+            </h1>
+            <p className="mt-1 max-w-2xl text-sm text-fg-muted">
+              Spread freight, duty, insurance and other import costs across the
+              goods you received. Draft vouchers can be edited; allocating
+              previews each item's share, and posting writes the stock and
+              accounting entries.
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            leadingIcon={<Download className="size-4" />}
+            onClick={handleExportList}
+            disabled={!listQ.data || listQ.data.length === 0}
+          >
+            Export CSV
+          </Button>
+        </div>
+      </header>
 
       <CreateVoucherForm
         onCreated={(v) => {
@@ -106,30 +230,56 @@ export function LandedCostPage() {
         }}
       />
 
-      <div className="mt-6 flex gap-6">
-        <div className="w-[360px]">
-          <div className="mb-2 flex items-center gap-2">
-            <label className="text-xs text-fg">Status</label>
+      <div className="flex flex-col gap-6 lg:flex-row">
+        <div className="lg:w-[340px] lg:shrink-0">
+          <Field label="Status" className="mb-2 w-44">
             <Select
               size="sm"
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
             >
-              <option value="">All</option>
+              <option value="">All statuses</option>
               <option value="draft">Draft</option>
               <option value="allocated">Allocated</option>
               <option value="posted">Posted</option>
             </Select>
-          </div>
-          {listQ.isLoading && <p>Loading…</p>}
-          {listQ.isError && (
-            <p className="text-danger">
-              Failed to load vouchers: {(listQ.error as Error).message}
-            </p>
-          )}
-          {listQ.data && (
+          </Field>
+          {listQ.isLoading ? (
+            <div className="flex flex-col gap-2">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <Skeleton key={i} className="h-10 w-full" />
+              ))}
+            </div>
+          ) : listQ.isError ? (
+            <EmptyState
+              icon={<AlertTriangle />}
+              title="Couldn't load vouchers"
+              description={(listQ.error as Error).message}
+              action={
+                <Button
+                  variant="secondary"
+                  onClick={() => void listQ.refetch()}
+                  disabled={listQ.isFetching}
+                >
+                  Retry
+                </Button>
+              }
+            />
+          ) : (listQ.data ?? []).length === 0 ? (
+            <EmptyState
+              icon={<FileStack />}
+              title={
+                statusFilter ? "No vouchers with this status" : "No vouchers yet"
+              }
+              description={
+                statusFilter
+                  ? "Try a different status filter."
+                  : "Create a voucher above to start allocating landed costs."
+              }
+            />
+          ) : (
             <VoucherList
-              vouchers={listQ.data}
+              vouchers={listQ.data ?? []}
               selectedId={selectedId}
               onSelect={setSelectedId}
             />
@@ -137,29 +287,48 @@ export function LandedCostPage() {
         </div>
 
         <div className="min-w-0 flex-1">
-          {!selectedId && (
-            <p className="text-fg-subtle">Select a voucher from the list.</p>
-          )}
-          {selectedId && detailQ.isLoading && <p>Loading detail…</p>}
-          {selectedId && detailQ.isError && (
-            <p className="text-danger">
-              Failed to load detail: {(detailQ.error as Error).message}
-            </p>
-          )}
-          {selectedId && detailQ.data && (
+          {!selectedId ? (
+            <EmptyState
+              icon={<FileStack />}
+              title="Select a voucher"
+              description="Pick a voucher from the list to view its charges and allocation."
+            />
+          ) : detailQ.isLoading ? (
+            <div className="flex flex-col gap-3">
+              <Skeleton className="h-8 w-64" />
+              <Skeleton className="h-40 w-full" />
+              <Skeleton className="h-40 w-full" />
+            </div>
+          ) : detailQ.isError ? (
+            <EmptyState
+              icon={<AlertTriangle />}
+              title="Couldn't load this voucher"
+              description={(detailQ.error as Error).message}
+              action={
+                <Button
+                  variant="secondary"
+                  onClick={() => void detailQ.refetch()}
+                  disabled={detailQ.isFetching}
+                >
+                  Retry
+                </Button>
+              }
+            />
+          ) : detailQ.data ? (
             // key={selectedId} forces a fresh VoucherDetail mount on
             // each selection so the local useState in ChargesSection /
             // TargetsSection (draft description, draft amount, etc.) is
-            // reset rather than persisted across vouchers. Without
-            // remount the previous voucher's half-typed inputs would
-            // bleed into the next voucher's form, which is a UX
-            // surprise even though no data integrity is at risk
-            // (mutations key on props.voucher.id).
+            // reset rather than persisted across vouchers.
             <VoucherDetail
               key={selectedId}
+              fmt={fmt}
               voucher={detailQ.data.voucher}
               charges={detailQ.data.charges}
               targets={detailQ.data.targets}
+              items={items}
+              warehouses={warehouses}
+              itemLabel={itemLabel}
+              whLabel={whLabel}
               onAllocate={() => allocateMut.mutate(selectedId)}
               onPost={() => postMut.mutate(selectedId)}
               isAllocating={allocateMut.isPending}
@@ -169,7 +338,7 @@ export function LandedCostPage() {
               onChargeMutated={invalidate}
               onTargetMutated={invalidate}
             />
-          )}
+          ) : null}
         </div>
       </div>
     </section>
@@ -181,56 +350,62 @@ function CreateVoucherForm(props: {
 }) {
   const [voucherNumber, setVoucherNumber] = useState("");
   const [description, setDescription] = useState("");
-  const [allocationMethod, setAllocationMethod] = useState<
-    "by_qty" | "by_amount" | "by_weight"
-  >("by_qty");
+  const [allocationMethod, setAllocationMethod] =
+    useState<AllocationMethod>("by_qty");
 
   const createMut = useMutation({
     mutationFn: (input: UpsertLandedCostVoucherInput) =>
       api.createLandedCostVoucher(input),
     onSuccess: (v) => {
       // Clear inputs only after the mutation lands so a server
-      // error doesn't silently wipe what the user typed. Same
-      // pattern as ChargesSection / TargetsSection.
+      // error doesn't silently wipe what the user typed.
       setVoucherNumber("");
       setDescription("");
       setAllocationMethod("by_qty");
+      toast.success("Voucher created", { description: v.voucher_number });
       props.onCreated(v);
     },
   });
 
   return (
-    <div className="mt-3 rounded-md border border-border p-3">
-      <strong className="text-sm">Create voucher</strong>
-      <div className="mt-2 flex flex-wrap gap-2">
-        <Input
-          size="sm"
-          placeholder="Voucher number"
-          value={voucherNumber}
-          onChange={(e) => setVoucherNumber(e.target.value)}
-        />
-        <Input
-          size="sm"
-          className="flex-1"
-          placeholder="Description (optional)"
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-        />
-        <Select
-          size="sm"
-          value={allocationMethod}
-          onChange={(e) =>
-            setAllocationMethod(
-              e.target.value as "by_qty" | "by_amount" | "by_weight",
-            )
-          }
+    <div className="rounded-lg border border-border bg-bg-subtle p-4">
+      <h2 className="text-sm font-semibold text-fg">Create a voucher</h2>
+      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_2fr_1fr_auto] lg:items-end">
+        <Field label="Voucher number" required>
+          <Input
+            size="sm"
+            placeholder="e.g. LC-1042"
+            value={voucherNumber}
+            onChange={(e) => setVoucherNumber(e.target.value)}
+          />
+        </Field>
+        <Field label="Description" help="Optional — what these costs relate to.">
+          <Input
+            size="sm"
+            placeholder="March ocean freight"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+          />
+        </Field>
+        <Field
+          label="Allocation"
+          help="How costs are split across items."
         >
-          <option value="by_qty">by_qty</option>
-          <option value="by_amount">by_amount</option>
-          <option value="by_weight">by_weight</option>
-        </Select>
+          <Select
+            size="sm"
+            value={allocationMethod}
+            onChange={(e) =>
+              setAllocationMethod(e.target.value as AllocationMethod)
+            }
+          >
+            <option value="by_qty">By quantity</option>
+            <option value="by_amount">By value</option>
+            <option value="by_weight">By weight</option>
+          </Select>
+        </Field>
         <Button
           size="sm"
+          leadingIcon={<Plus className="size-4" />}
           disabled={createMut.isPending || voucherNumber.trim() === ""}
           onClick={() =>
             createMut.mutate({
@@ -244,8 +419,8 @@ function CreateVoucherForm(props: {
         </Button>
       </div>
       {createMut.isError ? (
-        <p className="mt-1.5 text-xs text-danger">
-          Create failed: {(createMut.error as Error).message}
+        <p className="mt-2 text-xs text-danger">
+          Couldn't create voucher: {(createMut.error as Error).message}
         </p>
       ) : null}
     </div>
@@ -258,7 +433,7 @@ function VoucherList(props: {
   onSelect: (id: string) => void;
 }) {
   return (
-    <Table className="text-xs">
+    <Table>
       <TableHeader>
         <TableRow>
           <TableHead>Voucher</TableHead>
@@ -267,53 +442,41 @@ function VoucherList(props: {
         </TableRow>
       </TableHeader>
       <TableBody>
-        {props.vouchers.map((v) => (
-          <TableRow
-            key={v.id}
-            onClick={() => props.onSelect(v.id)}
-            className={
-              v.id === props.selectedId
-                ? "cursor-pointer bg-bg-muted"
-                : "cursor-pointer"
-            }
-          >
-            <TableCell>{v.voucher_number}</TableCell>
-            <TableCell>{v.allocation_method}</TableCell>
-            <TableCell>
-              <StatusBadge status={v.status} />
-            </TableCell>
-          </TableRow>
-        ))}
-        {props.vouchers.length === 0 && (
-          <TableRow>
-            <TableCell colSpan={3} className="text-fg-subtle">
-              No vouchers.
-            </TableCell>
-          </TableRow>
-        )}
+        {props.vouchers.map((v) => {
+          const selected = v.id === props.selectedId;
+          return (
+            <TableRow
+              key={v.id}
+              onClick={() => props.onSelect(v.id)}
+              aria-selected={selected}
+              className={selected ? "cursor-pointer bg-bg-muted" : "cursor-pointer"}
+            >
+              <TableCell className="font-medium text-fg">
+                {v.voucher_number}
+              </TableCell>
+              <TableCell className="text-fg-muted">
+                {ALLOCATION_METHOD_LABELS[v.allocation_method]}
+              </TableCell>
+              <TableCell>
+                <StatusBadge status={v.status} />
+              </TableCell>
+            </TableRow>
+          );
+        })}
       </TableBody>
     </Table>
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
-  // Map the voucher lifecycle to the design-system's semantic Badge
-  // variants so the colour meaning survives light/dark themes.
-  const variant: BadgeProps["variant"] =
-    status === "draft"
-      ? "default"
-      : status === "allocated"
-        ? "info"
-        : status === "posted"
-          ? "success"
-          : "danger";
-  return <Badge variant={variant}>{status}</Badge>;
-}
-
 function VoucherDetail(props: {
+  fmt: ReturnType<typeof useFormatter>;
   voucher: LandedCostVoucher;
   charges: LandedCostCharge[];
   targets: LandedCostTarget[];
+  items: InventoryItem[];
+  warehouses: InventoryWarehouse[];
+  itemLabel: Map<string, string>;
+  whLabel: Map<string, string>;
   onAllocate: () => void;
   onPost: () => void;
   isAllocating: boolean;
@@ -323,28 +486,30 @@ function VoucherDetail(props: {
   onChargeMutated: () => void;
   onTargetMutated: () => void;
 }) {
+  const { fmt } = props;
   const isDraft = props.voucher.status === "draft";
   const isAllocated = props.voucher.status === "allocated";
   const isPosted = props.voucher.status === "posted";
 
-  const totalCharges = useMemo(() => {
-    return props.charges.reduce((acc, c) => acc + Number(c.amount), 0);
-  }, [props.charges]);
-  const totalAllocated = useMemo(() => {
-    return props.targets.reduce(
-      (acc, t) => acc + Number(t.allocated_amount),
-      0,
-    );
-  }, [props.targets]);
+  const totalCharges = useMemo(
+    () => props.charges.reduce((acc, c) => acc + Number(c.amount), 0),
+    [props.charges],
+  );
+  const totalAllocated = useMemo(
+    () => props.targets.reduce((acc, t) => acc + Number(t.allocated_amount), 0),
+    [props.targets],
+  );
 
   return (
-    <div>
-      <div className="flex items-center gap-3">
-        <h2 className="m-0">{props.voucher.voucher_number}</h2>
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="m-0 text-lg font-semibold text-fg">
+          {props.voucher.voucher_number}
+        </h2>
         <StatusBadge status={props.voucher.status} />
-        <span className="text-xs text-fg-muted">
-          {props.voucher.allocation_method}
-        </span>
+        <Badge variant="outline">
+          {ALLOCATION_METHOD_LABELS[props.voucher.allocation_method]}
+        </Badge>
         <div className="ms-auto flex gap-2">
           <Button
             size="sm"
@@ -364,20 +529,21 @@ function VoucherDetail(props: {
         </div>
       </div>
       {props.voucher.description && (
-        <p className="mt-1 text-fg-muted">{props.voucher.description}</p>
+        <p className="text-sm text-fg-muted">{props.voucher.description}</p>
       )}
       {props.allocateError ? (
         <p className="text-xs text-danger">
-          Allocate failed: {(props.allocateError as Error).message}
+          Couldn't allocate: {(props.allocateError as Error).message}
         </p>
       ) : null}
       {props.postError ? (
         <p className="text-xs text-danger">
-          Post failed: {(props.postError as Error).message}
+          Couldn't post: {(props.postError as Error).message}
         </p>
       ) : null}
 
       <ChargesSection
+        fmt={fmt}
         voucher={props.voucher}
         charges={props.charges}
         editable={isDraft}
@@ -386,8 +552,13 @@ function VoucherDetail(props: {
       />
 
       <TargetsSection
+        fmt={fmt}
         voucher={props.voucher}
         targets={props.targets}
+        items={props.items}
+        warehouses={props.warehouses}
+        itemLabel={props.itemLabel}
+        whLabel={props.whLabel}
         editable={isDraft}
         onMutated={props.onTargetMutated}
         totalAllocated={totalAllocated}
@@ -398,12 +569,14 @@ function VoucherDetail(props: {
 }
 
 function ChargesSection(props: {
+  fmt: ReturnType<typeof useFormatter>;
   voucher: LandedCostVoucher;
   charges: LandedCostCharge[];
   editable: boolean;
   onMutated: () => void;
   totalCharges: number;
 }) {
+  const { fmt } = props;
   const [description, setDescription] = useState("");
   const [amount, setAmount] = useState("");
   const [accountCode, setAccountCode] = useState("");
@@ -412,8 +585,6 @@ function ChargesSection(props: {
     mutationFn: (input: UpsertLandedCostChargeInput) =>
       api.upsertLandedCostCharge(props.voucher.id, input),
     onSuccess: () => {
-      // Clear inputs only after the mutation lands so a server
-      // error doesn't silently wipe what the user typed.
       setDescription("");
       setAmount("");
       setAccountCode("");
@@ -427,101 +598,122 @@ function ChargesSection(props: {
   });
 
   return (
-    <div className="mt-4">
-      <h3 className="my-2 text-sm">Charges</h3>
-      <Table className="text-xs">
+    <div className="flex flex-col gap-2">
+      <h3 className="text-sm font-semibold text-fg">Charges</h3>
+      <Table>
         <TableHeader>
           <TableRow>
             <TableHead>Description</TableHead>
             <TableHead className="text-right">Amount</TableHead>
             <TableHead>Account</TableHead>
-            <TableHead />
+            {props.editable && <TableHead className="w-0 text-right">Actions</TableHead>}
           </TableRow>
         </TableHeader>
         <TableBody>
-          {props.charges.map((c) => (
-            <TableRow key={c.id}>
-              <TableCell>{c.description}</TableCell>
-              <TableCell className="text-right">{c.amount}</TableCell>
-              <TableCell>
-                {c.account_code ?? <em>(default)</em>}
-              </TableCell>
-              <TableCell className="text-right">
-                {props.editable && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => deleteMut.mutate(c.id)}
-                  >
-                    Delete
-                  </Button>
-                )}
+          {props.charges.length === 0 ? (
+            <TableRow>
+              <TableCell
+                colSpan={props.editable ? 4 : 3}
+                className="text-center text-fg-subtle"
+              >
+                No charges yet.
               </TableCell>
             </TableRow>
-          ))}
-          <TableRow>
-            <TableCell className="text-right">
-              <strong>Total</strong>
-            </TableCell>
-            <TableCell className="text-right">
-              <strong>{props.totalCharges.toFixed(2)}</strong>
-            </TableCell>
-            <TableCell />
-            <TableCell />
-          </TableRow>
+          ) : (
+            props.charges.map((c) => (
+              <TableRow key={c.id}>
+                <TableCell className="text-fg">{c.description}</TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {fmt.number(Number(c.amount), MONEY_OPTS)}
+                </TableCell>
+                <TableCell className="text-fg-muted">
+                  {c.account_code ?? (
+                    <span className="text-fg-subtle">Default</span>
+                  )}
+                </TableCell>
+                {props.editable && (
+                  <TableCell className="text-right">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => deleteMut.mutate(c.id)}
+                      disabled={deleteMut.isPending}
+                    >
+                      Delete
+                    </Button>
+                  </TableCell>
+                )}
+              </TableRow>
+            ))
+          )}
         </TableBody>
+        <TableFooter>
+          <TableRow>
+            <TableCell className="font-medium text-fg">Total charges</TableCell>
+            <TableCell className="text-right font-semibold tabular-nums text-fg">
+              {fmt.number(props.totalCharges, MONEY_OPTS)}
+            </TableCell>
+            <TableCell />
+            {props.editable && <TableCell />}
+          </TableRow>
+        </TableFooter>
       </Table>
       {props.editable && (
-        <div className="mt-2 flex flex-wrap gap-2">
-          <Input
-            size="sm"
-            className="flex-1"
-            placeholder="Description"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-          <Input
-            size="sm"
-            className="w-[100px]"
-            placeholder="Amount"
-            type="number"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-          />
-          <Input
-            size="sm"
-            className="w-[140px]"
-            placeholder="Account code (optional)"
-            value={accountCode}
-            onChange={(e) => setAccountCode(e.target.value)}
-          />
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-[2fr_1fr_1fr_auto] sm:items-end">
+          <Field label="Description" required>
+            <Input
+              size="sm"
+              placeholder="Ocean freight"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </Field>
+          <Field label="Amount" required>
+            <Input
+              size="sm"
+              placeholder="0.00"
+              type="number"
+              inputMode="decimal"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+            />
+          </Field>
+          <Field label="Account" help="Optional GL code.">
+            <Input
+              size="sm"
+              placeholder="Default"
+              value={accountCode}
+              onChange={(e) => setAccountCode(e.target.value)}
+            />
+          </Field>
           <Button
             size="sm"
+            leadingIcon={<Plus className="size-4" />}
             disabled={
               upsertMut.isPending ||
               description.trim() === "" ||
               amount.trim() === ""
             }
-            onClick={() => {
+            onClick={() =>
               upsertMut.mutate({
                 description: description.trim(),
                 amount: amount.trim(),
                 account_code: accountCode.trim() || undefined,
-              });
-            }}
+              })
+            }
           >
             Add charge
           </Button>
         </div>
       )}
       {upsertMut.isError ? (
-        <p className="mt-1.5 text-xs text-danger">
-          Add charge failed: {(upsertMut.error as Error).message}
+        <p className="text-xs text-danger">
+          Couldn't add charge: {(upsertMut.error as Error).message}
         </p>
       ) : null}
       {deleteMut.isError ? (
-        <p className="mt-1.5 text-xs text-danger">
-          Delete charge failed: {(deleteMut.error as Error).message}
+        <p className="text-xs text-danger">
+          Couldn't delete charge: {(deleteMut.error as Error).message}
         </p>
       ) : null}
     </div>
@@ -529,13 +721,19 @@ function ChargesSection(props: {
 }
 
 function TargetsSection(props: {
+  fmt: ReturnType<typeof useFormatter>;
   voucher: LandedCostVoucher;
   targets: LandedCostTarget[];
+  items: InventoryItem[];
+  warehouses: InventoryWarehouse[];
+  itemLabel: Map<string, string>;
+  whLabel: Map<string, string>;
   editable: boolean;
   onMutated: () => void;
   totalAllocated: number;
   totalCharges: number;
 }) {
+  const { fmt } = props;
   const [sourceKType, setSourceKType] = useState("");
   const [sourceID, setSourceID] = useState("");
   const [itemID, setItemID] = useState("");
@@ -548,8 +746,6 @@ function TargetsSection(props: {
     mutationFn: (input: UpsertLandedCostTargetInput) =>
       api.upsertLandedCostTarget(props.voucher.id, input),
     onSuccess: () => {
-      // Clear inputs only after the mutation lands — see
-      // ChargesSection for rationale.
       setSourceKType("");
       setSourceID("");
       setItemID("");
@@ -567,167 +763,231 @@ function TargetsSection(props: {
   });
 
   // JS float accumulation across independent reduce() passes can leave
-  // a sub-cent residual even when shopspring/decimal on the backend has
-  // them exactly equal (classic 0.1 + 0.2 === 0.30000000000000004 case).
-  // The display rounds to two decimals, so anything under half a cent is
-  // visual zero; gate the red Δ indicator on the same threshold so we
-  // don't paint a "Δ 0.00" mismatch for a balanced voucher.
+  // a sub-cent residual even when the backend's decimal type has them
+  // exactly equal. The display rounds to two decimals, so anything
+  // under half a cent is visual zero; gate the mismatch indicator on
+  // the same threshold so a balanced voucher never shows a stray Δ.
   const reconcile = props.totalCharges - props.totalAllocated;
   const reconcileMismatch = Math.abs(reconcile) >= 0.005;
 
+  const colSpan = props.editable ? 7 : 6;
+
   return (
-    <div className="mt-4">
-      <h3 className="my-2 text-sm">Targets</h3>
-      <Table className="text-xs">
-        <TableHeader>
-          <TableRow>
-            <TableHead>Source</TableHead>
-            <TableHead>Item</TableHead>
-            <TableHead>Warehouse</TableHead>
-            <TableHead className="text-right">Qty</TableHead>
-            <TableHead className="text-right">Unit cost</TableHead>
-            <TableHead className="text-right">Weight</TableHead>
-            <TableHead className="text-right">Allocated</TableHead>
-            <TableHead>Applied</TableHead>
-            <TableHead />
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {props.targets.map((t) => (
-            <TableRow key={t.id}>
-              <TableCell className="text-fg-muted">
-                {t.source_ktype}
-              </TableCell>
-              <TableCell className="font-mono">
-                {t.item_id.slice(0, 8)}…
-              </TableCell>
-              <TableCell className="font-mono">
-                {t.warehouse_id.slice(0, 8)}…
-              </TableCell>
-              <TableCell className="text-right">{t.qty}</TableCell>
-              <TableCell className="text-right">{t.unit_cost}</TableCell>
-              <TableCell className="text-right">{t.weight}</TableCell>
-              <TableCell className="text-right">
-                {t.allocated_amount}
-              </TableCell>
-              <TableCell>{t.applied ? "✓" : "—"}</TableCell>
-              <TableCell className="text-right">
-                {props.editable && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => deleteMut.mutate(t.id)}
-                  >
-                    Delete
-                  </Button>
-                )}
-              </TableCell>
-            </TableRow>
-          ))}
-          <TableRow>
-            <TableCell colSpan={6} className="text-right">
-              <strong>Total allocated</strong>
-            </TableCell>
-            <TableCell className="text-right">
-              <strong>{props.totalAllocated.toFixed(2)}</strong>
-            </TableCell>
-            <TableCell colSpan={2}>
-              {reconcileMismatch && props.totalAllocated > 0 && (
-                <span className="text-danger">
-                  Δ {reconcile.toFixed(2)}
-                </span>
+    <div className="flex flex-col gap-2">
+      <h3 className="text-sm font-semibold text-fg">Items receiving cost</h3>
+      <div className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Source</TableHead>
+              <TableHead>Item</TableHead>
+              <TableHead>Warehouse</TableHead>
+              <TableHead className="text-right">Qty</TableHead>
+              <TableHead className="text-right">Unit cost</TableHead>
+              <TableHead className="text-right">Allocated</TableHead>
+              {props.editable && (
+                <TableHead className="w-0 text-right">Actions</TableHead>
               )}
-            </TableCell>
-          </TableRow>
-        </TableBody>
-      </Table>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {props.targets.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={colSpan} className="text-center text-fg-subtle">
+                  No items added yet.
+                </TableCell>
+              </TableRow>
+            ) : (
+              props.targets.map((t) => (
+                <TableRow key={t.id}>
+                  <TableCell className="text-fg-muted">
+                    <span className="flex items-center gap-1.5">
+                      {t.source_ktype ? humanizeKType(t.source_ktype) : "Manual"}
+                      {t.applied && (
+                        <Badge variant="success" size="xs">
+                          Applied
+                        </Badge>
+                      )}
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-fg">
+                    {props.itemLabel.get(t.item_id) ?? "Unknown item"}
+                  </TableCell>
+                  <TableCell className="text-fg-muted">
+                    {props.whLabel.get(t.warehouse_id) ?? "Unknown warehouse"}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {fmt.number(Number(t.qty))}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {fmt.number(Number(t.unit_cost), MONEY_OPTS)}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {fmt.number(Number(t.allocated_amount), MONEY_OPTS)}
+                  </TableCell>
+                  {props.editable && (
+                    <TableCell className="text-right">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => deleteMut.mutate(t.id)}
+                        disabled={deleteMut.isPending}
+                      >
+                        Delete
+                      </Button>
+                    </TableCell>
+                  )}
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+          <TableFooter>
+            <TableRow>
+              <TableCell colSpan={5} className="text-right font-medium text-fg">
+                Total allocated
+              </TableCell>
+              <TableCell className="text-right font-semibold tabular-nums text-fg">
+                {fmt.number(props.totalAllocated, MONEY_OPTS)}
+              </TableCell>
+              {props.editable && <TableCell />}
+            </TableRow>
+            {reconcileMismatch && props.totalAllocated > 0 && (
+              <TableRow>
+                <TableCell colSpan={colSpan} className="text-right text-xs text-danger">
+                  Allocated total is off by {fmt.number(reconcile, MONEY_OPTS)} from
+                  charges — re-allocate to balance.
+                </TableCell>
+              </TableRow>
+            )}
+          </TableFooter>
+        </Table>
+      </div>
       {props.editable && (
-        <div className="mt-2 grid grid-cols-[repeat(4,1fr)_auto] gap-1.5">
-          <Input
-            size="sm"
-            placeholder="Source ktype"
-            value={sourceKType}
-            onChange={(e) => setSourceKType(e.target.value)}
-          />
-          <Input
-            size="sm"
-            placeholder="Source id (UUID)"
-            value={sourceID}
-            onChange={(e) => setSourceID(e.target.value)}
-          />
-          <Input
-            size="sm"
-            placeholder="Item id (UUID)"
-            value={itemID}
-            onChange={(e) => setItemID(e.target.value)}
-          />
-          <Input
-            size="sm"
-            placeholder="Warehouse id (UUID)"
-            value={warehouseID}
-            onChange={(e) => setWarehouseID(e.target.value)}
-          />
-          <span />
-          <Input
-            size="sm"
-            placeholder="Qty"
-            type="number"
-            value={qty}
-            onChange={(e) => setQty(e.target.value)}
-          />
-          <Input
-            size="sm"
-            placeholder="Unit cost"
-            type="number"
-            value={unitCost}
-            onChange={(e) => setUnitCost(e.target.value)}
-          />
-          <Input
-            size="sm"
-            placeholder="Weight (optional)"
-            type="number"
-            value={weight}
-            onChange={(e) => setWeight(e.target.value)}
-          />
-          <span />
-          <Button
-            size="sm"
-            disabled={
-              upsertMut.isPending ||
-              sourceID.trim() === "" ||
-              itemID.trim() === "" ||
-              warehouseID.trim() === "" ||
-              qty.trim() === "" ||
-              unitCost.trim() === ""
-            }
-            onClick={() => {
-              upsertMut.mutate({
-                source_ktype: sourceKType.trim() || undefined,
-                source_id: sourceID.trim(),
-                item_id: itemID.trim(),
-                warehouse_id: warehouseID.trim(),
-                qty: qty.trim(),
-                unit_cost: unitCost.trim(),
-                weight: weight.trim() || undefined,
-              });
-            }}
+        <div className="grid grid-cols-1 gap-3 rounded-lg border border-border bg-bg-subtle p-3 sm:grid-cols-2 lg:grid-cols-3">
+          <Field
+            label="Item"
+            required
+            className="lg:col-span-1"
           >
-            Add target
-          </Button>
+            <Select
+              size="sm"
+              value={itemID}
+              onChange={(e) => setItemID(e.target.value)}
+            >
+              <option value="">Select an item…</option>
+              {props.items.map((it) => (
+                <option key={it.id} value={it.id}>
+                  {it.sku} — {it.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Warehouse" required>
+            <Select
+              size="sm"
+              value={warehouseID}
+              onChange={(e) => setWarehouseID(e.target.value)}
+            >
+              <option value="">Select a warehouse…</option>
+              {props.warehouses.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.code} — {w.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field
+            label="Source reference"
+            required
+            help="Receipt or PO this line came from."
+          >
+            <Input
+              size="sm"
+              placeholder="e.g. GRN-2045"
+              value={sourceID}
+              onChange={(e) => setSourceID(e.target.value)}
+            />
+          </Field>
+          <Field label="Source type" help="Optional document type.">
+            <Input
+              size="sm"
+              placeholder="Goods receipt"
+              value={sourceKType}
+              onChange={(e) => setSourceKType(e.target.value)}
+            />
+          </Field>
+          <Field label="Quantity" required>
+            <Input
+              size="sm"
+              placeholder="0"
+              type="number"
+              inputMode="decimal"
+              value={qty}
+              onChange={(e) => setQty(e.target.value)}
+            />
+          </Field>
+          <Field label="Unit cost" required>
+            <Input
+              size="sm"
+              placeholder="0.00"
+              type="number"
+              inputMode="decimal"
+              value={unitCost}
+              onChange={(e) => setUnitCost(e.target.value)}
+            />
+          </Field>
+          <Field
+            label="Weight"
+            help="Used when allocating by weight."
+          >
+            <Input
+              size="sm"
+              placeholder="0"
+              type="number"
+              inputMode="decimal"
+              value={weight}
+              onChange={(e) => setWeight(e.target.value)}
+            />
+          </Field>
+          <div className="flex items-end sm:col-span-2 lg:col-span-1">
+            <Button
+              size="sm"
+              leadingIcon={<Plus className="size-4" />}
+              disabled={
+                upsertMut.isPending ||
+                sourceID.trim() === "" ||
+                itemID.trim() === "" ||
+                warehouseID.trim() === "" ||
+                qty.trim() === "" ||
+                unitCost.trim() === ""
+              }
+              onClick={() =>
+                upsertMut.mutate({
+                  source_ktype: sourceKType.trim() || undefined,
+                  source_id: sourceID.trim(),
+                  item_id: itemID.trim(),
+                  warehouse_id: warehouseID.trim(),
+                  qty: qty.trim(),
+                  unit_cost: unitCost.trim(),
+                  weight: weight.trim() || undefined,
+                })
+              }
+            >
+              Add item
+            </Button>
+          </div>
         </div>
       )}
       {upsertMut.isError ? (
-        <p className="mt-1.5 text-xs text-danger">
-          Add target failed: {(upsertMut.error as Error).message}
+        <p className="text-xs text-danger">
+          Couldn't add item: {(upsertMut.error as Error).message}
         </p>
       ) : null}
       {deleteMut.isError ? (
-        <p className="mt-1.5 text-xs text-danger">
-          Delete target failed: {(deleteMut.error as Error).message}
+        <p className="text-xs text-danger">
+          Couldn't delete item: {(deleteMut.error as Error).message}
         </p>
       ) : null}
     </div>
   );
 }
-
-export default LandedCostPage;
