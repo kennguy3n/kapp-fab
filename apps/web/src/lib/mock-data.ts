@@ -40,6 +40,10 @@ import type {
   JournalEntry,
   KRecord,
   KType,
+  LearningPath,
+  LearningPathCourse,
+  Badge,
+  BadgeAward,
   LandedCostCharge,
   LandedCostTarget,
   LandedCostVoucher,
@@ -1687,6 +1691,76 @@ export const INTERVIEWS: Interview[] = [
   { id: uuid("hr.interview:maria-tech"), tenant_id: DEMO_TENANT_ID, application_id: APP_IDS.maria, interviewer_id: EMP_IDS.vpEng, interview_type: "technical", scheduled_at: toCalendarISO(addDays(TODAY, 2)), duration_minutes: 60, location: undefined, meeting_link: "https://meet.example.com/maria-tech", status: "scheduled", rating: null, feedback: undefined, recommendation: undefined, created_by: "system", created_at: daysAgoIso(2), updated_at: daysAgoIso(2) },
   { id: uuid("hr.interview:sofia-panel"), tenant_id: DEMO_TENANT_ID, application_id: APP_IDS.sofia, interviewer_id: EMP_IDS.mgrSales, interview_type: "panel", scheduled_at: daysAgoIso(3), duration_minutes: 45, location: "NYC Office — Room 4B", meeting_link: undefined, status: "completed", rating: 5, feedback: "Excellent discovery skills; strong close.", recommendation: "strong_yes", created_by: "system", created_at: daysAgoIso(6), updated_at: daysAgoIso(3) },
   { id: uuid("hr.interview:liam-portfolio"), tenant_id: DEMO_TENANT_ID, application_id: APP_IDS.liam, interviewer_id: EMP_IDS.vpEng, interview_type: "video", scheduled_at: toCalendarISO(addDays(TODAY, 4)), duration_minutes: 45, location: undefined, meeting_link: "https://meet.example.com/liam-portfolio", status: "scheduled", rating: null, feedback: undefined, recommendation: undefined, created_by: "system", created_at: daysAgoIso(1), updated_at: daysAgoIso(1) },
+];
+
+// --- LMS: learning paths, badges, badge awards -----------------------
+//
+// Curated learning paths across the published / draft / archived
+// lifecycle, a gamification badge catalogue, and a feed of awards to
+// seeded employees (so the Badges page shows earned-vs-locked state).
+
+const LP_IDS = {
+  salesOnboarding: uuid("lms.learning_path:sales-onboarding"),
+  engFoundations: uuid("lms.learning_path:eng-foundations"),
+  managerEssentials: uuid("lms.learning_path:manager-essentials"),
+  securityCompliance: uuid("lms.learning_path:security-compliance"),
+  dataModeling: uuid("lms.learning_path:data-modeling"),
+  csBootcamp: uuid("lms.learning_path:cs-bootcamp"),
+};
+
+export const LEARNING_PATHS: LearningPath[] = [
+  { tenant_id: DEMO_TENANT_ID, id: LP_IDS.salesOnboarding, title: "Sales Onboarding", description: "Ramp new account executives on the product, pitch and CRM workflow.", status: "published", target_roles: ["Sales", "Account Executive"], estimated_duration_hours: 12, difficulty: "beginner", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LP_IDS.engFoundations, title: "Engineering Foundations", description: "Core services, the record engine and our development workflow.", status: "published", target_roles: ["Engineering"], estimated_duration_hours: 24, difficulty: "intermediate", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LP_IDS.managerEssentials, title: "Manager Essentials", description: "First-time manager fundamentals: 1:1s, feedback and goal-setting.", status: "published", target_roles: ["Management"], estimated_duration_hours: 8, difficulty: "beginner", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LP_IDS.securityCompliance, title: "Security & Compliance", description: "Annual security awareness, data handling and compliance training.", status: "published", target_roles: ["All Employees"], estimated_duration_hours: 4, difficulty: "beginner", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LP_IDS.dataModeling, title: "Advanced Data Modeling", description: "Designing ktypes, relationships and reporting models at scale.", status: "draft", target_roles: ["Engineering", "Data"], estimated_duration_hours: 16, difficulty: "advanced", created_by: "system", created_at: NOW_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LP_IDS.csBootcamp, title: "Customer Success Bootcamp", description: "Legacy onboarding programme for the customer success team.", status: "archived", target_roles: ["Customer Success"], estimated_duration_hours: 10, difficulty: "beginner", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+];
+
+function lpCourse(pathId: string, seed: string, courseId: string, order: number, mandatory: boolean): LearningPathCourse {
+  return { tenant_id: DEMO_TENANT_ID, id: uuid(`lms.learning_path_course:${seed}`), learning_path_id: pathId, course_id: courseId, sequence_order: order, is_mandatory: mandatory, prerequisite_course_ids: null };
+}
+
+export const LEARNING_PATH_COURSES_BY_PATH: Record<string, LearningPathCourse[]> = {
+  [LP_IDS.salesOnboarding]: [
+    lpCourse(LP_IDS.salesOnboarding, "sales-1", COURSE_IDS.c1, 1, true),
+    lpCourse(LP_IDS.salesOnboarding, "sales-2", COURSE_IDS.c3, 2, false),
+  ],
+  [LP_IDS.engFoundations]: [
+    lpCourse(LP_IDS.engFoundations, "eng-1", COURSE_IDS.c1, 1, true),
+    lpCourse(LP_IDS.engFoundations, "eng-2", COURSE_IDS.c2, 2, true),
+  ],
+  [LP_IDS.securityCompliance]: [
+    lpCourse(LP_IDS.securityCompliance, "sec-1", COURSE_IDS.c2, 1, true),
+  ],
+};
+
+const BADGE_IDS = {
+  firstCourse: uuid("lms.badge:first-course"),
+  pathfinder: uuid("lms.badge:pathfinder"),
+  compliancePro: uuid("lms.badge:compliance-pro"),
+  topPerformer: uuid("lms.badge:top-performer"),
+  streak: uuid("lms.badge:streak"),
+  mentor: uuid("lms.badge:mentor"),
+};
+
+export const BADGES: Badge[] = [
+  { tenant_id: DEMO_TENANT_ID, id: BADGE_IDS.firstCourse, name: "First Steps", description: "Awarded for completing your very first course.", icon: "footprints", criteria_type: "course_completion", criteria_value: { courses: 1 }, active: true, created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BADGE_IDS.pathfinder, name: "Pathfinder", description: "Complete an entire learning path end to end.", icon: "route", criteria_type: "path_completion", criteria_value: { paths: 1 }, active: true, created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BADGE_IDS.compliancePro, name: "Compliance Pro", description: "Finish the annual security & compliance training.", icon: "shield-check", criteria_type: "course_completion", criteria_value: { course: "Security & Compliance" }, active: true, created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BADGE_IDS.topPerformer, name: "Top Performer", description: "Score 90%+ on five graded assessments.", icon: "trophy", criteria_type: "assessment_score", criteria_value: { min_score: 90, count: 5 }, active: true, created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BADGE_IDS.streak, name: "On a Streak", description: "Learn something every day for 7 days running.", icon: "flame", criteria_type: "learning_streak", criteria_value: { days: 7 }, active: true, created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BADGE_IDS.mentor, name: "Mentor", description: "Answer 10 questions in course discussions.", icon: "users", criteria_type: "discussion_answers", criteria_value: { answers: 10 }, active: false, created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+];
+
+export const BADGE_AWARDS: BadgeAward[] = [
+  { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:1"), user_id: EMP_IDS.ic1, badge_id: BADGE_IDS.firstCourse, earned_at: daysAgoIso(20) },
+  { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:2"), user_id: EMP_IDS.ic2, badge_id: BADGE_IDS.firstCourse, earned_at: daysAgoIso(18) },
+  { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:3"), user_id: EMP_IDS.ic3, badge_id: BADGE_IDS.firstCourse, earned_at: daysAgoIso(12) },
+  { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:4"), user_id: EMP_IDS.ic1, badge_id: BADGE_IDS.compliancePro, earned_at: daysAgoIso(10) },
+  { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:5"), user_id: EMP_IDS.mgrSales, badge_id: BADGE_IDS.compliancePro, earned_at: daysAgoIso(9) },
+  { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:6"), user_id: EMP_IDS.ic3, badge_id: BADGE_IDS.pathfinder, earned_at: daysAgoIso(5) },
+  { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:7"), user_id: EMP_IDS.vpEng, badge_id: BADGE_IDS.topPerformer, earned_at: daysAgoIso(3) },
 ];
 
 function jl(account_code: string, debit: string, credit: string, memo = "", currency = "USD") {

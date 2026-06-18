@@ -58,6 +58,10 @@ import type {
   JournalEntry,
   KRecord,
   KType,
+  LearningPath,
+  LearningPathCourse,
+  Badge,
+  BadgeAward,
   LandedCostCharge,
   LandedCostPostResult,
   LandedCostTarget,
@@ -132,6 +136,10 @@ import {
   JOB_OPENINGS,
   INTERVIEWS,
   JOURNAL_ENTRIES,
+  LEARNING_PATHS,
+  LEARNING_PATH_COURSES_BY_PATH,
+  BADGES,
+  BADGE_AWARDS,
   LANDED_COST_CHARGES_BY_VOUCHER,
   LANDED_COST_TARGETS_BY_VOUCHER,
   LANDED_COST_VOUCHERS,
@@ -255,6 +263,10 @@ for (const [k, v] of Object.entries(CYCLE_COUNT_LINES_BY_SESSION)) {
 const jobOpenings: JobOpening[] = JOB_OPENINGS.map((o) => ({ ...o }));
 const applications: JobApplication[] = JOB_APPLICATIONS.map((a) => ({ ...a }));
 const interviews: Interview[] = INTERVIEWS.map((i) => ({ ...i }));
+
+// Mutable LMS demo state so creating a learning path round-trips in
+// the UI. Cloned from the fixtures so a reload resets.
+const learningPaths: LearningPath[] = LEARNING_PATHS.map((p) => ({ ...p }));
 
 // Mutable marketplace demo state so install / uninstall / upgrade /
 // rate actions round-trip inside the UI. Cloned from the fixtures so
@@ -1728,6 +1740,74 @@ const handlers = {
     }
     return delay<Interview>({ ...(i ?? interviews[0]) });
   },
+
+  // --- LMS: learning paths + badges ----------------------------------
+  listLearningPaths: (status?: string) => {
+    const rows = learningPaths.filter((p) => !status || p.status === status);
+    return delay<{ learning_paths: LearningPath[] }>({
+      learning_paths: rows.map((p) => ({ ...p })),
+    });
+  },
+  getLearningPath: (id: string) => {
+    const path = learningPaths.find((p) => p.id === id) ?? learningPaths[0];
+    return delay<{
+      learning_path: LearningPath;
+      courses: LearningPathCourse[];
+    }>({
+      learning_path: { ...path },
+      courses: (LEARNING_PATH_COURSES_BY_PATH[path.id] ?? []).map((c) => ({
+        ...c,
+      })),
+    });
+  },
+  createLearningPath: (input: {
+    title: string;
+    description?: string;
+    status?: string;
+    target_roles?: string[];
+    estimated_duration_hours?: number;
+    difficulty?: string;
+  }) => {
+    const p: LearningPath = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      title: input.title,
+      description: input.description ?? "",
+      status: (input.status as LearningPath["status"]) ?? "draft",
+      target_roles: input.target_roles ?? null,
+      estimated_duration_hours: input.estimated_duration_hours ?? 0,
+      difficulty: input.difficulty ?? "beginner",
+      created_by: "demo",
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    learningPaths.unshift(p);
+    return delay<LearningPath>({ ...p });
+  },
+  enrollInLearningPath: (id: string, userId?: string) => {
+    return delay<KRecord>({
+      id: nextId(),
+      tenant_id: DEMO_TENANT_ID,
+      ktype: "lms.enrollment",
+      ktype_version: 1,
+      data: {
+        learning_path_id: id,
+        user_id: userId ?? "demo-user",
+        status: "enrolled",
+        progress: 0,
+      },
+      status: "enrolled",
+      version: 1,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    });
+  },
+  listBadges: () =>
+    delay<{ badges: Badge[] }>({ badges: BADGES.map((b) => ({ ...b })) }),
+  listBadgeAwards: () =>
+    delay<{ awards: BadgeAward[] }>({
+      awards: BADGE_AWARDS.map((a) => ({ ...a })),
+    }),
 
   // --- POS ------------------------------------------------------------
   finalizePOSInvoice: () => delay<KRecord>({ id: nextId(), tenant_id: DEMO_TENANT_ID, ktype: "sales.pos_invoice", ktype_version: 1, data: { status: "finalized" }, status: "finalized", version: 1, created_at: nowIso(), updated_at: nowIso() }),
