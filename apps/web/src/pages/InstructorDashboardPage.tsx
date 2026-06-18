@@ -182,60 +182,86 @@ function CourseAnalyticsView({
   employeeNameById: Map<string, string>;
   fmt: ReturnType<typeof useFormatter>;
 }) {
-  const inProgress = Math.max(0, a.enrollment_count - a.completed_count);
-  const funnel: BarDatum[] = [
-    {
-      label: "Enrolled",
-      value: a.enrollment_count,
-      tone: "accent",
-      hint: fmt.number(a.enrollment_count),
-    },
-    {
-      label: "In progress",
-      value: inProgress,
-      tone: "info",
-      hint: fmt.number(inProgress),
-    },
-    {
-      label: "Completed",
-      value: a.completed_count,
-      tone: "success",
-      hint: fmt.number(a.completed_count),
-    },
-  ];
+  // All per-course derivations are memoized so they don't recompute when an
+  // unrelated parent re-render occurs; they only depend on the analytics
+  // payload, the formatter, and the resolved employee names.
+  const { funnel, scored, scoreDistribution, maxReached, atRisk, learnerName } =
+    useMemo(() => {
+      const inProgress = Math.max(0, a.enrollment_count - a.completed_count);
+      const funnel: BarDatum[] = [
+        {
+          label: "Enrolled",
+          value: a.enrollment_count,
+          tone: "accent",
+          hint: fmt.number(a.enrollment_count),
+        },
+        {
+          label: "In progress",
+          value: inProgress,
+          tone: "info",
+          hint: fmt.number(inProgress),
+        },
+        {
+          label: "Completed",
+          value: a.completed_count,
+          tone: "success",
+          hint: fmt.number(a.completed_count),
+        },
+      ];
 
-  const scored = a.per_learner.filter(
-    (l): l is typeof l & { average_score: number } => l.average_score != null,
-  );
-  const scoreDistribution: BarDatum[] = SCORE_BUCKETS.map((bucket) => {
-    const count = scored.filter(
-      (l) => l.average_score >= bucket.min && l.average_score < bucket.max,
-    ).length;
-    return { label: bucket.label, value: count, hint: fmt.number(count) };
-  });
+      const scored = a.per_learner.filter(
+        (l): l is typeof l & { average_score: number } =>
+          l.average_score != null,
+      );
+      const scoreDistribution: BarDatum[] = SCORE_BUCKETS.map((bucket) => {
+        const count = scored.filter(
+          (l) => l.average_score >= bucket.min && l.average_score < bucket.max,
+        ).length;
+        return { label: bucket.label, value: count, hint: fmt.number(count) };
+      });
 
-  const maxReached = Math.max(1, ...a.lesson_drop_off.map((l) => l.reached));
+      const maxReached = Math.max(
+        1,
+        ...a.lesson_drop_off.map((l) => l.reached),
+      );
 
-  const atRisk = a.per_learner.filter((l) => {
-    const ratio = l.lessons_total > 0 ? l.lessons_completed / l.lessons_total : 0;
-    const lowScore = l.average_score != null && l.average_score < 60;
-    return l.status !== "completed" && (ratio < 0.5 || lowScore);
-  });
+      const atRisk = a.per_learner.filter((l) => {
+        const ratio =
+          l.lessons_total > 0 ? l.lessons_completed / l.lessons_total : 0;
+        const lowScore = l.average_score != null && l.average_score < 60;
+        return l.status !== "completed" && (ratio < 0.5 || lowScore);
+      });
 
-  // Assign a stable fallback number to each distinct learner by their order in
-  // the full per-learner list, so an unnamed learner shows the same "Learner N"
-  // in both the at-risk card and the full table.
-  const learnerNameByUser = new Map<string, string>();
-  a.per_learner.forEach((l) => {
-    if (learnerNameByUser.has(l.user_id)) return;
-    const known = employeeNameById.get(l.user_id);
-    learnerNameByUser.set(
-      l.user_id,
-      known || `Learner ${learnerNameByUser.size + 1}`,
-    );
-  });
-  const learnerName = (userId: string) =>
-    learnerNameByUser.get(userId) ?? "Learner";
+      // Assign a stable fallback number to each distinct UNNAMED learner by
+      // their first appearance in the full per-learner list, so the same
+      // unnamed learner shows the same "Learner N" in both the at-risk card and
+      // the full table. The counter only increments for unnamed learners, so
+      // the numbering stays contiguous even when some learners resolve to a
+      // real name.
+      const nameByUser = new Map<string, string>();
+      let unknownCount = 0;
+      a.per_learner.forEach((l) => {
+        if (nameByUser.has(l.user_id)) return;
+        const known = employeeNameById.get(l.user_id);
+        if (known) {
+          nameByUser.set(l.user_id, known);
+        } else {
+          unknownCount += 1;
+          nameByUser.set(l.user_id, `Learner ${unknownCount}`);
+        }
+      });
+      const learnerName = (userId: string) =>
+        nameByUser.get(userId) ?? "Learner";
+
+      return {
+        funnel,
+        scored,
+        scoreDistribution,
+        maxReached,
+        atRisk,
+        learnerName,
+      };
+    }, [a, fmt, employeeNameById]);
 
   return (
     <div className="flex flex-col gap-6">

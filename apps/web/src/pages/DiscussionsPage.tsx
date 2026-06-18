@@ -46,10 +46,13 @@ type ThreadDraft = { title: string; body: string };
 /**
  * Format an ISO timestamp as a localized relative time ("3 hours ago").
  *
- * Each tier (minutes, hours, days, …) is derived directly from `diffSec`
- * rather than from the previously rounded tier. This is intentional: chaining
- * (e.g. deriving hours from already-rounded minutes) would compound rounding
- * error, whereas re-deriving from seconds keeps every boundary correct.
+ * The sub-day tiers (minutes, hours, days) are each derived directly from
+ * `diffSec` rather than from the previously rounded tier, so chaining (e.g.
+ * deriving hours from already-rounded minutes) can't compound rounding error
+ * at those boundaries. Months and years are derived from the rounded day count
+ * (`diffDay`); at that granularity any sub-day rounding is immaterial (off by
+ * at most a day), so a day-based divisor keeps the code simple and the labels
+ * sensible.
  */
 function relativeFromNow(iso: string, fmt: ReturnType<typeof useFormatter>): string {
   const then = new Date(iso).getTime();
