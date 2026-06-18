@@ -25,6 +25,9 @@ import type {
   JournalEntry,
   KRecord,
   KType,
+  MarketplaceExtension,
+  MarketplaceExtensionVersion,
+  MarketplaceInstallation,
   Plan,
   PlacementPolicy,
   RetentionPolicy,
@@ -1717,3 +1720,370 @@ export function getKTypeByName(name: string): KType | undefined {
   return KTYPES_BY_NAME.get(name);
 }
 export const ALL_KTYPES = KTYPES;
+
+// --- Marketplace ------------------------------------------------------
+// Demo catalogue for the Marketplace Browse / Detail / Installed
+// screens. Each listing carries the WS9 listing-metadata fields
+// (category, screenshots, rating rollup) so the redesigned surfaces
+// show populated states in demo mode rather than only their empty
+// states. Two listings are seeded as already-installed for this tenant
+// so the "Installed" badge and the verified-usage rating control are
+// both demonstrable.
+
+// xmlEscape guards the few user-facing strings interpolated into the
+// inline-SVG screenshot data URIs below.
+function xmlEscape(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// demoShot builds a self-contained 16:10 SVG "app screenshot" data URI
+// on the KChat violet palette. Kept inline (not network-fetched) so the
+// gallery renders deterministically offline during screenshot capture
+// and e2e runs. Real listings ship publisher-hosted HTTPS URLs; the
+// demo substitutes these synthetic frames.
+function demoShot(title: string, subtitle: string): string {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800" viewBox="0 0 1280 800" role="img">
+    <defs>
+      <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#553BD8"/>
+        <stop offset="1" stop-color="#8B79F2"/>
+      </linearGradient>
+    </defs>
+    <rect width="1280" height="800" fill="#F4F2FF"/>
+    <rect x="0" y="0" width="1280" height="132" fill="url(#g)"/>
+    <circle cx="64" cy="66" r="24" fill="#FFFFFF" opacity="0.92"/>
+    <rect x="104" y="48" width="360" height="18" rx="9" fill="#FFFFFF" opacity="0.9"/>
+    <rect x="104" y="78" width="220" height="12" rx="6" fill="#FFFFFF" opacity="0.55"/>
+    <rect x="1060" y="50" width="156" height="40" rx="20" fill="#FFFFFF" opacity="0.92"/>
+    <rect x="64" y="196" width="540" height="540" rx="24" fill="#FFFFFF"/>
+    <rect x="96" y="232" width="360" height="22" rx="11" fill="#191919" opacity="0.86"/>
+    <rect x="96" y="276" width="280" height="14" rx="7" fill="#5B5B5B" opacity="0.5"/>
+    <rect x="96" y="360" width="476" height="64" rx="14" fill="#F0EDFF"/>
+    <rect x="96" y="440" width="476" height="64" rx="14" fill="#F0EDFF"/>
+    <rect x="96" y="520" width="476" height="64" rx="14" fill="#F0EDFF"/>
+    <rect x="96" y="600" width="476" height="64" rx="14" fill="#F0EDFF"/>
+    <rect x="640" y="196" width="576" height="280" rx="24" fill="#FFFFFF"/>
+    <rect x="672" y="232" width="220" height="18" rx="9" fill="#191919" opacity="0.78"/>
+    <rect x="672" y="404" width="64" height="40" rx="8" fill="#553BD8"/>
+    <rect x="760" y="368" width="64" height="76" rx="8" fill="#7C66F0"/>
+    <rect x="848" y="324" width="64" height="120" rx="8" fill="#553BD8"/>
+    <rect x="936" y="288" width="64" height="156" rx="8" fill="#8B79F2"/>
+    <rect x="1024" y="344" width="64" height="100" rx="8" fill="#553BD8"/>
+    <rect x="1112" y="300" width="64" height="144" rx="8" fill="#7C66F0"/>
+    <rect x="640" y="500" width="576" height="236" rx="24" fill="#FFFFFF"/>
+    <rect x="672" y="536" width="180" height="16" rx="8" fill="#191919" opacity="0.7"/>
+    <circle cx="772" cy="648" r="76" fill="#F0EDFF"/>
+    <path d="M772 572 A76 76 0 0 1 838 686 L772 648 Z" fill="#553BD8"/>
+    <path d="M838 686 A76 76 0 0 1 724 712 L772 648 Z" fill="#8B79F2"/>
+    <rect x="912" y="560" width="272" height="14" rx="7" fill="#F0EDFF"/>
+    <rect x="912" y="596" width="240" height="14" rx="7" fill="#F0EDFF"/>
+    <rect x="912" y="632" width="256" height="14" rx="7" fill="#F0EDFF"/>
+    <rect x="912" y="668" width="208" height="14" rx="7" fill="#F0EDFF"/>
+    <text x="96" y="328" font-family="'Mona Sans', sans-serif" font-size="30" font-weight="700" fill="#191919">${xmlEscape(title)}</text>
+    <text x="672" y="704" font-family="'Mona Sans', sans-serif" font-size="20" fill="#5B5B5B">${xmlEscape(subtitle)}</text>
+  </svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg.replace(/\n\s*/g, " "))}`;
+}
+
+let __extVersionSeq = 0;
+function mkVersion(
+  extId: string,
+  version: string,
+  publishedAt: string,
+  opts: Partial<MarketplaceExtensionVersion> = {},
+): MarketplaceExtensionVersion {
+  __extVersionSeq += 1;
+  return {
+    id: uuid(`mkt-ver-${extId}-${version}`),
+    extension_id: extId,
+    version,
+    bundle_hash: `sha256:${uuid(`hash-${extId}-${version}`).replace(/-/g, "")}`,
+    bundle_size_bytes: opts.bundle_size_bytes ?? 1_400_000 + __extVersionSeq * 120_000,
+    bundle_url: `https://bundles.kapp.example/${extId}/${version}.kpkg`,
+    min_kapp_version: opts.min_kapp_version ?? "1.4.0",
+    max_kapp_version: opts.max_kapp_version,
+    features_required: opts.features_required ?? [],
+    permissions_required: opts.permissions_required ?? [],
+    ktypes_count: opts.ktypes_count ?? 0,
+    workflows_count: opts.workflows_count ?? 0,
+    agent_tools_count: opts.agent_tools_count ?? 0,
+    ui_extensions_count: opts.ui_extensions_count ?? 0,
+    webhooks_count: opts.webhooks_count ?? 0,
+    yanked: false,
+    published_at: publishedAt,
+    bundle_signature: opts.bundle_signature ?? "ed25519:demo",
+    bundle_signature_key_id: opts.bundle_signature_key_id ?? "kapp-publisher-2026",
+    signed_at: opts.signed_at ?? publishedAt,
+  };
+}
+
+const EXT_IDS = {
+  inventory: uuid("mkt-ext-inventory-sync"),
+  quickbooks: uuid("mkt-ext-quickbooks"),
+  slack: uuid("mkt-ext-slack-notify"),
+  leadScorer: uuid("mkt-ext-lead-scorer"),
+  timesheet: uuid("mkt-ext-timesheet"),
+  warehouse: uuid("mkt-ext-data-warehouse"),
+} as const;
+
+export const MARKETPLACE_VERSIONS: Record<string, MarketplaceExtensionVersion[]> = {
+  [EXT_IDS.inventory]: [
+    mkVersion(EXT_IDS.inventory, "2.3.1", LAST_WEEK_ISO, {
+      features_required: ["inventory"],
+      permissions_required: ["records.read", "records.write"],
+      ktypes_count: 2,
+      workflows_count: 1,
+      webhooks_count: 2,
+    }),
+    mkVersion(EXT_IDS.inventory, "2.2.0", LAST_MONTH_ISO, {
+      features_required: ["inventory"],
+      permissions_required: ["records.read", "records.write"],
+      ktypes_count: 2,
+      webhooks_count: 1,
+    }),
+  ],
+  [EXT_IDS.quickbooks]: [
+    mkVersion(EXT_IDS.quickbooks, "4.1.0", LAST_WEEK_ISO, {
+      features_required: ["finance"],
+      permissions_required: ["finance.read", "finance.write"],
+      ktypes_count: 1,
+      workflows_count: 2,
+      webhooks_count: 3,
+    }),
+    mkVersion(EXT_IDS.quickbooks, "4.0.0", LAST_MONTH_ISO, {
+      features_required: ["finance"],
+      permissions_required: ["finance.read", "finance.write"],
+      ktypes_count: 1,
+      workflows_count: 1,
+      webhooks_count: 2,
+    }),
+  ],
+  [EXT_IDS.slack]: [
+    mkVersion(EXT_IDS.slack, "1.7.2", LAST_MONTH_ISO, {
+      permissions_required: ["records.read"],
+      agent_tools_count: 1,
+      webhooks_count: 1,
+    }),
+  ],
+  [EXT_IDS.leadScorer]: [
+    mkVersion(EXT_IDS.leadScorer, "3.0.0", NOW_ISO, {
+      features_required: ["crm"],
+      permissions_required: ["records.read", "records.write"],
+      ktypes_count: 1,
+      agent_tools_count: 2,
+      ui_extensions_count: 1,
+    }),
+  ],
+  [EXT_IDS.timesheet]: [
+    mkVersion(EXT_IDS.timesheet, "1.2.4", LAST_MONTH_ISO, {
+      features_required: ["hr"],
+      permissions_required: ["records.read", "records.write"],
+      ktypes_count: 2,
+      workflows_count: 1,
+    }),
+  ],
+  [EXT_IDS.warehouse]: [
+    mkVersion(EXT_IDS.warehouse, "0.9.0", NOW_ISO, {
+      permissions_required: ["records.read"],
+      agent_tools_count: 1,
+      webhooks_count: 2,
+    }),
+  ],
+};
+
+function listedVersionString(extId: string): string {
+  return MARKETPLACE_VERSIONS[extId][0].version;
+}
+
+export const MARKETPLACE_EXTENSIONS: MarketplaceExtension[] = [
+  {
+    id: EXT_IDS.inventory,
+    name: "acme.inventory_sync",
+    publisher: "acme",
+    slug: "inventory_sync",
+    display_name: "Inventory Sync",
+    description:
+      "Keep stock levels accurate across every warehouse. Inventory Sync reconciles your Kapp inventory with external WMS feeds in near real time, flags drift, and pushes adjustments back automatically.",
+    author: "Acme Corp",
+    license: "MIT",
+    homepage: "https://acme.example/inventory-sync",
+    support_email: "support@acme.example",
+    status: "listed",
+    listed_version: listedVersionString(EXT_IDS.inventory),
+    category: "inventory",
+    screenshots: [
+      { url: demoShot("Live stock reconciliation", "Per-warehouse drift, resolved automatically"), caption: "Live reconciliation dashboard" },
+      { url: demoShot("Adjustment history", "Every correction, fully audited"), caption: "Adjustment audit trail" },
+      { url: demoShot("Warehouse coverage", "Connect every WMS feed in minutes") },
+    ],
+    rating_average: 4.6,
+    rating_count: 218,
+    created_at: LAST_MONTH_ISO,
+    updated_at: LAST_WEEK_ISO,
+  },
+  {
+    id: EXT_IDS.quickbooks,
+    name: "globex.quickbooks_connector",
+    publisher: "globex",
+    slug: "quickbooks_connector",
+    display_name: "QuickBooks Connector",
+    description:
+      "Sync invoices, bills, and payments between Kapp Finance and QuickBooks Online. Two-way mapping for accounts, taxes, and customers keeps your books reconciled without copy-paste.",
+    author: "Globex Financial",
+    license: "Apache-2.0",
+    homepage: "https://globex.example/quickbooks",
+    support_email: "help@globex.example",
+    status: "listed",
+    listed_version: listedVersionString(EXT_IDS.quickbooks),
+    category: "finance",
+    screenshots: [
+      { url: demoShot("Two-way ledger sync", "Invoices and bills, always reconciled"), caption: "Ledger sync overview" },
+      { url: demoShot("Account mapping", "Map Kapp accounts to QuickBooks once"), caption: "Chart-of-accounts mapping" },
+    ],
+    rating_average: 4.8,
+    rating_count: 342,
+    created_at: LAST_MONTH_ISO,
+    updated_at: LAST_WEEK_ISO,
+  },
+  {
+    id: EXT_IDS.slack,
+    name: "initech.slack_notify",
+    publisher: "initech",
+    slug: "slack_notify",
+    display_name: "Slack Notifications",
+    description:
+      "Send rich Kapp notifications to Slack. Route record changes, approvals, and SLA breaches to the right channels with per-event filters and digest scheduling.",
+    author: "Initech Labs",
+    license: "MIT",
+    support_email: "team@initech.example",
+    status: "listed",
+    listed_version: listedVersionString(EXT_IDS.slack),
+    category: "communication",
+    screenshots: [
+      { url: demoShot("Channel routing", "The right alert in the right channel"), caption: "Per-event channel routing" },
+    ],
+    rating_average: 4.2,
+    rating_count: 96,
+    created_at: LAST_MONTH_ISO,
+    updated_at: LAST_MONTH_ISO,
+  },
+  {
+    id: EXT_IDS.leadScorer,
+    name: "umbrella.lead_scorer",
+    publisher: "umbrella",
+    slug: "lead_scorer",
+    display_name: "AI Lead Scorer",
+    description:
+      "Prioritise the pipeline that matters. AI Lead Scorer ranks open deals by likelihood to close using your historical win data, and surfaces the next best action for each rep.",
+    author: "Umbrella AI",
+    license: "Commercial",
+    homepage: "https://umbrella.example/lead-scorer",
+    support_email: "sales@umbrella.example",
+    status: "listed",
+    listed_version: listedVersionString(EXT_IDS.leadScorer),
+    category: "sales",
+    screenshots: [
+      { url: demoShot("Pipeline scoring", "Every deal ranked by likelihood to close"), caption: "Scored pipeline view" },
+      { url: demoShot("Next best action", "Tell each rep what to do next"), caption: "Per-deal recommendations" },
+      { url: demoShot("Model insights", "Understand what drives every score") },
+    ],
+    rating_average: 4.9,
+    rating_count: 174,
+    created_at: LAST_WEEK_ISO,
+    updated_at: NOW_ISO,
+  },
+  {
+    id: EXT_IDS.timesheet,
+    name: "soylent.timesheet_pro",
+    publisher: "soylent",
+    slug: "timesheet_pro",
+    display_name: "Timesheet Pro",
+    description:
+      "Capture billable hours without the friction. Timesheet Pro adds one-tap timers, approval routing, and payroll-ready exports on top of Kapp HR.",
+    author: "Soylent Works",
+    license: "GPL-3.0",
+    support_email: "support@soylent.example",
+    status: "listed",
+    listed_version: listedVersionString(EXT_IDS.timesheet),
+    category: "hr",
+    screenshots: [
+      { url: demoShot("One-tap timers", "Start tracking in a single click"), caption: "Time capture" },
+      { url: demoShot("Approval routing", "Managers approve in bulk") },
+    ],
+    rating_average: 3.8,
+    rating_count: 41,
+    created_at: LAST_MONTH_ISO,
+    updated_at: LAST_MONTH_ISO,
+  },
+  {
+    id: EXT_IDS.warehouse,
+    name: "hooli.data_warehouse",
+    publisher: "hooli",
+    slug: "data_warehouse",
+    display_name: "Data Warehouse Export",
+    description:
+      "Stream Kapp records into your analytics warehouse. Incremental change-data-capture to Snowflake, BigQuery, or Redshift with schema mapping you control.",
+    author: "Hooli Data",
+    license: "Apache-2.0",
+    homepage: "https://hooli.example/warehouse",
+    support_email: "data@hooli.example",
+    status: "listed",
+    listed_version: listedVersionString(EXT_IDS.warehouse),
+    category: "analytics",
+    screenshots: [
+      { url: demoShot("Change-data-capture", "Stream every change incrementally"), caption: "CDC pipeline status" },
+    ],
+    // Newly published — no tenant has rated it yet, so Browse + Detail
+    // render the "No ratings yet" state.
+    rating_average: 0,
+    rating_count: 0,
+    created_at: NOW_ISO,
+    updated_at: NOW_ISO,
+  },
+];
+
+// This tenant's own saved ratings, keyed by extension id. Only the
+// installed extensions can carry a rating (server gates submission on
+// verified usage); Inventory Sync is rated, the QuickBooks install is
+// not yet rated so the detail page shows the un-rated prompt.
+export const MARKETPLACE_MY_RATINGS: Record<string, number> = {
+  [EXT_IDS.inventory]: 5,
+};
+
+export const MARKETPLACE_INSTALLATIONS: MarketplaceInstallation[] = [
+  {
+    id: uuid("mkt-install-inventory"),
+    tenant_id: DEMO_TENANT_ID,
+    extension_id: EXT_IDS.inventory,
+    // Installed on the previous version (2.2.0) while 2.3.1 is the
+    // listed default, so the Installed list shows the "Update
+    // available" badge.
+    extension_version_id: MARKETPLACE_VERSIONS[EXT_IDS.inventory][1].id,
+    status: "active",
+    settings: { sync_interval_minutes: 15, warehouses: ["main", "west"] },
+    webhook_base: "https://acme.kapp.example",
+    installed_at: LAST_WEEK_ISO,
+    updated_at: LAST_WEEK_ISO,
+    last_health_check_at: NOW_ISO,
+    last_health_check_status: "ok",
+  },
+  {
+    id: uuid("mkt-install-quickbooks"),
+    tenant_id: DEMO_TENANT_ID,
+    extension_id: EXT_IDS.quickbooks,
+    // Installed on an older version (4.0.0) than the listed default
+    // (4.1.0) so the "Update available" badge shows on the Installed
+    // list.
+    extension_version_id: MARKETPLACE_VERSIONS[EXT_IDS.quickbooks][1].id,
+    status: "active",
+    settings: { realm_id: "demo-realm", auto_post: true },
+    webhook_base: "https://acme.kapp.example",
+    installed_at: LAST_MONTH_ISO,
+    updated_at: LAST_MONTH_ISO,
+    last_health_check_at: NOW_ISO,
+    last_health_check_status: "ok",
+  },
+];

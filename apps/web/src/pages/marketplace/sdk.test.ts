@@ -41,6 +41,43 @@ describe("Marketplace SDK", () => {
     expect(url).toContain("q=inv");
   });
 
+  it("listMarketplaceExtensions forwards the category filter param", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(mockJSON({ items: [] }));
+    const api = newClient(fetchSpy);
+    await api.listMarketplaceExtensions({ category: "inventory" });
+    const url = fetchSpy.mock.calls[0][0] as string;
+    expect(url).toContain("/api/v1/marketplace/extensions?");
+    expect(url).toContain("category=inventory");
+  });
+
+  it("rateMarketplaceExtension POSTs {stars} to the extension ratings endpoint", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      mockJSON({ rating_average: 4.5, rating_count: 13, my_rating: 5 }),
+    );
+    const api = newClient(fetchSpy);
+    const summary = await api.rateMarketplaceExtension("ext-1", 5);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe("/api/v1/marketplace/extensions/ext-1/ratings");
+    expect(init.method).toBe("POST");
+    const body = JSON.parse(init.body as string) as { stars: number };
+    expect(body.stars).toBe(5);
+    expect(summary).toEqual({
+      rating_average: 4.5,
+      rating_count: 13,
+      my_rating: 5,
+    });
+  });
+
+  it("rateMarketplaceExtension URL-encodes the extension id", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      mockJSON({ rating_average: 0, rating_count: 0, my_rating: 3 }),
+    );
+    const api = newClient(fetchSpy);
+    await api.rateMarketplaceExtension("acme/ext 1", 3);
+    const url = fetchSpy.mock.calls[0][0] as string;
+    expect(url).toBe("/api/v1/marketplace/extensions/acme%2Fext%201/ratings");
+  });
+
   it("listMarketplaceExtensions forwards limit=0 instead of dropping it on a falsy check (ANALYSIS_0005)", async () => {
     // The SDK previously used `if (opts.limit)`, which is falsy
     // for 0 — so a caller asking for "limit=0" silently sent no

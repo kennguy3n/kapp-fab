@@ -245,6 +245,13 @@ var TenantScopedTables = []string{
 	"marketplace_extension_agent_tools",
 	"marketplace_webhook_subscriptions",
 	"marketplace_dispatch_log",
+	// Tenant-authored marketplace ratings (000102). Default
+	// (tenant_id, id) PK, so the fallback ON CONFLICT path applies and
+	// no tableConflictKeys entry is required. FKs the GLOBAL
+	// marketplace_extensions catalog (operator-managed, not dumped
+	// here) plus tenants/users; no FK to the installation row, so it
+	// carries no ordering dependency within the marketplace group.
+	"marketplace_extension_ratings",
 	// Session 17 — LMS deep enhancement. All carry the default
 	// (tenant_id, id) PK so the fallback ON CONFLICT path applies; no
 	// tableConflictKeys entries are required. Ordering is FK-driven for

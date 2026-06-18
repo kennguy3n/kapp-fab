@@ -7,6 +7,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 const getMarketplaceExtension = vi.fn();
 const listMarketplaceInstallations = vi.fn();
 const installMarketplaceExtension = vi.fn();
+const rateMarketplaceExtension = vi.fn();
 
 vi.mock("../../lib/api", () => ({
   api: {
@@ -15,8 +16,22 @@ vi.mock("../../lib/api", () => ({
       listMarketplaceInstallations(...a),
     installMarketplaceExtension: (...a: unknown[]) =>
       installMarketplaceExtension(...a),
+    rateMarketplaceExtension: (...a: unknown[]) =>
+      rateMarketplaceExtension(...a),
   },
 }));
+
+const INSTALL_ROW = {
+  id: "install-1",
+  tenant_id: "tnt-1",
+  extension_id: "ext-1",
+  extension_version_id: "ver-1",
+  status: "active" as const,
+  settings: {},
+  webhook_base: "https://acme.example.com",
+  installed_at: "2025-03-01T00:00:00Z",
+  updated_at: "2025-03-01T00:00:00Z",
+};
 
 import { MarketplaceExtensionDetailPage } from "./MarketplaceExtensionDetailPage";
 
@@ -32,9 +47,17 @@ const EXT_FIXTURE = {
     license: "MIT",
     status: "listed" as const,
     listed_version: "1.2.0",
+    category: "inventory" as const,
+    screenshots: [
+      { url: "https://cdn.example.com/shot1.png", caption: "Reconciliation" },
+      { url: "https://cdn.example.com/shot2.png" },
+    ],
+    rating_average: 4.5,
+    rating_count: 12,
     created_at: "2025-01-01T00:00:00Z",
     updated_at: "2025-02-01T00:00:00Z",
   },
+  my_rating: null,
   versions: [
     {
       id: "ver-1",
@@ -278,5 +301,87 @@ describe("MarketplaceExtensionDetailPage", () => {
       (b) => !b.hasAttribute("disabled") && b !== headerCta,
     );
     expect(enabledPerRow.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("renders the category badge + rating summary in the header", async () => {
+    getMarketplaceExtension.mockResolvedValueOnce(EXT_FIXTURE);
+    renderPage();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: /Inventory Sync/i }),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByText("Inventory")).toBeInTheDocument();
+    expect(
+      screen.getAllByLabelText("Rated 4.5 out of 5 from 12 ratings").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("shows the Screenshots tab with captions when the listing has screenshots", async () => {
+    getMarketplaceExtension.mockResolvedValueOnce(EXT_FIXTURE);
+    renderPage();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("tab", { name: /Screenshots/i }),
+      ).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByRole("tab", { name: /Screenshots/i }));
+    await waitFor(() =>
+      expect(screen.getByText("Reconciliation")).toBeInTheDocument(),
+    );
+    const imgs = screen.getAllByRole("img");
+    expect(imgs.some((i) => i.getAttribute("src")?.includes("shot1"))).toBe(
+      true,
+    );
+  });
+
+  it("hides the Screenshots tab when the listing has none", async () => {
+    getMarketplaceExtension.mockResolvedValueOnce({
+      ...EXT_FIXTURE,
+      extension: { ...EXT_FIXTURE.extension, screenshots: [] },
+    });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: /Overview/i })).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("tab", { name: /Screenshots/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("gates rating on a verified install: prompts to install when not installed", async () => {
+    getMarketplaceExtension.mockResolvedValueOnce(EXT_FIXTURE);
+    renderPage();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: /Inventory Sync/i }),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/Install this extension to rate it/i))
+      .toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Rate 5 stars out of 5/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("submits the tenant's rating when installed", async () => {
+    getMarketplaceExtension.mockResolvedValue({
+      ...EXT_FIXTURE,
+      my_rating: 0,
+    });
+    listMarketplaceInstallations.mockResolvedValue({ items: [INSTALL_ROW] });
+    rateMarketplaceExtension.mockResolvedValueOnce({
+      rating_average: 4.6,
+      rating_count: 13,
+      my_rating: 5,
+    });
+    renderPage();
+    const rateBtn = await screen.findByRole("button", {
+      name: /Rate 5 stars out of 5/i,
+    });
+    await userEvent.click(rateBtn);
+    await waitFor(() =>
+      expect(rateMarketplaceExtension).toHaveBeenCalledWith("ext-1", 5),
+    );
   });
 });

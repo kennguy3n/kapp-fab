@@ -9,19 +9,24 @@ import {
   EmptyState,
   Eyebrow,
   Input,
+  Select,
   Skeleton,
 } from "@kapp/ui";
 import { ArrowRight, Store } from "lucide-react";
 import { api } from "../../lib/api";
 import type {
+  MarketplaceCategory,
   MarketplaceExtension,
   MarketplaceListExtensionsResponse,
 } from "@kapp/client";
 import {
+  categoryLabel,
   extensionStatusLabel,
   extensionStatusVariant,
   formatTimestamp,
+  MARKETPLACE_CATEGORIES,
 } from "./lib";
+import { RatingStars } from "./RatingStars";
 
 /**
  * MarketplaceBrowsePage is the tenant-facing catalogue view.
@@ -50,6 +55,12 @@ export function MarketplaceBrowsePage() {
   // setTimeout in useEffect below).
   const [search, setSearch] = useState("");
   const [publisherFilter, setPublisherFilter] = useState("");
+  // Empty string = "All categories". The Select is an exact-match
+  // server-side filter, so it is NOT debounced (a single discrete
+  // choice, not free text).
+  const [categoryFilter, setCategoryFilter] = useState<MarketplaceCategory | "">(
+    "",
+  );
   const debouncedSearch = useDebounced(search, 250);
   const debouncedPublisher = useDebounced(publisherFilter, 250);
   // Round-9 ANALYSIS_0001: normalise the filter values ONCE and
@@ -69,15 +80,27 @@ export function MarketplaceBrowsePage() {
   // the wire identity. Single source of truth closes that.
   const qSearch = debouncedSearch.trim() || undefined;
   const qPublisher = debouncedPublisher.trim() || undefined;
+  const qCategory = categoryFilter || undefined;
 
   const q = useQuery<MarketplaceListExtensionsResponse>({
-    queryKey: ["marketplace", "extensions", { q: qSearch, publisher: qPublisher }],
+    queryKey: [
+      "marketplace",
+      "extensions",
+      { q: qSearch, publisher: qPublisher, category: qCategory },
+    ],
     queryFn: () =>
-      api.listMarketplaceExtensions({ q: qSearch, publisher: qPublisher }),
+      api.listMarketplaceExtensions({
+        q: qSearch,
+        publisher: qPublisher,
+        category: qCategory,
+      }),
   });
 
   const items = q.data?.items ?? [];
-  const hasFilter = debouncedSearch.trim() !== "" || debouncedPublisher.trim() !== "";
+  const hasFilter =
+    debouncedSearch.trim() !== "" ||
+    debouncedPublisher.trim() !== "" ||
+    categoryFilter !== "";
 
   return (
     <section className="flex flex-col gap-6">
@@ -115,6 +138,21 @@ export function MarketplaceBrowsePage() {
           aria-label="Filter by publisher"
           className="min-w-[200px]"
         />
+        <Select
+          value={categoryFilter}
+          onChange={(e) =>
+            setCategoryFilter(e.target.value as MarketplaceCategory | "")
+          }
+          aria-label="Filter by category"
+          className="min-w-[180px]"
+        >
+          <option value="">All categories</option>
+          {MARKETPLACE_CATEGORIES.map((c) => (
+            <option key={c.value} value={c.value}>
+              {c.label}
+            </option>
+          ))}
+        </Select>
       </div>
 
       {q.isLoading && (
@@ -150,7 +188,7 @@ export function MarketplaceBrowsePage() {
           }
           description={
             hasFilter
-              ? "Try a different search term or clear the publisher filter."
+              ? "Try a different search term, category, or clear the publisher filter."
               : "There aren’t any extensions published in the marketplace yet."
           }
         />
@@ -192,6 +230,10 @@ function ExtensionCard({ ext }: { ext: MarketplaceExtension }) {
                 {ext.listed_version ? ` · v${ext.listed_version}` : ""}
               </div>
             </div>
+          </div>
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <Badge variant="outline">{categoryLabel(ext.category)}</Badge>
+            <RatingStars average={ext.rating_average} count={ext.rating_count} />
           </div>
           <p className="m-0 line-clamp-3 text-sm text-fg-muted">
             {ext.description || (

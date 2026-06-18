@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Badge,
   Button,
@@ -27,6 +27,7 @@ import type {
   MarketplaceListInstallationsResponse,
 } from "@kapp/client";
 import {
+  categoryLabel,
   extensionStatusLabel,
   extensionStatusVariant,
   formatBundleSize,
@@ -35,6 +36,7 @@ import {
   installStatusVariant,
   sortVersionsByPublishedDesc,
 } from "./lib";
+import { RatingInput, RatingStars } from "./RatingStars";
 import { InstallExtensionDialog } from "./InstallExtensionDialog";
 
 /**
@@ -76,6 +78,18 @@ export function MarketplaceExtensionDetailPage() {
   });
 
   const [installVersionId, setInstallVersionId] = useState<string | null>(null);
+
+  // Submitting the tenant's own rating. The server UPSERTs and
+  // returns the recomputed rollup; we invalidate the detail query so
+  // the header average + the "Your rating" control both reflect the
+  // new value (rather than trusting the returned summary in two
+  // places and risking drift with the versions payload).
+  const rate = useMutation({
+    mutationFn: (stars: number) => api.rateMarketplaceExtension(extId!, stars),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["marketplace", "extension", extId] });
+    },
+  });
 
   if (!extId) {
     return (
@@ -181,6 +195,14 @@ export function MarketplaceExtensionDetailPage() {
             {ext.author ? `By ${ext.author}` : ext.publisher}
             {ext.license && ` · ${ext.license}`}
           </div>
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            <Badge variant="outline">{categoryLabel(ext.category)}</Badge>
+            <RatingStars
+              average={ext.rating_average}
+              count={ext.rating_count}
+              size="md"
+            />
+          </div>
         </div>
         <div className="flex gap-2">
           {installRow ? (
@@ -214,6 +236,11 @@ export function MarketplaceExtensionDetailPage() {
       <Tabs defaultValue="overview">
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
+          {ext.screenshots.length > 0 && (
+            <TabsTrigger value="screenshots">
+              Screenshots ({ext.screenshots.length})
+            </TabsTrigger>
+          )}
           <TabsTrigger value="versions">
             Versions ({versions.length})
           </TabsTrigger>
@@ -221,8 +248,21 @@ export function MarketplaceExtensionDetailPage() {
         </TabsList>
 
         <TabsContent value="overview">
-          <OverviewTab ext={ext} listedVersion={listedVersion} />
+          <OverviewTab
+            ext={ext}
+            listedVersion={listedVersion}
+            myRating={detail.data!.my_rating ?? 0}
+            canRate={!!installRow}
+            onRate={(stars) => rate.mutate(stars)}
+            rateBusy={rate.isPending}
+            rateError={rate.isError ? (rate.error as Error).message : null}
+          />
         </TabsContent>
+        {ext.screenshots.length > 0 && (
+          <TabsContent value="screenshots">
+            <ScreenshotsTab ext={ext} />
+          </TabsContent>
+        )}
         <TabsContent value="versions">
           <VersionsTab
             versions={versions}
@@ -321,9 +361,19 @@ function DetailIcon({
 function OverviewTab({
   ext,
   listedVersion,
+  myRating,
+  canRate,
+  onRate,
+  rateBusy,
+  rateError,
 }: {
   ext: MarketplaceGetExtensionResponse["extension"];
   listedVersion: MarketplaceExtensionVersion | null;
+  myRating: number;
+  canRate: boolean;
+  onRate: (stars: number) => void;
+  rateBusy: boolean;
+  rateError: string | null;
 }) {
   return (
     <div className="mt-4 grid gap-4">
@@ -339,6 +389,14 @@ function OverviewTab({
           )}
         </CardContent>
       </Card>
+      <RatingCard
+        ext={ext}
+        myRating={myRating}
+        canRate={canRate}
+        onRate={onRate}
+        busy={rateBusy}
+        error={rateError}
+      />
       <Card>
         <CardContent className="pt-4">
           <h3 className="mt-0">Publisher</h3>
@@ -403,6 +461,103 @@ function OverviewTab({
           </CardContent>
         </Card>
       )}
+    </div>
+  );
+}
+
+/**
+ * RatingCard shows the cross-tenant rating rollup plus this tenant's
+ * own editable rating. Rating is gated on verified usage server-side
+ * (the tenant must have the extension installed) — `canRate` mirrors
+ * that here so a non-installer sees a teaching prompt instead of a
+ * disabled control with no explanation.
+ */
+function RatingCard({
+  ext,
+  myRating,
+  canRate,
+  onRate,
+  busy,
+  error,
+}: {
+  ext: MarketplaceGetExtensionResponse["extension"];
+  myRating: number;
+  canRate: boolean;
+  onRate: (stars: number) => void;
+  busy: boolean;
+  error: string | null;
+}) {
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <h3 className="mt-0">Ratings</h3>
+        <RatingStars
+          average={ext.rating_average}
+          count={ext.rating_count}
+          size="md"
+        />
+        <div className="mt-4 border-t border-border pt-4">
+          <h4 className="mb-1 mt-0 text-sm font-medium text-fg">Your rating</h4>
+          {canRate ? (
+            <>
+              <p className="mb-2 mt-0 text-sm text-fg-muted">
+                {myRating > 0
+                  ? "Thanks for rating — tap a star to change your score."
+                  : "How would you rate this extension for your team?"}
+              </p>
+              <RatingInput value={myRating} onRate={onRate} busy={busy} />
+              {error && (
+                <p className="mt-2 text-sm text-danger">
+                  We couldn’t save your rating: {error}
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="m-0 text-sm text-fg-muted">
+              Install this extension to rate it. Ratings come from teams who
+              actually use the extension.
+            </p>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * ScreenshotsTab renders the publisher-declared screenshots gallery.
+ * Images are publisher-hosted HTTPS URLs (validated server-side); a
+ * broken URL falls back to a neutral placeholder rather than a broken-
+ * image glyph. Captions, when present, render beneath each frame.
+ */
+function ScreenshotsTab({
+  ext,
+}: {
+  ext: MarketplaceGetExtensionResponse["extension"];
+}) {
+  return (
+    <div className="mt-4 grid gap-4 sm:grid-cols-2">
+      {ext.screenshots.map((shot, i) => (
+        <figure
+          key={`${shot.url}-${i}`}
+          className="m-0 overflow-hidden rounded-lg border border-border bg-bg-muted"
+        >
+          <img
+            src={shot.url}
+            alt={shot.caption || `${ext.display_name} screenshot ${i + 1}`}
+            loading="lazy"
+            className="aspect-[16/10] w-full object-cover"
+            onError={(e) => {
+              e.currentTarget.style.visibility = "hidden";
+            }}
+          />
+          {shot.caption && (
+            <figcaption className="border-t border-border px-3 py-2 text-xs text-fg-muted">
+              {shot.caption}
+            </figcaption>
+          )}
+        </figure>
+      ))}
     </div>
   );
 }

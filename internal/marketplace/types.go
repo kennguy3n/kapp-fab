@@ -33,6 +33,8 @@ package marketplace
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -229,8 +231,91 @@ type Extension struct {
 	IconURL       string          `json:"icon_url,omitempty"`
 	Status        ExtensionStatus `json:"status"`
 	ListedVersion string          `json:"listed_version,omitempty"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
+	// Category is the publisher-declared taxonomy bucket (one of
+	// ValidCategories); it drives the Browse category filter.
+	Category string `json:"category"`
+	// Screenshots is the publisher-declared detail-page gallery.
+	// Always a (possibly empty) slice — never null on the wire.
+	Screenshots []Screenshot `json:"screenshots"`
+	// RatingAverage / RatingCount are the cross-tenant rollup
+	// derived from the denormalised rating_sum / rating_count
+	// columns (maintained by the rating aggregate trigger).
+	// RatingAverage is 0 when RatingCount is 0.
+	RatingAverage float64   `json:"rating_average"`
+	RatingCount   int       `json:"rating_count"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// Screenshot is one entry in an extension's detail-page gallery. URLs
+// are HTTPS-only (validated on write); Caption is optional alt text.
+type Screenshot struct {
+	URL     string `json:"url"`
+	Caption string `json:"caption,omitempty"`
+}
+
+// RatingSummary is the rollup returned after a tenant submits or
+// revises its rating: the recomputed marketplace average + count, and
+// the caller's own star value (MyRating).
+type RatingSummary struct {
+	RatingAverage float64 `json:"rating_average"`
+	RatingCount   int     `json:"rating_count"`
+	MyRating      int     `json:"my_rating"`
+}
+
+// ValidCategories is the curated marketplace taxonomy. Kept in
+// lock-step with the marketplace_extensions_category_valid CHECK in
+// migration 000102. DefaultCategory applies when a publisher declares
+// none.
+var ValidCategories = []string{
+	"productivity", "finance", "sales", "marketing", "crm", "hr",
+	"inventory", "analytics", "communication", "developer_tools",
+	"integrations", "other",
+}
+
+// DefaultCategory is assigned to a listing whose publisher declared no
+// category. Mirrors the DEFAULT on the category column.
+const DefaultCategory = "other"
+
+// IsValidCategory reports whether c is a member of the curated
+// taxonomy. The empty string is NOT valid here; callers coerce "" to
+// DefaultCategory before validating.
+func IsValidCategory(c string) bool {
+	for _, v := range ValidCategories {
+		if v == c {
+			return true
+		}
+	}
+	return false
+}
+
+// MaxScreenshots caps a listing's gallery so a publisher cannot bloat
+// the catalog row (and the detail page) with an unbounded array.
+const MaxScreenshots = 8
+
+// validateScreenshots normalises and validates a publisher-declared
+// gallery: trims entries, enforces the count cap, and requires each
+// URL to be HTTPS (reusing the same validator the install/webhook path
+// uses). Returns the cleaned slice ready to persist as JSONB.
+func validateScreenshots(in []Screenshot) ([]Screenshot, error) {
+	if len(in) == 0 {
+		return []Screenshot{}, nil
+	}
+	if len(in) > MaxScreenshots {
+		return nil, fmt.Errorf("%w: at most %d screenshots allowed", ErrInvalidManifest, MaxScreenshots)
+	}
+	out := make([]Screenshot, 0, len(in))
+	for i := range in {
+		url := strings.TrimSpace(in[i].URL)
+		if url == "" {
+			return nil, fmt.Errorf("%w: screenshot %d: url required", ErrInvalidManifest, i)
+		}
+		if err := validateHTTPSURL(url); err != nil {
+			return nil, fmt.Errorf("%w: screenshot %d: %w", ErrInvalidManifest, i, err)
+		}
+		out = append(out, Screenshot{URL: url, Caption: strings.TrimSpace(in[i].Caption)})
+	}
+	return out, nil
 }
 
 // ExtensionVersion is the per-(extension, version) bundle record. The
@@ -264,9 +349,9 @@ type ExtensionVersion struct {
 	// kept on this struct (rather than a nested pointer) so the
 	// JSON shape stays flat for clients — Signature() returns a
 	// typed view when callers want one.
-	BundleSignature        string     `json:"bundle_signature,omitempty"`
-	BundleSignatureKeyID   string     `json:"bundle_signature_key_id,omitempty"`
-	SignedAt               *time.Time `json:"signed_at,omitempty"`
+	BundleSignature      string     `json:"bundle_signature,omitempty"`
+	BundleSignatureKeyID string     `json:"bundle_signature_key_id,omitempty"`
+	SignedAt             *time.Time `json:"signed_at,omitempty"`
 }
 
 // Signature returns the typed BundleSignature view, or nil if the
@@ -457,16 +542,16 @@ var (
 // for the future fast-path (B7.1) that lets verified publishers'
 // patch-version bumps skip the manual_review step.
 type Publisher struct {
-	ID                 uuid.UUID  `json:"id"`
-	Slug               string     `json:"slug"`
-	DisplayName        string     `json:"display_name"`
-	ContactEmail       string     `json:"contact_email"`
-	VerifiedAt         *time.Time `json:"verified_at,omitempty"`
-	VerifiedBy         string     `json:"verified_by,omitempty"`
-	VerificationNotes  string     `json:"verification_notes,omitempty"`
-	AutoApprovePatch   bool       `json:"auto_approve_patch"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
+	ID                uuid.UUID  `json:"id"`
+	Slug              string     `json:"slug"`
+	DisplayName       string     `json:"display_name"`
+	ContactEmail      string     `json:"contact_email"`
+	VerifiedAt        *time.Time `json:"verified_at,omitempty"`
+	VerifiedBy        string     `json:"verified_by,omitempty"`
+	VerificationNotes string     `json:"verification_notes,omitempty"`
+	AutoApprovePatch  bool       `json:"auto_approve_patch"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 // PublisherMemberRole is the role of a user in the publisher

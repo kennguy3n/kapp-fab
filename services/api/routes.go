@@ -1155,6 +1155,22 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 					r.Delete("/installations/{install_id}", d.mph.uninstall)
 				})
 
+				// Rating: a tenant rates an extension it has
+				// installed. Gated on marketplace.read (the browse
+				// right) rather than marketplace.admin — any member
+				// who can see the catalog may rate, and the store's
+				// verified-usage check + the RLS-scoped ratings
+				// table enforce "the tenant must have installed it
+				// first". Rate-limited so the endpoint can't be used
+				// to hammer the aggregate trigger; the upsert is
+				// naturally idempotent (ON CONFLICT DO UPDATE) so no
+				// Idempotency-Key middleware is needed.
+				r.Group(func(r chi.Router) {
+					r.Use(d.authzGate("marketplace.read", ""))
+					r.Use(d.rateLimitMW)
+					r.Post("/extensions/{ext_id}/ratings", d.mph.rateExtension)
+				})
+
 				// Publisher surface — strictly more restrictive
 				// authz than the catalog read above. The role
 				// must be granted explicitly per tenant; B7

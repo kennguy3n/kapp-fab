@@ -148,6 +148,73 @@ func TestNewMarketplaceHandlersNilDeps(t *testing.T) {
 	}
 }
 
+// TestTenantListExtensionsFilter pins the query-string → store
+// filter mapping for the tenant browse endpoint. The category
+// param in particular regressed once (Devin Review on #203): the
+// handler read limit / publisher but dropped category, so the
+// Browse category dropdown was a silent no-op in production while
+// the demo mock still filtered. This unit test guards every param
+// the handler forwards, without needing a live DB.
+func TestTenantListExtensionsFilter(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		rawQuery      string
+		wantPublisher string
+		wantCategory  string
+		wantLimit     int
+	}{
+		{
+			name:     "empty query → listed, no facets",
+			rawQuery: "",
+		},
+		{
+			name:         "category is forwarded",
+			rawQuery:     "category=analytics",
+			wantCategory: "analytics",
+		},
+		{
+			name:          "publisher + category + limit together",
+			rawQuery:      "publisher=acme&category=finance&limit=25",
+			wantPublisher: "acme",
+			wantCategory:  "finance",
+			wantLimit:     25,
+		},
+		{
+			name:          "surrounding whitespace is trimmed",
+			rawQuery:      "publisher=%20acme%20&category=%20crm%20",
+			wantPublisher: "acme",
+			wantCategory:  "crm",
+		},
+		{
+			name:     "non-numeric limit falls back to zero (store clamps)",
+			rawQuery: "limit=lots",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodGet, "/?"+tc.rawQuery, http.NoBody)
+			got := tenantListExtensionsFilter(req)
+			// Status is always pinned to listed so the catalog
+			// never leaks unpublished drafts.
+			if got.Status != marketplace.ExtensionStatusListed {
+				t.Errorf("status = %q, want %q", got.Status, marketplace.ExtensionStatusListed)
+			}
+			if got.Publisher != tc.wantPublisher {
+				t.Errorf("publisher = %q, want %q", got.Publisher, tc.wantPublisher)
+			}
+			if got.Category != tc.wantCategory {
+				t.Errorf("category = %q, want %q", got.Category, tc.wantCategory)
+			}
+			if got.Limit != tc.wantLimit {
+				t.Errorf("limit = %d, want %d", got.Limit, tc.wantLimit)
+			}
+		})
+	}
+}
+
 // TestInstallationToViewEmptySettings exercises the JSON
 // settings normalisation path. The DB column defaults to '{}'
 // when InstallInput.Settings is empty (see store.Install), so
@@ -568,5 +635,3 @@ func TestReviewTransitionAcceptsAdminReachableStates(t *testing.T) {
 		})
 	}
 }
-
-

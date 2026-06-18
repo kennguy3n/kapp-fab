@@ -98,6 +98,10 @@ TABLES=(
   marketplace_extension_agent_tools
   marketplace_webhook_subscriptions
   marketplace_dispatch_log
+  # Tenant-authored marketplace ratings (000102). Default (tenant_id, id)
+  # PK; FKs the global marketplace_extensions catalog plus tenants/users,
+  # so no ordering dependency within the marketplace group.
+  marketplace_extension_ratings
   # Session 17 — LMS deep enhancement. Parents precede children so the
   # promote_tenant_to_schema FK walk copies learning_paths before its
   # courses/enrollments, lms_badges before lms_user_badges, and

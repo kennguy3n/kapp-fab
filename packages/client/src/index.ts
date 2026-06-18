@@ -2790,6 +2790,7 @@ export class ApiClient {
     const params = new URLSearchParams();
     if (opts.publisher) params.set("publisher", opts.publisher);
     if (opts.q) params.set("q", opts.q);
+    if (opts.category) params.set("category", opts.category);
     // `!= null` covers both undefined (param omitted) and null
     // (explicit null). Critically, this does NOT short-circuit
     // on limit=0 the way `if (opts.limit)` would. Today the
@@ -2815,6 +2816,26 @@ export class ApiClient {
   ): Promise<MarketplaceListVersionsResponse> {
     return this.request(
       `/marketplace/extensions/${encodeURIComponent(extId)}/versions`
+    );
+  }
+
+  // Submit (or revise) the calling tenant's 1..5 star rating for a
+  // listing. Wraps POST /marketplace/extensions/{ext_id}/ratings
+  // (rateExtensionRequestBody in marketplace_handlers.go). No
+  // Idempotency-Key: the server UPSERTs on (tenant, extension), so a
+  // retried POST is naturally idempotent — it overwrites with the
+  // same stars rather than double-counting. Returns the recomputed
+  // cross-tenant rollup plus the caller's saved value.
+  rateMarketplaceExtension(
+    extId: string,
+    stars: number
+  ): Promise<MarketplaceRatingSummary> {
+    return this.request(
+      `/marketplace/extensions/${encodeURIComponent(extId)}/ratings`,
+      {
+        method: "POST",
+        body: JSON.stringify({ stars }),
+      }
     );
   }
 
@@ -4645,6 +4666,32 @@ export type InstallStatus =
   | "failed"
   | "uninstalled";
 
+// MarketplaceCategory is the curated listing taxonomy. Kept in
+// lock-step with marketplace.ValidCategories (internal/marketplace/
+// types.go) and the marketplace_extensions_category_valid CHECK
+// (migration 000102). Human labels live in the consuming UI, not on
+// the wire.
+export type MarketplaceCategory =
+  | "productivity"
+  | "finance"
+  | "sales"
+  | "marketing"
+  | "crm"
+  | "hr"
+  | "inventory"
+  | "analytics"
+  | "communication"
+  | "developer_tools"
+  | "integrations"
+  | "other";
+
+// MarketplaceScreenshot mirrors marketplace.Screenshot. URLs are
+// HTTPS-only (enforced server-side); caption is optional.
+export interface MarketplaceScreenshot {
+  url: string;
+  caption?: string;
+}
+
 export interface MarketplaceExtension {
   id: string;
   name: string;
@@ -4659,6 +4706,16 @@ export interface MarketplaceExtension {
   icon_url?: string;
   status: ExtensionStatus;
   listed_version?: string;
+  // Publisher-declared taxonomy bucket; drives the Browse category
+  // filter. Always present (defaults to "other" server-side).
+  category: MarketplaceCategory;
+  // Publisher-declared detail-page gallery. Always an array — never
+  // null on the wire.
+  screenshots: MarketplaceScreenshot[];
+  // Cross-tenant rating rollup. rating_average is 0 when
+  // rating_count is 0 (no tenant has rated the listing yet).
+  rating_average: number;
+  rating_count: number;
   created_at: string;
   updated_at: string;
 }
@@ -4733,6 +4790,9 @@ export interface MarketplacePublisherPublic {
 export interface MarketplaceListExtensionsOptions {
   publisher?: string;
   q?: string;
+  // Restrict the catalog to a single taxonomy bucket. Drives the
+  // Browse category filter.
+  category?: MarketplaceCategory;
   limit?: number;
 }
 
@@ -4743,6 +4803,18 @@ export interface MarketplaceListExtensionsResponse {
 export interface MarketplaceGetExtensionResponse {
   extension: MarketplaceExtension;
   versions: MarketplaceExtensionVersion[];
+  // The requesting tenant's own star value (1..5), or null/absent
+  // when the tenant has not rated this extension.
+  my_rating?: number | null;
+}
+
+// MarketplaceRatingSummary mirrors marketplace.RatingSummary — the
+// recomputed rollup returned after a tenant submits a rating.
+// my_rating is the caller's just-saved star value (1..5).
+export interface MarketplaceRatingSummary {
+  rating_average: number;
+  rating_count: number;
+  my_rating: number;
 }
 
 export interface MarketplaceListVersionsResponse {

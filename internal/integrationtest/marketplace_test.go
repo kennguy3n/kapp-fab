@@ -1174,3 +1174,229 @@ func TestMarketplaceRegistry_SetListedAndStatus_Atomic(t *testing.T) {
 		t.Errorf("status leaked after status-graph rejection: got %q", after3.Status)
 	}
 }
+
+// TestMarketplaceListingMetadata_EndToEnd exercises the B2 listing-
+// metadata extension (PR adding category / screenshots / ratings):
+//
+//  1. CreateExtension persists a publisher-declared category and a
+//     screenshots JSONB array, and both round-trip through
+//     GetExtension / GetExtensionByName / ListExtensions.
+//  2. Category + screenshot validation rejects bad input in Go with
+//     ErrInvalidManifest before the DB CHECK fires (unknown category,
+//     non-HTTPS screenshot URL, too many screenshots).
+//  3. ListExtensions filters by category.
+//  4. RateExtension enforces: listing-status gate (ErrNotFound for a
+//     non-listed extension), verified-usage (ErrForbidden until the
+//     tenant has installed it), and the 1..5 range (ErrInvalidManifest).
+//  5. The AFTER trigger keeps rating_sum / rating_count correct across
+//     insert, revise (same tenant), and a second tenant — the cross-
+//     tenant average is right even though each tenant only ever sees
+//     its own ratings row under RLS.
+//  6. GetMyRating is RLS-scoped: each tenant reads back only its own
+//     star value, and 0 when it has not rated.
+func TestMarketplaceListingMetadata_EndToEnd(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	store := marketplace.NewStore(h.pool)
+
+	pub := strings.ReplaceAll(uniqueSlug("acme"), "-", "_")
+
+	// --- (1) category + screenshots round-trip ---
+	shots := []marketplace.Screenshot{
+		{URL: "https://cdn.example/shots/1.png", Caption: "Dashboard"},
+		{URL: "https://cdn.example/shots/2.png"},
+	}
+	ext, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pub, Slug: "analytics",
+		DisplayName: "Analytics Pro", Description: "Charts and more",
+		Author: "ACME Corp", License: "MIT",
+		Category: "analytics", Screenshots: shots,
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension: %v", err)
+	}
+	if ext.Category != "analytics" {
+		t.Errorf("category: want analytics got %q", ext.Category)
+	}
+	if len(ext.Screenshots) != 2 || ext.Screenshots[0].Caption != "Dashboard" || ext.Screenshots[1].URL != "https://cdn.example/shots/2.png" {
+		t.Errorf("screenshots round-trip wrong: %+v", ext.Screenshots)
+	}
+	if ext.RatingCount != 0 || ext.RatingAverage != 0 {
+		t.Errorf("new extension rating should be zero: avg=%v count=%d", ext.RatingAverage, ext.RatingCount)
+	}
+	gotByID, err := store.GetExtension(ctx, ext.ID)
+	if err != nil || gotByID.Category != "analytics" || len(gotByID.Screenshots) != 2 {
+		t.Fatalf("GetExtension metadata: %v %+v", err, gotByID)
+	}
+	gotByName, err := store.GetExtensionByName(ctx, ext.Name)
+	if err != nil || gotByName.Category != "analytics" || len(gotByName.Screenshots) != 2 {
+		t.Fatalf("GetExtensionByName metadata: %v %+v", err, gotByName)
+	}
+
+	// Default category when omitted.
+	extDefault, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pub, Slug: "nocategory",
+		DisplayName: "Plain", Description: "No category given",
+		Author: "ACME Corp", License: "MIT",
+	})
+	if err != nil {
+		t.Fatalf("CreateExtension default category: %v", err)
+	}
+	if extDefault.Category != marketplace.DefaultCategory {
+		t.Errorf("default category: want %q got %q", marketplace.DefaultCategory, extDefault.Category)
+	}
+	if extDefault.Screenshots == nil {
+		t.Errorf("screenshots should default to empty slice, got nil")
+	}
+
+	// --- (2) validation rejects bad metadata in Go ---
+	if _, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pub, Slug: "badcat",
+		DisplayName: "x", Description: "x", Author: "x", License: "MIT",
+		Category: "not-a-real-category",
+	}); !errors.Is(err, marketplace.ErrInvalidManifest) {
+		t.Errorf("unknown category: want ErrInvalidManifest got %v", err)
+	}
+	if _, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pub, Slug: "badshotscheme",
+		DisplayName: "x", Description: "x", Author: "x", License: "MIT",
+		Screenshots: []marketplace.Screenshot{{URL: "http://cdn.example/insecure.png"}},
+	}); !errors.Is(err, marketplace.ErrInvalidManifest) {
+		t.Errorf("non-HTTPS screenshot: want ErrInvalidManifest got %v", err)
+	}
+	tooMany := make([]marketplace.Screenshot, marketplace.MaxScreenshots+1)
+	for i := range tooMany {
+		tooMany[i] = marketplace.Screenshot{URL: fmt.Sprintf("https://cdn.example/s%d.png", i)}
+	}
+	if _, err := store.CreateExtension(ctx, marketplace.CreateExtensionInput{
+		Publisher: pub, Slug: "toomanyshots",
+		DisplayName: "x", Description: "x", Author: "x", License: "MIT",
+		Screenshots: tooMany,
+	}); !errors.Is(err, marketplace.ErrInvalidManifest) {
+		t.Errorf("too many screenshots: want ErrInvalidManifest got %v", err)
+	}
+
+	// --- (3) category filter ---
+	byCat, err := store.ListExtensions(ctx, marketplace.ListExtensionsFilter{
+		Publisher: pub, Category: "analytics",
+	})
+	if err != nil {
+		t.Fatalf("ListExtensions category filter: %v", err)
+	}
+	for _, e := range byCat {
+		if e.Category != "analytics" {
+			t.Errorf("category filter leaked %q (%s)", e.Category, e.Slug)
+		}
+	}
+	foundAnalytics := false
+	for _, e := range byCat {
+		if e.ID == ext.ID {
+			foundAnalytics = true
+		}
+	}
+	if !foundAnalytics {
+		t.Errorf("category filter should include the analytics extension")
+	}
+	if _, err := store.ListExtensions(ctx, marketplace.ListExtensionsFilter{Category: "bogus"}); !errors.Is(err, marketplace.ErrInvalidManifest) {
+		t.Errorf("ListExtensions with bad category: want ErrInvalidManifest got %v", err)
+	}
+
+	// --- (4) rate before listed → ErrNotFound (status gate) ---
+	tnA, err := h.tenants.Create(ctx, tenant.CreateInput{Slug: uniqueSlug("rate-a"), Name: "RateA", Cell: "test", Plan: "free"})
+	if err != nil {
+		t.Fatalf("tenant A: %v", err)
+	}
+	tnB, err := h.tenants.Create(ctx, tenant.CreateInput{Slug: uniqueSlug("rate-b"), Name: "RateB", Cell: "test", Plan: "free"})
+	if err != nil {
+		t.Fatalf("tenant B: %v", err)
+	}
+	if _, err := store.RateExtension(ctx, marketplace.RateExtensionInput{TenantID: tnA.ID, ExtensionID: ext.ID, Stars: 5}); !errors.Is(err, marketplace.ErrNotFound) {
+		t.Errorf("rate unlisted extension: want ErrNotFound got %v", err)
+	}
+
+	// Publish + list a version so the extension becomes ratable.
+	manifest := &marketplace.Manifest{
+		SchemaVersion: 1, Name: ext.Name, Publisher: ext.Publisher, Slug: ext.Slug,
+		Version: "1.0.0", Author: "ACME Corp", License: "MIT", Description: "v1",
+		MinKappVersion: "1.0.0",
+	}
+	ver, err := store.PublishVersion(ctx, marketplace.PublishVersionInput{
+		ExtensionID: ext.ID, Manifest: manifest,
+		BundleHash: strings.Repeat("a", 64), BundleSize: 4096,
+		BundleURL: "https://cdn.example/bundles/v1.tgz",
+	})
+	if err != nil {
+		t.Fatalf("PublishVersion: %v", err)
+	}
+	if err := store.SetListedAndStatus(ctx, ext.ID, "1.0.0", marketplace.ExtensionStatusListed); err != nil {
+		t.Fatalf("SetListedAndStatus listed: %v", err)
+	}
+
+	// --- (4b) verified-usage: rate before install → ErrForbidden ---
+	if _, err := store.RateExtension(ctx, marketplace.RateExtensionInput{TenantID: tnA.ID, ExtensionID: ext.ID, Stars: 5}); !errors.Is(err, marketplace.ErrForbidden) {
+		t.Errorf("rate before install: want ErrForbidden got %v", err)
+	}
+
+	// --- (4c) range guard ---
+	for _, bad := range []int{0, -1, 6, 99} {
+		if _, err := store.RateExtension(ctx, marketplace.RateExtensionInput{TenantID: tnA.ID, ExtensionID: ext.ID, Stars: bad}); !errors.Is(err, marketplace.ErrInvalidManifest) {
+			t.Errorf("rate stars=%d: want ErrInvalidManifest got %v", bad, err)
+		}
+	}
+
+	// Install for both tenants.
+	if _, err := store.Install(ctx, marketplace.InstallInput{TenantID: tnA.ID, ExtensionID: ext.ID, ExtensionVersionID: ver.ID, WebhookBase: "https://a.example/h"}); err != nil {
+		t.Fatalf("Install A: %v", err)
+	}
+	if _, err := store.Install(ctx, marketplace.InstallInput{TenantID: tnB.ID, ExtensionID: ext.ID, ExtensionVersionID: ver.ID, WebhookBase: "https://b.example/h"}); err != nil {
+		t.Fatalf("Install B: %v", err)
+	}
+
+	// --- (5) aggregate trigger across insert / revise / 2nd tenant ---
+	sumA, err := store.RateExtension(ctx, marketplace.RateExtensionInput{TenantID: tnA.ID, ExtensionID: ext.ID, Stars: 5})
+	if err != nil {
+		t.Fatalf("RateExtension A=5: %v", err)
+	}
+	if sumA.RatingCount != 1 || sumA.RatingAverage != 5 || sumA.MyRating != 5 {
+		t.Errorf("after A=5: want count=1 avg=5 mine=5, got %+v", sumA)
+	}
+	sumB, err := store.RateExtension(ctx, marketplace.RateExtensionInput{TenantID: tnB.ID, ExtensionID: ext.ID, Stars: 3})
+	if err != nil {
+		t.Fatalf("RateExtension B=3: %v", err)
+	}
+	if sumB.RatingCount != 2 || sumB.RatingAverage != 4 || sumB.MyRating != 3 {
+		t.Errorf("after B=3: want count=2 avg=4 mine=3, got %+v", sumB)
+	}
+	// Revise A 5 → 1: count stays 2, sum 4, avg 2.
+	sumA2, err := store.RateExtension(ctx, marketplace.RateExtensionInput{TenantID: tnA.ID, ExtensionID: ext.ID, Stars: 1})
+	if err != nil {
+		t.Fatalf("RateExtension A=1 (revise): %v", err)
+	}
+	if sumA2.RatingCount != 2 || sumA2.RatingAverage != 2 || sumA2.MyRating != 1 {
+		t.Errorf("after A revise to 1: want count=2 avg=2 mine=1, got %+v", sumA2)
+	}
+	// Denormalised rollup visible on the global extension row.
+	postRated, err := store.GetExtension(ctx, ext.ID)
+	if err != nil {
+		t.Fatalf("GetExtension after ratings: %v", err)
+	}
+	if postRated.RatingCount != 2 || postRated.RatingAverage != 2 {
+		t.Errorf("rollup on extension row: want count=2 avg=2, got count=%d avg=%v", postRated.RatingCount, postRated.RatingAverage)
+	}
+
+	// --- (6) GetMyRating is per-tenant ---
+	if mine, err := store.GetMyRating(ctx, tnA.ID, ext.ID); err != nil || mine != 1 {
+		t.Errorf("GetMyRating A: want 1 got %d (err=%v)", mine, err)
+	}
+	if mine, err := store.GetMyRating(ctx, tnB.ID, ext.ID); err != nil || mine != 3 {
+		t.Errorf("GetMyRating B: want 3 got %d (err=%v)", mine, err)
+	}
+	// A tenant that never rated reads back 0.
+	tnC, err := h.tenants.Create(ctx, tenant.CreateInput{Slug: uniqueSlug("rate-c"), Name: "RateC", Cell: "test", Plan: "free"})
+	if err != nil {
+		t.Fatalf("tenant C: %v", err)
+	}
+	if mine, err := store.GetMyRating(ctx, tnC.ID, ext.ID); err != nil || mine != 0 {
+		t.Errorf("GetMyRating C (never rated): want 0 got %d (err=%v)", mine, err)
+	}
+}
