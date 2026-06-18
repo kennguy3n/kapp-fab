@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Button, Input } from "@kapp/ui";
+import { ChevronDown, KeyRound, MessagesSquare } from "lucide-react";
+import { Button, Input, Spinner, cn } from "@kapp/ui";
+import { AuthScaffold, AuthAlert } from "./auth/AuthScaffold";
 
 // LoginPage drives the Phase H JWT auth flow. The dev path still
 // accepts a hand-pasted tenant slug + token for local work, but the
@@ -9,11 +11,16 @@ import { Button, Input } from "@kapp/ui";
 export function LoginPage() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
+  // Capture once whether we arrived back from the identity provider with
+  // an auth code in the URL — that path shows a branded "Signing you in…"
+  // state rather than the sign-in form.
+  const [autoExchanging] = useState(() => Boolean(params.get("code")));
   const [code, setCode] = useState("");
   const [tenant, setTenant] = useState(localStorage.getItem("kapp.tenant") ?? "");
   const [token, setToken] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [devOpen, setDevOpen] = useState(false);
 
   useEffect(() => {
     const qcode = params.get("code");
@@ -68,41 +75,128 @@ export function LoginPage() {
     navigate("/");
   };
 
+  // Branded redirect state: the user has come back from KChat/SSO with a
+  // `?code=` and we are exchanging it. The end user never sees a raw auth
+  // error here — only friendly copy with a way to retry.
+  if (autoExchanging) {
+    return (
+      <AuthScaffold bare>
+        {err ? (
+          <>
+            <h1 className="text-xl font-medium tracking-tight text-fg">
+              We couldn't sign you in
+            </h1>
+            <p className="max-w-sm text-sm text-fg-muted">
+              Your sign-in link may have expired. Please try signing in again.
+            </p>
+            <Button asChild className="mt-1">
+              <a href="/login">Back to sign in</a>
+            </Button>
+          </>
+        ) : (
+          <>
+            <Spinner size="lg" />
+            <p className="text-sm text-fg-muted">Signing you in…</p>
+          </>
+        )}
+      </AuthScaffold>
+    );
+  }
+
   return (
-    <form onSubmit={submit} className="flex max-w-[360px] flex-col gap-3">
-      <h1>Sign in</h1>
-      {/* iam-core Universal Login (OAuth2/OIDC). The backend's
-          GET /api/v1/auth/login starts the PKCE Authorization-Code
-          flow and redirects to iam-core; on return the /callback
-          route stores the tokens. When iam-core is not configured the
-          backend responds 503 and this link is a no-op, so the KChat
-          path below remains the default. A full-page navigation (not
-          fetch) is required so the browser follows the 302 to the
-          identity provider. */}
-      <p>
-        <a href="/api/v1/auth/login">Sign in with SSO (MFA, passkeys, social)</a>
-      </p>
-      <p>
-        <a href="/api/v1/auth/kchat/start">Sign in with KChat</a>
-      </p>
-      <label className="flex flex-col gap-1">
-        KChat auth code
-        <Input value={code} onChange={(e) => setCode(e.target.value)} />
-      </label>
-      <hr />
-      <p className="text-xs text-fg-muted">Dev mode (tenant + token)</p>
-      <label className="flex flex-col gap-1">
-        Tenant
-        <Input value={tenant} onChange={(e) => setTenant(e.target.value)} />
-      </label>
-      <label className="flex flex-col gap-1">
-        Token (optional)
-        <Input value={token} onChange={(e) => setToken(e.target.value)} />
-      </label>
-      <Button type="submit" disabled={busy} className="self-start">
-        {busy ? "Signing in…" : "Continue"}
-      </Button>
-      {err && <p className="text-danger">{err}</p>}
-    </form>
+    <AuthScaffold
+      title="Sign in"
+      description="Welcome back — sign in to your Kapp workspace."
+      footer={
+        <span>
+          Need a customer account?{" "}
+          <span className="text-fg">Ask your provider for a portal link.</span>
+        </span>
+      }
+    >
+      <div className="flex flex-col gap-3">
+        <Button asChild size="lg" className="w-full">
+          <a href="/api/v1/auth/kchat/start">
+            <MessagesSquare aria-hidden="true" className="h-4 w-4" />
+            Sign in with KChat
+          </a>
+        </Button>
+
+        <Button asChild variant="outline" size="lg" className="w-full">
+          <a href="/api/v1/auth/login">
+            <KeyRound aria-hidden="true" className="h-4 w-4" />
+            Use single sign-on
+          </a>
+        </Button>
+        <p className="text-center text-xs text-fg-muted">
+          Single sign-on supports passkeys, MFA, and social login.
+        </p>
+      </div>
+
+      <div className="border-t border-border pt-1">
+        <button
+          type="button"
+          onClick={() => setDevOpen((o) => !o)}
+          aria-expanded={devOpen}
+          aria-controls="dev-signin-panel"
+          className="flex w-full items-center justify-between rounded-md py-1.5 text-sm font-medium text-fg-muted transition-colors hover:text-fg"
+        >
+          Developer sign-in
+          <ChevronDown
+            aria-hidden="true"
+            className={cn(
+              "h-4 w-4 transition-transform",
+              devOpen && "rotate-180",
+            )}
+          />
+        </button>
+
+        {devOpen && (
+          <form
+            id="dev-signin-panel"
+            onSubmit={submit}
+            className="mt-3 flex flex-col gap-3"
+          >
+            <label className="flex flex-col gap-1.5 text-sm font-medium text-fg">
+              KChat auth code
+              <Input
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                placeholder="Paste a KChat auth code"
+                autoComplete="off"
+              />
+            </label>
+
+            <div className="h-px bg-border" role="separator" />
+            <p className="text-xs text-fg-muted">
+              Local dev only — sign in with a tenant slug and optional token.
+            </p>
+
+            <label className="flex flex-col gap-1.5 text-sm font-medium text-fg">
+              Tenant
+              <Input
+                value={tenant}
+                onChange={(e) => setTenant(e.target.value)}
+                placeholder="acme"
+                autoComplete="off"
+              />
+            </label>
+            <label className="flex flex-col gap-1.5 text-sm font-medium text-fg">
+              Token (optional)
+              <Input
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                autoComplete="off"
+              />
+            </label>
+
+            <Button type="submit" disabled={busy} className="w-full">
+              {busy ? "Signing in…" : "Continue"}
+            </Button>
+            {err && <AuthAlert tone="danger">{err}</AuthAlert>}
+          </form>
+        )}
+      </div>
+    </AuthScaffold>
   );
 }

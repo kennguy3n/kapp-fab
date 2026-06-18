@@ -35,6 +35,9 @@ describe("LoginPage", () => {
     const user = userEvent.setup();
     renderLogin();
 
+    await user.click(
+      screen.getByRole("button", { name: /Developer sign-in/i }),
+    );
     await user.type(screen.getByLabelText(/^Tenant$/i), "acme");
     await user.type(screen.getByLabelText(/Token/i), "dev-token-123");
     await user.click(screen.getByRole("button", { name: /Continue/i }));
@@ -48,6 +51,9 @@ describe("LoginPage", () => {
     const user = userEvent.setup();
     renderLogin();
 
+    await user.click(
+      screen.getByRole("button", { name: /Developer sign-in/i }),
+    );
     await user.type(screen.getByLabelText(/KChat auth code/i), "kchat-code");
     await user.click(screen.getByRole("button", { name: /Continue/i }));
 
@@ -78,6 +84,9 @@ describe("LoginPage", () => {
     const user = userEvent.setup();
     renderLogin();
 
+    await user.click(
+      screen.getByRole("button", { name: /Developer sign-in/i }),
+    );
     await user.type(screen.getByLabelText(/KChat auth code/i), "bad");
     await user.click(screen.getByRole("button", { name: /Continue/i }));
 

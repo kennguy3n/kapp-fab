@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Button, Spinner } from "@kapp/ui";
+import { AuthScaffold } from "./auth/AuthScaffold";
 
 // CallbackPage completes the iam-core (OAuth2/OIDC) Authorization-Code
 // login. The backend's GET /api/v1/auth/callback exchanges the code,
@@ -74,18 +76,35 @@ export function CallbackPage() {
 
   if (err) {
     return (
-      <div className="flex max-w-[360px] flex-col gap-3 p-6">
-        <h1>Sign-in failed</h1>
-        <p className="text-danger">We couldn't complete sign-in ({err}).</p>
-        <a href="/login">Try again</a>
-      </div>
+      <AuthScaffold title="Sign-in failed" description={friendlyCallbackError(err)}>
+        <Button asChild className="w-full">
+          <a href="/login">Try signing in again</a>
+        </Button>
+      </AuthScaffold>
     );
   }
   return (
-    <div className="flex max-w-[360px] flex-col gap-3 p-6">
-      <p>Signing you in…</p>
-    </div>
+    <AuthScaffold bare>
+      <Spinner size="lg" />
+      <p className="text-sm text-fg-muted">Signing you in…</p>
+    </AuthScaffold>
   );
+}
+
+// Map an internal/OAuth2 error code to calm, plain-language copy. The
+// raw code (a machine token like "access_denied") is never surfaced to
+// the user — only a friendly explanation with a clear next step.
+function friendlyCallbackError(code: string): string {
+  switch (code) {
+    case "login_incomplete":
+      return "We didn't receive your sign-in details. Please try signing in again.";
+    case "access_denied":
+      return "Sign-in was cancelled before it finished. Please try again to continue.";
+    case "invalid_request":
+      return "Something went wrong while signing you in. Please try again.";
+    default:
+      return "We couldn't complete your sign-in. Please try again.";
+  }
 }
 
 // tenantFromJWT pulls the Kapp tenant id out of an iam-core access
