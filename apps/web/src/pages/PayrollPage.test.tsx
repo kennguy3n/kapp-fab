@@ -40,6 +40,12 @@ const RUN = makeKRecord({
   ktype: "hr.pay_run",
   data: { name: "Jan 2024", pay_period_start: "2024-01-01", pay_period_end: "2024-01-31", department: "Eng", payslip_count: 2, total_gross: 12000, total_net: 9000, currency: "USD", status: "draft" },
 });
+// Employee records back the humanized name columns (structures + payslips
+// resolve employee_id → display name via the shared recordLabel helper).
+const EMPLOYEES = [
+  makeKRecord({ id: "emp-1", ktype: "hr.employee", data: { name: "Ada Lovelace", designation: "Engineer" } }),
+  makeKRecord({ id: "emp-9", ktype: "hr.employee", data: { name: "Grace Hopper", designation: "Engineer" } }),
+];
 
 // Route listRecords by the ktype argument so each tab's query gets the
 // matching fixture set.
@@ -48,6 +54,7 @@ function routeListRecords() {
     if (ktype === "hr.salary_component") return Promise.resolve([COMPONENT]);
     if (ktype === "hr.salary_structure") return Promise.resolve([STRUCTURE]);
     if (ktype === "hr.pay_run") return Promise.resolve([RUN]);
+    if (ktype === "hr.employee") return Promise.resolve(EMPLOYEES);
     return Promise.resolve([]);
   });
 }
@@ -67,9 +74,9 @@ describe("PayrollPage", () => {
     expect(screen.getByRole("heading", { name: "Payroll" })).toBeInTheDocument();
     expect(await screen.findByText("Basic Pay")).toBeInTheDocument();
     expect(screen.getByText("BASIC")).toBeInTheDocument();
-    // Components tab button reflects the active state.
-    expect(screen.getByRole("button", { name: "Components" })).toHaveAttribute(
-      "aria-pressed",
+    // Components tab reflects the active state.
+    expect(screen.getByRole("tab", { name: "Components" })).toHaveAttribute(
+      "aria-selected",
       "true",
     );
   });
@@ -77,9 +84,9 @@ describe("PayrollPage", () => {
   it("switches to the structures tab and lists salary structures", async () => {
     const user = userEvent.setup();
     renderWithProviders(<PayrollPage />);
-    await user.click(screen.getByRole("button", { name: "Structures" }));
-    expect(await screen.findByText("emp-1")).toBeInTheDocument();
-    expect(screen.getByText("monthly")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Structures" }));
+    expect(await screen.findByText("Ada Lovelace")).toBeInTheDocument();
+    expect(screen.getByText("Monthly")).toBeInTheDocument();
   });
 
   it("routes the New button to the create form for the active tab", async () => {
@@ -97,7 +104,7 @@ describe("PayrollPage", () => {
     });
     const user = userEvent.setup();
     renderWithProviders(<PayrollPage />);
-    await user.click(screen.getByRole("button", { name: "Pay Runs" }));
+    await user.click(screen.getByRole("tab", { name: "Pay Runs" }));
     await screen.findByText("Jan 2024");
 
     await user.click(screen.getByRole("button", { name: "Generate" }));
@@ -111,10 +118,12 @@ describe("PayrollPage", () => {
     postPayRun.mockRejectedValue(new Error("period locked"));
     const user = userEvent.setup();
     renderWithProviders(<PayrollPage />);
-    await user.click(screen.getByRole("button", { name: "Pay Runs" }));
+    await user.click(screen.getByRole("tab", { name: "Pay Runs" }));
     await screen.findByText("Jan 2024");
 
+    // Posting is irreversible, so it's gated behind a confirmation dialog.
     await user.click(screen.getByRole("button", { name: "Post" }));
+    await user.click(screen.getByRole("button", { name: "Post pay run" }));
     expect(await screen.findByText(/Post failed:.*period locked/i)).toBeInTheDocument();
   });
 
@@ -128,14 +137,14 @@ describe("PayrollPage", () => {
     ]);
     const user = userEvent.setup();
     renderWithProviders(<PayrollPage />);
-    await user.click(screen.getByRole("button", { name: "Pay Runs" }));
+    await user.click(screen.getByRole("tab", { name: "Pay Runs" }));
     await screen.findByText("Jan 2024");
 
     await user.click(screen.getByRole("button", { name: "View slips" }));
     expect(listPayRunPayslips).toHaveBeenCalledWith("run-1");
     const slipsSection = (await screen.findByRole("heading", { name: "Payslips" }))
       .closest("section") as HTMLElement;
-    expect(within(slipsSection).getByText("emp-9")).toBeInTheDocument();
+    expect(within(slipsSection).getByText("Grace Hopper")).toBeInTheDocument();
     // Toggling again hides the panel.
     await user.click(screen.getByRole("button", { name: "Hide slips" }));
     await waitFor(() =>
@@ -151,7 +160,7 @@ describe("PayrollPage", () => {
     );
     const user = userEvent.setup();
     renderWithProviders(<PayrollPage />);
-    await user.click(screen.getByRole("button", { name: "Pay Runs" }));
-    expect(await screen.findByText(/Failed to load\./i)).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Pay Runs" }));
+    expect(await screen.findByText(/We couldn't load pay runs/i)).toBeInTheDocument();
   });
 });
