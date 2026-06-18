@@ -376,6 +376,33 @@ function DateHeader({ iso }: { iso: string }) {
   );
 }
 
+/**
+ * Tenant shift colors are free-form hex, so the text painted on top can't
+ * rely on theme tokens (which assume the token background). Derive a readable
+ * foreground from the fill's WCAG relative luminance — white on dark fills,
+ * near-black on light ones — so chips always meet contrast in both themes.
+ * Returns undefined for unparseable input so we fall back to design tokens.
+ */
+function readableForeground(hex: string): string | undefined {
+  const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
+  if (!match) return undefined;
+  let h = match[1];
+  if (h.length === 3)
+    h = h
+      .split("")
+      .map((c) => c + c)
+      .join("");
+  const channel = (i: number) => parseInt(h.slice(i, i + 2), 16) / 255;
+  const linear = (c: number) =>
+    c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  const luminance =
+    0.2126 * linear(channel(0)) +
+    0.7152 * linear(channel(2)) +
+    0.0722 * linear(channel(4));
+  // 0.179 is the crossover where contrast against white equals black.
+  return luminance > 0.179 ? "#191919" : "#ffffff";
+}
+
 function ShiftBadge({
   label,
   time,
@@ -387,19 +414,23 @@ function ShiftBadge({
   color?: string;
   status: string;
 }) {
-  // `color` is tenant-defined per shift type (free-form hex stored on
-  // the record), so it stays an inline background; everything else is
-  // driven by design tokens. Fall back to the info tint when unset.
+  // `color` is tenant-defined per shift type (free-form hex stored on the
+  // record), so it stays an inline background and the text color is derived
+  // from it for contrast; everything else is driven by design tokens. Fall
+  // back to the info tint + tokens when no color is set.
+  const fg = color ? readableForeground(color) : undefined;
   return (
     <div
       className={cn(
         "rounded-md px-1.5 py-1 text-start text-xs leading-tight",
         !color && "bg-info/15",
       )}
-      style={color ? { background: color } : undefined}
+      style={color ? { background: color, color: fg } : undefined}
     >
-      <div className="font-semibold text-fg">{label}</div>
-      {time && <div className="text-fg-muted">{time}</div>}
+      <div className={cn("font-semibold", !color && "text-fg")}>{label}</div>
+      {time && (
+        <div className={cn(!color && "text-fg-muted")}>{time}</div>
+      )}
       {status !== "scheduled" && (
         <Badge variant={statusVariant(status)} size="xs" className="mt-0.5">
           {humanizeToken(status)}
