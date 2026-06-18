@@ -76,7 +76,19 @@ const HEADER_NAMES = (): HeadersInit => {
   return headers;
 };
 
+// In demo mode the mock layer installs a window.fetch shim that serves
+// the /roles routes from in-memory fixtures. api.ts installs it on boot,
+// but ensure the (idempotent) shim is in place before the first request
+// so a cold page load can't race the install and 500 through the proxy.
+const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
+async function ensureDemoFetch(): Promise<void> {
+  if (!demoMode) return;
+  const { installPortalDemoFetch } = await import("../lib/mock-api");
+  installPortalDemoFetch();
+}
+
 async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
+  await ensureDemoFetch();
   const res = await fetch(url, { ...init, headers: HEADER_NAMES() });
   if (!res.ok) {
     const text = await res.text();

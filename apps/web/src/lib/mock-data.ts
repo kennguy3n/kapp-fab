@@ -2685,6 +2685,134 @@ export interface DemoStagingRow {
   status: string;
 }
 
+// --- Roles & permissions (RoleManagementPage) -------------------------
+//
+// RoleManagementPage talks to /api/v1/roles with a bare fetch() (it is
+// not part of the typed ApiClient), so in demo mode it bypasses the mock
+// client and 500s against the Vite proxy. installPortalDemoFetch serves
+// the fixtures below. Shapes mirror the Role / PermissionRow interfaces
+// declared in the page; `permissions` are the human-facing permission
+// "packs" and the granular matrix lives in ROLE_PERMISSIONS.
+
+export interface DemoRole {
+  name: string;
+  description?: string;
+  permissions: string[];
+  parent_role?: string;
+}
+
+export interface DemoRolePermission {
+  id: string;
+  role_name: string;
+  ktype: string;
+  action: string;
+  conditions?: Record<string, unknown>;
+  granted_at?: string;
+}
+
+export const ROLES: DemoRole[] = [
+  {
+    name: "tenant.admin",
+    description: "Full administrative access to every module and platform setting.",
+    permissions: ["*"],
+  },
+  {
+    name: "finance.manager",
+    description: "Owns the general ledger, invoicing, budgets and financial reports.",
+    permissions: ["finance.*"],
+  },
+  {
+    name: "sales.rep",
+    description: "Works leads, deals and quotes and raises sales orders.",
+    permissions: ["crm.read", "sales.create"],
+  },
+  {
+    name: "hr.manager",
+    description: "Administers employees, payroll runs and shift schedules.",
+    permissions: ["hr.*"],
+  },
+  {
+    name: "support.agent",
+    description: "Responds to and resolves customer support tickets.",
+    permissions: ["helpdesk.*"],
+    parent_role: "sales.rep",
+  },
+  {
+    name: "inventory.clerk",
+    description: "Maintains stock levels, cycle counts and warehouse records.",
+    permissions: ["inventory.read", "inventory.update"],
+  },
+];
+
+function rolePerm(
+  role: string,
+  ktype: string,
+  action: string,
+  ageDays = 30,
+): DemoRolePermission {
+  return {
+    id: uuid(`perm:${role}:${ktype}:${action}`),
+    role_name: role,
+    ktype,
+    action,
+    conditions: {},
+    granted_at: daysAgoIso(ageDays),
+  };
+}
+
+export const ROLE_PERMISSIONS: DemoRolePermission[] = [
+  // tenant.admin — wildcard CRUD over every record type, plus the
+  // higher-order finance/HR actions so the matrix shows extra columns.
+  rolePerm("tenant.admin", "", "read", 120),
+  rolePerm("tenant.admin", "", "create", 120),
+  rolePerm("tenant.admin", "", "update", 120),
+  rolePerm("tenant.admin", "", "delete", 120),
+  rolePerm("tenant.admin", "finance.ar_invoice", "post", 120),
+  rolePerm("tenant.admin", "hr.pay_run", "approve", 120),
+  // finance.manager
+  rolePerm("finance.manager", "finance.ar_invoice", "read", 90),
+  rolePerm("finance.manager", "finance.ar_invoice", "create", 90),
+  rolePerm("finance.manager", "finance.ar_invoice", "update", 90),
+  rolePerm("finance.manager", "finance.ar_invoice", "post", 90),
+  rolePerm("finance.manager", "finance.ap_bill", "read", 90),
+  rolePerm("finance.manager", "finance.ap_bill", "create", 90),
+  rolePerm("finance.manager", "finance.ap_bill", "post", 90),
+  rolePerm("finance.manager", "finance.cost_center", "read", 90),
+  rolePerm("finance.manager", "finance.bank_account", "read", 90),
+  // sales.rep
+  rolePerm("sales.rep", "crm.lead", "read", 60),
+  rolePerm("sales.rep", "crm.lead", "create", 60),
+  rolePerm("sales.rep", "crm.lead", "update", 60),
+  rolePerm("sales.rep", "crm.deal", "read", 60),
+  rolePerm("sales.rep", "crm.deal", "create", 60),
+  rolePerm("sales.rep", "crm.deal", "update", 60),
+  rolePerm("sales.rep", "crm.quote", "read", 60),
+  rolePerm("sales.rep", "crm.quote", "create", 60),
+  rolePerm("sales.rep", "sales.order", "read", 60),
+  rolePerm("sales.rep", "sales.order", "create", 60),
+  // hr.manager
+  rolePerm("hr.manager", "hr.employee", "read", 75),
+  rolePerm("hr.manager", "hr.employee", "create", 75),
+  rolePerm("hr.manager", "hr.employee", "update", 75),
+  rolePerm("hr.manager", "hr.pay_run", "read", 75),
+  rolePerm("hr.manager", "hr.pay_run", "create", 75),
+  rolePerm("hr.manager", "hr.pay_run", "approve", 75),
+  rolePerm("hr.manager", "hr.shift_assignment", "read", 75),
+  rolePerm("hr.manager", "hr.shift_assignment", "create", 75),
+  rolePerm("hr.manager", "hr.payslip", "read", 75),
+  // support.agent
+  rolePerm("support.agent", "helpdesk.ticket", "read", 45),
+  rolePerm("support.agent", "helpdesk.ticket", "create", 45),
+  rolePerm("support.agent", "helpdesk.ticket", "update", 45),
+  rolePerm("support.agent", "crm.organization", "read", 45),
+  rolePerm("support.agent", "crm.contact", "read", 45),
+  // inventory.clerk
+  rolePerm("inventory.clerk", "inventory.item", "read", 50),
+  rolePerm("inventory.clerk", "inventory.item", "create", 50),
+  rolePerm("inventory.clerk", "inventory.item", "update", 50),
+  rolePerm("inventory.clerk", "sales.order", "read", 50),
+];
+
 // --- Dashboard summary ------------------------------------------------
 
 export const DASHBOARD_SUMMARY: DashboardSummary = {

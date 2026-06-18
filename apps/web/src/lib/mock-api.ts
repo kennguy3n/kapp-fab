@@ -162,6 +162,8 @@ import {
   PORTAL_TICKETS,
   RECORDS_BY_KTYPE,
   RETENTION_POLICIES,
+  ROLES,
+  ROLE_PERMISSIONS,
   ROUTINGS,
   SAVED_REPORTS,
   SAVED_VIEWS_BY_KTYPE,
@@ -287,6 +289,8 @@ const tenantKTypes: TenantKType[] = TENANT_KTYPES.map((k) => ({ ...k }));
 // resets to the seed. See installPortalDemoFetch below.
 const demoNotifications = NOTIFICATIONS.map((n) => ({ ...n }));
 const demoImportJobs = IMPORT_JOBS.map((j) => ({ ...j }));
+const demoRoles = ROLES.map((r) => ({ ...r, permissions: [...r.permissions] }));
+let demoRolePermissions = ROLE_PERMISSIONS.map((p) => ({ ...p }));
 
 // Mutable marketplace demo state so install / uninstall / upgrade /
 // rate actions round-trip inside the UI. Cloned from the fixtures so
@@ -2275,7 +2279,9 @@ export function installPortalDemoFetch(): void {
       path === "/health" ||
       path === "/admin/health/detailed" ||
       path === "/imports" ||
-      path.startsWith("/imports/");
+      path.startsWith("/imports/") ||
+      path === "/roles" ||
+      path.startsWith("/roles/");
     if (!handled) return origFetch(input as RequestInfo, init);
 
     await new Promise((r) => setTimeout(r, 80));
@@ -2377,6 +2383,90 @@ export function installPortalDemoFetch(): void {
         return jsonResponse({ job, imported });
       }
       return jsonResponse(job);
+    }
+
+    // --- Roles & permissions (RoleManagementPage) ---
+    // The role graph is exposed as /roles, /roles/{name} and the nested
+    // /roles/{name}/permissions[/{id}] grants. Mutations round-trip into
+    // the in-memory copies so the matrix toggles and create/delete work
+    // for the session; a reload resets to the seed.
+    if (path === "/roles") {
+      if (method === "POST") {
+        const body = parseBody(init);
+        const role = {
+          name: typeof body.name === "string" ? body.name : "new.role",
+          description:
+            typeof body.description === "string" ? body.description : undefined,
+          parent_role:
+            typeof body.parent_role === "string" ? body.parent_role : undefined,
+          permissions: Array.isArray(body.permissions)
+            ? (body.permissions.filter(
+                (p): p is string => typeof p === "string",
+              ) as string[])
+            : [],
+        };
+        const existing = demoRoles.findIndex((r) => r.name === role.name);
+        if (existing === -1) demoRoles.push(role);
+        else demoRoles[existing] = role;
+        return jsonResponse(role);
+      }
+      return jsonResponse(demoRoles.map((r) => ({ ...r })));
+    }
+    if (path.startsWith("/roles/")) {
+      const segs = path
+        .slice("/roles/".length)
+        .split("/")
+        .map((s) => decodeURIComponent(s));
+      const roleName = segs[0];
+      // /roles/{name}
+      if (segs.length === 1) {
+        if (method === "DELETE") {
+          const idx = demoRoles.findIndex((r) => r.name === roleName);
+          if (idx !== -1) demoRoles.splice(idx, 1);
+          demoRolePermissions = demoRolePermissions.filter(
+            (p) => p.role_name !== roleName,
+          );
+          return new Response(null, { status: 204 });
+        }
+        const role = demoRoles.find((r) => r.name === roleName);
+        return role
+          ? jsonResponse({ ...role })
+          : jsonResponse({ error: "role not found" }, 404);
+      }
+      // /roles/{name}/permissions[/{id}]
+      if (segs[1] === "permissions") {
+        if (segs.length === 2) {
+          if (method === "POST") {
+            const body = parseBody(init);
+            const row = {
+              id: nextId(),
+              role_name: roleName,
+              ktype: typeof body.ktype === "string" ? body.ktype : "",
+              action: typeof body.action === "string" ? body.action : "read",
+              conditions:
+                body.conditions && typeof body.conditions === "object"
+                  ? (body.conditions as Record<string, unknown>)
+                  : {},
+              granted_at: nowIso(),
+            };
+            demoRolePermissions.push(row);
+            return jsonResponse(row);
+          }
+          return jsonResponse(
+            demoRolePermissions
+              .filter((p) => p.role_name === roleName)
+              .map((p) => ({ ...p })),
+          );
+        }
+        if (segs.length === 3 && method === "DELETE") {
+          const id = segs[2];
+          demoRolePermissions = demoRolePermissions.filter(
+            (p) => p.id !== id,
+          );
+          return new Response(null, { status: 204 });
+        }
+      }
+      return jsonResponse({ error: "not found" }, 404);
     }
 
     // --- Customer portal ---
