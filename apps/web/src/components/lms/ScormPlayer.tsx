@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { ScormCMIData } from "@kapp/client";
+import { Badge, Spinner, cn } from "@kapp/ui";
+import { AlertTriangle } from "lucide-react";
 import { api } from "../../lib/api";
+import { humanizeToken } from "../../lib/ktypeView";
 
 /**
  * ScormPlayer (Session 17, Deliverable 2/12).
@@ -88,6 +91,37 @@ export function cmiScoreRaw(score: number | undefined): string | undefined {
 function hasScore(raw: string | undefined): raw is string {
   return raw != null && raw !== "";
 }
+
+export type ScormStatusTone = "info" | "accent" | "success" | "muted";
+
+// scormStatusLabel maps the player's internal lifecycle state
+// ("loading" | "ready" | "running" | "terminated") onto learner-facing
+// copy + a semantic tone, so the UI never surfaces the raw machine
+// token next to the lesson.
+export function scormStatusLabel(status: string): {
+  label: string;
+  tone: ScormStatusTone;
+} {
+  switch (status) {
+    case "loading":
+      return { label: "Loading", tone: "muted" };
+    case "ready":
+      return { label: "Ready", tone: "info" };
+    case "running":
+      return { label: "In progress", tone: "accent" };
+    case "terminated":
+      return { label: "Finished", tone: "success" };
+    default:
+      return { label: humanizeToken(status), tone: "muted" };
+  }
+}
+
+const SCORM_TONE_DOT: Record<ScormStatusTone, string> = {
+  info: "bg-info",
+  accent: "bg-accent",
+  success: "bg-success",
+  muted: "bg-fg-subtle",
+};
 
 function projectCMI(store: Store, version: ScormVersion): ScormCMIData {
   const cmi: ScormCMIData = {
@@ -266,18 +300,41 @@ export function ScormPlayer({
     };
   }, [lessonId, enrollmentId, version]);
 
+  const statusInfo = scormStatusLabel(status);
+
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-2 text-[12px] text-fg-muted">
-        <span>SCORM runtime: {version === "scorm_12" ? "1.2" : "2004"}</span>
-        <span>·</span>
-        <span>status: {status}</span>
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Badge variant="neutral" size="sm">
+            SCORM {version === "scorm_12" ? "1.2" : "2004"}
+          </Badge>
+          <span className="inline-flex items-center gap-1.5 text-xs text-fg-muted">
+            <span
+              className={cn(
+                "h-2 w-2 rounded-full",
+                SCORM_TONE_DOT[statusInfo.tone],
+              )}
+              aria-hidden
+            />
+            {statusInfo.label}
+          </span>
+        </div>
+        {status === "loading" ? (
+          <Spinner size="sm" className="text-fg-subtle" label="Loading lesson" />
+        ) : null}
       </div>
-      {error && (
-        <p className="text-danger" role="alert">
-          SCORM error: {error}
-        </p>
-      )}
+
+      {error ? (
+        <div
+          role="alert"
+          className="flex items-start gap-2 rounded-md border border-danger/30 bg-danger/10 p-3 text-sm text-fg"
+        >
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-danger" aria-hidden />
+          <span>We couldn't sync your progress: {error}</span>
+        </div>
+      ) : null}
+
       {hydrated ? (
         <iframe
           title="SCORM content"
@@ -286,8 +343,9 @@ export function ScormPlayer({
           sandbox="allow-scripts allow-same-origin allow-forms"
         />
       ) : (
-        <div className="flex h-[640px] w-full items-center justify-center rounded-lg border border-border bg-bg text-[12px] text-fg-muted">
-          Loading SCORM content…
+        <div className="flex h-[640px] w-full flex-col items-center justify-center gap-3 rounded-lg border border-border bg-bg-subtle text-sm text-fg-muted">
+          <Spinner size="lg" className="text-fg-subtle" />
+          <span>Loading lesson…</span>
         </div>
       )}
     </div>
