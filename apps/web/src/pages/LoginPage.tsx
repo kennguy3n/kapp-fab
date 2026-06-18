@@ -14,6 +14,13 @@ export function LoginPage() {
   // Capture once whether we arrived back from the identity provider with
   // an auth code in the URL — that path shows a branded "Signing you in…"
   // state rather than the sign-in form.
+  //
+  // Intentionally has NO setter: recovery from a failed exchange relies on
+  // the full-page `<a href="/login">` below remounting this component
+  // without `?code=`, which resets `autoExchanging` to false. Do NOT swap
+  // that anchor for a React Router `<Link>` — a client-side nav would keep
+  // the component mounted with `autoExchanging` stuck true, stranding the
+  // user on the error screen.
   const [autoExchanging] = useState(() => Boolean(params.get("code")));
   const [code, setCode] = useState("");
   const [tenant, setTenant] = useState(localStorage.getItem("kapp.tenant") ?? "");
@@ -89,6 +96,8 @@ export function LoginPage() {
             <p className="max-w-sm text-sm text-fg-muted">
               Your sign-in link may have expired. Please try signing in again.
             </p>
+            {/* Full-page nav (not <Link>) so the component remounts and
+                clears `autoExchanging` — see the useState note above. */}
             <Button asChild className="mt-1">
               <a href="/login">Back to sign in</a>
             </Button>

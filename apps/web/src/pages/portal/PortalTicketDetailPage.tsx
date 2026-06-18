@@ -14,6 +14,7 @@ import {
   cn,
 } from "@kapp/ui";
 import { portalApi } from "../../lib/portalApi";
+import { AuthAlert } from "../auth/AuthScaffold";
 import { PortalShell } from "./PortalShell";
 import {
   friendlyPortalError,
@@ -48,7 +49,7 @@ export function PortalTicketDetailPage() {
   });
   const [reply, setReply] = useState("");
   const replyMut = useMutation({
-    mutationFn: () => portalApi.reply(id!, reply),
+    mutationFn: (body: string) => portalApi.reply(id!, body),
     onSuccess: () => {
       setReply("");
       qc.invalidateQueries({ queryKey: ["portal-ticket", tenant_slug, id] });
@@ -196,7 +197,7 @@ export function PortalTicketDetailPage() {
             onSubmit={(e) => {
               e.preventDefault();
               if (!reply.trim() || replyMut.isPending) return;
-              replyMut.mutate();
+              replyMut.mutate(reply);
             }}
             className="flex flex-col gap-4"
           >
@@ -208,6 +209,14 @@ export function PortalTicketDetailPage() {
                 placeholder="Type your reply…"
               />
             </Field>
+            {replyMut.isError && (
+              <AuthAlert tone="danger">
+                {friendlyPortalError(
+                  replyMut.error,
+                  "We couldn't send your reply. Please try again.",
+                )}
+              </AuthAlert>
+            )}
             <div className="flex justify-end">
               <Button
                 type="submit"
