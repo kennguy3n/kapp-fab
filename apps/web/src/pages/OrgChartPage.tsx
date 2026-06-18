@@ -112,7 +112,10 @@ export function OrgChartPage() {
   }
 
   function isOpen(id: string): boolean {
-    if (q) return true; // search reveals the whole matched org
+    // While searching, expand only the reporting lines that lead to a
+    // match (forcedOpen holds those ancestors) so irrelevant branches stay
+    // collapsed and the result stays focused on large orgs.
+    if (q) return forcedOpen.has(id);
     return !collapsed.has(id);
   }
 
