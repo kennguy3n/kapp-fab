@@ -1,12 +1,23 @@
+import type { ComponentType } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Badge } from "@kapp/ui";
+import { Badge, Button, EmptyState, Eyebrow, Skeleton, cn } from "@kapp/ui";
+import {
+  AlertTriangle,
+  Clock,
+  CircleCheck,
+  CircleX,
+  History,
+} from "lucide-react";
 
 // StatusPage is the PUBLIC, unauthenticated status page backed by
 // GET /api/v1/health. It deliberately talks to the endpoint with a
 // bare fetch (no tenant/auth headers) rather than the shared
 // ApiClient: the page is mounted outside the authenticated app shell
 // and must render for anonymous visitors, so it cannot depend on a
-// tenant id or bearer token being present in localStorage.
+// tenant id or bearer token being present in localStorage. For the
+// same reason it formats dates/numbers with the platform Intl
+// defaults rather than the app's locale context, which isn't mounted
+// on the public route.
 
 type HealthStatus = "operational" | "degraded" | "down";
 
@@ -37,26 +48,42 @@ async function fetchPublicHealth(): Promise<PublicHealth> {
   return (await res.json()) as PublicHealth;
 }
 
-// STATUS_META centralises the human label + design-system colour
-// mapping for each status so the banner, the per-component pills, and
-// any future surface stay visually consistent. `badge` selects the
-// Badge variant; `banner` is the Tailwind token class pair for the
-// large headline banner.
+// STATUS_META centralises the human label + design-system colour +
+// icon mapping for each status so the banner, the per-component rows,
+// and any future surface stay visually consistent. `badge` selects
+// the Badge variant; `banner` is the token class pair for the large
+// headline banner; `icon`/`tone` drive the inline status glyph.
 const STATUS_META: Record<
   HealthStatus,
-  { label: string; badge: "success" | "warning" | "danger"; banner: string }
+  {
+    label: string;
+    badge: "success" | "warning" | "danger";
+    banner: string;
+    icon: ComponentType<{ className?: string }>;
+    tone: string;
+  }
 > = {
   operational: {
     label: "Operational",
     badge: "success",
     banner: "bg-success text-success-fg",
+    icon: CircleCheck,
+    tone: "text-success",
   },
   degraded: {
     label: "Degraded",
     badge: "warning",
     banner: "bg-warning text-warning-fg",
+    icon: AlertTriangle,
+    tone: "text-warning",
   },
-  down: { label: "Down", badge: "danger", banner: "bg-danger text-danger-fg" },
+  down: {
+    label: "Down",
+    badge: "danger",
+    banner: "bg-danger text-danger-fg",
+    icon: CircleX,
+    tone: "text-danger",
+  },
 };
 
 // COMPONENT_LABELS maps the public API's generic component names onto
@@ -76,6 +103,12 @@ const COMPONENT_LABELS: Record<string, string> = {
   service: "Service",
 };
 
+const BANNER_HEADLINE: Record<HealthStatus, string> = {
+  operational: "All systems operational",
+  degraded: "Some systems degraded",
+  down: "Major outage",
+};
+
 function StatusPill({ status }: { status: HealthStatus }) {
   const meta = STATUS_META[status];
   return <Badge variant={meta.badge}>{meta.label}</Badge>;
@@ -91,83 +124,128 @@ export function StatusPage() {
   });
 
   if (healthQuery.isLoading) {
-    return <div className="p-8">Loading status…</div>;
+    return (
+      <div className="mx-auto flex max-w-3xl flex-col gap-6 px-4 py-8">
+        <div className="flex flex-col gap-2">
+          <Skeleton className="h-4 w-20" />
+          <Skeleton className="h-8 w-56" />
+          <Skeleton className="h-4 w-40" />
+        </div>
+        <Skeleton className="h-24 w-full rounded-lg" />
+        <Skeleton className="h-48 w-full rounded-lg" />
+      </div>
+    );
   }
+
   if (healthQuery.error || !healthQuery.data) {
     return (
-      <div className="p-8 text-danger">
-        Unable to load platform status. Please try again shortly.
+      <div className="mx-auto max-w-3xl px-4 py-8">
+        <EmptyState
+          icon={<AlertTriangle className="h-6 w-6" aria-hidden />}
+          title="Unable to load platform status"
+          description="Please try again shortly."
+          action={
+            <Button
+              variant="secondary"
+              onClick={() => void healthQuery.refetch()}
+              disabled={healthQuery.isFetching}
+            >
+              Try again
+            </Button>
+          }
+        />
       </div>
     );
   }
 
   const data = healthQuery.data;
   const meta = STATUS_META[data.status];
+  const BannerIcon = meta.icon;
 
   return (
-    <div className="mx-auto max-w-[720px] px-4 py-8">
-      <h1 className="mb-1 text-2xl">Platform Status</h1>
-      <p className="mt-0 text-[13px] text-fg-muted">
-        Last checked {new Date(data.checked_at).toLocaleString()}
-      </p>
+    <div className="mx-auto flex max-w-3xl flex-col gap-8 px-4 py-8">
+      <header className="flex flex-col gap-1">
+        <Eyebrow>System</Eyebrow>
+        <h1 className="text-2xl font-semibold tracking-tight text-fg">
+          Platform status
+        </h1>
+        <p className="flex items-center gap-1.5 text-sm text-fg-muted">
+          <Clock className="h-3.5 w-3.5" aria-hidden />
+          Last checked {new Date(data.checked_at).toLocaleString()}
+        </p>
+      </header>
 
-      <div className={`mt-4 rounded-[10px] p-5 ${meta.banner}`}>
-        <div className="text-lg font-bold">
-          {data.status === "operational"
-            ? "All systems operational"
-            : data.status === "degraded"
-              ? "Some systems degraded"
-              : "Major outage"}
-        </div>
-        <div className="mt-1 text-[13px]">
-          {data.component_availability_percent.toFixed(0)}% of components
-          operational
+      <div
+        className={cn(
+          "flex items-center gap-4 rounded-lg p-5",
+          meta.banner,
+        )}
+      >
+        <BannerIcon className="h-8 w-8 shrink-0" aria-hidden />
+        <div className="flex flex-col">
+          <span className="text-lg font-semibold">
+            {BANNER_HEADLINE[data.status]}
+          </span>
+          <span className="text-sm opacity-90">
+            {data.component_availability_percent.toFixed(0)}% of components
+            operational
+          </span>
         </div>
       </div>
 
-      <section className="mt-8">
-        <h2 className="text-base">Components</h2>
-        <div className="mt-2">
-          {data.components.map((c, i) => (
-            <div
-              // Index-suffixed: the public API collapses any unmapped
-              // component to the generic "service" label, so names are
-              // not guaranteed unique — keying on name alone could
-              // collide if two unmapped probes ever co-exist.
-              key={`${c.name}-${i}`}
-              className="flex items-center justify-between border-b border-border py-2.5"
-            >
-              <span className="font-medium">
-                {COMPONENT_LABELS[c.name] ?? c.name}
-              </span>
-              <span className="flex items-center gap-3">
-                <span className="text-xs tabular-nums text-fg-subtle">
-                  {c.latency_ms.toFixed(0)} ms
+      <section className="flex flex-col gap-3">
+        <h2 className="text-base font-semibold text-fg">Components</h2>
+        <ul className="overflow-hidden rounded-lg border border-border">
+          {data.components.map((c, i) => {
+            const cMeta = STATUS_META[c.status];
+            const CIcon = cMeta.icon;
+            return (
+              <li
+                // Index-suffixed: the public API collapses any unmapped
+                // component to the generic "service" label, so names are
+                // not guaranteed unique — keying on name alone could
+                // collide if two unmapped probes ever co-exist.
+                key={`${c.name}-${i}`}
+                className="flex items-center justify-between gap-3 border-b border-border bg-bg px-4 py-3 last:border-b-0"
+              >
+                <span className="flex items-center gap-2.5">
+                  <CIcon className={cn("h-4 w-4 shrink-0", cMeta.tone)} aria-hidden />
+                  <span className="font-medium text-fg">
+                    {COMPONENT_LABELS[c.name] ?? c.name}
+                  </span>
                 </span>
-                <StatusPill status={c.status} />
-              </span>
-            </div>
-          ))}
-        </div>
+                <span className="flex items-center gap-3">
+                  <span className="font-tabular text-xs text-fg-subtle">
+                    {c.latency_ms.toFixed(0)} ms
+                  </span>
+                  <StatusPill status={c.status} />
+                </span>
+              </li>
+            );
+          })}
+        </ul>
       </section>
 
-      <section className="mt-8">
-        <h2 className="text-base">Recent capacity changes</h2>
+      <section className="flex flex-col gap-3">
+        <h2 className="flex items-center gap-2 text-base font-semibold text-fg">
+          <History className="h-4 w-4 text-fg-muted" aria-hidden />
+          Recent capacity changes
+        </h2>
         {data.incidents.length === 0 ? (
-          <p className="text-[13px] text-fg-muted">
+          <p className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-fg-muted">
             No capacity changes in the recent window.
           </p>
         ) : (
-          <ul className="mt-2 list-none p-0">
+          <ul className="flex flex-col gap-3">
             {data.incidents.map((incident, i) => (
               <li
                 key={`${incident.at}-${i}`}
-                className="border-b border-border py-2 text-[13px]"
+                className="flex flex-col gap-0.5 border-l-2 border-border pl-3"
               >
-                <span className="mr-2 text-fg-muted">
+                <span className="text-xs text-fg-subtle">
                   {new Date(incident.at).toLocaleString()}
                 </span>
-                {incident.summary}
+                <span className="text-sm text-fg">{incident.summary}</span>
               </li>
             ))}
           </ul>
