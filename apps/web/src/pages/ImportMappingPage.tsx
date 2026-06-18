@@ -1,9 +1,17 @@
 import { useState, useMemo, useEffect } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, Database } from "lucide-react";
 import type { KType } from "@kapp/client";
 import {
+  Badge,
   Button,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  EmptyState,
+  Field,
   Select,
   Table,
   TableBody,
@@ -13,10 +21,17 @@ import {
   TableRow,
 } from "@kapp/ui";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n";
+import { humanizeLabel, ktypeSingular } from "../lib/ktypeView";
+import {
+  AdminErrorState,
+  AdminPageHeader,
+  AdminTableSkeleton,
+} from "./adminKit";
 
 /**
- * ImportMappingPage is the drag-free advanced mapping editor reached
- * from ImportPage's step 2 when the operator needs per-field control.
+ * ImportMappingPage is the advanced mapping editor reached from
+ * ImportPage's step 2 when the operator needs per-field control.
  * Source rows come from the job's `progress.source.entities` payload
  * (written during Discover); target KType field lists come from the
  * KType registry. A field-level save round-trips via
@@ -78,6 +93,7 @@ export function ImportMappingPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const qc = useQueryClient();
+  const fmt = useFormatter();
 
   const jobQ = useQuery({
     queryKey: ["imports", id],
@@ -90,13 +106,15 @@ export function ImportMappingPage() {
   });
 
   const entities = useMemo(() => {
-    const progress = jobQ.data?.progress as {
-      source?: { entities?: SourceEntity[] };
-    } | undefined;
+    const progress = jobQ.data?.progress as
+      | { source?: { entities?: SourceEntity[] } }
+      | undefined;
     return progress?.source?.entities ?? [];
   }, [jobQ.data]);
 
-  const existing = (jobQ.data?.mapping as { entities?: Record<string, EntityMapping> } | undefined)?.entities ?? {};
+  const existing =
+    (jobQ.data?.mapping as { entities?: Record<string, EntityMapping> } | undefined)
+      ?.entities ?? {};
 
   const [mapping, setMapping] = useState<Record<string, EntityMapping>>({});
 
@@ -130,108 +148,174 @@ export function ImportMappingPage() {
     return m;
   }, [ktypesQ.data]);
 
+  const ktypeOptions = useMemo(
+    () =>
+      (ktypesQ.data ?? [])
+        .map((k) => ({ value: k.name, label: ktypeSingular(k.name) }))
+        .sort((a, b) => a.label.localeCompare(b.label)),
+    [ktypesQ.data],
+  );
+
   return (
-    <section>
-      <div className="mb-2">
-        <Link to={`/imports/${id}`}>← Back to wizard</Link>
-      </div>
-      <h1>Field mapping</h1>
-      {jobQ.isLoading && <p>Loading…</p>}
-      {jobQ.data && entities.length === 0 && (
-        <p className="text-fg-muted">
-          No discovered entities yet — re-run discovery from the wizard.
-        </p>
-      )}
-      {entities.map((e) => {
-        const em = mapping[e.name] ?? { target_ktype: "", fields: {} };
-        const targetKType = ktypeByName.get(em.target_ktype);
-        const targetFields = targetKType?.schema.fields.map((f) => f.name) ?? [];
-        const sourceFields = e.fields ?? [];
-        return (
-          <div
-            key={e.name}
-            className="mb-4 rounded border border-border p-3"
-          >
-            <div className="flex justify-between">
-              <h3 className="m-0">{e.name}</h3>
-              <span className="text-xs text-fg-muted">
-                {e.row_count ?? 0} rows
-              </span>
-            </div>
-            <label className="mt-2 flex items-center gap-2">
-              Target KType
-              <Select
-                value={em.target_ktype}
-                onChange={(ev) => {
-                  const v = ev.target.value;
-                  setMapping((m) => ({
-                    ...m,
-                    [e.name]: { target_ktype: v, fields: m[e.name]?.fields ?? {} },
-                  }));
-                }}
-                className="w-auto"
-              >
-                <option value="">(select)</option>
-                {(ktypesQ.data ?? []).map((k) => (
-                  <option key={k.name} value={k.name}>
-                    {k.name}
-                  </option>
-                ))}
-              </Select>
-            </label>
-            {sourceFields.length > 0 && (
-              <Table className="mt-2 text-[13px]">
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Source field</TableHead>
-                    <TableHead>Target field</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {sourceFields.map((sf) => (
-                    <TableRow key={sf}>
-                      <TableCell>{sf}</TableCell>
-                      <TableCell>
-                        <Select
-                          value={em.fields[sf] ?? ""}
-                          onChange={(ev) => {
-                            const v = ev.target.value;
-                            setMapping((m) => {
-                              const current = m[e.name] ?? {
-                                target_ktype: "",
-                                fields: {},
-                              };
-                              return {
-                                ...m,
-                                [e.name]: {
-                                  ...current,
-                                  fields: { ...current.fields, [sf]: v },
-                                },
-                              };
-                            });
-                          }}
-                        >
-                          <option value="">(skip)</option>
-                          {targetFields.map((tf) => (
-                            <option key={tf} value={tf}>
-                              {tf}
-                            </option>
-                          ))}
-                        </Select>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
+    <section className="flex flex-col gap-6">
+      <AdminPageHeader
+        area="Onboarding"
+        title="Field mapping"
+        description="Match each column in your source to a field on the matching record type. Columns left as “Skip” won't be imported."
+        actions={
+          <Button asChild variant="ghost">
+            <Link to={`/imports/${id}`}>
+              <ArrowLeft className="h-4 w-4" />
+              Back to wizard
+            </Link>
+          </Button>
+        }
+      />
+
+      {jobQ.isLoading ? (
+        <Card>
+          <CardContent className="pt-4">
+            <AdminTableSkeleton columns={["Your column", "Maps to field"]} rows={4} />
+          </CardContent>
+        </Card>
+      ) : jobQ.isError ? (
+        <AdminErrorState
+          title="Couldn't load this import"
+          error={jobQ.error}
+          onRetry={() => jobQ.refetch()}
+        />
+      ) : entities.length === 0 ? (
+        <Card>
+          <CardContent className="py-10">
+            <EmptyState
+              icon={<Database />}
+              title="No discovered entities yet"
+              description="Re-run discovery from the wizard to pull in your source tables, then come back to match their columns."
+              action={
+                <Button asChild variant="secondary">
+                  <Link to={`/imports/${id}`}>
+                    <ArrowLeft className="h-4 w-4" />
+                    Back to wizard
+                  </Link>
+                </Button>
+              }
+            />
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="flex flex-col gap-4">
+          {entities.map((e) => {
+            const em = mapping[e.name] ?? { target_ktype: "", fields: {} };
+            const targetKType = ktypeByName.get(em.target_ktype);
+            const targetFields = targetKType?.schema.fields.map((f) => f.name) ?? [];
+            const sourceFields = e.fields ?? [];
+            const label = humanizeLabel(e.name);
+            return (
+              <Card key={e.name}>
+                <CardHeader className="flex flex-row flex-wrap items-end justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <CardTitle>{label}</CardTitle>
+                    <Badge variant="neutral">
+                      {fmt.number(e.row_count ?? 0)} rows
+                    </Badge>
+                  </div>
+                  <Field label="Record type" className="w-full sm:w-64">
+                    <Select
+                      aria-label={`Record type for ${label}`}
+                      value={em.target_ktype}
+                      onChange={(ev) => {
+                        const v = ev.target.value;
+                        setMapping((m) => ({
+                          ...m,
+                          [e.name]: {
+                            target_ktype: v,
+                            fields: m[e.name]?.fields ?? {},
+                          },
+                        }));
+                      }}
+                    >
+                      <option value="">Choose a record type…</option>
+                      {ktypeOptions.map((k) => (
+                        <option key={k.value} value={k.value}>
+                          {k.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                </CardHeader>
+                <CardContent>
+                  {sourceFields.length === 0 ? (
+                    <p className="text-sm text-fg-muted">
+                      No columns were discovered for this table.
+                    </p>
+                  ) : !em.target_ktype ? (
+                    <p className="text-sm text-fg-muted">
+                      Choose a record type above to start matching columns.
+                    </p>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Your column</TableHead>
+                          <TableHead>Maps to field</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {sourceFields.map((sf) => (
+                          <TableRow key={sf}>
+                            <TableCell className="font-mono text-sm text-fg">
+                              {sf}
+                            </TableCell>
+                            <TableCell>
+                              <Field label={`Target field for ${sf}`} hideLabel>
+                                <Select
+                                  value={em.fields[sf] ?? ""}
+                                  onChange={(ev) => {
+                                    const v = ev.target.value;
+                                    setMapping((m) => {
+                                      const current = m[e.name] ?? {
+                                        target_ktype: "",
+                                        fields: {},
+                                      };
+                                      return {
+                                        ...m,
+                                        [e.name]: {
+                                          ...current,
+                                          fields: { ...current.fields, [sf]: v },
+                                        },
+                                      };
+                                    });
+                                  }}
+                                >
+                                  <option value="">Skip this column</option>
+                                  {targetFields.map((tf) => (
+                                    <option key={tf} value={tf}>
+                                      {humanizeLabel(tf)}
+                                    </option>
+                                  ))}
+                                </Select>
+                              </Field>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })}
+
+          <div className="flex flex-wrap items-center gap-3">
+            <Button onClick={() => save.mutate()} disabled={save.isPending}>
+              {save.isPending ? "Saving…" : "Save mapping"}
+            </Button>
+            <Button asChild variant="ghost">
+              <Link to={`/imports/${id}`}>Cancel</Link>
+            </Button>
           </div>
-        );
-      })}
-      <div>
-        <Button onClick={() => save.mutate()} disabled={save.isPending}>
-          {save.isPending ? "Saving…" : "Save mapping"}
-        </Button>
-      </div>
+        </div>
+      )}
     </section>
   );
 }

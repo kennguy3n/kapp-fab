@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
 import { server } from "../test/msw/server";
 import { makeTenant } from "../test/factories";
+import { LocaleProvider } from "../lib/i18n";
 import { TenantListPage } from "./TenantListPage";
 
 // TenantListPage reads api.listTenants(), which in the non-demo test
@@ -17,7 +18,9 @@ function renderPage() {
   });
   return render(
     <QueryClientProvider client={qc}>
-      <TenantListPage />
+      <LocaleProvider>
+        <TenantListPage />
+      </LocaleProvider>
     </QueryClientProvider>,
   );
 }
@@ -36,7 +39,9 @@ describe("TenantListPage", () => {
 
     expect(await screen.findByText("Acme Inc")).toBeInTheDocument();
     expect(screen.getByText("globex")).toBeInTheDocument();
-    expect(screen.getByText("suspended")).toBeInTheDocument();
+    // Status tokens are humanized into Title Case badges.
+    expect(screen.getByText("Suspended")).toBeInTheDocument();
+    expect(screen.getByText("Active")).toBeInTheDocument();
   });
 
   it("shows the empty state when no tenants exist", async () => {
@@ -47,7 +52,7 @@ describe("TenantListPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows an error message when the request fails", async () => {
+  it("shows an error state with a retry action when the request fails", async () => {
     server.use(
       http.get("/api/v1/tenants", () =>
         HttpResponse.json({ error: "nope" }, { status: 500 }),
@@ -55,7 +60,10 @@ describe("TenantListPage", () => {
     );
     renderPage();
     await waitFor(() =>
-      expect(screen.getByText(/Error loading tenants\./i)).toBeInTheDocument(),
+      expect(screen.getByText(/Couldn't load workspaces/i)).toBeInTheDocument(),
     );
+    expect(
+      screen.getByRole("button", { name: /try again/i }),
+    ).toBeInTheDocument();
   });
 });

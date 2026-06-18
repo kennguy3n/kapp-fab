@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { http, HttpResponse } from "msw";
 import { server } from "../test/msw/server";
+import { LocaleProvider } from "../lib/i18n";
 import { ImportPage } from "./ImportPage";
 
 // ImportPage talks to /api/v1/imports through the raw fetch API (the
@@ -18,14 +19,17 @@ function renderImports(initialEntry: string) {
   });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={[initialEntry]}>
-        <Routes>
-          <Route path="/imports" element={<ImportPage />} />
-          {/* /imports/new is captured by the :id param (id === "new"),
-              matching the real route table in App.tsx. */}
-          <Route path="/imports/:id" element={<ImportPage />} />
-        </Routes>
-      </MemoryRouter>
+      <LocaleProvider>
+        <MemoryRouter initialEntries={[initialEntry]}>
+          <Routes>
+            {/* Mirror App.tsx exactly: /imports/new is its own static route
+                (no :id param), registered ahead of the dynamic /imports/:id. */}
+            <Route path="/imports" element={<ImportPage />} />
+            <Route path="/imports/new" element={<ImportPage />} />
+            <Route path="/imports/:id" element={<ImportPage />} />
+          </Routes>
+        </MemoryRouter>
+      </LocaleProvider>
     </QueryClientProvider>,
   );
 }
@@ -60,8 +64,9 @@ describe("ImportPage", () => {
       ),
     );
     renderImports("/imports");
-    expect(await screen.findByText("frappe")).toBeInTheDocument();
-    expect(screen.getByText("completed")).toBeInTheDocument();
+    // Source type and status are humanized for display.
+    expect(await screen.findByText("Frappe / ERPNext")).toBeInTheDocument();
+    expect(screen.getByText("Completed")).toBeInTheDocument();
     // "New import" is a navigation control, so it renders as a Button
     // styled link (`<Button asChild><Link>`) — a single anchor with
     // role="link", replacing main's invalid <button>-inside-<a> nest.
@@ -73,7 +78,7 @@ describe("ImportPage", () => {
   it("shows the empty state when there are no jobs", async () => {
     server.use(http.get("/api/v1/imports", () => HttpResponse.json([])));
     renderImports("/imports");
-    expect(await screen.findByText("No imports yet.")).toBeInTheDocument();
+    expect(await screen.findByText(/No imports yet/i)).toBeInTheDocument();
   });
 
   it("surfaces a load error in the index", async () => {
@@ -81,7 +86,12 @@ describe("ImportPage", () => {
       http.get("/api/v1/imports", () => new HttpResponse(null, { status: 500, statusText: "Server Error" })),
     );
     renderImports("/imports");
-    expect(await screen.findByText(/Failed to load jobs:/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Couldn't load imports/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /try again/i }),
+    ).toBeInTheDocument();
   });
 
   it("creates a CSV job from step 1 and advances to the mapping step", async () => {
@@ -97,9 +107,9 @@ describe("ImportPage", () => {
     const user = userEvent.setup();
     renderImports("/imports/new");
 
-    await user.type(screen.getByLabelText(/Entity \(source/i), "customers");
-    await user.type(screen.getByLabelText(/Target KType/i), "crm.account");
-    await user.type(screen.getByLabelText(/Payload/i), "name\nAcme");
+    await user.type(screen.getByLabelText(/Source name/i), "customers");
+    await user.type(screen.getByLabelText(/Default record type/i), "crm.account");
+    await user.type(screen.getByLabelText(/Paste your CSV data/i), "name\nAcme");
     await user.click(screen.getByRole("button", { name: /Create job/i }));
 
     // Router navigates to /imports/job-1 and the wizard resumes on the
@@ -115,8 +125,10 @@ describe("ImportPage", () => {
     await user.selectOptions(screen.getByLabelText(/Source type/i), "frappe");
     expect(screen.getByLabelText(/Frappe base URL/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/DocTypes/i)).toBeInTheDocument();
-    // The CSV-only payload box is gone in Frappe mode.
-    expect(screen.queryByLabelText(/Payload/i)).not.toBeInTheDocument();
+    // The file-only payload box is gone in Frappe mode.
+    expect(
+      screen.queryByLabelText(/Paste your CSV data/i),
+    ).not.toBeInTheDocument();
   });
 
   it("renders the validation step with the per-row error report", async () => {
@@ -139,7 +151,7 @@ describe("ImportPage", () => {
     );
     renderImports("/imports/job-1");
     expect(await screen.findByRole("heading", { name: /Step 3\. Validate/i })).toBeInTheDocument();
-    expect(screen.getByText("1 invalid rows")).toBeInTheDocument();
+    expect(screen.getByText(/1 row needs fixing/i)).toBeInTheDocument();
     expect(screen.getByText(/email is required/)).toBeInTheDocument();
   });
 
@@ -162,7 +174,7 @@ describe("ImportPage", () => {
 
     expect(await screen.findByRole("heading", { name: /Step 4\. Review/i })).toBeInTheDocument();
     expect(screen.getByText("9")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Accept & cutover/i }));
+    await user.click(screen.getByRole("button", { name: /Accept & import/i }));
     await waitFor(() => expect(accepted).toBe(true));
   });
 
@@ -175,6 +187,6 @@ describe("ImportPage", () => {
     );
     renderImports("/imports/job-1");
     expect(await screen.findByRole("heading", { name: /Step 5\. Complete/i })).toBeInTheDocument();
-    expect(screen.getByText("42")).toBeInTheDocument();
+    expect(screen.getByText(/Imported 42 records/i)).toBeInTheDocument();
   });
 });

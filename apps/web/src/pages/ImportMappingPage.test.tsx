@@ -54,8 +54,11 @@ describe("ImportMappingPage", () => {
 
     expect(await screen.findByRole("heading", { name: "Customer" })).toBeInTheDocument();
     expect(screen.getByText("5 rows")).toBeInTheDocument();
-    // Each source field gets its own mapping row.
-    expect(screen.getByText("cust_name")).toBeInTheDocument();
+    // Each source field gets its own mapping row. The rows only appear
+    // once the target KType is defaulted from the entity (an effect that
+    // runs after the job query resolves), so await the first one rather
+    // than reading synchronously.
+    expect(await screen.findByText("cust_name")).toBeInTheDocument();
     expect(screen.getByText("email_addr")).toBeInTheDocument();
   });
 

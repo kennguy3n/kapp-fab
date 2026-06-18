@@ -1,10 +1,26 @@
 import { useState, useMemo } from "react";
-import { Link, useParams, useNavigate } from "react-router-dom";
+import { Link, useParams, useNavigate, useLocation } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowLeft,
+  CheckCircle2,
+  Database,
+  Plus,
+  XCircle,
+} from "lucide-react";
+import {
+  Badge,
   Button,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  EmptyState,
+  Field,
   Input,
   Select,
+  StatCard,
   Stepper,
   Table,
   TableBody,
@@ -12,12 +28,22 @@ import {
   TableHead,
   TableHeader,
   TableRow,
+  Textarea,
+  type BadgeProps,
 } from "@kapp/ui";
+import { useFormatter } from "../lib/i18n";
+import { humanizeLabel, humanizeToken } from "../lib/ktypeView";
+import {
+  AdminErrorState,
+  AdminPageHeader,
+  AdminTableSkeleton,
+  CopyableId,
+} from "./adminKit";
 
 /**
  * ImportPage drives the Phase F import wizard. Five steps:
  *
- *   1. Source selection   — CSV / JSON / Frappe REST
+ *   1. Source selection   — CSV / JSON / Frappe REST / cloud accounting
  *   2. Concept mapping    — source DocType → KType, source field → KType field
  *   3. Validation report  — per-row errors from POST /imports/{id}/validate
  *   4. Review             — reconciliation summary + counts
@@ -34,6 +60,8 @@ import {
  * fetch calls inline avoids churn on the shared packages/client while
  * the contract stabilizes.
  */
+
+type BadgeVariant = NonNullable<BadgeProps["variant"]>;
 
 interface ImportJob {
   id: string;
@@ -64,6 +92,40 @@ interface StagingRow {
 
 const baseUrl = "/api/v1";
 
+const SOURCE_LABEL: Record<string, string> = {
+  csv: "CSV file",
+  json: "JSON file",
+  frappe: "Frappe / ERPNext",
+  quickbooks: "QuickBooks Online",
+  xero: "Xero",
+  tally: "Tally Prime",
+  sage: "Sage Business Cloud",
+};
+
+function sourceLabel(raw: string): string {
+  return SOURCE_LABEL[raw] ?? humanizeToken(raw);
+}
+
+// Import job lifecycle → badge styling + plain-language label.
+const STATUS_META: Record<string, { label: string; variant: BadgeVariant }> = {
+  pending: { label: "Pending", variant: "neutral" },
+  discovering: { label: "Discovering", variant: "info" },
+  exporting: { label: "Exporting", variant: "info" },
+  normalizing: { label: "Normalizing", variant: "info" },
+  mapping: { label: "Mapping", variant: "warning" },
+  staging: { label: "Staging", variant: "info" },
+  validating: { label: "Validating", variant: "info" },
+  reconciling: { label: "Ready to review", variant: "warning" },
+  accepting: { label: "Importing", variant: "info" },
+  cutting_over: { label: "Importing", variant: "info" },
+  completed: { label: "Completed", variant: "success" },
+  failed: { label: "Failed", variant: "danger" },
+};
+
+function statusMeta(raw: string): { label: string; variant: BadgeVariant } {
+  return STATUS_META[raw] ?? { label: humanizeToken(raw), variant: "neutral" };
+}
+
 function tenantId(): string {
   return localStorage.getItem("kapp.tenant") ?? "default";
 }
@@ -87,61 +149,116 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function ImportPage() {
   const { id } = useParams<{ id?: string }>();
-  if (id && id !== "new") return <ImportWizard jobId={id} />;
-  if (id === "new") return <ImportWizard jobId={undefined} />;
+  const { pathname } = useLocation();
+  // App.tsx registers /imports/new as its own route, so on that path there
+  // is no :id param; fall back to the pathname to detect a fresh wizard.
+  const isNew = id === "new" || pathname.endsWith("/imports/new");
+  if (isNew) return <ImportWizard jobId={undefined} />;
+  if (id) return <ImportWizard jobId={id} />;
   return <ImportIndex />;
 }
 
 function ImportIndex() {
+  const fmt = useFormatter();
   const jobs = useQuery({
     queryKey: ["imports"],
     queryFn: () => apiFetch<ImportJob[]>("/imports"),
   });
 
+  const data = jobs.data ?? [];
+
   return (
-    <section>
-      <div className="flex justify-between">
-        <h1>Imports</h1>
-        <Button asChild>
-          <Link to="/imports/new">New import</Link>
-        </Button>
-      </div>
-      <p className="text-fg-muted">
-        Phase F data onboarding pipeline. Supports CSV, JSON, and Frappe
-        REST sources (ERPNext, HRMS, CRM, LMS).
-      </p>
-      {jobs.isLoading && <p>Loading…</p>}
-      {jobs.isError && (
-        <p className="text-danger">
-          Failed to load jobs: {(jobs.error as Error).message}
-        </p>
-      )}
-      {jobs.data && jobs.data.length === 0 && (
-        <p className="text-fg-muted">No imports yet.</p>
-      )}
-      {jobs.data && jobs.data.length > 0 && (
-        <Table className="text-[13px]">
-          <TableHeader>
-            <TableRow>
-              <TableHead>Job</TableHead>
-              <TableHead>Source</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Updated</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {jobs.data.map((j) => (
-              <TableRow key={j.id}>
-                <TableCell>
-                  <Link to={`/imports/${j.id}`}>{j.id.slice(0, 8)}…</Link>
-                </TableCell>
-                <TableCell>{j.source_type}</TableCell>
-                <TableCell>{j.status}</TableCell>
-                <TableCell>{j.updated_at}</TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+    <section className="flex flex-col gap-6">
+      <AdminPageHeader
+        area="Onboarding"
+        title="Data import"
+        description="Bring your existing data into Kapp from a file or another system. Each import is checked row by row before anything goes live."
+        actions={
+          <Button asChild>
+            <Link to="/imports/new">
+              <Plus className="h-4 w-4" />
+              New import
+            </Link>
+          </Button>
+        }
+      />
+
+      {jobs.isLoading ? (
+        <Card>
+          <CardContent className="pt-4">
+            <AdminTableSkeleton columns={["Reference", "Source", "Status", "Updated"]} />
+          </CardContent>
+        </Card>
+      ) : jobs.isError ? (
+        <AdminErrorState
+          title="Couldn't load imports"
+          error={jobs.error}
+          onRetry={() => jobs.refetch()}
+        />
+      ) : data.length === 0 ? (
+        <Card>
+          <CardContent className="py-10">
+            <EmptyState
+              icon={<Database />}
+              title="No imports yet"
+              description="Start your first import to bring customers, invoices, or any other records into your workspace."
+              action={
+                <Button asChild>
+                  <Link to="/imports/new">
+                    <Plus className="h-4 w-4" />
+                    New import
+                  </Link>
+                </Button>
+              }
+            />
+          </CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
+            <CardTitle>Recent imports</CardTitle>
+            <Badge variant="neutral">
+              {fmt.number(data.length)} {data.length === 1 ? "import" : "imports"}
+            </Badge>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Reference</TableHead>
+                  <TableHead>Source</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Updated</TableHead>
+                  <TableHead className="text-end">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.map((j) => {
+                  const meta = statusMeta(j.status);
+                  return (
+                    <TableRow key={j.id}>
+                      <TableCell>
+                        <CopyableId value={j.id} label="import reference" />
+                      </TableCell>
+                      <TableCell>{sourceLabel(j.source_type)}</TableCell>
+                      <TableCell>
+                        <Badge variant={meta.variant}>{meta.label}</Badge>
+                      </TableCell>
+                      <TableCell className="text-fg-muted">
+                        {fmt.dateTime(new Date(j.updated_at))}
+                      </TableCell>
+                      <TableCell className="text-end">
+                        <Button asChild variant="outline" size="sm">
+                          <Link to={`/imports/${j.id}`}>Open</Link>
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
       )}
     </section>
   );
@@ -206,26 +323,68 @@ function ImportWizard({ jobId }: { jobId: string | undefined }) {
   });
 
   return (
-    <section>
-      <div className="mb-2">
-        <Link to="/imports">← All imports</Link>
-      </div>
-      <h1>Import {jobId ? jobId.slice(0, 8) + "…" : ""}</h1>
+    <section className="flex flex-col gap-6">
+      <AdminPageHeader
+        area="Onboarding"
+        title="Data import"
+        description={
+          jobId ? (
+            <span className="inline-flex items-center gap-2">
+              Reference <CopyableId value={jobId} label="import reference" />
+            </span>
+          ) : (
+            "Follow the steps to bring your data in safely. You can review and fix problems before anything is saved."
+          )
+        }
+        actions={
+          <Button asChild variant="ghost">
+            <Link to="/imports">
+              <ArrowLeft className="h-4 w-4" />
+              All imports
+            </Link>
+          </Button>
+        }
+      />
+
       <Stepper
-        className="my-3"
         current={currentStep - 1}
         steps={[
-          { label: "Source" },
-          { label: "Mapping" },
-          { label: "Validate" },
-          { label: "Review" },
-          { label: "Complete" },
+          { label: "Source", description: "Where data comes from" },
+          { label: "Mapping", description: "Match to records" },
+          { label: "Validate", description: "Check every row" },
+          { label: "Review", description: "Confirm the totals" },
+          { label: "Complete", description: "Bring it live" },
         ]}
       />
-      {!jobId && <StepSource onCreate={(body) => createJob.mutate(body)} />}
-      {jobId && jobQ.isLoading && <p>Loading…</p>}
+
+      {!jobId && (
+        <StepSource
+          onCreate={(body) => createJob.mutate(body)}
+          pending={createJob.isPending}
+          error={createJob.error}
+        />
+      )}
+      {jobId && jobQ.isLoading && (
+        <Card>
+          <CardContent className="pt-4">
+            <AdminTableSkeleton columns={["Loading"]} rows={3} />
+          </CardContent>
+        </Card>
+      )}
+      {jobId && jobQ.isError && (
+        <AdminErrorState
+          title="Couldn't load this import"
+          error={jobQ.error}
+          onRetry={() => jobQ.refetch()}
+        />
+      )}
       {jobId && jobQ.data && currentStep === 2 && (
-        <StepMapping job={jobQ.data} onSubmit={(m) => submitMapping.mutate(m)} />
+        <StepMapping
+          job={jobQ.data}
+          onSubmit={(m) => submitMapping.mutate(m)}
+          pending={submitMapping.isPending}
+          error={submitMapping.error}
+        />
       )}
       {jobId && jobQ.data && currentStep === 3 && (
         <StepValidate
@@ -297,8 +456,12 @@ function pruneEmpty(obj: Record<string, string>): Record<string, string> {
 
 function StepSource({
   onCreate,
+  pending,
+  error,
 }: {
   onCreate: (body: { source_type: string; config: unknown }) => void;
+  pending: boolean;
+  error: unknown;
 }) {
   const [sourceType, setSourceType] = useState<SourceType>("csv");
   const [csvPayload, setCsvPayload] = useState("");
@@ -328,7 +491,8 @@ function StepSource({
       client_secret: clientSecret,
     });
 
-  const submit = () => {
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
     switch (sourceType) {
       case "frappe":
         onCreate({
@@ -381,199 +545,207 @@ function StepSource({
 
   const isFileSource = sourceType === "csv" || sourceType === "json";
   const isOAuthSource = OAUTH_SOURCES.includes(sourceType);
+  const fileLabel = sourceType === "csv" ? "CSV" : "JSON";
 
   return (
-    <div className="max-w-2xl">
-      <h2>Step 1. Source</h2>
-      <label className="mb-3 block text-sm">
-        Source type
-        <Select
-          className="mt-1"
-          value={sourceType}
-          onChange={(e) => setSourceType(e.target.value as SourceType)}
-        >
-          <option value="csv">CSV</option>
-          <option value="json">JSON</option>
-          <option value="frappe">Frappe REST</option>
-          <option value="quickbooks">QuickBooks Online</option>
-          <option value="xero">Xero</option>
-          <option value="tally">Tally Prime (file)</option>
-          <option value="sage">Sage Business Cloud</option>
-        </Select>
-      </label>
-      {isFileSource && (
-        <>
-          <label className="mb-2 block text-sm">
-            Entity (source table/sheet)
-            <Input
-              className="mt-1"
-              value={csvEntity}
-              onChange={(e) => setCsvEntity(e.target.value)}
-            />
-          </label>
-          <label className="mb-2 block text-sm">
-            Target KType (default for this entity)
-            <Input
-              className="mt-1"
-              value={csvKType}
-              onChange={(e) => setCsvKType(e.target.value)}
-              placeholder="crm.lead"
-            />
-          </label>
-          <label className="block text-sm">
-            Payload ({sourceType})
-            <textarea
-              value={csvPayload}
-              onChange={(e) => setCsvPayload(e.target.value)}
-              rows={12}
-              className="mt-1 block w-full rounded-md border border-border bg-bg-elevated p-2 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
-            />
-          </label>
-        </>
-      )}
-      {sourceType === "frappe" && (
-        <>
-          <label className="mb-2 block text-sm">
-            Frappe base URL
-            <Input
-              className="mt-1"
-              value={frappeURL}
-              onChange={(e) => setFrappeURL(e.target.value)}
-              placeholder="https://erp.example.com"
-            />
-          </label>
-          <label className="mb-2 block text-sm">
-            API key
-            <Input
-              className="mt-1"
-              value={frappeKey}
-              onChange={(e) => setFrappeKey(e.target.value)}
-            />
-          </label>
-          <label className="mb-2 block text-sm">
-            API secret
-            <Input
-              type="password"
-              className="mt-1"
-              value={frappeSecret}
-              onChange={(e) => setFrappeSecret(e.target.value)}
-            />
-          </label>
-          <label className="block text-sm">
-            DocTypes (comma-separated)
-            <Input
-              className="mt-1"
-              value={frappeDocTypes}
-              onChange={(e) => setFrappeDocTypes(e.target.value)}
-            />
-          </label>
-        </>
-      )}
-      {sourceType === "quickbooks" && (
-        <label className="mb-2 block text-sm">
-          Realm ID (company)
-          <Input
-            className="mt-1"
-            value={qbRealmId}
-            onChange={(e) => setQbRealmId(e.target.value)}
-            placeholder="1234567890"
-          />
-        </label>
-      )}
-      {sourceType === "xero" && (
-        <label className="mb-2 block text-sm">
-          Xero tenant ID
-          <Input
-            className="mt-1"
-            value={xeroTenantId}
-            onChange={(e) => setXeroTenantId(e.target.value)}
-            placeholder="organisation uuid"
-          />
-        </label>
-      )}
-      {isOAuthSource && (
-        <>
-          <p className="mb-2 text-fg-muted">
-            Provide an access token, or a refresh token plus client
-            credentials to mint one.
-          </p>
-          <label className="mb-2 block text-sm">
-            Access token
-            <Input
-              type="password"
-              className="mt-1"
-              value={accessToken}
-              onChange={(e) => setAccessToken(e.target.value)}
-            />
-          </label>
-          <label className="mb-2 block text-sm">
-            Refresh token
-            <Input
-              type="password"
-              className="mt-1"
-              value={refreshToken}
-              onChange={(e) => setRefreshToken(e.target.value)}
-            />
-          </label>
-          <label className="mb-2 block text-sm">
-            Client ID
-            <Input
-              className="mt-1"
-              value={clientId}
-              onChange={(e) => setClientId(e.target.value)}
-            />
-          </label>
-          <label className="mb-2 block text-sm">
-            Client secret
-            <Input
-              type="password"
-              className="mt-1"
-              value={clientSecret}
-              onChange={(e) => setClientSecret(e.target.value)}
-            />
-          </label>
-        </>
-      )}
-      {sourceType === "tally" && (
-        <>
-          <label className="mb-2 block text-sm">
-            Export format
+    <Card className="max-w-2xl">
+      <CardHeader>
+        <CardTitle>Step 1. Source</CardTitle>
+        <CardDescription>
+          Choose where your data comes from and provide it below.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={submit} className="flex flex-col gap-4">
+          <Field label="Source type" help="Pick the system or file you're importing from.">
             <Select
-              className="mt-1"
-              value={tallyFormat}
-              onChange={(e) => setTallyFormat(e.target.value as "xml" | "json")}
+              value={sourceType}
+              onChange={(e) => setSourceType(e.target.value as SourceType)}
             >
-              <option value="xml">XML</option>
-              <option value="json">JSON</option>
+              <option value="csv">CSV file</option>
+              <option value="json">JSON file</option>
+              <option value="frappe">Frappe / ERPNext</option>
+              <option value="quickbooks">QuickBooks Online</option>
+              <option value="xero">Xero</option>
+              <option value="tally">Tally Prime (file)</option>
+              <option value="sage">Sage Business Cloud</option>
             </Select>
-          </label>
-          <label className="block text-sm">
-            Tally export payload (masters + vouchers)
-            <textarea
-              value={tallyPayload}
-              onChange={(e) => setTallyPayload(e.target.value)}
-              rows={12}
-              className="mt-1 block w-full rounded-md border border-border bg-bg-elevated p-2 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
-            />
-          </label>
-        </>
-      )}
-      <div className="mt-4">
-        <Button onClick={submit}>Create job + stage rows</Button>
-      </div>
-    </div>
+          </Field>
+
+          {isFileSource && (
+            <>
+              <Field
+                label="Source name"
+                help="The table or sheet these rows come from, e.g. Customers."
+              >
+                <Input
+                  value={csvEntity}
+                  onChange={(e) => setCsvEntity(e.target.value)}
+                  placeholder="Customers"
+                />
+              </Field>
+              <Field
+                label="Default record type"
+                help="The record type rows import into by default. You can fine-tune this in the next step."
+              >
+                <Input
+                  value={csvKType}
+                  onChange={(e) => setCsvKType(e.target.value)}
+                  placeholder="crm.account"
+                  className="font-mono"
+                />
+              </Field>
+              <Field label={`Paste your ${fileLabel} data`}>
+                <Textarea
+                  value={csvPayload}
+                  onChange={(e) => setCsvPayload(e.target.value)}
+                  rows={10}
+                  className="font-mono"
+                />
+              </Field>
+            </>
+          )}
+
+          {sourceType === "frappe" && (
+            <>
+              <Field label="Frappe base URL">
+                <Input
+                  value={frappeURL}
+                  onChange={(e) => setFrappeURL(e.target.value)}
+                  placeholder="https://erp.example.com"
+                  type="url"
+                />
+              </Field>
+              <Field label="API key">
+                <Input
+                  value={frappeKey}
+                  onChange={(e) => setFrappeKey(e.target.value)}
+                />
+              </Field>
+              <Field label="API secret">
+                <Input
+                  type="password"
+                  value={frappeSecret}
+                  onChange={(e) => setFrappeSecret(e.target.value)}
+                />
+              </Field>
+              <Field
+                label="DocTypes"
+                help="Comma-separated list of record types to pull, e.g. Customer, Sales Invoice."
+              >
+                <Input
+                  value={frappeDocTypes}
+                  onChange={(e) => setFrappeDocTypes(e.target.value)}
+                />
+              </Field>
+            </>
+          )}
+
+          {sourceType === "quickbooks" && (
+            <Field label="Realm ID (company)">
+              <Input
+                value={qbRealmId}
+                onChange={(e) => setQbRealmId(e.target.value)}
+                placeholder="1234567890"
+              />
+            </Field>
+          )}
+          {sourceType === "xero" && (
+            <Field label="Xero tenant ID">
+              <Input
+                value={xeroTenantId}
+                onChange={(e) => setXeroTenantId(e.target.value)}
+                placeholder="Organisation ID"
+              />
+            </Field>
+          )}
+          {isOAuthSource && (
+            <>
+              <p className="text-sm text-fg-muted">
+                Provide an access token, or a refresh token plus client
+                credentials to mint one.
+              </p>
+              <Field label="Access token">
+                <Input
+                  type="password"
+                  value={accessToken}
+                  onChange={(e) => setAccessToken(e.target.value)}
+                />
+              </Field>
+              <Field label="Refresh token">
+                <Input
+                  type="password"
+                  value={refreshToken}
+                  onChange={(e) => setRefreshToken(e.target.value)}
+                />
+              </Field>
+              <Field label="Client ID">
+                <Input
+                  value={clientId}
+                  onChange={(e) => setClientId(e.target.value)}
+                />
+              </Field>
+              <Field label="Client secret">
+                <Input
+                  type="password"
+                  value={clientSecret}
+                  onChange={(e) => setClientSecret(e.target.value)}
+                />
+              </Field>
+            </>
+          )}
+          {sourceType === "tally" && (
+            <>
+              <Field label="Export format">
+                <Select
+                  value={tallyFormat}
+                  onChange={(e) => setTallyFormat(e.target.value as "xml" | "json")}
+                >
+                  <option value="xml">XML</option>
+                  <option value="json">JSON</option>
+                </Select>
+              </Field>
+              <Field label="Tally export data (masters + vouchers)">
+                <Textarea
+                  value={tallyPayload}
+                  onChange={(e) => setTallyPayload(e.target.value)}
+                  rows={10}
+                  className="font-mono"
+                />
+              </Field>
+            </>
+          )}
+
+          {error != null && (
+            <p className="text-sm text-danger">{(error as Error).message}</p>
+          )}
+          <div>
+            <Button type="submit" disabled={pending}>
+              {pending ? "Creating job…" : "Create job and continue"}
+            </Button>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
   );
 }
 
 function StepMapping({
   job,
   onSubmit,
+  pending,
+  error,
 }: {
   job: ImportJob;
   onSubmit: (mapping: unknown) => void;
+  pending: boolean;
+  error: unknown;
 }) {
+  const fmt = useFormatter();
   const entities = useMemo(() => {
-    const p = job.progress as { source?: { entities?: Array<{ name: string; target_ktype?: string }> } };
+    const p = job.progress as {
+      source?: { entities?: Array<{ name: string; target_ktype?: string }> };
+    };
     return p?.source?.entities ?? [];
   }, [job.progress]);
   const initial = useMemo(() => {
@@ -586,53 +758,78 @@ function StepMapping({
   const [mapping, setMapping] = useState(initial);
 
   return (
-    <div>
-      <h2>Step 2. Mapping</h2>
-      <p className="text-fg-muted">
-        Set the target KType for each discovered source entity. Per-field
-        renames happen automatically via the built-in concept map
-        (PROPOSAL §5.3).
-      </p>
-      <Table className="text-[13px]">
-        <TableHeader>
-          <TableRow>
-            <TableHead>Source entity</TableHead>
-            <TableHead>Source rows</TableHead>
-            <TableHead>Target KType</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {entities.map((e) => (
-            <TableRow key={e.name}>
-              <TableCell>{e.name}</TableCell>
-              <TableCell>
-                {((e as unknown as { row_count?: number }).row_count) ?? "—"}
-              </TableCell>
-              <TableCell>
-                <Input
-                  value={mapping[e.name]?.target_ktype ?? ""}
-                  onChange={(ev) =>
-                    setMapping((m) => ({
-                      ...m,
-                      [e.name]: { target_ktype: ev.target.value },
-                    }))
-                  }
-                  placeholder="crm.lead"
-                />
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-      <div className="mt-4 flex items-center">
-        <Button onClick={() => onSubmit({ entities: mapping })}>
-          Save mapping
-        </Button>
-        <Link to={`/imports/${job.id}/mapping`} className="ml-3">
-          Advanced field mapping →
-        </Link>
-      </div>
-    </div>
+    <Card>
+      <CardHeader>
+        <CardTitle>Step 2. Mapping</CardTitle>
+        <CardDescription>
+          Set the record type for each thing we found in your source. Individual
+          field names are matched automatically — fine-tune them under Advanced
+          field mapping.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {entities.length === 0 ? (
+          <EmptyState
+            icon={<Database />}
+            title="Nothing to map yet"
+            description="We didn't find any source tables to map. Go back and check the source data."
+          />
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Source</TableHead>
+                <TableHead className="text-end">Rows</TableHead>
+                <TableHead>Record type</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {entities.map((e) => {
+                const rowCount = (e as { row_count?: number }).row_count;
+                return (
+                  <TableRow key={e.name}>
+                    <TableCell className="font-medium text-fg">
+                      {humanizeLabel(e.name)}
+                    </TableCell>
+                    <TableCell className="text-end font-tabular">
+                      {rowCount == null ? "—" : fmt.number(rowCount)}
+                    </TableCell>
+                    <TableCell>
+                      <Input
+                        aria-label={`Record type for ${humanizeLabel(e.name)}`}
+                        value={mapping[e.name]?.target_ktype ?? ""}
+                        onChange={(ev) =>
+                          setMapping((m) => ({
+                            ...m,
+                            [e.name]: { target_ktype: ev.target.value },
+                          }))
+                        }
+                        placeholder="crm.account"
+                        className="font-mono"
+                      />
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        )}
+        {error != null && (
+          <p className="text-sm text-danger">{(error as Error).message}</p>
+        )}
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            onClick={() => onSubmit({ entities: mapping })}
+            disabled={pending || entities.length === 0}
+          >
+            {pending ? "Saving…" : "Save mapping"}
+          </Button>
+          <Button asChild variant="link">
+            <Link to={`/imports/${job.id}/mapping`}>Advanced field mapping</Link>
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -647,54 +844,73 @@ function StepValidate({
   onRun: () => void;
   pending: boolean;
 }) {
+  const fmt = useFormatter();
   return (
-    <div>
-      <h2>Step 3. Validate</h2>
-      <p className="text-fg-muted">
-        Runs schema + referential integrity checks over every staged row
-        and returns the per-row error report.
-      </p>
-      <Button onClick={onRun} disabled={pending}>
-        {pending ? "Validating…" : "Run validation"}
-      </Button>
-      {errors.length > 0 && (
-        <>
-          <h3 className="mt-4">{errors.length} invalid rows</h3>
-          <Table className="text-[13px]">
-            <TableHeader>
-              <TableRow>
-                <TableHead>Source ID</TableHead>
-                <TableHead>Target KType</TableHead>
-                <TableHead>Errors</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {errors.map((row) => (
-                <TableRow key={row.id}>
-                  <TableCell>{row.source_id ?? ""}</TableCell>
-                  <TableCell>{row.target_ktype}</TableCell>
-                  <TableCell>
-                    <ul className="m-0 pl-4">
-                      {(row.validation_errors ?? []).map((e, i) => (
-                        <li key={i}>
-                          <code>{e.code}</code>
-                          {e.field ? ` @ ${e.field}` : ""}: {e.message}
-                        </li>
-                      ))}
-                    </ul>
-                  </TableCell>
+    <Card>
+      <CardHeader>
+        <CardTitle>Step 3. Validate</CardTitle>
+        <CardDescription>
+          We check every row against your schema and links between records, then
+          list anything that needs fixing.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <div>
+          <Button onClick={onRun} disabled={pending}>
+            {pending ? "Checking…" : "Run validation"}
+          </Button>
+        </div>
+
+        {errors.length > 0 ? (
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center gap-2">
+              <Badge variant="danger">
+                {fmt.number(errors.length)}{" "}
+                {errors.length === 1 ? "row needs fixing" : "rows need fixing"}
+              </Badge>
+            </div>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Source row</TableHead>
+                  <TableHead>Record type</TableHead>
+                  <TableHead>What needs fixing</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </>
-      )}
-      {job.status === "reconciling" && errors.length === 0 && (
-        <p className="mt-3 text-success">
-          All rows valid — proceed to review.
-        </p>
-      )}
-    </div>
+              </TableHeader>
+              <TableBody>
+                {errors.map((row) => (
+                  <TableRow key={row.id}>
+                    <TableCell className="font-medium text-fg">
+                      {row.source_id || "—"}
+                    </TableCell>
+                    <TableCell>{row.target_ktype}</TableCell>
+                    <TableCell>
+                      <ul className="flex flex-col gap-1">
+                        {(row.validation_errors ?? []).map((e, i) => (
+                          <li key={i} className="flex flex-wrap items-center gap-1.5">
+                            {e.field && (
+                              <Badge variant="outline" size="xs">
+                                {humanizeLabel(e.field)}
+                              </Badge>
+                            )}
+                            <span className="text-sm">{e.message}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        ) : job.status === "reconciling" ? (
+          <div className="flex items-center gap-2 rounded-md border border-success/40 bg-success/10 p-3 text-sm text-success">
+            <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+            Every row passed — continue to review.
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -709,6 +925,7 @@ function StepReview({
   onAccept: () => void;
   pending: boolean;
 }) {
+  const fmt = useFormatter();
   const rec = job.reconciliation as {
     source_count?: number;
     staged_count?: number;
@@ -716,60 +933,89 @@ function StepReview({
     invalid_count?: number;
     discrepancies?: string[];
   };
+  const validCount = rec.valid_count ?? 0;
+  const stat = (n?: number) => (n == null ? "—" : fmt.number(n));
   return (
-    <div>
-      <h2>Step 4. Review &amp; Accept</h2>
-      <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
-        <dt>Source count</dt>
-        <dd>{rec.source_count ?? "—"}</dd>
-        <dt>Staged count</dt>
-        <dd>{rec.staged_count ?? "—"}</dd>
-        <dt>Valid</dt>
-        <dd>{rec.valid_count ?? "—"}</dd>
-        <dt>Invalid</dt>
-        <dd>{rec.invalid_count ?? "—"}</dd>
-      </dl>
-      {rec.discrepancies && rec.discrepancies.length > 0 && (
-        <div className="mt-3 text-danger">
-          <strong>Discrepancies:</strong>
-          <ul>
-            {rec.discrepancies.map((d) => (
-              <li key={d}>{d}</li>
-            ))}
-          </ul>
+    <Card>
+      <CardHeader>
+        <CardTitle>Step 4. Review &amp; Accept</CardTitle>
+        <CardDescription>
+          Confirm the totals below. Only valid rows are brought live; you can fix
+          and re-import the rest later.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <StatCard label="In source" value={stat(rec.source_count)} />
+          <StatCard label="Staged" value={stat(rec.staged_count)} />
+          <StatCard label="Valid" value={stat(rec.valid_count)} />
+          <StatCard label="Invalid" value={stat(rec.invalid_count)} />
         </div>
-      )}
-      <div className="mt-4">
-        <Button onClick={onAccept} disabled={pending}>
-          {pending
-            ? "Importing…"
-            : `Accept & cutover (${rec.valid_count ?? 0} rows)`}
-        </Button>
-      </div>
-      {errors.length > 0 && (
-        <p className="mt-2 text-xs text-fg-muted">
-          {errors.length} invalid rows will be skipped. Fix the source and
-          re-import them later.
-        </p>
-      )}
-    </div>
+
+        {rec.discrepancies && rec.discrepancies.length > 0 && (
+          <div className="rounded-md border border-danger/40 bg-danger/10 p-3">
+            <p className="flex items-center gap-1.5 text-sm font-medium text-danger">
+              <XCircle className="h-4 w-4" aria-hidden="true" />
+              Discrepancies found
+            </p>
+            <ul className="mt-1 list-disc pl-5 text-sm text-danger">
+              {rec.discrepancies.map((d) => (
+                <li key={d}>{d}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <div>
+          <Button onClick={onAccept} disabled={pending}>
+            {pending
+              ? "Importing…"
+              : `Accept & import (${fmt.number(validCount)} ${
+                  validCount === 1 ? "row" : "rows"
+                })`}
+          </Button>
+        </div>
+        {errors.length > 0 && (
+          <p className="text-sm text-fg-muted">
+            {fmt.number(errors.length)} invalid{" "}
+            {errors.length === 1 ? "row" : "rows"} will be skipped. Fix the
+            source and re-import them later.
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
 function StepComplete({ job }: { job: ImportJob }) {
-  const imported =
-    (job.progress as { imported?: number }).imported ?? 0;
+  const fmt = useFormatter();
+  const imported = (job.progress as { imported?: number }).imported ?? 0;
+  const ok = job.status === "completed";
   return (
-    <div>
-      <h2>Step 5. {job.status === "completed" ? "Complete" : "Failed"}</h2>
-      <p>
-        Import {job.status === "completed" ? "completed" : "failed"} at{" "}
-        {job.completed_at ?? job.updated_at}.
-      </p>
-      <p>
-        Imported <strong>{imported}</strong> records.
-      </p>
-      <Link to="/imports">← Back to imports</Link>
-    </div>
+    <Card>
+      <CardContent className="py-10">
+        <EmptyState
+          icon={ok ? <CheckCircle2 /> : <XCircle />}
+          title={ok ? "Step 5. Complete" : "Step 5. Failed"}
+          description={
+            ok
+              ? `Imported ${fmt.number(imported)} ${
+                  imported === 1 ? "record" : "records"
+                } on ${fmt.dateTime(new Date(job.completed_at ?? job.updated_at))}.`
+              : `This import failed on ${fmt.dateTime(
+                  new Date(job.completed_at ?? job.updated_at),
+                )}. Review the source data and try again.`
+          }
+          action={
+            <Button asChild variant="secondary">
+              <Link to="/imports">
+                <ArrowLeft className="h-4 w-4" />
+                Back to imports
+              </Link>
+            </Button>
+          }
+        />
+      </CardContent>
+    </Card>
   );
 }
