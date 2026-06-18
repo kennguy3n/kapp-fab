@@ -2238,12 +2238,14 @@ const parseBody = (init?: RequestInit): Record<string, unknown> => {
 //
 // Idempotent: api.ts installs this once on boot, but the raw-fetch
 // widgets also call it (awaiting the dynamic import) right before their
-// first fetch so a cold page load can't race the install and 500.
-let portalDemoFetchInstalled = false;
+// first fetch so a cold page load can't race the install and 500. The
+// guard lives on window (not module scope) so a Vite HMR re-eval of
+// this module doesn't reset it and wrap window.fetch a second time.
 export function installPortalDemoFetch(): void {
   if (typeof window === "undefined") return;
-  if (portalDemoFetchInstalled) return;
-  portalDemoFetchInstalled = true;
+  const w = window as Window & { __portalDemoFetchInstalled?: boolean };
+  if (w.__portalDemoFetchInstalled) return;
+  w.__portalDemoFetchInstalled = true;
   const origFetch = window.fetch.bind(window);
   window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
@@ -2258,14 +2260,20 @@ export function installPortalDemoFetch(): void {
     const path = url.slice(idx + marker.length).split(/[?#]/)[0];
     const method = (init?.method ?? "GET").toUpperCase();
 
-    // Only the routes below are demo-handled; everything else (e.g.
-    // record-engine traffic that already goes through mockApi) is left
-    // alone so we don't accidentally swallow real requests.
+    // Only the exact routes below are demo-handled; everything else
+    // (e.g. record-engine traffic that already goes through mockApi, or
+    // a future /notifications/settings route) is left alone so we don't
+    // accidentally swallow real requests. Match exact paths rather than
+    // broad prefixes for the same reason — the lone exceptions are the
+    // dynamic /notifications/{id}/read route, the /imports/{id}/* wizard
+    // sub-resources, and the pre-existing /portal surface.
     const handled =
       path.startsWith("/portal") ||
-      path.startsWith("/notifications") ||
+      path === "/notifications" ||
+      path === "/notifications/read-all" ||
+      (path.startsWith("/notifications/") && path.endsWith("/read")) ||
       path === "/health" ||
-      path.startsWith("/admin/health") ||
+      path === "/admin/health/detailed" ||
       path === "/imports" ||
       path.startsWith("/imports/");
     if (!handled) return origFetch(input as RequestInfo, init);
@@ -2273,16 +2281,23 @@ export function installPortalDemoFetch(): void {
     await new Promise((r) => setTimeout(r, 80));
 
     // --- Notifications (NotificationBell) ---
-    if (path === "/notifications") {
+    // Discriminate on method so the two mutators only fire on their real
+    // verb (POST), matching the /imports handler below; a non-POST hit
+    // falls through to the real backend rather than mutating state.
+    if (method === "GET" && path === "/notifications") {
       return jsonResponse(demoNotifications.map((n) => ({ ...n })));
     }
-    if (path === "/notifications/read-all") {
+    if (method === "POST" && path === "/notifications/read-all") {
       demoNotifications.forEach((n) => {
         n.read = true;
       });
       return new Response(null, { status: 204 });
     }
-    if (path.startsWith("/notifications/") && path.endsWith("/read")) {
+    if (
+      method === "POST" &&
+      path.startsWith("/notifications/") &&
+      path.endsWith("/read")
+    ) {
       const id = path.slice("/notifications/".length, -"/read".length);
       const n = demoNotifications.find((x) => x.id === id);
       if (n) n.read = true;
@@ -2290,7 +2305,7 @@ export function installPortalDemoFetch(): void {
     }
 
     // --- Health dashboards (StatusPage / AdminHealthPage) ---
-    if (path.startsWith("/admin/health")) {
+    if (path === "/admin/health/detailed") {
       return jsonResponse(ADMIN_HEALTH);
     }
     if (path === "/health") {
@@ -2388,6 +2403,11 @@ export function installPortalDemoFetch(): void {
       const t = PORTAL_TICKETS.find((x) => x.id === id) ?? PORTAL_TICKETS[0];
       return jsonResponse(t);
     }
-    return jsonResponse({});
+    // Unknown /portal sub-route: keep the pre-existing demo behavior of a
+    // benign empty 200. Anything else that slipped past the precise
+    // predicate above (e.g. a notification path whose verb didn't match)
+    // goes to the real backend untouched instead of being swallowed.
+    if (path.startsWith("/portal")) return jsonResponse({});
+    return origFetch(input as RequestInfo, init);
   }) as typeof window.fetch;
 }
