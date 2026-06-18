@@ -10,7 +10,7 @@
 // live in the dashboard `layout` blob — picking a value on one widget
 // re-runs every widget whose config maps the same `linked_filter_key`.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   useMutation,
   useQuery,
@@ -536,20 +536,23 @@ function DashboardHeader({
 
 // Measures the grid's own width (not the viewport) so the layout reacts
 // to the space actually available — the content column shrinks with the
-// sidebar, so a viewport breakpoint would leave cards cramped.
+// sidebar, so a viewport breakpoint would leave cards cramped. A callback
+// ref (re)attaches the observer whenever the node mounts, so it also works
+// when the grid appears after an empty dashboard gets its first widget.
 function useContainerWidth<T extends HTMLElement>() {
-  const ref = useRef<T | null>(null);
   const [width, setWidth] = useState(0);
-  useEffect(() => {
-    const el = ref.current;
+  const observerRef = useRef<ResizeObserver | null>(null);
+  const ref = useCallback((el: T | null) => {
+    observerRef.current?.disconnect();
+    observerRef.current = null;
     if (!el || typeof ResizeObserver === "undefined") return;
     const obs = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect.width ?? el.clientWidth;
       setWidth(w);
     });
     obs.observe(el);
+    observerRef.current = obs;
     setWidth(el.clientWidth);
-    return () => obs.disconnect();
   }, []);
   return [ref, width] as const;
 }
