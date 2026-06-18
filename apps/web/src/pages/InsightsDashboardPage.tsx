@@ -10,7 +10,7 @@
 // live in the dashboard `layout` blob — picking a value on one widget
 // re-runs every widget whose config maps the same `linked_filter_key`.
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   useMutation,
   useQuery,
@@ -26,7 +26,6 @@ import type {
   InsightsWidgetConfig,
 } from "@kapp/client";
 import {
-  Badge,
   Button,
   ConfirmDialog,
   EmptyState,
@@ -38,7 +37,15 @@ import {
   Skeleton,
   cn,
 } from "@kapp/ui";
-import { BarChart3, GripVertical, LayoutDashboard, Plus } from "lucide-react";
+import {
+  BarChart3,
+  Check,
+  GripVertical,
+  LayoutDashboard,
+  Pencil,
+  Plus,
+  X,
+} from "lucide-react";
 import { api } from "../lib/api";
 import { humanizeLabel } from "../lib/ktypeView";
 import { Viz } from "../components/insights/Charts";
@@ -527,6 +534,34 @@ function DashboardHeader({
   );
 }
 
+// Measures the grid's own width (not the viewport) so the layout reacts
+// to the space actually available — the content column shrinks with the
+// sidebar, so a viewport breakpoint would leave cards cramped. A callback
+// ref (re)attaches the observer whenever the node mounts, so it also works
+// when the grid appears after an empty dashboard gets its first widget.
+function useContainerWidth<T extends HTMLElement>() {
+  const [width, setWidth] = useState(0);
+  const observerRef = useRef<ResizeObserver | null>(null);
+  const ref = useCallback((el: T | null) => {
+    observerRef.current?.disconnect();
+    observerRef.current = null;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const obs = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? el.clientWidth;
+      setWidth(w);
+    });
+    obs.observe(el);
+    observerRef.current = obs;
+    setWidth(el.clientWidth);
+  }, []);
+  return [ref, width] as const;
+}
+
+// Below these container widths the designed 12-column placement leaves
+// cards too narrow (clipped charts), so we flow them at full width.
+const GRID_WIDE_PX = 880;
+const GRID_MED_PX = 560;
+
 function WidgetGrid({
   widgets,
   widgetResults,
@@ -543,6 +578,28 @@ function WidgetGrid({
   dashboardId: string;
 }) {
   const [dragId, setDragId] = useState<string | null>(null);
+  const [gridRef, gridWidth] = useContainerWidth<HTMLDivElement>();
+  // gridWidth starts at 0 before the first measurement; treat unknown as
+  // wide so the designed layout renders on the server/first paint.
+  const mode =
+    gridWidth === 0 || gridWidth >= GRID_WIDE_PX
+      ? "wide"
+      : gridWidth >= GRID_MED_PX
+        ? "medium"
+        : "narrow";
+
+  // Render order follows the saved grid position (top-to-bottom,
+  // left-to-right) so the flowed layouts match the placed one and a
+  // drag-swap reorders consistently in every mode.
+  const ordered = useMemo(
+    () =>
+      [...widgets].sort((a, b) => {
+        const pa = a.position ?? {};
+        const pb = b.position ?? {};
+        return (pa.y ?? 0) - (pb.y ?? 0) || (pa.x ?? 0) - (pb.x ?? 0);
+      }),
+    [widgets],
+  );
 
   const addWidget = () => {
     const blank: InsightsWidget = {
@@ -593,12 +650,26 @@ function WidgetGrid({
           <Plus className="h-4 w-4" aria-hidden /> Add chart
         </Button>
       </div>
-      <div className="grid auto-rows-[72px] grid-cols-12 gap-3">
-        {widgets.map((w) => {
+      <div
+        ref={gridRef}
+        className={cn(
+          "grid gap-3",
+          mode === "wide" && "auto-rows-[80px] grid-cols-12",
+          mode === "medium" && "grid-cols-2",
+          mode === "narrow" && "grid-cols-1",
+        )}
+      >
+        {ordered.map((w) => {
           const pos = w.position ?? {};
           const x = (pos.x ?? 0) + 1;
           const w_ = pos.w ?? 6;
           const h = pos.h ?? 4;
+          // Designed placement only at full width; otherwise flow the
+          // card and give it a comfortable fixed height so charts breathe.
+          const style =
+            mode === "wide"
+              ? { gridColumn: `${x} / span ${w_}`, gridRow: `span ${h}` }
+              : { minHeight: 320 };
           return (
             <div
               key={w.id}
@@ -613,10 +684,7 @@ function WidgetGrid({
                 "flex flex-col overflow-hidden rounded-lg border border-border bg-bg-elevated p-3 transition-shadow",
                 dragId && dragId !== w.id && "ring-1 ring-border",
               )}
-              style={{
-                gridColumn: `${x} / span ${w_}`,
-                gridRow: `span ${h}`,
-              }}
+              style={style}
             >
               <WidgetView
                 widget={w}
@@ -659,9 +727,9 @@ function WidgetView({
     "Untitled widget";
   return (
     <>
-      <div className="mb-1.5 flex items-center justify-between gap-1">
+      <div className="mb-1.5 flex items-start justify-between gap-1">
         <div
-          className="flex min-w-0 items-center gap-1.5"
+          className="flex min-w-0 items-start gap-1.5"
           draggable={!editing}
           onDragStart={(e) => {
             e.dataTransfer.effectAllowed = "move";
@@ -671,33 +739,35 @@ function WidgetView({
         >
           {!editing && (
             <GripVertical
-              className="h-4 w-4 shrink-0 cursor-grab text-fg-subtle"
+              className="mt-0.5 h-4 w-4 shrink-0 cursor-grab text-fg-subtle"
               aria-hidden
             />
           )}
-          <strong className="truncate text-sm text-fg">{title}</strong>
+          <strong className="line-clamp-2 text-sm leading-tight text-fg">
+            {title}
+          </strong>
         </div>
-        <span className="flex shrink-0 items-center gap-1">
-          {!editing && (
-            <Badge variant="neutral" size="xs">
-              {VIZ_LABELS[widget.viz_type]}
-            </Badge>
-          )}
+        <span className="flex shrink-0 items-center gap-0.5">
           <Button
-            size="sm"
+            size="icon"
             variant="ghost"
+            aria-label={editing ? "Finish editing widget" : "Edit widget"}
             onClick={() => setEditing((v) => !v)}
           >
-            {editing ? "Done" : "Edit"}
+            {editing ? (
+              <Check className="h-4 w-4" aria-hidden />
+            ) : (
+              <Pencil className="h-4 w-4" aria-hidden />
+            )}
           </Button>
           <Button
-            size="sm"
+            size="icon"
             variant="ghost"
             className="text-danger hover:text-danger"
             aria-label="Delete widget"
             onClick={onDelete}
           >
-            ✕
+            <X className="h-4 w-4" aria-hidden />
           </Button>
         </span>
       </div>

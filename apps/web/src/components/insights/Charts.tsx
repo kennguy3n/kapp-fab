@@ -353,7 +353,7 @@ export function PieChart({ result, config, height = 280 }: ChartProps) {
       <RcPieChart>
         {PieTooltip({ theme })}
         <Legend />
-        <Pie data={data} dataKey="value" nameKey="name" outerRadius="80%" label>
+        <Pie data={data} dataKey="value" nameKey="name" outerRadius="78%">
           {data.map((_, i) => (
             <Cell key={i} fill={theme.series[i % theme.series.length]} />
           ))}
@@ -376,9 +376,8 @@ export function DonutChart({ result, config, height = 280 }: ChartProps) {
           dataKey="value"
           nameKey="name"
           innerRadius="55%"
-          outerRadius="80%"
+          outerRadius="78%"
           paddingAngle={2}
-          label
         >
           {data.map((_, i) => (
             <Cell key={i} fill={theme.series[i % theme.series.length]} />
@@ -443,10 +442,12 @@ export function NumberCard({ result, config, height = 120 }: ChartProps) {
     config?.title ?? (valueCol ? humanizeLabel(valueCol) : "Value");
   return (
     <div
-      className="flex flex-col items-center justify-center gap-1.5 text-center"
-      style={{ height }}
+      className="@container flex h-full flex-col items-center justify-center gap-1.5 px-2 text-center"
+      style={{ minHeight: height }}
     >
-      <div className="font-tabular text-4xl font-semibold tracking-tight text-fg">
+      {/* Font scales with the card width (container query) so long values
+          like a formatted currency total never overflow a narrow card. */}
+      <div className="max-w-full font-tabular text-[length:clamp(1.5rem,13cqw,2.25rem)] font-semibold leading-tight tracking-tight text-fg">
         {formatValue(display, config?.format)}
       </div>
       <div className="text-sm text-fg-muted">{label}</div>
