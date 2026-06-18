@@ -153,6 +153,10 @@ import {
   MARKETPLACE_MY_RATINGS,
   MARKETPLACE_VERSIONS,
   MRP_RUNS,
+  NOTIFICATIONS,
+  PUBLIC_HEALTH,
+  ADMIN_HEALTH,
+  IMPORT_JOBS,
   PLACEMENT_POLICY,
   PLANS,
   PORTAL_TICKETS,
@@ -276,6 +280,13 @@ const learningPaths: LearningPath[] = LEARNING_PATHS.map((p) => ({ ...p }));
 // Mutable KType-builder demo state so authoring a custom object and
 // changing its status round-trips in the UI. Cloned so a reload resets.
 const tenantKTypes: TenantKType[] = TENANT_KTYPES.map((k) => ({ ...k }));
+
+// Mutable demo state for the raw-fetch widgets (NotificationBell, the
+// import wizard). Cloned from the fixtures so marking notifications
+// read / creating an import round-trips for the session and a reload
+// resets to the seed. See installPortalDemoFetch below.
+const demoNotifications = NOTIFICATIONS.map((n) => ({ ...n }));
+const demoImportJobs = IMPORT_JOBS.map((j) => ({ ...j }));
 
 // Mutable marketplace demo state so install / uninstall / upgrade /
 // rate actions round-trip inside the UI. Cloned from the fixtures so
@@ -2199,42 +2210,177 @@ export const mockApi = new Proxy({} as ApiClient, {
 
 export const PORTAL_TICKETS_FIXTURE = PORTAL_TICKETS;
 
-// installPortalDemoFetch overrides window.fetch for /api/v1/portal/*
-// requests so the customer portal pages work without a real backend.
-// Limited surface: list tickets, get ticket, request/verify magic link.
+const jsonResponse = (body: unknown, status = 200): Response =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+
+const parseBody = (init?: RequestInit): Record<string, unknown> => {
+  if (typeof init?.body !== "string" || init.body.trim() === "") return {};
+  try {
+    const parsed: unknown = JSON.parse(init.body);
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+};
+
+// installPortalDemoFetch overrides window.fetch for the handful of
+// REST routes that the UI talks to with a bare fetch() instead of the
+// typed ApiClient (the customer portal, NotificationBell, the public +
+// admin health dashboards and the import wizard). Without this they
+// bypass mockApi entirely and 500 against the Vite proxy in demo,
+// leaving infinite skeletons and console noise. Anything not handled
+// here falls through to the real fetch untouched.
 export function installPortalDemoFetch(): void {
   if (typeof window === "undefined") return;
   const origFetch = window.fetch.bind(window);
   window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    if (!url.includes("/api/v1/portal")) {
-      return origFetch(input as RequestInfo, init);
-    }
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    const marker = "/api/v1";
+    const idx = url.indexOf(marker);
+    if (idx === -1) return origFetch(input as RequestInfo, init);
+    const path = url.slice(idx + marker.length).split(/[?#]/)[0];
+    const method = (init?.method ?? "GET").toUpperCase();
+
+    // Only the routes below are demo-handled; everything else (e.g.
+    // record-engine traffic that already goes through mockApi) is left
+    // alone so we don't accidentally swallow real requests.
+    const handled =
+      path.startsWith("/portal") ||
+      path.startsWith("/notifications") ||
+      path === "/health" ||
+      path.startsWith("/admin/health") ||
+      path === "/imports" ||
+      path.startsWith("/imports/");
+    if (!handled) return origFetch(input as RequestInfo, init);
+
     await new Promise((r) => setTimeout(r, 80));
-    if (url.endsWith("/portal/auth/request")) {
+
+    // --- Notifications (NotificationBell) ---
+    if (path === "/notifications") {
+      return jsonResponse(demoNotifications.map((n) => ({ ...n })));
+    }
+    if (path === "/notifications/read-all") {
+      demoNotifications.forEach((n) => {
+        n.read = true;
+      });
       return new Response(null, { status: 204 });
     }
-    if (url.endsWith("/portal/auth/verify")) {
-      return new Response(
-        JSON.stringify({
-          token: "demo-portal-token",
-          expires_at: Date.now() / 1000 + 3600,
-          user: { id: "demo-user", tenant_id: DEMO_TENANT_ID, email: "buyer@globex.example", display_name: "Globex Buyer" },
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
-      );
+    if (path.startsWith("/notifications/") && path.endsWith("/read")) {
+      const id = path.slice("/notifications/".length, -"/read".length);
+      const n = demoNotifications.find((x) => x.id === id);
+      if (n) n.read = true;
+      return new Response(null, { status: 204 });
     }
-    if (url.endsWith("/portal/tickets/")) {
-      return new Response(JSON.stringify({ tickets: PORTAL_TICKETS }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
+
+    // --- Health dashboards (StatusPage / AdminHealthPage) ---
+    if (path.startsWith("/admin/health")) {
+      return jsonResponse(ADMIN_HEALTH);
+    }
+    if (path === "/health") {
+      return jsonResponse(PUBLIC_HEALTH);
+    }
+
+    // --- Import wizard (ImportPage / ImportMappingPage) ---
+    if (path === "/imports") {
+      if (method === "POST") {
+        const body = parseBody(init);
+        const job = {
+          id: nextId(),
+          tenant_id: DEMO_TENANT_ID,
+          source_type:
+            typeof body.source_type === "string" ? body.source_type : "csv",
+          status: "mapping",
+          config:
+            body.config && typeof body.config === "object"
+              ? (body.config as Record<string, unknown>)
+              : {},
+          mapping: { entities: [] },
+          progress: {},
+          errors: [],
+          reconciliation: {},
+          created_by: "demo",
+          created_at: nowIso(),
+          updated_at: nowIso(),
+          completed_at: null,
+        };
+        demoImportJobs.unshift(job);
+        return jsonResponse(job);
+      }
+      return jsonResponse(demoImportJobs.map((j) => ({ ...j })));
+    }
+    if (path.startsWith("/imports/")) {
+      const rest = path.slice("/imports/".length);
+      const id = rest.split("/")[0];
+      const job = demoImportJobs.find((j) => j.id === id) ?? demoImportJobs[0];
+      if (rest.endsWith("/errors")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && rest.endsWith("/map")) {
+        const body = parseBody(init);
+        if (job) {
+          if (body.mapping && typeof body.mapping === "object") {
+            job.mapping = body.mapping as Record<string, unknown>;
+          }
+          job.status = "validating";
+          job.updated_at = nowIso();
+        }
+        return jsonResponse(job);
+      }
+      if (method === "POST" && rest.endsWith("/validate")) {
+        if (job) {
+          job.status = "reconciling";
+          job.updated_at = nowIso();
+        }
+        return jsonResponse({ job });
+      }
+      if (method === "POST" && rest.endsWith("/accept")) {
+        let imported = 0;
+        if (job) {
+          job.status = "completed";
+          job.completed_at = nowIso();
+          job.updated_at = nowIso();
+          const total = job.progress?.total;
+          imported = typeof total === "number" ? total : 0;
+        }
+        return jsonResponse({ job, imported });
+      }
+      return jsonResponse(job);
+    }
+
+    // --- Customer portal ---
+    if (path === "/portal/auth/request") {
+      return new Response(null, { status: 204 });
+    }
+    if (path === "/portal/auth/verify") {
+      return jsonResponse({
+        token: "demo-portal-token",
+        expires_at: Date.now() / 1000 + 3600,
+        user: {
+          id: "demo-user",
+          tenant_id: DEMO_TENANT_ID,
+          email: "buyer@globex.example",
+          display_name: "Globex Buyer",
+        },
       });
     }
-    if (url.includes("/portal/tickets/")) {
-      const id = url.split("/portal/tickets/")[1].split(/[/?#]/)[0];
-      const t = PORTAL_TICKETS.find((x) => x.id === id) ?? PORTAL_TICKETS[0];
-      return new Response(JSON.stringify(t), { status: 200, headers: { "Content-Type": "application/json" } });
+    if (path === "/portal/tickets/") {
+      return jsonResponse({ tickets: PORTAL_TICKETS });
     }
-    return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    if (path.startsWith("/portal/tickets/")) {
+      const id = path.slice("/portal/tickets/".length).split("/")[0];
+      const t = PORTAL_TICKETS.find((x) => x.id === id) ?? PORTAL_TICKETS[0];
+      return jsonResponse(t);
+    }
+    return jsonResponse({});
   }) as typeof window.fetch;
 }

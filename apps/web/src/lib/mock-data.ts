@@ -2466,6 +2466,225 @@ export function searchResults(query: string): SearchResponse {
 
 export const PORTAL_TICKETS: KRecord[] = TICKETS.slice(0, 3);
 
+// --- Demo-only raw-fetch fixtures ------------------------------------
+//
+// A handful of widgets (NotificationBell, the status/health dashboards
+// and the import wizard) talk to the REST surface with a bare fetch()
+// rather than the typed ApiClient, so they bypass the mock client and
+// 500 against the Vite proxy in demo mode. installPortalDemoFetch in
+// mock-api.ts intercepts those routes and serves the fixtures below.
+// The shapes mirror the interfaces declared locally in each page.
+
+export type DemoHealthStatus = "operational" | "degraded" | "down";
+
+export interface DemoNotification {
+  id: string;
+  type: string;
+  title: string;
+  body: string;
+  read: boolean;
+  created_at: string;
+}
+
+export const NOTIFICATIONS: DemoNotification[] = [
+  { id: uuid("notification:1"), type: "approval.requested", title: "Approval needed: Q3 Marketing budget", body: "Jordan submitted the Q3 Marketing budget ($120,000) for your approval.", read: false, created_at: daysAgoIso(0) },
+  { id: uuid("notification:2"), type: "invoice.paid", title: "Invoice INV-2026-0042 paid", body: "Globex Corporation paid $42,000.00 against invoice INV-2026-0042.", read: false, created_at: daysAgoIso(0) },
+  { id: uuid("notification:3"), type: "inventory.low_stock", title: "Low stock: Hex Bolt M6 (ACM-003)", body: "On-hand quantity (45) has dropped below the reorder point (60) at Main Warehouse.", read: false, created_at: daysAgoIso(1) },
+  { id: uuid("notification:4"), type: "helpdesk.ticket_assigned", title: "Ticket assigned to you: “Login link expired”", body: "A new support ticket from Initech was routed to your queue.", read: true, created_at: daysAgoIso(2) },
+  { id: uuid("notification:5"), type: "mfg.work_order_completed", title: "Work order WO-2026-0007 completed", body: "78 of 80 units passed QA; 2 were scrapped. The order is ready to close.", read: true, created_at: daysAgoIso(3) },
+  { id: uuid("notification:6"), type: "lms.badge_awarded", title: "You earned the “Compliance Pro” badge", body: "Nice work finishing the annual Security & Compliance path.", read: true, created_at: daysAgoIso(6) },
+];
+
+export interface DemoPublicHealthComponent {
+  name: string;
+  status: DemoHealthStatus;
+  latency_ms: number;
+}
+
+export interface DemoPublicHealth {
+  status: DemoHealthStatus;
+  component_availability_percent: number;
+  components: DemoPublicHealthComponent[];
+  incidents: { summary: string; at: string }[];
+  checked_at: string;
+}
+
+export const PUBLIC_HEALTH: DemoPublicHealth = {
+  status: "operational",
+  component_availability_percent: 100,
+  checked_at: NOW_ISO,
+  components: [
+    { name: "database", status: "operational", latency_ms: 3.2 },
+    { name: "cache", status: "operational", latency_ms: 0.8 },
+    { name: "event_bus", status: "operational", latency_ms: 5.1 },
+    { name: "object_storage", status: "operational", latency_ms: 24.6 },
+    { name: "event_delivery", status: "operational", latency_ms: 12.0 },
+    { name: "background_jobs", status: "operational", latency_ms: 2.4 },
+  ],
+  incidents: [
+    { summary: "Scaled background-job workers from 4 to 6 to absorb month-end payroll load.", at: daysAgoIso(2) },
+    { summary: "Database connection pool widened to 100 connections.", at: daysAgoIso(9) },
+  ],
+};
+
+export interface DemoComponentHealth {
+  name: string;
+  status: DemoHealthStatus;
+  latency_ms: number;
+  error?: string;
+  detail?: Record<string, unknown>;
+}
+
+export interface DemoAdminHealth {
+  system: {
+    status: DemoHealthStatus;
+    components: DemoComponentHealth[];
+    checked_at: string;
+  };
+  cells: {
+    id: string;
+    region: string;
+    max_tenants: number;
+    tenant_count: number;
+    cpu_pct: number;
+    mem_pct: number;
+    conn_saturation_pct: number;
+    utilization_pct: number;
+  }[];
+  pool: {
+    max_conns: number;
+    total_conns: number;
+    acquired_conns: number;
+    idle_conns: number;
+    saturation_percent: number;
+  };
+  top_tenants: { tenant_id: string; name: string; api_calls: number }[];
+}
+
+export const ADMIN_HEALTH: DemoAdminHealth = {
+  system: {
+    status: "operational",
+    checked_at: NOW_ISO,
+    components: [
+      { name: "postgres", status: "operational", latency_ms: 3.2, detail: { open_connections: 18, max_connections: 100 } },
+      { name: "redis", status: "operational", latency_ms: 0.8, detail: { hit_rate: 0.97 } },
+      { name: "nats", status: "operational", latency_ms: 5.1, detail: { consumers: 12 } },
+      { name: "object_storage", status: "operational", latency_ms: 24.6, detail: { bucket: "kapp-prod-assets" } },
+      { name: "outbox", status: "operational", latency_ms: 2.4, detail: { undelivered_events: 0 } },
+      { name: "scheduler", status: "operational", latency_ms: 1.1, detail: { due_jobs: 3 } },
+    ],
+  },
+  pool: {
+    max_conns: 100,
+    total_conns: 42,
+    acquired_conns: 18,
+    idle_conns: 24,
+    saturation_percent: 42,
+  },
+  cells: [
+    { id: "cell-us-east-1", region: "us-east-1", max_tenants: 500, tenant_count: 318, cpu_pct: 47, mem_pct: 61, conn_saturation_pct: 42, utilization_pct: 64 },
+    { id: "cell-us-west-2", region: "us-west-2", max_tenants: 500, tenant_count: 212, cpu_pct: 33, mem_pct: 44, conn_saturation_pct: 28, utilization_pct: 42 },
+    { id: "cell-eu-central-1", region: "eu-central-1", max_tenants: 300, tenant_count: 256, cpu_pct: 58, mem_pct: 72, conn_saturation_pct: 66, utilization_pct: 85 },
+  ],
+  top_tenants: [
+    { tenant_id: uuid("tenant:globex"), name: "Globex Corporation", api_calls: 184293 },
+    { tenant_id: uuid("tenant:initech"), name: "Initech", api_calls: 142117 },
+    { tenant_id: uuid("tenant:hooli"), name: "Hooli", api_calls: 98432 },
+    { tenant_id: uuid("tenant:umbrella"), name: "Umbrella Inc.", api_calls: 54028 },
+    { tenant_id: DEMO_TENANT_ID, name: "Acme Corp", api_calls: 31884 },
+  ],
+};
+
+export interface DemoImportJob {
+  id: string;
+  tenant_id: string;
+  source_type: string;
+  status: string;
+  config: Record<string, unknown>;
+  mapping: Record<string, unknown>;
+  progress: Record<string, unknown>;
+  errors: unknown;
+  reconciliation: Record<string, unknown>;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+}
+
+export const IMPORT_JOBS: DemoImportJob[] = [
+  {
+    id: uuid("import:1"),
+    tenant_id: DEMO_TENANT_ID,
+    source_type: "quickbooks",
+    status: "completed",
+    config: { realm_id: "1234567890" },
+    mapping: { entities: [{ source: "Customer", target_ktype: "crm.organization" }, { source: "Invoice", target_ktype: "sales.invoice" }] },
+    progress: { total: 1284, imported: 1284 },
+    errors: [],
+    reconciliation: { created: 1208, updated: 76, skipped: 0 },
+    created_by: "system",
+    created_at: daysAgoIso(12),
+    updated_at: daysAgoIso(12),
+    completed_at: daysAgoIso(12),
+  },
+  {
+    id: uuid("import:2"),
+    tenant_id: DEMO_TENANT_ID,
+    source_type: "csv",
+    status: "reconciling",
+    config: { format: "csv", entity: "Products", target_ktype: "inventory.item" },
+    mapping: { entities: [{ source: "Products", target_ktype: "inventory.item" }] },
+    progress: { total: 342, staged: 342 },
+    errors: [],
+    reconciliation: { created: 318, updated: 22, skipped: 2 },
+    created_by: "system",
+    created_at: daysAgoIso(1),
+    updated_at: daysAgoIso(0),
+    completed_at: null,
+  },
+  {
+    id: uuid("import:3"),
+    tenant_id: DEMO_TENANT_ID,
+    source_type: "frappe",
+    status: "mapping",
+    config: { base_url: "https://erp.acme.example", doctypes: [{ name: "Supplier" }, { name: "Purchase Order" }] },
+    mapping: { entities: [] },
+    progress: { discovered: 2 },
+    errors: [],
+    reconciliation: {},
+    created_by: "system",
+    created_at: daysAgoIso(0),
+    updated_at: daysAgoIso(0),
+    completed_at: null,
+  },
+  {
+    id: uuid("import:4"),
+    tenant_id: DEMO_TENANT_ID,
+    source_type: "xero",
+    status: "failed",
+    config: { xero_tenant_id: "abc-123" },
+    mapping: { entities: [{ source: "Contacts", target_ktype: "crm.organization" }] },
+    progress: { total: 0 },
+    errors: [{ code: "auth_expired", message: "The Xero access token expired before discovery completed." }],
+    reconciliation: {},
+    created_by: "system",
+    created_at: daysAgoIso(5),
+    updated_at: daysAgoIso(5),
+    completed_at: null,
+  },
+];
+
+export interface DemoStagingRow {
+  id: number;
+  job_id: string;
+  source_type: string;
+  source_id?: string;
+  target_ktype: string;
+  data: Record<string, unknown>;
+  validation_errors: Array<{ field?: string; code: string; message: string }>;
+  status: string;
+}
+
 // --- Dashboard summary ------------------------------------------------
 
 export const DASHBOARD_SUMMARY: DashboardSummary = {
