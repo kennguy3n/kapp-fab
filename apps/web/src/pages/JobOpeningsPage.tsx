@@ -10,16 +10,38 @@ import type {
 import {
   Badge,
   Button,
+  ConfirmDialog,
+  EmptyState,
+  Eyebrow,
+  Field,
   Input,
+  Modal,
+  ModalContent,
+  ModalDescription,
+  ModalFooter,
+  ModalHeader,
+  ModalTitle,
   Select,
+  Skeleton,
   Table,
   TableBody,
+  TableCaption,
   TableCell,
   TableHead,
   TableHeader,
   TableRow,
+  Textarea,
+  toast,
 } from "@kapp/ui";
+import {
+  AlertTriangle,
+  Briefcase,
+  Plus,
+  RefreshCw,
+} from "lucide-react";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n/useFormatter";
+import { humanizeToken } from "../lib/ktypeView";
 
 const EMPLOYMENT_TYPES: Array<{ value: string; label: string }> = [
   { value: "full_time", label: "Full-time" },
@@ -28,323 +50,516 @@ const EMPLOYMENT_TYPES: Array<{ value: string; label: string }> = [
   { value: "intern", label: "Intern" },
 ];
 
-// STATUS_BADGE maps an opening's lifecycle status to a Badge variant so
-// the table communicates state at a glance, mirroring the colour
-// language used across the other HR surfaces.
-const STATUS_BADGE: Record<
-  JobOpeningStatus,
-  "default" | "accent" | "outline" | "success" | "warning" | "danger"
-> = {
-  draft: "outline",
-  open: "success",
-  on_hold: "warning",
-  closed: "default",
-  filled: "accent",
-};
+const CURRENCIES = ["USD", "EUR", "GBP", "CAD", "AUD", "INR", "SGD"];
+
+const STATUS_FILTERS: Array<{ value: string; label: string }> = [
+  { value: "", label: "All statuses" },
+  { value: "draft", label: "Draft" },
+  { value: "open", label: "Open" },
+  { value: "on_hold", label: "On hold" },
+  { value: "closed", label: "Closed" },
+  { value: "filled", label: "Filled" },
+];
 
 interface EmployeeData {
   name?: string;
 }
 
 /**
- * JobOpeningsPage lists recruitment job openings with their fill
- * progress and exposes the publish / close lifecycle actions plus an
- * inline create form. Openings are typed-table rows served by
- * /hr/recruitment/job-openings, so this page talks to the dedicated
- * client methods rather than the generic KRecord surface.
+ * JobOpeningsPage lists recruitment requisitions with their fill
+ * progress and exposes the publish / close lifecycle plus a guided
+ * create form. Openings are typed-table rows, so this page talks to the
+ * dedicated recruitment client methods rather than the generic record
+ * surface.
  */
 export function JobOpeningsPage() {
+  const fmt = useFormatter();
   const qc = useQueryClient();
   const nav = useNavigate();
   const [statusFilter, setStatusFilter] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
+  const [closeTarget, setCloseTarget] = useState<JobOpening | null>(null);
 
-  const openingsQ = useQuery({
+  const openingsQ = useQuery<JobOpening[]>({
     queryKey: ["recruitment", "job-openings", statusFilter],
     queryFn: () =>
       api.listJobOpenings(statusFilter ? { status: statusFilter } : undefined),
   });
-  const employeesQ = useQuery({
+  const employeesQ = useQuery<KRecord[]>({
     queryKey: ["records", "hr.employee"],
     queryFn: () => api.listRecords("hr.employee"),
   });
 
   const employeeName = useMemo(() => {
     const m = new Map<string, string>();
-    (employeesQ.data ?? []).forEach((r: KRecord) => {
+    (employeesQ.data ?? []).forEach((r) => {
       const d = r.data as EmployeeData;
       if (d?.name) m.set(r.id, d.name);
     });
     return m;
   }, [employeesQ.data]);
 
-  const lifecycleMut = useMutation({
-    mutationFn: ({ id, action }: { id: string; action: "publish" | "close" }) =>
-      action === "publish"
-        ? api.publishJobOpening(id)
-        : api.closeJobOpening(id),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ["recruitment", "job-openings"] }),
+  const publishMut = useMutation({
+    mutationFn: (id: string) => api.publishJobOpening(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["recruitment", "job-openings"] });
+      toast.success("Opening published");
+    },
+    onError: (e) => toast.error("Couldn't publish", { description: String(e) }),
+  });
+
+  const closeMut = useMutation({
+    mutationFn: (id: string) => api.closeJobOpening(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["recruitment", "job-openings"] });
+      setCloseTarget(null);
+      toast.success("Opening closed");
+    },
+    onError: (e) => toast.error("Couldn't close", { description: String(e) }),
   });
 
   const openings = openingsQ.data ?? [];
 
   return (
-    <section className="flex flex-col gap-3">
-      <h1 className="text-2xl font-semibold tracking-tight text-fg">
-        Job Openings
-      </h1>
-      <p className="text-sm text-fg-muted">
-        Requisitions tracked through draft → open → closed/filled. Publish
-        opens an opening to applicants; close stops intake.
-      </p>
+    <section className="flex flex-col gap-4">
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <Eyebrow>Human Resources</Eyebrow>
+          <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-fg">
+            Job Openings
+          </h1>
+          <p className="mt-1 text-sm text-fg-muted">
+            Track each role from draft to filled. Publish to open it to
+            applicants; close to stop taking applications.
+          </p>
+        </div>
+        <Button
+          size="sm"
+          leadingIcon={<Plus className="h-4 w-4" />}
+          onClick={() => setCreateOpen(true)}
+        >
+          New opening
+        </Button>
+      </header>
 
-      <CreateOpeningForm
+      <div className="flex items-center gap-2">
+        <label className="text-sm font-medium text-fg-muted" htmlFor="status-filter">
+          Status
+        </label>
+        <Select
+          id="status-filter"
+          size="sm"
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className="w-auto"
+        >
+          {STATUS_FILTERS.map((s) => (
+            <option key={s.value} value={s.value}>
+              {s.label}
+            </option>
+          ))}
+        </Select>
+      </div>
+
+      {openingsQ.isError && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center gap-3 rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-sm text-fg"
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0 text-danger" aria-hidden />
+          <span className="min-w-0 flex-1">We couldn't load job openings.</span>
+          <Button
+            size="sm"
+            variant="outline"
+            leadingIcon={<RefreshCw className="h-4 w-4" />}
+            onClick={() => openingsQ.refetch()}
+          >
+            Retry
+          </Button>
+        </div>
+      )}
+
+      {!openingsQ.isError && (
+        <Table>
+          <TableCaption>
+            {openingsQ.isLoading
+              ? "Loading job openings…"
+              : `${fmt.number(openings.length)} ${
+                  openings.length === 1 ? "opening" : "openings"
+                }${statusFilter ? " in this status" : ""}`}
+          </TableCaption>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Role</TableHead>
+              <TableHead>Department</TableHead>
+              <TableHead>Type</TableHead>
+              <TableHead>Hiring manager</TableHead>
+              <TableHead className="text-end">Filled</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead className="text-end">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {openingsQ.isLoading ? (
+              Array.from({ length: 4 }).map((_, i) => (
+                <TableRow key={i}>
+                  {Array.from({ length: 7 }).map((__, j) => (
+                    <TableCell key={j}>
+                      <Skeleton className="h-4 w-full" />
+                    </TableCell>
+                  ))}
+                </TableRow>
+              ))
+            ) : openings.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={7}>
+                  <EmptyState
+                    icon={<Briefcase />}
+                    title={
+                      statusFilter
+                        ? "No openings in this status"
+                        : "No job openings yet"
+                    }
+                    description={
+                      statusFilter
+                        ? "Try a different status filter, or create a new opening."
+                        : "Create your first opening to start receiving applications."
+                    }
+                    action={
+                      <Button size="sm" onClick={() => setCreateOpen(true)}>
+                        New opening
+                      </Button>
+                    }
+                  />
+                </TableCell>
+              </TableRow>
+            ) : (
+              openings.map((o) => (
+                <TableRow key={o.id}>
+                  <TableCell>
+                    <div className="font-medium text-fg">{o.title}</div>
+                    {o.location && (
+                      <div className="text-xs text-fg-subtle">{o.location}</div>
+                    )}
+                  </TableCell>
+                  <TableCell>{o.department || "—"}</TableCell>
+                  <TableCell>{humanEmploymentType(o.employment_type)}</TableCell>
+                  <TableCell>
+                    {o.hiring_manager_id
+                      ? employeeName.get(o.hiring_manager_id) ?? "—"
+                      : "—"}
+                  </TableCell>
+                  <TableCell className="text-end tabular-nums">
+                    {fmt.number(o.positions_filled)} of{" "}
+                    {fmt.number(o.max_positions)}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant={openingVariant(o.status)}>
+                      {humanizeToken(o.status)}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-end">
+                    <div className="flex justify-end gap-1">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() =>
+                          nav(
+                            `/hr/recruitment/applications?job_opening_id=${o.id}`,
+                          )
+                        }
+                      >
+                        Applicants
+                      </Button>
+                      {(o.status === "draft" || o.status === "on_hold") && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={
+                            publishMut.isPending && publishMut.variables === o.id
+                          }
+                          onClick={() => publishMut.mutate(o.id)}
+                        >
+                          Publish
+                        </Button>
+                      )}
+                      {o.status !== "closed" && o.status !== "filled" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setCloseTarget(o)}
+                        >
+                          Close
+                        </Button>
+                      )}
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      )}
+
+      <CreateOpeningModal
+        open={createOpen}
+        onOpenChange={setCreateOpen}
         employees={employeesQ.data ?? []}
         onCreated={() =>
           qc.invalidateQueries({ queryKey: ["recruitment", "job-openings"] })
         }
       />
 
-      <div className="flex items-center gap-2">
-        <label className="text-sm text-fg-muted" htmlFor="status-filter">
-          Status
-        </label>
-        <Select
-          id="status-filter"
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          className="w-auto"
-        >
-          <option value="">All</option>
-          <option value="draft">Draft</option>
-          <option value="open">Open</option>
-          <option value="on_hold">On hold</option>
-          <option value="closed">Closed</option>
-          <option value="filled">Filled</option>
-        </Select>
-      </div>
-
-      {openingsQ.isLoading && <p className="text-sm text-fg-muted">Loading…</p>}
-      {openingsQ.isError && (
-        <p className="text-sm text-danger">{String(openingsQ.error)}</p>
-      )}
-      {!openingsQ.isLoading && openings.length === 0 ? (
-        <p className="text-sm text-fg-muted">No job openings yet.</p>
-      ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Title</TableHead>
-              <TableHead>Department</TableHead>
-              <TableHead>Type</TableHead>
-              <TableHead>Hiring manager</TableHead>
-              <TableHead>Filled</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="text-end">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {openings.map((o: JobOpening) => (
-              <TableRow key={o.id}>
-                <TableCell className="font-medium">{o.title}</TableCell>
-                <TableCell>{o.department || "—"}</TableCell>
-                <TableCell>{humanEmploymentType(o.employment_type)}</TableCell>
-                <TableCell>
-                  {o.hiring_manager_id
-                    ? employeeName.get(o.hiring_manager_id) ?? "—"
-                    : "—"}
-                </TableCell>
-                <TableCell>
-                  {o.positions_filled}/{o.max_positions}
-                </TableCell>
-                <TableCell>
-                  <Badge variant={STATUS_BADGE[o.status]}>{o.status}</Badge>
-                </TableCell>
-                <TableCell className="text-end">
-                  <div className="flex justify-end gap-1">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() =>
-                        nav(
-                          `/hr/recruitment/applications?job_opening_id=${o.id}`,
-                        )
-                      }
-                    >
-                      Applications
-                    </Button>
-                    {(o.status === "draft" || o.status === "on_hold") && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={lifecycleMut.isPending}
-                        onClick={() =>
-                          lifecycleMut.mutate({ id: o.id, action: "publish" })
-                        }
-                      >
-                        Publish
-                      </Button>
-                    )}
-                    {o.status !== "closed" && o.status !== "filled" && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={lifecycleMut.isPending}
-                        onClick={() =>
-                          lifecycleMut.mutate({ id: o.id, action: "close" })
-                        }
-                      >
-                        Close
-                      </Button>
-                    )}
-                  </div>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      )}
-      {lifecycleMut.isError && (
-        <p className="text-sm text-danger">{String(lifecycleMut.error)}</p>
-      )}
+      <ConfirmDialog
+        open={closeTarget !== null}
+        onOpenChange={(o) => !o && setCloseTarget(null)}
+        title="Close this opening?"
+        description={
+          closeTarget
+            ? `“${closeTarget.title}” will stop accepting new applications. You can't reopen a closed opening.`
+            : ""
+        }
+        confirmLabel="Close opening"
+        destructive
+        loading={closeMut.isPending}
+        onConfirm={() => closeTarget && closeMut.mutate(closeTarget.id)}
+      />
     </section>
   );
 }
 
-function CreateOpeningForm({
+function CreateOpeningModal({
+  open,
+  onOpenChange,
   employees,
   onCreated,
 }: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   employees: KRecord[];
   onCreated: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [form, setForm] = useState<JobOpeningInput>({
+  const empty: JobOpeningInput = {
     title: "",
     department: "",
     employment_type: "full_time",
     currency: "USD",
     max_positions: 1,
-  });
-  const [error, setError] = useState<string | null>(null);
+  };
+  const [form, setForm] = useState<JobOpeningInput>(empty);
+  const [submitted, setSubmitted] = useState(false);
 
   const createMut = useMutation({
     mutationFn: (input: JobOpeningInput) => api.createJobOpening(input),
     onSuccess: () => {
-      setForm({
-        title: "",
-        department: "",
-        employment_type: "full_time",
-        currency: "USD",
-        max_positions: 1,
-      });
-      setOpen(false);
-      setError(null);
+      toast.success("Opening created");
+      onOpenChange(false);
       onCreated();
     },
-    onError: (e) => setError(String(e)),
   });
 
-  if (!open) {
-    return (
-      <div>
-        <Button size="sm" onClick={() => setOpen(true)}>
-          New opening
-        </Button>
-      </div>
-    );
+  const [seedOpen, setSeedOpen] = useState(open);
+  if (seedOpen !== open) {
+    setSeedOpen(open);
+    if (open) {
+      setForm(empty);
+      setSubmitted(false);
+      createMut.reset();
+    }
+  }
+
+  const titleError = submitted && !form.title.trim();
+
+  function patch(next: Partial<JobOpeningInput>) {
+    setForm((f) => ({ ...f, ...next }));
   }
 
   return (
-    <form
-      className="flex flex-col gap-2 rounded-lg border border-border bg-bg-subtle p-3"
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (!form.title.trim()) {
-          setError("Title is required");
-          return;
-        }
-        createMut.mutate(form);
-      }}
-    >
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        <Input
-          placeholder="Title (e.g. Senior Engineer)"
-          value={form.title}
-          onChange={(e) => setForm({ ...form, title: e.target.value })}
-          required
-        />
-        <Input
-          placeholder="Department"
-          value={form.department ?? ""}
-          onChange={(e) => setForm({ ...form, department: e.target.value })}
-        />
-        <Select
-          value={form.employment_type}
-          onChange={(e) =>
-            setForm({ ...form, employment_type: e.target.value })
-          }
-        >
-          {EMPLOYMENT_TYPES.map((t) => (
-            <option key={t.value} value={t.value}>
-              {t.label}
-            </option>
-          ))}
-        </Select>
-        <Input
-          placeholder="Location"
-          value={form.location ?? ""}
-          onChange={(e) => setForm({ ...form, location: e.target.value })}
-        />
-        <Select
-          value={form.hiring_manager_id ?? ""}
-          onChange={(e) =>
-            setForm({ ...form, hiring_manager_id: e.target.value || undefined })
-          }
-        >
-          <option value="">Hiring manager…</option>
-          {employees.map((emp) => (
-            <option key={emp.id} value={emp.id}>
-              {(emp.data as EmployeeData)?.name ?? emp.id}
-            </option>
-          ))}
-        </Select>
-        <Input
-          type="number"
-          min={1}
-          placeholder="Max positions"
-          value={form.max_positions ?? 1}
-          onChange={(e) =>
-            setForm({ ...form, max_positions: Number(e.target.value) || 1 })
-          }
-        />
-        <Input
-          placeholder="Currency"
-          value={form.currency ?? ""}
-          onChange={(e) => setForm({ ...form, currency: e.target.value })}
-        />
-      </div>
-      {error && <p className="text-sm text-danger">{error}</p>}
-      <div className="flex gap-2">
-        <Button size="sm" type="submit" disabled={createMut.isPending}>
-          {createMut.isPending ? "Creating…" : "Create"}
-        </Button>
-        <Button
-          size="sm"
-          type="button"
-          variant="ghost"
-          onClick={() => {
-            setOpen(false);
-            setError(null);
+    <Modal open={open} onOpenChange={onOpenChange}>
+      <ModalContent className="max-w-2xl">
+        <ModalHeader>
+          <ModalTitle>New job opening</ModalTitle>
+          <ModalDescription>
+            Describe the role. You can publish it to applicants once it's
+            ready.
+          </ModalDescription>
+        </ModalHeader>
+        <form
+          className="flex flex-col gap-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setSubmitted(true);
+            if (!form.title.trim()) return;
+            createMut.mutate({
+              ...form,
+              title: form.title.trim(),
+              department: form.department?.trim() || undefined,
+              location: form.location?.trim() || undefined,
+            });
           }}
         >
-          Cancel
-        </Button>
-      </div>
-    </form>
+          <Field
+            label="Role title"
+            required
+            error={titleError ? "Give the role a title." : undefined}
+          >
+            <Input
+              value={form.title}
+              onChange={(e) => patch({ title: e.target.value })}
+              placeholder="e.g. Senior Software Engineer"
+              invalid={titleError || undefined}
+            />
+          </Field>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Field label="Department">
+              <Input
+                value={form.department ?? ""}
+                onChange={(e) => patch({ department: e.target.value })}
+                placeholder="e.g. Engineering"
+              />
+            </Field>
+            <Field label="Location">
+              <Input
+                value={form.location ?? ""}
+                onChange={(e) => patch({ location: e.target.value })}
+                placeholder="e.g. Remote · London"
+              />
+            </Field>
+            <Field label="Employment type">
+              <Select
+                value={form.employment_type}
+                onChange={(e) => patch({ employment_type: e.target.value })}
+              >
+                {EMPLOYMENT_TYPES.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Hiring manager">
+              <Select
+                value={form.hiring_manager_id ?? ""}
+                onChange={(e) =>
+                  patch({ hiring_manager_id: e.target.value || undefined })
+                }
+              >
+                <option value="">Unassigned</option>
+                {employees.map((emp) => (
+                  <option key={emp.id} value={emp.id}>
+                    {(emp.data as EmployeeData)?.name ?? "Unnamed"}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+
+          <fieldset className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <Field label="Openings" help="How many people to hire.">
+              <Input
+                type="number"
+                min={1}
+                value={form.max_positions ?? 1}
+                onChange={(e) =>
+                  patch({ max_positions: Number(e.target.value) || 1 })
+                }
+              />
+            </Field>
+            <Field label="Pay range (min)">
+              <Input
+                type="number"
+                min={0}
+                inputMode="decimal"
+                value={form.salary_range_min ?? ""}
+                onChange={(e) =>
+                  patch({ salary_range_min: e.target.value || undefined })
+                }
+                placeholder="e.g. 80000"
+              />
+            </Field>
+            <Field label="Pay range (max)">
+              <div className="flex gap-2">
+                <Input
+                  type="number"
+                  min={0}
+                  inputMode="decimal"
+                  value={form.salary_range_max ?? ""}
+                  onChange={(e) =>
+                    patch({ salary_range_max: e.target.value || undefined })
+                  }
+                  placeholder="e.g. 120000"
+                />
+                <Select
+                  className="w-24"
+                  aria-label="Currency"
+                  value={form.currency}
+                  onChange={(e) => patch({ currency: e.target.value })}
+                >
+                  {CURRENCIES.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            </Field>
+          </fieldset>
+
+          <Field label="Description" help="What the role is about (optional).">
+            <Textarea
+              rows={3}
+              value={form.description ?? ""}
+              onChange={(e) => patch({ description: e.target.value })}
+              placeholder="Summarise the role and what you're looking for."
+            />
+          </Field>
+
+          {createMut.isError && (
+            <p className="text-sm text-danger">
+              Couldn't create the opening: {String(createMut.error)}
+            </p>
+          )}
+
+          <ModalFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => onOpenChange(false)}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" disabled={createMut.isPending}>
+              {createMut.isPending ? "Creating…" : "Create opening"}
+            </Button>
+          </ModalFooter>
+        </form>
+      </ModalContent>
+    </Modal>
   );
 }
 
+/** Job-opening lifecycle status → Badge variant. `open`/`filled` aren't
+ * in the shared statusVariant map, so the recruitment domain maps them
+ * here (open = live, filled = goal met). */
+function openingVariant(
+  status: JobOpeningStatus,
+): "success" | "warning" | "neutral" | "accent" | "info" {
+  switch (status) {
+    case "open":
+      return "success";
+    case "on_hold":
+      return "warning";
+    case "filled":
+      return "accent";
+    case "draft":
+      return "info";
+    case "closed":
+    default:
+      return "neutral";
+  }
+}
+
 function humanEmploymentType(t: string): string {
-  return EMPLOYMENT_TYPES.find((e) => e.value === t)?.label ?? t;
+  return EMPLOYMENT_TYPES.find((e) => e.value === t)?.label ?? humanizeToken(t);
 }

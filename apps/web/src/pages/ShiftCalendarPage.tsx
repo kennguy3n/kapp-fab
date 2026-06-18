@@ -1,9 +1,43 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
-import { Button, Input, Select, cn } from "@kapp/ui";
+import {
+  Avatar,
+  AvatarFallback,
+  Badge,
+  Button,
+  EmptyState,
+  Eyebrow,
+  Field,
+  Input,
+  Modal,
+  ModalContent,
+  ModalDescription,
+  ModalFooter,
+  ModalHeader,
+  ModalTitle,
+  Select,
+  Skeleton,
+  Tabs,
+  TabsList,
+  TabsTrigger,
+  Textarea,
+  initials,
+  toast,
+  cn,
+} from "@kapp/ui";
+import {
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  Plus,
+  RefreshCw,
+  Users,
+} from "lucide-react";
 import { api } from "../lib/api";
 import { toCalendarISO } from "../lib/date";
+import { useFormatter } from "../lib/i18n/useFormatter";
+import { humanizeToken, statusVariant } from "../lib/ktypeView";
 
 const KTYPE_SHIFT_TYPE = "hr.shift_type";
 const KTYPE_SHIFT_ASSIGNMENT = "hr.shift_assignment";
@@ -32,40 +66,39 @@ interface EmployeeData {
 }
 
 type View = "week" | "month";
+type ShiftType = { id: string } & ShiftTypeData;
+type Employee = { id: string; name?: string; department?: string };
 
 /**
- * ShiftCalendarPage renders the Phase M shift schedule. Two views:
- *
- * - Week: a 7-day grid keyed by employee row × date column. Each
- *   cell shows the shift_type badge for any hr.shift_assignment
- *   matching (employee_id, date).
- * - Month: same shape projected onto the current month's calendar.
- *
- * The page is a thin client over /records/* — no dedicated handler
- * is needed because both KTypes go through the generic KRecord
- * surface. New assignments are created inline via the agent tool
- * `hr.assign_shift` would normally use, but the form here calls
- * createRecord directly so operators can schedule without touching
- * the agent surface.
+ * ShiftCalendarPage is a calendar-first roster: employees down the
+ * side, dates across the top, and each scheduled shift shown in its
+ * cell. Operators schedule in two clicks — click an open day to open a
+ * pre-filled form, pick a shift, done. Week and month views share the
+ * same grid.
  */
 export function ShiftCalendarPage() {
+  const fmt = useFormatter();
   const [view, setView] = useState<View>("week");
   const [anchor, setAnchor] = useState(() => toCalendarISO(new Date()));
+  const [assignTarget, setAssignTarget] = useState<{
+    employeeId?: string;
+    date?: string;
+  } | null>(null);
 
-  const employeesQ = useQuery({
+  const employeesQ = useQuery<KRecord[]>({
     queryKey: ["records", KTYPE_EMPLOYEE],
     queryFn: () => api.listRecords(KTYPE_EMPLOYEE),
   });
-  const shiftTypesQ = useQuery({
+  const shiftTypesQ = useQuery<KRecord[]>({
     queryKey: ["records", KTYPE_SHIFT_TYPE],
     queryFn: () => api.listRecords(KTYPE_SHIFT_TYPE),
   });
-  const assignmentsQ = useQuery({
+  const assignmentsQ = useQuery<KRecord[]>({
     queryKey: ["records", KTYPE_SHIFT_ASSIGNMENT],
     queryFn: () => api.listRecords(KTYPE_SHIFT_ASSIGNMENT),
   });
 
-  const employees = useMemo(
+  const employees: Employee[] = useMemo(
     () =>
       (employeesQ.data ?? []).map((r) => ({
         id: r.id,
@@ -75,7 +108,7 @@ export function ShiftCalendarPage() {
   );
   const shiftTypes = useMemo(
     () =>
-      new Map(
+      new Map<string, ShiftType>(
         (shiftTypesQ.data ?? []).map((r) => [
           r.id,
           { id: r.id, ...(r.data as ShiftTypeData) },
@@ -89,58 +122,140 @@ export function ShiftCalendarPage() {
   );
 
   const dates = useMemo(() => buildDateRange(anchor, view), [anchor, view]);
+  const loading =
+    employeesQ.isLoading || shiftTypesQ.isLoading || assignmentsQ.isLoading;
+  const error = employeesQ.isError || shiftTypesQ.isError || assignmentsQ.isError;
+
+  function step(dir: -1 | 1) {
+    const d = new Date(`${anchor}T00:00:00`);
+    if (view === "week") d.setDate(d.getDate() + dir * 7);
+    else d.setMonth(d.getMonth() + dir);
+    setAnchor(toCalendarISO(d));
+  }
 
   return (
-    <section className="flex flex-col gap-2">
-      <h1 className="text-2xl font-semibold tracking-tight text-fg">
-        Shift Schedule
-      </h1>
-      <p className="text-sm text-fg-muted">
-        Phase M shift calendar. Rows are employees, columns are dates,
-        cells render any matching hr.shift_assignment for that
-        (employee, date) tuple. Click an empty cell to schedule.
-      </p>
-      <header className="mb-3 flex items-center gap-2">
+    <section className="flex flex-col gap-4">
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <Eyebrow>Human Resources</Eyebrow>
+          <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-fg">
+            Shift Schedule
+          </h1>
+          <p className="mt-1 text-sm text-fg-muted">
+            See who's working when. Click any open day to schedule a shift.
+          </p>
+        </div>
         <Button
           size="sm"
-          variant={view === "week" ? "primary" : "outline"}
-          onClick={() => setView("week")}
-          disabled={view === "week"}
+          leadingIcon={<Plus className="h-4 w-4" />}
+          disabled={employees.length === 0 || shiftTypes.size === 0}
+          onClick={() => setAssignTarget({})}
         >
-          Week
+          Schedule shift
         </Button>
-        <Button
-          size="sm"
-          variant={view === "month" ? "primary" : "outline"}
-          onClick={() => setView("month")}
-          disabled={view === "month"}
-        >
-          Month
-        </Button>
-        <Input
-          type="date"
-          value={anchor}
-          onChange={(e) => setAnchor(e.target.value)}
-          className="ml-3 w-auto"
-        />
-        <span className="ml-3 text-sm text-fg-muted">
-          {dates[0]} → {dates[dates.length - 1]}
-        </span>
       </header>
-      <ScheduleForm shiftTypes={Array.from(shiftTypes.values())} employees={employees} />
-      {(employeesQ.isLoading || shiftTypesQ.isLoading || assignmentsQ.isLoading) && (
-        <p className="text-sm text-fg-muted">Loading…</p>
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Tabs value={view} onValueChange={(v) => setView(v as View)}>
+          <TabsList>
+            <TabsTrigger value="week">Week</TabsTrigger>
+            <TabsTrigger value="month">Month</TabsTrigger>
+          </TabsList>
+        </Tabs>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1">
+            <Button
+              size="icon"
+              variant="outline"
+              aria-label="Previous period"
+              onClick={() => step(-1)}
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setAnchor(toCalendarISO(new Date()))}
+            >
+              Today
+            </Button>
+            <Button
+              size="icon"
+              variant="outline"
+              aria-label="Next period"
+              onClick={() => step(1)}
+            >
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
+          <Field label="Jump to date" hideLabel>
+            <Input
+              size="sm"
+              type="date"
+              className="w-auto"
+              value={anchor}
+              onChange={(e) => setAnchor(e.target.value || anchor)}
+            />
+          </Field>
+          <span className="text-sm font-medium text-fg">
+            {fmt.date(new Date(`${dates[0]}T00:00:00`))} –{" "}
+            {fmt.date(new Date(`${dates[dates.length - 1]}T00:00:00`))}
+          </span>
+        </div>
+      </div>
+
+      {error && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center gap-3 rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-sm text-fg"
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0 text-danger" aria-hidden />
+          <span className="min-w-0 flex-1">
+            We couldn't load the schedule.
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            leadingIcon={<RefreshCw className="h-4 w-4" />}
+            onClick={() => {
+              employeesQ.refetch();
+              shiftTypesQ.refetch();
+              assignmentsQ.refetch();
+            }}
+          >
+            Retry
+          </Button>
+        </div>
       )}
-      {employees.length === 0 ? (
-        <p className="text-sm text-fg-muted">No employees yet.</p>
-      ) : (
+
+      {loading && <ScheduleSkeleton cols={dates.length} />}
+
+      {!loading && !error && employees.length === 0 && (
+        <EmptyState
+          icon={<Users />}
+          title="No employees to schedule"
+          description="Add people in the Employees area first, then come back to build their roster."
+        />
+      )}
+
+      {!loading && !error && employees.length > 0 && (
         <ScheduleGrid
           dates={dates}
           employees={employees}
           shiftTypes={shiftTypes}
           assignmentsByCell={assignmentsByCell}
+          onPick={(employeeId, date) => setAssignTarget({ employeeId, date })}
         />
       )}
+
+      <AssignShiftModal
+        open={assignTarget !== null}
+        onOpenChange={(o) => !o && setAssignTarget(null)}
+        employees={employees}
+        shiftTypes={Array.from(shiftTypes.values())}
+        initialEmployeeId={assignTarget?.employeeId ?? ""}
+        initialDate={assignTarget?.date ?? toCalendarISO(new Date())}
+      />
     </section>
   );
 }
@@ -150,53 +265,97 @@ function ScheduleGrid({
   employees,
   shiftTypes,
   assignmentsByCell,
+  onPick,
 }: {
   dates: string[];
-  employees: { id: string; name?: string }[];
-  shiftTypes: Map<string, { id: string } & ShiftTypeData>;
+  employees: Employee[];
+  shiftTypes: Map<string, ShiftType>;
   assignmentsByCell: Map<string, KRecord[]>;
+  onPick: (employeeId: string, date: string) => void;
 }) {
+  const today = toCalendarISO(new Date());
   return (
-    <div className="overflow-x-auto">
-      <table className="min-w-full border-collapse">
+    <div className="max-h-[34rem] overflow-auto rounded-lg border border-border">
+      <table className="w-full border-separate border-spacing-0 text-sm">
         <thead>
           <tr>
-            <th className={TH}>Employee</th>
+            <th className="sticky left-0 top-0 z-30 border-b border-border bg-bg-subtle px-3 py-2 text-start text-xs font-medium text-fg-muted">
+              Employee
+            </th>
             {dates.map((d) => (
-              <th key={d} className={TH}>
-                {shortDate(d)}
+              <th
+                key={d}
+                className={cn(
+                  "sticky top-0 z-20 min-w-[6rem] border-b border-l border-border bg-bg-subtle px-2 py-2 text-center text-xs font-medium",
+                  isWeekend(d) ? "text-fg-subtle" : "text-fg-muted",
+                  d === today && "bg-accent/10 text-accent",
+                )}
+              >
+                <DateHeader iso={d} />
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
           {employees.map((e) => (
-            <tr key={e.id}>
-              <td className={TD}>{e.name ?? "(unnamed)"}</td>
+            <tr key={e.id} className="group">
+              <td className="sticky left-0 z-10 border-b border-border bg-bg-elevated px-3 py-2 align-middle">
+                <div className="flex items-center gap-2">
+                  <Avatar size="xs">
+                    <AvatarFallback>{initials(e.name ?? "?")}</AvatarFallback>
+                  </Avatar>
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-fg">
+                      {e.name ?? "Unnamed"}
+                    </div>
+                    {e.department && (
+                      <div className="truncate text-xs text-fg-subtle">
+                        {e.department}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </td>
               {dates.map((d) => {
                 const key = cellKey(e.id, d);
                 const recs = assignmentsByCell.get(key) ?? [];
-                if (recs.length === 0)
-                  return <td key={key} className={cn(TD, "bg-bg-subtle")} />;
                 return (
-                  <td key={key} className={TD}>
-                    <div className="flex flex-col gap-1">
-                      {recs.map((rec) => {
-                        const data = rec.data as ShiftAssignmentData;
-                        const st = data.shift_type_id
-                          ? shiftTypes.get(data.shift_type_id)
-                          : undefined;
-                        return (
-                          <ShiftBadge
-                            key={rec.id}
-                            label={st?.name ?? "shift"}
-                            time={st ? `${st.start_time ?? ""}–${st.end_time ?? ""}` : ""}
-                            color={st?.color}
-                            status={data.status ?? "scheduled"}
-                          />
-                        );
-                      })}
-                    </div>
+                  <td
+                    key={key}
+                    className={cn(
+                      "border-b border-l border-border p-1 align-top",
+                      isWeekend(d) && "bg-bg-subtle/40",
+                      d === today && "bg-accent/5",
+                    )}
+                  >
+                    <button
+                      type="button"
+                      aria-label={`Schedule a shift for ${e.name ?? "employee"} on ${d}`}
+                      onClick={() => onPick(e.id, d)}
+                      className="flex min-h-[2.75rem] w-full flex-col gap-1 rounded-md p-1 text-start transition-colors hover:bg-bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)"
+                    >
+                      {recs.length === 0 ? (
+                        <span className="flex items-center gap-1 text-xs text-fg-subtle opacity-0 transition-opacity group-hover:opacity-100">
+                          <Plus className="h-3 w-3" /> Add
+                        </span>
+                      ) : (
+                        recs.map((rec) => {
+                          const data = rec.data as ShiftAssignmentData;
+                          const st = data.shift_type_id
+                            ? shiftTypes.get(data.shift_type_id)
+                            : undefined;
+                          return (
+                            <ShiftBadge
+                              key={rec.id}
+                              label={st?.name ?? "Shift"}
+                              time={formatRange(st?.start_time, st?.end_time)}
+                              color={st?.color}
+                              status={data.status ?? "scheduled"}
+                            />
+                          );
+                        })
+                      )}
+                    </button>
                   </td>
                 );
               })}
@@ -206,6 +365,43 @@ function ScheduleGrid({
       </table>
     </div>
   );
+}
+
+function DateHeader({ iso }: { iso: string }) {
+  const d = new Date(`${iso}T00:00:00`);
+  return (
+    <div className="flex flex-col leading-tight">
+      <span>{d.toLocaleDateString(undefined, { weekday: "short" })}</span>
+      <span className="text-sm font-semibold tabular-nums">{d.getDate()}</span>
+    </div>
+  );
+}
+
+/**
+ * Tenant shift colors are free-form hex, so the text painted on top can't
+ * rely on theme tokens (which assume the token background). Derive a readable
+ * foreground from the fill's WCAG relative luminance — white on dark fills,
+ * near-black on light ones — so chips always meet contrast in both themes.
+ * Returns undefined for unparseable input so we fall back to design tokens.
+ */
+function readableForeground(hex: string): string | undefined {
+  const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
+  if (!match) return undefined;
+  let h = match[1];
+  if (h.length === 3)
+    h = h
+      .split("")
+      .map((c) => c + c)
+      .join("");
+  const channel = (i: number) => parseInt(h.slice(i, i + 2), 16) / 255;
+  const linear = (c: number) =>
+    c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  const luminance =
+    0.2126 * linear(channel(0)) +
+    0.7152 * linear(channel(2)) +
+    0.0722 * linear(channel(4));
+  // 0.179 is the crossover where contrast against white equals black.
+  return luminance > 0.179 ? "#191919" : "#ffffff";
 }
 
 function ShiftBadge({
@@ -219,38 +415,53 @@ function ShiftBadge({
   color?: string;
   status: string;
 }) {
-  // `color` is tenant-defined per shift_type (free-form hex stored on
-  // the record), so it stays an inline background; everything else is
-  // driven by design tokens. Fall back to the info tint when unset.
+  // `color` is tenant-defined per shift type (free-form hex stored on the
+  // record), so it stays an inline background and the text color is derived
+  // from it for contrast; everything else is driven by design tokens. Fall
+  // back to the info tint + tokens when no color is set.
+  const fg = color ? readableForeground(color) : undefined;
   return (
     <div
       className={cn(
-        "rounded px-1.5 py-1 text-xs leading-tight",
+        "rounded-md px-1.5 py-1 text-start text-xs leading-tight",
         !color && "bg-info/15",
       )}
-      style={color ? { background: color } : undefined}
+      style={color ? { background: color, color: fg } : undefined}
     >
-      <div className="font-semibold">{label}</div>
-      {time && <div className="text-fg-muted">{time}</div>}
+      <div className={cn("font-semibold", !color && "text-fg")}>{label}</div>
+      {time && (
+        <div className={cn(!color && "text-fg-muted")}>{time}</div>
+      )}
       {status !== "scheduled" && (
-        <div className="text-[10px] text-fg-subtle">{status}</div>
+        <Badge variant={statusVariant(status)} size="xs" className="mt-0.5">
+          {humanizeToken(status)}
+        </Badge>
       )}
     </div>
   );
 }
 
-function ScheduleForm({
-  shiftTypes,
+function AssignShiftModal({
+  open,
+  onOpenChange,
   employees,
+  shiftTypes,
+  initialEmployeeId,
+  initialDate,
 }: {
-  shiftTypes: ({ id: string } & ShiftTypeData)[];
-  employees: { id: string; name?: string }[];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  employees: Employee[];
+  shiftTypes: ShiftType[];
+  initialEmployeeId: string;
+  initialDate: string;
 }) {
   const qc = useQueryClient();
-  const [employeeId, setEmployeeId] = useState("");
+  const [employeeId, setEmployeeId] = useState(initialEmployeeId);
   const [shiftTypeId, setShiftTypeId] = useState("");
-  const [shiftDate, setShiftDate] = useState(() => toCalendarISO(new Date()));
-  const [error, setError] = useState<string | null>(null);
+  const [shiftDate, setShiftDate] = useState(initialDate);
+  const [notes, setNotes] = useState("");
+  const [submitted, setSubmitted] = useState(false);
 
   const create = useMutation({
     mutationFn: () =>
@@ -259,79 +470,175 @@ function ScheduleForm({
         shift_type_id: shiftTypeId,
         shift_date: shiftDate,
         status: "scheduled",
+        notes: notes || undefined,
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["records", KTYPE_SHIFT_ASSIGNMENT] });
-      setEmployeeId("");
-      setShiftTypeId("");
-      setError(null);
+      toast.success("Shift scheduled");
+      onOpenChange(false);
     },
-    onError: (err: Error) => setError(err.message),
   });
 
+  // Re-seed the form whenever a new cell opens it (the modal stays
+  // mounted, so prop changes drive the reset rather than remount).
+  const [seed, setSeed] = useState({ initialEmployeeId, initialDate, open });
+  if (
+    seed.initialEmployeeId !== initialEmployeeId ||
+    seed.initialDate !== initialDate ||
+    seed.open !== open
+  ) {
+    setSeed({ initialEmployeeId, initialDate, open });
+    if (open) {
+      setEmployeeId(initialEmployeeId);
+      setShiftDate(initialDate);
+      setShiftTypeId("");
+      setNotes("");
+      setSubmitted(false);
+      create.reset();
+    }
+  }
+
+  const valid = employeeId && shiftTypeId && shiftDate;
+
   return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (!employeeId || !shiftTypeId || !shiftDate) {
-          setError("employee, shift type, and date are required");
-          return;
-        }
-        create.mutate();
-      }}
-      className="mb-3 flex flex-wrap items-center gap-2"
-    >
-      <Select
-        className="w-auto"
-        value={employeeId}
-        onChange={(e) => setEmployeeId(e.target.value)}
-      >
-        <option value="">Select employee…</option>
-        {employees.map((e) => (
-          <option key={e.id} value={e.id}>
-            {e.name ?? e.id}
-          </option>
+    <Modal open={open} onOpenChange={onOpenChange}>
+      <ModalContent>
+        <ModalHeader>
+          <ModalTitle>Schedule a shift</ModalTitle>
+          <ModalDescription>
+            Assign a shift to a team member on a given day.
+          </ModalDescription>
+        </ModalHeader>
+        <form
+          className="flex flex-col gap-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setSubmitted(true);
+            if (!valid) return;
+            create.mutate();
+          }}
+        >
+          <Field
+            label="Employee"
+            required
+            error={submitted && !employeeId ? "Choose an employee." : undefined}
+          >
+            <Select
+              value={employeeId}
+              onChange={(e) => setEmployeeId(e.target.value)}
+            >
+              <option value="">Select employee…</option>
+              {employees.map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.name ?? "Unnamed"}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field
+            label="Shift type"
+            required
+            error={submitted && !shiftTypeId ? "Choose a shift type." : undefined}
+            help={
+              shiftTypes.length === 0
+                ? "No shift types defined yet — create one first."
+                : undefined
+            }
+          >
+            <Select
+              value={shiftTypeId}
+              onChange={(e) => setShiftTypeId(e.target.value)}
+            >
+              <option value="">Select shift type…</option>
+              {shiftTypes.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name ?? "Shift"}
+                  {s.start_time ? ` (${formatRange(s.start_time, s.end_time)})` : ""}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field
+            label="Date"
+            required
+            error={submitted && !shiftDate ? "Pick a date." : undefined}
+          >
+            <Input
+              type="date"
+              value={shiftDate}
+              onChange={(e) => setShiftDate(e.target.value)}
+            />
+          </Field>
+          <Field label="Notes" help="Optional — visible to schedulers.">
+            <Textarea
+              rows={2}
+              placeholder="e.g. Covering for Sam"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+            />
+          </Field>
+          {create.isError && (
+            <p className="text-sm text-danger">
+              Couldn't schedule the shift: {String(create.error)}
+            </p>
+          )}
+          <ModalFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => onOpenChange(false)}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" disabled={create.isPending}>
+              {create.isPending ? "Scheduling…" : "Schedule shift"}
+            </Button>
+          </ModalFooter>
+        </form>
+      </ModalContent>
+    </Modal>
+  );
+}
+
+function ScheduleSkeleton({ cols }: { cols: number }) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-border">
+      <div className="flex border-b border-border bg-bg-subtle">
+        <div className="w-44 px-3 py-2">
+          <Skeleton className="h-4 w-20" />
+        </div>
+        {Array.from({ length: Math.min(cols, 7) }).map((_, i) => (
+          <div key={i} className="flex-1 px-2 py-2">
+            <Skeleton className="mx-auto h-8 w-8" />
+          </div>
         ))}
-      </Select>
-      <Select
-        className="w-auto"
-        value={shiftTypeId}
-        onChange={(e) => setShiftTypeId(e.target.value)}
-      >
-        <option value="">Select shift type…</option>
-        {shiftTypes.map((s) => (
-          <option key={s.id} value={s.id}>
-            {s.name ?? s.id}
-          </option>
-        ))}
-      </Select>
-      <Input
-        type="date"
-        value={shiftDate}
-        onChange={(e) => setShiftDate(e.target.value)}
-        className="w-auto"
-      />
-      <Button type="submit" disabled={create.isPending}>
-        {create.isPending ? "Scheduling…" : "Schedule"}
-      </Button>
-      {error && <span className="text-sm text-danger">{error}</span>}
-    </form>
+      </div>
+      {Array.from({ length: 5 }).map((_, r) => (
+        <div key={r} className="flex border-b border-border">
+          <div className="flex w-44 items-center gap-2 px-3 py-2">
+            <Skeleton variant="circle" className="h-5 w-5" />
+            <Skeleton className="h-4 w-24" />
+          </div>
+          {Array.from({ length: Math.min(cols, 7) }).map((_, i) => (
+            <div key={i} className="flex-1 px-2 py-2">
+              <Skeleton className="h-10 w-full" />
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
   );
 }
 
 function indexAssignments(
   records: KRecord[],
-  shiftTypes: Map<string, { id: string } & ShiftTypeData>,
+  shiftTypes: Map<string, ShiftType>,
 ): Map<string, KRecord[]> {
-  // Split shifts (e.g. an employee scheduled for both a Morning and
-  // an Evening shift on the same date) are valid and the calendar
-  // must surface every assignment, not silently keep the last one
-  // wins. The map collects an array per (employee, date) cell, then
-  // sorts each cell by the resolved shift_type.start_time so the
-  // visual stack is stable across renders. Assignments missing a
-  // shift_type or start_time fall to the bottom via a sentinel
-  // "99:99" sort key — they're rare in practice (foreign-key drop)
-  // but shouldn't crash the grid.
+  // Split shifts (e.g. an employee scheduled for both a Morning and an
+  // Evening shift on the same date) are valid, so the calendar collects
+  // an array per (employee, date) cell and sorts each by the resolved
+  // shift_type.start_time for a stable visual stack. Assignments missing
+  // a type/start fall to the bottom via a "99:99" sentinel.
   const out = new Map<string, KRecord[]>();
   for (const r of records) {
     const data = r.data as ShiftAssignmentData;
@@ -346,11 +653,13 @@ function indexAssignments(
       const aData = a.data as ShiftAssignmentData;
       const bData = b.data as ShiftAssignmentData;
       const aStart =
-        (aData.shift_type_id ? shiftTypes.get(aData.shift_type_id)?.start_time : undefined) ??
-        "99:99";
+        (aData.shift_type_id
+          ? shiftTypes.get(aData.shift_type_id)?.start_time
+          : undefined) ?? "99:99";
       const bStart =
-        (bData.shift_type_id ? shiftTypes.get(bData.shift_type_id)?.start_time : undefined) ??
-        "99:99";
+        (bData.shift_type_id
+          ? shiftTypes.get(bData.shift_type_id)?.start_time
+          : undefined) ?? "99:99";
       return aStart.localeCompare(bStart);
     });
   }
@@ -361,13 +670,22 @@ function cellKey(employeeID: string, date: string): string {
   return `${employeeID}::${date}`;
 }
 
-function shortDate(iso: string): string {
-  const d = new Date(iso + "T00:00:00");
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+function isWeekend(iso: string): boolean {
+  const day = new Date(`${iso}T00:00:00`).getDay();
+  return day === 0 || day === 6;
+}
+
+/** Trim an "HH:MM:SS" time to "HH:MM" and join a start/end into a range. */
+function formatRange(start?: string, end?: string): string {
+  const t = (s?: string) => (s ? s.slice(0, 5) : "");
+  const a = t(start);
+  const b = t(end);
+  if (a && b) return `${a}–${b}`;
+  return a || b || "";
 }
 
 function buildDateRange(anchor: string, view: View): string[] {
-  const start = new Date(anchor + "T00:00:00");
+  const start = new Date(`${anchor}T00:00:00`);
   const out: string[] = [];
   if (view === "week") {
     const offset = start.getDay();
@@ -389,12 +707,3 @@ function buildDateRange(anchor: string, view: View): string[] {
   }
   return out;
 }
-
-// Shared cell classes for the bespoke employee × date grid. This grid
-// has custom column-width / sticky-header needs that the generic
-// @kapp/ui Table doesn't model, so it stays a raw <table> — but every
-// border/spacing/colour is a design token rather than an inline hex.
-const TH =
-  "whitespace-nowrap border-b border-border bg-bg-subtle px-2 py-1.5 text-left text-xs font-semibold text-fg";
-const TD =
-  "min-w-[90px] border-b border-r border-border px-1.5 py-1 align-top";
