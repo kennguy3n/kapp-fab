@@ -1,0 +1,223 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { renderWithProviders, makeKRecord } from "../test-utils";
+
+const listRecords = vi.fn();
+const postInvoice = vi.fn();
+const postBill = vi.fn();
+
+vi.mock("../lib/api", () => ({
+  api: {
+    listRecords: (...args: unknown[]) => listRecords(...args),
+    postInvoice: (...args: unknown[]) => postInvoice(...args),
+    postBill: (...args: unknown[]) => postBill(...args),
+  },
+}));
+
+import { SubledgerPage } from "./SubledgerPage";
+
+const orgs = [
+  makeKRecord({
+    id: "org1",
+    ktype: "crm.organization",
+    data: { name: "Acme Corp" },
+  }),
+];
+
+const invoices = [
+  makeKRecord({
+    id: "inv1",
+    ktype: "finance.ar_invoice",
+    data: {
+      invoice_number: "INV-001",
+      customer_id: "org1",
+      due_date: "2025-02-01T00:00:00Z",
+      total: "5000.00",
+      currency: "USD",
+      status: "posted",
+    },
+  }),
+  makeKRecord({
+    id: "inv2",
+    ktype: "finance.ar_invoice",
+    data: {
+      invoice_number: "INV-002",
+      customer_id: "org1",
+      due_date: "2025-03-01T00:00:00Z",
+      total: "2500.00",
+      currency: "USD",
+      status: "draft",
+    },
+  }),
+];
+
+function mockData() {
+  listRecords.mockImplementation((ktype: string) =>
+    ktype === "crm.organization"
+      ? Promise.resolve(orgs)
+      : Promise.resolve(invoices),
+  );
+}
+
+describe("SubledgerPage (AR)", () => {
+  beforeEach(() => {
+    listRecords.mockReset();
+    postInvoice.mockReset();
+    postBill.mockReset();
+    postInvoice.mockResolvedValue(undefined);
+  });
+
+  it("resolves counterparties to names and formats outstanding totals", async () => {
+    mockData();
+    renderWithProviders(<SubledgerPage variant="ar" />);
+
+    expect(await screen.findByText("INV-001")).toBeInTheDocument();
+    expect(screen.getByText("INV-002")).toBeInTheDocument();
+
+    // Counterparty UUIDs never leak — resolved to the org name.
+    expect(screen.getAllByText("Acme Corp").length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText("org1")).toBeNull();
+
+    // Amounts are currency-formatted; lifecycle tokens become badges.
+    expect(screen.getAllByText("$5,000.00").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("$2,500.00")).toBeInTheDocument();
+    expect(screen.getAllByText("Posted").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("Draft").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("posts a draft document to the ledger", async () => {
+    mockData();
+    renderWithProviders(<SubledgerPage variant="ar" />);
+    await screen.findByText("INV-002");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Post" }));
+
+    expect(postInvoice).toHaveBeenCalledWith("inv2");
+  });
+
+  it("renders an error surface with retry when the records query fails", async () => {
+    listRecords.mockImplementation((ktype: string) =>
+      ktype === "crm.organization"
+        ? Promise.resolve([])
+        : Promise.reject(new Error("subledger down")),
+    );
+    renderWithProviders(<SubledgerPage variant="ar" />);
+
+    expect(
+      await screen.findByText(/Couldn't load the ar subledger/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /try again/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("teaches the empty state when there are no invoices", async () => {
+    listRecords.mockResolvedValue([]);
+    renderWithProviders(<SubledgerPage variant="ar" />);
+
+    expect(await screen.findByText(/No invoices yet/i)).toBeInTheDocument();
+  });
+
+  it("counts posted and partially-paid documents toward outstanding", async () => {
+    const mixed = [
+      makeKRecord({
+        id: "p1",
+        ktype: "finance.ar_invoice",
+        data: {
+          invoice_number: "INV-100",
+          customer_id: "org1",
+          due_date: "2025-02-01T00:00:00Z",
+          total: "1000.00",
+          currency: "USD",
+          status: "posted",
+        },
+      }),
+      makeKRecord({
+        id: "p2",
+        ktype: "finance.ar_invoice",
+        data: {
+          invoice_number: "INV-101",
+          customer_id: "org1",
+          due_date: "2025-02-02T00:00:00Z",
+          total: "400.00",
+          currency: "USD",
+          status: "partially_paid",
+        },
+      }),
+      makeKRecord({
+        id: "p3",
+        ktype: "finance.ar_invoice",
+        data: {
+          invoice_number: "INV-102",
+          customer_id: "org1",
+          due_date: "2025-02-03T00:00:00Z",
+          total: "9999.00",
+          currency: "USD",
+          status: "paid",
+        },
+      }),
+    ];
+    listRecords.mockImplementation((ktype: string) =>
+      ktype === "crm.organization"
+        ? Promise.resolve(orgs)
+        : Promise.resolve(mixed),
+    );
+    renderWithProviders(<SubledgerPage variant="ar" />);
+
+    await screen.findByText("INV-100");
+    // 1000 + 400 outstanding; the paid 9999 is excluded.
+    expect(screen.getAllByText("$1,400.00").length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText("$10,399.00")).toBeNull();
+  });
+
+  it("links partially-paid documents to their posted journal entry", async () => {
+    const rows = [
+      makeKRecord({
+        id: "pp1",
+        ktype: "finance.ar_invoice",
+        data: {
+          invoice_number: "INV-200",
+          customer_id: "org1",
+          due_date: "2025-02-01T00:00:00Z",
+          total: "750.00",
+          currency: "USD",
+          status: "partially_paid",
+        },
+      }),
+      makeKRecord({
+        id: "dr1",
+        ktype: "finance.ar_invoice",
+        data: {
+          invoice_number: "INV-201",
+          customer_id: "org1",
+          due_date: "2025-02-02T00:00:00Z",
+          total: "300.00",
+          currency: "USD",
+          status: "draft",
+        },
+      }),
+    ];
+    listRecords.mockImplementation((ktype: string) =>
+      ktype === "crm.organization"
+        ? Promise.resolve(orgs)
+        : Promise.resolve(rows),
+    );
+    renderWithProviders(<SubledgerPage variant="ar" />);
+
+    // A partially-paid document was necessarily posted first, so it
+    // still drills through to its journal entry.
+    const ppRow = (await screen.findByText("INV-200")).closest(
+      "tr",
+    ) as HTMLElement;
+    const link = within(ppRow).getByRole("link", { name: /view entry/i });
+    const href = link.getAttribute("href") ?? "";
+    expect(href).toContain("source_id=pp1");
+    expect(href).toContain("source_ktype=finance.ar_invoice");
+
+    // A still-unposted draft has no entry to view.
+    const draftRow = screen.getByText("INV-201").closest("tr") as HTMLElement;
+    expect(within(draftRow).queryByRole("link")).toBeNull();
+  });
+});

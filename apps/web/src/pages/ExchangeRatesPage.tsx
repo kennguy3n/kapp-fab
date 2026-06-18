@@ -1,8 +1,12 @@
-import { useState } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Download } from "lucide-react";
 import type { ExchangeRate, UpsertExchangeRateInput } from "@kapp/client";
 import {
+  Badge,
   Button,
+  Eyebrow,
+  Field,
   Input,
   Table,
   TableBody,
@@ -10,8 +14,19 @@ import {
   TableHead,
   TableHeader,
   TableRow,
+  toast,
 } from "@kapp/ui";
 import { api } from "../lib/api";
+import { useFormatter } from "../lib/i18n";
+import {
+  csvFilename,
+  downloadCsv,
+  parseAmount,
+  todayLocalISO,
+} from "../lib/finance/format";
+import { FinanceError, TableSkeleton } from "../lib/finance/presentation";
+
+const CURRENCY_RE = /^[A-Za-z]{3}$/;
 
 /**
  * ExchangeRatesPage renders the tenant's per-day currency conversion
@@ -22,115 +37,210 @@ import { api } from "../lib/api";
  */
 export function ExchangeRatesPage() {
   const qc = useQueryClient();
+  const f = useFormatter();
+
   const q = useQuery<{ rates: ExchangeRate[] }>({
     queryKey: ["exchange-rates"],
     queryFn: () => api.listExchangeRates({ limit: 200 }),
   });
 
   const upsert = useMutation({
-    mutationFn: (input: UpsertExchangeRateInput) => api.upsertExchangeRate(input),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["exchange-rates"] }),
+    mutationFn: (input: UpsertExchangeRateInput) =>
+      api.upsertExchangeRate(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["exchange-rates"] });
+      toast.success("Exchange rate saved");
+    },
+    onError: (err) =>
+      toast.error("Couldn't save rate", {
+        description: err instanceof Error ? err.message : undefined,
+      }),
   });
 
-  const [form, setForm] = useState<UpsertExchangeRateInput>({
-    from_currency: "USD",
-    to_currency: "EUR",
-    rate_date: new Date().toISOString().slice(0, 10),
-    rate: "1.0",
-    provider: "",
-  });
+  const [from, setFrom] = useState("USD");
+  const [to, setTo] = useState("EUR");
+  const [rateDate, setRateDate] = useState(todayLocalISO());
+  const [rate, setRate] = useState("1.0");
+  const [provider, setProvider] = useState("");
+  const [touched, setTouched] = useState(false);
 
-  const submit = (e: React.FormEvent) => {
+  const rateNum = parseAmount(rate);
+  const fromError =
+    touched && !CURRENCY_RE.test(from.trim())
+      ? "Use a 3-letter code, e.g. USD."
+      : undefined;
+  const toError =
+    touched && !CURRENCY_RE.test(to.trim())
+      ? "Use a 3-letter code, e.g. EUR."
+      : undefined;
+  const rateError =
+    touched && !(Number.isFinite(rateNum) && rateNum > 0)
+      ? "Enter a rate greater than zero."
+      : undefined;
+  const canSubmit =
+    CURRENCY_RE.test(from.trim()) &&
+    CURRENCY_RE.test(to.trim()) &&
+    Number.isFinite(rateNum) &&
+    rateNum > 0 &&
+    !!rateDate;
+
+  const submit = (e: FormEvent) => {
     e.preventDefault();
-    upsert.mutate({
-      ...form,
-      from_currency: form.from_currency.toUpperCase(),
-      to_currency: form.to_currency.toUpperCase(),
-    });
+    setTouched(true);
+    if (!canSubmit) return;
+    upsert.mutate(
+      {
+        from_currency: from.trim().toUpperCase(),
+        to_currency: to.trim().toUpperCase(),
+        rate_date: rateDate,
+        rate: rate.trim(),
+        provider: provider.trim() || undefined,
+      },
+      {
+        onSuccess: () => {
+          setRate("1.0");
+          setProvider("");
+          setTouched(false);
+        },
+      },
+    );
   };
 
-  const rates = q.data?.rates ?? [];
+  const rates = useMemo(() => q.data?.rates ?? [], [q.data]);
+
+  const exportCsv = () => {
+    downloadCsv(
+      csvFilename("exchange_rates"),
+      ["Date", "From", "To", "Rate", "Source"],
+      rates.map((r) => [
+        r.rate_date.slice(0, 10),
+        r.from_currency,
+        r.to_currency,
+        r.rate,
+        r.provider ?? "",
+      ]),
+    );
+    toast.success("Exchange rates exported");
+  };
 
   return (
-    <section>
-      <h1>Exchange Rates</h1>
-      <p className="text-fg-muted">
-        Per-tenant daily FX quotes. The posting engine looks up the
-        effective rate for a journal entry using the latest row on or
-        before the entry date.
-      </p>
+    <section className="flex flex-col gap-5">
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <Eyebrow>Finance</Eyebrow>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-fg">
+            Exchange Rates
+          </h1>
+          <p className="mt-1 text-sm text-fg-muted">
+            Daily currency rates for your business. Postings use the most
+            recent rate on or before the entry date.
+          </p>
+        </div>
+        <Button
+          variant="secondary"
+          leadingIcon={<Download aria-hidden />}
+          onClick={exportCsv}
+          disabled={rates.length === 0}
+        >
+          Export CSV
+        </Button>
+      </header>
 
       <form
         onSubmit={submit}
-        className="my-3 flex flex-wrap gap-2 text-[13px]"
+        className="flex flex-col gap-4 rounded-lg border border-border bg-bg-subtle p-4"
+        noValidate
       >
-        <Input
-          placeholder="from"
-          value={form.from_currency}
-          onChange={(e) => setForm({ ...form, from_currency: e.target.value })}
-          maxLength={3}
-          required
-          className="w-16"
-        />
-        <Input
-          placeholder="to"
-          value={form.to_currency}
-          onChange={(e) => setForm({ ...form, to_currency: e.target.value })}
-          maxLength={3}
-          required
-          className="w-16"
-        />
-        <Input
-          type="date"
-          value={form.rate_date}
-          onChange={(e) => setForm({ ...form, rate_date: e.target.value })}
-          required
-          className="w-auto"
-        />
-        <Input
-          placeholder="rate"
-          value={form.rate}
-          onChange={(e) => setForm({ ...form, rate: e.target.value })}
-          required
-          className="w-[100px]"
-        />
-        <Input
-          placeholder="provider (optional)"
-          value={form.provider ?? ""}
-          onChange={(e) => setForm({ ...form, provider: e.target.value })}
-          className="w-auto"
-        />
-        <Button type="submit" disabled={upsert.isPending}>
-          {upsert.isPending ? "Saving…" : "Save rate"}
-        </Button>
+        <h2 className="text-sm font-semibold text-fg">Add or update a rate</h2>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          <Field label="From currency" required error={fromError}>
+            <Input
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+              maxLength={3}
+              placeholder="USD"
+              invalid={!!fromError}
+              className="uppercase"
+              required
+            />
+          </Field>
+          <Field label="To currency" required error={toError}>
+            <Input
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              maxLength={3}
+              placeholder="EUR"
+              invalid={!!toError}
+              className="uppercase"
+              required
+            />
+          </Field>
+          <Field label="Rate date" required>
+            <Input
+              type="date"
+              value={rateDate}
+              onChange={(e) => setRateDate(e.target.value)}
+              max={todayLocalISO()}
+              required
+            />
+          </Field>
+          <Field
+            label="Rate"
+            required
+            error={rateError}
+            help="Units of the to-currency per 1 from-currency."
+          >
+            <Input
+              inputMode="decimal"
+              value={rate}
+              onChange={(e) => setRate(e.target.value)}
+              placeholder="0.91"
+              invalid={!!rateError}
+              className="text-right tabular-nums"
+              required
+            />
+          </Field>
+          <Field label="Source" help="Optional, e.g. ECB or manual.">
+            <Input
+              value={provider}
+              onChange={(e) => setProvider(e.target.value)}
+              placeholder="manual"
+            />
+          </Field>
+        </div>
+        <div>
+          <Button type="submit" disabled={upsert.isPending}>
+            {upsert.isPending ? "Saving…" : "Save rate"}
+          </Button>
+        </div>
       </form>
 
-      {upsert.isError && (
-        <p className="text-[13px] text-danger">
-          {(upsert.error as Error).message}
-        </p>
+      {q.isLoading && <TableSkeleton columns={4} />}
+
+      {q.isError && (
+        <FinanceError
+          title="Failed to load rates"
+          error={q.error}
+          onRetry={() => void q.refetch()}
+        />
       )}
 
-      {q.isLoading && <p>Loading…</p>}
-      {q.isError && (
-        <p className="text-danger">
-          Failed to load rates: {(q.error as Error).message}
-        </p>
-      )}
-      {!q.isLoading && !q.isError && rates.length === 0 && (
-        <p className="italic text-fg-subtle">
-          No exchange rates yet.
-        </p>
+      {q.data && rates.length === 0 && (
+        <div className="rounded-lg border border-border p-8">
+          <p className="text-center text-sm text-fg-muted">
+            No exchange rates yet. Add your first quote above.
+          </p>
+        </div>
       )}
 
       {rates.length > 0 && (
-        <Table className="text-[13px]">
+        <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Date</TableHead>
+              <TableHead className="w-40">Date</TableHead>
               <TableHead>Pair</TableHead>
               <TableHead className="text-right">Rate</TableHead>
-              <TableHead>Provider</TableHead>
+              <TableHead className="w-32">Source</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -138,14 +248,30 @@ export function ExchangeRatesPage() {
               <TableRow
                 key={`${r.from_currency}-${r.to_currency}-${r.rate_date}`}
               >
-                <TableCell>{r.rate_date.slice(0, 10)}</TableCell>
-                <TableCell>
-                  <code>
-                    {r.from_currency} → {r.to_currency}
-                  </code>
+                <TableCell className="whitespace-nowrap text-fg-muted">
+                  {f.date(new Date(r.rate_date))}
                 </TableCell>
-                <TableCell className="text-right">{r.rate}</TableCell>
-                <TableCell>{r.provider ?? ""}</TableCell>
+                <TableCell>
+                  <span className="inline-flex items-center gap-1.5 font-medium">
+                    <span>{r.from_currency}</span>
+                    <span aria-hidden className="text-fg-subtle">
+                      →
+                    </span>
+                    <span>{r.to_currency}</span>
+                  </span>
+                </TableCell>
+                <TableCell className="text-right font-tabular tabular-nums">
+                  {Number.isFinite(parseAmount(r.rate))
+                    ? f.number(parseAmount(r.rate), { maximumFractionDigits: 6 })
+                    : "—"}
+                </TableCell>
+                <TableCell>
+                  {r.provider ? (
+                    <Badge variant="neutral">{r.provider}</Badge>
+                  ) : (
+                    <span className="text-fg-subtle">—</span>
+                  )}
+                </TableCell>
               </TableRow>
             ))}
           </TableBody>
