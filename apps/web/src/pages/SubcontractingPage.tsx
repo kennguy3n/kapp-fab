@@ -330,7 +330,7 @@ function CreateOrderForm({
       api.createSubcontractOrder(input),
     onSuccess: (order) => {
       qc.invalidateQueries({ queryKey: ORDERS_KEY });
-      onCreated(order);
+      if (order) onCreated(order);
       setItemID("");
       setWhID("");
       setQty("1");

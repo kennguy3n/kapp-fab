@@ -778,9 +778,10 @@ function BOMAuthoringForm(props: {
           })),
       }),
     onSuccess: (b) => {
-      toast.success("Recipe created", {
-        description: itemLabel.get(b.item_id) ?? undefined,
-      });
+      if (b)
+        toast.success("Recipe created", {
+          description: itemLabel.get(b.item_id) ?? undefined,
+        });
       // Reset every field the form owns so a follow-up authoring
       // session starts from a clean slate. The `activate` checkbox is
       // the load-bearing one — leaving it checked silently promotes the
@@ -795,7 +796,7 @@ function BOMAuthoringForm(props: {
       setNotes("");
       setActivate(false);
       setComponents([{ component_item_id: "", qty: "1", uom: "each" }]);
-      props.onCreated(b);
+      if (b) props.onCreated(b);
     },
   });
 

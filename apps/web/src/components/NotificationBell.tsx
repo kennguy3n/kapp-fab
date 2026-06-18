@@ -22,7 +22,20 @@ const headers = (): HeadersInit => {
   return h;
 };
 
+// In demo mode the mock layer installs a window.fetch shim that serves
+// these notification routes from in-memory fixtures. api.ts installs it
+// on boot, but the bell mounts on the app shell and fires its first
+// fetch immediately — so ensure the (idempotent) shim is in place first,
+// otherwise the cold load races the install and 500s through the proxy.
+const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
+async function ensureDemoFetch(): Promise<void> {
+  if (!demoMode) return;
+  const { installPortalDemoFetch } = await import("../lib/mock-api");
+  installPortalDemoFetch();
+}
+
 async function fetchNotifications(): Promise<Notification[]> {
+  await ensureDemoFetch();
   const r = await fetch("/api/v1/notifications?limit=20", {
     headers: headers(),
   });
@@ -31,6 +44,7 @@ async function fetchNotifications(): Promise<Notification[]> {
 }
 
 async function markRead(id: string): Promise<void> {
+  await ensureDemoFetch();
   const r = await fetch(`/api/v1/notifications/${id}/read`, {
     method: "POST",
     headers: headers(),
@@ -39,6 +53,7 @@ async function markRead(id: string): Promise<void> {
 }
 
 async function markAllRead(): Promise<void> {
+  await ensureDemoFetch();
   const r = await fetch(`/api/v1/notifications/read-all`, {
     method: "POST",
     headers: headers(),

@@ -203,7 +203,7 @@ export function BudgetPage() {
         fiscal_year: new Date().getUTCFullYear(),
         status: "draft",
       });
-      setSelectedId(b.id);
+      if (b) setSelectedId(b.id);
       qc.invalidateQueries({ queryKey: ["budgets"] });
       toast.success("Budget created");
     },

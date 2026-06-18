@@ -10,6 +10,17 @@ import type {
   AuditEntry,
   BankFeedRule,
   BankFeedSuggestion,
+  BOM,
+  BOMComponent,
+  Budget,
+  BudgetLine,
+  BudgetVarianceAccountType,
+  BudgetVarianceReport,
+  BudgetVarianceRow,
+  CapacityDayLoad,
+  CapacityPlan,
+  CycleCountLine,
+  CycleCountSession,
   DashboardSummary,
   ExchangeRate,
   FinanceAccount,
@@ -22,20 +33,39 @@ import type {
   InventoryItem,
   InventoryValuationReport,
   InventoryWarehouse,
+  Interview,
+  JobApplication,
+  JobCard,
+  JobOpening,
   JournalEntry,
   KRecord,
   KType,
+  LearningPath,
+  LearningPathCourse,
+  Badge,
+  BadgeAward,
+  LandedCostCharge,
+  LandedCostTarget,
+  LandedCostVoucher,
   MarketplaceExtension,
   MarketplaceExtensionVersion,
   MarketplaceInstallation,
+  MRPDemandLine,
+  MRPPlannedOrder,
+  MRPRun,
   Plan,
   PlacementPolicy,
   RetentionPolicy,
+  Routing,
+  RoutingOperation,
   SLAPolicy,
   SavedReport,
   SavedView,
   SearchResponse,
   StockLevel,
+  SubcontractComponent,
+  SubcontractOrder,
+  TenantKType,
   Tenant,
   TenantFeaturesResponse,
   TenantUsageHistoryResponse,
@@ -43,6 +73,9 @@ import type {
   TrialBalanceReport,
   Webhook,
   WebhookDelivery,
+  WorkCenter,
+  WorkCenterSchedule,
+  WorkOrder,
 } from "@kapp/client";
 import { toCalendarISO } from "./date";
 
@@ -1060,6 +1093,786 @@ export const FINANCE_ACCOUNTS: FinanceAccount[] = ACCOUNT_SEEDS.map((s) => ({
   active: true,
 }));
 
+// --- Finance: budgets (Phase N5) -------------------------------------
+
+const BUDGET_IDS = {
+  ops2026: uuid("finance.budget:ops-2026"),
+  sales2026: uuid("finance.budget:sales-2026"),
+  ops2025: uuid("finance.budget:ops-2025"),
+  draft2027: uuid("finance.budget:draft-2027"),
+};
+
+export const BUDGETS: Budget[] = [
+  { tenant_id: DEMO_TENANT_ID, id: BUDGET_IDS.ops2026, name: "FY2026 Operating Plan", fiscal_year: 2026, status: "active", cost_center: "ENG", notes: "Company-wide operating budget for the 2026 fiscal year.", variance_threshold: "10", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BUDGET_IDS.sales2026, name: "FY2026 Sales & Marketing", fiscal_year: 2026, status: "active", cost_center: "SALES", notes: "Go-to-market and demand-generation spend plan.", variance_threshold: "15", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BUDGET_IDS.ops2025, name: "FY2025 Operating Plan", fiscal_year: 2025, status: "closed", cost_center: "ENG", notes: "Prior-year plan, closed for reporting.", variance_threshold: "10", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BUDGET_IDS.draft2027, name: "FY2027 Draft Plan", fiscal_year: 2027, status: "draft", notes: "Early draft pending leadership review.", variance_threshold: null, created_by: "system", created_at: NOW_ISO, updated_at: NOW_ISO },
+];
+
+function budgetLine(budgetId: string, seed: string, account_code: string, cost_center: string | undefined, monthly: number): BudgetLine {
+  return {
+    tenant_id: DEMO_TENANT_ID,
+    id: uuid(`finance.budget_line:${seed}`),
+    budget_id: budgetId,
+    account_code,
+    cost_center,
+    months: Array(12).fill(monthly.toFixed(2)),
+    annual_total: (monthly * 12).toFixed(2),
+    created_at: LAST_MONTH_ISO,
+    updated_at: NOW_ISO,
+  };
+}
+
+export const BUDGET_LINES_BY_ID: Record<string, BudgetLine[]> = {
+  [BUDGET_IDS.ops2026]: [
+    budgetLine(BUDGET_IDS.ops2026, "ops26-salaries", "6010", "ENG", 62000),
+    budgetLine(BUDGET_IDS.ops2026, "ops26-rent", "6020", undefined, 14000),
+    budgetLine(BUDGET_IDS.ops2026, "ops26-marketing", "6030", "SALES", 9500),
+    budgetLine(BUDGET_IDS.ops2026, "ops26-cogs", "5000", undefined, 38000),
+    budgetLine(BUDGET_IDS.ops2026, "ops26-revenue", "4010", "SALES", 165000),
+  ],
+  [BUDGET_IDS.sales2026]: [
+    budgetLine(BUDGET_IDS.sales2026, "sales26-marketing", "6030", "SALES", 22000),
+    budgetLine(BUDGET_IDS.sales2026, "sales26-salaries", "6010", "SALES", 41000),
+    budgetLine(BUDGET_IDS.sales2026, "sales26-revenue", "4020", "SALES", 88000),
+  ],
+  [BUDGET_IDS.ops2025]: [
+    budgetLine(BUDGET_IDS.ops2025, "ops25-salaries", "6010", "ENG", 56000),
+    budgetLine(BUDGET_IDS.ops2025, "ops25-rent", "6020", undefined, 13000),
+    budgetLine(BUDGET_IDS.ops2025, "ops25-revenue", "4010", "SALES", 150000),
+  ],
+  [BUDGET_IDS.draft2027]: [],
+};
+
+// Deterministic per-account "actual vs plan" factors so the variance
+// dashboard renders believable favourable / unfavourable rows.
+const VARIANCE_FACTORS: Record<string, number> = {
+  "6010": 1.04, // salaries slightly over plan
+  "6020": 0.98, // rent slightly under plan
+  "6030": 1.18, // marketing over plan
+  "5000": 0.93, // COGS under plan
+  "4010": 1.07, // product revenue over plan
+  "4020": 0.95, // service revenue under plan
+};
+
+// buildBudgetVariance derives a believable plan-vs-actual report from a
+// budget's lines. The backend sign-normalises so a positive variance
+// always means actual exceeded plan; favourability then depends on the
+// account's chart-of-accounts type (revenue over = good, expense over =
+// bad).
+export function buildBudgetVariance(
+  budget: Budget,
+  lines: BudgetLine[]
+): BudgetVarianceReport {
+  let totalBudgeted = 0;
+  let totalActual = 0;
+  let totalFav = 0;
+  let totalUnfav = 0;
+  const rows: BudgetVarianceRow[] = lines.map((l) => {
+    const acct = FINANCE_ACCOUNTS.find((a) => a.code === l.account_code);
+    const accountType = (acct?.type ?? "") as BudgetVarianceAccountType;
+    const budgeted = Number(l.annual_total);
+    const factor = VARIANCE_FACTORS[l.account_code] ?? 1;
+    const actual = Math.round(budgeted * factor * 100) / 100;
+    const variance = Math.round((actual - budgeted) * 100) / 100;
+    const variancePct = budgeted ? variance / budgeted : 0;
+    const favourable =
+      accountType === "revenue" ? variance >= 0 : variance <= 0;
+    totalBudgeted += budgeted;
+    totalActual += actual;
+    if (favourable) totalFav += Math.abs(variance);
+    else totalUnfav += Math.abs(variance);
+    return {
+      budget_id: budget.id,
+      account_code: l.account_code,
+      account_name: acct?.name,
+      account_type: accountType,
+      cost_center: l.cost_center,
+      period: String(budget.fiscal_year),
+      budgeted: budgeted.toFixed(2),
+      actual: actual.toFixed(2),
+      variance: variance.toFixed(2),
+      variance_pct: variancePct.toFixed(4),
+      favourable,
+      unplanned: false,
+    };
+  });
+  return {
+    tenant_id: DEMO_TENANT_ID,
+    budget_id: budget.id,
+    budget_name: budget.name,
+    fiscal_year: budget.fiscal_year,
+    from: `${budget.fiscal_year}-01-01`,
+    to: `${budget.fiscal_year}-12-31`,
+    rows,
+    total_budgeted: totalBudgeted.toFixed(2),
+    total_actual: totalActual.toFixed(2),
+    total_variance: (totalActual - totalBudgeted).toFixed(2),
+    total_favourable_variance: totalFav.toFixed(2),
+    total_unfavourable_variance: totalUnfav.toFixed(2),
+  };
+}
+
+// --- Manufacturing: work centers, BOMs, routings, work orders, --------
+// job cards, capacity, MRP, subcontracting (Stream 2 / Batch-3) -------
+//
+// Finished goods and components are drawn from the shared inventory
+// catalogue above so item labels resolve everywhere a manufacturing
+// page joins to listInventoryItems().
+
+const MFG_ITEMS = {
+  widget: INVENTORY_ITEMS[0].id, // ACM-001 Acme Widget Mark II
+  gadget: INVENTORY_ITEMS[1].id, // ACM-002 Acme Gadget Pro
+  sprocket: INVENTORY_ITEMS[2].id, // ACM-003 Sprocket Assembly
+  bolt: INVENTORY_ITEMS[3].id, // ACM-004 Hex Bolt M8 (100-pack)
+  adapter: INVENTORY_ITEMS[4].id, // ACM-005 Power Adapter 12V
+  cable: INVENTORY_ITEMS[5].id, // ACM-006 Cable USB-C 2m
+  filter: INVENTORY_ITEMS[6].id, // ACM-007 Replacement Filter
+};
+
+const WC_IDS = {
+  assembly: uuid("mfg.work_center:assembly"),
+  machining: uuid("mfg.work_center:machining"),
+  finishing: uuid("mfg.work_center:finishing"),
+  packaging: uuid("mfg.work_center:packaging"),
+};
+
+export const WORK_CENTERS: WorkCenter[] = [
+  { tenant_id: DEMO_TENANT_ID, id: WC_IDS.assembly, name: "Assembly Line A", capacity_per_hour: "30", operating_hours_per_day: "8", efficiency_percent: "92", status: "active", notes: "Primary final-assembly line.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WC_IDS.machining, name: "CNC Machining Cell", capacity_per_hour: "12", operating_hours_per_day: "16", efficiency_percent: "88", status: "active", notes: "Two-shift CNC cell for machined parts.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WC_IDS.finishing, name: "Finishing & QA", capacity_per_hour: "20", operating_hours_per_day: "8", efficiency_percent: "95", status: "active", notes: "Surface finishing and final inspection.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WC_IDS.packaging, name: "Packaging Station", capacity_per_hour: "60", operating_hours_per_day: "8", efficiency_percent: "97", status: "maintenance", notes: "Offline for conveyor maintenance this week.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: NOW_ISO },
+];
+
+const BOM_IDS = {
+  widgetV2: uuid("mfg.bom:widget-v2"),
+  widgetV1: uuid("mfg.bom:widget-v1"),
+  gadgetV1: uuid("mfg.bom:gadget-v1"),
+  sprocketV1: uuid("mfg.bom:sprocket-v1"),
+};
+
+function bomComponent(bomId: string, componentItemId: string, qty: string, sort: number, scrap?: string): BOMComponent {
+  return { bom_id: bomId, component_item_id: componentItemId, qty, uom: "EA", scrap_percent: scrap ?? null, sort_order: sort };
+}
+
+export const BOMS: BOM[] = [
+  {
+    tenant_id: DEMO_TENANT_ID, id: BOM_IDS.widgetV2, item_id: MFG_ITEMS.widget, version: "v2", status: "active", output_qty: "1", uom: "EA",
+    notes: "Current production recipe for the Widget Mark II.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO,
+    components: [
+      bomComponent(BOM_IDS.widgetV2, MFG_ITEMS.sprocket, "2", 1),
+      bomComponent(BOM_IDS.widgetV2, MFG_ITEMS.bolt, "4", 2, "5"),
+      bomComponent(BOM_IDS.widgetV2, MFG_ITEMS.cable, "1", 3),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: BOM_IDS.widgetV1, item_id: MFG_ITEMS.widget, version: "v1", status: "obsolete", output_qty: "1", uom: "EA",
+    notes: "Superseded by v2; kept for historical orders.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO,
+    components: [
+      bomComponent(BOM_IDS.widgetV1, MFG_ITEMS.sprocket, "2", 1),
+      bomComponent(BOM_IDS.widgetV1, MFG_ITEMS.bolt, "6", 2),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: BOM_IDS.gadgetV1, item_id: MFG_ITEMS.gadget, version: "v1", status: "active", output_qty: "1", uom: "EA",
+    notes: "Gadget Pro standard build.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO,
+    components: [
+      bomComponent(BOM_IDS.gadgetV1, MFG_ITEMS.adapter, "1", 1),
+      bomComponent(BOM_IDS.gadgetV1, MFG_ITEMS.cable, "1", 2),
+      bomComponent(BOM_IDS.gadgetV1, MFG_ITEMS.bolt, "6", 3, "5"),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: BOM_IDS.sprocketV1, item_id: MFG_ITEMS.sprocket, version: "v1", status: "active", output_qty: "1", uom: "EA",
+    notes: "Sub-assembly consumed by the Widget Mark II recipe.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO,
+    components: [bomComponent(BOM_IDS.sprocketV1, MFG_ITEMS.bolt, "8", 1)],
+  },
+];
+
+const ROUTING_IDS = {
+  widget: uuid("mfg.routing:widget-v1"),
+  gadget: uuid("mfg.routing:gadget-v1"),
+  sprocket: uuid("mfg.routing:sprocket-v1"),
+};
+
+function routingOp(routingId: string, seq: number, name: string, wc: string, setup: string, cycle: string, description?: string): RoutingOperation {
+  return { routing_id: routingId, sequence: seq, operation_name: name, work_center_id: wc, setup_time_minutes: setup, cycle_time_minutes: cycle, description };
+}
+
+export const ROUTINGS: Routing[] = [
+  {
+    tenant_id: DEMO_TENANT_ID, id: ROUTING_IDS.widget, item_id: MFG_ITEMS.widget, version: "v1", status: "active",
+    notes: "Three-stage build for the Widget Mark II.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO,
+    operations: [
+      routingOp(ROUTING_IDS.widget, 1, "Machine sprockets", WC_IDS.machining, "30", "4", "Rough + finish machining."),
+      routingOp(ROUTING_IDS.widget, 2, "Assemble widget", WC_IDS.assembly, "15", "6", "Press-fit and fasten."),
+      routingOp(ROUTING_IDS.widget, 3, "Finish & inspect", WC_IDS.finishing, "10", "3", "Deburr, clean, QA."),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: ROUTING_IDS.gadget, item_id: MFG_ITEMS.gadget, version: "v1", status: "active",
+    notes: "Gadget Pro assembly and pack-out.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO,
+    operations: [
+      routingOp(ROUTING_IDS.gadget, 1, "Assemble gadget", WC_IDS.assembly, "20", "5", "Wire adapter and cable."),
+      routingOp(ROUTING_IDS.gadget, 2, "Pack & label", WC_IDS.packaging, "5", "1", "Box, label, palletise."),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: ROUTING_IDS.sprocket, item_id: MFG_ITEMS.sprocket, version: "v1", status: "draft",
+    notes: "Draft routing for in-house sprocket machining.", created_by: "system", created_at: NOW_ISO, updated_at: NOW_ISO,
+    operations: [routingOp(ROUTING_IDS.sprocket, 1, "Machine sprocket", WC_IDS.machining, "25", "3.5")],
+  },
+];
+
+const WO_IDS = {
+  widgetReleased: uuid("mfg.work_order:widget-released"),
+  gadgetInProgress: uuid("mfg.work_order:gadget-in-progress"),
+  sprocketDraft: uuid("mfg.work_order:sprocket-draft"),
+  widgetCompleted: uuid("mfg.work_order:widget-completed"),
+  gadgetClosed: uuid("mfg.work_order:gadget-closed"),
+  filterCancelled: uuid("mfg.work_order:filter-cancelled"),
+};
+
+export const WORK_ORDERS: WorkOrder[] = [
+  { tenant_id: DEMO_TENANT_ID, id: WO_IDS.widgetReleased, item_id: MFG_ITEMS.widget, bom_id: BOM_IDS.widgetV2, routing_id: ROUTING_IDS.widget, warehouse_id: WAREHOUSE_IDS.main, planned_qty: "100", actual_qty: null, status: "released", scheduled_start: toCalendarISO(addDays(TODAY, 1)), scheduled_end: toCalendarISO(addDays(TODAY, 5)), started_at: null, completed_at: null, notes: "Replenish Q3 widget stock.", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WO_IDS.gadgetInProgress, item_id: MFG_ITEMS.gadget, bom_id: BOM_IDS.gadgetV1, routing_id: ROUTING_IDS.gadget, warehouse_id: WAREHOUSE_IDS.main, planned_qty: "50", actual_qty: null, status: "in_progress", scheduled_start: toCalendarISO(addDays(TODAY, -1)), scheduled_end: toCalendarISO(addDays(TODAY, 2)), started_at: LAST_WEEK_ISO, completed_at: null, notes: "Priority customer order.", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WO_IDS.sprocketDraft, item_id: MFG_ITEMS.sprocket, bom_id: null, routing_id: null, warehouse_id: WAREHOUSE_IDS.west, planned_qty: "500", actual_qty: null, status: "draft", scheduled_start: null, scheduled_end: null, started_at: null, completed_at: null, notes: "Build sub-assembly buffer.", created_by: "system", created_at: NOW_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WO_IDS.widgetCompleted, item_id: MFG_ITEMS.widget, bom_id: BOM_IDS.widgetV2, routing_id: ROUTING_IDS.widget, warehouse_id: WAREHOUSE_IDS.main, planned_qty: "80", actual_qty: "78", status: "completed", scheduled_start: toCalendarISO(addDays(TODAY, -10)), scheduled_end: toCalendarISO(addDays(TODAY, -6)), started_at: LAST_MONTH_ISO, completed_at: LAST_WEEK_ISO, notes: "Two units scrapped at QA.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WO_IDS.gadgetClosed, item_id: MFG_ITEMS.gadget, bom_id: BOM_IDS.gadgetV1, routing_id: ROUTING_IDS.gadget, warehouse_id: WAREHOUSE_IDS.main, planned_qty: "40", actual_qty: "40", status: "closed", scheduled_start: toCalendarISO(addDays(TODAY, -20)), scheduled_end: toCalendarISO(addDays(TODAY, -16)), started_at: LAST_MONTH_ISO, completed_at: LAST_MONTH_ISO, notes: undefined, created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: WO_IDS.filterCancelled, item_id: MFG_ITEMS.filter, bom_id: null, routing_id: null, warehouse_id: WAREHOUSE_IDS.west, planned_qty: "30", actual_qty: null, status: "cancelled", scheduled_start: null, scheduled_end: null, started_at: null, completed_at: null, notes: "Cancelled — sourced externally.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+];
+
+function jobCard(woId: string, seq: number, wc: string, status: JobCard["status"], produced: string, rejected: string, start?: string, end?: string): JobCard {
+  return {
+    tenant_id: DEMO_TENANT_ID,
+    id: uuid(`mfg.job_card:${woId}:${seq}`),
+    work_order_id: woId,
+    routing_operation_seq: seq,
+    work_center_id: wc,
+    status,
+    planned_start: null,
+    planned_end: null,
+    actual_start: start ?? null,
+    actual_end: end ?? null,
+    operator_id: null,
+    qty_produced: produced,
+    qty_rejected: rejected,
+    created_at: LAST_WEEK_ISO,
+    updated_at: NOW_ISO,
+  };
+}
+
+export const JOB_CARDS_BY_WO: Record<string, JobCard[]> = {
+  [WO_IDS.widgetReleased]: [
+    jobCard(WO_IDS.widgetReleased, 1, WC_IDS.machining, "pending", "0", "0"),
+    jobCard(WO_IDS.widgetReleased, 2, WC_IDS.assembly, "pending", "0", "0"),
+    jobCard(WO_IDS.widgetReleased, 3, WC_IDS.finishing, "pending", "0", "0"),
+  ],
+  [WO_IDS.gadgetInProgress]: [
+    jobCard(WO_IDS.gadgetInProgress, 1, WC_IDS.assembly, "completed", "50", "0", LAST_WEEK_ISO, NOW_ISO),
+    jobCard(WO_IDS.gadgetInProgress, 2, WC_IDS.packaging, "in_progress", "0", "0", NOW_ISO),
+  ],
+};
+
+// buildCapacityPlan derives a finite-capacity utilisation grid across
+// the requested [start, end] calendar window. Weekdays carry a stable
+// per-work-center load (some intentionally overloaded); weekends are
+// idle. Dates are produced as YYYY-MM-DD so the page's calendar
+// parser lines them up exactly.
+const WC_DOW_LOAD: Record<string, number[]> = {
+  // Indexed by Date.getDay(): 0=Sun … 6=Sat.
+  [WC_IDS.assembly]: [0, 78, 92, 96, 88, 70, 0],
+  [WC_IDS.machining]: [0, 104, 118, 88, 112, 96, 0],
+  [WC_IDS.finishing]: [0, 54, 68, 73, 60, 48, 0],
+  [WC_IDS.packaging]: [0, 0, 0, 0, 0, 0, 0],
+};
+
+export function buildCapacityPlan(start: string, end: string): CapacityPlan {
+  const s = new Date(`${start}T00:00:00`);
+  const e = new Date(`${end}T00:00:00`);
+  const days: Date[] = [];
+  if (!isNaN(s.getTime()) && !isNaN(e.getTime()) && e >= s) {
+    let cur = s;
+    while (cur <= e && days.length < 45) {
+      days.push(new Date(cur));
+      cur = addDays(cur, 1);
+    }
+  }
+  if (days.length === 0) days.push(new Date(TODAY));
+  const rows: WorkCenterSchedule[] = WORK_CENTERS.map((wc) => {
+    const available = Number(wc.operating_hours_per_day) * 60;
+    const pattern = WC_DOW_LOAD[wc.id] ?? [0, 60, 60, 60, 60, 60, 0];
+    const dayLoads: CapacityDayLoad[] = days.map((d) => {
+      const util = pattern[d.getDay()] ?? 0;
+      const scheduled = Math.round((available * util) / 100);
+      return {
+        date: toCalendarISO(d),
+        scheduled_minutes: String(scheduled),
+        available_minutes: String(available),
+        utilization_percent: String(util),
+        overloaded: util > 100,
+      };
+    });
+    return { work_center_id: wc.id, work_center_name: wc.name, status: wc.status, days: dayLoads };
+  });
+  return { start, end, rows };
+}
+
+// --- MRP runs --------------------------------------------------------
+
+const MRP_IDS = {
+  run1: uuid("mfg.mrp_run:1"),
+  run2: uuid("mfg.mrp_run:2"),
+  run3: uuid("mfg.mrp_run:3"),
+};
+
+function demandLine(runId: string, seed: string, itemId: string, qty: string, due: string, source: MRPDemandLine["source"], sourceRef?: string): MRPDemandLine {
+  return { tenant_id: DEMO_TENANT_ID, id: uuid(`mfg.mrp_demand:${seed}`), run_id: runId, item_id: itemId, qty, due_date: due, source, source_ref: sourceRef, created_at: LAST_WEEK_ISO };
+}
+
+function plannedOrder(runId: string, seed: string, itemId: string, type: MRPPlannedOrder["order_type"], qty: string, due: string, startDate: string, level: number, lead: number, bomId?: string | null): MRPPlannedOrder {
+  return { tenant_id: DEMO_TENANT_ID, id: uuid(`mfg.mrp_planned:${seed}`), run_id: runId, item_id: itemId, order_type: type, qty, due_date: due, suggested_start_date: startDate, explosion_level: level, bom_id: bomId ?? null, routing_id: null, lead_time_days: lead, created_at: LAST_WEEK_ISO };
+}
+
+// Full MRP runs (header + detail). listMRPRuns strips the detail to
+// mirror the real list payload; getMRPRun returns the full record.
+export const MRP_RUNS: MRPRun[] = [
+  {
+    tenant_id: DEMO_TENANT_ID, id: MRP_IDS.run1, status: "completed",
+    horizon_start: toCalendarISO(TODAY), horizon_end: toCalendarISO(addDays(TODAY, 30)),
+    include_min_stock: true, buy_lead_time_days: 7, demand_line_count: 3, planned_order_count: 6, make_order_count: 3, buy_order_count: 3,
+    notes: "Monthly net-requirements run with reorder top-up.", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: LAST_WEEK_ISO,
+    demand_lines: [
+      demandLine(MRP_IDS.run1, "r1-widget", MFG_ITEMS.widget, "120", toCalendarISO(addDays(TODAY, 20)), "sales_order", "SO-2026-0042"),
+      demandLine(MRP_IDS.run1, "r1-gadget", MFG_ITEMS.gadget, "60", toCalendarISO(addDays(TODAY, 25)), "sales_order", "SO-2026-0043"),
+      demandLine(MRP_IDS.run1, "r1-sprocket", MFG_ITEMS.sprocket, "200", toCalendarISO(addDays(TODAY, 15)), "manual"),
+    ],
+    planned_orders: [
+      plannedOrder(MRP_IDS.run1, "r1-mk-widget", MFG_ITEMS.widget, "make", "120", toCalendarISO(addDays(TODAY, 20)), toCalendarISO(addDays(TODAY, 15)), 0, 5, BOM_IDS.widgetV2),
+      plannedOrder(MRP_IDS.run1, "r1-mk-gadget", MFG_ITEMS.gadget, "make", "60", toCalendarISO(addDays(TODAY, 25)), toCalendarISO(addDays(TODAY, 22)), 0, 3, BOM_IDS.gadgetV1),
+      plannedOrder(MRP_IDS.run1, "r1-mk-sprocket", MFG_ITEMS.sprocket, "make", "440", toCalendarISO(addDays(TODAY, 15)), toCalendarISO(addDays(TODAY, 12)), 1, 3, BOM_IDS.sprocketV1),
+      plannedOrder(MRP_IDS.run1, "r1-by-bolt", MFG_ITEMS.bolt, "buy", "4040", toCalendarISO(addDays(TODAY, 12)), toCalendarISO(addDays(TODAY, 5)), 2, 7),
+      plannedOrder(MRP_IDS.run1, "r1-by-adapter", MFG_ITEMS.adapter, "buy", "60", toCalendarISO(addDays(TODAY, 22)), toCalendarISO(addDays(TODAY, 12)), 1, 10),
+      plannedOrder(MRP_IDS.run1, "r1-by-cable", MFG_ITEMS.cable, "buy", "180", toCalendarISO(addDays(TODAY, 20)), toCalendarISO(addDays(TODAY, 13)), 1, 7),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: MRP_IDS.run2, status: "completed",
+    horizon_start: toCalendarISO(addDays(TODAY, -7)), horizon_end: toCalendarISO(addDays(TODAY, 14)),
+    include_min_stock: false, buy_lead_time_days: 7, demand_line_count: 2, planned_order_count: 3, make_order_count: 2, buy_order_count: 1,
+    notes: "Short-horizon check against firm orders.", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: LAST_WEEK_ISO,
+    demand_lines: [
+      demandLine(MRP_IDS.run2, "r2-widget", MFG_ITEMS.widget, "40", toCalendarISO(addDays(TODAY, 10)), "manual"),
+      demandLine(MRP_IDS.run2, "r2-gadget", MFG_ITEMS.gadget, "25", toCalendarISO(addDays(TODAY, 12)), "work_order", "WO-2026-0008"),
+    ],
+    planned_orders: [
+      plannedOrder(MRP_IDS.run2, "r2-mk-widget", MFG_ITEMS.widget, "make", "40", toCalendarISO(addDays(TODAY, 10)), toCalendarISO(addDays(TODAY, 5)), 0, 5, BOM_IDS.widgetV2),
+      plannedOrder(MRP_IDS.run2, "r2-mk-gadget", MFG_ITEMS.gadget, "make", "25", toCalendarISO(addDays(TODAY, 12)), toCalendarISO(addDays(TODAY, 9)), 0, 3, BOM_IDS.gadgetV1),
+      plannedOrder(MRP_IDS.run2, "r2-by-cable", MFG_ITEMS.cable, "buy", "65", toCalendarISO(addDays(TODAY, 10)), toCalendarISO(addDays(TODAY, 3)), 1, 7),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: MRP_IDS.run3, status: "failed",
+    horizon_start: toCalendarISO(addDays(TODAY, -14)), horizon_end: toCalendarISO(addDays(TODAY, -1)),
+    include_min_stock: false, buy_lead_time_days: 7, demand_line_count: 1, planned_order_count: 0, make_order_count: 0, buy_order_count: 0,
+    notes: "Failed — demand item had no active BOM.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO,
+    demand_lines: [
+      demandLine(MRP_IDS.run3, "r3-filter", MFG_ITEMS.filter, "30", toCalendarISO(addDays(TODAY, -2)), "manual"),
+    ],
+    planned_orders: [],
+  },
+];
+
+// --- Subcontracting --------------------------------------------------
+
+const SO_IDS = {
+  draft: uuid("mfg.subcontract:draft"),
+  issued: uuid("mfg.subcontract:issued"),
+  received: uuid("mfg.subcontract:received"),
+  closed: uuid("mfg.subcontract:closed"),
+  cancelled: uuid("mfg.subcontract:cancelled"),
+};
+
+function subComponent(orderId: string, seed: string, itemId: string, qty: string, issued: string): SubcontractComponent {
+  return { tenant_id: DEMO_TENANT_ID, id: uuid(`mfg.subcontract_component:${seed}`), subcontract_order_id: orderId, item_id: itemId, qty, issued_qty: issued, created_at: LAST_WEEK_ISO };
+}
+
+export const SUBCONTRACT_ORDERS: SubcontractOrder[] = [
+  {
+    tenant_id: DEMO_TENANT_ID, id: SO_IDS.draft, work_order_id: null, routing_operation_seq: null, supplier_id: "Globex Precision Castings",
+    item_id: MFG_ITEMS.sprocket, warehouse_id: WAREHOUSE_IDS.main, qty: "100", received_qty: "0", status: "draft", charge_amount: "1850.00", charge_currency: "USD",
+    issued_at: null, received_at: null, notes: "Outsourced sprocket machining.", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: LAST_WEEK_ISO,
+    components: [subComponent(SO_IDS.draft, "draft-bolt", MFG_ITEMS.bolt, "800", "0")],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: SO_IDS.issued, work_order_id: null, routing_operation_seq: null, supplier_id: "Initech Machining LLC",
+    item_id: MFG_ITEMS.widget, warehouse_id: WAREHOUSE_IDS.main, qty: "50", received_qty: "0", status: "issued", charge_amount: "1200.00", charge_currency: "USD",
+    issued_at: LAST_WEEK_ISO, received_at: null, notes: "Components issued to supplier.", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: NOW_ISO,
+    components: [
+      subComponent(SO_IDS.issued, "issued-bolt", MFG_ITEMS.bolt, "200", "200"),
+      subComponent(SO_IDS.issued, "issued-cable", MFG_ITEMS.cable, "50", "50"),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: SO_IDS.received, work_order_id: null, routing_operation_seq: null, supplier_id: "Hooli Assembly Partners",
+    item_id: MFG_ITEMS.gadget, warehouse_id: WAREHOUSE_IDS.main, qty: "40", received_qty: "40", status: "received", charge_amount: "980.00", charge_currency: "USD",
+    issued_at: LAST_MONTH_ISO, received_at: LAST_WEEK_ISO, notes: "Finished gadgets received back.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO,
+    components: [
+      subComponent(SO_IDS.received, "received-adapter", MFG_ITEMS.adapter, "40", "40"),
+      subComponent(SO_IDS.received, "received-cable", MFG_ITEMS.cable, "40", "40"),
+    ],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: SO_IDS.closed, work_order_id: null, routing_operation_seq: null, supplier_id: "Initech Machining LLC",
+    item_id: MFG_ITEMS.widget, warehouse_id: WAREHOUSE_IDS.main, qty: "30", received_qty: "30", status: "closed", charge_amount: "720.00", charge_currency: "USD",
+    issued_at: LAST_MONTH_ISO, received_at: LAST_MONTH_ISO, notes: "Closed and reconciled.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO,
+    components: [subComponent(SO_IDS.closed, "closed-bolt", MFG_ITEMS.bolt, "120", "120")],
+  },
+  {
+    tenant_id: DEMO_TENANT_ID, id: SO_IDS.cancelled, work_order_id: null, routing_operation_seq: null, supplier_id: null,
+    item_id: MFG_ITEMS.filter, warehouse_id: WAREHOUSE_IDS.west, qty: "20", received_qty: "0", status: "cancelled", charge_amount: "0.00", charge_currency: "USD",
+    issued_at: null, received_at: null, notes: "Cancelled before issue.", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO,
+    components: [],
+  },
+];
+
+// --- Inventory: landed-cost vouchers ---------------------------------
+//
+// Vouchers spread freight / duty / insurance across received goods.
+// Lifecycle: draft → allocated → posted. Charges + targets are loaded
+// per-voucher by getLandedCostVoucher.
+
+const LC_IDS = {
+  v0006: uuid("inventory.landed_cost:0006"),
+  v0007: uuid("inventory.landed_cost:0007"),
+  v0008: uuid("inventory.landed_cost:0008"),
+  v0009: uuid("inventory.landed_cost:0009"),
+};
+
+export const LANDED_COST_VOUCHERS: LandedCostVoucher[] = [
+  { tenant_id: DEMO_TENANT_ID, id: LC_IDS.v0009, voucher_number: "LC-2026-0009", description: "Marine insurance — March import", status: "draft", allocation_method: "by_qty", posted_at: null, je_id: null, created_by: "system", created_at: NOW_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LC_IDS.v0008, voucher_number: "LC-2026-0008", description: "Ocean freight — container HLCU-4471", status: "allocated", allocation_method: "by_amount", posted_at: null, je_id: null, created_by: "system", created_at: LAST_WEEK_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LC_IDS.v0007, voucher_number: "LC-2026-0007", description: "Freight + duty — Q1 widget shipment", status: "posted", allocation_method: "by_qty", posted_at: LAST_WEEK_ISO, je_id: uuid("je:lc-0007"), created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LC_IDS.v0006, voucher_number: "LC-2026-0006", description: "Air freight — expedite, handling", status: "posted", allocation_method: "by_weight", posted_at: LAST_MONTH_ISO, je_id: uuid("je:lc-0006"), created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+];
+
+function lcCharge(voucherId: string, seed: string, description: string, amount: string, account_code: string): LandedCostCharge {
+  return { tenant_id: DEMO_TENANT_ID, id: uuid(`inventory.landed_cost_charge:${seed}`), voucher_id: voucherId, description, amount, account_code, created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO };
+}
+
+function lcTarget(voucherId: string, seed: string, itemId: string, warehouseId: string, qty: string, unitCost: string, amount: string, weight: string, allocated: string, applied: boolean): LandedCostTarget {
+  return { tenant_id: DEMO_TENANT_ID, id: uuid(`inventory.landed_cost_target:${seed}`), voucher_id: voucherId, source_ktype: "inventory.goods_receipt", source_id: uuid(`inventory.goods_receipt:${seed}`), item_id: itemId, warehouse_id: warehouseId, qty, unit_cost: unitCost, amount, weight, allocated_amount: allocated, applied, created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO };
+}
+
+export const LANDED_COST_CHARGES_BY_VOUCHER: Record<string, LandedCostCharge[]> = {
+  [LC_IDS.v0009]: [lcCharge(LC_IDS.v0009, "0009-insurance", "Marine insurance", "300.00", "5220")],
+  [LC_IDS.v0008]: [lcCharge(LC_IDS.v0008, "0008-freight", "Ocean freight", "800.00", "5200")],
+  [LC_IDS.v0007]: [
+    lcCharge(LC_IDS.v0007, "0007-freight", "Ocean freight", "1200.00", "5200"),
+    lcCharge(LC_IDS.v0007, "0007-duty", "Import duty", "450.00", "5210"),
+  ],
+  [LC_IDS.v0006]: [
+    lcCharge(LC_IDS.v0006, "0006-air", "Air freight (expedite)", "2100.00", "5200"),
+    lcCharge(LC_IDS.v0006, "0006-handling", "Handling & brokerage", "180.00", "5210"),
+  ],
+};
+
+export const LANDED_COST_TARGETS_BY_VOUCHER: Record<string, LandedCostTarget[]> = {
+  [LC_IDS.v0009]: [
+    lcTarget(LC_IDS.v0009, "0009-cable", MFG_ITEMS.cable, WAREHOUSE_IDS.main, "300", "7.00", "2100.00", "15", "0.00", false),
+  ],
+  [LC_IDS.v0008]: [
+    lcTarget(LC_IDS.v0008, "0008-gadget", MFG_ITEMS.gadget, WAREHOUSE_IDS.main, "50", "40.00", "2000.00", "30", "421.05", false),
+    lcTarget(LC_IDS.v0008, "0008-adapter", MFG_ITEMS.adapter, WAREHOUSE_IDS.main, "100", "18.00", "1800.00", "20", "378.95", false),
+  ],
+  [LC_IDS.v0007]: [
+    lcTarget(LC_IDS.v0007, "0007-widget", MFG_ITEMS.widget, WAREHOUSE_IDS.main, "100", "15.00", "1500.00", "120", "550.00", true),
+    lcTarget(LC_IDS.v0007, "0007-sprocket", MFG_ITEMS.sprocket, WAREHOUSE_IDS.main, "200", "9.00", "1800.00", "60", "1100.00", true),
+  ],
+  [LC_IDS.v0006]: [
+    lcTarget(LC_IDS.v0006, "0006-bolt", MFG_ITEMS.bolt, WAREHOUSE_IDS.west, "1000", "0.08", "80.00", "40", "1403.08", true),
+    lcTarget(LC_IDS.v0006, "0006-filter", MFG_ITEMS.filter, WAREHOUSE_IDS.west, "50", "12.00", "600.00", "25", "876.92", true),
+  ],
+};
+
+// --- Inventory: cycle-count sessions ---------------------------------
+//
+// Lifecycle: draft → counting → reconciled → posted. Lines carry the
+// expected (system) qty, the counted qty and the variance between them.
+
+const CC_IDS = {
+  s0010: uuid("inventory.cycle_count:0010"),
+  s0011: uuid("inventory.cycle_count:0011"),
+  s0012: uuid("inventory.cycle_count:0012"),
+  s0013: uuid("inventory.cycle_count:0013"),
+};
+
+export const CYCLE_COUNT_SESSIONS: CycleCountSession[] = [
+  { tenant_id: DEMO_TENANT_ID, id: CC_IDS.s0013, code: "CC-2026-0013", description: "West hub spot check", warehouse_id: WAREHOUSE_IDS.west, status: "draft", created_by: "system", created_at: NOW_ISO, updated_at: NOW_ISO, posted_at: null },
+  { tenant_id: DEMO_TENANT_ID, id: CC_IDS.s0012, code: "CC-2026-0012", description: "Fast-movers weekly count", warehouse_id: WAREHOUSE_IDS.main, status: "counting", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: NOW_ISO, posted_at: null },
+  { tenant_id: DEMO_TENANT_ID, id: CC_IDS.s0011, code: "CC-2026-0011", description: "Bin A reconciliation", warehouse_id: WAREHOUSE_IDS.main, status: "reconciled", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: LAST_WEEK_ISO, posted_at: null },
+  { tenant_id: DEMO_TENANT_ID, id: CC_IDS.s0010, code: "CC-2026-0010", description: "Month-end full count", warehouse_id: WAREHOUSE_IDS.main, status: "posted", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO, posted_at: LAST_MONTH_ISO },
+];
+
+function ccLine(sessionId: string, seed: string, itemId: string, expected: string, counted: string): CycleCountLine {
+  const variance = (Number(counted) - Number(expected)).toFixed(2).replace(/\.00$/, "");
+  return { tenant_id: DEMO_TENANT_ID, id: uuid(`inventory.cycle_count_line:${seed}`), session_id: sessionId, item_id: itemId, expected_qty: expected, counted_qty: counted, variance, notes: undefined, created_at: LAST_WEEK_ISO, updated_at: NOW_ISO };
+}
+
+export const CYCLE_COUNT_LINES_BY_SESSION: Record<string, CycleCountLine[]> = {
+  [CC_IDS.s0013]: [],
+  [CC_IDS.s0012]: [
+    ccLine(CC_IDS.s0012, "0012-widget", MFG_ITEMS.widget, "120", "118"),
+    ccLine(CC_IDS.s0012, "0012-gadget", MFG_ITEMS.gadget, "60", "60"),
+    ccLine(CC_IDS.s0012, "0012-cable", MFG_ITEMS.cable, "300", "305"),
+  ],
+  [CC_IDS.s0011]: [
+    ccLine(CC_IDS.s0011, "0011-bolt", MFG_ITEMS.bolt, "1000", "990"),
+    ccLine(CC_IDS.s0011, "0011-sprocket", MFG_ITEMS.sprocket, "200", "200"),
+  ],
+  [CC_IDS.s0010]: [
+    ccLine(CC_IDS.s0010, "0010-widget", MFG_ITEMS.widget, "80", "80"),
+    ccLine(CC_IDS.s0010, "0010-adapter", MFG_ITEMS.adapter, "100", "97"),
+    ccLine(CC_IDS.s0010, "0010-filter", MFG_ITEMS.filter, "40", "41"),
+  ],
+};
+
+// --- Recruitment: job openings, applications, interviews -------------
+//
+// A small but believable hiring pipeline: open / draft / on-hold /
+// closed requisitions, candidates spread across the application
+// lifecycle, and a couple of scheduled + completed interviews.
+
+const JO_IDS = {
+  backend: uuid("hr.job_opening:backend"),
+  ae: uuid("hr.job_opening:account-exec"),
+  designer: uuid("hr.job_opening:product-designer"),
+  devops: uuid("hr.job_opening:devops"),
+  opsAnalyst: uuid("hr.job_opening:ops-analyst"),
+  techWriter: uuid("hr.job_opening:tech-writer"),
+};
+
+export const JOB_OPENINGS: JobOpening[] = [
+  { id: JO_IDS.backend, tenant_id: DEMO_TENANT_ID, title: "Senior Backend Engineer", department: "Engineering", description: "Own core services across the Kapp kernel — Go APIs, workers and the record engine.", requirements: "5+ years building production Go services; strong SQL; distributed systems.", employment_type: "full_time", location: "San Francisco / Remote", salary_range_min: "150000", salary_range_max: "190000", currency: DEMO_BASE_CURRENCY, status: "open", hiring_manager_id: EMP_IDS.vpEng, max_positions: 2, positions_filled: 0, published_at: LAST_WEEK_ISO, closes_at: toCalendarISO(addDays(TODAY, 21)), created_by: "system", created_at: LAST_WEEK_ISO, updated_at: NOW_ISO },
+  { id: JO_IDS.ae, tenant_id: DEMO_TENANT_ID, title: "Account Executive", department: "Sales", description: "Drive net-new revenue across mid-market accounts in the East region.", requirements: "3+ years B2B SaaS closing experience; track record of quota attainment.", employment_type: "full_time", location: "New York, NY", salary_range_min: "85000", salary_range_max: "115000", currency: DEMO_BASE_CURRENCY, status: "open", hiring_manager_id: EMP_IDS.mgrSales, max_positions: 3, positions_filled: 1, published_at: LAST_MONTH_ISO, closes_at: toCalendarISO(addDays(TODAY, 10)), created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { id: JO_IDS.designer, tenant_id: DEMO_TENANT_ID, title: "Product Designer", department: "Product", description: "Shape the end-to-end experience of the KChat UI across all 16 modules.", requirements: "Portfolio of shipped B2B products; fluency in Figma and design systems.", employment_type: "full_time", location: "Remote (US)", salary_range_min: "115000", salary_range_max: "145000", currency: DEMO_BASE_CURRENCY, status: "open", hiring_manager_id: EMP_IDS.vpEng, max_positions: 1, positions_filled: 0, published_at: LAST_WEEK_ISO, closes_at: null, created_by: "system", created_at: LAST_WEEK_ISO, updated_at: NOW_ISO },
+  { id: JO_IDS.devops, tenant_id: DEMO_TENANT_ID, title: "DevOps Engineer", department: "Engineering", description: "Own CI/CD, observability and the release pipeline.", requirements: "Kubernetes, Terraform, GitHub Actions; on-call maturity.", employment_type: "full_time", location: "Remote (US)", salary_range_min: "135000", salary_range_max: "165000", currency: DEMO_BASE_CURRENCY, status: "draft", hiring_manager_id: EMP_IDS.mgrPlatform, max_positions: 1, positions_filled: 0, published_at: null, closes_at: null, created_by: "system", created_at: NOW_ISO, updated_at: NOW_ISO },
+  { id: JO_IDS.opsAnalyst, tenant_id: DEMO_TENANT_ID, title: "Operations Analyst", department: "Operations", description: "Support demand planning and supplier performance reporting.", requirements: "Strong Excel/SQL; supply-chain exposure a plus.", employment_type: "full_time", location: "Austin, TX", salary_range_min: "72000", salary_range_max: "92000", currency: DEMO_BASE_CURRENCY, status: "on_hold", hiring_manager_id: EMP_IDS.vpOps, max_positions: 1, positions_filled: 0, published_at: LAST_MONTH_ISO, closes_at: null, created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { id: JO_IDS.techWriter, tenant_id: DEMO_TENANT_ID, title: "Technical Writer (Contract)", department: "Engineering", description: "Document the public API and onboarding guides.", requirements: "Developer-docs experience; comfortable reading Go + TypeScript.", employment_type: "contract", location: "Remote", salary_range_min: "60", salary_range_max: "85", currency: DEMO_BASE_CURRENCY, status: "filled", hiring_manager_id: EMP_IDS.vpEng, max_positions: 1, positions_filled: 1, published_at: LAST_MONTH_ISO, closes_at: LAST_WEEK_ISO, created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+];
+
+const APP_IDS = {
+  maria: uuid("hr.application:maria"),
+  david: uuid("hr.application:david"),
+  priya: uuid("hr.application:priya"),
+  james: uuid("hr.application:james"),
+  sofia: uuid("hr.application:sofia"),
+  liam: uuid("hr.application:liam"),
+  aisha: uuid("hr.application:aisha"),
+  tom: uuid("hr.application:tom"),
+};
+
+function daysAgoIso(n: number): string {
+  return new Date(TODAY.getTime() - n * 86400_000).toISOString();
+}
+
+export const JOB_APPLICATIONS: JobApplication[] = [
+  { id: APP_IDS.maria, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.backend, applicant_name: "Maria Gonzalez", applicant_email: "maria.gonzalez@example.com", phone: "+1-415-555-0142", resume_file_id: null, cover_letter: "Excited about the record-engine work.", source: "linkedin", referrer_employee_id: null, status: "interview", rating: 4, notes: "Strong systems background; advancing to onsite.", hired_employee_id: null, applied_at: daysAgoIso(9), created_by: "system", created_at: daysAgoIso(9), updated_at: daysAgoIso(2) },
+  { id: APP_IDS.david, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.backend, applicant_name: "David Chen", applicant_email: "david.chen@example.com", phone: "+1-408-555-0119", resume_file_id: null, cover_letter: undefined, source: "referral", referrer_employee_id: EMP_IDS.ic1, status: "screening", rating: null, notes: "Referred by platform team.", hired_employee_id: null, applied_at: daysAgoIso(6), created_by: "system", created_at: daysAgoIso(6), updated_at: daysAgoIso(3) },
+  { id: APP_IDS.priya, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.backend, applicant_name: "Priya Nair", applicant_email: "priya.nair@example.com", phone: undefined, resume_file_id: null, cover_letter: undefined, source: "website", referrer_employee_id: null, status: "applied", rating: null, notes: undefined, hired_employee_id: null, applied_at: daysAgoIso(2), created_by: "system", created_at: daysAgoIso(2), updated_at: daysAgoIso(2) },
+  { id: APP_IDS.james, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.ae, applicant_name: "James Wilson", applicant_email: "james.wilson@example.com", phone: "+1-212-555-0177", resume_file_id: null, cover_letter: "Closed $4M in net-new last year.", source: "referral", referrer_employee_id: EMP_IDS.mgrSales, status: "hired", rating: 5, notes: "Accepted offer; starts next month.", hired_employee_id: EMP_IDS.ic2, applied_at: daysAgoIso(25), created_by: "system", created_at: daysAgoIso(25), updated_at: daysAgoIso(5) },
+  { id: APP_IDS.sofia, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.ae, applicant_name: "Sofia Rossi", applicant_email: "sofia.rossi@example.com", phone: "+1-646-555-0163", resume_file_id: null, cover_letter: undefined, source: "agency", referrer_employee_id: null, status: "offered", rating: 5, notes: "Offer sent; awaiting response.", hired_employee_id: null, applied_at: daysAgoIso(14), created_by: "system", created_at: daysAgoIso(14), updated_at: daysAgoIso(1) },
+  { id: APP_IDS.liam, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.designer, applicant_name: "Liam O'Brien", applicant_email: "liam.obrien@example.com", phone: undefined, resume_file_id: null, cover_letter: "Portfolio attached.", source: "website", referrer_employee_id: null, status: "shortlisted", rating: 4, notes: "Strong portfolio; schedule design exercise.", hired_employee_id: null, applied_at: daysAgoIso(8), created_by: "system", created_at: daysAgoIso(8), updated_at: daysAgoIso(4) },
+  { id: APP_IDS.aisha, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.designer, applicant_name: "Aisha Khan", applicant_email: "aisha.khan@example.com", phone: undefined, resume_file_id: null, cover_letter: undefined, source: "website", referrer_employee_id: null, status: "rejected", rating: 2, notes: "Not enough B2B depth.", hired_employee_id: null, applied_at: daysAgoIso(12), created_by: "system", created_at: daysAgoIso(12), updated_at: daysAgoIso(7) },
+  { id: APP_IDS.tom, tenant_id: DEMO_TENANT_ID, job_opening_id: JO_IDS.opsAnalyst, applicant_name: "Tom Becker", applicant_email: "tom.becker@example.com", phone: "+1-512-555-0150", resume_file_id: null, cover_letter: undefined, source: "website", referrer_employee_id: null, status: "applied", rating: null, notes: undefined, hired_employee_id: null, applied_at: daysAgoIso(3), created_by: "system", created_at: daysAgoIso(3), updated_at: daysAgoIso(3) },
+];
+
+export const INTERVIEWS: Interview[] = [
+  { id: uuid("hr.interview:maria-phone"), tenant_id: DEMO_TENANT_ID, application_id: APP_IDS.maria, interviewer_id: EMP_IDS.mgrPlatform, interview_type: "phone", scheduled_at: daysAgoIso(5), duration_minutes: 30, location: undefined, meeting_link: "https://meet.example.com/maria-screen", status: "completed", rating: 4, feedback: "Solid phone screen; good communication.", recommendation: "yes", created_by: "system", created_at: daysAgoIso(6), updated_at: daysAgoIso(5) },
+  { id: uuid("hr.interview:maria-tech"), tenant_id: DEMO_TENANT_ID, application_id: APP_IDS.maria, interviewer_id: EMP_IDS.vpEng, interview_type: "technical", scheduled_at: toCalendarISO(addDays(TODAY, 2)), duration_minutes: 60, location: undefined, meeting_link: "https://meet.example.com/maria-tech", status: "scheduled", rating: null, feedback: undefined, recommendation: undefined, created_by: "system", created_at: daysAgoIso(2), updated_at: daysAgoIso(2) },
+  { id: uuid("hr.interview:sofia-panel"), tenant_id: DEMO_TENANT_ID, application_id: APP_IDS.sofia, interviewer_id: EMP_IDS.mgrSales, interview_type: "panel", scheduled_at: daysAgoIso(3), duration_minutes: 45, location: "NYC Office — Room 4B", meeting_link: undefined, status: "completed", rating: 5, feedback: "Excellent discovery skills; strong close.", recommendation: "strong_yes", created_by: "system", created_at: daysAgoIso(6), updated_at: daysAgoIso(3) },
+  { id: uuid("hr.interview:liam-portfolio"), tenant_id: DEMO_TENANT_ID, application_id: APP_IDS.liam, interviewer_id: EMP_IDS.vpEng, interview_type: "video", scheduled_at: toCalendarISO(addDays(TODAY, 4)), duration_minutes: 45, location: undefined, meeting_link: "https://meet.example.com/liam-portfolio", status: "scheduled", rating: null, feedback: undefined, recommendation: undefined, created_by: "system", created_at: daysAgoIso(1), updated_at: daysAgoIso(1) },
+];
+
+// --- LMS: learning paths, badges, badge awards -----------------------
+//
+// Curated learning paths across the published / draft / archived
+// lifecycle, a gamification badge catalogue, and a feed of awards to
+// seeded employees (so the Badges page shows earned-vs-locked state).
+
+const LP_IDS = {
+  salesOnboarding: uuid("lms.learning_path:sales-onboarding"),
+  engFoundations: uuid("lms.learning_path:eng-foundations"),
+  managerEssentials: uuid("lms.learning_path:manager-essentials"),
+  securityCompliance: uuid("lms.learning_path:security-compliance"),
+  dataModeling: uuid("lms.learning_path:data-modeling"),
+  csBootcamp: uuid("lms.learning_path:cs-bootcamp"),
+};
+
+export const LEARNING_PATHS: LearningPath[] = [
+  { tenant_id: DEMO_TENANT_ID, id: LP_IDS.salesOnboarding, title: "Sales Onboarding", description: "Ramp new account executives on the product, pitch and CRM workflow.", status: "published", target_roles: ["Sales", "Account Executive"], estimated_duration_hours: 12, difficulty: "beginner", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LP_IDS.engFoundations, title: "Engineering Foundations", description: "Core services, the record engine and our development workflow.", status: "published", target_roles: ["Engineering"], estimated_duration_hours: 24, difficulty: "intermediate", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LP_IDS.managerEssentials, title: "Manager Essentials", description: "First-time manager fundamentals: 1:1s, feedback and goal-setting.", status: "published", target_roles: ["Management"], estimated_duration_hours: 8, difficulty: "beginner", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LP_IDS.securityCompliance, title: "Security & Compliance", description: "Annual security awareness, data handling and compliance training.", status: "published", target_roles: ["All Employees"], estimated_duration_hours: 4, difficulty: "beginner", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LP_IDS.dataModeling, title: "Advanced Data Modeling", description: "Designing ktypes, relationships and reporting models at scale.", status: "draft", target_roles: ["Engineering", "Data"], estimated_duration_hours: 16, difficulty: "advanced", created_by: "system", created_at: NOW_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LP_IDS.csBootcamp, title: "Customer Success Bootcamp", description: "Legacy onboarding programme for the customer success team.", status: "archived", target_roles: ["Customer Success"], estimated_duration_hours: 10, difficulty: "beginner", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+];
+
+function lpCourse(pathId: string, seed: string, courseId: string, order: number, mandatory: boolean): LearningPathCourse {
+  return { tenant_id: DEMO_TENANT_ID, id: uuid(`lms.learning_path_course:${seed}`), learning_path_id: pathId, course_id: courseId, sequence_order: order, is_mandatory: mandatory, prerequisite_course_ids: null };
+}
+
+export const LEARNING_PATH_COURSES_BY_PATH: Record<string, LearningPathCourse[]> = {
+  [LP_IDS.salesOnboarding]: [
+    lpCourse(LP_IDS.salesOnboarding, "sales-1", COURSE_IDS.c1, 1, true),
+    lpCourse(LP_IDS.salesOnboarding, "sales-2", COURSE_IDS.c3, 2, false),
+  ],
+  [LP_IDS.engFoundations]: [
+    lpCourse(LP_IDS.engFoundations, "eng-1", COURSE_IDS.c1, 1, true),
+    lpCourse(LP_IDS.engFoundations, "eng-2", COURSE_IDS.c2, 2, true),
+  ],
+  [LP_IDS.securityCompliance]: [
+    lpCourse(LP_IDS.securityCompliance, "sec-1", COURSE_IDS.c2, 1, true),
+  ],
+};
+
+const BADGE_IDS = {
+  firstCourse: uuid("lms.badge:first-course"),
+  pathfinder: uuid("lms.badge:pathfinder"),
+  compliancePro: uuid("lms.badge:compliance-pro"),
+  topPerformer: uuid("lms.badge:top-performer"),
+  streak: uuid("lms.badge:streak"),
+  mentor: uuid("lms.badge:mentor"),
+};
+
+export const BADGES: Badge[] = [
+  { tenant_id: DEMO_TENANT_ID, id: BADGE_IDS.firstCourse, name: "First Steps", description: "Awarded for completing your very first course.", icon: "footprints", criteria_type: "course_completion", criteria_value: { courses: 1 }, active: true, created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BADGE_IDS.pathfinder, name: "Pathfinder", description: "Complete an entire learning path end to end.", icon: "route", criteria_type: "path_completion", criteria_value: { paths: 1 }, active: true, created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BADGE_IDS.compliancePro, name: "Compliance Pro", description: "Finish the annual security & compliance training.", icon: "shield-check", criteria_type: "course_completion", criteria_value: { course: "Security & Compliance" }, active: true, created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BADGE_IDS.topPerformer, name: "Top Performer", description: "Score 90%+ on five graded assessments.", icon: "trophy", criteria_type: "assessment_score", criteria_value: { min_score: 90, count: 5 }, active: true, created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BADGE_IDS.streak, name: "On a Streak", description: "Learn something every day for 7 days running.", icon: "flame", criteria_type: "learning_streak", criteria_value: { days: 7 }, active: true, created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: BADGE_IDS.mentor, name: "Mentor", description: "Answer 10 questions in course discussions.", icon: "users", criteria_type: "discussion_answers", criteria_value: { answers: 10 }, active: false, created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+];
+
+export const BADGE_AWARDS: BadgeAward[] = [
+  { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:1"), user_id: EMP_IDS.ic1, badge_id: BADGE_IDS.firstCourse, earned_at: daysAgoIso(20) },
+  { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:2"), user_id: EMP_IDS.ic2, badge_id: BADGE_IDS.firstCourse, earned_at: daysAgoIso(18) },
+  { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:3"), user_id: EMP_IDS.ic3, badge_id: BADGE_IDS.firstCourse, earned_at: daysAgoIso(12) },
+  { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:4"), user_id: EMP_IDS.ic1, badge_id: BADGE_IDS.compliancePro, earned_at: daysAgoIso(10) },
+  { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:5"), user_id: EMP_IDS.mgrSales, badge_id: BADGE_IDS.compliancePro, earned_at: daysAgoIso(9) },
+  { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:6"), user_id: EMP_IDS.ic3, badge_id: BADGE_IDS.pathfinder, earned_at: daysAgoIso(5) },
+  { tenant_id: DEMO_TENANT_ID, id: uuid("lms.badge_award:7"), user_id: EMP_IDS.vpEng, badge_id: BADGE_IDS.topPerformer, earned_at: daysAgoIso(3) },
+];
+
+// --- KType Builder: tenant-authored custom objects -------------------
+//
+// Low-code objects the tenant has authored on top of the platform —
+// across the draft / active / archived lifecycle. Each carries a
+// believable field schema restricted to the safe field-type subset.
+
+export const TENANT_KTYPE_FIELD_LIMIT = 50;
+
+export const TENANT_KTYPES: TenantKType[] = [
+  {
+    tenant_id: DEMO_TENANT_ID,
+    name: "custom.asset",
+    version: 1,
+    title: "Asset",
+    description: "Company asset register — equipment, vehicles and IT hardware.",
+    status: "active",
+    created_by: "system",
+    created_at: LAST_MONTH_ISO,
+    updated_at: LAST_WEEK_ISO,
+    schema: {
+      name: "custom.asset",
+      version: 1,
+      fields: [
+        { name: "asset_tag", type: "string", required: true, max_length: 32 },
+        { name: "name", type: "string", required: true },
+        { name: "category", type: "enum", values: ["IT", "Furniture", "Vehicle", "Machinery"] },
+        { name: "purchase_date", type: "date" },
+        { name: "purchase_cost", type: "decimal" },
+        { name: "assigned_to", type: "ref", ktype: "hr.employee" },
+        { name: "in_service", type: "boolean", default: true },
+      ],
+      views: { list: { columns: ["asset_tag", "name", "category", "assigned_to"] } },
+    },
+  },
+  {
+    tenant_id: DEMO_TENANT_ID,
+    name: "custom.warranty_claim",
+    version: 2,
+    title: "Warranty Claim",
+    description: "Customer warranty claims raised against shipped products.",
+    status: "active",
+    created_by: "system",
+    created_at: LAST_MONTH_ISO,
+    updated_at: NOW_ISO,
+    schema: {
+      name: "custom.warranty_claim",
+      version: 2,
+      fields: [
+        { name: "claim_number", type: "string", required: true, max_length: 24 },
+        { name: "customer", type: "ref", ktype: "crm.organization" },
+        { name: "product", type: "string" },
+        { name: "claim_date", type: "date" },
+        { name: "description", type: "text" },
+        { name: "status", type: "enum", values: ["open", "approved", "rejected", "closed"] },
+        { name: "approved_amount", type: "decimal" },
+      ],
+      views: { list: { columns: ["claim_number", "customer", "status", "claim_date"] } },
+    },
+  },
+  {
+    tenant_id: DEMO_TENANT_ID,
+    name: "custom.site_visit",
+    version: 1,
+    title: "Site Visit",
+    description: "Field engineer site-visit log with follow-up tracking.",
+    status: "draft",
+    created_by: "system",
+    created_at: NOW_ISO,
+    updated_at: NOW_ISO,
+    schema: {
+      name: "custom.site_visit",
+      version: 1,
+      fields: [
+        { name: "visit_code", type: "string", required: true },
+        { name: "site", type: "string" },
+        { name: "visited_on", type: "date" },
+        { name: "engineer", type: "ref", ktype: "hr.employee" },
+        { name: "notes", type: "text" },
+        { name: "follow_up_required", type: "boolean" },
+      ],
+      views: { list: { columns: ["visit_code", "site", "visited_on", "engineer"] } },
+    },
+  },
+  {
+    tenant_id: DEMO_TENANT_ID,
+    name: "custom.contract",
+    version: 1,
+    title: "Customer Contract",
+    description: "Legacy contract object — superseded by the billing module.",
+    status: "archived",
+    created_by: "system",
+    created_at: LAST_MONTH_ISO,
+    updated_at: LAST_MONTH_ISO,
+    schema: {
+      name: "custom.contract",
+      version: 1,
+      fields: [
+        { name: "contract_number", type: "string", required: true },
+        { name: "customer", type: "ref", ktype: "crm.organization" },
+        { name: "start_date", type: "date" },
+        { name: "end_date", type: "date" },
+        { name: "annual_value", type: "decimal" },
+        { name: "auto_renew", type: "boolean" },
+      ],
+      views: { list: { columns: ["contract_number", "customer", "annual_value"] } },
+    },
+  },
+];
+
 function jl(account_code: string, debit: string, credit: string, memo = "", currency = "USD") {
   return { account_code, debit, credit, memo, currency };
 }
@@ -1652,6 +2465,225 @@ export function searchResults(query: string): SearchResponse {
 // --- Portal tickets (subset of helpdesk visible to a portal user) ----
 
 export const PORTAL_TICKETS: KRecord[] = TICKETS.slice(0, 3);
+
+// --- Demo-only raw-fetch fixtures ------------------------------------
+//
+// A handful of widgets (NotificationBell, the status/health dashboards
+// and the import wizard) talk to the REST surface with a bare fetch()
+// rather than the typed ApiClient, so they bypass the mock client and
+// 500 against the Vite proxy in demo mode. installPortalDemoFetch in
+// mock-api.ts intercepts those routes and serves the fixtures below.
+// The shapes mirror the interfaces declared locally in each page.
+
+export type DemoHealthStatus = "operational" | "degraded" | "down";
+
+export interface DemoNotification {
+  id: string;
+  type: string;
+  title: string;
+  body: string;
+  read: boolean;
+  created_at: string;
+}
+
+export const NOTIFICATIONS: DemoNotification[] = [
+  { id: uuid("notification:1"), type: "approval.requested", title: "Approval needed: Q3 Marketing budget", body: "Jordan submitted the Q3 Marketing budget ($120,000) for your approval.", read: false, created_at: daysAgoIso(0) },
+  { id: uuid("notification:2"), type: "invoice.paid", title: "Invoice INV-2026-0042 paid", body: "Globex Corporation paid $42,000.00 against invoice INV-2026-0042.", read: false, created_at: daysAgoIso(0) },
+  { id: uuid("notification:3"), type: "inventory.low_stock", title: "Low stock: Hex Bolt M6 (ACM-003)", body: "On-hand quantity (45) has dropped below the reorder point (60) at Main Warehouse.", read: false, created_at: daysAgoIso(1) },
+  { id: uuid("notification:4"), type: "helpdesk.ticket_assigned", title: "Ticket assigned to you: “Login link expired”", body: "A new support ticket from Initech was routed to your queue.", read: true, created_at: daysAgoIso(2) },
+  { id: uuid("notification:5"), type: "mfg.work_order_completed", title: "Work order WO-2026-0007 completed", body: "78 of 80 units passed QA; 2 were scrapped. The order is ready to close.", read: true, created_at: daysAgoIso(3) },
+  { id: uuid("notification:6"), type: "lms.badge_awarded", title: "You earned the “Compliance Pro” badge", body: "Nice work finishing the annual Security & Compliance path.", read: true, created_at: daysAgoIso(6) },
+];
+
+export interface DemoPublicHealthComponent {
+  name: string;
+  status: DemoHealthStatus;
+  latency_ms: number;
+}
+
+export interface DemoPublicHealth {
+  status: DemoHealthStatus;
+  component_availability_percent: number;
+  components: DemoPublicHealthComponent[];
+  incidents: { summary: string; at: string }[];
+  checked_at: string;
+}
+
+export const PUBLIC_HEALTH: DemoPublicHealth = {
+  status: "operational",
+  component_availability_percent: 100,
+  checked_at: NOW_ISO,
+  components: [
+    { name: "database", status: "operational", latency_ms: 3.2 },
+    { name: "cache", status: "operational", latency_ms: 0.8 },
+    { name: "event_bus", status: "operational", latency_ms: 5.1 },
+    { name: "object_storage", status: "operational", latency_ms: 24.6 },
+    { name: "event_delivery", status: "operational", latency_ms: 12.0 },
+    { name: "background_jobs", status: "operational", latency_ms: 2.4 },
+  ],
+  incidents: [
+    { summary: "Scaled background-job workers from 4 to 6 to absorb month-end payroll load.", at: daysAgoIso(2) },
+    { summary: "Database connection pool widened to 100 connections.", at: daysAgoIso(9) },
+  ],
+};
+
+export interface DemoComponentHealth {
+  name: string;
+  status: DemoHealthStatus;
+  latency_ms: number;
+  error?: string;
+  detail?: Record<string, unknown>;
+}
+
+export interface DemoAdminHealth {
+  system: {
+    status: DemoHealthStatus;
+    components: DemoComponentHealth[];
+    checked_at: string;
+  };
+  cells: {
+    id: string;
+    region: string;
+    max_tenants: number;
+    tenant_count: number;
+    cpu_pct: number;
+    mem_pct: number;
+    conn_saturation_pct: number;
+    utilization_pct: number;
+  }[];
+  pool: {
+    max_conns: number;
+    total_conns: number;
+    acquired_conns: number;
+    idle_conns: number;
+    saturation_percent: number;
+  };
+  top_tenants: { tenant_id: string; name: string; api_calls: number }[];
+}
+
+export const ADMIN_HEALTH: DemoAdminHealth = {
+  system: {
+    status: "operational",
+    checked_at: NOW_ISO,
+    components: [
+      { name: "postgres", status: "operational", latency_ms: 3.2, detail: { open_connections: 18, max_connections: 100 } },
+      { name: "redis", status: "operational", latency_ms: 0.8, detail: { hit_rate: 0.97 } },
+      { name: "nats", status: "operational", latency_ms: 5.1, detail: { consumers: 12 } },
+      { name: "object_storage", status: "operational", latency_ms: 24.6, detail: { bucket: "kapp-prod-assets" } },
+      { name: "outbox", status: "operational", latency_ms: 2.4, detail: { undelivered_events: 0 } },
+      { name: "scheduler", status: "operational", latency_ms: 1.1, detail: { due_jobs: 3 } },
+    ],
+  },
+  pool: {
+    max_conns: 100,
+    total_conns: 42,
+    acquired_conns: 18,
+    idle_conns: 24,
+    saturation_percent: 42,
+  },
+  cells: [
+    { id: "cell-us-east-1", region: "us-east-1", max_tenants: 500, tenant_count: 318, cpu_pct: 47, mem_pct: 61, conn_saturation_pct: 42, utilization_pct: 64 },
+    { id: "cell-us-west-2", region: "us-west-2", max_tenants: 500, tenant_count: 212, cpu_pct: 33, mem_pct: 44, conn_saturation_pct: 28, utilization_pct: 42 },
+    { id: "cell-eu-central-1", region: "eu-central-1", max_tenants: 300, tenant_count: 256, cpu_pct: 58, mem_pct: 72, conn_saturation_pct: 66, utilization_pct: 85 },
+  ],
+  top_tenants: [
+    { tenant_id: uuid("tenant:globex"), name: "Globex Corporation", api_calls: 184293 },
+    { tenant_id: uuid("tenant:initech"), name: "Initech", api_calls: 142117 },
+    { tenant_id: uuid("tenant:hooli"), name: "Hooli", api_calls: 98432 },
+    { tenant_id: uuid("tenant:umbrella"), name: "Umbrella Inc.", api_calls: 54028 },
+    { tenant_id: DEMO_TENANT_ID, name: "Acme Corp", api_calls: 31884 },
+  ],
+};
+
+export interface DemoImportJob {
+  id: string;
+  tenant_id: string;
+  source_type: string;
+  status: string;
+  config: Record<string, unknown>;
+  mapping: Record<string, unknown>;
+  progress: Record<string, unknown>;
+  errors: unknown;
+  reconciliation: Record<string, unknown>;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+}
+
+export const IMPORT_JOBS: DemoImportJob[] = [
+  {
+    id: uuid("import:1"),
+    tenant_id: DEMO_TENANT_ID,
+    source_type: "quickbooks",
+    status: "completed",
+    config: { realm_id: "1234567890" },
+    mapping: { entities: [{ source: "Customer", target_ktype: "crm.organization" }, { source: "Invoice", target_ktype: "sales.invoice" }] },
+    progress: { total: 1284, imported: 1284 },
+    errors: [],
+    reconciliation: { created: 1208, updated: 76, skipped: 0 },
+    created_by: "system",
+    created_at: daysAgoIso(12),
+    updated_at: daysAgoIso(12),
+    completed_at: daysAgoIso(12),
+  },
+  {
+    id: uuid("import:2"),
+    tenant_id: DEMO_TENANT_ID,
+    source_type: "csv",
+    status: "reconciling",
+    config: { format: "csv", entity: "Products", target_ktype: "inventory.item" },
+    mapping: { entities: [{ source: "Products", target_ktype: "inventory.item" }] },
+    progress: { total: 342, staged: 342 },
+    errors: [],
+    reconciliation: { created: 318, updated: 22, skipped: 2 },
+    created_by: "system",
+    created_at: daysAgoIso(1),
+    updated_at: daysAgoIso(0),
+    completed_at: null,
+  },
+  {
+    id: uuid("import:3"),
+    tenant_id: DEMO_TENANT_ID,
+    source_type: "frappe",
+    status: "mapping",
+    config: { base_url: "https://erp.acme.example", doctypes: [{ name: "Supplier" }, { name: "Purchase Order" }] },
+    mapping: { entities: [] },
+    progress: { discovered: 2 },
+    errors: [],
+    reconciliation: {},
+    created_by: "system",
+    created_at: daysAgoIso(0),
+    updated_at: daysAgoIso(0),
+    completed_at: null,
+  },
+  {
+    id: uuid("import:4"),
+    tenant_id: DEMO_TENANT_ID,
+    source_type: "xero",
+    status: "failed",
+    config: { xero_tenant_id: "abc-123" },
+    mapping: { entities: [{ source: "Contacts", target_ktype: "crm.organization" }] },
+    progress: { total: 0 },
+    errors: [{ code: "auth_expired", message: "The Xero access token expired before discovery completed." }],
+    reconciliation: {},
+    created_by: "system",
+    created_at: daysAgoIso(5),
+    updated_at: daysAgoIso(5),
+    completed_at: null,
+  },
+];
+
+export interface DemoStagingRow {
+  id: number;
+  job_id: string;
+  source_type: string;
+  source_id?: string;
+  target_ktype: string;
+  data: Record<string, unknown>;
+  validation_errors: Array<{ field?: string; code: string; message: string }>;
+  status: string;
+}
 
 // --- Dashboard summary ------------------------------------------------
 

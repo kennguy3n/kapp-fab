@@ -11,6 +11,22 @@ import type {
   Approval,
   ApiClient,
   AuditEntry,
+  BOM,
+  Budget,
+  BudgetLine,
+  BudgetLineInput,
+  BudgetVarianceReport,
+  CapacityPlan,
+  CreateBOMInput,
+  CreateBudgetInput,
+  CreateRoutingInput,
+  CreateSubcontractOrderInput,
+  CreateWorkCenterInput,
+  CreateWorkOrderInput,
+  UpdateBudgetInput,
+  CycleCountLine,
+  CycleCountSession,
+  CycleCountSessionWithLines,
   DashboardSummary,
   ExchangeRate,
   FinanceAccount,
@@ -30,9 +46,30 @@ import type {
   InventoryItem,
   InventoryValuationReport,
   InventoryWarehouse,
+  Interview,
+  CompleteInterviewInput,
+  CreateInterviewInput,
+  JobApplication,
+  CreateApplicationInput,
+  UpdateApplicationInput,
+  JobCard,
+  JobOpening,
+  JobOpeningInput,
   JournalEntry,
   KRecord,
   KType,
+  LearningPath,
+  LearningPathCourse,
+  Badge,
+  BadgeAward,
+  LandedCostCharge,
+  LandedCostPostResult,
+  LandedCostTarget,
+  LandedCostVoucher,
+  LandedCostVoucherWithLines,
+  UpsertLandedCostVoucherInput,
+  UpsertLandedCostChargeInput,
+  UpsertLandedCostTargetInput,
   MarketplaceExtension,
   MarketplaceGetExtensionResponse,
   MarketplaceInstallation,
@@ -42,17 +79,24 @@ import type {
   MarketplaceListVersionsResponse,
   MarketplaceRatingSummary,
   MarketplaceUpdateSettingsResponse,
+  MRPRun,
   PayslipGenerateResult,
   Plan,
   PlacementPolicy,
   RetentionPolicy,
   ReportResult,
+  Routing,
+  RunMRPInput,
   SLAPolicy,
   SavedReport,
   SavedView,
   SearchResponse,
   StockLevel,
+  SubcontractOrder,
   Tenant,
+  TenantKType,
+  TenantKTypeStatus,
+  UpsertTenantKTypeInput,
   TenantFeaturesResponse,
   TenantUsageHistoryResponse,
   TenantUsageResponse,
@@ -61,6 +105,8 @@ import type {
   UpgradeMarketplaceInstallationResponse,
   Webhook,
   WebhookDelivery,
+  WorkCenter,
+  WorkOrder,
 } from "@kapp/client";
 
 import {
@@ -69,7 +115,15 @@ import {
   AUDIT_LOG,
   BANK_FEED_RULES_FIXTURE,
   BANK_FEED_SUGGESTIONS_FIXTURE,
+  BOMS,
+  BUDGETS,
+  BUDGET_LINES_BY_ID,
+  buildBudgetVariance,
+  buildCapacityPlan,
+  CYCLE_COUNT_LINES_BY_SESSION,
+  CYCLE_COUNT_SESSIONS,
   DASHBOARD_SUMMARY,
+  DEMO_BASE_CURRENCY,
   DEMO_TENANT_ID,
   EXCHANGE_RATES,
   FINANCE_ACCOUNTS,
@@ -80,20 +134,40 @@ import {
   INVENTORY_ITEMS,
   INVENTORY_VALUATION,
   INVENTORY_WAREHOUSES,
+  JOB_APPLICATIONS,
+  JOB_CARDS_BY_WO,
+  JOB_OPENINGS,
+  INTERVIEWS,
   JOURNAL_ENTRIES,
+  LEARNING_PATHS,
+  LEARNING_PATH_COURSES_BY_PATH,
+  BADGES,
+  BADGE_AWARDS,
+  LANDED_COST_CHARGES_BY_VOUCHER,
+  LANDED_COST_TARGETS_BY_VOUCHER,
+  LANDED_COST_VOUCHERS,
+  TENANT_KTYPES,
+  TENANT_KTYPE_FIELD_LIMIT,
   MARKETPLACE_EXTENSIONS,
   MARKETPLACE_INSTALLATIONS,
   MARKETPLACE_MY_RATINGS,
   MARKETPLACE_VERSIONS,
+  MRP_RUNS,
+  NOTIFICATIONS,
+  PUBLIC_HEALTH,
+  ADMIN_HEALTH,
+  IMPORT_JOBS,
   PLACEMENT_POLICY,
   PLANS,
   PORTAL_TICKETS,
   RECORDS_BY_KTYPE,
   RETENTION_POLICIES,
+  ROUTINGS,
   SAVED_REPORTS,
   SAVED_VIEWS_BY_KTYPE,
   SLA_POLICIES,
   STOCK_LEVELS,
+  SUBCONTRACT_ORDERS,
   TENANTS,
   TENANT_FEATURES,
   TENANT_USAGE,
@@ -101,6 +175,8 @@ import {
   TRIAL_BALANCE,
   WEBHOOKS,
   WEBHOOK_DELIVERIES,
+  WORK_CENTERS,
+  WORK_ORDERS,
   getKTypeByName,
   searchResults,
   widgetResultForQuery,
@@ -142,6 +218,75 @@ for (const [k, v] of Object.entries(RECORDS_BY_KTYPE)) {
 // demo: accepting marks the matched bank line and clears its candidate
 // suggestions, rejecting just clears the one candidate.
 let bankFeedSuggestions = [...BANK_FEED_SUGGESTIONS_FIXTURE];
+
+// Mutable budget demo state so create / update / delete + line edits
+// round-trip inside the UI. Cloned from the fixtures so reloading the
+// page resets to the seeded plans.
+const budgets: Budget[] = BUDGETS.map((b) => ({ ...b }));
+const budgetLines: Record<string, BudgetLine[]> = {};
+for (const [k, v] of Object.entries(BUDGET_LINES_BY_ID)) {
+  budgetLines[k] = v.map((l) => ({ ...l }));
+}
+
+// Mutable manufacturing demo state so create + lifecycle transitions
+// (release / start / complete / issue / receive …) round-trip in the
+// UI. Cloned from the fixtures so a page reload resets to the seed.
+const workCenters: WorkCenter[] = WORK_CENTERS.map((w) => ({ ...w }));
+const boms: BOM[] = BOMS.map((b) => ({ ...b }));
+const routings: Routing[] = ROUTINGS.map((r) => ({ ...r }));
+const workOrders: WorkOrder[] = WORK_ORDERS.map((w) => ({ ...w }));
+const jobCardsByWO: Record<string, JobCard[]> = {};
+for (const [k, v] of Object.entries(JOB_CARDS_BY_WO)) {
+  jobCardsByWO[k] = v.map((c) => ({ ...c }));
+}
+const mrpRuns: MRPRun[] = MRP_RUNS.map((r) => ({ ...r }));
+const subcontractOrders: SubcontractOrder[] = SUBCONTRACT_ORDERS.map((o) => ({
+  ...o,
+}));
+
+// Mutable inventory demo state for landed-cost vouchers and
+// cycle-count sessions so create + allocate / post / count edits
+// round-trip in the UI. Cloned from the fixtures so a reload resets.
+const landedCostVouchers: LandedCostVoucher[] = LANDED_COST_VOUCHERS.map(
+  (v) => ({ ...v }),
+);
+const landedCostCharges: Record<string, LandedCostCharge[]> = {};
+for (const [k, v] of Object.entries(LANDED_COST_CHARGES_BY_VOUCHER)) {
+  landedCostCharges[k] = v.map((c) => ({ ...c }));
+}
+const landedCostTargets: Record<string, LandedCostTarget[]> = {};
+for (const [k, v] of Object.entries(LANDED_COST_TARGETS_BY_VOUCHER)) {
+  landedCostTargets[k] = v.map((t) => ({ ...t }));
+}
+const cycleCountSessions: CycleCountSession[] = CYCLE_COUNT_SESSIONS.map(
+  (s) => ({ ...s }),
+);
+const cycleCountLines: Record<string, CycleCountLine[]> = {};
+for (const [k, v] of Object.entries(CYCLE_COUNT_LINES_BY_SESSION)) {
+  cycleCountLines[k] = v.map((l) => ({ ...l }));
+}
+
+// Mutable recruitment demo state so create + lifecycle transitions
+// (publish / close, advance / reject, schedule / complete interview)
+// round-trip in the UI. Cloned from the fixtures so a reload resets.
+const jobOpenings: JobOpening[] = JOB_OPENINGS.map((o) => ({ ...o }));
+const applications: JobApplication[] = JOB_APPLICATIONS.map((a) => ({ ...a }));
+const interviews: Interview[] = INTERVIEWS.map((i) => ({ ...i }));
+
+// Mutable LMS demo state so creating a learning path round-trips in
+// the UI. Cloned from the fixtures so a reload resets.
+const learningPaths: LearningPath[] = LEARNING_PATHS.map((p) => ({ ...p }));
+
+// Mutable KType-builder demo state so authoring a custom object and
+// changing its status round-trips in the UI. Cloned so a reload resets.
+const tenantKTypes: TenantKType[] = TENANT_KTYPES.map((k) => ({ ...k }));
+
+// Mutable demo state for the raw-fetch widgets (NotificationBell, the
+// import wizard). Cloned from the fixtures so marking notifications
+// read / creating an import round-trips for the session and a reload
+// resets to the seed. See installPortalDemoFetch below.
+const demoNotifications = NOTIFICATIONS.map((n) => ({ ...n }));
+const demoImportJobs = IMPORT_JOBS.map((j) => ({ ...j }));
 
 // Mutable marketplace demo state so install / uninstall / upgrade /
 // rate actions round-trip inside the UI. Cloned from the fixtures so
@@ -457,6 +602,99 @@ const handlers = {
     list[idx] = { ...list[idx], data: { ...list[idx].data, status: "posted" }, updated_at: nowIso() };
     return delay<KRecord>(list[idx]);
   },
+  // --- Finance: budgets -----------------------------------------------
+  listBudgets: () => delay<Budget[]>([...budgets]),
+  getBudget: (id: string) =>
+    delay<Budget>(budgets.find((b) => b.id === id) ?? budgets[0]),
+  createBudget: (input: CreateBudgetInput) => {
+    const now = nowIso();
+    const b: Budget = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      name: input.name,
+      fiscal_year: input.fiscal_year,
+      status: input.status ?? "draft",
+      cost_center: input.cost_center,
+      notes: input.notes,
+      variance_threshold: input.variance_threshold ?? null,
+      created_by: "demo-user",
+      created_at: now,
+      updated_at: now,
+    };
+    budgets.unshift(b);
+    budgetLines[b.id] = [];
+    return delay<Budget>(b);
+  },
+  updateBudget: (id: string, input: UpdateBudgetInput) => {
+    const idx = budgets.findIndex((b) => b.id === id);
+    if (idx === -1) return delay<Budget>(budgets[0]);
+    budgets[idx] = {
+      ...budgets[idx],
+      name: input.name,
+      status: input.status,
+      cost_center: input.cost_center,
+      notes: input.notes,
+      variance_threshold: input.variance_threshold ?? null,
+      updated_at: nowIso(),
+    };
+    return delay<Budget>(budgets[idx]);
+  },
+  deleteBudget: (id: string) => {
+    const idx = budgets.findIndex((b) => b.id === id);
+    if (idx !== -1) budgets.splice(idx, 1);
+    delete budgetLines[id];
+    return delay<void>(undefined as unknown as void);
+  },
+  listBudgetLines: (budgetId: string) =>
+    delay<BudgetLine[]>([...(budgetLines[budgetId] ?? [])]),
+  upsertBudgetLine: (budgetId: string, input: BudgetLineInput) => {
+    const list = budgetLines[budgetId] ?? (budgetLines[budgetId] = []);
+    const months = input.months.slice(0, 12);
+    const annual = months
+      .reduce((sum, m) => sum + (Number(m) || 0), 0)
+      .toFixed(2);
+    const now = nowIso();
+    if (input.id) {
+      const idx = list.findIndex((l) => l.id === input.id);
+      if (idx !== -1) {
+        list[idx] = {
+          ...list[idx],
+          account_code: input.account_code,
+          cost_center: input.cost_center,
+          months,
+          annual_total: annual,
+          updated_at: now,
+        };
+        return delay<BudgetLine>(list[idx]);
+      }
+    }
+    const line: BudgetLine = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      budget_id: budgetId,
+      account_code: input.account_code,
+      cost_center: input.cost_center,
+      months,
+      annual_total: annual,
+      created_at: now,
+      updated_at: now,
+    };
+    list.push(line);
+    return delay<BudgetLine>(line);
+  },
+  deleteBudgetLine: (budgetId: string, lineId: string) => {
+    const list = budgetLines[budgetId] ?? [];
+    const idx = list.findIndex((l) => l.id === lineId);
+    if (idx !== -1) list.splice(idx, 1);
+    return delay<void>(undefined as unknown as void);
+  },
+  budgetVariance: (budgetId: string) => {
+    const b = budgets.find((x) => x.id === budgetId) ?? budgets[0];
+    return delay<BudgetVarianceReport>(
+      buildBudgetVariance(b, budgetLines[b.id] ?? []),
+    );
+  },
+
   listExchangeRates: () => delay<{ rates: ExchangeRate[] }>({ rates: [...EXCHANGE_RATES] }),
   upsertExchangeRate: (input: Partial<ExchangeRate>) => {
     const er: ExchangeRate = {
@@ -479,6 +717,1177 @@ const handlers = {
   listStockLevels: () => delay<StockLevel[]>([...STOCK_LEVELS]),
   getInventoryValuation: () => delay<InventoryValuationReport>({ ...INVENTORY_VALUATION }),
   listInventoryBatchesByItem: () => delay<KRecord[]>([]),
+
+  // --- Manufacturing: work centers ------------------------------------
+  listWorkCenters: (status?: string) =>
+    delay<WorkCenter[]>(
+      workCenters.filter((w) => !status || w.status === status).map((w) => ({ ...w })),
+    ),
+  getWorkCenter: (id: string) =>
+    delay<WorkCenter>(workCenters.find((w) => w.id === id) ?? workCenters[0]),
+  createWorkCenter: (input: CreateWorkCenterInput) => {
+    const now = nowIso();
+    const wc: WorkCenter = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      name: input.name,
+      capacity_per_hour: input.capacity_per_hour,
+      operating_hours_per_day: input.operating_hours_per_day,
+      efficiency_percent: input.efficiency_percent,
+      status: "active",
+      notes: input.notes,
+      created_by: "demo-user",
+      created_at: now,
+      updated_at: now,
+    };
+    workCenters.unshift(wc);
+    return delay<WorkCenter>(wc);
+  },
+  setWorkCenterStatus: (id: string, status: string) => {
+    const wc = workCenters.find((w) => w.id === id);
+    if (wc) {
+      wc.status = status as WorkCenter["status"];
+      wc.updated_at = nowIso();
+    }
+    return delay<WorkCenter>(wc ?? workCenters[0]);
+  },
+
+  // --- Manufacturing: BOMs --------------------------------------------
+  listBOMs: (status?: string) =>
+    delay<BOM[]>(
+      boms
+        .filter((b) => !status || b.status === status)
+        .map(({ components: _omit, ...rest }) => ({ ...rest })),
+    ),
+  getBOM: (id: string) => {
+    const b = boms.find((x) => x.id === id) ?? boms[0];
+    return delay<BOM>({ ...b, components: (b.components ?? []).map((c) => ({ ...c })) });
+  },
+  createBOM: (input: CreateBOMInput) => {
+    const now = nowIso();
+    const id = nextId();
+    const activate = input.activate ?? false;
+    if (activate) {
+      // Activating a new BOM demotes any currently-active BOM for the
+      // same item to obsolete, mirroring the server's single-active rule.
+      boms.forEach((b) => {
+        if (b.item_id === input.item_id && b.status === "active") {
+          b.status = "obsolete";
+          b.updated_at = now;
+        }
+      });
+    }
+    const bom: BOM = {
+      tenant_id: DEMO_TENANT_ID,
+      id,
+      item_id: input.item_id,
+      version: input.version,
+      status: activate ? "active" : "draft",
+      output_qty: input.output_qty,
+      uom: input.uom,
+      notes: input.notes,
+      created_by: "demo-user",
+      created_at: now,
+      updated_at: now,
+      components: input.components.map((c, i) => ({
+        bom_id: id,
+        component_item_id: c.component_item_id,
+        qty: c.qty,
+        uom: c.uom,
+        scrap_percent: c.scrap_percent ?? null,
+        sort_order: i + 1,
+      })),
+    };
+    boms.unshift(bom);
+    return delay<BOM>(bom);
+  },
+  setBOMStatus: (id: string, status: string) => {
+    const b = boms.find((x) => x.id === id);
+    if (b) {
+      const next = status as BOM["status"];
+      if (next === "active") {
+        boms.forEach((other) => {
+          if (other.item_id === b.item_id && other.id !== b.id && other.status === "active") {
+            other.status = "obsolete";
+            other.updated_at = nowIso();
+          }
+        });
+      }
+      b.status = next;
+      b.updated_at = nowIso();
+    }
+    return delay<BOM>(b ?? boms[0]);
+  },
+
+  // --- Manufacturing: routings ----------------------------------------
+  listRoutings: (status?: string) =>
+    delay<Routing[]>(
+      routings
+        .filter((r) => !status || r.status === status)
+        .map(({ operations: _omit, ...rest }) => ({ ...rest })),
+    ),
+  getRouting: (id: string) => {
+    const r = routings.find((x) => x.id === id) ?? routings[0];
+    return delay<Routing>({ ...r, operations: (r.operations ?? []).map((o) => ({ ...o })) });
+  },
+  createRouting: (input: CreateRoutingInput) => {
+    const now = nowIso();
+    const id = nextId();
+    const activate = input.activate ?? false;
+    if (activate) {
+      routings.forEach((r) => {
+        if (r.item_id === input.item_id && r.status === "active") {
+          r.status = "obsolete";
+          r.updated_at = now;
+        }
+      });
+    }
+    const routing: Routing = {
+      tenant_id: DEMO_TENANT_ID,
+      id,
+      item_id: input.item_id,
+      version: input.version,
+      status: activate ? "active" : "draft",
+      notes: input.notes,
+      created_by: "demo-user",
+      created_at: now,
+      updated_at: now,
+      operations: input.operations.map((o, i) => ({
+        routing_id: id,
+        sequence: i + 1,
+        operation_name: o.operation_name,
+        work_center_id: o.work_center_id,
+        setup_time_minutes: o.setup_time_minutes,
+        cycle_time_minutes: o.cycle_time_minutes,
+        description: o.description,
+      })),
+    };
+    routings.unshift(routing);
+    return delay<Routing>(routing);
+  },
+  setRoutingStatus: (id: string, status: string) => {
+    const r = routings.find((x) => x.id === id);
+    if (r) {
+      const next = status as Routing["status"];
+      if (next === "active") {
+        routings.forEach((other) => {
+          if (other.item_id === r.item_id && other.id !== r.id && other.status === "active") {
+            other.status = "obsolete";
+            other.updated_at = nowIso();
+          }
+        });
+      }
+      r.status = next;
+      r.updated_at = nowIso();
+    }
+    return delay<Routing>(r ?? routings[0]);
+  },
+
+  // --- Manufacturing: capacity ----------------------------------------
+  capacityPlan: (params?: { start?: string; end?: string }) => {
+    const today = nowIso().slice(0, 10);
+    const start = params?.start ?? today;
+    const end = params?.end ?? start;
+    return delay<CapacityPlan>(buildCapacityPlan(start, end));
+  },
+
+  // --- Manufacturing: work orders -------------------------------------
+  listWorkOrders: (status?: string) =>
+    delay<WorkOrder[]>(
+      workOrders.filter((w) => !status || w.status === status).map((w) => ({ ...w })),
+    ),
+  getWorkOrder: (id: string) =>
+    delay<WorkOrder>(workOrders.find((w) => w.id === id) ?? workOrders[0]),
+  createWorkOrder: (input: CreateWorkOrderInput) => {
+    const now = nowIso();
+    const wo: WorkOrder = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      item_id: input.item_id,
+      bom_id: null,
+      routing_id: null,
+      warehouse_id: input.warehouse_id,
+      planned_qty: input.planned_qty,
+      actual_qty: null,
+      status: "draft",
+      scheduled_start: input.scheduled_start ?? null,
+      scheduled_end: input.scheduled_end ?? null,
+      started_at: null,
+      completed_at: null,
+      notes: input.notes,
+      created_by: "demo-user",
+      created_at: now,
+      updated_at: now,
+    };
+    workOrders.unshift(wo);
+    return delay<WorkOrder>(wo);
+  },
+  releaseWorkOrder: (id: string) => {
+    const wo = workOrders.find((w) => w.id === id);
+    if (wo) {
+      const activeBom = boms.find((b) => b.item_id === wo.item_id && b.status === "active");
+      const activeRouting = routings.find(
+        (r) => r.item_id === wo.item_id && r.status === "active",
+      );
+      wo.bom_id = activeBom?.id ?? wo.bom_id ?? null;
+      wo.routing_id = activeRouting?.id ?? wo.routing_id ?? null;
+      wo.status = "released";
+      wo.updated_at = nowIso();
+      // Job cards are generated one-per-operation when a routing exists.
+      if (activeRouting?.operations && !jobCardsByWO[wo.id]) {
+        jobCardsByWO[wo.id] = activeRouting.operations.map((op) => ({
+          tenant_id: DEMO_TENANT_ID,
+          id: nextId(),
+          work_order_id: wo.id,
+          routing_operation_seq: op.sequence,
+          work_center_id: op.work_center_id,
+          status: "pending",
+          planned_start: null,
+          planned_end: null,
+          actual_start: null,
+          actual_end: null,
+          operator_id: null,
+          qty_produced: "0",
+          qty_rejected: "0",
+          created_at: nowIso(),
+          updated_at: nowIso(),
+        }));
+      }
+    }
+    return delay<WorkOrder>(wo ?? workOrders[0]);
+  },
+  startWorkOrder: (id: string) => {
+    const wo = workOrders.find((w) => w.id === id);
+    if (wo) {
+      wo.status = "in_progress";
+      wo.started_at = nowIso();
+      wo.updated_at = nowIso();
+    }
+    return delay<WorkOrder>(wo ?? workOrders[0]);
+  },
+  completeWorkOrder: (id: string, actualQty?: string) => {
+    const wo = workOrders.find((w) => w.id === id);
+    if (wo) {
+      wo.status = "completed";
+      wo.actual_qty = actualQty ?? wo.planned_qty;
+      wo.completed_at = nowIso();
+      wo.updated_at = nowIso();
+    }
+    return delay<WorkOrder>(wo ?? workOrders[0]);
+  },
+  cancelWorkOrder: (id: string) => {
+    const wo = workOrders.find((w) => w.id === id);
+    if (wo) {
+      wo.status = "cancelled";
+      wo.updated_at = nowIso();
+    }
+    return delay<WorkOrder>(wo ?? workOrders[0]);
+  },
+  closeWorkOrder: (id: string) => {
+    const wo = workOrders.find((w) => w.id === id);
+    if (wo) {
+      wo.status = "closed";
+      wo.updated_at = nowIso();
+    }
+    return delay<WorkOrder>(wo ?? workOrders[0]);
+  },
+
+  // --- Manufacturing: job cards ---------------------------------------
+  listJobCards: (workOrderId: string) =>
+    delay<JobCard[]>((jobCardsByWO[workOrderId] ?? []).map((c) => ({ ...c }))),
+  getJobCard: (id: string) => {
+    for (const list of Object.values(jobCardsByWO)) {
+      const found = list.find((c) => c.id === id);
+      if (found) return delay<JobCard>({ ...found });
+    }
+    return delay<JobCard>(null as unknown as JobCard);
+  },
+  startJobCard: (id: string) => {
+    for (const list of Object.values(jobCardsByWO)) {
+      const card = list.find((c) => c.id === id);
+      if (card) {
+        card.status = "in_progress";
+        card.actual_start = nowIso();
+        card.updated_at = nowIso();
+        return delay<JobCard>({ ...card });
+      }
+    }
+    return delay<JobCard>(null as unknown as JobCard);
+  },
+  completeJobCard: (
+    id: string,
+    input?: { qty_produced?: string; qty_rejected?: string; notes?: string },
+  ) => {
+    for (const [woId, list] of Object.entries(jobCardsByWO)) {
+      const card = list.find((c) => c.id === id);
+      if (card) {
+        card.status = "completed";
+        card.actual_end = nowIso();
+        if (input?.qty_produced) card.qty_produced = input.qty_produced;
+        if (input?.qty_rejected) card.qty_rejected = input.qty_rejected;
+        card.updated_at = nowIso();
+        // Completing the last open card auto-completes the work order.
+        if (list.every((c) => c.status === "completed")) {
+          const wo = workOrders.find((w) => w.id === woId);
+          if (wo && (wo.status === "released" || wo.status === "in_progress")) {
+            wo.status = "completed";
+            wo.actual_qty = wo.planned_qty;
+            wo.completed_at = nowIso();
+            wo.updated_at = nowIso();
+          }
+        }
+        return delay<JobCard>({ ...card });
+      }
+    }
+    return delay<JobCard>(null as unknown as JobCard);
+  },
+
+  // --- Manufacturing: MRP ---------------------------------------------
+  listMRPRuns: () =>
+    delay<MRPRun[]>(
+      mrpRuns.map(({ demand_lines: _d, planned_orders: _p, ...rest }) => ({ ...rest })),
+    ),
+  getMRPRun: (id: string) => {
+    const run = mrpRuns.find((r) => r.id === id) ?? mrpRuns[0];
+    return delay<MRPRun>({
+      ...run,
+      demand_lines: (run.demand_lines ?? []).map((d) => ({ ...d })),
+      planned_orders: (run.planned_orders ?? []).map((p) => ({ ...p })),
+    });
+  },
+  runMRP: (input: RunMRPInput) => {
+    const now = nowIso();
+    const runId = nextId();
+    const buyLead = input.buy_lead_time_days && input.buy_lead_time_days > 0
+      ? input.buy_lead_time_days
+      : 7;
+    const shift = (iso: string, days: number) => {
+      const d = new Date(`${iso}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() - days);
+      return d.toISOString().slice(0, 10);
+    };
+    const demandLines = (input.demand ?? []).map((d) => ({
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      run_id: runId,
+      item_id: d.item_id,
+      qty: d.qty,
+      due_date: d.due_date,
+      source: d.source ?? ("manual" as const),
+      source_ref: d.source_ref,
+      created_at: now,
+    }));
+    const plannedOrders: MRPRun["planned_orders"] = [];
+    demandLines.forEach((d) => {
+      const activeBom = boms.find((b) => b.item_id === d.item_id && b.status === "active");
+      if (activeBom) {
+        plannedOrders.push({
+          tenant_id: DEMO_TENANT_ID,
+          id: nextId(),
+          run_id: runId,
+          item_id: d.item_id,
+          order_type: "make",
+          qty: d.qty,
+          due_date: d.due_date,
+          suggested_start_date: shift(d.due_date, 5),
+          explosion_level: 0,
+          bom_id: activeBom.id,
+          routing_id: null,
+          lead_time_days: 5,
+          created_at: now,
+        });
+        (activeBom.components ?? []).forEach((c) => {
+          plannedOrders.push({
+            tenant_id: DEMO_TENANT_ID,
+            id: nextId(),
+            run_id: runId,
+            item_id: c.component_item_id,
+            order_type: "buy",
+            qty: String(Number(c.qty) * Number(d.qty)),
+            due_date: shift(d.due_date, 5),
+            suggested_start_date: shift(d.due_date, 5 + buyLead),
+            explosion_level: 1,
+            bom_id: null,
+            routing_id: null,
+            lead_time_days: buyLead,
+            created_at: now,
+          });
+        });
+      } else {
+        plannedOrders.push({
+          tenant_id: DEMO_TENANT_ID,
+          id: nextId(),
+          run_id: runId,
+          item_id: d.item_id,
+          order_type: "buy",
+          qty: d.qty,
+          due_date: d.due_date,
+          suggested_start_date: shift(d.due_date, buyLead),
+          explosion_level: 0,
+          bom_id: null,
+          routing_id: null,
+          lead_time_days: buyLead,
+          created_at: now,
+        });
+      }
+    });
+    const makeCount = plannedOrders.filter((p) => p.order_type === "make").length;
+    const run: MRPRun = {
+      tenant_id: DEMO_TENANT_ID,
+      id: runId,
+      status: "completed",
+      horizon_start: input.horizon_start,
+      horizon_end: input.horizon_end,
+      include_min_stock: input.include_min_stock ?? false,
+      buy_lead_time_days: buyLead,
+      demand_line_count: demandLines.length,
+      planned_order_count: plannedOrders.length,
+      make_order_count: makeCount,
+      buy_order_count: plannedOrders.length - makeCount,
+      notes: input.notes,
+      created_by: "demo-user",
+      created_at: now,
+      updated_at: now,
+      demand_lines: demandLines,
+      planned_orders: plannedOrders,
+    };
+    mrpRuns.unshift(run);
+    return delay<MRPRun>(run);
+  },
+
+  // --- Manufacturing: subcontracting ----------------------------------
+  listSubcontractOrders: (status?: string) =>
+    delay<SubcontractOrder[]>(
+      subcontractOrders
+        .filter((o) => !status || o.status === status)
+        .map(({ components: _omit, ...rest }) => ({ ...rest })),
+    ),
+  getSubcontractOrder: (id: string) => {
+    const o = subcontractOrders.find((x) => x.id === id) ?? subcontractOrders[0];
+    return delay<SubcontractOrder>({
+      ...o,
+      components: (o.components ?? []).map((c) => ({ ...c })),
+    });
+  },
+  createSubcontractOrder: (input: CreateSubcontractOrderInput) => {
+    const now = nowIso();
+    const id = nextId();
+    const order: SubcontractOrder = {
+      tenant_id: DEMO_TENANT_ID,
+      id,
+      work_order_id: input.work_order_id ?? null,
+      routing_operation_seq: input.routing_operation_seq ?? null,
+      supplier_id: input.supplier_id ?? null,
+      item_id: input.item_id,
+      warehouse_id: input.warehouse_id,
+      qty: input.qty,
+      received_qty: "0",
+      status: "draft",
+      charge_amount: input.charge_amount ?? "0.00",
+      charge_currency: input.charge_currency ?? "USD",
+      issued_at: null,
+      received_at: null,
+      notes: input.notes,
+      created_by: "demo-user",
+      created_at: now,
+      updated_at: now,
+      components: input.components.map((c) => ({
+        tenant_id: DEMO_TENANT_ID,
+        id: nextId(),
+        subcontract_order_id: id,
+        item_id: c.item_id,
+        qty: c.qty,
+        issued_qty: "0",
+        created_at: now,
+      })),
+    };
+    subcontractOrders.unshift(order);
+    return delay<SubcontractOrder>(order);
+  },
+  issueSubcontractOrder: (id: string) => {
+    const o = subcontractOrders.find((x) => x.id === id);
+    if (o) {
+      o.status = "issued";
+      o.issued_at = nowIso();
+      o.updated_at = nowIso();
+      (o.components ?? []).forEach((c) => {
+        c.issued_qty = c.qty;
+      });
+    }
+    return delay<SubcontractOrder>(o ?? subcontractOrders[0]);
+  },
+  receiveSubcontractOrder: (id: string, input?: { actual_qty?: string }) => {
+    const o = subcontractOrders.find((x) => x.id === id);
+    if (o) {
+      o.status = "received";
+      o.received_qty = input?.actual_qty ?? o.qty;
+      o.received_at = nowIso();
+      o.updated_at = nowIso();
+    }
+    return delay<SubcontractOrder>(o ?? subcontractOrders[0]);
+  },
+  closeSubcontractOrder: (id: string) => {
+    const o = subcontractOrders.find((x) => x.id === id);
+    if (o) {
+      o.status = "closed";
+      o.updated_at = nowIso();
+    }
+    return delay<SubcontractOrder>(o ?? subcontractOrders[0]);
+  },
+  cancelSubcontractOrder: (id: string) => {
+    const o = subcontractOrders.find((x) => x.id === id);
+    if (o) {
+      o.status = "cancelled";
+      o.updated_at = nowIso();
+    }
+    return delay<SubcontractOrder>(o ?? subcontractOrders[0]);
+  },
+
+  // --- Inventory: landed-cost vouchers --------------------------------
+  listLandedCostVouchers: (params?: { status?: string }) => {
+    const rows = landedCostVouchers.filter(
+      (v) => !params?.status || v.status === params.status,
+    );
+    return delay<LandedCostVoucher[]>(rows.map((v) => ({ ...v })));
+  },
+  getLandedCostVoucher: (id: string) => {
+    const voucher =
+      landedCostVouchers.find((v) => v.id === id) ?? landedCostVouchers[0];
+    return delay<LandedCostVoucherWithLines>({
+      voucher: { ...voucher },
+      charges: (landedCostCharges[voucher.id] ?? []).map((c) => ({ ...c })),
+      targets: (landedCostTargets[voucher.id] ?? []).map((t) => ({ ...t })),
+    });
+  },
+  createLandedCostVoucher: (input: UpsertLandedCostVoucherInput) => {
+    const v: LandedCostVoucher = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      voucher_number: input.voucher_number,
+      description: input.description,
+      status: "draft",
+      allocation_method: input.allocation_method ?? "by_qty",
+      posted_at: null,
+      je_id: null,
+      created_by: "demo",
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    landedCostVouchers.unshift(v);
+    landedCostCharges[v.id] = [];
+    landedCostTargets[v.id] = [];
+    return delay<LandedCostVoucher>({ ...v });
+  },
+  updateLandedCostVoucher: (id: string, input: UpsertLandedCostVoucherInput) => {
+    const v = landedCostVouchers.find((x) => x.id === id);
+    if (v) {
+      v.voucher_number = input.voucher_number;
+      v.description = input.description;
+      if (input.allocation_method) v.allocation_method = input.allocation_method;
+      v.updated_at = nowIso();
+    }
+    return delay<LandedCostVoucher>({ ...(v ?? landedCostVouchers[0]) });
+  },
+  deleteLandedCostVoucher: (id: string) => {
+    const i = landedCostVouchers.findIndex((x) => x.id === id);
+    if (i >= 0) landedCostVouchers.splice(i, 1);
+    delete landedCostCharges[id];
+    delete landedCostTargets[id];
+    return delay<void>(undefined);
+  },
+  upsertLandedCostCharge: (
+    voucherId: string,
+    input: UpsertLandedCostChargeInput,
+  ) => {
+    const list = (landedCostCharges[voucherId] ??= []);
+    const existing = input.id ? list.find((c) => c.id === input.id) : undefined;
+    if (existing) {
+      existing.description = input.description;
+      existing.amount = String(input.amount);
+      existing.account_code = input.account_code;
+      existing.updated_at = nowIso();
+      return delay<LandedCostCharge>({ ...existing });
+    }
+    const charge: LandedCostCharge = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      voucher_id: voucherId,
+      description: input.description,
+      amount: String(input.amount),
+      account_code: input.account_code,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    list.push(charge);
+    return delay<LandedCostCharge>({ ...charge });
+  },
+  deleteLandedCostCharge: (voucherId: string, chargeId: string) => {
+    const list = landedCostCharges[voucherId] ?? [];
+    const i = list.findIndex((c) => c.id === chargeId);
+    if (i >= 0) list.splice(i, 1);
+    return delay<void>(undefined);
+  },
+  upsertLandedCostTarget: (
+    voucherId: string,
+    input: UpsertLandedCostTargetInput,
+  ) => {
+    const list = (landedCostTargets[voucherId] ??= []);
+    const qty = String(input.qty);
+    const unitCost = String(input.unit_cost);
+    const amount = (Number(qty) * Number(unitCost)).toFixed(2);
+    const weight = input.weight !== undefined ? String(input.weight) : "0";
+    const existing = input.id ? list.find((t) => t.id === input.id) : undefined;
+    if (existing) {
+      existing.source_id = input.source_id;
+      existing.item_id = input.item_id;
+      existing.warehouse_id = input.warehouse_id;
+      existing.qty = qty;
+      existing.unit_cost = unitCost;
+      existing.amount = amount;
+      existing.weight = weight;
+      existing.updated_at = nowIso();
+      return delay<LandedCostTarget>({ ...existing });
+    }
+    const target: LandedCostTarget = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      voucher_id: voucherId,
+      source_ktype: input.source_ktype ?? "inventory.goods_receipt",
+      source_id: input.source_id,
+      item_id: input.item_id,
+      warehouse_id: input.warehouse_id,
+      qty,
+      unit_cost: unitCost,
+      amount,
+      weight,
+      allocated_amount: "0.00",
+      applied: false,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    list.push(target);
+    return delay<LandedCostTarget>({ ...target });
+  },
+  deleteLandedCostTarget: (voucherId: string, targetId: string) => {
+    const list = landedCostTargets[voucherId] ?? [];
+    const i = list.findIndex((t) => t.id === targetId);
+    if (i >= 0) list.splice(i, 1);
+    return delay<void>(undefined);
+  },
+  allocateLandedCostVoucher: (id: string) => {
+    const voucher = landedCostVouchers.find((v) => v.id === id);
+    const targets = landedCostTargets[id] ?? [];
+    if (voucher) {
+      const totalCharges = (landedCostCharges[id] ?? []).reduce(
+        (s, c) => s + Number(c.amount),
+        0,
+      );
+      const basisOf = (t: LandedCostTarget) =>
+        voucher.allocation_method === "by_amount"
+          ? Number(t.amount)
+          : voucher.allocation_method === "by_weight"
+            ? Number(t.weight)
+            : Number(t.qty);
+      const totalBasis = targets.reduce((s, t) => s + basisOf(t), 0) || 1;
+      targets.forEach((t) => {
+        t.allocated_amount = (
+          (basisOf(t) / totalBasis) *
+          totalCharges
+        ).toFixed(2);
+        t.updated_at = nowIso();
+      });
+      voucher.status = "allocated";
+      voucher.updated_at = nowIso();
+    }
+    return delay<LandedCostTarget[]>(targets.map((t) => ({ ...t })));
+  },
+  postLandedCostVoucher: (id: string) => {
+    const voucher =
+      landedCostVouchers.find((v) => v.id === id) ?? landedCostVouchers[0];
+    const postedAt = nowIso();
+    voucher.status = "posted";
+    voucher.posted_at = postedAt;
+    voucher.je_id = nextId();
+    voucher.updated_at = postedAt;
+    (landedCostTargets[voucher.id] ?? []).forEach((t) => {
+      t.applied = true;
+      t.updated_at = postedAt;
+    });
+    return delay<LandedCostPostResult>({
+      voucher: { ...voucher },
+      journal_entry: { id: voucher.je_id, posted_at: postedAt },
+    });
+  },
+
+  // --- Inventory: cycle-count sessions --------------------------------
+  listCycleCountSessions: (filter?: {
+    status?: string;
+    warehouse_id?: string;
+  }) => {
+    const rows = cycleCountSessions.filter(
+      (s) =>
+        (!filter?.status || s.status === filter.status) &&
+        (!filter?.warehouse_id || s.warehouse_id === filter.warehouse_id),
+    );
+    return delay<CycleCountSession[]>(rows.map((s) => ({ ...s })));
+  },
+  createCycleCountSession: (input: {
+    code: string;
+    description?: string;
+    warehouse_id: string;
+  }) => {
+    const s: CycleCountSession = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      code: input.code,
+      description: input.description,
+      warehouse_id: input.warehouse_id,
+      status: "draft",
+      created_by: "demo",
+      created_at: nowIso(),
+      updated_at: nowIso(),
+      posted_at: null,
+    };
+    cycleCountSessions.unshift(s);
+    cycleCountLines[s.id] = [];
+    return delay<CycleCountSession>({ ...s });
+  },
+  getCycleCountSession: (id: string) => {
+    const session =
+      cycleCountSessions.find((s) => s.id === id) ?? cycleCountSessions[0];
+    return delay<CycleCountSessionWithLines>({
+      session: { ...session },
+      lines: (cycleCountLines[session.id] ?? []).map((l) => ({ ...l })),
+    });
+  },
+  updateCycleCountSession: (
+    id: string,
+    input: {
+      code: string;
+      description?: string;
+      warehouse_id: string;
+      status?: string;
+    },
+  ) => {
+    const s = cycleCountSessions.find((x) => x.id === id);
+    if (s) {
+      s.code = input.code;
+      s.description = input.description;
+      s.warehouse_id = input.warehouse_id;
+      if (input.status) s.status = input.status as CycleCountSession["status"];
+      s.updated_at = nowIso();
+    }
+    return delay<CycleCountSession>({ ...(s ?? cycleCountSessions[0]) });
+  },
+  deleteCycleCountSession: (id: string) => {
+    const i = cycleCountSessions.findIndex((x) => x.id === id);
+    if (i >= 0) cycleCountSessions.splice(i, 1);
+    delete cycleCountLines[id];
+    return delay<void>(undefined);
+  },
+  seedCycleCountSession: (id: string) => {
+    const session = cycleCountSessions.find((s) => s.id === id);
+    const wh = session?.warehouse_id;
+    const lines: CycleCountLine[] = STOCK_LEVELS.filter(
+      (lvl) => !wh || lvl.warehouse_id === wh,
+    )
+      .slice(0, 6)
+      .map((lvl) => ({
+        tenant_id: DEMO_TENANT_ID,
+        id: nextId(),
+        session_id: id,
+        item_id: lvl.item_id,
+        expected_qty: lvl.qty,
+        counted_qty: "0",
+        variance: (0 - Number(lvl.qty)).toString(),
+        notes: undefined,
+        created_at: nowIso(),
+        updated_at: nowIso(),
+      }));
+    cycleCountLines[id] = lines;
+    if (session && session.status === "draft") {
+      session.status = "counting";
+      session.updated_at = nowIso();
+    }
+    return delay<CycleCountLine[]>(lines.map((l) => ({ ...l })));
+  },
+  upsertCycleCountLine: (
+    sessionId: string,
+    input: {
+      id?: string;
+      item_id: string;
+      expected_qty: string;
+      counted_qty: string;
+      notes?: string;
+    },
+  ) => {
+    const list = (cycleCountLines[sessionId] ??= []);
+    const variance = (
+      Number(input.counted_qty) - Number(input.expected_qty)
+    ).toString();
+    const existing = input.id ? list.find((l) => l.id === input.id) : undefined;
+    if (existing) {
+      existing.item_id = input.item_id;
+      existing.expected_qty = input.expected_qty;
+      existing.counted_qty = input.counted_qty;
+      existing.variance = variance;
+      existing.notes = input.notes;
+      existing.updated_at = nowIso();
+      return delay<CycleCountLine>({ ...existing });
+    }
+    const line: CycleCountLine = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      session_id: sessionId,
+      item_id: input.item_id,
+      expected_qty: input.expected_qty,
+      counted_qty: input.counted_qty,
+      variance,
+      notes: input.notes,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    list.push(line);
+    return delay<CycleCountLine>({ ...line });
+  },
+  deleteCycleCountLine: (sessionId: string, lineId: string) => {
+    const list = cycleCountLines[sessionId] ?? [];
+    const i = list.findIndex((l) => l.id === lineId);
+    if (i >= 0) list.splice(i, 1);
+    return delay<void>(undefined);
+  },
+  postCycleCountSession: (id: string) => {
+    const s = cycleCountSessions.find((x) => x.id === id);
+    if (s) {
+      s.status = "posted";
+      s.posted_at = nowIso();
+      s.updated_at = nowIso();
+    }
+    return delay<CycleCountSession>({ ...(s ?? cycleCountSessions[0]) });
+  },
+
+  // --- Recruitment: job openings -------------------------------------
+  listJobOpenings: (filter?: { status?: string; department?: string }) => {
+    const rows = jobOpenings.filter(
+      (o) =>
+        (!filter?.status || o.status === filter.status) &&
+        (!filter?.department || o.department === filter.department),
+    );
+    return delay<JobOpening[]>(rows.map((o) => ({ ...o })));
+  },
+  getJobOpening: (id: string) => {
+    const o = jobOpenings.find((x) => x.id === id) ?? jobOpenings[0];
+    return delay<JobOpening>({ ...o });
+  },
+  createJobOpening: (input: JobOpeningInput) => {
+    const o: JobOpening = {
+      id: nextId(),
+      tenant_id: DEMO_TENANT_ID,
+      title: input.title,
+      department: input.department,
+      description: input.description,
+      requirements: input.requirements,
+      employment_type: input.employment_type ?? "full_time",
+      location: input.location,
+      salary_range_min: input.salary_range_min ?? null,
+      salary_range_max: input.salary_range_max ?? null,
+      currency: input.currency ?? DEMO_BASE_CURRENCY,
+      status: "draft",
+      hiring_manager_id: input.hiring_manager_id ?? null,
+      max_positions: input.max_positions ?? 1,
+      positions_filled: 0,
+      published_at: null,
+      closes_at: input.closes_at ?? null,
+      created_by: "demo",
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    jobOpenings.unshift(o);
+    return delay<JobOpening>({ ...o });
+  },
+  updateJobOpening: (id: string, input: JobOpeningInput) => {
+    const o = jobOpenings.find((x) => x.id === id);
+    if (o) {
+      o.title = input.title;
+      o.department = input.department;
+      o.description = input.description;
+      o.requirements = input.requirements;
+      if (input.employment_type) o.employment_type = input.employment_type;
+      o.location = input.location;
+      o.salary_range_min = input.salary_range_min ?? null;
+      o.salary_range_max = input.salary_range_max ?? null;
+      if (input.currency) o.currency = input.currency;
+      o.hiring_manager_id = input.hiring_manager_id ?? null;
+      if (input.max_positions !== undefined) o.max_positions = input.max_positions;
+      o.closes_at = input.closes_at ?? null;
+      o.updated_at = nowIso();
+    }
+    return delay<JobOpening>({ ...(o ?? jobOpenings[0]) });
+  },
+  publishJobOpening: (id: string) => {
+    const o = jobOpenings.find((x) => x.id === id);
+    if (o) {
+      o.status = "open";
+      o.published_at = nowIso();
+      o.updated_at = nowIso();
+    }
+    return delay<JobOpening>({ ...(o ?? jobOpenings[0]) });
+  },
+  closeJobOpening: (id: string) => {
+    const o = jobOpenings.find((x) => x.id === id);
+    if (o) {
+      o.status = "closed";
+      o.updated_at = nowIso();
+    }
+    return delay<JobOpening>({ ...(o ?? jobOpenings[0]) });
+  },
+
+  // --- Recruitment: applications -------------------------------------
+  listApplications: (filter?: {
+    job_opening_id?: string;
+    status?: string;
+  }) => {
+    const rows = applications.filter(
+      (a) =>
+        (!filter?.job_opening_id ||
+          a.job_opening_id === filter.job_opening_id) &&
+        (!filter?.status || a.status === filter.status),
+    );
+    return delay<JobApplication[]>(rows.map((a) => ({ ...a })));
+  },
+  getApplication: (id: string) => {
+    const a = applications.find((x) => x.id === id) ?? applications[0];
+    return delay<JobApplication>({ ...a });
+  },
+  createApplication: (input: CreateApplicationInput) => {
+    const a: JobApplication = {
+      id: nextId(),
+      tenant_id: DEMO_TENANT_ID,
+      job_opening_id: input.job_opening_id,
+      applicant_name: input.applicant_name,
+      applicant_email: input.applicant_email,
+      phone: input.phone,
+      resume_file_id: input.resume_file_id ?? null,
+      cover_letter: input.cover_letter,
+      source: input.source ?? "website",
+      referrer_employee_id: input.referrer_employee_id ?? null,
+      status: "applied",
+      rating: input.rating ?? null,
+      notes: input.notes,
+      hired_employee_id: null,
+      applied_at: nowIso(),
+      created_by: "demo",
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    applications.unshift(a);
+    return delay<JobApplication>({ ...a });
+  },
+  updateApplication: (id: string, input: UpdateApplicationInput) => {
+    const a = applications.find((x) => x.id === id);
+    if (a) {
+      a.applicant_name = input.applicant_name;
+      a.applicant_email = input.applicant_email;
+      a.phone = input.phone;
+      a.resume_file_id = input.resume_file_id ?? null;
+      a.cover_letter = input.cover_letter;
+      if (input.source) a.source = input.source;
+      a.referrer_employee_id = input.referrer_employee_id ?? null;
+      a.rating = input.rating ?? null;
+      a.notes = input.notes;
+      a.updated_at = nowIso();
+    }
+    return delay<JobApplication>({ ...(a ?? applications[0]) });
+  },
+  advanceApplication: (id: string, status: string) => {
+    const a = applications.find((x) => x.id === id);
+    if (a) {
+      a.status = status as JobApplication["status"];
+      a.updated_at = nowIso();
+    }
+    return delay<JobApplication>({ ...(a ?? applications[0]) });
+  },
+  rejectApplication: (id: string, reason?: string) => {
+    const a = applications.find((x) => x.id === id);
+    if (a) {
+      a.status = "rejected";
+      if (reason) a.notes = reason;
+      a.updated_at = nowIso();
+    }
+    return delay<JobApplication>({ ...(a ?? applications[0]) });
+  },
+
+  // --- Recruitment: interviews ---------------------------------------
+  listInterviews: (filter?: { application_id?: string; status?: string }) => {
+    const rows = interviews.filter(
+      (i) =>
+        (!filter?.application_id ||
+          i.application_id === filter.application_id) &&
+        (!filter?.status || i.status === filter.status),
+    );
+    return delay<Interview[]>(rows.map((i) => ({ ...i })));
+  },
+  createInterview: (input: CreateInterviewInput) => {
+    const i: Interview = {
+      id: nextId(),
+      tenant_id: DEMO_TENANT_ID,
+      application_id: input.application_id,
+      interviewer_id: input.interviewer_id ?? null,
+      interview_type: input.interview_type ?? "video",
+      scheduled_at: input.scheduled_at ?? null,
+      duration_minutes: input.duration_minutes ?? 45,
+      location: input.location,
+      meeting_link: input.meeting_link,
+      status: "scheduled",
+      rating: null,
+      feedback: undefined,
+      recommendation: undefined,
+      created_by: "demo",
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    interviews.unshift(i);
+    return delay<Interview>({ ...i });
+  },
+  completeInterview: (id: string, input: CompleteInterviewInput) => {
+    const i = interviews.find((x) => x.id === id);
+    if (i) {
+      i.status = "completed";
+      i.rating = input.rating ?? null;
+      i.feedback = input.feedback;
+      i.recommendation = input.recommendation;
+      i.updated_at = nowIso();
+    }
+    return delay<Interview>({ ...(i ?? interviews[0]) });
+  },
+
+  // --- LMS: learning paths + badges ----------------------------------
+  listLearningPaths: (status?: string) => {
+    const rows = learningPaths.filter((p) => !status || p.status === status);
+    return delay<{ learning_paths: LearningPath[] }>({
+      learning_paths: rows.map((p) => ({ ...p })),
+    });
+  },
+  getLearningPath: (id: string) => {
+    const path = learningPaths.find((p) => p.id === id) ?? learningPaths[0];
+    return delay<{
+      learning_path: LearningPath;
+      courses: LearningPathCourse[];
+    }>({
+      learning_path: { ...path },
+      courses: (LEARNING_PATH_COURSES_BY_PATH[path.id] ?? []).map((c) => ({
+        ...c,
+      })),
+    });
+  },
+  createLearningPath: (input: {
+    title: string;
+    description?: string;
+    status?: string;
+    target_roles?: string[];
+    estimated_duration_hours?: number;
+    difficulty?: string;
+  }) => {
+    const p: LearningPath = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      title: input.title,
+      description: input.description ?? "",
+      status: (input.status as LearningPath["status"]) ?? "draft",
+      target_roles: input.target_roles ?? null,
+      estimated_duration_hours: input.estimated_duration_hours ?? 0,
+      difficulty: input.difficulty ?? "beginner",
+      created_by: "demo",
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    learningPaths.unshift(p);
+    return delay<LearningPath>({ ...p });
+  },
+  enrollInLearningPath: (id: string, userId?: string) => {
+    return delay<KRecord>({
+      id: nextId(),
+      tenant_id: DEMO_TENANT_ID,
+      ktype: "lms.enrollment",
+      ktype_version: 1,
+      data: {
+        learning_path_id: id,
+        user_id: userId ?? "demo-user",
+        status: "enrolled",
+        progress: 0,
+      },
+      status: "enrolled",
+      version: 1,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    });
+  },
+  listBadges: () =>
+    delay<{ badges: Badge[] }>({ badges: BADGES.map((b) => ({ ...b })) }),
+  listBadgeAwards: () =>
+    delay<{ awards: BadgeAward[] }>({
+      awards: BADGE_AWARDS.map((a) => ({ ...a })),
+    }),
+
+  // --- KType Builder: tenant-authored custom objects -----------------
+  listTenantKTypes: () =>
+    delay<{ items: TenantKType[]; field_limit: number }>({
+      items: tenantKTypes.map((k) => ({ ...k })),
+      field_limit: TENANT_KTYPE_FIELD_LIMIT,
+    }),
+  getTenantKType: (name: string, version?: number) => {
+    const k =
+      tenantKTypes.find(
+        (x) => x.name === name && (version === undefined || x.version === version),
+      ) ?? tenantKTypes[0];
+    return delay<TenantKType>({ ...k });
+  },
+  upsertTenantKType: (input: UpsertTenantKTypeInput) => {
+    const version = input.version ?? 1;
+    const existing = tenantKTypes.find(
+      (x) => x.name === input.name && x.version === version,
+    );
+    if (existing) {
+      existing.title = input.title;
+      existing.description = input.description ?? "";
+      existing.schema = input.schema;
+      if (input.status) existing.status = input.status;
+      existing.updated_at = nowIso();
+      return delay<TenantKType>({ ...existing });
+    }
+    const k: TenantKType = {
+      tenant_id: DEMO_TENANT_ID,
+      name: input.name,
+      version,
+      title: input.title,
+      description: input.description ?? "",
+      schema: input.schema,
+      status: input.status ?? "draft",
+      created_by: "demo",
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    tenantKTypes.unshift(k);
+    return delay<TenantKType>({ ...k });
+  },
+  setTenantKTypeStatus: (
+    name: string,
+    version: number,
+    status: TenantKTypeStatus,
+  ) => {
+    const k = tenantKTypes.find(
+      (x) => x.name === name && x.version === version,
+    );
+    if (k) {
+      k.status = status;
+      k.updated_at = nowIso();
+    }
+    return delay<{
+      name: string;
+      version: number;
+      status: TenantKTypeStatus;
+    }>({ name, version, status });
+  },
 
   // --- POS ------------------------------------------------------------
   finalizePOSInvoice: () => delay<KRecord>({ id: nextId(), tenant_id: DEMO_TENANT_ID, ktype: "sales.pos_invoice", ktype_version: 1, data: { status: "finalized" }, status: "finalized", version: 1, created_at: nowIso(), updated_at: nowIso() }),
@@ -801,42 +2210,204 @@ export const mockApi = new Proxy({} as ApiClient, {
 
 export const PORTAL_TICKETS_FIXTURE = PORTAL_TICKETS;
 
-// installPortalDemoFetch overrides window.fetch for /api/v1/portal/*
-// requests so the customer portal pages work without a real backend.
-// Limited surface: list tickets, get ticket, request/verify magic link.
+const jsonResponse = (body: unknown, status = 200): Response =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+
+const parseBody = (init?: RequestInit): Record<string, unknown> => {
+  if (typeof init?.body !== "string" || init.body.trim() === "") return {};
+  try {
+    const parsed: unknown = JSON.parse(init.body);
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+};
+
+// installPortalDemoFetch overrides window.fetch for the handful of
+// REST routes that the UI talks to with a bare fetch() instead of the
+// typed ApiClient (the customer portal, NotificationBell, the public +
+// admin health dashboards and the import wizard). Without this they
+// bypass mockApi entirely and 500 against the Vite proxy in demo,
+// leaving infinite skeletons and console noise. Anything not handled
+// here falls through to the real fetch untouched.
+//
+// Idempotent: api.ts installs this once on boot, but the raw-fetch
+// widgets also call it (awaiting the dynamic import) right before their
+// first fetch so a cold page load can't race the install and 500. The
+// guard lives on window (not module scope) so a Vite HMR re-eval of
+// this module doesn't reset it and wrap window.fetch a second time.
 export function installPortalDemoFetch(): void {
   if (typeof window === "undefined") return;
+  const w = window as Window & { __portalDemoFetchInstalled?: boolean };
+  if (w.__portalDemoFetchInstalled) return;
+  w.__portalDemoFetchInstalled = true;
   const origFetch = window.fetch.bind(window);
   window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    if (!url.includes("/api/v1/portal")) {
-      return origFetch(input as RequestInfo, init);
-    }
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    const marker = "/api/v1";
+    const idx = url.indexOf(marker);
+    if (idx === -1) return origFetch(input as RequestInfo, init);
+    const path = url.slice(idx + marker.length).split(/[?#]/)[0];
+    const method = (init?.method ?? "GET").toUpperCase();
+
+    // Only the exact routes below are demo-handled; everything else
+    // (e.g. record-engine traffic that already goes through mockApi, or
+    // a future /notifications/settings route) is left alone so we don't
+    // accidentally swallow real requests. Match exact paths rather than
+    // broad prefixes for the same reason — the lone exceptions are the
+    // dynamic /notifications/{id}/read route, the /imports/{id}/* wizard
+    // sub-resources, and the pre-existing /portal surface.
+    const handled =
+      path.startsWith("/portal") ||
+      path === "/notifications" ||
+      path === "/notifications/read-all" ||
+      (path.startsWith("/notifications/") && path.endsWith("/read")) ||
+      path === "/health" ||
+      path === "/admin/health/detailed" ||
+      path === "/imports" ||
+      path.startsWith("/imports/");
+    if (!handled) return origFetch(input as RequestInfo, init);
+
     await new Promise((r) => setTimeout(r, 80));
-    if (url.endsWith("/portal/auth/request")) {
+
+    // --- Notifications (NotificationBell) ---
+    // Discriminate on method so the two mutators only fire on their real
+    // verb (POST), matching the /imports handler below; a non-POST hit
+    // falls through to the real backend rather than mutating state.
+    if (method === "GET" && path === "/notifications") {
+      return jsonResponse(demoNotifications.map((n) => ({ ...n })));
+    }
+    if (method === "POST" && path === "/notifications/read-all") {
+      demoNotifications.forEach((n) => {
+        n.read = true;
+      });
       return new Response(null, { status: 204 });
     }
-    if (url.endsWith("/portal/auth/verify")) {
-      return new Response(
-        JSON.stringify({
-          token: "demo-portal-token",
-          expires_at: Date.now() / 1000 + 3600,
-          user: { id: "demo-user", tenant_id: DEMO_TENANT_ID, email: "buyer@globex.example", display_name: "Globex Buyer" },
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
-      );
+    if (
+      method === "POST" &&
+      path.startsWith("/notifications/") &&
+      path.endsWith("/read")
+    ) {
+      const id = path.slice("/notifications/".length, -"/read".length);
+      const n = demoNotifications.find((x) => x.id === id);
+      if (n) n.read = true;
+      return new Response(null, { status: 204 });
     }
-    if (url.endsWith("/portal/tickets/")) {
-      return new Response(JSON.stringify({ tickets: PORTAL_TICKETS }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
+
+    // --- Health dashboards (StatusPage / AdminHealthPage) ---
+    if (path === "/admin/health/detailed") {
+      return jsonResponse(ADMIN_HEALTH);
+    }
+    if (path === "/health") {
+      return jsonResponse(PUBLIC_HEALTH);
+    }
+
+    // --- Import wizard (ImportPage / ImportMappingPage) ---
+    if (path === "/imports") {
+      if (method === "POST") {
+        const body = parseBody(init);
+        const job = {
+          id: nextId(),
+          tenant_id: DEMO_TENANT_ID,
+          source_type:
+            typeof body.source_type === "string" ? body.source_type : "csv",
+          status: "mapping",
+          config:
+            body.config && typeof body.config === "object"
+              ? (body.config as Record<string, unknown>)
+              : {},
+          mapping: { entities: [] },
+          progress: {},
+          errors: [],
+          reconciliation: {},
+          created_by: "demo",
+          created_at: nowIso(),
+          updated_at: nowIso(),
+          completed_at: null,
+        };
+        demoImportJobs.unshift(job);
+        return jsonResponse(job);
+      }
+      return jsonResponse(demoImportJobs.map((j) => ({ ...j })));
+    }
+    if (path.startsWith("/imports/")) {
+      const rest = path.slice("/imports/".length);
+      const id = rest.split("/")[0];
+      const job = demoImportJobs.find((j) => j.id === id) ?? demoImportJobs[0];
+      if (rest.endsWith("/errors")) {
+        return jsonResponse([]);
+      }
+      if (method === "POST" && rest.endsWith("/map")) {
+        const body = parseBody(init);
+        if (job) {
+          if (body.mapping && typeof body.mapping === "object") {
+            job.mapping = body.mapping as Record<string, unknown>;
+          }
+          job.status = "validating";
+          job.updated_at = nowIso();
+        }
+        return jsonResponse(job);
+      }
+      if (method === "POST" && rest.endsWith("/validate")) {
+        if (job) {
+          job.status = "reconciling";
+          job.updated_at = nowIso();
+        }
+        return jsonResponse({ job });
+      }
+      if (method === "POST" && rest.endsWith("/accept")) {
+        let imported = 0;
+        if (job) {
+          job.status = "completed";
+          job.completed_at = nowIso();
+          job.updated_at = nowIso();
+          const total = job.progress?.total;
+          imported = typeof total === "number" ? total : 0;
+        }
+        return jsonResponse({ job, imported });
+      }
+      return jsonResponse(job);
+    }
+
+    // --- Customer portal ---
+    if (path === "/portal/auth/request") {
+      return new Response(null, { status: 204 });
+    }
+    if (path === "/portal/auth/verify") {
+      return jsonResponse({
+        token: "demo-portal-token",
+        expires_at: Date.now() / 1000 + 3600,
+        user: {
+          id: "demo-user",
+          tenant_id: DEMO_TENANT_ID,
+          email: "buyer@globex.example",
+          display_name: "Globex Buyer",
+        },
       });
     }
-    if (url.includes("/portal/tickets/")) {
-      const id = url.split("/portal/tickets/")[1].split(/[/?#]/)[0];
-      const t = PORTAL_TICKETS.find((x) => x.id === id) ?? PORTAL_TICKETS[0];
-      return new Response(JSON.stringify(t), { status: 200, headers: { "Content-Type": "application/json" } });
+    if (path === "/portal/tickets/") {
+      return jsonResponse({ tickets: PORTAL_TICKETS });
     }
-    return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    if (path.startsWith("/portal/tickets/")) {
+      const id = path.slice("/portal/tickets/".length).split("/")[0];
+      const t = PORTAL_TICKETS.find((x) => x.id === id) ?? PORTAL_TICKETS[0];
+      return jsonResponse(t);
+    }
+    // Unknown /portal sub-route: keep the pre-existing demo behavior of a
+    // benign empty 200. Anything else that slipped past the precise
+    // predicate above (e.g. a notification path whose verb didn't match)
+    // goes to the real backend untouched instead of being swallowed.
+    if (path.startsWith("/portal")) return jsonResponse({});
+    return origFetch(input as RequestInfo, init);
   }) as typeof window.fetch;
 }
