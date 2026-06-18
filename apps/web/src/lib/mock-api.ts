@@ -24,6 +24,9 @@ import type {
   CreateWorkCenterInput,
   CreateWorkOrderInput,
   UpdateBudgetInput,
+  CycleCountLine,
+  CycleCountSession,
+  CycleCountSessionWithLines,
   DashboardSummary,
   ExchangeRate,
   FinanceAccount,
@@ -47,6 +50,14 @@ import type {
   JournalEntry,
   KRecord,
   KType,
+  LandedCostCharge,
+  LandedCostPostResult,
+  LandedCostTarget,
+  LandedCostVoucher,
+  LandedCostVoucherWithLines,
+  UpsertLandedCostVoucherInput,
+  UpsertLandedCostChargeInput,
+  UpsertLandedCostTargetInput,
   MarketplaceExtension,
   MarketplaceGetExtensionResponse,
   MarketplaceInstallation,
@@ -94,6 +105,8 @@ import {
   BUDGET_LINES_BY_ID,
   buildBudgetVariance,
   buildCapacityPlan,
+  CYCLE_COUNT_LINES_BY_SESSION,
+  CYCLE_COUNT_SESSIONS,
   DASHBOARD_SUMMARY,
   DEMO_TENANT_ID,
   EXCHANGE_RATES,
@@ -107,6 +120,9 @@ import {
   INVENTORY_WAREHOUSES,
   JOB_CARDS_BY_WO,
   JOURNAL_ENTRIES,
+  LANDED_COST_CHARGES_BY_VOUCHER,
+  LANDED_COST_TARGETS_BY_VOUCHER,
+  LANDED_COST_VOUCHERS,
   MARKETPLACE_EXTENSIONS,
   MARKETPLACE_INSTALLATIONS,
   MARKETPLACE_MY_RATINGS,
@@ -198,6 +214,28 @@ const mrpRuns: MRPRun[] = MRP_RUNS.map((r) => ({ ...r }));
 const subcontractOrders: SubcontractOrder[] = SUBCONTRACT_ORDERS.map((o) => ({
   ...o,
 }));
+
+// Mutable inventory demo state for landed-cost vouchers and
+// cycle-count sessions so create + allocate / post / count edits
+// round-trip in the UI. Cloned from the fixtures so a reload resets.
+const landedCostVouchers: LandedCostVoucher[] = LANDED_COST_VOUCHERS.map(
+  (v) => ({ ...v }),
+);
+const landedCostCharges: Record<string, LandedCostCharge[]> = {};
+for (const [k, v] of Object.entries(LANDED_COST_CHARGES_BY_VOUCHER)) {
+  landedCostCharges[k] = v.map((c) => ({ ...c }));
+}
+const landedCostTargets: Record<string, LandedCostTarget[]> = {};
+for (const [k, v] of Object.entries(LANDED_COST_TARGETS_BY_VOUCHER)) {
+  landedCostTargets[k] = v.map((t) => ({ ...t }));
+}
+const cycleCountSessions: CycleCountSession[] = CYCLE_COUNT_SESSIONS.map(
+  (s) => ({ ...s }),
+);
+const cycleCountLines: Record<string, CycleCountLine[]> = {};
+for (const [k, v] of Object.entries(CYCLE_COUNT_LINES_BY_SESSION)) {
+  cycleCountLines[k] = v.map((l) => ({ ...l }));
+}
 
 // Mutable marketplace demo state so install / uninstall / upgrade /
 // rate actions round-trip inside the UI. Cloned from the fixtures so
@@ -1152,6 +1190,329 @@ const handlers = {
       o.updated_at = nowIso();
     }
     return delay<SubcontractOrder>(o ?? subcontractOrders[0]);
+  },
+
+  // --- Inventory: landed-cost vouchers --------------------------------
+  listLandedCostVouchers: (params?: { status?: string }) => {
+    const rows = landedCostVouchers.filter(
+      (v) => !params?.status || v.status === params.status,
+    );
+    return delay<LandedCostVoucher[]>(rows.map((v) => ({ ...v })));
+  },
+  getLandedCostVoucher: (id: string) => {
+    const voucher =
+      landedCostVouchers.find((v) => v.id === id) ?? landedCostVouchers[0];
+    return delay<LandedCostVoucherWithLines>({
+      voucher: { ...voucher },
+      charges: (landedCostCharges[voucher.id] ?? []).map((c) => ({ ...c })),
+      targets: (landedCostTargets[voucher.id] ?? []).map((t) => ({ ...t })),
+    });
+  },
+  createLandedCostVoucher: (input: UpsertLandedCostVoucherInput) => {
+    const v: LandedCostVoucher = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      voucher_number: input.voucher_number,
+      description: input.description,
+      status: "draft",
+      allocation_method: input.allocation_method ?? "by_qty",
+      posted_at: null,
+      je_id: null,
+      created_by: "demo",
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    landedCostVouchers.unshift(v);
+    landedCostCharges[v.id] = [];
+    landedCostTargets[v.id] = [];
+    return delay<LandedCostVoucher>({ ...v });
+  },
+  updateLandedCostVoucher: (id: string, input: UpsertLandedCostVoucherInput) => {
+    const v = landedCostVouchers.find((x) => x.id === id);
+    if (v) {
+      v.voucher_number = input.voucher_number;
+      v.description = input.description;
+      if (input.allocation_method) v.allocation_method = input.allocation_method;
+      v.updated_at = nowIso();
+    }
+    return delay<LandedCostVoucher>({ ...(v ?? landedCostVouchers[0]) });
+  },
+  deleteLandedCostVoucher: (id: string) => {
+    const i = landedCostVouchers.findIndex((x) => x.id === id);
+    if (i >= 0) landedCostVouchers.splice(i, 1);
+    delete landedCostCharges[id];
+    delete landedCostTargets[id];
+    return delay<void>(undefined);
+  },
+  upsertLandedCostCharge: (
+    voucherId: string,
+    input: UpsertLandedCostChargeInput,
+  ) => {
+    const list = (landedCostCharges[voucherId] ??= []);
+    const existing = input.id ? list.find((c) => c.id === input.id) : undefined;
+    if (existing) {
+      existing.description = input.description;
+      existing.amount = String(input.amount);
+      existing.account_code = input.account_code;
+      existing.updated_at = nowIso();
+      return delay<LandedCostCharge>({ ...existing });
+    }
+    const charge: LandedCostCharge = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      voucher_id: voucherId,
+      description: input.description,
+      amount: String(input.amount),
+      account_code: input.account_code,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    list.push(charge);
+    return delay<LandedCostCharge>({ ...charge });
+  },
+  deleteLandedCostCharge: (voucherId: string, chargeId: string) => {
+    const list = landedCostCharges[voucherId] ?? [];
+    const i = list.findIndex((c) => c.id === chargeId);
+    if (i >= 0) list.splice(i, 1);
+    return delay<void>(undefined);
+  },
+  upsertLandedCostTarget: (
+    voucherId: string,
+    input: UpsertLandedCostTargetInput,
+  ) => {
+    const list = (landedCostTargets[voucherId] ??= []);
+    const qty = String(input.qty);
+    const unitCost = String(input.unit_cost);
+    const amount = (Number(qty) * Number(unitCost)).toFixed(2);
+    const weight = input.weight !== undefined ? String(input.weight) : "0";
+    const existing = input.id ? list.find((t) => t.id === input.id) : undefined;
+    if (existing) {
+      existing.source_id = input.source_id;
+      existing.item_id = input.item_id;
+      existing.warehouse_id = input.warehouse_id;
+      existing.qty = qty;
+      existing.unit_cost = unitCost;
+      existing.amount = amount;
+      existing.weight = weight;
+      existing.updated_at = nowIso();
+      return delay<LandedCostTarget>({ ...existing });
+    }
+    const target: LandedCostTarget = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      voucher_id: voucherId,
+      source_ktype: input.source_ktype ?? "inventory.goods_receipt",
+      source_id: input.source_id,
+      item_id: input.item_id,
+      warehouse_id: input.warehouse_id,
+      qty,
+      unit_cost: unitCost,
+      amount,
+      weight,
+      allocated_amount: "0.00",
+      applied: false,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    list.push(target);
+    return delay<LandedCostTarget>({ ...target });
+  },
+  deleteLandedCostTarget: (voucherId: string, targetId: string) => {
+    const list = landedCostTargets[voucherId] ?? [];
+    const i = list.findIndex((t) => t.id === targetId);
+    if (i >= 0) list.splice(i, 1);
+    return delay<void>(undefined);
+  },
+  allocateLandedCostVoucher: (id: string) => {
+    const voucher = landedCostVouchers.find((v) => v.id === id);
+    const targets = landedCostTargets[id] ?? [];
+    if (voucher) {
+      const totalCharges = (landedCostCharges[id] ?? []).reduce(
+        (s, c) => s + Number(c.amount),
+        0,
+      );
+      const basisOf = (t: LandedCostTarget) =>
+        voucher.allocation_method === "by_amount"
+          ? Number(t.amount)
+          : voucher.allocation_method === "by_weight"
+            ? Number(t.weight)
+            : Number(t.qty);
+      const totalBasis = targets.reduce((s, t) => s + basisOf(t), 0) || 1;
+      targets.forEach((t) => {
+        t.allocated_amount = (
+          (basisOf(t) / totalBasis) *
+          totalCharges
+        ).toFixed(2);
+        t.updated_at = nowIso();
+      });
+      voucher.status = "allocated";
+      voucher.updated_at = nowIso();
+    }
+    return delay<LandedCostTarget[]>(targets.map((t) => ({ ...t })));
+  },
+  postLandedCostVoucher: (id: string) => {
+    const voucher =
+      landedCostVouchers.find((v) => v.id === id) ?? landedCostVouchers[0];
+    const postedAt = nowIso();
+    voucher.status = "posted";
+    voucher.posted_at = postedAt;
+    voucher.je_id = nextId();
+    voucher.updated_at = postedAt;
+    (landedCostTargets[voucher.id] ?? []).forEach((t) => {
+      t.applied = true;
+      t.updated_at = postedAt;
+    });
+    return delay<LandedCostPostResult>({
+      voucher: { ...voucher },
+      journal_entry: { id: voucher.je_id, posted_at: postedAt },
+    });
+  },
+
+  // --- Inventory: cycle-count sessions --------------------------------
+  listCycleCountSessions: (filter?: {
+    status?: string;
+    warehouse_id?: string;
+  }) => {
+    const rows = cycleCountSessions.filter(
+      (s) =>
+        (!filter?.status || s.status === filter.status) &&
+        (!filter?.warehouse_id || s.warehouse_id === filter.warehouse_id),
+    );
+    return delay<CycleCountSession[]>(rows.map((s) => ({ ...s })));
+  },
+  createCycleCountSession: (input: {
+    code: string;
+    description?: string;
+    warehouse_id: string;
+  }) => {
+    const s: CycleCountSession = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      code: input.code,
+      description: input.description,
+      warehouse_id: input.warehouse_id,
+      status: "draft",
+      created_by: "demo",
+      created_at: nowIso(),
+      updated_at: nowIso(),
+      posted_at: null,
+    };
+    cycleCountSessions.unshift(s);
+    cycleCountLines[s.id] = [];
+    return delay<CycleCountSession>({ ...s });
+  },
+  getCycleCountSession: (id: string) => {
+    const session =
+      cycleCountSessions.find((s) => s.id === id) ?? cycleCountSessions[0];
+    return delay<CycleCountSessionWithLines>({
+      session: { ...session },
+      lines: (cycleCountLines[session.id] ?? []).map((l) => ({ ...l })),
+    });
+  },
+  updateCycleCountSession: (
+    id: string,
+    input: {
+      code: string;
+      description?: string;
+      warehouse_id: string;
+      status?: string;
+    },
+  ) => {
+    const s = cycleCountSessions.find((x) => x.id === id);
+    if (s) {
+      s.code = input.code;
+      s.description = input.description;
+      s.warehouse_id = input.warehouse_id;
+      if (input.status) s.status = input.status as CycleCountSession["status"];
+      s.updated_at = nowIso();
+    }
+    return delay<CycleCountSession>({ ...(s ?? cycleCountSessions[0]) });
+  },
+  deleteCycleCountSession: (id: string) => {
+    const i = cycleCountSessions.findIndex((x) => x.id === id);
+    if (i >= 0) cycleCountSessions.splice(i, 1);
+    delete cycleCountLines[id];
+    return delay<void>(undefined);
+  },
+  seedCycleCountSession: (id: string) => {
+    const session = cycleCountSessions.find((s) => s.id === id);
+    const wh = session?.warehouse_id;
+    const lines: CycleCountLine[] = STOCK_LEVELS.filter(
+      (lvl) => !wh || lvl.warehouse_id === wh,
+    )
+      .slice(0, 6)
+      .map((lvl) => ({
+        tenant_id: DEMO_TENANT_ID,
+        id: nextId(),
+        session_id: id,
+        item_id: lvl.item_id,
+        expected_qty: lvl.qty,
+        counted_qty: "0",
+        variance: (0 - Number(lvl.qty)).toString(),
+        notes: undefined,
+        created_at: nowIso(),
+        updated_at: nowIso(),
+      }));
+    cycleCountLines[id] = lines;
+    if (session && session.status === "draft") {
+      session.status = "counting";
+      session.updated_at = nowIso();
+    }
+    return delay<CycleCountLine[]>(lines.map((l) => ({ ...l })));
+  },
+  upsertCycleCountLine: (
+    sessionId: string,
+    input: {
+      id?: string;
+      item_id: string;
+      expected_qty: string;
+      counted_qty: string;
+      notes?: string;
+    },
+  ) => {
+    const list = (cycleCountLines[sessionId] ??= []);
+    const variance = (
+      Number(input.counted_qty) - Number(input.expected_qty)
+    ).toString();
+    const existing = input.id ? list.find((l) => l.id === input.id) : undefined;
+    if (existing) {
+      existing.item_id = input.item_id;
+      existing.expected_qty = input.expected_qty;
+      existing.counted_qty = input.counted_qty;
+      existing.variance = variance;
+      existing.notes = input.notes;
+      existing.updated_at = nowIso();
+      return delay<CycleCountLine>({ ...existing });
+    }
+    const line: CycleCountLine = {
+      tenant_id: DEMO_TENANT_ID,
+      id: nextId(),
+      session_id: sessionId,
+      item_id: input.item_id,
+      expected_qty: input.expected_qty,
+      counted_qty: input.counted_qty,
+      variance,
+      notes: input.notes,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    list.push(line);
+    return delay<CycleCountLine>({ ...line });
+  },
+  deleteCycleCountLine: (sessionId: string, lineId: string) => {
+    const list = cycleCountLines[sessionId] ?? [];
+    const i = list.findIndex((l) => l.id === lineId);
+    if (i >= 0) list.splice(i, 1);
+    return delay<void>(undefined);
+  },
+  postCycleCountSession: (id: string) => {
+    const s = cycleCountSessions.find((x) => x.id === id);
+    if (s) {
+      s.status = "posted";
+      s.posted_at = nowIso();
+      s.updated_at = nowIso();
+    }
+    return delay<CycleCountSession>({ ...(s ?? cycleCountSessions[0]) });
   },
 
   // --- POS ------------------------------------------------------------

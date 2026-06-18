@@ -19,6 +19,8 @@ import type {
   BudgetVarianceRow,
   CapacityDayLoad,
   CapacityPlan,
+  CycleCountLine,
+  CycleCountSession,
   DashboardSummary,
   ExchangeRate,
   FinanceAccount,
@@ -35,6 +37,9 @@ import type {
   JournalEntry,
   KRecord,
   KType,
+  LandedCostCharge,
+  LandedCostTarget,
+  LandedCostVoucher,
   MarketplaceExtension,
   MarketplaceExtensionVersion,
   MarketplaceInstallation,
@@ -1522,6 +1527,107 @@ export const SUBCONTRACT_ORDERS: SubcontractOrder[] = [
     components: [],
   },
 ];
+
+// --- Inventory: landed-cost vouchers ---------------------------------
+//
+// Vouchers spread freight / duty / insurance across received goods.
+// Lifecycle: draft → allocated → posted. Charges + targets are loaded
+// per-voucher by getLandedCostVoucher.
+
+const LC_IDS = {
+  v0006: uuid("inventory.landed_cost:0006"),
+  v0007: uuid("inventory.landed_cost:0007"),
+  v0008: uuid("inventory.landed_cost:0008"),
+  v0009: uuid("inventory.landed_cost:0009"),
+};
+
+export const LANDED_COST_VOUCHERS: LandedCostVoucher[] = [
+  { tenant_id: DEMO_TENANT_ID, id: LC_IDS.v0009, voucher_number: "LC-2026-0009", description: "Marine insurance — March import", status: "draft", allocation_method: "by_qty", posted_at: null, je_id: null, created_by: "system", created_at: NOW_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LC_IDS.v0008, voucher_number: "LC-2026-0008", description: "Ocean freight — container HLCU-4471", status: "allocated", allocation_method: "by_amount", posted_at: null, je_id: null, created_by: "system", created_at: LAST_WEEK_ISO, updated_at: NOW_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LC_IDS.v0007, voucher_number: "LC-2026-0007", description: "Freight + duty — Q1 widget shipment", status: "posted", allocation_method: "by_qty", posted_at: LAST_WEEK_ISO, je_id: uuid("je:lc-0007"), created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO },
+  { tenant_id: DEMO_TENANT_ID, id: LC_IDS.v0006, voucher_number: "LC-2026-0006", description: "Air freight — expedite, handling", status: "posted", allocation_method: "by_weight", posted_at: LAST_MONTH_ISO, je_id: uuid("je:lc-0006"), created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO },
+];
+
+function lcCharge(voucherId: string, seed: string, description: string, amount: string, account_code: string): LandedCostCharge {
+  return { tenant_id: DEMO_TENANT_ID, id: uuid(`inventory.landed_cost_charge:${seed}`), voucher_id: voucherId, description, amount, account_code, created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO };
+}
+
+function lcTarget(voucherId: string, seed: string, itemId: string, warehouseId: string, qty: string, unitCost: string, amount: string, weight: string, allocated: string, applied: boolean): LandedCostTarget {
+  return { tenant_id: DEMO_TENANT_ID, id: uuid(`inventory.landed_cost_target:${seed}`), voucher_id: voucherId, source_ktype: "inventory.goods_receipt", source_id: uuid(`inventory.goods_receipt:${seed}`), item_id: itemId, warehouse_id: warehouseId, qty, unit_cost: unitCost, amount, weight, allocated_amount: allocated, applied, created_at: LAST_MONTH_ISO, updated_at: LAST_WEEK_ISO };
+}
+
+export const LANDED_COST_CHARGES_BY_VOUCHER: Record<string, LandedCostCharge[]> = {
+  [LC_IDS.v0009]: [lcCharge(LC_IDS.v0009, "0009-insurance", "Marine insurance", "300.00", "5220")],
+  [LC_IDS.v0008]: [lcCharge(LC_IDS.v0008, "0008-freight", "Ocean freight", "800.00", "5200")],
+  [LC_IDS.v0007]: [
+    lcCharge(LC_IDS.v0007, "0007-freight", "Ocean freight", "1200.00", "5200"),
+    lcCharge(LC_IDS.v0007, "0007-duty", "Import duty", "450.00", "5210"),
+  ],
+  [LC_IDS.v0006]: [
+    lcCharge(LC_IDS.v0006, "0006-air", "Air freight (expedite)", "2100.00", "5200"),
+    lcCharge(LC_IDS.v0006, "0006-handling", "Handling & brokerage", "180.00", "5210"),
+  ],
+};
+
+export const LANDED_COST_TARGETS_BY_VOUCHER: Record<string, LandedCostTarget[]> = {
+  [LC_IDS.v0009]: [
+    lcTarget(LC_IDS.v0009, "0009-cable", MFG_ITEMS.cable, WAREHOUSE_IDS.main, "300", "7.00", "2100.00", "15", "0.00", false),
+  ],
+  [LC_IDS.v0008]: [
+    lcTarget(LC_IDS.v0008, "0008-gadget", MFG_ITEMS.gadget, WAREHOUSE_IDS.main, "50", "40.00", "2000.00", "30", "421.05", false),
+    lcTarget(LC_IDS.v0008, "0008-adapter", MFG_ITEMS.adapter, WAREHOUSE_IDS.main, "100", "18.00", "1800.00", "20", "378.95", false),
+  ],
+  [LC_IDS.v0007]: [
+    lcTarget(LC_IDS.v0007, "0007-widget", MFG_ITEMS.widget, WAREHOUSE_IDS.main, "100", "15.00", "1500.00", "120", "550.00", true),
+    lcTarget(LC_IDS.v0007, "0007-sprocket", MFG_ITEMS.sprocket, WAREHOUSE_IDS.main, "200", "9.00", "1800.00", "60", "1100.00", true),
+  ],
+  [LC_IDS.v0006]: [
+    lcTarget(LC_IDS.v0006, "0006-bolt", MFG_ITEMS.bolt, WAREHOUSE_IDS.west, "1000", "0.08", "80.00", "40", "1403.08", true),
+    lcTarget(LC_IDS.v0006, "0006-filter", MFG_ITEMS.filter, WAREHOUSE_IDS.west, "50", "12.00", "600.00", "25", "876.92", true),
+  ],
+};
+
+// --- Inventory: cycle-count sessions ---------------------------------
+//
+// Lifecycle: draft → counting → reconciled → posted. Lines carry the
+// expected (system) qty, the counted qty and the variance between them.
+
+const CC_IDS = {
+  s0010: uuid("inventory.cycle_count:0010"),
+  s0011: uuid("inventory.cycle_count:0011"),
+  s0012: uuid("inventory.cycle_count:0012"),
+  s0013: uuid("inventory.cycle_count:0013"),
+};
+
+export const CYCLE_COUNT_SESSIONS: CycleCountSession[] = [
+  { tenant_id: DEMO_TENANT_ID, id: CC_IDS.s0013, code: "CC-2026-0013", description: "West hub spot check", warehouse_id: WAREHOUSE_IDS.west, status: "draft", created_by: "system", created_at: NOW_ISO, updated_at: NOW_ISO, posted_at: null },
+  { tenant_id: DEMO_TENANT_ID, id: CC_IDS.s0012, code: "CC-2026-0012", description: "Fast-movers weekly count", warehouse_id: WAREHOUSE_IDS.main, status: "counting", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: NOW_ISO, posted_at: null },
+  { tenant_id: DEMO_TENANT_ID, id: CC_IDS.s0011, code: "CC-2026-0011", description: "Bin A reconciliation", warehouse_id: WAREHOUSE_IDS.main, status: "reconciled", created_by: "system", created_at: LAST_WEEK_ISO, updated_at: LAST_WEEK_ISO, posted_at: null },
+  { tenant_id: DEMO_TENANT_ID, id: CC_IDS.s0010, code: "CC-2026-0010", description: "Month-end full count", warehouse_id: WAREHOUSE_IDS.main, status: "posted", created_by: "system", created_at: LAST_MONTH_ISO, updated_at: LAST_MONTH_ISO, posted_at: LAST_MONTH_ISO },
+];
+
+function ccLine(sessionId: string, seed: string, itemId: string, expected: string, counted: string): CycleCountLine {
+  const variance = (Number(counted) - Number(expected)).toFixed(2).replace(/\.00$/, "");
+  return { tenant_id: DEMO_TENANT_ID, id: uuid(`inventory.cycle_count_line:${seed}`), session_id: sessionId, item_id: itemId, expected_qty: expected, counted_qty: counted, variance, notes: undefined, created_at: LAST_WEEK_ISO, updated_at: NOW_ISO };
+}
+
+export const CYCLE_COUNT_LINES_BY_SESSION: Record<string, CycleCountLine[]> = {
+  [CC_IDS.s0013]: [],
+  [CC_IDS.s0012]: [
+    ccLine(CC_IDS.s0012, "0012-widget", MFG_ITEMS.widget, "120", "118"),
+    ccLine(CC_IDS.s0012, "0012-gadget", MFG_ITEMS.gadget, "60", "60"),
+    ccLine(CC_IDS.s0012, "0012-cable", MFG_ITEMS.cable, "300", "305"),
+  ],
+  [CC_IDS.s0011]: [
+    ccLine(CC_IDS.s0011, "0011-bolt", MFG_ITEMS.bolt, "1000", "990"),
+    ccLine(CC_IDS.s0011, "0011-sprocket", MFG_ITEMS.sprocket, "200", "200"),
+  ],
+  [CC_IDS.s0010]: [
+    ccLine(CC_IDS.s0010, "0010-widget", MFG_ITEMS.widget, "80", "80"),
+    ccLine(CC_IDS.s0010, "0010-adapter", MFG_ITEMS.adapter, "100", "97"),
+    ccLine(CC_IDS.s0010, "0010-filter", MFG_ITEMS.filter, "40", "41"),
+  ],
+};
 
 function jl(account_code: string, debit: string, credit: string, memo = "", currency = "USD") {
   return { account_code, debit, credit, memo, currency };
