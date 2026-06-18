@@ -1855,6 +1855,13 @@ export const MARKETPLACE_VERSIONS: Record<string, MarketplaceExtensionVersion[]>
       workflows_count: 2,
       webhooks_count: 3,
     }),
+    mkVersion(EXT_IDS.quickbooks, "4.0.0", LAST_MONTH_ISO, {
+      features_required: ["finance"],
+      permissions_required: ["finance.read", "finance.write"],
+      ktypes_count: 1,
+      workflows_count: 1,
+      webhooks_count: 2,
+    }),
   ],
   [EXT_IDS.slack]: [
     mkVersion(EXT_IDS.slack, "1.7.2", LAST_MONTH_ISO, {
@@ -2069,9 +2076,10 @@ export const MARKETPLACE_INSTALLATIONS: MarketplaceInstallation[] = [
     id: uuid("mkt-install-quickbooks"),
     tenant_id: DEMO_TENANT_ID,
     extension_id: EXT_IDS.quickbooks,
-    // Installed on an older version than the listed default so the
-    // "Update available" badge shows on the Installed list.
-    extension_version_id: MARKETPLACE_VERSIONS[EXT_IDS.quickbooks][0].id,
+    // Installed on an older version (4.0.0) than the listed default
+    // (4.1.0) so the "Update available" badge shows on the Installed
+    // list.
+    extension_version_id: MARKETPLACE_VERSIONS[EXT_IDS.quickbooks][1].id,
     status: "active",
     settings: { realm_id: "demo-realm", auto_post: true },
     webhook_base: "https://acme.kapp.example",

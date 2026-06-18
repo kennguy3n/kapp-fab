@@ -161,7 +161,33 @@ function findExtension(extId: string): MarketplaceExtension {
 }
 
 function findInstallation(installId: string): MarketplaceInstallation {
-  return mktInstallations.find((i) => i.id === installId) ?? mktInstallations[0]!;
+  return (
+    mktInstallations.find((i) => i.id === installId) ??
+    syntheticInstallation(installId)
+  );
+}
+
+// syntheticInstallation backs the demo when an install id can't be
+// resolved — e.g. every seeded installation has been uninstalled, so
+// mktInstallations is empty. Returning a valid, mutable object (rather
+// than mktInstallations[0], which would be undefined) keeps the
+// settings/upgrade round-trips from operating on undefined and
+// crashing the demo, matching the mock's "always return something"
+// posture (see getTenant / findExtension).
+function syntheticInstallation(installId: string): MarketplaceInstallation {
+  return {
+    id: installId,
+    tenant_id: DEMO_TENANT_ID,
+    extension_id: mktExtensions[0]?.id ?? "",
+    extension_version_id: "",
+    status: "active",
+    settings: {},
+    webhook_base: "",
+    installed_at: nowIso(),
+    updated_at: nowIso(),
+    last_health_check_at: nowIso(),
+    last_health_check_status: "ok",
+  };
 }
 
 function nextId(): string {
