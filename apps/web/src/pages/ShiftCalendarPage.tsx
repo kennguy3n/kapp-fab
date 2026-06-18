@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { KRecord } from "@kapp/client";
 import { Button, Input, Select, cn } from "@kapp/ui";
 import { api } from "../lib/api";
+import { toCalendarISO } from "../lib/date";
 
 const KTYPE_SHIFT_TYPE = "hr.shift_type";
 const KTYPE_SHIFT_ASSIGNMENT = "hr.shift_assignment";
@@ -49,7 +50,7 @@ type View = "week" | "month";
  */
 export function ShiftCalendarPage() {
   const [view, setView] = useState<View>("week");
-  const [anchor, setAnchor] = useState(() => isoDate(new Date()));
+  const [anchor, setAnchor] = useState(() => toCalendarISO(new Date()));
 
   const employeesQ = useQuery({
     queryKey: ["records", KTYPE_EMPLOYEE],
@@ -248,7 +249,7 @@ function ScheduleForm({
   const qc = useQueryClient();
   const [employeeId, setEmployeeId] = useState("");
   const [shiftTypeId, setShiftTypeId] = useState("");
-  const [shiftDate, setShiftDate] = useState(() => isoDate(new Date()));
+  const [shiftDate, setShiftDate] = useState(() => toCalendarISO(new Date()));
   const [error, setError] = useState<string | null>(null);
 
   const create = useMutation({
@@ -360,13 +361,6 @@ function cellKey(employeeID: string, date: string): string {
   return `${employeeID}::${date}`;
 }
 
-function isoDate(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
 function shortDate(iso: string): string {
   const d = new Date(iso + "T00:00:00");
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
@@ -381,7 +375,7 @@ function buildDateRange(anchor: string, view: View): string[] {
     for (let i = 0; i < 7; i++) {
       const d = new Date(start);
       d.setDate(start.getDate() + i);
-      out.push(isoDate(d));
+      out.push(toCalendarISO(d));
     }
   } else {
     const first = new Date(start.getFullYear(), start.getMonth(), 1);
@@ -390,7 +384,7 @@ function buildDateRange(anchor: string, view: View): string[] {
     for (let i = 0; i < days; i++) {
       const d = new Date(first);
       d.setDate(first.getDate() + i);
-      out.push(isoDate(d));
+      out.push(toCalendarISO(d));
     }
   }
   return out;
