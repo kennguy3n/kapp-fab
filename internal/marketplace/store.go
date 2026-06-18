@@ -379,8 +379,8 @@ type ListExtensionsFilter struct {
 // marketplace_extensions_status_idx is used) — the caller does not
 // have to post-filter the result slice.
 func (s *Store) ListExtensions(ctx context.Context, filter ListExtensionsFilter) ([]Extension, error) {
-	conditions := make([]string, 0, 2)
-	args := make([]any, 0, 3)
+	conditions := make([]string, 0, 3)
+	args := make([]any, 0, 4)
 	if filter.Status != "" {
 		if !filter.Status.Valid() {
 			return nil, fmt.Errorf("%w: unknown status %q", ErrInvalidManifest, filter.Status)

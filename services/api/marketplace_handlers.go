@@ -407,6 +407,25 @@ type yankRequestBody struct {
 // middleware needed.
 // ---------------------------------------------------------------------------
 
+// tenantListExtensionsFilter builds the store filter for the
+// tenant browse view from the request query string. Status is
+// pinned to `listed` so the catalog never leaks unpublished
+// drafts. publisher / category / limit are read straight from the
+// query; an unknown category is left for the store to reject with
+// ErrInvalidManifest (→ 400) rather than silently widening the
+// result set. The free-text `q` match is applied by the handler
+// after the SQL fetch, so it is intentionally not part of the
+// store filter.
+func tenantListExtensionsFilter(r *http.Request) marketplace.ListExtensionsFilter {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	return marketplace.ListExtensionsFilter{
+		Status:    marketplace.ExtensionStatusListed,
+		Publisher: strings.TrimSpace(r.URL.Query().Get("publisher")),
+		Category:  strings.TrimSpace(r.URL.Query().Get("category")),
+		Limit:     limit,
+	}
+}
+
 // listExtensions surfaces only the `listed` catalog entries — a
 // tenant browsing the marketplace shouldn't see unpublished
 // drafts or removed listings. The publisher endpoint
@@ -415,20 +434,16 @@ type yankRequestBody struct {
 //
 // Pagination: ?limit= caps the page size (default 100, max 500
 // enforced by the store). ?publisher= filters to a single
-// publisher. ?q= performs a case-insensitive substring match on
-// the display_name / description columns in Go (the store does
-// not currently expose a full-text query path; if catalog growth
-// makes that expensive we'll add a tsvector column in B6.1).
+// publisher. ?category= filters to a single taxonomy bucket
+// (validated by the store against the curated set). ?q= performs
+// a case-insensitive substring match on the display_name /
+// description columns in Go (the store does not currently expose
+// a full-text query path; if catalog growth makes that expensive
+// we'll add a tsvector column in B6.1).
 func (h *marketplaceHandlers) listExtensions(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	publisher := strings.TrimSpace(r.URL.Query().Get("publisher"))
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 
-	exts, err := h.store.ListExtensions(r.Context(), marketplace.ListExtensionsFilter{
-		Status:    marketplace.ExtensionStatusListed,
-		Publisher: publisher,
-		Limit:     limit,
-	})
+	exts, err := h.store.ListExtensions(r.Context(), tenantListExtensionsFilter(r))
 	if err != nil {
 		h.writeError(w, err)
 		return
