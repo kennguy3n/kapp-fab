@@ -101,7 +101,15 @@ function slaState(dueIso: string | undefined): SlaState | null {
   const due = new Date(dueIso);
   if (Number.isNaN(due.getTime())) return null;
   const diffMs = due.getTime() - Date.now();
-  const gap = formatDuration(Math.round(Math.abs(diffMs) / 60000));
+  const mins = Math.round(Math.abs(diffMs) / 60000);
+  // Within ~30s of the deadline the minute count rounds to 0, where
+  // formatDuration returns "—"; show an explicit imminent label instead.
+  if (mins < 1) {
+    return diffMs < 0
+      ? { variant: "danger", label: "Just overdue" }
+      : { variant: "warning", label: "Due now" };
+  }
+  const gap = formatDuration(mins);
   if (diffMs < 0) return { variant: "danger", label: `Overdue ${gap}` };
   if (diffMs < FOUR_HOURS_MS) return { variant: "warning", label: `Due in ${gap}` };
   return { variant: "success", label: `Due in ${gap}` };

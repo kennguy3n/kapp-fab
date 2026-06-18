@@ -66,11 +66,15 @@ function ageLabel(iso: string, fmt: Formatter): string {
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "—";
   const diffMs = then - Date.now();
-  const minutes = Math.round(diffMs / 60_000);
-  if (Math.abs(minutes) < 60) return fmt.relativeTime(minutes, "minute");
-  const hours = Math.round(diffMs / 3_600_000);
-  if (Math.abs(hours) < 24) return fmt.relativeTime(hours, "hour");
-  return fmt.relativeTime(Math.round(diffMs / 86_400_000), "day");
+  // Round by magnitude then re-apply the sign: JS's Math.round(-1.5) === -1
+  // would otherwise report a 90-minute-old request as "1 hour ago".
+  const sign = diffMs < 0 ? -1 : 1;
+  const absMs = Math.abs(diffMs);
+  const minutes = Math.round(absMs / 60_000);
+  if (minutes < 60) return fmt.relativeTime(sign * minutes, "minute");
+  const hours = Math.round(absMs / 3_600_000);
+  if (hours < 24) return fmt.relativeTime(sign * hours, "hour");
+  return fmt.relativeTime(sign * Math.round(absMs / 86_400_000), "day");
 }
 
 interface ApprovalRowView {
@@ -224,6 +228,9 @@ export function ApprovalsPage() {
   });
 
   const busy = decide.isPending || bulkApprove.isPending;
+  // `decide` gets a fresh identity every render in TanStack Query v5, but
+  // `decide.mutate` is stable — depend on that so the columns memo holds.
+  const decideMutate = decide.mutate;
 
   const columns = useMemo<DataGridColumn<ApprovalRowView>[]>(
     () => [
@@ -306,7 +313,7 @@ export function ApprovalsPage() {
                 size="sm"
                 disabled={busy}
                 leadingIcon={<Check className="h-4 w-4" />}
-                onClick={() => decide.mutate({ id: r.id, decision: "approve" })}
+                onClick={() => decideMutate({ id: r.id, decision: "approve" })}
               >
                 Approve
               </Button>
@@ -325,7 +332,7 @@ export function ApprovalsPage() {
           ),
       },
     ],
-    [busy, decide, fmt],
+    [busy, decideMutate, fmt],
   );
 
   // The "actions" column is meaningless once a row is decided, so the
