@@ -35,6 +35,7 @@ import {
   Users,
 } from "lucide-react";
 import { api } from "../lib/api";
+import { toCalendarISO } from "../lib/date";
 import { useFormatter } from "../lib/i18n/useFormatter";
 import { humanizeToken, statusVariant } from "../lib/ktypeView";
 
@@ -78,7 +79,7 @@ type Employee = { id: string; name?: string; department?: string };
 export function ShiftCalendarPage() {
   const fmt = useFormatter();
   const [view, setView] = useState<View>("week");
-  const [anchor, setAnchor] = useState(() => isoDate(new Date()));
+  const [anchor, setAnchor] = useState(() => toCalendarISO(new Date()));
   const [assignTarget, setAssignTarget] = useState<{
     employeeId?: string;
     date?: string;
@@ -129,7 +130,7 @@ export function ShiftCalendarPage() {
     const d = new Date(`${anchor}T00:00:00`);
     if (view === "week") d.setDate(d.getDate() + dir * 7);
     else d.setMonth(d.getMonth() + dir);
-    setAnchor(isoDate(d));
+    setAnchor(toCalendarISO(d));
   }
 
   return (
@@ -174,7 +175,7 @@ export function ShiftCalendarPage() {
             <Button
               size="sm"
               variant="outline"
-              onClick={() => setAnchor(isoDate(new Date()))}
+              onClick={() => setAnchor(toCalendarISO(new Date()))}
             >
               Today
             </Button>
@@ -253,7 +254,7 @@ export function ShiftCalendarPage() {
         employees={employees}
         shiftTypes={Array.from(shiftTypes.values())}
         initialEmployeeId={assignTarget?.employeeId ?? ""}
-        initialDate={assignTarget?.date ?? isoDate(new Date())}
+        initialDate={assignTarget?.date ?? toCalendarISO(new Date())}
       />
     </section>
   );
@@ -272,7 +273,7 @@ function ScheduleGrid({
   assignmentsByCell: Map<string, KRecord[]>;
   onPick: (employeeId: string, date: string) => void;
 }) {
-  const today = isoDate(new Date());
+  const today = toCalendarISO(new Date());
   return (
     <div className="max-h-[34rem] overflow-auto rounded-lg border border-border">
       <table className="w-full border-separate border-spacing-0 text-sm">
@@ -669,13 +670,6 @@ function cellKey(employeeID: string, date: string): string {
   return `${employeeID}::${date}`;
 }
 
-function isoDate(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
 function isWeekend(iso: string): boolean {
   const day = new Date(`${iso}T00:00:00`).getDay();
   return day === 0 || day === 6;
@@ -699,7 +693,7 @@ function buildDateRange(anchor: string, view: View): string[] {
     for (let i = 0; i < 7; i++) {
       const d = new Date(start);
       d.setDate(start.getDate() + i);
-      out.push(isoDate(d));
+      out.push(toCalendarISO(d));
     }
   } else {
     const first = new Date(start.getFullYear(), start.getMonth(), 1);
@@ -708,7 +702,7 @@ function buildDateRange(anchor: string, view: View): string[] {
     for (let i = 0; i < days; i++) {
       const d = new Date(first);
       d.setDate(first.getDate() + i);
-      out.push(isoDate(d));
+      out.push(toCalendarISO(d));
     }
   }
   return out;

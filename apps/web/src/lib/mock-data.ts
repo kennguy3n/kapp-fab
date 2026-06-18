@@ -41,6 +41,7 @@ import type {
   Webhook,
   WebhookDelivery,
 } from "@kapp/client";
+import { toCalendarISO } from "./date";
 
 // --- Constants --------------------------------------------------------
 
@@ -54,15 +55,12 @@ const LAST_WEEK_ISO = new Date(TODAY.getTime() - 7 * 86400_000).toISOString();
 const LAST_MONTH_ISO = new Date(TODAY.getTime() - 30 * 86400_000).toISOString();
 const NEXT_WEEK_ISO = new Date(TODAY.getTime() + 7 * 86400_000).toISOString();
 
-function isoDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
-}
 function addDays(d: Date, n: number): Date {
   const out = new Date(d);
   out.setDate(out.getDate() + n);
   return out;
 }
-const TODAY_ISO_DATE = isoDate(TODAY);
+const TODAY_ISO_DATE = toCalendarISO(TODAY);
 
 // uuid generates a deterministic v4-shaped UUID from a counter so that
 // fixtures keep the same identifier across reloads — important for
@@ -570,17 +568,17 @@ const LEADS: KRecord[] = [
 ];
 
 const DEALS: KRecord[] = [
-  kr("crm.deal", "d1", { name: "Globex — Annual License", organization_id: ORG_IDS.globex, value: 42000, currency: "USD", stage: "prospecting", owner: "Avery N.", close_date: isoDate(addDays(TODAY, 30)) }),
-  kr("crm.deal", "d2", { name: "Initech — Pilot Expansion", organization_id: ORG_IDS.initech, value: 18000, currency: "USD", stage: "qualification", owner: "Sam K.", close_date: isoDate(addDays(TODAY, 25)) }),
-  kr("crm.deal", "d3", { name: "Hooli — Enterprise Tier", organization_id: ORG_IDS.hooli, value: 124000, currency: "USD", stage: "proposal", owner: "Mia P.", close_date: isoDate(addDays(TODAY, 14)) }),
-  kr("crm.deal", "d4", { name: "Umbrella — POS Rollout", organization_id: ORG_IDS.umbrella, value: 67500, currency: "USD", stage: "negotiation", owner: "Sam K.", close_date: isoDate(addDays(TODAY, 7)) }),
-  kr("crm.deal", "d5", { name: "Globex — Q1 Renewal", organization_id: ORG_IDS.globex, value: 36000, currency: "USD", stage: "closed_won", owner: "Avery N.", close_date: isoDate(addDays(TODAY, -3)) }),
+  kr("crm.deal", "d1", { name: "Globex — Annual License", organization_id: ORG_IDS.globex, value: 42000, currency: "USD", stage: "prospecting", owner: "Avery N.", close_date: toCalendarISO(addDays(TODAY, 30)) }),
+  kr("crm.deal", "d2", { name: "Initech — Pilot Expansion", organization_id: ORG_IDS.initech, value: 18000, currency: "USD", stage: "qualification", owner: "Sam K.", close_date: toCalendarISO(addDays(TODAY, 25)) }),
+  kr("crm.deal", "d3", { name: "Hooli — Enterprise Tier", organization_id: ORG_IDS.hooli, value: 124000, currency: "USD", stage: "proposal", owner: "Mia P.", close_date: toCalendarISO(addDays(TODAY, 14)) }),
+  kr("crm.deal", "d4", { name: "Umbrella — POS Rollout", organization_id: ORG_IDS.umbrella, value: 67500, currency: "USD", stage: "negotiation", owner: "Sam K.", close_date: toCalendarISO(addDays(TODAY, 7)) }),
+  kr("crm.deal", "d5", { name: "Globex — Q1 Renewal", organization_id: ORG_IDS.globex, value: 36000, currency: "USD", stage: "closed_won", owner: "Avery N.", close_date: toCalendarISO(addDays(TODAY, -3)) }),
 ];
 
 const ACTIVITIES: KRecord[] = [
-  kr("crm.activity", "a1", { subject: "Discovery call — Hooli", kind: "call", due_date: isoDate(TODAY), owner: "Mia P.", status: "open" }),
-  kr("crm.activity", "a2", { subject: "Send proposal — Umbrella", kind: "email", due_date: isoDate(addDays(TODAY, 2)), owner: "Sam K.", status: "open" }),
-  kr("crm.activity", "a3", { subject: "Onsite demo — Globex", kind: "meeting", due_date: isoDate(addDays(TODAY, 5)), owner: "Avery N.", status: "open" }),
+  kr("crm.activity", "a1", { subject: "Discovery call — Hooli", kind: "call", due_date: toCalendarISO(TODAY), owner: "Mia P.", status: "open" }),
+  kr("crm.activity", "a2", { subject: "Send proposal — Umbrella", kind: "email", due_date: toCalendarISO(addDays(TODAY, 2)), owner: "Sam K.", status: "open" }),
+  kr("crm.activity", "a3", { subject: "Onsite demo — Globex", kind: "meeting", due_date: toCalendarISO(addDays(TODAY, 5)), owner: "Avery N.", status: "open" }),
 ];
 
 const QUOTES: KRecord[] = [
@@ -623,9 +621,9 @@ const EMPLOYEES: KRecord[] = [
 ];
 
 const LEAVE_REQUESTS: KRecord[] = [
-  kr("hr.leave_request", "lr1", { employee_id: EMP_IDS.ic1, leave_type: "vacation", start_date: isoDate(addDays(TODAY, 10)), end_date: isoDate(addDays(TODAY, 15)), status: "pending" }),
-  kr("hr.leave_request", "lr2", { employee_id: EMP_IDS.ic3, leave_type: "sick", start_date: isoDate(addDays(TODAY, -2)), end_date: isoDate(addDays(TODAY, -1)), status: "approved" }),
-  kr("hr.leave_request", "lr3", { employee_id: EMP_IDS.mgrSales, leave_type: "vacation", start_date: isoDate(addDays(TODAY, 30)), end_date: isoDate(addDays(TODAY, 37)), status: "pending" }),
+  kr("hr.leave_request", "lr1", { employee_id: EMP_IDS.ic1, leave_type: "vacation", start_date: toCalendarISO(addDays(TODAY, 10)), end_date: toCalendarISO(addDays(TODAY, 15)), status: "pending" }),
+  kr("hr.leave_request", "lr2", { employee_id: EMP_IDS.ic3, leave_type: "sick", start_date: toCalendarISO(addDays(TODAY, -2)), end_date: toCalendarISO(addDays(TODAY, -1)), status: "approved" }),
+  kr("hr.leave_request", "lr3", { employee_id: EMP_IDS.mgrSales, leave_type: "vacation", start_date: toCalendarISO(addDays(TODAY, 30)), end_date: toCalendarISO(addDays(TODAY, 37)), status: "pending" }),
 ];
 
 const ATTENDANCE: KRecord[] = [
@@ -687,7 +685,7 @@ const SHIFT_TYPES: KRecord[] = [
 ];
 
 function todayPlus(n: number): string {
-  return isoDate(addDays(TODAY, n));
+  return toCalendarISO(addDays(TODAY, n));
 }
 const SHIFT_ASSIGNMENTS: KRecord[] = [];
 {
