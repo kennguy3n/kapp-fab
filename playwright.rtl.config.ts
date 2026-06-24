@@ -25,7 +25,7 @@ export default defineConfig({
   },
   webServer: {
     command:
-      "VITE_DEMO_MODE=true npm run dev --workspace=apps/web -- --host 127.0.0.1 --port 5173 --strictPort",
+      "npm run dev --workspace=apps/web -- --host 127.0.0.1 --port 5173 --strictPort",
     url: "http://localhost:5173",
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

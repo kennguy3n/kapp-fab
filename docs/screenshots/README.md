@@ -32,7 +32,9 @@ prefix and `module-page` is a kebab-cased descriptor of the screen:
 07-sales-...png
 08-pos-register.png
 09-inventory-...png
+09-manufacturing-...png
 10-hr-...png
+10-recruitment-...png
 11-lms-...png
 12-insights-...png
 13-admin-...png
@@ -52,9 +54,24 @@ npx playwright install chromium
 npm run screenshots
 ```
 
-Behind the scenes this runs `playwright test
-scripts/capture-screenshots.spec.ts` against a Vite dev server booted
-with `VITE_DEMO_MODE=true`. Each test:
+`npm run screenshots` runs `playwright test scripts/capture-screenshots.spec.ts`.
+The Playwright configuration starts the Vite dev server and sets `VITE_DEMO_MODE=true`
+automatically, so the command is the same on macOS, Linux, and Windows.
+
+If Playwright's bundled Chromium is not installed on your machine, you can point
+it at a system Chrome executable instead:
+
+```bash
+# macOS / Linux
+export PLAYWRIGHT_CHROME_EXECUTABLE=/usr/bin/google-chrome
+npm run screenshots
+
+# Windows PowerShell
+$env:PLAYWRIGHT_CHROME_EXECUTABLE="C:\Program Files\Google\Chrome\Application\chrome.exe"
+npm run screenshots
+```
+
+Each test:
 
 1. Pre-seeds `localStorage.kapp.tenant` and `localStorage.kapp.token`
    so the app shell doesn't redirect to `/login`.
@@ -65,7 +82,7 @@ with `VITE_DEMO_MODE=true`. Each test:
 To capture a single route, pass the test title fragment to Playwright:
 
 ```bash
-VITE_DEMO_MODE=true npx playwright test scripts/capture-screenshots.spec.ts -g "deals-kanban"
+npx playwright test scripts/capture-screenshots.spec.ts -g "deals-kanban"
 ```
 
 ## Determinism

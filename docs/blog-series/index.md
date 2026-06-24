@@ -1,49 +1,25 @@
-# Kapp in the Real World: One Platform, Five Businesses, Five Countries
+# Kapp in Action: A Live Walkthrough of the Seeded Demo
 
-This is a business-facing blog series. Instead of listing features, we provisioned
-five real tenants — different industries, different countries, different currencies
-and statutory rules — bootstrapped them with realistic data, and then drove the
-actual product end-to-end. Every screenshot below is the live application running
-against a real Postgres database with multi-tenant row-level security, not a mockup.
+This is a product-facing showcase series. Every screenshot below is a full-page capture of the real Kapp UI running in the browser against the built-in demo tenant. There is no Photoshop, no canned Figma mock, and no staging backend required: the same `npm run screenshots` command that generated these images launches Vite in `VITE_DEMO_MODE=true`, seeds the fictional **Acme Corp** tenant, and drives the application through every route.
 
-The goal is simple: show how a single SME platform handles the *jobs to be done*
-that a coffee roaster in Singapore, a consultancy in London, a distributor in Dubai,
-an outdoor retailer in the US, and a metal-fab shop in Mexico each care about — and
-to be honest about where we lead and where established competitors are still ahead.
+The demo tenant is a single USD business with a deliberately broad footprint — CRM, finance, sales, procurement, inventory, manufacturing, HR, LMS, projects, helpdesk, approvals, insights, and admin. That breadth lets us show how a single platform, a single sign-in, and a single underlying data model serve many different jobs-to-be-done without the integration seams that normally force SMEs to stitch five tools together.
 
-## The five businesses
+## What you are looking at
 
-| Tenant | Country | Currency | Industry | Persona & job-to-be-done |
-|---|---|---|---|---|
-| **Lion City Coffee** | 🇸🇬 Singapore | SGD | Coffee & Hospitality | Finance lead closing the books, tracing AR to the GL, watching the deal pipeline |
-| **Thistle & Oak** | 🇬🇧 United Kingdom | GBP | Professional Services | HR/People lead running recruitment and onboarding training |
-| **Falcon Trading** | 🇦🇪 UAE | AED | Wholesale & Distribution | Operations lead valuing stock across two warehouses |
-| **Cascade Outfitters** | 🇺🇸 United States | USD | Retail / E-commerce | Sales lead managing a deal pipeline and cash position |
-| **Talleres del Bajío** | 🇲🇽 Mexico | MXN | Manufacturing | Plant manager planning production capacity, SAT-compliant books |
-
-All five run on the **same binary and the same database**. The only differences are
-the tenant's feature flags, chart-of-accounts template, currency, locale, and the
-statutory tax pack selected at setup — all isolated per `tenant_id` by Postgres RLS.
+- The app shell, navigation, and every page are the current React frontend from `apps/web`.
+- Numbers, lists, and charts come from the deterministic mock fixtures in `apps/web/src/lib/mock-data.ts`.
+- Image files are stored in `docs/screenshots/` and are regenerated automatically by `scripts/capture-screenshots.spec.ts`.
 
 ## The posts
 
-1. [Finance for a Singapore coffee roaster](./01-finance-singapore.md) — invoicing, the trial balance, and tracing AR to the general ledger.
-2. [Recruitment for a UK consultancy](./02-recruitment-uk.md) — a hiring pipeline from application to offer, on a drag-to-advance kanban.
-3. [Training & LMS for a UK consultancy](./03-lms-uk.md) — learning paths, instructor analytics, and completion tracking.
-4. [Inventory for a Dubai distributor](./04-inventory-uae.md) — live stock levels and valuation across two warehouses, in AED.
-5. [CRM for a US outdoor retailer](./05-crm-usa.md) — a deal pipeline and at-a-glance cash KPIs in USD.
-6. [Manufacturing for a Mexican fab shop](./06-manufacturing-mexico.md) — BOMs, work orders, finite-capacity planning, and SAT-compliant statutory books in MXN.
-7. [Honest competitive assessment](./07-competitive-analysis.md) — Kapp vs Xero, QuickBooks, ERPNext, Odoo, SAP Business One, NetSuite, TalentLMS, and Moodle. Where we win, where we don't.
+1. [Getting Started: Login, Setup, and the Overview Dashboard](./01-getting-started.md) — sign-in, the tenant setup wizard, the live dashboard, and universal search.
+2. [CRM & Sales: Leads, Contacts, Deals, and Approvals](./02-crm-sales-approvals.md) — the record surfaces, the deal pipeline, sales orders, price lists, purchase orders, and the POS register.
+3. [Finance & Reporting: Chart of Accounts to Trial Balance](./03-finance-reporting.md) — the general ledger, journal entries, AR subledger, bank reconciliation, exchange rates, cost centers, and the report builder.
+4. [Operations & Manufacturing: Helpdesk, Projects, Inventory, and the Shop Floor](./04-operations-manufacturing.md) — SLA triage, project Gantt, live stock levels, inventory valuation, BOMs, work orders, routings, capacity planning, and job cards.
+5. [People, Recruitment & Learning: HR, Org Chart, Payroll, Recruitment, and LMS](./05-people-learning.md) — the employee directory, org chart, payroll, shift calendar, hiring pipeline, courses, and learner progress.
+6. [Insights, Administration, and Customer Portal](./06-insights-admin-portal.md) — the visual query builder, dashboards, tenant management, audit log, webhooks, retention, and the customer portal.
+7. [Honest Competitive Assessment](./07-competitive-analysis.md) — where Kapp wins, where Xero, QuickBooks, ERPNext, Odoo, SAP Business One, NetSuite, TalentLMS, and Moodle still lead, and which buyer should choose which path.
 
-## How the evidence was produced
+## A note on honesty
 
-- Five tenants were provisioned through the normal setup wizard, each with its own
-  country, currency, locale, and CoA template.
-- Demo data (customers, suppliers, GL postings, deals, inventory ledgers, employees,
-  recruitment pipelines, LMS enrolments, BOMs and work orders) was loaded the same way
-  a customer would — through the public API with a tenant-scoped JWT.
-- Each journey was then driven in the browser as the tenant owner. Screenshots are
-  full application views with real numbers.
-
-> A note on honesty: this series is meant to be credible to a buyer who will check
-> our claims. Where a competitor is genuinely better for a given job, post 7 says so.
+The demo is designed to look like a real business, but it is still a demo. This series does not pretend Kapp has deeper payroll than a national bureau, a more polished bank feed than Xero, or more mature MRP than Odoo. Where a competitor is genuinely better for a given job, the last post says so.

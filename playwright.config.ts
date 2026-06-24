@@ -22,10 +22,13 @@ export default defineConfig({
     viewport: { width: 1440, height: 900 },
     deviceScaleFactor: 1,
     headless: true,
+    launchOptions: process.env.PLAYWRIGHT_CHROME_EXECUTABLE
+      ? { executablePath: process.env.PLAYWRIGHT_CHROME_EXECUTABLE }
+      : {},
   },
   webServer: {
     command:
-      "VITE_DEMO_MODE=true npm run dev --workspace=apps/web -- --host 127.0.0.1 --port 5173 --strictPort",
+      "npm run dev --workspace=apps/web -- --host 127.0.0.1 --port 5173 --strictPort",
     url: "http://localhost:5173",
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
