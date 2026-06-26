@@ -46,7 +46,7 @@ func TestProjectsAgentToolsAndProgressSummary(t *testing.T) {
 	}
 
 	wfEngine := workflow.NewEngine(h.pool, h.publisher, h.auditor)
-	executor := agents.NewExecutor(h.records, wfEngine, h.auditor)
+	executor := agents.NewExecutor(h.records, wfEngine, h.auditor, nil)
 	agents.RegisterProjectTools(executor)
 
 	actor := uuid.New()

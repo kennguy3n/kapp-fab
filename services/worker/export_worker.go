@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"time"
 
 	"github.com/kennguy3n/kapp-fab/internal/exporter"
+	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/record"
 )
 
@@ -22,18 +24,21 @@ import (
 // MB). Scaling out is just running another worker — SKIP LOCKED
 // guarantees each job is claimed exactly once.
 type ExportWorker struct {
-	store    *exporter.Store
-	records  exporter.KRecordSource
-	interval time.Duration
+	store     *exporter.Store
+	records   exporter.KRecordSource
+	schemaSrc exporter.SchemaSource
+	interval  time.Duration
 }
 
 // NewExportWorker wires an export worker. The records source is
-// usually *record.PGStore; tests can pass a fake.
-func NewExportWorker(store *exporter.Store, records exporter.KRecordSource, interval time.Duration) *ExportWorker {
+// usually *record.PGStore; tests can pass a fake. schemaSrc provides
+// KType schemas for field-permissions filtering; nil disables
+// filtering (legacy behaviour).
+func NewExportWorker(store *exporter.Store, records exporter.KRecordSource, schemaSrc exporter.SchemaSource, interval time.Duration) *ExportWorker {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
-	return &ExportWorker{store: store, records: records, interval: interval}
+	return &ExportWorker{store: store, records: records, schemaSrc: schemaSrc, interval: interval}
 }
 
 // Run blocks until ctx is cancelled, draining the export queue on
@@ -78,7 +83,7 @@ func (w *ExportWorker) process(ctx context.Context, job *exporter.ExportJob) {
 		_ = w.store.Fail(ctx, job.TenantID, job.ID, "tenant-wide export: use the kapp-backup CLI")
 		return
 	}
-	payload, rowCount, err := exporter.ProcessKType(ctx, w.records, job.TenantID, job.KType, job.Format)
+	payload, rowCount, err := exporter.ProcessKType(ctx, w.records, w.schemaSrc, job.TenantID, job.KType, job.Format, job.UserRoles)
 	if err != nil {
 		log.Printf("export-worker: process job %s: %v", job.ID, err)
 		_ = w.store.Fail(ctx, job.TenantID, job.ID, err.Error())
@@ -98,6 +103,24 @@ func (w *ExportWorker) process(ctx context.Context, job *exporter.ExportJob) {
 // is the streaming iterator that lets the exporter walk all rows of
 // a KType without hitting the `ListAllMaxRows` safety cap.
 var _ exporter.KRecordSource = (*record.PGStore)(nil)
+
+// ktypeSchemaSource adapts *ktype.PGRegistry to the exporter.SchemaSource
+// interface. It fetches the latest version of a KType's schema so the
+// exporter can apply field_permissions filtering and sensitive-field
+// redaction.
+type ktypeSchemaSource struct {
+	registry *ktype.PGRegistry
+}
+
+func (s *ktypeSchemaSource) GetSchema(ctx context.Context, name string) (json.RawMessage, error) {
+	kt, err := s.registry.Get(ctx, name, 0)
+	if err != nil {
+		return nil, err
+	}
+	return kt.Schema, nil
+}
+
+var _ exporter.SchemaSource = (*ktypeSchemaSource)(nil)
 
 // stringErrIs is a small helper for tests checking the loop never
 // surfaces a known-okay error like ErrJobNotFound from a race.

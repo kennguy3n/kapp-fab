@@ -351,6 +351,13 @@ var TenantScopedTables = []string{
 	"payroll_payslip_lines",
 	"payroll_pay_inputs",
 	"payroll_ytd",
+	// Phase 2 P2-2c — per-tenant encryption keys (envelope encryption).
+	// PK is (tenant_id, key_version) — declared in tableConflictKeys.
+	// No FK to any other tenant-scoped table; ordering is irrelevant
+	// for restore. The wrapped DEKs are re-encrypted by the KEK on
+	// restore only if the master key has changed (future work); for
+	// now they round-trip as-is.
+	"tenant_keys",
 }
 
 // manifest is the first record in every dump file.
@@ -846,6 +853,9 @@ var tableConflictKeys = map[string][]string{
 	// payroll_payslip_lines, payroll_pay_inputs) use the standard
 	// (tenant_id, id) PK and fall through to the default path.
 	"payroll_ytd": {"tenant_id", "employee_id", "tax_year"},
+	// Phase 2 P2-2c — tenant_keys PK is (tenant_id, key_version),
+	// not the standard (tenant_id, id) composite.
+	"tenant_keys": {"tenant_id", "key_version"},
 }
 
 // insertRow issues a parameterised INSERT that lists the columns from

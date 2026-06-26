@@ -415,6 +415,18 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Route("/api/v1/admin", func(r chi.Router) {
 				d.adminChain(r)
 				r.Get("/isolation-audit", d.iah.get)
+				// Phase 2 P2-1 — runtime break-glass flow. Records
+				// time-boxed, reason-coded sessions in admin_audit_log
+				// (migrations/000103_admin_roles_split.sql). The
+				// handlers never bypass RLS themselves; they only
+				// record and surface who did, why, and when.
+				if d.bgh != nil {
+					r.Route("/break-glass/sessions", func(r chi.Router) {
+						r.Post("/", d.bgh.openSession)
+						r.Get("/", d.bgh.listSessions)
+						r.Get("/active", d.bgh.listActive)
+					})
+				}
 				// Phase G — tier upgrade endpoint. Replaces the
 				// scripts/upgrade_tier.sh shell script with an
 				// admin-only API call. Requires d.adminPool because
@@ -1387,6 +1399,23 @@ func registerRoutes(d *apiDeps, logger *slog.Logger, grpcRT *grpcRuntime) chi.Ro
 			r.Get("/{id}", d.exph.get)
 			r.Get("/{id}/download", d.exph.download)
 		})
+		// Phase 2 P2-3c — tenant privacy dashboard. Tenant-scoped
+		// (not admin), so it sits alongside the other tenant-facing
+		// routes. The aggregate /dashboard endpoint returns all
+		// sections in one response for the UI; individual sections
+		// are also available for granular polling.
+		if d.privH != nil {
+			r.Route("/api/v1/privacy", func(r chi.Router) {
+				d.tenantChain(r)
+				r.Use(d.apiCallMW)
+				r.Use(d.rateLimitMW)
+				r.Get("/dashboard", d.privH.dashboard)
+				r.Get("/encryption", d.privH.encryptionSummary)
+				r.Get("/break-glass", d.privH.breakGlassSummary)
+				r.Get("/keys", d.privH.keyVersions)
+				r.Get("/audit-summary", d.privH.auditSummary)
+			})
+		}
 
 		// Phase K — report schedules. CRUD only; the worker owns
 		// dispatch via reporting.ActionTypeReportSchedule.

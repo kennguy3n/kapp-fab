@@ -9,7 +9,7 @@ import (
 
 func TestRegisterBankFeedToolsNilCollaborators(t *testing.T) {
 	t.Parallel()
-	x := NewExecutor(nil, nil, nil)
+	x := NewExecutor(nil, nil, nil, nil)
 	// Nil collaborators must not panic at registration time — kernel /
 	// integration tests that never apply the bank-feed migration still
 	// register the tools; commit-mode calls then error cleanly.

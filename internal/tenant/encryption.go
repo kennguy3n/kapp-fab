@@ -3,6 +3,7 @@ package tenant
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -37,6 +38,18 @@ const keySize = 32
 // even if the tenant id salt accidentally collides.
 var infoLabel = []byte("kapp.krecord.field.v1")
 
+// auditHMACLabel is a separate HKDF context for the audit/event redaction
+// digest. Domain-separating it from the field-encryption label means a
+// per-tenant audit HMAC key can never be confused with the field DEK, so
+// leaking one does not compromise the other.
+var auditHMACLabel = []byte("kapp.audit.hmac.v1")
+
+// blindIndexLabel is a third HKDF context for the blind-index HMAC key.
+// Domain-separating it from both the field-encryption and audit-HMAC
+// labels means a blind-index key leak does not compromise field
+// encryption or audit integrity, and vice versa.
+var blindIndexLabel = []byte("kapp.blind.index.v1")
+
 // ciphertextPrefix marks values that have been encrypted at the field
 // level. An opaque prefix lets us distinguish legacy plaintext values
 // from ciphertext without a schema migration — anything that does not
@@ -55,6 +68,55 @@ var ErrMasterKeyMissing = errors.New("tenant: master key missing or too short; s
 // value shorter than 32 bytes after decoding is rejected.
 func LoadMasterKey() ([]byte, error) {
 	return loadKeyFromEnv(MasterKeyEnvVar)
+}
+
+// FailClosedOnMissingMasterKey enforces the production posture for the
+// per-tenant field-encryption master key. Pass the error returned by
+// LoadMasterKey. In a production deployment (KAPP_ENV=production|prod)
+// a missing/short master key is fatal: the service cannot decrypt
+// tenant credentials (bank feeds, marketplace signing secrets) or
+// krecord encrypted fields, so booting would silently degrade into a
+// broken state. Outside production the helper returns nil so dev /
+// staging keep the plaintext fallback.
+//
+// Call sites that already treat ErrMasterKeyMissing as "encryption
+// disabled" should route that branch through this helper so production
+// fails loudly:
+//
+//	key, err := tenant.LoadMasterKey()
+//	if err != nil {
+//	    if err := tenant.FailClosedOnMissingMasterKey(err); err != nil {
+//	        return err
+//	    }
+//	    // dev/staging: proceed without encryption
+//	}
+func FailClosedOnMissingMasterKey(err error) error {
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ErrMasterKeyMissing) {
+		// A non-sentinel error (e.g. malformed base64) is always fatal,
+		// regardless of environment — it means the operator set the var
+		// to something the loader cannot parse.
+		return err
+	}
+	if isProductionEnv() {
+		return fmt.Errorf("tenant: %w in production; set %s before boot", ErrMasterKeyMissing, MasterKeyEnvVar)
+	}
+	return nil
+}
+
+// isProductionEnv mirrors platform.IsProductionEnv without importing
+// platform (the tenant package must not depend on platform/ — see the
+// KeyManager import-cycle note). It reads KAPP_ENV directly so a single
+// env var drives every posture decision consistently.
+func isProductionEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("KAPP_ENV"))) {
+	case "production", "prod":
+		return true
+	default:
+		return false
+	}
 }
 
 // LoadPrevMasterKey reads the retiring master key if present. Returns
@@ -129,6 +191,13 @@ type KeyManager struct {
 	mu            sync.Mutex
 	entries       map[uuid.UUID]keyCacheEntry
 	prevEntries   map[uuid.UUID][]byte
+	// auditEntries caches per-tenant audit HMAC keys, derived under a
+	// separate HKDF label so they are independent of the field DEKs.
+	auditEntries map[uuid.UUID]keyCacheEntry
+	// blindIndexEntries caches per-tenant blind-index HMAC keys,
+	// derived under a third HKDF label so they are independent of both
+	// the field DEKs and the audit HMAC keys.
+	blindIndexEntries map[uuid.UUID]keyCacheEntry
 }
 
 type keyCacheEntry struct {
@@ -154,11 +223,13 @@ func NewKeyManagerWithPrev(masterKey, prevMasterKey []byte, ttl time.Duration) (
 		return nil, ErrMasterKeyMissing
 	}
 	return &KeyManager{
-		masterKey:     masterKey,
-		prevMasterKey: prevMasterKey,
-		ttl:           ttl,
-		entries:       make(map[uuid.UUID]keyCacheEntry),
-		prevEntries:   make(map[uuid.UUID][]byte),
+		masterKey:         masterKey,
+		prevMasterKey:     prevMasterKey,
+		ttl:               ttl,
+		entries:           make(map[uuid.UUID]keyCacheEntry),
+		prevEntries:       make(map[uuid.UUID][]byte),
+		auditEntries:      make(map[uuid.UUID]keyCacheEntry),
+		blindIndexEntries: make(map[uuid.UUID]keyCacheEntry),
 	}, nil
 }
 
@@ -282,6 +353,223 @@ func IsEncrypted(value string) bool {
 	return strings.HasPrefix(value, ciphertextPrefix)
 }
 
+// logSentinels is the set of substrings SanitizeForLog strips from any
+// string destined for a log line, error message, or other non-data-plane
+// surface. Operators can register additional sentinels (e.g. a tenant-
+// specific token rotated during an incident) via RegisterLogSentinel.
+var (
+	logSentinelsMu sync.RWMutex
+	logSentinels   []string
+)
+
+// RegisterLogSentinel adds a substring that SanitizeForLog will replace
+// with "<redacted>". Registration is process-global and intended for
+// incident-time use (e.g. "a live API key was pasted into a support
+// ticket; suppress it from logs until rotation completes"). It is safe
+// for concurrent use.
+func RegisterLogSentinel(s string) {
+	if s == "" {
+		return
+	}
+	logSentinelsMu.Lock()
+	defer logSentinelsMu.Unlock()
+	logSentinels = append(logSentinels, s)
+}
+
+// SanitizeForLog returns a copy of `s` safe to write to a log line, error
+// message, or any other non-data-plane surface:
+//
+//   - substrings carrying the field-encryption ciphertext envelope
+//     ("kapp:enc:v1:...") are replaced with "<ciphertext>" so a logged
+//     record value does not expose the (already-encrypted) blob, which
+//     keeps logs free of opaque noise and avoids any chance of a future
+//     decrypt path being pointed at harvested log text;
+//   - any substring registered via RegisterLogSentinel is replaced with
+//     "<redacted>".
+//
+// SanitizeForLog is the single chokepoint for the P1-7 log-redaction
+// posture (docs/SECURITY_HARDENING_PLAN.md). Call sites that format
+// record data, request bodies, or error details into log/error text
+// should route the sensitive fragments through it. It is intentionally
+// conservative: it only redacts known-sensitive patterns and does not
+// attempt to infer sensitive values heuristically.
+func SanitizeForLog(s string) string {
+	if s == "" {
+		return s
+	}
+	out := s
+	// Replace ciphertext envelopes. A value carrying the prefix runs to
+	// the next whitespace or string end; replacing the whole blob keeps
+	// logs readable.
+	if strings.Contains(out, ciphertextPrefix) {
+		out = stripCiphertextBlobs(out)
+	}
+	logSentinelsMu.RLock()
+	sentinels := logSentinels
+	logSentinelsMu.RUnlock()
+	for _, sent := range sentinels {
+		if sent != "" && strings.Contains(out, sent) {
+			out = strings.ReplaceAll(out, sent, "<redacted>")
+		}
+	}
+	return out
+}
+
+// stripCiphertextBlobs replaces every "kapp:enc:v1:..." run (up to the
+// next whitespace) with "<ciphertext>". The envelope is base64, which
+// contains no whitespace, so the whitespace boundary reliably delimits
+// the blob in practice.
+func stripCiphertextBlobs(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if strings.HasPrefix(s[i:], ciphertextPrefix) {
+			// Skip to the end of the base64 run.
+			j := i + len(ciphertextPrefix)
+			for j < len(s) && !isWhitespace(s[j]) {
+				j++
+			}
+			b.WriteString("<ciphertext>")
+			i = j
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+func isWhitespace(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\r', '"', '\'', ']', '}', ',', ')':
+		return true
+	default:
+		return false
+	}
+}
+
+// HMACString returns a base64-encoded HMAC-SHA256 of `value` keyed with a
+// per-tenant key derived from the master key under the audit HMAC label.
+// The digest is meant for audit/event redaction: it lets the audit trail
+// record that a sensitive field changed (and to which value, verifiably)
+// without storing the plaintext value itself. The digest is deterministic
+// for a given (master key, tenant, value) triple, so two audit rows that
+// reference the same value produce the same digest and a verifier can
+// detect "no change" without ever seeing the value.
+//
+// Returns ("", nil) when no master key is configured — callers treat the
+// empty digest as "hash unavailable" and omit it from the audit context
+// rather than failing the mutation. Redaction itself does not depend on
+// the digest, so dev environments without a master key still redact.
+func (k *KeyManager) HMACString(tenantID uuid.UUID, value string) (string, error) {
+	if k == nil {
+		return "", nil
+	}
+	key, err := k.auditHMACKey(tenantID)
+	if err != nil {
+		return "", err
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(value))
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+// auditHMACKey derives the per-tenant audit HMAC key. It mirrors the
+// field-encryption derivation but under auditHMACLabel so the two keys
+// are cryptographically independent. The result is cached alongside the
+// field-encryption entries so the HKDF round is paid once per tenant.
+func (k *KeyManager) auditHMACKey(tenantID uuid.UUID) ([]byte, error) {
+	if k == nil {
+		return nil, errors.New("tenant: nil key manager")
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if entry, ok := k.auditEntries[tenantID]; ok {
+		if k.ttl == 0 || time.Now().Before(entry.expires) {
+			return entry.key, nil
+		}
+	}
+	if len(k.masterKey) < keySize {
+		return nil, ErrMasterKeyMissing
+	}
+	salt := tenantID[:]
+	r := hkdf.New(sha256.New, k.masterKey, salt, auditHMACLabel)
+	out := make([]byte, keySize)
+	if _, err := io.ReadFull(r, out); err != nil {
+		return nil, fmt.Errorf("tenant: audit hkdf read: %w", err)
+	}
+	var expires time.Time
+	if k.ttl > 0 {
+		expires = time.Now().Add(k.ttl)
+	}
+	k.auditEntries[tenantID] = keyCacheEntry{key: out, expires: expires}
+	return out, nil
+}
+
+// BlindIndex returns a base64-encoded HMAC-SHA256 of `value` keyed with
+// a per-tenant key derived from the master key under the blind-index
+// label. The digest is truncated to 16 bytes (128 bits) before base64
+// encoding — enough collision resistance for equality lookup while
+// keeping the stored index compact. The digest is deterministic for a
+// given (master key, tenant, value) triple so ListByField can match on
+// it without decrypting the field.
+//
+// Returns ("", nil) when no master key is configured — callers treat
+// the empty digest as "blind index unavailable" and skip writing the
+// index entry. Queries against the index simply won't match rows
+// written without a master key, which is the correct dev-environment
+// degradation.
+func (k *KeyManager) BlindIndex(tenantID uuid.UUID, value string) (string, error) {
+	if k == nil {
+		return "", nil
+	}
+	key, err := k.blindIndexKey(tenantID)
+	if err != nil {
+		return "", err
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(value))
+	sum := mac.Sum(nil)
+	// Truncate to 16 bytes (128 bits) for compact storage. 128 bits
+	// of HMAC output is well above the birthday bound for any
+	// realistic tenant record count.
+	return base64.StdEncoding.EncodeToString(sum[:16]), nil
+}
+
+// blindIndexKey derives the per-tenant blind-index HMAC key. It mirrors
+// the audit-HMAC derivation but under blindIndexLabel so the two keys
+// are cryptographically independent. The result is cached alongside
+// the other per-tenant entries so the HKDF round is paid once per
+// tenant.
+func (k *KeyManager) blindIndexKey(tenantID uuid.UUID) ([]byte, error) {
+	if k == nil {
+		return nil, errors.New("tenant: nil key manager")
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if entry, ok := k.blindIndexEntries[tenantID]; ok {
+		if k.ttl == 0 || time.Now().Before(entry.expires) {
+			return entry.key, nil
+		}
+	}
+	if len(k.masterKey) < keySize {
+		return nil, ErrMasterKeyMissing
+	}
+	salt := tenantID[:]
+	r := hkdf.New(sha256.New, k.masterKey, salt, blindIndexLabel)
+	out := make([]byte, keySize)
+	if _, err := io.ReadFull(r, out); err != nil {
+		return nil, fmt.Errorf("tenant: blind index hkdf read: %w", err)
+	}
+	var expires time.Time
+	if k.ttl > 0 {
+		expires = time.Now().Add(k.ttl)
+	}
+	k.blindIndexEntries[tenantID] = keyCacheEntry{key: out, expires: expires}
+	return out, nil
+}
+
 func encryptWithKey(key []byte, plaintext string) (string, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -313,8 +601,8 @@ func decryptWithKey(key []byte, value string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("tenant: gcm: %w", err)
 	}
-	if len(raw) < gcm.NonceSize() {
-		return "", errors.New("tenant: ciphertext shorter than nonce")
+	if len(raw) < gcm.NonceSize()+gcm.Overhead() {
+		return "", errors.New("tenant: ciphertext too short")
 	}
 	nonce, ct := raw[:gcm.NonceSize()], raw[gcm.NonceSize():]
 	pt, err := gcm.Open(nil, nonce, ct, nil)

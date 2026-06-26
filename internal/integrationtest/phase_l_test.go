@@ -295,7 +295,7 @@ func TestInsightsGenerateQueryAgentTool(t *testing.T) {
 	ctx := context.Background()
 	tn, queries, dashboards, _, runner := newTenantForInsights(t, h)
 
-	executor := agents.NewExecutor(h.records, nil, h.auditor)
+	executor := agents.NewExecutor(h.records, nil, h.auditor, nil)
 	agents.RegisterInsightsTools(executor, queries, dashboards, runner)
 
 	inputs, _ := json.Marshal(map[string]any{
@@ -349,7 +349,7 @@ func TestInsightsExplainResultAgentTool(t *testing.T) {
 
 	q := makeCountQuery(t, ctx, queries, tn.ID, 60)
 
-	executor := agents.NewExecutor(h.records, nil, h.auditor)
+	executor := agents.NewExecutor(h.records, nil, h.auditor, nil)
 	agents.RegisterInsightsTools(executor, queries, dashboards, runner)
 
 	inputs, _ := json.Marshal(map[string]any{"query_id": q.ID})
@@ -406,7 +406,7 @@ func TestInsightsPostDashboardDigestAgentTool(t *testing.T) {
 		t.Fatalf("upsert widget: %v", err)
 	}
 
-	executor := agents.NewExecutor(h.records, nil, h.auditor)
+	executor := agents.NewExecutor(h.records, nil, h.auditor, nil)
 	agents.RegisterInsightsTools(executor, queries, dashboards, runner)
 
 	inputs, _ := json.Marshal(map[string]any{"dashboard_id": d.ID})
@@ -701,7 +701,7 @@ func TestInsightsGenerateQueryAgentToolValid(t *testing.T) {
 	ctx := context.Background()
 	tn, queries, dashboards, _, runner := newTenantForInsights(t, h)
 
-	executor := agents.NewExecutor(h.records, nil, h.auditor)
+	executor := agents.NewExecutor(h.records, nil, h.auditor, nil)
 	agents.RegisterInsightsTools(executor, queries, dashboards, runner)
 
 	inputs, _ := json.Marshal(map[string]any{

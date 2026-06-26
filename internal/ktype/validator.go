@@ -31,6 +31,104 @@ type FieldSpec struct {
 	// write and decrypts transparently on read — schema consumers
 	// outside the store path can treat the flag as advisory.
 	Encrypted bool `json:"encrypted,omitempty"`
+	// Classification is the platform-wide data classification of the
+	// field. Allowed values: "public", "internal", "confidential",
+	// "secret". A field classified "confidential" or "secret" is
+	// treated as sensitive for encryption and audit/event redaction
+	// even when Encrypted is not explicitly set, so the sensitive-data
+	// posture is driven by classification rather than relying on
+	// developers remembering {"encrypted": true}. Empty preserves the
+	// legacy behaviour (sensitivity is governed by Encrypted alone).
+	// ValidateSchema rejects values outside the allowed set.
+	Classification string `json:"classification,omitempty"`
+	// Path is an optional dotted path into nested JSON objects. When
+	// empty, the field name is used as the top-level key (legacy
+	// behaviour). When set (e.g. "employee.bank.iban"), encryption and
+	// redaction walk the nested object to the leaf and operate on it
+	// in place. Intermediate nodes must be objects (map[string]any);
+	// arrays are not traversed. Path segments must match [A-Za-z0-9_].
+	// ValidateSchema rejects malformed paths.
+	Path string `json:"path,omitempty"`
+	// Indexed marks a sensitive (encrypted) field as having a blind
+	// index entry stored alongside the record. The blind index is
+	// HMAC(tenant_search_key, canonical(value)) — a deterministic
+	// digest that lets ListByField match on the field without
+	// decrypting. Only meaningful when the field is also sensitive
+	// (Encrypted or classification confidential/secret); a non-
+	// sensitive indexed field is a no-op (the value is already
+	// queryable via direct JSONB access).
+	Indexed bool `json:"indexed,omitempty"`
+}
+
+// AllowedClassification values, in increasing sensitivity order.
+const (
+	ClassificationPublic       = "public"
+	ClassificationInternal     = "internal"
+	ClassificationConfidential = "confidential"
+	ClassificationSecret       = "secret"
+)
+
+// allowedClassifications is the set ValidateSchema accepts.
+var allowedClassifications = map[string]struct{}{
+	ClassificationPublic:       {},
+	ClassificationInternal:     {},
+	ClassificationConfidential: {},
+	ClassificationSecret:       {},
+}
+
+// IsSensitive reports whether a field must be treated as sensitive for
+// encryption and audit/event redaction. A field is sensitive when it is
+// explicitly marked Encrypted OR classified confidential/secret. This is
+// the single predicate the record store consults so classification and
+// the legacy Encrypted flag stay consistent.
+func (f FieldSpec) IsSensitive() bool {
+	if f.Encrypted {
+		return true
+	}
+	switch f.Classification {
+	case ClassificationConfidential, ClassificationSecret:
+		return true
+	default:
+		return false
+	}
+}
+
+// PathSegments returns the dotted-path segments for this field. When
+// Path is empty, the field Name is returned as a single-element slice
+// (the legacy top-level behaviour). When Path is set, it is split on
+// "." and the segments are returned. The caller can then walk a nested
+// JSON object to the leaf.
+func (f FieldSpec) PathSegments() []string {
+	if f.Path == "" {
+		return []string{f.Name}
+	}
+	return splitDottedPath(f.Path)
+}
+
+// splitDottedPath splits a dotted path on ".". It does not validate
+// segment contents; ValidateSchema does that at schema-load time.
+func splitDottedPath(p string) []string {
+	return strings.Split(p, ".")
+}
+
+// validPathSegment reports whether a single path segment contains only
+// [A-Za-z0-9_]. Used by ValidateSchema to reject malformed paths at
+// schema definition time so the encryption walker never encounters an
+// ambiguous segment.
+func validPathSegment(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		ok := (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '_'
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // Schema is the minimal shape of a KType schema consumed by the validator.
@@ -84,6 +182,60 @@ func ValidateData(schema json.RawMessage, data json.RawMessage) error {
 		return fmt.Errorf("ktype: parse data: %w", err)
 	}
 	return validateAgainstSchema(s, payload)
+}
+
+// ValidateSchema validates the structural well-formedness of a KType
+// schema itself (as opposed to ValidateData, which validates a payload
+// against a schema). It is the registration-time gate that keeps the
+// data-classification posture consistent:
+//
+//   - every field with a non-empty Classification must use one of the
+//     allowed values (public / internal / confidential / secret);
+//   - a field classified confidential or secret is treated as sensitive
+//     (FieldSpec.IsSensitive) and SHOULD be encrypted — the record
+//     store enforces encryption based on IsSensitive, so this is
+//     advisory here, not a hard error, to keep the gate forward-
+//     compatible with non-string sensitive fields the field encryptor
+//     does not yet handle.
+//
+// Returns a ValidationErrors slice with one entry per failing field, or
+// nil if the schema is well-formed.
+func ValidateSchema(schema json.RawMessage) error {
+	var s Schema
+	if err := json.Unmarshal(schema, &s); err != nil {
+		return fmt.Errorf("ktype: parse schema: %w", err)
+	}
+	var errs ValidationErrors
+	for _, field := range s.Fields {
+		if field.Classification == "" {
+			// still validate path even when classification is unset
+		} else if _, ok := allowedClassifications[field.Classification]; !ok {
+			errs = append(errs, ValidationError{
+				Field: field.Name,
+				Message: fmt.Sprintf("classification %q is not one of %v", field.Classification, []string{
+					ClassificationPublic, ClassificationInternal, ClassificationConfidential, ClassificationSecret,
+				}),
+			})
+		}
+		// Validate dotted-path syntax so the encryption/redaction
+		// walker never encounters an ambiguous segment. An empty Path
+		// is fine (legacy top-level field).
+		if field.Path != "" {
+			for _, seg := range splitDottedPath(field.Path) {
+				if !validPathSegment(seg) {
+					errs = append(errs, ValidationError{
+						Field:   field.Name,
+						Message: fmt.Sprintf("path %q contains invalid segment %q", field.Path, seg),
+					})
+					break
+				}
+			}
+		}
+	}
+	if len(errs) > 0 {
+		return errs
+	}
+	return nil
 }
 
 func validateAgainstSchema(s Schema, payload map[string]any) error {

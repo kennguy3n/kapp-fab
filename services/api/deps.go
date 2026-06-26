@@ -183,6 +183,8 @@ type apiDeps struct {
 	plch           *placementHandlers
 	reth           *retentionHandlers
 	iah            *isolationAuditHandlers
+	bgh            *breakGlassHandlers
+	privH          *privacyHandlers
 	meth           *meteringHandlers
 	kh             *ktypeHandlers
 	tkh            *tenantKTypeHandlers

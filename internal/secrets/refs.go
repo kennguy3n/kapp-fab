@@ -204,9 +204,10 @@ func ParseRef(ref string) (scheme, value string, err error) {
 	// "aws:arn:..." → value="arn:..."); when false the prefix
 	// is stripped wholesale.
 	type entry struct {
-		prefix         string
-		scheme         string
-		preserveMarker string
+		prefix          string
+		scheme          string
+		preserveMarker  string
+		requireNonEmpty bool // when true, the value after the prefix must be non-empty
 	}
 	// Order matters where prefixes overlap on the same input —
 	// the only such pair is "file://" vs "file:/", where the
@@ -225,16 +226,26 @@ func ParseRef(ref string) (scheme, value string, err error) {
 		{prefix: "gcp:projects/", scheme: "gcp", preserveMarker: "projects/"},
 		{prefix: "file://", scheme: "file"},
 		{prefix: "file:/", scheme: "file", preserveMarker: "/"},
+		// "file:" without a slash covers Windows drive-letter paths
+		// (file:C:\Users\...) where the colon after the drive letter
+		// would otherwise be misread as a scheme separator. The
+		// requireNonEmpty flag ensures bare "file:" (no path) still
+		// falls through to ErrUnknownScheme.
+		{prefix: "file:", scheme: "file", requireNonEmpty: true},
 		{prefix: "env:", scheme: "env"},
 	}
 	for _, e := range entries {
 		if !strings.HasPrefix(ref, e.prefix) {
 			continue
 		}
-		if e.preserveMarker != "" {
-			return e.scheme, e.preserveMarker + strings.TrimPrefix(ref, e.prefix), nil
+		value := strings.TrimPrefix(ref, e.prefix)
+		if e.requireNonEmpty && value == "" {
+			continue
 		}
-		return e.scheme, strings.TrimPrefix(ref, e.prefix), nil
+		if e.preserveMarker != "" {
+			return e.scheme, e.preserveMarker + value, nil
+		}
+		return e.scheme, value, nil
 	}
 	return "", "", fmt.Errorf("%w: %q", ErrUnknownScheme, ref)
 }

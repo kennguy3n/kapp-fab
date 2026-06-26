@@ -30,7 +30,7 @@ func mkInvocation(t *testing.T, mode Mode, inputs any) Invocation {
 
 func TestRegisterRecruitmentToolsNilStore(t *testing.T) {
 	t.Parallel()
-	x := NewExecutor(nil, nil, nil)
+	x := NewExecutor(nil, nil, nil, nil)
 	// A nil store must not panic at registration time — kernel/integration
 	// tests that never apply the recruitment migration still register.
 	RegisterRecruitmentTools(x, nil)

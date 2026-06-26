@@ -349,7 +349,7 @@ func TestAgentToolsDryRunAndCommit(t *testing.T) {
 	ctx := context.Background()
 	tn, engine := newTenantWithCRM(t, h)
 
-	executor := agents.NewExecutor(h.records, engine, h.auditor)
+	executor := agents.NewExecutor(h.records, engine, h.auditor, nil)
 	agents.RegisterCRMTools(executor)
 
 	actor := uuid.New()
@@ -462,7 +462,7 @@ func TestAdvanceDealTool(t *testing.T) {
 	ctx := context.Background()
 	tn, engine := newTenantWithCRM(t, h)
 
-	executor := agents.NewExecutor(h.records, engine, h.auditor)
+	executor := agents.NewExecutor(h.records, engine, h.auditor, nil)
 	agents.RegisterCRMTools(executor)
 
 	actor := uuid.New()
@@ -530,7 +530,7 @@ func TestSummarizePipelineTool(t *testing.T) {
 	ctx := context.Background()
 	tn, engine := newTenantWithCRM(t, h)
 
-	executor := agents.NewExecutor(h.records, engine, h.auditor)
+	executor := agents.NewExecutor(h.records, engine, h.auditor, nil)
 	agents.RegisterCRMTools(executor)
 
 	actor := uuid.New()
@@ -586,7 +586,7 @@ func TestCreateTaskTool(t *testing.T) {
 	ctx := context.Background()
 	tn, engine := newTenantWithCRM(t, h)
 
-	executor := agents.NewExecutor(h.records, engine, h.auditor)
+	executor := agents.NewExecutor(h.records, engine, h.auditor, nil)
 	agents.RegisterCRMTools(executor)
 
 	actor := uuid.New()
@@ -656,7 +656,7 @@ func TestRequestApprovalTool(t *testing.T) {
 	ctx := context.Background()
 	tn, engine := newTenantWithCRM(t, h)
 
-	executor := agents.NewExecutor(h.records, engine, h.auditor)
+	executor := agents.NewExecutor(h.records, engine, h.auditor, nil)
 	agents.RegisterCRMTools(executor)
 
 	actor := uuid.New()

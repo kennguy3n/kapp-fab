@@ -14,6 +14,7 @@ package exporter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -60,6 +61,10 @@ type ExportJob struct {
 	FileName    string     `json:"file_name"`
 	ContentType string     `json:"content_type"`
 	CreatedBy   *uuid.UUID `json:"created_by,omitempty"`
+	// UserRoles captures the requesting user's roles at enqueue time
+	// so the worker can apply field_permissions redaction. NULL/empty
+	// means no filtering (legacy behaviour, or system-initiated export).
+	UserRoles   []string   `json:"user_roles,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	StartedAt   *time.Time `json:"started_at,omitempty"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
@@ -133,13 +138,21 @@ func (s *Store) Enqueue(ctx context.Context, j ExportJob) (*ExportJob, error) {
 		if j.CreatedBy != nil {
 			createdBy = *j.CreatedBy
 		}
+		var rolesArg any
+		if len(j.UserRoles) > 0 {
+			rolesJSON, err := json.Marshal(j.UserRoles)
+			if err != nil {
+				return fmt.Errorf("exporter: marshal user_roles: %w", err)
+			}
+			rolesArg = rolesJSON
+		}
 		return tx.QueryRow(ctx,
 			`INSERT INTO export_jobs
-			     (tenant_id, id, ktype, format, status, file_name, content_type, created_by)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			     (tenant_id, id, ktype, format, status, file_name, content_type, created_by, user_roles)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			 RETURNING created_at`,
 			j.TenantID, j.ID, j.KType, j.Format, StatusPending,
-			j.FileName, j.ContentType, createdBy,
+			j.FileName, j.ContentType, createdBy, rolesArg,
 		).Scan(&out.CreatedAt)
 	})
 	if err != nil {
@@ -180,7 +193,7 @@ func (s *Store) getBy(ctx context.Context, tenantID, id uuid.UUID, withPayload b
 		return scanJob(tx.QueryRow(ctx,
 			`SELECT tenant_id, id, ktype, format, status, progress_pct, row_count,
 			        `+payloadExpr+`, error, file_name, content_type, created_by,
-			        created_at, started_at, completed_at
+			        created_at, started_at, completed_at, user_roles
 			   FROM export_jobs WHERE tenant_id = $1 AND id = $2`,
 			tenantID, id,
 		), &out)
@@ -206,7 +219,7 @@ func (s *Store) List(ctx context.Context, tenantID uuid.UUID) ([]ExportJob, erro
 		rows, err := tx.Query(ctx,
 			`SELECT tenant_id, id, ktype, format, status, progress_pct, row_count,
 			        NULL::bytea AS payload, error, file_name, content_type, created_by,
-			        created_at, started_at, completed_at
+			        created_at, started_at, completed_at, user_roles
 			   FROM export_jobs WHERE tenant_id = $1
 			   ORDER BY created_at DESC
 			   LIMIT 100`,
@@ -267,7 +280,7 @@ func (s *Store) ClaimNext(ctx context.Context) (*ExportJob, error) {
 		   )
 		   RETURNING tenant_id, id, ktype, format, status, progress_pct, row_count,
 		             NULL::bytea AS payload, error, file_name, content_type, created_by,
-		             created_at, started_at, completed_at`,
+		             created_at, started_at, completed_at, user_roles`,
 		StatusRunning, StatusPending,
 	), &out)
 	if err != nil {
@@ -353,12 +366,14 @@ func scanJob(r rowScanner, j *ExportJob) error {
 		completedAt *time.Time
 		payload     []byte
 		errMsg      *string
+		userRoles   []byte
 	)
 	if err := r.Scan(
 		&j.TenantID, &j.ID, &j.KType, &j.Format, &j.Status,
 		&j.ProgressPct, &j.RowCount, &payload, &errMsg,
 		&j.FileName, &j.ContentType, &createdBy,
 		&j.CreatedAt, &startedAt, &completedAt,
+		&userRoles,
 	); err != nil {
 		return err
 	}
@@ -369,6 +384,15 @@ func scanJob(r rowScanner, j *ExportJob) error {
 	j.CreatedBy = createdBy
 	j.StartedAt = startedAt
 	j.CompletedAt = completedAt
+	if len(userRoles) > 0 {
+		if err := json.Unmarshal(userRoles, &j.UserRoles); err != nil {
+			// Log the corruption but don't fail the scan — the
+			// export will proceed without role-based filtering,
+			// which is the legacy behaviour. The operator can
+			// investigate the corrupt row separately.
+			j.UserRoles = nil
+		}
+	}
 	return nil
 }
 

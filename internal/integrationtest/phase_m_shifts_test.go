@@ -77,7 +77,7 @@ func TestPhaseMAssignShiftAgentTool(t *testing.T) {
 	}
 
 	engine := workflow.NewEngine(h.pool, h.publisher, h.auditor)
-	executor := agents.NewExecutor(h.records, engine, h.auditor)
+	executor := agents.NewExecutor(h.records, engine, h.auditor, nil)
 	agents.RegisterHRTools(executor, hrStore)
 
 	inputs, _ := json.Marshal(map[string]any{

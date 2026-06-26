@@ -45,6 +45,17 @@ type PerTenantConfig struct {
 	MaxEntries int
 	IdleTTL    time.Duration
 
+	// RequireZKFabric, when true, makes the store fail closed if a
+	// tenant has not been provisioned on the ZK Object Fabric instead
+	// of silently falling back to the platform-default store. This is
+	// the production posture: a shared global bucket weakens the
+	// per-tenant isolation guarantee that ZK fabric provides, so a
+	// production tenant setup that cannot provision a dedicated bucket
+	// must fail loudly rather than drop tenant data into the shared
+	// pool. Default false preserves the gradual-rollout behaviour for
+	// dev / staging and for the migration window.
+	RequireZKFabric bool
+
 	// OnEvict, if non-nil, is called after the cached *S3Store has
 	// had Close() invoked. Useful for metrics ("per-tenant store
 	// evictions") and for tests that need to observe the eviction
@@ -66,10 +77,11 @@ type PerTenantConfig struct {
 // the tenant id through ContextValue, and PerTenantS3Store reads
 // it back here.
 type PerTenantS3Store struct {
-	resolver TenantResolver
-	fallback ObjectStore
-	endpoint string
-	region   string
+	resolver        TenantResolver
+	fallback        ObjectStore
+	endpoint        string
+	region          string
+	requireZKFabric bool
 
 	// stores holds *S3Store values keyed by tenant id (string form).
 	// Bounded with a hard cap + idle TTL so the cache cannot grow
@@ -118,11 +130,12 @@ func NewPerTenantS3Store(cfg PerTenantConfig) (*PerTenantS3Store, error) {
 		}
 	})
 	return &PerTenantS3Store{
-		resolver: cfg.Resolver,
-		fallback: cfg.Fallback,
-		endpoint: cfg.Endpoint,
-		region:   cfg.Region,
-		stores:   cache,
+		resolver:        cfg.Resolver,
+		fallback:        cfg.Fallback,
+		endpoint:        cfg.Endpoint,
+		region:          cfg.Region,
+		requireZKFabric: cfg.RequireZKFabric,
+		stores:          cache,
 	}, nil
 }
 
@@ -184,6 +197,14 @@ func (s *PerTenantS3Store) routeFor(ctx context.Context) (ObjectStore, error) {
 		return nil, fmt.Errorf("files: resolve zk credentials: %w", err)
 	}
 	if !ok {
+		// Fail closed in production: a tenant without a dedicated ZK
+		// fabric bucket must not silently drop its objects into the
+		// shared fallback bucket, which would weaken the per-tenant
+		// isolation guarantee. Dev / staging keep the fallback so the
+		// gradual rollout and local boots stay frictionless.
+		if s.requireZKFabric {
+			return nil, fmt.Errorf("files: tenant %s not provisioned on ZK fabric and KAPP_FILES_REQUIRE_ZK_FABRIC is enabled; refusing shared fallback", tenantID)
+		}
 		return s.fallback, nil
 	}
 	if cfg.Endpoint == "" {

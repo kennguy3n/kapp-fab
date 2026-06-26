@@ -130,6 +130,10 @@ func (s *PGStore) bulkPatchOne(
 		result.Failed = append(result.Failed, BulkError{ID: id, Error: err.Error()})
 		return nil
 	}
+	blindIdx, err := computeBlindIndexes(tenantID, kt.Schema, merged, s.blindIndexer)
+	if err != nil {
+		return fmt.Errorf("record: bulk blind index: %w", err)
+	}
 	mergedEncrypted, err := s.encryptFields(tenantID, kt.Schema, merged)
 	if err != nil {
 		return fmt.Errorf("record: bulk encrypt: %w", err)
@@ -138,11 +142,11 @@ func (s *PGStore) bulkPatchOne(
 	var updated KRecord
 	err = tx.QueryRow(ctx,
 		`UPDATE krecords
-		    SET data = $1, updated_by = $2, updated_at = now(), version = version + 1
-		  WHERE tenant_id = $3 AND id = $4
+		    SET data = $1, blind_indexes = $2, updated_by = $3, updated_at = now(), version = version + 1
+		  WHERE tenant_id = $4 AND id = $5
 		  RETURNING id, tenant_id, ktype, ktype_version, data, status, version,
 		            created_by, created_at, updated_by, updated_at, deleted_at`,
-		mergedEncrypted, actor, tenantID, id,
+		mergedEncrypted, blindIdx, actor, tenantID, id,
 	).Scan(
 		&updated.ID, &updated.TenantID, &updated.KType, &updated.KTypeVersion,
 		&updated.Data, &updated.Status, &updated.Version,
@@ -153,8 +157,7 @@ func (s *PGStore) bulkPatchOne(
 		return fmt.Errorf("record: bulk update: %w", err)
 	}
 	updated.Data = merged
-	diff := audit.Diff(existingPlain, merged)
-	if err := s.emit(ctx, tx, updated, "krecord.updated", audit.Entry{
+	if err := s.emit(ctx, tx, updated, "krecord.updated", kt.Schema, audit.Entry{
 		TenantID:    updated.TenantID,
 		ActorID:     updated.UpdatedBy,
 		ActorKind:   audit.ActorUser,
@@ -163,7 +166,6 @@ func (s *PGStore) bulkPatchOne(
 		TargetID:    &updated.ID,
 		Before:      existingPlain,
 		After:       merged,
-		Context:     diff,
 	}); err != nil {
 		return err
 	}
@@ -304,7 +306,7 @@ func (s *PGStore) bulkDeleteOne(
 		return fmt.Errorf("record: bulk decrypt: %w", err)
 	}
 	deleted.Data = existingPlain
-	if err := s.emit(ctx, tx, deleted, "krecord.deleted", audit.Entry{
+	if err := s.emit(ctx, tx, deleted, "krecord.deleted", kt.Schema, audit.Entry{
 		TenantID:    deleted.TenantID,
 		ActorID:     actor,
 		ActorKind:   audit.ActorUser,

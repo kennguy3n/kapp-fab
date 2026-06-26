@@ -163,6 +163,9 @@ var TenantScopedTables = []string{
 	"payroll_payslip_lines",
 	"payroll_pay_inputs",
 	"payroll_ytd",
+	// Phase 2 P2-2c — per-tenant encryption keys (envelope encryption).
+	// PK is (tenant_id, key_version). No FK to other tenant-scoped tables.
+	"tenant_keys",
 }
 
 // SchemaName returns the canonical dedicated-schema name for a

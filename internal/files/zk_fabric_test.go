@@ -258,3 +258,60 @@ func TestPerTenantStoreIdleTTLEviction(t *testing.T) {
 		t.Fatalf("expected one TTL eviction for tenant A, got %v", evicted)
 	}
 }
+
+// unprovisionedResolver always reports the tenant as NOT provisioned on
+// the ZK fabric, so the per-tenant store hits the fallback / fail-closed
+// branch on every routeFor.
+type unprovisionedResolver struct{}
+
+func (unprovisionedResolver) ResolveZKCredentials(context.Context, uuid.UUID) (S3StoreConfig, bool, error) {
+	return S3StoreConfig{}, false, nil
+}
+
+// TestPerTenantStoreFailClosedOnMissingZKProvisioning verifies the
+// production posture: when RequireZKFabric is enabled, a tenant without
+// ZK fabric credentials is refused rather than silently routed to the
+// shared fallback bucket. This is the P0-3 gate from
+// docs/SECURITY_HARDENING_PLAN.md — a shared bucket would weaken the
+// per-tenant isolation guarantee ZK fabric provides.
+func TestPerTenantStoreFailClosedOnMissingZKProvisioning(t *testing.T) {
+	store, err := NewPerTenantS3Store(PerTenantConfig{
+		Resolver:        unprovisionedResolver{},
+		Fallback:        NewMemoryStore(),
+		RequireZKFabric: true,
+	})
+	if err != nil {
+		t.Fatalf("NewPerTenantS3Store: %v", err)
+	}
+
+	tenantA := uuid.New()
+	ctx := WithTenant(context.Background(), tenantA)
+	if _, err := store.routeFor(ctx); err == nil {
+		t.Fatalf("routeFor: expected fail-closed error for unprovisioned tenant, got nil")
+	}
+}
+
+// TestPerTenantStoreFallbackWhenNotRequired confirms the dev/staging
+// posture: when RequireZKFabric is disabled, an unprovisioned tenant
+// transparently falls back to the shared store so the gradual rollout
+// and local boots stay frictionless.
+func TestPerTenantStoreFallbackWhenNotRequired(t *testing.T) {
+	fallback := NewMemoryStore()
+	store, err := NewPerTenantS3Store(PerTenantConfig{
+		Resolver:        unprovisionedResolver{},
+		Fallback:        fallback,
+		RequireZKFabric: false,
+	})
+	if err != nil {
+		t.Fatalf("NewPerTenantS3Store: %v", err)
+	}
+
+	tenantA := uuid.New()
+	got, err := store.routeFor(WithTenant(context.Background(), tenantA))
+	if err != nil {
+		t.Fatalf("routeFor: expected fallback, got error: %v", err)
+	}
+	if got != fallback {
+		t.Fatalf("routeFor: expected fallback store, got %T", got)
+	}
+}

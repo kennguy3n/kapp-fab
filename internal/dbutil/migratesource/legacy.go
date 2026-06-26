@@ -70,14 +70,28 @@ type fileEntry struct {
 // The `path` portion of the URL is taken as the absolute filesystem path
 // to the migrations directory.
 func (l *LegacySource) Open(rawurl string) (source.Driver, error) {
-	u, err := url.Parse(rawurl)
-	if err != nil {
-		return nil, fmt.Errorf("migratesource: parse url: %w", err)
+	// Strip the legacy:// scheme prefix directly rather than using
+	// url.Parse. On Windows, absolute paths like C:\Users\... contain
+	// colons and backslashes that url.Parse rejects as invalid URL
+	// syntax. The scheme is a fixed prefix so a manual strip is safe
+	// and avoids the URL parser entirely.
+	const scheme = "legacy://"
+	dir := strings.TrimPrefix(rawurl, scheme)
+	if dir == rawurl {
+		// No scheme prefix — try url.Parse as a fallback for
+		// callers that pass a real URL (e.g. legacy://localhost/path).
+		u, err := url.Parse(rawurl)
+		if err != nil {
+			return nil, fmt.Errorf("migratesource: parse url: %w", err)
+		}
+		dir = u.Path
 	}
-	dir := u.Path
 	if dir == "" {
 		return nil, fmt.Errorf("migratesource: empty path in %q", rawurl)
 	}
+	// url.Parse unescapes %XX sequences and may strip leading slashes
+	// on Windows paths. Convert back to a filesystem path.
+	dir = filepath.FromSlash(dir)
 	if !filepath.IsAbs(dir) {
 		abs, err := filepath.Abs(dir)
 		if err != nil {

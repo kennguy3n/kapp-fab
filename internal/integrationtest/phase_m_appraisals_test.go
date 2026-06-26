@@ -44,7 +44,7 @@ func TestAppraisalToolsAndDashboardTile(t *testing.T) {
 	}
 
 	wfEngine := workflow.NewEngine(h.pool, h.publisher, h.auditor)
-	executor := agents.NewExecutor(h.records, wfEngine, h.auditor)
+	executor := agents.NewExecutor(h.records, wfEngine, h.auditor, nil)
 	agents.RegisterHRTools(executor, hr.NewStore(h.pool))
 
 	actor := uuid.New()

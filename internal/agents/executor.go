@@ -35,12 +35,16 @@ const (
 // required on every invocation because the audit entry and any
 // downstream writes must be attributable.
 type Invocation struct {
-	TenantID    uuid.UUID       `json:"tenant_id"`
-	ActorID     uuid.UUID       `json:"actor_id"`
-	ToolName    string          `json:"tool_name"`
-	Inputs      json.RawMessage `json:"inputs"`
-	Mode        Mode            `json:"mode"`
-	Confirmed   bool            `json:"confirmed,omitempty"`
+	TenantID  uuid.UUID       `json:"tenant_id"`
+	ActorID   uuid.UUID       `json:"actor_id"`
+	ToolName  string          `json:"tool_name"`
+	Inputs    json.RawMessage `json:"inputs"`
+	Mode      Mode            `json:"mode"`
+	Confirmed bool            `json:"confirmed,omitempty"`
+	// UserRoles are the invoking user's roles, used by the executor
+	// to apply field_permissions filtering to any record returned by
+	// the tool. When empty, no filtering is applied (legacy behaviour).
+	UserRoles []string `json:"user_roles,omitempty"`
 }
 
 // Result is the uniform envelope returned by every tool. `Preview` is
@@ -66,17 +70,27 @@ type Handler interface {
 	Invoke(ctx context.Context, inv Invocation) (*Result, error)
 }
 
+// SchemaSource provides the KType schema for a given ktype name. The
+// executor uses it to look up field_permissions and sensitive-field
+// metadata so it can apply FilterFields + RedactData to records
+// returned by tools. When nil, no filtering is applied (legacy
+// behaviour).
+type SchemaSource interface {
+	GetSchema(ctx context.Context, ktypeName string) (json.RawMessage, error)
+}
+
 // Executor multiplexes tool calls across the registered handlers. The
 // record store / workflow engine / auditor are injected so tests can
 // swap them out for in-memory fakes. RequiresConfirmation enforces the
 // ARCHITECTURE.md §11 rule that "destructive" tools (approvals.decide,
 // approvals.request) must ship with confirmed=true before committing.
 type Executor struct {
-	mu       sync.RWMutex
-	handlers map[string]Handler
-	auditor  *audit.PGLogger
-	records  *record.PGStore
-	workflow *workflow.Engine
+	mu        sync.RWMutex
+	handlers  map[string]Handler
+	auditor   *audit.PGLogger
+	records   *record.PGStore
+	workflow  *workflow.Engine
+	schemaSrc SchemaSource
 }
 
 // Sentinel errors surfaced through the HTTP layer.
@@ -88,13 +102,15 @@ var (
 )
 
 // NewExecutor builds a tool-empty executor. Call Register() to add
-// tools before serving traffic.
-func NewExecutor(records *record.PGStore, wf *workflow.Engine, auditor *audit.PGLogger) *Executor {
+// tools before serving traffic. schemaSrc is optional — when nil, no
+// field-permissions filtering is applied to tool results.
+func NewExecutor(records *record.PGStore, wf *workflow.Engine, auditor *audit.PGLogger, schemaSrc SchemaSource) *Executor {
 	return &Executor{
-		handlers: map[string]Handler{},
-		records:  records,
-		workflow: wf,
-		auditor:  auditor,
+		handlers:  map[string]Handler{},
+		records:   records,
+		workflow:  wf,
+		auditor:   auditor,
+		schemaSrc: schemaSrc,
 	}
 }
 
@@ -156,8 +172,35 @@ func (x *Executor) Invoke(ctx context.Context, inv Invocation) (*Result, error) 
 	if res != nil {
 		res.Tool = inv.ToolName
 		res.Mode = inv.Mode
+		// Apply field-permissions filtering and sensitive-field
+		// redaction to any record returned by the tool. This ensures
+		// the agent never sees fields above the invoking user's
+		// permission level or plaintext for encrypted fields.
+		if res.Record != nil && res.Record.Data != nil && x.schemaSrc != nil {
+			x.redactResult(ctx, res.Record, inv.UserRoles)
+		}
 	}
 	return res, nil
+}
+
+// redactResult applies FilterFields (based on the invoking user's
+// roles) and RedactData (replaces sensitive fields with "<redacted>")
+// to a record returned by a tool. The schema is fetched via the
+// executor's SchemaSource. If the schema can't be loaded, no
+// filtering is applied — this degrades gracefully rather than
+// failing the tool call.
+func (x *Executor) redactResult(ctx context.Context, r *record.KRecord, userRoles []string) {
+	if r == nil || r.KType == "" {
+		return
+	}
+	schema, err := x.schemaSrc.GetSchema(ctx, r.KType)
+	if err != nil || len(schema) == 0 {
+		return
+	}
+	if len(userRoles) > 0 {
+		r.Data = record.FilterFields(r.Data, schema, userRoles)
+	}
+	r.Data = record.RedactData(schema, r.Data)
 }
 
 // logAudit writes one audit_log row per invocation. We emit even on

@@ -210,7 +210,13 @@ func TestPlanIsIdempotent(t *testing.T) {
 		"internal/tenant/wizard.go",
 		"apps/web/src/pages/SetupWizardPage.tsx",
 	} {
-		re := regexp.MustCompile(`PATCH\s+` + regexp.QuoteMeta(file) + `\s+\((\d+) insertion\(s\), (\d+) already-present skip\(s\)\)`)
+		// Build a regex that matches the file path regardless of
+		// platform path separator. On Windows the scaffold emits
+		// backslash-separated paths (internal\tenant\wizard.go);
+		// on Unix it uses forward slashes. Replace / with a
+		// character class that matches either separator.
+		pattern := strings.ReplaceAll(regexp.QuoteMeta(file), "/", "[/\\\\]")
+		re := regexp.MustCompile(`PATCH\s+` + pattern + `\s+\((\d+) insertion\(s\), (\d+) already-present skip\(s\)\)`)
 		match := re.FindStringSubmatch(got)
 		if match == nil {
 			t.Errorf("execute #2 output: no PATCH line for %s;\ngot:\n%s", file, got)

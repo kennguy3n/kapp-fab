@@ -122,7 +122,7 @@ func TestProcessKTypeRejectsBadInputs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := ProcessKType(context.Background(), tc.source, tc.tenant, tc.ktype, tc.format)
+			_, _, err := ProcessKType(context.Background(), tc.source, nil, tc.tenant, tc.ktype, tc.format, nil)
 			if !errors.Is(err, ErrInvalidInput) {
 				t.Fatalf("expected ErrInvalidInput, got %v", err)
 			}
@@ -141,7 +141,7 @@ func TestProcessKTypeStreamsJSON(t *testing.T) {
 	}
 	tenant := uuid.MustParse("00000000-0000-0000-0000-00000000aaaa")
 
-	payload, rows, err := ProcessKType(context.Background(), src, tenant, "invoice", FormatJSON)
+	payload, rows, err := ProcessKType(context.Background(), src, nil, tenant, "invoice", FormatJSON, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestProcessKTypeStreamsCSVWithUnionedKeys(t *testing.T) {
 	}
 	tenant := uuid.MustParse("00000000-0000-0000-0000-00000000aaaa")
 
-	payload, rows, err := ProcessKType(context.Background(), src, tenant, "invoice", FormatCSV)
+	payload, rows, err := ProcessKType(context.Background(), src, nil, tenant, "invoice", FormatCSV, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestProcessKTypePropagatesSourceErrors(t *testing.T) {
 	boom := errors.New("simulated db failure")
 	src := &fakeKRecordSource{surfaceErr: boom}
 
-	_, _, err := ProcessKType(context.Background(), src, tenant, "invoice", FormatJSON)
+	_, _, err := ProcessKType(context.Background(), src, nil, tenant, "invoice", FormatJSON, nil)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -270,7 +270,7 @@ func TestProcessKTypePropagatesMidStreamFailures(t *testing.T) {
 		callbackErr: mid,
 	}
 
-	_, _, err := ProcessKType(context.Background(), src, tenant, "invoice", FormatJSON)
+	_, _, err := ProcessKType(context.Background(), src, nil, tenant, "invoice", FormatJSON, nil)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -356,7 +356,7 @@ func TestProcessKTypeBypassesListAllCap(t *testing.T) {
 	src := &fakeKRecordSource{rows: rows}
 	tenant := uuid.MustParse("00000000-0000-0000-0000-00000000aaaa")
 
-	_, count, err := ProcessKType(context.Background(), src, tenant, "invoice", FormatJSON)
+	_, count, err := ProcessKType(context.Background(), src, nil, tenant, "invoice", FormatJSON, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}

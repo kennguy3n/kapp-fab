@@ -336,7 +336,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 			return nil, nil, err
 		}
 		keyManager = km
-		recordStore = recordStore.WithEncryptor(km)
+		recordStore = recordStore.WithEncryptor(km).WithAuditHasher(km).WithBlindIndexer(km)
 		if prevKey != nil {
 			log.Printf("api: per-tenant field encryption enabled (dual-key rotation active)")
 		} else {
@@ -792,11 +792,21 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	objectStore := files.ObjectStore(fallbackStore)
 	if zkEndpoint != "" {
 		resolver := newZKTenantResolver(tenantSvc, zkEndpoint, zkRegion)
+		// In production, refuse to fall back to the shared bucket for a
+		// tenant that has not been provisioned on ZK fabric — a shared
+		// bucket weakens the per-tenant isolation guarantee. KAPP_FILES_REQUIRE_ZK_FABRIC
+		// overrides the default; unset takes the prod fail-closed default
+		// and dev/staging keep the gradual-rollout fallback.
+		requireZK := platform.IsProductionEnv()
+		if v := os.Getenv("KAPP_FILES_REQUIRE_ZK_FABRIC"); v != "" {
+			requireZK = v == "1" || strings.EqualFold(v, "true")
+		}
 		perTenant, err := files.NewPerTenantS3Store(files.PerTenantConfig{
-			Resolver: resolver,
-			Fallback: fallbackStore,
-			Endpoint: zkEndpoint,
-			Region:   zkRegion,
+			Resolver:        resolver,
+			Fallback:        fallbackStore,
+			Endpoint:        zkEndpoint,
+			Region:          zkRegion,
+			RequireZKFabric: requireZK,
 		})
 		if err != nil {
 			runCleanups(cleanups)
@@ -870,7 +880,7 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// surface uses so dry-run and commit mode behave identically.
 	// Phase C extends it with the finance tool suite; Phase D adds
 	// inventory read + move tools.
-	executor := agents.NewExecutor(recordStore, workflowEngine, auditor)
+	executor := agents.NewExecutor(recordStore, workflowEngine, auditor, &agentSchemaSource{registry: ktypeRegistry})
 	agents.RegisterCRMTools(executor)
 	agents.RegisterProjectTools(executor)
 	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster, paymentPoster)
@@ -1021,10 +1031,29 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 	// audit probes need GUC-less queries.
 	var reth *retentionHandlers
 	var iah *isolationAuditHandlers
+	var bgh *breakGlassHandlers
+	var privH *privacyHandlers
 	if adminPool != nil {
 		retentionStore := platform.NewRetentionStore(pool, adminPool)
 		reth = &retentionHandlers{store: retentionStore}
 		iah = &isolationAuditHandlers{auditor: platform.NewIsolationAuditor(pool, adminPool)}
+		// Break-glass session store writes to admin_audit_log via the
+		// admin pool (kapp_admin role has INSERT+SELECT). The store
+		// never connects as kapp_breakglass — that role is reserved for
+		// the runtime BYPASSRLS gateway that checks ListActive before
+		// opening a connection.
+		bgh = &breakGlassHandlers{store: tenant.NewBreakGlassStore(adminPool)}
+		// Phase 2 P2-3c — tenant privacy dashboard. Surfaces
+		// encryption summary, break-glass sessions, key versions,
+		// and audit summary under /api/v1/privacy. The envelope key
+		// manager is nil when envelope encryption is disabled
+		// (KAPP_ENVELOPE_ENCRYPTION != "1"); the dashboard reports
+		// the feature as off in that case.
+		privH = &privacyHandlers{
+			ktypeRegistry: ktypeRegistry,
+			breakGlass:    tenant.NewBreakGlassStore(adminPool),
+			auditPool:     pool,
+		}
 	}
 	meth := &meteringHandlers{metering: meteringStore, tenants: tenantSvc, plans: planStore, features: featureStore}
 	kh := &ktypeHandlers{registry: ktypeRegistry}
@@ -1661,6 +1690,8 @@ func buildDeps(ctx context.Context, cfg *platform.Config) (deps *apiDeps, cleanu
 		plch:                   plch,
 		reth:                   reth,
 		iah:                    iah,
+		bgh:                    bgh,
+		privH:                  privH,
 		meth:                   meth,
 		kh:                     kh,
 		tkh:                    tkh,

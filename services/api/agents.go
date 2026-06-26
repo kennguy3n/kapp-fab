@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/kennguy3n/kapp-fab/internal/agents"
+	"github.com/kennguy3n/kapp-fab/internal/ktype"
 	"github.com/kennguy3n/kapp-fab/internal/platform"
 )
 
@@ -46,6 +48,7 @@ func (h *agentHandlers) invoke(w http.ResponseWriter, r *http.Request) {
 	inv.TenantID = t.ID
 	inv.ActorID = actorOrDefault(r.Context())
 	inv.ToolName = chi.URLParam(r, "name")
+	inv.UserRoles = platform.UserRolesFromContext(r.Context())
 
 	res, err := h.executor.Invoke(r.Context(), inv)
 	if err != nil {
@@ -69,3 +72,20 @@ func writeAgentError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
+
+// agentSchemaSource adapts *ktype.PGRegistry to the agents.SchemaSource
+// interface so the executor can apply field_permissions filtering and
+// sensitive-field redaction to records returned by tools.
+type agentSchemaSource struct {
+	registry *ktype.PGRegistry
+}
+
+func (s *agentSchemaSource) GetSchema(ctx context.Context, name string) (json.RawMessage, error) {
+	kt, err := s.registry.Get(ctx, name, 0)
+	if err != nil {
+		return nil, err
+	}
+	return kt.Schema, nil
+}
+
+var _ agents.SchemaSource = (*agentSchemaSource)(nil)

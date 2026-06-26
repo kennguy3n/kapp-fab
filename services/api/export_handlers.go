@@ -39,11 +39,13 @@ func (h *exportHandlers) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := actorOrDefault(r.Context())
+	roles := platform.UserRolesFromContext(r.Context())
 	job, err := h.store.Enqueue(r.Context(), exporter.ExportJob{
 		TenantID:  t.ID,
 		KType:     req.KType,
 		Format:    req.Format,
 		CreatedBy: &actor,
+		UserRoles: roles,
 	})
 	if err != nil {
 		writeExportError(w, err)

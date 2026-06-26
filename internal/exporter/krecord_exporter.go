@@ -31,6 +31,15 @@ type KRecordSource interface {
 	ForEach(ctx context.Context, tenantID uuid.UUID, filter record.ListFilter, fn record.ForEachFunc) error
 }
 
+// SchemaSource provides the KType schema for a given ktype name. The
+// exporter uses it to look up field_permissions and sensitive-field
+// metadata so it can apply FilterFields + RedactData to each record
+// before rendering. When nil, no filtering is applied (legacy
+// behaviour).
+type SchemaSource interface {
+	GetSchema(ctx context.Context, ktypeName string) (json.RawMessage, error)
+}
+
 // ProcessKType runs a per-KType export by streaming rows through
 // ForEach and rendering them in the requested format. Returns the
 // encoded payload alongside the row count so the worker can
@@ -53,7 +62,7 @@ type KRecordSource interface {
 // streaming chunk-write protocol (write CSV row-by-row to an
 // object-storage upload, finalise on the last chunk) is a future
 // improvement tracked in the export pipeline backlog.
-func ProcessKType(ctx context.Context, source KRecordSource, tenantID uuid.UUID, ktype, format string) ([]byte, int64, error) {
+func ProcessKType(ctx context.Context, source KRecordSource, schemaSrc SchemaSource, tenantID uuid.UUID, ktype, format string, userRoles []string) ([]byte, int64, error) {
 	if source == nil {
 		return nil, 0, fmt.Errorf("%w: krecord source required", ErrInvalidInput)
 	}
@@ -65,6 +74,19 @@ func ProcessKType(ctx context.Context, source KRecordSource, tenantID uuid.UUID,
 	}
 	if format != FormatCSV && format != FormatJSON {
 		return nil, 0, fmt.Errorf("%w: format %q", ErrInvalidInput, format)
+	}
+
+	// Fetch the KType schema once so we can apply field_permissions
+	// (FilterFields) and sensitive-field redaction (RedactData) to
+	// every record before rendering. When schemaSrc is nil or the
+	// schema is unavailable, no filtering is applied — this preserves
+	// the legacy behaviour for callers that haven't been wired yet.
+	var schema json.RawMessage
+	if schemaSrc != nil {
+		s, err := schemaSrc.GetSchema(ctx, ktype)
+		if err == nil {
+			schema = s
+		}
 	}
 
 	// Collect rows via ForEach. The previous ListAll formulation
@@ -86,6 +108,11 @@ func ProcessKType(ctx context.Context, source KRecordSource, tenantID uuid.UUID,
 	// switches to a buffer-pool scan (e.g. pgx.RowToStructByPos with
 	// a reusable buffer). Copying r.Data inside the callback honours
 	// the contract regardless of what the store does internally.
+	//
+	// After copying, apply FilterFields (strips fields the user's
+	// roles can't read) and RedactData (replaces sensitive fields
+	// with "<redacted>") so the export never leaks plaintext for
+	// encrypted fields or fields above the user's permission level.
 	var rows []record.KRecord
 	if err := source.ForEach(ctx, tenantID, record.ListFilter{
 		KType:  ktype,
@@ -95,6 +122,15 @@ func ProcessKType(ctx context.Context, source KRecordSource, tenantID uuid.UUID,
 			cp := make(json.RawMessage, len(r.Data))
 			copy(cp, r.Data)
 			r.Data = cp
+		}
+		// Apply field-permissions filtering and sensitive-field
+		// redaction. Both are no-ops when the schema is nil or has
+		// no field_permissions / sensitive fields.
+		if len(schema) > 0 {
+			if len(userRoles) > 0 {
+				r.Data = record.FilterFields(r.Data, schema, userRoles)
+			}
+			r.Data = record.RedactData(schema, r.Data)
 		}
 		rows = append(rows, r)
 		return nil

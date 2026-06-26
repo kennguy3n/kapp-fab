@@ -187,8 +187,11 @@ func run() error {
 			return kmErr
 		}
 		bankFeedEncryptor = km
-	} else if !errors.Is(mkErr, tenant.ErrMasterKeyMissing) {
-		return mkErr
+	} else if err := tenant.FailClosedOnMissingMasterKey(mkErr); err != nil {
+		// Production: a missing master key is fatal — the bridge cannot
+		// decrypt tenant bank-feed credentials. Dev/staging keep the
+		// plaintext fallback.
+		return err
 	}
 	bankFeedRegistry := bankfeed.BuildRegistry(bankfeed.RegistryConfig{
 		PlaidClientID:           cfg.PlaidClientID,

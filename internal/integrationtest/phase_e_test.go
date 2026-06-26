@@ -200,7 +200,7 @@ func TestLessonProgressTracksScoreAndCompletion(t *testing.T) {
 // store. Mirrors the production wiring in services/api/main.go so
 // hr.approve_leave runs the same code path end-to-end.
 func newLeaveRequestExecutor(h *harness, engine *workflow.Engine, hrStore *hr.Store) *agents.Executor {
-	ex := agents.NewExecutor(h.records, engine, h.auditor)
+	ex := agents.NewExecutor(h.records, engine, h.auditor, nil)
 	agents.RegisterHRTools(ex, hrStore)
 	return ex
 }

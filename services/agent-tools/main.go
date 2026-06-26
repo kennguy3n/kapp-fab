@@ -139,7 +139,7 @@ func run() error {
 	hrStore := hr.NewStore(pool)
 	lmsStore := lms.NewStore(pool)
 
-	executor := agents.NewExecutor(recordStore, workflowEngine, auditor)
+	executor := agents.NewExecutor(recordStore, workflowEngine, auditor, &agentSchemaSrc{registry: ktypeRegistry})
 	agents.RegisterCRMTools(executor)
 	agents.RegisterFinanceTools(executor, ledgerStore, invoicePoster, paymentPoster)
 	agents.RegisterInventoryTools(executor, inventoryStore)
@@ -336,3 +336,20 @@ func writeJSON(w http.ResponseWriter, code int, body any) {
 func healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
+
+// agentSchemaSrc adapts *ktype.PGRegistry to agents.SchemaSource so
+// the executor can apply field_permissions filtering and redaction to
+// records returned by tools.
+type agentSchemaSrc struct {
+	registry *ktype.PGRegistry
+}
+
+func (s *agentSchemaSrc) GetSchema(ctx context.Context, name string) (json.RawMessage, error) {
+	kt, err := s.registry.Get(ctx, name, 0)
+	if err != nil {
+		return nil, err
+	}
+	return kt.Schema, nil
+}
+
+var _ agents.SchemaSource = (*agentSchemaSrc)(nil)

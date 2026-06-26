@@ -293,8 +293,11 @@ func run() error {
 		}
 		workerKeyManager = km
 		log.Printf("worker: per-tenant field encryption enabled")
-	} else if !errors.Is(mkErr, tenant.ErrMasterKeyMissing) {
-		return mkErr
+	} else if err := tenant.FailClosedOnMissingMasterKey(mkErr); err != nil {
+		// Production: a missing/short master key is fatal — the worker
+		// cannot decrypt tenant credentials or marketplace signing
+		// secrets. Dev/staging keep the plaintext fallback.
+		return err
 	} else {
 		log.Printf("worker: per-tenant field encryption disabled (%s unset)", tenant.MasterKeyEnvVar)
 	}
@@ -477,7 +480,7 @@ func run() error {
 		warehouse.NewSyncHandler(warehouseConfigStore, warehouseRunStore, warehouseExporter),
 	)
 
-	exportWorker := NewExportWorker(exporter.NewStore(pool, adminPool), recordStore, 5*time.Second)
+	exportWorker := NewExportWorker(exporter.NewStore(pool, adminPool), recordStore, &ktypeSchemaSource{registry: ktypeRegistry}, 5*time.Second)
 	autoscaleEngine := platform.NewAutoscaleEngine(pool, platform.DefaultAutoscalePolicy(), nil)
 	// Optional cell auto-provisioning. Off unless KAPP_AUTOSCALE_PROVISION=true,
 	// preserving the historic observe-only behaviour (decisions are still

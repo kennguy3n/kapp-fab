@@ -28,8 +28,18 @@ type FieldEncryptor interface {
 	DecryptString(tenantID uuid.UUID, value string) (string, error)
 }
 
-// compile-time assertion that *tenant.KeyManager satisfies FieldEncryptor.
-var _ FieldEncryptor = (*tenant.KeyManager)(nil)
+// BlindIndexer is the subset of *tenant.KeyManager consumed by the
+// store to compute blind index digests for encrypted-field lookups.
+type BlindIndexer interface {
+	BlindIndex(tenantID uuid.UUID, value string) (string, error)
+}
+
+// compile-time assertion that *tenant.KeyManager satisfies both
+// FieldEncryptor and BlindIndexer.
+var (
+	_ FieldEncryptor = (*tenant.KeyManager)(nil)
+	_ BlindIndexer   = (*tenant.KeyManager)(nil)
+)
 
 // Sentinel errors.
 var (
@@ -88,6 +98,19 @@ type PGStore struct {
 	// — every name resolves through the global ktypes table. The
 	// store is wired via WithTenantKTypes on the boot path.
 	tenantKTypes *ktype.TenantStore
+	// auditHasher, when non-nil, computes per-tenant HMAC digests of
+	// sensitive field values for the audit/event redaction path. When
+	// nil (e.g. dev without KAPP_MASTER_KEY), redaction still replaces
+	// sensitive values with "<redacted>"; only the per-field change
+	// digests are omitted.
+	auditHasher AuditHasher
+	// blindIndexer, when non-nil, computes per-tenant blind index
+	// digests for sensitive fields marked {"indexed": true} in the
+	// KType schema. The digests are stored in the blind_indexes JSONB
+	// column and queried by ForEachByField for encrypted-field lookups.
+	// When nil, blind indexes are not written and ListByField on
+	// encrypted fields returns no rows (the legacy behaviour).
+	blindIndexer BlindIndexer
 }
 
 // NewPGStore wires a PGStore from the shared pool and its
@@ -132,6 +155,26 @@ func NewPGStoreWithRouter(
 // for any KType field whose schema carries {"encrypted": true}.
 func (s *PGStore) WithEncryptor(e FieldEncryptor) *PGStore {
 	s.encryptor = e
+	return s
+}
+
+// WithAuditHasher wires the per-tenant HMAC digester used by the
+// audit/event redaction path. The same *tenant.KeyManager that supplies
+// WithEncryptor satisfies AuditHasher, so the typical boot path calls
+// both with one instance. Passing nil disables the per-field change
+// digests (redaction itself still runs).
+func (s *PGStore) WithAuditHasher(h AuditHasher) *PGStore {
+	s.auditHasher = h
+	return s
+}
+
+// WithBlindIndexer wires the per-tenant blind-index digester used by
+// the encrypted-field lookup path. The same *tenant.KeyManager that
+// supplies WithEncryptor satisfies BlindIndexer, so the typical boot
+// path calls all three with one instance. Passing nil disables blind
+// index writes (ListByField on encrypted fields returns no rows).
+func (s *PGStore) WithBlindIndexer(b BlindIndexer) *PGStore {
+	s.blindIndexer = b
 	return s
 }
 
@@ -437,6 +480,12 @@ func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
 	// Encrypt fields the schema marks as sensitive. This happens after
 	// validation so validators still see plaintext (max_length, pattern,
 	// etc. are meaningful only against the real value).
+	// Compute blind indexes from the PLAINTEXT value before encryption
+	// — the index digest is of the original value, not the ciphertext.
+	blindIdx, err := computeBlindIndexes(r.TenantID, kt.Schema, r.Data, s.blindIndexer)
+	if err != nil {
+		return nil, err
+	}
 	encrypted, err := s.encryptFields(r.TenantID, kt.Schema, r.Data)
 	if err != nil {
 		return nil, err
@@ -457,11 +506,11 @@ func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
 	err = platform.WithTenantTx(ctx, s.pool, r.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 		err := tx.QueryRow(ctx,
 			`INSERT INTO krecords
-			     (id, tenant_id, ktype, ktype_version, data, status, version, created_by)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			     (id, tenant_id, ktype, ktype_version, data, blind_indexes, status, version, created_by)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			 RETURNING id, tenant_id, ktype, ktype_version, data, status, version,
 			           created_by, created_at, updated_by, updated_at, deleted_at`,
-			r.ID, r.TenantID, r.KType, r.KTypeVersion, r.Data, r.Status, r.Version, r.CreatedBy,
+			r.ID, r.TenantID, r.KType, r.KTypeVersion, r.Data, blindIdx, r.Status, r.Version, r.CreatedBy,
 		).Scan(
 			&created.ID, &created.TenantID, &created.KType, &created.KTypeVersion,
 			&created.Data, &created.Status, &created.Version,
@@ -484,7 +533,7 @@ func (s *PGStore) Create(ctx context.Context, r KRecord) (*KRecord, error) {
 		// Swap the RETURNING ciphertext for the original plaintext so the
 		// event envelope and audit After are both human-readable.
 		created.Data = plaintext
-		return s.emit(ctx, tx, created, "krecord.created", audit.Entry{
+		return s.emit(ctx, tx, created, "krecord.created", kt.Schema, audit.Entry{
 			TenantID:    created.TenantID,
 			ActorID:     &created.CreatedBy,
 			ActorKind:   audit.ActorUser,
@@ -996,7 +1045,72 @@ func (s *PGStore) ForEachByField(ctx context.Context, tenantID uuid.UUID, filter
 	if status == "" {
 		status = "active"
 	}
+
+	// Check whether the target field is encrypted+indexed. If so, the
+	// stored value is ciphertext and a direct JSONB lookup would never
+	// match. Instead, compute the blind index digest of the query
+	// value and match against the blind_indexes JSONB column.
+	//
+	// When the field is encrypted but NOT indexed, we return an error
+	// rather than silently returning no rows — the caller should know
+	// the lookup is impossible without an index, and the fix is to add
+	// {"indexed": true} to the field in the KType schema.
+	var blindDigest string
+	useBlindIndex := false
+	if s.blindIndexer != nil {
+		kt, err := s.resolveKType(ctx, tenantID, filter.KType, 0, resolveForRead)
+		if err == nil {
+			fields, _ := sensitiveFields(kt.Schema)
+			for _, f := range fields {
+				// Match by field name OR by dotted path, so callers
+				// can use either form interchangeably.
+				matches := f.Name == field || f.Path == field
+				if matches && f.Indexed {
+					digest, derr := s.blindIndexer.BlindIndex(tenantID, value)
+					if derr != nil {
+						return fmt.Errorf("record: blind index lookup: %w", derr)
+					}
+					blindDigest = digest
+					// The blind index is stored under the field NAME
+					// (not the path), so use f.Name in the SQL query.
+					field = f.Name
+					useBlindIndex = true
+					break
+				}
+				if matches && f.IsSensitive() && !f.Indexed {
+					return fmt.Errorf("record: field %q is encrypted but not indexed; cannot lookup without blind index", field)
+				}
+			}
+		}
+	}
+
 	return s.foreachKeyset(ctx, tenantID, func(haveLower bool, cursorTS time.Time, cursorID uuid.UUID, snapshot time.Time, chunk int) (string, []any) {
+		if useBlindIndex {
+			// Match against blind_indexes->>field = digest. The digest
+			// is already case-sensitive (HMAC output) so no lower()
+			// wrapping is needed.
+			if haveLower {
+				return `SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+					        created_by, created_at, updated_by, updated_at, deleted_at
+					 FROM krecords
+					 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+					   AND blind_indexes->>$4 = $5
+					   AND updated_at <= $6
+					   AND (updated_at, id) < ($7, $8)
+					 ORDER BY updated_at DESC, id DESC
+					 LIMIT $9`,
+					[]any{tenantID, filter.KType, status, field, blindDigest, snapshot, cursorTS, cursorID, chunk}
+			}
+			return `SELECT id, tenant_id, ktype, ktype_version, data, status, version,
+				        created_by, created_at, updated_by, updated_at, deleted_at
+				 FROM krecords
+				 WHERE tenant_id = $1 AND ktype = $2 AND status = $3
+				   AND blind_indexes->>$4 = $5
+				   AND updated_at <= $6
+				 ORDER BY updated_at DESC, id DESC
+				 LIMIT $7`,
+				[]any{tenantID, filter.KType, status, field, blindDigest, snapshot, chunk}
+		}
 		if haveLower {
 			return `SELECT id, tenant_id, ktype, ktype_version, data, status, version,
 				        created_by, created_at, updated_by, updated_at, deleted_at
@@ -1091,7 +1205,13 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 		}
 
 		// Re-encrypt the merged payload before writing so encrypted
-		// fields round-trip through the DB as ciphertext.
+		// fields round-trip through the DB as ciphertext. Compute blind
+		// indexes from the merged PLAINTEXT before encryption so the
+		// index digests reflect the new values.
+		blindIdx, err := computeBlindIndexes(r.TenantID, kt.Schema, merged, s.blindIndexer)
+		if err != nil {
+			return fmt.Errorf("record: blind index: %w", err)
+		}
 		mergedEncrypted, err := s.encryptFields(r.TenantID, kt.Schema, merged)
 		if err != nil {
 			return fmt.Errorf("record: encrypt merged: %w", err)
@@ -1100,11 +1220,11 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 		updatedBy := r.UpdatedBy
 		err = tx.QueryRow(ctx,
 			`UPDATE krecords
-			    SET data = $1, updated_by = $2, updated_at = now(), version = version + 1
-			  WHERE tenant_id = $3 AND id = $4
+			    SET data = $1, blind_indexes = $2, updated_by = $3, updated_at = now(), version = version + 1
+			  WHERE tenant_id = $4 AND id = $5
 			  RETURNING id, tenant_id, ktype, ktype_version, data, status, version,
 			            created_by, created_at, updated_by, updated_at, deleted_at`,
-			mergedEncrypted, updatedBy, r.TenantID, r.ID,
+			mergedEncrypted, blindIdx, updatedBy, r.TenantID, r.ID,
 		).Scan(
 			&updated.ID, &updated.TenantID, &updated.KType, &updated.KTypeVersion,
 			&updated.Data, &updated.Status, &updated.Version,
@@ -1115,12 +1235,14 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 			return fmt.Errorf("record: update: %w", err)
 		}
 
-		// Substitute plaintext for audit diff + event envelope. Comparing
-		// ciphertext would flag every encrypted field as changed on every
-		// update (fresh GCM nonces) and leave the audit trail unreadable.
+		// Substitute plaintext for the in-memory record returned to the
+		// API caller so the invoking user sees what they just wrote. The
+		// audit before/after and event payload are redacted inside emit
+		// — comparing ciphertext would flag every encrypted field as
+		// changed on every update (fresh GCM nonces), and storing
+		// plaintext would leak the very values encryption protects.
 		updated.Data = merged
-		diff := audit.Diff(existingPlain, merged)
-		return s.emit(ctx, tx, updated, "krecord.updated", audit.Entry{
+		return s.emit(ctx, tx, updated, "krecord.updated", kt.Schema, audit.Entry{
 			TenantID:    updated.TenantID,
 			ActorID:     updated.UpdatedBy,
 			ActorKind:   audit.ActorUser,
@@ -1129,7 +1251,6 @@ func (s *PGStore) Update(ctx context.Context, r KRecord) (*KRecord, error) {
 			TargetID:    &updated.ID,
 			Before:      existingPlain,
 			After:       merged,
-			Context:     diff,
 		})
 	})
 	if err != nil {
@@ -1218,7 +1339,7 @@ func (s *PGStore) Delete(ctx context.Context, tenantID, id, actorID uuid.UUID) e
 			return fmt.Errorf("record: decrypt existing: %w", err)
 		}
 		deleted.Data = existingPlain
-		return s.emit(ctx, tx, deleted, "krecord.deleted", audit.Entry{
+		return s.emit(ctx, tx, deleted, "krecord.deleted", kt.Schema, audit.Entry{
 			TenantID:    deleted.TenantID,
 			ActorID:     updatedBy,
 			ActorKind:   audit.ActorUser,
@@ -1233,23 +1354,27 @@ func (s *PGStore) Delete(ctx context.Context, tenantID, id, actorID uuid.UUID) e
 
 // emit fires the event + audit side-effects in the same transaction as the
 // state change.
-func (s *PGStore) emit(ctx context.Context, tx pgx.Tx, r KRecord, eventType string, entry audit.Entry) error {
-	payload, err := json.Marshal(map[string]any{
-		"id":       r.ID,
-		"tenant":   r.TenantID,
-		"ktype":    r.KType,
-		"version":  r.Version,
-		"status":   r.Status,
-		"data":     r.Data,
-		"updated":  r.UpdatedAt,
-		"created":  r.CreatedAt,
-		"actor":    entry.ActorID,
-		"kind":     string(entry.ActorKind),
-		"snapshot": snapshotTypeFor(eventType),
-	})
-	if err != nil {
-		return fmt.Errorf("record: marshal event payload: %w", err)
-	}
+//
+// emit redacts sensitive fields before they reach either sink: the audit
+// entry's Before/After are passed through RedactData, and the audit
+// Context carries a DiffSummary (changed field names + per-redacted-field
+// HMAC digests) instead of a plaintext diff. The event payload carries
+// only identity, status, and the redacted summary — never the record data
+// — so downstream consumers (SSE, webhooks, notifications, worker logs)
+// never receive plaintext field values.
+//
+// `schema` is the KType schema of the mutated record; it drives
+// redaction. `entry.Before`/`entry.After` are the *plaintext* payloads
+// the caller already assembled; emit redacts them in place before
+// forwarding to the auditor. The in-memory KRecord `r` is not mutated and
+// may still carry plaintext for the API response — that is intentional,
+// the invoking user is allowed to see what they just wrote.
+func (s *PGStore) emit(ctx context.Context, tx pgx.Tx, r KRecord, eventType string, schema json.RawMessage, entry audit.Entry) error {
+	summary := DiffSummary(schema, entry.Before, entry.After, s.auditHasher, r.TenantID)
+	entry.Before = RedactData(schema, entry.Before)
+	entry.After = RedactData(schema, entry.After)
+	entry.Context = summary
+	payload := eventSummaryPayload(r, eventType, summary, entry.ActorID, string(entry.ActorKind))
 	if err := s.publisher.EmitTx(ctx, tx, events.Event{
 		TenantID: r.TenantID,
 		Type:     eventType,
@@ -1273,15 +1398,18 @@ func snapshotTypeFor(eventType string) string {
 	}
 }
 
-// encryptFields transforms data in-place, encrypting every top-level
-// field that the schema flags {"encrypted": true}. When no encryptor
-// is wired up, or the schema has no encrypted fields, data is
-// returned unchanged — the feature is opt-in and cheap when off.
+// encryptFields transforms data in-place, encrypting every field that
+// the schema flags as sensitive ({"encrypted": true} OR classification
+// "confidential"/"secret"). Fields with a dotted Path are walked to
+// their nested leaf; top-level fields (Path == "") use the field Name
+// as the key (legacy behaviour). When no encryptor is wired up, or the
+// schema has no sensitive fields, data is returned unchanged — the
+// feature is opt-in and cheap when off.
 func (s *PGStore) encryptFields(tenantID uuid.UUID, schema, data json.RawMessage) (json.RawMessage, error) {
 	if s.encryptor == nil {
 		return data, nil
 	}
-	fields, err := encryptedFieldNames(schema)
+	fields, err := sensitiveFields(schema)
 	if err != nil {
 		return nil, err
 	}
@@ -1293,14 +1421,19 @@ func (s *PGStore) encryptFields(tenantID uuid.UUID, schema, data json.RawMessage
 		return nil, err
 	}
 	changed := false
-	for name := range fields {
-		v, ok := payload[name]
-		if !ok || v == nil {
+	for _, f := range fields {
+		segs := f.PathSegments()
+		parent, leaf, ok := walkPath(payload, segs)
+		if !ok {
+			continue
+		}
+		v := parent[leaf]
+		if v == nil {
 			continue
 		}
 		plaintext, ok := v.(string)
 		if !ok {
-			return nil, fmt.Errorf("record: encrypted field %q must be a string", name)
+			return nil, fmt.Errorf("record: encrypted field %q must be a string", f.Name)
 		}
 		// Always encrypt what we receive: callers only pass plaintext
 		// (validated user input on Create, decrypted-then-merged payload
@@ -1309,9 +1442,9 @@ func (s *PGStore) encryptFields(tenantID uuid.UUID, schema, data json.RawMessage
 		// store garbage verbatim and break decryption on read.
 		ct, err := s.encryptor.EncryptString(tenantID, plaintext)
 		if err != nil {
-			return nil, fmt.Errorf("record: encrypt field %q: %w", name, err)
+			return nil, fmt.Errorf("record: encrypt field %q: %w", f.Name, err)
 		}
-		payload[name] = ct
+		parent[leaf] = ct
 		changed = true
 	}
 	if !changed {
@@ -1413,7 +1546,7 @@ func (s *PGStore) decryptRecordWith(r *KRecord, kt *ktype.KType) (json.RawMessag
 	if s.encryptor == nil {
 		return r.Data, nil
 	}
-	fields, err := encryptedFieldNames(kt.Schema)
+	fields, err := sensitiveFields(kt.Schema)
 	if err != nil {
 		return nil, err
 	}
@@ -1425,9 +1558,14 @@ func (s *PGStore) decryptRecordWith(r *KRecord, kt *ktype.KType) (json.RawMessag
 		return nil, err
 	}
 	changed := false
-	for name := range fields {
-		v, ok := payload[name]
-		if !ok || v == nil {
+	for _, f := range fields {
+		segs := f.PathSegments()
+		parent, leaf, ok := walkPath(payload, segs)
+		if !ok {
+			continue
+		}
+		v := parent[leaf]
+		if v == nil {
 			continue
 		}
 		ct, ok := v.(string)
@@ -1436,10 +1574,10 @@ func (s *PGStore) decryptRecordWith(r *KRecord, kt *ktype.KType) (json.RawMessag
 		}
 		pt, err := s.encryptor.DecryptString(r.TenantID, ct)
 		if err != nil {
-			return nil, fmt.Errorf("record: decrypt field %q: %w", name, err)
+			return nil, fmt.Errorf("record: decrypt field %q: %w", f.Name, err)
 		}
 		if pt != ct {
-			payload[name] = pt
+			parent[leaf] = pt
 			changed = true
 		}
 	}
@@ -1447,23 +1585,6 @@ func (s *PGStore) decryptRecordWith(r *KRecord, kt *ktype.KType) (json.RawMessag
 		return r.Data, nil
 	}
 	return json.Marshal(payload)
-}
-
-// encryptedFieldNames extracts the set of field names in schema that
-// carry {"encrypted": true}. Returns an empty set (not nil) when none
-// are present so callers can range over the result unconditionally.
-func encryptedFieldNames(schema json.RawMessage) (map[string]struct{}, error) {
-	var s ktype.Schema
-	if err := json.Unmarshal(schema, &s); err != nil {
-		return nil, fmt.Errorf("record: parse schema for encryption: %w", err)
-	}
-	out := make(map[string]struct{})
-	for _, f := range s.Fields {
-		if f.Encrypted {
-			out[f.Name] = struct{}{}
-		}
-	}
-	return out, nil
 }
 
 // unmarshalData decodes a JSONB payload into a map. An empty payload
@@ -1539,12 +1660,26 @@ func FilterFields(data, schema json.RawMessage, userRoles []string) json.RawMess
 	for _, r := range userRoles {
 		roleSet[r] = struct{}{}
 	}
+	// Build a field-name → path-segments map so we can navigate
+	// nested paths when filtering. Fields without a Path use the
+	// field name as a top-level key.
+	fieldPaths := parseFieldPaths(schema)
 	for field, rule := range rules {
 		if len(rule.Read) == 0 {
 			continue
 		}
-		if !roleSetMatchesAny(roleSet, rule.Read) {
-			delete(doc, field)
+		if roleSetMatchesAny(roleSet, rule.Read) {
+			continue
+		}
+		// Remove the field from the document, navigating to its
+		// nested path if one is declared in the schema.
+		segs, ok := fieldPaths[field]
+		if !ok {
+			segs = []string{field}
+		}
+		parent, leaf, found := walkPath(doc, segs)
+		if found {
+			delete(parent, leaf)
 		}
 	}
 	out, err := json.Marshal(doc)
@@ -1575,16 +1710,25 @@ func FieldsForbiddenForWrite(data, schema json.RawMessage, userRoles []string) [
 	for _, r := range userRoles {
 		roleSet[r] = struct{}{}
 	}
+	// Build a field-name → path-segments map so we can check
+	// nested paths when enforcing write permissions.
+	fieldPaths := parseFieldPaths(schema)
 	forbidden := make([]string, 0)
-	for field := range doc {
-		rule, ok := rules[field]
-		if !ok {
-			continue
-		}
+	for field, rule := range rules {
 		if len(rule.Write) == 0 {
 			continue
 		}
-		if !roleSetMatchesAny(roleSet, rule.Write) {
+		if roleSetMatchesAny(roleSet, rule.Write) {
+			continue
+		}
+		// Check if the field is present in the document, navigating
+		// to its nested path if one is declared in the schema.
+		segs, ok := fieldPaths[field]
+		if !ok {
+			segs = []string{field}
+		}
+		_, _, found := walkPath(doc, segs)
+		if found {
 			forbidden = append(forbidden, field)
 		}
 	}
@@ -1594,6 +1738,32 @@ func FieldsForbiddenForWrite(data, schema json.RawMessage, userRoles []string) [
 type fieldRule struct {
 	Read  []string `json:"read,omitempty"`
 	Write []string `json:"write,omitempty"`
+}
+
+// parseFieldPaths builds a map from field name to path segments by
+// reading the schema's `fields` array. Fields without a Path use the
+// field name as a single-element path. This lets FilterFields and
+// FieldsForbiddenForWrite navigate nested JSON structures when
+// enforcing field permissions.
+func parseFieldPaths(schema json.RawMessage) map[string][]string {
+	var s struct {
+		Fields []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal(schema, &s); err != nil {
+		return nil
+	}
+	out := make(map[string][]string, len(s.Fields))
+	for _, f := range s.Fields {
+		if f.Path != "" {
+			out[f.Name] = strings.Split(f.Path, ".")
+		} else {
+			out[f.Name] = []string{f.Name}
+		}
+	}
+	return out
 }
 
 func parseFieldPermissions(schema json.RawMessage) map[string]fieldRule {

@@ -162,6 +162,9 @@ TABLES=(
   # first four default (tenant_id, id) PK; payroll_ytd uses a natural
   # composite PK (tenant_id, employee_id, tax_year).
   payroll_runs payroll_payslips payroll_payslip_lines payroll_pay_inputs payroll_ytd
+  # Phase 2 P2-2c — per-tenant encryption keys. PK is (tenant_id,
+  # key_version). No FK to other tenant-scoped tables.
+  tenant_keys
 )
 
 # Build a Postgres TEXT[] literal: ARRAY['t1','t2',...]
